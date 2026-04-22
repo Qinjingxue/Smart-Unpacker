@@ -5,12 +5,20 @@
   },
   "tools": {
     "seven_zip_candidates": [
+      "env:SMART_UNPACKER_7Z_EXE",
+      "cmd:7z",
+      "cmd:7za",
       "tools/7z.exe",
-      "tools/7zip/7z.exe"
+      "tools/7zip/7z.exe",
+      "C:/Program Files/7-Zip/7z.exe",
+      "C:/Program Files (x86)/7-Zip/7z.exe"
     ],
     "seven_zip_sfx_candidates": [
+      "env:SMART_UNPACKER_7Z_SFX",
       "tools/7zCon.sfx",
-      "tools/7zip/7zCon.sfx"
+      "tools/7zip/7zCon.sfx",
+      "C:/Program Files/7-Zip/7zCon.sfx",
+      "C:/Program Files (x86)/7-Zip/7zCon.sfx"
     ],
     "rar_candidates": [
       "env:SMART_UNPACKER_RAR_EXE",

@@ -48,6 +48,15 @@ class CliUnitTest(unittest.TestCase):
             parser.parse_args(["extract"])
         self.assertEqual(exc.exception.code, 2)
 
+    def test_main_usage_error_survives_legacy_console_encoding(self):
+        stdout_bytes = io.BytesIO()
+        stderr_bytes = io.BytesIO()
+        stdout = io.TextIOWrapper(stdout_bytes, encoding="cp1252", errors="strict")
+        stderr = io.TextIOWrapper(stderr_bytes, encoding="cp1252", errors="strict")
+
+        with patch.object(sys, "stdout", stdout), patch.object(sys, "stderr", stderr):
+            self.assertEqual(main(["extract"]), 2)
+
     def test_collect_cli_passwords_merges_sources_and_dedupes(self):
         args = SimpleNamespace(
             password=["123", "abc", "123"],

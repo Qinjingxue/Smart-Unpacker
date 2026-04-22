@@ -19,6 +19,20 @@ EXIT_USAGE = 2
 EXIT_RUNTIME = 3
 
 
+def configure_stdio_fallback() -> None:
+    """Avoid UnicodeEncodeError on legacy Windows consoles in CI."""
+    for stream_name in ("stdout", "stderr"):
+        stream = getattr(sys, stream_name, None)
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            if getattr(stream, "errors", None) != "backslashreplace":
+                reconfigure(errors="backslashreplace")
+        except Exception:
+            continue
+
+
 class CliReporter:
     def __init__(self, json_mode: bool = False, quiet: bool = False, verbose: bool = False):
         self.json_mode = json_mode
@@ -589,6 +603,7 @@ def main(argv: list[str] | None = None) -> int:
     if argv is None:
         argv = sys.argv[1:]
 
+    configure_stdio_fallback()
     argv = preprocess_sys_argv(argv)
     parser = build_cli_parser()
     try:

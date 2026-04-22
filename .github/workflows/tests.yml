@@ -36,6 +36,17 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
 
+      - name: Ensure 7-Zip is available
+        shell: pwsh
+        run: |
+          $existing = @(
+            "C:\Program Files\7-Zip\7z.exe",
+            "C:\Program Files (x86)\7-Zip\7z.exe"
+          ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $existing) {
+            choco install 7zip -y --no-progress
+          }
+
       - name: Run CI test script
         shell: pwsh
         run: .\scripts\run_ci_tests.ps1
