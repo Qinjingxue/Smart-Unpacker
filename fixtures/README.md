@@ -1,17 +1,8 @@
-This directory only keeps small, redistributable test fixtures in Git.
+这个目录是一些测试样例，不过因为是真实样例，涉及到商业版权，未提交到仓库
 
-Do not commit:
-- real game archives
-- copyrighted samples
-- third-party binaries
-- large generated archives used only for local validation
+当前测试会尝试使用的可选本地样例路径：
 
-Private local-only samples can be placed in either of these locations:
-- `fixtures/private/`
-- `fixtures/samples/`
-
-Current optional local sample paths used by tests:
 - `fixtures/rpgmakertest.7z`
 - `fixtures/samples/rpgmakertest.7z`
 
-If the RPG Maker sample is missing, the semantic acceptance test is skipped instead of failing. This keeps the public repository reproducible without redistributing copyrighted content.
+如果缺少 RPG Maker 样例，相关语义验收测试会被跳过，而不是直接失败。

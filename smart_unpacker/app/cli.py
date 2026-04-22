@@ -110,13 +110,30 @@ def build_cli_parser():
     common_parser = build_common_parser()
     password_parser = build_password_parser()
 
-    parser = argparse.ArgumentParser(description="智能解压工具：命令行模式。")
+    parser = argparse.ArgumentParser(
+        description="智能解压工具：命令行模式。",
+        usage=(
+            "SmartUnpacker [-h] <command> [command options] [paths...]\n"
+            "                     例如: SmartUnpacker extract [options] <paths...>"
+        ),
+        epilog=(
+            "示例:\n"
+            "  SmartUnpacker extract C:\\Archives\n"
+            "  SmartUnpacker inspect .\\fixtures\n"
+            "  SmartUnpacker passwords --prompt-passwords\n"
+            "\n"
+            "查看某个子命令的完整参数:\n"
+            "  SmartUnpacker <command> -h"
+        ),
+        formatter_class=argparse.RawTextHelpFormatter,
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     extract_parser = subparsers.add_parser(
         "extract",
         parents=[common_parser, password_parser],
         help="执行预检查、扫描、解压和清理。",
+        usage="SmartUnpacker extract [options] <paths...>",
     )
     extract_parser.add_argument("paths", nargs="+", help="要处理的文件或目录路径。")
 
@@ -124,6 +141,7 @@ def build_cli_parser():
         "scan",
         parents=[common_parser],
         help="只扫描候选归档，不修改文件系统。",
+        usage="SmartUnpacker scan [options] <paths...>",
     )
     scan_parser.add_argument("paths", nargs="+", help="要扫描的文件或目录路径。")
 
@@ -131,6 +149,7 @@ def build_cli_parser():
         "inspect",
         parents=[common_parser],
         help="输出文件检测详情，不修改文件系统。",
+        usage="SmartUnpacker inspect [options] <paths...>",
     )
     inspect_parser.add_argument("paths", nargs="+", help="要检查的文件或目录路径。")
 
@@ -138,6 +157,7 @@ def build_cli_parser():
         "passwords",
         parents=[common_parser, password_parser],
         help="查看当前会参与尝试的密码列表。",
+        usage="SmartUnpacker passwords [options]",
     )
 
     return parser
