@@ -42,6 +42,7 @@ class ModuleUnitTest(unittest.TestCase):
             engine = self.make_engine(root)
             context = engine._detect_scene_context(str(root))
             self.assertEqual(context.scene_type, "rpg_maker_game")
+            self.assertEqual(context.match_strength, "strong")
             self.assertIn("www_dir", context.markers)
 
     def test_scene_context_detects_renpy(self):
@@ -53,6 +54,7 @@ class ModuleUnitTest(unittest.TestCase):
             engine = self.make_engine(root)
             context = engine._detect_scene_context(str(root))
             self.assertEqual(context.scene_type, "renpy_game")
+            self.assertEqual(context.match_strength, "strong")
             self.assertIn("game_dir", context.markers)
 
     def test_scene_context_detects_godot(self):
@@ -63,6 +65,7 @@ class ModuleUnitTest(unittest.TestCase):
             engine = self.make_engine(root)
             context = engine._detect_scene_context(str(root))
             self.assertEqual(context.scene_type, "godot_game")
+            self.assertEqual(context.match_strength, "strong")
             self.assertIn("data_pck", context.markers)
 
     def test_scene_context_detects_nwjs(self):
@@ -73,6 +76,7 @@ class ModuleUnitTest(unittest.TestCase):
             engine = self.make_engine(root)
             context = engine._detect_scene_context(str(root))
             self.assertEqual(context.scene_type, "nwjs_game")
+            self.assertEqual(context.match_strength, "strong")
             self.assertIn("package_nw", context.markers)
 
     def test_scene_context_detects_electron(self):
@@ -84,7 +88,36 @@ class ModuleUnitTest(unittest.TestCase):
             engine = self.make_engine(root)
             context = engine._detect_scene_context(str(root))
             self.assertEqual(context.scene_type, "electron_app_game")
+            self.assertEqual(context.match_strength, "strong")
             self.assertIn("app_asar", context.markers)
+
+    def test_scene_context_detects_supported_variant_as_weak_match(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "www" / "js").mkdir(parents=True)
+            (root / "www" / "img").mkdir(parents=True)
+            (root / "Playtest.exe").write_bytes(b"MZ")
+            engine = self.make_engine(root)
+            context = engine._detect_scene_context(str(root))
+            self.assertEqual(context.scene_type, "rpg_maker_game")
+            self.assertEqual(context.match_strength, "weak")
+
+    def test_weak_scene_directory_does_not_short_circuit_scan(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "resources").mkdir(parents=True)
+            (root / "launcher.exe").write_bytes(b"MZ")
+            (root / "payload.zip").write_bytes(b"PK\x03\x04" + b"x" * (2 * 1024 * 1024))
+            engine = self.make_engine(root)
+            context = engine._detect_scene_context(str(root))
+            self.assertEqual(context.scene_type, "electron_app_game")
+            self.assertEqual(context.match_strength, "weak")
+
+            with patch.object(engine, "_collect_archive_groups", return_value={}) as collect_groups:
+                tasks = engine.scan_archives_readonly()
+
+            self.assertEqual(tasks, [])
+            collect_groups.assert_called_once()
 
     def test_scene_context_reuses_generic_cache(self):
         with tempfile.TemporaryDirectory() as td:
@@ -204,6 +237,23 @@ class ModuleUnitTest(unittest.TestCase):
             validate.assert_called_once()
             self.assertTrue(info.probe_detected_archive)
             self.assertFalse(info.validation_skipped)
+
+    def test_loose_embedded_scan_detects_non_tail_disguised_archive(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            disguised = root / "payload.bin"
+            disguised.write_bytes(b"x" * 4096 + b"PK\x03\x04" + b"y" * (2 * 1024 * 1024))
+            engine = self.make_engine(root)
+            with patch.object(
+                engine,
+                "_validate_with_7z",
+                return_value={"ok": False, "encrypted": False, "error_text": ""},
+            ) as validate:
+                info = engine.inspect_archive_candidate(str(disguised))
+            validate.assert_called_once()
+            self.assertTrue(info.probe_detected_archive)
+            self.assertEqual(info.detected_ext, ".zip")
+            self.assertTrue(any("宽松扫描" in reason for reason in info.reasons))
 
     @patch("smart_unpacker.detection.inspector.subprocess.run")
     def test_validate_with_7z_disconnects_stdin(self, mock_run):

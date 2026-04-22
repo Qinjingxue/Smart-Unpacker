@@ -198,7 +198,7 @@ class Engine:
 
     def should_scan_output_dir(self, target_dir):
         scene_context = self._detect_scene_context(target_dir)
-        if scene_context.scene_type != "generic":
+        if scene_context.scene_type != "generic" and scene_context.match_strength == "strong":
             self.log(
                 f"[SCAN] 跳过强场景目录: {scene_context.scene_type} @ {os.path.basename(target_dir) or '根目录'}"
             )
@@ -281,14 +281,19 @@ class Engine:
     def _scan_directory_target(self, target_dir):
         scene_context = self._detect_scene_context(target_dir)
         if scene_context.scene_type != "generic":
-            self.log(f"[SCAN] 目录语义识别: {scene_context.scene_type} @ {os.path.basename(target_dir) or '根目录'}")
+            self.log(
+                f"[SCAN] 目录语义识别: {scene_context.scene_type} ({scene_context.match_strength}) @ "
+                f"{os.path.basename(target_dir) or '根目录'}"
+            )
         self.pre_check_and_rename(target_dir, scene_context)
         return self._scan_directory_target_readonly(target_dir, scene_context=scene_context)
 
     def _scan_directory_target_readonly(self, target_dir, scene_context=None):
         scene_context = scene_context or self._detect_scene_context(target_dir)
-        if scene_context.scene_type != "generic":
-            self.log(f"[SCAN] 强场景目录已整目录跳过: {scene_context.scene_type} @ {os.path.basename(target_dir) or '根目录'}")
+        if scene_context.scene_type != "generic" and scene_context.match_strength == "strong":
+            self.log(
+                f"[SCAN] 强场景目录已整目录跳过: {scene_context.scene_type} @ {os.path.basename(target_dir) or '根目录'}"
+            )
             return []
 
         groups = self._collect_archive_groups(target_dir, scene_context)

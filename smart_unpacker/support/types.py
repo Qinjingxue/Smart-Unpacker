@@ -8,6 +8,7 @@ from typing import Any
 class SceneContext:
     target_dir: str
     scene_type: str
+    match_strength: str = "none"
     markers: set[str] = field(default_factory=set)
 
 

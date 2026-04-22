@@ -41,6 +41,10 @@ class SceneAnalyzer:
             "match_variants": (
                 {"all_of": {"www_dir"}, "any_of": {"game_exe", "package_json", "rpg_core", "rpg_managers", "plugins_js", "data_dir"}},
             ),
+            "weak_match_variants": (
+                {"all_of": {"www_dir"}, "any_of": {"js_dir", "data_dir", "img_dir", "audio_dir", "fonts_dir", "runtime_exe"}},
+                {"all_of": {"www_dir", "js_dir", "data_dir"}, "any_of": set()},
+            ),
             "protected_prefixes": RESOURCE_DIR_PREFIXES,
             "protected_exact_paths": (),
             "protected_archive_exts": {".7z", ".rar", ".zip", ".gz", ".bz2", ".xz", ".exe"},
@@ -65,6 +69,10 @@ class SceneAnalyzer:
             },
             "match_variants": (
                 {"all_of": {"game_dir"}, "any_of": {"renpy_dir", "lib_dir", "rpa_archive", "options_rpy", "script_rpy", "script_rpyc"}},
+            ),
+            "weak_match_variants": (
+                {"all_of": {"game_dir"}, "any_of": {"renpy_dir", "lib_dir", "script_rpy", "script_rpyc"}},
+                {"all_of": {"game_dir", "script_rpy"}, "any_of": set()},
             ),
             "protected_prefixes": ("game", "renpy"),
             "protected_exact_paths": (),
@@ -95,6 +103,10 @@ class SceneAnalyzer:
                 {"all_of": {"project_godot"}, "any_of": set()},
                 {"all_of": {"runtime_exe", "pck_pack"}, "any_of": set()},
             ),
+            "weak_match_variants": (
+                {"all_of": {"runtime_exe"}, "any_of": {"packs_dir", "dlc_dir", "mods_dir", "content_dir", "patches_dir"}},
+                {"all_of": {"pck_pack"}, "any_of": {"packs_dir", "dlc_dir", "mods_dir", "content_dir", "patches_dir"}},
+            ),
             "protected_prefixes": ("packs", "dlc", "mods", "content", "patches"),
             "protected_exact_paths": {"data.pck"},
             "protected_archive_exts": {".pck", ".zip"},
@@ -120,6 +132,10 @@ class SceneAnalyzer:
                 {"all_of": {"package_nw"}, "any_of": {"nw_exe", "app_exe"}},
                 {"all_of": {"package_nw_dir", "package_nw_package_json"}, "any_of": set()},
             ),
+            "weak_match_variants": (
+                {"all_of": {"package_nw"}, "any_of": set()},
+                {"all_of": {"package_nw_dir"}, "any_of": {"package_nw_package_json", "app_exe"}},
+            ),
             "protected_prefixes": ("package.nw",),
             "protected_exact_paths": {"package.nw"},
             "protected_archive_exts": {".nw", ".zip", ".exe"},
@@ -142,6 +158,9 @@ class SceneAnalyzer:
             "match_variants": (
                 {"all_of": {"resources_dir", "app_exe"}, "any_of": {"app_asar", "resources_app_dir"}},
                 {"all_of": {"resources_dir", "app_asar"}, "any_of": set()},
+            ),
+            "weak_match_variants": (
+                {"all_of": {"resources_dir"}, "any_of": {"app_exe", "app_asar", "resources_app_dir"}},
             ),
             "protected_prefixes": ("resources", "resources/app", "resources/app.asar.unpacked"),
             "protected_exact_paths": {"resources/app.asar"},
@@ -187,7 +206,45 @@ class SceneAnalyzer:
                 if os.path.exists(os.path.join(norm_target, *rel_path.split("/"))):
                     markers.add(marker)
 
+        top_level_dirs = {entry.name.lower() for entry in entries if entry.is_dir()}
+        top_level_files = {entry.name.lower() for entry in entries if entry.is_file()}
+        top_level_exes = {name for name in top_level_files if name.endswith(".exe")}
+
+        if "www" in top_level_dirs:
+            runtime_dirs = {"js", "data", "img", "audio", "fonts", "movies"}
+            present_runtime_dirs = sum(1 for name in runtime_dirs if name in self._list_child_dirs(norm_target, "www"))
+            if present_runtime_dirs >= 2:
+                markers.add("runtime_exe" if top_level_exes else "www_runtime_layout")
+        if os.path.isdir(os.path.join(norm_target, "www", "js")):
+            markers.add("js_dir")
+        if os.path.isdir(os.path.join(norm_target, "www", "data")):
+            markers.add("data_dir")
+        if os.path.isdir(os.path.join(norm_target, "www", "img")):
+            markers.add("img_dir")
+        if os.path.isdir(os.path.join(norm_target, "www", "audio")):
+            markers.add("audio_dir")
+        if os.path.isdir(os.path.join(norm_target, "www", "fonts")):
+            markers.add("fonts_dir")
+        if top_level_exes:
+            markers.add("runtime_exe")
+        if "resources" in top_level_dirs and top_level_exes:
+            markers.add("electron_runtime_layout")
+        if "package.nw" in top_level_files and top_level_exes:
+            markers.add("nwjs_runtime_layout")
+        if "game" in top_level_dirs and ("renpy" in top_level_dirs or "lib" in top_level_dirs):
+            markers.add("renpy_runtime_layout")
+        if top_level_exes and any(name.endswith(".pck") for name in top_level_files):
+            markers.add("godot_runtime_layout")
+
         return markers
+
+    @staticmethod
+    def _list_child_dirs(norm_target: str, child_name: str) -> set[str]:
+        child_path = os.path.join(norm_target, child_name)
+        try:
+            return {entry.name.lower() for entry in os.scandir(child_path) if entry.is_dir()}
+        except Exception:
+            return set()
 
     @staticmethod
     def _variant_matches(markers: set[str], variant: dict) -> bool:
@@ -203,8 +260,12 @@ class SceneAnalyzer:
         for rule in self.SCENE_RULES:
             for variant in rule.get("match_variants", ()):
                 if self._variant_matches(markers, variant):
-                    return rule
-        return None
+                    return rule, "strong"
+        for rule in self.SCENE_RULES:
+            for variant in rule.get("weak_match_variants", ()):
+                if self._variant_matches(markers, variant):
+                    return rule, "weak"
+        return None, "none"
 
     def _get_scene_rule(self, scene_type: str):
         for rule in self.SCENE_RULES:
@@ -224,11 +285,12 @@ class SceneAnalyzer:
             return cached
 
         markers = self._collect_scene_markers(norm_target)
-        matched_rule = self._match_scene_rule(markers)
+        matched_rule, match_strength = self._match_scene_rule(markers)
 
         context = SceneContext(
             target_dir=norm_target,
             scene_type=matched_rule["scene_type"] if matched_rule else "generic",
+            match_strength=match_strength if matched_rule else "none",
             markers=markers,
         )
         self.scene_context_cache[norm_target] = context
@@ -289,8 +351,8 @@ class SceneAnalyzer:
         if role == "embedded_resource_archive":
             info.score -= 8
             info.reasons.append("-8 目录语义保护：识别为游戏运行时资源包，默认不继续解压")
-            info.reasons.append(f"+0 场景识别：{scene_label} 运行目录")
+            info.reasons.append(f"+0 场景识别：{scene_label} 运行目录 ({scene_context.match_strength})")
         elif role == "embedded_resource":
             info.score -= 4
             info.reasons.append("-4 目录语义保护：游戏运行时资源目录中的常规资源")
-            info.reasons.append(f"+0 场景识别：{scene_label} 运行目录")
+            info.reasons.append(f"+0 场景识别：{scene_label} 运行目录 ({scene_context.match_strength})")

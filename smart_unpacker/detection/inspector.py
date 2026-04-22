@@ -11,6 +11,9 @@ from smart_unpacker.support.types import InspectionResult
 
 class ArchiveInspector:
     STREAM_CHUNK_SIZE = 1024 * 1024
+    LOOSE_SCAN_MIN_PREFIX = 32
+    LOOSE_SCAN_MIN_TAIL_BYTES = 4 * 1024
+    LOOSE_SCAN_MAX_HITS = 3
 
     def __init__(self, engine):
         self.engine = engine
@@ -190,6 +193,38 @@ class ArchiveInspector:
                     carry = sample
                 current_offset += len(chunk)
 
+    def _stream_find_tail_magics_anywhere(self, norm_path, min_offset=0):
+        if min_offset < 0:
+            min_offset = 0
+        max_tail_len = max((len(magic) for magic in self.TAIL_MAGICS), default=0)
+        overlap = max(max_tail_len - 1, 0)
+        hits = []
+        with open(norm_path, "rb") as handle:
+            handle.seek(min_offset)
+            carry = b""
+            current_offset = min_offset
+            while len(hits) < self.LOOSE_SCAN_MAX_HITS:
+                chunk = handle.read(self.STREAM_CHUNK_SIZE)
+                if not chunk:
+                    break
+                sample = carry + chunk
+                base_offset = current_offset - len(carry)
+                search_start = 0
+                while len(hits) < self.LOOSE_SCAN_MAX_HITS:
+                    detected_ext, relative_index = self._match_tail_magic(sample, search_start)
+                    if detected_ext is None:
+                        break
+                    absolute = base_offset + relative_index
+                    if absolute >= min_offset:
+                        hits.append({"detected_ext": detected_ext, "offset": absolute})
+                    search_start = relative_index + 1
+                if len(sample) > overlap:
+                    carry = sample[-overlap:]
+                else:
+                    carry = sample
+                current_offset += len(chunk)
+        return hits
+
     def _stream_find_tail_after_markers(self, norm_path, markers):
         markers = tuple(marker for marker in markers if marker)
         if not markers:
@@ -292,16 +327,35 @@ class ArchiveInspector:
             return None
         return {"detected_ext": detected_ext, "offset": index}
 
+    def _find_embedded_archive_by_loose_scan(self, norm_path, ext, file_size):
+        if file_size <= self.LOOSE_SCAN_MIN_PREFIX + self.LOOSE_SCAN_MIN_TAIL_BYTES:
+            return None
+        min_offset = self.LOOSE_SCAN_MIN_PREFIX
+        hits = self._stream_find_tail_magics_anywhere(norm_path, min_offset=min_offset)
+        if not hits:
+            return None
+        for hit in hits:
+            tail_bytes = file_size - hit["offset"]
+            if tail_bytes >= self.LOOSE_SCAN_MIN_TAIL_BYTES:
+                hit["mode"] = "loose_scan"
+                return hit
+        return None
+
     def _apply_embedded_tail_analysis(self, info, ext, norm_path):
-        if ext not in self.CARRIER_EXTS:
+        if ext not in self.CARRIER_EXTS and ext not in self.engine.AMBIGUOUS_RESOURCE_EXTS:
             return
         embedded = self._find_embedded_archive_after_carrier(norm_path, ext)
+        if not embedded:
+            embedded = self._find_embedded_archive_by_loose_scan(norm_path, ext, info.size)
         if not embedded:
             return
         info.detected_ext = embedded["detected_ext"]
         info.probe_detected_archive = True
         info.probe_offset = embedded["offset"]
-        self._add_reason(info, +5, f"载体文件尾部检测到嵌入式 {embedded['detected_ext']} 归档")
+        if embedded.get("mode") == "loose_scan":
+            self._add_reason(info, +4, f"宽松扫描检测到疑似嵌入式 {embedded['detected_ext']} 归档")
+        else:
+            self._add_reason(info, +5, f"载体文件尾部检测到嵌入式 {embedded['detected_ext']} 归档")
 
     def _apply_probe_analysis(self, info, ext, norm_path):
         if not self._should_probe_with_7z(info, ext, norm_path):
