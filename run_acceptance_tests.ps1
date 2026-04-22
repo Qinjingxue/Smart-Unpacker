@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
-    [switch]$VerboseOutput
+    [switch]$VerboseOutput,
+    [switch]$NoWait
 )
 
 $ErrorActionPreference = "Stop"
@@ -101,6 +102,25 @@ function Get-PythonCommand {
     throw "Python interpreter not found in PATH."
 }
 
+function Wait-BeforeExit {
+    param(
+        [string]$Message = "Press any key to exit..."
+    )
+
+    if ($NoWait) {
+        return
+    }
+
+    Write-Host ""
+    Write-Host $Message -ForegroundColor DarkGray
+    $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+}
+
+trap {
+    Wait-BeforeExit
+    throw
+}
+
 $python = Get-PythonCommand
 
 Invoke-TestStep -Label "CLI unit tests" -Command @($python, "-m", "unittest", "tests.cli_unit_test")
@@ -117,3 +137,4 @@ foreach ($result in $script:StepResults) {
 }
 Write-Host ""
 Write-Host "All logic acceptance tests passed." -ForegroundColor Green
+Wait-BeforeExit
