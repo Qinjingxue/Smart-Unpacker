@@ -220,7 +220,7 @@ class SceneAnalyzer:
     def detect_scene_context(self, target_dir):
         norm_target = os.path.normpath(target_dir)
         cached = self.scene_context_cache.get(norm_target)
-        if cached is not None and cached.scene_type != "generic":
+        if cached is not None:
             return cached
 
         markers = self._collect_scene_markers(norm_target)

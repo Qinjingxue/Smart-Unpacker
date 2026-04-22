@@ -86,6 +86,22 @@ class ModuleUnitTest(unittest.TestCase):
             self.assertEqual(context.scene_type, "electron_app_game")
             self.assertIn("app_asar", context.markers)
 
+    def test_scene_context_reuses_generic_cache(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "nested").mkdir(parents=True)
+            (root / "readme.txt").write_text("hello", encoding="utf-8")
+            engine = self.make_engine(root)
+
+            first = engine._detect_scene_context(str(root))
+            self.assertEqual(first.scene_type, "generic")
+
+            with patch.object(engine.scene_analyzer, "_collect_scene_markers") as collect_markers:
+                second = engine._detect_scene_context(str(root))
+
+            self.assertEqual(second.scene_type, "generic")
+            collect_markers.assert_not_called()
+
     def test_strong_scene_directory_scan_short_circuits_before_file_inspection(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)

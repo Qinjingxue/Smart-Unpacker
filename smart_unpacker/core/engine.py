@@ -486,6 +486,7 @@ class Engine:
                             if res and os.path.exists(res):
                                 success_count += 1
                                 self.flatten_candidates.add(os.path.normpath(res))
+                                self.reset_scan_caches()
                                 if self.should_scan_output_dir(res):
                                     new = self.scan_archives(res)
                                     if new:
@@ -503,6 +504,7 @@ class Engine:
                         self.flatten_dirs(flatten_target)
             else:
                 self.flatten_dirs(self.root_dir)
+            self.reset_scan_caches()
             self._log_final_summary(start_time, success_count)
             return RunSummary(success_count=success_count, failed_tasks=list(self.failed_tasks), processed_keys=sorted(self.processed))
         finally:
