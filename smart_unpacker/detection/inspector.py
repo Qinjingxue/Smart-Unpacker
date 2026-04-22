@@ -464,6 +464,8 @@ class ArchiveInspector:
         )
 
     def _should_validate_with_7z(self, info, ext):
+        if ext in self.engine.STRICT_SEMANTIC_SKIP_EXTS and not info.is_split_candidate:
+            return False
         if self._should_mark_validation_skipped(info, ext):
             return False
         should_validate = (

@@ -218,6 +218,33 @@ class ModuleUnitTest(unittest.TestCase):
             self.assertTrue(info.validation_skipped)
             self.assertFalse(info.validation_ok)
 
+    def test_unitypackage_is_semantically_protected_from_generic_extraction(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            archive = root / "asset.unitypackage"
+            archive.write_bytes(b"\x1f\x8b" + b"x" * (2 * 1024 * 1024))
+            engine = self.make_engine(root)
+
+            with patch.object(engine, "_validate_with_7z") as validate, patch.object(
+                engine, "_probe_archive_with_7z"
+            ) as probe:
+                info = engine.inspect_archive_candidate(str(archive))
+
+            self.assertEqual(info.decision, "not_archive")
+            self.assertFalse(info.should_extract)
+            self.assertTrue(any("强语义保护命中" in reason for reason in info.reasons))
+            validate.assert_not_called()
+            probe.assert_not_called()
+
+    def test_output_dir_scan_ignores_unitypackage_only_payloads(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            archive = root / "asset.unitypackage"
+            archive.write_bytes(b"\x1f\x8b" + b"x" * (2 * 1024 * 1024))
+            engine = self.make_engine(root)
+
+            self.assertFalse(engine.should_scan_output_dir(str(root)))
+
     def test_probe_detected_archive_still_validates(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)

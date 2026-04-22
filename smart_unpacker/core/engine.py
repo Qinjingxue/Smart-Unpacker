@@ -31,7 +31,10 @@ class Engine:
         self.selected_paths = [os.path.normpath(path) for path in (selected_paths or []) if path]
 
         self.MIN_SIZE = 1 * 1024 * 1024
-        self.STRICT_SEMANTIC_SKIP_EXTS = {".dll", ".save", ".py", ".pyc", ".json", ".xml", ".cfg", ".ini", ".sys", ".db", ".msi", ".cur", ".ani", ".ttf", ".woff", ".ico", ".pak", ".obb"}
+        self.STRICT_SEMANTIC_SKIP_EXTS = {
+            ".dll", ".save", ".py", ".pyc", ".json", ".xml", ".cfg", ".ini", ".sys", ".db",
+            ".msi", ".cur", ".ani", ".ttf", ".woff", ".ico", ".pak", ".obb", ".unitypackage",
+        }
         self.AMBIGUOUS_RESOURCE_EXTS = {".dat", ".bin"}
         self.LIKELY_RESOURCE_EXTS = self.STRICT_SEMANTIC_SKIP_EXTS | {
             ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tga",
