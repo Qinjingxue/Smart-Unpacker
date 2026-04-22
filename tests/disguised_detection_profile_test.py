@@ -26,6 +26,14 @@ def round_float(value: float) -> float:
     return round(value, 6)
 
 
+def print_json_safe(payload: dict) -> None:
+    text = json.dumps(payload, ensure_ascii=False, indent=2)
+    try:
+        print(text)
+    except UnicodeEncodeError:
+        print(json.dumps(payload, ensure_ascii=True, indent=2))
+
+
 class ProfilingArchiveInspector(ArchiveInspector):
     def __init__(self, engine):
         super().__init__(engine)
@@ -360,7 +368,7 @@ def main():
             "hot_files": summarize_hottest_files(inspection_records, args.limit, focus_names),
             "scan_task_samples": summarize_scan_tasks(tasks, target_path if target_path.is_dir() else target_path.parent, args.limit),
         }
-        print(json.dumps(output, ensure_ascii=False, indent=2))
+        print_json_safe(output)
     finally:
         if temp_ctx is not None:
             temp_ctx.cleanup()
