@@ -3,36 +3,69 @@
 [中文](./README.md) | [English](./README.en.md) | [日本語](./README.ja.md)
 
 Smart Unpacker is a Windows-oriented Python command-line extraction tool developed with AI assistance.
-It is mainly designed for batch processing of disguised archives, nested archives, split archives, password-protected archives, and self-extracting files, while trying to complete detection, validation, extraction, and cleanup through one unified workflow.
-It can also be registered as a Windows Explorer context-menu entry. The menu appears for folders or folder backgrounds. You can launch it from the right-click menu, enter multiple passwords, let it try them automatically, move successfully processed original archives to the Recycle Bin, and flatten single-child directories after extraction.
 
-# Usage
+It is designed for batch processing disguised archives, nested archives, split archives, password-protected archives, and self-extracting files. It tries to complete detection, validation, extraction, and cleanup through one consistent workflow.
 
-Using the Windows context menu is the recommended way to launch the program.
-You can download the prebuilt package from the Releases page, build it yourself from source by following the instructions, or run it directly from source.
-After downloading a release package, extract it to a fixed location. Run `scripts/register_context_menu.ps1` to register the context menu, and run `scripts/unregister_context_menu.ps1` to remove it.
-`builtin_passwords.txt` contains the built-in password list. If you do not want to enter passwords every time, you can add commonly used passwords there and let the program try them automatically.
+The recommended usage is to register it as a Windows Explorer context-menu entry. After registration, you can launch it by right-clicking a folder or an empty area inside a directory, enter multiple passwords, and let the tool try them automatically. After successful processing, the original archives are moved to the Recycle Bin, and extraction results with only one child directory are automatically flattened.
+
+## Use Cases
+
+- Batch extract mixed archive files in a folder.
+- Detect archives with disguised or missing extensions.
+- Handle split archives, nested archives, and self-extracting files.
+- Automatically try command-line passwords, password files, and built-in common passwords.
+- Clean up original archives after extraction and simplify one-level directory structures.
+
+## Quick Start
+
+Using the prebuilt package from Releases is recommended.
+
+1. Download the Release archive and extract it to a fixed directory.
+2. Register the context-menu entry:
+
+```powershell
+.\scripts\register_context_menu.ps1
+```
+
+3. In File Explorer, right-click a folder or an empty area inside a directory, then choose `Smart Unpacker`.
+4. To remove the context-menu entry, run:
+
+```powershell
+.\scripts\unregister_context_menu.ps1
+```
+
+`builtin_passwords.txt` is the built-in password list. If you do not want to manually enter common passwords every time, add them to this file, one password per line, and they will be tried automatically during extraction.
 
 ## Configuration
 
-`smart_unpacker_config.json` is the main configuration file.
+The main configuration file is `smart_unpacker_config.json`.
 
-`min_inspection_size_bytes` is the minimum archive size the program will inspect. Files smaller than this will not be recognized or processed. Increase it to reduce the performance cost of many noisy small files; decrease it if you want to detect smaller disguised archives. The default is `1 MB`.
+Common settings:
 
-Everything under `basic` is intended for normal users.
+- `basic.min_inspection_size_bytes`: Minimum file size to inspect. Files smaller than this value are ignored. The default is `1048576`, or `1 MB`. Increase it to reduce the performance cost of scanning many small files; decrease it to detect smaller disguised archives.
+- `basic.scheduler_profile`: Concurrency strategy. `auto` is usually enough; `aggressive` favors performance; `conservative` is safer when the tool creates too many processes or affects other tasks.
+- `advanced.scheduler`: Detailed concurrency controls. All values default to `0`, which means they follow `scheduler_profile`. Setting a concrete value overrides the corresponding profile behavior.
 
-`scheduler_profile` controls the concurrency strategy. `auto` is usually fine. Set it to `aggressive` if you want a more performance-oriented strategy. Set it to `conservative` if the program creates too many worker processes or affects other tasks on your machine.
-
-Everything under `advanced.scheduler` is for detailed concurrency tuning. By default, all values are `0`, which means they are overridden by the selected `scheduler_profile`. Once you fill in a concrete value there, it overrides the corresponding profile behavior.
-
-## Feature Overview
+## Commands
 
 - `inspect`: Recursively inspect files or directories and output each file's detection result, matching reasons, and whether extraction is recommended.
-- `scan`: Summarize extractable archives at the task level so you can review scan results before deciding to extract.
-- `extract`: Perform scanning, password attempts, archive validation, extraction, and post-processing, while dynamically adjusting concurrency based on system load.
-- `passwords`: Show the final list of passwords that may be tried, including command-line input and built-in common passwords.
-- Windows integration: Register an Explorer context-menu entry through PowerShell scripts.
-- Windows build: The build script automatically fills in missing 7-Zip runtime components and produces a distributable directory and zip package.
+- `scan`: Summarize processable archives by task so you can review scan results before extracting.
+- `extract`: Run scanning, password attempts, archive validation, extraction, and post-processing, while dynamically adjusting concurrency based on system load.
+- `passwords`: Show the final password list that may be tried, including command-line input, password files, and built-in common passwords.
+
+Common options:
+
+- `--json`: Output results as JSON.
+- `--quiet`: Reduce terminal output.
+- `--verbose`: Print more detailed information.
+- `--pause-on-exit`: Wait for a key press before exiting, useful for context-menu usage.
+
+Password options:
+
+- `-p, --password`: Provide an extraction password. Can be passed multiple times.
+- `--password-file`: Read passwords from a file, one password per line.
+- `--prompt-passwords`: Enter passwords interactively in the terminal.
+- `--no-builtin-passwords`: Disable built-in common passwords.
 
 ## Run Locally
 
@@ -45,9 +78,9 @@ Everything under `advanced.scheduler` is for detailed concurrency tuning. By def
 
 This script will:
 
-- create `.venv`
-- install the runtime dependencies listed in `requirements.txt`
-- automatically download and restore missing 7-Zip components in the `tools` directory
+- Create `.venv`.
+- Install runtime dependencies from `requirements.txt`.
+- Restore missing 7-Zip runtime components in the `tools` directory.
 
 3. Run the CLI:
 
@@ -73,19 +106,37 @@ Full logic acceptance test:
 .\run_acceptance_tests.ps1
 ```
 
-### Dependencies
+CI test entry used by GitHub Actions:
+
+```powershell
+.\scripts\run_ci_tests.ps1
+```
+
+Local test paths and tool lookup rules are configured in:
+
+```text
+tests/test_config.json
+```
+
+The current synthetic samples cover these directory-semantic families: RPG Maker, Ren'Py, Godot, NW.js, and Electron.
+
+RAR samples in the full test suite require `Rar.exe`. If it is missing, the RAR-dependent sample generation steps are skipped automatically. The `Rar.exe` path can be configured in `tests/test_config.json`.
+
+## Dependencies And Build
+
+Dependency files:
 
 - Runtime dependencies: `requirements.txt`
 - Build dependencies: `requirements-build.txt`
-- 7-Zip runtime components: automatically downloaded by the build script and local setup script when missing
+- 7-Zip runtime components: automatically downloaded by the local setup script and build script when missing.
 
-### Build
+Build the Windows release package:
 
 ```powershell
 .\scripts\build_windows.ps1
 ```
 
-The build process automatically runs tests to help ensure that project changes do not accidentally delete ordinary files.
+The build process runs tests automatically to help prevent project changes from accidentally deleting ordinary files.
 
 Optional parameters:
 
@@ -95,12 +146,12 @@ Optional parameters:
 
 After the build finishes, it generates:
 
-- `dist/SmartUnpacker/`: runnable release directory
-- `release/*.zip`: distributable zip package
+- `dist/SmartUnpacker/`: Runnable release directory.
+- `release/*.zip`: Distributable zip package.
 
-### Disclaimer
+## Disclaimer
 
-Although this software has been tested under complex scenarios, it does not guarantee that files will never be deleted by mistake. Use it at your own risk. The developer is not responsible for file loss.
+Although this software has been tested under complex scenarios, it cannot guarantee that files will never be deleted by mistake. Use it only when your data is recoverable or backed up. Any file loss caused by usage is the user's responsibility.
 
 ## License
 
