@@ -253,7 +253,6 @@ class ResourceLocator:
             strict_semantic_skip_exts=self._coerce_ext_set(extensions.get("strict_semantic_skip_exts")),
             ambiguous_resource_exts=self._coerce_ext_set(extensions.get("ambiguous_resource_exts")),
             likely_resource_exts_extra=self._coerce_ext_set(extensions.get("likely_resource_exts_extra")),
-            zip_container_exts=self._coerce_ext_set(extensions.get("zip_container_exts")),
             carrier_exts=self._coerce_ext_set(extensions.get("carrier_exts")),
             archive_score_threshold=self._coerce_positive_int(
                 thresholds.get("archive_score_threshold"),

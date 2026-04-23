@@ -58,6 +58,8 @@ RECOMMENDED_EXTENSIONS_PAYLOAD: dict[str, list[str]] = {
     "strict_semantic_skip_exts": [
         ".dll", ".save", ".py", ".pyc", ".json", ".xml", ".cfg", ".ini", ".sys", ".db",
         ".msi", ".cur", ".ani", ".ttf", ".woff", ".ico", ".pak", ".obb", ".unitypackage",
+        ".jar", ".apk", ".ipa", ".epub", ".odt", ".ods", ".odp", ".docx", ".xlsx",
+        ".pptx", ".whl", ".xpi", ".war", ".ear", ".aab",
     ],
     "ambiguous_resource_exts": [".dat", ".bin"],
     "likely_resource_exts_extra": [
@@ -65,10 +67,6 @@ RECOMMENDED_EXTENSIONS_PAYLOAD: dict[str, list[str]] = {
         ".mp3", ".wav", ".ogg", ".flac", ".aac",
         ".mp4", ".mkv", ".avi", ".mov", ".wmv", ".webm",
         ".txt", ".log", ".csv", ".pdf",
-    ],
-    "zip_container_exts": [
-        ".jar", ".apk", ".ipa", ".epub", ".odt", ".ods", ".odp", ".docx", ".xlsx",
-        ".pptx", ".whl", ".xpi", ".war", ".ear", ".aab",
     ],
     "carrier_exts": [".jpg", ".jpeg", ".png", ".pdf", ".gif", ".webp"],
 }

@@ -108,10 +108,9 @@
 {
   "extensions": {
     "standard_archive_exts": [".7z", ".rar", ".zip", ".gz", ".bz2", ".xz"],
-    "strict_semantic_skip_exts": [".dll", ".json", ".pak", ".unitypackage"],
+    "strict_semantic_skip_exts": [".dll", ".json", ".pak", ".unitypackage", ".docx", ".xlsx"],
     "ambiguous_resource_exts": [".dat", ".bin"],
     "likely_resource_exts_extra": [".jpg", ".png", ".mp3", ".mp4", ".txt", ".pdf"],
-    "zip_container_exts": [".jar", ".apk", ".docx", ".xlsx"],
     "carrier_exts": [".jpg", ".jpeg", ".png", ".pdf", ".gif", ".webp"]
   }
 }
@@ -154,6 +153,7 @@
 - 程序和系统文件：`.dll`、`.sys`、`.exe` 通常不建议直接加入，当前代码对独立 `.exe` 有额外保护，但自解压包仍可能需要被识别。
 - 配置和数据文件：`.json`、`.xml`、`.ini`、`.db`。
 - 游戏或应用资源包：`.pak`、`.obb`、`.unitypackage`。
+- 本质是 ZIP 但通常不应作为普通压缩包解压的语义容器：`.jar`、`.apk`、`.ipa`、`.epub`、`.odt`、`.ods`、`.odp`、`.docx`、`.xlsx`、`.pptx`、`.whl`、`.xpi`、`.war`、`.ear`、`.aab`。
 
 风险：加入太多会漏掉真实伪装包；加入太少会增加误解压资源文件的风险。
 
@@ -189,22 +189,6 @@
 - 文本和文档：`.txt`、`.log`、`.csv`、`.pdf`
 
 注意：如果这些后缀也出现在 `carrier_exts` 中，程序仍可针对“图片/PDF 后面拼接压缩包”的伪装形式做嵌入式扫描。
-
-### `zip_container_exts`
-
-类型：字符串数组。
-
-默认行为：缺失时为空。
-
-含义：本质是 ZIP 格式但语义上不是“要解压的普通压缩包”的后缀。命中后会降低归档评分，避免误解压应用包或文档。
-
-推荐值：
-
-```json
-[".jar", ".apk", ".ipa", ".epub", ".odt", ".ods", ".odp", ".docx", ".xlsx", ".pptx", ".whl", ".xpi", ".war", ".ear", ".aab"]
-```
-
-补充：即使后缀不是这些值，程序也会尝试识别部分 ZIP 内部结构，例如 `META-INF/MANIFEST.MF`、`[Content_Types].xml`、`AndroidManifest.xml` 等，并降低误解压概率。
 
 ### `carrier_exts`
 

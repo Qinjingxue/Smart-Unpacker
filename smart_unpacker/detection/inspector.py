@@ -3,7 +3,6 @@ from __future__ import annotations
 import os
 import re
 import subprocess
-import zipfile
 
 from smart_unpacker.support.types import InspectionResult
 
@@ -49,26 +48,6 @@ class ArchiveInspector:
     def _add_reason(self, info, score_delta, reason):
         info.score += score_delta
         info.reasons.append(f"{score_delta:+d} {reason}")
-
-    def _classify_zip_container(self, path):
-        lower_name = os.path.basename(path).lower()
-        _, ext = os.path.splitext(lower_name)
-        if ext in self.engine.ZIP_CONTAINER_EXTS:
-            return ext
-        try:
-            with zipfile.ZipFile(path, "r") as zf:
-                names = {name.lower() for name in zf.namelist()[:200]}
-        except Exception:
-            return None
-        if "meta-inf/manifest.mf" in names:
-            return ".jar"
-        if "[content_types].xml" in names and "word/document.xml" in names:
-            return ".docx"
-        if "[content_types].xml" in names and "xl/workbook.xml" in names:
-            return ".xlsx"
-        if "androidmanifest.xml" in names and "classes.dex" in names:
-            return ".apk"
-        return None
 
     def _validate_with_7z(self, path):
         norm_path = os.path.normpath(path)
@@ -138,8 +117,6 @@ class ArchiveInspector:
             self._add_reason(info, +1, f"大文件({info.size // (1024 * 1024)}MB)")
         if ext in self.engine.STANDARD_EXTS:
             self._add_reason(info, +4, "标准归档扩展名")
-        elif ext in self.engine.ZIP_CONTAINER_EXTS:
-            self._add_reason(info, -4, "ZIP 语义容器扩展名，默认不视为待解压包")
         elif ext in self.engine.AMBIGUOUS_RESOURCE_EXTS:
             self._add_reason(info, -1, "资源类易混淆扩展名")
 
@@ -158,13 +135,6 @@ class ArchiveInspector:
                 info.detected_ext = detected_ext
                 self._add_reason(info, -1, f"弱魔数命中 {detected_ext}")
                 return
-
-    def _apply_magic_analysis(self, info, norm_path):
-        if info.detected_ext == ".zip":
-            zip_container = self._classify_zip_container(norm_path)
-            if zip_container:
-                info.container_type = zip_container.lstrip(".")
-                self._add_reason(info, -5, f"识别为 ZIP 语义容器 {zip_container}")
 
     def _match_tail_magic(self, sample, offset):
         for magic, detected_ext in self.TAIL_MAGICS.items():
@@ -531,7 +501,6 @@ class ArchiveInspector:
             with open(norm_path, "rb") as f:
                 sig = f.read(8)
             self._detect_signature(info, sig)
-            self._apply_magic_analysis(info, norm_path)
             self._apply_embedded_tail_analysis(info, ext, norm_path)
             if not info.magic_matched:
                 self._apply_probe_analysis(info, ext, norm_path)

@@ -688,6 +688,37 @@ class ModuleUnitTest(unittest.TestCase):
             validate.assert_not_called()
             probe.assert_not_called()
 
+    def test_strict_semantic_docx_is_not_promoted_to_extract_task(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            config_path = root / "smart_unpacker_config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "extraction_rules": {
+                            "min_inspection_size_bytes": 0,
+                            "extensions": {
+                                "strict_semantic_skip_exts": [".docx"],
+                            },
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            archive = root / "sample.docx"
+            archive.write_bytes(b"PK\x03\x04" + b"x" * (2 * 1024 * 1024))
+            with patch.object(ResourceLocator, "get_resource_base_path", return_value=str(root)):
+                engine = self.make_engine(root)
+                with patch.object(engine, "_validate_with_7z") as validate, patch.object(engine, "_probe_archive_with_7z") as probe:
+                    info = engine.inspect_archive_candidate(str(archive))
+                    tasks = engine.scan_archives_readonly()
+
+            self.assertEqual(info.decision, "not_archive")
+            self.assertFalse(info.should_extract)
+            self.assertEqual(tasks, [])
+            validate.assert_not_called()
+            probe.assert_not_called()
+
     def test_custom_threshold_keeps_magic_archive_as_maybe(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)

@@ -58,7 +58,6 @@ class Engine:
         self.AMBIGUOUS_RESOURCE_EXTS = set(detection_config.ambiguous_resource_exts)
         self.LIKELY_RESOURCE_EXTS = self.STRICT_SEMANTIC_SKIP_EXTS | set(detection_config.likely_resource_exts_extra)
         self.STANDARD_EXTS = set(detection_config.standard_archive_exts)
-        self.ZIP_CONTAINER_EXTS = set(detection_config.zip_container_exts)
         self.ARCHIVE_SCORE_THRESHOLD = detection_config.archive_score_threshold
         self.MAYBE_ARCHIVE_THRESHOLD = detection_config.maybe_archive_threshold
         self.SPLIT_FIRST_PATTERNS = tuple(re.compile(pattern, re.I) for pattern in detection_config.split_first_patterns)

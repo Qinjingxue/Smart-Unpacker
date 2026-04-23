@@ -36,7 +36,6 @@ class DetectionConfig:
     strict_semantic_skip_exts: set[str] = field(default_factory=set)
     ambiguous_resource_exts: set[str] = field(default_factory=set)
     likely_resource_exts_extra: set[str] = field(default_factory=set)
-    zip_container_exts: set[str] = field(default_factory=set)
     archive_score_threshold: int = 6
     maybe_archive_threshold: int = 3
     split_first_patterns: tuple[str, ...] = ()
