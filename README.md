@@ -1,7 +1,5 @@
 # Smart Unpacker
 
-[中文](./README.md) | [English](./README.en.md) | [日本語](./README.ja.md)
-
 Smart Unpacker 是一个面向 Windows 的 Python 命令行解压工具，使用 AI 辅助开发。
 
 它适合批量处理伪装压缩包、嵌套压缩包、分卷压缩包、带密码压缩包和自解压文件，尽量用一套统一流程完成检测、校验、解压和清理。
