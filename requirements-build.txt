@@ -1,0 +1,2 @@
+pyinstaller
+maturin>=1.8,<2

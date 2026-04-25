@@ -1,0 +1,17 @@
+{
+  "name": "inspect archives only json shape",
+  "act": {
+    "type": "cli",
+    "args": ["inspect", "--json", "--archives-only", "{cli_pipeline_fixture}", "--no-pause"]
+  },
+  "assert": {
+    "returncode": 0,
+    "json.command": "inspect",
+    "json.inputs.archives_only": true,
+    "json.summary.archives_only": true
+  },
+  "has": [
+    "json.summary.displayed_items",
+    "json.items"
+  ]
+}

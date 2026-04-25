@@ -1,0 +1,34 @@
+{
+  "name": "carrier tail jpeg 7z detected",
+  "arrange": {
+    "files": [
+      {
+        "path": "fakepicture.jpg",
+        "content": {
+          "type": "parts",
+          "items": [
+            {
+              "type": "hex",
+              "value": "ffd8ffe000104a46494600010100000100010000ffdb004300080606070605080707070909080a0c140d0c0b0b0c19120f131d1a1f1e1d1a1c1c20242e2720222c231c1c2837292c30313434341f27393d38323c2e333432ffc0000b080001000101011100ffc40014000100000000000000000000000000000008ffda0008010100003f00d2cf20ffd9"
+            },
+            {
+              "type": "hex",
+              "value": "377abcaf271c"
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "act": {
+    "type": "rule_evaluate",
+    "target": "fakepicture.jpg",
+    "config": "embedded_archive_carrier_tail"
+  },
+  "assert": {
+    "decision.should_extract": true,
+    "decision.total_score": 5,
+    "facts.file.detected_ext": ".7z",
+    "facts.file.embedded_archive_found": true
+  }
+}

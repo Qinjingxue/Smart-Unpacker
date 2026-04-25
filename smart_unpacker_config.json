@@ -1,0 +1,143 @@
+{
+  "cli": {
+    "language": "zh"
+  },
+  "thresholds": {
+    "archive_score_threshold": 6,
+    "maybe_archive_threshold": 3
+  },
+  "recursive_extract": {
+    "mode": "infinite",
+    "max_rounds": 999
+  },
+  "post_extract": {
+    "archive_cleanup_mode": "recycle",
+    "flatten_single_directory": true
+  },
+  "filesystem": {
+    "directory_scan_mode": "recursive",
+    "scan_filters": [
+      {
+        "name": "blacklist",
+        "enabled": true,
+        "patterns": ["\\.git", "\\.vscode", "^\\$RECYCLE\\.BIN"],
+        "prune_dirs": [
+          "^\\.git$", "^\\.vscode$", "^__pycache__$", "^node_modules$",
+          "^site-packages$", "^\\.venv$", "^venv$", "^env$",
+          "^\\.cache$", "^repositories$"
+        ],
+        "blocked_extensions": [
+          ".dll", ".save", ".py", ".pyc", ".json", ".xml", ".cfg", ".ini",
+          ".sys", ".db", ".msi", ".cur", ".ani", ".ttf", ".woff", ".ico",
+          ".pak", ".obb", ".unitypackage", ".jar", ".apk", ".ipa", ".epub",
+          ".odt", ".ods", ".odp", ".docx", ".xlsx", ".pptx", ".whl", ".xpi",
+          ".war", ".ear", ".aab", ".ckpt", ".pt", ".pth", ".safetensors"
+        ]
+      },
+      {
+        "name": "size_minimum",
+        "enabled": true,
+        "min_inspection_size_bytes": 1048576
+      }
+    ]
+  },
+  "performance": {
+    "scheduler_profile": "auto"
+  },
+  "detection": {
+    "fact_collectors": [
+      {"name": "file_facts", "enabled": true},
+      {"name": "magic_bytes", "enabled": true},
+      {"name": "scene_markers", "enabled": true}
+    ],
+    "processors": [
+      {
+        "name": "embedded_archive",
+        "enabled": true,
+        "carrier_exts": [".jpg", ".jpeg", ".png", ".pdf", ".gif", ".webp"],
+        "ambiguous_resource_exts": [".dat", ".bin", ".exe"],
+        "loose_scan_min_tail_bytes": 4096
+      },
+      {"name": "scene_facts", "enabled": true},
+      {"name": "seven_zip_probe", "enabled": true},
+      {"name": "seven_zip_validation", "enabled": true},
+      {"name": "zip_structure", "enabled": true},
+      {"name": "archive_identity", "enabled": true}
+    ],
+    "rule_pipeline": {
+      "hard_stop": [
+        {
+          "name": "scene_protect",
+          "enabled": true,
+          "protect_weak_matches": true
+        }
+      ],
+      "scoring": [
+        {
+          "name": "extension",
+          "enabled": true,
+          "extension_score_groups": [
+            {
+              "score": 5,
+              "extensions": [".zip", ".7z", ".rar", ".gz", ".bz2", ".xz", ".001"]
+            }
+          ]
+        },
+        {
+          "name": "archive_identity",
+          "enabled": true,
+          "magic_start_score": 5,
+          "carrier_tail_score": 5,
+          "loose_scan_score": 4,
+          "sfx_hint_score": 3,
+          "zip_plausibility_required_for_loose_scan": true,
+          "zip_plausibility_required_for_carrier_tail": false,
+          "identity_scan_exts": [".7z", ".zip", ".rar", ".gz", ".bz2", ".xz", ".001"],
+          "carrier_exts": [".jpg", ".jpeg", ".png", ".pdf", ".gif", ".webp"],
+          "ambiguous_resource_exts": [".dat", ".bin", ".exe"],
+          "loose_scan_min_prefix": 32,
+          "loose_scan_min_tail_bytes": 4096,
+          "loose_scan_max_hits": 3,
+          "loose_scan_tail_window_bytes": 8388608,
+          "loose_scan_full_scan_max_bytes": 67108864,
+          "loose_scan_deep_scan": false,
+          "carrier_scan_tail_window_bytes": 8388608,
+          "carrier_scan_prefix_window_bytes": 8388608,
+          "carrier_scan_full_scan_max_bytes": 0,
+          "carrier_scan_deep_scan": false
+        },
+        {
+          "name": "scene_penalty",
+          "enabled": true,
+          "runtime_resource_archive_penalty": -99,
+          "weak_protected_path_penalty": -4,
+          "resource_penalty": -4,
+          "runtime_exact_path_penalty": 0,
+          "scene_context_max_parent_depth": 4,
+          "semantic_resource_exts": [
+            ".dll", ".save", ".py", ".pyc", ".json", ".xml", ".cfg", ".ini", ".sys", ".db",
+            ".msi", ".cur", ".ani", ".ttf", ".woff", ".ico", ".pak", ".obb", ".unitypackage",
+            ".jar", ".apk", ".ipa", ".epub", ".odt", ".ods", ".odp", ".docx", ".xlsx",
+            ".pptx", ".whl", ".xpi", ".war", ".ear", ".aab"
+          ],
+          "likely_resource_exts": [
+            ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tga",
+            ".mp3", ".wav", ".ogg", ".flac", ".aac",
+            ".mp4", ".mkv", ".avi", ".mov", ".wmv", ".webm",
+            ".txt", ".log", ".csv", ".pdf"
+          ]
+        }
+      ],
+      "confirmation": [
+        {
+          "name": "seven_zip_probe",
+          "enabled": true
+        },
+        {
+          "name": "seven_zip_validation",
+          "enabled": true
+        }
+      ]
+    }
+  }
+}

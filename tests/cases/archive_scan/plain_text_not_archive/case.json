@@ -1,0 +1,13 @@
+{
+  "name": "plain text is not archive",
+  "config": "archive_scan_full",
+  "files_dir": "files",
+  "expect": [
+    {
+      "path": "notes.txt",
+      "should_extract": false,
+      "decision": "not_archive",
+      "max_score": 0
+    }
+  ]
+}

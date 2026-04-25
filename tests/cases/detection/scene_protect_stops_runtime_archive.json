@@ -1,0 +1,39 @@
+{
+  "name": "scene protect stops runtime archive",
+  "arrange": {
+    "files": [
+      {
+        "path": "game.exe",
+        "content": {
+          "type": "hex",
+          "value": "4d5a"
+        }
+      },
+      {
+        "path": "www/data/Map001.json",
+        "content": "{}"
+      },
+      {
+        "path": "www/audio/bgm.7z",
+        "content": {
+          "type": "hex",
+          "value": "377abcaf271c"
+        }
+      }
+    ]
+  },
+  "act": {
+    "type": "rule_evaluate",
+    "target": "www/audio/bgm.7z",
+    "config": "scene_protect_enabled"
+  },
+  "assert": {
+    "decision.should_extract": false,
+    "decision.decision": "not_archive",
+    "facts.scene.scene_type": "rpg_maker_game",
+    "facts.scene.is_runtime_resource_archive": true
+  },
+  "contains": {
+    "decision.stop_reason": ["Scene Protect"]
+  }
+}

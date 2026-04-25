@@ -1,0 +1,13 @@
+{
+  "name": "help lists basic commands",
+  "act": {
+    "type": "cli",
+    "args": ["--help"]
+  },
+  "assert": {
+    "returncode": 0
+  },
+  "contains": {
+    "stdout": ["extract", "scan", "inspect", "passwords", "config"]
+  }
+}

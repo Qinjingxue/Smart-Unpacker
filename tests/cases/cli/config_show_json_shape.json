@@ -1,0 +1,13 @@
+{
+  "name": "config show json shape",
+  "act": {
+    "type": "cli",
+    "args": ["config", "--json", "show"]
+  },
+  "assert": {
+    "returncode": 0,
+    "json.command": "config",
+    "json.inputs.action": "show",
+    "json.summary.changed": false
+  }
+}

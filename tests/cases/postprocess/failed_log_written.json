@@ -1,0 +1,12 @@
+{
+  "name": "failed log written",
+  "act": {
+    "type": "failed_log",
+    "success_count": 3,
+    "failed_tasks": ["part2.rar [broken archive]", "secret.7z [wrong password]"]
+  },
+  "assert": {
+    "exists.failed_log.txt": true,
+    "files.failed_log.txt.lines": ["part2.rar [broken archive]", "secret.7z [wrong password]"]
+  }
+}

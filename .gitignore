@@ -1,0 +1,60 @@
+.DS_Store
+Thumbs.db
+
+# Python cache and build artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+build/
+dist/
+release/
+
+# Rust native build artifacts
+native/**/target/
+
+# Virtual environments
+.venv/
+.venv-build/
+venv/
+env/
+
+# IDE / editor
+.vscode/
+.idea/
+
+# Local reports and generated outputs
+reports/
+*.log
+
+# Local fixtures and private samples
+fixtures/samples/
+fixtures/private/
+fixtures/*.7z
+fixtures/*.zip
+fixtures/*.rar
+fixtures/*.exe
+fixtures/*.dll
+fixtures/*.bin
+
+# Bundled third-party binaries kept locally by default
+tools/*.exe
+tools/*.dll
+tools/*.sfx
+tools/*.ion
+
+# Temporary workspaces created by acceptance tests
+acceptance-*/
+acceptance-dataset-*/
+relationship-grouping-*/
+rpgmaker-semantic-*/
+fixtures/fakepicture.jpg
+
+testfiles/
+重构方案.txt
+test_pipeline_run/
+test_extract/

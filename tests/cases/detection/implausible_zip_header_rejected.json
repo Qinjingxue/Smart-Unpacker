@@ -1,0 +1,44 @@
+{
+  "name": "implausible zip header rejected",
+  "arrange": {
+    "files": [
+      {
+        "path": "payload.bin",
+        "content": {
+          "type": "parts",
+          "items": [
+            {
+              "type": "repeat",
+              "value": "x",
+              "count": 64
+            },
+            {
+              "type": "hex",
+              "value": "504b0304"
+            },
+            "not-a-real-zip-header",
+            {
+              "type": "repeat",
+              "value": "x",
+              "count": 4096
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "act": {
+    "type": "rule_evaluate",
+    "target": "payload.bin",
+    "config": "embedded_archive_loose"
+  },
+  "assert": {
+    "decision.should_extract": false,
+    "decision.total_score": 0,
+    "facts.zip.local_header_plausible": false,
+    "facts.zip.local_header_offset": 64
+  },
+  "has": [
+    "facts.zip.local_header_error"
+  ]
+}

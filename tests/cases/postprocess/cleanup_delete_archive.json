@@ -1,0 +1,19 @@
+{
+  "name": "cleanup delete archive",
+  "arrange": {
+    "files": [
+      {
+        "path": "dummy_archive.zip",
+        "content": "archive bytes"
+      }
+    ]
+  },
+  "act": {
+    "type": "cleanup",
+    "mode": "delete",
+    "archives": [["dummy_archive.zip"]]
+  },
+  "assert": {
+    "exists.dummy_archive.zip": false
+  }
+}

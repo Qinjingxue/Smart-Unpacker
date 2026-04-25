@@ -1,0 +1,33 @@
+{
+  "name": "carrier tail gif 7z detected",
+  "arrange": {
+    "files": [
+      {
+        "path": "anim.gif",
+        "content": {
+          "type": "parts",
+          "items": [
+            {
+              "type": "hex",
+              "value": "47494638396101000100800000000000ffffff21f90401000000002c000000000100010000020144003b"
+            },
+            {
+              "type": "hex",
+              "value": "377abcaf271c"
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "act": {
+    "type": "rule_evaluate",
+    "target": "anim.gif",
+    "config": "embedded_archive_carrier_tail"
+  },
+  "assert": {
+    "decision.should_extract": true,
+    "facts.file.detected_ext": ".7z",
+    "facts.file.embedded_archive_found": true
+  }
+}

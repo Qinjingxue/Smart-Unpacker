@@ -1,0 +1,24 @@
+{
+  "name": "flatten single child directory",
+  "arrange": {
+    "files": [
+      {
+        "path": "extracted_dir/only_child_folder/game_data.bin",
+        "content": ""
+      },
+      {
+        "path": "extracted_dir/only_child_folder/config.ini",
+        "content": ""
+      }
+    ]
+  },
+  "act": {
+    "type": "flatten",
+    "target": "extracted_dir"
+  },
+  "assert": {
+    "exists.extracted_dir/game_data.bin": true,
+    "exists.extracted_dir/config.ini": true,
+    "exists.extracted_dir/only_child_folder": false
+  }
+}

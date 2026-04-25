@@ -1,0 +1,33 @@
+{
+  "name": "carrier tail pdf zip detected",
+  "arrange": {
+    "files": [
+      {
+        "path": "document.pdf",
+        "content": {
+          "type": "parts",
+          "items": [
+            "%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\n%%EOF\n",
+            {
+              "type": "zip",
+              "entries": {
+                "inside.txt": "hello"
+              }
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "act": {
+    "type": "rule_evaluate",
+    "target": "document.pdf",
+    "config": "embedded_archive_carrier_tail"
+  },
+  "assert": {
+    "decision.should_extract": true,
+    "facts.file.detected_ext": ".zip",
+    "facts.file.embedded_archive_found": true,
+    "facts.zip.local_header_plausible": true
+  }
+}

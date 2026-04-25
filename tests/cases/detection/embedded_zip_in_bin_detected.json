@@ -1,0 +1,39 @@
+{
+  "name": "embedded zip in bin detected",
+  "arrange": {
+    "files": [
+      {
+        "path": "payload.bin",
+        "content": {
+          "type": "parts",
+          "items": [
+            {
+              "type": "repeat",
+              "value": "x",
+              "count": 64
+            },
+            {
+              "type": "zip",
+              "entries": {
+                "inside.txt": "hello"
+              }
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "act": {
+    "type": "rule_evaluate",
+    "target": "payload.bin",
+    "config": "embedded_archive_loose"
+  },
+  "assert": {
+    "decision.should_extract": true,
+    "decision.total_score": 5,
+    "facts.file.detected_ext": ".zip",
+    "facts.file.embedded_archive_found": true,
+    "facts.zip.local_header_plausible": true,
+    "facts.zip.local_header_offset": 64
+  }
+}

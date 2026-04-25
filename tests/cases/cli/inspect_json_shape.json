@@ -1,0 +1,15 @@
+{
+  "name": "inspect json shape",
+  "act": {
+    "type": "cli",
+    "args": ["inspect", "--json", "{cli_pipeline_fixture}", "--no-pause"]
+  },
+  "assert": {
+    "returncode": 0,
+    "json.command": "inspect"
+  },
+  "has": [
+    "json.summary.total_items",
+    "json.items"
+  ]
+}

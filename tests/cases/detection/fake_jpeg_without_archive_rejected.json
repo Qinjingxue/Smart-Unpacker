@@ -1,0 +1,23 @@
+{
+  "name": "fake jpeg without archive rejected",
+  "arrange": {
+    "files": [
+      {
+        "path": "plain_image.jpg",
+        "content": {
+          "type": "hex",
+          "value": "ffd8ffe000104a46494600010100000100010000ffd9"
+        }
+      }
+    ]
+  },
+  "act": {
+    "type": "rule_evaluate",
+    "target": "plain_image.jpg",
+    "config": "embedded_archive_carrier_tail"
+  },
+  "assert": {
+    "decision.should_extract": false,
+    "decision.total_score": 0
+  }
+}

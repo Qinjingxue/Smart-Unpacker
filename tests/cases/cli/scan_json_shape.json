@@ -1,0 +1,15 @@
+{
+  "name": "scan json shape",
+  "act": {
+    "type": "cli",
+    "args": ["scan", "--json", "{cli_pipeline_fixture}", "--no-pause"]
+  },
+  "assert": {
+    "returncode": 0,
+    "json.command": "scan"
+  },
+  "has": [
+    "json.summary.task_count",
+    "json.tasks"
+  ]
+}

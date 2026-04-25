@@ -1,0 +1,33 @@
+{
+  "name": "carrier tail png 7z detected",
+  "arrange": {
+    "files": [
+      {
+        "path": "sprite.png",
+        "content": {
+          "type": "parts",
+          "items": [
+            {
+              "type": "hex",
+              "value": "89504e470d0a1a0a0000000d4948445200000001000000010802000000907753de0000000c49444154789c63f8ffff3f0005fe02fea7a6459b0000000049454e44ae426082"
+            },
+            {
+              "type": "hex",
+              "value": "377abcaf271c"
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "act": {
+    "type": "rule_evaluate",
+    "target": "sprite.png",
+    "config": "embedded_archive_carrier_tail"
+  },
+  "assert": {
+    "decision.should_extract": true,
+    "facts.file.detected_ext": ".7z",
+    "facts.file.embedded_archive_found": true
+  }
+}
