@@ -1,7 +1,7 @@
 from typing import Dict, Any
 from smart_unpacker.detection.pipeline.processors.context import FactProcessorContext
 from smart_unpacker.detection.pipeline.processors.registry import register_processor
-from smart_unpacker.extraction.internal.native_password_tester import NativePasswordTester
+from smart_unpacker.extraction.internal.native_password_tester import cached_probe_archive
 
 EXECUTABLE_PROBE_TYPES = {"pe", "elf", "macho", "te"}
 
@@ -18,7 +18,7 @@ EXECUTABLE_PROBE_TYPES = {"pe", "elf", "macho", "te"}
 )
 def process_7z_probe(context: FactProcessorContext) -> Dict[str, Any]:
     base_path = context.fact_bag.get("file.path") or ""
-    probe = NativePasswordTester().probe_archive(base_path)
+    probe = cached_probe_archive(base_path)
     result = {
         "is_archive": probe.is_archive,
         "type": probe.archive_type or None,

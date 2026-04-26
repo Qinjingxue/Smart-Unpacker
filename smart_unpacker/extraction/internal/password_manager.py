@@ -6,7 +6,7 @@ from smart_unpacker.extraction.internal.errors import (
     has_definite_wrong_password,
 )
 from smart_unpacker.passwords import dedupe_passwords, parse_password_lines, read_password_file
-from smart_unpacker.extraction.internal.native_password_tester import NativePasswordTester
+from smart_unpacker.extraction.internal.native_password_tester import get_native_password_tester
 
 class PasswordManager:
     def __init__(
@@ -26,7 +26,7 @@ class PasswordManager:
         else:
             self.builtin_passwords = []
         self.recent_successful: List[str] = []
-        self.native_password_tester = NativePasswordTester()
+        self.native_password_tester = get_native_password_tester()
 
     @property
     def recent_passwords(self) -> List[str]:

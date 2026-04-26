@@ -4,6 +4,7 @@ import pytest
 
 from smart_unpacker.contracts.detection import FactBag
 from smart_unpacker.detection import DetectionScheduler
+from smart_unpacker.detection.pipeline.rules.scoring.zip_structure_identity import ZipStructureIdentityScoreRule
 from smart_unpacker.detection.scene.definitions import RECOMMENDED_SCENE_RULES_PAYLOAD
 from tests.helpers.detection_config import with_detection_pipeline
 from tests.helpers.fs_builder import make_zip
@@ -59,3 +60,27 @@ def test_rule_pipeline_evaluates_generated_files(tmp_path, relative_path, conten
         assert bag.get("file.detected_ext") == ".zip"
     if target.name == "bgm.7z":
         assert bag.get("scene.is_runtime_resource_archive") is True
+
+
+def test_scoring_stops_after_archive_threshold_when_remaining_rules_cannot_reduce_score(tmp_path, monkeypatch):
+    target = tmp_path / "archive.zip"
+    target.write_bytes(make_zip({"inside.txt": "hello"}))
+
+    def fail_if_called(self, facts, config):
+        raise AssertionError("zip_structure_identity should be skipped after score is fixed")
+
+    monkeypatch.setattr(ZipStructureIdentityScoreRule, "evaluate", fail_if_called)
+    config = with_detection_pipeline({
+        "thresholds": {"archive_score_threshold": 5, "maybe_archive_threshold": 3},
+    }, scoring=[
+        {"name": "extension", "enabled": True, "extension_score_groups": [{"score": 5, "extensions": [".zip"]}]},
+        {"name": "zip_structure_identity", "enabled": True},
+    ])
+
+    bag = FactBag()
+    bag.set("file.path", str(target))
+    decision = DetectionScheduler(config).evaluate_bag(bag)
+
+    assert decision.should_extract is True
+    assert decision.total_score == 5
+    assert decision.matched_rules == ["extension"]

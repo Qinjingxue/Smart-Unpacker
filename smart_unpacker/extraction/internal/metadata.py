@@ -4,7 +4,7 @@ from typing import List, Optional, Tuple, Dict, Any
 
 from smart_unpacker_native import scan_zip_central_directory_names as _NATIVE_SCAN_ZIP_NAMES
 
-from smart_unpacker.extraction.internal.native_password_tester import NativePasswordTester
+from smart_unpacker.extraction.internal.native_password_tester import cached_probe_archive
 
 class ArchiveMetadataScanResult:
     def __init__(self, archive_path: str, archive_type: str, reasons: List[str] = None):
@@ -265,7 +265,7 @@ class ArchiveMetadataScanner:
 
     def _scan_with_7z_listing(self, archive_path: str, archive_type: str, password: Optional[str] = None) -> ArchiveMetadataScanResult:
         result = ArchiveMetadataScanResult(archive_path=archive_path, archive_type=archive_type)
-        probe = NativePasswordTester().probe_archive(archive_path)
+        probe = cached_probe_archive(archive_path)
         result.sample_count = max(0, int(probe.item_count or 0))
         if probe.is_archive and not probe.is_encrypted:
             result.reasons.append(f"{archive_type.upper()} 元数据可由 7z.dll 正常列出，保持默认编码处理")

@@ -91,6 +91,43 @@ class RuleManager:
             if active_facts:
                 self.ensure_pool_facts([bag], set(active_facts), fact_configs)
 
+    def _ensure_scoring_rule_facts(self, fact_bags: List[FactBag], rule: PreparedRule):
+        if not fact_bags:
+            return
+        requirements = self._rule_fact_requirements(rule)
+        prerequisite_facts: set[str] = set()
+        for requirement in requirements:
+            prerequisite_facts.update(requirement.prerequisite_facts)
+        if prerequisite_facts:
+            self.ensure_pool_facts(fact_bags, prerequisite_facts)
+
+        active_groups: dict[frozenset[str], list[FactBag]] = {}
+        for bag in fact_bags:
+            active_facts = {
+                requirement.fact_name
+                for requirement in requirements
+                if requirement.matches(bag, self._effective_fact_config(requirement.fact_name, rule.config))
+            }
+            if active_facts:
+                active_groups.setdefault(frozenset(active_facts), []).append(bag)
+
+        for active_facts, active_bags in active_groups.items():
+            fact_configs = {
+                fact_name: self._effective_fact_config(fact_name, rule.config)
+                for fact_name in active_facts
+            }
+            self.ensure_pool_facts(active_bags, set(active_facts), fact_configs)
+
+    def _remaining_minimum_score(self, scoring_rules: List[PreparedRule]) -> int:
+        minimum = 0
+        for rule in scoring_rules:
+            minimum += int(rule.instance.minimum_score(rule.config))
+        return minimum
+
+    def _scoring_decision_fixed(self, total_score: int, remaining_rules: List[PreparedRule]) -> bool:
+        threshold = self.decision_policy.archive_threshold()
+        return total_score >= threshold and total_score + self._remaining_minimum_score(remaining_rules) >= threshold
+
     def _run_precheck(self, fact_bags: List[FactBag]) -> tuple[Dict[FactBag, RuleDecision], List[FactBag]]:
         decisions: Dict[FactBag, RuleDecision] = {}
         surviving = list(fact_bags)
@@ -165,23 +202,43 @@ class RuleManager:
             return decisions
 
         scoring_rules = self._prepare_rules("scoring")
-        self._ensure_scoring_facts(surviving, scoring_rules)
+        scoring_state: dict[FactBag, dict[str, Any]] = {
+            bag: {
+                "total_score": 0,
+                "matched_rules": [],
+                "score_breakdown": [],
+            }
+            for bag in surviving
+        }
+        active_bags = list(surviving)
 
-        for bag in surviving:
-            total_score = 0
-            matched_rules: List[str] = []
-            score_breakdown: list[dict[str, Any]] = []
-            for rule in scoring_rules:
+        for index, rule in enumerate(scoring_rules):
+            if not active_bags:
+                break
+            self._ensure_scoring_rule_facts(active_bags, rule)
+            remaining_rules = scoring_rules[index + 1 :]
+            next_active_bags: List[FactBag] = []
+            for bag in active_bags:
+                state = scoring_state[bag]
                 effect = rule.instance.evaluate(bag, rule.config)
                 if effect.decision == "score":
-                    total_score += effect.score
-                    score_breakdown.append({
+                    state["total_score"] += effect.score
+                    state["score_breakdown"].append({
                         "rule": rule.name,
                         "score": effect.score,
                         "reason": effect.reason,
                     })
                     if effect.score != 0:
-                        matched_rules.append(rule.name)
+                        state["matched_rules"].append(rule.name)
+                if not self._scoring_decision_fixed(state["total_score"], remaining_rules):
+                    next_active_bags.append(bag)
+            active_bags = next_active_bags
+
+        for bag in surviving:
+            state = scoring_state[bag]
+            total_score = state["total_score"]
+            matched_rules: List[str] = list(state["matched_rules"])
+            score_breakdown: list[dict[str, Any]] = list(state["score_breakdown"])
             confirmation_decision, confirmation_trace = self.confirmation_runner.run(
                 bag,
                 total_score,

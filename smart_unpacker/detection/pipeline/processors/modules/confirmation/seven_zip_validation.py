@@ -1,7 +1,7 @@
 from typing import Dict, Any
 from smart_unpacker.detection.pipeline.processors.context import FactProcessorContext
 from smart_unpacker.detection.pipeline.processors.registry import register_processor
-from smart_unpacker.extraction.internal.native_password_tester import NativePasswordTester
+from smart_unpacker.extraction.internal.native_password_tester import cached_test_archive
 
 EXECUTABLE_VALIDATION_TYPES = {"pe", "elf", "macho", "te"}
 
@@ -19,7 +19,7 @@ EXECUTABLE_VALIDATION_TYPES = {"pe", "elf", "macho", "te"}
 )
 def process_7z_validation(context: FactProcessorContext) -> Dict[str, Any]:
     base_path = context.fact_bag.get("file.path") or ""
-    test = NativePasswordTester().test_archive(base_path)
+    test = cached_test_archive(base_path)
     validation_type = test.archive_type or ""
     checksum_error = test.checksum_error
     is_executable_container = validation_type in EXECUTABLE_VALIDATION_TYPES

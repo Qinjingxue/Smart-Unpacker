@@ -36,6 +36,10 @@ class ExtensionScoreRule(RuleBase):
         },
     }
 
+    def minimum_score(self, config: Dict[str, Any]) -> int:
+        scores = normalize_extension_score_groups(config.get("extension_score_groups", []))
+        return min([0] + list(scores.values()))
+
     def evaluate(self, facts: FactBag, config: Dict[str, Any]) -> RuleEffect:
         path = facts.get("file.path")
         if not path:

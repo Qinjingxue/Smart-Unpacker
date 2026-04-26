@@ -5,7 +5,7 @@ import tempfile
 from dataclasses import dataclass
 from typing import List, Optional
 
-from smart_unpacker.extraction.internal.native_password_tester import NativePasswordTester
+from smart_unpacker.extraction.internal.native_password_tester import get_native_password_tester
 from smart_unpacker.relations.internal.group_builder import RelationsGroupBuilder
 
 
@@ -20,7 +20,7 @@ class SplitVolumeStager:
     def __init__(self, seven_z_path: str):
         self.seven_z_path = seven_z_path
         self._relations = RelationsGroupBuilder()
-        self._native_tester = NativePasswordTester()
+        self._native_tester = get_native_password_tester()
 
     def _format_numbered_volume(self, prefix: str, number: int, style: str, width: int) -> str:
         if style == "rar_part":
