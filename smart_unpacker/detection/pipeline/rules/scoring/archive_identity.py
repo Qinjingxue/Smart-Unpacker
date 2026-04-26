@@ -10,7 +10,6 @@ from smart_unpacker.detection.pipeline.rules.registry import register_rule
 DEFAULT_MAGIC_START_SCORE = 5
 DEFAULT_CARRIER_TAIL_SCORE = 5
 DEFAULT_LOOSE_SCAN_SCORE = 4
-DEFAULT_SFX_HINT_SCORE = 3
 DEFAULT_REQUIRE_ZIP_PLAUSIBILITY_FOR_LOOSE_SCAN = True
 DEFAULT_REQUIRE_ZIP_PLAUSIBILITY_FOR_CARRIER_TAIL = False
 
@@ -47,12 +46,6 @@ class ArchiveIdentityScoreRule(RuleBase):
             "required": False,
             "default": DEFAULT_LOOSE_SCAN_SCORE,
             "description": "Score for loose embedded archive identity evidence.",
-        },
-        "sfx_hint_score": {
-            "type": "int",
-            "required": False,
-            "default": DEFAULT_SFX_HINT_SCORE,
-            "description": "Score for archive identity evidence inside an executable-like carrier.",
         },
         "zip_plausibility_required_for_loose_scan": {
             "type": "bool",
@@ -165,8 +158,6 @@ class ArchiveIdentityScoreRule(RuleBase):
             return config.get("magic_start_score", DEFAULT_MAGIC_START_SCORE)
         if mode == "carrier_tail":
             return config.get("carrier_tail_score", DEFAULT_CARRIER_TAIL_SCORE)
-        if mode == "sfx_hint":
-            return config.get("sfx_hint_score", DEFAULT_SFX_HINT_SCORE)
         if mode == "loose_scan":
             return config.get("loose_scan_score", DEFAULT_LOOSE_SCAN_SCORE)
         return 0
@@ -186,7 +177,7 @@ class ArchiveIdentityScoreRule(RuleBase):
             facts.set("file.magic_matched", True)
         facts.set("file.probe_detected_archive", True)
         facts.set("file.probe_offset", int(identity.get("offset") or 0))
-        if identity.get("mode") in {"carrier_tail", "loose_scan", "sfx_hint"}:
+        if identity.get("mode") in {"carrier_tail", "loose_scan"}:
             facts.set("file.embedded_archive_found", True)
         self._record_zip_plausibility(facts, identity)
 

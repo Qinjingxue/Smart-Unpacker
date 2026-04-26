@@ -55,7 +55,7 @@
         "name": "embedded_archive",
         "enabled": true,
         "carrier_exts": [".jpg", ".jpeg", ".png", ".pdf", ".gif", ".webp"],
-        "ambiguous_resource_exts": [".dat", ".bin", ".exe"],
+        "ambiguous_resource_exts": [".dat", ".bin"],
         "loose_scan_min_tail_bytes": 4096
       },
       {"name": "scene_facts", "enabled": true},
@@ -66,6 +66,7 @@
       {"name": "tar_header_structure", "enabled": true},
       {"name": "compression_stream_structure", "enabled": true},
       {"name": "archive_container_structure", "enabled": true},
+      {"name": "pe_overlay_structure", "enabled": true},
       {"name": "archive_identity", "enabled": true}
     ],
     "rule_pipeline": {
@@ -102,12 +103,11 @@
           "magic_start_score": 5,
           "carrier_tail_score": 5,
           "loose_scan_score": 4,
-          "sfx_hint_score": 3,
           "zip_plausibility_required_for_loose_scan": true,
           "zip_plausibility_required_for_carrier_tail": false,
           "identity_scan_exts": [".7z", ".zip", ".rar", ".gz", ".bz2", ".xz", ".001"],
           "carrier_exts": [".jpg", ".jpeg", ".png", ".pdf", ".gif", ".webp"],
-          "ambiguous_resource_exts": [".dat", ".bin", ".exe"],
+          "ambiguous_resource_exts": [".dat", ".bin"],
           "loose_scan_min_prefix": 32,
           "loose_scan_min_tail_bytes": 4096,
           "loose_scan_max_hits": 3,
@@ -141,6 +141,12 @@
           "name": "compression_stream_identity",
           "enabled": true,
           "stream_score": 5
+        },
+        {
+          "name": "pe_overlay_archive_identity",
+          "enabled": true,
+          "overlay_start_score": 5,
+          "overlay_near_start_score": 4
         },
         {
           "name": "scene_penalty",

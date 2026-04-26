@@ -58,7 +58,7 @@ def test_empty_scoring_fact_requirements_keep_required_facts_unconditional(tmp_p
     assert counts["file.magic_bytes"] == 1
 
 
-def test_archive_identity_collects_low_level_facts_before_aggregate(tmp_path, monkeypatch):
+def test_archive_identity_ignores_exe_loose_scan_after_collecting_inputs(tmp_path, monkeypatch):
     target = tmp_path / "setup.exe"
     target.write_bytes(b"MZ" + b"x" * 256 + b"7z\xbc\xaf\x27\x1c" + b"x" * 64)
     collected = []
@@ -83,8 +83,9 @@ def test_archive_identity_collects_low_level_facts_before_aggregate(tmp_path, mo
         },
     ])).evaluate(bag, FactProvider(str(target)))
 
-    assert decision.decision == "maybe_archive"
+    assert decision.decision == "not_archive"
     assert set(collected) == {"file.magic_bytes"}
     assert bag.has("file.magic_bytes")
     assert bag.has("embedded_archive.analysis")
-    assert bag.get("archive.identity").get("mode") == "sfx_hint"
+    assert bag.get("embedded_archive.analysis").get("found") is True
+    assert bag.get("archive.identity").get("is_archive_like") is False

@@ -76,13 +76,6 @@ def _format_from_ext(ext: str) -> str:
     return ext[1:].lower() if ext.startswith(".") else ext.lower()
 
 
-def _embedded_mode(analysis: dict[str, Any], path_ext: str) -> str:
-    mode = analysis.get("mode") or ""
-    if path_ext == ".exe" and mode == "loose_scan":
-        return "sfx_hint"
-    return mode
-
-
 def empty_magic_start() -> dict[str, Any]:
     return {
         "matched": False,
@@ -145,9 +138,11 @@ def _candidate_from_embedded(path: str, analysis: dict[str, Any]) -> dict[str, A
     detected_ext = analysis.get("detected_ext") or ""
     archive_format = _format_from_ext(detected_ext)
     path_ext = os.path.splitext(path)[1].lower()
-    mode = _embedded_mode(analysis, path_ext)
+    mode = analysis.get("mode") or ""
+    if path_ext == ".exe" and mode == "loose_scan":
+        return None
     confidence = "strong" if mode == "carrier_tail" else "medium"
-    requires_confirmation = mode in {"loose_scan", "sfx_hint"}
+    requires_confirmation = mode == "loose_scan"
     evidence = [f"{mode}:{archive_format}"]
     zip_header = analysis.get("zip_local_header") or {}
     if detected_ext == ".zip":

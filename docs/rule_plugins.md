@@ -99,7 +99,7 @@ fact_requirements = [
             fields=("carrier_exts", "ambiguous_resource_exts"),
             defaults={
                 "carrier_exts": (".jpg", ".png", ".pdf", ".gif", ".webp"),
-                "ambiguous_resource_exts": (".dat", ".bin", ".exe"),
+                "ambiguous_resource_exts": (".dat", ".bin"),
             },
         ),
     )
@@ -169,6 +169,7 @@ def process_archive_identity(context):
 | `tar_structure_identity` | `scoring` | 消费 `tar.header_structure`，按 TAR header checksum 证据加分。 |
 | `archive_container_identity` | `scoring` | 消费 `archive.container_structure`，按 CAB、ARJ、CPIO 结构证据加分。 |
 | `compression_stream_identity` | `scoring` | 消费 `compression.stream_structure`，按 gzip、bzip2、xz、zstd 结构证据加分。 |
+| `pe_overlay_archive_identity` | `scoring` | 消费 `pe.overlay_structure`，按 PE overlay 中的归档载荷证据加分。 |
 | `scene_penalty` | `scoring` | 对运行目录资源、弱保护路径和常见资源文件扣分。 |
 | `seven_zip_probe` | `confirmation` | 用 7-Zip 轻量探测可疑候选。 |
 | `seven_zip_validation` | `confirmation` | 用 7-Zip 测试候选是否可读、是否加密。 |

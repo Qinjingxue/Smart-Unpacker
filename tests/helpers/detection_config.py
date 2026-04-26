@@ -4,7 +4,7 @@ AMBIGUOUS_RESOURCE_EXTS = [
     ".dat", ".bin", ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tga",
     ".mp3", ".wav", ".ogg", ".flac", ".aac",
     ".mp4", ".mkv", ".avi", ".mov", ".wmv", ".webm",
-    ".txt", ".log", ".csv", ".pdf", ".exe",
+    ".txt", ".log", ".csv", ".pdf",
 ]
 SEMANTIC_RESOURCE_EXTS = [
     ".dll", ".save", ".py", ".pyc", ".json", ".xml", ".cfg", ".ini", ".sys", ".db",

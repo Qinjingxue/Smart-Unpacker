@@ -192,6 +192,11 @@ FACT_SCHEMA: dict[str, dict[str, Any]] = {
         "producer": "processors.archive_container_structure",
         "description": "Lightweight CAB, ARJ, or CPIO container structure check derived from the candidate file.",
     },
+    "pe.overlay_structure": {
+        "type": "dict",
+        "producer": "processors.pe_overlay_structure",
+        "description": "PE header, overlay range, and archive-like overlay evidence derived from the candidate file.",
+    },
 }
 
 

@@ -15,7 +15,7 @@ def _identity_config():
     return {
         "identity_scan_exts": [".7z", ".zip", ".rar", ".gz", ".bz2", ".xz", ".001"],
         "carrier_exts": [".jpg", ".pdf", ".gif", ".webp"],
-        "ambiguous_resource_exts": [".bin", ".exe"],
+        "ambiguous_resource_exts": [".bin"],
         "loose_scan_min_tail_bytes": 1,
     }
 
@@ -88,17 +88,20 @@ def test_archive_identity_detects_gif_carrier_after_real_trailer(tmp_path):
     assert identity["mode"] == "carrier_tail"
 
 
-def test_archive_identity_detects_sfx_hint_for_exe_loose_scan(tmp_path):
+def test_archive_identity_ignores_exe_loose_scan_sfx_semantics(tmp_path):
     target = tmp_path / "setup.exe"
     target.write_bytes(b"MZ" + b"x" * 256 + b"7z\xbc\xaf\x27\x1c" + b"x" * 64)
 
-    embedded = analyze_embedded_archive(str(target), target.stat().st_size, _identity_config())
+    embedded = analyze_embedded_archive(
+        str(target),
+        target.stat().st_size,
+        {**_identity_config(), "ambiguous_resource_exts": [".exe"], "loose_scan_min_tail_bytes": 1},
+    )
     identity = build_archive_identity(str(target), embedded_analysis=embedded)
 
-    assert identity["format"] == "7z"
-    assert identity["mode"] == "sfx_hint"
-    assert identity["confidence"] == "medium"
-    assert identity["requires_confirmation"] is True
+    assert embedded["found"] is True
+    assert embedded["mode"] == "loose_scan"
+    assert identity["is_archive_like"] is False
 
 
 def test_archive_identity_rule_sets_detected_facts(tmp_path):
