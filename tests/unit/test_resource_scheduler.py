@@ -1,5 +1,7 @@
+import json
 import threading
 import time
+import os
 from types import SimpleNamespace
 
 from smart_unpacker.contracts.detection import FactBag
@@ -293,3 +295,150 @@ def test_task_executor_submits_only_after_resource_tokens_are_available(tmp_path
 
     assert len(results) == 4
     assert peak_active == 1
+
+
+def test_task_executor_best_fit_prefers_task_that_fills_resource_gap(tmp_path):
+    scheduler = ConcurrencyScheduler(
+        {
+            "initial_concurrency_limit": 3,
+            "cpu_tokens": 3,
+            "io_tokens": 3,
+            "memory_tokens": 3,
+        },
+        current_limit=3,
+        max_workers=3,
+    )
+    assert scheduler.try_acquire_slot(demand={"cpu": 1, "io": 1, "memory": 1}) is True
+    executor = TaskExecutor(scheduler, max_workers=3)
+
+    def make_task(name: str, tokens: dict[str, int]) -> ArchiveTask:
+        bag = FactBag()
+        bag.set("resource.tokens", tokens)
+        archive = tmp_path / name
+        archive.write_bytes(b"PK")
+        return ArchiveTask(fact_bag=bag, score=1, main_path=str(archive), all_parts=[str(archive)])
+
+    light = make_task("light.zip", {"cpu": 1, "io": 1, "memory": 1})
+    better_fit = make_task("better.zip", {"cpu": 2, "io": 1, "memory": 1})
+
+    selected = executor._select_best_fit_task([light, better_fit])
+
+    assert selected is not None
+    assert selected[1] is better_fit
+
+
+def test_process_sample_updates_live_pressure_and_memory_profile_adjustment():
+    scheduler = ConcurrencyScheduler(
+        {
+            "initial_concurrency_limit": 2,
+            "profile_calibration_max_delta": 2,
+        },
+        current_limit=2,
+        max_workers=4,
+    )
+    profile_key = "7z|lzma|solid|dict>=256m|size>=4g|files<1k"
+
+    scheduler.record_process_sample(
+        cpu_percent=200,
+        memory_bytes=3 * 1024 * 1024 * 1024,
+        io_bytes=1234,
+        profile_key=profile_key,
+    )
+    adjusted = scheduler.apply_profile_calibration({"cpu": 2, "io": 2, "memory": 1}, profile_key)
+
+    assert scheduler.live_process_cpu_percent > 0
+    assert scheduler.live_process_io_bytes == 1234
+    assert adjusted.memory == 2
+
+
+def test_process_sample_pressure_feeds_next_scheduler_adjustment():
+    scheduler = ConcurrencyScheduler(
+        {
+            "initial_concurrency_limit": 2,
+            "cpu_tokens": 4,
+            "io_tokens": 4,
+            "memory_tokens": 4,
+            "cpu_scale_down_threshold_percent": 80,
+            "scale_down_streak_required": 1,
+            "scale_up_streak_required": 1,
+            "medium_backlog_threshold": 100,
+            "high_backlog_threshold": 200,
+        },
+        current_limit=2,
+        max_workers=4,
+    )
+    scheduler.active_cpu_tokens = 2
+    scheduler.record_process_sample(
+        cpu_percent=(os.cpu_count() or 1) * 95,
+        memory_bytes=256 * 1024 * 1024,
+        io_bytes=0,
+    )
+
+    scheduler.adjust_once(
+        0,
+        cpu_percent=5,
+        available_memory=8 * 1024 * 1024 * 1024,
+    )
+
+    assert scheduler.cpu_limit == 1
+
+
+def test_profile_calibration_persists_to_project_cache_path(tmp_path):
+    cache_path = tmp_path / ".smart_unpacker_cache" / "profile_calibration.json"
+    profile_key = "7z|lzma|solid|dict>=256m|size>=4g|files<1k"
+    scheduler = ConcurrencyScheduler(
+        {
+            "initial_concurrency_limit": 2,
+            "profile_calibration_cache_path": str(cache_path),
+            "profile_calibration_window_size": 4,
+            "profile_regression_ratio": 0.95,
+        },
+        current_limit=2,
+        max_workers=6,
+    )
+    for active_workers, duration in ((1, 1.0), (1, 1.0), (3, 4.0), (3, 4.0)):
+        scheduler.record_task_feedback(
+            demand={"cpu": 2, "io": 2, "memory": 1},
+            duration_seconds=duration,
+            estimated_bytes=100 * 1024 * 1024,
+            active_workers_at_start=active_workers,
+            success=True,
+            profile_key=profile_key,
+        )
+
+    scheduler.stop()
+
+    payload = json.loads(cache_path.read_text(encoding="utf-8"))
+    assert payload["version"] == 1
+    assert payload["profiles"][profile_key]["cpu"] == 1
+    assert payload["profiles"][profile_key]["io"] == 1
+
+    loaded_scheduler = ConcurrencyScheduler(
+        {
+            "initial_concurrency_limit": 2,
+            "profile_calibration_cache_path": str(cache_path),
+        },
+        current_limit=2,
+        max_workers=6,
+    )
+    adjusted = loaded_scheduler.apply_profile_calibration({"cpu": 2, "io": 2, "memory": 1}, profile_key)
+
+    assert adjusted.cpu == 3
+    assert adjusted.io == 3
+
+
+def test_profile_calibration_ignores_corrupt_project_cache(tmp_path):
+    cache_path = tmp_path / ".smart_unpacker_cache" / "profile_calibration.json"
+    cache_path.parent.mkdir(parents=True)
+    cache_path.write_text("{not-json", encoding="utf-8")
+
+    scheduler = ConcurrencyScheduler(
+        {
+            "initial_concurrency_limit": 2,
+            "profile_calibration_cache_path": str(cache_path),
+        },
+        current_limit=2,
+        max_workers=4,
+    )
+
+    assert scheduler.profile_adjustments == {}

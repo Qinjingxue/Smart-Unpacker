@@ -48,15 +48,13 @@ class TaskExecutor:
                 futures: dict[concurrent.futures.Future, ResourceDemand] = {}
                 while pending or futures:
                     submitted = False
-                    index = 0
-                    while index < len(pending):
-                        task = pending[index]
-                        demand = self._resource_demand(task)
-                        profile_key = task_profile_key(task)
-                        demand = self.scheduler.apply_profile_calibration(demand, profile_key)
+                    while pending:
+                        selected = self._select_best_fit_task(pending)
+                        if selected is None:
+                            break
+                        index, task, demand, profile_key = selected
                         if not self.scheduler.try_acquire_slot(demand=demand):
-                            index += 1
-                            continue
+                            break
                         pending.pop(index)
                         try:
                             future = pool.submit(wrapped_worker, task, demand, profile_key)
@@ -124,6 +122,22 @@ class TaskExecutor:
             except Exception:
                 pass
         return demand_from_value(getattr(task, "resource_token_cost", 1) or 1)
+
+    def _select_best_fit_task(self, pending: list[Any]) -> tuple[int, Any, ResourceDemand, str] | None:
+        best: tuple[int, int, Any, ResourceDemand, str] | None = None
+        for index, task in enumerate(pending):
+            demand = self._resource_demand(task)
+            profile_key = task_profile_key(task)
+            demand = self.scheduler.apply_profile_calibration(demand, profile_key)
+            score = self.scheduler.fit_score(demand)
+            if score is None:
+                continue
+            if best is None or score < best[0]:
+                best = (score, index, task, demand, profile_key)
+        if best is None:
+            return None
+        _score, index, task, demand, profile_key = best
+        return index, task, demand, profile_key
 
     def _worker_result_success(self, result: Any) -> bool:
         if isinstance(result, tuple) and len(result) >= 2:

@@ -1,7 +1,10 @@
 import os
 import shutil
 import subprocess
+import inspect
 from typing import Callable, Optional
+
+import psutil
 
 from smart_unpacker.extraction.internal.concurrency import ConcurrencyScheduler, build_scheduler_profile_config, resolve_max_workers
 from smart_unpacker.extraction.internal.executor import TaskExecutor
@@ -11,6 +14,7 @@ from smart_unpacker.extraction.internal.output_paths import default_output_dir_f
 from smart_unpacker.extraction.internal.password_manager import ArchivePasswordTester
 from smart_unpacker.extraction.internal.password_resolution import PasswordResolver
 from smart_unpacker.extraction.internal.preflight import PreExtractInspector
+from smart_unpacker.extraction.internal.resource_model import task_profile_key
 from smart_unpacker.extraction.result import ExtractionResult
 from smart_unpacker.contracts.tasks import ArchiveTask, SplitArchiveInfo
 from smart_unpacker.rename.scheduler import RenameScheduler
@@ -88,14 +92,29 @@ class ExtractionScheduler:
         executor = TaskExecutor(scheduler, max_workers=self.max_workers)
         return skipped_results + executor.execute_all(
             ready_tasks,
-            lambda task: (task, self.extract(task, output_dir_resolver(task))),
+            lambda task: (task, self._call_extract_for_executor(task, output_dir_resolver(task), scheduler)),
         )
+
+    def _call_extract_for_executor(
+        self,
+        task: ArchiveTask,
+        out_dir: str,
+        scheduler: ConcurrencyScheduler,
+    ) -> ExtractionResult:
+        try:
+            parameters = inspect.signature(self.extract).parameters
+        except (TypeError, ValueError):
+            parameters = {}
+        if "runtime_scheduler" in parameters:
+            return self.extract(task, out_dir, runtime_scheduler=scheduler)
+        return self.extract(task, out_dir)
 
     def extract(
         self,
         task: ArchiveTask,
         out_dir: str,
         split_info: Optional[SplitArchiveInfo] = None,
+        runtime_scheduler: ConcurrencyScheduler | None = None,
     ) -> ExtractionResult:
         archive = task.main_path
         split_info = split_info or task.split_info
@@ -162,13 +181,11 @@ class ExtractionScheduler:
                     if correct_pwd:
                         cmd.append(f"-p{correct_pwd}")
 
-                    run_result = subprocess.run(
+                    run_result = self._run_extract_command(
                         cmd,
-                        capture_output=True,
-                        text=True,
-                        errors="replace",
                         startupinfo=startupinfo,
-                        stdin=subprocess.DEVNULL,
+                        runtime_scheduler=runtime_scheduler,
+                        task=task,
                     )
 
                     if run_result.returncode == 0:
@@ -207,6 +224,80 @@ class ExtractionScheduler:
             all_parts=list(all_parts or []),
             error=error,
         )
+
+    def _run_extract_command(
+        self,
+        cmd: list[str],
+        startupinfo,
+        runtime_scheduler: ConcurrencyScheduler | None,
+        task: ArchiveTask,
+    ) -> subprocess.CompletedProcess:
+        if runtime_scheduler is None:
+            return subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                errors="replace",
+                startupinfo=startupinfo,
+                stdin=subprocess.DEVNULL,
+            )
+
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            errors="replace",
+            startupinfo=startupinfo,
+            stdin=subprocess.DEVNULL,
+        )
+        stdout, stderr = self._communicate_observed_process(process, runtime_scheduler, task)
+        return subprocess.CompletedProcess(cmd, process.returncode, stdout, stderr)
+
+    def _communicate_observed_process(
+        self,
+        process: subprocess.Popen,
+        runtime_scheduler: ConcurrencyScheduler,
+        task: ArchiveTask,
+    ) -> tuple[str, str]:
+        interval = max(0.1, float(self.scheduler_config.get("process_sample_interval_ms", 500) or 500) / 1000.0)
+        profile_key = task_profile_key(task)
+        ps_process = None
+        last_io_bytes = 0
+        try:
+            ps_process = psutil.Process(process.pid)
+            ps_process.cpu_percent(interval=None)
+            try:
+                io_counters = ps_process.io_counters()
+                last_io_bytes = int(io_counters.read_bytes + io_counters.write_bytes)
+            except Exception:
+                last_io_bytes = 0
+        except Exception:
+            ps_process = None
+
+        while True:
+            try:
+                return process.communicate(timeout=interval)
+            except subprocess.TimeoutExpired:
+                if ps_process is None:
+                    continue
+                try:
+                    cpu_percent = ps_process.cpu_percent(interval=None)
+                    memory_bytes = ps_process.memory_info().rss
+                    io_counters = ps_process.io_counters()
+                    now_io_bytes = int(io_counters.read_bytes + io_counters.write_bytes)
+                    io_delta = max(0, now_io_bytes - last_io_bytes)
+                    last_io_bytes = now_io_bytes
+                    runtime_scheduler.record_process_sample(
+                        cpu_percent=cpu_percent,
+                        memory_bytes=memory_bytes,
+                        io_bytes=io_delta,
+                        profile_key=profile_key,
+                    )
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    ps_process = None
+                except Exception:
+                    continue
 
     def _resolve_split_entry(
         self,
