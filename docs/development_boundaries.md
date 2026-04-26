@@ -11,9 +11,10 @@
 5. `extraction` 是解压黑盒，对外通过 `ExtractionScheduler` 暴露能力。
 6. `passwords` 是密码能力黑盒，对外通过 `smart_unpacker.passwords` 暴露候选密码、密码尝试和归档密码会话能力。
 7. `postprocess` 是后处理黑盒，对外通过 `PostProcessActions` 暴露能力。
-8. `config` 接管外部配置读取、配置路径和配置视图。
-9. `support` 只放跨领域基础设施，不放业务策略。
-10. `contracts` 只放共享数据契约，不放流程控制。
+8. `verification` 是解压结果校验黑盒，对外通过 `VerificationScheduler` 暴露能力。
+9. `config` 接管外部配置读取、配置路径和配置视图。
+10. `support` 只放跨领域基础设施，不放业务策略。
+11. `contracts` 只放共享数据契约，不放流程控制。
 
 当一个新功能不知道放在哪里时，先问两个问题：
 
@@ -36,6 +37,7 @@ app
 coordinator
   -> detection
   -> extraction
+  -> verification
   -> postprocess
   -> rename
   -> contracts
@@ -104,6 +106,7 @@ contracts
 | 解压 | `extraction.scheduler.ExtractionScheduler` | 解压调度、默认输出目录、调度配置。 |
 | 密码 | `smart_unpacker.passwords` | 密码文件读取、候选密码管理、归档密码尝试和 archive -> password 会话。 |
 | 后处理 | `postprocess.actions.PostProcessActions` | 成功后清理和扁平化。 |
+| 校验 | `verification.VerificationScheduler` | 按配置流水线对解压结果进行评分式校验。 |
 | 文件系统 | `filesystem.directory_scanner.DirectoryScanner` | 目录扫描并生成目录快照。 |
 | 关系 | `relations.scheduler.RelationsScheduler` | 分卷、相关文件和候选组关系。 |
 | 重命名 | `rename.scheduler.RenameScheduler` | 输出目录命名和冲突处理。 |
@@ -519,6 +522,50 @@ postprocess/internal/
 - `space_guard` 决定什么时候需要释放空间。
 - 真正的 cleanup 通过 `PostProcessActions.cleanup_archive_file()` 调用。
 - 不允许 `coordinator` 直接导入 `postprocess.internal.cleanup`。
+
+## `verification`
+
+`verification` 是解压成功后、postprocess 前的校验黑盒。
+
+公开入口：
+
+- `VerificationScheduler`
+- `register_verification_method`
+
+内部结构：
+
+```text
+verification/
+  scheduler.py
+  pipeline.py
+  registry.py
+  evidence.py
+  result.py
+  methods/
+```
+
+应该做：
+
+- 从 `ArchiveTask`、`ExtractionResult`、`PasswordSession` 构建校验证据。
+- 按配置顺序执行 verification method。
+- 每个 method 返回分数变化、issue 和 hard fail 信号。
+- 每执行一个 method 后检查 fail-fast 阈值。
+- 产出 `VerificationResult`，由 coordinator 决定是否进入 postprocess。
+
+不应该做：
+
+- 不执行解压。
+- 不删除归档文件或扁平化输出目录。
+- 不判断候选文件是否应该被解压。
+- 不把具体校验方法写进 coordinator。
+
+配置语义：
+
+- `verification.enabled` 控制是否启用。
+- `verification.initial_score` 是初始分。
+- `verification.pass_threshold` 是最终通过阈值。
+- `verification.fail_fast_threshold` 是流水线中途失败阈值。
+- `verification.methods` 是有序 method 配置列表，顺序即执行顺序。
 
 ## `rename`
 

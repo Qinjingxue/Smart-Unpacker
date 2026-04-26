@@ -44,6 +44,13 @@
     "max_extract_task_seconds": 1800,
     "process_no_progress_timeout_seconds": 180
   },
+  "verification": {
+    "enabled": false,
+    "initial_score": 100,
+    "pass_threshold": 70,
+    "fail_fast_threshold": 40,
+    "methods": []
+  },
   "detection": {
     "fact_collectors": [
       {"name": "file_facts", "enabled": true},
