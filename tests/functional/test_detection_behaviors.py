@@ -29,8 +29,10 @@ class DetectionBehaviorTests(unittest.TestCase):
     def test_group_builder_sets_split_relation_facts(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            (root / "game.part1.rar").write_bytes(b"one")
-            (root / "game.part2.rar").write_bytes(b"two")
+            first = root / "game.part1.rar"
+            second = root / "game.part2.rar"
+            first.write_bytes(b"one")
+            second.write_bytes(b"two")
             (root / "orphan.002").write_bytes(b"alone")
 
             groups = DetectionScheduler(config_with_rules([])).build_candidate_fact_bags([str(root)])
@@ -41,6 +43,11 @@ class DetectionBehaviorTests(unittest.TestCase):
             self.assertTrue(split_group.get("relation.is_split_related"))
             self.assertEqual(split_group.get("file.split_role"), "first")
             self.assertEqual(len(split_group.get("file.split_members")), 1)
+            self.assertEqual(split_group.get("candidate.kind"), "split_archive")
+            self.assertEqual(split_group.get("candidate.entry_path"), str(first))
+            self.assertEqual(split_group.get("candidate.member_paths"), [str(first), str(second)])
+            self.assertEqual(split_group.get("relation.split_family"), "rar_part")
+            self.assertTrue(split_group.get("relation.split_is_first"))
             self.assertFalse(orphan.get("relation.is_split_related"))
 
     def test_inspect_uses_target_grouping_for_directory_split_sets(self):

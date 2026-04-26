@@ -25,6 +25,9 @@ def test_selected_split_member_scans_parent_and_returns_group(tmp_path):
     assert len(bags) == 1
     assert bags[0].get("file.path") == str(first)
     assert str(second) in bags[0].get("file.split_members")
+    assert bags[0].get("candidate.kind") == "split_archive"
+    assert bags[0].get("candidate.entry_path") == str(first)
+    assert bags[0].get("candidate.member_paths") == [str(first), str(second)]
 
 
 def test_scheduler_uses_current_backlog_floor_and_scale_up_step():

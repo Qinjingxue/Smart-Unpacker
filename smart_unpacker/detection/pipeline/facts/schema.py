@@ -102,6 +102,56 @@ FACT_SCHEMA: dict[str, dict[str, Any]] = {
         "producer": "relations.group_builder",
         "description": "Logical archive/group name derived from related paths.",
     },
+    "candidate.kind": {
+        "type": "str",
+        "producer": "relations.group_builder",
+        "description": "Logical candidate kind, such as file or split_archive.",
+    },
+    "candidate.entry_path": {
+        "type": "str",
+        "producer": "relations.group_builder",
+        "description": "Entry path used for detection and extraction of the logical candidate.",
+    },
+    "candidate.member_paths": {
+        "type": "list[str]",
+        "producer": "relations.group_builder",
+        "description": "All filesystem paths belonging to the logical candidate.",
+    },
+    "candidate.logical_name": {
+        "type": "str",
+        "producer": "relations.group_builder",
+        "description": "Logical display/group name for the candidate.",
+    },
+    "relation.split_entry_path": {
+        "type": "str",
+        "producer": "relations.group_builder",
+        "description": "Preferred entry path for the split relation.",
+    },
+    "relation.split_member_count": {
+        "type": "int",
+        "producer": "relations.group_builder",
+        "description": "Number of paths in the split relation candidate.",
+    },
+    "relation.split_group_complete": {
+        "type": "bool",
+        "producer": "relations.group_builder",
+        "description": "Whether the relation layer considers the split group complete enough to represent.",
+    },
+    "relation.split_family": {
+        "type": "str",
+        "producer": "relations.group_builder",
+        "description": "Split naming family, such as 7z_numbered, rar_part, or exe_companion.",
+    },
+    "relation.split_index": {
+        "type": "int",
+        "producer": "relations.group_builder",
+        "description": "Numeric index of the entry volume when available.",
+    },
+    "relation.split_is_first": {
+        "type": "bool",
+        "producer": "relations.group_builder",
+        "description": "Whether the logical candidate entry is the first split volume.",
+    },
     "file.detected_ext": {
         "type": "str",
         "producer": "rules.scoring",

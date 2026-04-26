@@ -53,7 +53,7 @@ class ArchiveTask:
 
     @classmethod
     def from_fact_bag(cls, fact_bag: FactBag, score: int) -> "ArchiveTask":
-        main_path = fact_bag.get("file.path", "")
+        main_path = fact_bag.get("candidate.entry_path") or fact_bag.get("file.path", "")
         members = list(fact_bag.get("file.split_members", []) or [])
         logical_name = fact_bag.get("file.logical_name") or ""
         if not logical_name and main_path:
@@ -74,6 +74,7 @@ class ArchiveTask:
             is_split=is_split or len(all_parts) > 1,
             is_sfx_stub=is_sfx_stub,
             parts=list(all_parts),
+            preferred_entry=fact_bag.get("relation.split_preferred_entry") or "",
             source="detection" if is_split or is_sfx_stub else "",
         )
         return cls(

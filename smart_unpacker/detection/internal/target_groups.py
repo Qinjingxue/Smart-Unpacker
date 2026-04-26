@@ -11,6 +11,10 @@ def relation_group_to_fact_bag(group: CandidateGroup) -> FactBag:
     relation = group.relation
     bag.set("file.path", group.head_path)
     bag.set("file.logical_name", group.logical_name)
+    bag.set("candidate.kind", group.kind)
+    bag.set("candidate.entry_path", group.entry_path)
+    bag.set("candidate.member_paths", group.all_paths)
+    bag.set("candidate.logical_name", group.logical_name)
     if isinstance(group.head_size, int):
         bag.set("file.size", group.head_size)
     bag.set("file.split_members", list(group.member_paths))
@@ -26,6 +30,12 @@ def relation_group_to_fact_bag(group: CandidateGroup) -> FactBag:
     bag.set("relation.match_rar_disguised", relation.match_rar_disguised)
     bag.set("relation.match_rar_head", relation.match_rar_head)
     bag.set("relation.match_001_head", relation.match_001_head)
+    bag.set("relation.split_entry_path", group.head_path)
+    bag.set("relation.split_member_count", len(group.member_paths) + 1 if group.is_split_candidate else 0)
+    bag.set("relation.split_group_complete", True)
+    bag.set("relation.split_family", relation.split_family)
+    bag.set("relation.split_index", relation.split_index)
+    bag.set("relation.split_is_first", relation.split_role == "first")
     if group.member_paths:
         bag.set("relation.member_paths", list(group.member_paths))
     return bag

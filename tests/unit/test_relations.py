@@ -35,8 +35,8 @@ def test_relation_group_builder_reuses_snapshot_metadata_for_split_expansion(tmp
     def fail_filesystem_scan(*_args, **_kwargs):
         raise AssertionError("relation grouping should reuse the directory snapshot")
 
-    monkeypatch.setattr("smart_unpacker.relations.scheduler.os.listdir", fail_filesystem_scan)
-    monkeypatch.setattr("smart_unpacker.relations.scheduler.os.stat", fail_filesystem_scan)
+    monkeypatch.setattr("smart_unpacker.relations.internal.group_builder.os.listdir", fail_filesystem_scan)
+    monkeypatch.setattr("smart_unpacker.relations.internal.group_builder.os.stat", fail_filesystem_scan)
 
     groups = RelationsScheduler().build_candidate_groups(snapshot)
 
