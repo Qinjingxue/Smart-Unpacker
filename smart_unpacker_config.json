@@ -12,7 +12,7 @@
     "flatten_single_directory": true
   },
   "filesystem": {
-    "directory_scan_mode": "*",
+    "directory_scan_mode": "-",
     "scan_filters": [
       {
         "name": "blacklist",
