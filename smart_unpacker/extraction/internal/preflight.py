@@ -9,7 +9,7 @@ from smart_unpacker.extraction.internal.native_password_tester import (
     get_native_password_tester,
 )
 from smart_unpacker.extraction.internal.errors import has_archive_damage_signals, has_definite_wrong_password
-from smart_unpacker.extraction.internal.resource_model import estimate_resource_demand
+from smart_unpacker.extraction.internal.resource_model import build_resource_profile_key, estimate_resource_demand
 from smart_unpacker.extraction.result import ExtractionResult
 
 
@@ -64,9 +64,11 @@ class PreExtractInspector:
                 demand = estimate_resource_demand(analysis)
                 task.fact_bag.set("resource.tokens", demand.as_dict())
                 task.fact_bag.set("resource.token_cost", demand.scalar_cost)
+                task.fact_bag.set("resource.profile_key", build_resource_profile_key(analysis))
             else:
                 task.fact_bag.set("resource.tokens", {"cpu": 1, "io": 1, "memory": 1})
                 task.fact_bag.set("resource.token_cost", 1)
+                task.fact_bag.set("resource.profile_key", "unknown")
         finally:
             self.rename_scheduler.cleanup_normalized_split_group(staged)
 

@@ -63,6 +63,7 @@ class TaskRunFeedback:
     estimated_bytes: int
     active_workers_at_start: int
     success: bool
+    profile_key: str = ""
 
     @property
     def throughput_bytes_per_second(self) -> float:
@@ -164,6 +165,25 @@ def estimate_resource_demand(analysis: Any) -> ResourceDemand:
     ).normalized()
 
 
+def build_resource_profile_key(analysis: Any) -> str:
+    archive_type = _analysis_value(analysis, "archive_type", "unknown") or "unknown"
+    method = _method_family(str(_analysis_value(analysis, "dominant_method", "") or ""))
+    solid = "solid" if bool(_analysis_value(analysis, "solid", False)) else "nonsolid"
+    dictionary_mb = max(0, int(_analysis_value(analysis, "largest_dictionary_size", 0) or 0)) / (1024 * 1024)
+    unpacked_mb = max(0, int(_analysis_value(analysis, "total_unpacked_size", 0) or 0)) / (1024 * 1024)
+    file_count = max(0, int(_analysis_value(analysis, "file_count", 0) or 0))
+    return "|".join(
+        [
+            str(archive_type).lower() or "unknown",
+            method,
+            solid,
+            _bucket(dictionary_mb, [(16, "dict<16m"), (64, "dict<64m"), (256, "dict<256m")], "dict>=256m"),
+            _bucket(unpacked_mb, [(256, "size<256m"), (1024, "size<1g"), (4096, "size<4g")], "size>=4g"),
+            _bucket(file_count, [(1000, "files<1k"), (10000, "files<10k"), (50000, "files<50k")], "files>=50k"),
+        ]
+    )
+
+
 def estimate_task_work_bytes(task: Any) -> int:
     fact_bag = getattr(task, "fact_bag", None)
     if fact_bag is not None:
@@ -185,3 +205,43 @@ def estimate_task_work_bytes(task: Any) -> int:
         except Exception:
             pass
     return max(0, total)
+
+
+def task_profile_key(task: Any) -> str:
+    fact_bag = getattr(task, "fact_bag", None)
+    if fact_bag is None:
+        return ""
+    try:
+        return str(fact_bag.get("resource.profile_key") or "")
+    except Exception:
+        return ""
+
+
+def _analysis_value(analysis: Any, key: str, default: Any = None) -> Any:
+    if isinstance(analysis, dict):
+        return analysis.get(key, default)
+    return getattr(analysis, key, default)
+
+
+def _method_family(method: str) -> str:
+    value = method.lower()
+    if "lzma" in value:
+        return "lzma"
+    if "ppmd" in value:
+        return "ppmd"
+    if "bzip2" in value:
+        return "bzip2"
+    if "deflate64" in value:
+        return "deflate64"
+    if "deflate" in value:
+        return "deflate"
+    if any(token in value for token in ("copy", "store")):
+        return "store"
+    return value.strip() or "unknown"
+
+
+def _bucket(value: float, thresholds: list[tuple[float, str]], fallback: str) -> str:
+    for upper_bound, label in thresholds:
+        if value < upper_bound:
+            return label
+    return fallback

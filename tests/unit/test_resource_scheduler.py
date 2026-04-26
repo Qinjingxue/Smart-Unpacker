@@ -6,7 +6,7 @@ from smart_unpacker.contracts.detection import FactBag
 from smart_unpacker.contracts.tasks import ArchiveTask
 from smart_unpacker.extraction.internal.concurrency import ConcurrencyScheduler
 from smart_unpacker.extraction.internal.executor import TaskExecutor
-from smart_unpacker.extraction.internal.resource_model import estimate_resource_demand
+from smart_unpacker.extraction.internal.resource_model import build_resource_profile_key, estimate_resource_demand
 
 
 def test_resource_demand_estimation_distinguishes_heavy_lzma_archive():
@@ -39,6 +39,20 @@ def test_resource_demand_estimation_distinguishes_heavy_lzma_archive():
     assert heavy_demand.cpu > light_demand.cpu
     assert heavy_demand.io > light_demand.io
     assert heavy_demand.memory > light_demand.memory
+
+
+def test_resource_profile_key_groups_algorithm_shape():
+    analysis = SimpleNamespace(
+        ok=True,
+        dominant_method="LZMA2:24",
+        archive_type="7z",
+        total_unpacked_size=2 * 1024 * 1024 * 1024,
+        largest_dictionary_size=128 * 1024 * 1024,
+        file_count=20_000,
+        solid=True,
+    )
+
+    assert build_resource_profile_key(analysis) == "7z|lzma|solid|dict<256m|size<4g|files<50k"
 
 
 def test_concurrency_scheduler_requires_all_resource_dimensions():
@@ -182,6 +196,63 @@ def test_concurrency_scheduler_allows_scale_up_when_total_throughput_improves():
     assert scheduler.cpu_limit > 2
     assert scheduler.io_limit > 2
     assert scheduler.memory_limit > 2
+
+
+def test_profile_calibration_raises_tokens_when_same_profile_regresses():
+    scheduler = ConcurrencyScheduler(
+        {
+            "initial_concurrency_limit": 2,
+            "profile_calibration_window_size": 4,
+            "profile_regression_ratio": 0.95,
+            "profile_calibration_max_delta": 2,
+        },
+        current_limit=2,
+        max_workers=6,
+    )
+    profile_key = "7z|lzma|solid|dict>=256m|size>=4g|files<1k"
+    for active_workers, duration in ((1, 1.0), (1, 1.0), (3, 4.0), (3, 4.0)):
+        scheduler.record_task_feedback(
+            demand={"cpu": 2, "io": 2, "memory": 1},
+            duration_seconds=duration,
+            estimated_bytes=100 * 1024 * 1024,
+            active_workers_at_start=active_workers,
+            success=True,
+            profile_key=profile_key,
+        )
+
+    adjusted = scheduler.apply_profile_calibration({"cpu": 2, "io": 2, "memory": 1}, profile_key)
+
+    assert adjusted.cpu == 3
+    assert adjusted.io == 3
+    assert adjusted.memory == 1
+
+
+def test_profile_calibration_lowers_tokens_when_same_profile_improves():
+    scheduler = ConcurrencyScheduler(
+        {
+            "initial_concurrency_limit": 2,
+            "profile_calibration_window_size": 4,
+            "profile_improvement_ratio": 1.05,
+        },
+        current_limit=2,
+        max_workers=6,
+    )
+    profile_key = "zip|deflate|nonsolid|dict<16m|size<1g|files<1k"
+    for active_workers, duration in ((1, 1.0), (1, 1.0), (3, 2.0), (3, 2.0)):
+        scheduler.record_task_feedback(
+            demand={"cpu": 2, "io": 2, "memory": 1},
+            duration_seconds=duration,
+            estimated_bytes=100 * 1024 * 1024,
+            active_workers_at_start=active_workers,
+            success=True,
+            profile_key=profile_key,
+        )
+
+    adjusted = scheduler.apply_profile_calibration({"cpu": 2, "io": 2, "memory": 1}, profile_key)
+
+    assert adjusted.cpu == 1
+    assert adjusted.io == 1
+    assert adjusted.memory == 1
 
 
 def test_task_executor_submits_only_after_resource_tokens_are_available(tmp_path):

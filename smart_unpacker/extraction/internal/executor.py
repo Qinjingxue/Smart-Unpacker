@@ -3,7 +3,12 @@ import time
 from typing import Any, Callable
 
 from smart_unpacker.extraction.internal.concurrency import ConcurrencyScheduler
-from smart_unpacker.extraction.internal.resource_model import ResourceDemand, demand_from_value, estimate_task_work_bytes
+from smart_unpacker.extraction.internal.resource_model import (
+    ResourceDemand,
+    demand_from_value,
+    estimate_task_work_bytes,
+    task_profile_key,
+)
 
 
 class TaskExecutor:
@@ -17,7 +22,7 @@ class TaskExecutor:
         self.scheduler.update_pending_task_estimate(len(tasks), 0)
         self.scheduler.start()
 
-        def wrapped_worker(task: Any, demand: ResourceDemand) -> Any:
+        def wrapped_worker(task: Any, demand: ResourceDemand, profile_key: str) -> Any:
             started_at = time.perf_counter()
             active_workers_at_start = self.scheduler.active_workers_snapshot()
             success = False
@@ -33,6 +38,7 @@ class TaskExecutor:
                     estimated_bytes=estimate_task_work_bytes(task),
                     active_workers_at_start=active_workers_at_start,
                     success=success,
+                    profile_key=profile_key,
                 )
                 self.scheduler.release_slot(demand=demand)
 
@@ -46,12 +52,14 @@ class TaskExecutor:
                     while index < len(pending):
                         task = pending[index]
                         demand = self._resource_demand(task)
+                        profile_key = task_profile_key(task)
+                        demand = self.scheduler.apply_profile_calibration(demand, profile_key)
                         if not self.scheduler.try_acquire_slot(demand=demand):
                             index += 1
                             continue
                         pending.pop(index)
                         try:
-                            future = pool.submit(wrapped_worker, task, demand)
+                            future = pool.submit(wrapped_worker, task, demand, profile_key)
                         except Exception:
                             self.scheduler.release_slot(demand=demand)
                             raise
@@ -62,9 +70,11 @@ class TaskExecutor:
                     if not futures:
                         task = pending.pop(0)
                         demand = self._resource_demand(task)
+                        profile_key = task_profile_key(task)
+                        demand = self.scheduler.apply_profile_calibration(demand, profile_key)
                         self.scheduler.acquire_slot(demand=demand)
                         try:
-                            future = pool.submit(wrapped_worker, task, demand)
+                            future = pool.submit(wrapped_worker, task, demand, profile_key)
                         except Exception:
                             self.scheduler.release_slot(demand=demand)
                             raise

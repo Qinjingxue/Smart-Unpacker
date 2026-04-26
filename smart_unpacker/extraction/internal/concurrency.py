@@ -2,7 +2,7 @@ import os
 import subprocess
 import threading
 import time
-from collections import deque
+from collections import defaultdict, deque
 
 import psutil
 
@@ -119,6 +119,14 @@ class ConcurrencyScheduler:
         self.feedback_window_size = max(4, int(config.get("throughput_window_size", 8) or 8))
         self.throughput_regression_ratio = float(config.get("throughput_regression_ratio", 0.95) or 0.95)
         self.feedback_window: deque[TaskRunFeedback] = deque(maxlen=self.feedback_window_size)
+        self.profile_window_size = max(4, int(config.get("profile_calibration_window_size", 4) or 4))
+        self.profile_regression_ratio = float(config.get("profile_regression_ratio", 0.95) or 0.95)
+        self.profile_improvement_ratio = float(config.get("profile_improvement_ratio", 1.05) or 1.05)
+        self.profile_calibration_max_delta = max(0, int(config.get("profile_calibration_max_delta", 2) or 2))
+        self.profile_feedback_windows: dict[str, deque[TaskRunFeedback]] = defaultdict(
+            lambda: deque(maxlen=self.profile_window_size)
+        )
+        self.profile_adjustments: dict[str, dict[str, int]] = {}
 
         self.cond = threading.Condition()
         self.thread = None
@@ -245,6 +253,7 @@ class ConcurrencyScheduler:
         estimated_bytes: int,
         active_workers_at_start: int,
         success: bool,
+        profile_key: str = "",
     ) -> None:
         feedback = TaskRunFeedback(
             demand=demand_from_value(demand),
@@ -252,11 +261,28 @@ class ConcurrencyScheduler:
             estimated_bytes=max(0, int(estimated_bytes or 0)),
             active_workers_at_start=max(1, int(active_workers_at_start or 1)),
             success=bool(success),
+            profile_key=str(profile_key or ""),
         )
         if feedback.throughput_bytes_per_second <= 0:
             return
         with self.cond:
             self.feedback_window.append(feedback)
+            if feedback.profile_key:
+                window = self.profile_feedback_windows[feedback.profile_key]
+                window.append(feedback)
+                self._recalibrate_profile_locked(feedback.profile_key, window)
+
+    def apply_profile_calibration(self, demand: ResourceDemand | dict, profile_key: str = "") -> ResourceDemand:
+        demand_value = demand_from_value(demand)
+        if not profile_key:
+            return demand_value
+        with self.cond:
+            adjustment = self.profile_adjustments.get(profile_key, {})
+            return ResourceDemand(
+                cpu=max(1, demand_value.cpu + int(adjustment.get("cpu", 0))),
+                io=max(1, demand_value.io + int(adjustment.get("io", 0))),
+                memory=max(1, demand_value.memory + int(adjustment.get("memory", 0))),
+            ).normalized()
 
     def acquire_slot(self, token_cost: int = 1, demand: ResourceDemand | dict | None = None):
         demand_value = demand_from_value(demand or token_cost)
@@ -448,3 +474,33 @@ class ConcurrencyScheduler:
         previous_total_throughput = previous_throughput * previous_workers
         recent_total_throughput = recent_throughput * recent_workers
         return recent_total_throughput >= previous_total_throughput * self.throughput_regression_ratio
+
+    def _recalibrate_profile_locked(self, profile_key: str, window: deque[TaskRunFeedback]) -> None:
+        if len(window) < self.profile_window_size:
+            return
+        samples = [sample for sample in window if sample.success and sample.throughput_bytes_per_second > 0]
+        if len(samples) < self.profile_window_size:
+            return
+        midpoint = len(samples) // 2
+        previous = samples[:midpoint]
+        recent = samples[midpoint:]
+        previous_total = self._estimated_total_throughput(previous)
+        recent_total = self._estimated_total_throughput(recent)
+        previous_workers = sum(item.active_workers_at_start for item in previous) / len(previous)
+        recent_workers = sum(item.active_workers_at_start for item in recent) / len(recent)
+        if recent_workers <= previous_workers:
+            return
+
+        adjustment = dict(self.profile_adjustments.get(profile_key, {"cpu": 0, "io": 0, "memory": 0}))
+        if recent_total < previous_total * self.profile_regression_ratio:
+            adjustment["cpu"] = min(self.profile_calibration_max_delta, int(adjustment.get("cpu", 0)) + 1)
+            adjustment["io"] = min(self.profile_calibration_max_delta, int(adjustment.get("io", 0)) + 1)
+        elif recent_total > previous_total * self.profile_improvement_ratio:
+            adjustment["cpu"] = max(-1, int(adjustment.get("cpu", 0)) - 1)
+            adjustment["io"] = max(-1, int(adjustment.get("io", 0)) - 1)
+        self.profile_adjustments[profile_key] = adjustment
+
+    def _estimated_total_throughput(self, samples: list[TaskRunFeedback]) -> float:
+        throughput = sum(item.throughput_bytes_per_second for item in samples) / len(samples)
+        workers = sum(item.active_workers_at_start for item in samples) / len(samples)
+        return throughput * workers
