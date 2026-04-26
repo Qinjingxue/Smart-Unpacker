@@ -1,0 +1,61 @@
+#pragma once
+
+#include "sevenzip_password_tester/password_tester.hpp"
+
+#include <cstdint>
+#include <string>
+#include <vector>
+
+namespace smart_unpacker::sevenzip {
+
+using UInt32 = std::uint32_t;
+using UInt64 = std::uint64_t;
+using Int32 = std::int32_t;
+
+struct HealthProbeResult {
+    PasswordTestStatus status = PasswordTestStatus::BackendUnavailable;
+    bool backend_available = false;
+    bool is_archive = false;
+    bool encrypted = false;
+    bool damaged = false;
+    bool missing_volume = false;
+    bool wrong_password = false;
+    Int32 operation_result = 0;
+    std::string message;
+};
+
+struct ResourceAnalysisResult {
+    PasswordTestStatus status = PasswordTestStatus::BackendUnavailable;
+    bool is_archive = false;
+    bool encrypted = false;
+    bool damaged = false;
+    bool solid = false;
+    UInt32 item_count = 0;
+    UInt32 file_count = 0;
+    UInt32 dir_count = 0;
+    UInt64 archive_size = 0;
+    UInt64 total_unpacked_size = 0;
+    UInt64 total_packed_size = 0;
+    UInt64 largest_item_size = 0;
+    UInt64 largest_dictionary_size = 0;
+    std::wstring dominant_method;
+    std::string message;
+};
+
+HealthProbeResult check_archive_health_with_parts(
+    const std::wstring& seven_zip_dll_path,
+    const std::wstring& archive_path,
+    const std::vector<std::wstring>& part_paths,
+    const std::wstring& password
+);
+
+ResourceAnalysisResult analyze_archive_resources_with_parts(
+    const std::wstring& seven_zip_dll_path,
+    const std::wstring& archive_path,
+    const std::vector<std::wstring>& part_paths,
+    const std::wstring& password
+);
+
+std::wstring archive_type_for_path(const std::wstring& path);
+
+}  // namespace smart_unpacker::sevenzip

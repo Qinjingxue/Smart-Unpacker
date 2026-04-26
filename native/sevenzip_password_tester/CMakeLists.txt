@@ -7,7 +7,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_library(sevenzip_password_tester STATIC
-    src/password_tester.cpp
+    src/internal/sevenzip_engine.cpp
 )
 
 target_include_directories(sevenzip_password_tester
@@ -23,7 +23,10 @@ endif()
 add_library(sevenzip_password_tester_capi SHARED
     src/archive_probe.cpp
     src/archive_test.cpp
-    src/password_tester.cpp
+    src/c_api_health.cpp
+    src/c_api_passwords.cpp
+    src/c_api_resources.cpp
+    src/internal/sevenzip_engine.cpp
 )
 
 target_include_directories(sevenzip_password_tester_capi
