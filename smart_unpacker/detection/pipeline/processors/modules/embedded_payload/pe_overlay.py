@@ -2,7 +2,7 @@ import os
 import struct
 from typing import Any
 
-from smart_unpacker.detection.pipeline.processors.modules.zip_structure import inspect_zip_local_header
+from smart_unpacker.detection.pipeline.processors.modules.format_structure.zip_local_header import inspect_zip_local_header
 from smart_unpacker.detection.pipeline.processors.context import FactProcessorContext
 from smart_unpacker.detection.pipeline.processors.registry import register_processor
 

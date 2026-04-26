@@ -2,7 +2,7 @@ from typing import Any, Dict
 
 from smart_unpacker.contracts.detection import FactBag
 from smart_unpacker.contracts.rules import RuleEffect
-from smart_unpacker.detection.pipeline.processors.modules.rar_structure import DEFAULT_MAX_FIRST_HEADER_CHECK_BYTES
+from smart_unpacker.detection.pipeline.processors.modules.format_structure.rar import DEFAULT_MAX_FIRST_HEADER_CHECK_BYTES
 from smart_unpacker.detection.pipeline.rules.base import RuleBase
 from smart_unpacker.detection.pipeline.rules.registry import register_rule
 

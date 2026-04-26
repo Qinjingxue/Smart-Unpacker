@@ -1,7 +1,7 @@
 import subprocess
 
-from smart_unpacker.detection.pipeline.processors.modules import seven_zip_probe
-from smart_unpacker.detection.pipeline.processors.modules import seven_zip_validation
+from smart_unpacker.detection.pipeline.processors.modules.confirmation import seven_zip_probe
+from smart_unpacker.detection.pipeline.processors.modules.confirmation import seven_zip_validation
 from smart_unpacker.contracts.detection import FactBag
 from smart_unpacker.support.external_command_cache import clear_cache_namespace
 

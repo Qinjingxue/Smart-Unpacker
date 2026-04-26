@@ -4,7 +4,7 @@ import zipfile
 from smart_unpacker.contracts.detection import FactBag
 from smart_unpacker.detection import DetectionScheduler
 from smart_unpacker.detection.pipeline.facts.provider import FactProvider
-from smart_unpacker.detection.pipeline.processors.modules.pe_overlay_structure import inspect_pe_overlay_structure
+from smart_unpacker.detection.pipeline.processors.modules.embedded_payload.pe_overlay import inspect_pe_overlay_structure
 from tests.helpers.detection_config import with_detection_pipeline
 
 

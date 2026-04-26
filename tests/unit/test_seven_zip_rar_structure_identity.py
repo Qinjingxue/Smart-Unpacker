@@ -4,8 +4,8 @@ import zlib
 from smart_unpacker.contracts.detection import FactBag
 from smart_unpacker.detection import DetectionScheduler
 from smart_unpacker.detection.pipeline.facts.provider import FactProvider
-from smart_unpacker.detection.pipeline.processors.modules.rar_structure import inspect_rar_structure
-from smart_unpacker.detection.pipeline.processors.modules.seven_zip_structure import inspect_seven_zip_structure
+from smart_unpacker.detection.pipeline.processors.modules.format_structure.rar import inspect_rar_structure
+from smart_unpacker.detection.pipeline.processors.modules.format_structure.seven_zip import inspect_seven_zip_structure
 from tests.helpers.detection_config import with_detection_pipeline
 
 

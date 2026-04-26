@@ -7,10 +7,10 @@ import zlib
 from smart_unpacker.contracts.detection import FactBag
 from smart_unpacker.detection import DetectionScheduler
 from smart_unpacker.detection.pipeline.facts.provider import FactProvider
-from smart_unpacker.detection.pipeline.processors.modules.archive_container_structure import (
+from smart_unpacker.detection.pipeline.processors.modules.format_structure.archive_container import (
     inspect_archive_container_structure,
 )
-from smart_unpacker.detection.pipeline.processors.modules.compression_stream_structure import (
+from smart_unpacker.detection.pipeline.processors.modules.format_structure.compression_stream import (
     inspect_compression_stream_structure,
 )
 from tests.helpers.detection_config import with_detection_pipeline

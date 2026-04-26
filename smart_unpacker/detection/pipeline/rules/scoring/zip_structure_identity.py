@@ -11,6 +11,7 @@ DEFAULT_ZIP_EMBEDDED_EOCD_SCORE = 4
 DEFAULT_ZIP_EMPTY_EOCD_SCORE = 4
 DEFAULT_ZIP_MAGIC_SCORE = 2
 DEFAULT_ZIP_LOCAL_HEADER_SCORE = 4
+DEFAULT_ZIP_CD_WALK_SCORE = 7
 
 
 @register_rule(name="zip_structure_identity", layer="scoring")
@@ -49,6 +50,17 @@ class ZipStructureIdentityScoreRule(RuleBase):
             "default": DEFAULT_ZIP_LOCAL_HEADER_SCORE,
             "description": "Score for a plausible ZIP local file header without EOCD evidence.",
         },
+        "cd_walk_score": {
+            "type": "int",
+            "required": False,
+            "default": DEFAULT_ZIP_CD_WALK_SCORE,
+            "description": "Score for ZIP EOCD, central directory entry walk, and local-header back references.",
+        },
+        "max_cd_entries_to_walk": {
+            "type": "int",
+            "required": False,
+            "description": "Maximum central directory entries checked by the ZIP structure processor.",
+        },
     }
 
     def evaluate(self, facts: FactBag, config: Dict[str, Any]) -> RuleEffect:
@@ -62,7 +74,15 @@ class ZipStructureIdentityScoreRule(RuleBase):
         facts.set("file.probe_offset", int(structure.get("archive_offset") or 0))
 
         archive_offset = int(structure.get("archive_offset") or 0)
-        if structure.get("plausible") and archive_offset > 0:
+        if (
+            structure.get("plausible")
+            and structure.get("central_directory_walk_ok")
+            and structure.get("local_header_links_ok")
+            and archive_offset == 0
+        ):
+            score = config.get("cd_walk_score", DEFAULT_ZIP_CD_WALK_SCORE)
+            reason = "ZIP structure: central directory entries and local header links"
+        elif structure.get("plausible") and archive_offset > 0:
             score = config.get("embedded_eocd_score", DEFAULT_ZIP_EMBEDDED_EOCD_SCORE)
             reason = "ZIP structure: embedded EOCD and central directory"
         elif structure.get("plausible") and structure.get("central_directory_present"):

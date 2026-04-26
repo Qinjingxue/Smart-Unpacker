@@ -92,7 +92,7 @@ def discover_processors():
         return
 
     package = importlib.import_module("smart_unpacker.detection.pipeline.processors.modules")
-    for module_info in pkgutil.iter_modules(package.__path__, package.__name__ + "."):
+    for module_info in pkgutil.walk_packages(package.__path__, package.__name__ + "."):
         importlib.import_module(module_info.name)
 
     _discovered = True

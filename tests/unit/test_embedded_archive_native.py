@@ -1,4 +1,4 @@
-from smart_unpacker.detection.pipeline.processors.modules import embedded_archive
+from smart_unpacker.detection.pipeline.processors.modules.embedded_payload import embedded_archive
 
 
 def test_native_carrier_archive_fast_path_is_used(tmp_path, monkeypatch):

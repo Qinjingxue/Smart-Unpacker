@@ -17,6 +17,11 @@ class ZipStructureAcceptRule(RuleBase):
             "default": True,
             "description": "Whether a structurally valid empty ZIP EOCD can be accepted before scoring.",
         },
+        "max_cd_entries_to_walk": {
+            "type": "int",
+            "required": False,
+            "description": "Maximum central directory entries checked by the ZIP structure processor.",
+        },
     }
 
     def evaluate(self, facts: FactBag, config: Dict[str, Any]) -> RuleEffect:
@@ -27,10 +32,14 @@ class ZipStructureAcceptRule(RuleBase):
             return RuleEffect.pass_()
 
         central_directory_present = bool(structure.get("central_directory_present"))
+        central_directory_walk_ok = bool(structure.get("central_directory_walk_ok"))
+        local_header_links_ok = bool(structure.get("local_header_links_ok"))
         empty_zip = (
             int(structure.get("total_entries") or 0) == 0
             and int(structure.get("central_directory_size") or 0) == 0
         )
+        if central_directory_present and not (central_directory_walk_ok and local_header_links_ok):
+            return RuleEffect.pass_()
         if not central_directory_present and not (empty_zip and config.get("accept_empty_zip", True)):
             return RuleEffect.pass_()
 
