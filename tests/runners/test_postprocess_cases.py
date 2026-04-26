@@ -21,6 +21,23 @@ def test_postprocess_case(case, case_workspace):
     assert_case_expectations(snapshot_workspace(workspace), case.get("assert", {}))
 
 
+def test_postprocess_flatten_output_uses_chinese_language(case_workspace, capsys):
+    target = case_workspace / "extract_out"
+    child = target / "only_child"
+    child.mkdir(parents=True)
+    (child / "payload.txt").write_text("ok", encoding="utf-8")
+
+    PostProcessActions(normalize_config({}), language="zh").apply(
+        cleanup_archives=False,
+        flatten_outputs=True,
+        flatten_targets=[str(target)],
+    )
+
+    output = capsys.readouterr().out
+    assert "正在压平单子目录" in output
+    assert "Flattening single-branch directories" not in output
+
+
 def run_postprocess_action(act: dict, workspace: Path):
     action_type = act["type"]
     if action_type == "cleanup":

@@ -49,7 +49,7 @@ The wrapper exports a narrow C ABI:
 - `sup7z_check_archive_health`
 - `sup7z_analyze_archive_resources`
 
-Python calls these through `smart_unpacker.extraction.internal.native_password_tester`.
+Python calls these through `smart_unpacker.support.sevenzip_native`.
 
 ## Runtime Responsibility
 

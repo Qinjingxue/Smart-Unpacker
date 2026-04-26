@@ -3,8 +3,17 @@ import shutil
 
 
 class DirectoryFlattener:
+    def __init__(self, language: str = "en"):
+        self.language = "zh" if str(language or "").strip().lower() == "zh" else "en"
+
+    def text(self, en: str, zh: str) -> str:
+        return zh if self.language == "zh" else en
+
     def flatten_dirs(self, base: str):
-        print("\n[CLEAN] Flattening single-branch directories...")
+        print(self.text(
+            "\n[CLEAN] Flattening single-branch directories...",
+            "\n[CLEAN] 正在压平单子目录...",
+        ))
         for root, dirs, files in os.walk(base, topdown=False):
             if len(dirs) == 1 and not files:
                 child_path = os.path.join(root, dirs[0])

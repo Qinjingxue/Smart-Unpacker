@@ -64,7 +64,7 @@ Windows 下最终解压要求存在 `tools\7z.exe` 或程序目录旁边的 `7z.
 
 ```powershell
 python -c "import smart_unpacker_native as n; print(n.native_available(), n.scanner_version())"
-python -c "from smart_unpacker.extraction.internal.native_password_tester import NativePasswordTester; print(NativePasswordTester().available())"
+python -c "from smart_unpacker.support.sevenzip_native import NativePasswordTester; print(NativePasswordTester().available())"
 ```
 
 ## 快速使用
@@ -142,6 +142,8 @@ python sunpack_cli.py config validate
 - `filesystem.directory_scan_mode`：`*` 递归扫描，`-` 只扫描当前目录。
 - `filesystem.scan_filters`：目录扫描阶段的黑名单、剪枝目录、阻止扩展名和最小检测大小。
 - `performance.scheduler_profile`：`auto`、`conservative` 或 `aggressive`。
+- `performance.max_extract_task_seconds` / `performance.process_no_progress_timeout_seconds`：限制单个解压任务总时长和无进展超时，`0` 表示关闭限制。
+- `verification`：解压结果校验、失败重试和失败输出清理策略；仓库默认配置已启用基础校验。
 - `detection.rule_pipeline`：检测规则流水线。
 
 完整说明见 [配置文件说明](docs/configuration.md)。

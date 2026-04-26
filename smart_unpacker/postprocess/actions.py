@@ -14,7 +14,7 @@ class PostProcessActions:
         if self.cleanup_mode not in {"keep", "recycle", "delete"}:
             raise ValueError("archive_cleanup_mode must be normalized before PostProcessActions starts")
         self.cleanup = ArchiveCleanup(mode=self.cleanup_mode, language=language)
-        self.flattener = DirectoryFlattener()
+        self.flattener = DirectoryFlattener(language=language)
 
     def apply(
         self,
