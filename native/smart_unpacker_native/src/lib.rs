@@ -4,6 +4,7 @@ mod carrier;
 mod directory_scan;
 mod format_structure;
 mod magic;
+mod pe_overlay;
 mod util;
 mod zip_names;
 
@@ -53,5 +54,6 @@ fn smart_unpacker_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(format_structure::inspect_tar_header_structure, m)?)?;
     m.add_function(wrap_pyfunction!(format_structure::inspect_compression_stream_structure, m)?)?;
     m.add_function(wrap_pyfunction!(format_structure::inspect_archive_container_structure, m)?)?;
+    m.add_function(wrap_pyfunction!(pe_overlay::inspect_pe_overlay_structure, m)?)?;
     Ok(())
 }

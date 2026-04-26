@@ -6,6 +6,11 @@ from smart_unpacker.detection.pipeline.processors.modules.format_structure.zip_l
 from smart_unpacker.detection.pipeline.processors.context import FactProcessorContext
 from smart_unpacker.detection.pipeline.processors.registry import register_processor
 
+try:
+    from smart_unpacker_native import inspect_pe_overlay_structure as _native_inspect_pe_overlay_structure
+except ImportError:  # pragma: no cover - exercised when native extension is absent
+    _native_inspect_pe_overlay_structure = None
+
 
 OVERLAY_SCAN_WINDOW_BYTES = 65536
 PE_SIGNATURE = b"PE\x00\x00"
@@ -55,6 +60,12 @@ def _find_archive_magic(sample: bytes) -> tuple[str, str, int] | None:
 
 
 def inspect_pe_overlay_structure(path: str, file_size: int | None = None, magic_bytes: bytes | None = None) -> dict[str, Any]:
+    if _native_inspect_pe_overlay_structure is not None:
+        try:
+            return dict(_native_inspect_pe_overlay_structure(path, file_size, magic_bytes or b""))
+        except Exception:
+            pass
+
     try:
         actual_size = os.path.getsize(path) if file_size is None or file_size < 0 else int(file_size)
         with open(path, "rb") as handle:
