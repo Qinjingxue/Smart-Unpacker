@@ -42,6 +42,25 @@ struct ResourceAnalysisResult {
     std::string message;
 };
 
+struct CrcManifestItem {
+    std::wstring path;
+    UInt64 size = 0;
+    UInt32 crc32 = 0;
+    bool has_crc = false;
+};
+
+struct CrcManifestResult {
+    PasswordTestStatus status = PasswordTestStatus::BackendUnavailable;
+    bool is_archive = false;
+    bool encrypted = false;
+    bool damaged = false;
+    bool checksum_error = false;
+    UInt32 item_count = 0;
+    UInt32 file_count = 0;
+    std::vector<CrcManifestItem> files;
+    std::string message;
+};
+
 HealthProbeResult check_archive_health_with_parts(
     const std::wstring& seven_zip_dll_path,
     const std::wstring& archive_path,
@@ -54,6 +73,14 @@ ResourceAnalysisResult analyze_archive_resources_with_parts(
     const std::wstring& archive_path,
     const std::vector<std::wstring>& part_paths,
     const std::wstring& password
+);
+
+CrcManifestResult read_archive_crc_manifest_with_parts(
+    const std::wstring& seven_zip_dll_path,
+    const std::wstring& archive_path,
+    const std::vector<std::wstring>& part_paths,
+    const std::wstring& password,
+    UInt32 max_items
 );
 
 std::wstring archive_type_for_path(const std::wstring& path);

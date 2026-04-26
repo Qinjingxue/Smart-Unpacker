@@ -55,7 +55,8 @@
         {"name": "extraction_exit_signal", "enabled": true},
         {"name": "output_presence", "enabled": true},
         {"name": "expected_name_presence", "enabled": true},
-        {"name": "manifest_size_match", "enabled": true}
+        {"name": "manifest_size_match", "enabled": true},
+        {"name": "archive_test_crc", "enabled": true}
       ]
     },
   "detection": {

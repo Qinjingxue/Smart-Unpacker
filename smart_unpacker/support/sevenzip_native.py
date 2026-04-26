@@ -1,4 +1,5 @@
 import ctypes
+import json
 import subprocess
 import sys
 import threading
@@ -111,6 +112,23 @@ class NativeArchiveResourceAnalysis:
     @property
     def ok(self) -> bool:
         return self.status == STATUS_OK and self.is_archive and not self.is_broken
+
+
+@dataclass(frozen=True)
+class NativeArchiveCrcManifest:
+    status: int
+    is_archive: bool
+    encrypted: bool
+    damaged: bool
+    checksum_error: bool
+    item_count: int
+    file_count: int
+    files: list[dict]
+    message: str
+
+    @property
+    def ok(self) -> bool:
+        return self.status == STATUS_OK and self.is_archive and not self.damaged and not self.checksum_error
 
 
 class _Sup7zArchiveHealth(ctypes.Structure):
@@ -341,6 +359,47 @@ class NativePasswordTester:
             message=message.value,
         )
 
+    def read_archive_crc_manifest(
+        self,
+        archive_path: str,
+        password: str = "",
+        part_paths: list[str] | None = None,
+        max_items: int = 200000,
+    ) -> NativeArchiveCrcManifest:
+        library = self._load()
+        function = getattr(library, "sup7z_read_archive_crc_manifest_with_parts", None)
+        if function is None:
+            raise RuntimeError("sevenzip_password_tester_capi.dll does not expose CRC manifest API")
+
+        normalized_parts, part_array = self._part_array(archive_path, part_paths)
+        manifest_json = ctypes.create_unicode_buffer(_manifest_buffer_chars(max_items))
+        message = ctypes.create_unicode_buffer(512)
+
+        status = function(
+            ctypes.c_wchar_p(str(self.seven_zip_dll_path)),
+            ctypes.c_wchar_p(str(archive_path)),
+            part_array,
+            ctypes.c_int(len(normalized_parts)),
+            ctypes.c_wchar_p(str(password or "")),
+            ctypes.c_int(max(0, int(max_items or 0))),
+            manifest_json,
+            ctypes.c_int(len(manifest_json)),
+            message,
+            ctypes.c_int(len(message)),
+        )
+        payload = _parse_manifest_json(manifest_json.value)
+        return NativeArchiveCrcManifest(
+            status=int(status),
+            is_archive=bool(payload.get("is_archive", False)),
+            encrypted=bool(payload.get("encrypted", False)),
+            damaged=bool(payload.get("damaged", False)),
+            checksum_error=bool(payload.get("checksum_error", False)),
+            item_count=int(payload.get("item_count", 0) or 0),
+            file_count=int(payload.get("file_count", 0) or 0),
+            files=list(payload.get("files") or []),
+            message=message.value,
+        )
+
     def _load(self):
         if self._library is not None:
             return self._library
@@ -462,8 +521,38 @@ class NativePasswordTester:
                 ctypes.c_int,
             ]
             library.sup7z_analyze_archive_resources_with_parts.restype = ctypes.c_int
+            self._bind_optional_crc_manifest_api(library)
             self._library = library
             return library
+
+    def _bind_optional_crc_manifest_api(self, library) -> None:
+        try:
+            library.sup7z_read_archive_crc_manifest.argtypes = [
+                ctypes.c_wchar_p,
+                ctypes.c_wchar_p,
+                ctypes.c_wchar_p,
+                ctypes.c_int,
+                ctypes.c_wchar_p,
+                ctypes.c_int,
+                ctypes.c_wchar_p,
+                ctypes.c_int,
+            ]
+            library.sup7z_read_archive_crc_manifest.restype = ctypes.c_int
+            library.sup7z_read_archive_crc_manifest_with_parts.argtypes = [
+                ctypes.c_wchar_p,
+                ctypes.c_wchar_p,
+                ctypes.POINTER(ctypes.c_wchar_p),
+                ctypes.c_int,
+                ctypes.c_wchar_p,
+                ctypes.c_int,
+                ctypes.c_wchar_p,
+                ctypes.c_int,
+                ctypes.c_wchar_p,
+                ctypes.c_int,
+            ]
+            library.sup7z_read_archive_crc_manifest_with_parts.restype = ctypes.c_int
+        except AttributeError:
+            pass
 
     def _default_wrapper_path(self) -> str:
         candidates: list[Path] = []
@@ -522,6 +611,22 @@ def _test_from_probe(probe: NativeArchiveProbe) -> NativeArchiveTest:
     )
 
 
+def _parse_manifest_json(value: str) -> dict:
+    try:
+        parsed = json.loads(value or "{}")
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _manifest_buffer_chars(max_items: int) -> int:
+    try:
+        item_count = max(1, int(max_items or 0))
+    except (TypeError, ValueError):
+        item_count = 1
+    return min(max(1024 * 1024, item_count * 256), 16 * 1024 * 1024)
+
+
 def cached_test_archive(archive_path: str, password: str = "", part_paths: list[str] | None = None) -> NativeArchiveTest:
     tester = get_native_password_tester()
     password = password or ""
@@ -556,4 +661,25 @@ def cached_analyze_archive_resources(archive_path: str, password: str = "", part
         "native_7z_resources",
         _cache_key(tester, archive_path, part_paths) + (password,),
         lambda: tester.analyze_archive_resources(archive_path, password=password, part_paths=part_paths),
+    )
+
+
+def cached_read_archive_crc_manifest(
+    archive_path: str,
+    password: str = "",
+    part_paths: list[str] | None = None,
+    max_items: int = 200000,
+) -> NativeArchiveCrcManifest:
+    tester = get_native_password_tester()
+    password = password or ""
+    max_items = max(0, int(max_items or 0))
+    return cached_value(
+        "native_7z_crc_manifest",
+        _cache_key(tester, archive_path, part_paths) + (password, max_items),
+        lambda: tester.read_archive_crc_manifest(
+            archive_path,
+            password=password,
+            part_paths=part_paths,
+            max_items=max_items,
+        ),
     )

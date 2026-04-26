@@ -20,6 +20,7 @@ DEFAULT_VERIFICATION_CONFIG = {
         {"name": "output_presence", "enabled": True},
         {"name": "expected_name_presence", "enabled": True},
         {"name": "manifest_size_match", "enabled": True},
+        {"name": "archive_test_crc", "enabled": True},
     ],
 }
 

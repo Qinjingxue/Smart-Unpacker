@@ -1,6 +1,7 @@
 from smart_unpacker.contracts.detection import FactBag
 from smart_unpacker.contracts.tasks import ArchiveTask
 from smart_unpacker.extraction.result import ExtractionResult
+from smart_unpacker.support import sevenzip_native as native
 from smart_unpacker.verification import VerificationScheduler
 
 
@@ -130,3 +131,103 @@ def test_expected_name_presence_skips_without_manifest_names(tmp_path):
     assert verification.ok is True
     assert verification.status == "passed"
     assert verification.steps[0].status == "skipped"
+
+
+def test_archive_test_crc_passes_when_archive_and_output_crc_match(tmp_path, monkeypatch):
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    (out_dir / "inside.txt").write_text("hello", encoding="utf-8")
+    task = _task(tmp_path)
+    result = ExtractionResult(success=True, archive=task.main_path, out_dir=str(out_dir), all_parts=task.all_parts)
+
+    monkeypatch.setattr(
+        "smart_unpacker.verification.methods.archive_test_crc.cached_read_archive_crc_manifest",
+        lambda *_args, **_kwargs: native.NativeArchiveCrcManifest(
+            status=native.STATUS_OK,
+            is_archive=True,
+            encrypted=False,
+            damaged=False,
+            checksum_error=False,
+            item_count=1,
+            file_count=1,
+            files=[{"path": "inside.txt", "size": 5, "has_crc": True, "crc32": 907060870}],
+            message="ok",
+        ),
+    )
+    monkeypatch.setattr(
+        "smart_unpacker.verification.methods.archive_test_crc._compute_directory_crc_manifest",
+        lambda *_args, **_kwargs: {
+            "status": "ok",
+            "files": [{"path": "inside.txt", "size": 5, "crc32": 907060870}],
+            "errors": [],
+        },
+    )
+
+    verification = _scheduler([{"name": "archive_test_crc"}]).verify(task, result)
+
+    assert verification.ok is True
+    assert verification.status == "passed"
+
+
+def test_archive_test_crc_hard_fails_on_crc_mismatch(tmp_path, monkeypatch):
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    (out_dir / "inside.txt").write_text("hello", encoding="utf-8")
+    task = _task(tmp_path)
+    result = ExtractionResult(success=True, archive=task.main_path, out_dir=str(out_dir), all_parts=task.all_parts)
+
+    monkeypatch.setattr(
+        "smart_unpacker.verification.methods.archive_test_crc.cached_read_archive_crc_manifest",
+        lambda *_args, **_kwargs: native.NativeArchiveCrcManifest(
+            status=native.STATUS_OK,
+            is_archive=True,
+            encrypted=False,
+            damaged=False,
+            checksum_error=False,
+            item_count=1,
+            file_count=1,
+            files=[{"path": "inside.txt", "size": 5, "has_crc": True, "crc32": 1}],
+            message="ok",
+        ),
+    )
+    monkeypatch.setattr(
+        "smart_unpacker.verification.methods.archive_test_crc._compute_directory_crc_manifest",
+        lambda *_args, **_kwargs: {
+            "status": "ok",
+            "files": [{"path": "inside.txt", "size": 5, "crc32": 2}],
+            "errors": [],
+        },
+    )
+
+    verification = _scheduler([{"name": "archive_test_crc"}]).verify(task, result)
+
+    assert verification.ok is False
+    assert verification.status == "failed"
+    assert verification.issues[0].code == "fail.archive_crc_mismatch"
+
+
+def test_archive_test_crc_hard_fails_when_archive_crc_test_fails(tmp_path, monkeypatch):
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    task = _task(tmp_path)
+    result = ExtractionResult(success=True, archive=task.main_path, out_dir=str(out_dir), all_parts=task.all_parts)
+
+    monkeypatch.setattr(
+        "smart_unpacker.verification.methods.archive_test_crc.cached_read_archive_crc_manifest",
+        lambda *_args, **_kwargs: native.NativeArchiveCrcManifest(
+            status=native.STATUS_DAMAGED,
+            is_archive=True,
+            encrypted=False,
+            damaged=True,
+            checksum_error=True,
+            item_count=0,
+            file_count=0,
+            files=[],
+            message="checksum error",
+        ),
+    )
+
+    verification = _scheduler([{"name": "archive_test_crc"}]).verify(task, result)
+
+    assert verification.ok is False
+    assert verification.issues[0].code == "fail.archive_crc_test_failed"

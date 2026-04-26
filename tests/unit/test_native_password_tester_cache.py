@@ -7,6 +7,7 @@ def _clear_native_7z_caches():
     clear_cache_namespace("native_7z_test")
     clear_cache_namespace("native_7z_health")
     clear_cache_namespace("native_7z_resources")
+    clear_cache_namespace("native_7z_crc_manifest")
 
 
 class FakeTester:
@@ -18,6 +19,7 @@ class FakeTester:
         self.test_calls = 0
         self.health_calls = 0
         self.resource_calls = 0
+        self.crc_manifest_calls = 0
 
     def probe_archive(self, archive_path: str, part_paths=None):
         self.probe_calls += 1
@@ -76,6 +78,20 @@ class FakeTester:
             largest_dictionary_size=0,
             archive_type="zip",
             dominant_method="Store",
+            message="ok",
+        )
+
+    def read_archive_crc_manifest(self, archive_path: str, password: str = "", part_paths=None, max_items: int = 200000):
+        self.crc_manifest_calls += 1
+        return native.NativeArchiveCrcManifest(
+            status=native.STATUS_OK,
+            is_archive=True,
+            encrypted=False,
+            damaged=False,
+            checksum_error=False,
+            item_count=1,
+            file_count=1,
+            files=[{"path": "inside.txt", "size": 5, "has_crc": True, "crc32": 907060870}],
             message="ok",
         )
 
@@ -195,4 +211,18 @@ def test_archive_resource_cache_is_password_specific(tmp_path, monkeypatch):
     assert second.ok
     assert first.dominant_method == "Store"
     assert fake.resource_calls == 1
+    _clear_native_7z_caches()
+
+
+def test_archive_crc_manifest_cache_is_password_and_limit_specific(tmp_path, monkeypatch):
+    fake = _install_fake_tester(monkeypatch)
+    archive = tmp_path / "sample.zip"
+    archive.write_bytes(b"PK")
+
+    first = native.cached_read_archive_crc_manifest(str(archive), password="secret", max_items=10)
+    second = native.cached_read_archive_crc_manifest(str(archive), password="secret", max_items=10)
+
+    assert first.ok
+    assert second.files[0]["path"] == "inside.txt"
+    assert fake.crc_manifest_calls == 1
     _clear_native_7z_caches()
