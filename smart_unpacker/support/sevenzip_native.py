@@ -115,6 +115,14 @@ class NativeArchiveResourceAnalysis:
 
 
 @dataclass(frozen=True)
+class NativeArchivePreflightResources:
+    health: NativeArchiveHealth
+    analysis: NativeArchiveResourceAnalysis
+    analysis_available: bool
+    message: str
+
+
+@dataclass(frozen=True)
 class NativeArchiveCrcManifest:
     status: int
     is_archive: bool
@@ -161,6 +169,14 @@ class _Sup7zArchiveResourceAnalysis(ctypes.Structure):
         ("largest_dictionary_size", ctypes.c_ulonglong),
         ("archive_type", ctypes.c_wchar * 32),
         ("dominant_method", ctypes.c_wchar * 128),
+    ]
+
+
+class _Sup7zArchivePreflightResources(ctypes.Structure):
+    _fields_ = [
+        ("health", _Sup7zArchiveHealth),
+        ("analysis", _Sup7zArchiveResourceAnalysis),
+        ("analysis_available", ctypes.c_int),
     ]
 
 
@@ -359,6 +375,51 @@ class NativePasswordTester:
             message=message.value,
         )
 
+    def preflight_archive_resources(
+        self,
+        archive_path: str,
+        password: str = "",
+        part_paths: list[str] | None = None,
+    ) -> NativeArchivePreflightResources:
+        library = self._load()
+        function = getattr(library, "sup7z_preflight_archive_resources_with_parts", None)
+        if function is None:
+            health = self.check_archive_health(archive_path, password=password, part_paths=part_paths)
+            analysis = (
+                self.analyze_archive_resources(archive_path, password=password, part_paths=part_paths)
+                if health.ok
+                else _empty_analysis_from_health(health)
+            )
+            return NativeArchivePreflightResources(
+                health=health,
+                analysis=analysis,
+                analysis_available=health.ok and analysis.ok,
+                message=health.message or analysis.message,
+            )
+
+        normalized_parts, part_array = self._part_array(archive_path, part_paths)
+        preflight = _Sup7zArchivePreflightResources()
+        message = ctypes.create_unicode_buffer(512)
+
+        function(
+            ctypes.c_wchar_p(str(self.seven_zip_dll_path)),
+            ctypes.c_wchar_p(str(archive_path)),
+            part_array,
+            ctypes.c_int(len(normalized_parts)),
+            ctypes.c_wchar_p(str(password or "")),
+            ctypes.byref(preflight),
+            message,
+            ctypes.c_int(len(message)),
+        )
+        health = _health_from_c_struct(preflight.health, message.value)
+        analysis = _analysis_from_c_struct(preflight.analysis, message.value)
+        return NativeArchivePreflightResources(
+            health=health,
+            analysis=analysis,
+            analysis_available=bool(preflight.analysis_available),
+            message=message.value,
+        )
+
     def read_archive_crc_manifest(
         self,
         archive_path: str,
@@ -521,9 +582,26 @@ class NativePasswordTester:
                 ctypes.c_int,
             ]
             library.sup7z_analyze_archive_resources_with_parts.restype = ctypes.c_int
+            self._bind_optional_preflight_resources_api(library)
             self._bind_optional_crc_manifest_api(library)
             self._library = library
             return library
+
+    def _bind_optional_preflight_resources_api(self, library) -> None:
+        try:
+            library.sup7z_preflight_archive_resources_with_parts.argtypes = [
+                ctypes.c_wchar_p,
+                ctypes.c_wchar_p,
+                ctypes.POINTER(ctypes.c_wchar_p),
+                ctypes.c_int,
+                ctypes.c_wchar_p,
+                ctypes.POINTER(_Sup7zArchivePreflightResources),
+                ctypes.c_wchar_p,
+                ctypes.c_int,
+            ]
+            library.sup7z_preflight_archive_resources_with_parts.restype = ctypes.c_int
+        except AttributeError:
+            pass
 
     def _bind_optional_crc_manifest_api(self, library) -> None:
         try:
@@ -611,6 +689,62 @@ def _test_from_probe(probe: NativeArchiveProbe) -> NativeArchiveTest:
     )
 
 
+def _health_from_c_struct(health, message: str) -> NativeArchiveHealth:
+    return NativeArchiveHealth(
+        status=int(health.status),
+        is_archive=bool(health.is_archive),
+        is_encrypted=bool(health.is_encrypted),
+        is_broken=bool(health.is_broken),
+        is_missing_volume=bool(health.is_missing_volume),
+        is_wrong_password=bool(health.is_wrong_password),
+        operation_result=int(health.operation_result),
+        archive_type=str(health.archive_type),
+        message=message,
+    )
+
+
+def _analysis_from_c_struct(analysis, message: str) -> NativeArchiveResourceAnalysis:
+    return NativeArchiveResourceAnalysis(
+        status=int(analysis.status),
+        is_archive=bool(analysis.is_archive),
+        is_encrypted=bool(analysis.is_encrypted),
+        is_broken=bool(analysis.is_broken),
+        solid=bool(analysis.solid),
+        item_count=int(analysis.item_count),
+        file_count=int(analysis.file_count),
+        dir_count=int(analysis.dir_count),
+        archive_size=int(analysis.archive_size),
+        total_unpacked_size=int(analysis.total_unpacked_size),
+        total_packed_size=int(analysis.total_packed_size),
+        largest_item_size=int(analysis.largest_item_size),
+        largest_dictionary_size=int(analysis.largest_dictionary_size),
+        archive_type=str(analysis.archive_type),
+        dominant_method=str(analysis.dominant_method),
+        message=message,
+    )
+
+
+def _empty_analysis_from_health(health: NativeArchiveHealth) -> NativeArchiveResourceAnalysis:
+    return NativeArchiveResourceAnalysis(
+        status=health.status,
+        is_archive=health.is_archive,
+        is_encrypted=health.is_encrypted,
+        is_broken=health.is_broken or health.is_missing_volume,
+        solid=False,
+        item_count=0,
+        file_count=0,
+        dir_count=0,
+        archive_size=0,
+        total_unpacked_size=0,
+        total_packed_size=0,
+        largest_item_size=0,
+        largest_dictionary_size=0,
+        archive_type=health.archive_type,
+        dominant_method="",
+        message=health.message,
+    )
+
+
 def _parse_manifest_json(value: str) -> dict:
     try:
         parsed = json.loads(value or "{}")
@@ -661,6 +795,20 @@ def cached_analyze_archive_resources(archive_path: str, password: str = "", part
         "native_7z_resources",
         _cache_key(tester, archive_path, part_paths) + (password,),
         lambda: tester.analyze_archive_resources(archive_path, password=password, part_paths=part_paths),
+    )
+
+
+def cached_preflight_archive_resources(
+    archive_path: str,
+    password: str = "",
+    part_paths: list[str] | None = None,
+) -> NativeArchivePreflightResources:
+    tester = get_native_password_tester()
+    password = password or ""
+    return cached_value(
+        "native_7z_preflight_resources",
+        _cache_key(tester, archive_path, part_paths) + (password,),
+        lambda: tester.preflight_archive_resources(archive_path, password=password, part_paths=part_paths),
     )
 
 

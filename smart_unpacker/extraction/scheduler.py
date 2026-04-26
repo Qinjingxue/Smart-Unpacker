@@ -56,6 +56,9 @@ class ExtractionScheduler:
     def inspect(self, task: ArchiveTask, out_dir: str):
         return PreExtractInspector(self.password_resolver, self.rename_scheduler).inspect(task, out_dir)
 
+    def inspect_with_resource_analysis(self, task: ArchiveTask, out_dir: str):
+        return PreExtractInspector(self.password_resolver, self.rename_scheduler).inspect_with_resource_analysis(task, out_dir)
+
     def extract(
         self,
         task: ArchiveTask,

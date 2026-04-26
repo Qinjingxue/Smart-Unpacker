@@ -83,17 +83,30 @@ class ExtractionBatchRunner:
     def _execute_ready_tasks(self, tasks: List[ArchiveTask], output_dir_resolver) -> list[tuple[ArchiveTask, BatchExtractionOutcome]]:
         ready_tasks: list[ArchiveTask] = []
         skipped_results: list[tuple[ArchiveTask, BatchExtractionOutcome]] = []
+        use_combined_preflight = len(tasks) > 1
         for task in tasks:
             out_dir = output_dir_resolver(task)
-            preflight = self.extractor.inspect(task, out_dir)
+            preflight = (
+                self.extractor.inspect_with_resource_analysis(task, out_dir)
+                if use_combined_preflight
+                else self.extractor.inspect(task, out_dir)
+            )
             if preflight.skip_result is not None:
                 skipped_results.append((task, BatchExtractionOutcome(preflight.skip_result)))
                 continue
-            self.resource_inspector.inspect(task)
+            resource_analysis = getattr(preflight, "resource_analysis", None)
+            if resource_analysis is not None:
+                self.resource_inspector.record_precise_analysis(task, resource_analysis)
             ready_tasks.append(task)
 
         if not ready_tasks:
             return skipped_results
+        if len(ready_tasks) == 1:
+            self.resource_inspector.record_estimated_single_task_profile(ready_tasks[0])
+        else:
+            for task in ready_tasks:
+                if not task.fact_bag.get("resource.analysis"):
+                    self.resource_inspector.inspect(task)
 
         initial_limit = self.scheduler_config.get("initial_concurrency_limit", 4)
         scheduler = ConcurrencyScheduler(

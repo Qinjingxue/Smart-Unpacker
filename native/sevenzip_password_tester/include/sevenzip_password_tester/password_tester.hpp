@@ -159,6 +159,12 @@ struct Sup7zArchiveResourceAnalysis {
     wchar_t dominant_method[128];
 };
 
+struct Sup7zArchivePreflightResources {
+    Sup7zArchiveHealth health;
+    Sup7zArchiveResourceAnalysis analysis;
+    int analysis_available;
+};
+
 SUP7Z_API int sup7z_check_archive_health(
     const wchar_t* seven_zip_dll_path,
     const wchar_t* archive_path,
@@ -195,6 +201,17 @@ SUP7Z_API int sup7z_analyze_archive_resources_with_parts(
     int part_count,
     const wchar_t* password,
     Sup7zArchiveResourceAnalysis* analysis,
+    wchar_t* message,
+    int message_chars
+);
+
+SUP7Z_API int sup7z_preflight_archive_resources_with_parts(
+    const wchar_t* seven_zip_dll_path,
+    const wchar_t* archive_path,
+    const wchar_t* const* part_paths,
+    int part_count,
+    const wchar_t* password,
+    Sup7zArchivePreflightResources* preflight,
     wchar_t* message,
     int message_chars
 );

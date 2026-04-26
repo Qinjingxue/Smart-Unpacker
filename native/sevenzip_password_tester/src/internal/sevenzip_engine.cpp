@@ -958,6 +958,83 @@ bool archive_has_encrypted_items(IInArchive* archive) {
     return false;
 }
 
+bool fill_resource_analysis_from_open_archive(IInArchive* archive, ResourceAnalysisResult& result) {
+    result.is_archive = true;
+    result.solid = get_archive_property_bool(archive, kpidSolid);
+    UInt32 num_items = 0;
+    if (archive->GetNumberOfItems(&num_items) != S_OK) {
+        result.status = PasswordTestStatus::Error;
+        result.message = "archive item list could not be read";
+        return false;
+    }
+
+    std::map<std::wstring, UInt64> method_sizes;
+    for (UInt32 index = 0; index < num_items; ++index) {
+        PROPVARIANT value{};
+        const bool is_dir = get_item_property(archive, index, kpidIsDir, value) ? prop_bool(value) : false;
+        clear_prop(value);
+
+        UInt64 unpacked_size = 0;
+        if (get_item_property(archive, index, kpidSize, value)) {
+            unpacked_size = prop_u64(value);
+        }
+        clear_prop(value);
+
+        UInt64 packed_size = 0;
+        if (get_item_property(archive, index, kpidPackSize, value)) {
+            packed_size = prop_u64(value);
+        }
+        clear_prop(value);
+
+        UInt64 dictionary_size = 0;
+        if (get_item_property(archive, index, kpidDictionarySize, value)) {
+            dictionary_size = prop_u64(value);
+        }
+        clear_prop(value);
+
+        bool encrypted = false;
+        if (get_item_property(archive, index, kpidEncrypted, value)) {
+            encrypted = prop_bool(value);
+        }
+        clear_prop(value);
+        result.encrypted = result.encrypted || encrypted;
+
+        std::wstring method;
+        if (get_item_property(archive, index, kpidMethod, value)) {
+            method = prop_text(value);
+        }
+        clear_prop(value);
+
+        result.item_count += 1;
+        if (is_dir) {
+            result.dir_count += 1;
+            continue;
+        }
+        result.file_count += 1;
+        result.total_unpacked_size += unpacked_size;
+        result.total_packed_size += packed_size;
+        result.largest_item_size = std::max(result.largest_item_size, unpacked_size);
+        result.largest_dictionary_size = std::max(result.largest_dictionary_size, dictionary_size);
+        if (!method.empty()) {
+            method_sizes[method] += unpacked_size ? unpacked_size : 1;
+        }
+    }
+
+    if (result.total_packed_size == 0) {
+        result.total_packed_size = result.archive_size;
+    }
+    UInt64 best_size = 0;
+    for (const auto& item : method_sizes) {
+        if (item.second > best_size) {
+            best_size = item.second;
+            result.dominant_method = item.first;
+        }
+    }
+    result.status = PasswordTestStatus::Ok;
+    result.message = "archive resources analyzed";
+    return true;
+}
+
 HealthProbeResult check_archive_health_internal(
     CreateObjectFunc create_object,
     const std::wstring& archive_path,
@@ -1088,81 +1165,11 @@ ResourceAnalysisResult analyze_archive_resources_internal(
             continue;
         }
 
-        result.is_archive = true;
-        result.solid = get_archive_property_bool(archive.get(), kpidSolid);
-        UInt32 num_items = 0;
-        if (archive->GetNumberOfItems(&num_items) != S_OK) {
-            archive->Close();
-            result.status = PasswordTestStatus::Error;
-            result.message = "archive item list could not be read";
+        const bool ok = fill_resource_analysis_from_open_archive(archive.get(), result);
+        archive->Close();
+        if (!ok) {
             return result;
         }
-
-        std::map<std::wstring, UInt64> method_sizes;
-        for (UInt32 index = 0; index < num_items; ++index) {
-            PROPVARIANT value{};
-            const bool is_dir = get_item_property(archive.get(), index, kpidIsDir, value) ? prop_bool(value) : false;
-            clear_prop(value);
-
-            UInt64 unpacked_size = 0;
-            if (get_item_property(archive.get(), index, kpidSize, value)) {
-                unpacked_size = prop_u64(value);
-            }
-            clear_prop(value);
-
-            UInt64 packed_size = 0;
-            if (get_item_property(archive.get(), index, kpidPackSize, value)) {
-                packed_size = prop_u64(value);
-            }
-            clear_prop(value);
-
-            UInt64 dictionary_size = 0;
-            if (get_item_property(archive.get(), index, kpidDictionarySize, value)) {
-                dictionary_size = prop_u64(value);
-            }
-            clear_prop(value);
-
-            bool encrypted = false;
-            if (get_item_property(archive.get(), index, kpidEncrypted, value)) {
-                encrypted = prop_bool(value);
-            }
-            clear_prop(value);
-            result.encrypted = result.encrypted || encrypted;
-
-            std::wstring method;
-            if (get_item_property(archive.get(), index, kpidMethod, value)) {
-                method = prop_text(value);
-            }
-            clear_prop(value);
-
-            result.item_count += 1;
-            if (is_dir) {
-                result.dir_count += 1;
-                continue;
-            }
-            result.file_count += 1;
-            result.total_unpacked_size += unpacked_size;
-            result.total_packed_size += packed_size;
-            result.largest_item_size = std::max(result.largest_item_size, unpacked_size);
-            result.largest_dictionary_size = std::max(result.largest_dictionary_size, dictionary_size);
-            if (!method.empty()) {
-                method_sizes[method] += unpacked_size ? unpacked_size : 1;
-            }
-        }
-        archive->Close();
-
-        if (result.total_packed_size == 0) {
-            result.total_packed_size = result.archive_size;
-        }
-        UInt64 best_size = 0;
-        for (const auto& item : method_sizes) {
-            if (item.second > best_size) {
-                best_size = item.second;
-                result.dominant_method = item.first;
-            }
-        }
-        result.status = PasswordTestStatus::Ok;
-        result.message = "archive resources analyzed";
         return result;
     }
 
@@ -1177,6 +1184,125 @@ ResourceAnalysisResult analyze_archive_resources_internal(
         result.status = PasswordTestStatus::Unsupported;
         result.message = "archive could not be opened by supported handlers";
     }
+    return result;
+}
+
+PreflightResourceResult preflight_archive_resources_internal(
+    CreateObjectFunc create_object,
+    const std::wstring& archive_path,
+    const std::wstring& password,
+    const std::vector<std::wstring>& part_paths
+) {
+    PreflightResourceResult result;
+    result.health.backend_available = true;
+    result.analysis.archive_size = archive_input_size(archive_path, part_paths);
+    bool any_format_created = false;
+    HRESULT last_hr = E_FAIL;
+    Int32 last_op_res = kOpOk;
+
+    for (const GUID& format : candidate_formats(archive_path, part_paths)) {
+        ComPtr<IInArchive> archive;
+        HRESULT hr = create_object(&format, &IID_IInArchive, reinterpret_cast<void**>(archive.out()));
+        if (hr != S_OK || !archive) {
+            last_hr = hr;
+            continue;
+        }
+        any_format_created = true;
+
+        bool stream_opened = false;
+        ComPtr<IInStream> stream = open_archive_stream(archive_path, part_paths, stream_opened);
+        if (!stream_opened) {
+            if (is_sfx_path(archive_path) && !sorted_data_volume_paths(part_paths).empty()) {
+                result.health.status = PasswordTestStatus::Damaged;
+                result.health.is_archive = true;
+                result.health.missing_volume = true;
+                result.health.message = "split self-extracting archive stub is missing";
+                result.analysis.status = PasswordTestStatus::Damaged;
+                result.analysis.is_archive = true;
+                result.analysis.damaged = true;
+                result.analysis.message = result.health.message;
+                return result;
+            }
+            result.health.status = PasswordTestStatus::Error;
+            result.health.message = "archive file could not be opened";
+            result.analysis.status = PasswordTestStatus::Error;
+            result.analysis.message = result.health.message;
+            return result;
+        }
+
+        ComPtr<IArchiveOpenCallback> open_callback(new OpenCallback(password, callback_archive_path(archive_path, part_paths), part_paths));
+        hr = archive->Open(stream.get(), nullptr, open_callback.get());
+        if (hr != S_OK) {
+            last_hr = hr;
+            continue;
+        }
+
+        result.health.is_archive = true;
+        result.health.operation_result = kOpOk;
+        if (has_split_volume_gap(part_paths) || likely_missing_split_tail(part_paths)) {
+            archive->Close();
+            result.health.status = PasswordTestStatus::Damaged;
+            result.health.missing_volume = true;
+            result.health.message = "split archive is missing one or more volumes";
+            result.analysis.status = PasswordTestStatus::Damaged;
+            result.analysis.is_archive = true;
+            result.analysis.damaged = true;
+            result.analysis.message = result.health.message;
+            return result;
+        }
+
+        const bool analysis_ok = fill_resource_analysis_from_open_archive(archive.get(), result.analysis);
+        archive->Close();
+        if (!analysis_ok) {
+            result.health.status = result.analysis.status;
+            result.health.is_archive = result.analysis.is_archive;
+            result.health.encrypted = result.analysis.encrypted;
+            result.health.damaged = result.analysis.damaged;
+            result.health.message = result.analysis.message;
+            return result;
+        }
+
+        if (result.analysis.encrypted && password.empty()) {
+            result.health.status = PasswordTestStatus::WrongPassword;
+            result.health.encrypted = true;
+            result.health.wrong_password = true;
+            result.health.message = "archive is encrypted or password is wrong";
+            result.analysis_available = false;
+            return result;
+        }
+
+        result.health.status = PasswordTestStatus::Ok;
+        result.health.encrypted = result.analysis.encrypted;
+        result.health.message = "archive preflight resources analyzed";
+        result.analysis_available = true;
+        return result;
+    }
+
+    result.health.operation_result = last_op_res;
+    if (!any_format_created) {
+        result.health.status = PasswordTestStatus::Unsupported;
+        result.health.message = "7z.dll did not create a supported archive handler";
+    } else if (has_split_volume_gap(part_paths) || likely_missing_split_tail(part_paths) ||
+        (has_split_volume_evidence(archive_path, part_paths) && looks_missing_volume(archive_path, last_op_res))) {
+        result.health.status = PasswordTestStatus::Damaged;
+        result.health.is_archive = true;
+        result.health.missing_volume = true;
+        result.health.message = "split archive is missing one or more volumes";
+    } else if (looks_wrong_password(last_hr, last_op_res)) {
+        result.health.status = PasswordTestStatus::WrongPassword;
+        result.health.is_archive = true;
+        result.health.encrypted = true;
+        result.health.wrong_password = true;
+        result.health.message = "archive is encrypted or password is wrong";
+    } else {
+        result.health.status = PasswordTestStatus::Unsupported;
+        result.health.message = "archive could not be opened by supported handlers";
+    }
+    result.analysis.status = result.health.status;
+    result.analysis.is_archive = result.health.is_archive;
+    result.analysis.encrypted = result.health.encrypted;
+    result.analysis.damaged = result.health.damaged || result.health.missing_volume;
+    result.analysis.message = result.health.message;
     return result;
 }
 
@@ -1460,6 +1586,38 @@ ResourceAnalysisResult analyze_archive_resources_with_parts(
     ResourceAnalysisResult result;
     result.status = PasswordTestStatus::BackendUnavailable;
     result.message = "native archive resource analysis is only implemented on Windows";
+    return result;
+#endif
+}
+
+PreflightResourceResult preflight_archive_resources_with_parts(
+    const std::wstring& seven_zip_dll_path,
+    const std::wstring& archive_path,
+    const std::vector<std::wstring>& part_paths,
+    const std::wstring& password
+) {
+#ifdef _WIN32
+    ComModule module(seven_zip_dll_path);
+    auto create_object = module.create_object();
+    if (!create_object) {
+        PreflightResourceResult result;
+        result.health.status = PasswordTestStatus::BackendUnavailable;
+        result.health.message = "7z.dll could not be loaded";
+        result.analysis.status = PasswordTestStatus::BackendUnavailable;
+        result.analysis.message = result.health.message;
+        return result;
+    }
+    return preflight_archive_resources_internal(create_object, archive_path, password, part_paths);
+#else
+    (void)seven_zip_dll_path;
+    (void)archive_path;
+    (void)part_paths;
+    (void)password;
+    PreflightResourceResult result;
+    result.health.status = PasswordTestStatus::BackendUnavailable;
+    result.health.message = "native archive preflight resource analysis is only implemented on Windows";
+    result.analysis.status = PasswordTestStatus::BackendUnavailable;
+    result.analysis.message = result.health.message;
     return result;
 #endif
 }

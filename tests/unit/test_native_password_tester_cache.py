@@ -7,6 +7,7 @@ def _clear_native_7z_caches():
     clear_cache_namespace("native_7z_test")
     clear_cache_namespace("native_7z_health")
     clear_cache_namespace("native_7z_resources")
+    clear_cache_namespace("native_7z_preflight_resources")
     clear_cache_namespace("native_7z_crc_manifest")
 
 
@@ -19,6 +20,7 @@ class FakeTester:
         self.test_calls = 0
         self.health_calls = 0
         self.resource_calls = 0
+        self.preflight_resource_calls = 0
         self.crc_manifest_calls = 0
 
     def probe_archive(self, archive_path: str, part_paths=None):
@@ -78,6 +80,15 @@ class FakeTester:
             largest_dictionary_size=0,
             archive_type="zip",
             dominant_method="Store",
+            message="ok",
+        )
+
+    def preflight_archive_resources(self, archive_path: str, password: str = "", part_paths=None):
+        self.preflight_resource_calls += 1
+        return native.NativeArchivePreflightResources(
+            health=self.check_archive_health(archive_path, password=password, part_paths=part_paths),
+            analysis=self.analyze_archive_resources(archive_path, password=password, part_paths=part_paths),
+            analysis_available=True,
             message="ok",
         )
 
@@ -211,6 +222,20 @@ def test_archive_resource_cache_is_password_specific(tmp_path, monkeypatch):
     assert second.ok
     assert first.dominant_method == "Store"
     assert fake.resource_calls == 1
+    _clear_native_7z_caches()
+
+
+def test_archive_preflight_resource_cache_is_password_specific(tmp_path, monkeypatch):
+    fake = _install_fake_tester(monkeypatch)
+    archive = tmp_path / "sample.zip"
+    archive.write_bytes(b"PK")
+
+    first = native.cached_preflight_archive_resources(str(archive), password="secret")
+    second = native.cached_preflight_archive_resources(str(archive), password="secret")
+
+    assert first.health.ok
+    assert second.analysis.dominant_method == "Store"
+    assert fake.preflight_resource_calls == 1
     _clear_native_7z_caches()
 
 

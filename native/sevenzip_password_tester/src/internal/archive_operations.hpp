@@ -42,6 +42,12 @@ struct ResourceAnalysisResult {
     std::string message;
 };
 
+struct PreflightResourceResult {
+    HealthProbeResult health;
+    ResourceAnalysisResult analysis;
+    bool analysis_available = false;
+};
+
 struct CrcManifestItem {
     std::wstring path;
     UInt64 size = 0;
@@ -69,6 +75,13 @@ HealthProbeResult check_archive_health_with_parts(
 );
 
 ResourceAnalysisResult analyze_archive_resources_with_parts(
+    const std::wstring& seven_zip_dll_path,
+    const std::wstring& archive_path,
+    const std::vector<std::wstring>& part_paths,
+    const std::wstring& password
+);
+
+PreflightResourceResult preflight_archive_resources_with_parts(
     const std::wstring& seven_zip_dll_path,
     const std::wstring& archive_path,
     const std::vector<std::wstring>& part_paths,

@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from smart_unpacker.contracts.tasks import ArchiveTask
 from smart_unpacker.support.sevenzip_native import (
     cached_check_archive_health,
+    cached_preflight_archive_resources,
     cached_test_archive,
 )
 from smart_unpacker.extraction.result import ExtractionResult
@@ -13,6 +14,7 @@ from smart_unpacker.support.archive_error_signals import has_archive_damage_sign
 class PreflightResult:
     task: ArchiveTask
     skip_result: ExtractionResult | None = None
+    resource_analysis: object | None = None
 
 
 class PreExtractInspector:
@@ -58,6 +60,56 @@ class PreExtractInspector:
             self.rename_scheduler.cleanup_normalized_split_group(staged)
 
         return PreflightResult(task=task)
+
+    def inspect_with_resource_analysis(self, task: ArchiveTask, output_dir: str) -> PreflightResult:
+        staged = self.rename_scheduler.normalize_archive_paths(task.main_path, list(task.all_parts or [task.main_path]))
+        try:
+            preflight = cached_preflight_archive_resources(staged.archive, part_paths=staged.run_parts)
+            health = preflight.health
+            self._record_health(task, health)
+
+            if health.is_missing_volume:
+                return self._skip(task, output_dir, staged.cleanup_parts, "分卷缺失或不完整")
+            if health.is_broken:
+                return self._skip(task, output_dir, staged.cleanup_parts, "压缩包损坏")
+
+            if health.is_encrypted or health.is_wrong_password:
+                if not self.password_resolver.password_tester.passwords:
+                    if (health.archive_type or "").lower() != "pe":
+                        structural_test = cached_test_archive(
+                            staged.archive,
+                            part_paths=staged.run_parts,
+                        )
+                        if has_archive_damage_signals(structural_test.message):
+                            return self._skip(task, output_dir, staged.cleanup_parts, "压缩包损坏")
+                    return self._skip(task, output_dir, staged.cleanup_parts, "密码错误或未知密码")
+                resolution = self._resolve_password(task, staged.archive, staged.run_parts)
+                if resolution.password is None:
+                    error_text = resolution.error_text or ""
+                    if has_archive_damage_signals(error_text) and not has_definite_wrong_password(error_text):
+                        return self._skip(task, output_dir, staged.cleanup_parts, "压缩包损坏")
+                    return self._skip(task, output_dir, staged.cleanup_parts, "密码错误或未知密码")
+                task.fact_bag.set("resource.password_resolved", True)
+                task.fact_bag.set("resource.password_required", True)
+                preflight = cached_preflight_archive_resources(
+                    staged.archive,
+                    password=resolution.password or "",
+                    part_paths=staged.run_parts,
+                )
+                health = preflight.health
+                self._record_health(task, health)
+                if health.is_missing_volume:
+                    return self._skip(task, output_dir, staged.cleanup_parts, "分卷缺失或不完整")
+                if health.is_broken:
+                    return self._skip(task, output_dir, staged.cleanup_parts, "压缩包损坏")
+            else:
+                task.fact_bag.set("resource.password_required", False)
+
+            analysis = preflight.analysis if preflight.analysis_available else None
+        finally:
+            self.rename_scheduler.cleanup_normalized_split_group(staged)
+
+        return PreflightResult(task=task, resource_analysis=analysis)
 
     def _resolve_password(self, task: ArchiveTask, archive_path: str, part_paths: list[str]):
         try:
