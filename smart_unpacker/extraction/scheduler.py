@@ -10,9 +10,10 @@ from smart_unpacker.extraction.internal.metadata import ArchiveMetadataScanner
 from smart_unpacker.extraction.internal.output_paths import default_output_dir_for_task
 from smart_unpacker.extraction.internal.password_manager import PasswordManager
 from smart_unpacker.extraction.internal.password_resolution import PasswordResolver
-from smart_unpacker.extraction.internal.split_stager import SplitVolumeStager
+from smart_unpacker.extraction.internal.preflight import PreExtractInspector
 from smart_unpacker.extraction.result import ExtractionResult
 from smart_unpacker.contracts.tasks import ArchiveTask, SplitArchiveInfo
+from smart_unpacker.rename.volume_normalizer import SplitVolumeStager
 from smart_unpacker.relations.internal.group_builder import RelationsGroupBuilder
 from smart_unpacker.support.resources import get_7z_path
 
@@ -63,6 +64,18 @@ class ExtractionScheduler:
         if not tasks:
             return []
         output_dir_resolver = output_dir_resolver or self.default_output_dir_for_task
+        inspector = PreExtractInspector(self.password_resolver, self.split_stager)
+        ready_tasks: list[ArchiveTask] = []
+        skipped_results: list[tuple[ArchiveTask, ExtractionResult]] = []
+        for task in tasks:
+            preflight = inspector.inspect(task, output_dir_resolver(task))
+            if preflight.skip_result is not None:
+                skipped_results.append((task, preflight.skip_result))
+            else:
+                ready_tasks.append(task)
+
+        if not ready_tasks:
+            return skipped_results
 
         initial_limit = self.scheduler_config.get("initial_concurrency_limit", 4)
         scheduler = ConcurrencyScheduler(
@@ -71,8 +84,8 @@ class ExtractionScheduler:
             max_workers=self.max_workers,
         )
         executor = TaskExecutor(scheduler, max_workers=self.max_workers)
-        return executor.execute_all(
-            tasks,
+        return skipped_results + executor.execute_all(
+            ready_tasks,
             lambda task: (task, self.extract(task, output_dir_resolver(task))),
         )
 

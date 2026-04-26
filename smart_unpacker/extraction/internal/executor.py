@@ -16,11 +16,12 @@ class TaskExecutor:
         self.scheduler.start()
 
         def wrapped_worker(task: Any) -> Any:
-            self.scheduler.acquire_slot()
+            token_cost = self._token_cost(task)
+            self.scheduler.acquire_slot(token_cost=token_cost)
             try:
                 return worker_func(task)
             finally:
-                self.scheduler.release_slot()
+                self.scheduler.release_slot(token_cost=token_cost)
 
         try:
             with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as pool:
@@ -36,3 +37,14 @@ class TaskExecutor:
             self.scheduler.stop()
 
         return results
+
+    def _token_cost(self, task: Any) -> int:
+        fact_bag = getattr(task, "fact_bag", None)
+        if fact_bag is not None:
+            try:
+                value = fact_bag.get("resource.token_cost")
+                if value:
+                    return max(1, int(value))
+            except Exception:
+                pass
+        return max(1, int(getattr(task, "resource_token_cost", 1) or 1))

@@ -46,6 +46,8 @@ The wrapper exports a narrow C ABI:
 - `sup7z_try_passwords`
 - `sup7z_test_archive`
 - `sup7z_probe_archive`
+- `sup7z_check_archive_health`
+- `sup7z_analyze_archive_resources`
 
 Python calls these through `smart_unpacker.extraction.internal.native_password_tester`.
 
@@ -56,6 +58,9 @@ Use this wrapper for:
 - password attempts over a supplied password array
 - `7z t`-style archive testing
 - `7z l`-style archive probing fields currently consumed by the detection pipeline
+- pre-extraction health checks that classify damaged or incomplete archives
+- aggregate resource analysis, such as unpacked size, packed size, item counts,
+  dominant compression method, solid archive flag, and dictionary size
 
 Keep final extraction on `7z.exe` unless the extraction scheduler is explicitly
 redesigned around the 7-Zip COM interfaces.

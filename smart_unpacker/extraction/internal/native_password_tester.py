@@ -72,6 +72,80 @@ class NativeArchiveProbe:
     message: str
 
 
+@dataclass(frozen=True)
+class NativeArchiveHealth:
+    status: int
+    is_archive: bool
+    is_encrypted: bool
+    is_broken: bool
+    is_missing_volume: bool
+    is_wrong_password: bool
+    operation_result: int
+    archive_type: str
+    message: str
+
+    @property
+    def ok(self) -> bool:
+        return self.status == STATUS_OK and self.is_archive and not self.is_broken and not self.is_missing_volume
+
+
+@dataclass(frozen=True)
+class NativeArchiveResourceAnalysis:
+    status: int
+    is_archive: bool
+    is_encrypted: bool
+    is_broken: bool
+    solid: bool
+    item_count: int
+    file_count: int
+    dir_count: int
+    archive_size: int
+    total_unpacked_size: int
+    total_packed_size: int
+    largest_item_size: int
+    largest_dictionary_size: int
+    archive_type: str
+    dominant_method: str
+    message: str
+
+    @property
+    def ok(self) -> bool:
+        return self.status == STATUS_OK and self.is_archive and not self.is_broken
+
+
+class _Sup7zArchiveHealth(ctypes.Structure):
+    _fields_ = [
+        ("status", ctypes.c_int),
+        ("is_archive", ctypes.c_int),
+        ("is_encrypted", ctypes.c_int),
+        ("is_broken", ctypes.c_int),
+        ("is_missing_volume", ctypes.c_int),
+        ("is_wrong_password", ctypes.c_int),
+        ("operation_result", ctypes.c_int),
+        ("archive_type", ctypes.c_wchar * 32),
+    ]
+
+
+class _Sup7zArchiveResourceAnalysis(ctypes.Structure):
+    _fields_ = [
+        ("status", ctypes.c_int),
+        ("is_archive", ctypes.c_int),
+        ("is_encrypted", ctypes.c_int),
+        ("is_broken", ctypes.c_int),
+        ("solid", ctypes.c_int),
+        ("item_count", ctypes.c_int),
+        ("file_count", ctypes.c_int),
+        ("dir_count", ctypes.c_int),
+        ("archive_size", ctypes.c_ulonglong),
+        ("total_unpacked_size", ctypes.c_ulonglong),
+        ("total_packed_size", ctypes.c_ulonglong),
+        ("largest_item_size", ctypes.c_ulonglong),
+        ("largest_dictionary_size", ctypes.c_ulonglong),
+        ("archive_type", ctypes.c_wchar * 32),
+        ("dominant_method", ctypes.c_wchar * 128),
+    ]
+
+
 class NativePasswordTester:
     def __init__(self, wrapper_path: str | None = None, seven_zip_dll_path: str | None = None):
         self.wrapper_path = wrapper_path or self._default_wrapper_path()
@@ -177,6 +251,65 @@ class NativePasswordTester:
             message=message.value,
         )
 
+    def check_archive_health(self, archive_path: str, password: str = "") -> NativeArchiveHealth:
+        library = self._load()
+
+        health = _Sup7zArchiveHealth()
+        message = ctypes.create_unicode_buffer(512)
+
+        status = library.sup7z_check_archive_health(
+            ctypes.c_wchar_p(str(self.seven_zip_dll_path)),
+            ctypes.c_wchar_p(str(archive_path)),
+            ctypes.c_wchar_p(str(password or "")),
+            ctypes.byref(health),
+            message,
+            ctypes.c_int(len(message)),
+        )
+        return NativeArchiveHealth(
+            status=int(status),
+            is_archive=bool(health.is_archive),
+            is_encrypted=bool(health.is_encrypted),
+            is_broken=bool(health.is_broken),
+            is_missing_volume=bool(health.is_missing_volume),
+            is_wrong_password=bool(health.is_wrong_password),
+            operation_result=int(health.operation_result),
+            archive_type=str(health.archive_type),
+            message=message.value,
+        )
+
+    def analyze_archive_resources(self, archive_path: str, password: str = "") -> NativeArchiveResourceAnalysis:
+        library = self._load()
+
+        analysis = _Sup7zArchiveResourceAnalysis()
+        message = ctypes.create_unicode_buffer(512)
+
+        status = library.sup7z_analyze_archive_resources(
+            ctypes.c_wchar_p(str(self.seven_zip_dll_path)),
+            ctypes.c_wchar_p(str(archive_path)),
+            ctypes.c_wchar_p(str(password or "")),
+            ctypes.byref(analysis),
+            message,
+            ctypes.c_int(len(message)),
+        )
+        return NativeArchiveResourceAnalysis(
+            status=int(status),
+            is_archive=bool(analysis.is_archive),
+            is_encrypted=bool(analysis.is_encrypted),
+            is_broken=bool(analysis.is_broken),
+            solid=bool(analysis.solid),
+            item_count=int(analysis.item_count),
+            file_count=int(analysis.file_count),
+            dir_count=int(analysis.dir_count),
+            archive_size=int(analysis.archive_size),
+            total_unpacked_size=int(analysis.total_unpacked_size),
+            total_packed_size=int(analysis.total_packed_size),
+            largest_item_size=int(analysis.largest_item_size),
+            largest_dictionary_size=int(analysis.largest_dictionary_size),
+            archive_type=str(analysis.archive_type),
+            dominant_method=str(analysis.dominant_method),
+            message=message.value,
+        )
+
     def _load(self):
         if self._library is not None:
             return self._library
@@ -230,6 +363,24 @@ class NativePasswordTester:
                 ctypes.c_int,
             ]
             library.sup7z_probe_archive.restype = ctypes.c_int
+            library.sup7z_check_archive_health.argtypes = [
+                ctypes.c_wchar_p,
+                ctypes.c_wchar_p,
+                ctypes.c_wchar_p,
+                ctypes.POINTER(_Sup7zArchiveHealth),
+                ctypes.c_wchar_p,
+                ctypes.c_int,
+            ]
+            library.sup7z_check_archive_health.restype = ctypes.c_int
+            library.sup7z_analyze_archive_resources.argtypes = [
+                ctypes.c_wchar_p,
+                ctypes.c_wchar_p,
+                ctypes.c_wchar_p,
+                ctypes.POINTER(_Sup7zArchiveResourceAnalysis),
+                ctypes.c_wchar_p,
+                ctypes.c_int,
+            ]
+            library.sup7z_analyze_archive_resources.restype = ctypes.c_int
             self._library = library
             return library
 
@@ -302,4 +453,24 @@ def cached_test_archive(archive_path: str, password: str = "") -> NativeArchiveT
         "native_7z_test",
         key,
         lambda: tester.test_archive(archive_path, password=password),
+    )
+
+
+def cached_check_archive_health(archive_path: str, password: str = "") -> NativeArchiveHealth:
+    tester = get_native_password_tester()
+    password = password or ""
+    return cached_value(
+        "native_7z_health",
+        _cache_key(tester, archive_path) + (password,),
+        lambda: tester.check_archive_health(archive_path, password=password),
+    )
+
+
+def cached_analyze_archive_resources(archive_path: str, password: str = "") -> NativeArchiveResourceAnalysis:
+    tester = get_native_password_tester()
+    password = password or ""
+    return cached_value(
+        "native_7z_resources",
+        _cache_key(tester, archive_path) + (password,),
+        lambda: tester.analyze_archive_resources(archive_path, password=password),
     )

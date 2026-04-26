@@ -89,6 +89,7 @@ class ConcurrencyScheduler:
 
         self.is_running = False
         self.active_workers = 0
+        self.active_resource_tokens = 0
         self.pending_task_estimate = 0
 
         self.scale_up_streak = 0
@@ -157,7 +158,7 @@ class ConcurrencyScheduler:
             self.dynamic_floor_workers = dynamic_floor
 
             old_limit = self.current_limit
-            near_capacity = self.active_workers >= max(1, self.current_limit - 1)
+            near_capacity = self.active_resource_tokens >= max(1, self.current_limit - 1)
 
             if avg_delta < scale_up_threshold or (
                 backlog > self.current_limit * 2 and avg_delta < scale_up_backlog_threshold
@@ -187,13 +188,17 @@ class ConcurrencyScheduler:
         with self.cond:
             self.pending_task_estimate = pending_count + futures_count + self.active_workers
 
-    def acquire_slot(self):
+    def acquire_slot(self, token_cost: int = 1):
+        token_cost = max(1, int(token_cost or 1))
         with self.cond:
-            while self.active_workers >= self.current_limit:
+            while self.active_workers > 0 and self.active_resource_tokens + token_cost > self.current_limit:
                 self.cond.wait()
             self.active_workers += 1
+            self.active_resource_tokens += token_cost
 
-    def release_slot(self):
+    def release_slot(self, token_cost: int = 1):
+        token_cost = max(1, int(token_cost or 1))
         with self.cond:
             self.active_workers -= 1
+            self.active_resource_tokens = max(0, self.active_resource_tokens - token_cost)
             self.cond.notify_all()

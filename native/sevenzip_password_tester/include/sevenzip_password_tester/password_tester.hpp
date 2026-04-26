@@ -85,4 +85,51 @@ SUP7Z_API int sup7z_probe_archive(
     wchar_t* message,
     int message_chars
 );
+
+struct Sup7zArchiveHealth {
+    int status;
+    int is_archive;
+    int is_encrypted;
+    int is_broken;
+    int is_missing_volume;
+    int is_wrong_password;
+    int operation_result;
+    wchar_t archive_type[32];
+};
+
+struct Sup7zArchiveResourceAnalysis {
+    int status;
+    int is_archive;
+    int is_encrypted;
+    int is_broken;
+    int solid;
+    int item_count;
+    int file_count;
+    int dir_count;
+    unsigned long long archive_size;
+    unsigned long long total_unpacked_size;
+    unsigned long long total_packed_size;
+    unsigned long long largest_item_size;
+    unsigned long long largest_dictionary_size;
+    wchar_t archive_type[32];
+    wchar_t dominant_method[128];
+};
+
+SUP7Z_API int sup7z_check_archive_health(
+    const wchar_t* seven_zip_dll_path,
+    const wchar_t* archive_path,
+    const wchar_t* password,
+    Sup7zArchiveHealth* health,
+    wchar_t* message,
+    int message_chars
+);
+
+SUP7Z_API int sup7z_analyze_archive_resources(
+    const wchar_t* seven_zip_dll_path,
+    const wchar_t* archive_path,
+    const wchar_t* password,
+    Sup7zArchiveResourceAnalysis* analysis,
+    wchar_t* message,
+    int message_chars
+);
 #endif

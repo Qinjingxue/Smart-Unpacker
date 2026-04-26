@@ -4,11 +4,25 @@ from collections import defaultdict
 from typing import Callable, Dict, List, Set
 
 from smart_unpacker.contracts.tasks import ArchiveTask, RenameInstruction
+from smart_unpacker.rename.volume_normalizer import SplitVolumeNormalizer, StagedSplit
 
 
 class RenameScheduler:
+    def __init__(self):
+        self.volume_normalizer = SplitVolumeNormalizer()
+
     def apply_renames(self, tasks: List[ArchiveTask]) -> Dict[str, str]:
         return self.execute(self.plan(tasks))
+
+    def normalize_split_group(self, task: ArchiveTask, startupinfo=None) -> StagedSplit:
+        return self.volume_normalizer.normalize(
+            task.main_path,
+            list(task.all_parts or [task.main_path]),
+            startupinfo=startupinfo,
+        )
+
+    def cleanup_normalized_split_group(self, staged: StagedSplit):
+        self.volume_normalizer.cleanup(staged)
 
     def build_output_dir_resolver(
         self,

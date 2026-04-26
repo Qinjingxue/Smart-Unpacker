@@ -5,6 +5,8 @@ from smart_unpacker.support.external_command_cache import clear_cache_namespace
 def _clear_native_7z_caches():
     clear_cache_namespace("native_7z_probe")
     clear_cache_namespace("native_7z_test")
+    clear_cache_namespace("native_7z_health")
+    clear_cache_namespace("native_7z_resources")
 
 
 class FakeTester:
@@ -14,6 +16,8 @@ class FakeTester:
     def __init__(self):
         self.probe_calls = 0
         self.test_calls = 0
+        self.health_calls = 0
+        self.resource_calls = 0
 
     def probe_archive(self, archive_path: str):
         self.probe_calls += 1
@@ -37,6 +41,41 @@ class FakeTester:
             encrypted=False,
             checksum_error=False,
             archive_type="zip",
+            message="ok",
+        )
+
+    def check_archive_health(self, archive_path: str, password: str = ""):
+        self.health_calls += 1
+        return native.NativeArchiveHealth(
+            status=native.STATUS_OK,
+            is_archive=True,
+            is_encrypted=False,
+            is_broken=False,
+            is_missing_volume=False,
+            is_wrong_password=False,
+            operation_result=0,
+            archive_type="zip",
+            message="ok",
+        )
+
+    def analyze_archive_resources(self, archive_path: str, password: str = ""):
+        self.resource_calls += 1
+        return native.NativeArchiveResourceAnalysis(
+            status=native.STATUS_OK,
+            is_archive=True,
+            is_encrypted=False,
+            is_broken=False,
+            solid=False,
+            item_count=1,
+            file_count=1,
+            dir_count=0,
+            archive_size=100,
+            total_unpacked_size=200,
+            total_packed_size=100,
+            largest_item_size=200,
+            largest_dictionary_size=0,
+            archive_type="zip",
+            dominant_method="Store",
             message="ok",
         )
 
@@ -127,4 +166,33 @@ def test_empty_password_test_derives_validation_fields_from_status(tmp_path, mon
     assert test.status == native.STATUS_UNSUPPORTED
     assert fake.probe_calls == 1
     assert fake.test_calls == 0
+    _clear_native_7z_caches()
+
+
+def test_archive_health_cache_reuses_result_for_unchanged_file(tmp_path, monkeypatch):
+    fake = _install_fake_tester(monkeypatch)
+    archive = tmp_path / "sample.zip"
+    archive.write_bytes(b"PK")
+
+    first = native.cached_check_archive_health(str(archive))
+    second = native.cached_check_archive_health(str(archive))
+
+    assert first.ok
+    assert second.ok
+    assert fake.health_calls == 1
+    _clear_native_7z_caches()
+
+
+def test_archive_resource_cache_is_password_specific(tmp_path, monkeypatch):
+    fake = _install_fake_tester(monkeypatch)
+    archive = tmp_path / "sample.zip"
+    archive.write_bytes(b"PK")
+
+    first = native.cached_analyze_archive_resources(str(archive), password="secret")
+    second = native.cached_analyze_archive_resources(str(archive), password="secret")
+
+    assert first.ok
+    assert second.ok
+    assert first.dominant_method == "Store"
+    assert fake.resource_calls == 1
     _clear_native_7z_caches()

@@ -55,6 +55,20 @@ pytest tests/runners -q
 
 `run_acceptance_tests.ps1` 会分步运行 unit、functional、integration、CLI、runner 和 CLI smoke checks。`scripts/run_ci_tests.ps1` 会运行完整 pytest 套件，再执行两个 CLI smoke checks。
 
+## 大文件性能压测
+
+10 个 300MB 普通 zip 归档的真实解压并发压测挂在 pytest 性能测试体系下，默认跳过。需要时显式开启：
+
+```powershell
+pytest tests/performance/test_large_archives.py --run-large-archive-performance -s
+```
+
+默认会在 pytest 临时目录中生成 10 个约 300MB 的普通 `.zip` 文件，走 `PipelineRunner` 实际解压，并采样当前进程树中的 `7z.exe` 数量，确认调度器确实拉起多个 7z 进程并行工作。可按需调整规模和阈值：
+
+```powershell
+pytest tests/performance/test_large_archives.py --run-large-archive-performance -s --large-archive-count 10 --large-archive-size-mb 300 --large-archive-max-extract-seconds 300 --large-archive-min-parallel-7z 2 --large-archive-scheduler-profile auto
+```
+
 ## 慢速真实归档测试
 
 `tests/integration/test_real_archive_edge_cases.py` 默认保留一组快速真实归档 smoke 测试。完整格式矩阵标记为 `slow_real_archive`，默认跳过；需要时显式开启：

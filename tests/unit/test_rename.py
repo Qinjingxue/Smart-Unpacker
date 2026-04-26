@@ -1,6 +1,15 @@
 from smart_unpacker.contracts.detection import FactBag
 from smart_unpacker.contracts.tasks import ArchiveTask
 from smart_unpacker.rename.scheduler import RenameScheduler
+from smart_unpacker.relations.internal.group_builder import RelationsGroupBuilder
+
+
+class FakeNativeTester:
+    def test_archive(self, archive: str):
+        class Result:
+            ok = True
+
+        return Result()
 
 
 def test_rename_planner_and_executor_apply_disguised_archive_extensions(tmp_path):
@@ -70,3 +79,27 @@ def test_output_dir_resolver_disambiguates_duplicate_task_outputs(tmp_path):
 
     assert resolver(first) == str(tmp_path / "collision_7z_2")
     assert resolver(second) == str(tmp_path / "collision_zip")
+
+
+def test_rename_scheduler_normalizes_misnamed_split_group_as_black_box(tmp_path):
+    first = tmp_path / "bundle.7z.001"
+    candidate = tmp_path / "bundle"
+    first.write_bytes(b"first")
+    candidate.write_bytes(b"candidate")
+
+    bag = FactBag()
+    task = ArchiveTask(fact_bag=bag, score=10, main_path=str(first), all_parts=[str(first)])
+
+    scheduler = RenameScheduler()
+    scheduler.volume_normalizer._native_tester = FakeNativeTester()
+    scheduler.volume_normalizer._relations = RelationsGroupBuilder()
+    scheduler.volume_normalizer._collect_misnamed_volume_candidates = (
+        lambda archive, all_parts, archive_prefix, style: [str(candidate)]
+    )
+
+    staged = scheduler.normalize_split_group(task)
+
+    assert staged.archive != str(first)
+    assert staged.run_parts == [str(first), str(candidate)]
+    assert staged.verified_candidates is True
+    scheduler.cleanup_normalized_split_group(staged)
