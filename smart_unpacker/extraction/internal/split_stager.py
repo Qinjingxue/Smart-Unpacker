@@ -21,9 +21,6 @@ class SplitVolumeStager:
         self.seven_z_path = seven_z_path
         self._relations = RelationsGroupBuilder()
 
-    def _parse_numbered_volume(self, path: str):
-        return self._relations.parse_numbered_volume(path)
-
     def _format_numbered_volume(self, prefix: str, number: int, style: str, width: int) -> str:
         if style == "rar_part":
             return f"{prefix}.part{number:0{width}d}.rar"
@@ -39,7 +36,7 @@ class SplitVolumeStager:
             shutil.copy2(source, target)
 
     def stage(self, archive: str, all_parts: List[str], startupinfo=None) -> StagedSplit:
-        parsed_main = self._parse_numbered_volume(os.path.normpath(archive))
+        parsed_main = self._relations.parse_numbered_volume(os.path.normpath(archive))
         if not parsed_main or parsed_main["number"] != 1:
             return StagedSplit(archive=archive, all_parts=list(all_parts))
 
@@ -48,7 +45,7 @@ class SplitVolumeStager:
         width = parsed_main["width"]
         numbered_parts = {}
         for path in all_parts:
-            parsed = self._parse_numbered_volume(os.path.normpath(path))
+            parsed = self._relations.parse_numbered_volume(os.path.normpath(path))
             if parsed and parsed["style"] == style and os.path.normcase(parsed["prefix"]) == os.path.normcase(archive_prefix):
                 numbered_parts[parsed["number"]] = os.path.normpath(path)
 

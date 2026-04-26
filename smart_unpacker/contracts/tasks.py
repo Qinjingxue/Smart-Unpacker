@@ -31,6 +31,10 @@ class ArchiveTask:
     all_parts: Optional[List[str]] = None
     logical_name: str = ""
     split_info: SplitArchiveInfo = field(default_factory=SplitArchiveInfo)
+    decision: str = "archive"
+    stop_reason: str = ""
+    matched_rules: List[str] = field(default_factory=list)
+    detected_ext: str = ""
 
     def __post_init__(self):
         self.all_parts = list(self.all_parts or [])
@@ -46,7 +50,7 @@ class ArchiveTask:
             self.split_info.is_split = True
 
     @classmethod
-    def from_fact_bag(cls, fact_bag: FactBag, score: int) -> "ArchiveTask":
+    def from_fact_bag(cls, fact_bag: FactBag, score: int, decision=None) -> "ArchiveTask":
         main_path = fact_bag.get("candidate.entry_path") or ""
         all_parts = list(fact_bag.get("candidate.member_paths") or [])
         logical_name = fact_bag.get("candidate.logical_name") or ""
@@ -75,6 +79,10 @@ class ArchiveTask:
             all_parts=all_parts,
             logical_name=logical_name,
             split_info=split_info,
+            decision=getattr(decision, "decision", "archive"),
+            stop_reason=getattr(decision, "stop_reason", "") or "",
+            matched_rules=list(getattr(decision, "matched_rules", []) or []),
+            detected_ext=fact_bag.get("file.detected_ext", ""),
         )
 
     def apply_path_mapping(self, path_map: dict[str, str]):

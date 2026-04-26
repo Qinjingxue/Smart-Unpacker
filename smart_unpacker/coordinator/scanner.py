@@ -1,7 +1,8 @@
 from typing import List, Dict, Any
 from dataclasses import dataclass
 
-from smart_unpacker.detection import DetectionScheduler
+from smart_unpacker.coordinator.context import RunContext
+from smart_unpacker.coordinator.task_scan import ArchiveTaskScanner
 
 @dataclass
 class ScanResult:
@@ -18,32 +19,24 @@ class ScanResult:
 
 class ScanOrchestrator:
     def __init__(self, config: Dict[str, Any]):
-        self.detector = DetectionScheduler(config)
+        self.task_scanner = ArchiveTaskScanner(config, RunContext())
 
     def scan(self, root_dir: str) -> List[ScanResult]:
         return self.scan_targets([root_dir])
 
     def scan_targets(self, target_paths: List[str]) -> List[ScanResult]:
-        results = []
-        for detection in self.detector.detect_targets(target_paths):
-            bag = detection.fact_bag
-            main_path = bag.get("candidate.entry_path")
-            if not main_path:
-                continue
-            decision = detection.decision
-            
-            if decision.should_extract:
-                results.append(ScanResult(
-                    logical_name=bag.get("candidate.logical_name", ""),
-                    main_path=main_path,
-                    all_parts=list(bag.get("candidate.member_paths") or []),
-                    should_extract=decision.should_extract,
-                    score=decision.total_score,
-                    stop_reason=decision.stop_reason or "",
-                    matched_rules=decision.matched_rules,
-                    detected_ext=bag.get("file.detected_ext", ""),
-                    fact_bag=bag,
-                    decision=decision.decision,
-                ))
-                
-        return results
+        return [
+            ScanResult(
+                logical_name=task.logical_name,
+                main_path=task.main_path,
+                all_parts=list(task.all_parts),
+                should_extract=True,
+                score=task.score,
+                stop_reason=task.stop_reason,
+                matched_rules=list(task.matched_rules),
+                detected_ext=task.detected_ext,
+                fact_bag=task.fact_bag,
+                decision=task.decision,
+            )
+            for task in self.task_scanner.scan_targets(target_paths)
+        ]

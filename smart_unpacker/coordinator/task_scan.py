@@ -1,11 +1,11 @@
 import os
-import re
 from typing import Any, Dict, List
 
 from smart_unpacker.config.detection_view import detection_config, rule_pipeline_config
 from smart_unpacker.coordinator.context import RunContext
 from smart_unpacker.detection import DetectionScheduler
 from smart_unpacker.contracts.tasks import ArchiveTask
+from smart_unpacker.relations.internal.group_builder import RelationsGroupBuilder
 
 
 STANDARD_ARCHIVE_EXTS = {".7z", ".zip", ".rar", ".gz", ".bz2", ".xz"}
@@ -16,6 +16,7 @@ class ArchiveTaskScanner:
         self.config = config
         self.detector = DetectionScheduler(config)
         self.context = context
+        self._relations = RelationsGroupBuilder()
 
     def scan_root(self, scan_root: str) -> List[ArchiveTask]:
         return self.scan_targets([scan_root])
@@ -32,7 +33,7 @@ class ArchiveTaskScanner:
 
             decision = detection.decision
             if decision.should_extract:
-                task = ArchiveTask.from_fact_bag(bag, decision.total_score)
+                task = ArchiveTask.from_fact_bag(bag, decision.total_score, decision=decision)
                 if task.key in self.context.processed_keys:
                     continue
                 tasks.append(task)
@@ -72,15 +73,8 @@ class ArchiveTaskScanner:
         ext = os.path.splitext(name)[1]
         if ext in STANDARD_ARCHIVE_EXTS:
             return True
-        if self._is_standard_split_head(name):
+        if self._relations.detect_split_role(name) == "first":
             return True
         if ext == ".exe" and bag.get("relation.is_split_exe_companion"):
             return True
         return False
-
-    def _is_standard_split_head(self, name: str) -> bool:
-        return (
-            re.search(r"\.(7z|zip|rar)\.001$", name, re.IGNORECASE) is not None
-            or re.search(r"\.001$", name, re.IGNORECASE) is not None
-            or re.search(r"\.part0*1\.rar$", name, re.IGNORECASE) is not None
-        )

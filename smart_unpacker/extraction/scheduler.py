@@ -1,5 +1,4 @@
 import os
-import re
 import shutil
 import subprocess
 from typing import Callable, Optional
@@ -204,13 +203,17 @@ class ExtractionScheduler:
         entry = split_info.preferred_entry or ""
 
         if not entry:
-            entry = self._select_first_volume(all_parts)
+            entry = self._relations.select_first_volume(all_parts)
 
-        if not entry and self._should_scan_split_siblings(archive, split_info):
-            sibling_parts = self._find_standard_split_siblings(archive)
+        if not entry and self._relations.should_scan_split_siblings(
+            archive,
+            is_split=split_info.is_split,
+            is_sfx_stub=split_info.is_sfx_stub,
+        ):
+            sibling_parts = self._relations.find_standard_split_siblings(archive)
             if sibling_parts:
                 all_parts = self._dedupe_paths(all_parts + sibling_parts)
-                entry = self._select_first_volume(all_parts)
+                entry = self._relations.select_first_volume(all_parts)
 
         if entry and os.path.normcase(os.path.normpath(entry)) != os.path.normcase(os.path.normpath(archive)):
             print(f"[SPLIT] 使用分卷入口: {entry}")
@@ -233,133 +236,6 @@ class ExtractionScheduler:
             )
 
         return archive, all_parts, split_info
-
-    def _select_first_volume(self, paths: list[str]) -> str:
-        if not paths:
-            return ""
-
-        for path in paths:
-            parsed = self._parse_numbered_volume(os.path.normpath(path))
-            if parsed and parsed["number"] == 1:
-                return path
-
-        lower_names = {os.path.basename(path).lower() for path in paths}
-        for path in paths:
-            if self._is_legacy_rar_head(path, lower_names):
-                return path
-
-        return ""
-
-    def _should_scan_split_siblings(self, archive: str, split_info: SplitArchiveInfo) -> bool:
-        if split_info.is_split or split_info.is_sfx_stub:
-            return True
-        parsed = self._parse_numbered_volume(os.path.normpath(archive))
-        if parsed and parsed["number"] == 1:
-            return True
-        return os.path.splitext(archive)[1].lower() in {".exe", ".rar"}
-
-    def _parse_numbered_volume(self, path: str):
-        parsed = self._relations.parse_numbered_volume(path)
-        if parsed:
-            return parsed
-
-        match = re.search(r"^(?P<prefix>.+\.(?:7z|zip|rar))\.(?P<number>\d{3})$", path, re.IGNORECASE)
-        if match:
-            return {
-                "prefix": match.group("prefix"),
-                "number": int(match.group("number")),
-                "style": "numeric_suffix",
-                "width": 3,
-            }
-
-        match = re.search(r"^(?P<prefix>.+)\.part(?P<number>\d+)\.rar$", path, re.IGNORECASE)
-        if match:
-            return {
-                "prefix": match.group("prefix"),
-                "number": int(match.group("number")),
-                "style": "rar_part",
-                "width": len(match.group("number")),
-            }
-
-        match = re.search(r"^(?P<prefix>.+)\.(?P<number>\d{3})$", path, re.IGNORECASE)
-        if match:
-            return {
-                "prefix": match.group("prefix"),
-                "number": int(match.group("number")),
-                "style": "plain_numeric_suffix",
-                "width": 3,
-            }
-
-        return None
-
-    def _find_standard_split_siblings(self, archive: str) -> list[str]:
-        directory = os.path.dirname(archive) or "."
-        base = os.path.splitext(os.path.basename(archive))[0]
-        try:
-            names = os.listdir(directory)
-        except OSError:
-            return []
-
-        lower_names = {name.lower() for name in names}
-        expected_heads = {
-            f"{base}.7z.001".lower(),
-            f"{base}.zip.001".lower(),
-            f"{base}.rar.001".lower(),
-            f"{base}.001".lower(),
-            f"{base}.part1.rar".lower(),
-            f"{base}.part01.rar".lower(),
-            f"{base}.part001.rar".lower(),
-        }
-        legacy_rar_head = f"{base}.rar".lower()
-        legacy_rar_present = legacy_rar_head in lower_names and any(
-            f"{base}.r{number:02d}".lower() in lower_names for number in range(0, 100)
-        )
-        if legacy_rar_present:
-            expected_heads.add(f"{base}.rar".lower())
-
-        if not (expected_heads & lower_names):
-            return []
-
-        siblings = []
-        for name in names:
-            lower = name.lower()
-            if self._is_standard_split_sibling(base.lower(), lower, legacy_rar_present):
-                siblings.append(os.path.join(directory, name))
-
-        return sorted(siblings, key=self._split_sort_key)
-
-    def _is_standard_split_sibling(self, base: str, lower_name: str, legacy_rar_present: bool) -> bool:
-        if re.match(rf"^{re.escape(base)}\.(7z|zip|rar)\.\d{{3}}$", lower_name):
-            return True
-        if re.match(rf"^{re.escape(base)}\.\d{{3}}$", lower_name):
-            return True
-        if re.match(rf"^{re.escape(base)}\.part\d+\.rar$", lower_name):
-            return True
-        if legacy_rar_present and lower_name == f"{base}.rar":
-            return True
-        if legacy_rar_present and re.match(rf"^{re.escape(base)}\.r\d{{2}}$", lower_name):
-            return True
-        return False
-
-    def _split_sort_key(self, path: str) -> tuple[int, int, str]:
-        parsed = self._parse_numbered_volume(os.path.normpath(path))
-        if parsed:
-            return (0, parsed["number"], path.lower())
-
-        lower_name = os.path.basename(path).lower()
-        match = re.search(r"\.r(\d{2})$", lower_name)
-        if match:
-            return (1, int(match.group(1)) + 2, path.lower())
-        if lower_name.endswith(".rar"):
-            return (1, 1, path.lower())
-        return (2, 0, path.lower())
-
-    def _is_legacy_rar_head(self, path: str, lower_names: set[str]) -> bool:
-        lower_name = os.path.basename(path).lower()
-        if not lower_name.endswith(".rar"):
-            return False
-        base = lower_name[:-4]
-        return any(f"{base}.r{number:02d}" in lower_names for number in range(0, 100))
 
     def _looks_like_sfx_stub(self, path: str) -> bool:
         return os.path.splitext(path)[1].lower() == ".exe"

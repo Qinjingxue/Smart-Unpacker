@@ -179,7 +179,15 @@ class RelationsGroupBuilder:
         if not match:
             match = re.search(r"^(?P<prefix>.+)\.part(?P<number>\d+)\.rar$", path, re.IGNORECASE)
             if not match:
-                return None
+                match = re.search(r"^(?P<prefix>.+)\.(?P<number>\d{3})$", path, re.IGNORECASE)
+                if not match:
+                    return None
+                return {
+                    "prefix": match.group("prefix"),
+                    "number": int(match.group("number")),
+                    "style": "plain_numeric_suffix",
+                    "width": 3,
+                }
             return {
                 "prefix": match.group("prefix"),
                 "number": int(match.group("number")),
@@ -192,6 +200,99 @@ class RelationsGroupBuilder:
             "style": "numeric_suffix",
             "width": 3,
         }
+
+    def select_first_volume(self, paths: List[str]) -> str:
+        if not paths:
+            return ""
+
+        for path in paths:
+            parsed = self.parse_numbered_volume(os.path.normpath(path))
+            if parsed and parsed["number"] == 1:
+                return path
+
+        lower_names = {os.path.basename(path).lower() for path in paths}
+        for path in paths:
+            if self.is_legacy_rar_head(path, lower_names):
+                return path
+
+        return ""
+
+    def should_scan_split_siblings(self, archive: str, is_split: bool = False, is_sfx_stub: bool = False) -> bool:
+        if is_split or is_sfx_stub:
+            return True
+        parsed = self.parse_numbered_volume(os.path.normpath(archive))
+        if parsed and parsed["number"] == 1:
+            return True
+        return os.path.splitext(archive)[1].lower() in {".exe", ".rar"}
+
+    def find_standard_split_siblings(self, archive: str) -> List[str]:
+        directory = os.path.dirname(archive) or "."
+        base = os.path.splitext(os.path.basename(archive))[0]
+        try:
+            names = os.listdir(directory)
+        except OSError:
+            return []
+
+        lower_names = {name.lower() for name in names}
+        expected_heads = {
+            f"{base}.7z.001".lower(),
+            f"{base}.zip.001".lower(),
+            f"{base}.rar.001".lower(),
+            f"{base}.001".lower(),
+            f"{base}.part1.rar".lower(),
+            f"{base}.part01.rar".lower(),
+            f"{base}.part001.rar".lower(),
+        }
+        legacy_rar_head = f"{base}.rar".lower()
+        legacy_rar_present = legacy_rar_head in lower_names and any(
+            f"{base}.r{number:02d}".lower() in lower_names for number in range(0, 100)
+        )
+        if legacy_rar_present:
+            expected_heads.add(f"{base}.rar".lower())
+
+        if not (expected_heads & lower_names):
+            return []
+
+        siblings = []
+        for name in names:
+            lower = name.lower()
+            if self.is_standard_split_sibling(base.lower(), lower, legacy_rar_present):
+                siblings.append(os.path.join(directory, name))
+
+        return sorted(siblings, key=self.split_sort_key)
+
+    def is_standard_split_sibling(self, base: str, lower_name: str, legacy_rar_present: bool) -> bool:
+        if re.match(rf"^{re.escape(base)}\.(7z|zip|rar)\.\d{{3}}$", lower_name):
+            return True
+        if re.match(rf"^{re.escape(base)}\.\d{{3}}$", lower_name):
+            return True
+        if re.match(rf"^{re.escape(base)}\.part\d+\.rar$", lower_name):
+            return True
+        if legacy_rar_present and lower_name == f"{base}.rar":
+            return True
+        if legacy_rar_present and re.match(rf"^{re.escape(base)}\.r\d{{2}}$", lower_name):
+            return True
+        return False
+
+    def split_sort_key(self, path: str) -> tuple[int, int, str]:
+        parsed = self.parse_numbered_volume(os.path.normpath(path))
+        if parsed:
+            return (0, parsed["number"], path.lower())
+
+        lower_name = os.path.basename(path).lower()
+        match = re.search(r"\.r(\d{2})$", lower_name)
+        if match:
+            return (1, int(match.group(1)) + 2, path.lower())
+        if lower_name.endswith(".rar"):
+            return (1, 1, path.lower())
+        return (2, 0, path.lower())
+
+    def is_legacy_rar_head(self, path: str, lower_names: Set[str]) -> bool:
+        lower_name = os.path.basename(path).lower()
+        if not lower_name.endswith(".rar"):
+            return False
+        base = lower_name[:-4]
+        return any(f"{base}.r{number:02d}" in lower_names for number in range(0, 100))
 
     def collect_misnamed_volume_candidates(
         self,
