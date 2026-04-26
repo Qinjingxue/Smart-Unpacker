@@ -106,6 +106,7 @@ contracts
 | 文件系统 | `filesystem.directory_scanner.DirectoryScanner` | 目录扫描并生成目录快照。 |
 | 关系 | `relations.scheduler.RelationsScheduler` | 分卷、相关文件和候选组关系。 |
 | 重命名 | `rename.scheduler.RenameScheduler` | 输出目录命名和冲突处理。 |
+| 支撑 | `support.sevenzip_native` | C++ 7z wrapper 的 Python 绑定和缓存入口。 |
 | 契约 | `contracts.*` | 跨模块共享的数据结构。 |
 
 ## `app`
@@ -535,12 +536,14 @@ postprocess/internal/
 - `resources.py`：资源路径查找、7-Zip 查找、路径候选去重。
 - `json_format.py`：JSON 读写和格式化。
 - `external_command_cache.py`：外部命令和文件指纹缓存。
+- `sevenzip_native.py`：C++ 7z wrapper 的 Python ABI 绑定、状态结构和文件指纹缓存入口。
 
 可以放进 `support` 的代码：
 
 - 不知道任何业务对象的纯基础设施。
 - 多个领域都需要的通用资源查找、缓存、JSON 工具。
 - 不依赖 `detection`、`extraction`、`coordinator` 等领域包。
+- 外部 ABI 适配层，例如 7z.dll wrapper 的 Python 绑定；业务解释仍留在调用领域。
 
 不应该放进 `support` 的代码：
 

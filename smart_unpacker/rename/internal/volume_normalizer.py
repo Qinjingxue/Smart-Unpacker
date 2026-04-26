@@ -5,7 +5,7 @@ import tempfile
 from dataclasses import dataclass
 from typing import List, Optional
 
-from smart_unpacker.extraction.internal.sevenzip.native_password_tester import get_native_password_tester
+from smart_unpacker.support.sevenzip_native import get_native_password_tester
 from smart_unpacker.relations.internal.group_builder import RelationsGroupBuilder
 
 

@@ -81,7 +81,7 @@ Copy-Item native\sevenzip_password_tester\build\Release\sevenzip_password_tester
 
 ```powershell
 .\.venv\Scripts\python.exe -c "import smart_unpacker_native as n; print(n.native_available(), n.scanner_version())"
-.\.venv\Scripts\python.exe -c "from smart_unpacker.extraction.internal.native_password_tester import NativePasswordTester; print(NativePasswordTester().available())"
+.\.venv\Scripts\python.exe -c "from smart_unpacker.support.sevenzip_native import NativePasswordTester; print(NativePasswordTester().available())"
 ```
 
 第一个命令确认 Rust native 可导入。第二个命令确认 `tools\sevenzip_password_tester_capi.dll` 和 `tools\7z.dll` 都可被找到。

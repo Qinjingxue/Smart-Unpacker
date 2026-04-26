@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 
 from smart_unpacker.contracts.tasks import ArchiveTask
-from smart_unpacker.extraction.internal.sevenzip.native_password_tester import (
+from smart_unpacker.support.sevenzip_native import (
     STATUS_BACKEND_UNAVAILABLE,
     STATUS_UNSUPPORTED,
     cached_analyze_archive_resources,

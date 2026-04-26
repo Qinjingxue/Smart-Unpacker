@@ -4,7 +4,7 @@ from typing import List, Optional, Tuple, Dict, Any
 
 from smart_unpacker_native import scan_zip_central_directory_names as _NATIVE_SCAN_ZIP_NAMES
 
-from smart_unpacker.extraction.internal.sevenzip.native_password_tester import cached_probe_archive
+from smart_unpacker.support.sevenzip_native import cached_probe_archive
 
 class ArchiveMetadataScanResult:
     def __init__(self, archive_path: str, archive_type: str, reasons: List[str] = None):

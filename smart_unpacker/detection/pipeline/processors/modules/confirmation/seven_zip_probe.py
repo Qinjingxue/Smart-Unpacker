@@ -1,7 +1,7 @@
 from typing import Dict, Any
 from smart_unpacker.detection.pipeline.processors.context import FactProcessorContext
 from smart_unpacker.detection.pipeline.processors.registry import register_processor
-from smart_unpacker.extraction.internal.sevenzip.native_password_tester import cached_probe_archive
+from smart_unpacker.support.sevenzip_native import cached_probe_archive
 from smart_unpacker.rename.scheduler import RenameScheduler
 
 EXECUTABLE_PROBE_TYPES = {"pe", "elf", "macho", "te"}

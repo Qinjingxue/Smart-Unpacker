@@ -1,4 +1,4 @@
-from smart_unpacker.extraction.internal.sevenzip import native_password_tester as native
+from smart_unpacker.support import sevenzip_native as native
 from smart_unpacker.support.external_command_cache import clear_cache_namespace
 
 
