@@ -6,6 +6,7 @@ from tests.helpers.tool_config import get_optional_rar, require_7z
 
 
 PASSWORD = "sfx-split-secret"
+WRONG_PASSWORD = "wrong-sfx-password"
 
 
 def _parts(case):
@@ -40,6 +41,9 @@ def test_native_wrapper_handles_7z_sfx_split_health_password_and_resources(tmp_p
     if password:
         assert health.is_encrypted
         assert tester.test_archive(str(case.entry_path), password=password, part_paths=parts).ok
+        attempt = tester.try_passwords(str(case.entry_path), [WRONG_PASSWORD, password], part_paths=parts)
+        assert attempt.ok
+        assert attempt.matched_index == 1
     else:
         assert health.ok
         assert tester.test_archive(str(case.entry_path), part_paths=parts).ok
@@ -77,6 +81,9 @@ def test_native_wrapper_handles_zip_sfx_split_health_password_and_resources(tmp_
     if password:
         assert health.is_encrypted
         assert tester.test_archive(str(case.entry_path), password=password, part_paths=parts).ok
+        attempt = tester.try_passwords(str(case.entry_path), [WRONG_PASSWORD, password], part_paths=parts)
+        assert attempt.ok
+        assert attempt.matched_index == 1
     else:
         assert health.ok
         assert tester.test_archive(str(case.entry_path), part_paths=parts).ok
@@ -142,6 +149,9 @@ def test_native_wrapper_handles_rar_sfx_split_health_password_and_resources(tmp_
     if password:
         assert health.is_encrypted
         assert tester.test_archive(str(case.entry_path), password=password, part_paths=parts).ok
+        attempt = tester.try_passwords(str(case.entry_path), [WRONG_PASSWORD, password], part_paths=parts)
+        assert attempt.ok
+        assert attempt.matched_index == 1
     else:
         assert health.ok
         assert tester.test_archive(str(case.entry_path), part_paths=parts).ok
@@ -162,3 +172,34 @@ def test_native_wrapper_detects_missing_rar_sfx_split_tail(tmp_path):
     health = get_native_password_tester().check_archive_health(str(case.entry_path), part_paths=_parts(case))
 
     assert health.is_missing_volume
+
+
+@pytest.mark.parametrize(
+    ("archive_format", "case_kwargs"),
+    [
+        ("7z", {"sfx": True}),
+        ("7z", {"carrier": "jpg"}),
+        ("rar", {}),
+        ("rar", {"split": True}),
+    ],
+)
+def test_native_password_retry_reaches_correct_password_after_wrong_passwords(tmp_path, archive_format, case_kwargs):
+    require_7z()
+    if archive_format == "rar" and not get_optional_rar():
+        pytest.skip("RAR generator is not configured")
+    case = ArchiveFixtureFactory().create(
+        tmp_path,
+        f"native_retry_after_wrong_{archive_format}_{'_'.join(case_kwargs) or 'plain'}",
+        archive_format,
+        password=PASSWORD,
+        **case_kwargs,
+    )
+
+    attempt = get_native_password_tester().try_passwords(
+        str(case.entry_path),
+        [WRONG_PASSWORD, "still-wrong", PASSWORD],
+        part_paths=_parts(case),
+    )
+
+    assert attempt.ok
+    assert attempt.matched_index == 2

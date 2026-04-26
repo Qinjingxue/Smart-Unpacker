@@ -259,13 +259,15 @@ def choose_entry_path(archive_dir: Path, case_id: str, archive_format: str, sfx:
     files = sorted(path for path in archive_dir.iterdir() if path.is_file())
     if not files:
         raise RuntimeError(f"No generated files for {case_id}")
-    if sfx:
-        return archive_dir / f"{case_id}.exe"
     if archive_format == "rar":
         for path in files:
             lower = path.name.lower()
+            if sfx and ".part1.exe" in lower:
+                return path
             if ".part1.rar" in lower or lower.endswith(".rar"):
                 return path
+    if sfx:
+        return archive_dir / f"{case_id}.exe"
     for path in files:
         lower = path.name.lower()
         if lower.endswith(".001") or lower.endswith(f".{archive_format}"):

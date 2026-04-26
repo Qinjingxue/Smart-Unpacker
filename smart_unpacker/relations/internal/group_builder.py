@@ -12,12 +12,12 @@ from smart_unpacker.support.path_keys import case_key, normalized_path, path_key
 
 
 SPLIT_FIRST_PATTERNS = [
-    re.compile(r"\.part0*1\.rar(?:\.[^.]+)?$", re.IGNORECASE),
+    re.compile(r"\.part0*1\.(?:rar|exe)(?:\.[^.]+)?$", re.IGNORECASE),
     re.compile(r"\.(7z|zip|rar)\.001(?:\.[^.]+)?$", re.IGNORECASE),
     re.compile(r"\.001(?:\.[^.]+)?$", re.IGNORECASE),
 ]
 
-SPLIT_MEMBER_PATTERN = re.compile(r"\.(part\d+\.rar|\d{3})(?:\.[^.]+)?$", re.IGNORECASE)
+SPLIT_MEMBER_PATTERN = re.compile(r"\.(part\d+\.(?:rar|exe)|\d{3})(?:\.[^.]+)?$", re.IGNORECASE)
 
 
 class RelationsGroupBuilder:
@@ -86,7 +86,7 @@ class RelationsGroupBuilder:
         return None
 
     def get_logical_name(self, filename: str, is_archive: bool = False) -> str:
-        name, count = re.subn(r"\.part\d+\.rar(?:\.[^.]+)?$", "", filename, flags=re.IGNORECASE)
+        name, count = re.subn(r"\.part\d+\.(?:rar|exe)(?:\.[^.]+)?$", "", filename, flags=re.IGNORECASE)
         if count > 0:
             return name.strip().rstrip(".")
 
@@ -184,7 +184,7 @@ class RelationsGroupBuilder:
     def parse_numbered_volume(self, path: str):
         match = re.search(r"^(?P<prefix>.+\.(?:7z|zip|rar))\.(?P<number>\d{3})$", path, re.IGNORECASE)
         if not match:
-            match = re.search(r"^(?P<prefix>.+)\.part(?P<number>\d+)\.rar$", path, re.IGNORECASE)
+            match = re.search(r"^(?P<prefix>.+)\.part(?P<number>\d+)\.(?:rar|exe)$", path, re.IGNORECASE)
             if not match:
                 match = re.search(r"^(?P<prefix>.+)\.(?P<number>\d{3})$", path, re.IGNORECASE)
                 if not match:
@@ -234,7 +234,12 @@ class RelationsGroupBuilder:
 
     def find_standard_split_siblings(self, archive: str) -> List[str]:
         directory = os.path.dirname(archive) or "."
-        base = os.path.splitext(os.path.basename(archive))[0]
+        archive_name = os.path.basename(archive)
+        parsed_archive = self.parse_numbered_volume(archive_name)
+        if parsed_archive and parsed_archive["style"] == "rar_part":
+            base = str(parsed_archive["prefix"])
+        else:
+            base = os.path.splitext(archive_name)[0]
         entries = self._iter_directory_files(directory)
         names = [entry.path.name for entry in entries]
 
@@ -247,6 +252,9 @@ class RelationsGroupBuilder:
             f"{base}.part1.rar".lower(),
             f"{base}.part01.rar".lower(),
             f"{base}.part001.rar".lower(),
+            f"{base}.part1.exe".lower(),
+            f"{base}.part01.exe".lower(),
+            f"{base}.part001.exe".lower(),
         }
         legacy_rar_head = f"{base}.rar".lower()
         legacy_rar_present = legacy_rar_head in lower_names and any(
@@ -272,7 +280,7 @@ class RelationsGroupBuilder:
             return True
         if re.match(rf"^{re.escape(base)}\.\d{{3}}$", lower_name):
             return True
-        if re.match(rf"^{re.escape(base)}\.part\d+\.rar$", lower_name):
+        if re.match(rf"^{re.escape(base)}\.part\d+\.(rar|exe)$", lower_name):
             return True
         if legacy_rar_present and lower_name == f"{base}.rar":
             return True
@@ -466,7 +474,7 @@ class RelationsGroupBuilder:
         patterns = [
             re.compile(re.escape(base_name) + r"\.(7z|zip|rar)\.\d+(?:\.[^.]+)?$", re.IGNORECASE),
             re.compile(re.escape(base_name) + r"\.\d{3}(?:\.[^.]+)?$", re.IGNORECASE),
-            re.compile(re.escape(base_name) + r"\.part\d+\.rar(?:\.[^.]+)?$", re.IGNORECASE),
+            re.compile(re.escape(base_name) + r"\.part\d+\.(?:rar|exe)(?:\.[^.]+)?$", re.IGNORECASE),
         ]
         return any(any(pattern.match(candidate) for pattern in patterns) for candidate in sibling_names)
 

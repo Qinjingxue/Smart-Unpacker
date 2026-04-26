@@ -1662,7 +1662,18 @@ PasswordTestResult test_passwords_with_parts(
         password_count = 1;
     }
     const std::wstring ext = lower_extension(archive_path);
-    const bool retry_unsupported_as_password = ext == L".7z" || ext == L".001";
+    const bool retry_unsupported_as_password =
+        ext == L".7z" ||
+        ext == L".001" ||
+        ext == L".rar" ||
+        ext == L".r00" ||
+        ext == L".jpg" ||
+        ext == L".jpeg" ||
+        ext == L".png" ||
+        ext == L".gif" ||
+        ext == L".pdf" ||
+        ext == L".webp" ||
+        is_sfx_path(archive_path);
 
     for (int i = 0; i < password_count; ++i) {
         const wchar_t* raw_password = passwords[i] ? passwords[i] : L"";

@@ -24,6 +24,28 @@ def test_relation_group_builder_groups_split_volumes(tmp_path):
     assert orphan_group.relation.is_split_related is False
 
 
+def test_relation_group_builder_groups_rar_sfx_split_volumes(tmp_path):
+    first = tmp_path / "installer.part1.exe"
+    second = tmp_path / "installer.part2.rar"
+    third = tmp_path / "installer.part3.rar"
+    first.write_bytes(b"one")
+    second.write_bytes(b"two")
+    third.write_bytes(b"three")
+
+    snapshot = DirectoryScanner(str(tmp_path)).scan()
+    groups = RelationsScheduler().build_candidate_groups(snapshot)
+
+    split_group = next(group for group in groups if group.logical_name == "installer")
+
+    assert Path(split_group.head_path).name == "installer.part1.exe"
+    assert [Path(path).name for path in split_group.member_paths] == [
+        "installer.part2.rar",
+        "installer.part3.rar",
+    ]
+    assert split_group.is_split_candidate is True
+    assert split_group.relation.split_role == "first"
+
+
 def test_relation_group_builder_keeps_same_stem_archives_separate(tmp_path):
     seven_zip = tmp_path / "collision.7z"
     zip_file = tmp_path / "collision.zip"
