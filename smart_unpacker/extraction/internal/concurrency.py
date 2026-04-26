@@ -5,6 +5,8 @@ import time
 
 import psutil
 
+from smart_unpacker.extraction.internal.resource_model import ResourceDemand, build_resource_budget, demand_from_value
+
 
 SCHEDULER_PROFILES = {
     "conservative": {
@@ -86,10 +88,14 @@ class ConcurrencyScheduler:
         self.max_workers = max_workers
         self.min_workers = 1
         self.dynamic_floor_workers = 1
+        self.base_budget = build_resource_budget(config, max_workers)
 
         self.is_running = False
         self.active_workers = 0
         self.active_resource_tokens = 0
+        self.active_cpu_tokens = 0
+        self.active_io_tokens = 0
+        self.active_memory_tokens = 0
         self.pending_task_estimate = 0
 
         self.scale_up_streak = 0
@@ -188,17 +194,59 @@ class ConcurrencyScheduler:
         with self.cond:
             self.pending_task_estimate = pending_count + futures_count + self.active_workers
 
-    def acquire_slot(self, token_cost: int = 1):
-        token_cost = max(1, int(token_cost or 1))
+    def acquire_slot(self, token_cost: int = 1, demand: ResourceDemand | dict | None = None):
+        demand_value = demand_from_value(demand or token_cost)
         with self.cond:
-            while self.active_workers > 0 and self.active_resource_tokens + token_cost > self.current_limit:
+            while not self._can_acquire_locked(demand_value):
                 self.cond.wait()
             self.active_workers += 1
-            self.active_resource_tokens += token_cost
+            self._add_demand_locked(demand_value)
 
-    def release_slot(self, token_cost: int = 1):
-        token_cost = max(1, int(token_cost or 1))
+    def try_acquire_slot(self, token_cost: int = 1, demand: ResourceDemand | dict | None = None) -> bool:
+        demand_value = demand_from_value(demand or token_cost)
         with self.cond:
-            self.active_workers -= 1
-            self.active_resource_tokens = max(0, self.active_resource_tokens - token_cost)
+            if not self._can_acquire_locked(demand_value):
+                return False
+            self.active_workers += 1
+            self._add_demand_locked(demand_value)
+            return True
+
+    def release_slot(self, token_cost: int = 1, demand: ResourceDemand | dict | None = None):
+        demand_value = demand_from_value(demand or token_cost)
+        with self.cond:
+            self.active_workers = max(0, self.active_workers - 1)
+            self.active_cpu_tokens = max(0, self.active_cpu_tokens - demand_value.cpu)
+            self.active_io_tokens = max(0, self.active_io_tokens - demand_value.io)
+            self.active_memory_tokens = max(0, self.active_memory_tokens - demand_value.memory)
+            self._refresh_active_scalar_locked()
             self.cond.notify_all()
+
+    def _effective_budget_locked(self):
+        return self.base_budget.scale(self.current_limit, self.max_workers)
+
+    def _can_acquire_locked(self, demand: ResourceDemand) -> bool:
+        demand = demand.normalized()
+        budget = self._effective_budget_locked()
+        if self.active_workers <= 0:
+            return True
+        if self.active_workers >= self.max_workers:
+            return False
+        return (
+            self.active_cpu_tokens + demand.cpu <= budget.cpu
+            and self.active_io_tokens + demand.io <= budget.io
+            and self.active_memory_tokens + demand.memory <= budget.memory
+        )
+
+    def _add_demand_locked(self, demand: ResourceDemand) -> None:
+        demand = demand.normalized()
+        self.active_cpu_tokens += demand.cpu
+        self.active_io_tokens += demand.io
+        self.active_memory_tokens += demand.memory
+        self._refresh_active_scalar_locked()
+
+    def _refresh_active_scalar_locked(self) -> None:
+        self.active_resource_tokens = max(
+            self.active_cpu_tokens,
+            self.active_io_tokens,
+            self.active_memory_tokens,
+        )

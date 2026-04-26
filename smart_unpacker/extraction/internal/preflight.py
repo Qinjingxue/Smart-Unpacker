@@ -9,6 +9,7 @@ from smart_unpacker.extraction.internal.native_password_tester import (
     get_native_password_tester,
 )
 from smart_unpacker.extraction.internal.errors import has_archive_damage_signals, has_definite_wrong_password
+from smart_unpacker.extraction.internal.resource_model import estimate_resource_demand
 from smart_unpacker.extraction.result import ExtractionResult
 
 
@@ -60,8 +61,11 @@ class PreExtractInspector:
             if health.status not in {STATUS_BACKEND_UNAVAILABLE, STATUS_UNSUPPORTED}:
                 analysis = cached_analyze_archive_resources(staged.archive, password=password, part_paths=staged.run_parts)
                 self._record_analysis(task, analysis)
-                task.fact_bag.set("resource.token_cost", self._estimate_token_cost(analysis))
+                demand = estimate_resource_demand(analysis)
+                task.fact_bag.set("resource.tokens", demand.as_dict())
+                task.fact_bag.set("resource.token_cost", demand.scalar_cost)
             else:
+                task.fact_bag.set("resource.tokens", {"cpu": 1, "io": 1, "memory": 1})
                 task.fact_bag.set("resource.token_cost", 1)
         finally:
             self.rename_scheduler.cleanup_normalized_split_group(staged)
@@ -112,29 +116,3 @@ class PreExtractInspector:
             "dominant_method": analysis.dominant_method,
             "message": analysis.message,
         })
-
-    def _estimate_token_cost(self, analysis) -> int:
-        if not analysis.ok:
-            return 1
-
-        method = (analysis.dominant_method or "").lower()
-        unpacked_mb = max(0, analysis.total_unpacked_size) / (1024 * 1024)
-        file_count = max(0, analysis.file_count)
-        dictionary_mb = max(0, analysis.largest_dictionary_size) / (1024 * 1024)
-
-        cost = 1
-        if any(token in method for token in ("lzma", "ppmd", "bzip2", "deflate64")):
-            cost += 2
-        elif "deflate" in method:
-            cost += 1
-
-        if analysis.solid:
-            cost += 1
-        if dictionary_mb >= 64:
-            cost += 1
-        if unpacked_mb >= 1024:
-            cost += 1
-        if file_count >= 10_000:
-            cost += 1
-
-        return max(1, min(cost, 6))
