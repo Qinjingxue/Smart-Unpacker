@@ -1,0 +1,1 @@
+"""External configuration field declarations."""

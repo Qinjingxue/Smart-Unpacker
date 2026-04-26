@@ -20,9 +20,9 @@ class ConfigField:
 
 
 CONFIG_FIELD_PROVIDER_MODULES = (
-    "smart_unpacker.coordinator.config_fields",
-    "smart_unpacker.filesystem.config_fields",
-    "smart_unpacker.postprocess.config_fields",
+    "smart_unpacker.config.fields.coordinator",
+    "smart_unpacker.config.fields.filesystem",
+    "smart_unpacker.config.fields.postprocess",
 )
 
 _FIELDS: dict[tuple[str, ...], ConfigField] | None = None

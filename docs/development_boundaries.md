@@ -623,7 +623,7 @@ postprocess/internal/
 放置：
 
 - 默认配置：`smart_unpacker_config.json`
-- 外部配置字段声明：字段所属领域的轻量 `config_fields.py`
+- 外部配置字段声明：`config/fields/` 下按领域拆分的字段声明文件。
 - 字段发现和归一化入口：`config.schema`
 - 读取：`config.loader`
 - 领域视图：必要时新增或扩展 `config.*_view.py`
