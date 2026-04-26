@@ -2,7 +2,8 @@ import subprocess
 from typing import List, Optional, Tuple
 
 from smart_unpacker.support.sevenzip_native import get_native_password_tester
-from smart_unpacker.passwords import PasswordStore
+from smart_unpacker.passwords.internal.store import PasswordStore
+
 
 class ArchivePasswordTester:
     def __init__(

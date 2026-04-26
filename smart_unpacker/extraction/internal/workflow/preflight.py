@@ -46,7 +46,7 @@ class PreExtractInspector:
                         if has_archive_damage_signals(structural_test.message):
                             return self._skip(task, output_dir, staged.cleanup_parts, "压缩包损坏")
                     return self._skip(task, output_dir, staged.cleanup_parts, "密码错误或未知密码")
-                resolution = self.password_resolver.resolve(staged.archive, task.fact_bag, part_paths=staged.run_parts)
+                resolution = self._resolve_password(task, staged.archive, staged.run_parts)
                 if resolution.password is None:
                     error_text = resolution.error_text or ""
                     if has_archive_damage_signals(error_text) and not has_definite_wrong_password(error_text):
@@ -73,6 +73,17 @@ class PreExtractInspector:
             self.rename_scheduler.cleanup_normalized_split_group(staged)
 
         return PreflightResult(task=task)
+
+    def _resolve_password(self, task: ArchiveTask, archive_path: str, part_paths: list[str]):
+        try:
+            return self.password_resolver.resolve(
+                archive_path,
+                task.fact_bag,
+                part_paths=part_paths,
+                archive_key=task.key,
+            )
+        except TypeError:
+            return self.password_resolver.resolve(archive_path, task.fact_bag, part_paths=part_paths)
 
     def _skip(self, task: ArchiveTask, output_dir: str, all_parts: list[str], error: str) -> PreflightResult:
         return PreflightResult(

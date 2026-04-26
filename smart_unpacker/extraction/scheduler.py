@@ -6,8 +6,6 @@ from smart_unpacker.extraction.internal.scheduling.concurrency import Concurrenc
 from smart_unpacker.extraction.internal.scheduling.executor import TaskExecutor
 from smart_unpacker.extraction.internal.sevenzip.metadata import ArchiveMetadataScanner
 from smart_unpacker.extraction.internal.workflow.output_paths import default_output_dir_for_task
-from smart_unpacker.extraction.internal.passwords.password_manager import ArchivePasswordTester
-from smart_unpacker.extraction.internal.passwords.password_resolution import PasswordResolver
 from smart_unpacker.extraction.internal.workflow.preflight import PreExtractInspector
 from smart_unpacker.extraction.internal.workflow.retry_policy import ExtractRetryPolicy
 from smart_unpacker.extraction.internal.sevenzip.sevenzip_runner import SevenZipRunner
@@ -17,7 +15,7 @@ from smart_unpacker.extraction.result import ExtractionResult
 from smart_unpacker.contracts.tasks import ArchiveTask, SplitArchiveInfo
 from smart_unpacker.rename.scheduler import RenameScheduler
 from smart_unpacker.relations.internal.group_builder import RelationsGroupBuilder
-from smart_unpacker.passwords import PasswordStore
+from smart_unpacker.passwords import ArchivePasswordTester, PasswordResolver, PasswordSession, PasswordStore
 from smart_unpacker.support.resources import get_7z_path
 
 
@@ -36,8 +34,9 @@ class ExtractionScheduler:
             cli_passwords=cli_passwords or [],
             builtin_passwords=builtin_passwords or [],
         )
+        self.password_session = PasswordSession()
         self.password_tester = ArchivePasswordTester(password_store=self.password_store)
-        self.password_resolver = PasswordResolver(self.password_tester)
+        self.password_resolver = PasswordResolver(self.password_tester, self.password_session)
         self.metadata_scanner = ArchiveMetadataScanner()
         self.seven_z_path = get_7z_path()
         self.rename_scheduler = RenameScheduler()

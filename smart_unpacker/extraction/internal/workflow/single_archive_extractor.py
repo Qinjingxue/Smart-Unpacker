@@ -83,7 +83,7 @@ class SingleArchiveExtractor:
             selected_codepage = None
 
             try:
-                resolution = self.password_resolver.resolve(run_archive, task.fact_bag, part_paths=run_parts)
+                resolution = self._resolve_password(task, run_archive, run_parts)
                 correct_pwd = resolution.password
                 test_result = resolution.test_result
                 test_err = resolution.error_text
@@ -155,6 +155,17 @@ class SingleArchiveExtractor:
         if correct_pwd:
             cmd.append(f"-p{correct_pwd}")
         return cmd
+
+    def _resolve_password(self, task: ArchiveTask, archive_path: str, part_paths: list[str]):
+        try:
+            return self.password_resolver.resolve(
+                archive_path,
+                task.fact_bag,
+                part_paths=part_paths,
+                archive_key=task.key,
+            )
+        except TypeError:
+            return self.password_resolver.resolve(archive_path, task.fact_bag, part_paths=part_paths)
 
     def _startupinfo(self):
         import sys

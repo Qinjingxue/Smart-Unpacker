@@ -9,7 +9,7 @@
 3. `app` 只负责 CLI 交互、参数解析和输出适配，不绕过领域模块。
 4. `detection` 只判断候选是否应被解压，不执行解压、清理或 CLI 输出。
 5. `extraction` 是解压黑盒，对外通过 `ExtractionScheduler` 暴露能力。
-6. `passwords` 是密码列表黑盒，对外通过 `smart_unpacker.passwords` 暴露能力。
+6. `passwords` 是密码能力黑盒，对外通过 `smart_unpacker.passwords` 暴露候选密码、密码尝试和归档密码会话能力。
 7. `postprocess` 是后处理黑盒，对外通过 `PostProcessActions` 暴露能力。
 8. `config` 接管外部配置读取、配置路径和配置视图。
 9. `support` 只放跨领域基础设施，不放业务策略。
@@ -63,6 +63,7 @@ config
 
 passwords
   -> support.resources
+  -> support.sevenzip_native
 
 filesystem / relations / rename
   -> contracts
@@ -101,7 +102,7 @@ contracts
 | 检测 | `detection.NestedOutputScanPolicy` | 判断解压输出目录是否值得进入下一轮检测。 |
 | 检测 | `detection.validate_detection_contracts` | 校验检测插件和配置契约。 |
 | 解压 | `extraction.scheduler.ExtractionScheduler` | 解压调度、默认输出目录、调度配置。 |
-| 密码 | `smart_unpacker.passwords` | 密码文件读取、内置密码、去重和行解析。 |
+| 密码 | `smart_unpacker.passwords` | 密码文件读取、候选密码管理、归档密码尝试和 archive -> password 会话。 |
 | 后处理 | `postprocess.actions.PostProcessActions` | 成功后清理和扁平化。 |
 | 文件系统 | `filesystem.directory_scanner.DirectoryScanner` | 目录扫描并生成目录快照。 |
 | 关系 | `relations.scheduler.RelationsScheduler` | 分卷、相关文件和候选组关系。 |
@@ -179,7 +180,7 @@ contracts
 不应该做：
 
 - 不读取磁盘。
-- 不调用 7-Zip。
+- 不执行 `7z.exe x` 解压。
 - 不执行规则判断。
 - 不了解 CLI 或 coordinator。
 
@@ -421,8 +422,6 @@ extraction/internal/
   executor.py
   metadata.py
   output_paths.py
-  password_manager.py
-  password_resolution.py
   split_stager.py
 ```
 
@@ -453,7 +452,7 @@ extraction/internal/
 
 ## `passwords`
 
-`passwords` 是密码列表黑盒。
+`passwords` 是密码相关能力黑盒。
 
 公开入口在 `smart_unpacker/passwords/__init__.py`：
 
@@ -462,6 +461,11 @@ extraction/internal/
 - `read_password_file()`
 - `parse_password_lines()`
 - `dedupe_passwords()`
+- `PasswordStore`
+- `ArchivePasswordTester`
+- `PasswordResolver`
+- `PasswordSession`
+- `PasswordResolution`
 
 应该做：
 
@@ -469,14 +473,18 @@ extraction/internal/
 - 读取用户密码文件。
 - 解析密码文本行。
 - 去重并保持顺序。
+- 管理候选密码和最近成功密码。
+- 调用 `support.sevenzip_native` 尝试归档密码。
+- 维护当前运行内的 `archive_key -> password` 会话映射，供 extraction 和后续 verification 复用。
 
 不应该做：
 
 - 不调用 7-Zip。
-- 不判断密码是否正确。
+- 不执行解压。
+- 不判断候选是否应该解压。
 - 不处理 CLI 参数。
 
-密码是否能解开归档属于 `extraction.internal.password_resolution`；密码列表如何获得属于 `passwords`。
+密码列表如何获得、如何尝试、以及某个归档已解析出的密码，都属于 `passwords`。具体什么时候需要密码、是否继续解压，仍由调用方领域决定。
 
 ## `postprocess`
 
