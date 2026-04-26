@@ -705,28 +705,61 @@ std::wstring split_volume_family(const std::vector<std::wstring>& part_paths) {
     return L"";
 }
 
-std::vector<unsigned char> rar_format_ids_for_signature(const std::wstring& archive_path) {
+std::vector<unsigned char> format_ids_for_signature(const std::wstring& archive_path, bool scan_prefix = false) {
     HANDLE handle = CreateFileW(archive_path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                                 nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (handle == INVALID_HANDLE_VALUE) {
-        return {0xCC, 0x03};
+        return {};
     }
 
-    unsigned char signature[8] = {};
+    const DWORD bytes_to_read = scan_prefix ? 1024 * 1024 : 8;
+    std::vector<unsigned char> buffer(bytes_to_read);
     DWORD read = 0;
-    const BOOL ok = ReadFile(handle, signature, sizeof(signature), &read, nullptr);
+    const BOOL ok = ReadFile(handle, buffer.data(), bytes_to_read, &read, nullptr);
     CloseHandle(handle);
-    if (!ok || read < 7) {
-        return {0xCC, 0x03};
+    if (!ok || read == 0) {
+        return {};
     }
+    buffer.resize(read);
 
     const unsigned char rar4[] = {'R', 'a', 'r', '!', 0x1A, 0x07, 0x00};
     const unsigned char rar5[] = {'R', 'a', 'r', '!', 0x1A, 0x07, 0x01, 0x00};
-    if (read >= sizeof(rar5) && std::equal(std::begin(rar5), std::end(rar5), signature)) {
-        return {0xCC};
+    const unsigned char seven_zip[] = {'7', 'z', 0xBC, 0xAF, 0x27, 0x1C};
+    const unsigned char zip[] = {'P', 'K', 0x03, 0x04};
+
+    const std::size_t search_limit = scan_prefix ? buffer.size() : 1;
+    for (std::size_t offset = 0; offset < search_limit; ++offset) {
+        const std::size_t remaining = buffer.size() - offset;
+        const unsigned char* cursor = buffer.data() + offset;
+        if (remaining >= sizeof(rar5) && std::equal(std::begin(rar5), std::end(rar5), cursor)) {
+            return {0xCC};
+        }
+        if (remaining >= sizeof(rar4) && std::equal(std::begin(rar4), std::end(rar4), cursor)) {
+            return {0x03};
+        }
+        if (remaining >= sizeof(seven_zip) && std::equal(std::begin(seven_zip), std::end(seven_zip), cursor)) {
+            return {0x07};
+        }
+        if (remaining >= sizeof(zip) && std::equal(std::begin(zip), std::end(zip), cursor)) {
+            return {0x01};
+        }
     }
-    if (std::equal(std::begin(rar4), std::end(rar4), signature)) {
-        return {0x03};
+    return {};
+}
+
+std::vector<unsigned char> rar_format_ids_for_paths(
+    const std::wstring& archive_path,
+    const std::vector<std::wstring>& part_paths,
+    bool scan_prefix = false
+) {
+    std::vector<std::wstring> candidates = unique_existing_paths(archive_path, part_paths);
+    std::vector<std::wstring> volumes = sorted_data_volume_paths(candidates);
+    candidates.insert(candidates.end(), volumes.begin(), volumes.end());
+    for (const auto& path : candidates) {
+        const auto ids = format_ids_for_signature(path, scan_prefix || is_sfx_path(path));
+        if (ids == std::vector<unsigned char>{0xCC} || ids == std::vector<unsigned char>{0x03}) {
+            return ids;
+        }
     }
     return {0xCC, 0x03};
 }
@@ -742,19 +775,27 @@ std::vector<GUID> candidate_formats(const std::wstring& archive_path, const std:
     } else if (is_sfx_path(archive_path) && split_family == L"7z") {
         ids = {0x07};
     } else if (is_sfx_path(archive_path) && split_family == L"rar") {
-        ids = {0x03, 0xCC};
+        ids = rar_format_ids_for_paths(archive_path, part_paths, true);
     } else if (ext == L".zip" || ext == L".jar" || ext == L".docx" || ext == L".xlsx" || ext == L".apk") {
         ids = {0x01};
     } else if (name.size() >= 8 && name.compare(name.size() - 8, 8, L".zip.001") == 0) {
         ids = {0x01, 0x07};
     } else if (name.size() >= 7 && name.compare(name.size() - 7, 7, L".7z.001") == 0) {
         ids = {0x07, 0x01};
-    } else if (ext == L".7z" || ext == L".001") {
+    } else if (ext == L".7z") {
         ids = {0x07};
+    } else if (ext == L".001") {
+        ids = format_ids_for_signature(archive_path);
+        if (ids.empty()) {
+            ids = {0x07};
+        }
     } else if (ext == L".rar" || ext == L".r00") {
-        ids = rar_format_ids_for_signature(archive_path);
+        ids = rar_format_ids_for_paths(archive_path, part_paths);
     } else {
-        ids = {0x07, 0x01, 0x03, 0xCC};
+        ids = format_ids_for_signature(archive_path, is_sfx_path(archive_path));
+        if (ids.empty()) {
+            ids = {0x07, 0x01, 0x03, 0xCC};
+        }
     }
 
     std::vector<GUID> formats;
