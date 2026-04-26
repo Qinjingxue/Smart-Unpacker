@@ -16,14 +16,20 @@ class ResourcePreflightInspector:
         self,
         password_session: PasswordSession | None = None,
         rename_scheduler: RenameScheduler | None = None,
+        precise_resource_min_size_mb: int = 256,
     ):
         self.password_session = password_session
         self.rename_scheduler = rename_scheduler or RenameScheduler()
+        self.precise_resource_min_size_bytes = max(0, int(precise_resource_min_size_mb or 0)) * 1024 * 1024
 
     def inspect(self, task: ArchiveTask) -> ArchiveTask:
         health = task.fact_bag.get("resource.health") or {}
         if health.get("status") in {STATUS_BACKEND_UNAVAILABLE, STATUS_UNSUPPORTED}:
             return self._record_unknown(task)
+
+        archive_size = self._archive_size(task)
+        if archive_size < self.precise_resource_min_size_bytes:
+            return self.record_estimated_profile(task, reason="estimated small-archive resource profile", archive_size=archive_size)
 
         staged = self.rename_scheduler.normalize_archive_paths(task.main_path, list(task.all_parts or [task.main_path]))
         try:
@@ -41,14 +47,15 @@ class ResourcePreflightInspector:
         task.fact_bag.set("resource.token_cost", demand.scalar_cost)
         task.fact_bag.set("resource.profile_key", build_resource_profile_key(analysis))
 
-    def record_estimated_single_task_profile(self, task: ArchiveTask) -> ArchiveTask:
-        archive_size = 0
-        for path in list(task.all_parts or [task.main_path]):
-            try:
-                archive_size += os.path.getsize(path)
-            except OSError:
-                pass
-
+    def record_estimated_profile(
+        self,
+        task: ArchiveTask,
+        *,
+        reason: str = "estimated resource profile",
+        archive_size: int | None = None,
+        profile_suffix: str = "estimated",
+    ) -> ArchiveTask:
+        archive_size = self._archive_size(task) if archive_size is None else archive_size
         archive_type = self._archive_type_for(task)
         analysis = {
             "status": 0,
@@ -66,13 +73,20 @@ class ResourcePreflightInspector:
             "largest_dictionary_size": 0,
             "archive_type": archive_type,
             "dominant_method": "",
-            "message": "estimated single-task resource profile",
+            "message": reason,
         }
         task.fact_bag.set("resource.analysis", analysis)
         task.fact_bag.set("resource.tokens", self._estimated_tokens_for_size(archive_size))
         task.fact_bag.set("resource.token_cost", max(task.fact_bag.get("resource.tokens").values()))
-        task.fact_bag.set("resource.profile_key", f"{archive_type or 'unknown'}|estimated|single")
+        task.fact_bag.set("resource.profile_key", f"{archive_type or 'unknown'}|{profile_suffix}|size<{self.precise_resource_min_size_bytes // (1024 * 1024)}m")
         return task
+
+    def record_estimated_single_task_profile(self, task: ArchiveTask) -> ArchiveTask:
+        return self.record_estimated_profile(
+            task,
+            reason="estimated single-task resource profile",
+            profile_suffix="estimated|single",
+        )
 
     def _password_for(self, task: ArchiveTask) -> str:
         if self.password_session is None:
@@ -92,6 +106,15 @@ class ResourcePreflightInspector:
             return archive_type
         detected_ext = str(task.fact_bag.get("file.detected_ext") or os.path.splitext(task.main_path)[1]).lower()
         return detected_ext.lstrip(".") or archive_type or "unknown"
+
+    def _archive_size(self, task: ArchiveTask) -> int:
+        archive_size = 0
+        for path in list(task.all_parts or [task.main_path]):
+            try:
+                archive_size += os.path.getsize(path)
+            except OSError:
+                pass
+        return archive_size
 
     def _estimated_tokens_for_size(self, archive_size: int) -> dict[str, int]:
         archive_mb = max(0, int(archive_size or 0)) / (1024 * 1024)

@@ -1390,7 +1390,30 @@ PasswordTestResult test_one_password(
     CreateObjectFunc create_object,
     const std::wstring& archive_path,
     const std::wstring& password,
+    const std::vector<std::wstring>& part_paths,
+    const std::vector<GUID>& formats
+);
+
+PasswordTestResult test_one_password(
+    CreateObjectFunc create_object,
+    const std::wstring& archive_path,
+    const std::wstring& password,
     const std::vector<std::wstring>& part_paths
+) {
+    return test_one_password(
+        create_object,
+        archive_path,
+        password,
+        part_paths,
+        candidate_formats(archive_path, part_paths));
+}
+
+PasswordTestResult test_one_password(
+    CreateObjectFunc create_object,
+    const std::wstring& archive_path,
+    const std::wstring& password,
+    const std::vector<std::wstring>& part_paths,
+    const std::vector<GUID>& formats
 ) {
     PasswordTestResult result;
     result.backend_available = true;
@@ -1400,7 +1423,7 @@ PasswordTestResult test_one_password(
     HRESULT last_hr = E_FAIL;
     Int32 last_op_res = kOpOk;
 
-    for (const GUID& format : candidate_formats(archive_path, part_paths)) {
+    for (const GUID& format : formats) {
         ComPtr<IInArchive> archive;
         HRESULT hr = create_object(&format, &IID_IInArchive, reinterpret_cast<void**>(archive.out()));
         if (hr != S_OK || !archive) {
@@ -1674,6 +1697,9 @@ PasswordTestResult test_passwords_with_parts(
         ext == L".pdf" ||
         ext == L".webp" ||
         is_sfx_path(archive_path);
+    const std::vector<std::wstring> effective_part_paths =
+        part_paths.empty() ? std::vector<std::wstring>{archive_path} : part_paths;
+    const std::vector<GUID> formats = candidate_formats(archive_path, effective_part_paths);
 
     for (int i = 0; i < password_count; ++i) {
         const wchar_t* raw_password = passwords[i] ? passwords[i] : L"";
@@ -1681,7 +1707,8 @@ PasswordTestResult test_passwords_with_parts(
             create_object,
             archive_path,
             raw_password,
-            part_paths.empty() ? std::vector<std::wstring>{archive_path} : part_paths);
+            effective_part_paths,
+            formats);
         current.attempts = i + 1;
         last = current;
         if (current.status == PasswordTestStatus::Ok) {

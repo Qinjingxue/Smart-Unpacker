@@ -50,9 +50,11 @@ class ExtractionBatchRunner:
         self.scheduler_config = self._build_scheduler_config(self.config)
         self.max_workers = resolve_max_workers()
         self.verifier = VerificationScheduler(self.config, password_session=self.extractor.password_session)
+        performance = self.config.get("performance", {}) if isinstance(self.config.get("performance"), dict) else {}
         self.resource_inspector = ResourcePreflightInspector(
             password_session=self.extractor.password_session,
             rename_scheduler=self.rename_scheduler,
+            precise_resource_min_size_mb=performance.get("precise_resource_min_size_mb", 256),
         )
 
     def prepare_tasks(self, tasks: List[ArchiveTask]):

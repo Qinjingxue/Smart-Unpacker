@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from smart_unpacker.config.schema import normalize_config
 from smart_unpacker.contracts.detection import FactBag
 from smart_unpacker.contracts.tasks import ArchiveTask
+from smart_unpacker.coordinator import resource_preflight as resource_preflight_module
 from smart_unpacker.coordinator.context import RunContext
 from smart_unpacker.coordinator.extraction_batch import ExtractionBatchRunner
 from smart_unpacker.detection import NestedOutputScanPolicy
@@ -100,25 +101,15 @@ def test_single_ready_task_uses_estimated_resource_profile(tmp_path, monkeypatch
 
     runner._execute_ready_tasks([task], lambda _item: str(out_dir))
 
-    assert bag.get("resource.profile_key") == "rar|estimated|single"
+    assert bag.get("resource.profile_key") == "rar|estimated|single|size<256m"
     assert bag.get("resource.analysis")["message"] == "estimated single-task resource profile"
 
 
-def test_multiple_ready_tasks_keep_precise_resource_analysis(tmp_path, monkeypatch):
+def test_multiple_ready_small_tasks_use_estimated_resource_profile(tmp_path, monkeypatch):
     config = normalize_config(with_detection_pipeline({"recursive_extract": "1"}))
     extractor = ExtractionScheduler(max_retries=1)
     runner = ExtractionBatchRunner(RunContext(), extractor, NestedOutputScanPolicy(config), config=config)
     monkeypatch.setattr(extractor, "inspect", lambda *_args, **_kwargs: SimpleNamespace(skip_result=None))
-
-    calls = 0
-
-    def fake_resource_inspect(task):
-        nonlocal calls
-        calls += 1
-        task.fact_bag.set("resource.tokens", {"cpu": 1, "io": 1, "memory": 1})
-        return task
-
-    monkeypatch.setattr(runner.resource_inspector, "inspect", fake_resource_inspect)
     monkeypatch.setattr(
         extractor,
         "extract",
@@ -139,7 +130,68 @@ def test_multiple_ready_tasks_keep_precise_resource_analysis(tmp_path, monkeypat
 
     runner._execute_ready_tasks(tasks, lambda item: str(tmp_path / (item.main_path + ".out")))
 
+    for task in tasks:
+        assert task.fact_bag.get("resource.profile_key") == "rar|estimated|size<256m"
+        assert task.fact_bag.get("resource.analysis")["message"] == "estimated small-archive resource profile"
+
+
+def test_multiple_ready_large_tasks_keep_precise_resource_analysis(tmp_path, monkeypatch):
+    config = normalize_config(with_detection_pipeline({
+        "recursive_extract": "1",
+        "performance": {"precise_resource_min_size_mb": 1},
+    }))
+    extractor = ExtractionScheduler(max_retries=1)
+    runner = ExtractionBatchRunner(RunContext(), extractor, NestedOutputScanPolicy(config), config=config)
+    monkeypatch.setattr(extractor, "inspect", lambda *_args, **_kwargs: SimpleNamespace(skip_result=None))
+
+    calls = 0
+
+    def fake_analyze(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return SimpleNamespace(
+            status=0,
+            is_archive=True,
+            is_encrypted=False,
+            is_broken=False,
+            solid=False,
+            item_count=1,
+            file_count=1,
+            dir_count=0,
+            archive_size=1024 * 1024 + 1,
+            total_unpacked_size=1024 * 1024 + 1,
+            total_packed_size=1024 * 1024 + 1,
+            largest_item_size=1024 * 1024 + 1,
+            largest_dictionary_size=0,
+            archive_type="rar",
+            dominant_method="store",
+            message="precise",
+        )
+
+    monkeypatch.setattr(resource_preflight_module, "cached_analyze_archive_resources", fake_analyze)
+    monkeypatch.setattr(
+        extractor,
+        "extract",
+        lambda item, output_dir, runtime_scheduler=None: ExtractionResult(
+            success=False,
+            archive=item.main_path,
+            out_dir=output_dir,
+            all_parts=item.all_parts,
+            error="stop",
+        ),
+    )
+
+    tasks = []
+    for index in range(2):
+        archive = tmp_path / f"sample{index}.rar"
+        archive.write_bytes(b"x" * (1024 * 1024 + 1))
+        tasks.append(ArchiveTask(fact_bag=FactBag(), score=10, main_path=str(archive), all_parts=[str(archive)]))
+
+    runner._execute_ready_tasks(tasks, lambda item: str(tmp_path / (item.main_path + ".out")))
+
     assert calls == 2
+    for task in tasks:
+        assert task.fact_bag.get("resource.profile_key") == "rar|store|nonsolid|dict<16m|size<256m|files<1k"
 
 
 def test_batch_verification_failure_retries_extract_and_cleans_output(tmp_path, monkeypatch):
