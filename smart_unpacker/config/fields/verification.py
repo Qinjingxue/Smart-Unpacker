@@ -10,7 +10,12 @@ DEFAULT_VERIFICATION_CONFIG = {
     "fail_fast_threshold": 40,
     "max_retries": 0,
     "cleanup_failed_output": True,
-    "methods": [],
+    "methods": [
+        {"name": "extraction_exit_signal", "enabled": True},
+        {"name": "output_presence", "enabled": True},
+        {"name": "expected_name_presence", "enabled": True},
+        {"name": "manifest_size_match", "enabled": True},
+    ],
 }
 
 

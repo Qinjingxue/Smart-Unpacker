@@ -566,6 +566,7 @@ verification/
 - 每执行一个 method 后检查 fail-fast 阈值。
 - 产出 `VerificationResult`，由 coordinator 决定是否进入 postprocess。
 - 不通过时只描述失败和分数；是否清理输出、是否重试，由 coordinator worker 根据配置决定。
+- 内置 method 放在 `verification/methods/`，通过 `register_verification_method()` 注册。
 
 不应该做：
 

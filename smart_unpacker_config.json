@@ -51,8 +51,13 @@
     "fail_fast_threshold": 40,
     "max_retries": 0,
     "cleanup_failed_output": true,
-    "methods": []
-  },
+      "methods": [
+        {"name": "extraction_exit_signal", "enabled": true},
+        {"name": "output_presence", "enabled": true},
+        {"name": "expected_name_presence", "enabled": true},
+        {"name": "manifest_size_match", "enabled": true}
+      ]
+    },
   "detection": {
     "fact_collectors": [
       {"name": "file_facts", "enabled": true},

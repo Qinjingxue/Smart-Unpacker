@@ -42,9 +42,10 @@ def _task_and_result(tmp_path):
     archive.write_bytes(b"zip")
     out_dir = tmp_path / "sample"
     out_dir.mkdir()
+    (out_dir / "inside.txt").write_text("hello", encoding="utf-8")
     bag = FactBag()
     bag.set("resource.health", {"is_archive": True})
-    bag.set("resource.analysis", {"file_count": 1})
+    bag.set("resource.analysis", {"file_count": 1, "total_unpacked_size": 5})
     task = ArchiveTask(fact_bag=bag, score=10, key="sample-key", main_path=str(archive), all_parts=[str(archive)])
     result = ExtractionResult(success=True, archive=str(archive), out_dir=str(out_dir), all_parts=[str(archive)])
     return task, result
@@ -144,7 +145,7 @@ def test_verification_evidence_uses_password_session_when_result_has_no_password
     verification = scheduler.verify(task, result)
 
     assert verification.ok is True
-    assert verification.status == "skipped"
+    assert verification.status == "passed"
 
 
 def test_verification_config_is_normalized():
@@ -158,4 +159,5 @@ def test_verification_config_is_normalized():
 
     assert config["verification"]["enabled"] is True
     assert config["verification"]["initial_score"] == 100
+    assert config["verification"]["methods"][0]["name"] == "unit_score_delta"
     assert config["verification"]["methods"][0]["enabled"] is True
