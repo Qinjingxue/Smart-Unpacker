@@ -37,6 +37,25 @@ class UnitHardFailMethod:
         )
 
 
+@register_verification_method("unit_password_check")
+class UnitPasswordCheckMethod:
+    def verify(self, evidence, config):
+        return VerificationStepResult(
+            method=config["name"],
+            status="passed" if evidence.password == config.get("expected_password") else "failed",
+            score_delta=0 if evidence.password == config.get("expected_password") else -100,
+            issues=[] if evidence.password == config.get("expected_password") else [
+                VerificationIssue(
+                    method=config["name"],
+                    code="fail.password_mismatch",
+                    message="Verification evidence password did not match",
+                    expected=config.get("expected_password"),
+                    actual=evidence.password,
+                )
+            ],
+        )
+
+
 def _task_and_result(tmp_path):
     archive = tmp_path / "sample.zip"
     archive.write_bytes(b"zip")
@@ -140,7 +159,14 @@ def test_verification_evidence_uses_password_session_when_result_has_no_password
     task, result = _task_and_result(tmp_path)
     session = PasswordSession()
     session.set_resolved("sample-key", "secret")
-    scheduler = VerificationScheduler({"verification": {"enabled": True}}, password_session=session)
+    scheduler = VerificationScheduler({
+        "verification": {
+            "enabled": True,
+            "methods": [
+                {"name": "unit_password_check", "enabled": True, "expected_password": "secret"},
+            ],
+        }
+    }, password_session=session)
 
     verification = scheduler.verify(task, result)
 

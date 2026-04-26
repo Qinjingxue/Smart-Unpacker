@@ -294,7 +294,7 @@ function Build-SevenZipWrapper {
     Write-Step "Building 7z.dll C++ wrapper"
     Assert-PathExists -LiteralPath (Join-Path $WrapperRoot "CMakeLists.txt") -Description "7z wrapper CMake project"
     Assert-PathExists -LiteralPath $SevenZipDllPath -Description "Bundled 7z.dll"
-    Invoke-Native -FilePath $CMakeCommand -Arguments @("-S", $WrapperRoot, "-B", $BuildDir)
+    Invoke-Native -FilePath $CMakeCommand -Arguments @("-S", $WrapperRoot, "-B", $BuildDir, "-DCMAKE_BUILD_TYPE=Release")
     Invoke-Native -FilePath $CMakeCommand -Arguments @("--build", $BuildDir, "--config", "Release")
     Invoke-Native -FilePath "ctest" -Arguments @("--test-dir", $BuildDir, "-C", "Release", "--output-on-failure")
 
@@ -317,7 +317,7 @@ function Test-SevenZipWrapper {
 
     Invoke-Native -FilePath $PythonPath -Arguments @(
         "-c",
-        "from smart_unpacker.extraction.internal.native_password_tester import NativePasswordTester; tester = NativePasswordTester(); assert tester.available(), (tester.wrapper_path, tester.seven_zip_dll_path)"
+        "from smart_unpacker.support.sevenzip_native import NativePasswordTester; tester = NativePasswordTester(); assert tester.available(), (tester.wrapper_path, tester.seven_zip_dll_path)"
     )
 }
 

@@ -6,9 +6,30 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
+
+function(apply_release_optimizations target_name)
+    if(MSVC)
+        target_compile_options(${target_name} PRIVATE
+            $<$<CONFIG:Release>:/O2 /Oi /Ot /GL /Gy /Gw /GF>
+        )
+        target_link_options(${target_name} PRIVATE
+            $<$<CONFIG:Release>:/LTCG /OPT:REF /OPT:ICF>
+        )
+    else()
+        target_compile_options(${target_name} PRIVATE
+            $<$<CONFIG:Release>:-O3 -flto -ffunction-sections -fdata-sections>
+        )
+        target_link_options(${target_name} PRIVATE
+            $<$<CONFIG:Release>:-flto -Wl,--gc-sections>
+        )
+    endif()
+endfunction()
+
 add_library(sevenzip_password_tester STATIC
     src/internal/sevenzip_engine.cpp
 )
+apply_release_optimizations(sevenzip_password_tester)
 
 target_include_directories(sevenzip_password_tester
     PUBLIC
@@ -29,6 +50,7 @@ add_library(sevenzip_password_tester_capi SHARED
     src/c_api_resources.cpp
     src/internal/sevenzip_engine.cpp
 )
+apply_release_optimizations(sevenzip_password_tester_capi)
 
 target_include_directories(sevenzip_password_tester_capi
     PUBLIC
@@ -43,6 +65,7 @@ endif()
 add_executable(sevenzip_password_tester_smoke
     tests/smoke.cpp
 )
+apply_release_optimizations(sevenzip_password_tester_smoke)
 
 target_link_libraries(sevenzip_password_tester_smoke
     PRIVATE sevenzip_password_tester

@@ -116,7 +116,8 @@ trap {
     throw
 }
 
-$python = Get-PythonCommand
+$venvPython = Join-Path $repoRoot ".venv\Scripts\python.exe"
+$python = if (Test-Path -LiteralPath $venvPython) { $venvPython } else { Get-PythonCommand }
 $env:PYTHONPATH = $repoRoot
 
 Invoke-TestStep -Label "Unit tests" -Command @($python, "-m", "pytest", "-q", "tests/unit")
