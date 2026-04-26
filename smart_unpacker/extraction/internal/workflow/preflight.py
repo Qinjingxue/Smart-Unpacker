@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from smart_unpacker.contracts.tasks import ArchiveTask
 from smart_unpacker.support.sevenzip_native import (
     cached_check_archive_health,
-    get_native_password_tester,
+    cached_test_archive,
 )
 from smart_unpacker.extraction.internal.workflow.errors import has_archive_damage_signals, has_definite_wrong_password
 from smart_unpacker.extraction.result import ExtractionResult
@@ -35,7 +35,7 @@ class PreExtractInspector:
             if health.is_encrypted or health.is_wrong_password:
                 if not self.password_resolver.password_tester.passwords:
                     if (health.archive_type or "").lower() != "pe":
-                        structural_test = get_native_password_tester().test_archive(
+                        structural_test = cached_test_archive(
                             staged.archive,
                             part_paths=staged.run_parts,
                         )

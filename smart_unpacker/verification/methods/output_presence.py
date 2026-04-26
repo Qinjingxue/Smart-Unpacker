@@ -1,5 +1,5 @@
 from smart_unpacker.verification.evidence import VerificationEvidence
-from smart_unpacker.verification.methods._output_stats import collect_output_stats
+from smart_unpacker.verification.methods._output_stats import output_stats_for_evidence
 from smart_unpacker.verification.registry import register_verification_method
 from smart_unpacker.verification.result import VerificationIssue, VerificationStepResult
 
@@ -9,7 +9,7 @@ class OutputPresenceMethod:
     name = "output_presence"
 
     def verify(self, evidence: VerificationEvidence, config: dict) -> VerificationStepResult:
-        stats = collect_output_stats(evidence.output_dir)
+        stats = output_stats_for_evidence(evidence)
         issues: list[VerificationIssue] = []
         score_delta = 0
         hard_fail = False

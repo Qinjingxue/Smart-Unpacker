@@ -1,7 +1,7 @@
 import subprocess
 from typing import List, Optional, Tuple
 
-from smart_unpacker.support.sevenzip_native import get_native_password_tester
+from smart_unpacker.support.sevenzip_native import cached_test_archive, get_native_password_tester
 from smart_unpacker.passwords.internal.store import PasswordStore
 
 
@@ -35,7 +35,7 @@ class ArchivePasswordTester:
         self.password_store.remember_success(pwd)
 
     def test_password(self, archive_path: str, password: str = "", part_paths: list[str] | None = None) -> Tuple[subprocess.CompletedProcess, str]:
-        native_test = self.native_password_tester.test_archive(archive_path, password=password, part_paths=part_paths)
+        native_test = cached_test_archive(archive_path, password=password, part_paths=part_paths)
         result = native_test.as_completed_process(archive_path)
         error_text = native_test.message.lower()
         if native_test.encrypted and "wrong password" not in error_text:

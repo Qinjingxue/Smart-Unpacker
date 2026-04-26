@@ -25,7 +25,8 @@ class NestedOutputScanPolicy:
         return self._should_consider_candidate(str(entry.path), size=entry.size)
 
     def should_scan_output_dir(self, target_dir: str) -> bool:
-        ctx = detect_scene_context_for_directory(target_dir)
+        snapshot = DirectoryScanner(target_dir, config=self.config).scan()
+        ctx = detect_scene_context_for_directory(target_dir, snapshot=snapshot)
         if is_strong_scene_context(ctx):
             print(
                 "[SCAN] Skipping strong scene output directory: "
@@ -33,7 +34,6 @@ class NestedOutputScanPolicy:
             )
             return False
 
-        snapshot = DirectoryScanner(target_dir, config=self.config).scan()
         for entry in snapshot.entries:
             if self.should_consider_entry_for_nested_scan(entry):
                 return True

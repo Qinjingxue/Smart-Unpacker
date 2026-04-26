@@ -4,6 +4,7 @@ from smart_unpacker_native import inspect_seven_zip_structure as _native_inspect
 
 from smart_unpacker.detection.pipeline.processors.context import FactProcessorContext
 from smart_unpacker.detection.pipeline.processors.registry import register_processor
+from smart_unpacker.support.external_command_cache import cached_value, file_identity
 
 
 DEFAULT_MAX_NEXT_HEADER_CHECK_BYTES = 1024 * 1024
@@ -14,7 +15,13 @@ def inspect_seven_zip_structure(
     magic_bytes: bytes | None = None,
     max_next_header_check_bytes: int = DEFAULT_MAX_NEXT_HEADER_CHECK_BYTES,
 ) -> dict[str, Any]:
-    return dict(_native_inspect_seven_zip_structure(path, magic_bytes or b"", max_next_header_check_bytes))
+    effective_magic = magic_bytes or b""
+    key = (file_identity(path), effective_magic, int(max_next_header_check_bytes))
+    return cached_value(
+        "format_seven_zip_structure",
+        key,
+        lambda: dict(_native_inspect_seven_zip_structure(path, effective_magic, max_next_header_check_bytes)),
+    )
 
 
 @register_processor(

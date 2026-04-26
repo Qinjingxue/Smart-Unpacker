@@ -4,10 +4,17 @@ from smart_unpacker_native import inspect_pe_overlay_structure as _native_inspec
 
 from smart_unpacker.detection.pipeline.processors.context import FactProcessorContext
 from smart_unpacker.detection.pipeline.processors.registry import register_processor
+from smart_unpacker.support.external_command_cache import cached_value, file_identity
 
 
 def inspect_pe_overlay_structure(path: str, file_size: int | None = None, magic_bytes: bytes | None = None) -> dict[str, Any]:
-    return dict(_native_inspect_pe_overlay_structure(path, file_size, magic_bytes or b""))
+    effective_magic = magic_bytes or b""
+    key = (file_identity(path), file_size, effective_magic)
+    return cached_value(
+        "format_pe_overlay_structure",
+        key,
+        lambda: dict(_native_inspect_pe_overlay_structure(path, file_size, effective_magic)),
+    )
 
 
 @register_processor(

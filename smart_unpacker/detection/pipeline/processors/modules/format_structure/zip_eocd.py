@@ -4,13 +4,19 @@ from smart_unpacker_native import inspect_zip_eocd_structure as _native_inspect_
 
 from smart_unpacker.detection.pipeline.processors.context import FactProcessorContext
 from smart_unpacker.detection.pipeline.processors.registry import register_processor
+from smart_unpacker.support.external_command_cache import cached_value, file_identity
 
 
 DEFAULT_MAX_CD_ENTRIES_TO_WALK = 16
 
 
 def inspect_zip_eocd_structure(path: str, max_cd_entries_to_walk: int = DEFAULT_MAX_CD_ENTRIES_TO_WALK) -> dict[str, Any]:
-    return dict(_native_inspect_zip_eocd_structure(path, max_cd_entries_to_walk))
+    key = (file_identity(path), int(max_cd_entries_to_walk))
+    return cached_value(
+        "format_zip_eocd_structure",
+        key,
+        lambda: dict(_native_inspect_zip_eocd_structure(path, max_cd_entries_to_walk)),
+    )
 
 
 @register_processor(

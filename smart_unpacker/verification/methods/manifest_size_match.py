@@ -1,5 +1,5 @@
 from smart_unpacker.verification.evidence import VerificationEvidence
-from smart_unpacker.verification.methods._output_stats import collect_output_stats
+from smart_unpacker.verification.methods._output_stats import output_stats_for_evidence
 from smart_unpacker.verification.registry import register_verification_method
 from smart_unpacker.verification.result import VerificationIssue, VerificationStepResult
 
@@ -14,7 +14,7 @@ class ManifestSizeMatchMethod:
         if expected_files <= 0 and expected_size <= 0:
             return VerificationStepResult(method=self.name, status="skipped")
 
-        stats = collect_output_stats(evidence.output_dir)
+        stats = output_stats_for_evidence(evidence)
         if not stats.exists or not stats.is_dir:
             return VerificationStepResult(method=self.name, status="skipped")
 

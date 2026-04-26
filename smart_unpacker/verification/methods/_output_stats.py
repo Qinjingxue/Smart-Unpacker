@@ -1,5 +1,6 @@
 import os
 from dataclasses import dataclass
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -59,3 +60,15 @@ def collect_output_stats(output_dir: str) -> OutputStats:
         unreadable_count=unreadable_count,
         relative_paths=tuple(relative_paths),
     )
+
+
+def output_stats_for_evidence(evidence: Any) -> OutputStats:
+    cached = getattr(evidence, "_output_stats_cache", None)
+    if cached is not None:
+        return cached
+    stats = collect_output_stats(getattr(evidence, "output_dir", ""))
+    try:
+        object.__setattr__(evidence, "_output_stats_cache", stats)
+    except Exception:
+        pass
+    return stats

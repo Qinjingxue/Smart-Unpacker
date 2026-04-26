@@ -4,10 +4,15 @@ from smart_unpacker_native import inspect_archive_container_structure as _native
 
 from smart_unpacker.detection.pipeline.processors.context import FactProcessorContext
 from smart_unpacker.detection.pipeline.processors.registry import register_processor
+from smart_unpacker.support.external_command_cache import cached_value, file_identity
 
 
 def inspect_archive_container_structure(path: str) -> dict[str, Any]:
-    return dict(_native_inspect_archive_container_structure(path))
+    return cached_value(
+        "format_archive_container_structure",
+        (file_identity(path),),
+        lambda: dict(_native_inspect_archive_container_structure(path)),
+    )
 
 
 @register_processor(
