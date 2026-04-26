@@ -20,9 +20,6 @@ EXECUTABLE_VALIDATION_TYPES = {"pe", "elf", "macho", "te"}
 def process_7z_validation(context: FactProcessorContext) -> Dict[str, Any]:
     base_path = context.fact_bag.get("file.path") or ""
     test = NativePasswordTester().test_archive(base_path)
-    if test is None:
-        return {"error": "7z.dll backend unavailable"}
-
     validation_type = test.archive_type or ""
     checksum_error = test.checksum_error
     is_executable_container = validation_type in EXECUTABLE_VALIDATION_TYPES

@@ -52,21 +52,22 @@ def get_resource_path(filename: str) -> Path:
 
 
 def get_7z_path() -> str:
-    if sys.platform == "win32":
-        for root in candidate_resource_roots():
-            for relative in (Path("tools") / "7z.exe", Path("7z.exe")):
-                seven_z = root / relative
-                if seven_z.exists():
-                    return str(seven_z)
-    return "7z"
-
-
-def get_7z_dll_path() -> str | None:
     if sys.platform != "win32":
-        return None
+        raise RuntimeError("Bundled 7z.exe is only supported on Windows in this test build.")
+    for root in candidate_resource_roots():
+        for relative in (Path("tools") / "7z.exe", Path("7z.exe")):
+            seven_z = root / relative
+            if seven_z.exists():
+                return str(seven_z)
+    raise FileNotFoundError("Required bundled 7z.exe was not found under tools\\ or the application root.")
+
+
+def get_7z_dll_path() -> str:
+    if sys.platform != "win32":
+        raise RuntimeError("Bundled 7z.dll is only supported on Windows in this test build.")
     for root in candidate_resource_roots():
         for relative in (Path("tools") / "7z.dll", Path("7z.dll")):
             seven_z = root / relative
             if seven_z.exists():
                 return str(seven_z)
-    return None
+    raise FileNotFoundError("Required bundled 7z.dll was not found under tools\\ or the application root.")

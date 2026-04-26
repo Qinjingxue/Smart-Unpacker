@@ -266,9 +266,6 @@ class ArchiveMetadataScanner:
     def _scan_with_7z_listing(self, archive_path: str, archive_type: str, password: Optional[str] = None) -> ArchiveMetadataScanResult:
         result = ArchiveMetadataScanResult(archive_path=archive_path, archive_type=archive_type)
         probe = NativePasswordTester().probe_archive(archive_path)
-        if probe is None:
-            result.warnings.append(f"{archive_type.upper()} 元数据列出失败: 7z.dll backend unavailable")
-            return result
         result.sample_count = max(0, int(probe.item_count or 0))
         if probe.is_archive and not probe.is_encrypted:
             result.reasons.append(f"{archive_type.upper()} 元数据可由 7z.dll 正常列出，保持默认编码处理")

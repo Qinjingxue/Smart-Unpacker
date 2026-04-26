@@ -1,17 +1,13 @@
 import os
 import re
-import stat as stat_module
 from collections import defaultdict
 from pathlib import Path
 from typing import Dict, List, Optional, Set
 
+from smart_unpacker_native import list_regular_files_in_directory as _native_list_regular_files_in_directory
+
 from smart_unpacker.contracts.filesystem import DirectorySnapshot, FileEntry
 from smart_unpacker.relations.internal.models import CandidateGroup, DirectoryFileIndex, FileRelation
-
-try:
-    from smart_unpacker_native import list_regular_files_in_directory as _native_list_regular_files_in_directory
-except ImportError:  # pragma: no cover - exercised when native extension is absent
-    _native_list_regular_files_in_directory = None
 
 
 SPLIT_FIRST_PATTERNS = [
@@ -504,19 +500,7 @@ class RelationsGroupBuilder:
         if directory_index is not None:
             return list(directory_index.entries)
 
-        native_entries = self._native_directory_files(directory)
-        if native_entries is not None:
-            return native_entries
-
-        return self._python_directory_files(directory)
-
-    def _native_directory_files(self, directory: str) -> List[FileEntry] | None:
-        if _native_list_regular_files_in_directory is None:
-            return None
-        try:
-            rows = _native_list_regular_files_in_directory(directory)
-        except Exception:
-            return None
+        rows = _native_list_regular_files_in_directory(directory)
         entries: List[FileEntry] = []
         for row in rows:
             if not isinstance(row, dict) or not row.get("path"):
@@ -528,26 +512,6 @@ class RelationsGroupBuilder:
                     size=row.get("size"),
                     mtime_ns=row.get("mtime_ns"),
                 )
-            )
-        return entries
-
-    def _python_directory_files(self, directory: str) -> List[FileEntry]:
-        try:
-            filenames = os.listdir(directory)
-        except OSError:
-            return []
-
-        entries: List[FileEntry] = []
-        for filename in filenames:
-            path = os.path.normpath(os.path.join(directory, filename))
-            try:
-                stat = os.stat(path)
-            except OSError:
-                continue
-            if not stat_module.S_ISREG(stat.st_mode):
-                continue
-            entries.append(
-                FileEntry(path=Path(path), is_dir=False, size=stat.st_size, mtime_ns=stat.st_mtime_ns)
             )
         return entries
 

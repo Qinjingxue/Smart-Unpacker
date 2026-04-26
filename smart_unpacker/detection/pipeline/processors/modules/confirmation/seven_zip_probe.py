@@ -19,9 +19,6 @@ EXECUTABLE_PROBE_TYPES = {"pe", "elf", "macho", "te"}
 def process_7z_probe(context: FactProcessorContext) -> Dict[str, Any]:
     base_path = context.fact_bag.get("file.path") or ""
     probe = NativePasswordTester().probe_archive(base_path)
-    if probe is None:
-        return {"error": "7z.dll backend unavailable"}
-
     result = {
         "is_archive": probe.is_archive,
         "type": probe.archive_type or None,

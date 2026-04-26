@@ -58,14 +58,6 @@ class PasswordManager:
 
     def test_password(self, archive_path: str, password: str = "") -> Tuple[subprocess.CompletedProcess, str]:
         native_test = self.native_password_tester.test_archive(archive_path, password=password)
-        if native_test is None:
-            result = subprocess.CompletedProcess(
-                args=["7z.dll", "test-archive", archive_path],
-                returncode=2,
-                stdout="7z.dll backend unavailable",
-                stderr="7z.dll backend unavailable",
-            )
-            return result, "7z.dll backend unavailable"
         result = native_test.as_completed_process(archive_path)
         error_text = native_test.message.lower()
         if native_test.encrypted and "wrong password" not in error_text:
@@ -83,18 +75,9 @@ class PasswordManager:
             passwords_to_try = [""]
 
         native_attempt = self.native_password_tester.try_passwords(archive_path, passwords_to_try)
-        if native_attempt is not None:
-            native_result = native_attempt.as_completed_process(archive_path)
-            if native_attempt.ok:
-                pwd = passwords_to_try[native_attempt.matched_index]
-                self.add_recent_password(pwd)
-                return pwd, native_result, ""
-            return None, native_result, native_attempt.message.lower() or "wrong password"
-
-        result = subprocess.CompletedProcess(
-            args=["7z.dll", "test-passwords", archive_path],
-            returncode=2,
-            stdout="7z.dll backend unavailable",
-            stderr="7z.dll backend unavailable",
-        )
-        return None, result, "7z.dll backend unavailable"
+        native_result = native_attempt.as_completed_process(archive_path)
+        if native_attempt.ok:
+            pwd = passwords_to_try[native_attempt.matched_index]
+            self.add_recent_password(pwd)
+            return pwd, native_result, ""
+        return None, native_result, native_attempt.message.lower() or "wrong password"

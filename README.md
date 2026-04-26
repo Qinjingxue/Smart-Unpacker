@@ -58,7 +58,7 @@ ctest --test-dir native\sevenzip_password_tester\build -C Release --output-on-fa
 Copy-Item native\sevenzip_password_tester\build\Release\sevenzip_password_tester_capi.dll tools\sevenzip_password_tester_capi.dll -Force
 ```
 
-Windows 下最终解压会优先查找 `tools\7z.exe` 或程序目录旁边的 `7z.exe`；找不到时会尝试调用系统 PATH 中的 `7z`。检测、测试和密码尝试会优先使用 `tools\sevenzip_password_tester_capi.dll` 加载 `tools\7z.dll`。
+Windows 下最终解压要求存在 `tools\7z.exe` 或程序目录旁边的 `7z.exe`，不会回退到系统 PATH。检测、测试和密码尝试要求存在 `tools\sevenzip_password_tester_capi.dll` 和 `tools\7z.dll`，缺失时直接报错。
 
 确认原生扩展可用：
 

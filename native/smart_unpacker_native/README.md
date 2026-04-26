@@ -124,6 +124,7 @@ pipeline:
 - `inspect_archive_container_structure`
 - `inspect_pe_overlay_structure`
 
-These functions preserve the Python result shapes and are called through
-Python fallbacks, so the application can still run if the extension is missing
-or a native inspector raises unexpectedly.
+These functions preserve the Python result shapes. During the current test
+phase the application treats this native extension as required; missing native
+functions or native errors should fail fast instead of falling back to Python
+parsers.

@@ -80,12 +80,13 @@ class SplitVolumeStager:
 
                 staged_archive = self._format_numbered_volume(staged_prefix, 1, style, width)
                 result = self._native_tester.test_archive(staged_archive)
-                if result and result.ok:
+                if result.ok:
                     cleanup_parts = list(dict.fromkeys(list(all_parts) + candidates))
                     print("[SPLIT] Fixed misnamed split volumes in temporary staging directory.")
                     return StagedSplit(archive=staged_archive, all_parts=cleanup_parts, temp_dir=temp_dir)
-        except Exception as exc:
-            print(f"[SPLIT] Failed to stage misnamed split volumes, falling back to original files: {exc}")
+        except Exception:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            raise
 
         shutil.rmtree(temp_dir, ignore_errors=True)
         return StagedSplit(archive=archive, all_parts=list(dict.fromkeys(list(all_parts) + candidates)))

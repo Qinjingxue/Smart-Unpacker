@@ -26,15 +26,6 @@ class NativePasswordAttempt:
     def ok(self) -> bool:
         return self.status == STATUS_OK and self.matched_index >= 0
 
-    @property
-    def should_fallback(self) -> bool:
-        return self.status in {
-            STATUS_DAMAGED,
-            STATUS_UNSUPPORTED,
-            STATUS_BACKEND_UNAVAILABLE,
-            STATUS_ERROR,
-        }
-
     def as_completed_process(self, archive_path: str) -> subprocess.CompletedProcess:
         return subprocess.CompletedProcess(
             args=["7z.dll", "test-passwords", archive_path],
@@ -88,13 +79,8 @@ class NativePasswordTester:
     def available(self) -> bool:
         return bool(self.wrapper_path and self.seven_zip_dll_path and Path(self.wrapper_path).exists())
 
-    def try_passwords(self, archive_path: str, passwords: list[str]) -> NativePasswordAttempt | None:
-        if sys.platform != "win32" or not self.available():
-            return None
-
+    def try_passwords(self, archive_path: str, passwords: list[str]) -> NativePasswordAttempt:
         library = self._load()
-        if library is None:
-            return None
 
         normalized_passwords = list(passwords or [""])
         password_array_type = ctypes.c_wchar_p * len(normalized_passwords)
@@ -120,13 +106,8 @@ class NativePasswordTester:
             message=message.value,
         )
 
-    def test_archive(self, archive_path: str, password: str = "") -> NativeArchiveTest | None:
-        if sys.platform != "win32" or not self.available():
-            return None
-
+    def test_archive(self, archive_path: str, password: str = "") -> NativeArchiveTest:
         library = self._load()
-        if library is None:
-            return None
 
         command_ok = ctypes.c_int(0)
         encrypted = ctypes.c_int(0)
@@ -155,13 +136,8 @@ class NativePasswordTester:
             message=message.value,
         )
 
-    def probe_archive(self, archive_path: str) -> NativeArchiveProbe | None:
-        if sys.platform != "win32" or not self.available():
-            return None
-
+    def probe_archive(self, archive_path: str) -> NativeArchiveProbe:
         library = self._load()
-        if library is None:
-            return None
 
         is_archive = ctypes.c_int(0)
         is_encrypted = ctypes.c_int(0)
@@ -201,61 +177,64 @@ class NativePasswordTester:
     def _load(self):
         if self._library is not None:
             return self._library
-        try:
-            library = ctypes.WinDLL(str(self.wrapper_path))
-            library.sup7z_try_passwords.argtypes = [
-                ctypes.c_wchar_p,
-                ctypes.c_wchar_p,
-                ctypes.POINTER(ctypes.c_wchar_p),
-                ctypes.c_int,
-                ctypes.POINTER(ctypes.c_int),
-                ctypes.POINTER(ctypes.c_int),
-                ctypes.c_wchar_p,
-                ctypes.c_int,
-            ]
-            library.sup7z_try_passwords.restype = ctypes.c_int
-            library.sup7z_test_archive.argtypes = [
-                ctypes.c_wchar_p,
-                ctypes.c_wchar_p,
-                ctypes.c_wchar_p,
-                ctypes.POINTER(ctypes.c_int),
-                ctypes.POINTER(ctypes.c_int),
-                ctypes.POINTER(ctypes.c_int),
-                ctypes.c_wchar_p,
-                ctypes.c_int,
-                ctypes.c_wchar_p,
-                ctypes.c_int,
-            ]
-            library.sup7z_test_archive.restype = ctypes.c_int
-            library.sup7z_probe_archive.argtypes = [
-                ctypes.c_wchar_p,
-                ctypes.c_wchar_p,
-                ctypes.POINTER(ctypes.c_int),
-                ctypes.POINTER(ctypes.c_int),
-                ctypes.POINTER(ctypes.c_int),
-                ctypes.POINTER(ctypes.c_int),
-                ctypes.POINTER(ctypes.c_ulonglong),
-                ctypes.POINTER(ctypes.c_int),
-                ctypes.c_wchar_p,
-                ctypes.c_int,
-                ctypes.c_wchar_p,
-                ctypes.c_int,
-            ]
-            library.sup7z_probe_archive.restype = ctypes.c_int
-        except OSError:
-            return None
+        if sys.platform != "win32":
+            raise RuntimeError("7z.dll wrapper is only supported on Windows in this test build.")
+        if not self.wrapper_path or not Path(self.wrapper_path).exists():
+            raise FileNotFoundError("Required sevenzip_password_tester_capi.dll was not found.")
+        if not self.seven_zip_dll_path or not Path(self.seven_zip_dll_path).exists():
+            raise FileNotFoundError("Required 7z.dll was not found.")
+
+        library = ctypes.WinDLL(str(self.wrapper_path))
+        library.sup7z_try_passwords.argtypes = [
+            ctypes.c_wchar_p,
+            ctypes.c_wchar_p,
+            ctypes.POINTER(ctypes.c_wchar_p),
+            ctypes.c_int,
+            ctypes.POINTER(ctypes.c_int),
+            ctypes.POINTER(ctypes.c_int),
+            ctypes.c_wchar_p,
+            ctypes.c_int,
+        ]
+        library.sup7z_try_passwords.restype = ctypes.c_int
+        library.sup7z_test_archive.argtypes = [
+            ctypes.c_wchar_p,
+            ctypes.c_wchar_p,
+            ctypes.c_wchar_p,
+            ctypes.POINTER(ctypes.c_int),
+            ctypes.POINTER(ctypes.c_int),
+            ctypes.POINTER(ctypes.c_int),
+            ctypes.c_wchar_p,
+            ctypes.c_int,
+            ctypes.c_wchar_p,
+            ctypes.c_int,
+        ]
+        library.sup7z_test_archive.restype = ctypes.c_int
+        library.sup7z_probe_archive.argtypes = [
+            ctypes.c_wchar_p,
+            ctypes.c_wchar_p,
+            ctypes.POINTER(ctypes.c_int),
+            ctypes.POINTER(ctypes.c_int),
+            ctypes.POINTER(ctypes.c_int),
+            ctypes.POINTER(ctypes.c_int),
+            ctypes.POINTER(ctypes.c_ulonglong),
+            ctypes.POINTER(ctypes.c_int),
+            ctypes.c_wchar_p,
+            ctypes.c_int,
+            ctypes.c_wchar_p,
+            ctypes.c_int,
+        ]
+        library.sup7z_probe_archive.restype = ctypes.c_int
         self._library = library
         return library
 
-    def _default_wrapper_path(self) -> str | None:
+    def _default_wrapper_path(self) -> str:
         candidates: list[Path] = []
         for root in candidate_resource_roots():
             candidates.extend([
                 root / "tools" / "sevenzip_password_tester_capi.dll",
                 root / "sevenzip_password_tester_capi.dll",
-                root / "native" / "sevenzip_password_tester" / "build" / "Release" / "sevenzip_password_tester_capi.dll",
             ])
         for candidate in candidates:
             if candidate.exists():
                 return str(candidate)
-        return None
+        raise FileNotFoundError("Required sevenzip_password_tester_capi.dll was not found under tools\\ or the application root.")
