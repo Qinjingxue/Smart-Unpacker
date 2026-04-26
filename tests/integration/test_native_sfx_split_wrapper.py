@@ -114,9 +114,12 @@ def test_native_wrapper_detects_damaged_zip_sfx_split_tail(tmp_path):
         pytest.skip("generated ZIP SFX archive has no tail data volume")
     parts[-1].write_bytes(b"\0" * parts[-1].stat().st_size)
 
-    health = get_native_password_tester().check_archive_health(str(case.entry_path), part_paths=_parts(case))
+    tester = get_native_password_tester()
+    health = tester.check_archive_health(str(case.entry_path), part_paths=_parts(case))
 
-    assert health.is_broken or health.is_missing_volume
+    assert health.ok
+    full_test = tester.test_archive(str(case.entry_path), part_paths=_parts(case))
+    assert full_test.checksum_error or not full_test.ok
 
 
 @pytest.mark.parametrize("password", [None, PASSWORD])

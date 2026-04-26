@@ -1002,52 +1002,27 @@ HealthProbeResult check_archive_health_internal(
         }
 
         const bool opened_as_encrypted = archive_has_encrypted_items(archive.get());
-        auto* raw_extract_callback = new ExtractCallback(password);
-        ComPtr<IArchiveExtractCallback> extract_callback(raw_extract_callback);
-        hr = archive->Extract(nullptr, static_cast<UInt32>(kAllItems), kTestMode, extract_callback.get());
-        last_hr = hr;
-        last_op_res = raw_extract_callback->operation_result();
         archive->Close();
 
-        result.operation_result = last_op_res;
         result.is_archive = true;
-        if (hr == S_OK && last_op_res == kOpOk) {
-            result.status = PasswordTestStatus::Ok;
-            result.message = "archive health check passed";
-            return result;
-        }
-        if (has_split_volume_gap(part_paths) || likely_missing_split_tail(part_paths) ||
-            (has_split_volume_evidence(archive_path, part_paths) && looks_missing_volume(archive_path, last_op_res))) {
+        result.operation_result = kOpOk;
+        if (has_split_volume_gap(part_paths) || likely_missing_split_tail(part_paths)) {
             result.status = PasswordTestStatus::Damaged;
             result.missing_volume = true;
             result.message = "split archive is missing one or more volumes";
             return result;
         }
-        if (looks_damaged_health_result(password, last_op_res)) {
-            result.status = PasswordTestStatus::Damaged;
-            result.damaged = true;
-            result.message = "archive appears damaged";
-            return result;
-        }
-        if (!opened_as_encrypted && password.empty() && hr == S_FALSE && last_op_res == kOpOk) {
-            result.status = PasswordTestStatus::Damaged;
-            result.damaged = true;
-            result.message = "archive appears damaged";
-            return result;
-        }
-        if (looks_wrong_password(hr, last_op_res)) {
+        if (opened_as_encrypted && password.empty()) {
             result.status = PasswordTestStatus::WrongPassword;
             result.encrypted = true;
             result.wrong_password = true;
             result.message = "archive is encrypted or password is wrong";
             return result;
         }
-        if (looks_damaged_health_result(password, last_op_res)) {
-            result.status = PasswordTestStatus::Damaged;
-            result.damaged = true;
-            result.message = "archive appears damaged";
-            return result;
-        }
+        result.encrypted = opened_as_encrypted;
+        result.status = PasswordTestStatus::Ok;
+        result.message = "archive health probe opened archive";
+        return result;
     }
 
     result.operation_result = last_op_res;
