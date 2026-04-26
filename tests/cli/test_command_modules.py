@@ -20,9 +20,17 @@ def test_cli_command_modules_declare_required_contract():
 def test_cli_parser_registers_discovered_commands():
     ctx = CliContext(language="en")
     parser = build_cli_parser(ctx)
-    choices = next(action.choices for action in parser._actions if action.dest == "command")
 
-    assert set(choices) >= {"extract", "scan", "inspect", "passwords", "config"}
+    command_args = {
+        "extract": ["extract", "."],
+        "scan": ["scan", "."],
+        "inspect": ["inspect", "."],
+        "passwords": ["passwords"],
+        "config": ["config", "show"],
+    }
+
+    for command, args in command_args.items():
+        assert parser.parse_args(args).command == command
 
 
 def test_cli_parser_uses_command_module_language_text():

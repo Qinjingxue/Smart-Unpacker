@@ -6,7 +6,6 @@ import zipfile
 from pathlib import Path
 
 from smart_unpacker.coordinator.runner import PipelineRunner
-from smart_unpacker.detection.pipeline.facts.provider import FactProvider
 from smart_unpacker.contracts.detection import FactBag
 from smart_unpacker.contracts.tasks import ArchiveTask
 from smart_unpacker.rename.scheduler import RenameScheduler
@@ -41,8 +40,8 @@ class DetectionPipelineTests(unittest.TestCase):
             archive_path.write_bytes(b"PK\x05\x06" + b"\0" * 18)
 
             bag = FactBag()
-            provider = FactProvider(str(archive_path))
-            decision = DetectionScheduler(minimal_config()).evaluate(bag, provider)
+            bag.set("file.path", str(archive_path))
+            decision = DetectionScheduler(minimal_config()).evaluate_bag(bag)
 
             self.assertTrue(decision.should_extract)
             self.assertEqual(decision.total_score, 5)

@@ -1,13 +1,13 @@
 # 测试结构
 
-测试套件按“测试形态”组织，而不是按源码包组织。新增测试时，优先选择能锁住行为的最小测试。
+测试套件按“测试形态”组织，而不是按源码包组织。新增测试时，优先选择能锁住行为的最小测试，并通过项目公开入口表达预期行为。
 
 ## 目录说明
 
 - `cases/`：数据驱动 JSON 用例。普通 CLI、检测、后处理和归档扫描场景优先放这里。
 - `runners/`：`cases/` 的通用 pytest runner。一般不需要频繁修改。
 - `helpers/`：共享构造器、断言、测试配置、归档 fixture 和 CLI 辅助工具。
-- `unit/`：聚焦单个模块或契约的测试，不覆盖端到端 pipeline 行为。
+- `unit/`：聚焦公开模块或契约的测试，不覆盖黑箱模块内部算法。
 - `functional/`：跨模块行为测试，尽量避免真实外部解压。
 - `integration/`：pipeline、解压和真实执行路径测试。
 - `cli/`：CLI parser、命令契约和命令行为测试。
@@ -63,14 +63,20 @@ pytest tests/runners -q
 pytest tests/integration/test_real_archive_edge_cases.py --run-slow-real-archives
 ```
 
+## 公共接口边界
+
+测试默认不直接导入 `*/internal/*`、`detection.pipeline.*`，也不调用下划线私有方法或 monkeypatch 私有实现。黑箱模块只通过公开入口测试行为，例如 `DetectionScheduler`、`ExtractionScheduler`、`PostProcessActions`、`DirectoryScanner`、`RelationsScheduler`、`RenameScheduler`、CLI 和 coordinator 编排入口。
+
+确实需要覆盖新规则或检测场景时，优先使用 `cases/detection/`、`cases/archive_scan/` 或 functional 测试，并从 `DetectionScheduler` 进入，而不是直接测试 rule、processor、collector 的内部方法。
+
 ## 新增测试建议
 
 场景能匹配现有 runner 时，新增 JSON case。只有需要新 runner、新 helper、新 fixture 或确实存在新的交互方式时，再新增 Python 测试。
 
 常用位置：
 
-- 新增 CLI 输出或命令形状：优先 `cases/cli/`；如果 parser 或命令内部需要直接覆盖，再加到 `cli/`。
-- 新增规则行为：规则级 facts 用 `cases/detection/`；如果文件系统扫描和候选构建也重要，用 `cases/archive_scan/`。
+- 新增 CLI 输出或命令形状：优先 `cases/cli/`；如果 parser 或命令公共契约需要直接覆盖，再加到 `cli/`。
+- 新增规则行为：优先用 `cases/detection/` 从公开调度入口评估；如果文件系统扫描和候选构建也重要，用 `cases/archive_scan/`。
 - 新增清理或扁平化行为：`cases/postprocess/`。
 - 新增共享测试配置：`tests/helpers/config_factory.py`。
 - 新增可复用文件系统构造：`tests/helpers/fs_builder.py` 或 `tests/helpers/generated_fixtures.py`。

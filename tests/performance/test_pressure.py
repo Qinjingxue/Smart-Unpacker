@@ -1,14 +1,8 @@
-import threading
 import time
 import zipfile
 from pathlib import Path
 
 from smart_unpacker.coordinator.scanner import ScanOrchestrator
-from smart_unpacker.detection.pipeline.facts.provider import FactProvider
-from smart_unpacker.extraction.scheduler import ConcurrencyScheduler
-from smart_unpacker.extraction.internal.executor import TaskExecutor
-from smart_unpacker.contracts.detection import FactBag
-from smart_unpacker.contracts.tasks import ArchiveTask
 from tests.helpers.detection_config import with_detection_pipeline
 from tests.helpers.fs_builder import make_zip
 
@@ -87,17 +81,8 @@ def build_pressure_corpus(root: Path):
     return sorted(expected)
 
 
-def test_pressure_scan_avoids_7z_confirmation_fanout_on_mixed_corpus(tmp_path, monkeypatch):
+def test_pressure_scan_finds_expected_archives_in_mixed_corpus(tmp_path):
     expected = build_pressure_corpus(tmp_path)
-    fact_counts = {"7z.probe": 0, "7z.validation": 0}
-    original_fill_fact = FactProvider.fill_fact
-
-    def counting_fill_fact(self, fact_bag, fact_name):
-        if fact_name in fact_counts:
-            fact_counts[fact_name] += 1
-        return original_fill_fact(self, fact_bag, fact_name)
-
-    monkeypatch.setattr(FactProvider, "fill_fact", counting_fill_fact)
 
     start = time.perf_counter()
     results = ScanOrchestrator(pressure_scan_config()).scan(str(tmp_path))
@@ -105,48 +90,4 @@ def test_pressure_scan_avoids_7z_confirmation_fanout_on_mixed_corpus(tmp_path, m
     actual = sorted(Path(result.main_path).name for result in results)
 
     assert actual == expected
-    assert fact_counts == {"7z.probe": 0, "7z.validation": 0}
     assert elapsed < 2.0
-
-
-def test_task_executor_uses_multiple_workers_under_backlog():
-    scheduler = ConcurrencyScheduler(
-        {
-            "initial_concurrency_limit": 4,
-            "poll_interval_ms": 100,
-            "scale_up_streak_required": 1,
-            "scale_down_streak_required": 1,
-        },
-        current_limit=4,
-        max_workers=4,
-    )
-    executor = TaskExecutor(scheduler, max_workers=4)
-    lock = threading.Lock()
-    active = 0
-    peak_active = 0
-
-    def make_task(index: int) -> ArchiveTask:
-        bag = FactBag()
-        path = f"archive_{index}.zip"
-        return ArchiveTask(fact_bag=bag, score=5, main_path=path, all_parts=[path])
-
-    def worker(_task):
-        nonlocal active, peak_active
-        with lock:
-            active += 1
-            peak_active = max(peak_active, active)
-        try:
-            time.sleep(0.05)
-            return True
-        finally:
-            with lock:
-                active -= 1
-
-    tasks = [make_task(index) for index in range(8)]
-    start = time.perf_counter()
-    results = executor.execute_all(tasks, worker)
-    elapsed = time.perf_counter() - start
-
-    assert results == [True] * 8
-    assert peak_active >= 3
-    assert elapsed < 0.35

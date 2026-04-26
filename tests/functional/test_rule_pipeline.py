@@ -2,7 +2,6 @@ from pathlib import Path
 
 import pytest
 
-from smart_unpacker.detection.pipeline.facts.provider import FactProvider
 from smart_unpacker.contracts.detection import FactBag
 from smart_unpacker.detection import DetectionScheduler
 from smart_unpacker.detection.scene.definitions import RECOMMENDED_SCENE_RULES_PAYLOAD
@@ -52,7 +51,8 @@ def test_rule_pipeline_evaluates_generated_files(tmp_path, relative_path, conten
         (tmp_path / "game" / "www" / "data" / "Map001.json").write_text("{}", encoding="utf-8")
 
     bag = FactBag()
-    decision = DetectionScheduler(_rule_pipeline_config()).evaluate(bag, FactProvider(str(target)))
+    bag.set("file.path", str(target))
+    decision = DetectionScheduler(_rule_pipeline_config()).evaluate_bag(bag)
 
     assert decision.should_extract is expected_extract
     if target.suffix == ".zip":

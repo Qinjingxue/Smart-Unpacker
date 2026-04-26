@@ -2,7 +2,6 @@ from pathlib import Path
 
 import pytest
 
-from smart_unpacker.detection.pipeline.facts.provider import FactProvider
 from smart_unpacker.contracts.detection import FactBag
 from smart_unpacker.detection import DetectionScheduler
 from tests.helpers.assertions import MISSING, assert_case_expectations, get_path
@@ -38,10 +37,11 @@ def run_detection_case(case, workspace: Path) -> dict:
     target = workspace / act["target"]
     config = get_config(act.get("config", "minimal"), act.get("config_overrides"))
     bag = FactBag()
+    bag.set("file.path", str(target))
     for fact_name, value in act.get("facts", {}).items():
         bag.set(fact_name, value)
 
-    decision = DetectionScheduler(config).evaluate(bag, FactProvider(str(target)))
+    decision = DetectionScheduler(config).evaluate_bag(bag)
     return {
         "decision": {
             "should_extract": decision.should_extract,

@@ -5,8 +5,6 @@ import unittest
 import zipfile
 from pathlib import Path
 
-from smart_unpacker.detection.pipeline.facts.provider import FactProvider
-from smart_unpacker.detection.pipeline.processors.runner import ProcessingCoordinator
 from smart_unpacker.contracts.detection import FactBag
 from smart_unpacker.coordinator.inspector import InspectOrchestrator
 from smart_unpacker.detection import DetectionScheduler
@@ -75,7 +73,7 @@ class DetectionBehaviorTests(unittest.TestCase):
             bag.set("file.path", str(carrier))
             decision = DetectionScheduler(config_with_rules([
                 {"name": "embedded_payload_identity", "enabled": True},
-            ])).evaluate(bag, FactProvider(str(carrier)))
+            ])).evaluate_bag(bag)
 
             self.assertTrue(decision.should_extract)
             self.assertEqual(bag.get("file.detected_ext"), ".zip")
@@ -102,7 +100,7 @@ class DetectionBehaviorTests(unittest.TestCase):
                     "enabled": True,
                     "carrier_scan_tail_window_bytes": 128,
                 },
-            ])).evaluate(bag, FactProvider(str(carrier)))
+            ])).evaluate_bag(bag)
 
             self.assertTrue(decision.should_extract)
             self.assertEqual(bag.get("file.detected_ext"), ".rar")
@@ -126,7 +124,7 @@ class DetectionBehaviorTests(unittest.TestCase):
                     "carrier_scan_prefix_window_bytes": 0,
                     "carrier_scan_full_scan_max_bytes": 1024,
                 },
-            ])).evaluate(bag, FactProvider(str(carrier)))
+            ])).evaluate_bag(bag)
 
             self.assertFalse(decision.should_extract)
             self.assertFalse(bag.get("file.embedded_archive_found"))
@@ -146,7 +144,7 @@ class DetectionBehaviorTests(unittest.TestCase):
                     "loose_scan_score": 5,
                     "loose_scan_min_tail_bytes": 1,
                 },
-            ])).evaluate(bag, FactProvider(str(carrier)))
+            ])).evaluate_bag(bag)
 
             self.assertFalse(decision.should_extract)
             self.assertFalse(bag.get("zip.local_header_plausible"))
@@ -173,7 +171,7 @@ class DetectionBehaviorTests(unittest.TestCase):
                     "loose_scan_score": 5,
                     "loose_scan_min_tail_bytes": 1,
                 },
-            ])).evaluate(bag, FactProvider(str(carrier)))
+            ])).evaluate_bag(bag)
 
             self.assertTrue(decision.should_extract)
             self.assertTrue(bag.get("zip.local_header_plausible"))
@@ -198,7 +196,7 @@ class DetectionBehaviorTests(unittest.TestCase):
                     "loose_scan_tail_window_bytes": 128,
                     "loose_scan_full_scan_max_bytes": 128,
                 },
-            ])).evaluate(bag, FactProvider(str(carrier)))
+            ])).evaluate_bag(bag)
 
             self.assertTrue(decision.should_extract)
             self.assertEqual(bag.get("file.detected_ext"), ".7z")
@@ -221,7 +219,7 @@ class DetectionBehaviorTests(unittest.TestCase):
                     "loose_scan_tail_window_bytes": 128,
                     "loose_scan_full_scan_max_bytes": 1024,
                 },
-            ])).evaluate(bag, FactProvider(str(carrier)))
+            ])).evaluate_bag(bag)
 
             self.assertFalse(decision.should_extract)
             self.assertFalse(bag.get("file.embedded_archive_found"))
@@ -244,7 +242,7 @@ class DetectionBehaviorTests(unittest.TestCase):
                     "loose_scan_full_scan_max_bytes": 1024,
                     "loose_scan_deep_scan": True,
                 },
-            ])).evaluate(bag, FactProvider(str(carrier)))
+            ])).evaluate_bag(bag)
 
             self.assertTrue(decision.should_extract)
             self.assertEqual(bag.get("file.detected_ext"), ".7z")
@@ -270,37 +268,11 @@ class DetectionBehaviorTests(unittest.TestCase):
                 {"name": "embedded_payload_identity", "enabled": True},
                 {"name": "scene_penalty", "enabled": True, "scene_rules": RECOMMENDED_SCENE_RULES_PAYLOAD},
             ])
-            decision = DetectionScheduler(config).evaluate(bag, FactProvider(str(resource)))
+            decision = DetectionScheduler(config).evaluate_bag(bag)
 
             self.assertFalse(decision.should_extract)
             self.assertTrue(bag.get("file.embedded_archive_found"))
             self.assertIn("scene_penalty", decision.matched_rules)
-
-    def test_scene_facts_identify_protected_runtime_archive(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            (root / "www" / "audio").mkdir(parents=True)
-            (root / "www" / "data").mkdir(parents=True)
-            (root / "game.exe").write_bytes(b"MZ")
-            archive = root / "www" / "audio" / "bgm.7z"
-            archive.write_bytes(b"7z\xbc\xaf\x27\x1c")
-
-            bag = FactBag()
-            bag.set("file.path", str(archive))
-            provider = FactProvider(str(archive))
-            ProcessingCoordinator(provider).ensure_facts(bag, {
-                "scene.scene_type",
-                "scene.relative_path",
-                "scene.is_protected_path",
-                "scene.protected_archive_ext_match",
-                "scene.is_runtime_resource_archive",
-            })
-
-            self.assertEqual(bag.get("scene.scene_type"), "rpg_maker_game")
-            self.assertEqual(bag.get("scene.relative_path"), "www/audio/bgm.7z")
-            self.assertTrue(bag.get("scene.is_protected_path"))
-            self.assertTrue(bag.get("scene.protected_archive_ext_match"))
-            self.assertTrue(bag.get("scene.is_runtime_resource_archive"))
 
     def test_scene_protect_stops_protected_archive_but_not_runtime_exact_path(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -318,11 +290,11 @@ class DetectionBehaviorTests(unittest.TestCase):
 
             archive_bag = FactBag()
             archive_bag.set("file.path", str(archive))
-            archive_decision = DetectionScheduler(config).evaluate(archive_bag, FactProvider(str(archive)))
+            archive_decision = DetectionScheduler(config).evaluate_bag(archive_bag)
 
             runtime_bag = FactBag()
             runtime_bag.set("file.path", str(runtime))
-            runtime_decision = DetectionScheduler(config).evaluate(runtime_bag, FactProvider(str(runtime)))
+            runtime_decision = DetectionScheduler(config).evaluate_bag(runtime_bag)
 
             self.assertFalse(archive_decision.should_extract)
             self.assertEqual(archive_decision.stop_reason.split(":", 1)[0], "Scene Protect")
@@ -354,7 +326,7 @@ class DetectionBehaviorTests(unittest.TestCase):
                 },
             ])
 
-            decision = DetectionScheduler(config).evaluate(bag, FactProvider(str(archive)))
+            decision = DetectionScheduler(config).evaluate_bag(bag)
 
             self.assertFalse(decision.should_extract)
             self.assertEqual(decision.total_score, -94)
@@ -391,7 +363,7 @@ class DetectionBehaviorTests(unittest.TestCase):
                 },
             ])
 
-            decision = DetectionScheduler(config).evaluate(bag, FactProvider(str(archive)))
+            decision = DetectionScheduler(config).evaluate_bag(bag)
 
             self.assertIsNone(decision.stop_reason)
             self.assertFalse(decision.should_extract)
@@ -417,7 +389,7 @@ class DetectionBehaviorTests(unittest.TestCase):
                 {"name": "extension", "enabled": True, "extension_score_groups": [{"score": 5, "extensions": [".zip", ".7z", ".rar", ".gz", ".bz2", ".xz", ".001"]}]},
             ])
             config["thresholds"]["archive_score_threshold"] = 6
-            decision = DetectionScheduler(config).evaluate(bag, FactProvider(str(first)))
+            decision = DetectionScheduler(config).evaluate_bag(bag)
 
             self.assertFalse(decision.should_extract)
             self.assertEqual(decision.decision, "maybe_archive")

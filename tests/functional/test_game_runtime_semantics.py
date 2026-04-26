@@ -2,7 +2,6 @@ from pathlib import Path
 
 import pytest
 
-from smart_unpacker.detection.pipeline.facts.provider import FactProvider
 from smart_unpacker.contracts.detection import FactBag
 from smart_unpacker.detection import DetectionScheduler
 from smart_unpacker.detection.scene.definitions import RECOMMENDED_SCENE_RULES_PAYLOAD
@@ -26,7 +25,8 @@ SCENE_PROTECT_CONFIG = with_detection_pipeline({
 
 def _evaluate(path: Path):
     bag = FactBag()
-    decision = DetectionScheduler(SCENE_PROTECT_CONFIG).evaluate(bag, FactProvider(str(path)))
+    bag.set("file.path", str(path))
+    decision = DetectionScheduler(SCENE_PROTECT_CONFIG).evaluate_bag(bag)
     return decision, bag
 
 
