@@ -7,7 +7,7 @@ from smart_unpacker.app.cli_types import CliCommandResult, CliPasswordSummary
 from smart_unpacker.config.schema import normalize_config_value
 from smart_unpacker.config.detection_view import directory_scan_mode, rule_pipeline_config, scan_filter_config
 from smart_unpacker.extraction.scheduler import ExtractionScheduler
-from smart_unpacker.passwords import dedupe_passwords, get_builtin_passwords, read_password_file
+from smart_unpacker.passwords import dedupe_passwords, get_builtin_passwords, PasswordStore, read_password_file
 
 
 def build_effective_config(config: dict) -> dict[str, Any]:
@@ -99,12 +99,16 @@ def build_password_summary(
 ) -> CliPasswordSummary:
     recent = dedupe_passwords(recent_passwords or [])
     builtin = get_builtin_passwords() if use_builtin_passwords else []
-    combined = dedupe_passwords(list(user_passwords) + recent + builtin)
-    return CliPasswordSummary(
-        user_passwords=list(user_passwords),
+    store = PasswordStore.from_sources(
+        cli_passwords=user_passwords,
         recent_passwords=recent,
         builtin_passwords=builtin,
-        combined_passwords=combined,
+    )
+    return CliPasswordSummary(
+        user_passwords=store.user_passwords,
+        recent_passwords=store.recent_passwords,
+        builtin_passwords=store.builtin_passwords,
+        combined_passwords=store.candidates(),
         use_builtin_passwords=use_builtin_passwords,
     )
 

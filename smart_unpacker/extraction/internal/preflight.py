@@ -8,7 +8,7 @@ from smart_unpacker.extraction.internal.native_password_tester import (
     cached_check_archive_health,
     get_native_password_tester,
 )
-from smart_unpacker.extraction.internal.errors import has_archive_damage_signals
+from smart_unpacker.extraction.internal.errors import has_archive_damage_signals, has_definite_wrong_password
 from smart_unpacker.extraction.result import ExtractionResult
 
 
@@ -33,17 +33,23 @@ class PreExtractInspector:
                 return self._skip(task, output_dir, staged.cleanup_parts, "分卷缺失或不完整")
             if health.is_broken:
                 return self._skip(task, output_dir, staged.cleanup_parts, "压缩包损坏")
-            if health.is_encrypted or health.is_wrong_password:
-                structural_test = get_native_password_tester().test_archive(staged.archive, part_paths=staged.run_parts)
-                if has_archive_damage_signals(structural_test.message):
-                    return self._skip(task, output_dir, staged.cleanup_parts, "压缩包损坏")
 
             password = ""
             if health.is_encrypted or health.is_wrong_password:
-                if not self.password_resolver.password_manager.passwords:
+                if not self.password_resolver.password_tester.passwords:
+                    if (health.archive_type or "").lower() != "pe":
+                        structural_test = get_native_password_tester().test_archive(
+                            staged.archive,
+                            part_paths=staged.run_parts,
+                        )
+                        if has_archive_damage_signals(structural_test.message):
+                            return self._skip(task, output_dir, staged.cleanup_parts, "压缩包损坏")
                     return self._skip(task, output_dir, staged.cleanup_parts, "密码错误或未知密码")
                 resolution = self.password_resolver.resolve(staged.archive, task.fact_bag, part_paths=staged.run_parts)
                 if resolution.password is None:
+                    error_text = resolution.error_text or ""
+                    if has_archive_damage_signals(error_text) and not has_definite_wrong_password(error_text):
+                        return self._skip(task, output_dir, staged.cleanup_parts, "压缩包损坏")
                     return self._skip(task, output_dir, staged.cleanup_parts, "密码错误或未知密码")
                 password = resolution.password or ""
                 task.fact_bag.set("resource.password_resolved", True)

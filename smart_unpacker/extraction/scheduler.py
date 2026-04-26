@@ -8,13 +8,14 @@ from smart_unpacker.extraction.internal.executor import TaskExecutor
 from smart_unpacker.extraction.internal.errors import classify_extract_error
 from smart_unpacker.extraction.internal.metadata import ArchiveMetadataScanner
 from smart_unpacker.extraction.internal.output_paths import default_output_dir_for_task
-from smart_unpacker.extraction.internal.password_manager import PasswordManager
+from smart_unpacker.extraction.internal.password_manager import ArchivePasswordTester
 from smart_unpacker.extraction.internal.password_resolution import PasswordResolver
 from smart_unpacker.extraction.internal.preflight import PreExtractInspector
 from smart_unpacker.extraction.result import ExtractionResult
 from smart_unpacker.contracts.tasks import ArchiveTask, SplitArchiveInfo
 from smart_unpacker.rename.volume_normalizer import SplitVolumeNormalizer
 from smart_unpacker.relations.internal.group_builder import RelationsGroupBuilder
+from smart_unpacker.passwords import PasswordStore
 from smart_unpacker.support.resources import get_7z_path
 
 
@@ -28,11 +29,12 @@ class ExtractionScheduler:
         scheduler_profile: str | None = "auto",
         max_workers: int | None = None,
     ):
-        self.password_manager = PasswordManager(
+        self.password_store = PasswordStore.from_sources(
             cli_passwords=cli_passwords or [],
             builtin_passwords=builtin_passwords or [],
         )
-        self.password_resolver = PasswordResolver(self.password_manager)
+        self.password_tester = ArchivePasswordTester(password_store=self.password_store)
+        self.password_resolver = PasswordResolver(self.password_tester)
         self.metadata_scanner = ArchiveMetadataScanner()
         self.seven_z_path = get_7z_path()
         self.volume_normalizer = SplitVolumeNormalizer()
@@ -48,7 +50,7 @@ class ExtractionScheduler:
 
     @property
     def recent_passwords(self) -> list[str]:
-        return self.password_manager.recent_passwords
+        return self.password_store.recent_passwords
 
     def default_output_dir_for_task(self, task: ArchiveTask) -> str:
         return default_output_dir_for_task(task)
@@ -141,7 +143,7 @@ class ExtractionScheduler:
                 correct_pwd = resolution.password
                 test_result = resolution.test_result
                 test_err = resolution.error_text
-                if self.password_manager.passwords:
+                if self.password_store.has_candidates():
                     if correct_pwd is None and "wrong password" in test_err:
                         shutil.rmtree(out_dir, ignore_errors=True)
                         return self._failed(archive, out_dir, run_parts, "密码错误或未知密码")

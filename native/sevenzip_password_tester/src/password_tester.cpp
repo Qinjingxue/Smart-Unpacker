@@ -687,12 +687,35 @@ std::wstring lower_extension(const std::wstring& path) {
     return ext;
 }
 
-std::vector<GUID> candidate_formats(const std::wstring& archive_path) {
+std::wstring split_volume_family(const std::vector<std::wstring>& part_paths) {
+    for (const auto& path : sorted_data_volume_paths(part_paths)) {
+        const std::wstring name = filename_lower(path);
+        if (name.find(L".zip.") != std::wstring::npos) {
+            return L"zip";
+        }
+        if (name.find(L".7z.") != std::wstring::npos) {
+            return L"7z";
+        }
+        if (name.find(L".rar.") != std::wstring::npos || name.find(L".part") != std::wstring::npos || ends_with(name, L".r00")) {
+            return L"rar";
+        }
+    }
+    return L"";
+}
+
+std::vector<GUID> candidate_formats(const std::wstring& archive_path, const std::vector<std::wstring>& part_paths = {}) {
     const std::wstring ext = lower_extension(archive_path);
     std::wstring name = std::filesystem::path(archive_path).filename().wstring();
     std::transform(name.begin(), name.end(), name.begin(), [](wchar_t ch) { return static_cast<wchar_t>(::towlower(ch)); });
+    const std::wstring split_family = split_volume_family(part_paths);
     std::vector<unsigned char> ids;
-    if (ext == L".zip" || ext == L".jar" || ext == L".docx" || ext == L".xlsx" || ext == L".apk") {
+    if (is_sfx_path(archive_path) && split_family == L"zip") {
+        ids = {0x01};
+    } else if (is_sfx_path(archive_path) && split_family == L"7z") {
+        ids = {0x07};
+    } else if (is_sfx_path(archive_path) && split_family == L"rar") {
+        ids = {0x03, 0xCC};
+    } else if (ext == L".zip" || ext == L".jar" || ext == L".docx" || ext == L".xlsx" || ext == L".apk") {
         ids = {0x01};
     } else if (name.size() >= 8 && name.compare(name.size() - 8, 8, L".zip.001") == 0) {
         ids = {0x01, 0x07};
@@ -729,9 +752,7 @@ bool looks_missing_volume(const std::wstring& archive_path, Int32 op_res) {
     if (op_res != kOpUnexpectedEnd && op_res != kOpUnavailable && op_res != kOpHeadersError) {
         return false;
     }
-    const std::wstring name = std::filesystem::path(archive_path).filename().wstring();
-    std::wstring lower = name;
-    std::transform(lower.begin(), lower.end(), lower.begin(), [](wchar_t ch) { return static_cast<wchar_t>(::towlower(ch)); });
+    const std::wstring lower = filename_lower(archive_path);
     return lower.find(L".001") != std::wstring::npos ||
         lower.find(L".part") != std::wstring::npos ||
         lower.find(L".r00") != std::wstring::npos ||
@@ -746,7 +767,7 @@ bool has_numbered_split_head(const std::vector<std::wstring>& part_paths) {
         if (name.size() >= 4 && name.compare(name.size() - 4, 4, L".001") == 0) {
             return true;
         }
-        if (parse_volume_number(path).value_or(0) == 1) {
+        if (name.find(L".part") != std::wstring::npos && parse_volume_number(path).value_or(0) == 1) {
             return true;
         }
     }
@@ -787,6 +808,14 @@ bool has_split_volume_gap(const std::vector<std::wstring>& part_paths) {
         expected += 1;
     }
     return false;
+}
+
+bool has_split_volume_evidence(const std::wstring& archive_path, const std::vector<std::wstring>& part_paths) {
+    const auto volumes = sorted_data_volume_paths(unique_existing_paths(archive_path, part_paths));
+    if (volumes.size() > 1) {
+        return true;
+    }
+    return looks_missing_volume(archive_path, kOpHeadersError);
 }
 
 std::wstring archive_type_for_path(const std::wstring& path) {
@@ -947,7 +976,7 @@ HealthProbeResult check_archive_health_internal(
     HRESULT last_hr = E_FAIL;
     Int32 last_op_res = kOpOk;
 
-    for (const GUID& format : candidate_formats(archive_path)) {
+    for (const GUID& format : candidate_formats(archive_path, part_paths)) {
         ComPtr<IInArchive> archive;
         HRESULT hr = create_object(&format, &IID_IInArchive, reinterpret_cast<void**>(archive.out()));
         if (hr != S_OK || !archive) {
@@ -993,7 +1022,8 @@ HealthProbeResult check_archive_health_internal(
             result.message = "archive health check passed";
             return result;
         }
-        if (has_split_volume_gap(part_paths) || looks_missing_volume(archive_path, last_op_res) || likely_missing_split_tail(part_paths)) {
+        if (has_split_volume_gap(part_paths) || likely_missing_split_tail(part_paths) ||
+            (has_split_volume_evidence(archive_path, part_paths) && looks_missing_volume(archive_path, last_op_res))) {
             result.status = PasswordTestStatus::Damaged;
             result.missing_volume = true;
             result.message = "split archive is missing one or more volumes";
@@ -1030,7 +1060,8 @@ HealthProbeResult check_archive_health_internal(
     if (!any_format_created) {
         result.status = PasswordTestStatus::Unsupported;
         result.message = "7z.dll did not create a supported archive handler";
-    } else if (has_split_volume_gap(part_paths) || looks_missing_volume(archive_path, last_op_res) || likely_missing_split_tail(part_paths)) {
+    } else if (has_split_volume_gap(part_paths) || likely_missing_split_tail(part_paths) ||
+        (has_split_volume_evidence(archive_path, part_paths) && looks_missing_volume(archive_path, last_op_res))) {
         result.status = PasswordTestStatus::Damaged;
         result.is_archive = true;
         result.missing_volume = true;
@@ -1082,7 +1113,7 @@ ResourceAnalysisResult analyze_archive_resources_internal(
     bool any_format_created = false;
     HRESULT last_hr = E_FAIL;
 
-    for (const GUID& format : candidate_formats(archive_path)) {
+    for (const GUID& format : candidate_formats(archive_path, part_paths)) {
         ComPtr<IInArchive> archive;
         HRESULT hr = create_object(&format, &IID_IInArchive, reinterpret_cast<void**>(archive.out()));
         if (hr != S_OK || !archive) {
@@ -1212,7 +1243,7 @@ PasswordTestResult test_one_password(
     HRESULT last_hr = E_FAIL;
     Int32 last_op_res = kOpOk;
 
-    for (const GUID& format : candidate_formats(archive_path)) {
+    for (const GUID& format : candidate_formats(archive_path, part_paths)) {
         ComPtr<IInArchive> archive;
         HRESULT hr = create_object(&format, &IID_IInArchive, reinterpret_cast<void**>(archive.out()));
         if (hr != S_OK || !archive) {

@@ -1,60 +1,37 @@
 import subprocess
 from typing import List, Optional, Tuple
 
-from smart_unpacker.extraction.internal.errors import (
-    has_archive_damage_signals,
-    has_definite_wrong_password,
-)
-from smart_unpacker.passwords import dedupe_passwords, parse_password_lines, read_password_file
 from smart_unpacker.extraction.internal.native_password_tester import get_native_password_tester
+from smart_unpacker.passwords import PasswordStore
 
-class PasswordManager:
+class ArchivePasswordTester:
     def __init__(
         self,
         cli_passwords: List[str] = None,
         builtin_passwords_file: str = None,
         builtin_passwords: List[str] = None,
+        password_store: PasswordStore | None = None,
     ):
-        self.user_passwords = dedupe_passwords(cli_passwords or [])
-        if builtin_passwords is not None:
-            self.builtin_passwords = dedupe_passwords(builtin_passwords)
-        elif builtin_passwords_file:
-            try:
-                self.builtin_passwords = dedupe_passwords(read_password_file(builtin_passwords_file))
-            except Exception:
-                self.builtin_passwords = []
-        else:
-            self.builtin_passwords = []
-        self.recent_successful: List[str] = []
+        self.password_store = password_store or PasswordStore.from_sources(
+            cli_passwords=cli_passwords or [],
+            builtin_passwords=builtin_passwords,
+            builtin_passwords_file=builtin_passwords_file,
+        )
         self.native_password_tester = get_native_password_tester()
 
     @property
     def recent_passwords(self) -> List[str]:
-        return list(getattr(self, "recent_successful", []))
+        return list(self.password_store.recent_passwords)
 
     @property
     def passwords(self) -> List[str]:
-        return self.get_passwords_to_try()
+        return self.password_store.candidates()
 
     def get_passwords_to_try(self) -> List[str]:
-        return dedupe_passwords(
-            list(getattr(self, "user_passwords", []))
-            + list(getattr(self, "recent_successful", []))
-            + list(getattr(self, "builtin_passwords", []))
-        )
+        return self.password_store.candidates()
 
     def add_recent_password(self, pwd: str):
-        if not pwd:
-            return
-        if pwd in self.recent_successful:
-            self.recent_successful.remove(pwd)
-        self.recent_successful.insert(0, pwd)
-
-    def _has_archive_damage_signals(self, err_text: str) -> bool:
-        return has_archive_damage_signals(err_text)
-
-    def _has_definite_wrong_password(self, err_text: str) -> bool:
-        return has_definite_wrong_password(err_text)
+        self.password_store.remember_success(pwd)
 
     def test_password(self, archive_path: str, password: str = "", part_paths: list[str] | None = None) -> Tuple[subprocess.CompletedProcess, str]:
         native_test = self.native_password_tester.test_archive(archive_path, password=password, part_paths=part_paths)
@@ -78,6 +55,9 @@ class PasswordManager:
         native_result = native_attempt.as_completed_process(archive_path)
         if native_attempt.ok:
             pwd = passwords_to_try[native_attempt.matched_index]
-            self.add_recent_password(pwd)
+            self.password_store.remember_success(pwd)
             return pwd, native_result, ""
         return None, native_result, native_attempt.message.lower() or "wrong password"
+
+
+PasswordManager = ArchivePasswordTester

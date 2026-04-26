@@ -58,7 +58,7 @@ def test_pipeline_runner_exposes_recent_passwords_without_password_manager():
         "user_passwords": ["secret"],
         "builtin_passwords": [],
     })))
-    runner.extractor.password_manager.add_recent_password("secret")
+    runner.extractor.password_store.remember_success("secret")
 
     assert not hasattr(runner, "password_manager")
     assert runner.recent_passwords == ["secret"]
@@ -89,6 +89,14 @@ def test_batch_skips_stale_nested_output_tasks_in_same_round(tmp_path, monkeypat
         return ExtractionResult(success=True, archive=task.main_path, out_dir=out_dir, all_parts=task.all_parts)
 
     monkeypatch.setattr(runner.extractor, "extract", fake_extract)
+    monkeypatch.setattr(
+        runner.extractor,
+        "extract_all",
+        lambda tasks, output_dir_resolver=None: [
+            (task, fake_extract(task, output_dir_resolver(task)))
+            for task in tasks
+        ],
+    )
     runner.batch_runner.execute([task_for(archive), task_for(nested)])
 
     assert extracted == [str(archive)]

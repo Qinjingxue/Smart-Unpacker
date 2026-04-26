@@ -161,8 +161,8 @@ class ArchiveFixtureFactory:
             create_7z_archive(source_dir, archive_path, password=password, split=split, sfx=sfx)
             return
         if archive_format == "zip":
-            archive_path = archive_dir / f"{case_id}.zip"
-            create_zip_archive(source_dir, archive_path, password=password, split=split)
+            archive_path = archive_dir / f"{case_id}{'.exe' if sfx else '.zip'}"
+            create_zip_archive(source_dir, archive_path, password=password, split=split, sfx=sfx)
             return
         if archive_format == "rar":
             archive_path = archive_dir / f"{case_id}{'.exe' if sfx else '.rar'}"
@@ -206,13 +206,19 @@ def create_7z_archive(source_dir: Path, output_path: Path, password: str | None 
     run_cmd(cmd, output_path.parent)
 
 
-def create_zip_archive(source_dir: Path, output_path: Path, password: str | None = None, split: bool = False):
+def create_zip_archive(source_dir: Path, output_path: Path, password: str | None = None, split: bool = False, sfx: bool = False):
+    tools = get_test_tools()
     seven_zip = require_7z()
     cmd = [str(seven_zip), "a", str(output_path), str(source_dir), "-tzip", "-mx=0", "-y"]
     if password:
         cmd.append(f"-p{password}")
     if split:
         cmd.append("-v100k")
+    if sfx:
+        sfx_path = tools["seven_zip_sfx"]
+        if not sfx_path or not sfx_path.is_file():
+            raise FileNotFoundError("7z SFX module is required for ZIP SFX samples.")
+        cmd.append(f"-sfx{sfx_path}")
     run_cmd(cmd, output_path.parent)
 
 
