@@ -37,6 +37,7 @@ constexpr Int32 kOpIsNotArc = 7;
 constexpr Int32 kOpHeadersError = 8;
 constexpr Int32 kOpWrongPassword = 9;
 
+constexpr UInt32 kpidName = 4;
 constexpr UInt32 kpidIsDir = 6;
 constexpr UInt32 kpidSize = 7;
 constexpr UInt32 kpidPackSize = 8;
@@ -57,6 +58,8 @@ const GUID IID_IArchiveOpenCallback = {
     0x23170F69, 0x40C1, 0x278A, {0x00, 0x00, 0x00, 0x06, 0x00, 0x10, 0x00, 0x00}};
 const GUID IID_IArchiveExtractCallback = {
     0x23170F69, 0x40C1, 0x278A, {0x00, 0x00, 0x00, 0x06, 0x00, 0x20, 0x00, 0x00}};
+const GUID IID_IArchiveOpenVolumeCallback = {
+    0x23170F69, 0x40C1, 0x278A, {0x00, 0x00, 0x00, 0x06, 0x00, 0x30, 0x00, 0x00}};
 const GUID IID_IInArchive = {
     0x23170F69, 0x40C1, 0x278A, {0x00, 0x00, 0x00, 0x06, 0x00, 0x60, 0x00, 0x00}};
 
@@ -80,6 +83,11 @@ struct IProgress : public IUnknown {
 struct IArchiveOpenCallback : public IUnknown {
     virtual HRESULT STDMETHODCALLTYPE SetTotal(const UInt64* files, const UInt64* bytes) = 0;
     virtual HRESULT STDMETHODCALLTYPE SetCompleted(const UInt64* files, const UInt64* bytes) = 0;
+};
+
+struct IArchiveOpenVolumeCallback : public IUnknown {
+    virtual HRESULT STDMETHODCALLTYPE GetProperty(UInt32 propID, PROPVARIANT* value) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetStream(const wchar_t* name, IInStream** inStream) = 0;
 };
 
 struct ISequentialOutStream : public IUnknown {
@@ -220,9 +228,176 @@ private:
     HANDLE handle_ = INVALID_HANDLE_VALUE;
 };
 
-class OpenCallback final : public IArchiveOpenCallback, public ICryptoGetTextPassword {
+class MultiFileInStream final : public IInStream {
 public:
-    explicit OpenCallback(std::wstring password) : password_(std::move(password)) {}
+    explicit MultiFileInStream(std::vector<std::wstring> paths) : paths_(std::move(paths)) {
+        UInt64 total = 0;
+        for (const auto& path : paths_) {
+            try {
+                const UInt64 size = static_cast<UInt64>(std::filesystem::file_size(path));
+                sizes_.push_back(size);
+                offsets_.push_back(total);
+                total += size;
+            } catch (...) {
+                valid_ = false;
+                sizes_.push_back(0);
+                offsets_.push_back(total);
+            }
+        }
+        total_size_ = total;
+        valid_ = valid_ && !paths_.empty();
+    }
+
+    bool is_open() const { return valid_; }
+
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** object) override {
+        if (!object) {
+            return E_POINTER;
+        }
+        *object = nullptr;
+        if (IsEqualGUID(iid, IID_IUnknown) || IsEqualGUID(iid, IID_ISequentialInStream) || IsEqualGUID(iid, IID_IInStream)) {
+            *object = static_cast<IInStream*>(this);
+            AddRef();
+            return S_OK;
+        }
+        return E_NOINTERFACE;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return InterlockedIncrement(&refs_); }
+    ULONG STDMETHODCALLTYPE Release() override {
+        const ULONG refs = InterlockedDecrement(&refs_);
+        if (refs == 0) {
+            delete this;
+        }
+        return refs;
+    }
+    HRESULT STDMETHODCALLTYPE Read(void* data, UInt32 size, UInt32* processedSize) override {
+        if (processedSize) {
+            *processedSize = 0;
+        }
+        if (!valid_ || !data) {
+            return E_FAIL;
+        }
+
+        auto* out = static_cast<unsigned char*>(data);
+        UInt32 total_read = 0;
+        while (total_read < size && position_ < total_size_) {
+            std::size_t index = find_part_index(position_);
+            if (index >= paths_.size()) {
+                break;
+            }
+            const UInt64 part_offset = position_ - offsets_[index];
+            const UInt64 remaining_in_part = sizes_[index] - part_offset;
+            const UInt32 want = static_cast<UInt32>(std::min<UInt64>(size - total_read, remaining_in_part));
+            if (want == 0) {
+                break;
+            }
+
+            HANDLE handle = CreateFileW(paths_[index].c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                        nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (handle == INVALID_HANDLE_VALUE) {
+                return HRESULT_FROM_WIN32(GetLastError());
+            }
+            LARGE_INTEGER distance{};
+            distance.QuadPart = static_cast<LONGLONG>(part_offset);
+            if (!SetFilePointerEx(handle, distance, nullptr, FILE_BEGIN)) {
+                const DWORD error = GetLastError();
+                CloseHandle(handle);
+                return HRESULT_FROM_WIN32(error);
+            }
+            DWORD read = 0;
+            const BOOL ok = ReadFile(handle, out + total_read, want, &read, nullptr);
+            const DWORD error = GetLastError();
+            CloseHandle(handle);
+            if (!ok) {
+                return HRESULT_FROM_WIN32(error);
+            }
+            if (read == 0) {
+                break;
+            }
+            total_read += read;
+            position_ += read;
+        }
+        if (processedSize) {
+            *processedSize = total_read;
+        }
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE Seek(Int64 offset, UInt32 seekOrigin, UInt64* newPosition) override {
+        Int64 base = 0;
+        if (seekOrigin == FILE_CURRENT) {
+            base = static_cast<Int64>(position_);
+        } else if (seekOrigin == FILE_END) {
+            base = static_cast<Int64>(total_size_);
+        }
+        const Int64 next = base + offset;
+        if (next < 0) {
+            return E_INVALIDARG;
+        }
+        position_ = static_cast<UInt64>(next);
+        if (newPosition) {
+            *newPosition = position_;
+        }
+        return S_OK;
+    }
+
+private:
+    std::size_t find_part_index(UInt64 position) const {
+        for (std::size_t index = 0; index < paths_.size(); ++index) {
+            if (position >= offsets_[index] && position < offsets_[index] + sizes_[index]) {
+                return index;
+            }
+        }
+        return paths_.size();
+    }
+
+    LONG refs_ = 1;
+    std::vector<std::wstring> paths_;
+    std::vector<UInt64> sizes_;
+    std::vector<UInt64> offsets_;
+    UInt64 total_size_ = 0;
+    UInt64 position_ = 0;
+    bool valid_ = true;
+};
+
+ComPtr<IInStream> open_archive_stream(
+    const std::wstring& archive_path,
+    const std::vector<std::wstring>& part_paths,
+    bool& opened
+) {
+    opened = false;
+    std::vector<std::wstring> paths = part_paths.empty() ? std::vector<std::wstring>{archive_path} : part_paths;
+    if (paths.size() > 1) {
+        auto* stream = new MultiFileInStream(std::move(paths));
+        opened = stream->is_open();
+        return ComPtr<IInStream>(stream);
+    }
+
+    auto* stream = new FileInStream(archive_path);
+    opened = stream->is_open();
+    return ComPtr<IInStream>(stream);
+}
+
+class OpenCallback final : public IArchiveOpenCallback, public IArchiveOpenVolumeCallback, public ICryptoGetTextPassword {
+public:
+    explicit OpenCallback(std::wstring password, std::wstring archive_path = L"", std::vector<std::wstring> part_paths = {})
+        : password_(std::move(password)),
+          archive_path_(std::move(archive_path)),
+          part_paths_(std::move(part_paths)) {
+        for (const auto& path : part_paths_) {
+            const std::wstring name = lower_path(std::filesystem::path(path).filename().wstring());
+            if (!name.empty()) {
+                volume_paths_[name] = path;
+            }
+            volume_paths_[lower_path(std::filesystem::path(path).wstring())] = path;
+        }
+        if (!archive_path_.empty()) {
+            const std::wstring name = lower_path(std::filesystem::path(archive_path_).filename().wstring());
+            if (!name.empty()) {
+                volume_paths_[name] = archive_path_;
+            }
+            volume_paths_[lower_path(std::filesystem::path(archive_path_).wstring())] = archive_path_;
+        }
+    }
 
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** object) override {
         if (!object) {
@@ -231,6 +406,8 @@ public:
         *object = nullptr;
         if (IsEqualGUID(iid, IID_IUnknown) || IsEqualGUID(iid, IID_IArchiveOpenCallback)) {
             *object = static_cast<IArchiveOpenCallback*>(this);
+        } else if (IsEqualGUID(iid, IID_IArchiveOpenVolumeCallback)) {
+            *object = static_cast<IArchiveOpenVolumeCallback*>(this);
         } else if (IsEqualGUID(iid, IID_ICryptoGetTextPassword)) {
             *object = static_cast<ICryptoGetTextPassword*>(this);
         } else {
@@ -249,6 +426,45 @@ public:
     }
     HRESULT STDMETHODCALLTYPE SetTotal(const UInt64*, const UInt64*) override { return S_OK; }
     HRESULT STDMETHODCALLTYPE SetCompleted(const UInt64*, const UInt64*) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE GetProperty(UInt32 propID, PROPVARIANT* value) override {
+        if (!value) {
+            return E_POINTER;
+        }
+        value->vt = VT_EMPTY;
+        if (propID == kpidName && !archive_path_.empty()) {
+            value->vt = VT_BSTR;
+            value->bstrVal = SysAllocString(archive_path_.c_str());
+            return value->bstrVal ? S_OK : E_OUTOFMEMORY;
+        }
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE GetStream(const wchar_t* name, IInStream** inStream) override {
+        if (!inStream) {
+            return E_POINTER;
+        }
+        *inStream = nullptr;
+        if (!name) {
+            return E_FAIL;
+        }
+
+        std::wstring requested = lower_path(std::filesystem::path(name).filename().wstring());
+        auto found = volume_paths_.find(requested);
+        if (found == volume_paths_.end()) {
+            requested = lower_path(std::wstring(name));
+            found = volume_paths_.find(requested);
+        }
+        if (found == volume_paths_.end()) {
+            return E_FAIL;
+        }
+
+        auto* stream = new FileInStream(found->second);
+        if (!stream->is_open()) {
+            stream->Release();
+            return E_FAIL;
+        }
+        *inStream = stream;
+        return S_OK;
+    }
     HRESULT STDMETHODCALLTYPE CryptoGetTextPassword(BSTR* password) override {
         if (!password) {
             return E_POINTER;
@@ -258,8 +474,16 @@ public:
     }
 
 private:
+    static std::wstring lower_path(std::wstring value) {
+        std::transform(value.begin(), value.end(), value.begin(), [](wchar_t ch) { return static_cast<wchar_t>(::towlower(ch)); });
+        return value;
+    }
+
     LONG refs_ = 1;
     std::wstring password_;
+    std::wstring archive_path_;
+    std::vector<std::wstring> part_paths_;
+    std::map<std::wstring, std::wstring> volume_paths_;
 };
 
 class ExtractCallback final : public IArchiveExtractCallback, public ICryptoGetTextPassword {
@@ -326,9 +550,15 @@ std::wstring lower_extension(const std::wstring& path) {
 
 std::vector<GUID> candidate_formats(const std::wstring& archive_path) {
     const std::wstring ext = lower_extension(archive_path);
+    std::wstring name = std::filesystem::path(archive_path).filename().wstring();
+    std::transform(name.begin(), name.end(), name.begin(), [](wchar_t ch) { return static_cast<wchar_t>(::towlower(ch)); });
     std::vector<unsigned char> ids;
     if (ext == L".zip" || ext == L".jar" || ext == L".docx" || ext == L".xlsx" || ext == L".apk") {
         ids = {0x01};
+    } else if (name.size() >= 8 && name.compare(name.size() - 8, 8, L".zip.001") == 0) {
+        ids = {0x01, 0x07};
+    } else if (name.size() >= 7 && name.compare(name.size() - 7, 7, L".7z.001") == 0) {
+        ids = {0x07, 0x01};
     } else if (ext == L".7z" || ext == L".001") {
         ids = {0x07};
     } else if (ext == L".rar" || ext == L".r00") {
@@ -352,6 +582,10 @@ bool looks_damaged(Int32 op_res) {
     return op_res == kOpUnexpectedEnd || op_res == kOpHeadersError || op_res == kOpIsNotArc || op_res == kOpUnavailable;
 }
 
+bool looks_damaged_health_result(const std::wstring& password, Int32 op_res) {
+    return looks_damaged(op_res) || (password.empty() && (op_res == kOpDataError || op_res == kOpCrcError));
+}
+
 bool looks_missing_volume(const std::wstring& archive_path, Int32 op_res) {
     if (op_res != kOpUnexpectedEnd && op_res != kOpUnavailable && op_res != kOpHeadersError) {
         return false;
@@ -363,6 +597,31 @@ bool looks_missing_volume(const std::wstring& archive_path, Int32 op_res) {
         lower.find(L".part") != std::wstring::npos ||
         lower.find(L".r00") != std::wstring::npos ||
         lower.find(L".r01") != std::wstring::npos;
+}
+
+UInt64 file_size_or_zero(const std::wstring& path);
+
+bool has_numbered_split_head(const std::vector<std::wstring>& part_paths) {
+    for (const auto& path : part_paths) {
+        std::wstring name = std::filesystem::path(path).filename().wstring();
+        std::transform(name.begin(), name.end(), name.begin(), [](wchar_t ch) { return static_cast<wchar_t>(::towlower(ch)); });
+        if (name.size() >= 4 && name.compare(name.size() - 4, 4, L".001") == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool likely_missing_split_tail(const std::vector<std::wstring>& part_paths) {
+    if (part_paths.empty() || !has_numbered_split_head(part_paths)) {
+        return false;
+    }
+    if (part_paths.size() == 1) {
+        return true;
+    }
+    const UInt64 first_size = file_size_or_zero(part_paths.front());
+    const UInt64 last_size = file_size_or_zero(part_paths.back());
+    return first_size > 0 && last_size >= first_size;
 }
 
 std::wstring archive_type_for_path(const std::wstring& path) {
@@ -400,6 +659,15 @@ UInt64 file_size_or_zero(const std::wstring& path) {
     } catch (...) {
         return 0;
     }
+}
+
+UInt64 archive_input_size(const std::wstring& archive_path, const std::vector<std::wstring>& part_paths) {
+    const auto paths = part_paths.empty() ? std::vector<std::wstring>{archive_path} : part_paths;
+    UInt64 total = 0;
+    for (const auto& path : paths) {
+        total += file_size_or_zero(path);
+    }
+    return total;
 }
 
 bool prop_bool(const PROPVARIANT& value) {
@@ -470,6 +738,26 @@ bool get_item_property(IInArchive* archive, UInt32 index, UInt32 prop_id, PROPVA
     return archive->GetProperty(index, prop_id, &value) == S_OK && value.vt != VT_EMPTY;
 }
 
+bool archive_has_encrypted_items(IInArchive* archive) {
+    UInt32 num_items = 0;
+    if (!archive || archive->GetNumberOfItems(&num_items) != S_OK) {
+        return false;
+    }
+    for (UInt32 index = 0; index < num_items; ++index) {
+        PROPVARIANT value{};
+        if (get_item_property(archive, index, kpidEncrypted, value)) {
+            const bool encrypted = prop_bool(value);
+            clear_prop(value);
+            if (encrypted) {
+                return true;
+            }
+        } else {
+            clear_prop(value);
+        }
+    }
+    return false;
+}
+
 struct HealthProbeResult {
     PasswordTestStatus status = PasswordTestStatus::BackendUnavailable;
     bool backend_available = false;
@@ -485,7 +773,8 @@ struct HealthProbeResult {
 HealthProbeResult check_archive_health_internal(
     CreateObjectFunc create_object,
     const std::wstring& archive_path,
-    const std::wstring& password
+    const std::wstring& password,
+    const std::vector<std::wstring>& part_paths
 ) {
     HealthProbeResult result;
     result.backend_available = true;
@@ -502,21 +791,22 @@ HealthProbeResult check_archive_health_internal(
         }
         any_format_created = true;
 
-        ComPtr<IInStream> stream(new FileInStream(archive_path));
-        auto* file_stream = static_cast<FileInStream*>(stream.get());
-        if (!file_stream->is_open()) {
+        bool stream_opened = false;
+        ComPtr<IInStream> stream = open_archive_stream(archive_path, part_paths, stream_opened);
+        if (!stream_opened) {
             result.status = PasswordTestStatus::Error;
             result.message = "archive file could not be opened";
             return result;
         }
 
-        ComPtr<IArchiveOpenCallback> open_callback(new OpenCallback(password));
+        ComPtr<IArchiveOpenCallback> open_callback(new OpenCallback(password, archive_path, part_paths));
         hr = archive->Open(stream.get(), nullptr, open_callback.get());
         if (hr != S_OK) {
             last_hr = hr;
             continue;
         }
 
+        const bool opened_as_encrypted = archive_has_encrypted_items(archive.get());
         auto* raw_extract_callback = new ExtractCallback(password);
         ComPtr<IArchiveExtractCallback> extract_callback(raw_extract_callback);
         hr = archive->Extract(nullptr, static_cast<UInt32>(kAllItems), kTestMode, extract_callback.get());
@@ -531,6 +821,24 @@ HealthProbeResult check_archive_health_internal(
             result.message = "archive health check passed";
             return result;
         }
+        if (looks_missing_volume(archive_path, last_op_res) || likely_missing_split_tail(part_paths)) {
+            result.status = PasswordTestStatus::Damaged;
+            result.missing_volume = true;
+            result.message = "split archive is missing one or more volumes";
+            return result;
+        }
+        if (looks_damaged_health_result(password, last_op_res)) {
+            result.status = PasswordTestStatus::Damaged;
+            result.damaged = true;
+            result.message = "archive appears damaged";
+            return result;
+        }
+        if (!opened_as_encrypted && password.empty() && hr == S_FALSE && last_op_res == kOpOk) {
+            result.status = PasswordTestStatus::Damaged;
+            result.damaged = true;
+            result.message = "archive appears damaged";
+            return result;
+        }
         if (looks_wrong_password(hr, last_op_res)) {
             result.status = PasswordTestStatus::WrongPassword;
             result.encrypted = true;
@@ -538,13 +846,7 @@ HealthProbeResult check_archive_health_internal(
             result.message = "archive is encrypted or password is wrong";
             return result;
         }
-        if (looks_missing_volume(archive_path, last_op_res)) {
-            result.status = PasswordTestStatus::Damaged;
-            result.missing_volume = true;
-            result.message = "split archive is missing one or more volumes";
-            return result;
-        }
-        if (looks_damaged(last_op_res)) {
+        if (looks_damaged_health_result(password, last_op_res)) {
             result.status = PasswordTestStatus::Damaged;
             result.damaged = true;
             result.message = "archive appears damaged";
@@ -556,12 +858,12 @@ HealthProbeResult check_archive_health_internal(
     if (!any_format_created) {
         result.status = PasswordTestStatus::Unsupported;
         result.message = "7z.dll did not create a supported archive handler";
-    } else if (looks_missing_volume(archive_path, last_op_res)) {
+    } else if (looks_missing_volume(archive_path, last_op_res) || likely_missing_split_tail(part_paths)) {
         result.status = PasswordTestStatus::Damaged;
         result.is_archive = true;
         result.missing_volume = true;
         result.message = "split archive is missing one or more volumes";
-    } else if (looks_damaged(last_op_res)) {
+    } else if (looks_damaged_health_result(password, last_op_res)) {
         result.status = PasswordTestStatus::Damaged;
         result.is_archive = true;
         result.damaged = true;
@@ -600,10 +902,11 @@ struct ResourceAnalysisResult {
 ResourceAnalysisResult analyze_archive_resources_internal(
     CreateObjectFunc create_object,
     const std::wstring& archive_path,
-    const std::wstring& password
+    const std::wstring& password,
+    const std::vector<std::wstring>& part_paths
 ) {
     ResourceAnalysisResult result;
-    result.archive_size = file_size_or_zero(archive_path);
+    result.archive_size = archive_input_size(archive_path, part_paths);
     bool any_format_created = false;
     HRESULT last_hr = E_FAIL;
 
@@ -616,15 +919,15 @@ ResourceAnalysisResult analyze_archive_resources_internal(
         }
         any_format_created = true;
 
-        ComPtr<IInStream> stream(new FileInStream(archive_path));
-        auto* file_stream = static_cast<FileInStream*>(stream.get());
-        if (!file_stream->is_open()) {
+        bool stream_opened = false;
+        ComPtr<IInStream> stream = open_archive_stream(archive_path, part_paths, stream_opened);
+        if (!stream_opened) {
             result.status = PasswordTestStatus::Error;
             result.message = "archive file could not be opened";
             return result;
         }
 
-        ComPtr<IArchiveOpenCallback> open_callback(new OpenCallback(password));
+        ComPtr<IArchiveOpenCallback> open_callback(new OpenCallback(password, archive_path, part_paths));
         hr = archive->Open(stream.get(), nullptr, open_callback.get());
         if (hr != S_OK) {
             last_hr = hr;
@@ -726,7 +1029,8 @@ ResourceAnalysisResult analyze_archive_resources_internal(
 PasswordTestResult test_one_password(
     CreateObjectFunc create_object,
     const std::wstring& archive_path,
-    const std::wstring& password
+    const std::wstring& password,
+    const std::vector<std::wstring>& part_paths
 ) {
     PasswordTestResult result;
     result.backend_available = true;
@@ -745,15 +1049,15 @@ PasswordTestResult test_one_password(
         }
         any_format_created = true;
 
-        ComPtr<IInStream> stream(new FileInStream(archive_path));
-        auto* file_stream = static_cast<FileInStream*>(stream.get());
-        if (!file_stream->is_open()) {
+        bool stream_opened = false;
+        ComPtr<IInStream> stream = open_archive_stream(archive_path, part_paths, stream_opened);
+        if (!stream_opened) {
             result.status = PasswordTestStatus::Error;
             result.message = "archive file could not be opened";
             return result;
         }
 
-        ComPtr<IArchiveOpenCallback> open_callback(new OpenCallback(password));
+        ComPtr<IArchiveOpenCallback> open_callback(new OpenCallback(password, archive_path, part_paths));
         hr = archive->Open(stream.get(), nullptr, open_callback.get());
         if (hr != S_OK) {
             last_hr = hr;
@@ -818,9 +1122,33 @@ bool is_backend_available(const std::wstring& seven_zip_dll_path) {
 #endif
 }
 
+PasswordTestResult test_password_with_parts(
+    const std::wstring& seven_zip_dll_path,
+    const std::wstring& archive_path,
+    const std::vector<std::wstring>& part_paths,
+    const std::wstring& password
+);
+
+PasswordTestResult test_passwords_with_parts(
+    const std::wstring& seven_zip_dll_path,
+    const std::wstring& archive_path,
+    const std::vector<std::wstring>& part_paths,
+    const wchar_t* const* passwords,
+    int password_count
+);
+
 PasswordTestResult test_password(
     const std::wstring& seven_zip_dll_path,
     const std::wstring& archive_path,
+    const std::wstring& password
+) {
+    return test_password_with_parts(seven_zip_dll_path, archive_path, {archive_path}, password);
+}
+
+PasswordTestResult test_password_with_parts(
+    const std::wstring& seven_zip_dll_path,
+    const std::wstring& archive_path,
+    const std::vector<std::wstring>& part_paths,
     const std::wstring& password
 ) {
 #ifdef _WIN32
@@ -833,7 +1161,7 @@ PasswordTestResult test_password(
         return result;
     }
 
-    PasswordTestResult result = test_one_password(create_object, archive_path, password);
+    PasswordTestResult result = test_one_password(create_object, archive_path, password, part_paths.empty() ? std::vector<std::wstring>{archive_path} : part_paths);
     result.attempts = 1;
     result.matched_index = result.status == PasswordTestStatus::Ok ? 0 : -1;
     return result;
@@ -851,6 +1179,16 @@ PasswordTestResult test_password(
 PasswordTestResult test_passwords(
     const std::wstring& seven_zip_dll_path,
     const std::wstring& archive_path,
+    const wchar_t* const* passwords,
+    int password_count
+) {
+    return test_passwords_with_parts(seven_zip_dll_path, archive_path, {archive_path}, passwords, password_count);
+}
+
+PasswordTestResult test_passwords_with_parts(
+    const std::wstring& seven_zip_dll_path,
+    const std::wstring& archive_path,
+    const std::vector<std::wstring>& part_paths,
     const wchar_t* const* passwords,
     int password_count
 ) {
@@ -876,7 +1214,11 @@ PasswordTestResult test_passwords(
 
     for (int i = 0; i < password_count; ++i) {
         const wchar_t* raw_password = passwords[i] ? passwords[i] : L"";
-        PasswordTestResult current = test_one_password(create_object, archive_path, raw_password);
+        PasswordTestResult current = test_one_password(
+            create_object,
+            archive_path,
+            raw_password,
+            part_paths.empty() ? std::vector<std::wstring>{archive_path} : part_paths);
         current.attempts = i + 1;
         last = current;
         if (current.status == PasswordTestStatus::Ok) {
@@ -958,6 +1300,25 @@ int status_code(smart_unpacker::sevenzip::PasswordTestStatus status) {
     return static_cast<int>(status);
 }
 
+std::vector<std::wstring> collect_part_paths(
+    const wchar_t* archive_path,
+    const wchar_t* const* part_paths,
+    int part_count
+) {
+    std::vector<std::wstring> parts;
+    if (part_paths && part_count > 0) {
+        for (int i = 0; i < part_count; ++i) {
+            if (part_paths[i] && part_paths[i][0] != L'\0') {
+                parts.emplace_back(part_paths[i]);
+            }
+        }
+    }
+    if (parts.empty() && archive_path) {
+        parts.emplace_back(archive_path);
+    }
+    return parts;
+}
+
 }  // namespace
 
 SUP7Z_API int sup7z_try_passwords(
@@ -984,6 +1345,45 @@ SUP7Z_API int sup7z_try_passwords(
     const auto result = smart_unpacker::sevenzip::test_passwords(
         seven_zip_dll_path,
         archive_path,
+        passwords,
+        password_count);
+    if (matched_index) {
+        *matched_index = result.matched_index;
+    }
+    if (attempts) {
+        *attempts = result.attempts;
+    }
+    copy_message(message, message_chars, result.message);
+    return status_code(result.status);
+}
+
+SUP7Z_API int sup7z_try_passwords_with_parts(
+    const wchar_t* seven_zip_dll_path,
+    const wchar_t* archive_path,
+    const wchar_t* const* part_paths,
+    int part_count,
+    const wchar_t* const* passwords,
+    int password_count,
+    int* matched_index,
+    int* attempts,
+    wchar_t* message,
+    int message_chars
+) {
+    if (matched_index) {
+        *matched_index = -1;
+    }
+    if (attempts) {
+        *attempts = 0;
+    }
+    if (!seven_zip_dll_path || !archive_path) {
+        copy_message(message, message_chars, "missing required path");
+        return status_code(smart_unpacker::sevenzip::PasswordTestStatus::Error);
+    }
+
+    const auto result = smart_unpacker::sevenzip::test_passwords_with_parts(
+        seven_zip_dll_path,
+        archive_path,
+        collect_part_paths(archive_path, part_paths, part_count),
         passwords,
         password_count);
     if (matched_index) {
@@ -1029,7 +1429,59 @@ SUP7Z_API int sup7z_check_archive_health(
     const auto result = smart_unpacker::sevenzip::check_archive_health_internal(
         create_object,
         archive_path_text,
-        password ? password : L"");
+        password ? password : L"",
+        {archive_path_text});
+    if (health) {
+        health->status = status_code(result.status);
+        health->is_archive = result.is_archive ? 1 : 0;
+        health->is_encrypted = result.encrypted ? 1 : 0;
+        health->is_broken = result.damaged ? 1 : 0;
+        health->is_missing_volume = result.missing_volume ? 1 : 0;
+        health->is_wrong_password = result.wrong_password ? 1 : 0;
+        health->operation_result = result.operation_result;
+        copy_wide(health->archive_type, 32, smart_unpacker::sevenzip::archive_type_for_path(archive_path_text));
+    }
+    copy_message(message, message_chars, result.message);
+    return status_code(result.status);
+}
+
+SUP7Z_API int sup7z_check_archive_health_with_parts(
+    const wchar_t* seven_zip_dll_path,
+    const wchar_t* archive_path,
+    const wchar_t* const* part_paths,
+    int part_count,
+    const wchar_t* password,
+    Sup7zArchiveHealth* health,
+    wchar_t* message,
+    int message_chars
+) {
+    if (health) {
+        *health = Sup7zArchiveHealth{};
+    }
+    if (!seven_zip_dll_path || !archive_path) {
+        copy_message(message, message_chars, "missing required path");
+        if (health) {
+            health->status = status_code(smart_unpacker::sevenzip::PasswordTestStatus::Error);
+        }
+        return status_code(smart_unpacker::sevenzip::PasswordTestStatus::Error);
+    }
+
+    smart_unpacker::sevenzip::ComModule module(seven_zip_dll_path);
+    auto create_object = module.create_object();
+    if (!create_object) {
+        copy_message(message, message_chars, "7z.dll could not be loaded");
+        if (health) {
+            health->status = status_code(smart_unpacker::sevenzip::PasswordTestStatus::BackendUnavailable);
+        }
+        return status_code(smart_unpacker::sevenzip::PasswordTestStatus::BackendUnavailable);
+    }
+
+    const std::wstring archive_path_text(archive_path);
+    const auto result = smart_unpacker::sevenzip::check_archive_health_internal(
+        create_object,
+        archive_path_text,
+        password ? password : L"",
+        collect_part_paths(archive_path, part_paths, part_count));
     if (health) {
         health->status = status_code(result.status);
         health->is_archive = result.is_archive ? 1 : 0;
@@ -1077,7 +1529,66 @@ SUP7Z_API int sup7z_analyze_archive_resources(
     const auto result = smart_unpacker::sevenzip::analyze_archive_resources_internal(
         create_object,
         archive_path_text,
-        password ? password : L"");
+        password ? password : L"",
+        {archive_path_text});
+    if (analysis) {
+        analysis->status = status_code(result.status);
+        analysis->is_archive = result.is_archive ? 1 : 0;
+        analysis->is_encrypted = result.encrypted ? 1 : 0;
+        analysis->is_broken = result.damaged ? 1 : 0;
+        analysis->solid = result.solid ? 1 : 0;
+        analysis->item_count = static_cast<int>(result.item_count);
+        analysis->file_count = static_cast<int>(result.file_count);
+        analysis->dir_count = static_cast<int>(result.dir_count);
+        analysis->archive_size = result.archive_size;
+        analysis->total_unpacked_size = result.total_unpacked_size;
+        analysis->total_packed_size = result.total_packed_size;
+        analysis->largest_item_size = result.largest_item_size;
+        analysis->largest_dictionary_size = result.largest_dictionary_size;
+        copy_wide(analysis->archive_type, 32, smart_unpacker::sevenzip::archive_type_for_path(archive_path_text));
+        copy_wide(analysis->dominant_method, 128, result.dominant_method);
+    }
+    copy_message(message, message_chars, result.message);
+    return status_code(result.status);
+}
+
+SUP7Z_API int sup7z_analyze_archive_resources_with_parts(
+    const wchar_t* seven_zip_dll_path,
+    const wchar_t* archive_path,
+    const wchar_t* const* part_paths,
+    int part_count,
+    const wchar_t* password,
+    Sup7zArchiveResourceAnalysis* analysis,
+    wchar_t* message,
+    int message_chars
+) {
+    if (analysis) {
+        *analysis = Sup7zArchiveResourceAnalysis{};
+    }
+    if (!seven_zip_dll_path || !archive_path) {
+        copy_message(message, message_chars, "missing required path");
+        if (analysis) {
+            analysis->status = status_code(smart_unpacker::sevenzip::PasswordTestStatus::Error);
+        }
+        return status_code(smart_unpacker::sevenzip::PasswordTestStatus::Error);
+    }
+
+    smart_unpacker::sevenzip::ComModule module(seven_zip_dll_path);
+    auto create_object = module.create_object();
+    if (!create_object) {
+        copy_message(message, message_chars, "7z.dll could not be loaded");
+        if (analysis) {
+            analysis->status = status_code(smart_unpacker::sevenzip::PasswordTestStatus::BackendUnavailable);
+        }
+        return status_code(smart_unpacker::sevenzip::PasswordTestStatus::BackendUnavailable);
+    }
+
+    const std::wstring archive_path_text(archive_path);
+    const auto result = smart_unpacker::sevenzip::analyze_archive_resources_internal(
+        create_object,
+        archive_path_text,
+        password ? password : L"",
+        collect_part_paths(archive_path, part_paths, part_count));
     if (analysis) {
         analysis->status = status_code(result.status);
         analysis->is_archive = result.is_archive ? 1 : 0;

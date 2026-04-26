@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from smart_unpacker.contracts.detection import FactBag
 from smart_unpacker.contracts.tasks import ArchiveTask
 from smart_unpacker.rename.scheduler import RenameScheduler
@@ -5,7 +7,7 @@ from smart_unpacker.relations.internal.group_builder import RelationsGroupBuilde
 
 
 class FakeNativeTester:
-    def test_archive(self, archive: str):
+    def test_archive(self, archive: str, part_paths=None):
         class Result:
             ok = True
 
@@ -100,6 +102,6 @@ def test_rename_scheduler_normalizes_misnamed_split_group_as_black_box(tmp_path)
     staged = scheduler.normalize_split_group(task)
 
     assert staged.archive != str(first)
-    assert staged.run_parts == [str(first), str(candidate)]
+    assert [Path(path).name for path in staged.run_parts] == ["bundle.7z.001", "bundle.7z.002"]
     assert staged.verified_candidates is True
     scheduler.cleanup_normalized_split_group(staged)

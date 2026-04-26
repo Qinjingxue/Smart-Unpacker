@@ -19,7 +19,7 @@ class FakeTester:
         self.health_calls = 0
         self.resource_calls = 0
 
-    def probe_archive(self, archive_path: str):
+    def probe_archive(self, archive_path: str, part_paths=None):
         self.probe_calls += 1
         return native.NativeArchiveProbe(
             status=native.STATUS_OK,
@@ -33,7 +33,7 @@ class FakeTester:
             message="ok",
         )
 
-    def test_archive(self, archive_path: str, password: str = ""):
+    def test_archive(self, archive_path: str, password: str = "", part_paths=None):
         self.test_calls += 1
         return native.NativeArchiveTest(
             status=native.STATUS_OK,
@@ -44,7 +44,7 @@ class FakeTester:
             message="ok",
         )
 
-    def check_archive_health(self, archive_path: str, password: str = ""):
+    def check_archive_health(self, archive_path: str, password: str = "", part_paths=None):
         self.health_calls += 1
         return native.NativeArchiveHealth(
             status=native.STATUS_OK,
@@ -58,7 +58,7 @@ class FakeTester:
             message="ok",
         )
 
-    def analyze_archive_resources(self, archive_path: str, password: str = ""):
+    def analyze_archive_resources(self, archive_path: str, password: str = "", part_paths=None):
         self.resource_calls += 1
         return native.NativeArchiveResourceAnalysis(
             status=native.STATUS_OK,
@@ -81,7 +81,7 @@ class FakeTester:
 
 
 class UnsupportedProbeTester(FakeTester):
-    def probe_archive(self, archive_path: str):
+    def probe_archive(self, archive_path: str, part_paths=None):
         self.probe_calls += 1
         return native.NativeArchiveProbe(
             status=native.STATUS_UNSUPPORTED,

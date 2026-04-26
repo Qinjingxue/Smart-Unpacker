@@ -13,7 +13,7 @@ from smart_unpacker.extraction.internal.password_resolution import PasswordResol
 from smart_unpacker.extraction.internal.preflight import PreExtractInspector
 from smart_unpacker.extraction.result import ExtractionResult
 from smart_unpacker.contracts.tasks import ArchiveTask, SplitArchiveInfo
-from smart_unpacker.rename.volume_normalizer import SplitVolumeStager
+from smart_unpacker.rename.volume_normalizer import SplitVolumeNormalizer
 from smart_unpacker.relations.internal.group_builder import RelationsGroupBuilder
 from smart_unpacker.support.resources import get_7z_path
 
@@ -35,7 +35,7 @@ class ExtractionScheduler:
         self.password_resolver = PasswordResolver(self.password_manager)
         self.metadata_scanner = ArchiveMetadataScanner()
         self.seven_z_path = get_7z_path()
-        self.split_stager = SplitVolumeStager(self.seven_z_path)
+        self.volume_normalizer = SplitVolumeNormalizer()
         self._relations = RelationsGroupBuilder()
         self.ensure_space = ensure_space or (lambda _required_gb: True)
         self.max_retries = max(1, max_retries)
@@ -64,7 +64,7 @@ class ExtractionScheduler:
         if not tasks:
             return []
         output_dir_resolver = output_dir_resolver or self.default_output_dir_for_task
-        inspector = PreExtractInspector(self.password_resolver, self.split_stager)
+        inspector = PreExtractInspector(self.password_resolver, self.volume_normalizer)
         ready_tasks: list[ArchiveTask] = []
         skipped_results: list[tuple[ArchiveTask, ExtractionResult]] = []
         for task in tasks:
@@ -126,7 +126,7 @@ class ExtractionScheduler:
                 shutil.rmtree(out_dir, ignore_errors=True)
                 return self._failed(archive, out_dir, all_parts, "磁盘空间不足")
 
-            staged = self.split_stager.stage(archive, all_parts, startupinfo=startupinfo)
+            staged = self.volume_normalizer.normalize(archive, all_parts, startupinfo=startupinfo)
             run_archive = staged.archive
             run_parts = staged.run_parts if hasattr(staged, "run_parts") else staged.all_parts
             cleanup_parts = getattr(staged, "cleanup_parts", run_parts)
@@ -137,7 +137,7 @@ class ExtractionScheduler:
             selected_codepage = None
 
             try:
-                resolution = self.password_resolver.resolve(run_archive, task.fact_bag)
+                resolution = self.password_resolver.resolve(run_archive, task.fact_bag, part_paths=run_parts)
                 correct_pwd = resolution.password
                 test_result = resolution.test_result
                 test_err = resolution.error_text
@@ -146,7 +146,7 @@ class ExtractionScheduler:
                         shutil.rmtree(out_dir, ignore_errors=True)
                         return self._failed(archive, out_dir, run_parts, "密码错误或未知密码")
 
-                metadata_scan = self.metadata_scanner.scan(run_archive, password=correct_pwd)
+                metadata_scan = self.metadata_scanner.scan(run_archive, password=correct_pwd, part_paths=run_parts)
                 if metadata_scan and metadata_scan.selected_codepage:
                     selected_codepage = metadata_scan.selected_codepage
                     print(f"[META] 文件名编码修正: -mcp={selected_codepage}")
@@ -182,7 +182,7 @@ class ExtractionScheduler:
 
                     err = f"{run_result.stdout}\n{run_result.stderr}".lower()
             finally:
-                self.split_stager.cleanup(staged)
+                self.volume_normalizer.cleanup(staged)
 
             if run_result and ("no space" in err or "write error" in err or run_result.returncode == 8):
                 retry_count += 1

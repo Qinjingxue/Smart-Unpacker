@@ -24,17 +24,17 @@ def runner_config():
 
 
 class FakePasswordResolver:
-    def resolve(self, archive_path, fact_bag):
+    def resolve(self, archive_path, fact_bag, part_paths=None):
         return SimpleNamespace(password="", test_result=None, error_text="")
 
 
 class FakeMetadataScanner:
-    def scan(self, archive, password=None):
+    def scan(self, archive, password=None, part_paths=None):
         return None
 
 
 class FakeStager:
-    def stage(self, archive, all_parts, startupinfo=None):
+    def normalize(self, archive, all_parts, startupinfo=None):
         parts = list(all_parts)
         return SimpleNamespace(archive=archive, run_parts=parts, cleanup_parts=parts)
 
@@ -52,7 +52,7 @@ class ExtractionExecutionTests(unittest.TestCase):
             out_dir = Path(tmp) / "sample_out"
 
             class CandidateStager:
-                def stage(self, archive, all_parts, startupinfo=None):
+                def normalize(self, archive, all_parts, startupinfo=None):
                     return SimpleNamespace(
                         archive=archive,
                         run_parts=[str(archive_path), str(candidate_path)],
@@ -65,7 +65,7 @@ class ExtractionExecutionTests(unittest.TestCase):
             extractor = ExtractionScheduler(max_retries=1)
             extractor.password_resolver = FakePasswordResolver()
             extractor.metadata_scanner = FakeMetadataScanner()
-            extractor.split_stager = CandidateStager()
+            extractor.volume_normalizer = CandidateStager()
 
             bag = FactBag()
             task = ArchiveTask(fact_bag=bag, score=10, main_path=str(archive_path), all_parts=[str(archive_path)])
@@ -92,7 +92,7 @@ class ExtractionExecutionTests(unittest.TestCase):
             extractor = ExtractionScheduler(ensure_space=ensure_space, max_retries=2)
             extractor.password_resolver = FakePasswordResolver()
             extractor.metadata_scanner = FakeMetadataScanner()
-            extractor.split_stager = FakeStager()
+            extractor.volume_normalizer = FakeStager()
 
             failed = SimpleNamespace(returncode=8, stdout="", stderr="write error")
             succeeded = SimpleNamespace(returncode=0, stdout="", stderr="")

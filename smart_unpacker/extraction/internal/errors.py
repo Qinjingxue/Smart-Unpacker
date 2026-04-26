@@ -34,6 +34,7 @@ def has_archive_damage_signals(err_text: str) -> bool:
             "data error",
             "can not open the file as archive",
             "cannot open the file as",
+            "could not be opened by supported handlers",
             "is not archive",
             "archive is corrupted",
             "checksum error",

@@ -156,19 +156,27 @@ class NativePasswordTester:
     def available(self) -> bool:
         return bool(self.wrapper_path and self.seven_zip_dll_path and Path(self.wrapper_path).exists())
 
-    def try_passwords(self, archive_path: str, passwords: list[str]) -> NativePasswordAttempt:
+    def _part_array(self, archive_path: str, part_paths: list[str] | None):
+        normalized_parts = list(dict.fromkeys(part_paths or [archive_path]))
+        array_type = ctypes.c_wchar_p * len(normalized_parts)
+        return normalized_parts, array_type(*normalized_parts)
+
+    def try_passwords(self, archive_path: str, passwords: list[str], part_paths: list[str] | None = None) -> NativePasswordAttempt:
         library = self._load()
 
         normalized_passwords = list(passwords or [""])
         password_array_type = ctypes.c_wchar_p * len(normalized_passwords)
         password_array = password_array_type(*normalized_passwords)
+        normalized_parts, part_array = self._part_array(archive_path, part_paths)
         matched_index = ctypes.c_int(-1)
         attempts = ctypes.c_int(0)
         message = ctypes.create_unicode_buffer(512)
 
-        status = library.sup7z_try_passwords(
+        status = library.sup7z_try_passwords_with_parts(
             ctypes.c_wchar_p(str(self.seven_zip_dll_path)),
             ctypes.c_wchar_p(str(archive_path)),
+            part_array,
+            ctypes.c_int(len(normalized_parts)),
             password_array,
             ctypes.c_int(len(normalized_passwords)),
             ctypes.byref(matched_index),
@@ -183,18 +191,21 @@ class NativePasswordTester:
             message=message.value,
         )
 
-    def test_archive(self, archive_path: str, password: str = "") -> NativeArchiveTest:
+    def test_archive(self, archive_path: str, password: str = "", part_paths: list[str] | None = None) -> NativeArchiveTest:
         library = self._load()
 
+        normalized_parts, part_array = self._part_array(archive_path, part_paths)
         command_ok = ctypes.c_int(0)
         encrypted = ctypes.c_int(0)
         checksum_error = ctypes.c_int(0)
         archive_type = ctypes.create_unicode_buffer(64)
         message = ctypes.create_unicode_buffer(512)
 
-        status = library.sup7z_test_archive(
+        status = library.sup7z_test_archive_with_parts(
             ctypes.c_wchar_p(str(self.seven_zip_dll_path)),
             ctypes.c_wchar_p(str(archive_path)),
+            part_array,
+            ctypes.c_int(len(normalized_parts)),
             ctypes.c_wchar_p(str(password or "")),
             ctypes.byref(command_ok),
             ctypes.byref(encrypted),
@@ -213,7 +224,21 @@ class NativePasswordTester:
             message=message.value,
         )
 
-    def probe_archive(self, archive_path: str) -> NativeArchiveProbe:
+    def probe_archive(self, archive_path: str, part_paths: list[str] | None = None) -> NativeArchiveProbe:
+        if part_paths and len(part_paths) > 1:
+            health = self.check_archive_health(archive_path, part_paths=part_paths)
+            return NativeArchiveProbe(
+                status=health.status,
+                is_archive=health.is_archive,
+                is_encrypted=health.is_encrypted,
+                is_broken=health.is_broken or health.is_missing_volume,
+                checksum_error=health.is_broken,
+                offset=0,
+                item_count=1 if health.ok else 0,
+                archive_type=health.archive_type,
+                message=health.message,
+            )
+
         library = self._load()
 
         is_archive = ctypes.c_int(0)
@@ -251,15 +276,18 @@ class NativePasswordTester:
             message=message.value,
         )
 
-    def check_archive_health(self, archive_path: str, password: str = "") -> NativeArchiveHealth:
+    def check_archive_health(self, archive_path: str, password: str = "", part_paths: list[str] | None = None) -> NativeArchiveHealth:
         library = self._load()
 
+        normalized_parts, part_array = self._part_array(archive_path, part_paths)
         health = _Sup7zArchiveHealth()
         message = ctypes.create_unicode_buffer(512)
 
-        status = library.sup7z_check_archive_health(
+        status = library.sup7z_check_archive_health_with_parts(
             ctypes.c_wchar_p(str(self.seven_zip_dll_path)),
             ctypes.c_wchar_p(str(archive_path)),
+            part_array,
+            ctypes.c_int(len(normalized_parts)),
             ctypes.c_wchar_p(str(password or "")),
             ctypes.byref(health),
             message,
@@ -277,15 +305,18 @@ class NativePasswordTester:
             message=message.value,
         )
 
-    def analyze_archive_resources(self, archive_path: str, password: str = "") -> NativeArchiveResourceAnalysis:
+    def analyze_archive_resources(self, archive_path: str, password: str = "", part_paths: list[str] | None = None) -> NativeArchiveResourceAnalysis:
         library = self._load()
 
+        normalized_parts, part_array = self._part_array(archive_path, part_paths)
         analysis = _Sup7zArchiveResourceAnalysis()
         message = ctypes.create_unicode_buffer(512)
 
-        status = library.sup7z_analyze_archive_resources(
+        status = library.sup7z_analyze_archive_resources_with_parts(
             ctypes.c_wchar_p(str(self.seven_zip_dll_path)),
             ctypes.c_wchar_p(str(archive_path)),
+            part_array,
+            ctypes.c_int(len(normalized_parts)),
             ctypes.c_wchar_p(str(password or "")),
             ctypes.byref(analysis),
             message,
@@ -335,6 +366,19 @@ class NativePasswordTester:
                 ctypes.c_int,
             ]
             library.sup7z_try_passwords.restype = ctypes.c_int
+            library.sup7z_try_passwords_with_parts.argtypes = [
+                ctypes.c_wchar_p,
+                ctypes.c_wchar_p,
+                ctypes.POINTER(ctypes.c_wchar_p),
+                ctypes.c_int,
+                ctypes.POINTER(ctypes.c_wchar_p),
+                ctypes.c_int,
+                ctypes.POINTER(ctypes.c_int),
+                ctypes.POINTER(ctypes.c_int),
+                ctypes.c_wchar_p,
+                ctypes.c_int,
+            ]
+            library.sup7z_try_passwords_with_parts.restype = ctypes.c_int
             library.sup7z_test_archive.argtypes = [
                 ctypes.c_wchar_p,
                 ctypes.c_wchar_p,
@@ -348,6 +392,21 @@ class NativePasswordTester:
                 ctypes.c_int,
             ]
             library.sup7z_test_archive.restype = ctypes.c_int
+            library.sup7z_test_archive_with_parts.argtypes = [
+                ctypes.c_wchar_p,
+                ctypes.c_wchar_p,
+                ctypes.POINTER(ctypes.c_wchar_p),
+                ctypes.c_int,
+                ctypes.c_wchar_p,
+                ctypes.POINTER(ctypes.c_int),
+                ctypes.POINTER(ctypes.c_int),
+                ctypes.POINTER(ctypes.c_int),
+                ctypes.c_wchar_p,
+                ctypes.c_int,
+                ctypes.c_wchar_p,
+                ctypes.c_int,
+            ]
+            library.sup7z_test_archive_with_parts.restype = ctypes.c_int
             library.sup7z_probe_archive.argtypes = [
                 ctypes.c_wchar_p,
                 ctypes.c_wchar_p,
@@ -372,6 +431,17 @@ class NativePasswordTester:
                 ctypes.c_int,
             ]
             library.sup7z_check_archive_health.restype = ctypes.c_int
+            library.sup7z_check_archive_health_with_parts.argtypes = [
+                ctypes.c_wchar_p,
+                ctypes.c_wchar_p,
+                ctypes.POINTER(ctypes.c_wchar_p),
+                ctypes.c_int,
+                ctypes.c_wchar_p,
+                ctypes.POINTER(_Sup7zArchiveHealth),
+                ctypes.c_wchar_p,
+                ctypes.c_int,
+            ]
+            library.sup7z_check_archive_health_with_parts.restype = ctypes.c_int
             library.sup7z_analyze_archive_resources.argtypes = [
                 ctypes.c_wchar_p,
                 ctypes.c_wchar_p,
@@ -381,6 +451,17 @@ class NativePasswordTester:
                 ctypes.c_int,
             ]
             library.sup7z_analyze_archive_resources.restype = ctypes.c_int
+            library.sup7z_analyze_archive_resources_with_parts.argtypes = [
+                ctypes.c_wchar_p,
+                ctypes.c_wchar_p,
+                ctypes.POINTER(ctypes.c_wchar_p),
+                ctypes.c_int,
+                ctypes.c_wchar_p,
+                ctypes.POINTER(_Sup7zArchiveResourceAnalysis),
+                ctypes.c_wchar_p,
+                ctypes.c_int,
+            ]
+            library.sup7z_analyze_archive_resources_with_parts.restype = ctypes.c_int
             self._library = library
             return library
 
@@ -411,20 +492,22 @@ def get_native_password_tester() -> NativePasswordTester:
         return _DEFAULT_TESTER
 
 
-def _cache_key(tester: NativePasswordTester, archive_path: str) -> tuple:
+def _cache_key(tester: NativePasswordTester, archive_path: str, part_paths: list[str] | None = None) -> tuple:
+    parts = tuple(file_identity(path) for path in list(dict.fromkeys(part_paths or [archive_path])))
     return (
         str(tester.wrapper_path),
         str(tester.seven_zip_dll_path),
         file_identity(archive_path),
+        parts,
     )
 
 
-def cached_probe_archive(archive_path: str) -> NativeArchiveProbe:
+def cached_probe_archive(archive_path: str, part_paths: list[str] | None = None) -> NativeArchiveProbe:
     tester = get_native_password_tester()
     return cached_value(
         "native_7z_probe",
-        _cache_key(tester, archive_path),
-        lambda: tester.probe_archive(archive_path),
+        _cache_key(tester, archive_path, part_paths),
+        lambda: tester.probe_archive(archive_path, part_paths=part_paths),
     )
 
 
@@ -439,38 +522,38 @@ def _test_from_probe(probe: NativeArchiveProbe) -> NativeArchiveTest:
     )
 
 
-def cached_test_archive(archive_path: str, password: str = "") -> NativeArchiveTest:
+def cached_test_archive(archive_path: str, password: str = "", part_paths: list[str] | None = None) -> NativeArchiveTest:
     tester = get_native_password_tester()
     password = password or ""
-    key = _cache_key(tester, archive_path) + (password,)
+    key = _cache_key(tester, archive_path, part_paths) + (password,)
     if not password:
         return cached_value(
             "native_7z_test",
             key,
-            lambda: _test_from_probe(cached_probe_archive(archive_path)),
+            lambda: _test_from_probe(cached_probe_archive(archive_path, part_paths=part_paths)),
         )
     return cached_value(
         "native_7z_test",
         key,
-        lambda: tester.test_archive(archive_path, password=password),
+        lambda: tester.test_archive(archive_path, password=password, part_paths=part_paths),
     )
 
 
-def cached_check_archive_health(archive_path: str, password: str = "") -> NativeArchiveHealth:
+def cached_check_archive_health(archive_path: str, password: str = "", part_paths: list[str] | None = None) -> NativeArchiveHealth:
     tester = get_native_password_tester()
     password = password or ""
     return cached_value(
         "native_7z_health",
-        _cache_key(tester, archive_path) + (password,),
-        lambda: tester.check_archive_health(archive_path, password=password),
+        _cache_key(tester, archive_path, part_paths) + (password,),
+        lambda: tester.check_archive_health(archive_path, password=password, part_paths=part_paths),
     )
 
 
-def cached_analyze_archive_resources(archive_path: str, password: str = "") -> NativeArchiveResourceAnalysis:
+def cached_analyze_archive_resources(archive_path: str, password: str = "", part_paths: list[str] | None = None) -> NativeArchiveResourceAnalysis:
     tester = get_native_password_tester()
     password = password or ""
     return cached_value(
         "native_7z_resources",
-        _cache_key(tester, archive_path) + (password,),
-        lambda: tester.analyze_archive_resources(archive_path, password=password),
+        _cache_key(tester, archive_path, part_paths) + (password,),
+        lambda: tester.analyze_archive_resources(archive_path, password=password, part_paths=part_paths),
     )

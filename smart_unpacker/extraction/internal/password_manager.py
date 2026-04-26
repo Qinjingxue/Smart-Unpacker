@@ -56,8 +56,8 @@ class PasswordManager:
     def _has_definite_wrong_password(self, err_text: str) -> bool:
         return has_definite_wrong_password(err_text)
 
-    def test_password(self, archive_path: str, password: str = "") -> Tuple[subprocess.CompletedProcess, str]:
-        native_test = self.native_password_tester.test_archive(archive_path, password=password)
+    def test_password(self, archive_path: str, password: str = "", part_paths: list[str] | None = None) -> Tuple[subprocess.CompletedProcess, str]:
+        native_test = self.native_password_tester.test_archive(archive_path, password=password, part_paths=part_paths)
         result = native_test.as_completed_process(archive_path)
         error_text = native_test.message.lower()
         if native_test.encrypted and "wrong password" not in error_text:
@@ -66,15 +66,15 @@ class PasswordManager:
             error_text = f"{error_text}\nchecksum error".strip()
         return result, error_text
 
-    def test_without_password(self, archive_path: str) -> Tuple[subprocess.CompletedProcess, str]:
-        return self.test_password(archive_path, "")
+    def test_without_password(self, archive_path: str, part_paths: list[str] | None = None) -> Tuple[subprocess.CompletedProcess, str]:
+        return self.test_password(archive_path, "", part_paths=part_paths)
 
-    def find_working_password(self, archive_path: str) -> Tuple[Optional[str], subprocess.CompletedProcess, str]:
+    def find_working_password(self, archive_path: str, part_paths: list[str] | None = None) -> Tuple[Optional[str], subprocess.CompletedProcess, str]:
         passwords_to_try = self.get_passwords_to_try()
         if not passwords_to_try:
             passwords_to_try = [""]
 
-        native_attempt = self.native_password_tester.try_passwords(archive_path, passwords_to_try)
+        native_attempt = self.native_password_tester.try_passwords(archive_path, passwords_to_try, part_paths=part_paths)
         native_result = native_attempt.as_completed_process(archive_path)
         if native_attempt.ok:
             pwd = passwords_to_try[native_attempt.matched_index]

@@ -6,7 +6,9 @@ from smart_unpacker.extraction.internal.native_password_tester import (
     STATUS_UNSUPPORTED,
     cached_analyze_archive_resources,
     cached_check_archive_health,
+    get_native_password_tester,
 )
+from smart_unpacker.extraction.internal.errors import has_archive_damage_signals
 from smart_unpacker.extraction.result import ExtractionResult
 
 
@@ -17,27 +19,30 @@ class PreflightResult:
 
 
 class PreExtractInspector:
-    def __init__(self, password_resolver, split_stager):
+    def __init__(self, password_resolver, volume_normalizer):
         self.password_resolver = password_resolver
-        self.split_stager = split_stager
+        self.volume_normalizer = volume_normalizer
 
     def inspect(self, task: ArchiveTask, output_dir: str) -> PreflightResult:
-        staged = self.split_stager.stage(task.main_path, list(task.all_parts or [task.main_path]))
+        staged = self.volume_normalizer.normalize(task.main_path, list(task.all_parts or [task.main_path]))
         try:
-            health = cached_check_archive_health(staged.archive)
+            health = cached_check_archive_health(staged.archive, part_paths=staged.run_parts)
             self._record_health(task, health)
-            is_split_task = bool(task.split_info.is_split or len(task.all_parts or []) > 1)
 
             if health.is_missing_volume:
                 return self._skip(task, output_dir, staged.cleanup_parts, "分卷缺失或不完整")
             if health.is_broken:
                 return self._skip(task, output_dir, staged.cleanup_parts, "压缩包损坏")
+            if health.is_encrypted or health.is_wrong_password:
+                structural_test = get_native_password_tester().test_archive(staged.archive, part_paths=staged.run_parts)
+                if has_archive_damage_signals(structural_test.message):
+                    return self._skip(task, output_dir, staged.cleanup_parts, "压缩包损坏")
 
             password = ""
-            if (health.is_encrypted or health.is_wrong_password) and not is_split_task:
+            if health.is_encrypted or health.is_wrong_password:
                 if not self.password_resolver.password_manager.passwords:
                     return self._skip(task, output_dir, staged.cleanup_parts, "密码错误或未知密码")
-                resolution = self.password_resolver.resolve(staged.archive, task.fact_bag)
+                resolution = self.password_resolver.resolve(staged.archive, task.fact_bag, part_paths=staged.run_parts)
                 if resolution.password is None:
                     return self._skip(task, output_dir, staged.cleanup_parts, "密码错误或未知密码")
                 password = resolution.password or ""
@@ -46,14 +51,14 @@ class PreExtractInspector:
             else:
                 task.fact_bag.set("resource.password_required", False)
 
-            if health.status not in {STATUS_BACKEND_UNAVAILABLE, STATUS_UNSUPPORTED} and not is_split_task:
-                analysis = cached_analyze_archive_resources(staged.archive, password=password)
+            if health.status not in {STATUS_BACKEND_UNAVAILABLE, STATUS_UNSUPPORTED}:
+                analysis = cached_analyze_archive_resources(staged.archive, password=password, part_paths=staged.run_parts)
                 self._record_analysis(task, analysis)
                 task.fact_bag.set("resource.token_cost", self._estimate_token_cost(analysis))
             else:
                 task.fact_bag.set("resource.token_cost", 1)
         finally:
-            self.split_stager.cleanup(staged)
+            self.volume_normalizer.cleanup(staged)
 
         return PreflightResult(task=task)
 

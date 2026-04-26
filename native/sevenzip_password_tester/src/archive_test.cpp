@@ -6,6 +6,7 @@
 #include <cwchar>
 #include <filesystem>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -59,6 +60,25 @@ void copy_ascii(wchar_t* destination, int destination_chars, const std::string& 
     copy_text(destination, destination_chars, std::wstring(text.begin(), text.end()));
 }
 
+std::vector<std::wstring> collect_part_paths(
+    const wchar_t* archive_path,
+    const wchar_t* const* part_paths,
+    int part_count
+) {
+    std::vector<std::wstring> parts;
+    if (part_paths && part_count > 0) {
+        for (int i = 0; i < part_count; ++i) {
+            if (part_paths[i] && part_paths[i][0] != L'\0') {
+                parts.emplace_back(part_paths[i]);
+            }
+        }
+    }
+    if (parts.empty() && archive_path) {
+        parts.emplace_back(archive_path);
+    }
+    return parts;
+}
+
 }  // namespace
 
 SUP7Z_API int sup7z_test_archive(
@@ -93,6 +113,55 @@ SUP7Z_API int sup7z_test_archive(
     const auto result = smart_unpacker::sevenzip::test_password(
         seven_zip_dll_path,
         archive_path_text,
+        password ? password : L"");
+    if (command_ok) {
+        *command_ok = result.status == smart_unpacker::sevenzip::PasswordTestStatus::Ok ? 1 : 0;
+    }
+    if (encrypted) {
+        *encrypted = result.status == smart_unpacker::sevenzip::PasswordTestStatus::WrongPassword ? 1 : 0;
+    }
+    if (checksum_error) {
+        *checksum_error = result.status == smart_unpacker::sevenzip::PasswordTestStatus::Damaged ? 1 : 0;
+    }
+    copy_ascii(message, message_chars, result.message);
+    return static_cast<int>(result.status);
+}
+
+SUP7Z_API int sup7z_test_archive_with_parts(
+    const wchar_t* seven_zip_dll_path,
+    const wchar_t* archive_path,
+    const wchar_t* const* part_paths,
+    int part_count,
+    const wchar_t* password,
+    int* command_ok,
+    int* encrypted,
+    int* checksum_error,
+    wchar_t* archive_type,
+    int archive_type_chars,
+    wchar_t* message,
+    int message_chars
+) {
+    if (command_ok) {
+        *command_ok = 0;
+    }
+    if (encrypted) {
+        *encrypted = 0;
+    }
+    if (checksum_error) {
+        *checksum_error = 0;
+    }
+    if (!seven_zip_dll_path || !archive_path) {
+        copy_ascii(message, message_chars, "missing required path");
+        return static_cast<int>(smart_unpacker::sevenzip::PasswordTestStatus::Error);
+    }
+
+    const std::wstring archive_path_text(archive_path);
+    copy_text(archive_type, archive_type_chars, archive_type_for_path(archive_path_text));
+
+    const auto result = smart_unpacker::sevenzip::test_password_with_parts(
+        seven_zip_dll_path,
+        archive_path_text,
+        collect_part_paths(archive_path, part_paths, part_count),
         password ? password : L"");
     if (command_ok) {
         *command_ok = result.status == smart_unpacker::sevenzip::PasswordTestStatus::Ok ? 1 : 0;

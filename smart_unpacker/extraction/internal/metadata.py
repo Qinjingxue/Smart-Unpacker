@@ -37,30 +37,37 @@ class ArchiveMetadataScanner:
     def clear_caches(self):
         self.cache.clear()
 
-    def scan(self, archive_path: str, password: Optional[str] = None) -> ArchiveMetadataScanResult:
+    def scan(self, archive_path: str, password: Optional[str] = None, part_paths: list[str] | None = None) -> ArchiveMetadataScanResult:
         archive_path = os.path.normpath(archive_path)
-        cache_key = self._build_cache_key(archive_path)
+        cache_key = self._build_cache_key(archive_path, part_paths=part_paths)
         cached = self.cache.get(cache_key)
         if cached is not None:
             return cached
 
-        result = self._scan_uncached(archive_path, password=password)
+        result = self._scan_uncached(archive_path, password=password, part_paths=part_paths)
         self.cache[cache_key] = result
         return result
 
-    def _build_cache_key(self, archive_path: str) -> Tuple[str, int, int]:
+    def _build_cache_key(self, archive_path: str, part_paths: list[str] | None = None) -> tuple:
+        part_keys = []
+        for path in list(dict.fromkeys(part_paths or [archive_path])):
+            try:
+                stat = os.stat(path)
+                part_keys.append((path, stat.st_size, stat.st_mtime_ns))
+            except OSError:
+                part_keys.append((path, 0, 0))
         try:
             stat = os.stat(archive_path)
-            return (archive_path, stat.st_size, stat.st_mtime_ns)
+            return (archive_path, stat.st_size, stat.st_mtime_ns, tuple(part_keys))
         except OSError:
-            return (archive_path, 0, 0)
+            return (archive_path, 0, 0, tuple(part_keys))
 
-    def _scan_uncached(self, archive_path: str, password: Optional[str] = None) -> ArchiveMetadataScanResult:
+    def _scan_uncached(self, archive_path: str, password: Optional[str] = None, part_paths: list[str] | None = None) -> ArchiveMetadataScanResult:
         ext = os.path.splitext(archive_path)[1].lower()
         if ext == ".zip":
             return self._scan_zip_central_directory(archive_path)
         if ext in {".7z", ".rar"}:
-            return self._scan_with_7z_listing(archive_path, ext.lstrip("."), password=password)
+            return self._scan_with_7z_listing(archive_path, ext.lstrip("."), password=password, part_paths=part_paths)
         return ArchiveMetadataScanResult(
             archive_path=archive_path,
             archive_type=ext.lstrip(".") or "unknown",
@@ -263,9 +270,9 @@ class ArchiveMetadataScanner:
         score -= latin_symbols
         return score, stats
 
-    def _scan_with_7z_listing(self, archive_path: str, archive_type: str, password: Optional[str] = None) -> ArchiveMetadataScanResult:
+    def _scan_with_7z_listing(self, archive_path: str, archive_type: str, password: Optional[str] = None, part_paths: list[str] | None = None) -> ArchiveMetadataScanResult:
         result = ArchiveMetadataScanResult(archive_path=archive_path, archive_type=archive_type)
-        probe = cached_probe_archive(archive_path)
+        probe = cached_probe_archive(archive_path, part_paths=part_paths)
         result.sample_count = max(0, int(probe.item_count or 0))
         if probe.is_archive and not probe.is_encrypted:
             result.reasons.append(f"{archive_type.upper()} 元数据可由 7z.dll 正常列出，保持默认编码处理")

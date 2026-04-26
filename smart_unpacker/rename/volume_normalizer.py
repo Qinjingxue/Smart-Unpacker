@@ -85,6 +85,10 @@ class SplitVolumeNormalizer:
             for number, source in numbered_parts.items():
                 self._link_or_copy(source, self._format_numbered_volume(staged_prefix, number, style, width))
 
+            staged_paths = [
+                self._format_numbered_volume(staged_prefix, number, style, width)
+                for number in range(1, total_count + 1)
+            ]
             target_paths = [self._format_numbered_volume(staged_prefix, number, style, width) for number in missing_numbers]
             permutations = itertools.permutations(candidates)
             if len(candidates) > 7:
@@ -99,14 +103,14 @@ class SplitVolumeNormalizer:
                     self._link_or_copy(source, target)
 
                 staged_archive = self._format_numbered_volume(staged_prefix, 1, style, width)
-                result = self._native_tester.test_archive(staged_archive)
+                result = self._native_tester.test_archive(staged_archive, part_paths=staged_paths)
                 if result.ok:
                     used_candidates = list(permutation)
                     cleanup_parts = list(dict.fromkeys(list(all_parts) + used_candidates))
                     print("[RENAME] Fixed misnamed split volumes in temporary staging directory.")
                     return StagedSplit(
                         archive=staged_archive,
-                        run_parts=cleanup_parts,
+                        run_parts=staged_paths,
                         cleanup_parts=cleanup_parts,
                         candidate_parts=used_candidates,
                         temp_dir=temp_dir,
@@ -127,14 +131,3 @@ class SplitVolumeNormalizer:
     def cleanup(self, staged: StagedSplit):
         if staged.temp_dir:
             shutil.rmtree(staged.temp_dir, ignore_errors=True)
-
-
-class SplitVolumeStager(SplitVolumeNormalizer):
-    """Backward-compatible name while extraction code migrates to rename."""
-
-    def __init__(self, seven_z_path: str | None = None):
-        self.seven_z_path = seven_z_path
-        super().__init__()
-
-    def stage(self, archive: str, all_parts: List[str], startupinfo=None) -> StagedSplit:
-        return self.normalize(archive, all_parts, startupinfo=startupinfo)

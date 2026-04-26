@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <vector>
 
 namespace smart_unpacker::sevenzip {
 
@@ -29,9 +30,24 @@ PasswordTestResult test_password(
     const std::wstring& password
 );
 
+PasswordTestResult test_password_with_parts(
+    const std::wstring& seven_zip_dll_path,
+    const std::wstring& archive_path,
+    const std::vector<std::wstring>& part_paths,
+    const std::wstring& password
+);
+
 PasswordTestResult test_passwords(
     const std::wstring& seven_zip_dll_path,
     const std::wstring& archive_path,
+    const wchar_t* const* passwords,
+    int password_count
+);
+
+PasswordTestResult test_passwords_with_parts(
+    const std::wstring& seven_zip_dll_path,
+    const std::wstring& archive_path,
+    const std::vector<std::wstring>& part_paths,
     const wchar_t* const* passwords,
     int password_count
 );
@@ -58,9 +74,37 @@ SUP7Z_API int sup7z_try_passwords(
     int message_chars
 );
 
+SUP7Z_API int sup7z_try_passwords_with_parts(
+    const wchar_t* seven_zip_dll_path,
+    const wchar_t* archive_path,
+    const wchar_t* const* part_paths,
+    int part_count,
+    const wchar_t* const* passwords,
+    int password_count,
+    int* matched_index,
+    int* attempts,
+    wchar_t* message,
+    int message_chars
+);
+
 SUP7Z_API int sup7z_test_archive(
     const wchar_t* seven_zip_dll_path,
     const wchar_t* archive_path,
+    const wchar_t* password,
+    int* command_ok,
+    int* encrypted,
+    int* checksum_error,
+    wchar_t* archive_type,
+    int archive_type_chars,
+    wchar_t* message,
+    int message_chars
+);
+
+SUP7Z_API int sup7z_test_archive_with_parts(
+    const wchar_t* seven_zip_dll_path,
+    const wchar_t* archive_path,
+    const wchar_t* const* part_paths,
+    int part_count,
     const wchar_t* password,
     int* command_ok,
     int* encrypted,
@@ -124,9 +168,31 @@ SUP7Z_API int sup7z_check_archive_health(
     int message_chars
 );
 
+SUP7Z_API int sup7z_check_archive_health_with_parts(
+    const wchar_t* seven_zip_dll_path,
+    const wchar_t* archive_path,
+    const wchar_t* const* part_paths,
+    int part_count,
+    const wchar_t* password,
+    Sup7zArchiveHealth* health,
+    wchar_t* message,
+    int message_chars
+);
+
 SUP7Z_API int sup7z_analyze_archive_resources(
     const wchar_t* seven_zip_dll_path,
     const wchar_t* archive_path,
+    const wchar_t* password,
+    Sup7zArchiveResourceAnalysis* analysis,
+    wchar_t* message,
+    int message_chars
+);
+
+SUP7Z_API int sup7z_analyze_archive_resources_with_parts(
+    const wchar_t* seven_zip_dll_path,
+    const wchar_t* archive_path,
+    const wchar_t* const* part_paths,
+    int part_count,
     const wchar_t* password,
     Sup7zArchiveResourceAnalysis* analysis,
     wchar_t* message,
