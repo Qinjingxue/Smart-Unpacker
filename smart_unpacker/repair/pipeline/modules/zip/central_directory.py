@@ -25,7 +25,7 @@ class ZipCentralDirectoryRebuild:
             return 0.95
         if flags & {"central_directory_bad", "directory_integrity_bad_or_unknown", "local_header_recovery"}:
             return 0.9
-        if "safe_fallback" in diagnosis.categories:
+        if "safe_repair" in diagnosis.categories:
             return 0.25
         return 0.0
 

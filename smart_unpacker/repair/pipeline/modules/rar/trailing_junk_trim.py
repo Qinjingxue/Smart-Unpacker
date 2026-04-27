@@ -17,7 +17,7 @@ class RarTrailingJunkTrim:
         name="rar_trailing_junk_trim",
         formats=("rar",),
         categories=("boundary_repair",),
-        stage="safe_fallback",
+        stage="safe_repair",
     )
 
     def can_handle(self, job: RepairJob, diagnosis: RepairDiagnosis, config: dict) -> float:

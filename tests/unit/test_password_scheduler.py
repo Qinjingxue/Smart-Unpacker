@@ -167,7 +167,7 @@ def test_verifier_chain_confirms_fast_match_with_final_verifier():
 def test_verifier_chain_falls_back_when_fast_verifier_is_unknown():
     fast = StaticVerifier(PasswordBatchVerification(
         ok=False,
-        status="unknown_need_fallback",
+        status="unknown_needs_final_verifier",
         attempts=0,
     ))
     final = StaticVerifier(PasswordBatchVerification(

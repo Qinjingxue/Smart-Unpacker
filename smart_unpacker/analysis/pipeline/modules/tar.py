@@ -11,7 +11,7 @@ class TarAnalysisModule:
         candidates = [0]
         candidates.extend(max(0, int(hit.get("offset") or 0) - 257) for hit in prepass.get("hits", []) if hit.get("name") == "tar_ustar")
         for start in sorted(set(candidates)):
-            result = view.probe_tar(start_offset=start, max_entries_to_walk=max_entries) if hasattr(view, "probe_tar") else None
+            result = view.probe_tar(start_offset=start, max_entries_to_walk=max_entries)
             if result and result.get("plausible"):
                 confidence = 0.94 if result.get("end_zero_blocks") else 0.86
                 return ArchiveFormatEvidence(
@@ -21,15 +21,6 @@ class TarAnalysisModule:
                     segments=[ArchiveSegment(start_offset=start, end_offset=result.get("segment_end"), confidence=confidence, evidence=list(result.get("evidence") or []))],
                     details=result,
                 )
-        if any(hit.get("name") == "tar_ustar" for hit in prepass.get("hits", [])):
-            start = min(max(0, int(hit.get("offset") or 0) - 257) for hit in prepass.get("hits", []) if hit.get("name") == "tar_ustar")
-            return ArchiveFormatEvidence(
-                format="tar",
-                confidence=0.35,
-                status="weak",
-                segments=[ArchiveSegment(start_offset=start, end_offset=None, confidence=0.35, damage_flags=["tar_header_unverified"], evidence=["tar:ustar_magic"])],
-                details={"plausible": False, "boundary_confidence": "none"},
-            )
         return ArchiveFormatEvidence(format="tar", confidence=0.0, status="not_found")
 
 

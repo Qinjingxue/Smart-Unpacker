@@ -10,17 +10,10 @@ from typing import Iterable
 from smart_unpacker.watch.scanner import WatchCandidate, looks_like_archive, scan_watch_candidates
 from smart_unpacker.watch.state import WatchStateStore
 
+from watchdog.events import FileSystemEvent, FileSystemEventHandler
+from watchdog.observers import Observer
 
 PipelineRunner = None
-
-
-try:
-    from watchdog.events import FileSystemEvent, FileSystemEventHandler
-    from watchdog.observers import Observer
-except ImportError:  # pragma: no cover - exercised only in incomplete environments
-    FileSystemEvent = object  # type: ignore[assignment]
-    FileSystemEventHandler = object  # type: ignore[assignment,misc]
-    Observer = None  # type: ignore[assignment]
 
 
 @dataclass
@@ -45,8 +38,6 @@ class WatchScheduler:
         recursive: bool = True,
         initial_scan: bool = True,
     ):
-        if Observer is None:
-            raise RuntimeError("watchdog is required for watch mode. Install requirements.txt first.")
         self.config = config
         self.watch_roots = [os.path.abspath(path) for path in watch_roots]
         self.out_dir = os.path.abspath(out_dir)

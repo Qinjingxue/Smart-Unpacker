@@ -14,7 +14,7 @@ class TarHeaderChecksumFix:
     spec = RepairModuleSpec(
         name="tar_header_checksum_fix",
         formats=("tar",),
-        categories=("directory_rebuild", "safe_fallback"),
+        categories=("directory_rebuild", "safe_repair"),
         stage="targeted",
     )
 
@@ -22,7 +22,7 @@ class TarHeaderChecksumFix:
         flags = set(job.damage_flags)
         if flags & {"tar_checksum_bad", "header_checksum_bad"}:
             return 0.9
-        if diagnosis.format == "tar" and "safe_fallback" in diagnosis.categories:
+        if diagnosis.format == "tar" and "safe_repair" in diagnosis.categories:
             return 0.45
         return 0.0
 

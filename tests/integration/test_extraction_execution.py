@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from smart_unpacker.coordinator.output_scan import OutputScanPolicy
+from smart_unpacker.detection.nested_scan_policy import NestedOutputScanPolicy as OutputScanPolicy
 from smart_unpacker.config.schema import normalize_config
 from smart_unpacker.extraction.scheduler import ExtractionScheduler
 from smart_unpacker.contracts.detection import FactBag

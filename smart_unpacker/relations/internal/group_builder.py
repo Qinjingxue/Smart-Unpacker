@@ -221,7 +221,7 @@ class RelationsGroupBuilder:
 
         lower_names = {os.path.basename(path).lower() for path in paths}
         for path in paths:
-            if self.is_legacy_rar_head(path, lower_names):
+            if self.is_oldstyle_rar_head(path, lower_names):
                 return path
 
         return ""
@@ -258,11 +258,11 @@ class RelationsGroupBuilder:
             f"{base}.part01.exe".lower(),
             f"{base}.part001.exe".lower(),
         }
-        legacy_rar_head = f"{base}.rar".lower()
-        legacy_rar_present = legacy_rar_head in lower_names and any(
+        oldstyle_rar_head = f"{base}.rar".lower()
+        oldstyle_rar_present = oldstyle_rar_head in lower_names and any(
             f"{base}.r{number:02d}".lower() in lower_names for number in range(0, 100)
         )
-        if legacy_rar_present:
+        if oldstyle_rar_present:
             expected_heads.add(f"{base}.rar".lower())
 
         if not (expected_heads & lower_names):
@@ -272,21 +272,21 @@ class RelationsGroupBuilder:
         for entry in entries:
             name = entry.path.name
             lower = name.lower()
-            if self.is_standard_split_sibling(base.lower(), lower, legacy_rar_present):
+            if self.is_standard_split_sibling(base.lower(), lower, oldstyle_rar_present):
                 siblings.append(os.path.join(directory, name))
 
         return sorted(siblings, key=self.split_sort_key)
 
-    def is_standard_split_sibling(self, base: str, lower_name: str, legacy_rar_present: bool) -> bool:
+    def is_standard_split_sibling(self, base: str, lower_name: str, oldstyle_rar_present: bool) -> bool:
         if re.match(rf"^{re.escape(base)}\.(7z|zip|rar)\.\d{{3}}$", lower_name):
             return True
         if re.match(rf"^{re.escape(base)}\.\d{{3}}$", lower_name):
             return True
         if re.match(rf"^{re.escape(base)}\.part\d+\.(rar|exe)$", lower_name):
             return True
-        if legacy_rar_present and lower_name == f"{base}.rar":
+        if oldstyle_rar_present and lower_name == f"{base}.rar":
             return True
-        if legacy_rar_present and re.match(rf"^{re.escape(base)}\.r\d{{2}}$", lower_name):
+        if oldstyle_rar_present and re.match(rf"^{re.escape(base)}\.r\d{{2}}$", lower_name):
             return True
         return False
 
@@ -303,7 +303,7 @@ class RelationsGroupBuilder:
             return (1, 1, path.lower())
         return (2, 0, path.lower())
 
-    def is_legacy_rar_head(self, path: str, lower_names: Set[str]) -> bool:
+    def is_oldstyle_rar_head(self, path: str, lower_names: Set[str]) -> bool:
         lower_name = os.path.basename(path).lower()
         if not lower_name.endswith(".rar"):
             return False

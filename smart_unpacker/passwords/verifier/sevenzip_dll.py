@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 from typing import Any
 
 from smart_unpacker.passwords.verifier.base import PasswordBatchVerification
@@ -31,11 +32,16 @@ class SevenZipDllVerifier:
             normalized_passwords,
             part_paths=part_paths,
         )
-        native_result = native_attempt.as_completed_process(archive_path)
+        native_result = subprocess.CompletedProcess(
+            args=["7z.dll", "test-passwords", archive_path],
+            returncode=0 if native_attempt.ok else 2,
+            stdout="" if native_attempt.ok else native_attempt.message,
+            stderr="" if native_attempt.ok else native_attempt.message,
+        )
         error_text = (native_attempt.message or "").lower()
         if native_attempt.ok:
             password = normalized_passwords[native_attempt.matched_index]
-            if self.password_tester is not None and hasattr(self.password_tester, "add_recent_password"):
+            if self.password_tester is not None:
                 self.password_tester.add_recent_password(password)
             return PasswordBatchVerification(
                 ok=True,

@@ -15,7 +15,7 @@ class XzTrailingJunkTrim:
         name="xz_trailing_junk_trim",
         formats=("xz",),
         categories=("boundary_repair",),
-        stage="safe_fallback",
+        stage="safe_repair",
     )
 
     def can_handle(self, job: RepairJob, diagnosis: RepairDiagnosis, config: dict) -> float:

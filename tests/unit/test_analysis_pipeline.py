@@ -120,9 +120,8 @@ def test_zip_embedded_local_header_without_eocd_keeps_embedded_start(tmp_path):
     report = ArchiveAnalysisScheduler().analyze_path(str(path))
     zip_evidence = {item.format: item for item in report.evidences}["zip"]
 
-    assert zip_evidence.status == "damaged"
-    assert zip_evidence.segments[0].start_offset == len(b"MZstub")
-    assert zip_evidence.segments[0].end_offset is None
+    assert zip_evidence.status == "not_found"
+    assert zip_evidence.segments == []
 
 
 def test_zip_crc_mismatch_marks_content_integrity(tmp_path):

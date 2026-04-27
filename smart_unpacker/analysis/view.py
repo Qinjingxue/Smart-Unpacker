@@ -4,10 +4,8 @@ from binascii import crc32
 from collections import OrderedDict
 from dataclasses import dataclass
 
-try:
-    from smart_unpacker_native import AnalysisBinaryView as _NativeAnalysisBinaryView
-except (ImportError, AttributeError):
-    _NativeAnalysisBinaryView = None
+from smart_unpacker_native import AnalysisBinaryView as _NativeAnalysisBinaryView
+from smart_unpacker_native import repair_concat_ranges_to_bytes as _native_concat_ranges_to_bytes
 
 
 @dataclass(frozen=True)
@@ -31,101 +29,46 @@ class SharedBinaryView:
         self.size = os.path.getsize(path)
         self.cache_bytes = max(0, int(cache_bytes or 0))
         self.max_read_bytes = max_read_bytes if max_read_bytes is None else max(0, int(max_read_bytes))
-        self._native = None
-        if _NativeAnalysisBinaryView is not None:
-            try:
-                self._native = _NativeAnalysisBinaryView(
-                    path,
-                    cache_bytes=self.cache_bytes,
-                    max_read_bytes=self.max_read_bytes,
-                    max_concurrent_reads=max_concurrent_reads,
-                )
-                self.size = int(self._native.size)
-            except Exception:
-                self._native = None
-        self._read_semaphore = threading.Semaphore(max(1, int(max_concurrent_reads or 1)))
-        self._cache: OrderedDict[tuple[int, int], bytes] = OrderedDict()
-        self._cache_size = 0
-        self._lock = threading.Lock()
-        self._read_bytes = 0
-        self._cache_hits = 0
+        self._native = _NativeAnalysisBinaryView(
+            path,
+            cache_bytes=self.cache_bytes,
+            max_read_bytes=self.max_read_bytes,
+            max_concurrent_reads=max_concurrent_reads,
+        )
+        self.size = int(self._native.size)
 
     def read_at(self, offset: int, size: int) -> bytes:
-        if self._native is not None:
-            return bytes(self._native.read_at(int(offset), int(size)))
-        offset = max(0, int(offset))
-        size = max(0, int(size))
-        if offset >= self.size or size <= 0:
-            return b""
-        size = min(size, self.size - offset)
-        key = (offset, size)
-        with self._lock:
-            cached = self._cache.get(key)
-            if cached is not None:
-                self._cache_hits += 1
-                self._cache.move_to_end(key)
-                return cached
-            self._reserve_read_budget(size)
-
-        with self._read_semaphore:
-            with open(self.path, "rb") as handle:
-                handle.seek(offset)
-                data = handle.read(size)
-
-        with self._lock:
-            self._read_bytes += len(data)
-            self._store_cache_entry(key, data)
-        return data
+        return bytes(self._native.read_at(int(offset), int(size)))
 
     def read_tail(self, size: int) -> bytes:
-        if self._native is not None:
-            return bytes(self._native.read_tail(int(size)))
-        size = min(max(0, int(size)), self.size)
-        return self.read_at(max(0, self.size - size), size)
+        return bytes(self._native.read_tail(int(size)))
 
     def stats(self) -> ReadStats:
-        if self._native is not None:
-            stats = self._native.stats()
-            return ReadStats(
-                read_bytes=int(stats.get("read_bytes", 0) or 0),
-                cache_hits=int(stats.get("cache_hits", 0) or 0),
-            )
-        with self._lock:
-            return ReadStats(read_bytes=self._read_bytes, cache_hits=self._cache_hits)
+        stats = self._native.stats()
+        return ReadStats(
+            read_bytes=int(stats.get("read_bytes", 0) or 0),
+            cache_hits=int(stats.get("cache_hits", 0) or 0),
+        )
 
     def signature_prepass(self, *, head_bytes: int, tail_bytes: int) -> dict | None:
-        if self._native is None or not hasattr(self._native, "signature_prepass"):
-            return None
         return dict(self._native.signature_prepass(int(head_bytes), int(tail_bytes)))
 
     def probe_zip(self, *, eocd_offset: int, max_cd_entries_to_walk: int = 64) -> dict | None:
-        if self._native is None or not hasattr(self._native, "probe_zip"):
-            return None
         return dict(self._native.probe_zip(int(eocd_offset), int(max_cd_entries_to_walk)))
 
     def probe_rar(self, *, start_offset: int, max_blocks_to_walk: int = 4096) -> dict | None:
-        if self._native is None or not hasattr(self._native, "probe_rar"):
-            return None
         return dict(self._native.probe_rar(int(start_offset), int(max_blocks_to_walk)))
 
     def probe_seven_zip(self, *, start_offset: int, max_next_header_check_bytes: int = 1024 * 1024) -> dict | None:
-        if self._native is None or not hasattr(self._native, "probe_seven_zip"):
-            return None
         return dict(self._native.probe_seven_zip(int(start_offset), int(max_next_header_check_bytes)))
 
     def probe_tar(self, *, start_offset: int = 0, max_entries_to_walk: int = 64) -> dict | None:
-        if self._native is None or not hasattr(self._native, "probe_tar"):
-            return None
         return dict(self._native.probe_tar(int(start_offset), int(max_entries_to_walk)))
 
     def probe_compression_stream(self, *, format: str) -> dict | None:
-        if self._native is None or not hasattr(self._native, "probe_compression_stream"):
-            return None
         return dict(self._native.probe_compression_stream(str(format)))
 
     def probe_compressed_tar(self, *, format: str, max_probe_bytes: int = 4 * 1024 * 1024) -> dict | None:
-        if self._native is None or not hasattr(self._native, "probe_compressed_tar"):
-            return None
         return dict(self._native.probe_compressed_tar(str(format), int(max_probe_bytes)))
 
     def _reserve_read_budget(self, size: int) -> None:
@@ -202,13 +145,15 @@ class MultiVolumeBinaryView:
                     continue
                 local_start = max(cursor, start)
                 local_end = min(cursor + remaining, end)
-                with open(path, "rb") as handle:
-                    handle.seek(local_start - start)
-                    chunks.append(handle.read(local_end - local_start))
+                chunks.append({
+                    "path": path,
+                    "start": local_start - start,
+                    "end": local_end - start,
+                })
                 remaining -= local_end - local_start
                 cursor = local_end
 
-        data = b"".join(chunks)
+        data = bytes(_native_concat_ranges_to_bytes(chunks))
         with self._lock:
             self._read_bytes += len(data)
             self._store_cache_entry(key, data)
@@ -223,7 +168,27 @@ class MultiVolumeBinaryView:
             return ReadStats(read_bytes=self._read_bytes, cache_hits=self._cache_hits)
 
     def signature_prepass(self, *, head_bytes: int, tail_bytes: int) -> dict | None:
-        return None
+        head_size = int(head_bytes)
+        tail_size = int(tail_bytes)
+        head = self.read_at(0, min(head_size, self.size))
+        tail_len = min(tail_size, self.size)
+        tail_start = max(0, self.size - tail_len)
+        tail = self.read_at(tail_start, tail_len)
+        hits = []
+        for name, signature in _KNOWN_SIGNATURES.items():
+            for offset in _find_all(head, signature):
+                hits.append({"name": name, "offset": offset})
+            for offset in _find_all(tail, signature):
+                absolute = tail_start + offset
+                if absolute >= len(head) or tail_start > 0:
+                    hits.append({"name": name, "offset": absolute})
+        hits.sort(key=lambda item: int(item["offset"]))
+        return {
+            "hits": hits,
+            "formats": sorted(_formats_from_hits(hits)),
+            "head_bytes": len(head),
+            "tail_bytes": len(tail),
+        }
 
     def probe_zip(self, *, eocd_offset: int, max_cd_entries_to_walk: int = 64) -> dict | None:
         return _probe_zip_view(self, int(eocd_offset), int(max_cd_entries_to_walk))
@@ -502,6 +467,53 @@ def _probe_rar5_view(view, result: dict, start_offset: int, max_blocks: int) -> 
 
 def _probe_base(fmt: str, start_offset: int) -> dict:
     return {"format": fmt, "plausible": False, "magic_matched": False, "strong_accept": False, "error": "", "archive_offset": start_offset, "evidence": []}
+
+
+_KNOWN_SIGNATURES = {
+    "zip_local": b"PK\x03\x04",
+    "zip_eocd": b"PK\x05\x06",
+    "rar4": b"Rar!\x1a\x07\x00",
+    "rar5": b"Rar!\x1a\x07\x01\x00",
+    "7z": b"7z\xbc\xaf\x27\x1c",
+    "gzip": b"\x1f\x8b\x08",
+    "bzip2": b"BZh",
+    "xz": b"\xfd7zXZ\x00",
+    "zstd": b"\x28\xb5\x2f\xfd",
+    "tar_ustar": b"ustar",
+}
+
+
+def _find_all(data: bytes, needle: bytes):
+    start = 0
+    while True:
+        index = data.find(needle, start)
+        if index < 0:
+            return
+        yield index
+        start = index + 1
+
+
+def _formats_from_hits(hits: list[dict]) -> set[str]:
+    formats = set()
+    for hit in hits:
+        name = str(hit.get("name") or "")
+        if name.startswith("zip_"):
+            formats.add("zip")
+        elif name.startswith("rar"):
+            formats.add("rar")
+        elif name == "7z":
+            formats.add("7z")
+        elif name == "gzip":
+            formats.add("gzip")
+        elif name == "bzip2":
+            formats.add("bzip2")
+        elif name == "xz":
+            formats.add("xz")
+        elif name == "zstd":
+            formats.add("zstd")
+        elif name == "tar_ustar":
+            formats.add("tar")
+    return formats
 
 
 def _read_vint(data: bytes, offset: int):

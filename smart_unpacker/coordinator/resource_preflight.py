@@ -6,8 +6,6 @@ from smart_unpacker.coordinator.scheduling.resource_model import build_resource_
 from smart_unpacker.passwords import PasswordSession
 from smart_unpacker.rename.scheduler import RenameScheduler
 
-cached_analyze_archive_resources = None
-
 
 class ResourcePreflightInspector:
     def __init__(
@@ -27,11 +25,6 @@ class ResourcePreflightInspector:
             self.record_resource_demand(task, analysis)
             return task
         archive_size = self._archive_size(task)
-        if archive_size >= self.precise_resource_min_size_bytes and callable(cached_analyze_archive_resources):
-            analysis = cached_analyze_archive_resources(task.main_path, password=self._password_for(task), part_paths=list(task.all_parts or [task.main_path]))
-            self._record_legacy_analysis(task, analysis)
-            self.record_resource_demand(task, analysis)
-            return task
         reason = (
             "estimated small-archive resource profile"
             if archive_size < self.precise_resource_min_size_bytes
@@ -124,23 +117,3 @@ class ResourcePreflightInspector:
         elif archive_mb >= 256:
             io = 2
         return {"cpu": 1, "io": io, "memory": 1}
-
-    def _record_legacy_analysis(self, task: ArchiveTask, analysis) -> None:
-        task.fact_bag.set("resource.analysis", {
-            "status": analysis.status,
-            "is_archive": analysis.is_archive,
-            "is_encrypted": analysis.is_encrypted,
-            "is_broken": analysis.is_broken,
-            "solid": analysis.solid,
-            "item_count": analysis.item_count,
-            "file_count": analysis.file_count,
-            "dir_count": analysis.dir_count,
-            "archive_size": analysis.archive_size,
-            "total_unpacked_size": analysis.total_unpacked_size,
-            "total_packed_size": analysis.total_packed_size,
-            "largest_item_size": analysis.largest_item_size,
-            "largest_dictionary_size": analysis.largest_dictionary_size,
-            "archive_type": analysis.archive_type,
-            "dominant_method": analysis.dominant_method,
-            "message": analysis.message,
-        })

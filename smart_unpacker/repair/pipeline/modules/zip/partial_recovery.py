@@ -16,7 +16,7 @@ class ZipPartialRecovery:
         name="zip_partial_recovery",
         formats=("zip",),
         categories=("content_recovery", "directory_rebuild"),
-        stage="safe_fallback",
+        stage="safe_repair",
     )
 
     def can_handle(self, job: RepairJob, diagnosis: RepairDiagnosis, config: dict) -> float:

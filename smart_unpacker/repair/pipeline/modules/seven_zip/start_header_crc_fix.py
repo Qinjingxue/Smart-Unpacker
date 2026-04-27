@@ -17,7 +17,7 @@ class SevenZipStartHeaderCrcFix:
     spec = RepairModuleSpec(
         name="seven_zip_start_header_crc_fix",
         formats=("7z", "seven_zip"),
-        categories=("directory_rebuild", "safe_fallback"),
+        categories=("directory_rebuild", "safe_repair"),
         stage="targeted",
     )
 
@@ -25,7 +25,7 @@ class SevenZipStartHeaderCrcFix:
         flags = set(job.damage_flags)
         if flags & {"start_header_crc_bad", "start_header_corrupt"}:
             return 0.86
-        if diagnosis.format in {"7z", "seven_zip"} and "safe_fallback" in diagnosis.categories:
+        if diagnosis.format in {"7z", "seven_zip"} and "safe_repair" in diagnosis.categories:
             return 0.35
         return 0.0
 

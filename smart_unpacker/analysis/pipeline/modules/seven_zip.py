@@ -3,11 +3,6 @@ from smart_unpacker.analysis.pipeline.registry import register_analysis_module
 from smart_unpacker.analysis.pipeline.modules._boundaries import next_archive_boundary
 from smart_unpacker.analysis.result import ArchiveFormatEvidence, ArchiveSegment
 
-try:
-    from smart_unpacker_native import inspect_seven_zip_structure as _inspect_seven_zip_structure
-except (ImportError, AttributeError):
-    _inspect_seven_zip_structure = None
-
 
 class SevenZipAnalysisModule:
     spec = AnalysisModuleSpec(name="seven_zip", formats=("7z",), signatures=(b"7z\xbc\xaf\x27\x1c",))
@@ -17,28 +12,11 @@ class SevenZipAnalysisModule:
         if not hits:
             return ArchiveFormatEvidence(format="7z", confidence=0.0, status="not_found")
         start = min(hit["offset"] for hit in hits)
-        if hasattr(view, "probe_seven_zip"):
-            native = view.probe_seven_zip(
-                start_offset=start,
-                max_next_header_check_bytes=int(config.get("max_next_header_check_bytes", 1024 * 1024) or 1024 * 1024),
-            )
-            if native:
-                return self._from_native(dict(native), start, next_archive_boundary(prepass, start, view.size))
-        if _inspect_seven_zip_structure and start == 0:
-            return self._from_native(
-                dict(_inspect_seven_zip_structure(str(view.path), max_next_header_check_bytes=int(config.get("max_next_header_check_bytes", 1024 * 1024) or 1024 * 1024))),
-                start,
-                next_archive_boundary(prepass, start, view.size),
-            )
-
-        end = next_archive_boundary(prepass, start, view.size)
-        return ArchiveFormatEvidence(
-            format="7z",
-            confidence=0.45,
-            status="weak",
-            segments=[ArchiveSegment(start_offset=start, end_offset=end, confidence=0.45, evidence=["7z:signature", "7z:boundary_inferred"], damage_flags=["native_probe_unavailable"])],
-            warnings=["7z segment end inferred from next archive signature or EOF"] if start > 0 else [],
+        native = view.probe_seven_zip(
+            start_offset=start,
+            max_next_header_check_bytes=int(config.get("max_next_header_check_bytes", 1024 * 1024) or 1024 * 1024),
         )
+        return self._from_native(dict(native), start, next_archive_boundary(prepass, start, view.size))
 
     def _from_native(self, native: dict, start: int, boundary: int) -> ArchiveFormatEvidence:
         if not native.get("magic_matched"):

@@ -139,7 +139,7 @@ def test_cached_probe_reuses_result_for_unchanged_file(tmp_path, monkeypatch):
     _clear_native_7z_caches()
 
 
-def test_empty_password_test_reuses_probe_without_second_native_call(tmp_path, monkeypatch):
+def test_empty_password_test_uses_test_api_directly(tmp_path, monkeypatch):
     fake = _install_fake_tester(monkeypatch)
     archive = tmp_path / "sample.zip"
     archive.write_bytes(b"PK")
@@ -151,7 +151,7 @@ def test_empty_password_test_reuses_probe_without_second_native_call(tmp_path, m
     assert test.ok
     assert test.archive_type == "zip"
     assert fake.probe_calls == 1
-    assert fake.test_calls == 0
+    assert fake.test_calls == 1
     _clear_native_7z_caches()
 
 
@@ -170,18 +170,18 @@ def test_password_test_keeps_password_specific_native_call(tmp_path, monkeypatch
     _clear_native_7z_caches()
 
 
-def test_empty_password_test_derives_validation_fields_from_status(tmp_path, monkeypatch):
+def test_empty_password_test_uses_native_test_status(tmp_path, monkeypatch):
     fake = _install_tester(monkeypatch, UnsupportedProbeTester())
     archive = tmp_path / "sample.7z"
     archive.write_bytes(b"7z")
 
     test = native.cached_test_archive(str(archive))
 
-    assert not test.ok
+    assert test.ok
     assert not test.encrypted
-    assert test.status == native.STATUS_UNSUPPORTED
-    assert fake.probe_calls == 1
-    assert fake.test_calls == 0
+    assert test.status == native.STATUS_OK
+    assert fake.probe_calls == 0
+    assert fake.test_calls == 1
     _clear_native_7z_caches()
 
 

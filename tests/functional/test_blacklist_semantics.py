@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from smart_unpacker.coordinator.output_scan import OutputScanPolicy
+from smart_unpacker.detection.nested_scan_policy import NestedOutputScanPolicy as OutputScanPolicy
 from smart_unpacker.coordinator.scanner import ScanOrchestrator
 from smart_unpacker.detection import DetectionScheduler
 from smart_unpacker.detection.scene.definitions import RECOMMENDED_SCENE_RULES_PAYLOAD

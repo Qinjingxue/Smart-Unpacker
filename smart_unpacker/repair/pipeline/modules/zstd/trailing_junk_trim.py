@@ -13,7 +13,7 @@ class ZstdTrailingJunkTrim:
         name="zstd_trailing_junk_trim",
         formats=("zstd", "zst"),
         categories=("boundary_repair",),
-        stage="safe_fallback",
+        stage="safe_repair",
     )
 
     def can_handle(self, job: RepairJob, diagnosis: RepairDiagnosis, config: dict) -> float:
@@ -25,10 +25,8 @@ class ZstdTrailingJunkTrim:
         return 0.0
 
     def repair(self, job: RepairJob, diagnosis: RepairDiagnosis, workspace: str, config: dict) -> RepairResult:
-        try:
-            import zstandard as zstd
-        except ImportError:
-            return RepairResult(status="unsupported", confidence=0.0, format="zstd", module_name=self.spec.name, diagnosis=diagnosis.as_dict(), message="zstandard package is not available")
+        import zstandard as zstd
+
         data = load_source_bytes(job.source_input)
         decompressor = zstd.ZstdDecompressor().decompressobj()
         try:

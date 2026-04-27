@@ -14,7 +14,7 @@ DEFAULT_REPAIR_CONFIG = {
     },
     "stages": {
         "targeted": True,
-        "safe_fallback": True,
+        "safe_repair": True,
         "deep": False,
     },
     "modules": [

@@ -18,7 +18,7 @@ from smart_unpacker.app.cli_types import CliCommandResult
 CURRENT_CLI_LANG = DEFAULT_CLI_LANG
 
 
-def configure_stdio_fallback():
+def configure_stdio_encoding():
     for stream_name in ("stdout", "stderr"):
         stream = getattr(sys, stream_name, None)
         reconfigure = getattr(stream, "reconfigure", None)
@@ -93,7 +93,7 @@ def main(argv=None):
     if argv is None:
         argv = sys.argv[1:]
 
-    configure_stdio_fallback()
+    configure_stdio_encoding()
     argv = preprocess_sys_argv(argv)
     CURRENT_CLI_LANG = load_cli_language_from_config()
     ctx = CliContext(language=CURRENT_CLI_LANG)

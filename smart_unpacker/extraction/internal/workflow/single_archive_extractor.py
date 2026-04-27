@@ -72,18 +72,15 @@ class SingleArchiveExtractor:
             except Exception as exc:
                 return self._failed(archive, out_dir, all_parts, f"目录创建失败: {exc}")
 
-            try:
-                staged = self.rename_scheduler.normalize_archive_paths(
-                    archive,
-                    all_parts,
-                    startupinfo=startupinfo,
-                    volume_entries=list(split_info.volumes or []),
-                )
-            except TypeError:
-                staged = self.rename_scheduler.normalize_archive_paths(archive, all_parts, startupinfo=startupinfo)
+            staged = self.rename_scheduler.normalize_archive_paths(
+                archive,
+                all_parts,
+                startupinfo=startupinfo,
+                volume_entries=list(split_info.volumes or []),
+            )
             run_archive = staged.archive
-            run_parts = staged.run_parts if hasattr(staged, "run_parts") else staged.all_parts
-            cleanup_parts = getattr(staged, "cleanup_parts", run_parts)
+            run_parts = staged.run_parts
+            cleanup_parts = staged.cleanup_parts
             run_result = None
             test_result = None
             err = ""
@@ -156,36 +153,27 @@ class SingleArchiveExtractor:
         if archive_input:
             known_password = (
                 fact_bag.get("archive.password")
-                or fact_bag.get("password.resolved")
-                or fact_bag.get("password")
             )
             if known_password is not None:
                 return PasswordResolution(password=str(known_password), archive_key=task.key)
             if not self._facts_require_password(fact_bag):
                 return PasswordResolution(password="", archive_key=task.key, encrypted=False)
-        password_tester = getattr(self.password_resolver, "password_tester", None)
-        if password_tester is not None and not getattr(password_tester, "passwords", []):
+        password_tester = self.password_resolver.password_tester
+        if not password_tester.passwords:
             return PasswordResolution(password="", archive_key=task.key, encrypted=False)
-        try:
-            return self.password_resolver.resolve(
-                archive_path,
-                task.fact_bag,
-                part_paths=part_paths,
-                archive_key=task.key,
-            )
-        except TypeError:
-            return self.password_resolver.resolve(archive_path, task.fact_bag, part_paths=part_paths)
+        return self.password_resolver.resolve(
+            archive_path,
+            task.fact_bag,
+            part_paths=part_paths,
+            archive_key=task.key,
+        )
 
     @staticmethod
     def _codepage_from_facts(task: ArchiveTask) -> str | None:
         fact_bag = getattr(task, "fact_bag", None)
         if fact_bag is None or not hasattr(fact_bag, "get"):
             return None
-        for key in ("archive.codepage", "metadata.codepage", "analysis.codepage"):
-            value = fact_bag.get(key)
-            if value:
-                return str(value)
-        metadata = fact_bag.get("archive.metadata") or fact_bag.get("analysis.metadata") or {}
+        metadata = fact_bag.get("archive.metadata") or {}
         if isinstance(metadata, dict) and metadata.get("selected_codepage"):
             return str(metadata.get("selected_codepage"))
         return None
@@ -197,7 +185,7 @@ class SingleArchiveExtractor:
         health = fact_bag.get("resource.health") or {}
         if isinstance(health, dict) and (health.get("is_encrypted") or health.get("is_wrong_password")):
             return True
-        return bool(fact_bag.get("file.validation_encrypted"))
+        return False
 
     def _startupinfo(self):
         import sys

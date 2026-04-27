@@ -1,5 +1,4 @@
 from smart_unpacker.contracts.detection import FactBag
-from smart_unpacker.passwords.archive_tester import ArchivePasswordTester
 from smart_unpacker.passwords.candidates import PasswordCandidatePipeline
 from smart_unpacker.passwords.job import PasswordJob
 from smart_unpacker.passwords.result import PasswordResolution
@@ -11,17 +10,13 @@ from smart_unpacker.support.archive_error_signals import has_archive_damage_sign
 class PasswordResolver:
     def __init__(
         self,
-        password_tester: ArchivePasswordTester,
+        password_tester,
         password_session: PasswordSession | None = None,
         password_scheduler: PasswordScheduler | None = None,
     ):
         self.password_tester = password_tester
         self.password_session = password_session or PasswordSession()
-        self.password_scheduler = (
-            password_scheduler
-            or getattr(password_tester, "password_scheduler", None)
-            or PasswordScheduler.from_archive_password_tester(password_tester)
-        )
+        self.password_scheduler = password_scheduler or password_tester.password_scheduler
 
     def resolve(
         self,
@@ -99,11 +94,7 @@ class PasswordResolver:
         )
 
     def _run_password_search(self, archive_path: str, part_paths: list[str] | None = None):
-        password_store = getattr(self.password_tester, "password_store", None)
-        if password_store is not None:
-            candidates = PasswordCandidatePipeline.from_password_store(password_store)
-        else:
-            candidates = PasswordCandidatePipeline.from_values(getattr(self.password_tester, "passwords", []), source="legacy")
+        candidates = PasswordCandidatePipeline.from_password_store(self.password_tester.password_store)
         return self.password_scheduler.run(PasswordJob(
             archive_path=archive_path,
             part_paths=part_paths,

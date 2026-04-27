@@ -4,8 +4,8 @@ from smart_unpacker.support.path_keys import normalized_path
 
 
 def context_from_marker_candidates(candidates: list[dict[str, Any]], rules: list[dict[str, Any]]) -> dict[str, Any]:
-    fallback = candidates[0] if candidates else {"target_dir": "", "markers": []}
-    fallback_ctx = context_from_markers(str(fallback.get("target_dir") or ""), set(fallback.get("markers") or []), rules)
+    default_candidate = candidates[0] if candidates else {"target_dir": "", "markers": []}
+    default_ctx = context_from_markers(str(default_candidate.get("target_dir") or ""), set(default_candidate.get("markers") or []), rules)
     for candidate in candidates:
         ctx = context_from_markers(
             str(candidate.get("target_dir") or ""),
@@ -14,7 +14,7 @@ def context_from_marker_candidates(candidates: list[dict[str, Any]], rules: list
         )
         if ctx["scene_type"] != "generic":
             return ctx
-    return fallback_ctx
+    return default_ctx
 
 
 def context_from_markers(target_dir: str, markers: set[str], rules: list[dict[str, Any]]) -> dict[str, Any]:

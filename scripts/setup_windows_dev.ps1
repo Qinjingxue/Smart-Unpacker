@@ -438,7 +438,7 @@ if (-not (Test-Path -LiteralPath $venvPython)) {
 }
 
 Invoke-Native -FilePath $venvPython -Arguments @("-m", "pip", "install", "--upgrade", "pip")
-Install-RequirementsOrValidate -PythonPath $venvPython -RequirementsFile $requirementsPath -RequiredModules @("psutil", "send2trash", "watchdog") -Label "Runtime dependency"
+Install-RequirementsOrValidate -PythonPath $venvPython -RequirementsFile $requirementsPath -RequiredModules @("psutil", "send2trash", "watchdog", "zstandard") -Label "Runtime dependency"
 Install-PackageOrValidate -PythonPath $venvPython -PackageName "pytest" -ModuleName "pytest" -Label "Test dependency"
 if ($IncludeBuildDeps) {
     Install-RequirementsOrValidate -PythonPath $venvPython -RequirementsFile $buildRequirementsPath -RequiredModules @("PyInstaller", "maturin", "cmake") -Label "Build dependency"

@@ -158,7 +158,7 @@ def _categories_for(fmt: str, flags: set[str], failure: dict[str, Any]) -> list[
     if failure.get("unsupported_method"):
         categories.append("unsupported_method")
     if not categories:
-        categories.append("safe_fallback")
+        categories.append("safe_repair")
     if fmt.lower() == "zip" and "local_header_recovery" in flags and "directory_rebuild" not in categories:
         categories.append("directory_rebuild")
     return _dedupe(categories)

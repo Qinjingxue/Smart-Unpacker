@@ -16,7 +16,7 @@ class Bzip2TrailingJunkTrim:
         name="bzip2_trailing_junk_trim",
         formats=("bzip2", "bz2"),
         categories=("boundary_repair",),
-        stage="safe_fallback",
+        stage="safe_repair",
     )
 
     def can_handle(self, job: RepairJob, diagnosis: RepairDiagnosis, config: dict) -> float:

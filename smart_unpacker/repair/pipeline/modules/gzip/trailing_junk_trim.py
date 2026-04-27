@@ -16,7 +16,7 @@ class GzipTrailingJunkTrim:
         name="gzip_trailing_junk_trim",
         formats=("gzip", "gz"),
         categories=("boundary_repair",),
-        stage="safe_fallback",
+        stage="safe_repair",
     )
 
     def can_handle(self, job: RepairJob, diagnosis: RepairDiagnosis, config: dict) -> float:

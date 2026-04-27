@@ -37,7 +37,7 @@ class PasswordVerifierChain:
         part_paths: list[str] | None = None,
     ) -> PasswordBatchVerification:
         if not self.fast_verifiers:
-            return self._fallback(archive_path, passwords, part_paths=part_paths)
+            return self._run_final_verifier(archive_path, passwords, part_paths=part_paths)
 
         remaining = list(passwords)
         offset = 0
@@ -81,15 +81,15 @@ class PasswordVerifierChain:
             if fast_outcome.status in {"damaged", "backend_unavailable"}:
                 return fast_outcome
 
-            fallback = self._fallback(archive_path, passwords, part_paths=part_paths)
+            final_outcome = self._run_final_verifier(archive_path, passwords, part_paths=part_paths)
             return PasswordBatchVerification(
-                ok=fallback.ok,
-                status=fallback.status,
-                matched_index=fallback.matched_index,
-                attempts=fallback.attempts or total_fast_attempts,
-                test_result=fallback.test_result,
-                error_text=fallback.error_text or last_error,
-                terminal=fallback.terminal,
+                ok=final_outcome.ok,
+                status=final_outcome.status,
+                matched_index=final_outcome.matched_index,
+                attempts=final_outcome.attempts or total_fast_attempts,
+                test_result=final_outcome.test_result,
+                error_text=final_outcome.error_text or last_error,
+                terminal=final_outcome.terminal,
             )
 
         return PasswordBatchVerification(
@@ -110,12 +110,12 @@ class PasswordVerifierChain:
     ) -> PasswordBatchVerification:
         for verifier in self.fast_verifiers:
             outcome = verifier.verify_batch(archive_path, passwords, part_paths=part_paths)
-            if outcome.status in {"unsupported_method", "unknown_need_fallback"}:
+            if outcome.status in {"unsupported_method", "unknown_needs_final_verifier"}:
                 continue
             return outcome
         return PasswordBatchVerification(
             ok=False,
-            status="unknown_need_fallback",
+            status="unknown_needs_final_verifier",
             attempts=0,
             error_text="no fast verifier accepted archive",
         )
@@ -131,7 +131,7 @@ class PasswordVerifierChain:
             return PasswordBatchVerification(ok=True, status="match", matched_index=0, attempts=1, terminal=True)
         return self.final_verifier.verify_batch(archive_path, [password], part_paths=part_paths)
 
-    def _fallback(
+    def _run_final_verifier(
         self,
         archive_path: str,
         passwords: list[str],
@@ -141,7 +141,7 @@ class PasswordVerifierChain:
         if self.final_verifier is None:
             return PasswordBatchVerification(
                 ok=False,
-                status="unknown_need_fallback",
+                status="unknown_needs_final_verifier",
                 attempts=0,
                 error_text="no final password verifier configured",
                 terminal=True,

@@ -240,8 +240,8 @@ def _method_family(method: str) -> str:
     return value.strip() or "unknown"
 
 
-def _bucket(value: float, thresholds: list[tuple[float, str]], fallback: str) -> str:
+def _bucket(value: float, thresholds: list[tuple[float, str]], default: str) -> str:
     for upper_bound, label in thresholds:
         if value < upper_bound:
             return label
-    return fallback
+    return default

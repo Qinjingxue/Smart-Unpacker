@@ -3,11 +3,6 @@ from smart_unpacker.analysis.pipeline.registry import register_analysis_module
 from smart_unpacker.analysis.pipeline.modules._boundaries import next_archive_boundary
 from smart_unpacker.analysis.result import ArchiveFormatEvidence, ArchiveSegment
 
-try:
-    from smart_unpacker_native import inspect_rar_structure as _inspect_rar_structure
-except (ImportError, AttributeError):
-    _inspect_rar_structure = None
-
 
 class RarAnalysisModule:
     spec = AnalysisModuleSpec(name="rar", formats=("rar",), signatures=(b"Rar!\x1a\x07\x00", b"Rar!\x1a\x07\x01\x00"))
@@ -17,25 +12,8 @@ class RarAnalysisModule:
         if not hits:
             return ArchiveFormatEvidence(format="rar", confidence=0.0, status="not_found")
         start = min(hit["offset"] for hit in hits)
-        if hasattr(view, "probe_rar"):
-            native = view.probe_rar(start_offset=start, max_blocks_to_walk=int(config.get("max_blocks_to_walk", 4096) or 4096))
-            if native:
-                return self._from_native(dict(native), start, next_archive_boundary(prepass, start, view.size))
-        if _inspect_rar_structure and start == 0:
-            return self._from_native(
-                dict(_inspect_rar_structure(str(view.path), max_first_header_check_bytes=int(config.get("max_first_header_check_bytes", 1024 * 1024) or 1024 * 1024))),
-                start,
-                next_archive_boundary(prepass, start, view.size),
-            )
-
-        end = next_archive_boundary(prepass, start, view.size)
-        return ArchiveFormatEvidence(
-            format="rar",
-            confidence=0.90,
-            status="extractable",
-            segments=[ArchiveSegment(start_offset=start, end_offset=end, confidence=0.90, evidence=["rar:signature", "rar:boundary_inferred"])],
-            warnings=["rar segment end inferred from next archive signature or EOF"],
-        )
+        native = view.probe_rar(start_offset=start, max_blocks_to_walk=int(config.get("max_blocks_to_walk", 4096) or 4096))
+        return self._from_native(dict(native), start, next_archive_boundary(prepass, start, view.size))
 
     def _from_native(self, native: dict, start: int, boundary: int) -> ArchiveFormatEvidence:
         if not native.get("magic_matched"):

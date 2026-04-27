@@ -17,7 +17,7 @@ class SevenZipBoundaryTrim:
         name="seven_zip_boundary_trim",
         formats=("7z", "seven_zip"),
         categories=("boundary_repair",),
-        stage="safe_fallback",
+        stage="safe_repair",
     )
 
     def can_handle(self, job: RepairJob, diagnosis: RepairDiagnosis, config: dict) -> float:

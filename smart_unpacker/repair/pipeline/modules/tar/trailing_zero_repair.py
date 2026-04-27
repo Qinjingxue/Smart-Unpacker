@@ -16,7 +16,7 @@ class TarTrailingZeroBlockRepair:
         name="tar_trailing_zero_block_repair",
         formats=("tar",),
         categories=("boundary_repair",),
-        stage="safe_fallback",
+        stage="safe_repair",
     )
 
     def can_handle(self, job: RepairJob, diagnosis: RepairDiagnosis, config: dict) -> float:

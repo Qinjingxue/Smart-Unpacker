@@ -1,6 +1,5 @@
 import ctypes
 import json
-import subprocess
 import sys
 import threading
 from dataclasses import dataclass
@@ -29,14 +28,6 @@ class NativePasswordAttempt:
     def ok(self) -> bool:
         return self.status == STATUS_OK and self.matched_index >= 0
 
-    def as_completed_process(self, archive_path: str) -> subprocess.CompletedProcess:
-        return subprocess.CompletedProcess(
-            args=["7z.dll", "test-passwords", archive_path],
-            returncode=0 if self.ok else 2,
-            stdout="" if self.ok else self.message,
-            stderr="" if self.ok else self.message,
-        )
-
 
 @dataclass(frozen=True)
 class NativeArchiveTest:
@@ -50,14 +41,6 @@ class NativeArchiveTest:
     @property
     def ok(self) -> bool:
         return self.status == STATUS_OK and self.command_ok
-
-    def as_completed_process(self, archive_path: str) -> subprocess.CompletedProcess:
-        return subprocess.CompletedProcess(
-            args=["7z.dll", "test-archive", archive_path],
-            returncode=0 if self.ok else 2,
-            stdout="" if self.ok else self.message,
-            stderr="" if self.ok else self.message,
-        )
 
 
 @dataclass(frozen=True)
@@ -367,15 +350,12 @@ class NativePasswordTester:
         max_items: int = 200000,
     ) -> NativeArchiveCrcManifest:
         library = self._load()
-        function = getattr(library, "sup7z_read_archive_crc_manifest_with_parts", None)
-        if function is None:
-            raise RuntimeError("sevenzip_password_tester_capi.dll does not expose CRC manifest API")
 
         normalized_parts, part_array = self._part_array(archive_path, part_paths)
         manifest_json = ctypes.create_unicode_buffer(_manifest_buffer_chars(max_items))
         message = ctypes.create_unicode_buffer(512)
 
-        status = function(
+        status = library.sup7z_read_archive_crc_manifest_with_parts(
             ctypes.c_wchar_p(str(self.seven_zip_dll_path)),
             ctypes.c_wchar_p(str(archive_path)),
             part_array,
@@ -526,33 +506,30 @@ class NativePasswordTester:
             return library
 
     def _bind_optional_crc_manifest_api(self, library) -> None:
-        try:
-            library.sup7z_read_archive_crc_manifest.argtypes = [
-                ctypes.c_wchar_p,
-                ctypes.c_wchar_p,
-                ctypes.c_wchar_p,
-                ctypes.c_int,
-                ctypes.c_wchar_p,
-                ctypes.c_int,
-                ctypes.c_wchar_p,
-                ctypes.c_int,
-            ]
-            library.sup7z_read_archive_crc_manifest.restype = ctypes.c_int
-            library.sup7z_read_archive_crc_manifest_with_parts.argtypes = [
-                ctypes.c_wchar_p,
-                ctypes.c_wchar_p,
-                ctypes.POINTER(ctypes.c_wchar_p),
-                ctypes.c_int,
-                ctypes.c_wchar_p,
-                ctypes.c_int,
-                ctypes.c_wchar_p,
-                ctypes.c_int,
-                ctypes.c_wchar_p,
-                ctypes.c_int,
-            ]
-            library.sup7z_read_archive_crc_manifest_with_parts.restype = ctypes.c_int
-        except AttributeError:
-            pass
+        library.sup7z_read_archive_crc_manifest.argtypes = [
+            ctypes.c_wchar_p,
+            ctypes.c_wchar_p,
+            ctypes.c_wchar_p,
+            ctypes.c_int,
+            ctypes.c_wchar_p,
+            ctypes.c_int,
+            ctypes.c_wchar_p,
+            ctypes.c_int,
+        ]
+        library.sup7z_read_archive_crc_manifest.restype = ctypes.c_int
+        library.sup7z_read_archive_crc_manifest_with_parts.argtypes = [
+            ctypes.c_wchar_p,
+            ctypes.c_wchar_p,
+            ctypes.POINTER(ctypes.c_wchar_p),
+            ctypes.c_int,
+            ctypes.c_wchar_p,
+            ctypes.c_int,
+            ctypes.c_wchar_p,
+            ctypes.c_int,
+            ctypes.c_wchar_p,
+            ctypes.c_int,
+        ]
+        library.sup7z_read_archive_crc_manifest_with_parts.restype = ctypes.c_int
 
     def _default_wrapper_path(self) -> str:
         candidates: list[Path] = []
@@ -600,17 +577,6 @@ def cached_probe_archive(archive_path: str, part_paths: list[str] | None = None)
     )
 
 
-def _test_from_probe(probe: NativeArchiveProbe) -> NativeArchiveTest:
-    return NativeArchiveTest(
-        status=probe.status,
-        command_ok=probe.status == STATUS_OK,
-        encrypted=probe.status == STATUS_WRONG_PASSWORD,
-        checksum_error=probe.status == STATUS_DAMAGED,
-        archive_type=probe.archive_type,
-        message=probe.message,
-    )
-
-
 def _parse_manifest_json(value: str) -> dict:
     try:
         parsed = json.loads(value or "{}")
@@ -631,12 +597,6 @@ def cached_test_archive(archive_path: str, password: str = "", part_paths: list[
     tester = get_native_password_tester()
     password = password or ""
     key = _cache_key(tester, archive_path, part_paths) + (password,)
-    if not password:
-        return cached_value(
-            "native_7z_test",
-            key,
-            lambda: _test_from_probe(cached_probe_archive(archive_path, part_paths=part_paths)),
-        )
     return cached_value(
         "native_7z_test",
         key,

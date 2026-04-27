@@ -1,10 +1,8 @@
 import subprocess
-from typing import List, Optional, Tuple
+from typing import List, Tuple
 
 from smart_unpacker.support.sevenzip_native import cached_test_archive, get_native_password_tester
-from smart_unpacker.passwords.candidates import PasswordCandidatePipeline
 from smart_unpacker.passwords.internal.store import PasswordStore
-from smart_unpacker.passwords.job import PasswordJob
 from smart_unpacker.passwords.scheduler import PasswordScheduler
 
 
@@ -40,7 +38,12 @@ class ArchivePasswordTester:
 
     def test_password(self, archive_path: str, password: str = "", part_paths: list[str] | None = None) -> Tuple[subprocess.CompletedProcess, str]:
         native_test = cached_test_archive(archive_path, password=password, part_paths=part_paths)
-        result = native_test.as_completed_process(archive_path)
+        result = subprocess.CompletedProcess(
+            args=["7z.dll", "test-archive", archive_path],
+            returncode=0 if native_test.ok else 2,
+            stdout="" if native_test.ok else native_test.message,
+            stderr="" if native_test.ok else native_test.message,
+        )
         error_text = native_test.message.lower()
         if native_test.encrypted and "wrong password" not in error_text:
             error_text = f"{error_text}\nwrong password".strip()
@@ -50,15 +53,5 @@ class ArchivePasswordTester:
 
     def test_without_password(self, archive_path: str, part_paths: list[str] | None = None) -> Tuple[subprocess.CompletedProcess, str]:
         return self.test_password(archive_path, "", part_paths=part_paths)
-
-    def find_working_password(self, archive_path: str, part_paths: list[str] | None = None) -> Tuple[Optional[str], subprocess.CompletedProcess, str]:
-        pipeline = PasswordCandidatePipeline.from_password_store(self.password_store)
-        result = self.password_scheduler.run(PasswordJob(
-            archive_path=archive_path,
-            part_paths=part_paths,
-            candidates=pipeline,
-        ))
-        return result.password, result.test_result, result.error_text
-
 
 PasswordManager = ArchivePasswordTester

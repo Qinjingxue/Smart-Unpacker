@@ -1,4 +1,4 @@
-from smart_unpacker.coordinator.output_scan import OutputScanPolicy
+from smart_unpacker.detection.nested_scan_policy import NestedOutputScanPolicy as OutputScanPolicy
 from smart_unpacker.contracts.filesystem import FileEntry
 from tests.helpers.detection_config import with_detection_pipeline
 

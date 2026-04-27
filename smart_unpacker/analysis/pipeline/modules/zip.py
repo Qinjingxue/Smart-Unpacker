@@ -2,11 +2,6 @@ from smart_unpacker.analysis.pipeline.module import AnalysisModuleSpec
 from smart_unpacker.analysis.pipeline.registry import register_analysis_module
 from smart_unpacker.analysis.result import ArchiveFormatEvidence, ArchiveSegment
 
-try:
-    from smart_unpacker_native import inspect_zip_eocd_structure as _inspect_zip_eocd_structure
-except (ImportError, AttributeError):
-    _inspect_zip_eocd_structure = None
-
 
 class ZipAnalysisModule:
     spec = AnalysisModuleSpec(name="zip", formats=("zip",), signatures=(b"PK\x03\x04", b"PK\x05\x06"), io_profile="tail_heavy")
@@ -19,49 +14,20 @@ class ZipAnalysisModule:
         max_entries = int(config.get("max_cd_entries_to_walk", 64) or 64)
         eocd_hits = [int(hit["offset"]) for hit in hits if hit.get("name") == "zip_eocd"]
         native = None
-        if eocd_hits and hasattr(view, "probe_zip"):
-            for eocd_offset in sorted(eocd_hits, reverse=True):
-                candidate = view.probe_zip(eocd_offset=eocd_offset, max_cd_entries_to_walk=max_entries)
-                if candidate and candidate.get("plausible"):
-                    native = candidate
-                    break
-            if native is None:
-                native = view.probe_zip(eocd_offset=max(eocd_hits), max_cd_entries_to_walk=max_entries)
-        if native is None and _inspect_zip_eocd_structure:
-            native = _inspect_zip_eocd_structure(str(view.path), max_entries)
+        for eocd_offset in sorted(eocd_hits, reverse=True):
+            candidate = view.probe_zip(eocd_offset=eocd_offset, max_cd_entries_to_walk=max_entries)
+            if candidate and candidate.get("plausible"):
+                native = candidate
+                break
+        if native is None and eocd_hits:
+            native = view.probe_zip(eocd_offset=max(eocd_hits), max_cd_entries_to_walk=max_entries)
         if native and (native.get("magic_matched") or native.get("plausible")):
             native = dict(native)
             recovered = self._local_header_recovery(view, native, hits)
             if recovered:
                 return recovered
             return self._from_native(view, native, hits)
-
-        local_hits = [hit["offset"] for hit in hits if hit.get("name") == "zip_local"]
-        start = min(local_hits or [hits[0]["offset"]])
-        end = None
-        evidence = []
-        confidence = 0.45
-        status = "weak"
-        if local_hits:
-            evidence.append("local_header")
-            confidence += 0.25
-        if eocd_hits:
-            evidence.append("eocd")
-            eocd = max(eocd_hits)
-            end = min(view.size, eocd + 22)
-            confidence += 0.25
-        if local_hits and eocd_hits:
-            status = "extractable"
-            confidence = 0.95
-        elif local_hits or eocd_hits:
-            status = "damaged"
-
-        return ArchiveFormatEvidence(
-            format="zip",
-            confidence=min(confidence, 1.0),
-            status=status,
-            segments=[ArchiveSegment(start_offset=start, end_offset=end, confidence=min(confidence, 1.0), evidence=evidence)],
-        )
+        return ArchiveFormatEvidence(format="zip", confidence=0.0, status="not_found")
 
     def _from_native(self, view, native: dict, hits: list[dict]) -> ArchiveFormatEvidence:
         if not native.get("magic_matched") and not hits:

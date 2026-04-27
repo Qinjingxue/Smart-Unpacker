@@ -7,7 +7,7 @@ from typing import Literal, Protocol
 VerifierStatus = Literal[
     "match",
     "no_match",
-    "unknown_need_fallback",
+    "unknown_needs_final_verifier",
     "damaged",
     "unsupported_method",
     "backend_unavailable",
@@ -17,7 +17,7 @@ VerifierStatus = Literal[
 @dataclass(frozen=True)
 class PasswordBatchVerification:
     ok: bool
-    status: VerifierStatus = "unknown_need_fallback"
+    status: VerifierStatus = "unknown_needs_final_verifier"
     matched_index: int = -1
     attempts: int = 0
     test_result: object = None

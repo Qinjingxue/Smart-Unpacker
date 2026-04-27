@@ -18,8 +18,7 @@ class _CompressionModule:
         return AnalysisModuleSpec(name=self.name, formats=(self.fmt,), signatures=(self.magic,), io_profile="head_tail")
 
     def analyze(self, view, prepass: dict, config: dict) -> ArchiveFormatEvidence:
-        result = view.probe_compression_stream(format=self.fmt) if hasattr(view, "probe_compression_stream") else None
-        result = result or {"format": self.fmt, "magic_matched": False, "plausible": False, "error": "native_probe_unavailable", "evidence": []}
+        result = view.probe_compression_stream(format=self.fmt)
         if not result.get("magic_matched"):
             return ArchiveFormatEvidence(format=self.fmt, confidence=0.0, status="not_found", details=result)
         if result.get("plausible"):
@@ -77,8 +76,7 @@ class _CompressedTarModule:
         result = view.probe_compressed_tar(
             format=self.stream_fmt,
             max_probe_bytes=int(config.get("max_probe_bytes", 4 * 1024 * 1024) or 4 * 1024 * 1024),
-        ) if hasattr(view, "probe_compressed_tar") else None
-        result = result or {"format": self.stream_fmt, "magic_matched": False, "plausible": False, "error": "native_probe_unavailable", "evidence": []}
+        )
         if not result.get("magic_matched"):
             return ArchiveFormatEvidence(format=self.fmt, confidence=0.0, status="not_found", details=result)
         if result.get("tar_plausible"):
