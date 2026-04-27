@@ -120,6 +120,7 @@ class PipelineRunner:
 
         log_dir = first_target if os.path.isdir(first_target) else os.path.dirname(first_target)
         self.logger.log_final_summary(log_dir, start_time, self.context.success_count, self.context.failed_tasks)
+        self.extractor.close()
         
         return RunSummary(
             success_count=self.context.success_count,

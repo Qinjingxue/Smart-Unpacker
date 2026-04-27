@@ -18,6 +18,15 @@ std::string read_stdin() {
     return buffer.str();
 }
 
+bool has_arg(int argc, char** argv, const std::string& expected) {
+    for (int i = 1; i < argc; ++i) {
+        if (argv[i] && expected == argv[i]) {
+            return true;
+        }
+    }
+    return false;
+}
+
 std::string json_escape(const std::string& value) {
     std::string out;
     out.reserve(value.size() + 8);
@@ -429,11 +438,18 @@ std::string status_to_string(smart_unpacker::sevenzip::PasswordTestStatus status
 
 }  // namespace
 
-int main() {
+int run_request(const std::string& request) {
     using namespace smart_unpacker::sevenzip;
 
-    const std::string request = read_stdin();
     const std::string job_id = json_string_field(request, "job_id", "");
+    const std::string command = json_string_field(request, "worker_command", "");
+    if (command == "shutdown") {
+        print_json_line(
+            "{\"type\":\"result\",\"job_id\":\"" + json_escape(job_id) +
+            "\",\"status\":\"ok\",\"native_status\":\"ok\",\"message\":\"worker shutdown\"}");
+        return 0;
+    }
+
     const std::wstring dll_path = utf8_to_wide(json_string_field(request, "seven_zip_dll_path", "tools\\7z.dll"));
     const std::wstring archive_path = utf8_to_wide(json_string_field(request, "archive_path", ""));
     const std::wstring output_dir = utf8_to_wide(json_string_field(request, "output_dir", ""));
@@ -488,4 +504,26 @@ int main() {
         "\",\"failed_item\":\"" + json_escape(wide_to_utf8(result.failed_item)) +
         "\",\"message\":\"" + json_escape(result.message) + "\"}");
     return ok ? 0 : 1;
+}
+
+int main(int argc, char** argv) {
+    const bool persistent = has_arg(argc, argv, "--persistent");
+    if (!persistent) {
+        return run_request(read_stdin());
+    }
+
+    std::string line;
+    while (std::getline(std::cin, line)) {
+        line.erase(line.begin(), std::find_if(line.begin(), line.end(), [](unsigned char ch) {
+            return ch > 0x20;
+        }));
+        if (line.empty()) {
+            continue;
+        }
+        const int code = run_request(line);
+        if (json_string_field(line, "worker_command", "") == "shutdown") {
+            return code;
+        }
+    }
+    return 0;
 }

@@ -71,6 +71,9 @@ class ExtractionScheduler:
             runtime_scheduler=runtime_scheduler,
         )
 
+    def close(self) -> None:
+        self.sevenzip_runner.close()
+
     def _failed(self, archive: str, out_dir: str, all_parts: list[str], error: str) -> ExtractionResult:
         return ExtractionResult(
             success=False,
