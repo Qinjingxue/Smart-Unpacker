@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import bz2
 import gzip
 import io
 import lzma
@@ -214,6 +215,40 @@ def test_zip_trailing_junk_trim_removes_bytes_after_eocd(tmp_path):
     assert len(open(result.repaired_input["path"], "rb").read()) == len(original)
 
 
+def test_zip_comment_length_fix_patches_oversized_comment_length(tmp_path):
+    source = tmp_path / "bad_comment_len.zip"
+    _write_zip(source, {"payload.txt": b"zip payload"})
+    data = bytearray(source.read_bytes())
+    eocd_offset = bytes(data).rfind(b"PK\x05\x06")
+    struct.pack_into("<H", data, eocd_offset + 20, 12)
+    source.write_bytes(bytes(data))
+
+    result = _run_repair(tmp_path, "zip_comment_length_fix", "zip", source, ["comment_length_bad"])
+
+    assert result.ok is True
+    with zipfile.ZipFile(result.repaired_input["path"]) as archive:
+        assert archive.read("payload.txt") == b"zip payload"
+
+
+def test_zip_central_directory_count_fix_patches_bad_counts(tmp_path):
+    source = tmp_path / "bad_count.zip"
+    _write_zip(source, {"a.txt": b"a", "b.txt": b"b"})
+    data = bytearray(source.read_bytes())
+    eocd_offset = bytes(data).rfind(b"PK\x05\x06")
+    struct.pack_into("<HH", data, eocd_offset + 8, 1, 1)
+    source.write_bytes(bytes(data))
+
+    result = _run_repair(tmp_path, "zip_central_directory_count_fix", "zip", source, ["central_directory_count_bad"])
+
+    assert result.ok is True
+    repaired = open(result.repaired_input["path"], "rb").read()
+    repaired_eocd = repaired.rfind(b"PK\x05\x06")
+    assert struct.unpack_from("<HH", repaired, repaired_eocd + 8) == (2, 2)
+    with zipfile.ZipFile(result.repaired_input["path"]) as archive:
+        assert archive.read("a.txt") == b"a"
+        assert archive.read("b.txt") == b"b"
+
+
 def test_tar_header_checksum_fix_rewrites_bad_checksum(tmp_path):
     source = tmp_path / "bad_checksum.tar"
     source.write_bytes(_tar_bytes({"payload.txt": b"tar payload"}))
@@ -240,6 +275,21 @@ def test_tar_trailing_zero_block_repair_appends_missing_end_blocks(tmp_path):
         assert archive.extractfile("payload.txt").read() == b"tar payload"
 
 
+def test_tar_trailing_junk_trim_removes_bytes_after_zero_blocks(tmp_path):
+    source = tmp_path / "tar_tail.tar"
+    original = _tar_bytes({"payload.txt": b"tar payload"})
+    source.write_bytes(original + b"JUNK")
+
+    result = _run_repair(tmp_path, "tar_trailing_junk_trim", "tar", source, ["trailing_junk"])
+
+    assert result.ok is True
+    repaired = open(result.repaired_input["path"], "rb").read()
+    assert repaired == original[:len(repaired)]
+    assert not repaired.endswith(b"JUNK")
+    with tarfile.open(result.repaired_input["path"]) as archive:
+        assert archive.extractfile("payload.txt").read() == b"tar payload"
+
+
 def test_gzip_footer_fix_rewrites_crc_and_isize(tmp_path):
     source = tmp_path / "bad_footer.gz"
     data = bytearray(gzip.compress(b"gzip payload"))
@@ -250,6 +300,30 @@ def test_gzip_footer_fix_rewrites_crc_and_isize(tmp_path):
 
     assert result.ok is True
     assert gzip.decompress(open(result.repaired_input["path"], "rb").read()) == b"gzip payload"
+
+
+def test_gzip_trailing_junk_trim_removes_bytes_after_stream(tmp_path):
+    source = tmp_path / "gzip_tail.gz"
+    original = gzip.compress(b"gzip payload")
+    source.write_bytes(original + b"JUNK")
+
+    result = _run_repair(tmp_path, "gzip_trailing_junk_trim", "gzip", source, ["trailing_junk"])
+
+    assert result.ok is True
+    assert open(result.repaired_input["path"], "rb").read() == original
+    assert gzip.decompress(open(result.repaired_input["path"], "rb").read()) == b"gzip payload"
+
+
+def test_bzip2_trailing_junk_trim_removes_bytes_after_stream(tmp_path):
+    source = tmp_path / "bzip2_tail.bz2"
+    original = bz2.compress(b"bzip2 payload")
+    source.write_bytes(original + b"JUNK")
+
+    result = _run_repair(tmp_path, "bzip2_trailing_junk_trim", "bzip2", source, ["trailing_junk"])
+
+    assert result.ok is True
+    assert open(result.repaired_input["path"], "rb").read() == original
+    assert bz2.decompress(open(result.repaired_input["path"], "rb").read()) == b"bzip2 payload"
 
 
 def test_xz_trailing_junk_trim_removes_bytes_after_stream(tmp_path):
