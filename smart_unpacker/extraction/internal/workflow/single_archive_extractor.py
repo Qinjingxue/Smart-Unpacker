@@ -142,7 +142,14 @@ class SingleArchiveExtractor:
             error_msg = self.retry_policy.append_retry_count(error_msg, retry_count)
             print(f"[EXTRACT] 失败: {archive} (错误: {error_msg})")
             shutil.rmtree(out_dir, ignore_errors=True)
-            return self._failed(archive, out_dir, run_parts, error_msg)
+            return self._failed(
+                archive,
+                out_dir,
+                run_parts,
+                error_msg,
+                password_used=correct_pwd,
+                selected_codepage=selected_codepage,
+            )
 
         shutil.rmtree(out_dir, ignore_errors=True)
         return self._failed(archive, out_dir, all_parts, "磁盘空间不足")
@@ -196,11 +203,22 @@ class SingleArchiveExtractor:
         startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
         return startupinfo
 
-    def _failed(self, archive: str, out_dir: str, all_parts: list[str], error: str) -> ExtractionResult:
+    def _failed(
+        self,
+        archive: str,
+        out_dir: str,
+        all_parts: list[str],
+        error: str,
+        *,
+        password_used: str | None = None,
+        selected_codepage: str | None = None,
+    ) -> ExtractionResult:
         return ExtractionResult(
             success=False,
             archive=archive,
             out_dir=out_dir,
             all_parts=list(all_parts or []),
             error=error,
+            password_used=password_used,
+            selected_codepage=selected_codepage,
         )

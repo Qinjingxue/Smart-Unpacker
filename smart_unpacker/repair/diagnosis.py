@@ -10,17 +10,31 @@ BOUNDARY_FLAGS = {
     "missing_end_block",
     "probably_truncated",
     "start_header_corrupt",
+    "trailing_junk",
+    "central_directory_offset_bad",
+    "comment_length_bad",
+    "compressed_size_bad",
 }
 DIRECTORY_FLAGS = {
+    "eocd_bad",
     "central_directory_bad",
+    "central_directory_offset_bad",
+    "central_directory_count_bad",
     "directory_integrity_bad_or_unknown",
     "local_header_recovery",
     "local_headers_present",
+    "start_header_crc_bad",
+    "start_header_corrupt",
+    "tar_checksum_bad",
+    "data_descriptor",
 }
 CONTENT_FLAGS = {
+    "damaged",
     "content_integrity_bad_or_unknown",
     "checksum_error",
     "crc_error",
+    "gzip_footer_bad",
+    "local_header_recovery",
 }
 
 

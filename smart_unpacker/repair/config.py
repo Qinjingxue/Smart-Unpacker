@@ -6,6 +6,7 @@ DEFAULT_REPAIR_CONFIG = {
     "workspace": ".smart_unpacker_repair",
     "keep_candidates": False,
     "max_modules_per_job": 4,
+    "max_attempts_per_task": 1,
     "trigger_on_medium_confidence": True,
     "trigger_on_extraction_failure": True,
     "thresholds": {

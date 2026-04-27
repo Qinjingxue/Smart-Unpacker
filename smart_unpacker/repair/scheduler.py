@@ -63,7 +63,10 @@ class RepairScheduler:
                 continue
             if diagnosis.format not in module.spec.formats and "archive" not in module.spec.formats:
                 continue
-            if module.spec.stage == "deep" and not self.config.get("stages", {}).get("deep", False):
+            if module.spec.categories and not (set(module.spec.categories) & set(diagnosis.categories)):
+                continue
+            stages = self.config.get("stages", {}) if isinstance(self.config.get("stages"), dict) else {}
+            if not stages.get(module.spec.stage, True):
                 continue
             score = float(module.can_handle(job, diagnosis, enabled.get(name, {})) or 0.0)
             if score <= 0:
