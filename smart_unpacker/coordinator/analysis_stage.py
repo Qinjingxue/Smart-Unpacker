@@ -4,6 +4,12 @@ from typing import Any
 
 from smart_unpacker.analysis import ArchiveAnalysisReport, ArchiveAnalysisScheduler
 from smart_unpacker.analysis.result import ArchiveFormatEvidence, ArchiveSegment
+from smart_unpacker.contracts.archive_input import (
+    ArchiveInputDescriptor,
+    ArchiveInputPart,
+    ArchiveInputRange,
+    ArchiveInputSegment,
+)
 from smart_unpacker.contracts.tasks import ArchiveTask
 
 
@@ -43,7 +49,7 @@ class ArchiveAnalysisStage:
         task.fact_bag.set("analysis.selected_format", selected.format)
         task.fact_bag.set("analysis.segment", segment_payload)
         if archive_input:
-            task.fact_bag.set("archive.input", archive_input)
+            task.fact_bag.set("archive.input", archive_input.to_dict())
         return report
 
     def _record_report(self, task: ArchiveTask, report: ArchiveAnalysisReport) -> None:
@@ -90,7 +96,7 @@ class ArchiveAnalysisStage:
         task: ArchiveTask,
         evidence: ArchiveFormatEvidence,
         segment: ArchiveSegment,
-    ) -> dict | None:
+    ) -> ArchiveInputDescriptor | None:
         parts = self._ordered_parts(task)
         if not parts:
             return None
@@ -101,13 +107,28 @@ class ArchiveAnalysisStage:
                 return None
             if self._is_standard_archive_path(parts[0]):
                 return None
-            return {
-                "kind": "file_range",
-                "path": parts[0],
-                "start": int(segment.start_offset),
-                "end": int(segment.end_offset) if segment.end_offset is not None else None,
-                "format_hint": evidence.format,
-            }
+            archive_range = ArchiveInputRange(
+                path=parts[0],
+                start=int(segment.start_offset),
+                end=int(segment.end_offset) if segment.end_offset is not None else None,
+            )
+            return ArchiveInputDescriptor(
+                entry_path=parts[0],
+                open_mode="file_range",
+                format_hint=evidence.format,
+                logical_name=str(task.logical_name or ""),
+                parts=[ArchiveInputPart(path=parts[0], range=archive_range)],
+                segment=ArchiveInputSegment(
+                    start=int(segment.start_offset),
+                    end=int(segment.end_offset) if segment.end_offset is not None else None,
+                    confidence=float(segment.confidence),
+                ),
+                analysis={
+                    "status": evidence.status,
+                    "confidence": float(evidence.confidence),
+                    "damage_flags": list(segment.damage_flags),
+                },
+            )
         ranges = self._logical_range_to_file_ranges(
             parts,
             int(segment.start_offset),
@@ -115,11 +136,23 @@ class ArchiveAnalysisStage:
         )
         if not ranges:
             return None
-        return {
-            "kind": "concat_ranges",
-            "ranges": ranges,
-            "format_hint": evidence.format,
-        }
+        return ArchiveInputDescriptor(
+            entry_path=task.main_path,
+            open_mode="concat_ranges",
+            format_hint=evidence.format,
+            logical_name=str(task.logical_name or ""),
+            ranges=[ArchiveInputRange(path=item["path"], start=item["start"], end=item.get("end")) for item in ranges],
+            segment=ArchiveInputSegment(
+                start=int(segment.start_offset),
+                end=int(segment.end_offset) if segment.end_offset is not None else None,
+                confidence=float(segment.confidence),
+            ),
+            analysis={
+                "status": evidence.status,
+                "confidence": float(evidence.confidence),
+                "damage_flags": list(segment.damage_flags),
+            },
+        )
 
     def _ordered_parts(self, task: ArchiveTask) -> list[str]:
         volumes = list(getattr(task.split_info, "volumes", None) or [])

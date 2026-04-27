@@ -246,6 +246,51 @@ std::vector<std::string> json_object_array_field(const std::string& json, const 
     return objects;
 }
 
+std::string json_object_field(const std::string& json, const std::string& key) {
+    const std::string needle = "\"" + key + "\"";
+    const std::size_t key_pos = json.find(needle);
+    if (key_pos == std::string::npos) {
+        return "";
+    }
+    const std::size_t colon = json.find(':', key_pos + needle.size());
+    if (colon == std::string::npos) {
+        return "";
+    }
+    std::size_t pos = skip_ws(json, colon + 1);
+    if (pos >= json.size() || json[pos] != '{') {
+        return "";
+    }
+    const std::size_t start = pos;
+    int depth = 0;
+    bool in_string = false;
+    for (; pos < json.size(); ++pos) {
+        const char ch = json[pos];
+        if (ch == '"' && (pos == 0 || json[pos - 1] != '\\')) {
+            in_string = !in_string;
+        }
+        if (in_string) {
+            continue;
+        }
+        if (ch == '{') {
+            ++depth;
+        } else if (ch == '}') {
+            --depth;
+            if (depth == 0) {
+                return json.substr(start, pos - start + 1);
+            }
+        }
+    }
+    return "";
+}
+
+struct WorkerArchiveInput {
+    std::wstring archive_path;
+    std::wstring format_hint;
+    std::wstring open_mode;
+    std::vector<std::wstring> part_paths;
+    std::vector<smart_unpacker::sevenzip::ExtractInputRange> ranges;
+};
+
 std::vector<smart_unpacker::sevenzip::ExtractInputRange> parse_input_ranges(const std::string& request, const std::string& archive_path) {
     using smart_unpacker::sevenzip::ExtractInputRange;
     std::vector<ExtractInputRange> ranges;
@@ -281,6 +326,96 @@ std::vector<smart_unpacker::sevenzip::ExtractInputRange> parse_input_ranges(cons
         ranges.push_back(range);
     }
     return ranges;
+}
+
+std::vector<smart_unpacker::sevenzip::ExtractInputRange> parse_ranges_from_objects(
+    const std::vector<std::string>& objects,
+    const std::string& default_path
+) {
+    using smart_unpacker::sevenzip::ExtractInputRange;
+    std::vector<ExtractInputRange> ranges;
+    for (const auto& object_json : objects) {
+        unsigned long long start = 0;
+        unsigned long long end = 0;
+        const bool has_start = json_uint_field_in_object(object_json, "start", &start) || json_uint_field_in_object(object_json, "start_offset", &start);
+        const bool has_end = json_uint_field_in_object(object_json, "end", &end) || json_uint_field_in_object(object_json, "end_offset", &end);
+        const std::string path = json_string_field(object_json, "path", default_path);
+        if (path.empty() && default_path.empty()) {
+            continue;
+        }
+        ExtractInputRange range;
+        range.path = utf8_to_wide(path.empty() ? default_path : path);
+        range.start = has_start ? start : 0;
+        range.end = end;
+        range.has_end = has_end;
+        ranges.push_back(range);
+    }
+    return ranges;
+}
+
+WorkerArchiveInput parse_archive_input_descriptor(
+    const std::string& request,
+    const std::wstring& fallback_archive_path,
+    const std::wstring& fallback_format_hint,
+    const std::vector<std::wstring>& fallback_part_paths
+) {
+    WorkerArchiveInput input;
+    input.archive_path = fallback_archive_path;
+    input.format_hint = fallback_format_hint;
+    input.open_mode = L"file";
+    input.part_paths = fallback_part_paths;
+
+    const std::string descriptor = json_object_field(request, "archive_input");
+    if (descriptor.empty()) {
+        input.ranges = parse_input_ranges(request, json_string_field(request, "archive_path", ""));
+        if (!input.ranges.empty()) {
+            input.open_mode = utf8_to_wide(json_string_field(request, "kind", "concat_ranges"));
+        }
+        return input;
+    }
+
+    const std::string entry_path = json_string_field(descriptor, "entry_path", json_string_field(request, "archive_path", ""));
+    if (!entry_path.empty()) {
+        input.archive_path = utf8_to_wide(entry_path);
+    }
+    const std::string mode = json_string_field(descriptor, "open_mode", json_string_field(descriptor, "kind", "file"));
+    input.open_mode = utf8_to_wide(mode.empty() ? "file" : mode);
+    const std::string format_hint = json_string_field(descriptor, "format_hint", json_string_field(request, "format_hint", ""));
+    input.format_hint = utf8_to_wide(format_hint);
+
+    std::vector<std::wstring> parts;
+    for (const auto& object_json : json_object_array_field(descriptor, "parts")) {
+        const std::string path = json_string_field(object_json, "path", "");
+        if (!path.empty()) {
+            parts.push_back(utf8_to_wide(path));
+        }
+    }
+    if (!parts.empty()) {
+        input.part_paths = parts;
+    }
+
+    if (mode == "file_range") {
+        input.ranges = parse_ranges_from_objects(json_object_array_field(descriptor, "parts"), entry_path);
+        if (input.ranges.empty()) {
+            const std::string segment = json_object_field(descriptor, "segment");
+            unsigned long long start = 0;
+            unsigned long long end = 0;
+            const bool has_start = json_uint_field_in_object(segment, "start", &start) || json_uint_field_in_object(segment, "start_offset", &start);
+            const bool has_end = json_uint_field_in_object(segment, "end", &end) || json_uint_field_in_object(segment, "end_offset", &end);
+            smart_unpacker::sevenzip::ExtractInputRange range;
+            range.path = utf8_to_wide(entry_path.empty() ? json_string_field(request, "archive_path", "") : entry_path);
+            range.start = has_start ? start : 0;
+            range.end = end;
+            range.has_end = has_end;
+            input.ranges.push_back(range);
+        }
+    } else if (mode == "concat_ranges") {
+        input.ranges = parse_ranges_from_objects(json_object_array_field(descriptor, "ranges"), entry_path);
+        if (input.ranges.empty()) {
+            input.ranges = parse_ranges_from_objects(json_object_array_field(descriptor, "parts"), entry_path);
+        }
+    }
+    return input;
 }
 
 void print_json_line(const std::string& json) {
@@ -327,10 +462,10 @@ int main() {
                 ",\"item_path\":\"" + json_escape(wide_to_utf8(event.item_path)) + "\"}");
     };
 
-    const auto input_ranges = parse_input_ranges(request, json_string_field(request, "archive_path", ""));
-    const auto result = input_ranges.empty()
-        ? extract_archive_with_parts(dll_path, archive_path, part_paths, password, output_dir, progress)
-        : extract_archive_with_ranges(dll_path, archive_path, input_ranges, format_hint, password, output_dir, progress);
+    const auto archive_input = parse_archive_input_descriptor(request, archive_path, format_hint, part_paths);
+    const auto result = archive_input.ranges.empty()
+        ? extract_archive_with_parts(dll_path, archive_input.archive_path, archive_input.part_paths, password, output_dir, progress)
+        : extract_archive_with_ranges(dll_path, archive_input.archive_path, archive_input.ranges, archive_input.format_hint, password, output_dir, progress);
 
     const bool ok = result.status == PasswordTestStatus::Ok && result.command_ok;
     print_json_line(
@@ -348,7 +483,8 @@ int main() {
         ",\"files_written\":" + std::to_string(result.files_written) +
         ",\"dirs_written\":" + std::to_string(result.dirs_written) +
         ",\"bytes_written\":" + std::to_string(result.bytes_written) +
-        ",\"archive_type\":\"" + json_escape(wide_to_utf8(result.archive_type)) +
+        ",\"open_mode\":\"" + json_escape(wide_to_utf8(archive_input.open_mode)) +
+        "\",\"archive_type\":\"" + json_escape(wide_to_utf8(result.archive_type)) +
         "\",\"failed_item\":\"" + json_escape(wide_to_utf8(result.failed_item)) +
         "\",\"message\":\"" + json_escape(result.message) + "\"}");
     return ok ? 0 : 1;

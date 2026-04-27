@@ -61,11 +61,14 @@ def test_analysis_stage_writes_file_range_input(tmp_path):
     assert task.fact_bag.get("analysis.selected_format") == "zip"
     assert task.fact_bag.get("analysis.segment")["start_offset"] == 4
     assert task.fact_bag.get("archive.input") == {
-        "kind": "file_range",
-        "path": str(archive),
-        "start": 4,
-        "end": 40,
+        "kind": "archive_input",
+        "entry_path": str(archive),
+        "open_mode": "file_range",
         "format_hint": "zip",
+        "logical_name": "case",
+        "parts": [{"path": str(archive), "role": "main", "start": 4, "end": 40}],
+        "segment": {"start": 4, "source": "analysis", "end": 40, "confidence": 0.99},
+        "analysis": {"status": "extractable", "confidence": 0.99, "damage_flags": []},
     }
 
 
@@ -95,11 +98,16 @@ def test_analysis_stage_maps_split_logical_segment_to_concat_ranges(tmp_path):
     stage.analyze_task(task)
 
     assert task.fact_bag.get("archive.input") == {
-        "kind": "concat_ranges",
+        "kind": "archive_input",
+        "entry_path": str(part1),
+        "open_mode": "concat_ranges",
+        "format_hint": "7z",
+        "logical_name": "case",
         "ranges": [
             {"path": str(part1), "start": 8, "end": 10},
             {"path": str(part2), "start": 0, "end": 10},
             {"path": str(part3), "start": 0, "end": 4},
         ],
-        "format_hint": "7z",
+        "segment": {"start": 8, "source": "analysis", "end": 24, "confidence": 0.97},
+        "analysis": {"status": "extractable", "confidence": 0.97, "damage_flags": []},
     }

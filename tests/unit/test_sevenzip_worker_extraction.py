@@ -2,6 +2,7 @@ import subprocess
 
 import pytest
 
+from smart_unpacker.contracts.archive_input import ArchiveInputDescriptor, ArchiveInputPart, ArchiveInputRange
 from smart_unpacker.contracts.detection import FactBag
 from smart_unpacker.contracts.tasks import ArchiveTask
 from smart_unpacker.extraction.scheduler import ExtractionScheduler
@@ -98,3 +99,28 @@ def test_extraction_scheduler_uses_worker_for_concat_ranges(tmp_path):
 
     assert result.success is True
     assert (tmp_path / "out" / filename).read_text(encoding="utf-8") == "concat payload"
+
+
+def test_extraction_scheduler_uses_worker_archive_input_descriptor(tmp_path):
+    archive, filename = _create_7z(tmp_path, "payload", "descriptor payload")
+    data = archive.read_bytes()
+    prefix = b"DESCRIPTOR"
+    mixed = tmp_path / "descriptor.bin"
+    mixed.write_bytes(prefix + data + b"TAIL")
+
+    descriptor = ArchiveInputDescriptor(
+        entry_path=str(mixed),
+        open_mode="file_range",
+        format_hint="7z",
+        parts=[
+            ArchiveInputPart(
+                path=str(mixed),
+                range=ArchiveInputRange(path=str(mixed), start=len(prefix), end=len(prefix) + len(data)),
+            )
+        ],
+    )
+    task = _task(mixed, descriptor.to_dict())
+    result = ExtractionScheduler(max_retries=1).extract(task, str(tmp_path / "out"))
+
+    assert result.success is True
+    assert (tmp_path / "out" / filename).read_text(encoding="utf-8") == "descriptor payload"

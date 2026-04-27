@@ -5,6 +5,7 @@ from typing import Any
 
 import psutil
 
+from smart_unpacker.contracts.archive_input import ArchiveInputDescriptor
 from smart_unpacker.contracts.tasks import ArchiveTask
 from smart_unpacker.support.resources import get_7z_dll_path, get_sevenzip_worker_path
 
@@ -88,51 +89,32 @@ class SevenZipRunner:
 
         archive_input = self._archive_input(task, archive_path, part_paths)
         if archive_input:
-            job["input"] = archive_input
-            job.update(archive_input)
-            if archive_input.get("format_hint"):
-                job["format_hint"] = archive_input.get("format_hint")
+            descriptor_payload = archive_input.to_dict()
+            job["archive_input"] = descriptor_payload
+            if descriptor_payload.get("format_hint"):
+                job["format_hint"] = descriptor_payload.get("format_hint")
         return job
 
-    def _archive_input(self, task: ArchiveTask, archive_path: str, part_paths: list[str]) -> dict | None:
+    def _archive_input(self, task: ArchiveTask, archive_path: str, part_paths: list[str]) -> ArchiveInputDescriptor | None:
         fact_bag = getattr(task, "fact_bag", None)
         raw = fact_bag.get("archive.input") if fact_bag is not None and hasattr(fact_bag, "get") else None
         if isinstance(raw, dict):
             return self._normalize_archive_input(raw, archive_path, part_paths)
         return None
 
-    def _normalize_archive_input(self, raw: dict, archive_path: str, part_paths: list[str]) -> dict:
+    def _normalize_archive_input(self, raw: dict, archive_path: str, part_paths: list[str]) -> ArchiveInputDescriptor:
+        if raw.get("kind") == "archive_input" or raw.get("open_mode"):
+            return ArchiveInputDescriptor.from_dict(raw, archive_path=archive_path, part_paths=part_paths)
         kind = str(raw.get("kind") or "file").lower()
         if kind == "file_range":
-            value = {
-                "kind": "file_range",
-                "path": str(raw.get("path") or archive_path),
-                "start": int(raw.get("start", raw.get("start_offset", 0)) or 0),
-            }
-            end = raw.get("end", raw.get("end_offset"))
-            if end is not None:
-                value["end"] = int(end)
-            if raw.get("format_hint") or raw.get("format"):
-                value["format_hint"] = str(raw.get("format_hint") or raw.get("format") or "")
-            return value
+            return ArchiveInputDescriptor.from_legacy(raw, archive_path=archive_path, part_paths=part_paths)
         if kind == "concat_ranges":
-            ranges = []
-            for item in raw.get("ranges") or []:
-                if not isinstance(item, dict):
-                    continue
-                entry = {
-                    "path": str(item.get("path") or archive_path),
-                    "start": int(item.get("start", item.get("start_offset", 0)) or 0),
-                }
-                end = item.get("end", item.get("end_offset"))
-                if end is not None:
-                    entry["end"] = int(end)
-                ranges.append(entry)
-            value = {"kind": "concat_ranges", "ranges": ranges}
-            if raw.get("format_hint") or raw.get("format"):
-                value["format_hint"] = str(raw.get("format_hint") or raw.get("format") or "")
-            return value
-        return {"kind": "file", "part_paths": list(part_paths or [archive_path])}
+            return ArchiveInputDescriptor.from_legacy(raw, archive_path=archive_path, part_paths=part_paths)
+        return ArchiveInputDescriptor.from_parts(
+            archive_path=archive_path,
+            part_paths=list(part_paths or [archive_path]),
+            format_hint=str(raw.get("format_hint") or raw.get("format") or ""),
+        )
 
     def _run_worker(self, job: dict, startupinfo, runtime_scheduler: Any, task: ArchiveTask) -> subprocess.CompletedProcess:
         payload = json.dumps(job, ensure_ascii=False, separators=(",", ":"))
