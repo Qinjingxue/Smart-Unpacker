@@ -58,7 +58,7 @@ std::string wide_to_utf8(const std::wstring& value) {
     }
     const int bytes = WideCharToMultiByte(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), nullptr, 0, nullptr, nullptr);
     if (bytes <= 0) {
-        return std::string(value.begin(), value.end());
+        return "";
     }
     std::string out(static_cast<std::size_t>(bytes), '\0');
     WideCharToMultiByte(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), out.data(), bytes, nullptr, nullptr);
@@ -156,6 +156,133 @@ std::vector<std::string> json_string_array_field(const std::string& json, const 
     return values;
 }
 
+unsigned long long parse_uint_at(const std::string& json, std::size_t pos, bool* ok = nullptr) {
+    if (ok) {
+        *ok = false;
+    }
+    pos = skip_ws(json, pos);
+    unsigned long long value = 0;
+    bool any = false;
+    while (pos < json.size() && json[pos] >= '0' && json[pos] <= '9') {
+        any = true;
+        value = value * 10 + static_cast<unsigned long long>(json[pos] - '0');
+        ++pos;
+    }
+    if (ok) {
+        *ok = any;
+    }
+    return value;
+}
+
+bool json_uint_field_in_object(const std::string& object_json, const std::string& key, unsigned long long* value) {
+    const std::string needle = "\"" + key + "\"";
+    const std::size_t key_pos = object_json.find(needle);
+    if (key_pos == std::string::npos) {
+        return false;
+    }
+    const std::size_t colon = object_json.find(':', key_pos + needle.size());
+    if (colon == std::string::npos) {
+        return false;
+    }
+    bool ok = false;
+    const unsigned long long parsed = parse_uint_at(object_json, colon + 1, &ok);
+    if (ok && value) {
+        *value = parsed;
+    }
+    return ok;
+}
+
+std::vector<std::string> json_object_array_field(const std::string& json, const std::string& key) {
+    std::vector<std::string> objects;
+    const std::string needle = "\"" + key + "\"";
+    const std::size_t key_pos = json.find(needle);
+    if (key_pos == std::string::npos) {
+        return objects;
+    }
+    const std::size_t colon = json.find(':', key_pos + needle.size());
+    if (colon == std::string::npos) {
+        return objects;
+    }
+    std::size_t pos = skip_ws(json, colon + 1);
+    if (pos >= json.size() || json[pos] != '[') {
+        return objects;
+    }
+    ++pos;
+    while (pos < json.size()) {
+        pos = skip_ws(json, pos);
+        if (pos < json.size() && json[pos] == ']') {
+            break;
+        }
+        if (pos >= json.size() || json[pos] != '{') {
+            break;
+        }
+        const std::size_t start = pos;
+        int depth = 0;
+        bool in_string = false;
+        for (; pos < json.size(); ++pos) {
+            const char ch = json[pos];
+            if (ch == '"' && (pos == 0 || json[pos - 1] != '\\')) {
+                in_string = !in_string;
+            }
+            if (in_string) {
+                continue;
+            }
+            if (ch == '{') {
+                ++depth;
+            } else if (ch == '}') {
+                --depth;
+                if (depth == 0) {
+                    objects.push_back(json.substr(start, pos - start + 1));
+                    ++pos;
+                    break;
+                }
+            }
+        }
+        pos = skip_ws(json, pos);
+        if (pos < json.size() && json[pos] == ',') {
+            ++pos;
+        }
+    }
+    return objects;
+}
+
+std::vector<smart_unpacker::sevenzip::ExtractInputRange> parse_input_ranges(const std::string& request, const std::string& archive_path) {
+    using smart_unpacker::sevenzip::ExtractInputRange;
+    std::vector<ExtractInputRange> ranges;
+    const std::string kind = json_string_field(request, "kind", "file");
+    if (kind == "file_range") {
+        unsigned long long start = 0;
+        unsigned long long end = 0;
+        const bool has_start = json_uint_field_in_object(request, "start", &start) || json_uint_field_in_object(request, "start_offset", &start);
+        const bool has_end = json_uint_field_in_object(request, "end", &end) || json_uint_field_in_object(request, "end_offset", &end);
+        const std::string path = json_string_field(request, "path", archive_path);
+        ExtractInputRange range;
+        range.path = utf8_to_wide(path.empty() ? archive_path : path);
+        range.start = has_start ? start : 0;
+        range.end = end;
+        range.has_end = has_end;
+        ranges.push_back(range);
+        return ranges;
+    }
+    if (kind != "concat_ranges") {
+        return ranges;
+    }
+    for (const auto& object_json : json_object_array_field(request, "ranges")) {
+        unsigned long long start = 0;
+        unsigned long long end = 0;
+        const bool has_start = json_uint_field_in_object(object_json, "start", &start) || json_uint_field_in_object(object_json, "start_offset", &start);
+        const bool has_end = json_uint_field_in_object(object_json, "end", &end) || json_uint_field_in_object(object_json, "end_offset", &end);
+        const std::string path = json_string_field(object_json, "path", archive_path);
+        ExtractInputRange range;
+        range.path = utf8_to_wide(path.empty() ? archive_path : path);
+        range.start = has_start ? start : 0;
+        range.end = end;
+        range.has_end = has_end;
+        ranges.push_back(range);
+    }
+    return ranges;
+}
+
 void print_json_line(const std::string& json) {
     std::cout << json << "\n";
     std::cout.flush();
@@ -176,6 +303,7 @@ int main() {
     const std::wstring archive_path = utf8_to_wide(json_string_field(request, "archive_path", ""));
     const std::wstring output_dir = utf8_to_wide(json_string_field(request, "output_dir", ""));
     const std::wstring password = utf8_to_wide(json_string_field(request, "password", ""));
+    const std::wstring format_hint = utf8_to_wide(json_string_field(request, "format_hint", ""));
 
     std::vector<std::wstring> part_paths;
     for (const auto& part : json_string_array_field(request, "part_paths")) {
@@ -189,13 +317,7 @@ int main() {
         return 2;
     }
 
-    const auto result = extract_archive_with_parts(
-        dll_path,
-        archive_path,
-        part_paths,
-        password,
-        output_dir,
-        [job_id](const ExtractProgressEvent& event) {
+    auto progress = [job_id](const ExtractProgressEvent& event) {
             print_json_line(
                 "{\"type\":\"progress\",\"job_id\":\"" + json_escape(job_id) +
                 "\",\"event\":\"" + json_escape(event.event) +
@@ -203,7 +325,12 @@ int main() {
                 ",\"total_bytes\":" + std::to_string(event.total_bytes) +
                 ",\"item_index\":" + std::to_string(event.item_index) +
                 ",\"item_path\":\"" + json_escape(wide_to_utf8(event.item_path)) + "\"}");
-        });
+    };
+
+    const auto input_ranges = parse_input_ranges(request, json_string_field(request, "archive_path", ""));
+    const auto result = input_ranges.empty()
+        ? extract_archive_with_parts(dll_path, archive_path, part_paths, password, output_dir, progress)
+        : extract_archive_with_ranges(dll_path, archive_path, input_ranges, format_hint, password, output_dir, progress);
 
     const bool ok = result.status == PasswordTestStatus::Ok && result.command_ok;
     print_json_line(

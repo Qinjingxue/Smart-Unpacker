@@ -53,6 +53,13 @@ struct ExtractArchiveResult {
 
 using ExtractProgressCallback = std::function<void(const ExtractProgressEvent&)>;
 
+struct ExtractInputRange {
+    std::wstring path;
+    unsigned long long start = 0;
+    unsigned long long end = 0;
+    bool has_end = false;
+};
+
 bool is_backend_available(const std::wstring& seven_zip_dll_path);
 
 PasswordTestResult test_password(
@@ -87,6 +94,16 @@ ExtractArchiveResult extract_archive_with_parts(
     const std::wstring& seven_zip_dll_path,
     const std::wstring& archive_path,
     const std::vector<std::wstring>& part_paths,
+    const std::wstring& password,
+    const std::wstring& output_dir,
+    ExtractProgressCallback progress = {}
+);
+
+ExtractArchiveResult extract_archive_with_ranges(
+    const std::wstring& seven_zip_dll_path,
+    const std::wstring& archive_path,
+    const std::vector<ExtractInputRange>& ranges,
+    const std::wstring& format_hint,
     const std::wstring& password,
     const std::wstring& output_dir,
     ExtractProgressCallback progress = {}

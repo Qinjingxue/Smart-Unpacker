@@ -24,6 +24,7 @@ namespace smart_unpacker::sevenzip {
 
 using UInt32 = std::uint32_t;
 using UInt64 = std::uint64_t;
+using UInt16 = std::uint16_t;
 using Int32 = std::int32_t;
 using Int64 = std::int64_t;
 
@@ -371,6 +372,150 @@ private:
     std::vector<std::wstring> paths_;
     std::vector<UInt64> sizes_;
     std::vector<UInt64> offsets_;
+    UInt64 total_size_ = 0;
+    UInt64 position_ = 0;
+    bool valid_ = true;
+};
+
+struct NormalizedInputRange {
+    std::wstring path;
+    UInt64 start = 0;
+    UInt64 length = 0;
+    UInt64 virtual_offset = 0;
+};
+
+class MultiRangeInStream final : public IInStream {
+public:
+    explicit MultiRangeInStream(const std::vector<ExtractInputRange>& ranges) {
+        UInt64 virtual_offset = 0;
+        for (const auto& input : ranges) {
+            if (input.path.empty()) {
+                valid_ = false;
+                continue;
+            }
+            UInt64 file_size = 0;
+            try {
+                file_size = static_cast<UInt64>(std::filesystem::file_size(input.path));
+            } catch (...) {
+                valid_ = false;
+                continue;
+            }
+            const UInt64 start = std::min<UInt64>(input.start, file_size);
+            const UInt64 end = input.has_end ? std::min<UInt64>(input.end, file_size) : file_size;
+            if (end < start) {
+                valid_ = false;
+                continue;
+            }
+            const UInt64 length = end - start;
+            if (length == 0) {
+                continue;
+            }
+            ranges_.push_back(NormalizedInputRange{input.path, start, length, virtual_offset});
+            virtual_offset += length;
+        }
+        total_size_ = virtual_offset;
+        valid_ = valid_ && !ranges_.empty();
+    }
+
+    bool is_open() const { return valid_; }
+
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** object) override {
+        if (!object) {
+            return E_POINTER;
+        }
+        *object = nullptr;
+        if (IsEqualGUID(iid, IID_IUnknown) || IsEqualGUID(iid, IID_ISequentialInStream) || IsEqualGUID(iid, IID_IInStream)) {
+            *object = static_cast<IInStream*>(this);
+            AddRef();
+            return S_OK;
+        }
+        return E_NOINTERFACE;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return InterlockedIncrement(&refs_); }
+    ULONG STDMETHODCALLTYPE Release() override {
+        const ULONG refs = InterlockedDecrement(&refs_);
+        if (refs == 0) {
+            delete this;
+        }
+        return refs;
+    }
+    HRESULT STDMETHODCALLTYPE Read(void* data, UInt32 size, UInt32* processedSize) override {
+        if (processedSize) {
+            *processedSize = 0;
+        }
+        if (!valid_ || !data) {
+            return E_FAIL;
+        }
+        auto* out = static_cast<unsigned char*>(data);
+        UInt32 total_read = 0;
+        while (total_read < size && position_ < total_size_) {
+            const auto* range = find_range(position_);
+            if (!range) {
+                break;
+            }
+            const UInt64 offset_in_range = position_ - range->virtual_offset;
+            const UInt64 remaining = range->length - offset_in_range;
+            const UInt32 want = static_cast<UInt32>(std::min<UInt64>(size - total_read, remaining));
+            HANDLE handle = CreateFileW(range->path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                        nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (handle == INVALID_HANDLE_VALUE) {
+                return HRESULT_FROM_WIN32(GetLastError());
+            }
+            LARGE_INTEGER distance{};
+            distance.QuadPart = static_cast<LONGLONG>(range->start + offset_in_range);
+            if (!SetFilePointerEx(handle, distance, nullptr, FILE_BEGIN)) {
+                const DWORD error = GetLastError();
+                CloseHandle(handle);
+                return HRESULT_FROM_WIN32(error);
+            }
+            DWORD read = 0;
+            const BOOL ok = ReadFile(handle, out + total_read, want, &read, nullptr);
+            const DWORD error = GetLastError();
+            CloseHandle(handle);
+            if (!ok) {
+                return HRESULT_FROM_WIN32(error);
+            }
+            if (read == 0) {
+                break;
+            }
+            total_read += read;
+            position_ += read;
+        }
+        if (processedSize) {
+            *processedSize = total_read;
+        }
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE Seek(Int64 offset, UInt32 seekOrigin, UInt64* newPosition) override {
+        Int64 base = 0;
+        if (seekOrigin == FILE_CURRENT) {
+            base = static_cast<Int64>(position_);
+        } else if (seekOrigin == FILE_END) {
+            base = static_cast<Int64>(total_size_);
+        }
+        const Int64 next = base + offset;
+        if (next < 0) {
+            return E_INVALIDARG;
+        }
+        position_ = static_cast<UInt64>(next);
+        if (newPosition) {
+            *newPosition = position_;
+        }
+        return S_OK;
+    }
+
+private:
+    const NormalizedInputRange* find_range(UInt64 position) const {
+        for (const auto& range : ranges_) {
+            if (position >= range.virtual_offset && position < range.virtual_offset + range.length) {
+                return &range;
+            }
+        }
+        return nullptr;
+    }
+
+    LONG refs_ = 1;
+    std::vector<NormalizedInputRange> ranges_;
     UInt64 total_size_ = 0;
     UInt64 position_ = 0;
     bool valid_ = true;
@@ -898,7 +1043,9 @@ public:
     }
     HRESULT STDMETHODCALLTYPE PrepareOperation(Int32) override { return S_OK; }
     HRESULT STDMETHODCALLTYPE SetOperationResult(Int32 opRes) override {
-        operation_result_ = opRes;
+        if (opRes != kOpOk || operation_result_ == kOpOk) {
+            operation_result_ = opRes;
+        }
         if (opRes == kOpOk && !current_item_.empty()) {
             files_written_ += 1;
         } else if (opRes != kOpOk && failed_item_.empty()) {
@@ -1061,6 +1208,31 @@ std::vector<GUID> candidate_formats(const std::wstring& archive_path, const std:
         }
     }
 
+    std::vector<GUID> formats;
+    for (const unsigned char id : ids) {
+        formats.push_back(format_guid(id));
+    }
+    return formats;
+}
+
+std::vector<GUID> candidate_formats_for_hint(const std::wstring& format_hint, const std::wstring& archive_path, const std::vector<std::wstring>& part_paths = {}) {
+    std::wstring hint = lower_text(format_hint);
+    if (!hint.empty() && hint.front() == L'.') {
+        hint.erase(hint.begin());
+    }
+    std::vector<unsigned char> ids;
+    if (hint == L"zip") {
+        ids = {0x01};
+    } else if (hint == L"7z" || hint == L"sevenzip" || hint == L"seven_zip") {
+        ids = {0x07};
+    } else if (hint == L"rar" || hint == L"rar4") {
+        ids = {0x03, 0xCC};
+    } else if (hint == L"rar5") {
+        ids = {0xCC, 0x03};
+    }
+    if (ids.empty()) {
+        return candidate_formats(archive_path, part_paths);
+    }
     std::vector<GUID> formats;
     for (const unsigned char id : ids) {
         formats.push_back(format_guid(id));
@@ -1649,11 +1821,143 @@ CrcManifestResult read_archive_crc_manifest_internal(
     return result;
 }
 
+UInt16 le16_at(const std::vector<unsigned char>& data, std::size_t offset) {
+    if (offset + 2 > data.size()) {
+        return 0;
+    }
+    return static_cast<UInt16>(data[offset] | (data[offset + 1] << 8));
+}
+
+UInt32 le32_at(const std::vector<unsigned char>& data, std::size_t offset) {
+    if (offset + 4 > data.size()) {
+        return 0;
+    }
+    return static_cast<UInt32>(data[offset] | (data[offset + 1] << 8) | (data[offset + 2] << 16) | (data[offset + 3] << 24));
+}
+
+UInt32 crc32_bytes(const unsigned char* bytes, std::size_t size) {
+    UInt32 crc = 0xFFFF'FFFFu;
+    for (std::size_t i = 0; i < size; ++i) {
+        crc ^= bytes[i];
+        for (int bit = 0; bit < 8; ++bit) {
+            const UInt32 mask = (crc & 1u) ? 0xEDB8'8320u : 0u;
+            crc = (crc >> 1) ^ mask;
+        }
+    }
+    return ~crc;
+}
+
+bool read_file_bytes(const std::wstring& path, std::vector<unsigned char>& data) {
+    try {
+        const auto size = std::filesystem::file_size(path);
+        data.resize(static_cast<std::size_t>(size));
+    } catch (...) {
+        return false;
+    }
+    HANDLE handle = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (handle == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+    DWORD read = 0;
+    const BOOL ok = data.empty() || ReadFile(handle, data.data(), static_cast<DWORD>(data.size()), &read, nullptr);
+    CloseHandle(handle);
+    return ok && read == data.size();
+}
+
+bool strict_zip_stored_entries_ok(const std::wstring& path) {
+    std::vector<unsigned char> data;
+    if (!read_file_bytes(path, data) || data.size() < 22) {
+        return false;
+    }
+    const std::size_t min_eocd = data.size() > 65557 ? data.size() - 65557 : 0;
+    std::size_t eocd = std::string::npos;
+    for (std::size_t pos = data.size() - 22 + 1; pos-- > min_eocd;) {
+        if (pos + 4 <= data.size() && le32_at(data, pos) == 0x06054b50u) {
+            eocd = pos;
+            break;
+        }
+        if (pos == 0) {
+            break;
+        }
+    }
+    if (eocd == std::string::npos || eocd + 22 > data.size()) {
+        return false;
+    }
+    const UInt16 entries = le16_at(data, eocd + 10);
+    const UInt16 comment_len = le16_at(data, eocd + 20);
+    const UInt32 cd_size = le32_at(data, eocd + 12);
+    const UInt32 cd_offset = le32_at(data, eocd + 16);
+    if (entries == 0 || eocd + 22u + comment_len != data.size() || cd_offset > data.size() || static_cast<UInt64>(cd_offset) + cd_size > data.size()) {
+        return false;
+    }
+    auto extra_ok = [&](std::size_t offset, std::size_t size) {
+        const std::size_t end = offset + size;
+        if (end > data.size()) {
+            return false;
+        }
+        std::size_t cursor = offset;
+        while (cursor < end) {
+            if (cursor + 4 > end) {
+                return false;
+            }
+            const UInt16 header_id = le16_at(data, cursor);
+            const UInt16 data_size = le16_at(data, cursor + 2);
+            if (header_id == 0 && data_size == 0) {
+                return false;
+            }
+            cursor += 4u + data_size;
+        }
+        return cursor == end;
+    };
+    std::size_t cursor = cd_offset;
+    for (UInt16 index = 0; index < entries; ++index) {
+        if (cursor + 46 > data.size() || le32_at(data, cursor) != 0x02014b50u) {
+            return false;
+        }
+        const UInt16 method = le16_at(data, cursor + 10);
+        const UInt32 expected_crc = le32_at(data, cursor + 16);
+        const UInt32 compressed_size = le32_at(data, cursor + 20);
+        const UInt32 local_offset = le32_at(data, cursor + 42);
+        const UInt16 name_len = le16_at(data, cursor + 28);
+        const UInt16 extra_len = le16_at(data, cursor + 30);
+        const UInt16 comment_len = le16_at(data, cursor + 32);
+        if (!extra_ok(cursor + 46u + name_len, extra_len)) {
+            return false;
+        }
+        const std::size_t cd_name_offset = cursor + 46u;
+        cursor += 46u + name_len + extra_len + comment_len;
+        if (cursor > data.size() || local_offset + 30u > data.size() || le32_at(data, local_offset) != 0x04034b50u) {
+            return false;
+        }
+        const UInt16 local_name_len = le16_at(data, local_offset + 26);
+        const UInt16 local_extra_len = le16_at(data, local_offset + 28);
+        const std::size_t local_name_offset = local_offset + 30u;
+        if (local_name_len != name_len || local_name_offset + local_name_len > data.size() ||
+            !std::equal(data.begin() + cd_name_offset, data.begin() + cd_name_offset + name_len, data.begin() + local_name_offset)) {
+            return false;
+        }
+        if (!extra_ok(local_offset + 30u + local_name_len, local_extra_len)) {
+            return false;
+        }
+        const UInt64 payload_offset = static_cast<UInt64>(local_offset) + 30u + local_name_len + local_extra_len;
+        if (payload_offset + compressed_size > data.size()) {
+            return false;
+        }
+        if (method == 0 && crc32_bytes(data.data() + payload_offset, compressed_size) != expected_crc) {
+            return false;
+        }
+    }
+    return cursor == static_cast<std::size_t>(cd_offset) + cd_size;
+}
+
 ExtractArchiveResult extract_archive_internal(
     CreateObjectFunc create_object,
     const std::wstring& archive_path,
     const std::wstring& password,
     const std::vector<std::wstring>& part_paths,
+    const std::vector<ExtractInputRange>& input_ranges,
+    const std::wstring& format_hint,
     const std::wstring& output_dir,
     ExtractProgressCallback progress
 ) {
@@ -1672,7 +1976,8 @@ ExtractArchiveResult extract_archive_internal(
         return result;
     }
 
-    for (const GUID& format : candidate_formats(archive_path, part_paths)) {
+    const auto formats = candidate_formats_for_hint(format_hint, archive_path, part_paths);
+    for (const GUID& format : formats) {
         ComPtr<IInArchive> archive;
         HRESULT hr = create_object(&format, &IID_IInArchive, reinterpret_cast<void**>(archive.out()));
         if (hr != S_OK || !archive) {
@@ -1682,7 +1987,14 @@ ExtractArchiveResult extract_archive_internal(
         any_format_created = true;
 
         bool stream_opened = false;
-        ComPtr<IInStream> stream = open_archive_stream(archive_path, part_paths, stream_opened);
+        ComPtr<IInStream> stream = [&]() {
+            if (!input_ranges.empty()) {
+                auto* range_stream = new MultiRangeInStream(input_ranges);
+                stream_opened = range_stream->is_open();
+                return ComPtr<IInStream>(range_stream);
+            }
+            return open_archive_stream(archive_path, part_paths, stream_opened);
+        }();
         if (!stream_opened) {
             result.status = PasswordTestStatus::Error;
             result.message = "archive file could not be opened";
@@ -1702,7 +2014,7 @@ ExtractArchiveResult extract_archive_internal(
             result.item_count = num_items;
         }
 
-        result.archive_type = archive_type_for_path(archive_path);
+        result.archive_type = !format_hint.empty() ? format_hint : archive_type_for_path(archive_path);
         auto* raw_extract_callback = new ExtractToDiskCallback(archive.get(), password, output_dir, std::move(progress));
         ComPtr<IArchiveExtractCallback> extract_callback(raw_extract_callback);
         hr = archive->Extract(nullptr, static_cast<UInt32>(kAllItems), 0, extract_callback.get());
@@ -1716,6 +2028,22 @@ ExtractArchiveResult extract_archive_internal(
         archive->Close();
 
         if (hr == S_OK && last_op_res == kOpOk) {
+            if (!result.failed_item.empty()) {
+                result.status = PasswordTestStatus::Damaged;
+                result.command_ok = false;
+                result.damaged = true;
+                result.checksum_error = true;
+                result.message = "archive item failed during extraction";
+                return result;
+            }
+            if (password.empty() && input_ranges.empty() && lower_extension(archive_path) == L".zip" && !strict_zip_stored_entries_ok(archive_path)) {
+                result.status = PasswordTestStatus::Damaged;
+                result.command_ok = false;
+                result.damaged = true;
+                result.checksum_error = true;
+                result.message = "zip structure or stored-entry checksum error";
+                return result;
+            }
             result.status = PasswordTestStatus::Ok;
             result.command_ok = true;
             result.message = "archive extracted";
@@ -1727,6 +2055,13 @@ ExtractArchiveResult extract_archive_internal(
             return result;
         }
         if (looks_wrong_password(hr, last_op_res)) {
+            if (password.empty() && (last_op_res == kOpDataError || last_op_res == kOpCrcError || last_op_res == kOpHeadersError || last_op_res == kOpUnexpectedEnd)) {
+                result.status = PasswordTestStatus::Damaged;
+                result.damaged = true;
+                result.checksum_error = last_op_res == kOpCrcError;
+                result.message = result.checksum_error ? "archive checksum error" : "archive appears damaged";
+                return result;
+            }
             result.status = PasswordTestStatus::WrongPassword;
             result.encrypted = true;
             result.wrong_password = true;
@@ -1756,6 +2091,13 @@ ExtractArchiveResult extract_archive_internal(
         result.status = PasswordTestStatus::Unsupported;
         result.message = "7z.dll did not create a supported archive handler";
     } else if (!any_opened) {
+        if (password.empty() && (last_op_res == kOpDataError || last_op_res == kOpCrcError || last_op_res == kOpHeadersError || last_op_res == kOpUnexpectedEnd)) {
+            result.status = PasswordTestStatus::Damaged;
+            result.damaged = true;
+            result.checksum_error = last_op_res == kOpCrcError;
+            result.message = result.checksum_error ? "archive checksum error" : "archive appears damaged";
+            return result;
+        }
         result.status = looks_wrong_password(last_hr, last_op_res) ? PasswordTestStatus::WrongPassword : PasswordTestStatus::Unsupported;
         result.wrong_password = result.status == PasswordTestStatus::WrongPassword;
         result.encrypted = result.wrong_password;
@@ -1907,6 +2249,8 @@ ExtractArchiveResult extract_archive_with_parts(
         archive_path,
         password,
         effective_part_paths,
+        {},
+        L"",
         output_dir,
         std::move(progress));
 #else
@@ -1919,6 +2263,48 @@ ExtractArchiveResult extract_archive_with_parts(
     ExtractArchiveResult result;
     result.status = PasswordTestStatus::BackendUnavailable;
     result.message = "native archive extraction is only implemented on Windows";
+    return result;
+#endif
+}
+
+ExtractArchiveResult extract_archive_with_ranges(
+    const std::wstring& seven_zip_dll_path,
+    const std::wstring& archive_path,
+    const std::vector<ExtractInputRange>& ranges,
+    const std::wstring& format_hint,
+    const std::wstring& password,
+    const std::wstring& output_dir,
+    ExtractProgressCallback progress
+) {
+#ifdef _WIN32
+    ComModule module(seven_zip_dll_path);
+    auto create_object = module.create_object();
+    if (!create_object) {
+        ExtractArchiveResult result;
+        result.status = PasswordTestStatus::BackendUnavailable;
+        result.message = "7z.dll could not be loaded";
+        return result;
+    }
+    return extract_archive_internal(
+        create_object,
+        archive_path,
+        password,
+        {},
+        ranges,
+        format_hint,
+        output_dir,
+        std::move(progress));
+#else
+    (void)seven_zip_dll_path;
+    (void)archive_path;
+    (void)ranges;
+    (void)format_hint;
+    (void)password;
+    (void)output_dir;
+    (void)progress;
+    ExtractArchiveResult result;
+    result.status = PasswordTestStatus::BackendUnavailable;
+    result.message = "native archive range extraction is only implemented on Windows";
     return result;
 #endif
 }

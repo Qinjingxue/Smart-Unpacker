@@ -12,7 +12,6 @@ from smart_unpacker.contracts.tasks import ArchiveTask, SplitArchiveInfo
 from smart_unpacker.rename.scheduler import RenameScheduler
 from smart_unpacker.relations.internal.group_builder import RelationsGroupBuilder
 from smart_unpacker.passwords import ArchivePasswordTester, PasswordResolver, PasswordSession, PasswordStore
-from smart_unpacker.support.resources import get_7z_path
 
 
 class ExtractionScheduler:
@@ -32,7 +31,7 @@ class ExtractionScheduler:
         self.password_tester = ArchivePasswordTester(password_store=self.password_store)
         self.password_resolver = PasswordResolver(self.password_tester, self.password_session)
         self.metadata_scanner = ArchiveMetadataScanner()
-        self.seven_z_path = get_7z_path()
+        self.seven_z_path = ""
         self.rename_scheduler = RenameScheduler()
         self._relations = RelationsGroupBuilder()
         self.split_entry_resolver = SplitEntryResolver(self._relations)

@@ -9,6 +9,7 @@ from smart_unpacker.extraction.internal.workflow.retry_policy import ExtractRetr
 from smart_unpacker.extraction.internal.sevenzip.sevenzip_runner import SevenZipRunner
 from smart_unpacker.extraction.internal.workflow.split_entry import SplitEntryResolver
 from smart_unpacker.extraction.result import ExtractionResult
+from smart_unpacker.passwords.result import PasswordResolution
 
 
 class SingleArchiveExtractor:
@@ -107,9 +108,12 @@ class SingleArchiveExtractor:
                 if correct_pwd is None:
                     err = test_err
                 else:
-                    cmd = self._build_extract_command(run_archive, out_dir, selected_codepage, correct_pwd)
-                    run_result = self.sevenzip_runner.run_extract_command(
-                        cmd,
+                    run_result = self.sevenzip_runner.run_extract(
+                        archive_path=run_archive,
+                        part_paths=run_parts,
+                        out_dir=out_dir,
+                        password=correct_pwd,
+                        selected_codepage=selected_codepage,
                         startupinfo=startupinfo,
                         runtime_scheduler=runtime_scheduler,
                         task=task,
@@ -149,21 +153,19 @@ class SingleArchiveExtractor:
         shutil.rmtree(out_dir, ignore_errors=True)
         return self._failed(archive, out_dir, all_parts, "磁盘空间不足")
 
-    def _build_extract_command(
-        self,
-        run_archive: str,
-        out_dir: str,
-        selected_codepage: str | None,
-        correct_pwd: str | None,
-    ) -> list[str]:
-        cmd = [self.seven_z_path, "x", run_archive, f"-o{out_dir}", "-y"]
-        if selected_codepage:
-            cmd.append(f"-mcp={selected_codepage}")
-        if correct_pwd:
-            cmd.append(f"-p{correct_pwd}")
-        return cmd
-
     def _resolve_password(self, task: ArchiveTask, archive_path: str, part_paths: list[str]):
+        fact_bag = getattr(task, "fact_bag", None)
+        archive_input = fact_bag.get("archive.input") if fact_bag is not None and hasattr(fact_bag, "get") else None
+        if archive_input:
+            known_password = (
+                fact_bag.get("archive.password")
+                or fact_bag.get("password.resolved")
+                or fact_bag.get("password")
+            )
+            if known_password is not None:
+                return PasswordResolution(password=str(known_password), archive_key=task.key)
+            if not self._facts_require_password(fact_bag):
+                return PasswordResolution(password="", archive_key=task.key, encrypted=False)
         try:
             return self.password_resolver.resolve(
                 archive_path,
@@ -173,6 +175,15 @@ class SingleArchiveExtractor:
             )
         except TypeError:
             return self.password_resolver.resolve(archive_path, task.fact_bag, part_paths=part_paths)
+
+    @staticmethod
+    def _facts_require_password(fact_bag) -> bool:
+        if fact_bag is None or not hasattr(fact_bag, "get"):
+            return False
+        health = fact_bag.get("resource.health") or {}
+        if isinstance(health, dict) and (health.get("is_encrypted") or health.get("is_wrong_password")):
+            return True
+        return bool(fact_bag.get("file.validation_encrypted"))
 
     def _startupinfo(self):
         import sys

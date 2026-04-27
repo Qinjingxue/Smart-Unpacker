@@ -62,6 +62,23 @@ def get_7z_path() -> str:
     raise FileNotFoundError("Required bundled 7z.exe was not found under tools\\ or the application root.")
 
 
+def get_sevenzip_worker_path() -> str:
+    if sys.platform != "win32":
+        raise RuntimeError("sevenzip_worker.exe is only supported on Windows in this test build.")
+    relatives = (
+        Path("tools") / "sevenzip_worker.exe",
+        Path("sevenzip_worker.exe"),
+        Path("native") / "sevenzip_password_tester" / "build" / "Release" / "sevenzip_worker.exe",
+        Path("native") / "sevenzip_password_tester" / "build" / "Debug" / "sevenzip_worker.exe",
+    )
+    for root in candidate_resource_roots():
+        for relative in relatives:
+            worker = root / relative
+            if worker.exists():
+                return str(worker)
+    raise FileNotFoundError("Required sevenzip_worker.exe was not found under tools\\ or native\\sevenzip_password_tester\\build.")
+
+
 def get_7z_dll_path() -> str:
     if sys.platform != "win32":
         raise RuntimeError("Bundled 7z.dll is only supported on Windows in this test build.")

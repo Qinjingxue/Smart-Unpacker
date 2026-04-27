@@ -1,4 +1,5 @@
 import os
+import json
 import subprocess
 from typing import Optional
 
@@ -20,6 +21,12 @@ def should_retry_extract_failure(
     is_split_archive: bool = False,
 ) -> bool:
     err_lower = _norm(err_text)
+    worker_result = _worker_result_payload(err_text)
+    if worker_result:
+        if worker_result.get("wrong_password") or worker_result.get("damaged") or worker_result.get("missing_volume"):
+            return False
+        if worker_result.get("native_status") in {"wrong_password", "damaged", "unsupported"}:
+            return False
 
     if has_definite_wrong_password(err_lower):
         return False
@@ -51,6 +58,22 @@ def classify_extract_error(
     archive_name = os.path.basename(archive or "").lower()
     is_split_archive = is_split_archive or looks_like_split_archive_name(archive_name)
     err_lower = _norm(err_text)
+    worker_result = _worker_result_payload(err_text)
+    if worker_result:
+        if worker_result.get("missing_volume"):
+            return "分卷缺失或不完整"
+        if worker_result.get("wrong_password") or worker_result.get("native_status") == "wrong_password":
+            return "密码错误"
+        if worker_result.get("checksum_error"):
+            return "压缩包损坏"
+        if worker_result.get("damaged") or worker_result.get("native_status") == "damaged":
+            return "压缩包损坏"
+        if worker_result.get("unsupported_method"):
+            return "致命错误 (文件损坏或格式不支持)"
+        if worker_result.get("native_status") == "backend_unavailable":
+            return "7z后端不可用"
+        if worker_result.get("native_status") == "unsupported":
+            return "致命错误 (文件损坏或格式不支持)"
 
     if "missing volume" in err_lower:
         return "分卷缺失或不完整"
@@ -98,3 +121,16 @@ def classify_extract_error(
 
     return error_msg
 
+
+def _worker_result_payload(text: str) -> dict:
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict) and payload.get("type") == "result":
+            return payload
+    return {}
