@@ -39,6 +39,12 @@ class StaticVerifier:
         return self.outcome
 
 
+class FormatVerifier(StaticVerifier):
+    def __init__(self, format_hint: str, outcome: PasswordBatchVerification):
+        super().__init__(outcome)
+        self.format_hint = format_hint
+
+
 def test_password_scheduler_batches_lazy_candidates_and_stops_on_match(tmp_path):
     archive = tmp_path / "sample.7z"
     archive.write_bytes(b"archive")
@@ -185,3 +191,43 @@ def test_verifier_chain_falls_back_when_fast_verifier_is_unknown():
     assert outcome.ok is True
     assert outcome.matched_index == 2
     assert final.batches == [["bad1", "bad2", "secret"]]
+
+
+def test_verifier_chain_prioritizes_fast_verifier_from_extension():
+    zip_fast = FormatVerifier("zip", PasswordBatchVerification(ok=False, status="unsupported_method"))
+    rar_fast = FormatVerifier("rar", PasswordBatchVerification(ok=False, status="unsupported_method"))
+    seven_zip_fast = FormatVerifier("7z", PasswordBatchVerification(
+        ok=False,
+        status="no_match",
+        attempts=2,
+        error_text="wrong password",
+    ))
+    chain = PasswordVerifierChain([zip_fast, rar_fast, seven_zip_fast], None)
+
+    outcome = chain.verify_batch("sample.7z", ["bad1", "bad2"])
+
+    assert outcome.status == "no_match"
+    assert seven_zip_fast.batches == [["bad1", "bad2"]]
+    assert zip_fast.batches == []
+    assert rar_fast.batches == []
+
+
+def test_verifier_chain_prioritizes_fast_verifier_from_archive_input():
+    zip_fast = FormatVerifier("zip", PasswordBatchVerification(ok=False, status="unsupported_method"))
+    rar_fast = FormatVerifier("rar", PasswordBatchVerification(
+        ok=False,
+        status="no_match",
+        attempts=1,
+        error_text="wrong password",
+    ))
+    chain = PasswordVerifierChain([zip_fast, rar_fast], None)
+
+    outcome = chain.verify_batch(
+        "carrier.jpg",
+        ["bad"],
+        archive_input={"format_hint": "rar"},
+    )
+
+    assert outcome.status == "no_match"
+    assert rar_fast.batches == [["bad"]]
+    assert zip_fast.batches == []

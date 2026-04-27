@@ -57,6 +57,12 @@ class FakeFailingPasswordTester(FakePasswordTester):
         return PasswordSearchResult(password=None, test_result=SimpleNamespace(returncode=2), error_text="wrong password")
 
 
+class FakeDamagedPasswordTester(FakeFailingPasswordTester):
+    def search_passwords(self, job: PasswordJob):
+        self.search_calls += 1
+        return PasswordSearchResult(password=None, test_result=SimpleNamespace(returncode=2), error_text="headers error")
+
+
 class FakePasswordScheduler:
     def __init__(self, tester):
         self.tester = tester
@@ -115,7 +121,7 @@ def test_password_resolver_trusts_encrypted_resource_health_without_empty_passwo
     assert tester.search_calls == 1
 
 
-def test_password_resolver_rechecks_failed_encrypted_resolution_for_damage():
+def test_password_resolver_does_not_recheck_clear_wrong_password_after_encrypted_search():
     bag = FactBag()
     bag.set("resource.health", {
         "is_archive": True,
@@ -123,6 +129,25 @@ def test_password_resolver_rechecks_failed_encrypted_resolution_for_damage():
         "is_wrong_password": False,
     })
     tester = FakeFailingPasswordTester()
+    session = PasswordSession()
+    resolver = PasswordResolver(tester, session)
+
+    result = resolver.resolve("sample.zip", fact_bag=bag, archive_key="archive-key")
+
+    assert result.password is None
+    assert result.error_text == "wrong password"
+    assert tester.search_calls == 1
+    assert tester.test_without_password_calls == 0
+
+
+def test_password_resolver_rechecks_failed_encrypted_resolution_for_damage():
+    bag = FactBag()
+    bag.set("resource.health", {
+        "is_archive": True,
+        "is_encrypted": True,
+        "is_wrong_password": False,
+    })
+    tester = FakeDamagedPasswordTester()
     session = PasswordSession()
     resolver = PasswordResolver(tester, session)
 

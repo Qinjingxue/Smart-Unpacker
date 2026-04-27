@@ -41,7 +41,7 @@ class PasswordResolver:
         if self._facts_require_password(fact_bag):
             search = self._run_password_search(archive_path, fact_bag=fact_bag, part_paths=part_paths)
             password, result, error = search.password, search.test_result, search.error_text
-            if password is None:
+            if password is None and self._should_recheck_failed_encrypted_search(error):
                 test_result, error_text = self.password_tester.test_without_password(archive_path, part_paths=part_paths)
                 if has_archive_damage_signals(error_text) and not has_definite_wrong_password(error_text):
                     return PasswordResolution(
@@ -140,6 +140,12 @@ class PasswordResolver:
         if isinstance(health, dict) and (health.get("is_encrypted") or health.get("is_wrong_password")):
             return True
         return bool(fact_bag.get("file.validation_encrypted"))
+
+    @staticmethod
+    def _should_recheck_failed_encrypted_search(error_text: str) -> bool:
+        if has_archive_damage_signals(error_text):
+            return True
+        return not has_definite_wrong_password(error_text)
 
     @staticmethod
     def _archive_key_from_fact_bag(fact_bag: FactBag | None) -> str:

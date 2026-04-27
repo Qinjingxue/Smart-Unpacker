@@ -6,6 +6,8 @@ from smart_unpacker_native import zip_fast_verify_passwords, zip_fast_verify_pas
 
 
 class ZipFastVerifier:
+    format_hint = "zip"
+
     def verify_batch(
         self,
         archive_path: str,

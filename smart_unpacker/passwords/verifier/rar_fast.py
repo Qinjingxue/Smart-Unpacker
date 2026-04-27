@@ -6,6 +6,8 @@ from smart_unpacker_native import rar_fast_verify_passwords, rar_fast_verify_pas
 
 
 class RarFastVerifier:
+    format_hint = "rar"
+
     def verify_batch(
         self,
         archive_path: str,

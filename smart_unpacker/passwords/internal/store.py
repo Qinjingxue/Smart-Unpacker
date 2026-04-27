@@ -38,7 +38,7 @@ class PasswordStore:
         )
 
     def has_candidates(self) -> bool:
-        return bool(self.candidates())
+        return bool(self.recent_passwords or self.user_passwords or self.builtin_passwords)
 
     def remember_success(self, password: str) -> None:
         if not password:

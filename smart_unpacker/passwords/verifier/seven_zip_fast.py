@@ -6,6 +6,8 @@ from smart_unpacker_native import seven_zip_fast_verify_passwords, seven_zip_fas
 
 
 class SevenZipFastVerifier:
+    format_hint = "7z"
+
     def verify_batch(
         self,
         archive_path: str,

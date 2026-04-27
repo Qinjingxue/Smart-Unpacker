@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 
 from smart_unpacker.passwords.verifier.base import PasswordBatchVerification, PasswordVerifier
@@ -121,7 +122,7 @@ class PasswordVerifierChain:
         part_paths: list[str] | None = None,
         archive_input: dict | None = None,
     ) -> PasswordBatchVerification:
-        for verifier in self.fast_verifiers:
+        for verifier in self._ordered_fast_verifiers(archive_path, archive_input):
             outcome = _call_verifier(
                 verifier,
                 archive_path,
@@ -138,6 +139,23 @@ class PasswordVerifierChain:
             attempts=0,
             error_text="no fast verifier accepted archive",
         )
+
+    def _ordered_fast_verifiers(self, archive_path: str, archive_input: dict | None = None) -> list[PasswordVerifier]:
+        preferred = _preferred_archive_format(archive_path, archive_input)
+        if not preferred:
+            return list(self.fast_verifiers)
+        matching = [
+            verifier
+            for verifier in self.fast_verifiers
+            if _normalize_archive_format(str(getattr(verifier, "format_hint", ""))) == preferred
+        ]
+        if not matching:
+            return list(self.fast_verifiers)
+        return matching + [
+            verifier
+            for verifier in self.fast_verifiers
+            if verifier not in matching
+        ]
 
     def _confirm_match(
         self,
@@ -201,3 +219,38 @@ def _call_verifier(
         if "archive_input" not in str(error):
             raise
         return verifier.verify_batch(archive_path, passwords, part_paths=part_paths)
+
+
+def _preferred_archive_format(archive_path: str, archive_input: dict | None = None) -> str:
+    if isinstance(archive_input, dict):
+        hinted = _normalize_archive_format(str(archive_input.get("format_hint") or archive_input.get("format") or ""))
+        if hinted:
+            return hinted
+    return _format_from_path(archive_path)
+
+
+def _format_from_path(archive_path: str) -> str:
+    name = os.path.basename(str(archive_path or "")).lower()
+    if name.endswith(".part1.rar") or name.endswith(".part01.rar"):
+        return "rar"
+    suffixes = []
+    root = name
+    while True:
+        root, ext = os.path.splitext(root)
+        if not ext:
+            break
+        suffixes.append(ext)
+    if not suffixes:
+        return ""
+    if suffixes[0] == ".001" and len(suffixes) > 1:
+        return _normalize_archive_format(suffixes[1].lstrip("."))
+    return _normalize_archive_format(suffixes[0].lstrip("."))
+
+
+def _normalize_archive_format(value: str) -> str:
+    normalized = (value or "").strip().lower().lstrip(".")
+    if normalized in {"7zip", "sevenzip", "seven_zip"}:
+        return "7z"
+    if normalized in {"zip", "rar", "7z"}:
+        return normalized
+    return ""
