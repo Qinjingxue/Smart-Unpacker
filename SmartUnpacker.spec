@@ -8,6 +8,7 @@ project_root = Path(SPECPATH)
 
 hiddenimports = ["smart_unpacker_native"]
 for package in (
+    "watchdog",
     "smart_unpacker.app.commands",
     "smart_unpacker.config.fields",
     "smart_unpacker.filesystem.filters.modules",

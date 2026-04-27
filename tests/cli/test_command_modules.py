@@ -6,7 +6,7 @@ from smart_unpacker.app.cli_context import CliContext
 def test_cli_discovers_builtin_command_modules_in_order():
     modules = discover_command_modules()
 
-    assert [module.COMMAND for module in modules] == ["extract", "scan", "inspect", "passwords", "config"]
+    assert [module.COMMAND for module in modules] == ["extract", "watch", "scan", "inspect", "passwords", "config"]
 
 
 def test_cli_command_modules_declare_required_contract():
@@ -23,6 +23,7 @@ def test_cli_parser_registers_discovered_commands():
 
     command_args = {
         "extract": ["extract", "."],
+        "watch": ["watch", "--once", "--stable", "0", "."],
         "scan": ["scan", "."],
         "inspect": ["inspect", "."],
         "passwords": ["passwords"],

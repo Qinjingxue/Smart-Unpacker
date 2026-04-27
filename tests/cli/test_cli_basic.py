@@ -23,6 +23,7 @@ class CliBasicTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0)
         self.assertIn("extract", result.stdout)
+        self.assertIn("watch", result.stdout)
         self.assertIn("scan", result.stdout)
         self.assertIn("inspect", result.stdout)
         self.assertIn("passwords", result.stdout)
@@ -112,6 +113,15 @@ class CliBasicTests(unittest.TestCase):
         self.assertIn("--cleanup", result.stdout)
         self.assertIn("--out-dir", result.stdout)
         self.assertNotIn("--min-size", result.stdout)
+
+    def test_watch_help_documents_watchdog_options(self):
+        result = run_cli("watch", "-h")
+
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("--stable", result.stdout)
+        self.assertIn("--interval", result.stdout)
+        self.assertIn("--no-initial-scan", result.stdout)
+        self.assertIn("--out-dir", result.stdout)
 
     def test_passwords_help_only_shows_password_relevant_options(self):
         result = run_cli("passwords", "-h")
