@@ -308,6 +308,9 @@ class NativePasswordTester:
         part_paths: list[str] | None = None,
         archive_input: dict | None = None,
     ) -> NativePasswordAttempt:
+        normalized_passwords = list(passwords or [""])
+        if len(normalized_passwords) == 1:
+            return self._try_passwords_ctypes(archive_path, normalized_passwords, part_paths)
         worker_attempt = self._try_passwords_with_worker(
             archive_path,
             passwords,
@@ -317,11 +320,17 @@ class NativePasswordTester:
         if worker_attempt is not None:
             return worker_attempt
 
-        library = self._load()
+        return self._try_passwords_ctypes(archive_path, normalized_passwords, part_paths)
 
-        normalized_passwords = list(passwords or [""])
-        password_array_type = ctypes.c_wchar_p * len(normalized_passwords)
-        password_array = password_array_type(*normalized_passwords)
+    def _try_passwords_ctypes(
+        self,
+        archive_path: str,
+        passwords: list[str],
+        part_paths: list[str] | None = None,
+    ) -> NativePasswordAttempt:
+        library = self._load()
+        password_array_type = ctypes.c_wchar_p * len(passwords)
+        password_array = password_array_type(*passwords)
         normalized_parts, part_array = self._part_array(archive_path, part_paths)
         matched_index = ctypes.c_int(-1)
         attempts = ctypes.c_int(0)
@@ -333,7 +342,7 @@ class NativePasswordTester:
             part_array,
             ctypes.c_int(len(normalized_parts)),
             password_array,
-            ctypes.c_int(len(normalized_passwords)),
+            ctypes.c_int(len(passwords)),
             ctypes.byref(matched_index),
             ctypes.byref(attempts),
             message,

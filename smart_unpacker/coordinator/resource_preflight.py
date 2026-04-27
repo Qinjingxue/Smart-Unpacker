@@ -5,6 +5,7 @@ from smart_unpacker.contracts.tasks import ArchiveTask
 from smart_unpacker.coordinator.scheduling.resource_model import build_resource_profile_key, estimate_resource_demand
 from smart_unpacker.passwords import PasswordSession
 from smart_unpacker.rename.scheduler import RenameScheduler
+from smart_unpacker.support.sevenzip_native import cached_check_archive_health
 
 
 class ResourcePreflightInspector:
@@ -46,6 +47,7 @@ class ResourcePreflightInspector:
         archive_size: int | None = None,
         profile_suffix: str = "estimated",
     ) -> ArchiveTask:
+        self._ensure_resource_health(task)
         archive_size = self._archive_size(task) if archive_size is None else archive_size
         archive_type = self._archive_type_for(task)
         analysis = {
@@ -78,6 +80,25 @@ class ResourcePreflightInspector:
             reason="estimated single-task resource profile",
             profile_suffix="estimated|single",
         )
+
+    def _ensure_resource_health(self, task: ArchiveTask) -> None:
+        if task.fact_bag.has("resource.health"):
+            return
+        try:
+            part_paths = (task.all_parts if task.all_parts and len(task.all_parts) > 1 else None) or None
+            health = cached_check_archive_health(task.main_path, part_paths=part_paths)
+            if not health.is_archive:
+                return
+            task.fact_bag.set("resource.health", {
+                "is_archive": health.is_archive,
+                "is_encrypted": health.is_encrypted,
+                "is_broken": health.is_broken,
+                "is_wrong_password": health.is_wrong_password,
+                "archive_type": health.archive_type,
+                "checksum_error": False,
+            })
+        except Exception:
+            pass
 
     def _password_for(self, task: ArchiveTask) -> str:
         if self.password_session is None:
