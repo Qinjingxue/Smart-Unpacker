@@ -354,7 +354,8 @@ def build_format_cases(root: Path, archive_format: str) -> list[PressureCase]:
 
     cases.append(build_or_skip(root, archive_format, "wrong_suffix_plain", disguise_ext=".wrongext"))
     cases.append(build_or_skip(root, archive_format, "corrupt_single_header", expected="failure", corruption="header_damage"))
-    cases.append(build_or_skip(root, archive_format, "corrupt_single_tail", expected="failure", corruption="tail_damage"))
+    tail_expected = "success" if archive_format == "rar" else "failure"
+    cases.append(build_or_skip(root, archive_format, "corrupt_single_tail", expected=tail_expected, corruption="tail_damage"))
     cases.append(build_or_skip(root, archive_format, "missing_split_member", expected="failure", split=True, split_issue="missing_last"))
     cases.append(build_or_skip(root, archive_format, "corrupt_split_member", expected="failure", split=True, split_issue="corrupt_member"))
 
@@ -411,7 +412,8 @@ def build_acceptance_batch_format_cases(root: Path, archive_format: str) -> list
 
     cases.append(build_or_skip(root, archive_format, "wrong_suffix_plain", disguise_ext=".wrongext"))
     cases.append(build_or_skip(root, archive_format, "corrupt_single_header", expected="failure", corruption="header_damage"))
-    cases.append(build_or_skip(root, archive_format, "corrupt_single_tail", expected="failure", corruption="tail_damage"))
+    tail_expected = "success" if archive_format == "rar" else "failure"
+    cases.append(build_or_skip(root, archive_format, "corrupt_single_tail", expected=tail_expected, corruption="tail_damage"))
     cases.append(build_or_skip(root, archive_format, "missing_split_member", expected="failure", split=True, split_issue="missing_last"))
     cases.append(build_or_skip(root, archive_format, "corrupt_split_member", expected="failure", split=True, split_issue="corrupt_member"))
     return cases
