@@ -95,9 +95,26 @@ def test_rename_scheduler_normalizes_misnamed_split_group_as_black_box(tmp_path)
     scheduler = RenameScheduler()
     scheduler.volume_normalizer._native_tester = FakeNativeTester()
     scheduler.volume_normalizer._relations = RelationsGroupBuilder()
-    scheduler.volume_normalizer._collect_misnamed_volume_candidates = (
-        lambda archive, all_parts, archive_prefix, style: [str(candidate)]
-    )
+    task.split_info.volumes = [
+        {
+            "path": str(first),
+            "number": 1,
+            "role": "first",
+            "source": "standard",
+            "style": "numeric_suffix",
+            "prefix": str(first).removesuffix(".001"),
+            "width": 3,
+        },
+        {
+            "path": str(candidate),
+            "number": 2,
+            "role": "member",
+            "source": "candidate",
+            "style": "numeric_suffix",
+            "prefix": str(first).removesuffix(".001"),
+            "width": 3,
+        },
+    ]
 
     staged = scheduler.normalize_split_group(task)
 

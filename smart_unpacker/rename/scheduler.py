@@ -20,13 +20,21 @@ class RenameScheduler:
             task.main_path,
             list(task.all_parts or [task.main_path]),
             startupinfo=startupinfo,
+            volume_entries=list(task.split_info.volumes or []),
         )
 
-    def normalize_archive_paths(self, entry_path: str, all_parts: list[str] | None = None, startupinfo=None) -> StagedSplit:
+    def normalize_archive_paths(
+        self,
+        entry_path: str,
+        all_parts: list[str] | None = None,
+        startupinfo=None,
+        volume_entries: list[dict] | None = None,
+    ) -> StagedSplit:
         return self.volume_normalizer.normalize(
             entry_path,
             list(all_parts or [entry_path]),
             startupinfo=startupinfo,
+            volume_entries=volume_entries,
         )
 
     def cleanup_normalized_split_group(self, staged: StagedSplit):

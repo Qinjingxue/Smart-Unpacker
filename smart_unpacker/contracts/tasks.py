@@ -11,6 +11,7 @@ class SplitArchiveInfo:
     parts: List[str] = field(default_factory=list)
     preferred_entry: str = ""
     source: str = ""
+    volumes: List[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -71,6 +72,7 @@ class ArchiveTask:
             parts=list(all_parts),
             preferred_entry="",
             source="detection" if is_split or is_sfx_stub else "",
+            volumes=list(fact_bag.get("relation.split_volumes") or []),
         )
         return cls(
             fact_bag=fact_bag,
@@ -101,9 +103,16 @@ class ArchiveTask:
         self.main_path = mapped(self.main_path)
         self.all_parts = [mapped(path) for path in self.all_parts]
         self.split_info.parts = [mapped(path) for path in self.split_info.parts]
+        self.split_info.volumes = [
+            {**volume, "path": mapped(str(volume.get("path") or ""))}
+            for volume in self.split_info.volumes
+            if isinstance(volume, dict)
+        ]
         if self.split_info.preferred_entry:
             self.split_info.preferred_entry = mapped(self.split_info.preferred_entry)
         self.fact_bag.set("file.path", self.main_path)
         self.fact_bag.set("candidate.entry_path", self.main_path)
         self.fact_bag.set("candidate.member_paths", list(self.all_parts))
         self.fact_bag.set("file.split_members", [path for path in self.all_parts if path != self.main_path])
+        if self.split_info.volumes:
+            self.fact_bag.set("relation.split_volumes", list(self.split_info.volumes))

@@ -36,6 +36,19 @@ def relation_group_to_fact_bag(group: CandidateGroup) -> FactBag:
     bag.set("relation.split_family", relation.split_family)
     bag.set("relation.split_index", relation.split_index)
     bag.set("relation.split_is_first", relation.split_role == "first")
+    if group.split_volumes:
+        bag.set("relation.split_volumes", [
+            {
+                "path": volume.path,
+                "number": volume.number,
+                "role": volume.role,
+                "source": volume.source,
+                "style": volume.style,
+                "prefix": volume.prefix,
+                "width": volume.width,
+            }
+            for volume in group.split_volumes
+        ])
     if group.member_paths:
         bag.set("relation.member_paths", list(group.member_paths))
     return bag

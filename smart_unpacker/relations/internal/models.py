@@ -24,6 +24,17 @@ class FileRelation:
 
 
 @dataclass
+class SplitVolumeEntry:
+    path: str
+    number: int
+    role: str = "member"
+    source: str = "standard"
+    style: str = ""
+    prefix: str = ""
+    width: int = 3
+
+
+@dataclass
 class CandidateGroup:
     head_path: str
     logical_name: str
@@ -31,6 +42,7 @@ class CandidateGroup:
     member_paths: List[str]
     is_split_candidate: bool = False
     head_size: int | None = None
+    split_volumes: List[SplitVolumeEntry] = None
 
     @property
     def kind(self) -> str:
@@ -42,6 +54,8 @@ class CandidateGroup:
 
     @property
     def all_paths(self) -> List[str]:
+        if self.split_volumes:
+            return [volume.path for volume in self.split_volumes]
         return [self.head_path] + list(self.member_paths)
 
 

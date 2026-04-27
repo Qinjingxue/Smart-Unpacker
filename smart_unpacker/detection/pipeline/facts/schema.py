@@ -152,6 +152,11 @@ FACT_SCHEMA: dict[str, dict[str, Any]] = {
         "producer": "relations.group_builder",
         "description": "Whether the logical candidate entry is the first split volume.",
     },
+    "relation.split_volumes": {
+        "type": "list",
+        "producer": "relations.group_builder",
+        "description": "Structured split volume entries with path, inferred number, role, and naming style.",
+    },
     "file.detected_ext": {
         "type": "str",
         "producer": "rules.scoring",

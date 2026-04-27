@@ -71,7 +71,15 @@ class SingleArchiveExtractor:
             except Exception as exc:
                 return self._failed(archive, out_dir, all_parts, f"目录创建失败: {exc}")
 
-            staged = self.rename_scheduler.normalize_archive_paths(archive, all_parts, startupinfo=startupinfo)
+            try:
+                staged = self.rename_scheduler.normalize_archive_paths(
+                    archive,
+                    all_parts,
+                    startupinfo=startupinfo,
+                    volume_entries=list(split_info.volumes or []),
+                )
+            except TypeError:
+                staged = self.rename_scheduler.normalize_archive_paths(archive, all_parts, startupinfo=startupinfo)
             run_archive = staged.archive
             run_parts = staged.run_parts if hasattr(staged, "run_parts") else staged.all_parts
             cleanup_parts = getattr(staged, "cleanup_parts", run_parts)

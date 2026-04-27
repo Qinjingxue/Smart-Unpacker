@@ -7,7 +7,7 @@ from typing import Dict, List, Optional, Set
 from smart_unpacker_native import list_regular_files_in_directory as _native_list_regular_files_in_directory
 
 from smart_unpacker.contracts.filesystem import DirectorySnapshot, FileEntry
-from smart_unpacker.relations.internal.models import CandidateGroup, DirectoryFileIndex, FileRelation
+from smart_unpacker.relations.internal.models import CandidateGroup, DirectoryFileIndex, FileRelation, SplitVolumeEntry
 from smart_unpacker.support.path_keys import case_key, normalized_path, path_key
 
 
@@ -413,6 +413,60 @@ class RelationsGroupBuilder:
         )
         return list(dict.fromkeys(list(all_parts) + candidates))
 
+    def build_split_volume_entries(self, archive: str, all_parts: List[str]) -> List[SplitVolumeEntry]:
+        parsed_main = self.parse_numbered_volume(normalized_path(archive))
+        if not parsed_main or parsed_main["number"] != 1:
+            return []
+
+        archive_prefix = str(parsed_main["prefix"])
+        style = str(parsed_main["style"])
+        width = int(parsed_main["width"])
+        confirmed: dict[int, str] = {}
+        candidates: List[str] = []
+        seen_paths: set[str] = set()
+
+        for path in all_parts:
+            norm_path = normalized_path(path)
+            path_id = path_key(norm_path)
+            if path_id in seen_paths:
+                continue
+            seen_paths.add(path_id)
+
+            parsed = self.parse_numbered_volume(norm_path)
+            if parsed and parsed["style"] == style and case_key(parsed["prefix"]) == case_key(archive_prefix):
+                confirmed[int(parsed["number"])] = norm_path
+            else:
+                candidates.append(norm_path)
+
+        total_count = len(confirmed) + len(candidates)
+        missing_numbers = [number for number in range(1, total_count + 1) if number not in confirmed]
+
+        entries: List[SplitVolumeEntry] = [
+            SplitVolumeEntry(
+                path=path,
+                number=number,
+                role="first" if number == 1 else "member",
+                source="standard",
+                style=style,
+                prefix=archive_prefix,
+                width=width,
+            )
+            for number, path in sorted(confirmed.items())
+        ]
+
+        for number, path in zip(missing_numbers, candidates):
+            entries.append(SplitVolumeEntry(
+                path=path,
+                number=number,
+                role="first" if number == 1 else "member",
+                source="candidate",
+                style=style,
+                prefix=archive_prefix,
+                width=width,
+            ))
+
+        return sorted(entries, key=lambda volume: (volume.number, volume.path.lower()))
+
     def _build_group(
         self,
         group_entries: List[FileEntry],
@@ -432,6 +486,7 @@ class RelationsGroupBuilder:
                 member_paths=[path for path in all_parts if path != str(entry.path)],
                 is_split_candidate=relation.is_split_related,
                 head_size=entry.size,
+                split_volumes=self.build_split_volume_entries(str(entry.path), all_parts),
             )
 
         head_entry = None
@@ -468,6 +523,7 @@ class RelationsGroupBuilder:
             member_paths=[path for path in all_parts if path != str(head_entry.path)],
             is_split_candidate=True,
             head_size=head_entry.size,
+            split_volumes=self.build_split_volume_entries(str(head_entry.path), all_parts),
         )
 
     def _has_split_companions_in_dir(self, sibling_names: Set[str], base_name: str) -> bool:

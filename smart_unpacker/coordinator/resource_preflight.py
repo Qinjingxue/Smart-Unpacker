@@ -31,7 +31,14 @@ class ResourcePreflightInspector:
         if archive_size < self.precise_resource_min_size_bytes:
             return self.record_estimated_profile(task, reason="estimated small-archive resource profile", archive_size=archive_size)
 
-        staged = self.rename_scheduler.normalize_archive_paths(task.main_path, list(task.all_parts or [task.main_path]))
+        try:
+            staged = self.rename_scheduler.normalize_archive_paths(
+                task.main_path,
+                list(task.all_parts or [task.main_path]),
+                volume_entries=list(task.split_info.volumes or []),
+            )
+        except TypeError:
+            staged = self.rename_scheduler.normalize_archive_paths(task.main_path, list(task.all_parts or [task.main_path]))
         try:
             password = self._password_for(task)
             analysis = cached_analyze_archive_resources(staged.archive, password=password, part_paths=staged.run_parts)

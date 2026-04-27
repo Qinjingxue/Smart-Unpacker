@@ -21,7 +21,14 @@ class PreExtractInspector:
         self.rename_scheduler = rename_scheduler
 
     def inspect(self, task: ArchiveTask, output_dir: str) -> PreflightResult:
-        staged = self.rename_scheduler.normalize_archive_paths(task.main_path, list(task.all_parts or [task.main_path]))
+        try:
+            staged = self.rename_scheduler.normalize_archive_paths(
+                task.main_path,
+                list(task.all_parts or [task.main_path]),
+                volume_entries=list(task.split_info.volumes or []),
+            )
+        except TypeError:
+            staged = self.rename_scheduler.normalize_archive_paths(task.main_path, list(task.all_parts or [task.main_path]))
         try:
             health = cached_check_archive_health(staged.archive, part_paths=staged.run_parts)
             self._record_health(task, health)

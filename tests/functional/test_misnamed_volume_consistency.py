@@ -23,3 +23,13 @@ def test_scan_reports_misnamed_split_parts_consistently(tmp_path):
     assert len(results) == 1
     assert results[0].main_path == str(first)
     assert results[0].all_parts == [str(first), str(normal_2), str(normal_3), str(fuzzy_4), str(fuzzy_5)]
+    assert [
+        (item["path"], item["number"], item["source"])
+        for item in results[0].fact_bag.get("relation.split_volumes")
+    ] == [
+        (str(first), 1, "standard"),
+        (str(normal_2), 2, "candidate"),
+        (str(normal_3), 3, "candidate"),
+        (str(fuzzy_4), 4, "candidate"),
+        (str(fuzzy_5), 5, "candidate"),
+    ]

@@ -41,6 +41,7 @@ class SplitEntryResolver:
                 parts=list(all_parts),
                 preferred_entry=entry,
                 source=split_info.source or "filename",
+                volumes=list(split_info.volumes or []),
             )
             return entry, all_parts, split_info
 
@@ -51,6 +52,7 @@ class SplitEntryResolver:
                 parts=list(all_parts),
                 preferred_entry=split_info.preferred_entry,
                 source=split_info.source or "filename",
+                volumes=list(split_info.volumes or []),
             )
 
         return archive, all_parts, split_info

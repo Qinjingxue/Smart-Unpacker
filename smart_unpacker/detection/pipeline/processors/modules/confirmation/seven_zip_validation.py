@@ -21,8 +21,9 @@ EXECUTABLE_VALIDATION_TYPES = {"pe", "elf", "macho", "te"}
 def process_7z_validation(context: FactProcessorContext) -> Dict[str, Any]:
     base_path = context.fact_bag.get("file.path") or ""
     member_paths = list(context.fact_bag.get("candidate.member_paths") or [base_path])
+    volume_entries = list(context.fact_bag.get("relation.split_volumes") or [])
     normalizer = RenameScheduler()
-    staged = normalizer.normalize_archive_paths(base_path, member_paths)
+    staged = normalizer.normalize_archive_paths(base_path, member_paths, volume_entries=volume_entries)
     try:
         test = cached_test_archive(staged.archive, part_paths=staged.run_parts)
     finally:
