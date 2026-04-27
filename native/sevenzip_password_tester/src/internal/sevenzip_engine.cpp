@@ -83,6 +83,22 @@ GUID format_guid(unsigned char format_id) {
     return {0x23170F69, 0x40C1, 0x278A, {0x10, 0x00, 0x00, 0x01, 0x10, format_id, 0x00, 0x00}};
 }
 
+std::wstring win32_extended_path(const std::wstring& path) {
+    if (path.empty()) {
+        return path;
+    }
+    if (path.rfind(LR"(\\?\)", 0) == 0 || path.rfind(LR"(\\.\)", 0) == 0) {
+        return path;
+    }
+    if (path.rfind(LR"(\\)", 0) == 0) {
+        return LR"(\\?\UNC\)" + path.substr(2);
+    }
+    if (path.size() >= 3 && path[1] == L':' && (path[2] == L'\\' || path[2] == L'/')) {
+        return LR"(\\?\)" + path;
+    }
+    return path;
+}
+
 struct ISequentialInStream : public IUnknown {
     virtual HRESULT STDMETHODCALLTYPE Read(void* data, UInt32 size, UInt32* processedSize) = 0;
 };
@@ -186,7 +202,7 @@ private:
 class FileInStream final : public IInStream {
 public:
     explicit FileInStream(const std::wstring& path)
-        : handle_(CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        : handle_(CreateFileW(win32_extended_path(path).c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                               nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr)) {}
     ~FileInStream() {
         if (handle_ != INVALID_HANDLE_VALUE) {
@@ -310,7 +326,7 @@ public:
                 break;
             }
 
-            HANDLE handle = CreateFileW(paths_[index].c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            HANDLE handle = CreateFileW(win32_extended_path(paths_[index]).c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                                         nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
             if (handle == INVALID_HANDLE_VALUE) {
                 return HRESULT_FROM_WIN32(GetLastError());
@@ -456,7 +472,7 @@ public:
             const UInt64 offset_in_range = position_ - range->virtual_offset;
             const UInt64 remaining = range->length - offset_in_range;
             const UInt32 want = static_cast<UInt32>(std::min<UInt64>(size - total_read, remaining));
-            HANDLE handle = CreateFileW(range->path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            HANDLE handle = CreateFileW(win32_extended_path(range->path).c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                                         nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
             if (handle == INVALID_HANDLE_VALUE) {
                 return HRESULT_FROM_WIN32(GetLastError());
@@ -844,7 +860,7 @@ private:
 class FileOutStream final : public ISequentialOutStream {
 public:
     explicit FileOutStream(const std::wstring& path)
-        : handle_(CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr)) {}
+        : handle_(CreateFileW(win32_extended_path(path).c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr)) {}
     ~FileOutStream() {
         if (handle_ != INVALID_HANDLE_VALUE) {
             CloseHandle(handle_);
@@ -1016,7 +1032,7 @@ public:
             output_error_ = true;
             return E_INVALIDARG;
         }
-        const auto target = std::filesystem::path(output_dir_) / safe_path.value();
+        const auto target = std::filesystem::path(win32_extended_path(output_dir_)) / safe_path.value();
         emit("item_start", index, name);
         try {
             if (is_dir) {
@@ -1116,7 +1132,7 @@ std::wstring split_volume_family(const std::vector<std::wstring>& part_paths) {
 }
 
 std::vector<unsigned char> format_ids_for_signature(const std::wstring& archive_path, bool scan_prefix = false) {
-    HANDLE handle = CreateFileW(archive_path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+    HANDLE handle = CreateFileW(win32_extended_path(archive_path).c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                                 nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (handle == INVALID_HANDLE_VALUE) {
         return {};
@@ -1854,7 +1870,7 @@ bool read_file_bytes(const std::wstring& path, std::vector<unsigned char>& data)
     } catch (...) {
         return false;
     }
-    HANDLE handle = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+    HANDLE handle = CreateFileW(win32_extended_path(path).c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                                 nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (handle == INVALID_HANDLE_VALUE) {
         return false;
@@ -1999,7 +2015,7 @@ ExtractArchiveResult extract_archive_internal(
     Int32 last_op_res = kOpOk;
 
     try {
-        std::filesystem::create_directories(output_dir);
+        std::filesystem::create_directories(std::filesystem::path(win32_extended_path(output_dir)));
     } catch (...) {
         result.status = PasswordTestStatus::Error;
         result.message = "output directory could not be created";

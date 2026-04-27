@@ -138,6 +138,9 @@ def attach_pipeline_timing(runner: PipelineRunner) -> TimingRecorder:
     recorder = TimingRecorder()
     wrap_method(runner.task_scanner, "scan_targets", recorder, "pipeline_scan")
     wrap_method(runner.batch_runner, "prepare_tasks", recorder, "prepare")
+    wrap_method(runner.batch_runner.analysis_stage, "analyze_tasks", recorder, "analysis")
+    wrap_method(runner.batch_runner.repair_stage, "repair_medium_confidence_tasks", recorder, "repair_medium_confidence")
+    wrap_method(runner.batch_runner.repair_stage, "repair_after_extraction_failure", recorder, "repair_after_failure")
     wrap_method(runner.extractor, "inspect", recorder, "health_password_preflight")
     wrap_method(runner.batch_runner.resource_inspector, "inspect", recorder, "resource_preflight")
     wrap_method(runner.batch_runner.resource_inspector, "record_estimated_single_task_profile", recorder, "resource_estimate")
@@ -155,6 +158,8 @@ def timing_columns(recorder: TimingRecorder | None) -> dict[str, float | dict]:
         return {
             "pipeline_scan_ms": 0.0,
             "prepare_ms": 0.0,
+            "analysis_ms": 0.0,
+            "repair_ms": 0.0,
             "preflight_ms": 0.0,
             "health_ms": 0.0,
             "password_resolve_ms": 0.0,
@@ -168,6 +173,8 @@ def timing_columns(recorder: TimingRecorder | None) -> dict[str, float | dict]:
     return {
         "pipeline_scan_ms": recorder.ms("pipeline_scan"),
         "prepare_ms": recorder.ms("prepare"),
+        "analysis_ms": recorder.ms("analysis"),
+        "repair_ms": round(recorder.ms("repair_medium_confidence") + recorder.ms("repair_after_failure"), 2),
         "preflight_ms": recorder.ms("health_password_preflight"),
         "health_ms": recorder.ms("health_probe"),
         "password_resolve_ms": recorder.ms("password_resolve"),
@@ -641,6 +648,8 @@ def print_table(rows: list[dict]):
         "scan_ms",
         "pipeline_ms",
         "pipeline_scan_ms",
+        "analysis_ms",
+        "repair_ms",
         "preflight_ms",
         "health_ms",
         "password_resolve_ms",
