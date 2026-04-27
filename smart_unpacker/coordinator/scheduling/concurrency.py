@@ -1,6 +1,5 @@
 import os
 import threading
-import time
 
 import psutil
 
@@ -56,6 +55,7 @@ class ConcurrencyScheduler:
 
         self.cond = threading.Condition()
         self.thread = None
+        self._wake_event = threading.Event()
 
     @property
     def profile_adjustments(self) -> dict[str, dict[str, int]]:
@@ -80,6 +80,7 @@ class ConcurrencyScheduler:
 
     def stop(self):
         self.is_running = False
+        self._wake_event.set()
         if self.thread:
             self.thread.join(timeout=2.0)
         self._save_profile_adjustments()
@@ -90,7 +91,10 @@ class ConcurrencyScheduler:
         last_bytes = (last_io.read_bytes + last_io.write_bytes) if last_io else 0
 
         while self.is_running:
-            time.sleep(poll_interval)
+            self._wake_event.wait(timeout=poll_interval)
+            self._wake_event.clear()
+            if not self.is_running:
+                break
             now_io = psutil.disk_io_counters()
             if not now_io:
                 continue
