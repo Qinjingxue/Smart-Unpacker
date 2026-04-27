@@ -19,6 +19,7 @@ for package in (
     "smart_unpacker.detection.pipeline.rules.precheck",
     "smart_unpacker.detection.pipeline.rules.scoring",
     "smart_unpacker.detection.pipeline.rules.confirmation",
+    "smart_unpacker.analysis.pipeline.modules",
     "smart_unpacker.repair.pipeline.modules",
     "smart_unpacker.verification.methods",
 ):
