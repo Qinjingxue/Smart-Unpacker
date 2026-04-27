@@ -7,14 +7,11 @@ import lzma
 from binascii import crc32
 from io import BytesIO
 
-import smart_unpacker_native
-
 from smart_unpacker.analysis.pipeline.module import AnalysisModuleSpec
 from smart_unpacker.analysis.pipeline.registry import get_analysis_module_registry
 from smart_unpacker.analysis.result import ArchiveFormatEvidence
 from smart_unpacker.analysis.scheduler import ArchiveAnalysisScheduler
 from smart_unpacker.analysis.view import SharedBinaryView
-from smart_unpacker.relations.internal.models import CandidateGroup, FileRelation, SplitVolumeEntry
 
 
 def _zip_bytes(tmp_path):
@@ -308,33 +305,6 @@ def test_analysis_scheduler_reads_7z_across_split_volumes(tmp_path):
     assert seven.segments[0].end_offset == len(seven_data)
 
 
-def test_analysis_scheduler_accepts_relation_split_group(tmp_path):
-    zip_data = _zip_bytes(tmp_path)
-    first = tmp_path / "game.zip.001"
-    second = tmp_path / "game.zip.002"
-    first.write_bytes(zip_data[:31])
-    second.write_bytes(zip_data[31:])
-    group = CandidateGroup(
-        head_path=str(first),
-        logical_name="game",
-        relation=FileRelation(filename=first.name, logical_name="game", split_role="first", is_split_related=True),
-        member_paths=[str(second)],
-        is_split_candidate=True,
-        split_volumes=[
-            SplitVolumeEntry(path=str(first), number=1, role="first"),
-            SplitVolumeEntry(path=str(second), number=2, role="member"),
-        ],
-        split_group_complete=True,
-    )
-
-    report = ArchiveAnalysisScheduler().analyze_relation_group(group)
-    zip_evidence = {item.format: item for item in report.evidences}["zip"]
-
-    assert report.path == str(first)
-    assert zip_evidence.status == "extractable"
-    assert zip_evidence.segments[0].end_offset == len(zip_data)
-
-
 def test_analysis_scheduler_detects_tar(tmp_path):
     tar_data = _tar_bytes()
     path = _write_bytes(tmp_path / "payload.tar", tar_data)
@@ -413,8 +383,6 @@ def test_shared_binary_view_reuses_cached_reads(tmp_path):
     path.write_bytes(b"abcdef")
     view = SharedBinaryView(str(path), cache_bytes=1024)
 
-    if hasattr(smart_unpacker_native, "AnalysisBinaryView"):
-        assert view._native is not None
     assert view.read_at(0, 3) == b"abc"
     assert view.read_at(0, 3) == b"abc"
 

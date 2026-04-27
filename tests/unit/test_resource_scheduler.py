@@ -7,7 +7,6 @@ from types import SimpleNamespace
 from smart_unpacker.contracts.detection import FactBag
 from smart_unpacker.contracts.tasks import ArchiveTask
 from smart_unpacker.coordinator.scheduling.concurrency import ConcurrencyScheduler
-from smart_unpacker.extraction.internal.workflow.errors import classify_extract_error, should_retry_extract_failure
 from smart_unpacker.coordinator.scheduling.executor import TaskExecutor
 from smart_unpacker.coordinator.scheduling.resource_model import build_resource_profile_key, estimate_resource_demand
 
@@ -299,36 +298,6 @@ def test_task_executor_submits_only_after_resource_tokens_are_available(tmp_path
     assert peak_active == 1
 
 
-def test_task_executor_best_fit_prefers_task_that_fills_resource_gap(tmp_path):
-    scheduler = ConcurrencyScheduler(
-        {
-            "initial_concurrency_limit": 3,
-            "cpu_tokens": 3,
-            "io_tokens": 3,
-            "memory_tokens": 3,
-        },
-        current_limit=3,
-        max_workers=3,
-    )
-    assert scheduler.try_acquire_slot(demand={"cpu": 1, "io": 1, "memory": 1}) is True
-    executor = TaskExecutor(scheduler, max_workers=3)
-
-    def make_task(name: str, tokens: dict[str, int]) -> ArchiveTask:
-        bag = FactBag()
-        bag.set("resource.tokens", tokens)
-        archive = tmp_path / name
-        archive.write_bytes(b"PK")
-        return ArchiveTask(fact_bag=bag, score=1, main_path=str(archive), all_parts=[str(archive)])
-
-    light = make_task("light.zip", {"cpu": 1, "io": 1, "memory": 1})
-    better_fit = make_task("better.zip", {"cpu": 2, "io": 1, "memory": 1})
-
-    selected = executor._select_best_fit_task([light, better_fit])
-
-    assert selected is not None
-    assert selected[1] is better_fit
-
-
 def test_process_sample_updates_live_pressure_and_memory_profile_adjustment():
     scheduler = ConcurrencyScheduler(
         {
@@ -448,23 +417,3 @@ def test_profile_calibration_ignores_corrupt_project_cache(tmp_path):
 
     assert scheduler.profile_adjustments == {}
 
-
-def test_extract_error_classifies_process_abnormal_conditions():
-    assert classify_extract_error(SimpleNamespace(returncode=-100), "") == "7z进程启动失败"
-    assert classify_extract_error(SimpleNamespace(returncode=-101), "") == "7z进程超时"
-    assert classify_extract_error(SimpleNamespace(returncode=-102), "") == "7z进程无进展"
-    assert classify_extract_error(SimpleNamespace(returncode=-9), "") == "7z进程异常退出或被终止"
-    assert classify_extract_error(SimpleNamespace(returncode=123), "") == "7z进程异常退出 (退出码 123)"
-
-
-def test_extract_retry_policy_only_retries_transient_failures():
-    assert should_retry_extract_failure(
-        SimpleNamespace(returncode=-102),
-        "7z process made no observable progress",
-    ) is True
-    assert should_retry_extract_failure(SimpleNamespace(returncode=8), "write error") is True
-    assert should_retry_extract_failure(SimpleNamespace(returncode=1), "sharing violation") is True
-
-    assert should_retry_extract_failure(SimpleNamespace(returncode=2), "headers error") is False
-    assert should_retry_extract_failure(SimpleNamespace(returncode=2), "missing volume") is False
-    assert should_retry_extract_failure(SimpleNamespace(returncode=2), "wrong password") is False

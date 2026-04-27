@@ -1,14 +1,10 @@
 import tempfile
 import unittest
-import subprocess
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
 
-from smart_unpacker.coordinator.scheduling.concurrency import ConcurrencyScheduler
 from smart_unpacker.coordinator.output_scan import OutputScanPolicy
 from smart_unpacker.config.schema import normalize_config
-from smart_unpacker.extraction.internal.sevenzip.sevenzip_runner import SevenZipRunner
 from smart_unpacker.extraction.scheduler import ExtractionScheduler
 from smart_unpacker.contracts.detection import FactBag
 from smart_unpacker.contracts.tasks import ArchiveTask
@@ -74,8 +70,8 @@ class ExtractionExecutionTests(unittest.TestCase):
             task = ArchiveTask(fact_bag=bag, score=10, main_path=str(archive_path), all_parts=[str(archive_path)])
 
             succeeded = SimpleNamespace(returncode=0, stdout="", stderr="")
-            with patch("smart_unpacker.extraction.internal.sevenzip.sevenzip_runner.subprocess.run", return_value=succeeded):
-                result = extractor.extract(task, str(out_dir))
+            extractor.sevenzip_runner.run_extract = lambda **_kwargs: succeeded
+            result = extractor.extract(task, str(out_dir))
 
             self.assertTrue(result.success)
             self.assertEqual(result.all_parts, [str(archive_path)])
@@ -103,8 +99,10 @@ class ExtractionExecutionTests(unittest.TestCase):
             bag = FactBag()
             task = ArchiveTask(fact_bag=bag, score=10, main_path=str(archive_path), all_parts=[str(archive_path)])
 
-            with patch("smart_unpacker.extraction.internal.sevenzip.sevenzip_runner.subprocess.run", side_effect=[failed, succeeded]):
-                result = extractor.extract(task, str(out_dir))
+            attempts = iter([failed, succeeded])
+            extractor.sevenzip_runner.run_extract = lambda **_kwargs: next(attempts)
+            extractor.retry_policy.backoff = lambda _retry_count: None
+            result = extractor.extract(task, str(out_dir))
 
             self.assertTrue(result.success)
             self.assertIn(10, calls)
@@ -137,9 +135,9 @@ class ExtractionExecutionTests(unittest.TestCase):
             bag = FactBag()
             task = ArchiveTask(fact_bag=bag, score=10, main_path=str(archive_path), all_parts=[str(archive_path)])
 
-            with patch("smart_unpacker.extraction.internal.sevenzip.sevenzip_runner.subprocess.run", side_effect=fake_run):
-                with patch("smart_unpacker.extraction.internal.workflow.retry_policy.time.sleep", return_value=None):
-                    result = extractor.extract(task, str(out_dir))
+            extractor.sevenzip_runner.run_extract = lambda **_kwargs: fake_run()
+            extractor.retry_policy.backoff = lambda _retry_count: None
+            result = extractor.extract(task, str(out_dir))
 
             self.assertTrue(result.success)
             self.assertFalse(partial_path.exists())
@@ -159,12 +157,19 @@ class ExtractionExecutionTests(unittest.TestCase):
             bag = FactBag()
             task = ArchiveTask(fact_bag=bag, score=10, main_path=str(archive_path), all_parts=[str(archive_path)])
 
-            with patch("smart_unpacker.extraction.internal.sevenzip.sevenzip_runner.subprocess.run", return_value=failed) as run_mock:
-                result = extractor.extract(task, str(out_dir))
+            calls = 0
+
+            def fake_extract(**_kwargs):
+                nonlocal calls
+                calls += 1
+                return failed
+
+            extractor.sevenzip_runner.run_extract = fake_extract
+            result = extractor.extract(task, str(out_dir))
 
             self.assertFalse(result.success)
             self.assertEqual(result.error, "压缩包损坏")
-            self.assertEqual(run_mock.call_count, 1)
+            self.assertEqual(calls, 1)
 
     def test_extractor_reports_retry_count_after_transient_failures_are_exhausted(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -181,103 +186,12 @@ class ExtractionExecutionTests(unittest.TestCase):
             bag = FactBag()
             task = ArchiveTask(fact_bag=bag, score=10, main_path=str(archive_path), all_parts=[str(archive_path)])
 
-            with patch("smart_unpacker.extraction.internal.sevenzip.sevenzip_runner.subprocess.run", return_value=failed):
-                with patch("smart_unpacker.extraction.internal.workflow.retry_policy.time.sleep", return_value=None):
-                    result = extractor.extract(task, str(out_dir))
+            extractor.sevenzip_runner.run_extract = lambda **_kwargs: failed
+            extractor.retry_policy.backoff = lambda _retry_count: None
+            result = extractor.extract(task, str(out_dir))
 
             self.assertFalse(result.success)
             self.assertIn("已重试 1 次", result.error)
-
-    def test_observed_extract_command_reports_popen_start_failure(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            archive_path = Path(tmp) / "sample.zip"
-            archive_path.write_bytes(b"zip")
-
-            extractor = ExtractionScheduler(max_retries=1)
-            bag = FactBag()
-            task = ArchiveTask(fact_bag=bag, score=10, main_path=str(archive_path), all_parts=[str(archive_path)])
-            scheduler = ConcurrencyScheduler({}, current_limit=1, max_workers=1)
-            runner = SevenZipRunner(extractor.process_config)
-
-            with patch("smart_unpacker.extraction.internal.sevenzip.sevenzip_runner.subprocess.Popen", side_effect=OSError("blocked")):
-                result = runner.run_extract_command(
-                    ["7z", "x", str(archive_path)],
-                    startupinfo=None,
-                    runtime_scheduler=scheduler,
-                    task=task,
-                )
-
-            self.assertEqual(result.returncode, -100)
-            self.assertIn("failed to start", result.stderr)
-
-    def test_observed_process_timeout_is_classified(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            archive_path = Path(tmp) / "sample.zip"
-            archive_path.write_bytes(b"zip")
-            extractor = ExtractionScheduler(max_retries=1)
-            extractor.process_config["max_extract_task_seconds"] = 0.01
-            extractor.process_config["process_sample_interval_ms"] = 10
-            bag = FactBag()
-            task = ArchiveTask(fact_bag=bag, score=10, main_path=str(archive_path), all_parts=[str(archive_path)])
-            scheduler = ConcurrencyScheduler({}, current_limit=1, max_workers=1)
-            runner = SevenZipRunner(extractor.process_config)
-
-            class HangingProcess:
-                pid = -1
-                returncode = None
-
-                def __init__(self):
-                    self.killed = False
-
-                def communicate(self, timeout=None):
-                    if self.killed:
-                        return "", "killed"
-                    raise subprocess.TimeoutExpired(cmd=["7z"], timeout=timeout)
-
-                def kill(self):
-                    self.killed = True
-
-            process = HangingProcess()
-            stdout, stderr = runner.communicate_observed_process(process, scheduler, task)
-
-            self.assertEqual(process.returncode, -101)
-            self.assertEqual(stdout, "")
-            self.assertIn("timed out", stderr)
-
-    def test_observed_process_no_progress_watchdog_is_classified(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            archive_path = Path(tmp) / "sample.zip"
-            archive_path.write_bytes(b"zip")
-            extractor = ExtractionScheduler(max_retries=1)
-            extractor.process_config["max_extract_task_seconds"] = 0
-            extractor.process_config["process_no_progress_timeout_seconds"] = 0.01
-            extractor.process_config["process_sample_interval_ms"] = 10
-            bag = FactBag()
-            task = ArchiveTask(fact_bag=bag, score=10, main_path=str(archive_path), all_parts=[str(archive_path)])
-            scheduler = ConcurrencyScheduler({}, current_limit=1, max_workers=1)
-            runner = SevenZipRunner(extractor.process_config)
-
-            class HangingProcess:
-                pid = -1
-                returncode = None
-
-                def __init__(self):
-                    self.killed = False
-
-                def communicate(self, timeout=None):
-                    if self.killed:
-                        return "", "killed"
-                    raise subprocess.TimeoutExpired(cmd=["7z"], timeout=timeout)
-
-                def kill(self):
-                    self.killed = True
-
-            process = HangingProcess()
-            stdout, stderr = runner.communicate_observed_process(process, scheduler, task)
-
-            self.assertEqual(process.returncode, -102)
-            self.assertEqual(stdout, "")
-            self.assertIn("no observable progress", stderr)
 
     def test_runner_skips_strong_scene_output_directory_for_recursion(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -18,7 +18,6 @@ from smart_unpacker.config.schema import normalize_config
 from smart_unpacker.coordinator.runner import PipelineRunner
 from smart_unpacker.coordinator.scanner import ScanOrchestrator
 from smart_unpacker.coordinator import resource_preflight as resource_preflight_module
-from smart_unpacker.extraction.internal.workflow import preflight as preflight_module
 from tests.helpers.detection_config import with_detection_pipeline
 from tests.helpers.real_archives import ArchiveCase, ArchiveFixtureFactory
 from tests.helpers.tool_config import get_optional_rar, require_7z
@@ -162,8 +161,6 @@ def attach_pipeline_timing(runner: PipelineRunner) -> TimingRecorder:
     wrap_method(runner.extractor, "inspect", recorder, "health_password_preflight")
     wrap_method(runner.batch_runner.resource_inspector, "inspect", recorder, "resource_preflight")
     wrap_method(runner.batch_runner.resource_inspector, "record_estimated_single_task_profile", recorder, "resource_estimate")
-    wrap_attribute(preflight_module, "cached_check_archive_health", recorder, "health_probe", detail=_native_result_detail)
-    wrap_attribute(preflight_module, "cached_test_archive", recorder, "preflight_structural_test", detail=_native_result_detail)
     wrap_attribute(resource_preflight_module, "cached_analyze_archive_resources", recorder, "resource_native_analyze", detail=_native_result_detail)
     wrap_method(runner.extractor.password_resolver, "resolve", recorder, "password_resolve")
     wrap_method(runner.extractor.password_tester, "test_password", recorder, "password_native_test_archive")

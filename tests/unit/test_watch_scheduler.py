@@ -8,6 +8,9 @@ from smart_unpacker.watch.scheduler import WatchScheduler
 
 
 class FakeObserver:
+    started_count = 0
+    stopped_count = 0
+
     def __init__(self):
         self.scheduled = []
         self.started = False
@@ -18,9 +21,11 @@ class FakeObserver:
 
     def start(self):
         self.started = True
+        type(self).started_count += 1
 
     def stop(self):
         self.stopped = True
+        type(self).stopped_count += 1
 
     def join(self, timeout=None):
         return None
@@ -37,6 +42,8 @@ def _write_zip(path: Path):
 
 
 def test_watch_scheduler_uses_watchdog_observer_and_initial_scan(tmp_path, monkeypatch):
+    FakeObserver.started_count = 0
+    FakeObserver.stopped_count = 0
     monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
 
     watch_root = tmp_path / "in"
@@ -55,12 +62,11 @@ def test_watch_scheduler_uses_watchdog_observer_and_initial_scan(tmp_path, monke
 
     watcher.start()
 
-    assert isinstance(watcher._observer, FakeObserver)
-    assert watcher._observer.started
     assert watcher.pending_count == 1
+    assert FakeObserver.started_count == 1
 
     watcher.stop()
-    assert watcher._observer.stopped
+    assert FakeObserver.stopped_count == 1
 
 
 def test_watch_scheduler_processes_stable_candidate_with_watch_root_common_root(tmp_path, monkeypatch):
