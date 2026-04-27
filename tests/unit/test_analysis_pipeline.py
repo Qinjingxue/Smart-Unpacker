@@ -9,6 +9,7 @@ from smart_unpacker.analysis.pipeline.registry import get_analysis_module_regist
 from smart_unpacker.analysis.result import ArchiveFormatEvidence
 from smart_unpacker.analysis.scheduler import ArchiveAnalysisScheduler
 from smart_unpacker.analysis.view import SharedBinaryView
+from smart_unpacker.relations.internal.models import CandidateGroup, FileRelation, SplitVolumeEntry
 
 
 def _zip_bytes(tmp_path):
@@ -28,6 +29,32 @@ def _rar4_block(header_type: int, flags: int = 0, payload: bytes = b"") -> bytes
 
 def _rar4_bytes() -> bytes:
     return b"Rar!\x1a\x07\x00" + _rar4_block(0x73) + _rar4_block(0x7B)
+
+
+def _rar5_vint(value: int) -> bytes:
+    out = bytearray()
+    while True:
+        byte = value & 0x7F
+        value >>= 7
+        if value:
+            out.append(byte | 0x80)
+        else:
+            out.append(byte)
+            return bytes(out)
+
+
+def _rar5_block(header_type: int, flags: int = 0, data: bytes = b"") -> bytes:
+    fields = _rar5_vint(header_type) + _rar5_vint(flags)
+    if data:
+        flags |= 0x0002
+        fields = _rar5_vint(header_type) + _rar5_vint(flags) + _rar5_vint(len(data))
+    header_size = _rar5_vint(len(fields))
+    header_data = header_size + fields
+    return crc32(header_data).to_bytes(4, "little") + header_data + data
+
+
+def _rar5_bytes() -> bytes:
+    return b"Rar!\x1a\x07\x01\x00" + _rar5_block(1) + _rar5_block(5)
 
 
 def _seven_zip_bytes() -> bytes:
@@ -67,6 +94,20 @@ def test_analysis_scheduler_finds_embedded_archive_segments(tmp_path):
     assert {item.format for item in report.selected} == {"zip", "rar"}
 
 
+def test_zip_embedded_local_header_without_eocd_keeps_embedded_start(tmp_path):
+    zip_data = _zip_bytes(tmp_path)
+    payload = b"MZstub" + zip_data[:40]
+    path = tmp_path / "zip_sfx_split_head.exe"
+    path.write_bytes(payload)
+
+    report = ArchiveAnalysisScheduler().analyze_path(str(path))
+    zip_evidence = {item.format: item for item in report.evidences}["zip"]
+
+    assert zip_evidence.status == "damaged"
+    assert zip_evidence.segments[0].start_offset == len(b"MZstub")
+    assert zip_evidence.segments[0].end_offset is None
+
+
 def test_analysis_scheduler_prefers_structural_boundary_over_next_signature(tmp_path):
     rar_data = _rar4_bytes()
     seven_data = _seven_zip_bytes()
@@ -99,6 +140,24 @@ def test_analysis_scheduler_walks_rar4_blocks_to_endarc(tmp_path):
     assert rar.details["end_block_found"] is True
 
 
+def test_analysis_scheduler_walks_rar5_blocks_to_endarc(tmp_path):
+    rar_data = _rar5_bytes()
+    payload = b"shell" + rar_data + b"tail-shell"
+    path = tmp_path / "rar5.bin"
+    path.write_bytes(payload)
+
+    report = ArchiveAnalysisScheduler().analyze_path(str(path))
+    rar = {item.format: item for item in report.evidences}["rar"]
+
+    assert rar.status == "extractable"
+    assert rar.confidence == 0.97
+    assert rar.segments[0].start_offset == len(b"shell")
+    assert rar.segments[0].end_offset == len(b"shell") + len(rar_data)
+    assert not rar.warnings
+    assert rar.details["version"] == 5
+    assert rar.details["end_block_found"] is True
+
+
 def test_analysis_scheduler_uses_7z_start_header_for_segment_end(tmp_path):
     seven_data = _seven_zip_bytes()
     payload = b"shell" + seven_data + b"tail-shell"
@@ -114,6 +173,65 @@ def test_analysis_scheduler_uses_7z_start_header_for_segment_end(tmp_path):
     assert seven.segments[0].end_offset == len(b"shell") + len(seven_data)
     assert not seven.warnings
     assert seven.details["next_header_crc_ok"] is True
+
+
+def test_analysis_scheduler_reads_zip_across_split_volumes(tmp_path):
+    zip_data = _zip_bytes(tmp_path)
+    first = tmp_path / "archive.zip.001"
+    second = tmp_path / "archive.zip.002"
+    first.write_bytes(zip_data[:37])
+    second.write_bytes(zip_data[37:])
+
+    report = ArchiveAnalysisScheduler().analyze_paths([str(first), str(second)])
+    zip_evidence = {item.format: item for item in report.evidences}["zip"]
+
+    assert zip_evidence.status == "extractable"
+    assert zip_evidence.confidence == 0.99
+    assert zip_evidence.segments[0].start_offset == 0
+    assert zip_evidence.segments[0].end_offset == len(zip_data)
+
+
+def test_analysis_scheduler_reads_7z_across_split_volumes(tmp_path):
+    seven_data = _seven_zip_bytes()
+    first = tmp_path / "archive.7z.001"
+    second = tmp_path / "archive.7z.002"
+    first.write_bytes(seven_data[:20])
+    second.write_bytes(seven_data[20:])
+
+    report = ArchiveAnalysisScheduler().analyze_paths([str(first), str(second)])
+    seven = {item.format: item for item in report.evidences}["7z"]
+
+    assert seven.status == "extractable"
+    assert seven.confidence == 0.97
+    assert seven.segments[0].start_offset == 0
+    assert seven.segments[0].end_offset == len(seven_data)
+
+
+def test_analysis_scheduler_accepts_relation_split_group(tmp_path):
+    zip_data = _zip_bytes(tmp_path)
+    first = tmp_path / "game.zip.001"
+    second = tmp_path / "game.zip.002"
+    first.write_bytes(zip_data[:31])
+    second.write_bytes(zip_data[31:])
+    group = CandidateGroup(
+        head_path=str(first),
+        logical_name="game",
+        relation=FileRelation(filename=first.name, logical_name="game", split_role="first", is_split_related=True),
+        member_paths=[str(second)],
+        is_split_candidate=True,
+        split_volumes=[
+            SplitVolumeEntry(path=str(first), number=1, role="first"),
+            SplitVolumeEntry(path=str(second), number=2, role="member"),
+        ],
+        split_group_complete=True,
+    )
+
+    report = ArchiveAnalysisScheduler().analyze_relation_group(group)
+    zip_evidence = {item.format: item for item in report.evidences}["zip"]
+
+    assert report.path == str(first)
+    assert zip_evidence.status == "extractable"
+    assert zip_evidence.segments[0].end_offset == len(zip_data)
 
 
 def test_analysis_module_config_can_disable_formats(tmp_path):

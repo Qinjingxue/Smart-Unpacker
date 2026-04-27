@@ -29,7 +29,7 @@ class ZipAnalysisModule:
                 native = view.probe_zip(eocd_offset=max(eocd_hits), max_cd_entries_to_walk=max_entries)
         if native is None and _inspect_zip_eocd_structure:
             native = _inspect_zip_eocd_structure(str(view.path), max_entries)
-        if native:
+        if native and (native.get("magic_matched") or native.get("plausible")):
             return self._from_native(view, dict(native), hits)
 
         local_hits = [hit["offset"] for hit in hits if hit.get("name") == "zip_local"]

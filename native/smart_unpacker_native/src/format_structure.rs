@@ -755,16 +755,17 @@ fn inspect_rar5(py: Python<'_>, data: &[u8], file_size: u64) -> PyResult<Py<PyDi
     d.set_item("first_header_type", header_type)?;
     let evidence = PyList::new(py, ["rar5:signature"])?;
     d.set_item("evidence", &evidence)?;
-    if header_size == 0 || first_header_offset as u64 + 4 + header_size > file_size {
+    let first_header_total_size = 4 + (after_size - (first_header_offset + 4)) as u64 + header_size;
+    if header_size == 0 || first_header_offset as u64 + first_header_total_size > file_size {
         d.set_item("error", "rar5_first_header_size_out_of_range")?;
         return Ok(d.unbind());
     }
     d.set_item("plausible", true)?;
     d.set_item("confidence", "strong")?;
     evidence.append("rar5:first_header")?;
-    if data.len() >= first_header_offset + 4 + header_size as usize {
+    if data.len() >= first_header_offset + first_header_total_size as usize {
         let stored_crc = u32_le(data, first_header_offset);
-        let header_data = &data[first_header_offset + 4..first_header_offset + 4 + header_size as usize];
+        let header_data = &data[first_header_offset + 4..first_header_offset + first_header_total_size as usize];
         let crc_ok = crc32(header_data) == stored_crc;
         d.set_item("header_crc_checked", true)?;
         d.set_item("header_crc_ok", crc_ok)?;
@@ -774,7 +775,7 @@ fn inspect_rar5(py: Python<'_>, data: &[u8], file_size: u64) -> PyResult<Py<PyDi
             d.set_item("error", "rar5_header_crc_mismatch")?;
         }
     }
-    let second_offset = first_header_offset + 4 + header_size as usize;
+    let second_offset = first_header_offset + first_header_total_size as usize;
     if header_type == 1 && d.get_item("header_crc_ok")?.unwrap().extract::<bool>()? && second_offset < file_size as usize {
         let second = inspect_rar5_block(data, second_offset, file_size);
         d.set_item("second_block_checked", true)?;
@@ -810,15 +811,16 @@ fn inspect_rar5_block(data: &[u8], offset: usize, file_size: u64) -> (bool, u64,
     if !matches!(header_type, 1..=5) {
         return (false, header_type, header_size, "rar5_second_header_unknown_type");
     }
-    if header_size == 0 || offset as u64 + 4 + header_size > file_size || data.len() < offset + 4 + header_size as usize {
+    let header_total_size = 4 + (after_size - (offset + 4)) as u64 + header_size;
+    if header_size == 0 || offset as u64 + header_total_size > file_size || data.len() < offset + header_total_size as usize {
         return (false, header_type, header_size, "rar5_second_header_size_out_of_range");
     }
     let stored_crc = u32_le(data, offset);
-    let header_data = &data[offset + 4..offset + 4 + header_size as usize];
+    let header_data = &data[offset + 4..offset + header_total_size as usize];
     if crc32(header_data) != stored_crc {
         return (false, header_type, header_size, "rar5_second_header_crc_mismatch");
     }
-    (true, header_type, 4 + header_size, "")
+    (true, header_type, header_total_size, "")
 }
 
 fn tar_empty<'py>(py: Python<'py>, error: &str) -> PyResult<Bound<'py, PyDict>> {

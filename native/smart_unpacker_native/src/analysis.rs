@@ -577,12 +577,13 @@ impl AnalysisBinaryView {
                 result.set_item("error", "rar5_header_size_vint_missing")?;
                 return Ok(());
             };
-            if header_size == 0 || cursor + 4 + header_size > size {
+            let header_total_size = 4 + (after_size - 4) as u64 + header_size;
+            if header_size == 0 || cursor + header_total_size > size {
                 result.set_item("blocks_checked", index)?;
                 result.set_item("error", "rar5_header_size_out_of_range")?;
                 return Ok(());
             }
-            let full = self.read_at_bytes(cursor, (4 + header_size) as usize)?;
+            let full = self.read_at_bytes(cursor, header_total_size as usize)?;
             let Some((header_type, after_type)) = read_vint(&full, after_size) else {
                 result.set_item("blocks_checked", index)?;
                 result.set_item("error", "rar5_header_type_vint_missing")?;
@@ -622,7 +623,7 @@ impl AnalysisBinaryView {
                 };
                 data_size = value;
             }
-            let next_cursor = cursor + 4 + header_size + data_size;
+            let next_cursor = cursor + header_total_size + data_size;
             if next_cursor > size {
                 result.set_item("blocks_checked", index)?;
                 result.set_item("error", "rar5_block_payload_out_of_range")?;
