@@ -3,7 +3,9 @@ $ErrorActionPreference = "Stop"
 
 $keys = @(
     "HKCU:\Software\Classes\Directory\shell\SmartUnpacker",
-    "HKCU:\Software\Classes\Directory\Background\shell\SmartUnpacker"
+    "HKCU:\Software\Classes\Directory\Background\shell\SmartUnpacker",
+    "HKCU:\Software\Classes\SmartUnpacker.FolderContextMenu",
+    "HKCU:\Software\Classes\SmartUnpacker.BackgroundContextMenu"
 )
 
 foreach ($key in $keys) {

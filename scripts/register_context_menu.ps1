@@ -93,14 +93,20 @@ function Set-ContextMenuParent {
     param(
         [string]$KeyPath,
         [string]$MenuLabel,
-        [string]$IconValue
+        [string]$IconValue,
+        [string]$SubCommandsKey
     )
 
     $null = New-Item -Path $KeyPath -Force
     Set-Item -Path $KeyPath -Value $MenuLabel
     Set-ItemProperty -Path $KeyPath -Name "MUIVerb" -Value $MenuLabel
     Set-ItemProperty -Path $KeyPath -Name "Icon" -Value $IconValue
-    Set-ItemProperty -Path $KeyPath -Name "SubCommands" -Value ""
+    Set-ItemProperty -Path $KeyPath -Name "ExtendedSubCommandsKey" -Value $SubCommandsKey
+    Remove-ItemProperty -Path $KeyPath -Name "SubCommands" -ErrorAction SilentlyContinue
+    $localShellKey = Join-Path $KeyPath "shell"
+    if (Test-Path -LiteralPath $localShellKey) {
+        Remove-Item -LiteralPath $localShellKey -Recurse -Force
+    }
 }
 
 function Set-ContextMenuCommand {
@@ -150,13 +156,19 @@ function New-ChineseMenuText {
     )
 }
 
+function New-ChineseText {
+    param([int[]]$CodePoints)
+
+    return -join ($CodePoints | ForEach-Object { [char]$_ })
+}
+
 function Get-SubMenuTexts {
     param([string]$MenuText)
 
     if ($MenuText -eq (New-ChineseMenuText)) {
         return @{
-            Prompt = "交互输入密码解压"
-            Direct = "直接解压"
+            Prompt = New-ChineseText @(0x4EA4, 0x4E92, 0x8F93, 0x5165, 0x5BC6, 0x7801, 0x89E3, 0x538B)
+            Direct = New-ChineseText @(0x76F4, 0x63A5, 0x89E3, 0x538B)
         }
     }
     return @{
@@ -173,6 +185,10 @@ $resolvedMenuText = if ($MenuText) { $MenuText } else { Get-DefaultMenuText -Rep
 
 $folderKey = "HKCU:\Software\Classes\Directory\shell\SmartUnpacker"
 $backgroundKey = "HKCU:\Software\Classes\Directory\Background\shell\SmartUnpacker"
+$folderSubCommandsName = "SmartUnpacker.FolderContextMenu"
+$backgroundSubCommandsName = "SmartUnpacker.BackgroundContextMenu"
+$folderSubCommandsKey = "HKCU:\Software\Classes\$folderSubCommandsName"
+$backgroundSubCommandsKey = "HKCU:\Software\Classes\$backgroundSubCommandsName"
 $subMenuTexts = Get-SubMenuTexts -MenuText $resolvedMenuText
 
 $folderPromptCommand = New-CommandString -Launcher $launcher -TargetToken "%1" -OutDirToken "%1" -PromptPasswords $true
@@ -180,16 +196,18 @@ $folderDirectCommand = New-CommandString -Launcher $launcher -TargetToken "%1" -
 $backgroundPromptCommand = New-CommandString -Launcher $launcher -TargetToken "%V" -OutDirToken "%V" -PromptPasswords $true
 $backgroundDirectCommand = New-CommandString -Launcher $launcher -TargetToken "%V" -OutDirToken "%V" -PromptPasswords $false
 
-Set-ContextMenuParent -KeyPath $folderKey -MenuLabel $resolvedMenuText -IconValue $resolvedIconPath
-Set-ContextMenuCommand -ParentKeyPath $folderKey -CommandName "PromptPassword" -MenuLabel $subMenuTexts.Prompt -CommandLine $folderPromptCommand -IconValue $resolvedIconPath
-Set-ContextMenuCommand -ParentKeyPath $folderKey -CommandName "DirectExtract" -MenuLabel $subMenuTexts.Direct -CommandLine $folderDirectCommand -IconValue $resolvedIconPath
-Set-ContextMenuParent -KeyPath $backgroundKey -MenuLabel $resolvedMenuText -IconValue $resolvedIconPath
-Set-ContextMenuCommand -ParentKeyPath $backgroundKey -CommandName "PromptPassword" -MenuLabel $subMenuTexts.Prompt -CommandLine $backgroundPromptCommand -IconValue $resolvedIconPath
-Set-ContextMenuCommand -ParentKeyPath $backgroundKey -CommandName "DirectExtract" -MenuLabel $subMenuTexts.Direct -CommandLine $backgroundDirectCommand -IconValue $resolvedIconPath
+Set-ContextMenuParent -KeyPath $folderKey -MenuLabel $resolvedMenuText -IconValue $resolvedIconPath -SubCommandsKey $folderSubCommandsName
+Set-ContextMenuCommand -ParentKeyPath $folderSubCommandsKey -CommandName "PromptPassword" -MenuLabel $subMenuTexts.Prompt -CommandLine $folderPromptCommand -IconValue $resolvedIconPath
+Set-ContextMenuCommand -ParentKeyPath $folderSubCommandsKey -CommandName "DirectExtract" -MenuLabel $subMenuTexts.Direct -CommandLine $folderDirectCommand -IconValue $resolvedIconPath
+Set-ContextMenuParent -KeyPath $backgroundKey -MenuLabel $resolvedMenuText -IconValue $resolvedIconPath -SubCommandsKey $backgroundSubCommandsName
+Set-ContextMenuCommand -ParentKeyPath $backgroundSubCommandsKey -CommandName "PromptPassword" -MenuLabel $subMenuTexts.Prompt -CommandLine $backgroundPromptCommand -IconValue $resolvedIconPath
+Set-ContextMenuCommand -ParentKeyPath $backgroundSubCommandsKey -CommandName "DirectExtract" -MenuLabel $subMenuTexts.Direct -CommandLine $backgroundDirectCommand -IconValue $resolvedIconPath
 
 Write-Host "Context menu registration completed." -ForegroundColor Green
 Write-Host "Folder menu key:" $folderKey
 Write-Host "Directory background key:" $backgroundKey
+Write-Host "Folder submenu key:" $folderSubCommandsKey
+Write-Host "Directory background submenu key:" $backgroundSubCommandsKey
 Write-Host "Launch mode:" $launcher.Mode
 if ($launcher.Mode -eq "app") {
     Write-Host "App path:" $launcher.AppPath

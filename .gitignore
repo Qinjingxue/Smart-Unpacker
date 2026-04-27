@@ -51,7 +51,7 @@ acceptance-dataset-*/
 relationship-grouping-*/
 rpgmaker-semantic-*/
 fixtures/fakepicture.jpg
-
+.smart_unpacker_repair/
 testfiles/
 test_pipeline_run/
 test_extract/
