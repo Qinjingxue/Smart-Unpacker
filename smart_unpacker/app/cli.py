@@ -110,8 +110,9 @@ def main(argv=None):
     args.quiet = bool(getattr(args, "quiet", False) or "-q" in argv or "--quiet" in argv)
     args.verbose = bool(getattr(args, "verbose", False) or "-v" in argv or "--verbose" in argv)
     args.pause_on_exit = bool(getattr(args, "pause_on_exit", False) or "--pause" in argv)
+    args.color = getattr(args, "color", "auto")
 
-    reporter = CliReporter(json_mode=args.json, quiet=args.quiet, verbose=args.verbose)
+    reporter = CliReporter(json_mode=args.json, quiet=args.quiet, verbose=args.verbose, color=args.color)
     ctx.reporter = reporter
     try:
         exit_code, result = dispatch_command(args, ctx)

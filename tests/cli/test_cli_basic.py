@@ -108,6 +108,7 @@ class CliBasicTests(unittest.TestCase):
         result = run_cli("extract", "-h")
 
         self.assertEqual(result.returncode, 0)
+        self.assertIn("--color", result.stdout)
         self.assertIn("--recur", result.stdout)
         self.assertIn("--sched", result.stdout)
         self.assertIn("--cleanup", result.stdout)

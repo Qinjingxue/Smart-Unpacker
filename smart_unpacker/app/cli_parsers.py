@@ -38,6 +38,7 @@ def build_common_parser(ctx: CliContext) -> argparse.ArgumentParser:
     parser.add_argument("-j", "--json", action="store_true", help=ctx.core_text("json"))
     parser.add_argument("-q", "--quiet", action="store_true", help=ctx.core_text("quiet"))
     parser.add_argument("-v", "--verbose", action="store_true", help=ctx.core_text("verbose"))
+    parser.add_argument("--color", choices=("auto", "always", "never"), default="auto", help=ctx.core_text("color"))
     pause_group = parser.add_mutually_exclusive_group()
     pause_group.add_argument("--no-pause", action="store_true", help=ctx.core_text("no_pause"))
     pause_group.add_argument("--pause", dest="pause_on_exit", action="store_true", help=ctx.core_text("pause"))
