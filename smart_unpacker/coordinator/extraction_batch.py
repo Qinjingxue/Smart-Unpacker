@@ -5,6 +5,7 @@ from typing import List
 
 from smart_unpacker.contracts.run_context import RunContext
 from smart_unpacker.contracts.tasks import ArchiveTask
+from smart_unpacker.coordinator.analysis_stage import ArchiveAnalysisStage
 from smart_unpacker.coordinator.resource_preflight import ResourcePreflightInspector
 from smart_unpacker.coordinator.scheduling import (
     ConcurrencyScheduler,
@@ -49,6 +50,7 @@ class ExtractionBatchRunner:
         self.config = config or {}
         self.scheduler_config = self._build_scheduler_config(self.config)
         self.max_workers = resolve_max_workers()
+        self.analysis_stage = ArchiveAnalysisStage(self.config)
         self.verifier = VerificationScheduler(self.config, password_session=self.extractor.password_session)
         performance = self.config.get("performance", {}) if isinstance(self.config.get("performance"), dict) else {}
         self.resource_inspector = ResourcePreflightInspector(
@@ -68,6 +70,7 @@ class ExtractionBatchRunner:
             return []
 
         self.prepare_tasks(tasks)
+        self.analysis_stage.analyze_tasks(tasks)
         output_dir_resolver = self.rename_scheduler.build_output_dir_resolver(
             tasks,
             self.extractor.default_output_dir_for_task,

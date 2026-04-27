@@ -99,15 +99,6 @@ class SevenZipRunner:
         raw = fact_bag.get("archive.input") if fact_bag is not None and hasattr(fact_bag, "get") else None
         if isinstance(raw, dict):
             return self._normalize_archive_input(raw, archive_path, part_paths)
-        segment = fact_bag.get("analysis.segment") if fact_bag is not None and hasattr(fact_bag, "get") else None
-        if isinstance(segment, dict):
-            return self._normalize_archive_input({
-                "kind": "file_range",
-                "path": segment.get("path") or archive_path,
-                "start": segment.get("start_offset", segment.get("start", 0)),
-                "end": segment.get("end_offset", segment.get("end")),
-                "format_hint": segment.get("format") or segment.get("format_hint") or getattr(task, "detected_ext", ""),
-            }, archive_path, part_paths)
         return None
 
     def _normalize_archive_input(self, raw: dict, archive_path: str, part_paths: list[str]) -> dict:

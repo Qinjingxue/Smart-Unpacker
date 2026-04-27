@@ -156,7 +156,7 @@ class SingleArchiveExtractor:
             )
             if known_password is not None:
                 return PasswordResolution(password=str(known_password), archive_key=task.key)
-            if not self._facts_require_password(fact_bag):
+            if not self.password_store.has_candidates() and not self._facts_require_password(fact_bag):
                 return PasswordResolution(password="", archive_key=task.key, encrypted=False)
         password_tester = self.password_resolver.password_tester
         if not password_tester.passwords:
