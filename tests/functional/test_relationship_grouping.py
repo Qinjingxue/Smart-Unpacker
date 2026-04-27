@@ -5,6 +5,8 @@ import zlib
 import pytest
 
 from smart_unpacker.coordinator.scanner import ScanOrchestrator
+from smart_unpacker.coordinator.runner import PipelineRunner
+from smart_unpacker.detection.scheduler import DetectionScheduler
 from tests.helpers.detection_config import with_detection_pipeline
 
 
@@ -136,4 +138,51 @@ def test_disguised_sfx_companion_groups_with_disguised_parts_not_noise(tmp_path)
             "bundle.7z.003.camouflage",
             "bundle.exe",
         ],
+    }
+
+
+def test_missing_middle_split_volume_is_failed_before_detection(tmp_path):
+    root = tmp_path / "missing_middle"
+    _write_files(root, ["gap.7z.001", "gap.7z.002", "gap.7z.004"])
+
+    bags = DetectionScheduler(SCAN_CONFIG).build_candidate_fact_bags([str(root)])
+    gap = next(bag for bag in bags if bag.get("candidate.logical_name") == "gap")
+
+    assert gap.get("relation.split_group_complete") is False
+    assert gap.get("relation.split_missing_reason") == "missing_middle"
+    assert gap.get("relation.split_missing_indices") == [3]
+
+    summary = PipelineRunner(SCAN_CONFIG).run(str(root))
+
+    assert summary.success_count == 0
+    assert any("分卷缺失或不完整" in item for item in summary.failed_tasks)
+
+
+def test_missing_head_split_volume_is_failed_before_detection(tmp_path):
+    root = tmp_path / "missing_head"
+    _write_files(root, ["lost.7z.002", "lost.7z.003"])
+
+    bags = DetectionScheduler(SCAN_CONFIG).build_candidate_fact_bags([str(root)])
+    lost = next(bag for bag in bags if bag.get("candidate.logical_name") == "lost")
+
+    assert lost.get("relation.split_group_complete") is False
+    assert lost.get("relation.split_missing_reason") == "missing_head"
+    assert lost.get("relation.split_missing_indices") == [1]
+
+    summary = PipelineRunner(SCAN_CONFIG).run(str(root))
+
+    assert summary.success_count == 0
+    assert any("分卷缺失或不完整" in item for item in summary.failed_tasks)
+
+
+def test_missing_head_split_volume_can_be_recovered_by_fuzzy_candidate(tmp_path):
+    root = tmp_path / "recovered_head"
+    _write_files(root, ["lost.7z", "lost.7z.002", "lost.7z.003"])
+    for path in root.iterdir():
+        path.write_bytes(b"x" * (1024 * 1024))
+
+    actual = _scan_parts(root)
+
+    assert actual == {
+        "lost.7z": ["lost.7z", "lost.7z.002", "lost.7z.003"],
     }

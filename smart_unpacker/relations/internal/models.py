@@ -43,6 +43,9 @@ class CandidateGroup:
     is_split_candidate: bool = False
     head_size: int | None = None
     split_volumes: List[SplitVolumeEntry] = None
+    split_group_complete: bool | None = None
+    split_missing_reason: str = ""
+    split_missing_indices: List[int] = None
 
     @property
     def kind(self) -> str:

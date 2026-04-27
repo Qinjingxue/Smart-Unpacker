@@ -2,6 +2,7 @@ import os
 from typing import Any
 
 from smart_unpacker.config.detection_view import detection_config, rule_pipeline_config
+from smart_unpacker.contracts.detection import FactBag
 from smart_unpacker.contracts.tasks import ArchiveTask
 from smart_unpacker.detection.scheduler import DetectionScheduler
 from smart_unpacker.relations.scheduler import RelationsScheduler
@@ -17,14 +18,17 @@ class ArchiveTaskProvider:
         self.config = config
         self.detector = DetectionScheduler(config)
         self._relations = RelationsScheduler()
+        self.failed_candidates: list[str] = []
 
     def scan_targets(self, scan_roots: list[str], processed_keys: set[str] | None = None) -> list[ArchiveTask]:
         processed_keys = processed_keys or set()
+        self.failed_candidates = []
         if self._detection_pipeline_disabled():
             return self._scan_standard_archive_targets(scan_roots, processed_keys)
 
         tasks: list[ArchiveTask] = []
-        for detection in self.detector.detect_targets(scan_roots):
+        fact_bags = self._filter_incomplete_split_groups(self.detector.build_candidate_fact_bags(scan_roots))
+        for detection in self.detector.evaluate_bags(fact_bags):
             bag = detection.fact_bag
             if not bag.get("candidate.entry_path"):
                 continue
@@ -43,7 +47,7 @@ class ArchiveTaskProvider:
         processed_keys: set[str],
     ) -> list[ArchiveTask]:
         tasks: list[ArchiveTask] = []
-        for bag in self.detector.build_candidate_fact_bags(scan_roots):
+        for bag in self._filter_incomplete_split_groups(self.detector.build_candidate_fact_bags(scan_roots)):
             main_path = bag.get("candidate.entry_path")
             if not main_path or not self._is_standard_archive_candidate(main_path, bag):
                 continue
@@ -80,3 +84,21 @@ class ArchiveTaskProvider:
         if ext == ".exe" and bag.get("relation.is_split_exe_companion"):
             return True
         return False
+
+    def _filter_incomplete_split_groups(self, bags: list[FactBag]) -> list[FactBag]:
+        filtered = []
+        seen_failures = set()
+        for bag in bags:
+            if bag.get("relation.split_group_complete") is False:
+                message = self._incomplete_split_failure_message(bag)
+                if message not in seen_failures:
+                    seen_failures.add(message)
+                    self.failed_candidates.append(message)
+                continue
+            filtered.append(bag)
+        return filtered
+
+    def _incomplete_split_failure_message(self, bag: FactBag) -> str:
+        path = bag.get("candidate.entry_path") or bag.get("file.path") or ""
+        name = os.path.basename(path) or str(bag.get("candidate.logical_name") or "split archive")
+        return f"{name} [分卷缺失或不完整]"

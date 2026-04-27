@@ -21,6 +21,8 @@ SPLIT_MEMBER_PATTERN = re.compile(r"\.(part\d+\.(?:rar|exe)|\d{3})(?:\.[^.]+)?$"
 
 
 class RelationsGroupBuilder:
+    FUZZY_TIME_WINDOW_NS = 24 * 60 * 60 * 1_000_000_000
+
     def build_candidate_groups(self, snapshot: DirectorySnapshot) -> List[CandidateGroup]:
         dir_files: Dict[str, List[FileEntry]] = defaultdict(list)
         for entry in snapshot.entries:
@@ -413,10 +415,19 @@ class RelationsGroupBuilder:
         )
         return list(dict.fromkeys(list(all_parts) + candidates))
 
-    def build_split_volume_entries(self, archive: str, all_parts: List[str]) -> List[SplitVolumeEntry]:
+    def build_split_volume_entries(
+        self,
+        archive: str,
+        all_parts: List[str],
+        directory_index: DirectoryFileIndex | None = None,
+    ) -> tuple[List[SplitVolumeEntry], bool | None, str, List[int]]:
         parsed_main = self.parse_numbered_volume(normalized_path(archive))
-        if not parsed_main or parsed_main["number"] != 1:
-            return []
+        if not parsed_main:
+            if os.path.splitext(archive)[1].lower() == ".exe":
+                return [], None, "", []
+            parsed_main = self._first_parsed_volume(all_parts)
+        if not parsed_main:
+            return [], None, "", []
 
         archive_prefix = str(parsed_main["prefix"])
         style = str(parsed_main["style"])
@@ -438,8 +449,39 @@ class RelationsGroupBuilder:
             else:
                 candidates.append(norm_path)
 
-        total_count = len(confirmed) + len(candidates)
-        missing_numbers = [number for number in range(1, total_count + 1) if number not in confirmed]
+        if not confirmed:
+            return [], None, "", []
+
+        max_confirmed = max(confirmed)
+        missing_numbers = [number for number in range(1, max_confirmed + 1) if number not in confirmed]
+        fuzzy_candidates = self._find_fuzzy_candidates_for_missing_volumes(
+            archive=archive,
+            archive_prefix=archive_prefix,
+            style=style,
+            known_paths=set(seen_paths),
+            directory_index=directory_index,
+        )
+
+        assigned_candidates: dict[int, str] = {}
+        available_candidates = list(dict.fromkeys(candidates + fuzzy_candidates))
+        for number in missing_numbers:
+            match = self._select_candidate_for_missing_number(
+                number,
+                available_candidates,
+                archive_prefix,
+                style,
+            )
+            if not match:
+                continue
+            assigned_candidates[number] = match
+            available_candidates = [path for path in available_candidates if path_key(path) != path_key(match)]
+
+        next_number = max_confirmed + 1
+        for path in available_candidates:
+            while next_number in confirmed or next_number in assigned_candidates:
+                next_number += 1
+            assigned_candidates[next_number] = path
+            next_number += 1
 
         entries: List[SplitVolumeEntry] = [
             SplitVolumeEntry(
@@ -454,7 +496,7 @@ class RelationsGroupBuilder:
             for number, path in sorted(confirmed.items())
         ]
 
-        for number, path in zip(missing_numbers, candidates):
+        for number, path in sorted(assigned_candidates.items()):
             entries.append(SplitVolumeEntry(
                 path=path,
                 number=number,
@@ -465,7 +507,86 @@ class RelationsGroupBuilder:
                 width=width,
             ))
 
-        return sorted(entries, key=lambda volume: (volume.number, volume.path.lower()))
+        unresolved = [number for number in missing_numbers if number not in assigned_candidates]
+        if unresolved:
+            reason = "missing_head" if 1 in unresolved else "missing_middle"
+            return sorted(entries, key=lambda volume: (volume.number, volume.path.lower())), False, reason, unresolved
+
+        return sorted(entries, key=lambda volume: (volume.number, volume.path.lower())), True, "", []
+
+    def _first_parsed_volume(self, all_parts: List[str]):
+        parsed_items = []
+        for path in all_parts:
+            parsed = self.parse_numbered_volume(normalized_path(path))
+            if parsed:
+                parsed_items.append(parsed)
+        if not parsed_items:
+            return None
+        return sorted(parsed_items, key=lambda item: int(item["number"]))[0]
+
+    def _find_fuzzy_candidates_for_missing_volumes(
+        self,
+        archive: str,
+        archive_prefix: str,
+        style: str,
+        known_paths: set[str],
+        directory_index: DirectoryFileIndex | None,
+    ) -> List[str]:
+        reference_path = self._reference_path_for_prefix(archive, archive_prefix, style, directory_index)
+        if not reference_path:
+            return []
+        return self._collect_fuzzy_volume_candidates(
+            reference_path,
+            archive_prefix,
+            style,
+            set(known_paths),
+            directory_index=directory_index,
+        )
+
+    def _reference_path_for_prefix(
+        self,
+        archive: str,
+        archive_prefix: str,
+        style: str,
+        directory_index: DirectoryFileIndex | None,
+    ) -> str:
+        parsed_archive = self.parse_numbered_volume(normalized_path(archive))
+        if parsed_archive and parsed_archive["style"] == style and case_key(parsed_archive["prefix"]) == case_key(archive_prefix):
+            return normalized_path(archive)
+        entries = self._iter_directory_files(os.path.dirname(archive), directory_index)
+        candidates = []
+        for entry in entries:
+            parsed = self.parse_numbered_volume(normalized_path(entry.path))
+            if parsed and parsed["style"] == style and case_key(parsed["prefix"]) == case_key(archive_prefix):
+                candidates.append((int(parsed["number"]), normalized_path(entry.path)))
+        return sorted(candidates)[0][1] if candidates else ""
+
+    def _select_candidate_for_missing_number(
+        self,
+        number: int,
+        candidates: List[str],
+        archive_prefix: str,
+        style: str,
+    ) -> str:
+        if not candidates:
+            return ""
+        archive_name = os.path.basename(archive_prefix).lower()
+        logical_name = os.path.splitext(archive_name)[0] if style != "rar_part" else archive_name
+        exact_names = set()
+        if number == 1:
+            exact_names.update({archive_name, logical_name})
+            if style == "rar_part":
+                exact_names.add(f"{logical_name}.rar")
+        exact_names.add(f"{archive_name}.{number}")
+        exact_names.add(f"{archive_name}.{number:02d}")
+        if style == "rar_part":
+            exact_names.add(f"{logical_name}.rar.{number}")
+            exact_names.add(f"{logical_name}.rar.{number:02d}")
+
+        for path in sorted(candidates, key=lambda item: os.path.basename(item).lower()):
+            if os.path.basename(path).lower() in exact_names:
+                return path
+        return sorted(candidates, key=lambda item: os.path.basename(item).lower())[0]
 
     def _build_group(
         self,
@@ -479,14 +600,26 @@ class RelationsGroupBuilder:
             all_parts = [str(entry.path)]
             if self.detect_split_role(entry.path.name) == "first":
                 all_parts = self.expand_misnamed_split_parts(str(entry.path), all_parts, directory_index)
+            split_volumes, split_complete, missing_reason, missing_indices = self.build_split_volume_entries(
+                str(entry.path),
+                all_parts,
+                directory_index,
+            )
+            head_path = str(entry.path)
+            first_volume = next((volume for volume in split_volumes if volume.number == 1), None)
+            if first_volume:
+                head_path = first_volume.path
             return CandidateGroup(
-                head_path=str(entry.path),
+                head_path=head_path,
                 logical_name=relation.logical_name,
                 relation=relation,
-                member_paths=[path for path in all_parts if path != str(entry.path)],
+                member_paths=[path for path in all_parts if path_key(path) != path_key(head_path)],
                 is_split_candidate=relation.is_split_related,
                 head_size=entry.size,
-                split_volumes=self.build_split_volume_entries(str(entry.path), all_parts),
+                split_volumes=split_volumes,
+                split_group_complete=split_complete,
+                split_missing_reason=missing_reason,
+                split_missing_indices=missing_indices,
             )
 
         head_entry = None
@@ -516,14 +649,27 @@ class RelationsGroupBuilder:
             split_role = "first"
             relation = FileRelation(**{**relation.__dict__, "split_role": split_role})
 
+        split_volumes, split_complete, missing_reason, missing_indices = self.build_split_volume_entries(
+            str(head_entry.path),
+            all_parts,
+            directory_index,
+        )
+        head_path = str(head_entry.path)
+        first_volume = next((volume for volume in split_volumes if volume.number == 1), None)
+        if first_volume:
+            head_path = first_volume.path
+
         return CandidateGroup(
-            head_path=str(head_entry.path),
+            head_path=head_path,
             logical_name=relation.logical_name,
             relation=relation,
-            member_paths=[path for path in all_parts if path != str(head_entry.path)],
+            member_paths=[path for path in all_parts if path_key(path) != path_key(head_path)],
             is_split_candidate=True,
             head_size=head_entry.size,
-            split_volumes=self.build_split_volume_entries(str(head_entry.path), all_parts),
+            split_volumes=split_volumes,
+            split_group_complete=split_complete,
+            split_missing_reason=missing_reason,
+            split_missing_indices=missing_indices,
         )
 
     def _has_split_companions_in_dir(self, sibling_names: Set[str], base_name: str) -> bool:
@@ -629,7 +775,7 @@ class RelationsGroupBuilder:
                 continue
             if entry.size < min_size or entry.size > main_size:
                 continue
-            if abs(entry.mtime_ns - archive_mtime_ns) > 24 * 60 * 60 * 1_000_000_000:
+            if abs(entry.mtime_ns - archive_mtime_ns) > self.FUZZY_TIME_WINDOW_NS:
                 continue
             if not self._looks_like_fuzzy_volume_candidate(path, archive_prefix, style):
                 continue

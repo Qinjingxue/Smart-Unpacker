@@ -137,6 +137,16 @@ FACT_SCHEMA: dict[str, dict[str, Any]] = {
         "producer": "relations.group_builder",
         "description": "Whether the relation layer considers the split group complete enough to represent.",
     },
+    "relation.split_missing_reason": {
+        "type": "str",
+        "producer": "relations.group_builder",
+        "description": "Reason a split group was marked incomplete, such as missing_head or missing_middle.",
+    },
+    "relation.split_missing_indices": {
+        "type": "list",
+        "producer": "relations.group_builder",
+        "description": "Split volume numbers that appear to be missing before the last observed volume.",
+    },
     "relation.split_family": {
         "type": "str",
         "producer": "relations.group_builder",

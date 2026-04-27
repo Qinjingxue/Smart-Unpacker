@@ -34,6 +34,8 @@ class PreExtractInspector:
             self._record_health(task, health)
 
             if health.is_missing_volume:
+                task.fact_bag.set("relation.split_group_complete", False)
+                task.fact_bag.set("relation.split_missing_reason", "native_health_missing_volume")
                 return self._skip(task, output_dir, staged.cleanup_parts, "分卷缺失或不完整")
             if health.is_broken:
                 return self._skip(task, output_dir, staged.cleanup_parts, "压缩包损坏")

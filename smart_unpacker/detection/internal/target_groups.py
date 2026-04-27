@@ -9,15 +9,17 @@ from smart_unpacker.filesystem.directory_scanner import DirectoryScanner
 def relation_group_to_fact_bag(group: CandidateGroup) -> FactBag:
     bag = FactBag()
     relation = group.relation
+    all_paths = group.all_paths
+    member_paths = [path for path in all_paths if path != group.head_path]
     bag.set("file.path", group.head_path)
     bag.set("file.logical_name", group.logical_name)
     bag.set("candidate.kind", group.kind)
     bag.set("candidate.entry_path", group.entry_path)
-    bag.set("candidate.member_paths", group.all_paths)
+    bag.set("candidate.member_paths", all_paths)
     bag.set("candidate.logical_name", group.logical_name)
     if isinstance(group.head_size, int):
         bag.set("file.size", group.head_size)
-    bag.set("file.split_members", list(group.member_paths))
+    bag.set("file.split_members", list(member_paths))
     bag.set("file.split_role", relation.split_role)
     bag.set("file.is_split_candidate", group.is_split_candidate or relation.is_split_related)
     bag.set("relation.is_split_related", group.is_split_candidate or relation.is_split_related)
@@ -31,8 +33,15 @@ def relation_group_to_fact_bag(group: CandidateGroup) -> FactBag:
     bag.set("relation.match_rar_head", relation.match_rar_head)
     bag.set("relation.match_001_head", relation.match_001_head)
     bag.set("relation.split_entry_path", group.head_path)
-    bag.set("relation.split_member_count", len(group.member_paths) + 1 if group.is_split_candidate else 0)
-    bag.set("relation.split_group_complete", True)
+    bag.set("relation.split_member_count", len(all_paths) if group.is_split_candidate else 0)
+    if group.split_group_complete is not None:
+        bag.set("relation.split_group_complete", bool(group.split_group_complete))
+    else:
+        bag.set("relation.split_group_complete", True)
+    if group.split_missing_reason:
+        bag.set("relation.split_missing_reason", group.split_missing_reason)
+    if group.split_missing_indices:
+        bag.set("relation.split_missing_indices", list(group.split_missing_indices))
     bag.set("relation.split_family", relation.split_family)
     bag.set("relation.split_index", relation.split_index)
     bag.set("relation.split_is_first", relation.split_role == "first")
@@ -49,8 +58,8 @@ def relation_group_to_fact_bag(group: CandidateGroup) -> FactBag:
             }
             for volume in group.split_volumes
         ])
-    if group.member_paths:
-        bag.set("relation.member_paths", list(group.member_paths))
+    if member_paths:
+        bag.set("relation.member_paths", list(member_paths))
     return bag
 
 
