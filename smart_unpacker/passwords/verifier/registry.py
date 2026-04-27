@@ -52,6 +52,17 @@ class PasswordVerifierChain:
             if fast_outcome.status == "match" and fast_outcome.matched_index >= 0:
                 candidate_index = offset + fast_outcome.matched_index
                 candidate = passwords[candidate_index]
+                if not fast_outcome.final_confirmation_required:
+                    return PasswordBatchVerification(
+                        ok=True,
+                        status="match",
+                        matched_index=candidate_index,
+                        attempts=candidate_index + 1,
+                        test_result=fast_outcome.test_result,
+                        error_text="",
+                        terminal=True,
+                        final_confirmation_required=False,
+                    )
                 confirmation = self._confirm_match(archive_path, candidate, part_paths=part_paths, archive_input=archive_input)
                 if confirmation.ok:
                     return PasswordBatchVerification(

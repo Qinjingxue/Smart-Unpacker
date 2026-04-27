@@ -1,3 +1,4 @@
+use crate::password_input::{parse_ranges, ranges_total_len, VirtualRangeReader};
 use pbkdf2::pbkdf2_hmac;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
@@ -14,7 +15,6 @@ pub(crate) fn zip_fast_verify_passwords(
     archive_path: String,
     passwords: &Bound<'_, PyList>,
 ) -> PyResult<Py<PyAny>> {
-    let result = PyDict::new(py);
     let candidates = passwords
         .iter()
         .map(|item| item.extract::<String>())
@@ -22,7 +22,33 @@ pub(crate) fn zip_fast_verify_passwords(
 
     let mut file = File::open(&archive_path)?;
     let metadata = file.metadata()?;
-    let scan_len = metadata.len().min(MAX_PREFIX_SCAN as u64) as usize;
+    verify_zip_stream(py, &mut file, metadata.len(), &candidates)
+}
+
+#[pyfunction]
+pub(crate) fn zip_fast_verify_passwords_from_ranges(
+    py: Python<'_>,
+    ranges: &Bound<'_, PyList>,
+    passwords: &Bound<'_, PyList>,
+) -> PyResult<Py<PyAny>> {
+    let candidates = passwords
+        .iter()
+        .map(|item| item.extract::<String>())
+        .collect::<PyResult<Vec<_>>>()?;
+    let parsed = parse_ranges(ranges)?;
+    let total_len = ranges_total_len(&parsed);
+    let mut reader = VirtualRangeReader::new(parsed);
+    verify_zip_stream(py, &mut reader, total_len, &candidates)
+}
+
+fn verify_zip_stream<R: Read + Seek>(
+    py: Python<'_>,
+    file: &mut R,
+    total_len: u64,
+    candidates: &[String],
+) -> PyResult<Py<PyAny>> {
+    let result = PyDict::new(py);
+    let scan_len = total_len.min(MAX_PREFIX_SCAN as u64) as usize;
     let mut prefix = vec![0u8; scan_len];
     file.read_exact(&mut prefix)?;
 
@@ -50,7 +76,7 @@ pub(crate) fn zip_fast_verify_passwords(
         return Ok(result.into());
     }
     if header.method == 99 {
-        return verify_winzip_aes(py, &mut file, &candidates, &header);
+        return verify_winzip_aes(py, file, &candidates, &header);
     }
 
     let mut encryption_header = [0u8; 12];
@@ -120,7 +146,7 @@ fn parse_local_header(bytes: &[u8], offset: usize) -> Option<ZipLocalHeader> {
 
 fn verify_winzip_aes(
     py: Python<'_>,
-    file: &mut File,
+    file: &mut (impl Read + Seek),
     candidates: &[String],
     header: &ZipLocalHeader,
 ) -> PyResult<Py<PyAny>> {

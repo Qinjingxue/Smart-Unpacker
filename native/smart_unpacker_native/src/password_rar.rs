@@ -1,3 +1,4 @@
+use crate::password_input::{parse_ranges, read_prefix_from_ranges};
 use aes::cipher::{block_padding::NoPadding, BlockModeDecrypt, KeyIvInit};
 use aes::Aes128;
 use cbc::Decryptor;
@@ -34,6 +35,30 @@ pub(crate) fn rar_fast_verify_passwords(
     let len = file.read(&mut data)?;
     data.truncate(len);
 
+    if data.starts_with(RAR5_SIGNATURE) {
+        return verify_rar5(py, &data, &candidates);
+    }
+    if data.starts_with(RAR4_SIGNATURE) {
+        return verify_rar4(py, &data, &candidates);
+    }
+    if data.starts_with(b"Rar!") {
+        return status(py, "damaged", -1, 0, "rar signature is incomplete or unknown");
+    }
+    status(py, "unsupported_method", -1, 0, "rar signature not found")
+}
+
+#[pyfunction]
+pub(crate) fn rar_fast_verify_passwords_from_ranges(
+    py: Python<'_>,
+    ranges: &Bound<'_, PyList>,
+    passwords: &Bound<'_, PyList>,
+) -> PyResult<Py<PyAny>> {
+    let candidates = passwords
+        .iter()
+        .map(|item| item.extract::<String>())
+        .collect::<PyResult<Vec<_>>>()?;
+    let parsed = parse_ranges(ranges)?;
+    let data = read_prefix_from_ranges(&parsed, MAX_RAR_PREFIX_SCAN)?;
     if data.starts_with(RAR5_SIGNATURE) {
         return verify_rar5(py, &data, &candidates);
     }

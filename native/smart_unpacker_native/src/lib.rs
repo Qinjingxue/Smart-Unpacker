@@ -7,6 +7,7 @@ mod file_crc;
 mod format_structure;
 mod magic;
 mod password_7z;
+mod password_input;
 mod password_rar;
 mod password_zip;
 mod pe_overlay;
@@ -100,11 +101,23 @@ fn smart_unpacker_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(
+        password_7z::seven_zip_fast_verify_passwords_from_ranges,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
         password_rar::rar_fast_verify_passwords,
         m
     )?)?;
     m.add_function(wrap_pyfunction!(
+        password_rar::rar_fast_verify_passwords_from_ranges,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
         password_zip::zip_fast_verify_passwords,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        password_zip::zip_fast_verify_passwords_from_ranges,
         m
     )?)?;
     m.add_function(wrap_pyfunction!(repair_io::repair_read_file_range, m)?)?;

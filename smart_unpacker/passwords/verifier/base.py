@@ -23,6 +23,7 @@ class PasswordBatchVerification:
     test_result: object = None
     error_text: str = ""
     terminal: bool = False
+    final_confirmation_required: bool = True
 
 
 class PasswordVerifier(Protocol):
