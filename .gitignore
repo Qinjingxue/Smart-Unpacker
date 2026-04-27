@@ -43,10 +43,7 @@ fixtures/*.dll
 fixtures/*.bin
 
 # Bundled third-party binaries kept locally by default
-tools/*.exe
-tools/*.dll
-tools/*.sfx
-tools/*.ion
+tools/
 
 # Temporary workspaces created by acceptance tests
 acceptance-*/
@@ -56,6 +53,5 @@ rpgmaker-semantic-*/
 fixtures/fakepicture.jpg
 
 testfiles/
-重构方案.txt
 test_pipeline_run/
 test_extract/
