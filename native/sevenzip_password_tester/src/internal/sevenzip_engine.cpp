@@ -14,6 +14,8 @@
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
@@ -392,6 +394,19 @@ private:
     UInt64 position_ = 0;
     bool valid_ = true;
 };
+
+CreateObjectFunc cached_create_object(const std::wstring& seven_zip_dll_path) {
+    static std::mutex mutex;
+    static std::wstring cached_path;
+    static std::unique_ptr<ComModule> cached_module;
+
+    std::lock_guard<std::mutex> lock(mutex);
+    if (!cached_module || cached_path != seven_zip_dll_path) {
+        cached_module = std::make_unique<ComModule>(seven_zip_dll_path);
+        cached_path = seven_zip_dll_path;
+    }
+    return cached_module ? cached_module->create_object() : nullptr;
+}
 
 struct NormalizedInputRange {
     std::wstring path;
@@ -2163,7 +2178,8 @@ PasswordTestResult test_one_password(
     const std::wstring& archive_path,
     const std::wstring& password,
     const std::vector<std::wstring>& part_paths,
-    const std::vector<GUID>& formats
+    const std::vector<GUID>& formats,
+    const std::vector<ExtractInputRange>& input_ranges = {}
 );
 
 PasswordTestResult test_one_password(
@@ -2177,7 +2193,8 @@ PasswordTestResult test_one_password(
         archive_path,
         password,
         part_paths,
-        candidate_formats(archive_path, part_paths));
+        candidate_formats(archive_path, part_paths),
+        {});
 }
 
 PasswordTestResult test_one_password(
@@ -2185,7 +2202,8 @@ PasswordTestResult test_one_password(
     const std::wstring& archive_path,
     const std::wstring& password,
     const std::vector<std::wstring>& part_paths,
-    const std::vector<GUID>& formats
+    const std::vector<GUID>& formats,
+    const std::vector<ExtractInputRange>& input_ranges
 ) {
     PasswordTestResult result;
     result.backend_available = true;
@@ -2205,7 +2223,14 @@ PasswordTestResult test_one_password(
         any_format_created = true;
 
         bool stream_opened = false;
-        ComPtr<IInStream> stream = open_archive_stream(archive_path, part_paths, stream_opened);
+        ComPtr<IInStream> stream = [&]() {
+            if (!input_ranges.empty()) {
+                auto* range_stream = new MultiRangeInStream(input_ranges);
+                stream_opened = range_stream->is_open();
+                return ComPtr<IInStream>(range_stream);
+            }
+            return open_archive_stream(archive_path, part_paths, stream_opened);
+        }();
         if (!stream_opened) {
             result.status = PasswordTestStatus::Error;
             result.message = "archive file could not be opened";
@@ -2483,8 +2508,7 @@ PasswordTestResult test_password_with_parts(
     const std::wstring& password
 ) {
 #ifdef _WIN32
-    ComModule module(seven_zip_dll_path);
-    CreateObjectFunc create_object = module.create_object();
+    CreateObjectFunc create_object = cached_create_object(seven_zip_dll_path);
     if (!create_object) {
         PasswordTestResult result;
         result.status = PasswordTestStatus::BackendUnavailable;
@@ -2524,8 +2548,7 @@ PasswordTestResult test_passwords_with_parts(
     int password_count
 ) {
 #ifdef _WIN32
-    ComModule module(seven_zip_dll_path);
-    CreateObjectFunc create_object = module.create_object();
+    CreateObjectFunc create_object = cached_create_object(seven_zip_dll_path);
     if (!create_object) {
         PasswordTestResult result;
         result.status = PasswordTestStatus::BackendUnavailable;
@@ -2591,6 +2614,75 @@ PasswordTestResult test_passwords_with_parts(
 #else
     (void)seven_zip_dll_path;
     (void)archive_path;
+    (void)passwords;
+    (void)password_count;
+    PasswordTestResult result;
+    result.status = PasswordTestStatus::BackendUnavailable;
+    result.message = "native password testing is only implemented on Windows";
+    return result;
+#endif
+}
+
+PasswordTestResult test_passwords_with_ranges(
+    const std::wstring& seven_zip_dll_path,
+    const std::wstring& archive_path,
+    const std::vector<ExtractInputRange>& ranges,
+    const std::wstring& format_hint,
+    const wchar_t* const* passwords,
+    int password_count
+) {
+#ifdef _WIN32
+    CreateObjectFunc create_object = cached_create_object(seven_zip_dll_path);
+    if (!create_object) {
+        PasswordTestResult result;
+        result.status = PasswordTestStatus::BackendUnavailable;
+        result.message = "7z.dll could not be loaded";
+        return result;
+    }
+
+    PasswordTestResult last;
+    last.backend_available = true;
+    if (password_count <= 0) {
+        const wchar_t* empty = L"";
+        passwords = &empty;
+        password_count = 1;
+    }
+
+    const std::vector<std::wstring> part_paths{archive_path};
+    const std::vector<GUID> formats = candidate_formats_for_hint(format_hint, archive_path, part_paths);
+    for (int i = 0; i < password_count; ++i) {
+        const wchar_t* raw_password = passwords[i] ? passwords[i] : L"";
+        PasswordTestResult current = test_one_password(
+            create_object,
+            archive_path,
+            raw_password,
+            part_paths,
+            formats,
+            ranges);
+        current.attempts = i + 1;
+        last = current;
+        if (current.status == PasswordTestStatus::Ok) {
+            current.matched_index = i;
+            return current;
+        }
+        if (current.status == PasswordTestStatus::BackendUnavailable ||
+            current.status == PasswordTestStatus::Damaged ||
+            current.status == PasswordTestStatus::Error) {
+            current.matched_index = -1;
+            return current;
+        }
+    }
+
+    last.status = PasswordTestStatus::WrongPassword;
+    last.matched_index = -1;
+    last.attempts = password_count;
+    last.message = "wrong password";
+    return last;
+#else
+    (void)seven_zip_dll_path;
+    (void)archive_path;
+    (void)ranges;
+    (void)format_hint;
     (void)passwords;
     (void)password_count;
     PasswordTestResult result;

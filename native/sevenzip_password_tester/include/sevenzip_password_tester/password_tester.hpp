@@ -90,6 +90,15 @@ PasswordTestResult test_passwords_with_parts(
     int password_count
 );
 
+PasswordTestResult test_passwords_with_ranges(
+    const std::wstring& seven_zip_dll_path,
+    const std::wstring& archive_path,
+    const std::vector<ExtractInputRange>& ranges,
+    const std::wstring& format_hint,
+    const wchar_t* const* passwords,
+    int password_count
+);
+
 ExtractArchiveResult extract_archive_with_parts(
     const std::wstring& seven_zip_dll_path,
     const std::wstring& archive_path,

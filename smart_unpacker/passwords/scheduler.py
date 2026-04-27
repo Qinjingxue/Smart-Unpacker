@@ -156,10 +156,12 @@ class PasswordScheduler:
             batch_size=len(batch),
             elapsed_seconds=time.monotonic() - started_at,
         ))
-        verification = self.verifier.verify_batch(
+        verification = _call_verifier(
+            self.verifier,
             job.archive_path,
             batch,
             part_paths=job.part_paths,
+            archive_input=job.archive_input,
         )
         attempted_in_batch = max(0, min(max(verification.attempts, 0), len(batch)))
         if not verification.ok and attempted_in_batch == 0:
@@ -239,3 +241,24 @@ def _candidate_value(candidate: PasswordCandidate | str) -> str:
     if isinstance(candidate, PasswordCandidate):
         return candidate.value
     return str(candidate)
+
+
+def _call_verifier(
+    verifier: PasswordVerifier,
+    archive_path: str,
+    passwords: list[str],
+    *,
+    part_paths: list[str] | None = None,
+    archive_input: dict | None = None,
+):
+    try:
+        return verifier.verify_batch(
+            archive_path,
+            passwords,
+            part_paths=part_paths,
+            archive_input=archive_input,
+        )
+    except TypeError as error:
+        if "archive_input" not in str(error):
+            raise
+        return verifier.verify_batch(archive_path, passwords, part_paths=part_paths)

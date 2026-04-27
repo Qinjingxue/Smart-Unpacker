@@ -11,6 +11,7 @@ from smart_unpacker.passwords.fingerprint import ArchiveFingerprint
 class PasswordJob:
     archive_path: str
     part_paths: list[str] | None = None
+    archive_input: dict | None = None
     archive_key: str = ""
     fingerprint: ArchiveFingerprint | None = None
     candidates: Iterable[PasswordCandidate | str] | None = None

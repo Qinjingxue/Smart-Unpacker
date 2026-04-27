@@ -25,12 +25,14 @@ class SevenZipDllVerifier:
         passwords: list[str],
         *,
         part_paths: list[str] | None = None,
+        archive_input: dict | None = None,
     ) -> PasswordBatchVerification:
         normalized_passwords = list(passwords or [""])
         native_attempt = self.native_password_tester.try_passwords(
             archive_path,
             normalized_passwords,
             part_paths=part_paths,
+            archive_input=archive_input,
         )
         native_result = subprocess.CompletedProcess(
             args=["7z.dll", "test-passwords", archive_path],

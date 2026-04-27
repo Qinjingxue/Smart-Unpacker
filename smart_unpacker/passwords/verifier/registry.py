@@ -35,23 +35,24 @@ class PasswordVerifierChain:
         passwords: list[str],
         *,
         part_paths: list[str] | None = None,
+        archive_input: dict | None = None,
     ) -> PasswordBatchVerification:
         if not self.fast_verifiers:
-            return self._run_final_verifier(archive_path, passwords, part_paths=part_paths)
+            return self._run_final_verifier(archive_path, passwords, part_paths=part_paths, archive_input=archive_input)
 
         remaining = list(passwords)
         offset = 0
         total_fast_attempts = 0
         last_error = ""
         while remaining:
-            fast_outcome = self._run_fast_verifiers(archive_path, remaining, part_paths=part_paths)
+            fast_outcome = self._run_fast_verifiers(archive_path, remaining, part_paths=part_paths, archive_input=archive_input)
             total_fast_attempts += max(fast_outcome.attempts, len(remaining) if fast_outcome.status == "no_match" else 0)
             last_error = fast_outcome.error_text or last_error
 
             if fast_outcome.status == "match" and fast_outcome.matched_index >= 0:
                 candidate_index = offset + fast_outcome.matched_index
                 candidate = passwords[candidate_index]
-                confirmation = self._confirm_match(archive_path, candidate, part_paths=part_paths)
+                confirmation = self._confirm_match(archive_path, candidate, part_paths=part_paths, archive_input=archive_input)
                 if confirmation.ok:
                     return PasswordBatchVerification(
                         ok=True,
@@ -81,7 +82,7 @@ class PasswordVerifierChain:
             if fast_outcome.status in {"damaged", "backend_unavailable"}:
                 return fast_outcome
 
-            final_outcome = self._run_final_verifier(archive_path, passwords, part_paths=part_paths)
+            final_outcome = self._run_final_verifier(archive_path, passwords, part_paths=part_paths, archive_input=archive_input)
             return PasswordBatchVerification(
                 ok=final_outcome.ok,
                 status=final_outcome.status,
@@ -107,9 +108,16 @@ class PasswordVerifierChain:
         passwords: list[str],
         *,
         part_paths: list[str] | None = None,
+        archive_input: dict | None = None,
     ) -> PasswordBatchVerification:
         for verifier in self.fast_verifiers:
-            outcome = verifier.verify_batch(archive_path, passwords, part_paths=part_paths)
+            outcome = _call_verifier(
+                verifier,
+                archive_path,
+                passwords,
+                part_paths=part_paths,
+                archive_input=archive_input,
+            )
             if outcome.status in {"unsupported_method", "unknown_needs_final_verifier"}:
                 continue
             return outcome
@@ -126,10 +134,17 @@ class PasswordVerifierChain:
         password: str,
         *,
         part_paths: list[str] | None = None,
+        archive_input: dict | None = None,
     ) -> PasswordBatchVerification:
         if self.final_verifier is None:
             return PasswordBatchVerification(ok=True, status="match", matched_index=0, attempts=1, terminal=True)
-        return self.final_verifier.verify_batch(archive_path, [password], part_paths=part_paths)
+        return _call_verifier(
+            self.final_verifier,
+            archive_path,
+            [password],
+            part_paths=part_paths,
+            archive_input=archive_input,
+        )
 
     def _run_final_verifier(
         self,
@@ -137,6 +152,7 @@ class PasswordVerifierChain:
         passwords: list[str],
         *,
         part_paths: list[str] | None = None,
+        archive_input: dict | None = None,
     ) -> PasswordBatchVerification:
         if self.final_verifier is None:
             return PasswordBatchVerification(
@@ -146,4 +162,31 @@ class PasswordVerifierChain:
                 error_text="no final password verifier configured",
                 terminal=True,
             )
-        return self.final_verifier.verify_batch(archive_path, passwords, part_paths=part_paths)
+        return _call_verifier(
+            self.final_verifier,
+            archive_path,
+            passwords,
+            part_paths=part_paths,
+            archive_input=archive_input,
+        )
+
+
+def _call_verifier(
+    verifier: PasswordVerifier,
+    archive_path: str,
+    passwords: list[str],
+    *,
+    part_paths: list[str] | None = None,
+    archive_input: dict | None = None,
+) -> PasswordBatchVerification:
+    try:
+        return verifier.verify_batch(
+            archive_path,
+            passwords,
+            part_paths=part_paths,
+            archive_input=archive_input,
+        )
+    except TypeError as error:
+        if "archive_input" not in str(error):
+            raise
+        return verifier.verify_batch(archive_path, passwords, part_paths=part_paths)

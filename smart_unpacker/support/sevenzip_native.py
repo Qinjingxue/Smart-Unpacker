@@ -1,11 +1,14 @@
 import ctypes
+import atexit
 import json
+import subprocess
 import sys
 import threading
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
-from smart_unpacker.support.resources import candidate_resource_roots, get_7z_dll_path
+from smart_unpacker.support.resources import candidate_resource_roots, get_7z_dll_path, get_sevenzip_worker_path
 from smart_unpacker.support.global_cache_manager import cached_value, file_identity
 
 
@@ -114,6 +117,140 @@ class NativeArchiveCrcManifest:
         return self.status == STATUS_OK and self.is_archive and not self.damaged and not self.checksum_error
 
 
+class _PasswordWorker:
+    def __init__(self, worker_path: str):
+        startupinfo = None
+        if sys.platform == "win32":
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        self.worker_path = worker_path
+        self.process = subprocess.Popen(
+            [worker_path, "--persistent"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            startupinfo=startupinfo,
+        )
+        self.lock = threading.Lock()
+
+    def request(self, payload: dict) -> dict:
+        with self.lock:
+            if self.process.poll() is not None or self.process.stdin is None or self.process.stdout is None:
+                raise RuntimeError("sevenzip password worker is not running")
+            self.process.stdin.write(json.dumps(payload, ensure_ascii=False) + "\n")
+            self.process.stdin.flush()
+            while True:
+                line = self.process.stdout.readline()
+                if not line:
+                    raise RuntimeError("sevenzip password worker closed stdout")
+                event = json.loads(line)
+                if event.get("type") == "result" and event.get("job_id") == payload.get("job_id"):
+                    return event
+
+    def close(self) -> None:
+        with self.lock:
+            if self.process.poll() is not None:
+                return
+            try:
+                if self.process.stdin is not None:
+                    self.process.stdin.write('{"worker_command":"shutdown","job_id":"shutdown"}\n')
+                    self.process.stdin.flush()
+            except OSError:
+                pass
+            try:
+                self.process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+                self.process.wait(timeout=2)
+            for stream in (self.process.stdin, self.process.stdout, self.process.stderr):
+                try:
+                    if stream is not None:
+                        stream.close()
+                except OSError:
+                    pass
+
+
+class _PasswordWorkerPool:
+    def __init__(self, worker_path: str, size: int | None = None):
+        self.worker_path = worker_path
+        self.size = max(1, int(size or 2))
+        self._workers: list[_PasswordWorker] = []
+        self._lock = threading.Lock()
+        self._next = 0
+
+    def try_passwords(
+        self,
+        *,
+        seven_zip_dll_path: str,
+        archive_path: str,
+        passwords: list[str],
+        part_paths: list[str] | None = None,
+        archive_input: dict | None = None,
+    ) -> NativePasswordAttempt:
+        worker = self._borrow()
+        payload = {
+            "worker_command": "try_passwords",
+            "job_id": f"pw-{uuid.uuid4().hex}",
+            "seven_zip_dll_path": seven_zip_dll_path,
+            "archive_path": archive_path,
+            "part_paths": list(part_paths or []),
+            "passwords": list(passwords or [""]),
+        }
+        if archive_input:
+            payload["archive_input"] = archive_input
+        result = worker.request(payload)
+        native_status = str(result.get("native_status") or "")
+        return NativePasswordAttempt(
+            status=_password_status_from_worker(native_status),
+            matched_index=_json_int(result, "matched_index", -1),
+            attempts=_json_int(result, "attempts", 0),
+            message=str(result.get("message") or native_status or "password worker failed"),
+        )
+
+    def _borrow(self) -> _PasswordWorker:
+        with self._lock:
+            while len(self._workers) < self.size:
+                self._workers.append(_PasswordWorker(self.worker_path))
+            worker = self._workers[self._next % len(self._workers)]
+            self._next += 1
+            return worker
+
+    def close(self) -> None:
+        with self._lock:
+            workers = list(self._workers)
+            self._workers.clear()
+        for worker in workers:
+            worker.close()
+
+
+def _password_status_from_worker(native_status: str) -> int:
+    normalized = native_status.lower()
+    if normalized == "ok":
+        return STATUS_OK
+    if normalized == "wrong_password":
+        return STATUS_WRONG_PASSWORD
+    if normalized == "damaged":
+        return STATUS_DAMAGED
+    if normalized == "unsupported":
+        return STATUS_UNSUPPORTED
+    if normalized == "backend_unavailable":
+        return STATUS_BACKEND_UNAVAILABLE
+    return STATUS_ERROR
+
+
+def _json_int(payload: dict, key: str, default: int) -> int:
+    value = payload.get(key, default)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 class _Sup7zArchiveHealth(ctypes.Structure):
     _fields_ = [
         ("status", ctypes.c_int),
@@ -153,6 +290,8 @@ class NativePasswordTester:
         self.seven_zip_dll_path = seven_zip_dll_path or get_7z_dll_path()
         self._library = None
         self._load_lock = threading.Lock()
+        self._password_worker_pool: _PasswordWorkerPool | None = None
+        self._password_worker_lock = threading.Lock()
 
     def available(self) -> bool:
         return bool(self.wrapper_path and self.seven_zip_dll_path and Path(self.wrapper_path).exists())
@@ -162,7 +301,22 @@ class NativePasswordTester:
         array_type = ctypes.c_wchar_p * len(normalized_parts)
         return normalized_parts, array_type(*normalized_parts)
 
-    def try_passwords(self, archive_path: str, passwords: list[str], part_paths: list[str] | None = None) -> NativePasswordAttempt:
+    def try_passwords(
+        self,
+        archive_path: str,
+        passwords: list[str],
+        part_paths: list[str] | None = None,
+        archive_input: dict | None = None,
+    ) -> NativePasswordAttempt:
+        worker_attempt = self._try_passwords_with_worker(
+            archive_path,
+            passwords,
+            part_paths=part_paths,
+            archive_input=archive_input,
+        )
+        if worker_attempt is not None:
+            return worker_attempt
+
         library = self._load()
 
         normalized_passwords = list(passwords or [""])
@@ -191,6 +345,35 @@ class NativePasswordTester:
             attempts=int(attempts.value),
             message=message.value,
         )
+
+    def _try_passwords_with_worker(
+        self,
+        archive_path: str,
+        passwords: list[str],
+        *,
+        part_paths: list[str] | None = None,
+        archive_input: dict | None = None,
+    ) -> NativePasswordAttempt | None:
+        try:
+            pool = self._get_password_worker_pool()
+            return pool.try_passwords(
+                seven_zip_dll_path=str(self.seven_zip_dll_path),
+                archive_path=str(archive_path),
+                passwords=list(passwords or [""]),
+                part_paths=part_paths,
+                archive_input=archive_input,
+            )
+        except Exception:
+            return None
+
+    def _get_password_worker_pool(self) -> "_PasswordWorkerPool":
+        if self._password_worker_pool is not None:
+            return self._password_worker_pool
+        with self._password_worker_lock:
+            if self._password_worker_pool is None:
+                self._password_worker_pool = _PasswordWorkerPool(get_sevenzip_worker_path())
+                atexit.register(self._password_worker_pool.close)
+            return self._password_worker_pool
 
     def test_archive(self, archive_path: str, password: str = "", part_paths: list[str] | None = None) -> NativeArchiveTest:
         library = self._load()

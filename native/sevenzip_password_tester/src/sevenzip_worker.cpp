@@ -436,6 +436,18 @@ std::string status_to_string(smart_unpacker::sevenzip::PasswordTestStatus status
     return smart_unpacker::sevenzip::status_name(status);
 }
 
+std::string password_result_json(
+    const std::string& job_id,
+    const smart_unpacker::sevenzip::PasswordTestResult& result
+) {
+    return "{\"type\":\"result\",\"job_id\":\"" + json_escape(job_id) +
+        "\",\"status\":\"" + std::string(result.status == smart_unpacker::sevenzip::PasswordTestStatus::Ok ? "ok" : "failed") +
+        "\",\"native_status\":\"" + json_escape(status_to_string(result.status)) +
+        "\",\"matched_index\":" + std::to_string(result.matched_index) +
+        ",\"attempts\":" + std::to_string(result.attempts) +
+        ",\"message\":\"" + json_escape(result.message) + "\"}";
+}
+
 }  // namespace
 
 int run_request(const std::string& request) {
@@ -459,6 +471,35 @@ int run_request(const std::string& request) {
     std::vector<std::wstring> part_paths;
     for (const auto& part : json_string_array_field(request, "part_paths")) {
         part_paths.push_back(utf8_to_wide(part));
+    }
+
+    if (command == "try_passwords") {
+        std::vector<std::wstring> passwords;
+        for (const auto& password_item : json_string_array_field(request, "passwords")) {
+            passwords.push_back(utf8_to_wide(password_item));
+        }
+        std::vector<const wchar_t*> password_ptrs;
+        password_ptrs.reserve(passwords.size());
+        for (const auto& password_item : passwords) {
+            password_ptrs.push_back(password_item.c_str());
+        }
+        const auto archive_input = parse_archive_input_descriptor(request, archive_path, format_hint, part_paths);
+        const auto result = archive_input.ranges.empty()
+            ? test_passwords_with_parts(
+                dll_path,
+                archive_input.archive_path,
+                archive_input.part_paths,
+                password_ptrs.empty() ? nullptr : password_ptrs.data(),
+                static_cast<int>(password_ptrs.size()))
+            : test_passwords_with_ranges(
+                dll_path,
+                archive_input.archive_path,
+                archive_input.ranges,
+                archive_input.format_hint,
+                password_ptrs.empty() ? nullptr : password_ptrs.data(),
+                static_cast<int>(password_ptrs.size()));
+        print_json_line(password_result_json(job_id, result));
+        return result.status == PasswordTestStatus::Ok ? 0 : 1;
     }
 
     if (archive_path.empty() || output_dir.empty()) {

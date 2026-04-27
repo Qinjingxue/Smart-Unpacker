@@ -32,5 +32,6 @@ class PasswordVerifier(Protocol):
         passwords: list[str],
         *,
         part_paths: list[str] | None = None,
+        archive_input: dict | None = None,
     ) -> PasswordBatchVerification:
         ...
