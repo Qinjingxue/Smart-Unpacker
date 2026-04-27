@@ -275,6 +275,51 @@ def test_zstd_trailing_junk_trim_removes_bytes_after_stream_when_backend_availab
     assert open(result.repaired_input["path"], "rb").read() == original
 
 
+def test_seven_zip_boundary_trim_removes_bytes_after_next_header(tmp_path):
+    source = tmp_path / "tail.7z"
+    original = _seven_zip_bytes()
+    source.write_bytes(original + b"JUNK")
+
+    result = _run_repair(tmp_path, "seven_zip_boundary_trim", "7z", source, ["trailing_junk"])
+
+    assert result.ok is True
+    assert open(result.repaired_input["path"], "rb").read() == original
+
+
+def test_seven_zip_start_header_crc_fix_rewrites_bad_crc(tmp_path):
+    source = tmp_path / "bad_start_crc.7z"
+    data = bytearray(_seven_zip_bytes())
+    data[8:12] = b"\0\0\0\0"
+    source.write_bytes(bytes(data))
+
+    result = _run_repair(tmp_path, "seven_zip_start_header_crc_fix", "7z", source, ["start_header_crc_bad"])
+
+    assert result.ok is True
+    assert open(result.repaired_input["path"], "rb").read() == _seven_zip_bytes()
+
+
+def test_rar_trailing_junk_trim_supports_rar4(tmp_path):
+    source = tmp_path / "tail4.rar"
+    original = _rar4_bytes()
+    source.write_bytes(original + b"JUNK")
+
+    result = _run_repair(tmp_path, "rar_trailing_junk_trim", "rar", source, ["trailing_junk"])
+
+    assert result.ok is True
+    assert open(result.repaired_input["path"], "rb").read() == original
+
+
+def test_rar_trailing_junk_trim_supports_rar5(tmp_path):
+    source = tmp_path / "tail5.rar"
+    original = _rar5_bytes()
+    source.write_bytes(original + b"JUNK")
+
+    result = _run_repair(tmp_path, "rar_trailing_junk_trim", "rar", source, ["trailing_junk"])
+
+    assert result.ok is True
+    assert open(result.repaired_input["path"], "rb").read() == original
+
+
 @dataclass
 class _DummyBoundaryModule:
     spec = RepairModuleSpec(
@@ -365,3 +410,48 @@ def _descriptor_zip_fragment(name: str, payload: bytes, *, zip64: bool = False) 
         descriptor,
         b"PK\x01\x02BROKEN-CENTRAL-DIR",
     ])
+
+
+def _seven_zip_bytes() -> bytes:
+    next_header = b"\x01"
+    gap = b"abcde"
+    start_header = struct.pack("<QQI", len(gap), len(next_header), zlib.crc32(next_header) & 0xFFFFFFFF)
+    return b"7z\xbc\xaf\x27\x1c" + b"\x00\x04" + struct.pack("<I", zlib.crc32(start_header) & 0xFFFFFFFF) + start_header + gap + next_header
+
+
+def _rar4_block(header_type: int, flags: int = 0, payload: bytes = b"") -> bytes:
+    add_size = len(payload).to_bytes(4, "little") if payload else b""
+    header_size = 7 + len(add_size)
+    body = bytes([header_type]) + flags.to_bytes(2, "little") + header_size.to_bytes(2, "little") + add_size
+    header_crc = (zlib.crc32(body) & 0xFFFF).to_bytes(2, "little")
+    return header_crc + body + payload
+
+
+def _rar4_bytes() -> bytes:
+    return b"Rar!\x1a\x07\x00" + _rar4_block(0x73) + _rar4_block(0x7B)
+
+
+def _rar5_vint(value: int) -> bytes:
+    output = bytearray()
+    while True:
+        byte = value & 0x7F
+        value >>= 7
+        if value:
+            output.append(byte | 0x80)
+        else:
+            output.append(byte)
+            return bytes(output)
+
+
+def _rar5_block(header_type: int, flags: int = 0, data: bytes = b"") -> bytes:
+    fields = _rar5_vint(header_type) + _rar5_vint(flags)
+    if data:
+        flags |= 0x0002
+        fields = _rar5_vint(header_type) + _rar5_vint(flags) + _rar5_vint(len(data))
+    header_size = _rar5_vint(len(fields))
+    header_data = header_size + fields
+    return zlib.crc32(header_data).to_bytes(4, "little") + header_data + data
+
+
+def _rar5_bytes() -> bytes:
+    return b"Rar!\x1a\x07\x01\x00" + _rar5_block(1) + _rar5_block(5)

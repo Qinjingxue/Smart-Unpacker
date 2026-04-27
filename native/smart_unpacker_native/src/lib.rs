@@ -1,15 +1,16 @@
 use pyo3::prelude::*;
 
-mod carrier;
 mod analysis;
+mod carrier;
 mod directory_scan;
 mod file_crc;
 mod format_structure;
 mod magic;
-mod pe_overlay;
 mod password_7z;
 mod password_rar;
 mod password_zip;
+mod pe_overlay;
+mod repair_io;
 mod util;
 mod zip_names;
 
@@ -53,19 +54,70 @@ fn smart_unpacker_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(directory_scan::scan_directory_entries, m)?)?;
-    m.add_function(wrap_pyfunction!(directory_scan::list_regular_files_in_directory, m)?)?;
-    m.add_function(wrap_pyfunction!(file_crc::compute_directory_crc_manifest, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        directory_scan::list_regular_files_in_directory,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        file_crc::compute_directory_crc_manifest,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(file_crc::sample_directory_readability, m)?)?;
-    m.add_function(wrap_pyfunction!(format_structure::inspect_zip_local_header, m)?)?;
-    m.add_function(wrap_pyfunction!(format_structure::inspect_zip_eocd_structure, m)?)?;
-    m.add_function(wrap_pyfunction!(format_structure::inspect_seven_zip_structure, m)?)?;
-    m.add_function(wrap_pyfunction!(format_structure::inspect_rar_structure, m)?)?;
-    m.add_function(wrap_pyfunction!(format_structure::inspect_tar_header_structure, m)?)?;
-    m.add_function(wrap_pyfunction!(format_structure::inspect_compression_stream_structure, m)?)?;
-    m.add_function(wrap_pyfunction!(format_structure::inspect_archive_container_structure, m)?)?;
-    m.add_function(wrap_pyfunction!(pe_overlay::inspect_pe_overlay_structure, m)?)?;
-    m.add_function(wrap_pyfunction!(password_7z::seven_zip_fast_verify_passwords, m)?)?;
-    m.add_function(wrap_pyfunction!(password_rar::rar_fast_verify_passwords, m)?)?;
-    m.add_function(wrap_pyfunction!(password_zip::zip_fast_verify_passwords, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        format_structure::inspect_zip_local_header,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        format_structure::inspect_zip_eocd_structure,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        format_structure::inspect_seven_zip_structure,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        format_structure::inspect_rar_structure,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        format_structure::inspect_tar_header_structure,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        format_structure::inspect_compression_stream_structure,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        format_structure::inspect_archive_container_structure,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        pe_overlay::inspect_pe_overlay_structure,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        password_7z::seven_zip_fast_verify_passwords,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        password_rar::rar_fast_verify_passwords,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        password_zip::zip_fast_verify_passwords,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(repair_io::repair_read_file_range, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        repair_io::repair_concat_ranges_to_bytes,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(repair_io::repair_write_candidate, m)?)?;
+    m.add_function(wrap_pyfunction!(repair_io::repair_copy_range_to_file, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        repair_io::repair_concat_ranges_to_file,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(repair_io::repair_patch_file, m)?)?;
     Ok(())
 }
