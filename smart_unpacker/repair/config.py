@@ -18,6 +18,9 @@ DEFAULT_REPAIR_CONFIG = {
         "deep": False,
     },
     "modules": [
+        {"name": "zip_central_directory_rebuild", "enabled": True},
+        {"name": "zip_data_descriptor_recovery", "enabled": True},
+        {"name": "zip_partial_recovery", "enabled": True},
         {"name": "zip_boundary", "enabled": True},
         {"name": "zip_directory", "enabled": True},
         {"name": "seven_zip_boundary", "enabled": True},
