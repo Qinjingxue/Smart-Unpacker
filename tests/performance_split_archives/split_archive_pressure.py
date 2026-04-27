@@ -17,6 +17,7 @@ if str(REPO_ROOT) not in sys.path:
 from smart_unpacker.config.schema import normalize_config
 from smart_unpacker.coordinator.runner import PipelineRunner
 from smart_unpacker.coordinator.scanner import ScanOrchestrator
+from smart_unpacker.coordinator.scheduling.executor import TaskExecutor
 from tests.helpers.detection_config import with_detection_pipeline
 from tests.helpers.real_archives import ArchiveCase, ArchiveFixtureFactory
 from tests.helpers.tool_config import get_optional_rar, require_7z
@@ -124,6 +125,32 @@ def _password_try_detail(args, kwargs, result) -> str:
     )
 
 
+def _task_path_from_arg(value) -> str:
+    return str(getattr(value, "main_path", value) or "")
+
+
+def _archive_task_detail(args, kwargs, result) -> str:
+    archive = _task_path_from_arg(args[0] if args else kwargs.get("task", ""))
+    status = "success" if getattr(result, "success", False) else "failure"
+    return f"ext={_path_ext(archive)}|status={status}"
+
+
+def _password_resolve_detail(args, kwargs, result) -> str:
+    archive = _task_path_from_arg(args[0] if args else kwargs.get("task", ""))
+    status = getattr(result, "status", "")
+    password = getattr(result, "password", None)
+    matched = password is not None
+    return f"ext={_path_ext(archive)}|status={status}|matched={matched}"
+
+
+def _task_count_detail(args, kwargs, result) -> str:
+    tasks = args[1] if len(args) > 1 else kwargs.get("tasks", [])
+    try:
+        return f"tasks={len(tasks or [])}"
+    except TypeError:
+        return ""
+
+
 def wrap_method(owner, method_name: str, recorder: TimingRecorder, label: str, detail: Callable | None = None):
     original = getattr(owner, method_name)
 
@@ -137,19 +164,26 @@ def wrap_method(owner, method_name: str, recorder: TimingRecorder, label: str, d
 def attach_pipeline_timing(runner: PipelineRunner) -> TimingRecorder:
     recorder = TimingRecorder()
     wrap_method(runner.task_scanner, "scan_targets", recorder, "pipeline_scan")
+    wrap_method(runner.batch_runner, "execute", recorder, "batch_execute")
     wrap_method(runner.batch_runner, "prepare_tasks", recorder, "prepare")
     wrap_method(runner.batch_runner.analysis_stage, "analyze_tasks", recorder, "analysis")
     wrap_method(runner.batch_runner.repair_stage, "repair_medium_confidence_tasks", recorder, "repair_medium_confidence")
     wrap_method(runner.batch_runner.repair_stage, "repair_after_extraction_failure", recorder, "repair_after_failure")
+    wrap_method(runner.batch_runner, "_execute_ready_tasks", recorder, "execute_ready")
+    wrap_method(runner.batch_runner, "collect_result", recorder, "collect_result")
+    wrap_method(runner.output_scan_policy, "scan_roots_from_outputs", recorder, "output_scan")
+    wrap_method(TaskExecutor, "execute_all", recorder, "execute_all_wall", detail=_task_count_detail)
     wrap_method(runner.extractor, "inspect", recorder, "health_password_preflight")
     wrap_method(runner.batch_runner.resource_inspector, "inspect", recorder, "resource_preflight")
     wrap_method(runner.batch_runner.resource_inspector, "record_estimated_single_task_profile", recorder, "resource_estimate")
-    wrap_method(runner.extractor.password_resolver, "resolve", recorder, "password_resolve")
+    wrap_method(runner.extractor.password_resolver, "resolve", recorder, "password_resolve", detail=_password_resolve_detail)
     wrap_method(runner.extractor.password_tester, "test_password", recorder, "password_native_test_archive")
     wrap_method(runner.extractor.password_tester.native_password_tester, "try_passwords", recorder, "password_native_try", detail=_password_try_detail)
-    wrap_method(runner.extractor, "extract", recorder, "extract")
+    wrap_method(runner.extractor, "extract", recorder, "extract", detail=_archive_task_detail)
     wrap_method(runner.batch_runner.verifier, "verify", recorder, "verify")
     wrap_method(runner.postprocess_actions, "apply", recorder, "postprocess")
+    wrap_method(runner.logger, "log_final_summary", recorder, "final_summary")
+    wrap_method(runner.extractor, "close", recorder, "extractor_close")
     return recorder
 
 
@@ -157,9 +191,12 @@ def timing_columns(recorder: TimingRecorder | None) -> dict[str, float | dict]:
     if recorder is None:
         return {
             "pipeline_scan_ms": 0.0,
+            "batch_execute_ms": 0.0,
             "prepare_ms": 0.0,
             "analysis_ms": 0.0,
             "repair_ms": 0.0,
+            "execute_ready_ms": 0.0,
+            "execute_all_wall_ms": 0.0,
             "preflight_ms": 0.0,
             "health_ms": 0.0,
             "password_resolve_ms": 0.0,
@@ -167,14 +204,21 @@ def timing_columns(recorder: TimingRecorder | None) -> dict[str, float | dict]:
             "resource_ms": 0.0,
             "extract_ms": 0.0,
             "verify_ms": 0.0,
+            "collect_result_ms": 0.0,
+            "output_scan_ms": 0.0,
             "postprocess_ms": 0.0,
+            "final_summary_ms": 0.0,
+            "extractor_close_ms": 0.0,
             "timings": {},
         }
     return {
         "pipeline_scan_ms": recorder.ms("pipeline_scan"),
+        "batch_execute_ms": recorder.ms("batch_execute"),
         "prepare_ms": recorder.ms("prepare"),
         "analysis_ms": recorder.ms("analysis"),
         "repair_ms": round(recorder.ms("repair_medium_confidence") + recorder.ms("repair_after_failure"), 2),
+        "execute_ready_ms": recorder.ms("execute_ready"),
+        "execute_all_wall_ms": recorder.ms("execute_all_wall"),
         "preflight_ms": recorder.ms("health_password_preflight"),
         "health_ms": recorder.ms("health_probe"),
         "password_resolve_ms": recorder.ms("password_resolve"),
@@ -186,7 +230,11 @@ def timing_columns(recorder: TimingRecorder | None) -> dict[str, float | dict]:
         "resource_ms": recorder.ms("resource_preflight") + recorder.ms("resource_estimate"),
         "extract_ms": recorder.ms("extract"),
         "verify_ms": recorder.ms("verify"),
+        "collect_result_ms": recorder.ms("collect_result"),
+        "output_scan_ms": recorder.ms("output_scan"),
         "postprocess_ms": recorder.ms("postprocess"),
+        "final_summary_ms": recorder.ms("final_summary"),
+        "extractor_close_ms": recorder.ms("extractor_close"),
         "timings": recorder.snapshot(),
     }
 
@@ -648,8 +696,11 @@ def print_table(rows: list[dict]):
         "scan_ms",
         "pipeline_ms",
         "pipeline_scan_ms",
+        "batch_execute_ms",
         "analysis_ms",
         "repair_ms",
+        "execute_ready_ms",
+        "execute_all_wall_ms",
         "preflight_ms",
         "health_ms",
         "password_resolve_ms",
@@ -657,7 +708,11 @@ def print_table(rows: list[dict]):
         "resource_ms",
         "extract_ms",
         "verify_ms",
+        "collect_result_ms",
+        "output_scan_ms",
         "postprocess_ms",
+        "final_summary_ms",
+        "extractor_close_ms",
         "scan_results",
         "success_count",
         "failed_count",
