@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import List, Optional
 
 from smart_unpacker.support.sevenzip_native import get_native_password_tester
-from smart_unpacker.relations.internal.group_builder import RelationsGroupBuilder
+from smart_unpacker.relations import RelationsScheduler
 from smart_unpacker.support.path_keys import case_key, normalized_path
 
 
@@ -33,7 +33,7 @@ class SplitVolumeNormalizer:
     """
 
     def __init__(self):
-        self._relations = RelationsGroupBuilder()
+        self._relations = RelationsScheduler()
         self._native_tester = get_native_password_tester()
 
     def _format_numbered_volume(self, prefix: str, number: int, style: str, width: int) -> str:

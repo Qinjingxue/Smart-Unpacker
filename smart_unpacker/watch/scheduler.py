@@ -13,8 +13,6 @@ from smart_unpacker.watch.state import WatchStateStore
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
 
-PipelineRunner = None
-
 
 @dataclass
 class WatchRunResult:
@@ -37,6 +35,7 @@ class WatchScheduler:
         stable_seconds: float = 10.0,
         recursive: bool = True,
         initial_scan: bool = True,
+        runner_factory=None,
     ):
         self.config = config
         self.watch_roots = [os.path.abspath(path) for path in watch_roots]
@@ -51,6 +50,7 @@ class WatchScheduler:
         self._stable_since: dict[str, float] = {}
         self._observer = Observer()
         self._started = False
+        self.runner_factory = runner_factory
 
     def start(self):
         if self._started:
@@ -141,14 +141,15 @@ class WatchScheduler:
         return ready
 
     def _process_candidate(self, candidate: WatchCandidate) -> WatchRunResult:
-        runner_class = _get_pipeline_runner()
+        if self.runner_factory is None:
+            raise RuntimeError("WatchScheduler requires a runner_factory.")
         run_config = dict(self.config)
         run_config["output"] = {
             **(run_config.get("output", {}) if isinstance(run_config.get("output"), dict) else {}),
             "root": self.out_dir,
             "common_root": self._common_root_for(candidate.path),
         }
-        summary = runner_class(run_config).run_targets([candidate.path])
+        summary = self.runner_factory(run_config).run_targets([candidate.path])
         failed = list(summary.failed_tasks)
         if failed:
             error = failed[0] if failed else "watch extraction failed"
@@ -222,11 +223,3 @@ def _is_relative_to(path: str, root: str) -> bool:
     except ValueError:
         return False
 
-
-def _get_pipeline_runner():
-    global PipelineRunner
-    if PipelineRunner is None:
-        from smart_unpacker.coordinator.runner import PipelineRunner as runner_class
-
-        PipelineRunner = runner_class
-    return PipelineRunner

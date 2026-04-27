@@ -10,7 +10,7 @@ from smart_unpacker.extraction.internal.workflow.split_entry import SplitEntryRe
 from smart_unpacker.extraction.result import ExtractionResult
 from smart_unpacker.contracts.tasks import ArchiveTask, SplitArchiveInfo
 from smart_unpacker.rename.scheduler import RenameScheduler
-from smart_unpacker.relations.internal.group_builder import RelationsGroupBuilder
+from smart_unpacker.relations import RelationsScheduler
 from smart_unpacker.passwords import ArchivePasswordTester, PasswordResolver, PasswordSession, PasswordStore
 
 
@@ -34,7 +34,7 @@ class ExtractionScheduler:
         self.metadata_scanner = ArchiveMetadataScanner()
         self.seven_z_path = ""
         self.rename_scheduler = RenameScheduler()
-        self._relations = RelationsGroupBuilder()
+        self._relations = RelationsScheduler()
         self.split_entry_resolver = SplitEntryResolver(self._relations)
         self.ensure_space = ensure_space or (lambda _required_gb: True)
         self.max_retries = max(1, max_retries)

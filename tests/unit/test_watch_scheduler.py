@@ -81,8 +81,6 @@ def test_watch_scheduler_processes_stable_candidate_with_watch_root_common_root(
             captured["paths"] = paths
             return FakeSummary()
 
-    monkeypatch.setattr(scheduler_module, "PipelineRunner", FakePipelineRunner)
-
     watch_root = tmp_path / "in"
     nested = watch_root / "nested"
     nested.mkdir(parents=True)
@@ -96,6 +94,7 @@ def test_watch_scheduler_processes_stable_candidate_with_watch_root_common_root(
         state_path=str(tmp_path / "state.json"),
         stable_seconds=0,
         initial_scan=False,
+        runner_factory=FakePipelineRunner,
     )
     watcher.enqueue(str(archive_path))
 

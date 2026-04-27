@@ -4,8 +4,7 @@ from smart_unpacker.contracts.detection import FactBag
 from smart_unpacker.contracts.filesystem import DirectorySnapshot
 from smart_unpacker.detection.internal.target_groups import relation_group_to_fact_bag
 from smart_unpacker.filesystem.directory_scanner import DirectoryScanner
-from smart_unpacker.relations.internal.group_builder import RelationsGroupBuilder
-from smart_unpacker.relations.scheduler import CandidateGroup, RelationsScheduler
+from smart_unpacker.relations import CandidateGroup, RelationsScheduler
 from smart_unpacker.support.path_keys import path_key
 
 
@@ -14,7 +13,6 @@ class DetectionScanSession:
 
     def __init__(self, relations: RelationsScheduler | None = None, config: dict | None = None):
         self.relations = relations or RelationsScheduler()
-        self._relation_helpers = RelationsGroupBuilder()
         self.config = config or {}
         self._snapshots: dict[str, DirectorySnapshot] = {}
         self._relation_groups: dict[str, List[CandidateGroup]] = {}
@@ -52,7 +50,7 @@ class DetectionScanSession:
         return self._fact_bags[key]
 
     def logical_name_for_archive(self, filename: str) -> str:
-        return self._relation_helpers.get_logical_name(filename, is_archive=True)
+        return self.relations.logical_name_for_archive(filename)
 
     def _directory_key(self, directory: str) -> str:
         return path_key(directory)

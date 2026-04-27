@@ -2,7 +2,7 @@ import os
 import time
 from typing import List, Dict, Any
 
-from smart_unpacker.coordinator.context import RunContext
+from smart_unpacker.contracts.run_context import RunContext
 from smart_unpacker.contracts.results import RunSummary
 from smart_unpacker.contracts.tasks import ArchiveTask
 

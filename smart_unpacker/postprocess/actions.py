@@ -1,7 +1,7 @@
 import os
 from typing import Any, Dict, Iterable
 
-from smart_unpacker.coordinator.context import RunContext
+from smart_unpacker.contracts.run_context import RunContext
 from smart_unpacker.postprocess.internal.cleanup import ArchiveCleanup
 from smart_unpacker.postprocess.internal.flatten import DirectoryFlattener
 

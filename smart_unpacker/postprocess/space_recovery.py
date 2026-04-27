@@ -1,4 +1,4 @@
-from smart_unpacker.coordinator.context import RunContext
+from smart_unpacker.contracts.run_context import RunContext
 from smart_unpacker.postprocess.actions import PostProcessActions
 
 

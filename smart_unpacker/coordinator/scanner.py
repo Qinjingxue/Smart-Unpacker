@@ -1,7 +1,7 @@
 from typing import List, Dict, Any
 from dataclasses import dataclass
 
-from smart_unpacker.coordinator.context import RunContext
+from smart_unpacker.contracts.run_context import RunContext
 from smart_unpacker.coordinator.task_scan import ArchiveTaskScanner
 
 @dataclass

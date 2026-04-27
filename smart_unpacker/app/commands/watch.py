@@ -21,6 +21,7 @@ from smart_unpacker.app.cli_runtime import (
 )
 from smart_unpacker.app.cli_types import CliCommandResult
 from smart_unpacker.config.loader import load_config
+from smart_unpacker.coordinator.runner import PipelineRunner
 from smart_unpacker.watch import WatchScheduler
 
 COMMAND = "watch"
@@ -117,6 +118,7 @@ def handle(args, ctx):
             stable_seconds=args.stable,
             recursive=args.recursive,
             initial_scan=args.initial_scan,
+            runner_factory=PipelineRunner,
         )
     except Exception as exc:
         return EXIT_TASK_FAILED, CliCommandResult(

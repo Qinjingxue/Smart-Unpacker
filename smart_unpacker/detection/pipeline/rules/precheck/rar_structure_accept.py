@@ -2,7 +2,7 @@ from typing import Any, Dict
 
 from smart_unpacker.contracts.detection import FactBag
 from smart_unpacker.contracts.rules import RuleEffect
-from smart_unpacker.detection.pipeline.processors.modules.format_structure.rar import DEFAULT_MAX_FIRST_HEADER_CHECK_BYTES
+from smart_unpacker.detection.pipeline.format_defaults import DEFAULT_RAR_MAX_FIRST_HEADER_CHECK_BYTES
 from smart_unpacker.detection.pipeline.rules.base import RuleBase
 from smart_unpacker.detection.pipeline.rules.registry import register_rule
 
@@ -15,7 +15,7 @@ class RarStructureAcceptRule(RuleBase):
         "max_first_header_check_bytes": {
             "type": "int",
             "required": False,
-            "default": DEFAULT_MAX_FIRST_HEADER_CHECK_BYTES,
+            "default": DEFAULT_RAR_MAX_FIRST_HEADER_CHECK_BYTES,
             "description": "Maximum RAR first-header bytes read to verify the header CRC before precheck accept.",
         },
     }

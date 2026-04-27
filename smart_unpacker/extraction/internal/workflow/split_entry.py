@@ -2,13 +2,13 @@ import os
 from typing import Optional
 
 from smart_unpacker.contracts.tasks import SplitArchiveInfo
-from smart_unpacker.relations.internal.group_builder import RelationsGroupBuilder
+from smart_unpacker.relations import RelationsScheduler
 from smart_unpacker.support.path_keys import path_key
 
 
 class SplitEntryResolver:
-    def __init__(self, relations: RelationsGroupBuilder | None = None):
-        self.relations = relations or RelationsGroupBuilder()
+    def __init__(self, relations: RelationsScheduler | None = None):
+        self.relations = relations or RelationsScheduler()
 
     def resolve(
         self,

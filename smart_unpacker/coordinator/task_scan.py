@@ -1,7 +1,7 @@
 from typing import Any
 
+from smart_unpacker.contracts.run_context import RunContext
 from smart_unpacker.contracts.tasks import ArchiveTask
-from smart_unpacker.coordinator.context import RunContext
 from smart_unpacker.detection import ArchiveTaskProvider
 
 

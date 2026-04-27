@@ -1,7 +1,7 @@
 import shutil
 from typing import Callable, Optional
 
-from smart_unpacker.coordinator.context import RunContext
+from smart_unpacker.contracts.run_context import RunContext
 from smart_unpacker.postprocess.space_recovery import ArchiveSpaceRecovery
 
 

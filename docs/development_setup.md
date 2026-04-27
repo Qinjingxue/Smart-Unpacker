@@ -15,15 +15,16 @@
 
 Python 依赖：
 
-- `requirements.txt`：运行依赖，目前包括 `psutil`、`send2trash`
+- `requirements.txt`：运行依赖，目前包括 `psutil`、`send2trash`、`watchdog`、`zstandard`
 - `requirements-build.txt`：构建依赖，目前包括 `pyinstaller`、`maturin`、`cmake`
 - `pytest`：开发和测试依赖，由开发环境脚本安装
 
 第三方二进制依赖：
 
-- `tools\7z.exe`：最终解压使用
+- `tools\7z.exe`：开发 fixture、手工诊断和 7-Zip 文件来源
 - `tools\7z.dll`：C++ wrapper 运行时使用
 - `tools\sevenzip_password_tester_capi.dll`：项目本地构建的 7z.dll wrapper
+- `tools\sevenzip_worker.exe`：项目解压后端 worker
 
 `setup_windows_dev.ps1` 可以自动下载/准备 7-Zip 文件和 license，但不会安装 Rust 或 Visual Studio C++ 编译器。
 
@@ -41,8 +42,8 @@ Python 依赖：
 4. 构建并安装 Rust/PyO3 扩展 `smart_unpacker_native`
 5. 准备 `tools\7z.exe`、`tools\7z.dll` 和 7-Zip license
 6. 安装/查找 CMake
-7. 构建 C++ wrapper `sevenzip_password_tester_capi.dll`
-8. 将 wrapper DLL 复制到 `tools\`
+7. 构建 C++ wrapper `sevenzip_password_tester_capi.dll` 和 `sevenzip_worker.exe`
+8. 将 wrapper DLL 和 worker 复制到 `tools\`
 9. 运行 CLI 和 native smoke checks
 
 需要同时安装 PyInstaller 等打包依赖：
@@ -75,6 +76,7 @@ cmake -S native\sevenzip_password_tester -B native\sevenzip_password_tester\buil
 cmake --build native\sevenzip_password_tester\build --config Release
 ctest --test-dir native\sevenzip_password_tester\build -C Release --output-on-failure
 Copy-Item native\sevenzip_password_tester\build\Release\sevenzip_password_tester_capi.dll tools\sevenzip_password_tester_capi.dll -Force
+Copy-Item native\sevenzip_password_tester\build\Release\sevenzip_worker.exe tools\sevenzip_worker.exe -Force
 ```
 
 ## Smoke Checks
@@ -118,7 +120,7 @@ Copy-Item native\sevenzip_password_tester\build\Release\sevenzip_password_tester
 4. 构建 `sevenzip_password_tester_capi.dll` 并复制到 `tools\`
 5. 可选运行验收测试
 6. 使用 PyInstaller 构建 `sunpack.exe`
-7. 将 `tools\7z.exe`、`tools\7z.dll`、`tools\sevenzip_password_tester_capi.dll` 和 license 复制到发行目录
+7. 将 `tools\7z.exe`、`tools\7z.dll`、`tools\sevenzip_password_tester_capi.dll`、`tools\sevenzip_worker.exe` 和 license 复制到发行目录
 8. 运行 packaged smoke tests
 9. 生成 `release\sunpack-windows-x64-<version>.zip`
 
@@ -147,5 +149,6 @@ Copy-Item native\sevenzip_password_tester\build\Release\sevenzip_password_tester
 - archive probe，替代检测路径中的 `7z l`
 - archive test，替代检测路径中的 `7z t`
 - 密码数组尝试，避免为每个密码启动 `7z.exe`
+- worker 解压，接收 JSON job，调用 7z.dll 处理普通文件、file range 和 concat range 虚拟输入
 
-最终解压仍由 `7z.exe x` 执行。
+最终解压由 `sevenzip_worker.exe` 通过 `7z.dll` 执行。`7z.exe` 仍保留在工具目录中，主要用于开发 fixture、手工诊断和 7-Zip 文件来源。

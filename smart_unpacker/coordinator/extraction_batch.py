@@ -3,8 +3,8 @@ import shutil
 from dataclasses import dataclass
 from typing import List
 
+from smart_unpacker.contracts.run_context import RunContext
 from smart_unpacker.contracts.tasks import ArchiveTask
-from smart_unpacker.coordinator.context import RunContext
 from smart_unpacker.coordinator.resource_preflight import ResourcePreflightInspector
 from smart_unpacker.coordinator.scheduling import (
     ConcurrencyScheduler,
