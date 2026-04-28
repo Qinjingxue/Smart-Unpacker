@@ -131,9 +131,19 @@ class ExtractionBatchRunner:
         if not ready_tasks:
             return skipped_results
         if len(ready_tasks) == 1:
-            self.resource_inspector.record_estimated_single_task_profile(ready_tasks[0])
+            if isinstance(ready_tasks[0].fact_bag.get("resource.analysis"), dict):
+                self.resource_inspector.inspect(ready_tasks[0])
+            else:
+                self.resource_inspector.record_estimated_single_task_profile(ready_tasks[0])
         else:
             self._inspect_resource_profiles(ready_tasks)
+        guarded_results = self._resource_guard_results(ready_tasks, output_dir_resolver)
+        if guarded_results:
+            guarded = {id(task) for task, _outcome in guarded_results}
+            ready_tasks = [task for task in ready_tasks if id(task) not in guarded]
+            skipped_results.extend(guarded_results)
+        if not ready_tasks:
+            return skipped_results
 
         initial_limit = self.scheduler_config.get("initial_concurrency_limit", 4)
         scheduler = ConcurrencyScheduler(
@@ -149,6 +159,55 @@ class ExtractionBatchRunner:
                 self._extract_verify_with_retries(task, output_dir_resolver(task), runtime_scheduler),
             ),
         )
+
+    def _resource_guard_results(self, tasks: list[ArchiveTask], output_dir_resolver) -> list[tuple[ArchiveTask, BatchExtractionOutcome]]:
+        guard = self._resource_guard_config()
+        if not guard or not bool(guard.get("enabled", False)):
+            return []
+        results: list[tuple[ArchiveTask, BatchExtractionOutcome]] = []
+        for task in tasks:
+            analysis = task.fact_bag.get("resource.analysis")
+            if not isinstance(analysis, dict):
+                continue
+            violations = _resource_guard_violations(analysis, guard)
+            if not violations:
+                continue
+            guard_payload = {
+                "status": "guarded",
+                "violations": violations,
+                "policy": {
+                    "max_file_count": guard.get("max_file_count"),
+                    "max_total_unpacked_size": guard.get("max_total_unpacked_size"),
+                    "max_largest_item_size": guard.get("max_largest_item_size"),
+                    "max_compression_ratio": guard.get("max_compression_ratio"),
+                },
+            }
+            task.fact_bag.set("resource.guard", guard_payload)
+            out_dir = output_dir_resolver(task)
+            result = ExtractionResult(
+                success=False,
+                archive=task.main_path,
+                out_dir=out_dir,
+                all_parts=task.all_parts,
+                error="resource_guard",
+                diagnostics={
+                    "result": {
+                        "status": "failed",
+                        "native_status": "guarded",
+                        "failure_stage": "preflight",
+                        "failure_kind": "resource_guard",
+                        "guard_status": "guarded",
+                        "resource_guard": guard_payload,
+                    }
+                },
+            )
+            results.append((task, BatchExtractionOutcome(result=result)))
+        return results
+
+    def _resource_guard_config(self) -> dict:
+        performance = self.config.get("performance") if isinstance(self.config.get("performance"), dict) else {}
+        guard = performance.get("resource_guard") if isinstance(performance.get("resource_guard"), dict) else {}
+        return dict(guard)
 
     def _build_scheduler_config(self, config: dict) -> dict:
         performance = config.get("performance", {}) if isinstance(config.get("performance"), dict) else {}
@@ -636,6 +695,55 @@ def _verification_accepts_partial(verification: VerificationResult | Any) -> boo
     return getattr(verification, "decision_hint", "") == DECISION_ACCEPT_PARTIAL
 
 
+def _resource_guard_violations(analysis: dict[str, Any], guard: dict[str, Any]) -> list[dict[str, Any]]:
+    checks = [
+        ("file_count", "max_file_count"),
+        ("item_count", "max_item_count"),
+        ("total_unpacked_size", "max_total_unpacked_size"),
+        ("largest_item_size", "max_largest_item_size"),
+    ]
+    violations: list[dict[str, Any]] = []
+    for field, limit_key in checks:
+        limit = _optional_positive_int(guard.get(limit_key))
+        if limit is None:
+            continue
+        actual = _safe_int(analysis.get(field))
+        if actual > limit:
+            violations.append({"field": field, "limit": limit, "actual": actual})
+    ratio_limit = _optional_positive_float(guard.get("max_compression_ratio"))
+    if ratio_limit is not None:
+        unpacked = _safe_int(analysis.get("total_unpacked_size"))
+        packed = _safe_int(analysis.get("total_packed_size") or analysis.get("archive_size"))
+        if packed > 0:
+            ratio = unpacked / packed
+            if ratio > ratio_limit:
+                violations.append({"field": "compression_ratio", "limit": ratio_limit, "actual": ratio})
+    return violations
+
+
+def _optional_positive_int(value: Any) -> int | None:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _optional_positive_float(value: Any) -> float | None:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _safe_int(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _source_input_digest(source_input: dict[str, Any]) -> str:
     payload = json.dumps(source_input or {}, ensure_ascii=True, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
@@ -684,6 +792,7 @@ def _write_recovery_report(task: ArchiveTask, outcome: BatchExtractionOutcome, o
         "out_dir": out_dir,
         "success_kind": "partial",
         "progress_manifest": outcome.result.progress_manifest,
+        "archive_state": _archive_state_payload(task),
         "verification": _verification_payload(verification),
         "archive_coverage": _coverage_payload(verification),
         "files": _file_recovery_items(verification, manifest_path=outcome.result.progress_manifest),
@@ -696,6 +805,19 @@ def _write_recovery_report(task: ArchiveTask, outcome: BatchExtractionOutcome, o
         return str(target)
     except OSError:
         return ""
+
+
+def _archive_state_payload(task: ArchiveTask) -> dict[str, Any]:
+    try:
+        state = task.archive_state()
+    except (TypeError, ValueError):
+        return {}
+    return {
+        "patch_digest": state.effective_patch_digest(),
+        "state_is_patched": bool(state.patches),
+        "source": state.source.to_dict(),
+        "patch_stack": [patch.to_dict() for patch in state.patches],
+    }
 
 
 def _annotate_progress_manifest(manifest_path: str, recovery_report: dict[str, Any]) -> None:
@@ -744,6 +866,9 @@ def _file_recovery_items(verification: VerificationResult, *, manifest_path: str
             "crc_expected": observation.crc_expected,
             "crc_actual": observation.crc_actual,
             "method": observation.method,
+            "failure_stage": str(observation.details.get("failure_stage") or ""),
+            "failure_kind": _observation_failure_kind(observation, status),
+            "message": str(observation.details.get("message") or ""),
             "user_action": _user_action_for_file_status(status),
         }
         key = (str(payload["archive_path"]), str(payload["output_path"]))
@@ -777,6 +902,10 @@ def _file_recovery_items(verification: VerificationResult, *, manifest_path: str
         if key in seen:
             if status == "discarded":
                 _merge_discarded_file_status(items, key, payload)
+            else:
+                _merge_manifest_file_details(items, key, payload)
+            continue
+        if status != "discarded" and _merge_manifest_file_details_by_archive_path(items, payload):
             continue
         seen.add(key)
         items.append(payload)
@@ -814,6 +943,58 @@ def _merge_discarded_file_status(items: list[dict[str, Any]], key: tuple[str, st
         if discarded.get("message"):
             item["message"] = discarded.get("message")
         return
+
+
+def _merge_manifest_file_details(items: list[dict[str, Any]], key: tuple[str, str], manifest_item: dict[str, Any]) -> None:
+    for item in items:
+        if (str(item.get("archive_path") or ""), str(item.get("output_path") or "")) != key:
+            continue
+        _merge_file_details(item, manifest_item)
+        return
+
+
+def _merge_manifest_file_details_by_archive_path(items: list[dict[str, Any]], manifest_item: dict[str, Any]) -> bool:
+    archive_path = str(manifest_item.get("archive_path") or "")
+    if not archive_path:
+        return False
+    matches = [item for item in items if str(item.get("archive_path") or "") == archive_path]
+    if len(matches) != 1:
+        return False
+    _merge_file_details(matches[0], manifest_item)
+    return True
+
+
+def _merge_file_details(item: dict[str, Any], extra: dict[str, Any]) -> None:
+    if _file_status_rank(str(extra.get("status") or "")) > _file_status_rank(str(item.get("status") or "")):
+        item["observed_status"] = extra.get("status")
+    elif _file_status_rank(str(extra.get("status") or "")) < _file_status_rank(str(item.get("status") or "")):
+        item["observed_status"] = item.get("status")
+        item["status"] = extra.get("status")
+        item["user_action"] = _user_action_for_file_status(str(extra.get("status") or ""))
+    for field in ("failure_stage", "failure_kind", "message", "retention"):
+        if extra.get(field) and not item.get(field):
+            item[field] = extra.get(field)
+    if extra.get("crc_ok") is not None and item.get("crc_ok") is None:
+        item["crc_ok"] = extra.get("crc_ok")
+    if extra.get("output_path") and (not item.get("output_path") or not Path(str(item.get("output_path") or "")).is_absolute()):
+        item["output_path"] = extra.get("output_path")
+    if int(extra.get("bytes_written", 0) or 0) > int(item.get("bytes_written", 0) or 0):
+        item["bytes_written"] = int(extra.get("bytes_written", 0) or 0)
+    if item.get("expected_size") in {None, ""} and extra.get("expected_size") not in {None, ""}:
+        item["expected_size"] = extra.get("expected_size")
+    if item.get("progress") is None and extra.get("progress") is not None:
+        item["progress"] = extra.get("progress")
+
+
+def _observation_failure_kind(observation: Any, status: str) -> str:
+    details = observation.details if isinstance(getattr(observation, "details", None), dict) else {}
+    failure_kind = str(details.get("failure_kind") or "")
+    if failure_kind:
+        return failure_kind
+    if status == "failed" and observation.crc_expected is not None and observation.crc_actual is not None:
+        if int(observation.crc_expected) != int(observation.crc_actual):
+            return "checksum_error"
+    return ""
 
 
 def _normalize_file_status(value: Any) -> str:

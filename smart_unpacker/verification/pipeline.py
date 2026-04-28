@@ -116,7 +116,7 @@ class VerificationPipeline:
         archive_coverage = _archive_coverage_summary(issues, file_observations)
         completeness = _aggregate_completeness(file_observations, completeness_hints)
         if archive_coverage.confidence > 0:
-            completeness = min(completeness, archive_coverage.completeness)
+            completeness = archive_coverage.completeness
         source_integrity = _aggregate_source_integrity(source_hints)
         recoverable_upper_bound = _aggregate_upper_bound(source_integrity, upper_bound_hints)
         counts = _file_counts(file_observations)
@@ -261,7 +261,9 @@ def _merge_coverage_sources(sources: list[dict]) -> ArchiveCoverageSummary:
     missing_files = _as_int(strongest.get("missing_files"))
     matched_bytes = _as_int(strongest.get("matched_bytes"))
     complete_bytes = _as_int(strongest.get("complete_bytes"))
-    completeness = _min_float([item.get("completeness") for item in sources], default=1.0)
+    completeness = _as_float(strongest.get("completeness"), None)
+    if completeness is None:
+        completeness = _coverage_value(strongest, "file_coverage", matched_files, expected_files)
     file_coverage = _coverage_value(strongest, "file_coverage", matched_files, expected_files)
     byte_coverage = _coverage_value(strongest, "byte_coverage", matched_bytes, expected_bytes)
     confidence = _coverage_confidence(strongest)

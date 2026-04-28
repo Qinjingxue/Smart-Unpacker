@@ -51,6 +51,7 @@ def coverage_from_archive_and_output(
 
     for item in expected:
         expected_path = item["path"]
+        unsafe_path = bool(item.get("unsafe"))
         expected_size = item["size"]
         expected_crc = item["crc32"]
         expected_has_crc = item["has_crc"]
@@ -60,17 +61,26 @@ def coverage_from_archive_and_output(
         output_item = output_by_path.get(normalize_match_path(expected_path))
         item_issues = list(issues_by_path.get(expected_path) or [])
         if output_item is None:
-            missing_files += 1
+            state = "failed" if unsafe_path else "missing"
+            if unsafe_path:
+                failed_files += 1
+            else:
+                missing_files += 1
             observations.append(FileVerificationObservation(
                 path=expected_path,
                 archive_path=expected_path,
-                state="missing",
+                state=state,
                 method=method,
                 expected_size=expected_size,
                 crc_expected=expected_crc,
                 progress=0.0,
                 issues=item_issues,
-                details={"expected_has_crc": expected_has_crc},
+                details={
+                    "expected_has_crc": expected_has_crc,
+                    "path_blocked": unsafe_path,
+                    "raw_archive_path": item.get("raw_path") or expected_path,
+                    "failure_kind": "output_filesystem" if unsafe_path else "",
+                },
             ))
             continue
 
@@ -191,12 +201,30 @@ def coverage_details(coverage: ArchiveOutputCoverage) -> dict[str, Any]:
 
 
 def _archive_item(item: dict[str, Any]) -> dict[str, Any]:
+    raw_path = str(item.get("path") or item.get("name") or "")
+    cleaned = clean_relative_archive_path(raw_path)
     return {
-        "path": clean_relative_archive_path(item.get("path") or item.get("name")),
+        "path": cleaned,
+        "raw_path": raw_path,
+        "unsafe": _unsafe_archive_path(raw_path, cleaned),
         "size": _optional_int(item.get("size", item.get("unpacked_size"))),
         "has_crc": bool(item.get("has_crc", item.get("crc32") is not None)),
         "crc32": _optional_crc(item.get("crc32")),
     }
+
+
+def _unsafe_archive_path(raw_path: str, cleaned: str) -> bool:
+    text = str(raw_path or "").replace("\\", "/")
+    if not text:
+        return False
+    if text.startswith("/") or text.startswith("//"):
+        return True
+    if len(text) >= 3 and text[1] == ":" and text[2] == "/":
+        return True
+    parts = [part for part in text.split("/") if part]
+    if any(part == ".." for part in parts):
+        return True
+    return bool(cleaned and cleaned != text.strip().strip("/"))
 
 
 def _index_output_files(files: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:

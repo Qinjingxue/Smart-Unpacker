@@ -110,3 +110,65 @@ def test_extract_verbose_prints_partial_recovery_file_details(tmp_path, monkeypa
     assert result.summary["partial_success_count"] == 1
     assert "[complete] good.txt 2/2 B" in captured.out
     assert "[partial] partial.bin 4/8 B" in captured.out
+
+
+def test_extract_normal_mode_keeps_partial_file_details_out_of_console(tmp_path, monkeypatch, capsys):
+    target = tmp_path / "archives"
+    target.mkdir()
+    report = tmp_path / "recovery_report.json"
+    report.write_text(
+        """{
+          "archive_coverage": {"completeness": 0.5, "expected_files": 2, "complete_files": 1, "failed_files": 1},
+          "archive_state": {"patch_digest": "abc", "patch_stack": [{"id": "crop"}]},
+          "files": [
+            {"archive_path": "good.txt", "status": "complete", "bytes_written": 2, "expected_size": 2, "user_action": "safe_to_use"},
+            {"archive_path": "bad.bin", "status": "failed", "failure_kind": "checksum_error", "user_action": "not_recovered"}
+          ]
+        }""",
+        encoding="utf-8",
+    )
+
+    class FakeRunner:
+        recent_passwords = []
+
+        def __init__(self, _config):
+            pass
+
+        def run_targets(self, _target_paths):
+            return SimpleNamespace(
+                success_count=1,
+                failed_tasks=[],
+                processed_keys=["broken"],
+                partial_success_count=1,
+                recovered_outputs=[{
+                    "archive": "broken.zip",
+                    "recovery_report": str(report),
+                    "archive_coverage": {"completeness": 0.5},
+                }],
+            )
+
+    monkeypatch.setattr(extract, "PipelineRunner", FakeRunner)
+    args = SimpleNamespace(
+        paths=[str(target)],
+        password=[],
+        password_file=None,
+        prompt_passwords=False,
+        no_builtin_passwords=True,
+        recursive_extract=None,
+        scheduler_profile=None,
+        archive_cleanup_mode=None,
+        flatten_single_directory=None,
+        json=False,
+        quiet=False,
+        verbose=False,
+    )
+    ctx = CliContext(language="en", reporter=CliReporter(verbose=False))
+
+    exit_code, result = extract.handle(args, ctx)
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert result.summary["partial_success_count"] == 1
+    assert result.summary["recovered_outputs"][0]["recovery_report"] == str(report)
+    assert "[partial]" not in captured.out
+    assert "bad.bin" not in captured.out

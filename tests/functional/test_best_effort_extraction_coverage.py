@@ -16,7 +16,7 @@ from smart_unpacker.contracts.archive_state import ArchiveState, PatchOperation,
 from smart_unpacker.contracts.run_context import RunContext
 from smart_unpacker.contracts.tasks import ArchiveTask
 from smart_unpacker.config.schema import normalize_config
-from smart_unpacker.coordinator.extraction_batch import ExtractionBatchRunner
+from smart_unpacker.coordinator.extraction_batch import BatchExtractionOutcome, ExtractionBatchRunner
 from smart_unpacker.coordinator.repair_beam import RepairBeamLoop, RepairBeamState
 from smart_unpacker.coordinator.runner import PipelineRunner
 from smart_unpacker.coordinator.analysis_stage import ArchiveAnalysisStage
@@ -26,9 +26,116 @@ from smart_unpacker.extraction.result import ExtractionResult
 from smart_unpacker.repair.candidate import RepairCandidate, RepairCandidateBatch
 from smart_unpacker.repair.result import RepairResult
 from smart_unpacker.support.resources import get_7z_dll_path, get_sevenzip_worker_path
-from smart_unpacker.verification import VerificationScheduler
+from smart_unpacker.verification import VerificationResult, VerificationScheduler
+from smart_unpacker.verification.evidence import VerificationEvidence
+from smart_unpacker.verification.pipeline import VerificationPipeline
+from smart_unpacker.verification.registry import register_verification_method
+from smart_unpacker.verification.result import (
+    FileVerificationObservation,
+    VerificationIssue,
+    VerificationStepResult,
+)
 from tests.helpers.detection_config import with_detection_pipeline
 from tests.helpers.tool_config import require_7z
+
+
+@register_verification_method("test_worker_3_of_4_coverage")
+class _TestWorkerThreeOfFourCoverage:
+    name = "test_worker_3_of_4_coverage"
+
+    def verify(self, evidence: VerificationEvidence, config: dict) -> VerificationStepResult:
+        observations = [
+            FileVerificationObservation(path=f"f{index}.txt", archive_path=f"f{index}.txt", state="complete", method=self.name)
+            for index in range(3)
+        ]
+        observations.append(FileVerificationObservation(path="bad.txt", archive_path="bad.txt", state="failed", method=self.name))
+        return VerificationStepResult(
+            method=self.name,
+            status="partial",
+            completeness_hint=0.75,
+            source_integrity_hint="payload_damaged",
+            decision_hint="accept_partial",
+            file_observations=observations,
+            issues=[VerificationIssue(
+                method=self.name,
+                code="info.worker_manifest_coverage",
+                message="worker manifest coverage",
+                actual={"coverage": {
+                    "completeness": 0.75,
+                    "file_coverage": 0.75,
+                    "byte_coverage": 0.75,
+                    "expected_files": 4,
+                    "matched_files": 4,
+                    "complete_files": 3,
+                    "failed_files": 1,
+                    "confidence": 0.9,
+                }},
+            )],
+        )
+
+
+@register_verification_method("test_native_crc_2_of_4_coverage")
+class _TestNativeTwoOfFourCoverage:
+    name = "test_native_crc_2_of_4_coverage"
+
+    def verify(self, evidence: VerificationEvidence, config: dict) -> VerificationStepResult:
+        return VerificationStepResult(
+            method=self.name,
+            status="failed",
+            completeness_hint=0.5,
+            source_integrity_hint="payload_damaged",
+            issues=[VerificationIssue(
+                method=self.name,
+                code="info.archive_output_coverage",
+                message="native CRC manifest only saw part of the damaged archive",
+                actual={"coverage": {
+                    "completeness": 0.5,
+                    "file_coverage": 0.5,
+                    "byte_coverage": 0.5,
+                    "expected_files": 4,
+                    "matched_files": 2,
+                    "complete_files": 2,
+                    "failed_files": 0,
+                    "confidence": 0.55,
+                    "source_strength": "partial_native_probe",
+                }},
+            )],
+        )
+
+
+@register_verification_method("test_weak_expected_name_scan")
+class _TestWeakExpectedNameScan:
+    name = "test_weak_expected_name_scan"
+
+    def verify(self, evidence: VerificationEvidence, config: dict) -> VerificationStepResult:
+        observations = [
+            FileVerificationObservation(path=f"f{index}.txt", archive_path=f"f{index}.txt", state="complete", method=self.name)
+            for index in range(3)
+        ]
+        observations.append(FileVerificationObservation(path="maybe-missing.txt", archive_path="maybe-missing.txt", state="missing", method=self.name))
+        return VerificationStepResult(
+            method=self.name,
+            status="warning",
+            completeness_hint=0.75,
+            source_integrity_hint="damaged",
+            decision_hint="none",
+            file_observations=observations,
+            issues=[VerificationIssue(
+                method=self.name,
+                code="warning.weak_expected_names_missing",
+                message="weak damaged-scan expected name was missing",
+                actual={"coverage": {
+                    "completeness": 0.75,
+                    "file_coverage": 0.75,
+                    "expected_files": 4,
+                    "matched_files": 3,
+                    "complete_files": 3,
+                    "missing_files": 1,
+                    "confidence": 0.3,
+                    "expected_names_source": "damaged_scan",
+                }},
+            )],
+        )
 
 
 def test_worker_best_effort_zip_payload_damage_records_complete_and_failed_items(tmp_path):
@@ -93,6 +200,58 @@ def test_verification_scores_best_effort_payload_damage_coverage_from_worker_out
     assert verification.failed_files == 1
     assert verification.completeness == pytest.approx(0.75, abs=0.02)
     assert verification.archive_coverage.completeness == pytest.approx(0.75, abs=0.02)
+
+
+def test_verification_coverage_merge_does_not_let_weak_sources_veto_worker_manifest(tmp_path):
+    archive = tmp_path / "conflict.zip"
+    archive.write_bytes(b"placeholder")
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    task = _task(archive)
+    task.fact_bag.set("resource.analysis", {
+        "status": "damaged",
+        "expected_names_source": "damaged_scan",
+    })
+    evidence = VerificationEvidence(
+        task=task,
+        extraction_result=ExtractionResult(
+            success=False,
+            archive=str(archive),
+            out_dir=str(out_dir),
+            all_parts=[str(archive)],
+            error="payload damaged",
+            partial_outputs=True,
+        ),
+        archive_state=task.archive_state(),
+        archive_source=task.archive_state().source.to_dict(),
+        patch_digest=task.archive_state().effective_patch_digest(),
+        state_is_patched=False,
+        archive_path=str(archive),
+        output_dir=str(out_dir),
+        password=None,
+        fact_bag=task.fact_bag,
+        health={},
+        analysis={"status": "damaged", "expected_names_source": "damaged_scan"},
+        progress_manifest=None,
+    )
+
+    verification = VerificationPipeline({
+        "methods": [
+            {"name": "test_worker_3_of_4_coverage"},
+            {"name": "test_native_crc_2_of_4_coverage"},
+            {"name": "test_weak_expected_name_scan"},
+        ],
+        "partial_accept_threshold": 0.2,
+    }).run(evidence)
+
+    assert verification.decision_hint == "accept_partial"
+    assert verification.assessment_status == "partial"
+    assert verification.archive_coverage.expected_files == 4
+    assert verification.archive_coverage.complete_files == 3
+    assert verification.archive_coverage.failed_files == 1
+    assert verification.archive_coverage.missing_files == 0
+    assert verification.archive_coverage.completeness == pytest.approx(0.75, abs=0.01)
+    assert verification.completeness == pytest.approx(0.75, abs=0.01)
 
 
 def test_worker_continues_after_middle_zip_payload_damage(tmp_path):
@@ -364,6 +523,72 @@ def test_unicode_reserved_and_long_zip_paths_match_archive_paths(tmp_path):
     assert verification.archive_coverage.completeness == pytest.approx(0.75, abs=0.02)
 
 
+def test_path_safety_blocks_unsafe_entries_but_counts_them_in_recovery(tmp_path):
+    archive = _zip_with_unsafe_and_conflicting_paths(tmp_path)
+    out_dir = tmp_path / "out"
+    escape_target = tmp_path / "escape.txt"
+
+    _completed, worker_result = _run_worker(archive, out_dir, format_hint="zip")
+    verification = _verify_worker_output(archive, out_dir, worker_result, detected_ext="zip")
+    states = {item.archive_path: item.state for item in verification.file_observations}
+
+    assert not escape_target.exists()
+    assert not (tmp_path / "absolute.txt").exists()
+    assert (out_dir / "safe.txt").read_text(encoding="utf-8") == "safe"
+    assert verification.archive_coverage.expected_files == 6
+    assert verification.archive_coverage.complete_files >= 1
+    assert states["safe.txt"] == "complete"
+    assert states["../escape.txt"] in {"failed", "blocked"}
+    assert states["absolute.txt"] in {"failed", "blocked"}
+    assert states["C:/Windows/system32/evil.txt"] in {"failed", "blocked"}
+    assert "unicode/cafe\u0301.txt" in states
+    assert "unicode/caf\u00e9.txt" in states
+
+
+def test_resource_guard_blocks_many_entry_archive_as_guarded_not_generic_failure(tmp_path):
+    archive = _zip_with_many_entries(tmp_path, count=260)
+    out_dir = tmp_path / "out"
+    task = _task(archive)
+    task.fact_bag.set("resource.analysis", {
+        "status": 0,
+        "is_archive": True,
+        "is_broken": False,
+        "archive_type": "zip",
+        "item_count": 260,
+        "file_count": 260,
+        "dir_count": 0,
+        "total_unpacked_size": 260,
+        "total_packed_size": archive.stat().st_size,
+        "largest_item_size": 1,
+        "message": "many-entry test fixture",
+    })
+    runner = ExtractionBatchRunner(
+        RunContext(),
+        _FailIfCalledExtractor(archive, out_dir),
+        _NoNestedOutputScanPolicy(),
+        config={
+            "performance": {
+                "resource_guard": {
+                    "enabled": True,
+                    "max_file_count": 128,
+                    "on_violation": "fail",
+                }
+            },
+            "verification": {"enabled": True, "methods": []},
+        },
+    )
+
+    [(returned_task, outcome)] = runner._execute_ready_tasks([task], lambda _task: str(out_dir))
+
+    assert returned_task is task
+    assert outcome.success is False
+    assert outcome.result.error == "resource_guard"
+    assert outcome.result.diagnostics["result"]["failure_kind"] == "resource_guard"
+    assert outcome.result.diagnostics["result"]["guard_status"] == "guarded"
+    assert task.fact_bag.get("resource.guard")["status"] == "guarded"
+    assert not out_dir.exists()
+
+
 def test_missing_split_volume_is_not_reported_as_payload_partial(tmp_path):
     archive, part_paths = _seven_zip_missing_middle_volume(tmp_path)
     out_dir = tmp_path / "out"
@@ -451,6 +676,45 @@ def test_patch_stack_crop_then_cd_rebuild_then_payload_partial_uses_same_state(t
     assert all(source.get("patch_digest") == expected_digest
                for source in verification.archive_coverage.sources
                if source.get("method") == "archive_test_crc")
+
+
+def test_recovery_report_includes_failure_kind_coverage_and_patch_lineage(tmp_path):
+    sfx, patch_stack, expected_digest = _sfx_zip_with_payload_damage_and_bad_cd_patch_stack(tmp_path)
+    task = _task(sfx, detected_ext="zip")
+    task.set_archive_state(ArchiveState.from_archive_input(task.archive_input(), patches=patch_stack))
+    out_dir = tmp_path / "out"
+    _completed, worker_result = _run_worker_state(task, out_dir, format_hint="zip")
+    verification = _verify_worker_output(sfx, out_dir, worker_result, detected_ext="zip", fact_bag=task.fact_bag)
+    result = ExtractionResult(
+        success=False,
+        archive=str(sfx),
+        out_dir=str(out_dir),
+        all_parts=[str(sfx)],
+        error="payload damaged",
+        diagnostics={"result": worker_result, "partial_outputs": True},
+        partial_outputs=True,
+        progress_manifest=str(out_dir / ".sunpack" / "extraction_manifest.json"),
+    )
+    runner = ExtractionBatchRunner(
+        RunContext(),
+        _NoopExtractor(out_dir),
+        _NoNestedOutputScanPolicy(),
+        config={"verification": {"enabled": True, "methods": []}},
+    )
+
+    collected = runner.collect_result(task, BatchExtractionOutcome(result=result, verification=verification))
+    report = json.loads((out_dir / ".sunpack" / "recovery_report.json").read_text(encoding="utf-8"))
+    bad = [item for item in report["files"] if item["archive_path"] == "bad.bin"]
+
+    assert collected == str(out_dir)
+    assert report["archive_coverage"]["expected_files"] == 4
+    assert report["archive_state"]["patch_digest"] == expected_digest
+    assert [patch["id"] for patch in report["archive_state"]["patch_stack"]] == [
+        "crop-sfx-prefix",
+        "rebuild-central-directory",
+    ]
+    assert bad
+    assert bad[0]["failure_kind"] in {"checksum_error", "data_error", "corrupted_data"}
 
 
 def test_beam_dedupes_equivalent_patch_plans_and_assesses_best_coverage(tmp_path):
@@ -681,6 +945,55 @@ def test_main_flow_nested_archive_keeps_outer_complete_and_inner_partial_coverag
     assert inner_report["archive_coverage"]["complete_files"] == 3
     assert inner_report["archive_coverage"]["failed_files"] == 1
     assert inner_report["archive_coverage"]["completeness"] == pytest.approx(0.75, abs=0.02)
+
+
+def test_main_flow_outer_partial_and_inner_tar_gz_partial_keep_coverage_separate(tmp_path):
+    _require_worker_or_skip()
+    _require_7z_dll_or_skip()
+    input_root = tmp_path / "input"
+    input_root.mkdir()
+    archive = _outer_zip_partial_with_inner_truncated_tar_gz(input_root)
+    config = _zip_tar_gz_recursive_pipeline_config(tmp_path)
+
+    summary = PipelineRunner(config).run(str(input_root))
+
+    outer_out_dir = input_root / archive.stem
+    inner_out_dir = outer_out_dir / "inner.tar"
+    outer_report = json.loads((outer_out_dir / ".sunpack" / "recovery_report.json").read_text(encoding="utf-8"))
+    inner_report = json.loads((inner_out_dir / ".sunpack" / "recovery_report.json").read_text(encoding="utf-8"))
+
+    assert summary.partial_success_count == 2
+    assert not summary.failed_tasks
+    assert outer_report["archive"].endswith("outer-partial-inner-targz.zip")
+    assert outer_report["archive_coverage"]["expected_files"] == 3
+    assert outer_report["archive_coverage"]["complete_files"] == 2
+    assert outer_report["archive_coverage"]["failed_files"] == 1
+    assert outer_report["archive_coverage"]["completeness"] == pytest.approx(2 / 3, abs=0.02)
+    assert inner_report["archive"].endswith("inner.tar.gz")
+    assert inner_report["archive_coverage"]["expected_files"] == 1
+    assert inner_report["archive_coverage"]["partial_files"] == 1
+    assert inner_report["archive_coverage"]["completeness"] < outer_report["archive_coverage"]["completeness"]
+
+
+def test_main_flow_outer_complete_inner_missing_volume_does_not_mix_coverage(tmp_path):
+    _require_worker_or_skip()
+    _require_7z_dll_or_skip()
+    input_root = tmp_path / "input"
+    input_root.mkdir()
+    archive = _outer_zip_with_inner_missing_volume_marker(input_root)
+    config = _zip_7z_recursive_pipeline_config(tmp_path)
+
+    summary = PipelineRunner(config).run(str(input_root))
+
+    outer_out_dir = input_root / archive.stem
+    outer_manifest = json.loads((outer_out_dir / ".sunpack" / "extraction_manifest.json").read_text(encoding="utf-8"))
+
+    assert summary.success_count == 1
+    assert summary.partial_success_count == 0
+    assert any("inner-missing.7z.001" in item for item in summary.failed_tasks)
+    assert outer_manifest["summary"]["complete"] == 2
+    assert "recovery" not in outer_manifest
+    assert not (outer_out_dir / "inner-missing.7z" / ".sunpack" / "recovery_report.json").exists()
 
 
 def test_main_flow_recurses_into_truncated_tar_gz_partial_tar_stream(tmp_path):
@@ -953,6 +1266,81 @@ def _best_effort_pipeline_config(
     ]))
 
 
+def _zip_tar_gz_recursive_pipeline_config(tmp_path: Path) -> dict:
+    return normalize_config(with_detection_pipeline({
+        "recursive_extract": "3",
+        "thresholds": {"archive_score_threshold": 5, "maybe_archive_threshold": 3},
+        "post_extract": {
+            "archive_cleanup_mode": "k",
+            "flatten_single_directory": False,
+        },
+        "repair": {
+            "enabled": True,
+            "max_attempts_per_task": 0,
+            "max_repair_rounds_per_task": 0,
+            "workspace": str(tmp_path / "repair"),
+        },
+        "verification": {
+            "enabled": True,
+            "methods": [
+                {"name": "extraction_exit_signal", "enabled": True},
+                {"name": "output_presence", "enabled": True},
+                {"name": "archive_test_crc", "enabled": True},
+            ],
+            "partial_min_completeness": 0.2,
+            "partial_accept_threshold": 0.2,
+        },
+    }, precheck=[
+        {"name": "size_minimum", "enabled": True, "min_inspection_size_bytes": 0},
+    ], scoring=[
+        {
+            "name": "extension",
+            "enabled": True,
+            "extension_score_groups": [{"score": 5, "extensions": [".zip", ".tar", ".gz", ".tgz", ".tar.gz"]}],
+        },
+        {"name": "zip_structure_identity", "enabled": True},
+        {"name": "compression_stream_identity", "enabled": True},
+        {"name": "tar_structure_identity", "enabled": True},
+    ]))
+
+
+def _zip_7z_recursive_pipeline_config(tmp_path: Path) -> dict:
+    return normalize_config(with_detection_pipeline({
+        "recursive_extract": "3",
+        "thresholds": {"archive_score_threshold": 5, "maybe_archive_threshold": 3},
+        "post_extract": {
+            "archive_cleanup_mode": "k",
+            "flatten_single_directory": False,
+        },
+        "repair": {
+            "enabled": True,
+            "max_attempts_per_task": 0,
+            "max_repair_rounds_per_task": 0,
+            "workspace": str(tmp_path / "repair"),
+        },
+        "verification": {
+            "enabled": True,
+            "methods": [
+                {"name": "extraction_exit_signal", "enabled": True},
+                {"name": "output_presence", "enabled": True},
+                {"name": "archive_test_crc", "enabled": True},
+            ],
+            "partial_min_completeness": 0.2,
+            "partial_accept_threshold": 0.2,
+        },
+    }, precheck=[
+        {"name": "size_minimum", "enabled": True, "min_inspection_size_bytes": 0},
+    ], scoring=[
+        {
+            "name": "extension",
+            "enabled": True,
+            "extension_score_groups": [{"score": 5, "extensions": [".zip", ".7z", ".001"]}],
+        },
+        {"name": "zip_structure_identity", "enabled": True},
+        {"name": "seven_zip_structure_identity", "enabled": True},
+    ]))
+
+
 def _tar_gz_recursive_pipeline_config(tmp_path: Path) -> dict:
     return normalize_config(with_detection_pipeline({
         "recursive_extract": "3",
@@ -1037,6 +1425,30 @@ def _outer_zip_with_damaged_inner_zip(tmp_path: Path) -> Path:
     with zipfile.ZipFile(outer, "w", compression=zipfile.ZIP_STORED) as zf:
         zf.writestr("outer-note.txt", b"outer")
         zf.writestr("inner.zip", inner_bytes)
+    return outer
+
+
+def _outer_zip_partial_with_inner_truncated_tar_gz(tmp_path: Path) -> Path:
+    inner = _truncated_tar_gz_with_valid_partial_tar_prefix(tmp_path)
+    inner_bytes = inner.read_bytes()
+    inner.unlink()
+    outer = tmp_path / "outer-partial-inner-targz.zip"
+    with zipfile.ZipFile(outer, "w", compression=zipfile.ZIP_STORED) as zf:
+        zf.writestr("outer-note.txt", b"outer")
+        zf.writestr("inner.tar.gz", inner_bytes)
+        zf.writestr("outer-bad.bin", b"B" * 32)
+    data = bytearray(outer.read_bytes())
+    payload_offset = _zip_stored_payload_offset(bytes(data), "outer-bad.bin")
+    data[payload_offset + 3] ^= 0x55
+    outer.write_bytes(bytes(data))
+    return outer
+
+
+def _outer_zip_with_inner_missing_volume_marker(tmp_path: Path) -> Path:
+    outer = tmp_path / "outer-complete-inner-missing-volume.zip"
+    with zipfile.ZipFile(outer, "w", compression=zipfile.ZIP_STORED) as zf:
+        zf.writestr("outer-note.txt", b"outer")
+        zf.writestr("inner-missing.7z.001", b"7z\xbc\xaf\x27\x1cmissing tail placeholder")
     return outer
 
 
@@ -1231,6 +1643,26 @@ def _zip_with_unicode_reserved_long_paths(tmp_path: Path) -> tuple[Path, dict[st
     data[payload_offset] ^= 0x55
     archive.write_bytes(bytes(data))
     return archive, names
+
+
+def _zip_with_unsafe_and_conflicting_paths(tmp_path: Path) -> Path:
+    archive = tmp_path / "unsafe-paths.zip"
+    with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_STORED) as zf:
+        zf.writestr("safe.txt", "safe")
+        zf.writestr("../escape.txt", "escape")
+        zf.writestr("/absolute.txt", "absolute")
+        zf.writestr("C:/Windows/system32/evil.txt", "evil")
+        zf.writestr("unicode/cafe\u0301.txt", "combining")
+        zf.writestr("unicode/caf\u00e9.txt", "precomposed")
+    return archive
+
+
+def _zip_with_many_entries(tmp_path: Path, *, count: int) -> Path:
+    archive = tmp_path / "many-entries.zip"
+    with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_STORED) as zf:
+        for index in range(count):
+            zf.writestr(f"items/{index:04d}.txt", b"x")
+    return archive
 
 
 def _truncated_tar_with_partial_member(tmp_path: Path) -> Path:
@@ -1580,6 +2012,39 @@ class _AlwaysFailingExtractor:
                 }
             },
         )
+
+
+class _FailIfCalledExtractor:
+    password_session = None
+
+    def __init__(self, archive: Path, out_dir: Path):
+        self.archive = archive
+        self.out_dir = out_dir
+
+    def default_output_dir_for_task(self, task):
+        return str(self.out_dir)
+
+    def inspect(self, task, out_dir):
+        return type("Preflight", (), {"skip_result": None})()
+
+    def extract(self, task, out_dir, runtime_scheduler=None):
+        raise AssertionError("resource-guarded task should not reach extraction")
+
+
+class _NoopExtractor:
+    password_session = None
+
+    def __init__(self, out_dir: Path):
+        self.out_dir = out_dir
+
+    def default_output_dir_for_task(self, task):
+        return str(self.out_dir)
+
+    def inspect(self, task, out_dir):
+        return type("Preflight", (), {"skip_result": None})()
+
+    def extract(self, task, out_dir, runtime_scheduler=None):
+        raise AssertionError("noop extractor should not be called")
 
 
 class _TerminalMissingVolumeRepairStage:
