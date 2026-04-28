@@ -151,7 +151,10 @@ def test_repair_config_is_normalized_by_config_schema():
             "safety": {"allow_unsafe": True, "allow_partial": "false"},
             "deep": {
                 "max_candidates_per_module": "2",
+                "max_entries": "12",
                 "max_seconds_per_module": "1.5",
+                "max_output_size_mb": "64",
+                "max_entry_uncompressed_mb": "8",
                 "verify_candidates": "false",
             },
         },
@@ -160,7 +163,10 @@ def test_repair_config_is_normalized_by_config_schema():
     assert config["repair"]["safety"]["allow_unsafe"] is True
     assert config["repair"]["safety"]["allow_partial"] is False
     assert config["repair"]["deep"]["max_candidates_per_module"] == 2
+    assert config["repair"]["deep"]["max_entries"] == 12
     assert config["repair"]["deep"]["max_seconds_per_module"] == 1.5
+    assert config["repair"]["deep"]["max_output_size_mb"] == 64.0
+    assert config["repair"]["deep"]["max_entry_uncompressed_mb"] == 8.0
     assert config["repair"]["deep"]["verify_candidates"] is False
 
 
@@ -434,6 +440,34 @@ def test_bzip2_trailing_junk_trim_removes_bytes_after_stream(tmp_path):
     assert bz2.decompress(open(result.repaired_input["path"], "rb").read()) == b"bzip2 payload"
 
 
+def test_gzip_truncated_partial_recovery_recompresses_prefix(tmp_path):
+    payload = _pseudo_random_payload(512 * 1024)
+    source = tmp_path / "truncated.gz"
+    data = gzip.compress(payload)
+    source.write_bytes(data[:len(data) * 9 // 10])
+
+    result = _run_stream_partial_repair(tmp_path, "gzip_truncated_partial_recovery", "gzip", source)
+
+    assert result.ok is True
+    recovered = gzip.decompress(open(result.repaired_input["path"], "rb").read())
+    assert payload.startswith(recovered)
+    assert 0 < len(recovered) < len(payload)
+
+
+def test_bzip2_truncated_partial_recovery_recompresses_prefix(tmp_path):
+    payload = _pseudo_random_payload(2 * 1024 * 1024)
+    source = tmp_path / "truncated.bz2"
+    data = bz2.compress(payload)
+    source.write_bytes(data[:len(data) * 9 // 10])
+
+    result = _run_stream_partial_repair(tmp_path, "bzip2_truncated_partial_recovery", "bzip2", source)
+
+    assert result.ok is True
+    recovered = bz2.decompress(open(result.repaired_input["path"], "rb").read())
+    assert payload.startswith(recovered)
+    assert 0 < len(recovered) < len(payload)
+
+
 def test_xz_trailing_junk_trim_removes_bytes_after_stream(tmp_path):
     source = tmp_path / "tail.xz"
     original = lzma.compress(b"xz payload", format=lzma.FORMAT_XZ)
@@ -443,6 +477,20 @@ def test_xz_trailing_junk_trim_removes_bytes_after_stream(tmp_path):
 
     assert result.ok is True
     assert open(result.repaired_input["path"], "rb").read() == original
+
+
+def test_xz_truncated_partial_recovery_recompresses_prefix(tmp_path):
+    payload = _pseudo_random_payload(1024 * 1024)
+    source = tmp_path / "truncated.xz"
+    data = lzma.compress(payload, format=lzma.FORMAT_XZ)
+    source.write_bytes(data[:len(data) * 9 // 10])
+
+    result = _run_stream_partial_repair(tmp_path, "xz_truncated_partial_recovery", "xz", source)
+
+    assert result.ok is True
+    recovered = lzma.decompress(open(result.repaired_input["path"], "rb").read())
+    assert payload.startswith(recovered)
+    assert 0 < len(recovered) < len(payload)
 
 
 def test_zstd_trailing_junk_trim_removes_bytes_after_stream_when_backend_available(tmp_path):
@@ -455,6 +503,21 @@ def test_zstd_trailing_junk_trim_removes_bytes_after_stream_when_backend_availab
 
     assert result.ok is True
     assert open(result.repaired_input["path"], "rb").read() == original
+
+
+def test_zstd_truncated_partial_recovery_recompresses_prefix_when_backend_available(tmp_path):
+    zstd = pytest.importorskip("zstandard")
+    payload = _pseudo_random_payload(4 * 1024 * 1024)
+    source = tmp_path / "truncated.zst"
+    data = zstd.ZstdCompressor().compress(payload)
+    source.write_bytes(data[:len(data) * 9 // 10])
+
+    result = _run_stream_partial_repair(tmp_path, "zstd_truncated_partial_recovery", "zstd", source)
+
+    assert result.ok is True
+    recovered = zstd.ZstdDecompressor().decompress(open(result.repaired_input["path"], "rb").read())
+    assert payload.startswith(recovered)
+    assert 0 < len(recovered) < len(payload)
 
 
 def test_seven_zip_boundary_trim_removes_bytes_after_next_header(tmp_path):
@@ -637,6 +700,23 @@ def _run_repair(tmp_path, module_name, fmt, source, flags):
     ))
 
 
+def _run_stream_partial_repair(tmp_path, module_name, fmt, source):
+    scheduler = RepairScheduler({
+        "repair": {
+            "workspace": str(tmp_path / "repair"),
+            "stages": {"deep": True},
+            "modules": [{"name": module_name, "enabled": True}],
+        }
+    })
+    return scheduler.repair(RepairJob(
+        source_input={"kind": "file", "path": str(source)},
+        format=fmt,
+        confidence=0.7,
+        damage_flags=["stream_truncated", "unexpected_end"],
+        archive_key=source.name,
+    ))
+
+
 def _deep_merge(target, source):
     for key, value in source.items():
         if isinstance(value, dict) and isinstance(target.get(key), dict):
@@ -740,6 +820,17 @@ def _raw_deflate_descriptor_entry(name: str, payload: bytes) -> bytes:
         compressed,
         struct.pack("<IIII", 0x08074B50, crc32, len(compressed), len(payload)),
     ])
+
+
+def _pseudo_random_payload(size: int) -> bytes:
+    value = 0x12345678
+    output = bytearray()
+    for _ in range(size):
+        value ^= (value << 13) & 0xFFFFFFFF
+        value ^= value >> 17
+        value ^= (value << 5) & 0xFFFFFFFF
+        output.append(value & 0xFF)
+    return bytes(output)
 
 
 def _seven_zip_bytes() -> bytes:

@@ -2,6 +2,7 @@ use pyo3::prelude::*;
 
 mod analysis;
 mod carrier;
+mod compression_stream_repair;
 mod directory_scan;
 mod file_crc;
 mod format_structure;
@@ -135,6 +136,10 @@ fn smart_unpacker_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(repair_io::repair_patch_file, m)?)?;
     m.add_function(wrap_pyfunction!(
         zip_deep_repair::zip_deep_partial_recovery,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        compression_stream_repair::compression_stream_partial_recovery,
         m
     )?)?;
     Ok(())

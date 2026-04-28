@@ -9,6 +9,11 @@ BOUNDARY_FLAGS = {
     "start_trusted_only",
     "missing_end_block",
     "probably_truncated",
+    "stream_truncated",
+    "input_truncated",
+    "truncated",
+    "unexpected_end",
+    "unexpected_eof",
     "start_header_corrupt",
     "trailing_junk",
     "central_directory_offset_bad",
@@ -35,6 +40,12 @@ CONTENT_FLAGS = {
     "crc_error",
     "gzip_footer_bad",
     "local_header_recovery",
+    "stream_truncated",
+    "input_truncated",
+    "truncated",
+    "unexpected_end",
+    "unexpected_eof",
+    "data_error",
 }
 
 
