@@ -6,13 +6,13 @@ from pathlib import Path
 from smart_unpacker.repair.diagnosis import RepairDiagnosis
 from smart_unpacker.repair.job import RepairJob
 from smart_unpacker.repair.pipeline.module import RepairModuleSpec, RepairRoute
-from smart_unpacker.repair.pipeline.modules._common import source_input_for_job
+from smart_unpacker.repair.pipeline.modules._common import copy_range_to_file, source_input_for_job
 from smart_unpacker.repair.pipeline.modules.archive_carrier_crop import _result_from_native, attach_native_crop_patch_plans, normalize_native_candidate_lengths
 from smart_unpacker.repair.pipeline.modules._native_candidates import candidates_from_native_result
 from smart_unpacker.repair.pipeline.registry import register_repair_module
-from smart_unpacker.repair.pipeline.modules.rar._structure import walk_rar_blocks
 
 from smart_unpacker_native import archive_carrier_crop_recovery as _native_archive_carrier_crop_recovery
+from smart_unpacker_native import rar_block_chain_trim_recovery as _native_rar_block_chain_trim_recovery
 
 
 class RarCarrierCropDeepRecovery:
@@ -48,7 +48,15 @@ class RarCarrierCropDeepRecovery:
         result = self._run_native(job, workspace, config)
         repair_result = _result_from_native(self.spec.name, result, job, diagnosis, config)
         if repair_result.ok and repair_result.repaired_input:
-            _trim_rar_file_to_end(str(repair_result.repaired_input.get("path") or ""))
+            trimmed = _trimmed_rar_file_to_end(str(repair_result.repaired_input.get("path") or ""), workspace)
+            if trimmed:
+                repaired_input = dict(repair_result.repaired_input)
+                repaired_input["path"] = trimmed
+                repair_result = replace(
+                    repair_result,
+                    repaired_input=repaired_input,
+                    workspace_paths=[trimmed, *[item for item in repair_result.workspace_paths if item != trimmed]],
+                )
         return repair_result
 
     def generate_candidates(self, job: RepairJob, diagnosis: RepairDiagnosis, workspace: str, config: dict):
@@ -108,7 +116,7 @@ def _isolate_candidate_path(candidate, workspace: str):
     target = Path(workspace) / f"{candidate.module_name}_{path.name}"
     if path.resolve() != target.resolve():
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(path.read_bytes())
+        copy_range_to_file(str(path), 0, None, str(target))
     repaired_input["path"] = str(target)
     workspace_paths = [str(target), *[item for item in candidate.workspace_paths if item != str(target)]]
     return replace(candidate, repaired_input=repaired_input, workspace_paths=workspace_paths)
@@ -117,22 +125,27 @@ def _isolate_candidate_path(candidate, workspace: str):
 def _trim_rar_candidate(candidate):
     repaired_input = dict(candidate.repaired_input or {})
     path = str(repaired_input.get("path") or "")
-    _trim_rar_file_to_end(path)
-    return candidate
+    trimmed = _trimmed_rar_file_to_end(path, str(Path(path).parent) if path else "")
+    if not trimmed:
+        return candidate
+    repaired_input["path"] = trimmed
+    workspace_paths = [trimmed, *[item for item in candidate.workspace_paths if item != trimmed]]
+    return replace(candidate, repaired_input=repaired_input, workspace_paths=workspace_paths)
 
 
-def _trim_rar_file_to_end(path: str) -> None:
+def _trimmed_rar_file_to_end(path: str, workspace: str) -> str:
     if not path:
-        return
-    candidate = Path(path)
-    try:
-        data = candidate.read_bytes()
-    except OSError:
-        return
-    walk = walk_rar_blocks(data)
-    if walk is None or walk.end_offset is None or walk.end_offset >= len(data):
-        return
-    try:
-        candidate.write_bytes(data[:walk.end_offset])
-    except OSError:
-        return
+        return ""
+    result = _native_rar_block_chain_trim_recovery(
+        {"kind": "file", "path": path, "format_hint": "rar"},
+        workspace or str(Path(path).parent),
+        512.0,
+        1,
+    )
+    candidates = result.get("candidates") if isinstance(result, dict) else None
+    if not candidates:
+        return ""
+    first = candidates[0]
+    if not isinstance(first, dict):
+        return ""
+    return str(first.get("path") or "")

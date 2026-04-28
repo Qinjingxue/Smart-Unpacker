@@ -23,7 +23,7 @@ def test_config_validate_checks_rule_schema_types_even_when_disabled():
     assert any("Invalid type" in error for error in result["errors"])
 
 
-def test_config_validate_rejects_legacy_config_switch_values():
+def test_config_validate_rejects_normalized_config_values_in_external_shorthand_fields():
     payload = _payload()
     payload["recursive_extract"] = {"mode": "infinite", "max_rounds": 999}
     payload["post_extract"] = {"archive_cleanup_mode": "recycle"}

@@ -7,6 +7,9 @@ from collections import OrderedDict
 from collections.abc import Callable, Sequence
 from typing import Any
 
+from smart_unpacker_native import batch_file_head_facts as _native_batch_file_head_facts
+from smart_unpacker_native import scan_directory_entries as _native_scan_directory_entries
+
 from smart_unpacker.support.path_keys import path_key
 
 
@@ -60,26 +63,24 @@ GLOBAL_CACHE = CacheManager()
 
 def file_identity(path: str) -> tuple[str, int, int]:
     norm_path = path_key(path)
-    try:
-        stat = os.stat(norm_path)
-    except OSError:
+    rows = _native_batch_file_head_facts([norm_path], 0)
+    if not rows or not isinstance(rows[0], dict):
         return norm_path, 0, 0
-    return norm_path, stat.st_size, stat.st_mtime_ns
+    return norm_path, int(rows[0].get("size") or 0), int(rows[0].get("mtime_ns") or 0)
 
 
 def directory_identity(path: str) -> tuple[str, int, tuple]:
     norm_path = path_key(path)
-    try:
-        entries = []
-        for entry in os.scandir(norm_path):
-            try:
-                stat = entry.stat()
-                entries.append((entry.name.lower(), entry.is_dir(), stat.st_size, stat.st_mtime_ns))
-            except OSError:
-                entries.append((entry.name.lower(), entry.is_dir(), 0, 0))
-        return norm_path, len(entries), tuple(sorted(entries))
-    except OSError:
+    rows = _native_scan_directory_entries(norm_path, 0, [], [], [], None)
+    if not rows:
         return norm_path, 0, ()
+    entries = []
+    for row in rows:
+        if not isinstance(row, dict) or not row.get("path"):
+            continue
+        name = os.path.basename(str(row.get("path") or "")).lower()
+        entries.append((name, bool(row.get("is_dir")), int(row.get("size") or 0), int(row.get("mtime_ns") or 0)))
+    return norm_path, len(entries), tuple(sorted(entries))
 
 
 def stable_fingerprint(value: Any) -> str:

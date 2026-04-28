@@ -1,10 +1,6 @@
-import os
 from typing import Any, List
 
-try:
-    from smart_unpacker_native import batch_file_head_facts as _native_batch_file_head_facts
-except ImportError:
-    _native_batch_file_head_facts = None
+from smart_unpacker_native import batch_file_head_facts as _native_batch_file_head_facts
 
 from smart_unpacker.contracts.detection import FactBag
 from smart_unpacker.contracts.filesystem import DirectorySnapshot
@@ -74,13 +70,7 @@ class DetectionScanSession:
             if self._file_head_fetch_needed(path, magic_size=magic_size)
         ]
         if missing:
-            if _native_batch_file_head_facts is None:
-                rows = []
-            else:
-                try:
-                    rows = _native_batch_file_head_facts(missing, max(0, int(magic_size or 0)))
-                except Exception:
-                    rows = []
+            rows = _native_batch_file_head_facts(missing, max(0, int(magic_size or 0)))
             seen = set()
             for row in rows:
                 if not isinstance(row, dict) or not row.get("path"):
@@ -98,7 +88,14 @@ class DetectionScanSession:
             for path in missing:
                 key = path_key(path)
                 if key not in seen:
-                    self._file_head_facts[key] = self._fallback_file_head_facts(path, magic_size=magic_size)
+                    self._file_head_facts[key] = {
+                        "path": path,
+                        "exists": False,
+                        "is_file": False,
+                        "size": None,
+                        "mtime_ns": None,
+                        "magic": b"",
+                    }
         return {
             path_key(path): dict(self._file_head_facts.get(path_key(path), {}))
             for path in requested
@@ -144,31 +141,3 @@ class DetectionScanSession:
         if facts is None:
             return True
         return bool(magic_size > 0 and facts.get("is_file") and not facts.get("magic"))
-
-    def _fallback_file_head_facts(self, path: str, *, magic_size: int) -> dict[str, Any]:
-        try:
-            stat = os.stat(path)
-        except OSError:
-            return {
-                "path": path,
-                "exists": False,
-                "is_file": False,
-                "size": None,
-                "mtime_ns": None,
-                "magic": b"",
-            }
-        magic = b""
-        if stat and magic_size > 0:
-            try:
-                with open(path, "rb") as handle:
-                    magic = handle.read(max(0, int(magic_size or 0)))
-            except OSError:
-                magic = b""
-        return {
-            "path": path,
-            "exists": True,
-            "is_file": True,
-            "size": stat.st_size,
-            "mtime_ns": stat.st_mtime_ns,
-            "magic": magic,
-        }

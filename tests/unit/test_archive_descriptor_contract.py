@@ -7,7 +7,7 @@ from smart_unpacker.contracts.tasks import ArchiveTask
 from smart_unpacker.repair.job import RepairJob
 
 
-def test_archive_task_exposes_default_descriptor_from_compat_fields(tmp_path):
+def test_archive_task_exposes_default_descriptor_from_task_paths(tmp_path):
     first = tmp_path / "sample.7z.001"
     second = tmp_path / "sample.7z.002"
     first.write_bytes(b"one")
@@ -47,7 +47,7 @@ def test_archive_task_from_detection_fact_bag_carries_empty_archive_state(tmp_pa
     assert state["patches"] == []
 
 
-def test_archive_task_set_descriptor_updates_current_compat_facts(tmp_path):
+def test_archive_task_set_descriptor_updates_archive_state(tmp_path):
     archive = tmp_path / "carrier.bin"
     archive.write_bytes(b"junkPK")
     task = ArchiveTask(fact_bag=FactBag(), score=10, main_path=str(archive), all_parts=[str(archive)])
@@ -63,7 +63,7 @@ def test_archive_task_set_descriptor_updates_current_compat_facts(tmp_path):
     assert task.fact_bag.get("archive.input")["open_mode"] == "file_range"
     assert task.archive_state().source.entry_path == str(archive)
     assert task.archive_state().source.part_paths() == [str(archive)]
-    assert task.archive_input().to_legacy_source_input() == {
+    assert task.archive_input().to_source_input() == {
         "kind": "file_range",
         "path": str(archive),
         "start": 4,
@@ -113,7 +113,7 @@ def test_repair_job_archive_input_prefers_typed_descriptor(tmp_path):
     source.write_bytes(b"zip")
     descriptor = ArchiveInputDescriptor.from_parts(archive_path=str(source), format_hint="zip")
     job = RepairJob(
-        source_input={"kind": "file", "path": "legacy.bin", "format_hint": "rar"},
+        source_input={"kind": "file", "path": "unused.bin", "format_hint": "rar"},
         format="rar",
         source_descriptor=descriptor,
     )

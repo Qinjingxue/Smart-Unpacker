@@ -128,7 +128,7 @@ class ArchiveAnalysisScheduler:
         try:
             if raw.get("kind") == "archive_input" or raw.get("open_mode"):
                 return ArchiveInputDescriptor.from_dict(raw, archive_path=archive_path, part_paths=part_paths)
-            return ArchiveInputDescriptor.from_legacy(raw, archive_path=archive_path, part_paths=part_paths)
+            return ArchiveInputDescriptor.from_source_input(raw, archive_path=archive_path, part_paths=part_paths)
         except (TypeError, ValueError):
             return None
 

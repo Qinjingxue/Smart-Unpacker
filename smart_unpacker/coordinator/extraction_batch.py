@@ -510,11 +510,11 @@ class ExtractionBatchRunner:
         try:
             archive_state = item.candidate.plan.get("archive_state") if isinstance(item.candidate.plan, dict) else None
             if isinstance(archive_state, dict):
-                task.set_archive_state(archive_state, sync_compat=False)
+                task.set_archive_state(archive_state)
             else:
                 descriptor = self.repair_stage._descriptor_from_repaired_input(task, item.candidate.repaired_input)
                 if descriptor is not None:
-                    task.set_archive_state(ArchiveState.from_archive_input(descriptor), sync_compat=False)
+                    task.set_archive_state(ArchiveState.from_archive_input(descriptor))
                 else:
                     task.set_archive_input(item.candidate.repaired_input)
             extracted = self.extractor.extract(task, temp_dir, runtime_scheduler=runtime_scheduler)
@@ -522,7 +522,7 @@ class ExtractionBatchRunner:
             evaluated[digest] = (item.candidate, extracted, assessed, temp_dir)
             return assessed
         finally:
-            task.set_archive_state(original_state, sync_compat=False)
+            task.set_archive_state(original_state)
 
     def _promote_beam_output(self, result: ExtractionResult, temp_dir: str, out_dir: str) -> ExtractionResult:
         if os.path.abspath(temp_dir) != os.path.abspath(out_dir):

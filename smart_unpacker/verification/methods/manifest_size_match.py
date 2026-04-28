@@ -195,7 +195,7 @@ def _coverage_actual(coverage, state_manifest: ArchiveStateManifest, evidence: V
         "state_aware": True,
         "patch_digest": evidence.patch_digest,
         "archive_type": state_manifest.archive_type,
-        "manifest_source": state_manifest.source if state_manifest.ok else "analysis_fallback",
+        "manifest_source": state_manifest.source if state_manifest.ok else "analysis_estimate",
     })
     return actual
 

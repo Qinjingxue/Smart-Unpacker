@@ -4,90 +4,24 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Dict, List, Optional, Set
 
-from smart_unpacker_native import list_regular_files_in_directory as _native_list_regular_files_in_directory
-
-try:
-    from smart_unpacker_native import (
-        relations_build_candidate_groups as _native_build_candidate_groups,
-        relations_detect_split_role as _native_detect_split_role,
-        relations_logical_name as _native_logical_name,
-        relations_parse_numbered_volume as _native_parse_numbered_volume,
-        relations_split_sort_key as _native_split_sort_key,
-    )
-except ImportError:
-    _native_build_candidate_groups = None
-    _native_detect_split_role = None
-    _native_logical_name = None
-    _native_parse_numbered_volume = None
-    _native_split_sort_key = None
+from smart_unpacker_native import (
+    list_regular_files_in_directory as _native_list_regular_files_in_directory,
+    relations_build_candidate_groups as _native_build_candidate_groups,
+    relations_detect_split_role as _native_detect_split_role,
+    relations_logical_name as _native_logical_name,
+    relations_parse_numbered_volume as _native_parse_numbered_volume,
+    relations_split_sort_key as _native_split_sort_key,
+)
 
 from smart_unpacker.contracts.filesystem import DirectorySnapshot, FileEntry
 from smart_unpacker.relations.internal.models import CandidateGroup, DirectoryFileIndex, FileRelation, SplitVolumeEntry
 from smart_unpacker.support.path_keys import case_key, normalized_path, path_key
 
 
-SPLIT_FIRST_PATTERNS = [
-    re.compile(r"\.part0*1\.(?:rar|exe)(?:\.[^.]+)?$", re.IGNORECASE),
-    re.compile(r"\.(7z|zip|rar)\.001(?:\.[^.]+)?$", re.IGNORECASE),
-    re.compile(r"\.001(?:\.[^.]+)?$", re.IGNORECASE),
-]
-
-SPLIT_MEMBER_PATTERN = re.compile(r"\.(part\d+\.(?:rar|exe)|\d{3})(?:\.[^.]+)?$", re.IGNORECASE)
-
-
 class RelationsGroupBuilder:
     FUZZY_TIME_WINDOW_NS = 24 * 60 * 60 * 1_000_000_000
 
     def build_candidate_groups(self, snapshot: DirectorySnapshot) -> List[CandidateGroup]:
-        native_groups = self._build_candidate_groups_native(snapshot)
-        if native_groups is not None:
-            return native_groups
-        return self._build_candidate_groups_python(snapshot)
-
-    def _build_candidate_groups_python(self, snapshot: DirectorySnapshot) -> List[CandidateGroup]:
-        dir_files: Dict[str, List[FileEntry]] = defaultdict(list)
-        for entry in snapshot.entries:
-            if not entry.is_dir:
-                parent = str(entry.path.parent)
-                dir_files[parent].append(entry)
-
-        groups: List[CandidateGroup] = []
-
-        for _, entries in dir_files.items():
-            directory_index = self._build_directory_index(entries)
-            relations = {
-                entry.path.name: self._build_file_relation(entry.path.name, directory_index.lower_names)
-                for entry in entries
-            }
-
-            logical_groups: Dict[str, List[FileEntry]] = defaultdict(list)
-            for entry in entries:
-                logical_groups[relations[entry.path.name].logical_name].append(entry)
-
-            for _, group_entries in logical_groups.items():
-                if not group_entries:
-                    continue
-
-                has_split_relation = any(relations[entry.path.name].is_split_related for entry in group_entries)
-                if has_split_relation:
-                    group_entries = [
-                        entry for entry in group_entries
-                        if relations[entry.path.name].is_split_related
-                    ]
-                    if not group_entries:
-                        continue
-                elif len(group_entries) > 1:
-                    for entry in group_entries:
-                        groups.append(self._build_group([entry], relations, directory_index))
-                    continue
-
-                groups.append(self._build_group(group_entries, relations, directory_index))
-
-        return groups
-
-    def _build_candidate_groups_native(self, snapshot: DirectorySnapshot) -> List[CandidateGroup] | None:
-        if _native_build_candidate_groups is None:
-            return None
         rows = []
         dir_files: Dict[str, List[FileEntry]] = defaultdict(list)
         for entry in snapshot.entries:
@@ -106,17 +40,14 @@ class RelationsGroupBuilder:
             directory: self._build_directory_index(entries)
             for directory, entries in dir_files.items()
         }
-        try:
-            native_groups = _native_build_candidate_groups(rows)
-        except Exception:
-            return None
+        native_groups = _native_build_candidate_groups(rows)
         groups: List[CandidateGroup] = []
         for raw in native_groups:
             if not isinstance(raw, dict):
-                return None
+                raise ValueError("native relations returned a non-object group")
             group = self._candidate_group_from_native(raw, directory_indexes)
             if group is None:
-                return None
+                raise ValueError("native relations returned an invalid group")
             groups.append(group)
         return groups
 
@@ -177,40 +108,10 @@ class RelationsGroupBuilder:
         )
 
     def detect_split_role(self, filename: str) -> Optional[str]:
-        if _native_detect_split_role is not None:
-            try:
-                return _native_detect_split_role(filename)
-            except Exception:
-                pass
-        if any(pattern.search(filename) for pattern in SPLIT_FIRST_PATTERNS):
-            return "first"
-        if SPLIT_MEMBER_PATTERN.search(filename):
-            return "member"
-        return None
+        return _native_detect_split_role(filename)
 
     def get_logical_name(self, filename: str, is_archive: bool = False) -> str:
-        if _native_logical_name is not None:
-            try:
-                return _native_logical_name(filename, is_archive)
-            except Exception:
-                pass
-        name, count = re.subn(r"\.part\d+\.(?:rar|exe)(?:\.[^.]+)?$", "", filename, flags=re.IGNORECASE)
-        if count > 0:
-            return name.strip().rstrip(".")
-
-        name, count = re.subn(r"\.(7z|zip|rar)\.\d{3}(?:\.[^.]+)?$", "", name, flags=re.IGNORECASE)
-        if count > 0:
-            return name.strip().rstrip(".")
-
-        name, count = re.subn(r"\.\d{3}$", "", name, flags=re.IGNORECASE)
-        if count > 0:
-            return name.strip().rstrip(".")
-
-        base, ext = os.path.splitext(filename)
-        if is_archive or ext.lower() in (".7z", ".rar", ".zip", ".gz", ".bz2", ".xz", ".exe"):
-            return base.strip().rstrip(".")
-
-        return filename.strip().rstrip(".")
+        return _native_logical_name(filename, is_archive)
 
     def build_file_relation(self, filename: str, sibling_names: Set[str]) -> FileRelation:
         return self._build_file_relation(filename, {name.lower() for name in sibling_names})
@@ -290,36 +191,7 @@ class RelationsGroupBuilder:
         )
 
     def parse_numbered_volume(self, path: str):
-        if _native_parse_numbered_volume is not None:
-            try:
-                return _native_parse_numbered_volume(path)
-            except Exception:
-                pass
-        match = re.search(r"^(?P<prefix>.+\.(?:7z|zip|rar))\.(?P<number>\d{3})$", path, re.IGNORECASE)
-        if not match:
-            match = re.search(r"^(?P<prefix>.+)\.part(?P<number>\d+)\.(?:rar|exe)$", path, re.IGNORECASE)
-            if not match:
-                match = re.search(r"^(?P<prefix>.+)\.(?P<number>\d{3})$", path, re.IGNORECASE)
-                if not match:
-                    return None
-                return {
-                    "prefix": match.group("prefix"),
-                    "number": int(match.group("number")),
-                    "style": "plain_numeric_suffix",
-                    "width": 3,
-                }
-            return {
-                "prefix": match.group("prefix"),
-                "number": int(match.group("number")),
-                "style": "rar_part",
-                "width": len(match.group("number")),
-            }
-        return {
-            "prefix": match.group("prefix"),
-            "number": int(match.group("number")),
-            "style": "numeric_suffix",
-            "width": 3,
-        }
+        return _native_parse_numbered_volume(path)
 
     def select_first_volume(self, paths: List[str]) -> str:
         if not paths:
@@ -402,22 +274,8 @@ class RelationsGroupBuilder:
         return False
 
     def split_sort_key(self, path: str) -> tuple[int, int, str]:
-        if _native_split_sort_key is not None:
-            try:
-                return _native_split_sort_key(normalized_path(path))
-            except Exception:
-                pass
-        parsed = self.parse_numbered_volume(normalized_path(path))
-        if parsed:
-            return (0, parsed["number"], path.lower())
-
-        lower_name = os.path.basename(path).lower()
-        match = re.search(r"\.r(\d{2})$", lower_name)
-        if match:
-            return (1, int(match.group(1)) + 2, path.lower())
-        if lower_name.endswith(".rar"):
-            return (1, 1, path.lower())
-        return (2, 0, path.lower())
+        raw = _native_split_sort_key(normalized_path(path))
+        return (int(raw[0]), int(raw[1]), str(raw[2]))
 
     def is_oldstyle_rar_head(self, path: str, lower_names: Set[str]) -> bool:
         lower_name = os.path.basename(path).lower()

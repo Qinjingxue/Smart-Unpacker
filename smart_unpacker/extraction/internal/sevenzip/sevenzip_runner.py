@@ -267,9 +267,9 @@ class SevenZipRunner:
             return ArchiveInputDescriptor.from_dict(raw, archive_path=archive_path, part_paths=part_paths)
         kind = str(raw.get("kind") or "file").lower()
         if kind == "file_range":
-            return ArchiveInputDescriptor.from_legacy(raw, archive_path=archive_path, part_paths=part_paths)
+            return ArchiveInputDescriptor.from_source_input(raw, archive_path=archive_path, part_paths=part_paths)
         if kind == "concat_ranges":
-            return ArchiveInputDescriptor.from_legacy(raw, archive_path=archive_path, part_paths=part_paths)
+            return ArchiveInputDescriptor.from_source_input(raw, archive_path=archive_path, part_paths=part_paths)
         return ArchiveInputDescriptor.from_parts(
             archive_path=archive_path,
             part_paths=list(part_paths or [archive_path]),

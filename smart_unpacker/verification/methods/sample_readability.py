@@ -2,10 +2,7 @@ from smart_unpacker.verification.evidence import VerificationEvidence
 from smart_unpacker.verification.registry import register_verification_method
 from smart_unpacker.verification.result import FileVerificationObservation, VerificationIssue, VerificationStepResult
 
-try:
-    from smart_unpacker_native import sample_directory_readability as _sample_directory_readability
-except Exception:  # pragma: no cover - depends on optional native build availability
-    _sample_directory_readability = None
+from smart_unpacker_native import sample_directory_readability as _sample_directory_readability
 
 
 @register_verification_method("sample_readability")
@@ -13,33 +10,9 @@ class SampleReadabilityMethod:
     name = "sample_readability"
 
     def verify(self, evidence: VerificationEvidence, config: dict) -> VerificationStepResult:
-        if _sample_directory_readability is None:
-            return VerificationStepResult(
-                method=self.name,
-                status="skipped",
-                issues=[VerificationIssue(
-                    method=self.name,
-                    code="warning.sample_readability_backend_unavailable",
-                    message="Rust sample readability backend is unavailable",
-                    path=evidence.output_dir,
-                )],
-            )
-
         max_samples = max(1, int(config.get("max_samples", 64) or 64))
         read_bytes = max(1, int(config.get("read_bytes", 4096) or 4096))
-        try:
-            sample = _sample_directory_readability(evidence.output_dir, max_samples, read_bytes)
-        except Exception as exc:
-            return VerificationStepResult(
-                method=self.name,
-                status="skipped",
-                issues=[VerificationIssue(
-                    method=self.name,
-                    code="warning.sample_readability_backend_error",
-                    message=f"Rust sample readability backend failed: {exc}",
-                    path=evidence.output_dir,
-                )],
-            )
+        sample = _sample_directory_readability(evidence.output_dir, max_samples, read_bytes)
 
         status = str(sample.get("status") or "")
         if status != "ok":

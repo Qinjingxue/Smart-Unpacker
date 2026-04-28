@@ -20,10 +20,7 @@ from smart_unpacker.verification.result import (
     VerificationStepResult,
 )
 
-try:
-    from smart_unpacker_native import compute_directory_crc_manifest as _compute_directory_crc_manifest
-except Exception:  # pragma: no cover - depends on optional native build availability
-    _compute_directory_crc_manifest = None
+from smart_unpacker_native import compute_directory_crc_manifest as _compute_directory_crc_manifest
 
 
 @register_verification_method("archive_test_crc")
@@ -41,31 +38,7 @@ class ArchiveTestCrcMethod:
         archive_files = [item for item in archive_manifest.files if isinstance(item, dict) and item.get("path")]
         if not archive_files:
             return VerificationStepResult(method=self.name, status="skipped")
-        if _compute_directory_crc_manifest is None:
-            return VerificationStepResult(
-                method=self.name,
-                status="skipped",
-                issues=[VerificationIssue(
-                    method=self.name,
-                    code="warning.output_crc_backend_unavailable",
-                    message="Rust output CRC backend is unavailable",
-                    path=evidence.output_dir,
-                )],
-            )
-
-        try:
-            output_manifest = _compute_directory_crc_manifest(evidence.output_dir, max_items)
-        except Exception as exc:
-            return VerificationStepResult(
-                method=self.name,
-                status="skipped",
-                issues=[VerificationIssue(
-                    method=self.name,
-                    code="warning.output_crc_backend_error",
-                    message=f"Output CRC backend failed: {exc}",
-                    path=evidence.output_dir,
-                )],
-            )
+        output_manifest = _compute_directory_crc_manifest(evidence.output_dir, max_items)
 
         status = str(output_manifest.get("status") or "")
         if status != "ok":

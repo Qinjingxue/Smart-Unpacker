@@ -147,7 +147,7 @@ def test_verification_evidence_uses_archive_password_fact_when_session_has_none(
     assert verification.completeness == 1.0
 
 
-def test_verification_config_is_normalized_without_legacy_score_fields():
+def test_verification_config_supplies_completeness_threshold_defaults():
     config = normalize_config({
         "recursive_extract": "1",
         "verification": {

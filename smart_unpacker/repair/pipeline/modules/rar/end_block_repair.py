@@ -3,12 +3,10 @@ from __future__ import annotations
 from smart_unpacker.repair.diagnosis import RepairDiagnosis
 from smart_unpacker.repair.job import RepairJob
 from smart_unpacker.repair.pipeline.module import RepairModuleSpec, RepairRoute
-from smart_unpacker.repair.pipeline.modules._common import load_source_bytes, patch_plan_for_crop_append, source_input_for_job, write_candidate
+from smart_unpacker.repair.pipeline.modules._common import patch_plan_for_crop_append, source_input_for_job
 from smart_unpacker.repair.pipeline.modules.archive_carrier_crop import _result_from_native
 from smart_unpacker.repair.pipeline.modules._native_candidates import candidates_from_native_result
-from smart_unpacker.repair.candidate import CandidateValidation, RepairCandidate
 from smart_unpacker.repair.pipeline.registry import register_repair_module
-from smart_unpacker.repair.pipeline.modules.rar._structure import walk_rar_blocks
 
 from smart_unpacker_native import rar_end_block_repair as _native_rar_end_block_repair
 
@@ -60,8 +58,7 @@ class RarEndBlockRepair:
         )
         if candidates:
             return candidates
-        fallback = _fallback_end_block_candidate(self.spec.name, job, diagnosis, workspace)
-        return [fallback] if fallback is not None else []
+        return []
 
     def _run_native(self, job: RepairJob, workspace: str, config: dict) -> dict:
         deep = config.get("deep") if isinstance(config.get("deep"), dict) else {}
@@ -110,49 +107,6 @@ def _rar_end_block_for_actions(actions: list[str]) -> bytes:
     if "append_rar5_end_block" in actions:
         return _rar5_end_block()
     return b""
-
-
-def _fallback_end_block_candidate(module_name: str, job: RepairJob, diagnosis: RepairDiagnosis, workspace: str) -> RepairCandidate | None:
-    try:
-        data = load_source_bytes(source_input_for_job(job))
-    except (OSError, ValueError):
-        return None
-    walk = walk_rar_blocks(data)
-    if walk is None or walk.end_block_found:
-        return None
-    offset = int(walk.last_complete_offset or 0)
-    if offset <= 0 or offset > len(data):
-        return None
-    actions = ["append_rar5_end_block" if walk.version == 5 else "append_rar4_end_block"]
-    end_block = _rar_end_block_for_actions(actions)
-    if not end_block:
-        return None
-    repaired = data[:offset] + end_block
-    path = write_candidate(repaired, workspace, "rar_end_block_repair.rar")
-    return RepairCandidate(
-        module_name=module_name,
-        format="rar",
-        repaired_input={"kind": "file", "path": path, "format_hint": "rar"},
-        status="repaired",
-        stage="deep",
-        confidence=0.82,
-        actions=[*actions, "crop_trailing_bytes_before_end_block"],
-        damage_flags=list(job.damage_flags),
-        workspace_paths=[path],
-        diagnosis={
-            **diagnosis.as_dict(),
-            "native_archive_deep_repair": {"status": "fallback", "last_complete_offset": offset, "version": walk.version},
-        },
-        message="RAR end-block repair appended a missing end block after the last complete block",
-        validations=[
-            CandidateValidation(
-                name="rar_end_block_fallback",
-                accepted=True,
-                score=0.82,
-                details={"version": walk.version, "last_complete_offset": offset, "input_bytes": len(data), "output_bytes": len(repaired)},
-            )
-        ],
-    )
 
 
 def _rar4_end_block() -> bytes:

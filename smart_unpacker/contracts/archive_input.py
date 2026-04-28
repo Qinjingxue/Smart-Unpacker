@@ -103,7 +103,7 @@ class ArchiveInputDescriptor:
             payload["analysis"] = dict(self.analysis)
         return payload
 
-    def to_legacy_source_input(self) -> dict[str, Any]:
+    def to_source_input(self) -> dict[str, Any]:
         if self.open_mode == "file":
             return {"kind": "file", "path": self.entry_path, "format_hint": self.format_hint}
         if self.open_mode == "file_range":
@@ -246,7 +246,7 @@ class ArchiveInputDescriptor:
         )
 
     @classmethod
-    def from_legacy(cls, raw: dict[str, Any], *, archive_path: str, part_paths: list[str] | None = None) -> "ArchiveInputDescriptor":
+    def from_source_input(cls, raw: dict[str, Any], *, archive_path: str, part_paths: list[str] | None = None) -> "ArchiveInputDescriptor":
         kind = str(raw.get("kind") or "file").lower()
         format_hint = str(raw.get("format_hint") or raw.get("format") or "")
         if kind == "file":
@@ -326,7 +326,7 @@ class ArchiveInputDescriptor:
             if raw.get("kind") == "archive_input" or raw.get("open_mode"):
                 descriptor = cls.from_dict(raw, archive_path=archive_path, part_paths=part_paths)
             else:
-                descriptor = cls.from_legacy(raw, archive_path=archive_path, part_paths=part_paths)
+                descriptor = cls.from_source_input(raw, archive_path=archive_path, part_paths=part_paths)
             if not descriptor.format_hint and format_hint:
                 return cls(
                     entry_path=descriptor.entry_path,

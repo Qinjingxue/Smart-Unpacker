@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from smart_unpacker_native import scan_output_tree as _native_scan_output_tree
 
-from smart_unpacker.support.path_names import clean_relative_archive_path, normalize_match_name, normalize_match_path
+from smart_unpacker.support.path_names import clean_relative_archive_path, normalize_match_path
 from smart_unpacker.verification.result import FileVerificationObservation, VerificationIssue
 
 
@@ -34,11 +33,10 @@ def coverage_from_archive_and_output(
     *,
     method: str,
     issues_by_path: dict[str, list[VerificationIssue]] | None = None,
-    allow_basename_fallback: bool = True,
 ) -> ArchiveOutputCoverage:
     expected = [_archive_item(item) for item in archive_files if isinstance(item, dict)]
     expected = [item for item in expected if item["path"]]
-    output_by_path, output_by_name = _index_output_files(output_files)
+    output_by_path = _index_output_files(output_files)
     issues_by_path = issues_by_path or {}
 
     observations: list[FileVerificationObservation] = []
@@ -60,9 +58,6 @@ def coverage_from_archive_and_output(
             expected_bytes += max(0, expected_size)
 
         output_item = output_by_path.get(normalize_match_path(expected_path))
-        if output_item is None and allow_basename_fallback:
-            output_item = output_by_name.get(normalize_match_name(os.path.basename(expected_path)))
-
         item_issues = list(issues_by_path.get(expected_path) or [])
         if output_item is None:
             missing_files += 1
@@ -195,10 +190,8 @@ def _archive_item(item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _index_output_files(files: list[dict[str, Any]]) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+def _index_output_files(files: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     by_path: dict[str, dict[str, Any]] = {}
-    by_name: dict[str, dict[str, Any]] = {}
-    duplicate_names = set()
     for raw in files:
         if not isinstance(raw, dict):
             continue
@@ -209,16 +202,7 @@ def _index_output_files(files: list[dict[str, Any]]) -> tuple[dict[str, dict[str
         item["path"] = path
         item["_matched_by"] = "path"
         by_path[normalize_match_path(path)] = item
-        name = normalize_match_name(os.path.basename(path))
-        if name in by_name:
-            duplicate_names.add(name)
-        else:
-            basename_item = dict(item)
-            basename_item["_matched_by"] = "basename"
-            by_name[name] = basename_item
-    for name in duplicate_names:
-        by_name.pop(name, None)
-    return by_path, by_name
+    return by_path
 
 
 def _size_progress(actual_size: int | None, expected_size: int | None) -> float | None:

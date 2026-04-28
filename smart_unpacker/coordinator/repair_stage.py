@@ -91,11 +91,11 @@ class ArchiveRepairStage:
         task.fact_bag.set("repair.module", result.module_name)
         descriptor = self._descriptor_from_repaired_input(task, result.repaired_input or {})
         if result.repaired_state is not None:
-            task.set_archive_state(result.repaired_state, sync_compat=False)
+            task.set_archive_state(result.repaired_state)
         elif descriptor is None:
             return result
         else:
-            task.set_archive_state(ArchiveState.from_archive_input(descriptor), sync_compat=False)
+            task.set_archive_state(ArchiveState.from_archive_input(descriptor))
         if job.password is not None:
             task.fact_bag.set("archive.password", job.password)
         task.fact_bag.set("archive.repaired", True)
@@ -260,7 +260,7 @@ class ArchiveRepairStage:
 
     def _source_input_from_task(self, task: ArchiveTask, *, format_hint: str = "") -> dict[str, Any] | None:
         descriptor = task.archive_state().to_archive_input_descriptor()
-        source_input = descriptor.to_legacy_source_input()
+        source_input = descriptor.to_source_input()
         if source_input:
             if format_hint and not source_input.get("format_hint"):
                 source_input["format_hint"] = format_hint
@@ -318,7 +318,7 @@ class ArchiveRepairStage:
                 analysis={"source": "repair", "module": task.fact_bag.get("repair.module", "")},
             )
         if kind in {"file_range", "concat_ranges"}:
-            return ArchiveInputDescriptor.from_legacy(repaired_input, archive_path=task.main_path, part_paths=list(task.all_parts or []))
+            return ArchiveInputDescriptor.from_source_input(repaired_input, archive_path=task.main_path, part_paths=list(task.all_parts or []))
         return None
 
     def _failure_payload(self, task: ArchiveTask, result: ExtractionResult) -> dict[str, Any]:

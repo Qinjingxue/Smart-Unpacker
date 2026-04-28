@@ -459,7 +459,7 @@ pub(crate) fn rar_end_block_repair(
     let mut written = Vec::new();
     let mut skipped_warnings = Vec::new();
     for walk in walks {
-        if walk.end_block_found || walk.last_complete_end != data.len() || walk.missing_volume || !walk.last_block_can_precede_end {
+        if walk.end_block_found || walk.missing_volume || !walk.last_block_can_precede_end {
             skipped_warnings.extend(walk.warnings);
             continue;
         }
@@ -483,6 +483,10 @@ pub(crate) fn rar_end_block_repair(
             RarVersion::Rar4 => "append_rar4_end_block",
             RarVersion::Rar5 => "append_rar5_end_block",
         };
+        let mut actions = vec![action.to_string()];
+        if walk.last_complete_end < data.len() {
+            actions.push("crop_trailing_bytes_before_end_block".to_string());
+        }
         written.push(WrittenArchiveCandidate {
             name: format!("end_block_repair_{:08x}", walk.offset),
             path: output_path.to_string_lossy().to_string(),
@@ -492,7 +496,7 @@ pub(crate) fn rar_end_block_repair(
             end_offset: (walk.last_complete_end + end_block.len()) as u64,
             output_bytes,
             confidence: 0.82,
-            actions: vec![action.to_string()],
+            actions,
             warnings: walk.warnings,
         });
     }

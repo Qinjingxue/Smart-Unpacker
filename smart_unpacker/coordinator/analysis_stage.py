@@ -114,7 +114,7 @@ class ArchiveAnalysisStage:
         task.fact_bag.set("analysis.segment_index", index)
         task.fact_bag.set("analysis.segment", segment_payload)
         if archive_input:
-            task.set_archive_state(ArchiveState.from_archive_input(archive_input), sync_compat=False)
+            task.set_archive_state(ArchiveState.from_archive_input(archive_input))
 
     def _record_report(self, task: ArchiveTask, report: ArchiveAnalysisReport) -> None:
         task.fact_bag.set("analysis.status", "extractable" if report.has_extractable else "not_extractable")
@@ -162,7 +162,6 @@ class ArchiveAnalysisStage:
                 analysis=analysis,
                 verification=dict(state.verification),
             ),
-            sync_compat=False,
         )
 
     def _extractable_segments(self, report: ArchiveAnalysisReport) -> list[tuple[ArchiveFormatEvidence, ArchiveSegment, int]]:

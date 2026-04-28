@@ -1,4 +1,5 @@
-import os
+from smart_unpacker_native import batch_file_head_facts as _native_batch_file_head_facts
+
 from smart_unpacker.detection.pipeline.facts.registry import register_batch_fact, register_fact
 from smart_unpacker.support.path_keys import path_key
 
@@ -27,10 +28,10 @@ def collect_file_size(context) -> int:
         size = facts.get("size")
         if isinstance(size, int):
             return size
-    try:
-        return os.path.getsize(base_path)
-    except OSError:
-        return -1
+    rows = _native_batch_file_head_facts([base_path], 0)
+    if rows and isinstance(rows[0], dict) and isinstance(rows[0].get("size"), int):
+        return int(rows[0]["size"])
+    return -1
 
 
 @register_batch_fact("file.size")
@@ -57,7 +58,8 @@ def collect_file_size_batch(context) -> None:
         if isinstance(size, int):
             bag.set(context.fact_name, size)
             continue
-        try:
-            bag.set(context.fact_name, os.path.getsize(path))
-        except OSError:
+        rows = _native_batch_file_head_facts([path], 0)
+        if rows and isinstance(rows[0], dict) and isinstance(rows[0].get("size"), int):
+            bag.set(context.fact_name, int(rows[0]["size"]))
+        else:
             bag.set(context.fact_name, -1)

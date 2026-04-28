@@ -79,7 +79,7 @@ def test_analysis_reads_non_empty_patch_state(tmp_path):
     )
     bag = FactBag()
     task = ArchiveTask(fact_bag=bag, score=10, main_path=str(archive), all_parts=[str(archive)], detected_ext="zip")
-    task.set_archive_state(state, sync_compat=False)
+    task.set_archive_state(state)
 
     report = ArchiveAnalysisScheduler({"analysis": {"fuzzy": {"enabled": False}}}).analyze_task(task)
 

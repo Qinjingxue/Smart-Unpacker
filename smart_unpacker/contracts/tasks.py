@@ -161,10 +161,10 @@ class ArchiveTask:
 
     def ensure_archive_state(self) -> "ArchiveTask":
         if not isinstance(self.fact_bag.get("archive.state"), dict):
-            self.set_archive_state(self.archive_state(), sync_compat=False)
+            self.set_archive_state(self.archive_state())
         return self
 
-    def set_archive_input(self, descriptor: ArchiveInputDescriptor | dict, *, sync_compat: bool = True) -> None:
+    def set_archive_input(self, descriptor: ArchiveInputDescriptor | dict) -> None:
         if isinstance(descriptor, dict):
             descriptor = ArchiveInputDescriptor.from_any(
                 descriptor,
@@ -175,12 +175,9 @@ class ArchiveTask:
             )
         self.fact_bag.set("archive.input", descriptor.to_dict())
         self.fact_bag.set("archive.descriptor.source", descriptor.to_dict())
-        self._store_archive_state(ArchiveState.from_archive_input(descriptor), sync_compat=False)
-        if not sync_compat:
-            return
-        self._sync_descriptor_compat(descriptor)
+        self._store_archive_state(ArchiveState.from_archive_input(descriptor))
 
-    def set_archive_state(self, state: ArchiveState | dict, *, sync_compat: bool = False) -> None:
+    def set_archive_state(self, state: ArchiveState | dict) -> None:
         if isinstance(state, dict):
             state = ArchiveState.from_any(
                 state,
@@ -190,22 +187,13 @@ class ArchiveTask:
                 logical_name=str(self.logical_name or ""),
                 archive_input=self.fact_bag.get("archive.input"),
             )
-        self._store_archive_state(state, sync_compat=sync_compat)
+        self._store_archive_state(state)
 
-    def _store_archive_state(self, state: ArchiveState, *, sync_compat: bool) -> None:
+    def _store_archive_state(self, state: ArchiveState) -> None:
         self.fact_bag.set("archive.state", state.to_dict())
         self.fact_bag.set("archive.source", state.source.to_dict())
         self.fact_bag.set("archive.patch_stack", [patch.to_dict() for patch in state.patches])
         self.fact_bag.set("archive.patch_digest", state.effective_patch_digest())
-        if sync_compat:
-            descriptor = state.to_archive_input_descriptor()
-            self.fact_bag.set("archive.input", descriptor.to_dict())
-            self.fact_bag.set("archive.descriptor.source", descriptor.to_dict())
-            self._sync_descriptor_compat(descriptor)
-
-    def _sync_descriptor_compat(self, descriptor: ArchiveInputDescriptor) -> None:
-        if descriptor.format_hint:
-            self.fact_bag.set("archive.format_hint", descriptor.format_hint)
 
     def archive_descriptor(self) -> ArchiveDescriptor:
         source = self.archive_state().to_archive_input_descriptor()

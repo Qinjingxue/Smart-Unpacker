@@ -5,20 +5,23 @@ import bz2
 import gzip
 import hashlib
 import io
+import json
 import lzma
 import random
 import struct
+import subprocess
 import tarfile
 import zipfile
+import zlib
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from smart_unpacker.contracts.archive_input import ArchiveInputDescriptor
 from smart_unpacker.contracts.archive_state import PatchOperation, PatchPlan
 
 
-ArchiveFormat = Literal["zip", "tar", "gzip", "bzip2", "xz"]
+ArchiveFormat = Literal["zip", "tar", "gzip", "bzip2", "xz", "7z", "rar"]
 
 
 @dataclass(frozen=True)
@@ -55,7 +58,10 @@ class CorruptionCase:
     expected_module: str = ""
     expected_files: dict[str, bytes] = field(default_factory=dict)
     expected_payload: bytes = b""
+    expected_bytes: bytes = b""
     output_required: bool = True
+    builder_call: str = ""
+    password: str | None = None
 
     @property
     def patch_plan(self) -> PatchPlan:
@@ -76,6 +82,47 @@ class CorruptionCase:
 
     def mutation_summary(self) -> list[dict]:
         return [mutation.to_dict() for mutation in self.mutations]
+
+    def diagnostic_report(self, repair_result: Any = None) -> dict:
+        report = {
+            "seed": self.seed,
+            "case_id": self.case_id,
+            "format": self.format,
+            "corrupted_sha256": self.corrupted_sha256,
+            "source_input": _source_input_summary(self.source_input),
+            "clean_source_input": _source_input_summary(self.clean_source_input),
+            "damage_flags": list(self.damage_flags),
+            "oracle": {
+                "expected_statuses": list(self.expected_statuses),
+                "expected_module": self.expected_module,
+                "output_required": self.output_required,
+                "expected_files": sorted(self.expected_files),
+                "expected_payload_bytes": len(self.expected_payload),
+                "expected_bytes": len(self.expected_bytes),
+                "password_present": self.password is not None,
+            },
+            "mutations": self.mutation_summary(),
+            "patch_plan": self.patch_plan.to_dict(),
+            "regression_snippet": self.regression_snippet(),
+        }
+        if repair_result is not None:
+            report["repair_result"] = repair_result_summary(repair_result)
+        return report
+
+    def diagnostic_json(self, repair_result: Any = None) -> str:
+        return json.dumps(self.diagnostic_report(repair_result), ensure_ascii=True, indent=2, sort_keys=True)
+
+    def regression_snippet(self, root_expr: str = "tmp_path / \"case\"") -> str:
+        builder = self.builder_call or f"{self.case_id}(root)"
+        return "\n".join([
+            "from tests.helpers.binary_corruptor import BinaryCorruptor, apply_mutations",
+            "",
+            f"root = {root_expr}",
+            f"case = BinaryCorruptor({self.seed}).{builder}",
+            f"assert case.case_id == {self.case_id!r}",
+            f"assert case.corrupted_sha256 == {self.corrupted_sha256!r}",
+            "assert apply_mutations(case.clean_data, case.mutations) == case.corrupted_data",
+        ])
 
     def archive_state_input(self):
         descriptor = ArchiveInputDescriptor.from_any(
@@ -411,6 +458,79 @@ class BinaryCorruptor:
             expected_payload=payload,
         )
 
+    def seven_zip_start_next_crc_tail(self, root: Path) -> CorruptionCase:
+        clean = _seven_zip_bytes(minor=3, next_header=b"\x01\x02")
+        start_header = bytearray(clean[12:32])
+        start_header[16:20] = struct.pack("<I", 0)
+        bad_start_crc = struct.pack("<I", zlib_crc32(start_header))
+        mutations = [
+            _replace_bytes("bad_7z_start_crc", 8, b"\0\0\0\0", "7z.start_header_crc", "start header CRC must be recomputed"),
+            _replace_bytes("bad_7z_next_crc", 28, b"\0\0\0\0", "7z.next_header_crc", "next header CRC must be rewritten"),
+            _replace_bytes("sync_7z_start_crc_to_bad_header", 8, bad_start_crc, "7z.start_header_crc", "start CRC tracks the intentionally bad next CRC"),
+            _append("append_7z_crc_tail_noise", self._junk("7Z-JUNK", 4, 12), "archive.tail", "CRC repair must preserve logical stream"),
+        ]
+        corrupted = apply_mutations(clean, mutations)
+        return self._write_case(
+            root,
+            "seven-crc-tail.7z",
+            "seven_zip_start_next_crc_tail",
+            "7z",
+            clean,
+            corrupted,
+            mutations,
+            damage_flags=["start_header_crc_bad", "next_header_crc_bad", "trailing_junk"],
+            expected_statuses=("repaired",),
+            expected_module="seven_zip_crc_field_repair",
+            expected_bytes=clean,
+        )
+
+    def seven_zip_fake_magic_sfx(self, root: Path) -> CorruptionCase:
+        clean = _seven_zip_bytes()
+        prefix = b"MZ-FAKE-7Z" + b"7z\xbc\xaf\x27\x1c" + b"\xff\xffNOT-A-HEADER" + self._junk("SFX", 3, 8)
+        mutations = [
+            _insert("insert_fake_7z_sfx_prefix", 0, prefix, "7z.sfx.fake_magic", "boundary repair must ignore fake 7z magic"),
+            _append("append_7z_sfx_tail", self._junk("7Z-SFX", 4, 10), "archive.tail", "boundary repair must crop tail"),
+        ]
+        corrupted = apply_mutations(clean, mutations)
+        return self._write_case(
+            root,
+            "seven-fake-sfx.exe",
+            "seven_zip_fake_magic_sfx",
+            "7z",
+            clean,
+            corrupted,
+            mutations,
+            damage_flags=["carrier_archive", "sfx", "boundary_unreliable", "trailing_junk"],
+            expected_statuses=("repaired",),
+            expected_module="seven_zip_precise_boundary_repair",
+            expected_bytes=clean,
+        )
+
+    def rar5_sfx_missing_end_tail(self, root: Path) -> CorruptionCase:
+        clean = _rar5_bytes(file_payload=b"rar payload")
+        without_end = RAR5_MAGIC + _rar5_block(1) + _rar5_block(2, data=b"rar payload")
+        prefix = b"MZ-RAR-SFX" + self._junk("RAR", 4, 10)
+        tail = self._junk("RAR-TAIL", 4, 10)
+        mutations = [
+            _truncate("drop_rar5_end_block", len(without_end), "rar.end_block", "end block must be restored"),
+            _insert("insert_rar5_sfx_prefix", 0, prefix, "rar.sfx.prefix", "carrier crop must find real RAR"),
+            _append("append_rar5_tail_noise", tail, "archive.tail", "tail should be trimmed after carrier crop"),
+        ]
+        corrupted = apply_mutations(clean, mutations)
+        return self._write_case(
+            root,
+            "rar5-sfx-missing-end.exe",
+            "rar5_sfx_missing_end_tail",
+            "rar",
+            clean,
+            corrupted,
+            mutations,
+            damage_flags=["carrier_archive", "sfx", "boundary_unreliable", "trailing_junk"],
+            expected_statuses=("repaired",),
+            expected_module="rar_carrier_crop_deep_recovery",
+            expected_bytes=without_end,
+        )
+
     def raw_binary_perturbation(self, root: Path, fmt: ArchiveFormat = "zip", *, budget: int = 5) -> CorruptionCase:
         clean = _clean_archive_bytes(fmt, self.seed)
         mutations = self.raw_binary_mutations(clean, budget=budget, label_prefix=f"raw_{fmt}")
@@ -426,6 +546,69 @@ class BinaryCorruptor:
             damage_flags=["damaged", "checksum_error", "boundary_unreliable"],
             expected_statuses=("repaired", "partial", "unrepairable", "unsupported"),
             output_required=False,
+            builder_call=f'raw_binary_perturbation(root, "{fmt}", budget={budget})',
+        )
+
+    def zone_aware_raw_perturbation(self, root: Path, fmt: ArchiveFormat = "zip") -> CorruptionCase:
+        clean = _clean_archive_bytes(fmt, self.seed)
+        mutations = self.zone_aware_raw_mutations(clean, fmt=fmt)
+        corrupted = apply_mutations(clean, mutations)
+        return self._write_case(
+            root,
+            f"zone-{fmt}-perturbed.{_extension_for_format(fmt)}",
+            f"zone_{fmt}_raw_perturbation",
+            fmt,
+            clean,
+            corrupted,
+            mutations,
+            damage_flags=["damaged", "checksum_error", "boundary_unreliable"],
+            expected_statuses=("repaired", "partial", "unrepairable", "unsupported"),
+            output_required=False,
+            builder_call=f'zone_aware_raw_perturbation(root, "{fmt}")',
+        )
+
+    def encrypted_zip_trailing_junk(self, root: Path, *, password: str = "secret") -> CorruptionCase:
+        clean = _build_encrypted_zip(root, password=password)
+        tail = self._junk("ENC-ZIP-JUNK", 5, 15)
+        mutations = [
+            _append("append_encrypted_zip_tail_noise", tail, "zip.encrypted.tail", "encrypted archive should still be structurally repairable with password"),
+        ]
+        corrupted = apply_mutations(clean, mutations)
+        return self._write_case(
+            root,
+            "encrypted-tail.zip",
+            "encrypted_zip_trailing_junk",
+            "zip",
+            clean,
+            corrupted,
+            mutations,
+            damage_flags=["trailing_junk"],
+            expected_statuses=("repaired",),
+            expected_module="zip_trailing_junk_trim",
+            output_required=False,
+            password=password,
+            builder_call=f'encrypted_zip_trailing_junk(root, password="{password}")',
+        )
+
+    def encrypted_zip_payload_bad_unknown_password(self, root: Path, *, password: str = "secret") -> CorruptionCase:
+        clean = _build_encrypted_zip(root, password=password)
+        payload_offset = max(0, len(clean) // 2)
+        mutations = [
+            _replace_byte("flip_encrypted_zip_payload_byte", payload_offset, clean[payload_offset] ^ 0x44, "zip.encrypted.payload", "without password this must not be misreported as repaired"),
+        ]
+        corrupted = apply_mutations(clean, mutations)
+        return self._write_case(
+            root,
+            "encrypted-payload-bad.zip",
+            "encrypted_zip_payload_bad_unknown_password",
+            "zip",
+            clean,
+            corrupted,
+            mutations,
+            damage_flags=["checksum_error", "crc_error", "damaged"],
+            expected_statuses=("needs_password", "unrepairable", "unsupported"),
+            output_required=False,
+            builder_call=f'encrypted_zip_payload_bad_unknown_password(root, password="{password}")',
         )
 
     def zip_multipart_tail_noise(self, root: Path) -> CorruptionCase:
@@ -453,6 +636,7 @@ class BinaryCorruptor:
             expected_statuses=("repaired",),
             expected_module="zip_trailing_junk_trim",
             expected_files=entries,
+            builder_call="zip_multipart_tail_noise(root)",
         )
 
     def zip_multipart_missing_middle(self, root: Path) -> CorruptionCase:
@@ -482,6 +666,7 @@ class BinaryCorruptor:
             damage_flags=["missing_volume", "input_truncated", "central_directory_bad", "checksum_error", "trailing_junk"],
             expected_statuses=("unrepairable", "unsupported"),
             output_required=False,
+            builder_call="zip_multipart_missing_middle(root)",
         )
 
     def raw_binary_mutations(self, data: bytes, *, budget: int, label_prefix: str = "raw") -> list[BinaryMutation]:
@@ -508,6 +693,21 @@ class BinaryCorruptor:
                 output.append(_truncate(f"{label_prefix}_truncate_tail_{index}", offset, "raw.truncate", "arbitrary tail truncated"))
         return output
 
+    def zone_aware_raw_mutations(self, data: bytes, *, fmt: ArchiveFormat) -> list[BinaryMutation]:
+        zones = _semantic_zones(data, fmt)
+        output: list[BinaryMutation] = []
+        for zone_name in ("header", "payload", "footer", "boundary"):
+            start, end = zones[zone_name]
+            if end <= start:
+                continue
+            offset = self.random.randrange(start, end)
+            output.append(_replace_byte(f"zone_{fmt}_{zone_name}_flip", offset, data[offset] ^ 0x21, f"{fmt}.{zone_name}", f"{zone_name} byte changed"))
+        fake_magic = _fake_magic_for_format(fmt)
+        insert_at = zones["boundary"][0]
+        if fake_magic:
+            output.append(_insert(f"zone_{fmt}_insert_fake_magic", insert_at, fake_magic + self._junk("FAKE", 2, 6), f"{fmt}.boundary.fake_magic", "fake archive magic inserted at semantic boundary"))
+        return output
+
     def combine_mutations(self, *groups: list[BinaryMutation]) -> list[BinaryMutation]:
         combined: list[BinaryMutation] = []
         for group_index, group in enumerate(groups):
@@ -529,6 +729,9 @@ class BinaryCorruptor:
             self.xz_trailing_junk(root / "xz"),
             self.zip_multipart_tail_noise(root / "zip_multipart_tail"),
             self.zip_multipart_missing_middle(root / "zip_multipart_missing"),
+            self.seven_zip_start_next_crc_tail(root / "7z_crc"),
+            self.seven_zip_fake_magic_sfx(root / "7z_sfx"),
+            self.rar5_sfx_missing_end_tail(root / "rar_sfx"),
         ]
 
     def _junk(self, prefix: str, min_len: int, max_len: int) -> bytes:
@@ -557,7 +760,10 @@ class BinaryCorruptor:
         expected_module: str = "",
         expected_files: dict[str, bytes] | None = None,
         expected_payload: bytes = b"",
+        expected_bytes: bytes = b"",
         output_required: bool = True,
+        builder_call: str = "",
+        password: str | None = None,
     ) -> CorruptionCase:
         root.mkdir(parents=True, exist_ok=True)
         clean_path = root / f"clean-{filename}"
@@ -578,7 +784,10 @@ class BinaryCorruptor:
             expected_module=expected_module,
             expected_files=dict(expected_files or {}),
             expected_payload=expected_payload,
+            expected_bytes=expected_bytes,
             output_required=output_required,
+            builder_call=builder_call or f"{case_id}(root)",
+            password=password,
         )
 
     def _write_multipart_case(
@@ -622,7 +831,29 @@ def apply_mutations(data: bytes, mutations: list[BinaryMutation]) -> bytes:
     return bytes(output)
 
 
+def repair_result_summary(result: Any) -> dict:
+    repaired_input = getattr(result, "repaired_input", None)
+    diagnosis = getattr(result, "diagnosis", None)
+    return {
+        "status": str(getattr(result, "status", "")),
+        "ok": bool(getattr(result, "ok", False)),
+        "module_name": str(getattr(result, "module_name", "")),
+        "format": str(getattr(result, "format", "")),
+        "confidence": float(getattr(result, "confidence", 0.0) or 0.0),
+        "partial": bool(getattr(result, "partial", False)),
+        "message": str(getattr(result, "message", "")),
+        "actions": list(getattr(result, "actions", []) or []),
+        "warnings": list(getattr(result, "warnings", []) or []),
+        "damage_flags": list(getattr(result, "damage_flags", []) or []),
+        "repaired_input": _source_input_summary(repaired_input if isinstance(repaired_input, dict) else {}),
+        "diagnosis": _diagnosis_summary(diagnosis if isinstance(diagnosis, dict) else {}),
+    }
+
+
 def verify_corruption_case_output(case: CorruptionCase, path: Path) -> None:
+    if case.expected_bytes:
+        assert path.read_bytes() == case.expected_bytes
+        return
     if case.format == "zip":
         with zipfile.ZipFile(path) as archive:
             assert sorted(archive.namelist()) == sorted(case.expected_files)
@@ -648,6 +879,63 @@ def verify_corruption_case_output(case: CorruptionCase, path: Path) -> None:
         assert lzma.decompress(path.read_bytes()) == case.expected_payload
         return
     raise AssertionError(f"unsupported verification format: {case.format}")
+
+
+def _source_input_summary(source_input: dict) -> dict:
+    kind = str(source_input.get("kind") or source_input.get("open_mode") or "")
+    summary = {
+        "kind": kind,
+        "format_hint": str(source_input.get("format_hint") or source_input.get("format") or ""),
+    }
+    path = str(source_input.get("path") or source_input.get("entry_path") or "")
+    if path:
+        summary["path_name"] = Path(path).name
+    ranges = source_input.get("ranges")
+    if isinstance(ranges, list):
+        summary["range_count"] = len(ranges)
+        summary["range_path_names"] = [
+            Path(str(item.get("path") or "")).name
+            for item in ranges
+            if isinstance(item, dict) and item.get("path")
+        ]
+    parts = source_input.get("parts")
+    if isinstance(parts, list):
+        summary["part_count"] = len(parts)
+        summary["part_path_names"] = [
+            Path(str(item.get("path") or "")).name
+            for item in parts
+            if isinstance(item, dict) and item.get("path")
+        ]
+    return {
+        key: value
+        for key, value in summary.items()
+        if value != "" and value != [] and value != 0
+    }
+
+
+def _diagnosis_summary(diagnosis: dict) -> dict:
+    capability = diagnosis.get("repair_capability") if isinstance(diagnosis.get("repair_capability"), dict) else {}
+    coverage = diagnosis.get("archive_coverage") if isinstance(diagnosis.get("archive_coverage"), dict) else {}
+    return {
+        "status": diagnosis.get("status"),
+        "format": diagnosis.get("format"),
+        "confidence": diagnosis.get("confidence"),
+        "repairable": diagnosis.get("repairable"),
+        "categories": list(diagnosis.get("categories") or []),
+        "damage_flags": list(diagnosis.get("damage_flags") or []),
+        "notes": list(diagnosis.get("notes") or []),
+        "archive_coverage": {
+            key: coverage.get(key)
+            for key in ("completeness", "recoverable_upper_bound", "complete_files", "partial_files", "failed_files", "missing_files")
+            if key in coverage
+        },
+        "repair_capability": {
+            key: capability.get(key)
+            for key in ("automatic_unrepairable", "reason", "reasons", "message")
+            if key in capability
+        },
+        "diagnosis_keys": sorted(str(key) for key in diagnosis),
+    }
 
 
 def _replace_byte(name: str, offset: int, value: int, zone: str, expected_effect: str) -> BinaryMutation:
@@ -753,6 +1041,52 @@ def _pseudo_random_payload(seed: int, size: int) -> bytes:
     return generator.randbytes(size)
 
 
+def zlib_crc32(data: bytes | bytearray) -> int:
+    return zlib.crc32(bytes(data)) & 0xFFFFFFFF
+
+
+def _seven_zip_bytes(*, minor: int = 4, gap: bytes = b"abcde", next_header: bytes = b"\x01") -> bytes:
+    start_header = struct.pack("<QQI", len(gap), len(next_header), zlib_crc32(next_header))
+    return (
+        b"7z\xbc\xaf\x27\x1c"
+        + bytes([0, minor])
+        + struct.pack("<I", zlib_crc32(start_header))
+        + start_header
+        + gap
+        + next_header
+    )
+
+
+RAR5_MAGIC = b"Rar!\x1a\x07\x01\x00"
+
+
+def _rar5_vint(value: int) -> bytes:
+    output = bytearray()
+    while True:
+        byte = value & 0x7F
+        value >>= 7
+        if value:
+            output.append(byte | 0x80)
+        else:
+            output.append(byte)
+            return bytes(output)
+
+
+def _rar5_block(header_type: int, flags: int = 0, data: bytes = b"") -> bytes:
+    fields = _rar5_vint(header_type) + _rar5_vint(flags)
+    if data:
+        flags |= 0x0002
+        fields = _rar5_vint(header_type) + _rar5_vint(flags) + _rar5_vint(len(data))
+    header_size = _rar5_vint(len(fields))
+    header_data = header_size + fields
+    return zlib_crc32(header_data).to_bytes(4, "little") + header_data + data
+
+
+def _rar5_bytes(*, file_payload: bytes = b"") -> bytes:
+    file_block = _rar5_block(2, data=file_payload) if file_payload else b""
+    return RAR5_MAGIC + _rar5_block(1) + file_block + _rar5_block(5)
+
+
 def _zip_bytes(entries: dict[str, bytes]) -> bytes:
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_STORED) as archive:
@@ -828,6 +1162,10 @@ def _clean_archive_bytes(fmt: ArchiveFormat, seed: int) -> bytes:
         return bz2.compress(payload)
     if fmt == "xz":
         return lzma.compress(payload, format=lzma.FORMAT_XZ)
+    if fmt == "7z":
+        return _seven_zip_bytes(next_header=b"\x01\x02")
+    if fmt == "rar":
+        return _rar5_bytes(file_payload=payload[:16])
     raise ValueError(f"unsupported format: {fmt}")
 
 
@@ -838,4 +1176,72 @@ def _extension_for_format(fmt: ArchiveFormat) -> str:
         "gzip": "gz",
         "bzip2": "bz2",
         "xz": "xz",
+        "7z": "7z",
+        "rar": "rar",
     }[fmt]
+
+
+def _semantic_zones(data: bytes, fmt: ArchiveFormat) -> dict[str, tuple[int, int]]:
+    size = len(data)
+    if size <= 0:
+        return {name: (0, 0) for name in ("header", "payload", "footer", "boundary")}
+    header_end = min(size, max(1, min(64, size // 5 or 1)))
+    footer_start = min(size, max(header_end, size - max(1, min(64, size // 5 or 1))))
+    payload_start = min(size, header_end)
+    payload_end = max(payload_start, footer_start)
+    boundary = _format_boundary(data, fmt, header_end, footer_start)
+    return {
+        "header": (0, header_end),
+        "payload": (payload_start, payload_end),
+        "footer": (footer_start, size),
+        "boundary": boundary,
+    }
+
+
+def _format_boundary(data: bytes, fmt: ArchiveFormat, header_end: int, footer_start: int) -> tuple[int, int]:
+    if fmt == "zip":
+        eocd = data.rfind(b"PK\x05\x06")
+        if eocd >= 0:
+            return eocd, min(len(data), eocd + 22)
+    if fmt == "7z":
+        return 8, min(len(data), 32)
+    if fmt == "rar":
+        return 0, min(len(data), len(RAR5_MAGIC) + 8)
+    return max(0, footer_start - 4), min(len(data), footer_start + 4)
+
+
+def _fake_magic_for_format(fmt: ArchiveFormat) -> bytes:
+    return {
+        "zip": b"PK\x03\x04",
+        "7z": b"7z\xbc\xaf\x27\x1c",
+        "rar": RAR5_MAGIC,
+        "gzip": b"\x1f\x8b\x08",
+        "bzip2": b"BZh",
+        "xz": b"\xfd7zXZ\x00",
+        "tar": b"ustar",
+    }.get(fmt, b"")
+
+
+def _build_encrypted_zip(root: Path, *, password: str) -> bytes:
+    tool = Path(__file__).resolve().parents[2] / "tools" / "7z.exe"
+    if not tool.is_file():
+        raise FileNotFoundError(str(tool))
+    root.mkdir(parents=True, exist_ok=True)
+    payload = root / "encrypted-payload.txt"
+    archive = root / "encrypted-source.zip"
+    payload.write_bytes(b"encrypted zip payload")
+    if archive.exists():
+        archive.unlink()
+    command = [
+        str(tool),
+        "a",
+        "-tzip",
+        f"-p{password}",
+        "-mem=ZipCrypto",
+        str(archive),
+        str(payload),
+    ]
+    completed = subprocess.run(command, cwd=str(root), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if completed.returncode != 0 or not archive.is_file():
+        raise RuntimeError(f"7z encrypted ZIP fixture failed: {completed.stderr or completed.stdout}")
+    return archive.read_bytes()

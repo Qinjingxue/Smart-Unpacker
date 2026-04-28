@@ -1,4 +1,5 @@
-import os
+from smart_unpacker_native import batch_file_head_facts as _native_batch_file_head_facts
+
 from smart_unpacker.detection.pipeline.facts.registry import register_batch_fact, register_fact
 from smart_unpacker.support.path_keys import path_key
 
@@ -16,11 +17,10 @@ def collect_magic_bytes(context) -> bytes:
         magic = facts.get("magic")
         if isinstance(magic, bytes):
             return magic[:16]
-    try:
-        with open(base_path, "rb") as f:
-            return f.read(16)
-    except OSError:
-        return b""
+    rows = _native_batch_file_head_facts([base_path], 16)
+    if rows and isinstance(rows[0], dict) and isinstance(rows[0].get("magic"), bytes):
+        return rows[0]["magic"][:16]
+    return b""
 
 
 @register_batch_fact("file.magic_bytes")
@@ -46,8 +46,8 @@ def collect_magic_bytes_batch(context) -> None:
         if isinstance(magic, bytes):
             bag.set(context.fact_name, magic[:16])
             continue
-        try:
-            with open(path, "rb") as handle:
-                bag.set(context.fact_name, handle.read(16))
-        except OSError:
+        rows = _native_batch_file_head_facts([path], 16)
+        if rows and isinstance(rows[0], dict) and isinstance(rows[0].get("magic"), bytes):
+            bag.set(context.fact_name, rows[0]["magic"][:16])
+        else:
             bag.set(context.fact_name, b"")
