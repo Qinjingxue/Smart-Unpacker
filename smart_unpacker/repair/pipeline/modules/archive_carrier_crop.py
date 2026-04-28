@@ -45,7 +45,7 @@ def _result_from_native(module_name: str, result: dict, job: RepairJob, diagnosi
     fmt = str(result.get("format") or diagnosis.format or job.format or "archive")
     warnings = list(result.get("warnings") or [])
     validation: dict = {}
-    if status == "repaired" and selected_path:
+    if status in {"repaired", "partial"} and selected_path:
         ok, validation_warnings, validation = validate_with_native_probe(selected_path, fmt, config)
         warnings.extend(validation_warnings)
         if not ok:
@@ -62,7 +62,7 @@ def _result_from_native(module_name: str, result: dict, job: RepairJob, diagnosi
                 message="native probe rejected repaired candidate",
             )
         return RepairResult(
-            status="repaired",
+            status=status,
             confidence=float(result.get("confidence") or 0.78),
             format=fmt,
             repaired_input={"kind": "file", "path": selected_path, "format_hint": fmt},
@@ -70,6 +70,7 @@ def _result_from_native(module_name: str, result: dict, job: RepairJob, diagnosi
             damage_flags=list(job.damage_flags),
             warnings=warnings,
             workspace_paths=list(result.get("workspace_paths") or []),
+            partial=status == "partial",
             module_name=module_name,
             diagnosis={**diagnosis.as_dict(), "native_archive_deep_repair": dict(result), "native_probe": validation},
             message=str(result.get("message") or "archive carrier crop produced a candidate"),

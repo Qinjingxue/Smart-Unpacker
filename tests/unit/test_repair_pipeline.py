@@ -18,6 +18,10 @@ from smart_unpacker.repair.pipeline.registry import get_repair_module_registry
 from smart_unpacker.repair.result import RepairResult
 
 
+RAR4_MAGIC = b"Rar!\x1a\x07\x00"
+RAR5_MAGIC = b"Rar!\x1a\x07\x01\x00"
+
+
 def test_repair_scheduler_without_modules_returns_unsupported(tmp_path):
     scheduler = RepairScheduler({"repair": {"workspace": str(tmp_path), "modules": []}})
     job = RepairJob(
@@ -630,6 +634,25 @@ def test_archive_carrier_crop_deep_recovery_crops_embedded_rar(tmp_path):
     assert open(result.repaired_input["path"], "rb").read() == original
 
 
+def test_rar_carrier_crop_deep_recovery_crops_embedded_rar(tmp_path):
+    source = tmp_path / "carrier-rar-dedicated.bin"
+    original = _rar4_bytes()
+    source.write_bytes(b"MZ-stub" + original)
+
+    result = _run_deep_repair(
+        tmp_path,
+        "rar_carrier_crop_deep_recovery",
+        "rar",
+        source,
+        ["sfx", "carrier_archive", "boundary_unreliable"],
+    )
+
+    assert result.ok is True
+    assert result.module_name == "rar_carrier_crop_deep_recovery"
+    assert result.repaired_input["format_hint"] == "rar"
+    assert open(result.repaired_input["path"], "rb").read() == original
+
+
 def test_seven_zip_precise_boundary_repair_trims_carrier_and_tail(tmp_path):
     source = tmp_path / "carrier-tail.7z"
     original = _seven_zip_bytes()
@@ -692,6 +715,82 @@ def test_rar_trailing_junk_trim_supports_rar5(tmp_path):
 
     assert result.ok is True
     assert open(result.repaired_input["path"], "rb").read() == original
+
+
+def test_rar_block_chain_trim_deep_trims_rar4_tail(tmp_path):
+    source = tmp_path / "deep-tail4.rar"
+    original = _rar4_bytes()
+    source.write_bytes(b"SFX" + original + b"JUNK")
+
+    result = _run_deep_repair(
+        tmp_path,
+        "rar_block_chain_trim",
+        "rar",
+        source,
+        ["trailing_junk", "boundary_unreliable"],
+    )
+
+    assert result.ok is True
+    assert result.module_name == "rar_block_chain_trim"
+    assert open(result.repaired_input["path"], "rb").read() == original
+    assert result.actions == ["walk_rar4_block_chain_trim_boundary"]
+
+
+def test_rar_block_chain_trim_deep_trims_rar5_tail(tmp_path):
+    source = tmp_path / "deep-tail5.rar"
+    original = _rar5_bytes()
+    source.write_bytes(original + b"JUNK")
+
+    result = _run_deep_repair(
+        tmp_path,
+        "rar_block_chain_trim",
+        "rar",
+        source,
+        ["trailing_junk", "boundary_unreliable"],
+    )
+
+    assert result.ok is True
+    assert open(result.repaired_input["path"], "rb").read() == original
+    assert result.actions == ["walk_rar5_block_chain_trim_boundary"]
+
+
+def test_rar_end_block_repair_appends_rar4_end_block(tmp_path):
+    source = tmp_path / "missing-end4.rar"
+    without_end = RAR4_MAGIC + _rar4_block(0x73) + _rar4_block(0x74, flags=0x8000, payload=b"payload")
+    expected = without_end + _rar4_block(0x7B)
+    source.write_bytes(without_end)
+
+    result = _run_deep_repair(
+        tmp_path,
+        "rar_end_block_repair",
+        "rar",
+        source,
+        ["missing_end_block", "probably_truncated"],
+    )
+
+    assert result.ok is True
+    assert result.module_name == "rar_end_block_repair"
+    assert open(result.repaired_input["path"], "rb").read() == expected
+    assert result.actions == ["append_rar4_end_block"]
+
+
+def test_rar_end_block_repair_appends_rar5_end_block(tmp_path):
+    source = tmp_path / "missing-end5.rar"
+    without_end = RAR5_MAGIC + _rar5_block(1) + _rar5_block(2, data=b"payload")
+    expected = without_end + _rar5_block(5)
+    source.write_bytes(without_end)
+
+    result = _run_deep_repair(
+        tmp_path,
+        "rar_end_block_repair",
+        "rar",
+        source,
+        ["missing_end_block", "probably_truncated"],
+    )
+
+    assert result.ok is True
+    assert open(result.repaired_input["path"], "rb").read() == expected
+    assert result.actions == ["append_rar5_end_block"]
 
 
 @dataclass

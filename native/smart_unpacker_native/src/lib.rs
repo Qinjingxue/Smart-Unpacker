@@ -159,5 +159,13 @@ fn smart_unpacker_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
         archive_deep_repair::seven_zip_crc_field_repair,
         m
     )?)?;
+    m.add_function(wrap_pyfunction!(
+        archive_deep_repair::rar_block_chain_trim_recovery,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        archive_deep_repair::rar_end_block_repair,
+        m
+    )?)?;
     Ok(())
 }

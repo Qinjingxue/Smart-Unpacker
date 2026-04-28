@@ -269,6 +269,245 @@ pub(crate) fn seven_zip_crc_field_repair(
     )
 }
 
+#[pyfunction]
+#[pyo3(signature = (
+    source_input,
+    workspace,
+    max_input_size_mb=512.0,
+    max_candidates=8
+))]
+pub(crate) fn rar_block_chain_trim_recovery(
+    py: Python<'_>,
+    source_input: &Bound<'_, PyDict>,
+    workspace: &str,
+    max_input_size_mb: f64,
+    max_candidates: usize,
+) -> PyResult<Py<PyDict>> {
+    let data = match read_source_input(source_input, mb_to_bytes(max_input_size_mb)) {
+        Ok(data) => data,
+        Err(message) => {
+            return status_dict(py, "skipped", "", "rar", &message, &[], 0, 0, 0, 0.0, &[])
+        }
+    };
+    let Some(walk) = first_rar_walk(&data, max_candidates.max(1)) else {
+        return status_dict(
+            py,
+            "unrepairable",
+            "",
+            "rar",
+            "no RAR block chain with valid leading block CRCs was found",
+            &[],
+            0,
+            data.len() as u64,
+            0,
+            0.0,
+            &[],
+        );
+    };
+    if walk.last_complete_end <= walk.offset
+        || (walk.offset == 0 && walk.last_complete_end == data.len())
+    {
+        return status_dict(
+            py,
+            "unrepairable",
+            "",
+            "rar",
+            "RAR block chain already ends at the input boundary",
+            &walk.warnings,
+            walk.offset as u64,
+            walk.last_complete_end as u64,
+            0,
+            0.0,
+            &[],
+        );
+    }
+
+    let output_path =
+        Path::new(workspace).join(format!("rar_block_chain_trim_{:08x}.rar", walk.offset));
+    let output_bytes =
+        match write_slice_candidate(&data[walk.offset..walk.last_complete_end], &output_path) {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                return status_dict(
+                    py,
+                    "unrepairable",
+                    "",
+                    "rar",
+                    &err.to_string(),
+                    &walk.warnings,
+                    walk.offset as u64,
+                    walk.last_complete_end as u64,
+                    0,
+                    0.0,
+                    &[],
+                )
+            }
+        };
+    let status = if walk.end_block_found {
+        "repaired"
+    } else {
+        "partial"
+    };
+    let action = match walk.version {
+        RarVersion::Rar4 => "walk_rar4_block_chain_trim_boundary",
+        RarVersion::Rar5 => "walk_rar5_block_chain_trim_boundary",
+    };
+    status_dict(
+        py,
+        status,
+        &output_path.to_string_lossy(),
+        "rar",
+        "RAR block chain was cropped to the last complete CRC-verified block",
+        &walk.warnings,
+        walk.offset as u64,
+        walk.last_complete_end as u64,
+        output_bytes,
+        if walk.end_block_found { 0.9 } else { 0.72 },
+        &[action],
+    )
+}
+
+#[pyfunction]
+#[pyo3(signature = (
+    source_input,
+    workspace,
+    max_input_size_mb=512.0,
+    max_candidates=8
+))]
+pub(crate) fn rar_end_block_repair(
+    py: Python<'_>,
+    source_input: &Bound<'_, PyDict>,
+    workspace: &str,
+    max_input_size_mb: f64,
+    max_candidates: usize,
+) -> PyResult<Py<PyDict>> {
+    let data = match read_source_input(source_input, mb_to_bytes(max_input_size_mb)) {
+        Ok(data) => data,
+        Err(message) => {
+            return status_dict(py, "skipped", "", "rar", &message, &[], 0, 0, 0, 0.0, &[])
+        }
+    };
+    let Some(walk) = first_rar_walk(&data, max_candidates.max(1)) else {
+        return status_dict(
+            py,
+            "unrepairable",
+            "",
+            "rar",
+            "no RAR block chain with valid leading block CRCs was found",
+            &[],
+            0,
+            data.len() as u64,
+            0,
+            0.0,
+            &[],
+        );
+    };
+    if walk.end_block_found {
+        return status_dict(
+            py,
+            "unrepairable",
+            "",
+            "rar",
+            "RAR end block is already present",
+            &walk.warnings,
+            walk.offset as u64,
+            walk.last_complete_end as u64,
+            0,
+            0.0,
+            &[],
+        );
+    }
+    if walk.last_complete_end != data.len() {
+        return status_dict(
+            py,
+            "unrepairable",
+            "",
+            "rar",
+            "RAR block chain has trailing bytes or a truncated block; trim before synthesizing an end block",
+            &walk.warnings,
+            walk.offset as u64,
+            walk.last_complete_end as u64,
+            0,
+            0.0,
+            &[],
+        );
+    }
+    if walk.missing_volume {
+        return status_dict(
+            py,
+            "unrepairable",
+            "",
+            "rar",
+            "RAR volume flag is set; end block synthesis is not safe",
+            &walk.warnings,
+            walk.offset as u64,
+            walk.last_complete_end as u64,
+            0,
+            0.0,
+            &[],
+        );
+    }
+    if !walk.last_block_can_precede_end {
+        return status_dict(
+            py,
+            "unrepairable",
+            "",
+            "rar",
+            "RAR chain does not end after a complete file or service block",
+            &walk.warnings,
+            walk.offset as u64,
+            walk.last_complete_end as u64,
+            0,
+            0.0,
+            &[],
+        );
+    }
+
+    let mut candidate = data[walk.offset..walk.last_complete_end].to_vec();
+    let end_block = match walk.version {
+        RarVersion::Rar4 => rar4_end_block(),
+        RarVersion::Rar5 => rar5_end_block(),
+    };
+    candidate.extend_from_slice(&end_block);
+    let output_path =
+        Path::new(workspace).join(format!("rar_end_block_repair_{:08x}.rar", walk.offset));
+    let output_bytes = match write_slice_candidate(&candidate, &output_path) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            return status_dict(
+                py,
+                "unrepairable",
+                "",
+                "rar",
+                &err.to_string(),
+                &walk.warnings,
+                walk.offset as u64,
+                walk.last_complete_end as u64,
+                0,
+                0.0,
+                &[],
+            )
+        }
+    };
+    let action = match walk.version {
+        RarVersion::Rar4 => "append_rar4_end_block",
+        RarVersion::Rar5 => "append_rar5_end_block",
+    };
+    status_dict(
+        py,
+        "repaired",
+        &output_path.to_string_lossy(),
+        "rar",
+        "canonical RAR end block was appended after a complete CRC-verified block chain",
+        &walk.warnings,
+        walk.offset as u64,
+        (walk.last_complete_end + end_block.len()) as u64,
+        output_bytes,
+        0.82,
+        &[action],
+    )
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TargetFormat {
     SevenZip,
@@ -330,6 +569,22 @@ struct SevenZipCrcRepair {
     bytes: Vec<u8>,
     archive_end: usize,
     actions: Vec<String>,
+    warnings: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RarVersion {
+    Rar4,
+    Rar5,
+}
+
+struct RarWalk {
+    version: RarVersion,
+    offset: usize,
+    last_complete_end: usize,
+    end_block_found: bool,
+    missing_volume: bool,
+    last_block_can_precede_end: bool,
     warnings: Vec<String>,
 }
 
@@ -568,6 +823,288 @@ fn repair_seven_zip_crc_candidate(data: &[u8], offset: usize) -> Option<SevenZip
         actions,
         warnings,
     })
+}
+
+fn first_rar_walk(data: &[u8], max_candidates: usize) -> Option<RarWalk> {
+    let mut candidates = find_all(data, RAR4_MAGIC)
+        .into_iter()
+        .map(|offset| (offset, RarVersion::Rar4))
+        .chain(
+            find_all(data, RAR5_MAGIC)
+                .into_iter()
+                .map(|offset| (offset, RarVersion::Rar5)),
+        )
+        .collect::<Vec<_>>();
+    candidates.sort_by_key(|item| item.0);
+    for (index, (offset, version)) in candidates.into_iter().enumerate() {
+        if index >= max_candidates {
+            break;
+        }
+        let walk = match version {
+            RarVersion::Rar4 => walk_rar4_blocks(data, offset),
+            RarVersion::Rar5 => walk_rar5_blocks(data, offset),
+        };
+        if let Some(walk) = walk {
+            return Some(walk);
+        }
+    }
+    None
+}
+
+fn walk_rar4_blocks(data: &[u8], offset: usize) -> Option<RarWalk> {
+    if !data.get(offset..)?.starts_with(RAR4_MAGIC) {
+        return None;
+    }
+    let mut pos = offset.checked_add(RAR4_MAGIC.len())?;
+    let mut last_complete_end = pos;
+    let mut blocks = 0usize;
+    let mut missing_volume = false;
+    let mut last_type = 0u8;
+    let mut warnings = Vec::new();
+
+    while pos < data.len() {
+        if pos.checked_add(7)? > data.len() {
+            warnings.push("RAR4 trailing block header is truncated".to_string());
+            break;
+        }
+        let stored_crc = u16_le(data, pos) as u32;
+        let header_type = data[pos + 2];
+        let flags = u16_le(data, pos + 3);
+        let header_size = u16_le(data, pos + 5) as usize;
+        if !matches!(header_type, 0x73..=0x7b) {
+            warnings.push("RAR4 block chain stopped before an unknown block type".to_string());
+            break;
+        }
+        if header_size < 7 {
+            warnings.push("RAR4 block chain stopped before an invalid header size".to_string());
+            break;
+        }
+        let Some(header_end) = pos.checked_add(header_size) else {
+            warnings.push("RAR4 block header size overflowed".to_string());
+            break;
+        };
+        if header_end > data.len() {
+            warnings.push("RAR4 block header is truncated".to_string());
+            break;
+        }
+        let header = &data[pos..header_end];
+        if (crc32(&header[2..]) & 0xffff) != stored_crc {
+            warnings.push("RAR4 block chain stopped before a header CRC mismatch".to_string());
+            break;
+        }
+        let add_size = if flags & 0x8000 != 0 {
+            if header_size < 11 {
+                warnings.push("RAR4 block add_size field is missing".to_string());
+                break;
+            }
+            u32_le(header, 7) as usize
+        } else {
+            0
+        };
+        let Some(block_end) = header_end.checked_add(add_size) else {
+            warnings.push("RAR4 block payload size overflowed".to_string());
+            break;
+        };
+        if block_end > data.len() {
+            warnings.push("RAR4 block payload is truncated".to_string());
+            break;
+        }
+        if blocks == 0 && header_type == 0x73 && flags & 0x0001 != 0 {
+            missing_volume = true;
+        }
+        blocks += 1;
+        last_type = header_type;
+        last_complete_end = block_end;
+        pos = block_end;
+        if header_type == 0x7b {
+            return Some(RarWalk {
+                version: RarVersion::Rar4,
+                offset,
+                last_complete_end,
+                end_block_found: true,
+                missing_volume,
+                last_block_can_precede_end: true,
+                warnings,
+            });
+        }
+    }
+
+    (blocks > 0).then_some(RarWalk {
+        version: RarVersion::Rar4,
+        offset,
+        last_complete_end,
+        end_block_found: false,
+        missing_volume,
+        last_block_can_precede_end: matches!(last_type, 0x74 | 0x7a),
+        warnings,
+    })
+}
+
+fn walk_rar5_blocks(data: &[u8], offset: usize) -> Option<RarWalk> {
+    if !data.get(offset..)?.starts_with(RAR5_MAGIC) {
+        return None;
+    }
+    let mut pos = offset.checked_add(RAR5_MAGIC.len())?;
+    let mut last_complete_end = pos;
+    let mut blocks = 0usize;
+    let mut missing_volume = false;
+    let mut last_type = 0u64;
+    let mut warnings = Vec::new();
+
+    while pos < data.len() {
+        let Some(block) = parse_rar5_block(data, pos) else {
+            warnings
+                .push("RAR5 block chain stopped before a truncated or invalid block".to_string());
+            break;
+        };
+        if block.end > data.len() {
+            warnings.push("RAR5 block payload is truncated".to_string());
+            break;
+        }
+        if !block.crc_ok {
+            warnings.push("RAR5 block chain stopped before a header CRC mismatch".to_string());
+            break;
+        }
+        if blocks == 0 && block.block_type == 1 && block.archive_flags & 0x0001 != 0 {
+            missing_volume = true;
+        }
+        blocks += 1;
+        last_type = block.block_type;
+        last_complete_end = block.end;
+        pos = block.end;
+        if block.block_type == 5 {
+            return Some(RarWalk {
+                version: RarVersion::Rar5,
+                offset,
+                last_complete_end,
+                end_block_found: true,
+                missing_volume,
+                last_block_can_precede_end: true,
+                warnings,
+            });
+        }
+    }
+
+    (blocks > 0).then_some(RarWalk {
+        version: RarVersion::Rar5,
+        offset,
+        last_complete_end,
+        end_block_found: false,
+        missing_volume,
+        last_block_can_precede_end: matches!(last_type, 2 | 3),
+        warnings,
+    })
+}
+
+struct Rar5Block {
+    block_type: u64,
+    archive_flags: u64,
+    end: usize,
+    crc_ok: bool,
+}
+
+fn parse_rar5_block(data: &[u8], offset: usize) -> Option<Rar5Block> {
+    if offset.checked_add(6)? > data.len() {
+        return None;
+    }
+    let stored_crc = u32_le(data, offset);
+    let (header_size, fields_start) = read_vint(data, offset + 4)?;
+    let fields_end = fields_start.checked_add(usize::try_from(header_size).ok()?)?;
+    if header_size == 0 || fields_end > data.len() {
+        return None;
+    }
+    let (block_type, after_type) = read_vint(data, fields_start)?;
+    if !matches!(block_type, 1..=5) {
+        return None;
+    }
+    let (flags, after_flags) = read_vint(data, after_type)?;
+    let mut cursor = after_flags;
+    if flags & 0x0001 != 0 {
+        let (_, after_extra_size) = read_vint(data, cursor)?;
+        cursor = after_extra_size;
+    }
+    let mut data_size = 0usize;
+    if flags & 0x0002 != 0 {
+        let (value, after_data_size) = read_vint(data, cursor)?;
+        data_size = usize::try_from(value).ok()?;
+        cursor = after_data_size;
+    }
+    let archive_flags = if block_type == 1 && cursor < fields_end {
+        read_vint(data, cursor).map(|item| item.0).unwrap_or(0)
+    } else {
+        0
+    };
+    let end = fields_end.checked_add(data_size)?;
+    let crc_ok = crc32(&data[offset + 4..fields_end]) == stored_crc;
+    Some(Rar5Block {
+        block_type,
+        archive_flags,
+        end,
+        crc_ok,
+    })
+}
+
+fn rar4_end_block() -> Vec<u8> {
+    rar4_block(0x7b, 0, &[])
+}
+
+fn rar5_end_block() -> Vec<u8> {
+    rar5_block(5, 0, &[])
+}
+
+fn rar4_block(header_type: u8, flags: u16, payload: &[u8]) -> Vec<u8> {
+    let add_size = if payload.is_empty() {
+        Vec::new()
+    } else {
+        (payload.len() as u32).to_le_bytes().to_vec()
+    };
+    let header_size = 7 + add_size.len();
+    let mut body = Vec::with_capacity(5 + add_size.len());
+    body.push(header_type);
+    body.extend_from_slice(&flags.to_le_bytes());
+    body.extend_from_slice(&(header_size as u16).to_le_bytes());
+    body.extend_from_slice(&add_size);
+    let header_crc = (crc32(&body) & 0xffff) as u16;
+    let mut output = Vec::with_capacity(header_size + payload.len());
+    output.extend_from_slice(&header_crc.to_le_bytes());
+    output.extend_from_slice(&body);
+    output.extend_from_slice(payload);
+    output
+}
+
+fn rar5_block(block_type: u64, flags: u64, data: &[u8]) -> Vec<u8> {
+    let mut effective_flags = flags;
+    let mut fields = Vec::new();
+    fields.extend_from_slice(&write_vint(block_type));
+    if !data.is_empty() {
+        effective_flags |= 0x0002;
+    }
+    fields.extend_from_slice(&write_vint(effective_flags));
+    if !data.is_empty() {
+        fields.extend_from_slice(&write_vint(data.len() as u64));
+    }
+    let mut header_data = write_vint(fields.len() as u64);
+    header_data.extend_from_slice(&fields);
+    let mut output = Vec::with_capacity(4 + header_data.len() + data.len());
+    output.extend_from_slice(&crc32(&header_data).to_le_bytes());
+    output.extend_from_slice(&header_data);
+    output.extend_from_slice(data);
+    output
+}
+
+fn write_vint(mut value: u64) -> Vec<u8> {
+    let mut output = Vec::new();
+    loop {
+        let mut byte = (value & 0x7f) as u8;
+        value >>= 7;
+        if value != 0 {
+            byte |= 0x80;
+        }
+        output.push(byte);
+        if value == 0 {
+            return output;
+        }
+    }
 }
 
 fn read_source_input(
