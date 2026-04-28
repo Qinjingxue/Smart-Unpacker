@@ -2326,6 +2326,87 @@ PasswordTestResult test_one_password(
     return result;
 }
 
+PasswordTestResult test_one_password_reuse_stream(
+    CreateObjectFunc create_object,
+    const std::wstring& archive_path,
+    const std::wstring& password,
+    const std::vector<std::wstring>& part_paths,
+    const std::vector<GUID>& formats,
+    IInStream* stream
+) {
+    PasswordTestResult result;
+    result.backend_available = true;
+
+    bool any_format_created = false;
+    bool any_opened = false;
+    HRESULT last_hr = E_FAIL;
+    Int32 last_op_res = kOpOk;
+
+    UInt64 pos = 0;
+    stream->Seek(0, 0, &pos);
+
+    for (const GUID& format : formats) {
+        ComPtr<IInArchive> archive;
+        HRESULT hr = create_object(&format, &IID_IInArchive, reinterpret_cast<void**>(archive.out()));
+        if (hr != S_OK || !archive) {
+            last_hr = hr;
+            continue;
+        }
+        any_format_created = true;
+
+        ComPtr<IArchiveOpenCallback> open_callback(new OpenCallback(password, callback_archive_path(archive_path, part_paths), part_paths));
+        hr = archive->Open(stream, nullptr, open_callback.get());
+        if (hr != S_OK) {
+            last_hr = hr;
+            continue;
+        }
+        any_opened = true;
+
+        auto* raw_extract_callback = new ExtractCallback(password);
+        ComPtr<IArchiveExtractCallback> extract_callback(raw_extract_callback);
+        hr = archive->Extract(nullptr, static_cast<UInt32>(kAllItems), kTestMode, extract_callback.get());
+        last_hr = hr;
+        last_op_res = raw_extract_callback->operation_result();
+        archive->Close();
+
+        if (hr == S_OK && last_op_res == kOpOk) {
+            result.status = PasswordTestStatus::Ok;
+            result.message = "password accepted";
+            return result;
+        }
+
+        if (looks_wrong_password(hr, last_op_res)) {
+            result.status = PasswordTestStatus::WrongPassword;
+            result.message = "wrong password";
+            return result;
+        }
+
+        if (looks_damaged(last_op_res)) {
+            result.status = PasswordTestStatus::Damaged;
+            result.message = "archive appears damaged";
+            return result;
+        }
+    }
+
+    if (!any_format_created) {
+        result.status = PasswordTestStatus::Unsupported;
+        result.message = "7z.dll did not create a supported archive handler";
+    } else if (!any_opened) {
+        result.status = PasswordTestStatus::Unsupported;
+        result.message = "archive could not be opened by supported handlers";
+    } else if (looks_damaged(last_op_res)) {
+        result.status = PasswordTestStatus::Damaged;
+        result.message = "archive appears damaged";
+    } else if (looks_wrong_password(last_hr, last_op_res)) {
+        result.status = PasswordTestStatus::WrongPassword;
+        result.message = "wrong password";
+    } else {
+        result.status = PasswordTestStatus::Error;
+        result.message = "archive test failed";
+    }
+    return result;
+}
+
 #endif
 
 bool is_backend_available(const std::wstring& seven_zip_dll_path) {
@@ -2618,14 +2699,24 @@ PasswordTestResult test_passwords_with_parts(
         part_paths.empty() ? std::vector<std::wstring>{archive_path} : part_paths;
     const std::vector<GUID> formats = candidate_formats(archive_path, effective_part_paths);
 
+    bool stream_opened = false;
+    ComPtr<IInStream> stream = open_archive_stream(archive_path, effective_part_paths, stream_opened);
+    if (!stream_opened) {
+        PasswordTestResult result;
+        result.status = PasswordTestStatus::Error;
+        result.message = "archive file could not be opened";
+        return result;
+    }
+
     for (int i = 0; i < password_count; ++i) {
         const wchar_t* raw_password = passwords[i] ? passwords[i] : L"";
-        PasswordTestResult current = test_one_password(
+        PasswordTestResult current = test_one_password_reuse_stream(
             create_object,
             archive_path,
             raw_password,
             effective_part_paths,
-            formats);
+            formats,
+            stream.get());
         current.attempts = i + 1;
         last = current;
         if (current.status == PasswordTestStatus::Ok) {
