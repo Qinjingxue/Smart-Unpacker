@@ -31,7 +31,11 @@ def build_extraction_progress_manifest(
 ) -> dict[str, Any]:
     result = _worker_result(diagnostics)
     output_trace = _output_trace(result)
-    items = [_manifest_item(item, round_index=round_index) for item in output_trace.get("items") or [] if isinstance(item, dict)]
+    items = [
+        _manifest_item(item, out_dir=out_dir, round_index=round_index)
+        for item in output_trace.get("items") or []
+        if isinstance(item, dict)
+    ]
     items = _merge_untraced_files(items, out_dir, round_index=round_index)
     summary = _summary(items)
     return {
@@ -158,15 +162,15 @@ def _trace_has_progress(output_trace: dict[str, Any]) -> bool:
     return False
 
 
-def _manifest_item(item: dict[str, Any], *, round_index: int) -> dict[str, Any]:
+def _manifest_item(item: dict[str, Any], *, out_dir: str, round_index: int) -> dict[str, Any]:
     failed = bool(item.get("failed"))
     bytes_written = int(item.get("bytes_written", 0) or 0)
     status = "complete"
     if failed:
         status = "partial" if bytes_written > 0 else "failed"
     return {
-        "path": str(item.get("path") or item.get("output_path") or ""),
-        "archive_path": str(item.get("archive_path") or item.get("name") or item.get("path") or ""),
+        "path": _output_path_from_trace(item, out_dir),
+        "archive_path": _archive_path_from_trace(item, out_dir),
         "status": str(item.get("status") or status),
         "source_round": round_index,
         "bytes_written": bytes_written,
@@ -176,6 +180,30 @@ def _manifest_item(item: dict[str, Any], *, round_index: int) -> dict[str, Any]:
         "failure_kind": str(item.get("failure_kind") or ""),
         "message": str(item.get("message") or item.get("error") or ""),
     }
+
+
+def _output_path_from_trace(item: dict[str, Any], out_dir: str) -> str:
+    path = str(item.get("path") or item.get("output_path") or "")
+    if not path:
+        return ""
+    item_path = Path(path)
+    if item_path.is_absolute():
+        return str(item_path)
+    return str(Path(out_dir) / item_path)
+
+
+def _archive_path_from_trace(item: dict[str, Any], out_dir: str) -> str:
+    explicit = item.get("archive_path") or item.get("name")
+    if explicit:
+        return str(explicit).replace("\\", "/")
+    path = str(item.get("path") or item.get("output_path") or "")
+    if not path:
+        return ""
+    root = Path(out_dir)
+    try:
+        return str(Path(path).relative_to(root)).replace("\\", "/")
+    except ValueError:
+        return Path(path).name
 
 
 def _merge_untraced_files(items: list[dict[str, Any]], out_dir: str, *, round_index: int) -> list[dict[str, Any]]:
