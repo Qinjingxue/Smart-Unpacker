@@ -1,0 +1,80 @@
+#include "sevenzip_status.hpp"
+
+
+
+namespace smart_unpacker::sevenzip {
+
+
+
+#ifdef _WIN32
+
+
+
+bool looks_wrong_password(HRESULT hr, Int32 op_res) {
+
+    return op_res == kOpWrongPassword || op_res == kOpDataError || op_res == kOpCrcError || hr == S_FALSE;
+
+}
+
+
+
+bool looks_damaged(Int32 op_res) {
+
+    return op_res == kOpUnexpectedEnd || op_res == kOpHeadersError || op_res == kOpIsNotArc || op_res == kOpUnavailable;
+
+}
+
+
+
+bool looks_damaged_health_result(const std::wstring& password, Int32 op_res) {
+
+    return looks_damaged(op_res) || (password.empty() && (op_res == kOpDataError || op_res == kOpCrcError));
+
+}
+
+
+
+#endif
+
+
+
+const char* status_name(PasswordTestStatus status) {
+
+    switch (status) {
+
+    case PasswordTestStatus::Ok:
+
+        return "ok";
+
+    case PasswordTestStatus::WrongPassword:
+
+        return "wrong_password";
+
+    case PasswordTestStatus::Damaged:
+
+        return "damaged";
+
+    case PasswordTestStatus::Unsupported:
+
+        return "unsupported";
+
+    case PasswordTestStatus::BackendUnavailable:
+
+        return "backend_unavailable";
+
+    case PasswordTestStatus::Error:
+
+        return "error";
+
+    }
+
+    return "unknown";
+
+}
+
+
+
+
+
+}  // namespace smart_unpacker::sevenzip
+

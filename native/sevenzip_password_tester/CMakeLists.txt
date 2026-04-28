@@ -26,10 +26,27 @@ function(apply_release_optimizations target_name)
     endif()
 endfunction()
 
-add_library(sevenzip_password_tester STATIC
-    src/internal/sevenzip_engine.cpp
+set(SUP7Z_INTERNAL_SOURCES
+    src/internal/archive_extract.cpp
+    src/internal/archive_crc_manifest.cpp
+    src/internal/archive_health.cpp
+    src/internal/archive_open_plan.cpp
+    src/internal/archive_resources.cpp
     src/internal/embedded_7z.cpp
     src/internal/operation_dispatch.cpp
+    src/internal/password_testing.cpp
+    src/internal/sevenzip_engine.cpp
+    src/internal/sevenzip_formats.cpp
+    src/internal/sevenzip_paths.cpp
+    src/internal/sevenzip_properties.cpp
+    src/internal/sevenzip_sdk.cpp
+    src/internal/sevenzip_status.cpp
+    src/internal/sevenzip_streams.cpp
+    src/internal/strict_archive_validation.cpp
+)
+
+add_library(sevenzip_password_tester STATIC
+    ${SUP7Z_INTERNAL_SOURCES}
 )
 apply_release_optimizations(sevenzip_password_tester)
 
@@ -51,9 +68,7 @@ add_library(sevenzip_password_tester_capi SHARED
     src/c_api_passwords.cpp
     src/c_api_crc_manifest.cpp
     src/c_api_resources.cpp
-    src/internal/sevenzip_engine.cpp
-    src/internal/embedded_7z.cpp
-    src/internal/operation_dispatch.cpp
+    ${SUP7Z_INTERNAL_SOURCES}
 )
 apply_release_optimizations(sevenzip_password_tester_capi)
 

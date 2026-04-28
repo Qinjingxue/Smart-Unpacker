@@ -1,0 +1,124 @@
+#include "sevenzip_streams.hpp"
+
+
+
+namespace smart_unpacker::sevenzip {
+
+
+
+#ifdef _WIN32
+
+
+
+ComPtr<IInStream> open_archive_stream(
+
+    const std::wstring& archive_path,
+
+    const std::vector<std::wstring>& part_paths,
+
+    bool& opened
+
+) {
+
+    opened = false;
+
+    if (is_sfx_path(archive_path)) {
+
+        std::vector<std::wstring> volumes = sorted_data_volume_paths(unique_existing_paths(archive_path, part_paths));
+
+        if (!volumes.empty() && is_sfx_path(volumes.front())) {
+
+            auto* stream = new FileInStream(volumes.front());
+
+            opened = stream->is_open();
+
+            return ComPtr<IInStream>(stream);
+
+        }
+
+        if (volumes.size() > 1) {
+
+            auto* stream = new MultiFileInStream(std::move(volumes));
+
+            opened = stream->is_open();
+
+            return ComPtr<IInStream>(stream);
+
+        }
+
+        if (volumes.size() == 1) {
+
+            auto* stream = new FileInStream(volumes.front());
+
+            opened = stream->is_open();
+
+            return ComPtr<IInStream>(stream);
+
+        }
+
+        auto* stream = new FileInStream(archive_path);
+
+        opened = stream->is_open();
+
+        return ComPtr<IInStream>(stream);
+
+    }
+
+
+
+    std::vector<std::wstring> paths = sorted_data_volume_paths(unique_existing_paths(archive_path, part_paths));
+
+    if (paths.empty()) {
+
+        paths = std::vector<std::wstring>{archive_path};
+
+    }
+
+    if (paths.size() > 1) {
+
+        auto* stream = new MultiFileInStream(std::move(paths));
+
+        opened = stream->is_open();
+
+        return ComPtr<IInStream>(stream);
+
+    }
+
+
+
+    auto* stream = new FileInStream(archive_path);
+
+    opened = stream->is_open();
+
+    return ComPtr<IInStream>(stream);
+
+}
+
+
+
+std::wstring callback_archive_path(const std::wstring& archive_path, const std::vector<std::wstring>& part_paths) {
+
+    if (is_sfx_path(archive_path)) {
+
+        const auto volumes = sorted_data_volume_paths(unique_existing_paths(archive_path, part_paths));
+
+        if (!volumes.empty() && is_sfx_path(volumes.front())) {
+
+            return volumes.front();
+
+        }
+
+    }
+
+    return archive_path;
+
+}
+
+
+
+#endif
+
+
+
+}  // namespace smart_unpacker::sevenzip
+
