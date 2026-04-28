@@ -7,6 +7,7 @@ from smart_unpacker.analysis.structure_pipeline.prepass import run_signature_pre
 from smart_unpacker.analysis.structure_pipeline.registry import discover_analysis_modules, get_analysis_module_registry
 from smart_unpacker.analysis.result import ArchiveAnalysisReport, ArchiveFormatEvidence
 from smart_unpacker.analysis.view import MultiVolumeBinaryView, SharedBinaryView
+from smart_unpacker.contracts.archive_input import ArchiveInputDescriptor
 
 
 class ArchiveAnalysisScheduler:
@@ -39,6 +40,9 @@ class ArchiveAnalysisScheduler:
         return self.analyze_paths(getattr(group, "all_paths", None) or [group.head_path], report_path=getattr(group, "head_path", None))
 
     def analyze_task(self, task) -> ArchiveAnalysisReport:
+        archive_input_report = self._analyze_archive_input(task)
+        if archive_input_report is not None:
+            return archive_input_report
         volumes = list(getattr(getattr(task, "split_info", None), "volumes", None) or [])
         if volumes:
             return self.analyze_paths(volumes, report_path=getattr(task, "main_path", None))
@@ -46,6 +50,49 @@ class ArchiveAnalysisScheduler:
         if paths:
             return self.analyze_paths(paths, report_path=getattr(task, "main_path", None))
         return self.analyze_path(task.main_path)
+
+    def _analyze_archive_input(self, task) -> ArchiveAnalysisReport | None:
+        fact_bag = getattr(task, "fact_bag", None)
+        raw = fact_bag.get("archive.input") if fact_bag is not None and hasattr(fact_bag, "get") else None
+        if not isinstance(raw, dict):
+            return None
+        descriptor = self._normalize_archive_input(raw, task)
+        if descriptor is None:
+            return None
+        if descriptor.open_mode == "file" and descriptor.entry_path:
+            return self.analyze_path(descriptor.entry_path)
+        if descriptor.open_mode in {"native_volumes", "staged_volumes", "sfx_with_volumes"} and descriptor.parts:
+            paths = [
+                {"path": part.path, "number": part.volume_number or index + 1}
+                for index, part in enumerate(descriptor.parts)
+                if part.path
+            ]
+            if paths:
+                return self.analyze_paths(paths, report_path=descriptor.entry_path or getattr(task, "main_path", None))
+        if descriptor.open_mode == "concat_ranges" and descriptor.ranges:
+            simple_paths = [
+                item.path
+                for item in descriptor.ranges
+                if item.path and int(item.start) == 0 and item.end is None
+            ]
+            if simple_paths and len(simple_paths) == len(descriptor.ranges):
+                return self.analyze_paths(simple_paths, report_path=descriptor.entry_path or getattr(task, "main_path", None))
+        if descriptor.open_mode == "file_range" and descriptor.parts:
+            part = descriptor.parts[0]
+            item_range = part.range
+            if part.path and item_range is not None and int(item_range.start) == 0 and item_range.end is None:
+                return self.analyze_path(part.path)
+        return None
+
+    def _normalize_archive_input(self, raw: dict, task) -> ArchiveInputDescriptor | None:
+        archive_path = str(getattr(task, "main_path", "") or "")
+        part_paths = list(getattr(task, "all_parts", None) or [])
+        try:
+            if raw.get("kind") == "archive_input" or raw.get("open_mode"):
+                return ArchiveInputDescriptor.from_dict(raw, archive_path=archive_path, part_paths=part_paths)
+            return ArchiveInputDescriptor.from_legacy(raw, archive_path=archive_path, part_paths=part_paths)
+        except (TypeError, ValueError):
+            return None
 
     def analyze_view(self, view: SharedBinaryView | MultiVolumeBinaryView, *, report_path: str | None = None) -> ArchiveAnalysisReport:
         prepass_config = self.config.get("prepass") if isinstance(self.config.get("prepass"), dict) else {}

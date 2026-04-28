@@ -6,6 +6,7 @@ from typing import List
 from smart_unpacker.contracts.run_context import RunContext
 from smart_unpacker.contracts.tasks import ArchiveTask
 from smart_unpacker.coordinator.analysis_stage import ArchiveAnalysisStage
+from smart_unpacker.coordinator.repair_loop import RepairLoopLimits, RepairLoopState
 from smart_unpacker.coordinator.repair_stage import ArchiveRepairStage
 from smart_unpacker.coordinator.resource_preflight import ResourcePreflightInspector
 from smart_unpacker.coordinator.scheduling import (
@@ -53,6 +54,7 @@ class ExtractionBatchRunner:
         self.max_workers = resolve_max_workers()
         self.analysis_stage = ArchiveAnalysisStage(self.config)
         self.repair_stage = ArchiveRepairStage(self.config)
+        self.repair_loop_limits = RepairLoopLimits.from_config(self.repair_stage.config)
         self.verifier = VerificationScheduler(self.config, password_session=self.extractor.password_session)
         performance = self.config.get("performance", {}) if isinstance(self.config.get("performance"), dict) else {}
         self.resource_inspector = ResourcePreflightInspector(
@@ -73,7 +75,7 @@ class ExtractionBatchRunner:
 
         self.prepare_tasks(tasks)
         tasks = self.analysis_stage.analyze_tasks(tasks)
-        self.repair_stage.repair_medium_confidence_tasks(tasks)
+        tasks = self._settle_analysis_repair_loops(tasks)
         output_dir_resolver = self.rename_scheduler.build_output_dir_resolver(
             tasks,
             self.extractor.default_output_dir_for_task,
@@ -132,6 +134,36 @@ class ExtractionBatchRunner:
         })
         return scheduler_config
 
+    def _settle_analysis_repair_loops(self, tasks: list[ArchiveTask]) -> list[ArchiveTask]:
+        settled: list[ArchiveTask] = []
+        for task in tasks:
+            settled.extend(self._settle_single_analysis_repair_loop(task))
+        return settled
+
+    def _settle_single_analysis_repair_loop(self, task: ArchiveTask) -> list[ArchiveTask]:
+        current_tasks = [task]
+        settled: list[ArchiveTask] = []
+        while current_tasks:
+            current = current_tasks.pop(0)
+            state = RepairLoopState(current, self.repair_loop_limits)
+            while state.can_attempt(trigger="analysis"):
+                repair_result = self.repair_stage.repair_medium_confidence_task(current)
+                if repair_result is None:
+                    break
+                if not state.record_result(repair_result, trigger="analysis"):
+                    break
+                analyzed = self.analysis_stage.analyze_task_to_tasks(current)
+                if len(analyzed) == 1:
+                    current = analyzed[0]
+                    state = RepairLoopState(current, self.repair_loop_limits)
+                    continue
+                current_tasks.extend(analyzed)
+                current = None
+                break
+            if current is not None:
+                settled.append(current)
+        return settled
+
     def _extract_verify_with_retries(
         self,
         task: ArchiveTask,
@@ -144,15 +176,20 @@ class ExtractionBatchRunner:
         attempts = max_verification_retries + 1
         last_outcome: BatchExtractionOutcome | None = None
 
-        for attempt_index in range(attempts):
+        attempt_index = 0
+        while attempt_index < attempts:
             result = self.extractor.extract(task, out_dir, runtime_scheduler=runtime_scheduler)
             if not result.success:
-                if self.repair_stage.repair_after_extraction_failure(task, result):
+                state = RepairLoopState(task, self.repair_loop_limits)
+                if state.can_attempt(trigger="extraction", failure=result):
+                    repair_result = self.repair_stage.repair_after_extraction_failure_result(task, result)
+                    can_continue = state.record_result(repair_result, trigger="extraction")
+                else:
+                    can_continue = False
+                if can_continue:
                     shutil.rmtree(out_dir, ignore_errors=True)
-                    result = self.extractor.extract(task, out_dir, runtime_scheduler=runtime_scheduler)
-                    if result.success:
-                        verification = self.verifier.verify(task, result)
-                        return BatchExtractionOutcome(result=result, verification=verification, attempts=attempt_index + 1)
+                    self.analysis_stage.analyze_task(task)
+                    continue
                 return BatchExtractionOutcome(result=result, attempts=attempt_index + 1)
 
             verification = self.verifier.verify(task, result)
@@ -165,6 +202,7 @@ class ExtractionBatchRunner:
                 break
             if cleanup_failed_output:
                 shutil.rmtree(result.out_dir, ignore_errors=True)
+            attempt_index += 1
 
         return last_outcome or BatchExtractionOutcome(
             result=ExtractionResult(

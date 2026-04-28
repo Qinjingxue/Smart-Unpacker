@@ -26,30 +26,39 @@ class ArchiveRepairStage:
         thresholds = self.config.get("thresholds") if isinstance(self.config.get("thresholds"), dict) else {}
         self.medium_min = float(thresholds.get("medium_confidence_min", 0.35) or 0.35)
         self.extractable_confidence = float(thresholds.get("extractable_confidence", 0.85) or 0.85)
-        self.max_attempts_per_task = max(0, int(self.config.get("max_attempts_per_task", 1) or 0))
+        round_limit = self.config.get("max_repair_rounds_per_task", self.config.get("max_attempts_per_task", 3))
+        self.max_attempts_per_task = max(0, int(round_limit or 0))
 
     def repair_medium_confidence_tasks(self, tasks: list[ArchiveTask]) -> None:
         if not self.enabled or self.scheduler is None or not self.config.get("trigger_on_medium_confidence", True):
             return
         for task in tasks:
-            evidence = self._medium_confidence_evidence(task)
-            if evidence is None:
-                continue
-            job = self._job_from_analysis(task, evidence)
-            if job is None:
-                continue
-            self._run_and_apply(task, job, trigger="analysis")
+            self.repair_medium_confidence_task(task)
+
+    def repair_medium_confidence_task(self, task: ArchiveTask) -> RepairResult | None:
+        if not self.enabled or self.scheduler is None or not self.config.get("trigger_on_medium_confidence", True):
+            return None
+        evidence = self._medium_confidence_evidence(task)
+        if evidence is None:
+            return None
+        job = self._job_from_analysis(task, evidence)
+        if job is None:
+            return None
+        return self._run_and_apply(task, job, trigger="analysis")
 
     def repair_after_extraction_failure(self, task: ArchiveTask, result: ExtractionResult) -> bool:
+        repair_result = self.repair_after_extraction_failure_result(task, result)
+        return bool(repair_result and repair_result.ok)
+
+    def repair_after_extraction_failure_result(self, task: ArchiveTask, result: ExtractionResult) -> RepairResult | None:
         if not self.enabled or self.scheduler is None or not self.config.get("trigger_on_extraction_failure", True):
-            return False
+            return None
         if result.success or self._attempts(task) >= self.max_attempts_per_task:
-            return False
+            return None
         job = self._job_from_extraction_failure(task, result)
         if job is None:
-            return False
-        repair_result = self._run_and_apply(task, job, trigger="extraction")
-        return bool(repair_result and repair_result.ok)
+            return None
+        return self._run_and_apply(task, job, trigger="extraction")
 
     def _run_and_apply(self, task: ArchiveTask, job: RepairJob, *, trigger: str) -> RepairResult | None:
         if self.scheduler is None or self._attempts(task) >= self.max_attempts_per_task:

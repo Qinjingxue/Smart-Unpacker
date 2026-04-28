@@ -7,7 +7,11 @@ DEFAULT_REPAIR_CONFIG = {
     "workspace": ".smart_unpacker_repair",
     "keep_candidates": False,
     "max_modules_per_job": 4,
-    "max_attempts_per_task": 1,
+    "max_attempts_per_task": 3,
+    "max_repair_rounds_per_task": 3,
+    "max_repair_seconds_per_task": 120.0,
+    "max_repair_generated_files_per_task": 16,
+    "max_repair_generated_mb_per_task": 2048.0,
     "trigger_on_medium_confidence": True,
     "trigger_on_extraction_failure": True,
     "thresholds": {
@@ -97,6 +101,10 @@ def normalize_repair_config(value: Any) -> dict[str, Any]:
     config["keep_candidates"] = _bool_value(config.get("keep_candidates", False), "repair.keep_candidates")
     config["max_modules_per_job"] = _int_at_least(config, "max_modules_per_job", 1)
     config["max_attempts_per_task"] = _int_at_least(config, "max_attempts_per_task", 0)
+    config["max_repair_rounds_per_task"] = _int_at_least(config, "max_repair_rounds_per_task", 0)
+    config["max_repair_seconds_per_task"] = _float_at_least(config, "max_repair_seconds_per_task", 0.0)
+    config["max_repair_generated_files_per_task"] = _int_at_least(config, "max_repair_generated_files_per_task", 0)
+    config["max_repair_generated_mb_per_task"] = _float_at_least(config, "max_repair_generated_mb_per_task", 0.0)
     config["trigger_on_medium_confidence"] = _bool_value(
         config.get("trigger_on_medium_confidence", True),
         "repair.trigger_on_medium_confidence",
