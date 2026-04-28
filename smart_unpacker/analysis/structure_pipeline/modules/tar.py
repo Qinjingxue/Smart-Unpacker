@@ -1,5 +1,6 @@
-from smart_unpacker.analysis.pipeline.module import AnalysisModuleSpec
-from smart_unpacker.analysis.pipeline.registry import register_analysis_module
+from smart_unpacker.analysis.structure_pipeline.module import AnalysisModuleSpec
+from smart_unpacker.analysis.structure_pipeline.registry import register_analysis_module
+from smart_unpacker.analysis.structure_pipeline.modules._fuzzy import apply_fuzzy_routes
 from smart_unpacker.analysis.result import ArchiveFormatEvidence, ArchiveSegment
 
 
@@ -14,12 +15,25 @@ class TarAnalysisModule:
             result = view.probe_tar(start_offset=start, max_entries_to_walk=max_entries)
             if result and result.get("plausible"):
                 confidence = 0.94 if result.get("end_zero_blocks") else 0.86
+                details = dict(result)
+                evidence = list(result.get("evidence") or [])
+                damage_flags = []
+                apply_fuzzy_routes(
+                    details,
+                    evidence,
+                    damage_flags,
+                    prepass,
+                    start_offset=start,
+                    end_offset=result.get("segment_end"),
+                    file_size=int(view.size),
+                    format_hint="tar",
+                )
                 return ArchiveFormatEvidence(
                     format="tar",
                     confidence=confidence,
                     status="extractable",
-                    segments=[ArchiveSegment(start_offset=start, end_offset=result.get("segment_end"), confidence=confidence, evidence=list(result.get("evidence") or []))],
-                    details=result,
+                    segments=[ArchiveSegment(start_offset=start, end_offset=result.get("segment_end"), confidence=confidence, damage_flags=damage_flags, evidence=evidence)],
+                    details=details,
                 )
         return ArchiveFormatEvidence(format="tar", confidence=0.0, status="not_found")
 

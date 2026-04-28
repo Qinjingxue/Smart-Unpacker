@@ -5,6 +5,7 @@ from collections import OrderedDict
 from dataclasses import dataclass
 
 from smart_unpacker_native import AnalysisBinaryView as _NativeAnalysisBinaryView
+from smart_unpacker_native import fuzzy_binary_profile_for_paths as _native_fuzzy_binary_profile_for_paths
 from smart_unpacker_native import repair_concat_ranges_to_bytes as _native_concat_ranges_to_bytes
 
 
@@ -70,6 +71,29 @@ class SharedBinaryView:
 
     def probe_compressed_tar(self, *, format: str, max_probe_bytes: int = 4 * 1024 * 1024) -> dict | None:
         return dict(self._native.probe_compressed_tar(str(format), int(max_probe_bytes)))
+
+    def fuzzy_binary_profile(
+        self,
+        *,
+        window_bytes: int = 64 * 1024,
+        max_windows: int = 8,
+        max_sample_bytes: int = 1024 * 1024,
+        entropy_high_threshold: float = 6.8,
+        entropy_low_threshold: float = 3.5,
+        entropy_jump_threshold: float = 1.25,
+        ngram_top_k: int = 8,
+        max_ngram_sample_bytes: int = 256 * 1024,
+    ) -> dict:
+        return dict(self._native.fuzzy_binary_profile(
+            int(window_bytes),
+            int(max_windows),
+            int(max_sample_bytes),
+            float(entropy_high_threshold),
+            float(entropy_low_threshold),
+            float(entropy_jump_threshold),
+            int(ngram_top_k),
+            int(max_ngram_sample_bytes),
+        ))
 
     def _reserve_read_budget(self, size: int) -> None:
         if self.max_read_bytes is None:
@@ -198,6 +222,30 @@ class MultiVolumeBinaryView:
 
     def probe_seven_zip(self, *, start_offset: int, max_next_header_check_bytes: int = 1024 * 1024) -> dict | None:
         return _probe_seven_zip_view(self, int(start_offset), int(max_next_header_check_bytes))
+
+    def fuzzy_binary_profile(
+        self,
+        *,
+        window_bytes: int = 64 * 1024,
+        max_windows: int = 8,
+        max_sample_bytes: int = 1024 * 1024,
+        entropy_high_threshold: float = 6.8,
+        entropy_low_threshold: float = 3.5,
+        entropy_jump_threshold: float = 1.25,
+        ngram_top_k: int = 8,
+        max_ngram_sample_bytes: int = 256 * 1024,
+    ) -> dict:
+        return dict(_native_fuzzy_binary_profile_for_paths(
+            self.volumes,
+            int(window_bytes),
+            int(max_windows),
+            int(max_sample_bytes),
+            float(entropy_high_threshold),
+            float(entropy_low_threshold),
+            float(entropy_jump_threshold),
+            int(ngram_top_k),
+            int(max_ngram_sample_bytes),
+        ))
 
     def _reserve_read_budget(self, size: int) -> None:
         if self.max_read_bytes is None:

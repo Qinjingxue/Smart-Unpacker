@@ -7,10 +7,10 @@ import lzma
 from binascii import crc32
 from io import BytesIO
 
-from smart_unpacker.analysis.pipeline.module import AnalysisModuleSpec
-from smart_unpacker.analysis.pipeline.registry import get_analysis_module_registry
 from smart_unpacker.analysis.result import ArchiveFormatEvidence
 from smart_unpacker.analysis.scheduler import ArchiveAnalysisScheduler
+from smart_unpacker.analysis.structure_pipeline.module import AnalysisModuleSpec
+from smart_unpacker.analysis.structure_pipeline.registry import get_analysis_module_registry
 from smart_unpacker.analysis.view import SharedBinaryView
 
 
@@ -109,6 +109,47 @@ def test_analysis_scheduler_finds_embedded_archive_segments(tmp_path):
     assert by_format["7z"].status == "not_found"
     assert by_format["7z"].confidence == 0.0
     assert {item.format for item in report.selected} == {"zip", "rar"}
+
+
+def test_analysis_scheduler_runs_fuzzy_binary_profile_before_structure(tmp_path):
+    payload = b"MZ" + (b"A" * 8192) + _seven_zip_bytes() + b"\xff" * 8192
+    path = tmp_path / "profiled.bin"
+    path.write_bytes(payload)
+
+    report = ArchiveAnalysisScheduler({
+        "analysis": {
+            "fuzzy": {
+                "modules": [
+                    {
+                        "name": "binary_profile",
+                        "enabled": True,
+                        "window_bytes": 4096,
+                        "max_windows": 4,
+                        "max_sample_bytes": 16 * 1024,
+                    }
+                ]
+            }
+        }
+    }).analyze_path(str(path))
+
+    profile = report.fuzzy["binary_profile"]
+    assert profile["sampled"] is True
+    assert profile["sample_count"] >= 2
+    for key in (
+        "entropy_profile",
+        "byte_class_profile",
+        "window_anomalies",
+        "ngram_sketch",
+        "run_profile",
+        "offset_hints",
+    ):
+        assert key in profile
+    assert profile["ngram_sketch"]["byte_histogram_top"]
+    by_format = {item.format: item for item in report.evidences}
+    assert "7z" in by_format
+    assert "fuzzy" in by_format["7z"].details
+    assert "carrier_prefix" in by_format["7z"].segments[0].damage_flags
+    assert "fuzzy:carrier_prefix" in by_format["7z"].segments[0].evidence
 
 
 def test_zip_embedded_local_header_without_eocd_keeps_embedded_start(tmp_path):
@@ -282,6 +323,8 @@ def test_analysis_scheduler_reads_zip_across_split_volumes(tmp_path):
     report = ArchiveAnalysisScheduler().analyze_paths([str(first), str(second)])
     zip_evidence = {item.format: item for item in report.evidences}["zip"]
 
+    assert report.fuzzy["binary_profile"]["sampled"] is True
+    assert "warnings" not in report.fuzzy
     assert zip_evidence.status == "extractable"
     assert zip_evidence.confidence == 0.99
     assert zip_evidence.segments[0].start_offset == 0
@@ -298,6 +341,8 @@ def test_analysis_scheduler_reads_7z_across_split_volumes(tmp_path):
     report = ArchiveAnalysisScheduler().analyze_paths([str(first), str(second)])
     seven = {item.format: item for item in report.evidences}["7z"]
 
+    assert report.fuzzy["binary_profile"]["sampled"] is True
+    assert "warnings" not in report.fuzzy
     assert seven.status == "extractable"
     assert seven.confidence == 0.97
     assert seven.segments[0].start_offset == 0

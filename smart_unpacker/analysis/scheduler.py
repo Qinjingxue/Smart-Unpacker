@@ -1,9 +1,10 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
-from smart_unpacker.analysis.config import analysis_config, enabled_module_configs
-from smart_unpacker.analysis.pipeline.prepass import run_signature_prepass
-from smart_unpacker.analysis.pipeline.registry import discover_analysis_modules, get_analysis_module_registry
+from smart_unpacker.analysis.config import analysis_config, enabled_fuzzy_module_configs, enabled_module_configs
+from smart_unpacker.analysis.fuzzy_pipeline.registry import discover_fuzzy_analysis_modules, get_fuzzy_analysis_module_registry
+from smart_unpacker.analysis.structure_pipeline.prepass import run_signature_prepass
+from smart_unpacker.analysis.structure_pipeline.registry import discover_analysis_modules, get_analysis_module_registry
 from smart_unpacker.analysis.result import ArchiveAnalysisReport, ArchiveFormatEvidence
 from smart_unpacker.analysis.view import MultiVolumeBinaryView, SharedBinaryView
 
@@ -11,6 +12,7 @@ from smart_unpacker.analysis.view import MultiVolumeBinaryView, SharedBinaryView
 class ArchiveAnalysisScheduler:
     def __init__(self, config: dict[str, Any] | None = None):
         self.config = analysis_config(config or {})
+        discover_fuzzy_analysis_modules()
         discover_analysis_modules()
 
     def analyze_path(self, path: str) -> ArchiveAnalysisReport:
@@ -48,8 +50,10 @@ class ArchiveAnalysisScheduler:
     def analyze_view(self, view: SharedBinaryView | MultiVolumeBinaryView, *, report_path: str | None = None) -> ArchiveAnalysisReport:
         prepass_config = self.config.get("prepass") if isinstance(self.config.get("prepass"), dict) else {}
         prepass = run_signature_prepass(view, prepass_config) if prepass_config.get("enabled", True) else {}
-        modules = self._selected_modules(prepass)
-        evidences = self._run_modules(view, prepass, modules)
+        fuzzy = self._run_fuzzy_pipeline(view, prepass)
+        structure_context = {**prepass, "fuzzy": fuzzy}
+        modules = self._selected_structure_modules(structure_context)
+        evidences = self._run_structure_modules(view, structure_context, modules)
         selected = self._selected_evidences(evidences)
         stats = view.stats()
         return ArchiveAnalysisReport(
@@ -58,6 +62,7 @@ class ArchiveAnalysisScheduler:
             evidences=sorted(evidences, key=lambda item: item.confidence, reverse=True),
             selected=selected,
             prepass=prepass,
+            fuzzy=fuzzy,
             read_bytes=stats.read_bytes,
             cache_hits=stats.cache_hits,
         )
@@ -84,7 +89,28 @@ class ArchiveAnalysisScheduler:
             max_concurrent_reads=int(self.config.get("max_concurrent_reads", 1) or 1),
         )
 
-    def _selected_modules(self, prepass: dict):
+    def _run_fuzzy_pipeline(self, view: SharedBinaryView | MultiVolumeBinaryView, prepass: dict) -> dict[str, Any]:
+        fuzzy_config = self.config.get("fuzzy") if isinstance(self.config.get("fuzzy"), dict) else {}
+        if not fuzzy_config.get("enabled", True):
+            return {}
+        module_configs = enabled_fuzzy_module_configs(self.config)
+        registry = get_fuzzy_analysis_module_registry()
+        results = {}
+        warnings = []
+        for name, module_config in module_configs.items():
+            module = registry.get(name)
+            if module is None:
+                warnings.append(f"{name}: fuzzy analysis module is not registered")
+                continue
+            try:
+                results[name] = module.analyze(view, prepass, module_config)
+            except Exception as exc:
+                warnings.append(f"{name}: {exc}")
+        if warnings:
+            results["warnings"] = warnings
+        return results
+
+    def _selected_structure_modules(self, prepass: dict):
         enabled_configs = enabled_module_configs(self.config)
         registry = get_analysis_module_registry()
         modules = []
@@ -95,7 +121,7 @@ class ArchiveAnalysisScheduler:
             modules.append(module)
         return modules
 
-    def _run_modules(self, view: SharedBinaryView, prepass: dict, modules) -> list[ArchiveFormatEvidence]:
+    def _run_structure_modules(self, view: SharedBinaryView, prepass: dict, modules) -> list[ArchiveFormatEvidence]:
         module_configs = enabled_module_configs(self.config)
         if not modules:
             return []

@@ -2,7 +2,7 @@ import importlib
 import pkgutil
 from typing import Dict
 
-from smart_unpacker.analysis.pipeline.module import AnalysisModule
+from smart_unpacker.analysis.structure_pipeline.module import AnalysisModule
 
 
 class AnalysisModuleRegistry:
@@ -37,7 +37,7 @@ def discover_analysis_modules():
     if _discovered:
         return
 
-    package = importlib.import_module("smart_unpacker.analysis.pipeline.modules")
+    package = importlib.import_module("smart_unpacker.analysis.structure_pipeline.modules")
     for module_info in pkgutil.iter_modules(package.__path__, package.__name__ + "."):
         importlib.import_module(module_info.name)
 

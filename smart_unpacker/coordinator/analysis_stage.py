@@ -117,6 +117,7 @@ class ArchiveAnalysisStage:
         task.fact_bag.set("analysis.read_bytes", report.read_bytes)
         task.fact_bag.set("analysis.cache_hits", report.cache_hits)
         task.fact_bag.set("analysis.prepass", report.prepass)
+        task.fact_bag.set("analysis.fuzzy", report.fuzzy)
         task.fact_bag.set(
             "analysis.evidences",
             [

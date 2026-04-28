@@ -2,6 +2,7 @@ use pyo3::prelude::*;
 
 mod analysis;
 mod archive_deep_repair;
+mod binary_profile;
 mod carrier;
 mod compression_stream_repair;
 mod directory_scan;
@@ -52,6 +53,10 @@ fn smart_unpacker_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<analysis::AnalysisBinaryView>()?;
     m.add_function(wrap_pyfunction!(magic::scan_after_markers, m)?)?;
     m.add_function(wrap_pyfunction!(magic::scan_magics_anywhere, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        binary_profile::fuzzy_binary_profile_for_paths,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(carrier::scan_carrier_archive, m)?)?;
     m.add_function(wrap_pyfunction!(
         zip_names::scan_zip_central_directory_names,

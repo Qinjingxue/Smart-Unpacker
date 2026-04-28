@@ -1,6 +1,7 @@
-from smart_unpacker.analysis.pipeline.module import AnalysisModuleSpec
-from smart_unpacker.analysis.pipeline.registry import register_analysis_module
-from smart_unpacker.analysis.pipeline.modules._boundaries import next_archive_boundary
+from smart_unpacker.analysis.structure_pipeline.module import AnalysisModuleSpec
+from smart_unpacker.analysis.structure_pipeline.registry import register_analysis_module
+from smart_unpacker.analysis.structure_pipeline.modules._boundaries import next_archive_boundary
+from smart_unpacker.analysis.structure_pipeline.modules._fuzzy import apply_fuzzy_routes
 from smart_unpacker.analysis.result import ArchiveFormatEvidence, ArchiveSegment
 
 
@@ -13,9 +14,9 @@ class RarAnalysisModule:
             return ArchiveFormatEvidence(format="rar", confidence=0.0, status="not_found")
         start = min(hit["offset"] for hit in hits)
         native = view.probe_rar(start_offset=start, max_blocks_to_walk=int(config.get("max_blocks_to_walk", 4096) or 4096))
-        return self._from_native(dict(native), start, next_archive_boundary(prepass, start, view.size))
+        return self._from_native(dict(native), start, next_archive_boundary(prepass, start, view.size), prepass, view.size)
 
-    def _from_native(self, native: dict, start: int, boundary: int) -> ArchiveFormatEvidence:
+    def _from_native(self, native: dict, start: int, boundary: int, prepass: dict, file_size: int) -> ArchiveFormatEvidence:
         if not native.get("magic_matched"):
             return ArchiveFormatEvidence(format="rar", confidence=0.0, status="not_found", details=native)
         evidence = list(native.get("evidence") or ["rar:signature"])
@@ -55,6 +56,16 @@ class RarAnalysisModule:
             native["boundary_confidence"] = "low"
             native["password_required"] = True
             native["header_encrypted"] = True
+        apply_fuzzy_routes(
+            native,
+            evidence,
+            damage_flags,
+            prepass,
+            start_offset=start,
+            end_offset=segment_end,
+            file_size=file_size,
+            format_hint="rar",
+        )
         return ArchiveFormatEvidence(
             format="rar",
             confidence=confidence,

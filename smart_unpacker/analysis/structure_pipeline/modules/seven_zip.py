@@ -1,6 +1,7 @@
-from smart_unpacker.analysis.pipeline.module import AnalysisModuleSpec
-from smart_unpacker.analysis.pipeline.registry import register_analysis_module
-from smart_unpacker.analysis.pipeline.modules._boundaries import next_archive_boundary
+from smart_unpacker.analysis.structure_pipeline.module import AnalysisModuleSpec
+from smart_unpacker.analysis.structure_pipeline.registry import register_analysis_module
+from smart_unpacker.analysis.structure_pipeline.modules._boundaries import next_archive_boundary
+from smart_unpacker.analysis.structure_pipeline.modules._fuzzy import apply_fuzzy_routes
 from smart_unpacker.analysis.result import ArchiveFormatEvidence, ArchiveSegment
 
 
@@ -16,9 +17,9 @@ class SevenZipAnalysisModule:
             start_offset=start,
             max_next_header_check_bytes=int(config.get("max_next_header_check_bytes", 1024 * 1024) or 1024 * 1024),
         )
-        return self._from_native(dict(native), start, next_archive_boundary(prepass, start, view.size))
+        return self._from_native(dict(native), start, next_archive_boundary(prepass, start, view.size), prepass, view.size)
 
-    def _from_native(self, native: dict, start: int, boundary: int) -> ArchiveFormatEvidence:
+    def _from_native(self, native: dict, start: int, boundary: int, prepass: dict, file_size: int) -> ArchiveFormatEvidence:
         if not native.get("magic_matched"):
             return ArchiveFormatEvidence(format="7z", confidence=0.0, status="not_found", details=native)
         evidence = list(native.get("evidence") or ["7z:signature"])
@@ -53,6 +54,16 @@ class SevenZipAnalysisModule:
         end_offset = int(native.get("segment_end") or 0) or (start + 32 + next_header_offset + next_header_size if next_header_size else None)
         if boundary_unreliable:
             end_offset = None
+        apply_fuzzy_routes(
+            native,
+            evidence,
+            damage_flags,
+            prepass,
+            start_offset=start,
+            end_offset=end_offset,
+            file_size=file_size,
+            format_hint="7z",
+        )
         return ArchiveFormatEvidence(
             format="7z",
             confidence=confidence,

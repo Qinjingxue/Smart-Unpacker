@@ -1,5 +1,6 @@
-from smart_unpacker.analysis.pipeline.module import AnalysisModuleSpec
-from smart_unpacker.analysis.pipeline.registry import register_analysis_module
+from smart_unpacker.analysis.structure_pipeline.module import AnalysisModuleSpec
+from smart_unpacker.analysis.structure_pipeline.registry import register_analysis_module
+from smart_unpacker.analysis.structure_pipeline.modules._fuzzy import apply_fuzzy_routes
 from smart_unpacker.analysis.result import ArchiveFormatEvidence, ArchiveSegment
 
 
@@ -23,13 +24,13 @@ class ZipAnalysisModule:
             native = view.probe_zip(eocd_offset=max(eocd_hits), max_cd_entries_to_walk=max_entries)
         if native and (native.get("magic_matched") or native.get("plausible")):
             native = dict(native)
-            recovered = self._local_header_recovery(view, native, hits)
+            recovered = self._local_header_recovery(view, native, hits, prepass)
             if recovered:
                 return recovered
-            return self._from_native(view, native, hits)
+            return self._from_native(view, native, hits, prepass)
         return ArchiveFormatEvidence(format="zip", confidence=0.0, status="not_found")
 
-    def _from_native(self, view, native: dict, hits: list[dict]) -> ArchiveFormatEvidence:
+    def _from_native(self, view, native: dict, hits: list[dict], prepass: dict) -> ArchiveFormatEvidence:
         if not native.get("magic_matched") and not hits:
             return ArchiveFormatEvidence(format="zip", confidence=0.0, status="not_found", details=native)
 
@@ -70,6 +71,17 @@ class ZipAnalysisModule:
         else:
             native.setdefault("integrity_confidence", "unknown" if not plausible else "medium")
         native.setdefault("boundary_confidence", "high" if plausible and walk_ok else "low")
+        segment_end = min(end_offset, int(view.size)) if end_offset is not None else None
+        apply_fuzzy_routes(
+            native,
+            evidence,
+            damage_flags,
+            prepass,
+            start_offset=archive_offset,
+            end_offset=segment_end,
+            file_size=int(view.size),
+            format_hint="zip",
+        )
         return ArchiveFormatEvidence(
             format="zip",
             confidence=confidence,
@@ -77,7 +89,7 @@ class ZipAnalysisModule:
             segments=[
                 ArchiveSegment(
                     start_offset=archive_offset,
-                    end_offset=min(end_offset, int(view.size)) if end_offset is not None else None,
+                    end_offset=segment_end,
                     confidence=confidence,
                     damage_flags=damage_flags,
                     evidence=evidence or ["zip:eocd" if native.get("magic_matched") else "zip:signature"],
@@ -87,7 +99,7 @@ class ZipAnalysisModule:
             details=native,
         )
 
-    def _local_header_recovery(self, view, native: dict, hits: list[dict]) -> ArchiveFormatEvidence | None:
+    def _local_header_recovery(self, view, native: dict, hits: list[dict], prepass: dict) -> ArchiveFormatEvidence | None:
         error = str(native.get("error") or "")
         if error not in {"bad_central_directory_signature", "archive_offset_underflow", "central_directory_size_out_of_range"}:
             return None
@@ -102,6 +114,18 @@ class ZipAnalysisModule:
             "recovery_strategy": "local_header_scan",
             "directory_confidence": "low",
         }
+        evidence = ["zip:local_header"]
+        damage_flags = ["central_directory_unreliable", "local_header_recovery"]
+        apply_fuzzy_routes(
+            details,
+            evidence,
+            damage_flags,
+            prepass,
+            start_offset=start,
+            end_offset=None,
+            file_size=int(view.size),
+            format_hint="zip",
+        )
         return ArchiveFormatEvidence(
             format="zip",
             confidence=0.70,
@@ -111,8 +135,8 @@ class ZipAnalysisModule:
                     start_offset=start,
                     end_offset=None,
                     confidence=0.70,
-                    damage_flags=["central_directory_unreliable", "local_header_recovery"],
-                    evidence=["zip:local_header"],
+                    damage_flags=damage_flags,
+                    evidence=evidence,
                 )
             ],
             warnings=["zip central directory is damaged; recovered candidate from local headers"],

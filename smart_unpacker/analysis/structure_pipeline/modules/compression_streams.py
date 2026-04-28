@@ -1,5 +1,5 @@
-from smart_unpacker.analysis.pipeline.module import AnalysisModuleSpec
-from smart_unpacker.analysis.pipeline.registry import register_analysis_module
+from smart_unpacker.analysis.structure_pipeline.module import AnalysisModuleSpec
+from smart_unpacker.analysis.structure_pipeline.registry import register_analysis_module
 from smart_unpacker.analysis.result import ArchiveFormatEvidence, ArchiveSegment
 
 GZIP_MAGIC = b"\x1f\x8b\x08"
