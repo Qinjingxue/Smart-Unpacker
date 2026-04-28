@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from smart_unpacker.repair.result import RepairResult, RepairStatus
 from smart_unpacker.support.sevenzip_native import get_native_password_tester
@@ -22,7 +22,7 @@ class CandidateValidation:
 class RepairCandidate:
     module_name: str
     format: str
-    repaired_input: dict[str, Any]
+    repaired_input: dict[str, Any] = field(default_factory=dict)
     status: RepairStatus = "repaired"
     stage: str = ""
     confidence: float = 0.0
@@ -36,6 +36,13 @@ class RepairCandidate:
     message: str = ""
     validations: list[CandidateValidation] = field(default_factory=list)
     score_hint: float = 0.0
+    materializer: Callable[[], Any] | None = field(default=None, compare=False, repr=False)
+    materialized: bool = True
+    plan: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def is_lazy(self) -> bool:
+        return self.materializer is not None and not self.materialized
 
     @classmethod
     def from_result(
@@ -112,7 +119,8 @@ class CandidateSelector:
         self.config = config or {}
 
     def select(self, candidates: list[RepairCandidate]) -> tuple[RepairCandidate | None, dict[str, Any]]:
-        validated = [self._with_native_validation(candidate) for candidate in candidates]
+        materialized = materialize_candidates(candidates)
+        validated = [self._with_native_validation(candidate) for candidate in materialized]
         accepted = [candidate for candidate in validated if self._accepted(candidate)]
         if not accepted:
             return None, {
@@ -271,7 +279,7 @@ class CandidateSelector:
 
     @staticmethod
     def _accepted(candidate: RepairCandidate) -> bool:
-        return bool(candidate.repaired_input) and all(item.accepted for item in candidate.validations)
+        return bool(candidate.repaired_input) and not candidate.is_lazy and all(item.accepted for item in candidate.validations)
 
     @staticmethod
     def _score(candidate: RepairCandidate) -> float:
@@ -303,6 +311,69 @@ def _selection_warnings(candidates: list[RepairCandidate]) -> list[str]:
                 continue
             warnings.extend(validation.warnings)
     return _dedupe(warnings)
+
+
+def materialize_candidates(candidates: list[RepairCandidate]) -> list[RepairCandidate]:
+    output: list[RepairCandidate] = []
+    for candidate in candidates:
+        output.extend(materialize_candidate(candidate))
+    return output
+
+
+def materialize_candidate(candidate: RepairCandidate) -> list[RepairCandidate]:
+    if not candidate.is_lazy:
+        return [candidate]
+    try:
+        produced = candidate.materializer() if candidate.materializer is not None else None
+    except Exception as exc:
+        return [_materialization_failed(candidate, str(exc))]
+    items = produced if isinstance(produced, list) else [produced]
+    materialized: list[RepairCandidate] = []
+    for item in items:
+        coerced = _coerce_materialized_candidate(candidate, item)
+        if coerced is not None:
+            materialized.append(coerced)
+    if not materialized:
+        return [_materialization_failed(candidate, "repair plan produced no candidate")]
+    return materialized
+
+
+def _coerce_materialized_candidate(plan: RepairCandidate, item: Any) -> RepairCandidate | None:
+    if isinstance(item, RepairCandidate):
+        return replace(
+            item,
+            score_hint=max(float(item.score_hint or 0.0), float(plan.score_hint or 0.0)),
+            stage=item.stage or plan.stage,
+            diagnosis={**plan.diagnosis, **item.diagnosis},
+            materializer=None,
+            materialized=True,
+            plan={**plan.plan, **item.plan},
+        )
+    if isinstance(item, RepairResult):
+        candidate = RepairCandidate.from_result(item, score_hint=plan.score_hint, stage=plan.stage)
+        if candidate is None:
+            return None
+        return replace(candidate, diagnosis={**plan.diagnosis, **candidate.diagnosis}, plan=dict(plan.plan))
+    return None
+
+
+def _materialization_failed(candidate: RepairCandidate, message: str) -> RepairCandidate:
+    return replace(
+        candidate,
+        materializer=None,
+        materialized=True,
+        validations=[
+            *candidate.validations,
+            CandidateValidation(
+                name="repair_plan_materialization",
+                accepted=False,
+                warnings=[message],
+                details={"module": candidate.module_name, "plan": dict(candidate.plan)},
+            ),
+        ],
+        warnings=_dedupe([*candidate.warnings, message]),
+        message=message,
+    )
 
 
 def _native_validation(validations: list[CandidateValidation]) -> CandidateValidation | None:

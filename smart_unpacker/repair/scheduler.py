@@ -2,7 +2,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from smart_unpacker.repair.candidate import CandidateSelector, RepairCandidate, RepairCandidateBatch
+from smart_unpacker.repair.candidate import CandidateSelector, CandidateValidation, RepairCandidate, RepairCandidateBatch
 from smart_unpacker.repair.capability import ModuleCapabilityDecision, RepairCapabilityDecision
 from smart_unpacker.repair.config import enabled_module_configs, repair_config
 from smart_unpacker.repair.context import RepairContext, build_repair_context
@@ -43,7 +43,7 @@ class RepairScheduler:
             message=batch.message or "registered repair modules did not produce a candidate",
         )
 
-    def generate_repair_candidates(self, job: RepairJob) -> RepairCandidateBatch:
+    def generate_repair_candidates(self, job: RepairJob, *, lazy: bool = False) -> RepairCandidateBatch:
         diagnosis = self.diagnose(job)
         context = build_repair_context(job, diagnosis)
         if not self.config.get("enabled", True):
@@ -77,6 +77,16 @@ class RepairScheduler:
         repair_candidates: list[RepairCandidate] = []
         for score, module, route_score in modules:
             module_config = self._module_runtime_config(module.spec.name, module_configs)
+            if lazy:
+                repair_candidates.append(_lazy_module_candidate(
+                    module,
+                    job,
+                    diagnosis,
+                    str(workspace),
+                    module_config,
+                    score_hint=max(score, route_score),
+                ))
+                continue
             try:
                 if hasattr(module, "generate_candidates"):
                     generated = module.generate_candidates(  # type: ignore[attr-defined]
@@ -547,3 +557,67 @@ def _normalize_format(value: Any) -> str:
         "txz": "tar.xz",
     }
     return aliases.get(text, text or "unknown")
+
+
+def _lazy_module_candidate(
+    module,
+    job: RepairJob,
+    diagnosis: RepairDiagnosis,
+    workspace: str,
+    module_config: dict[str, Any],
+    *,
+    score_hint: float,
+) -> RepairCandidate:
+    module_name = module.spec.name
+
+    def materialize():
+        if hasattr(module, "generate_candidates"):
+            return list(module.generate_candidates(  # type: ignore[attr-defined]
+                job,
+                diagnosis,
+                workspace,
+                module_config,
+            ) or [])
+        result = module.repair(job, diagnosis, workspace, module_config)
+        if result.ok:
+            return RepairCandidate.from_result(
+                result,
+                score_hint=score_hint,
+                stage=module.spec.stage,
+            )
+        return None
+
+    return RepairCandidate(
+        module_name=module_name,
+        format=diagnosis.format or job.format,
+        repaired_input={},
+        status="partial" if module.spec.partial else "repaired",
+        stage=module.spec.stage,
+        confidence=float(score_hint or 0.0),
+        partial=bool(module.spec.partial),
+        actions=["plan_repair", module_name],
+        damage_flags=list(job.damage_flags),
+        diagnosis=diagnosis.as_dict(),
+        message="repair plan pending materialization",
+        validations=[
+            CandidateValidation(
+                name="repair_plan",
+                accepted=True,
+                score=float(score_hint or 0.0),
+                details={
+                    "module": module_name,
+                    "stage": module.spec.stage,
+                    "lazy": True,
+                },
+            )
+        ],
+        score_hint=float(score_hint or 0.0),
+        materializer=materialize,
+        materialized=False,
+        plan={
+            "module": module_name,
+            "stage": module.spec.stage,
+            "workspace": workspace,
+            "lazy": True,
+        },
+    )

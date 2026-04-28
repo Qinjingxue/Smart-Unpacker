@@ -123,6 +123,30 @@ def test_repair_beam_builds_from_repair_config():
     assert loop.min_improvement == 0.2
 
 
+def test_repair_beam_materializes_only_assessment_window():
+    calls = []
+    scheduler = _FakeLazyCandidateScheduler([
+        _lazy_candidate("first", confidence=0.9, calls=calls),
+        _lazy_candidate("second", confidence=0.8, calls=calls),
+        _lazy_candidate("third", confidence=0.7, calls=calls),
+    ])
+    loop = RepairBeamLoop(
+        scheduler,
+        beam_width=3,
+        max_analyze_candidates=3,
+        max_assess_candidates=1,
+        assess=lambda item: {"assessment_status": "partial", "decision_hint": "repair", "completeness": 0.5},
+    )
+
+    round_result = loop.expand_round([
+        RepairBeamState(source_input={"kind": "file", "path": "broken.zip"}, format="zip", archive_key="broken")
+    ], round_index=1)
+
+    assert calls == ["first"]
+    assert len(round_result.states_out) == 1
+    assert round_result.states_out[0].source_input["path"] == "first.zip"
+
+
 class _FakeCandidateScheduler:
     def __init__(self, candidates):
         self.candidates = candidates
@@ -130,6 +154,16 @@ class _FakeCandidateScheduler:
 
     def generate_repair_candidates(self, job):
         self.jobs.append(job)
+        return RepairCandidateBatch(candidates=list(self.candidates), diagnosis={"format": job.format, "confidence": job.confidence})
+
+
+class _FakeLazyCandidateScheduler:
+    def __init__(self, candidates):
+        self.candidates = candidates
+        self.lazy_flags = []
+
+    def generate_repair_candidates(self, job, *, lazy=False):
+        self.lazy_flags.append(lazy)
         return RepairCandidateBatch(candidates=list(self.candidates), diagnosis={"format": job.format, "confidence": job.confidence})
 
 
@@ -141,4 +175,22 @@ def _candidate(module_name, *, confidence, path=None):
         confidence=confidence,
         actions=[module_name],
         validations=[CandidateValidation(name="module_result", accepted=True, score=confidence)],
+    )
+
+
+def _lazy_candidate(module_name, *, confidence, calls):
+    def materialize():
+        calls.append(module_name)
+        return _candidate(module_name, confidence=confidence)
+
+    return RepairCandidate(
+        module_name=module_name,
+        format="zip",
+        repaired_input={},
+        confidence=confidence,
+        actions=["plan_repair", module_name],
+        validations=[CandidateValidation(name="repair_plan", accepted=True, score=confidence)],
+        materializer=materialize,
+        materialized=False,
+        plan={"module": module_name},
     )

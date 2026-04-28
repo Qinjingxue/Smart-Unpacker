@@ -5,7 +5,7 @@ import json
 from dataclasses import dataclass, field, replace
 from typing import Any, Callable
 
-from smart_unpacker.repair.candidate import CandidateSelector, RepairCandidate
+from smart_unpacker.repair.candidate import CandidateSelector, RepairCandidate, materialize_candidate
 from smart_unpacker.repair.job import RepairJob
 from smart_unpacker.repair.scheduler import RepairScheduler
 from smart_unpacker.verification.result import (
@@ -187,7 +187,10 @@ class RepairBeamLoop:
     def expand_round(self, states: list[RepairBeamState], *, round_index: int) -> RepairBeamRound:
         raw_candidates: list[RepairBeamCandidate] = []
         for state in states:
-            batch = self.scheduler.generate_repair_candidates(state.to_job())
+            try:
+                batch = self.scheduler.generate_repair_candidates(state.to_job(), lazy=True)
+            except TypeError:
+                batch = self.scheduler.generate_repair_candidates(state.to_job())
             candidates = list(batch.candidates)
             if self.max_candidates_per_state is not None:
                 candidates = candidates[: max(0, int(self.max_candidates_per_state))]
@@ -204,11 +207,12 @@ class RepairBeamLoop:
             for item in ranked[: self.max_analyze_candidates]
         ]
         analyzed = sorted(analyzed, key=lambda item: item.score, reverse=True)
+        assessment_window = _materialize_beam_items(analyzed[: self.max_assess_candidates])
+        assessment_window = sorted(assessment_window, key=lambda item: item.score, reverse=True)
         assessed = [
             _with_assessment(item, self.assess(item))
-            for item in analyzed[: self.max_assess_candidates]
+            for item in assessment_window
         ]
-        assessed.extend(analyzed[self.max_assess_candidates:])
         assessed = sorted(assessed, key=lambda item: item.score, reverse=True)
         states_out = self._states_from_candidates(assessed, round_index=round_index)
         accepted_states = [state for state in states_out if _state_accepted(state)]
@@ -272,6 +276,24 @@ def _candidate_pre_score(candidate: RepairCandidate, state: RepairBeamState) -> 
     prior_score = min(1.0, max(0.0, state.score)) * 0.03
     prior_completeness = min(1.0, max(0.0, state.completeness)) * 0.04
     return selector_score + progress_score * 0.08 + prior_score + prior_completeness
+
+
+def _materialize_beam_items(items: list[RepairBeamCandidate]) -> list[RepairBeamCandidate]:
+    output: list[RepairBeamCandidate] = []
+    for item in items:
+        materialized = materialize_candidate(item.candidate)
+        for candidate in materialized:
+            if candidate.is_lazy or not candidate.repaired_input:
+                continue
+            rescored = _candidate_pre_score(candidate, item.state)
+            output.append(RepairBeamCandidate(
+                state=item.state,
+                candidate=candidate,
+                analyze=item.analyze,
+                assessment=item.assessment,
+                score=max(item.score, rescored),
+            ))
+    return output
 
 
 def _with_analyze(item: RepairBeamCandidate, analyze: dict[str, Any]) -> RepairBeamCandidate:
