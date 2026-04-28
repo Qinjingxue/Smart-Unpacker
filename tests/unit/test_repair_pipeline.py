@@ -11,6 +11,7 @@ import zlib
 import pytest
 
 from smart_unpacker.analysis.result import ArchiveFormatEvidence, ArchiveSegment
+from smart_unpacker.config.schema import normalize_config
 from smart_unpacker.repair import RepairJob, RepairScheduler
 from smart_unpacker.repair.pipeline.module import RepairModuleSpec
 from smart_unpacker.repair.pipeline.registry import get_repair_module_registry
@@ -90,6 +91,77 @@ def test_repair_scheduler_runs_registered_module(tmp_path):
     assert result.ok is True
     assert result.module_name == module.spec.name
     assert result.repaired_input == {"kind": "file_range", "path": "mixed.bin", "start": 10, "end": 100}
+
+
+def test_repair_scheduler_filters_unsafe_modules_by_default(tmp_path):
+    result = _run_dummy_repair(tmp_path, _DummyUnsafeModule())
+
+    assert result.status == "unsupported"
+
+
+def test_repair_scheduler_allows_unsafe_modules_when_configured(tmp_path):
+    result = _run_dummy_repair(tmp_path, _DummyUnsafeModule(), {
+        "safety": {"allow_unsafe": True},
+    })
+
+    assert result.ok is True
+    assert result.module_name == "dummy_unsafe_boundary"
+
+
+def test_repair_scheduler_can_disable_partial_modules(tmp_path):
+    result = _run_dummy_repair(tmp_path, _DummyPartialModule(), {
+        "safety": {"allow_partial": False},
+    })
+
+    assert result.status == "unsupported"
+
+
+def test_repair_scheduler_gates_deep_modules_and_passes_budget_config(tmp_path):
+    source = tmp_path / "deep.zip"
+    source.write_bytes(b"x" * 4096)
+    module = _DummyDeepModule()
+
+    disabled = _run_dummy_repair(tmp_path, module, source=source)
+    size_blocked = _run_dummy_repair(tmp_path, module, {
+        "stages": {"deep": True},
+        "deep": {"max_input_size_mb": 0.001},
+    }, source=source)
+    allowed = _run_dummy_repair(tmp_path, module, {
+        "stages": {"deep": True},
+        "deep": {"max_input_size_mb": 1},
+        "modules": [
+            {
+                "name": module.spec.name,
+                "enabled": True,
+                "deep": {"max_candidates_per_module": 2},
+            }
+        ],
+    }, source=source)
+
+    assert disabled.status == "unsupported"
+    assert size_blocked.status == "unsupported"
+    assert allowed.ok is True
+    assert allowed.actions == ["deep_candidates=2"]
+
+
+def test_repair_config_is_normalized_by_config_schema():
+    config = normalize_config({
+        "recursive_extract": "1",
+        "repair": {
+            "safety": {"allow_unsafe": True, "allow_partial": "false"},
+            "deep": {
+                "max_candidates_per_module": "2",
+                "max_seconds_per_module": "1.5",
+                "verify_candidates": "false",
+            },
+        },
+    })
+
+    assert config["repair"]["safety"]["allow_unsafe"] is True
+    assert config["repair"]["safety"]["allow_partial"] is False
+    assert config["repair"]["deep"]["max_candidates_per_module"] == 2
+    assert config["repair"]["deep"]["max_seconds_per_module"] == 1.5
+    assert config["repair"]["deep"]["verify_candidates"] is False
 
 
 def test_zip_central_directory_rebuild_repairs_missing_eocd(tmp_path):
@@ -418,6 +490,97 @@ class _DummyBoundaryModule:
         )
 
 
+@dataclass
+class _DummyUnsafeModule:
+    spec = RepairModuleSpec(
+        name="dummy_unsafe_boundary",
+        formats=("zip",),
+        categories=("boundary_repair",),
+        safe=False,
+    )
+
+    def can_handle(self, job, diagnosis, config):
+        return 1.0 if "boundary_repair" in diagnosis.categories else 0.0
+
+    def repair(self, job, diagnosis, workspace, config):
+        return _dummy_result(self.spec.name, job, diagnosis, workspace)
+
+
+@dataclass
+class _DummyPartialModule:
+    spec = RepairModuleSpec(
+        name="dummy_partial_boundary",
+        formats=("zip",),
+        categories=("boundary_repair",),
+        partial=True,
+    )
+
+    def can_handle(self, job, diagnosis, config):
+        return 1.0 if "boundary_repair" in diagnosis.categories else 0.0
+
+    def repair(self, job, diagnosis, workspace, config):
+        return _dummy_result(self.spec.name, job, diagnosis, workspace, status="partial")
+
+
+@dataclass
+class _DummyDeepModule:
+    spec = RepairModuleSpec(
+        name="dummy_deep_boundary",
+        formats=("zip",),
+        categories=("boundary_repair",),
+        stage="deep",
+    )
+
+    def can_handle(self, job, diagnosis, config):
+        return 1.0 if "boundary_repair" in diagnosis.categories else 0.0
+
+    def repair(self, job, diagnosis, workspace, config):
+        return _dummy_result(
+            self.spec.name,
+            job,
+            diagnosis,
+            workspace,
+            actions=[f"deep_candidates={config['deep']['max_candidates_per_module']}"],
+        )
+
+
+def _dummy_result(module_name, job, diagnosis, workspace, *, status="repaired", actions=None):
+    return RepairResult(
+        status=status,
+        confidence=0.9,
+        format=diagnosis.format,
+        repaired_input={**job.source_input, "end": 100},
+        actions=list(actions or ["dummy_boundary_trim"]),
+        module_name=module_name,
+        diagnosis=diagnosis.as_dict(),
+        workspace_paths=[workspace],
+    )
+
+
+def _run_dummy_repair(tmp_path, module, config=None, *, source=None):
+    registry = get_repair_module_registry()
+    registry.register(module)
+    repair_config = {
+        "workspace": str(tmp_path / "repair"),
+        "modules": [{"name": module.spec.name, "enabled": True}],
+    }
+    if config:
+        _deep_merge(repair_config, config)
+    scheduler = RepairScheduler({"repair": repair_config})
+    source_input = (
+        {"kind": "file", "path": str(source)}
+        if source is not None
+        else {"kind": "file_range", "path": "mixed.bin", "start": 10}
+    )
+    return scheduler.repair(RepairJob(
+        source_input=source_input,
+        format="zip",
+        confidence=0.8,
+        damage_flags=["boundary_unreliable"],
+        archive_key="sample",
+    ))
+
+
 def _run_zip_repair(tmp_path, module_name, source, flags):
     return _run_repair(tmp_path, module_name, "zip", source, flags)
 
@@ -436,6 +599,14 @@ def _run_repair(tmp_path, module_name, fmt, source, flags):
         damage_flags=flags,
         archive_key=source.name,
     ))
+
+
+def _deep_merge(target, source):
+    for key, value in source.items():
+        if isinstance(value, dict) and isinstance(target.get(key), dict):
+            _deep_merge(target[key], value)
+        else:
+            target[key] = value
 
 
 def _write_zip(path, files):

@@ -60,6 +60,35 @@
         {"name": "sample_readability", "enabled": false}
       ]
     },
+  "repair": {
+    "enabled": true,
+    "workspace": ".smart_unpacker_repair",
+    "keep_candidates": false,
+    "max_modules_per_job": 4,
+    "max_attempts_per_task": 1,
+    "trigger_on_medium_confidence": true,
+    "trigger_on_extraction_failure": true,
+    "thresholds": {
+      "medium_confidence_min": 0.35,
+      "extractable_confidence": 0.85
+    },
+    "stages": {
+      "targeted": true,
+      "safe_repair": true,
+      "deep": false
+    },
+    "safety": {
+      "allow_unsafe": false,
+      "allow_partial": true,
+      "allow_lossy": false
+    },
+    "deep": {
+      "max_candidates_per_module": 3,
+      "max_seconds_per_module": 30,
+      "max_input_size_mb": 512,
+      "verify_candidates": true
+    }
+  },
   "detection": {
     "fact_collectors": [
       {"name": "file_facts", "enabled": true},

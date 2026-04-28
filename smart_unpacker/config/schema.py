@@ -23,6 +23,7 @@ CONFIG_FIELD_PROVIDER_MODULES = (
     "smart_unpacker.config.fields.coordinator",
     "smart_unpacker.config.fields.filesystem",
     "smart_unpacker.config.fields.postprocess",
+    "smart_unpacker.config.fields.repair",
     "smart_unpacker.config.fields.verification",
 )
 

@@ -1,3 +1,4 @@
+from copy import deepcopy
 from typing import Any
 
 
@@ -17,6 +18,17 @@ DEFAULT_REPAIR_CONFIG = {
         "targeted": True,
         "safe_repair": True,
         "deep": False,
+    },
+    "safety": {
+        "allow_unsafe": False,
+        "allow_partial": True,
+        "allow_lossy": False,
+    },
+    "deep": {
+        "max_candidates_per_module": 3,
+        "max_seconds_per_module": 30.0,
+        "max_input_size_mb": 512,
+        "verify_candidates": True,
     },
     "modules": [
         {"name": "zip_eocd_repair", "enabled": True},
@@ -53,7 +65,34 @@ DEFAULT_REPAIR_CONFIG = {
 
 def repair_config(config: dict[str, Any] | None) -> dict[str, Any]:
     payload = dict((config or {}).get("repair") or {})
-    return _merge(DEFAULT_REPAIR_CONFIG, payload)
+    return normalize_repair_config(payload)
+
+
+def normalize_repair_config(value: Any) -> dict[str, Any]:
+    if value is None:
+        value = {}
+    if not isinstance(value, dict):
+        raise ValueError("repair must be an object")
+    config = _merge(DEFAULT_REPAIR_CONFIG, value)
+    config["enabled"] = _bool_value(config.get("enabled", True), "repair.enabled")
+    config["workspace"] = str(config.get("workspace") or ".smart_unpacker_repair")
+    config["keep_candidates"] = _bool_value(config.get("keep_candidates", False), "repair.keep_candidates")
+    config["max_modules_per_job"] = _int_at_least(config, "max_modules_per_job", 1)
+    config["max_attempts_per_task"] = _int_at_least(config, "max_attempts_per_task", 0)
+    config["trigger_on_medium_confidence"] = _bool_value(
+        config.get("trigger_on_medium_confidence", True),
+        "repair.trigger_on_medium_confidence",
+    )
+    config["trigger_on_extraction_failure"] = _bool_value(
+        config.get("trigger_on_extraction_failure", True),
+        "repair.trigger_on_extraction_failure",
+    )
+    config["thresholds"] = _normalize_thresholds(config.get("thresholds"))
+    config["stages"] = _normalize_bool_map(config.get("stages"), "repair.stages")
+    config["safety"] = _normalize_safety(config.get("safety"))
+    config["deep"] = _normalize_deep(config.get("deep"))
+    config["modules"] = _normalize_modules(config.get("modules"))
+    return config
 
 
 def enabled_module_configs(config: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -75,10 +114,109 @@ def enabled_module_configs(config: dict[str, Any]) -> dict[str, dict[str, Any]]:
 
 
 def _merge(base: dict, override: dict) -> dict:
-    result = dict(base)
+    result = deepcopy(base)
     for key, value in override.items():
         if isinstance(value, dict) and isinstance(result.get(key), dict):
             result[key] = _merge(result[key], value)
         else:
-            result[key] = value
+            result[key] = deepcopy(value)
     return result
+
+
+def _normalize_thresholds(value: Any) -> dict[str, float]:
+    if not isinstance(value, dict):
+        raise ValueError("repair.thresholds must be an object")
+    medium = _float_at_least(value, "medium_confidence_min", 0.0)
+    extractable = _float_at_least(value, "extractable_confidence", 0.0)
+    if medium > extractable:
+        raise ValueError("repair.thresholds.medium_confidence_min must be <= extractable_confidence")
+    return {
+        **value,
+        "medium_confidence_min": medium,
+        "extractable_confidence": extractable,
+    }
+
+
+def _normalize_bool_map(value: Any, path: str) -> dict[str, bool]:
+    if not isinstance(value, dict):
+        raise ValueError(f"{path} must be an object")
+    return {str(key): _bool_value(item, f"{path}.{key}") for key, item in value.items()}
+
+
+def _normalize_safety(value: Any) -> dict[str, bool]:
+    if not isinstance(value, dict):
+        raise ValueError("repair.safety must be an object")
+    allow_unsafe = value.get("allow_unsafe", value.get("allow_unsafe_modules", False))
+    allow_partial = value.get("allow_partial", value.get("allow_partial_results", True))
+    allow_lossy = value.get("allow_lossy", value.get("allow_lossy_repair", False))
+    return {
+        **value,
+        "allow_unsafe": _bool_value(allow_unsafe, "repair.safety.allow_unsafe"),
+        "allow_partial": _bool_value(allow_partial, "repair.safety.allow_partial"),
+        "allow_lossy": _bool_value(allow_lossy, "repair.safety.allow_lossy"),
+    }
+
+
+def _normalize_deep(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError("repair.deep must be an object")
+    return {
+        **value,
+        "max_candidates_per_module": _int_at_least(value, "max_candidates_per_module", 1),
+        "max_seconds_per_module": _float_at_least(value, "max_seconds_per_module", 0.0),
+        "max_input_size_mb": _float_at_least(value, "max_input_size_mb", 0.0),
+        "verify_candidates": _bool_value(value.get("verify_candidates", True), "repair.deep.verify_candidates"),
+    }
+
+
+def _normalize_modules(value: Any) -> list[dict[str, Any]]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError("repair.modules must be a list")
+    result = []
+    for index, item in enumerate(value):
+        if not isinstance(item, dict):
+            raise ValueError(f"repair.modules[{index}] must be an object")
+        name = str(item.get("name") or "").strip()
+        if not name:
+            raise ValueError(f"repair.modules[{index}].name must not be empty")
+        normalized = dict(item)
+        normalized["name"] = name
+        normalized["enabled"] = _bool_value(item.get("enabled", False), f"repair.modules[{index}].enabled")
+        result.append(normalized)
+    return result
+
+
+def _int_at_least(config: dict[str, Any], name: str, minimum: int) -> int:
+    try:
+        value = int(config.get(name))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"repair.{name} must be an integer") from exc
+    if value < minimum:
+        raise ValueError(f"repair.{name} must be >= {minimum}")
+    return value
+
+
+def _float_at_least(config: dict[str, Any], name: str, minimum: float) -> float:
+    try:
+        value = float(config.get(name))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"repair.{name} must be a number") from exc
+    if value < minimum:
+        raise ValueError(f"repair.{name} must be >= {minimum:g}")
+    return value
+
+
+def _bool_value(value: Any, path: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in {0, 1}:
+        return bool(value)
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in {"1", "true", "yes", "y", "on"}:
+            return True
+        if text in {"0", "false", "no", "n", "off"}:
+            return False
+    raise ValueError(f"{path} must be a boolean")

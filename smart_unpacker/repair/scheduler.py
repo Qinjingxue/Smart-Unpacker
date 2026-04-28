@@ -32,12 +32,13 @@ class RepairScheduler:
         module_configs = enabled_module_configs(self.config)
         warnings = []
         for score, module in modules:
+            module_config = self._module_runtime_config(module.spec.name, module_configs)
             try:
                 result = module.repair(
                     job,
                     diagnosis,
                     str(workspace),
-                    module_configs.get(module.spec.name, {}),
+                    module_config,
                 )
             except Exception as exc:
                 warnings.append(f"{module.spec.name}: {exc}")
@@ -68,13 +69,50 @@ class RepairScheduler:
             stages = self.config.get("stages", {}) if isinstance(self.config.get("stages"), dict) else {}
             if not stages.get(module.spec.stage, True):
                 continue
-            score = float(module.can_handle(job, diagnosis, enabled.get(name, {})) or 0.0)
+            module_config = self._module_runtime_config(name, enabled)
+            if not self._safety_allows(module, module_config):
+                continue
+            if module.spec.stage == "deep" and not self._deep_input_allowed(job, module_config):
+                continue
+            score = float(module.can_handle(job, diagnosis, module_config) or 0.0)
             if score <= 0:
                 continue
             candidates.append((score, module))
         candidates.sort(key=lambda item: item[0], reverse=True)
         limit = max(1, int(self.config.get("max_modules_per_job", 4) or 4))
         return candidates[:limit]
+
+    def _safety_allows(self, module, module_config: dict[str, Any]) -> bool:
+        safety = module_config.get("safety") if isinstance(module_config.get("safety"), dict) else {}
+        if not bool(safety.get("allow_unsafe", False)) and not module.spec.safe:
+            return False
+        if not bool(safety.get("allow_partial", True)) and module.spec.partial:
+            return False
+        if not bool(safety.get("allow_lossy", False)) and module.spec.lossy:
+            return False
+        return True
+
+    def _deep_input_allowed(self, job: RepairJob, module_config: dict[str, Any]) -> bool:
+        deep = module_config.get("deep") if isinstance(module_config.get("deep"), dict) else {}
+        max_mb = float(deep.get("max_input_size_mb", 0) or 0)
+        if max_mb <= 0:
+            return True
+        size = _source_input_size(job.source_input)
+        if size is None:
+            return True
+        return size <= int(max_mb * 1024 * 1024)
+
+    def _module_runtime_config(self, name: str, module_configs: dict[str, dict[str, Any]]) -> dict[str, Any]:
+        config = dict(module_configs.get(name, {}))
+        safety = dict(self.config.get("safety") or {})
+        if isinstance(config.get("safety"), dict):
+            safety.update(config["safety"])
+        deep = dict(self.config.get("deep") or {})
+        if isinstance(config.get("deep"), dict):
+            deep.update(config["deep"])
+        config["safety"] = safety
+        config["deep"] = deep
+        return config
 
     def _workspace_for(self, job: RepairJob) -> Path:
         base = Path(job.workspace or self.config.get("workspace") or ".smart_unpacker_repair")
@@ -106,3 +144,40 @@ def _dedupe(values: list[str]) -> list[str]:
         seen.add(value)
         result.append(value)
     return result
+
+
+def _source_input_size(source_input: dict[str, Any]) -> int | None:
+    kind = str(source_input.get("kind") or "file")
+    if kind == "file":
+        return _path_size(source_input.get("path"))
+    if kind == "file_range":
+        return _range_size(source_input)
+    if kind == "concat_ranges":
+        total = 0
+        for item in source_input.get("ranges") or []:
+            if not isinstance(item, dict):
+                return None
+            size = _range_size(item)
+            if size is None:
+                return None
+            total += size
+        return total
+    return None
+
+
+def _range_size(item: dict[str, Any]) -> int | None:
+    start = int(item.get("start") or 0)
+    end = item.get("end")
+    if end is not None:
+        return max(0, int(end) - start)
+    size = _path_size(item.get("path"))
+    if size is None:
+        return None
+    return max(0, size - start)
+
+
+def _path_size(path: Any) -> int | None:
+    try:
+        return Path(str(path)).stat().st_size
+    except (OSError, TypeError, ValueError):
+        return None

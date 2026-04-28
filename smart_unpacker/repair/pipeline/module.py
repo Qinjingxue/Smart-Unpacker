@@ -14,6 +14,8 @@ class RepairModuleSpec:
     stage: str = "targeted"
     safe: bool = True
     parallel_safe: bool = True
+    partial: bool = False
+    lossy: bool = False
 
 
 class RepairModule(Protocol):
