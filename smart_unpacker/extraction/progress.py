@@ -34,9 +34,9 @@ def build_extraction_progress_manifest(
     items = [
         _manifest_item(item, out_dir=out_dir, round_index=round_index)
         for item in output_trace.get("items") or []
-        if isinstance(item, dict)
+        if isinstance(item, dict) and not bool(item.get("is_dir"))
     ]
-    items = _merge_untraced_files(items, out_dir, round_index=round_index)
+    items = _merge_untraced_files(items, out_dir, round_index=round_index, worker_ok=str(result.get("status") or "") == "ok")
     summary = _summary(items)
     return {
         "version": 1,
@@ -199,6 +199,8 @@ def _archive_path_from_trace(item: dict[str, Any], out_dir: str) -> str:
     path = str(item.get("path") or item.get("output_path") or "")
     if not path:
         return ""
+    if not Path(path).is_absolute():
+        return path.replace("\\", "/")
     root = Path(out_dir)
     try:
         return str(Path(path).relative_to(root)).replace("\\", "/")
@@ -206,23 +208,24 @@ def _archive_path_from_trace(item: dict[str, Any], out_dir: str) -> str:
         return Path(path).name
 
 
-def _merge_untraced_files(items: list[dict[str, Any]], out_dir: str, *, round_index: int) -> list[dict[str, Any]]:
+def _merge_untraced_files(items: list[dict[str, Any]], out_dir: str, *, round_index: int, worker_ok: bool = False) -> list[dict[str, Any]]:
     seen = {str(item.get("path") or "") for item in items if item.get("path")}
     for file_item in _iter_files(out_dir):
         text = str(file_item.get("abs_path") or "")
         if text in seen:
             continue
+        status = "complete" if worker_ok else "unverified"
         items.append({
             "path": text,
             "archive_path": str(file_item.get("path") or ""),
-            "status": "unverified",
+            "status": status,
             "source_round": round_index,
             "bytes_written": int(file_item.get("size", 0) or 0),
             "expected_size": None,
             "crc_ok": None,
             "failure_stage": "",
             "failure_kind": "",
-            "message": "file was present after partial extraction but was not reported by worker output trace",
+            "message": "file was present after extraction but was not reported by worker output trace",
         })
     return items
 

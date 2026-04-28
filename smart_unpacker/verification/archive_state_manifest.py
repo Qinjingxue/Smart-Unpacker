@@ -142,7 +142,7 @@ def archive_state_manifest(state: ArchiveState, *, max_items: int = 200000, pass
             archive_type="zip",
             patch_digest=patch_digest,
         )
-    except RuntimeError as exc:
+    except (RuntimeError, ValueError) as exc:
         return ArchiveStateManifest(
             status=STATUS_DAMAGED,
             is_archive=True,
