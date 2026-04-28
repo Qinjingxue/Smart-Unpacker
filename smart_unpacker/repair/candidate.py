@@ -192,7 +192,9 @@ class CandidateSelector:
         try:
             tester = get_native_password_tester()
             probe = tester.probe_archive(path)
+            empty_password_test = tester.test_archive(path, password="") if password else None
             test = tester.test_archive(path, password=password)
+            resources = _analyze_resources(tester, path, password)
             dry_run = dry_run_archive(path, format_hint=format_hint, password=password, timeout=max(1.0, timeout))
         except Exception as exc:
             validation = CandidateValidation(
@@ -215,6 +217,8 @@ class CandidateSelector:
 
         probe_ok = bool(probe.is_archive and not (probe.is_broken and not candidate.partial))
         test_ok = bool(test.ok)
+        empty_password_ok = bool(getattr(empty_password_test, "ok", False)) if empty_password_test is not None else test_ok
+        resources_ok = bool(getattr(resources, "ok", False))
         dry_ok = bool(dry_run.ok)
         accepted = bool(probe_ok and (test_ok or dry_ok or partial_progress))
         score = 0.0
@@ -222,12 +226,19 @@ class CandidateSelector:
             score += 0.2
         if probe_ok:
             score += 0.1
+        if empty_password_ok:
+            score += 0.04
         if test_ok:
-            score += 0.28
+            score += 0.32
+        if resources_ok:
+            score += 0.08
         if dry_ok:
             score += 0.35
         elif partial_progress:
             score += 0.12
+        coverage_ratio = _candidate_coverage_ratio(resources, dry_files)
+        if coverage_ratio is not None:
+            score += min(0.1, coverage_ratio * 0.1)
 
         warnings = []
         if not probe_ok:
@@ -245,6 +256,8 @@ class CandidateSelector:
             details={
                 "path": path,
                 "format_hint": format_hint,
+                "password_present": bool(password),
+                "empty_password_ok": empty_password_ok,
                 "probe": {
                     "status": probe.status,
                     "is_archive": probe.is_archive,
@@ -263,6 +276,12 @@ class CandidateSelector:
                     "checksum_error": test.checksum_error,
                     "archive_type": test.archive_type,
                     "message": test.message,
+                },
+                "resource_analysis": _resource_details(resources),
+                "archive_coverage": {
+                    "complete_files": dry_files,
+                    "expected_files": int(getattr(resources, "file_count", 0) or 0) if resources is not None else 0,
+                    "completeness": coverage_ratio,
                 },
                 "dry_run": {
                     "ok": dry_run.ok,
@@ -292,9 +311,9 @@ class CandidateSelector:
         validation_score = max([_clamp01(float(item.score or 0.0)) for item in candidate.validations] or [0.0])
 
         if native_validation is not None and not _native_validation_skipped(native_validation):
-            score = confidence * 0.45
-            score += _native_validation_strength(native_validation) * 0.48
-            score += validation_score * 0.04
+            score = confidence * 0.25
+            score += _native_validation_strength(native_validation) * 0.65
+            score += validation_score * 0.05
         else:
             score = confidence * 0.86
             score += validation_score * 0.09
@@ -402,7 +421,15 @@ def _native_validation_strength(validation: CandidateValidation) -> float:
     if probe.get("is_archive") and not probe.get("is_broken"):
         strength += 0.16
     if test.get("ok"):
-        strength += 0.2
+        strength += 0.22
+    if details.get("empty_password_ok"):
+        strength += 0.03
+    resources = details.get("resource_analysis") if isinstance(details.get("resource_analysis"), dict) else {}
+    if resources.get("ok"):
+        strength += 0.08
+    coverage = details.get("archive_coverage") if isinstance(details.get("archive_coverage"), dict) else {}
+    if coverage.get("completeness") is not None:
+        strength += min(0.1, float(coverage.get("completeness") or 0.0) * 0.1)
     if dry_run.get("ok"):
         strength += 0.24
     elif int(dry_run.get("files_written", 0) or 0) > 0 or int(dry_run.get("bytes_written", 0) or 0) > 0:
@@ -412,6 +439,48 @@ def _native_validation_strength(validation: CandidateValidation) -> float:
 
 def _clamp01(value: float) -> float:
     return min(1.0, max(0.0, value))
+
+
+def _analyze_resources(tester, path: str, password: str):
+    analyze = getattr(tester, "analyze_archive_resources", None)
+    if not callable(analyze):
+        return None
+    try:
+        return analyze(path, password=password)
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+def _resource_details(resources) -> dict[str, Any]:
+    if resources is None:
+        return {"available": False}
+    if isinstance(resources, dict):
+        return {"available": False, **resources}
+    return {
+        "available": True,
+        "status": getattr(resources, "status", None),
+        "ok": bool(getattr(resources, "ok", False)),
+        "is_archive": bool(getattr(resources, "is_archive", False)),
+        "is_encrypted": bool(getattr(resources, "is_encrypted", False)),
+        "is_broken": bool(getattr(resources, "is_broken", False)),
+        "archive_type": str(getattr(resources, "archive_type", "") or ""),
+        "item_count": int(getattr(resources, "item_count", 0) or 0),
+        "file_count": int(getattr(resources, "file_count", 0) or 0),
+        "total_unpacked_size": int(getattr(resources, "total_unpacked_size", 0) or 0),
+        "total_packed_size": int(getattr(resources, "total_packed_size", 0) or 0),
+        "message": str(getattr(resources, "message", "") or ""),
+    }
+
+
+def _candidate_coverage_ratio(resources, complete_files: int) -> float | None:
+    if resources is None:
+        return None
+    if isinstance(resources, dict):
+        return None
+    expected = int(getattr(resources, "file_count", 0) or 0)
+    if expected <= 0:
+        return None
+    return _clamp01(float(max(0, int(complete_files or 0))) / float(expected))
 
 
 def _dedupe(values: list[str]) -> list[str]:

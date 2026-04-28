@@ -29,7 +29,7 @@ class RepairScheduler:
         selector = CandidateSelector(self.config)
         warnings = list(batch.warnings)
         if batch.candidates:
-            selected, selection = selector.select(batch.candidates)
+            selected, selection = selector.select(_with_job_password_candidates(batch.candidates, job))
             if selected is not None:
                 return selected.to_result(selection=selection)
             warnings.extend(selection.get("warnings") or [])
@@ -107,6 +107,7 @@ class RepairScheduler:
                         warnings.append(f"{module.spec.name}: produced no repair candidates")
                         continue
                     for candidate in generated:
+                        candidate = _with_job_password_candidate(candidate, job)
                         repair_candidates.append(replace(
                             candidate,
                             score_hint=max(score, route_score, candidate.score_hint),
@@ -127,7 +128,7 @@ class RepairScheduler:
                 continue
             if result.ok:
                 candidate = RepairCandidate.from_result(
-                    result,
+                    _with_job_password_result(result, job),
                     score_hint=max(score, route_score),
                     stage=module.spec.stage,
                 )
@@ -536,16 +537,16 @@ def _lazy_module_candidate(
 
     def materialize():
         if hasattr(module, "generate_candidates"):
-            return list(module.generate_candidates(  # type: ignore[attr-defined]
+            return _with_job_password_candidates(list(module.generate_candidates(  # type: ignore[attr-defined]
                 job,
                 diagnosis,
                 workspace,
                 {**module_config, "virtual_patch_candidate": True},
-            ) or [])
+            ) or []), job)
         result = module.repair(job, diagnosis, workspace, {**module_config, "virtual_patch_candidate": True})
         if result.ok:
             return RepairCandidate.from_result(
-                result,
+                _with_job_password_result(result, job),
                 score_hint=score_hint,
                 stage=module.spec.stage,
             )
@@ -585,3 +586,28 @@ def _lazy_module_candidate(
             "lazy": True,
         },
     )
+
+
+def _with_job_password_result(result: RepairResult, job: RepairJob) -> RepairResult:
+    if job.password is None or not isinstance(result.repaired_input, dict):
+        return result
+    repaired_input = _with_password(result.repaired_input, job.password)
+    return replace(result, repaired_input=repaired_input)
+
+
+def _with_job_password_candidates(candidates: list[RepairCandidate], job: RepairJob) -> list[RepairCandidate]:
+    return [_with_job_password_candidate(candidate, job) for candidate in candidates]
+
+
+def _with_job_password_candidate(candidate: RepairCandidate, job: RepairJob) -> RepairCandidate:
+    if job.password is None or not isinstance(candidate.repaired_input, dict):
+        return candidate
+    repaired_input = _with_password(candidate.repaired_input, job.password)
+    return replace(candidate, repaired_input=repaired_input)
+
+
+def _with_password(payload: dict[str, Any], password: str | None) -> dict[str, Any]:
+    output = dict(payload)
+    if password is not None and "password" not in output:
+        output["password"] = password
+    return output

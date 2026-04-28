@@ -95,7 +95,7 @@ def diagnose_repair_job(job: RepairJob) -> RepairDiagnosis:
     fmt = _first_text([job.format, *(item.format for item in evidences)])
     flags = {flag for item in evidences for flag in item.damage_flags}
     categories = _categories_for(fmt, flags, job.extraction_failure or {})
-    severity = _severity(flags, job.extraction_failure or {}, job.confidence)
+    severity = _severity(flags, job.extraction_failure or {}, job.confidence, password=job.password)
     repairable, unsafe_actions, notes = _repairability(job, flags)
     return RepairDiagnosis(
         format=fmt,
@@ -210,8 +210,8 @@ def _categories_for(fmt: str, flags: set[str], failure: dict[str, Any]) -> list[
     return _dedupe(categories)
 
 
-def _severity(flags: set[str], failure: dict[str, Any], confidence: float) -> str:
-    if "wrong_password" in flags or failure.get("wrong_password"):
+def _severity(flags: set[str], failure: dict[str, Any], confidence: float, *, password: str | None = None) -> str:
+    if ("wrong_password" in flags or failure.get("wrong_password")) and not _has_resolved_password_value(password):
         return "blocked"
     if "missing_volume" in flags or failure.get("missing_volume"):
         return "high"
@@ -225,7 +225,7 @@ def _severity(flags: set[str], failure: dict[str, Any], confidence: float) -> st
 
 
 def _repairability(job: RepairJob, flags: set[str]) -> tuple[bool, list[str], list[str]]:
-    if "wrong_password" in flags:
+    if "wrong_password" in flags and not _has_resolved_password(job):
         return False, [], ["password must be resolved before structural repair"]
     if flags & {"output_filesystem", "process_failure"}:
         return False, [], ["failure is outside archive repair scope"]
@@ -254,6 +254,14 @@ def _coverage_flags(coverage: dict[str, Any]) -> list[str]:
     if failed or partial:
         flags.append("content_integrity_bad_or_unknown")
     return flags
+
+
+def _has_resolved_password(job: RepairJob) -> bool:
+    return _has_resolved_password_value(job.password)
+
+
+def _has_resolved_password_value(value: Any) -> bool:
+    return value is not None and str(value) != ""
 
 
 def _first_text(values) -> str:

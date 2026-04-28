@@ -44,12 +44,12 @@ def archive_state_manifest_for_evidence(evidence, *, max_items: int = 200000) ->
     cached = getattr(evidence, cache_key, None)
     if isinstance(cached, ArchiveStateManifest):
         return cached
-    manifest = archive_state_manifest(evidence.archive_state, max_items=max_items)
+    manifest = archive_state_manifest(evidence.archive_state, max_items=max_items, password=evidence.password)
     object.__setattr__(evidence, cache_key, manifest)
     return manifest
 
 
-def archive_state_manifest(state: ArchiveState, *, max_items: int = 200000) -> ArchiveStateManifest:
+def archive_state_manifest(state: ArchiveState, *, max_items: int = 200000, password: str | None = None) -> ArchiveStateManifest:
     patch_digest = state.effective_patch_digest()
     try:
         data = archive_state_to_bytes(state)
@@ -110,7 +110,9 @@ def archive_state_manifest(state: ArchiveState, *, max_items: int = 200000) -> A
             damaged = False
             checksum_error = False
             message = "Archive-state ZIP manifest loaded"
-            if not encrypted:
+            if encrypted and password:
+                archive.setpassword(str(password).encode("utf-8"))
+            if not encrypted or password:
                 bad_name = archive.testzip()
                 if bad_name:
                     damaged = True

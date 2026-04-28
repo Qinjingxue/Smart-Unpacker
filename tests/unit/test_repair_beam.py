@@ -47,6 +47,26 @@ def test_repair_beam_deduplicates_equivalent_state_outputs():
     assert len(round_result.states_out) == 1
 
 
+def test_repair_beam_preserves_password_context_across_jobs_and_states():
+    scheduler = _FakeCandidateScheduler([
+        _candidate("with_password", confidence=0.8),
+    ])
+    loop = RepairBeamLoop(scheduler, beam_width=1, max_analyze_candidates=1)
+
+    round_result = loop.expand_round([
+        RepairBeamState(
+            source_input={"kind": "file", "path": "encrypted.zip"},
+            format="zip",
+            archive_key="encrypted",
+            password="secret",
+        )
+    ], round_index=1)
+
+    assert scheduler.jobs[0].password == "secret"
+    assert round_result.states_out[0].password == "secret"
+    assert round_result.states_out[0].source_input["password"] == "secret"
+
+
 def test_repair_beam_ranks_verification_completeness_over_module_confidence():
     scheduler = _FakeCandidateScheduler([
         _candidate("confident_but_incomplete", confidence=0.95),

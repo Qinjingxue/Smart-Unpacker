@@ -5,6 +5,7 @@ import io
 import lzma
 import tarfile
 import struct
+from types import SimpleNamespace
 import zipfile
 import zlib
 
@@ -212,6 +213,38 @@ def test_repair_scheduler_exposes_generated_candidate_batch(tmp_path):
     assert batch.diagnosis["capability_decision"]["selected_modules"] == [module.spec.name]
 
 
+def test_repair_scheduler_propagates_password_to_results_and_candidates(tmp_path):
+    module = _DummyGeneratedCandidatesModule()
+    registry = get_repair_module_registry()
+    previous = registry.get(module.spec.name)
+    registry.register(module)
+    try:
+        scheduler = RepairScheduler({
+            "repair": {
+                "workspace": str(tmp_path / "repair"),
+                "stages": {"deep": True},
+                "deep": {"verify_candidates": False},
+                "modules": [{"name": module.spec.name, "enabled": True}],
+            }
+        })
+        job = RepairJob(
+            source_input={"kind": "file", "path": str(tmp_path / "source.zip")},
+            format="zip",
+            confidence=0.7,
+            damage_flags=["boundary_unreliable"],
+            archive_key="multi",
+            password="secret",
+        )
+        batch = scheduler.generate_repair_candidates(job)
+        result = scheduler.repair(job)
+    finally:
+        if previous is not None:
+            registry.register(previous)
+
+    assert all(candidate.repaired_input["password"] == "secret" for candidate in batch.candidates)
+    assert result.repaired_input["password"] == "secret"
+
+
 def test_repair_scheduler_routes_module_from_fuzzy_profile(tmp_path):
     module = _DummyFuzzyRouteModule()
     registry = get_repair_module_registry()
@@ -348,6 +381,46 @@ def test_candidate_selector_prefers_validated_candidate_over_module_confidence()
 
     assert selected is validated
     assert selection["selected_module"] == "validated"
+
+
+def test_candidate_native_validation_uses_candidate_password_for_encrypted_archive(tmp_path, monkeypatch):
+    archive = tmp_path / "encrypted.zip"
+    archive.write_bytes(b"not a real archive; native calls are faked")
+    fake = _FakePasswordAwareNativeTester()
+    dry_calls = []
+
+    def fake_dry_run(path, *, format_hint="", password="", timeout=0):
+        dry_calls.append({"path": path, "format_hint": format_hint, "password": password, "timeout": timeout})
+        return SimpleNamespace(
+            ok=True,
+            returncode=0,
+            message="ok",
+            result={"status": "ok", "files_written": 2, "bytes_written": 12},
+            diagnostics={},
+        )
+
+    monkeypatch.setattr("smart_unpacker.repair.candidate.get_native_password_tester", lambda: fake)
+    monkeypatch.setattr("smart_unpacker.repair.candidate.dry_run_archive", fake_dry_run)
+
+    candidate = RepairCandidate(
+        module_name="encrypted_candidate",
+        format="zip",
+        repaired_input={"kind": "file", "path": str(archive), "format_hint": "zip", "password": "secret"},
+        confidence=0.4,
+        requires_native_validation=True,
+        validations=[CandidateValidation(name="module_result", accepted=True, score=0.4)],
+    )
+
+    selected, selection = CandidateSelector().select([candidate])
+
+    assert selected is not None
+    assert fake.test_passwords == ["", "secret"]
+    assert fake.resource_passwords == ["secret"]
+    assert dry_calls[0]["password"] == "secret"
+    details = selection["validations"][-1]["details"]
+    assert details["password_present"] is True
+    assert details["empty_password_ok"] is False
+    assert details["archive_coverage"]["completeness"] == 1.0
 
 
 def test_repair_scheduler_records_module_failure_feedback_for_later_decision(tmp_path):
@@ -1213,6 +1286,54 @@ class _DummyGeneratedCandidatesModule:
                 validations=[CandidateValidation(name="dummy", accepted=True, score=0.95)],
             ),
         ]
+
+
+class _FakePasswordAwareNativeTester:
+    def __init__(self):
+        self.test_passwords = []
+        self.resource_passwords = []
+
+    def probe_archive(self, path):
+        return SimpleNamespace(
+            status=0,
+            is_archive=True,
+            is_encrypted=True,
+            is_broken=False,
+            checksum_error=False,
+            offset=0,
+            item_count=2,
+            archive_type="zip",
+            message="ok",
+        )
+
+    def test_archive(self, path, password=""):
+        self.test_passwords.append(password)
+        ok = password == "secret"
+        return SimpleNamespace(
+            status=0 if ok else 1,
+            ok=ok,
+            command_ok=ok,
+            encrypted=True,
+            checksum_error=False,
+            archive_type="zip",
+            message="ok" if ok else "wrong password",
+        )
+
+    def analyze_archive_resources(self, path, password=""):
+        self.resource_passwords.append(password)
+        return SimpleNamespace(
+            status=0,
+            ok=True,
+            is_archive=True,
+            is_encrypted=True,
+            is_broken=False,
+            archive_type="zip",
+            item_count=2,
+            file_count=2,
+            total_unpacked_size=12,
+            total_packed_size=8,
+            message="ok",
+        )
 
 
 @dataclass

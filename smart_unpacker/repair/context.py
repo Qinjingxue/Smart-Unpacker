@@ -115,7 +115,7 @@ def _damage_flags(
         flags.append("checksum_error")
     if failure.get("missing_volume"):
         flags.append("missing_volume")
-    if failure.get("wrong_password"):
+    if failure.get("wrong_password") and not _has_resolved_password(job):
         flags.append("wrong_password")
     if failure.get("unsupported_method"):
         flags.append("unsupported_method")
@@ -135,7 +135,13 @@ def _damage_flags(
         flags.append("output_filesystem")
     if failure_stage.startswith("worker_") or failure_kind.startswith("process_"):
         flags.append("process_failure")
+    if _has_resolved_password(job):
+        flags = [flag for flag in flags if str(flag) != "wrong_password"]
     return _dedupe([str(item) for item in flags if item])
+
+
+def _has_resolved_password(job: RepairJob) -> bool:
+    return job.password is not None and str(job.password) != ""
 
 
 def _archive_coverage(failure: dict[str, Any]) -> dict[str, Any]:

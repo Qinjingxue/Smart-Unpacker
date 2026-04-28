@@ -114,6 +114,7 @@ class ArchiveRepairStage:
             analysis_prepass=self._analysis_prepass(task),
             fuzzy_profile=self._analysis_fuzzy_profile(task),
             damage_flags=flags,
+            password=self._password_from_task(task),
             archive_key=task.key,
             workspace=str(self._workspace_root()),
             attempts=self._attempts(task),
@@ -142,7 +143,7 @@ class ArchiveRepairStage:
             extraction_failure=failure,
             extraction_diagnostics=dict(result.diagnostics or {}),
             damage_flags=self._flags_from_failure_text(result.error),
-            password=result.password_used,
+            password=result.password_used if result.password_used is not None else self._password_from_task(task),
             archive_key=task.key,
             workspace=str(self._workspace_root()),
             attempts=self._attempts(task),
@@ -211,7 +212,7 @@ class ArchiveRepairStage:
                 *self._flags_from_failure_text(result.error),
                 *self._flags_from_verification(verification),
             ]),
-            password=result.password_used,
+            password=result.password_used if result.password_used is not None else self._password_from_task(task),
             archive_key=task.key,
             workspace=str(self._workspace_root()),
             attempts=self._attempts(task),
@@ -286,6 +287,15 @@ class ArchiveRepairStage:
                 for part in descriptor.parts
             ]
             return {"kind": "concat_ranges", "ranges": ranges, "format_hint": descriptor.format_hint}
+        return None
+
+    @staticmethod
+    def _password_from_task(task: ArchiveTask) -> str | None:
+        fact_bag = getattr(task, "fact_bag", None)
+        if fact_bag is not None and hasattr(fact_bag, "get"):
+            password = fact_bag.get("archive.password")
+            if password is not None:
+                return str(password)
         return None
 
     def _descriptor_from_repaired_input(self, task: ArchiveTask, repaired_input: dict[str, Any]) -> ArchiveInputDescriptor | None:

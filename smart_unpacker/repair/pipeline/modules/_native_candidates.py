@@ -74,6 +74,8 @@ def candidates_from_native_result(
             }
             diagnosis_payload = patch_diagnosis(diagnosis_payload, patch_plan, repaired_state)
             requires_native_validation = False
+        if job.password is not None:
+            repaired_input["password"] = job.password
         candidates.append(RepairCandidate(
             module_name=module_name,
             format=candidate_format,

@@ -447,6 +447,7 @@ class ExtractionBatchRunner:
             archive_state=job.archive_state.to_dict() if job.archive_state is not None else {},
             confidence=job.confidence,
             damage_flags=list(job.damage_flags),
+            password=job.password,
             archive_key=job.archive_key,
             completeness=verification.completeness,
             recoverable_upper_bound=verification.recoverable_upper_bound,

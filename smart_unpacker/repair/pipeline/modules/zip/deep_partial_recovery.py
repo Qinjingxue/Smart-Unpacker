@@ -76,6 +76,8 @@ class ZipDeepPartialRecovery:
 
     def generate_candidates(self, job: RepairJob, diagnosis: RepairDiagnosis, workspace: str, config: dict):
         result = self._run_native(job, workspace, config)
+        if _requires_password_for_encrypted_entries(result, job):
+            return []
         coverage = coverage_view_from_job(job)
         candidates = candidates_from_native_result(
             self.spec.name,
@@ -120,6 +122,27 @@ class ZipDeepPartialRecovery:
         status = str(result.get("status") or "unrepairable")
         coverage = coverage_view_from_job(job)
         selected_path = str(result.get("selected_path") or "")
+        if _requires_password_for_encrypted_entries(result, job):
+            return RepairResult(
+                status="needs_password",
+                confidence=0.0,
+                format="zip",
+                actions=list(result.get("actions") or []),
+                damage_flags=list(job.damage_flags),
+                warnings=["ZIP deep partial recovery found encrypted entries but no resolved password is available"],
+                workspace_paths=list(result.get("workspace_paths") or []),
+                partial=True,
+                module_name=self.spec.name,
+                diagnosis={
+                    **diagnosis.as_dict(),
+                    "native_zip_deep_recovery": {
+                        "encrypted_entries": result.get("encrypted_entries", 0),
+                        "recovered_entries": result.get("recovered_entries", 0),
+                        "verified_entries": result.get("verified_entries", 0),
+                    },
+                },
+                message="encrypted ZIP entries require a resolved password before partial recovery",
+            )
         if status not in {"repaired", "partial"} or not selected_path:
             return RepairResult(
                 status="unrepairable" if status == "skipped" else status,
@@ -167,3 +190,11 @@ class ZipDeepPartialRecovery:
 
 
 register_repair_module(ZipDeepPartialRecovery())
+
+
+def _requires_password_for_encrypted_entries(result: dict, job: RepairJob) -> bool:
+    return int(result.get("encrypted_entries", 0) or 0) > 0 and not _has_password(job)
+
+
+def _has_password(job: RepairJob) -> bool:
+    return job.password is not None and str(job.password) != ""

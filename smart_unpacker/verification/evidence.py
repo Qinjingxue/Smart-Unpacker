@@ -36,6 +36,8 @@ def build_verification_evidence(
     password = extraction_result.password_used
     if password is None and password_session is not None:
         password = password_session.get_resolved(task.key)
+    if password is None:
+        password = fact_bag.get("archive.password")
     archive_state = task.archive_state()
     archive_input = archive_state.to_archive_input_descriptor()
     return VerificationEvidence(

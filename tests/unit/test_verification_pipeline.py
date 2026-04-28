@@ -129,6 +129,24 @@ def test_verification_evidence_uses_password_session_when_result_has_no_password
     assert verification.completeness == 1.0
 
 
+def test_verification_evidence_uses_archive_password_fact_when_session_has_none(tmp_path):
+    task, result = _task_and_result(tmp_path)
+    task.fact_bag.set("archive.password", "secret")
+    scheduler = VerificationScheduler({
+        "verification": {
+            "enabled": True,
+            "methods": [
+                {"name": "unit_password_assessment", "enabled": True, "expected_password": "secret"},
+            ],
+        }
+    })
+
+    verification = scheduler.verify(task, result)
+
+    assert verification.decision_hint == "accept"
+    assert verification.completeness == 1.0
+
+
 def test_verification_config_is_normalized_without_legacy_score_fields():
     config = normalize_config({
         "recursive_extract": "1",

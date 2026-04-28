@@ -236,6 +236,8 @@ def patch_repair_result(
         repaired_input = {"kind": "file", "path": path, "format_hint": fmt}
     else:
         repaired_input = virtual_patch_repaired_input(repaired_state)
+    if job.password is not None:
+        repaired_input["password"] = job.password
     diagnosis_payload = diagnosis.as_dict() if hasattr(diagnosis, "as_dict") else dict(diagnosis or {})
     return RepairResult(
         status=status,  # type: ignore[arg-type]

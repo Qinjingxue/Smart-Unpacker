@@ -36,6 +36,7 @@ class RepairBeamState:
     archive_state: dict[str, Any] = field(default_factory=dict)
     confidence: float = 0.0
     damage_flags: list[str] = field(default_factory=list)
+    password: str | None = None
     archive_key: str = ""
     round_index: int = 0
     score: float = 0.0
@@ -55,6 +56,7 @@ class RepairBeamState:
             "source_input": self.source_input,
             "archive_state": self.archive_state,
             "format": self.format,
+            "password_present": self.password is not None,
         }
         return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode("utf-8")).hexdigest()
 
@@ -79,6 +81,7 @@ class RepairBeamState:
                 confidence=self.confidence,
                 extraction_failure=extraction_failure or self.job_template.extraction_failure,
                 damage_flags=list(self.damage_flags),
+                password=self.password if self.password is not None else self.job_template.password,
                 archive_key=self.archive_key,
                 attempts=self.round_index,
             )
@@ -89,6 +92,7 @@ class RepairBeamState:
             confidence=self.confidence,
             extraction_failure=extraction_failure,
             damage_flags=list(self.damage_flags),
+            password=self.password,
             archive_key=self.archive_key,
             attempts=self.round_index,
         )
@@ -233,7 +237,8 @@ class RepairBeamLoop:
         output: list[RepairBeamState] = []
         seen: set[str] = set()
         for item in candidates:
-            repaired_input = item.candidate.repaired_input
+            password = _candidate_or_state_password(item)
+            repaired_input = _source_input_with_password(item.candidate.repaired_input, password)
             candidate_state = _candidate_archive_state(item.candidate)
             state = RepairBeamState(
                 source_input=dict(repaired_input),
@@ -245,6 +250,7 @@ class RepairBeamLoop:
                     float(item.assessment.get("confidence", 0.0) or 0.0),
                 ),
                 damage_flags=list(item.candidate.damage_flags or item.state.damage_flags),
+                password=password,
                 archive_key=f"{item.state.archive_key or 'repair'}:{round_index}:{item.candidate.module_name}",
                 round_index=round_index,
                 score=item.score,
@@ -292,6 +298,20 @@ def _candidate_archive_state(candidate: RepairCandidate) -> dict[str, Any]:
     return dict(raw) if isinstance(raw, dict) else {}
 
 
+def _candidate_or_state_password(item: RepairBeamCandidate) -> str | None:
+    repaired_input = item.candidate.repaired_input if isinstance(item.candidate.repaired_input, dict) else {}
+    if "password" in repaired_input:
+        return repaired_input.get("password")
+    return item.state.password
+
+
+def _source_input_with_password(source_input: dict[str, Any], password: str | None) -> dict[str, Any]:
+    payload = dict(source_input or {})
+    if password is not None and "password" not in payload:
+        payload["password"] = password
+    return payload
+
+
 def _state_from_dict(raw: dict[str, Any]) -> ArchiveState | None:
     if not isinstance(raw, dict) or not raw:
         return None
@@ -308,6 +328,10 @@ def _materialize_beam_items(items: list[RepairBeamCandidate]) -> list[RepairBeam
         for candidate in materialized:
             if candidate.is_lazy or not candidate.repaired_input:
                 continue
+            candidate = replace(
+                candidate,
+                repaired_input=_source_input_with_password(candidate.repaired_input, item.state.password),
+            )
             rescored = _candidate_pre_score(candidate, item.state)
             output.append(RepairBeamCandidate(
                 state=item.state,
