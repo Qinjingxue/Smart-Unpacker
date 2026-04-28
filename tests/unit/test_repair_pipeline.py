@@ -209,6 +209,46 @@ def test_repair_scheduler_routes_module_from_fuzzy_profile(tmp_path):
     assert result.diagnosis["candidate_selection"]["selected_module"] == module.spec.name
 
 
+def test_repair_scheduler_synthesizes_unrepairable_from_module_requirements(tmp_path):
+    module = _DummyTrailingOnlyRouteModule()
+    registry = get_repair_module_registry()
+    previous = registry.get(module.spec.name)
+    registry.register(module)
+    try:
+        scheduler = RepairScheduler({
+            "repair": {
+                "workspace": str(tmp_path),
+                "modules": [{"name": module.spec.name, "enabled": True}],
+            }
+        })
+        result = scheduler.repair(RepairJob(
+            source_input={"kind": "file", "path": str(tmp_path / "payload.zip")},
+            format="zip",
+            confidence=0.8,
+            damage_flags=["checksum_error", "damaged"],
+            archive_key="payload",
+        ))
+    finally:
+        if previous is not None:
+            registry.register(previous)
+
+    assert result.status == "unrepairable"
+    assert "no enabled repair module declares support" in result.message
+    decision = result.diagnosis["capability_decision"]
+    assert decision["automatic_unrepairable"] is True
+    assert decision["format_supported_modules"] == [module.spec.name]
+    assert decision["modules"][0]["declarative_reasons"] == ["route_requirements_unmet"]
+
+
+def test_repair_scheduler_records_policy_filter_reasons(tmp_path):
+    result = _run_dummy_repair(tmp_path, _DummyUnsafeModule())
+
+    assert result.status == "unsupported"
+    decision = result.diagnosis["capability_decision"]
+    assert decision["automatic_unrepairable"] is False
+    assert decision["modules"][0]["policy_reasons"] == ["unsafe_module_blocked"]
+
+
 def test_repair_scheduler_blocks_process_level_failures(tmp_path):
     scheduler = RepairScheduler({"repair": {"workspace": str(tmp_path)}})
     result = scheduler.repair(RepairJob(
@@ -999,6 +1039,27 @@ class _DummyFuzzyRouteModule:
             RepairRoute(
                 formats=("zip",),
                 require_any_fuzzy_hints=("carrier_prefix_likely",),
+                base_score=0.8,
+            ),
+        ),
+    )
+
+    def can_handle(self, job, diagnosis, config):
+        return 0.0
+
+    def repair(self, job, diagnosis, workspace, config):
+        return _dummy_result(self.spec.name, job, diagnosis, workspace)
+
+
+@dataclass
+class _DummyTrailingOnlyRouteModule:
+    spec = RepairModuleSpec(
+        name="dummy_trailing_only_route",
+        formats=("zip",),
+        routes=(
+            RepairRoute(
+                formats=("zip",),
+                require_any_flags=("trailing_junk",),
                 base_score=0.8,
             ),
         ),
