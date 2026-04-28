@@ -265,6 +265,11 @@ def _build_zip_split_trailing_junk(root: Path) -> MatrixFixture:
     )
 
 
+def _build_zip_missing_split_volume_with_extra_damage(root: Path) -> MatrixFixture:
+    original = _zip_bytes()
+    return _fixture_from_bytes(root, "zip-missing-volume-extra-damage.zip.001", original[:57] + b"JUNK")
+
+
 def _build_zip_sfx_prefix_tail(root: Path) -> MatrixFixture:
     original = _zip_bytes()
     prefix = b"MZ\x90\x00SUNPACK-SFX-STUB"
@@ -284,6 +289,22 @@ def _build_zip_sfx_split_prefix_tail(root: Path) -> MatrixFixture:
     )
 
 
+def _build_zip_sfx_split_prefix_tail_bad_cd(root: Path) -> MatrixFixture:
+    data = bytearray(_zip_bytes())
+    eocd = _zip_eocd_offset(data)
+    struct.pack_into("<HH", data, eocd + 8, 1, 1)
+    struct.pack_into("<I", data, eocd + 16, 0)
+    prefix = b"MZ\x90\x00SFX-SPLIT-BAD-CD"
+    payload = prefix + bytes(data) + b"TAIL"
+    return _fixture_from_ranges(
+        root,
+        "zip-sfx-split-bad-cd.exe",
+        payload,
+        split_at=len(prefix) + 47,
+        zip_entries=_zip_entries(),
+    )
+
+
 def _build_zip_single_payload_crc_bad(root: Path) -> MatrixFixture:
     entries = {"only.txt": b"one payload"}
     data = bytearray(_zip_bytes(entries))
@@ -296,6 +317,22 @@ def _build_zip_one_bad_payload_one_good(root: Path) -> MatrixFixture:
     data = bytearray(_zip_bytes(entries))
     data[_zip_payload_offset(data, "bad.txt")] ^= 0x55
     return _fixture_from_bytes(root, "zip-one-bad-payload.zip", bytes(data), zip_entries={"good.txt": b"good payload"})
+
+
+def _build_zip_multi_structure_and_payload_bad(root: Path) -> MatrixFixture:
+    entries = {"bad.txt": b"bad payload", "good.txt": b"good payload"}
+    data = bytearray(_zip_bytes(entries))
+    data[_zip_payload_offset(data, "bad.txt")] ^= 0x55
+    eocd = _zip_eocd_offset(data)
+    struct.pack_into("<HH", data, eocd + 8, 1, 1)
+    struct.pack_into("<I", data, eocd + 16, 0)
+    struct.pack_into("<H", data, eocd + 20, 0)
+    return _fixture_from_bytes(
+        root,
+        "zip-multi-structure-payload-bad.zip",
+        bytes(data) + b"JUNK",
+        zip_entries={"good.txt": b"good payload"},
+    )
 
 
 def _descriptor_zip_fragment(name: str, payload: bytes, *, zip64: bool = False) -> bytes:
@@ -380,6 +417,13 @@ def _build_7z_crc_fields_and_trailing_junk(root: Path) -> MatrixFixture:
     data = _patch_7z_next_crc(original, 0, recompute_start_crc=False)
     data = data[:8] + b"\0\0\0\0" + data[12:] + b"JUNK"
     return _fixture_from_bytes(root, "seven-crc-fields-tail.7z", data, expected_bytes=original)
+
+
+def _build_7z_v03_start_next_crc_and_trailing_junk(root: Path) -> MatrixFixture:
+    original = _seven_zip_bytes(minor=3, next_header=b"\x01\x02")
+    data = _patch_7z_next_crc(original, 0, recompute_start_crc=False)
+    data = data[:8] + b"\0\0\0\0" + data[12:] + b"JUNK"
+    return _fixture_from_bytes(root, "seven-v03-crc-fields-tail.7z", data, expected_bytes=original)
 
 
 def _build_7z_sfx_prefix_tail(root: Path) -> MatrixFixture:
@@ -484,6 +528,19 @@ def _build_rar5_sfx_split_prefix_tail(root: Path) -> MatrixFixture:
     original = _rar5_bytes()
     prefix = b"MZ-SFX-SPLIT"
     return _fixture_from_ranges(root, "rar5-sfx-split.exe", prefix + original + b"TAIL", split_at=len(prefix) + 9, expected_bytes=original)
+
+
+def _build_rar5_sfx_split_tail_missing_end(root: Path) -> MatrixFixture:
+    original_without_end = RAR5_MAGIC + _rar5_block(1) + _rar5_block(2, data=b"payload")
+    expected = original_without_end + _rar5_block(5)
+    prefix = b"MZ-SFX-SPLIT"
+    return _fixture_from_ranges(
+        root,
+        "rar5-sfx-split-missing-end.exe",
+        prefix + original_without_end + b"TAIL",
+        split_at=len(prefix) + 11,
+        expected_bytes=expected,
+    )
 
 
 def _build_rar4_split_trailing_junk(root: Path) -> MatrixFixture:
@@ -602,15 +659,19 @@ MATRIX = [
     MatrixCase("zip_multiple_directory_fields", "zip", ("central_directory_offset_bad", "central_directory_count_bad", "central_directory_bad"), _build_zip_multiple_directory_fields, ("repaired",), "zip_eocd_repair", _verify_zip),
     MatrixCase("zip_eocd_four_field_combo", "zip", ("central_directory_offset_bad", "central_directory_count_bad", "comment_length_bad", "trailing_junk", "central_directory_bad"), _build_zip_eocd_four_field_combo, ("repaired",), "zip_eocd_repair", _verify_zip),
     MatrixCase("zip_split_trailing_junk", "zip", ("trailing_junk", "boundary_unreliable"), _build_zip_split_trailing_junk, ("repaired",), "zip_trailing_junk_trim", _verify_zip),
+    MatrixCase("zip_missing_split_volume_with_extra_damage", "zip", ("missing_volume", "input_truncated", "trailing_junk", "central_directory_bad", "checksum_error"), _build_zip_missing_split_volume_with_extra_damage, UNREPAIRABLE, None),
     MatrixCase("zip_sfx_prefix_tail", "zip", ("carrier_archive", "sfx", "boundary_unreliable", "trailing_junk"), _build_zip_sfx_prefix_tail, ("repaired", "partial"), "zip_deep_partial_recovery", _verify_zip),
     MatrixCase("zip_sfx_split_prefix_tail", "zip", ("carrier_archive", "sfx", "boundary_unreliable", "trailing_junk"), _build_zip_sfx_split_prefix_tail, ("repaired", "partial"), "zip_deep_partial_recovery", _verify_zip),
+    MatrixCase("zip_sfx_split_prefix_tail_bad_cd", "zip", ("carrier_archive", "sfx", "boundary_unreliable", "trailing_junk", "central_directory_offset_bad", "central_directory_count_bad", "central_directory_bad"), _build_zip_sfx_split_prefix_tail_bad_cd, ("repaired",), "zip_central_directory_rebuild", _verify_zip),
     MatrixCase("zip_single_payload_crc_bad", "zip", ("checksum_error", "crc_error", "damaged"), _build_zip_single_payload_crc_bad, UNREPAIRABLE, None),
     MatrixCase("zip_one_bad_payload_one_good", "zip", ("checksum_error", "crc_error", "damaged"), _build_zip_one_bad_payload_one_good, ("partial",), "zip_deep_partial_recovery", _verify_zip),
+    MatrixCase("zip_multi_structure_and_payload_bad", "zip", ("checksum_error", "crc_error", "damaged", "central_directory_offset_bad", "central_directory_count_bad", "comment_length_bad", "trailing_junk", "central_directory_bad"), _build_zip_multi_structure_and_payload_bad, ("partial",), "zip_central_directory_rebuild", _verify_zip),
     MatrixCase("7z_trailing_junk_v04", "7z", ("trailing_junk",), _build_7z_trailing_junk_v04, ("repaired",), "seven_zip_boundary_trim", _verify_bytes),
     MatrixCase("7z_start_crc_bad_v03", "7z", ("start_header_crc_bad",), _build_7z_start_crc_bad_v03, ("repaired",), "seven_zip_start_header_crc_fix", _verify_bytes),
     MatrixCase("7z_next_crc_bad", "7z", ("next_header_crc_bad",), _build_7z_next_crc_bad, ("repaired",), "seven_zip_crc_field_repair", _verify_bytes),
     MatrixCase("7z_start_and_next_crc_bad", "7z", ("start_header_crc_bad", "next_header_crc_bad"), _build_7z_start_and_next_crc_bad, ("repaired",), "seven_zip_crc_field_repair", _verify_bytes),
     MatrixCase("7z_crc_fields_and_trailing_junk", "7z", ("start_header_crc_bad", "next_header_crc_bad", "trailing_junk"), _build_7z_crc_fields_and_trailing_junk, ("repaired",), "seven_zip_crc_field_repair", _verify_bytes),
+    MatrixCase("7z_v03_start_next_crc_and_trailing_junk", "7z", ("start_header_crc_bad", "next_header_crc_bad", "trailing_junk"), _build_7z_v03_start_next_crc_and_trailing_junk, ("repaired",), "seven_zip_crc_field_repair", _verify_bytes),
     MatrixCase("7z_sfx_prefix_tail", "7z", ("carrier_archive", "sfx", "boundary_unreliable", "trailing_junk"), _build_7z_sfx_prefix_tail, ("repaired",), "seven_zip_precise_boundary_repair", _verify_bytes),
     MatrixCase("7z_split_trailing_junk", "7z", ("trailing_junk", "boundary_unreliable"), _build_7z_split_trailing_junk, ("repaired",), "seven_zip_boundary_trim", _verify_bytes),
     MatrixCase("7z_sfx_split_prefix_tail", "7z", ("carrier_archive", "sfx", "boundary_unreliable", "trailing_junk"), _build_7z_sfx_split_prefix_tail, ("repaired",), "seven_zip_precise_boundary_repair", _verify_bytes),
@@ -640,6 +701,16 @@ MATRIX = [
 
 
 MULTI_ROUND_MATRIX = [
+    MultiRoundCase(
+        "rar5_sfx_split_tail_then_missing_end",
+        "rar",
+        _build_rar5_sfx_split_tail_missing_end,
+        (
+            RepairRound(("carrier_archive", "sfx", "boundary_unreliable", "trailing_junk"), ("repaired",), "rar_carrier_crop_deep_recovery"),
+            RepairRound(("missing_end_block", "probably_truncated"), ("repaired",), "rar_end_block_repair"),
+        ),
+        _verify_bytes,
+    ),
     MultiRoundCase(
         "tar_checksum_then_missing_zero_blocks",
         "tar",

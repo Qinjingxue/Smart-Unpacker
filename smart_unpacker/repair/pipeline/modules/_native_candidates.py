@@ -80,7 +80,7 @@ def candidates_from_native_result(
             module_name=module_name,
             format=candidate_format,
             repaired_input=repaired_input,
-            status=item_status if item_status in {"repaired", "partial"} else status,
+            status="partial" if partial_default else (item_status if item_status in {"repaired", "partial"} else status),
             stage="deep",
             confidence=confidence,
             partial=bool(partial_default or item_status == "partial" or status == "partial"),

@@ -423,6 +423,57 @@ def test_candidate_native_validation_uses_candidate_password_for_encrypted_archi
     assert details["archive_coverage"]["completeness"] == 1.0
 
 
+def test_candidate_selector_uses_password_to_rank_and_reject_encrypted_candidates(tmp_path, monkeypatch):
+    archive = tmp_path / "encrypted.zip"
+    archive.write_bytes(b"encrypted candidate bytes")
+    fake = _FakePasswordAwareNativeTester()
+
+    def fake_dry_run(path, *, format_hint="", password="", timeout=0):
+        ok = password == "secret"
+        return SimpleNamespace(
+            ok=ok,
+            returncode=0 if ok else 2,
+            message="ok" if ok else "wrong password",
+            result={"status": "ok" if ok else "wrong_password", "files_written": 2 if ok else 0, "bytes_written": 12 if ok else 0},
+            diagnostics={},
+        )
+
+    monkeypatch.setattr("smart_unpacker.repair.candidate.get_native_password_tester", lambda: fake)
+    monkeypatch.setattr("smart_unpacker.repair.candidate.dry_run_archive", fake_dry_run)
+
+    confident_unvalidated = RepairCandidate(
+        module_name="confident_unvalidated",
+        format="zip",
+        repaired_input={"kind": "file", "path": str(tmp_path / "confident.zip"), "format_hint": "zip"},
+        confidence=0.95,
+        validations=[CandidateValidation(name="module_result", accepted=True, score=0.95)],
+    )
+    password_validated = RepairCandidate(
+        module_name="password_validated",
+        format="zip",
+        repaired_input={"kind": "file", "path": str(archive), "format_hint": "zip", "password": "secret"},
+        confidence=0.4,
+        requires_native_validation=True,
+        validations=[CandidateValidation(name="module_result", accepted=True, score=0.4)],
+    )
+    unknown_password = RepairCandidate(
+        module_name="unknown_password",
+        format="zip",
+        repaired_input={"kind": "file", "path": str(archive), "format_hint": "zip"},
+        confidence=0.9,
+        requires_native_validation=True,
+        validations=[CandidateValidation(name="module_result", accepted=True, score=0.9)],
+    )
+
+    selected, _selection = CandidateSelector().select([confident_unvalidated, password_validated])
+    rejected, rejection = CandidateSelector().select([unknown_password])
+
+    assert selected is not None
+    assert selected.module_name == "password_validated"
+    assert rejected is None
+    assert rejection["accepted_count"] == 0
+
+
 def test_repair_scheduler_records_module_failure_feedback_for_later_decision(tmp_path):
     failing = _DummyFailingBoundaryModule()
     succeeding = _DummyNamedBoundaryModule("z_success_boundary")

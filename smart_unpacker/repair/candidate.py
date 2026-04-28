@@ -311,9 +311,9 @@ class CandidateSelector:
         validation_score = max([_clamp01(float(item.score or 0.0)) for item in candidate.validations] or [0.0])
 
         if native_validation is not None and not _native_validation_skipped(native_validation):
-            score = confidence * 0.25
-            score += _native_validation_strength(native_validation) * 0.65
-            score += validation_score * 0.05
+            score = confidence * 0.1
+            score += _native_validation_strength(native_validation) * 0.85
+            score += validation_score * 0.04
         else:
             score = confidence * 0.86
             score += validation_score * 0.09
@@ -322,6 +322,8 @@ class CandidateSelector:
             score -= 0.12
         if candidate.partial:
             score -= 0.02
+        if _content_damage_candidate(candidate) and not candidate.partial and native_validation is None:
+            score = min(score, 0.45)
         return score
 
 
@@ -403,6 +405,17 @@ def _native_validation(validations: list[CandidateValidation]) -> CandidateValid
     if not native:
         return None
     return max(native, key=lambda item: float(item.score or 0.0))
+
+
+def _content_damage_candidate(candidate: RepairCandidate) -> bool:
+    return bool({
+        "checksum_error",
+        "crc_error",
+        "damaged",
+        "content_integrity_bad_or_unknown",
+        "corrupted_data",
+        "data_error",
+    } & {str(flag) for flag in candidate.damage_flags})
 
 
 def _native_validation_skipped(validation: CandidateValidation) -> bool:

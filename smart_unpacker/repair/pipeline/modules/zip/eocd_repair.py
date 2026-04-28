@@ -30,6 +30,7 @@ class ZipEocdRepair:
                 formats=("zip",),
                 require_any_flags=("eocd_bad", "central_directory_bad", "directory_integrity_bad_or_unknown"),
                 require_any_failure_kinds=("structure_recognition", "corrupted_data"),
+                reject_any_flags=("wrong_password", "carrier_archive", "sfx", "embedded_archive", "carrier_prefix"),
                 base_score=0.82,
             ),
         ),

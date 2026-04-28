@@ -14,6 +14,7 @@ class RarWalkResult:
     end_offset: int | None
     end_block_found: bool
     warnings: list[str]
+    last_complete_offset: int | None = None
 
 
 def walk_rar_blocks(data: bytes) -> RarWalkResult | None:
@@ -26,6 +27,7 @@ def walk_rar_blocks(data: bytes) -> RarWalkResult | None:
 
 def _walk_rar4(data: bytes) -> RarWalkResult:
     pos = len(RAR4_MAGIC)
+    last_complete = pos
     warnings: list[str] = []
     while pos + 7 <= len(data):
         header_type = data[pos + 2]
@@ -45,13 +47,15 @@ def _walk_rar4(data: bytes) -> RarWalkResult:
             warnings.append("rar4 block data is truncated")
             break
         if header_type == 0x7B:
-            return RarWalkResult(version=4, end_offset=end, end_block_found=True, warnings=warnings)
+            return RarWalkResult(version=4, end_offset=end, end_block_found=True, warnings=warnings, last_complete_offset=end)
+        last_complete = end
         pos = end
-    return RarWalkResult(version=4, end_offset=None, end_block_found=False, warnings=warnings)
+    return RarWalkResult(version=4, end_offset=None, end_block_found=False, warnings=warnings, last_complete_offset=last_complete)
 
 
 def _walk_rar5(data: bytes) -> RarWalkResult:
     pos = len(RAR5_MAGIC)
+    last_complete = pos
     warnings: list[str] = []
     while pos + 5 <= len(data):
         header_start = pos + 4
@@ -86,9 +90,10 @@ def _walk_rar5(data: bytes) -> RarWalkResult:
             warnings.append("rar5 block data is truncated")
             break
         if block_type == 5:
-            return RarWalkResult(version=5, end_offset=end, end_block_found=True, warnings=warnings)
+            return RarWalkResult(version=5, end_offset=end, end_block_found=True, warnings=warnings, last_complete_offset=end)
+        last_complete = end
         pos = end
-    return RarWalkResult(version=5, end_offset=None, end_block_found=False, warnings=warnings)
+    return RarWalkResult(version=5, end_offset=None, end_block_found=False, warnings=warnings, last_complete_offset=last_complete)
 
 
 def _read_vint(data: bytes, offset: int) -> tuple[int | None, int | None]:
