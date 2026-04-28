@@ -12,7 +12,7 @@
     "flatten_single_directory": true
   },
   "filesystem": {
-    "directory_scan_mode": "-",
+    "directory_scan_mode": "*",
     "scan_filters": [
       {
         "name": "blacklist",
@@ -129,7 +129,7 @@
           "enabled": true,
           "carrier_tail_score": 5,
           "loose_scan_score": 4,
-          "overlay_start_score": 5,
+          "overlay_start_score": 6,
           "overlay_near_start_score": 4,
           "zip_plausibility_required_for_loose_scan": true,
           "zip_plausibility_required_for_carrier_tail": false,

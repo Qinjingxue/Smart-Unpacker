@@ -248,6 +248,33 @@ class DetectionBehaviorTests(unittest.TestCase):
             self.assertEqual(bag.get("file.detected_ext"), ".7z")
             self.assertEqual(bag.get("embedded_archive.analysis").get("scan_scope"), "full")
 
+    def test_pe_overlay_start_strong_hit_reaches_default_archive_threshold(self):
+        bag = FactBag()
+        bag.set("file.path", "installer.exe")
+        bag.set("embedded_archive.analysis", {"found": False})
+        bag.set("pe.overlay_structure", {
+            "archive_like": True,
+            "offset_delta_from_overlay": 0,
+            "format": "7z",
+            "detected_ext": ".7z",
+            "archive_offset": 434176,
+            "confidence": "strong",
+        })
+
+        decision = DetectionScheduler(with_detection_pipeline({
+            "thresholds": {
+                "archive_score_threshold": 6,
+                "maybe_archive_threshold": 3,
+            },
+        }, scoring=[
+            {"name": "embedded_payload_identity", "enabled": True},
+        ])).evaluate_bag(bag)
+
+        self.assertTrue(decision.should_extract)
+        self.assertEqual(decision.total_score, 6)
+        self.assertEqual(bag.get("file.detected_ext"), ".7z")
+        self.assertEqual(bag.get("file.probe_offset"), 434176)
+
     def test_scene_penalty_suppresses_embedded_runtime_resource(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

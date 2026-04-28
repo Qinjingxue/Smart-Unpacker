@@ -22,7 +22,6 @@ from smart_unpacker.app.cli_runtime import (
 from smart_unpacker.app.cli_types import CliCommandResult
 from smart_unpacker.config.loader import load_config
 from smart_unpacker.coordinator.runner import PipelineRunner
-from smart_unpacker.watch import WatchScheduler
 
 COMMAND = "watch"
 ORDER = 15
@@ -109,6 +108,8 @@ def handle(args, ctx):
     out_dir = config["output"]["root"]
     state_path = args.state_path or os.path.join(out_dir, ".smart_unpacker_watch", "state.json")
     try:
+        from smart_unpacker.watch import WatchScheduler
+
         watcher = WatchScheduler(
             config,
             target_paths,
