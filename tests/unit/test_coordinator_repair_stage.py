@@ -85,6 +85,60 @@ def test_repair_stage_repairs_after_extraction_failure(tmp_path):
     assert task.fact_bag.get("archive.input")["entry_path"] == str(repaired)
 
 
+def test_repair_stage_passes_partial_output_progress_to_repair_job(tmp_path):
+    source = tmp_path / "payload_bad.zip"
+    repaired = tmp_path / "partial.zip"
+    source.write_bytes(b"broken")
+    repaired.write_bytes(b"partial")
+    manifest = tmp_path / "out" / ".sunpack" / "extraction_manifest.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text("{}", encoding="utf-8")
+    task = _task(source)
+    scheduler = _FakeRepairScheduler(repaired)
+    stage = ArchiveRepairStage({"repair": {"workspace": str(tmp_path / "repair")}})
+    stage.scheduler = scheduler
+    result = ExtractionResult(
+        success=False,
+        archive=str(source),
+        out_dir=str(tmp_path / "out"),
+        all_parts=[str(source)],
+        error="CRC Failed",
+        partial_outputs=True,
+        progress_manifest=str(manifest),
+        diagnostics={
+            "failure_stage": "item_extract",
+            "failure_kind": "checksum_error",
+            "result": {
+                "status": "failed",
+                "native_status": "damaged",
+                "failure_stage": "item_extract",
+                "failure_kind": "checksum_error",
+                "checksum_error": True,
+                "files_written": 1,
+                "bytes_written": 128,
+                "diagnostics": {
+                    "output_trace": {
+                        "items": [
+                            {"path": str(tmp_path / "out" / "good.txt"), "archive_path": "good.txt", "failed": False, "bytes_written": 64},
+                            {"path": str(tmp_path / "out" / "bad.bin"), "archive_path": "bad.bin", "failed": True, "bytes_written": 64},
+                        ]
+                    }
+                },
+            },
+        },
+    )
+
+    assert stage.repair_after_extraction_failure(task, result) is True
+    failure = scheduler.jobs[0].extraction_failure
+    assert failure["partial_outputs"] is True
+    assert failure["progress_manifest"] == str(manifest)
+    assert failure["files_written"] == 1
+    assert failure["bytes_written"] == 128
+    assert len(failure["complete_items"]) == 1
+    assert len(failure["failed_items"]) == 1
+    assert failure["output_trace"]["items"][1]["archive_path"] == "bad.bin"
+
+
 class _FakeRepairScheduler:
     def __init__(self, repaired_path: Path):
         self.repaired_path = repaired_path

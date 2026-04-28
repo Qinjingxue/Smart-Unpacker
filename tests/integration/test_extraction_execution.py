@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -172,6 +173,83 @@ class ExtractionExecutionTests(unittest.TestCase):
             self.assertFalse(result.success)
             self.assertEqual(result.error, "压缩包损坏")
             self.assertEqual(calls, 1)
+
+    def test_extractor_preserves_best_effort_outputs_for_item_payload_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            archive_path = Path(tmp) / "broken_payload.zip"
+            archive_path.write_bytes(b"zip")
+            out_dir = Path(tmp) / "broken_payload"
+            good_path = out_dir / "good.txt"
+            partial_path = out_dir / "bad.bin"
+
+            extractor = ExtractionScheduler(max_retries=1)
+            extractor.password_resolver = FakePasswordResolver()
+            extractor.metadata_scanner = FakeMetadataScanner()
+            extractor.rename_scheduler = FakeStager()
+
+            def fake_extract(**_kwargs):
+                good_path.parent.mkdir(parents=True, exist_ok=True)
+                good_path.write_text("good", encoding="utf-8")
+                partial_path.write_bytes(b"bad-")
+                diagnostics = {
+                    "source": "sevenzip_worker",
+                    "returncode": 2,
+                    "failure_stage": "item_extract",
+                    "failure_kind": "checksum_error",
+                    "result": {
+                        "type": "result",
+                        "status": "failed",
+                        "native_status": "damaged",
+                        "failure_stage": "item_extract",
+                        "failure_kind": "checksum_error",
+                        "checksum_error": True,
+                        "files_written": 2,
+                        "bytes_written": 8,
+                        "diagnostics": {
+                            "output_trace": {
+                                "items": [
+                                    {
+                                        "path": str(good_path),
+                                        "archive_path": "good.txt",
+                                        "failed": False,
+                                        "bytes_written": 4,
+                                        "expected_size": 4,
+                                        "crc_ok": True,
+                                    },
+                                    {
+                                        "path": str(partial_path),
+                                        "archive_path": "bad.bin",
+                                        "failed": True,
+                                        "bytes_written": 4,
+                                        "expected_size": 8,
+                                        "crc_ok": False,
+                                        "failure_stage": "item_extract",
+                                        "failure_kind": "checksum_error",
+                                    },
+                                ],
+                                "total_bytes_written": 8,
+                            }
+                        },
+                    },
+                }
+                return SimpleNamespace(returncode=2, stdout="", stderr="CRC Failed", worker_diagnostics=diagnostics)
+
+            bag = FactBag()
+            task = ArchiveTask(fact_bag=bag, score=10, main_path=str(archive_path), all_parts=[str(archive_path)])
+            extractor.sevenzip_runner.run_extract = fake_extract
+
+            result = extractor.extract(task, str(out_dir))
+
+            self.assertFalse(result.success)
+            self.assertTrue(result.partial_outputs)
+            self.assertTrue(good_path.exists())
+            self.assertTrue(partial_path.exists())
+            self.assertTrue(Path(result.progress_manifest).is_file())
+            manifest = json.loads(Path(result.progress_manifest).read_text(encoding="utf-8"))
+            by_archive_path = {item["archive_path"]: item for item in manifest["files"]}
+            self.assertEqual(by_archive_path["good.txt"]["status"], "complete")
+            self.assertEqual(by_archive_path["bad.bin"]["status"], "partial")
+            self.assertEqual(manifest["summary"]["partial"], 1)
 
     def test_extractor_reports_retry_count_after_transient_failures_are_exhausted(self):
         with tempfile.TemporaryDirectory() as tmp:

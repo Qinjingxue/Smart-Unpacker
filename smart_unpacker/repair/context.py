@@ -116,6 +116,8 @@ def _damage_flags(
         flags.append("wrong_password")
     if failure.get("unsupported_method"):
         flags.append("unsupported_method")
+    if failure.get("partial_outputs"):
+        flags.append("partial_extract_available")
     if failure_kind:
         flags.append(failure_kind)
     if failure_stage == "archive_open" and failure_kind == "structure_recognition":

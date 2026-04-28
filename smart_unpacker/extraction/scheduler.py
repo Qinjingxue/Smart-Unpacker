@@ -94,4 +94,5 @@ class ExtractionScheduler:
             retry_policy=self.retry_policy,
             split_entry_resolver=self.split_entry_resolver,
             sevenzip_runner=self.sevenzip_runner,
+            best_effort=True,
         )

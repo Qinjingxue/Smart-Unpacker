@@ -8,6 +8,7 @@ from smart_unpacker.extraction.internal.workflow.errors import classify_extract_
 from smart_unpacker.extraction.internal.workflow.retry_policy import ExtractRetryPolicy
 from smart_unpacker.extraction.internal.sevenzip.sevenzip_runner import SevenZipRunner
 from smart_unpacker.extraction.internal.workflow.split_entry import SplitEntryResolver
+from smart_unpacker.extraction.progress import has_recoverable_partial_outputs, write_extraction_progress_manifest
 from smart_unpacker.extraction.result import ExtractionResult
 from smart_unpacker.passwords.result import PasswordResolution
 
@@ -24,6 +25,7 @@ class SingleArchiveExtractor:
         retry_policy: ExtractRetryPolicy,
         split_entry_resolver: SplitEntryResolver,
         sevenzip_runner: SevenZipRunner,
+        best_effort: bool = True,
     ):
         self.seven_z_path = seven_z_path
         self.password_store = password_store
@@ -34,6 +36,7 @@ class SingleArchiveExtractor:
         self.retry_policy = retry_policy
         self.split_entry_resolver = split_entry_resolver
         self.sevenzip_runner = sevenzip_runner
+        self.best_effort = bool(best_effort)
 
     def extract(
         self,
@@ -145,6 +148,16 @@ class SingleArchiveExtractor:
 
                     if run_result.returncode == 0:
                         print(f"[EXTRACT] 成功: {archive}")
+                        diagnostics = self._diagnostics_from(run_result)
+                        manifest_path = ""
+                        if diagnostics.get("result"):
+                            manifest_path = write_extraction_progress_manifest(
+                                archive=archive,
+                                out_dir=out_dir,
+                                diagnostics=diagnostics,
+                                round_index=retry_count + 1,
+                            )
+                            diagnostics["progress_manifest"] = manifest_path
                         return ExtractionResult(
                             success=True,
                             archive=archive,
@@ -152,6 +165,8 @@ class SingleArchiveExtractor:
                             all_parts=cleanup_parts,
                             password_used=correct_pwd,
                             selected_codepage=selected_codepage,
+                            diagnostics=diagnostics,
+                            progress_manifest=manifest_path,
                         )
 
                     err = f"{run_result.stdout}\n{run_result.stderr}".lower()
@@ -177,6 +192,27 @@ class SingleArchiveExtractor:
             error_msg = classify_extract_error(run_result or test_result, err, archive=archive, is_split_archive=is_split)
             error_msg = self.retry_policy.append_retry_count(error_msg, retry_count)
             print(f"[EXTRACT] 失败: {archive} (错误: {error_msg})")
+            diagnostics = self._diagnostics_from(run_result or test_result)
+            if self.best_effort and has_recoverable_partial_outputs(diagnostics, out_dir):
+                manifest_path = write_extraction_progress_manifest(
+                    archive=archive,
+                    out_dir=out_dir,
+                    diagnostics=diagnostics,
+                    round_index=retry_count + 1,
+                )
+                diagnostics["partial_outputs"] = True
+                diagnostics["progress_manifest"] = manifest_path
+                return self._failed(
+                    archive,
+                    out_dir,
+                    run_parts,
+                    error_msg,
+                    password_used=correct_pwd,
+                    selected_codepage=selected_codepage,
+                    diagnostics=diagnostics,
+                    partial_outputs=True,
+                    progress_manifest=manifest_path,
+                )
             shutil.rmtree(out_dir, ignore_errors=True)
             return self._failed(
                 archive,
@@ -185,7 +221,7 @@ class SingleArchiveExtractor:
                 error_msg,
                 password_used=correct_pwd,
                 selected_codepage=selected_codepage,
-                diagnostics=self._diagnostics_from(run_result or test_result),
+                diagnostics=diagnostics,
             )
 
         shutil.rmtree(out_dir, ignore_errors=True)
@@ -256,6 +292,8 @@ class SingleArchiveExtractor:
         password_used: str | None = None,
         selected_codepage: str | None = None,
         diagnostics: dict | None = None,
+        partial_outputs: bool = False,
+        progress_manifest: str = "",
     ) -> ExtractionResult:
         return ExtractionResult(
             success=False,
@@ -266,6 +304,8 @@ class SingleArchiveExtractor:
             password_used=password_used,
             selected_codepage=selected_codepage,
             diagnostics=dict(diagnostics or {}),
+            partial_outputs=partial_outputs,
+            progress_manifest=progress_manifest,
         )
 
     @staticmethod

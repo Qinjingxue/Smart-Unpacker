@@ -262,9 +262,22 @@ class ArchiveRepairStage:
                 "hresult",
                 "hresult_hex",
                 "message",
+                "files_written",
+                "bytes_written",
             ):
                 if key in worker_result:
                     payload[key] = worker_result[key]
+            worker_native = worker_result.get("diagnostics") if isinstance(worker_result.get("diagnostics"), dict) else {}
+            output_trace = worker_native.get("output_trace") if isinstance(worker_native.get("output_trace"), dict) else {}
+            if output_trace:
+                payload["output_trace"] = dict(output_trace)
+                items = output_trace.get("items") if isinstance(output_trace.get("items"), list) else []
+                payload["complete_items"] = [dict(item) for item in items if isinstance(item, dict) and not item.get("failed")]
+                payload["failed_items"] = [dict(item) for item in items if isinstance(item, dict) and item.get("failed")]
+        if result.partial_outputs:
+            payload["partial_outputs"] = True
+        if result.progress_manifest:
+            payload["progress_manifest"] = result.progress_manifest
         for key in ("failure_stage", "failure_kind"):
             if diagnostics.get(key) and not payload.get(key):
                 payload[key] = diagnostics[key]

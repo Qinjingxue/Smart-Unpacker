@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -102,13 +103,24 @@ def assert_success_with_detection_disabled(case: ArchiveCase, passwords: list[st
     assert marker_was_extracted(case.archive_dir, case.marker_name, case.marker_text)
 
 
-def assert_failure_contains(case: ArchiveCase, expected_options: set[str], passwords: list[str] | None = None):
+def assert_failure_contains(
+    case: ArchiveCase,
+    expected_options: set[str],
+    passwords: list[str] | None = None,
+    *,
+    allow_best_effort_outputs: bool = False,
+):
     summary = run_pipeline(case.archive_dir, passwords=passwords)
 
     assert summary.success_count == 0
     assert summary.failed_tasks
     assert any(any(expected in item for expected in expected_options) for item in summary.failed_tasks)
-    assert not marker_was_extracted(case.archive_dir, case.marker_name, case.marker_text)
+    if allow_best_effort_outputs:
+        manifests = list(case.archive_dir.rglob("extraction_manifest.json"))
+        assert manifests
+        assert any(json.loads(path.read_text(encoding="utf-8")).get("partial_outputs") for path in manifests)
+    else:
+        assert not marker_was_extracted(case.archive_dir, case.marker_name, case.marker_text)
 
 
 def assert_partial_success_without_marker(case: ArchiveCase):
@@ -290,7 +302,14 @@ def test_real_archive_edge_corruption_modes_fail(tmp_path, archive_format, corru
     if archive_format == "zip" and corruption == "tail_damage":
         assert_success(case)
         return
-    assert_failure_contains(case, {"压缩包损坏", "致命错误"})
+    assert_failure_contains(
+        case,
+        {"压缩包损坏", "致命错误"},
+        allow_best_effort_outputs=(
+            (archive_format == "7z" and corruption == "byte_flip")
+            or (archive_format == "zip" and corruption == "header_damage")
+        ),
+    )
 
 
 @pytest.mark.parametrize("archive_format", archive_format_params(set()))

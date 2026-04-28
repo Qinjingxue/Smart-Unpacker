@@ -162,6 +162,8 @@ def _extraction_evidence(job: RepairJob) -> DamageEvidence:
         flags.append("wrong_password")
     if failure.get("unsupported_method"):
         flags.append("unsupported_method")
+    if failure.get("partial_outputs"):
+        flags.append("partial_extract_available")
     failure_stage = str(failure.get("failure_stage") or "")
     failure_kind = str(failure.get("failure_kind") or "")
     if failure_stage:
@@ -196,7 +198,7 @@ def _categories_for(fmt: str, flags: set[str], failure: dict[str, Any]) -> list[
         categories.append("boundary_repair")
     if flags & DIRECTORY_FLAGS:
         categories.append("directory_rebuild")
-    if flags & CONTENT_FLAGS or failure.get("failed_item"):
+    if flags & CONTENT_FLAGS or failure.get("failed_item") or failure.get("partial_outputs"):
         categories.append("content_recovery")
     if failure.get("unsupported_method"):
         categories.append("unsupported_method")

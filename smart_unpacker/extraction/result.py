@@ -12,3 +12,5 @@ class ExtractionResult:
     password_used: Optional[str] = None
     selected_codepage: Optional[str] = None
     diagnostics: dict[str, Any] = field(default_factory=dict)
+    partial_outputs: bool = False
+    progress_manifest: str = ""
