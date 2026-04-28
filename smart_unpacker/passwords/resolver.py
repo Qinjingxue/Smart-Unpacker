@@ -1,4 +1,5 @@
 from smart_unpacker.contracts.detection import FactBag
+from smart_unpacker.contracts.archive_state import ArchiveState
 from smart_unpacker.passwords.candidates import PasswordCandidatePipeline
 from smart_unpacker.passwords.job import PasswordJob
 from smart_unpacker.passwords.result import PasswordResolution
@@ -34,6 +35,14 @@ class PasswordResolver:
 
         if self._facts_confirm_unencrypted(fact_bag):
             return self._remember(archive_key, "", encrypted=False)
+
+        if self._facts_have_patches(fact_bag) and self._facts_require_password(fact_bag):
+            return PasswordResolution(
+                password=None,
+                error_text="password verification is unsupported for patched archive state without a resolved password",
+                archive_key=archive_key,
+                encrypted=True,
+            )
 
         if not self.password_tester.passwords:
             return self._remember(archive_key, "", encrypted=False)
@@ -102,12 +111,12 @@ class PasswordResolver:
         )
 
     def _run_password_search(self, archive_path: str, fact_bag: FactBag | None = None, part_paths: list[str] | None = None):
-        archive_input = fact_bag.get("archive.input") if fact_bag is not None else None
+        archive_input = self._archive_input_for_password_probe(archive_path, fact_bag, part_paths)
         candidates = PasswordCandidatePipeline.from_password_store(self.password_tester.password_store)
         return self.password_scheduler.run(PasswordJob(
             archive_path=archive_path,
             part_paths=part_paths,
-            archive_input=archive_input if isinstance(archive_input, dict) else None,
+            archive_input=archive_input,
             candidates=candidates,
         ))
 
@@ -118,7 +127,7 @@ class PasswordResolver:
         fact_bag: FactBag | None = None,
         part_paths: list[str] | None = None,
     ):
-        archive_input = fact_bag.get("archive.input") if fact_bag is not None else None
+        archive_input = self._archive_input_for_password_probe(archive_path, fact_bag, part_paths)
         if isinstance(archive_input, dict):
             try:
                 return self.password_tester.test_without_password(
@@ -130,6 +139,26 @@ class PasswordResolver:
                 if "archive_input" not in str(error):
                     raise
         return self.password_tester.test_without_password(archive_path, part_paths=part_paths)
+
+    @staticmethod
+    def _archive_input_for_password_probe(
+        archive_path: str,
+        fact_bag: FactBag | None,
+        part_paths: list[str] | None,
+    ) -> dict | None:
+        if fact_bag is None:
+            return None
+        raw_state = fact_bag.get("archive.state")
+        if isinstance(raw_state, dict):
+            try:
+                state = ArchiveState.from_any(raw_state, archive_path=archive_path, part_paths=part_paths)
+            except (TypeError, ValueError):
+                return None
+            if state.patches:
+                return None
+            return state.to_archive_input_descriptor().to_dict()
+        archive_input = fact_bag.get("archive.input")
+        return archive_input if isinstance(archive_input, dict) else None
 
     def _remember(
         self,
@@ -180,3 +209,13 @@ class PasswordResolver:
         if fact_bag is None:
             return ""
         return str(fact_bag.get("candidate.logical_name") or fact_bag.get("candidate.entry_path") or "")
+
+    @staticmethod
+    def _facts_have_patches(fact_bag: FactBag | None) -> bool:
+        if fact_bag is None:
+            return False
+        raw_state = fact_bag.get("archive.state")
+        if isinstance(raw_state, dict):
+            patches = raw_state.get("patches") or raw_state.get("patch_stack") or []
+            return bool(patches)
+        return False

@@ -11,6 +11,7 @@ from smart_unpacker.contracts.archive_input import (
     ArchiveInputRange,
     ArchiveInputSegment,
 )
+from smart_unpacker.contracts.archive_state import ArchiveState
 from smart_unpacker.contracts.detection import FactBag
 from smart_unpacker.contracts.tasks import ArchiveTask, SplitArchiveInfo
 
@@ -70,6 +71,7 @@ class ArchiveAnalysisStage:
     def _analyze_task_to_tasks(self, task: ArchiveTask) -> tuple[ArchiveAnalysisReport | None, list[ArchiveTask]]:
         if self.scheduler is None:
             return None, [task]
+        task.ensure_archive_state()
         try:
             report = self.scheduler.analyze_task(task)
         except Exception as exc:
@@ -85,10 +87,12 @@ class ArchiveAnalysisStage:
             if password_candidate is not None:
                 evidence, segment, index = password_candidate
                 self._apply_selected_segment(task, evidence, segment, index=index)
+                self._record_state_analysis(task, report)
             return report, [task]
         if len(candidates) == 1:
             evidence, segment, _ = candidates[0]
             self._apply_selected_segment(task, evidence, segment, index=0)
+            self._record_state_analysis(task, report)
             return report, [task]
         return report, [
             self._child_task_for_segment(task, report, evidence, segment, index=index)
@@ -110,7 +114,7 @@ class ArchiveAnalysisStage:
         task.fact_bag.set("analysis.segment_index", index)
         task.fact_bag.set("analysis.segment", segment_payload)
         if archive_input:
-            task.set_archive_input(archive_input)
+            task.set_archive_state(ArchiveState.from_archive_input(archive_input), sync_compat=False)
 
     def _record_report(self, task: ArchiveTask, report: ArchiveAnalysisReport) -> None:
         task.fact_bag.set("analysis.status", "extractable" if report.has_extractable else "not_extractable")
@@ -131,6 +135,34 @@ class ArchiveAnalysisStage:
                 }
                 for evidence in report.evidences
             ],
+        )
+        self._record_state_analysis(task, report)
+
+    def _record_state_analysis(self, task: ArchiveTask, report: ArchiveAnalysisReport) -> None:
+        state = task.archive_state()
+        selected = report.selected[0] if report.selected else None
+        analysis = {
+            "status": "extractable" if report.has_extractable else "not_extractable",
+            "report_path": report.path,
+            "read_bytes": report.read_bytes,
+            "cache_hits": report.cache_hits,
+        }
+        if selected is not None:
+            analysis.update({
+                "selected_format": selected.format,
+                "confidence": float(selected.confidence),
+            })
+        task.set_archive_state(
+            ArchiveState(
+                source=state.source,
+                patches=list(state.patches),
+                patch_digest=state.effective_patch_digest(),
+                logical_name=state.logical_name,
+                format_hint=state.format_hint,
+                analysis=analysis,
+                verification=dict(state.verification),
+            ),
+            sync_compat=False,
         )
 
     def _extractable_segments(self, report: ArchiveAnalysisReport) -> list[tuple[ArchiveFormatEvidence, ArchiveSegment, int]]:
@@ -360,6 +392,7 @@ class ArchiveAnalysisStage:
         child.fact_bag.set("analysis.logical_archive_index", index)
         child.fact_bag.set("candidate.logical_name", child.logical_name)
         self._apply_selected_segment(child, evidence, segment, index=index)
+        self._record_state_analysis(child, report)
         return child
 
     def _segment_logical_name(self, task: ArchiveTask, evidence: ArchiveFormatEvidence, index: int) -> str:

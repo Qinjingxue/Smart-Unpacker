@@ -3,7 +3,7 @@ from __future__ import annotations
 from smart_unpacker.repair.diagnosis import RepairDiagnosis
 from smart_unpacker.repair.job import RepairJob
 from smart_unpacker.repair.pipeline.module import RepairModuleSpec, RepairRoute
-from smart_unpacker.repair.pipeline.modules._common import load_source_bytes, write_candidate
+from smart_unpacker.repair.pipeline.modules._common import load_job_source_bytes, patch_plan_for_truncate, patch_repair_result
 from smart_unpacker.repair.pipeline.registry import register_repair_module
 from smart_unpacker.repair.result import RepairResult
 
@@ -36,7 +36,7 @@ class ZstdTrailingJunkTrim:
     def repair(self, job: RepairJob, diagnosis: RepairDiagnosis, workspace: str, config: dict) -> RepairResult:
         import zstandard as zstd
 
-        data = load_source_bytes(job.source_input)
+        data = load_job_source_bytes(job)
         decompressor = zstd.ZstdDecompressor().decompressobj()
         try:
             decompressor.decompress(data)
@@ -45,18 +45,21 @@ class ZstdTrailingJunkTrim:
         unused = getattr(decompressor, "unused_data", b"")
         if not unused:
             return RepairResult(status="unrepairable", confidence=0.0, format="zstd", module_name=self.spec.name, diagnosis=diagnosis.as_dict(), message="no trailing junk after complete zstd stream")
-        repaired = data[:len(data) - len(unused)]
-        path = write_candidate(repaired, workspace, "zstd_trailing_junk_trim.zst")
-        return RepairResult(
-            status="repaired",
-            confidence=0.78,
-            format="zstd",
-            repaired_input={"kind": "file", "path": path, "format_hint": "zstd"},
-            actions=["trim_after_zstd_stream"],
-            damage_flags=list(job.damage_flags),
-            workspace_paths=[path],
+        stream_end = len(data) - len(unused)
+        actions = ["trim_after_zstd_stream"]
+        patch_plan = patch_plan_for_truncate(job, self.spec.name, stream_end, confidence=0.78, actions=actions)
+        return patch_repair_result(
+            job=job,
+            diagnosis=diagnosis,
             module_name=self.spec.name,
-            diagnosis=diagnosis.as_dict(),
+            fmt="zstd",
+            patch_plan=patch_plan,
+            confidence=0.78,
+            actions=actions,
+            workspace=workspace,
+            filename="zstd_trailing_junk_trim.zst",
+            config=config,
+            materialized_data=data[:stream_end],
         )
 
 

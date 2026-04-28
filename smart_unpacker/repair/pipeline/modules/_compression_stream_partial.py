@@ -3,6 +3,7 @@ from __future__ import annotations
 from smart_unpacker.repair.diagnosis import RepairDiagnosis
 from smart_unpacker.repair.job import RepairJob
 from smart_unpacker.repair.pipeline.module import RepairModuleSpec, RepairRoute
+from smart_unpacker.repair.pipeline.modules._common import source_input_for_job
 from smart_unpacker.repair.pipeline.modules._native_candidates import candidates_from_native_result
 from smart_unpacker.repair.result import RepairResult
 
@@ -76,7 +77,7 @@ class CompressionStreamPartialRecovery:
     def _run_native(self, job: RepairJob, workspace: str, config: dict) -> dict:
         deep = config.get("deep") if isinstance(config.get("deep"), dict) else {}
         return _native_stream_partial_recovery(
-            job.source_input,
+            source_input_for_job(job),
             self.format_name,
             workspace,
             float(deep.get("max_input_size_mb", 512) or 0),

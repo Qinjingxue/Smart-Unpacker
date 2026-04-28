@@ -72,7 +72,7 @@ def test_analysis_stage_writes_file_range_input(tmp_path):
 
     assert task.fact_bag.get("analysis.selected_format") == "zip"
     assert task.fact_bag.get("analysis.segment")["start_offset"] == 4
-    assert task.fact_bag.get("archive.input") == {
+    assert task.archive_input().to_dict() == {
         "kind": "archive_input",
         "entry_path": str(archive),
         "open_mode": "file_range",
@@ -82,6 +82,10 @@ def test_analysis_stage_writes_file_range_input(tmp_path):
         "segment": {"start": 4, "source": "analysis", "end": 40, "confidence": 0.99},
         "analysis": {"status": "extractable", "confidence": 0.99, "damage_flags": []},
     }
+    state = task.fact_bag.get("archive.state")
+    assert state["source"]["open_mode"] == "file_range"
+    assert state["source"]["parts"][0]["start"] == 4
+    assert state["patches"] == []
 
 
 def test_analysis_stage_expands_carrier_into_logical_archive_tasks(tmp_path):
@@ -108,7 +112,7 @@ def test_analysis_stage_expands_carrier_into_logical_archive_tasks(tmp_path):
 
     assert [item.logical_name for item in tasks] == ["case_01_rar", "case_02_7z"]
     assert [item.fact_bag.get("analysis.selected_format") for item in tasks] == ["rar", "7z"]
-    assert tasks[0].fact_bag.get("archive.input") == {
+    assert tasks[0].archive_input().to_dict() == {
         "kind": "archive_input",
         "entry_path": str(carrier),
         "open_mode": "file_range",
@@ -118,8 +122,8 @@ def test_analysis_stage_expands_carrier_into_logical_archive_tasks(tmp_path):
         "segment": {"start": 4, "source": "analysis", "end": 32, "confidence": 0.97},
         "analysis": {"status": "extractable", "confidence": 0.97, "damage_flags": []},
     }
-    assert tasks[1].fact_bag.get("archive.input")["format_hint"] == "7z"
-    assert tasks[1].fact_bag.get("archive.input")["parts"][0]["start"] == 35
+    assert tasks[1].archive_input().format_hint == "7z"
+    assert tasks[1].archive_input().parts[0].range.start == 35
     assert tasks[1].key.endswith("#segment2:7z")
 
 
@@ -174,7 +178,7 @@ def test_analysis_stage_uses_range_input_for_embedded_password_required_archive(
     stage.analyze_task(task)
 
     assert task.fact_bag.get("analysis.selected_format") == "rar"
-    assert task.fact_bag.get("archive.input") == {
+    assert task.archive_input().to_dict() == {
         "kind": "archive_input",
         "entry_path": str(carrier),
         "open_mode": "file_range",
@@ -215,7 +219,7 @@ def test_analysis_stage_maps_split_logical_segment_to_concat_ranges(tmp_path):
 
     stage.analyze_task(task)
 
-    assert task.fact_bag.get("archive.input") == {
+    assert task.archive_input().to_dict() == {
         "kind": "archive_input",
         "entry_path": str(part1),
         "open_mode": "concat_ranges",
@@ -229,3 +233,6 @@ def test_analysis_stage_maps_split_logical_segment_to_concat_ranges(tmp_path):
         "segment": {"start": 8, "source": "analysis", "end": 24, "confidence": 0.97},
         "analysis": {"status": "extractable", "confidence": 0.97, "damage_flags": []},
     }
+    state = task.fact_bag.get("archive.state")
+    assert state["source"]["open_mode"] == "concat_ranges"
+    assert [item["path"] for item in state["source"]["ranges"]] == [str(part1), str(part2), str(part3)]

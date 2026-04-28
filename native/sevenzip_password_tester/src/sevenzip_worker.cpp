@@ -325,7 +325,31 @@ struct WorkerArchiveInput {
     std::wstring open_mode;
     std::vector<std::wstring> part_paths;
     std::vector<smart_unpacker::sevenzip::ExtractInputRange> ranges;
+    std::vector<smart_unpacker::sevenzip::ExtractPatchOperation> patches;
 };
+
+std::vector<unsigned char> base64_decode(const std::string& text) {
+    static const std::string alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::vector<unsigned char> out;
+    int value = 0;
+    int bits = -8;
+    for (const unsigned char ch : text) {
+        if (ch == '=') {
+            break;
+        }
+        const auto index = alphabet.find(static_cast<char>(ch));
+        if (index == std::string::npos) {
+            continue;
+        }
+        value = (value << 6) + static_cast<int>(index);
+        bits += 6;
+        if (bits >= 0) {
+            out.push_back(static_cast<unsigned char>((value >> bits) & 0xFF));
+            bits -= 8;
+        }
+    }
+    return out;
+}
 
 std::vector<smart_unpacker::sevenzip::ExtractInputRange> parse_input_ranges(const std::string& request, const std::string& archive_path) {
     using smart_unpacker::sevenzip::ExtractInputRange;
@@ -389,6 +413,8 @@ std::vector<smart_unpacker::sevenzip::ExtractInputRange> parse_ranges_from_objec
     return ranges;
 }
 
+std::vector<smart_unpacker::sevenzip::ExtractPatchOperation> parse_patch_operations_from_state(const std::string& request);
+
 WorkerArchiveInput parse_archive_input_descriptor(
     const std::string& request,
     const std::wstring& fallback_archive_path,
@@ -401,12 +427,20 @@ WorkerArchiveInput parse_archive_input_descriptor(
     input.open_mode = L"file";
     input.part_paths = fallback_part_paths;
 
-    const std::string descriptor = json_object_field(request, "archive_input");
+    std::string descriptor = json_object_field(request, "archive_input");
+    const std::string state = json_object_field(request, "archive_state");
+    if (!state.empty()) {
+        const std::string state_source = json_object_field(state, "source");
+        if (!state_source.empty()) {
+            descriptor = state_source;
+        }
+    }
     if (descriptor.empty()) {
         input.ranges = parse_input_ranges(request, json_string_field(request, "archive_path", ""));
         if (!input.ranges.empty()) {
             input.open_mode = utf8_to_wide(json_string_field(request, "kind", "concat_ranges"));
         }
+        input.patches = parse_patch_operations_from_state(request);
         return input;
     }
 
@@ -451,7 +485,38 @@ WorkerArchiveInput parse_archive_input_descriptor(
             input.ranges = parse_ranges_from_objects(json_object_array_field(descriptor, "parts"), entry_path);
         }
     }
+    input.patches = parse_patch_operations_from_state(request);
     return input;
+}
+
+std::vector<smart_unpacker::sevenzip::ExtractPatchOperation> parse_patch_operations_from_state(const std::string& request) {
+    using smart_unpacker::sevenzip::ExtractPatchOperation;
+    std::vector<ExtractPatchOperation> operations;
+    const std::string state = json_object_field(request, "archive_state");
+    if (state.empty()) {
+        return operations;
+    }
+    for (const auto& patch_json : json_object_array_field(state, "patches")) {
+        for (const auto& operation_json : json_object_array_field(patch_json, "operations")) {
+            ExtractPatchOperation operation;
+            operation.op = utf8_to_wide(json_string_field(operation_json, "op", ""));
+            operation.target = utf8_to_wide(json_string_field(operation_json, "target", "logical"));
+            unsigned long long offset = 0;
+            if (json_uint_field_in_object(operation_json, "offset", &offset)) {
+                operation.offset = offset;
+            }
+            unsigned long long size = 0;
+            if (json_uint_field_in_object(operation_json, "size", &size)) {
+                operation.size = size;
+                operation.has_size = true;
+            }
+            operation.data = base64_decode(json_string_field(operation_json, "data_b64", ""));
+            if (!operation.op.empty()) {
+                operations.push_back(std::move(operation));
+            }
+        }
+    }
+    return operations;
 }
 
 void print_json_line(const std::string& json) {
@@ -619,7 +684,9 @@ int run_request(const std::string& request) {
     };
 
     const auto archive_input = parse_archive_input_descriptor(request, archive_path, format_hint, part_paths);
-    ExtractArchiveResult result = archive_input.ranges.empty()
+    ExtractArchiveResult result = !archive_input.patches.empty()
+        ? extract_archive_with_patches(dll_path, archive_input.archive_path, archive_input.part_paths, archive_input.ranges, archive_input.patches, archive_input.format_hint, password, output_dir, progress, dry_run)
+        : archive_input.ranges.empty()
         ? extract_archive_with_parts(dll_path, archive_input.archive_path, archive_input.part_paths, archive_input.format_hint, password, output_dir, progress, dry_run)
         : extract_archive_with_ranges(dll_path, archive_input.archive_path, archive_input.ranges, archive_input.format_hint, password, output_dir, progress, dry_run);
 

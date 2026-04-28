@@ -9,6 +9,7 @@ from smart_unpacker.repair.context import RepairContext, build_repair_context
 from smart_unpacker.repair.diagnosis import RepairDiagnosis, diagnose_repair_job
 from smart_unpacker.repair.job import RepairJob
 from smart_unpacker.repair.pipeline.module import RepairRoute
+from smart_unpacker.repair.pipeline.modules._common import job_source_size
 from smart_unpacker.repair.pipeline.registry import discover_repair_modules, get_repair_module_registry
 from smart_unpacker.repair.result import RepairResult
 
@@ -351,7 +352,7 @@ class RepairScheduler:
         max_mb = float(deep.get("max_input_size_mb", 0) or 0)
         if max_mb <= 0:
             return True
-        size = _source_input_size(job.source_input)
+        size = job_source_size(job)
         if size is None:
             return True
         return size <= int(max_mb * 1024 * 1024)
@@ -497,43 +498,6 @@ def _dedupe(values: list[str]) -> list[str]:
     return result
 
 
-def _source_input_size(source_input: dict[str, Any]) -> int | None:
-    kind = str(source_input.get("kind") or "file")
-    if kind == "file":
-        return _path_size(source_input.get("path"))
-    if kind == "file_range":
-        return _range_size(source_input)
-    if kind == "concat_ranges":
-        total = 0
-        for item in source_input.get("ranges") or []:
-            if not isinstance(item, dict):
-                return None
-            size = _range_size(item)
-            if size is None:
-                return None
-            total += size
-        return total
-    return None
-
-
-def _range_size(item: dict[str, Any]) -> int | None:
-    start = int(item.get("start") or 0)
-    end = item.get("end")
-    if end is not None:
-        return max(0, int(end) - start)
-    size = _path_size(item.get("path"))
-    if size is None:
-        return None
-    return max(0, size - start)
-
-
-def _path_size(path: Any) -> int | None:
-    try:
-        return Path(str(path)).stat().st_size
-    except (OSError, TypeError, ValueError):
-        return None
-
-
 def _intersects(left, right) -> bool:
     return bool({str(item).lower() for item in left} & {str(item).lower() for item in right if str(item or "")})
 
@@ -576,9 +540,9 @@ def _lazy_module_candidate(
                 job,
                 diagnosis,
                 workspace,
-                module_config,
+                {**module_config, "virtual_patch_candidate": True},
             ) or [])
-        result = module.repair(job, diagnosis, workspace, module_config)
+        result = module.repair(job, diagnosis, workspace, {**module_config, "virtual_patch_candidate": True})
         if result.ok:
             return RepairCandidate.from_result(
                 result,

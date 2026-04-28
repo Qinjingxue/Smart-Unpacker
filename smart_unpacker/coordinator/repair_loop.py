@@ -9,10 +9,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from smart_unpacker.contracts.archive_state import ArchiveState
 from smart_unpacker.contracts.archive_input import ArchiveInputDescriptor
 from smart_unpacker.contracts.tasks import ArchiveTask
 from smart_unpacker.extraction.result import ExtractionResult
 from smart_unpacker.repair.result import RepairResult
+from smart_unpacker.support.archive_state_view import archive_state_to_bytes
 
 
 LOGGER = logging.getLogger(__name__)
@@ -219,7 +221,7 @@ class RepairLoopState:
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(source, target)
         format_hint = str(repaired_input.get("format_hint") or repaired_input.get("format") or result.format or "")
-        self.task.set_archive_input({
+        self.task.set_archive_state(ArchiveState.from_archive_input(ArchiveInputDescriptor.from_dict({
             "kind": "archive_input",
             "entry_path": str(target),
             "open_mode": "file",
@@ -232,7 +234,7 @@ class RepairLoopState:
                 "actions": list(result.actions),
                 "round": int(round_number),
             },
-        })
+        })), sync_compat=False)
         return str(target)
 
     def _round_snapshot_path(self, source: Path, result: RepairResult, round_number: int) -> Path:
@@ -306,6 +308,12 @@ def terminal_failure_reason(result: ExtractionResult) -> str:
 
 
 def input_digest(task: ArchiveTask) -> str:
+    try:
+        state = task.archive_state()
+    except (TypeError, ValueError):
+        state = None
+    if state is not None:
+        return _state_digest(state)
     raw = task.fact_bag.get("archive.input")
     descriptor = _descriptor_from_task(task, raw)
     h = hashlib.sha256()
@@ -328,6 +336,29 @@ def input_digest(task: ArchiveTask) -> str:
         for part in descriptor.parts:
             _hash_path(h, part.path)
     return h.hexdigest()
+
+
+def _state_digest(state: ArchiveState) -> str:
+    h = hashlib.sha256()
+    h.update(b"\0archive_state\0")
+    h.update(_stable_json(_state_shape(state)).encode("utf-8"))
+    try:
+        h.update(archive_state_to_bytes(state))
+    except (OSError, ValueError):
+        h.update(b"\0unreadable_state\0")
+        h.update(_stable_json(state.to_dict()).encode("utf-8"))
+    return h.hexdigest()
+
+
+def _state_shape(state: ArchiveState) -> dict[str, Any]:
+    descriptor = state.to_archive_input_descriptor()
+    return {
+        "source": _descriptor_shape(descriptor),
+        "format_hint": state.format_hint or state.source.format_hint,
+        "logical_name": state.logical_name,
+        "patches": [patch.to_dict() for patch in state.patches],
+        "patch_digest": state.effective_patch_digest(),
+    }
 
 
 def _descriptor_shape(descriptor: ArchiveInputDescriptor | None) -> dict[str, Any]:

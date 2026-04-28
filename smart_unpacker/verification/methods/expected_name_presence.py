@@ -1,6 +1,8 @@
 import os
 from typing import Any
 
+from smart_unpacker.support.sevenzip_native import STATUS_DAMAGED, STATUS_OK
+from smart_unpacker.verification.archive_state_manifest import ArchiveStateManifest, archive_state_manifest_for_evidence
 from smart_unpacker.verification.evidence import VerificationEvidence
 from smart_unpacker.verification.methods._archive_output_match import (
     archive_files_from_names,
@@ -36,7 +38,11 @@ class ExpectedNamePresenceMethod:
     name = "expected_name_presence"
 
     def verify(self, evidence: VerificationEvidence, config: dict) -> VerificationStepResult:
-        expected_names = self._expected_names(evidence, config)
+        state_manifest = archive_state_manifest_for_evidence(
+            evidence,
+            max_items=max(1, int(config.get("max_expected_names", 50) or 50)),
+        )
+        expected_names = self._expected_names(evidence, config, state_manifest)
         if not expected_names:
             return VerificationStepResult(method=self.name, status="skipped")
 
@@ -65,7 +71,7 @@ class ExpectedNamePresenceMethod:
                 method=self.name,
                 status="passed",
                 completeness_hint=coverage.completeness,
-                source_integrity_hint=_source_integrity_hint(evidence),
+                source_integrity_hint=_source_integrity_hint(evidence, state_manifest),
                 file_observations=coverage.observations,
                 issues=[VerificationIssue(
                     method=self.name,
@@ -73,7 +79,7 @@ class ExpectedNamePresenceMethod:
                     message="Expected archive names were matched against extraction output",
                     path=evidence.output_dir,
                     expected=len(expected_names),
-                    actual=coverage_details(coverage),
+                    actual=_coverage_actual(coverage, state_manifest, evidence),
                 )],
             )
 
@@ -102,10 +108,10 @@ class ExpectedNamePresenceMethod:
                 "matched": matched,
                 "missing": missing,
                 "missing_ratio": round(missing_ratio, 3),
-                "coverage": coverage_details(coverage),
+                "coverage": _coverage_actual(coverage, state_manifest, evidence),
             },
         )
-        source_integrity = _source_integrity_hint(evidence)
+        source_integrity = _source_integrity_hint(evidence, state_manifest)
         return VerificationStepResult(
             method=self.name,
             status="warning",
@@ -113,13 +119,20 @@ class ExpectedNamePresenceMethod:
             completeness_hint=coverage.completeness,
             recoverable_upper_bound_hint=coverage.completeness if source_integrity != SOURCE_INTEGRITY_COMPLETE else None,
             source_integrity_hint=source_integrity,
-            decision_hint=DECISION_REPAIR if _expected_names_are_strong(evidence, config, source_integrity) else DECISION_NONE,
+            decision_hint=DECISION_REPAIR if _expected_names_are_strong(evidence, config, source_integrity, state_manifest) else DECISION_NONE,
             file_observations=coverage.observations,
         )
 
-    def _expected_names(self, evidence: VerificationEvidence, config: dict) -> list[str]:
+    def _expected_names(
+        self,
+        evidence: VerificationEvidence,
+        config: dict,
+        state_manifest: ArchiveStateManifest | None = None,
+    ) -> list[str]:
         configured = config.get("expected_names")
         candidates = list(_iter_name_values(configured))
+        if not candidates and state_manifest is not None and state_manifest.ok:
+            candidates.extend(state_manifest.expected_names)
         if not candidates:
             for field in NAME_FIELDS:
                 candidates.extend(_iter_name_values(evidence.analysis.get(field)))
@@ -171,7 +184,12 @@ def _iter_name_values(value: Any):
             yield from _iter_name_values(item)
 
 
-def _source_integrity_hint(evidence: VerificationEvidence) -> str:
+def _source_integrity_hint(evidence: VerificationEvidence, state_manifest: ArchiveStateManifest | None = None) -> str:
+    if state_manifest is not None:
+        if state_manifest.status == STATUS_OK and state_manifest.ok:
+            return SOURCE_INTEGRITY_COMPLETE
+        if state_manifest.status == STATUS_DAMAGED or state_manifest.damaged:
+            return SOURCE_INTEGRITY_DAMAGED
     analysis = evidence.analysis or {}
     status = str(analysis.get("status") or "")
     if status in {"damaged", "weak"}:
@@ -179,10 +197,28 @@ def _source_integrity_hint(evidence: VerificationEvidence) -> str:
     return SOURCE_INTEGRITY_COMPLETE
 
 
-def _expected_names_are_strong(evidence: VerificationEvidence, config: dict, source_integrity: str) -> bool:
+def _expected_names_are_strong(
+    evidence: VerificationEvidence,
+    config: dict,
+    source_integrity: str,
+    state_manifest: ArchiveStateManifest | None = None,
+) -> bool:
     if config.get("expected_names"):
+        return True
+    if state_manifest is not None and state_manifest.ok and state_manifest.expected_names:
         return True
     source = str(config.get("expected_names_source") or evidence.analysis.get("expected_names_source") or "")
     if source in {"user", "central_directory", "manifest"}:
         return True
     return source_integrity == SOURCE_INTEGRITY_COMPLETE
+
+
+def _coverage_actual(coverage, state_manifest: ArchiveStateManifest | None, evidence: VerificationEvidence) -> dict[str, Any]:
+    actual = coverage_details(coverage)
+    actual.update({
+        "state_aware": True,
+        "patch_digest": evidence.patch_digest,
+        "archive_type": state_manifest.archive_type if state_manifest is not None else "",
+        "manifest_source": state_manifest.source if state_manifest is not None and state_manifest.ok else "analysis_or_config",
+    })
+    return actual

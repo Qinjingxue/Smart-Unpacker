@@ -1,6 +1,8 @@
 from typing import List
 
 from smart_unpacker.contracts.detection import FactBag
+from smart_unpacker.contracts.archive_input import ArchiveInputDescriptor
+from smart_unpacker.contracts.archive_state import ArchiveState
 from smart_unpacker.contracts.filesystem import DirectorySnapshot
 from smart_unpacker.relations.scheduler import CandidateGroup, RelationsScheduler
 from smart_unpacker.filesystem.directory_scanner import DirectoryScanner
@@ -17,6 +19,16 @@ def relation_group_to_fact_bag(group: CandidateGroup) -> FactBag:
     bag.set("candidate.entry_path", group.entry_path)
     bag.set("candidate.member_paths", all_paths)
     bag.set("candidate.logical_name", group.logical_name)
+    source_descriptor = ArchiveInputDescriptor.from_parts(
+        archive_path=group.entry_path,
+        part_paths=all_paths,
+        logical_name=group.logical_name,
+    )
+    state = ArchiveState.from_archive_input(source_descriptor)
+    bag.set("archive.state", state.to_dict())
+    bag.set("archive.source", state.source.to_dict())
+    bag.set("archive.patch_stack", [])
+    bag.set("archive.patch_digest", state.effective_patch_digest())
     if isinstance(group.head_size, int):
         bag.set("file.size", group.head_size)
     bag.set("file.split_members", list(member_paths))

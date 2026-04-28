@@ -1,9 +1,12 @@
 import json
 import subprocess
+import struct
+import zipfile
 
 import pytest
 
 from smart_unpacker.contracts.archive_input import ArchiveInputDescriptor, ArchiveInputPart, ArchiveInputRange
+from smart_unpacker.contracts.archive_state import ArchiveState, PatchOperation, PatchPlan
 from smart_unpacker.contracts.detection import FactBag
 from smart_unpacker.contracts.tasks import ArchiveTask
 from smart_unpacker.extraction.scheduler import ExtractionScheduler
@@ -67,6 +70,19 @@ def _create_7z_with_nested_file(tmp_path):
     return archive
 
 
+def _create_zip_with_bad_eocd_count(tmp_path):
+    archive = tmp_path / "bad_count.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("payload.txt", "patched worker payload")
+    data = bytearray(archive.read_bytes())
+    eocd = data.rfind(b"PK\x05\x06")
+    if eocd < 0:
+        raise RuntimeError("test ZIP did not contain EOCD")
+    struct.pack_into("<H", data, eocd + 10, 99)
+    archive.write_bytes(bytes(data))
+    return archive, eocd
+
+
 def test_worker_failed_result_includes_diagnostics(tmp_path):
     worker = _require_worker_or_skip()
     seven_zip_dll = _require_7z_dll_or_skip()
@@ -97,6 +113,40 @@ def test_worker_failed_result_includes_diagnostics(tmp_path):
     assert worker_result["diagnostics"]["input_trace"]["last_win32_error"] != 0
     assert "handler_attempts" in worker_result["diagnostics"]
     assert "output_trace" in worker_result["diagnostics"]
+
+
+def test_worker_dry_run_reads_archive_state_with_patch_stack(tmp_path):
+    worker = _require_worker_or_skip()
+    seven_zip_dll = _require_7z_dll_or_skip()
+    archive, eocd = _create_zip_with_bad_eocd_count(tmp_path)
+    descriptor = ArchiveInputDescriptor.from_parts(archive_path=str(archive), format_hint="zip")
+    state = ArchiveState.from_archive_input(
+        descriptor,
+        patches=[PatchPlan(operations=[PatchOperation.replace_bytes(offset=eocd + 10, data=struct.pack("<H", 1))])],
+    )
+    payload = {
+        "job_id": "patched-state",
+        "seven_zip_dll_path": seven_zip_dll,
+        "archive_path": str(archive),
+        "part_paths": [str(archive)],
+        "archive_state": state.to_dict(),
+        "format_hint": "zip",
+        "dry_run": True,
+    }
+
+    result = subprocess.run(
+        [worker],
+        input=json.dumps(payload, ensure_ascii=False),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    lines = [json.loads(line) for line in result.stdout.splitlines() if line.strip().startswith("{")]
+    worker_result = next(item for item in lines if item.get("type") == "result")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert worker_result["status"] == "ok"
+    assert worker_result["diagnostics"]["input_trace"]["mode"] == "virtual_patch"
 
 
 def test_worker_output_trace_includes_per_item_failure(tmp_path):

@@ -10,6 +10,7 @@ from smart_unpacker.contracts.archive_input import (
     ArchiveInputPart,
     ArchiveInputRange,
 )
+from smart_unpacker.contracts.archive_state import ArchiveState
 from smart_unpacker.contracts.tasks import ArchiveTask
 from smart_unpacker.extraction.result import ExtractionResult
 from smart_unpacker.repair.config import repair_config
@@ -89,9 +90,12 @@ class ArchiveRepairStage:
         task.fact_bag.set("repair.status", result.status)
         task.fact_bag.set("repair.module", result.module_name)
         descriptor = self._descriptor_from_repaired_input(task, result.repaired_input or {})
-        if descriptor is None:
+        if result.repaired_state is not None:
+            task.set_archive_state(result.repaired_state, sync_compat=False)
+        elif descriptor is None:
             return result
-        task.set_archive_input(descriptor)
+        else:
+            task.set_archive_state(ArchiveState.from_archive_input(descriptor), sync_compat=False)
         if job.password is not None:
             task.fact_bag.set("archive.password", job.password)
         task.fact_bag.set("archive.repaired", True)
@@ -120,6 +124,7 @@ class ArchiveRepairStage:
                 format_hint=self._normalize_format(evidence.format),
                 logical_name=str(task.logical_name or ""),
             ),
+            archive_state=task.archive_state(),
         )
 
     def _job_from_extraction_failure(self, task: ArchiveTask, result: ExtractionResult) -> RepairJob | None:
@@ -142,6 +147,7 @@ class ArchiveRepairStage:
             workspace=str(self._workspace_root()),
             attempts=self._attempts(task),
             source_descriptor=task.archive_input(),
+            archive_state=task.archive_state(),
         )
 
     def _job_from_verification_assessment(
@@ -210,6 +216,7 @@ class ArchiveRepairStage:
             workspace=str(self._workspace_root()),
             attempts=self._attempts(task),
             source_descriptor=task.archive_input(),
+            archive_state=task.archive_state(),
         )
 
     def _medium_confidence_evidence(self, task: ArchiveTask) -> ArchiveFormatEvidence | None:
@@ -225,7 +232,7 @@ class ArchiveRepairStage:
         return max(evidences, key=lambda item: item.confidence)
 
     def _source_input_for_evidence(self, task: ArchiveTask, evidence: ArchiveFormatEvidence) -> dict[str, Any] | None:
-        current_source = task.archive_input()
+        current_source = task.archive_state().to_archive_input_descriptor()
         current_parts = current_source.part_paths() or list(task.all_parts or [task.main_path])
         current_entry = current_source.entry_path or task.main_path
         if evidence.segments:
@@ -251,21 +258,13 @@ class ArchiveRepairStage:
         return self._source_input_from_task(task, format_hint=evidence.format)
 
     def _source_input_from_task(self, task: ArchiveTask, *, format_hint: str = "") -> dict[str, Any] | None:
-        raw = task.fact_bag.get("archive.input")
-        if isinstance(raw, dict):
-            source_input = task.archive_input().to_legacy_source_input()
-            if source_input:
-                if format_hint and not source_input.get("format_hint"):
-                    source_input["format_hint"] = format_hint
-                return source_input
-        parts = list(task.all_parts or [task.main_path])
-        if len(parts) > 1:
-            return {
-                "kind": "concat_ranges",
-                "ranges": [{"path": path, "start": 0, "end": None} for path in parts],
-                "format_hint": format_hint or self._format_from_task(task),
-            }
-        return {"kind": "file", "path": task.main_path, "format_hint": format_hint or self._format_from_task(task)}
+        descriptor = task.archive_state().to_archive_input_descriptor()
+        source_input = descriptor.to_legacy_source_input()
+        if source_input:
+            if format_hint and not source_input.get("format_hint"):
+                source_input["format_hint"] = format_hint
+            return source_input
+        return None
 
     def _source_input_from_archive_input(self, raw: dict[str, Any], *, archive_path: str, part_paths: list[str]) -> dict[str, Any] | None:
         descriptor = ArchiveInputDescriptor.from_dict(raw, archive_path=archive_path, part_paths=part_paths)
@@ -470,9 +469,9 @@ class ArchiveRepairStage:
         selected = task.fact_bag.get("analysis.selected_format")
         if selected:
             return self._normalize_format(str(selected))
-        archive_input = task.fact_bag.get("archive.input")
-        if isinstance(archive_input, dict) and archive_input.get("format_hint"):
-            return self._normalize_format(str(task.archive_input().format_hint))
+        state = task.archive_state()
+        if state.format_hint or state.source.format_hint:
+            return self._normalize_format(str(state.format_hint or state.source.format_hint))
         detected = task.detected_ext or Path(task.main_path).suffix
         return self._normalize_format(str(detected).lstrip("."))
 

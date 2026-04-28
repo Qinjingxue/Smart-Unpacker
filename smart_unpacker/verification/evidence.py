@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from smart_unpacker.contracts.archive_state import ArchiveState
 from smart_unpacker.contracts.tasks import ArchiveTask
 from smart_unpacker.extraction.result import ExtractionResult
 from smart_unpacker.passwords import PasswordSession
@@ -12,8 +13,11 @@ from smart_unpacker.passwords import PasswordSession
 class VerificationEvidence:
     task: ArchiveTask
     extraction_result: ExtractionResult
+    archive_state: ArchiveState
+    archive_source: dict[str, Any]
+    patch_digest: str
+    state_is_patched: bool
     archive_path: str
-    archive_parts: list[str]
     output_dir: str
     password: str | None
     fact_bag: Any
@@ -32,11 +36,16 @@ def build_verification_evidence(
     password = extraction_result.password_used
     if password is None and password_session is not None:
         password = password_session.get_resolved(task.key)
+    archive_state = task.archive_state()
+    archive_input = archive_state.to_archive_input_descriptor()
     return VerificationEvidence(
         task=task,
         extraction_result=extraction_result,
-        archive_path=extraction_result.archive or task.main_path,
-        archive_parts=list(extraction_result.all_parts or task.all_parts or []),
+        archive_state=archive_state,
+        archive_source=archive_state.source.to_dict(),
+        patch_digest=archive_state.effective_patch_digest(),
+        state_is_patched=bool(archive_state.patches),
+        archive_path=archive_input.entry_path,
         output_dir=extraction_result.out_dir,
         password=password,
         fact_bag=fact_bag,

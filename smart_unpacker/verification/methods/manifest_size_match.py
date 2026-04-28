@@ -1,3 +1,5 @@
+from smart_unpacker.support.sevenzip_native import STATUS_DAMAGED, STATUS_OK
+from smart_unpacker.verification.archive_state_manifest import ArchiveStateManifest, archive_state_manifest_for_evidence
 from smart_unpacker.verification.evidence import VerificationEvidence
 from smart_unpacker.verification.methods._archive_output_match import (
     archive_files_from_names,
@@ -21,9 +23,13 @@ class ManifestSizeMatchMethod:
     name = "manifest_size_match"
 
     def verify(self, evidence: VerificationEvidence, config: dict) -> VerificationStepResult:
-        expected_files = _as_int(evidence.analysis.get("file_count"))
-        expected_size = _as_int(evidence.analysis.get("total_unpacked_size"))
-        expected_names = _expected_names(evidence)
+        state_manifest = archive_state_manifest_for_evidence(
+            evidence,
+            max_items=max(1, int(config.get("max_expected_names", 2000) or 2000)),
+        )
+        expected_files = _expected_file_count(evidence, state_manifest)
+        expected_size = _expected_total_size(evidence, state_manifest)
+        expected_names = _expected_names(evidence, state_manifest)
         if expected_files <= 0 and expected_size <= 0:
             return VerificationStepResult(method=self.name, status="skipped")
 
@@ -32,7 +38,7 @@ class ManifestSizeMatchMethod:
             return VerificationStepResult(method=self.name, status="skipped")
 
         issues: list[VerificationIssue] = []
-        source_integrity = _source_integrity_hint(evidence)
+        source_integrity = _source_integrity_hint(evidence, state_manifest)
         name_coverage = None
         if expected_names:
             name_coverage = coverage_from_archive_and_output(
@@ -47,7 +53,7 @@ class ManifestSizeMatchMethod:
                     message="Some manifest-named files were not found in extraction output",
                     path=evidence.output_dir,
                     expected=len(expected_names),
-                    actual=coverage_details(name_coverage),
+                    actual=_coverage_actual(name_coverage, state_manifest, evidence),
                 ))
 
         if expected_files > 0:
@@ -141,7 +147,12 @@ def _manifest_completeness(actual_files: int, actual_size: int, expected_files: 
     return min(ratios) if ratios else 1.0
 
 
-def _source_integrity_hint(evidence: VerificationEvidence) -> str:
+def _source_integrity_hint(evidence: VerificationEvidence, state_manifest: ArchiveStateManifest | None = None) -> str:
+    if state_manifest is not None:
+        if state_manifest.status == STATUS_OK and state_manifest.ok:
+            return SOURCE_INTEGRITY_COMPLETE
+        if state_manifest.status == STATUS_DAMAGED or state_manifest.damaged:
+            return SOURCE_INTEGRITY_DAMAGED
     health = evidence.health or {}
     analysis = evidence.analysis or {}
     status = str(analysis.get("status") or health.get("status") or "")
@@ -152,8 +163,8 @@ def _source_integrity_hint(evidence: VerificationEvidence) -> str:
     return SOURCE_INTEGRITY_COMPLETE
 
 
-def _expected_names(evidence: VerificationEvidence) -> list[str]:
-    names = []
+def _expected_names(evidence: VerificationEvidence, state_manifest: ArchiveStateManifest | None = None) -> list[str]:
+    names = list(state_manifest.expected_names) if state_manifest is not None and state_manifest.ok else []
     for field in ("expected_names", "manifest_names", "item_names", "file_names", "paths"):
         names.extend(_iter_names(evidence.analysis.get(field)))
     result = []
@@ -164,6 +175,29 @@ def _expected_names(evidence: VerificationEvidence) -> list[str]:
         seen.add(name)
         result.append(name)
     return result[:2000]
+
+
+def _expected_file_count(evidence: VerificationEvidence, state_manifest: ArchiveStateManifest) -> int:
+    if state_manifest.ok and state_manifest.file_count > 0:
+        return state_manifest.file_count
+    return _as_int(evidence.analysis.get("file_count"))
+
+
+def _expected_total_size(evidence: VerificationEvidence, state_manifest: ArchiveStateManifest) -> int:
+    if state_manifest.ok and state_manifest.total_unpacked_size > 0:
+        return state_manifest.total_unpacked_size
+    return _as_int(evidence.analysis.get("total_unpacked_size"))
+
+
+def _coverage_actual(coverage, state_manifest: ArchiveStateManifest, evidence: VerificationEvidence) -> dict:
+    actual = coverage_details(coverage)
+    actual.update({
+        "state_aware": True,
+        "patch_digest": evidence.patch_digest,
+        "archive_type": state_manifest.archive_type,
+        "manifest_source": state_manifest.source if state_manifest.ok else "analysis_fallback",
+    })
+    return actual
 
 
 def _iter_names(value):

@@ -6,7 +6,7 @@ import zlib
 from smart_unpacker.repair.diagnosis import RepairDiagnosis
 from smart_unpacker.repair.job import RepairJob
 from smart_unpacker.repair.pipeline.module import RepairModuleSpec, RepairRoute
-from smart_unpacker.repair.pipeline.modules._common import load_source_bytes, write_candidate
+from smart_unpacker.repair.pipeline.modules._common import load_job_source_bytes, patch_plan_for_truncate_append, patch_repair_result
 from smart_unpacker.repair.pipeline.registry import register_repair_module
 from smart_unpacker.repair.result import RepairResult
 
@@ -37,7 +37,7 @@ class GzipFooterFix:
         return 0.0
 
     def repair(self, job: RepairJob, diagnosis: RepairDiagnosis, workspace: str, config: dict) -> RepairResult:
-        data = load_source_bytes(job.source_input)
+        data = load_job_source_bytes(job)
         header_end = _gzip_header_end(data)
         if header_end is None or len(data) < header_end + 8:
             return RepairResult(status="unrepairable", confidence=0.0, format="gzip", module_name=self.spec.name, diagnosis=diagnosis.as_dict(), message="invalid gzip header")
@@ -52,17 +52,20 @@ class GzipFooterFix:
         repaired = data[:stream_end] + footer
         if repaired == data:
             return RepairResult(status="unrepairable", confidence=0.0, format="gzip", module_name=self.spec.name, diagnosis=diagnosis.as_dict(), message="gzip footer already matches decoded payload")
-        path = write_candidate(repaired, workspace, "gzip_footer_fix.gz")
-        return RepairResult(
-            status="repaired",
-            confidence=0.88,
-            format="gzip",
-            repaired_input={"kind": "file", "path": path, "format_hint": "gzip"},
-            actions=["decode_deflate_payload", "rewrite_gzip_footer"],
-            damage_flags=list(job.damage_flags),
-            workspace_paths=[path],
+        actions = ["decode_deflate_payload", "rewrite_gzip_footer"]
+        patch_plan = patch_plan_for_truncate_append(job, self.spec.name, stream_end, footer, confidence=0.88, actions=actions)
+        return patch_repair_result(
+            job=job,
+            diagnosis=diagnosis,
             module_name=self.spec.name,
-            diagnosis=diagnosis.as_dict(),
+            fmt="gzip",
+            patch_plan=patch_plan,
+            confidence=0.88,
+            actions=actions,
+            workspace=workspace,
+            filename="gzip_footer_fix.gz",
+            config=config,
+            materialized_data=repaired,
         )
 
 

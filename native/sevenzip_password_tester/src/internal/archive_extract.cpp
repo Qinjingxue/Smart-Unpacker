@@ -152,6 +152,8 @@ ExtractArchiveResult extract_archive_internal(
 
     const std::vector<ExtractInputRange>& input_ranges,
 
+    const std::vector<ExtractPatchOperation>& input_patches,
+
     const std::wstring& format_hint,
 
     const std::wstring& output_dir,
@@ -231,6 +233,38 @@ ExtractArchiveResult extract_archive_internal(
         bool stream_opened = false;
 
         ComPtr<IInStream> stream = [&]() {
+
+            if (!input_patches.empty()) {
+
+                std::vector<ExtractInputRange> patch_ranges = input_ranges;
+
+                if (patch_ranges.empty()) {
+
+                    const std::vector<std::wstring> effective_parts = part_paths.empty() ? std::vector<std::wstring>{archive_path} : part_paths;
+
+                    for (const auto& path : effective_parts) {
+
+                        ExtractInputRange range;
+
+                        range.path = path;
+
+                        range.start = 0;
+
+                        range.has_end = false;
+
+                        patch_ranges.push_back(std::move(range));
+
+                    }
+
+                }
+
+                auto* patched_stream = new PatchedInStream(patch_ranges, input_patches, &result.input_trace);
+
+                stream_opened = patched_stream->is_open();
+
+                return ComPtr<IInStream>(patched_stream);
+
+            }
 
             if (!input_ranges.empty()) {
 
@@ -348,7 +382,7 @@ ExtractArchiveResult extract_archive_internal(
 
             }
 
-            if (password.empty() && input_ranges.empty() && lower_extension(archive_path) == L".zip" && !strict_zip_stored_entries_ok(archive_path)) {
+            if (password.empty() && input_ranges.empty() && input_patches.empty() && lower_extension(archive_path) == L".zip" && !strict_zip_stored_entries_ok(archive_path)) {
 
                 result.status = PasswordTestStatus::Damaged;
 
@@ -602,6 +636,8 @@ ExtractArchiveResult extract_archive_with_parts(
 
         {},
 
+        {},
+
         format_hint,
 
         output_dir,
@@ -698,6 +734,8 @@ ExtractArchiveResult extract_archive_with_ranges(
 
         ranges,
 
+        {},
+
         format_hint,
 
         output_dir,
@@ -733,6 +771,116 @@ ExtractArchiveResult extract_archive_with_ranges(
     result.failure_kind = "backend_unavailable";
 
     result.message = "native archive range extraction is only implemented on Windows";
+
+    return result;
+
+#endif
+
+}
+
+
+
+ExtractArchiveResult extract_archive_with_patches(
+
+    const std::wstring& seven_zip_dll_path,
+
+    const std::wstring& archive_path,
+
+    const std::vector<std::wstring>& part_paths,
+
+    const std::vector<ExtractInputRange>& ranges,
+
+    const std::vector<ExtractPatchOperation>& patches,
+
+    const std::wstring& format_hint,
+
+    const std::wstring& password,
+
+    const std::wstring& output_dir,
+
+    ExtractProgressCallback progress,
+
+    bool dry_run
+
+) {
+
+#ifdef _WIN32
+
+    ComModule module(seven_zip_dll_path);
+
+    auto create_object = module.create_object();
+
+    if (!create_object) {
+
+        ExtractArchiveResult result;
+
+        result.status = PasswordTestStatus::BackendUnavailable;
+
+        set_failure(result, "backend_load", "backend_unavailable");
+
+        result.message = "7z.dll could not be loaded";
+
+        return result;
+
+    }
+
+    const std::vector<std::wstring> effective_part_paths =
+
+        part_paths.empty() ? std::vector<std::wstring>{archive_path} : part_paths;
+
+    return extract_archive_internal(
+
+        create_object,
+
+        archive_path,
+
+        password,
+
+        effective_part_paths,
+
+        ranges,
+
+        patches,
+
+        format_hint,
+
+        output_dir,
+
+        std::move(progress),
+
+        dry_run);
+
+#else
+
+    (void)seven_zip_dll_path;
+
+    (void)archive_path;
+
+    (void)part_paths;
+
+    (void)ranges;
+
+    (void)patches;
+
+    (void)format_hint;
+
+    (void)password;
+
+    (void)output_dir;
+
+    (void)progress;
+
+    (void)dry_run;
+
+    ExtractArchiveResult result;
+
+    result.status = PasswordTestStatus::BackendUnavailable;
+
+    result.failure_stage = "backend_load";
+
+    result.failure_kind = "backend_unavailable";
+
+    result.message = "native archive patched extraction is only implemented on Windows";
 
     return result;
 

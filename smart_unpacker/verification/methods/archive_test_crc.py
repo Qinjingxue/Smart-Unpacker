@@ -6,8 +6,8 @@ from smart_unpacker.support.sevenzip_native import (
     STATUS_OK,
     STATUS_UNSUPPORTED,
     STATUS_WRONG_PASSWORD,
-    cached_read_archive_crc_manifest,
 )
+from smart_unpacker.verification.archive_state_manifest import archive_state_manifest_for_evidence
 from smart_unpacker.verification.evidence import VerificationEvidence
 from smart_unpacker.verification.methods._archive_output_match import coverage_details, coverage_from_archive_and_output
 from smart_unpacker.verification.registry import register_verification_method
@@ -32,24 +32,7 @@ class ArchiveTestCrcMethod:
 
     def verify(self, evidence: VerificationEvidence, config: dict) -> VerificationStepResult:
         max_items = max(0, int(config.get("max_items", 200000) or 0))
-        try:
-            archive_manifest = cached_read_archive_crc_manifest(
-                evidence.archive_path,
-                password=evidence.password or "",
-                part_paths=evidence.archive_parts or [evidence.archive_path],
-                max_items=max_items,
-            )
-        except Exception as exc:
-            return VerificationStepResult(
-                method=self.name,
-                status="skipped",
-                issues=[VerificationIssue(
-                    method=self.name,
-                    code="warning.archive_crc_backend_unavailable",
-                    message=f"Archive CRC backend is unavailable: {exc}",
-                    path=evidence.archive_path,
-                )],
-            )
+        archive_manifest = archive_state_manifest_for_evidence(evidence, max_items=max_items)
 
         archive_status_result = self._archive_status_result(archive_manifest, evidence)
         if archive_status_result is not None:
@@ -88,6 +71,7 @@ class ArchiveTestCrcMethod:
         if status != "ok":
             return VerificationStepResult(method=self.name, status="skipped")
 
+        source_integrity = _manifest_source_integrity(archive_manifest)
         mismatches = []
         missing = []
         issue_by_path: dict[str, list[VerificationIssue]] = {}
@@ -144,32 +128,33 @@ class ArchiveTestCrcMethod:
                 method=self.name,
                 status="passed",
                 completeness_hint=coverage.completeness,
-                source_integrity_hint=SOURCE_INTEGRITY_COMPLETE,
+                source_integrity_hint=source_integrity,
                 file_observations=coverage.observations,
                 issues=[VerificationIssue(
                     method=self.name,
                     code="info.archive_output_coverage",
-                    message="Archive files were matched against extraction output",
+                    message="Archive-state files were matched against extraction output",
                     path=evidence.output_dir,
                     expected=coverage.expected_files,
-                    actual=coverage_details(coverage),
+                    actual=_coverage_actual(coverage, archive_manifest, evidence),
                 )],
             )
         issues.append(VerificationIssue(
             method=self.name,
             code="info.archive_output_coverage",
-            message="Archive files were matched against extraction output",
+            message="Archive-state files were matched against extraction output",
             path=evidence.output_dir,
             expected=coverage.expected_files,
-            actual=coverage_details(coverage),
+            actual=_coverage_actual(coverage, archive_manifest, evidence),
         ))
         return VerificationStepResult(
             method=self.name,
             status="failed",
             issues=issues,
             completeness_hint=coverage.completeness,
-            source_integrity_hint=SOURCE_INTEGRITY_COMPLETE,
-            decision_hint=DECISION_REPAIR,
+            source_integrity_hint=source_integrity,
+            recoverable_upper_bound_hint=coverage.completeness if source_integrity != SOURCE_INTEGRITY_COMPLETE else None,
+            decision_hint=DECISION_REPAIR if source_integrity == SOURCE_INTEGRITY_COMPLETE else "none",
             file_observations=coverage.observations,
         )
 
@@ -182,9 +167,14 @@ class ArchiveTestCrcMethod:
                 status="skipped",
                 issues=[VerificationIssue(
                     method=self.name,
-                    code="warning.archive_crc_unsupported",
+                    code="warning.archive_crc_state_unsupported",
                     message=archive_manifest.message,
                     path=evidence.archive_path,
+                    actual={
+                        "state_aware": True,
+                        "patch_digest": evidence.patch_digest,
+                        "archive_type": getattr(archive_manifest, "archive_type", ""),
+                    },
                 )],
             )
         if archive_manifest.status == STATUS_WRONG_PASSWORD:
@@ -198,6 +188,8 @@ class ArchiveTestCrcMethod:
                     path=evidence.archive_path,
                 )],
             )
+        if (archive_manifest.status == STATUS_DAMAGED or archive_manifest.checksum_error or archive_manifest.damaged) and archive_manifest.files:
+            return None
         if archive_manifest.status == STATUS_DAMAGED or archive_manifest.checksum_error or archive_manifest.damaged:
             return VerificationStepResult(
                 method=self.name,
@@ -223,6 +215,25 @@ class ArchiveTestCrcMethod:
                 actual=archive_manifest.status,
             )],
         )
+
+
+def _coverage_actual(coverage, archive_manifest, evidence: VerificationEvidence) -> dict[str, Any]:
+    actual = coverage_details(coverage)
+    actual.update({
+        "state_aware": True,
+        "patch_digest": evidence.patch_digest,
+        "archive_type": getattr(archive_manifest, "archive_type", ""),
+        "source_integrity": _manifest_source_integrity(archive_manifest),
+    })
+    return actual
+
+
+def _manifest_source_integrity(archive_manifest) -> str:
+    if getattr(archive_manifest, "checksum_error", False):
+        return SOURCE_INTEGRITY_PAYLOAD_DAMAGED
+    if getattr(archive_manifest, "damaged", False) or getattr(archive_manifest, "status", STATUS_OK) == STATUS_DAMAGED:
+        return SOURCE_INTEGRITY_DAMAGED
+    return SOURCE_INTEGRITY_COMPLETE
 
 
 def _output_by_path_or_name(files: list[dict], expected_path: str) -> dict | None:

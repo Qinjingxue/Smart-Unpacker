@@ -1,7 +1,7 @@
 use flate2::{Decompress, FlushDecompress, Status};
 use memchr::memmem;
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList};
+use pyo3::types::{PyBytes, PyDict, PyList};
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -1127,6 +1127,17 @@ fn read_source_input(
         .map_err(|err| err.to_string())?
         .unwrap_or_else(|| "file".to_string());
     match kind.as_str() {
+        "bytes" | "memory" => {
+            let data_obj = source_input
+                .get_item("data")
+                .map_err(|err| err.to_string())?
+                .ok_or_else(|| "missing bytes repair input data".to_string())?;
+            let data = data_obj.cast::<PyBytes>().map_err(|err| err.to_string())?.as_bytes();
+            if max_bytes.is_some_and(|limit| data.len() as u64 > limit) {
+                return Err("ZIP deep repair input exceeds max_input_size_mb".to_string());
+            }
+            Ok(data.to_vec())
+        }
         "file" => {
             let path = get_required_string(source_input, "path").map_err(|err| err.to_string())?;
             read_range_to_vec(&path, 0, None, max_bytes)

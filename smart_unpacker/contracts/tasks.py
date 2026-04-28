@@ -8,6 +8,7 @@ from smart_unpacker.contracts.archive_input import (
     ArchiveRelationState,
     ArchiveRepairState,
 )
+from smart_unpacker.contracts.archive_state import ArchiveState
 from smart_unpacker.contracts.detection import FactBag
 from smart_unpacker.support.path_keys import normalized_path, path_key
 
@@ -94,7 +95,7 @@ class ArchiveTask:
             stop_reason=getattr(decision, "stop_reason", "") or "",
             matched_rules=list(getattr(decision, "matched_rules", []) or []),
             detected_ext=fact_bag.get("file.detected_ext", ""),
-        )
+        ).ensure_archive_state()
 
     def apply_path_mapping(self, path_map: dict[str, str]):
         if not path_map:
@@ -124,11 +125,22 @@ class ArchiveTask:
         self.fact_bag.set("file.split_members", [path for path in self.all_parts if path != self.main_path])
         if self.split_info.volumes:
             self.fact_bag.set("relation.split_volumes", list(self.split_info.volumes))
-        raw_archive_input = self.fact_bag.get("archive.input")
-        if isinstance(raw_archive_input, dict):
+        raw_archive_state = self.fact_bag.get("archive.state")
+        if isinstance(raw_archive_state, dict):
+            self.set_archive_state(self.archive_state().with_path_mapping(mapped))
+        elif isinstance(self.fact_bag.get("archive.input"), dict):
             self.set_archive_input(self.archive_input().with_path_mapping(mapped))
 
     def archive_input(self) -> ArchiveInputDescriptor:
+        raw_state = self.fact_bag.get("archive.state")
+        if isinstance(raw_state, dict):
+            return ArchiveState.from_any(
+                raw_state,
+                archive_path=self.main_path,
+                part_paths=list(self.all_parts or [self.main_path]),
+                format_hint=self._format_hint(),
+                logical_name=str(self.logical_name or ""),
+            ).to_archive_input_descriptor()
         return ArchiveInputDescriptor.from_any(
             self.fact_bag.get("archive.input"),
             archive_path=self.main_path,
@@ -136,6 +148,21 @@ class ArchiveTask:
             format_hint=self._format_hint(),
             logical_name=str(self.logical_name or ""),
         )
+
+    def archive_state(self) -> ArchiveState:
+        return ArchiveState.from_any(
+            self.fact_bag.get("archive.state"),
+            archive_path=self.main_path,
+            part_paths=list(self.all_parts or [self.main_path]),
+            format_hint=self._format_hint(),
+            logical_name=str(self.logical_name or ""),
+            archive_input=self.fact_bag.get("archive.input"),
+        )
+
+    def ensure_archive_state(self) -> "ArchiveTask":
+        if not isinstance(self.fact_bag.get("archive.state"), dict):
+            self.set_archive_state(self.archive_state(), sync_compat=False)
+        return self
 
     def set_archive_input(self, descriptor: ArchiveInputDescriptor | dict, *, sync_compat: bool = True) -> None:
         if isinstance(descriptor, dict):
@@ -148,15 +175,40 @@ class ArchiveTask:
             )
         self.fact_bag.set("archive.input", descriptor.to_dict())
         self.fact_bag.set("archive.descriptor.source", descriptor.to_dict())
+        self._store_archive_state(ArchiveState.from_archive_input(descriptor), sync_compat=False)
         if not sync_compat:
             return
-        self.fact_bag.set("archive.current_entry_path", descriptor.entry_path)
-        self.fact_bag.set("archive.current_member_paths", descriptor.part_paths())
+        self._sync_descriptor_compat(descriptor)
+
+    def set_archive_state(self, state: ArchiveState | dict, *, sync_compat: bool = False) -> None:
+        if isinstance(state, dict):
+            state = ArchiveState.from_any(
+                state,
+                archive_path=self.main_path,
+                part_paths=list(self.all_parts or [self.main_path]),
+                format_hint=self._format_hint(),
+                logical_name=str(self.logical_name or ""),
+                archive_input=self.fact_bag.get("archive.input"),
+            )
+        self._store_archive_state(state, sync_compat=sync_compat)
+
+    def _store_archive_state(self, state: ArchiveState, *, sync_compat: bool) -> None:
+        self.fact_bag.set("archive.state", state.to_dict())
+        self.fact_bag.set("archive.source", state.source.to_dict())
+        self.fact_bag.set("archive.patch_stack", [patch.to_dict() for patch in state.patches])
+        self.fact_bag.set("archive.patch_digest", state.effective_patch_digest())
+        if sync_compat:
+            descriptor = state.to_archive_input_descriptor()
+            self.fact_bag.set("archive.input", descriptor.to_dict())
+            self.fact_bag.set("archive.descriptor.source", descriptor.to_dict())
+            self._sync_descriptor_compat(descriptor)
+
+    def _sync_descriptor_compat(self, descriptor: ArchiveInputDescriptor) -> None:
         if descriptor.format_hint:
             self.fact_bag.set("archive.format_hint", descriptor.format_hint)
 
     def archive_descriptor(self) -> ArchiveDescriptor:
-        source = self.archive_input()
+        source = self.archive_state().to_archive_input_descriptor()
         selected_format = str(self.fact_bag.get("analysis.selected_format") or "")
         confidence = 0.0
         evidence = self.fact_bag.get("analysis.segment")

@@ -6,7 +6,8 @@ from pathlib import Path
 from smart_unpacker.repair.diagnosis import RepairDiagnosis
 from smart_unpacker.repair.job import RepairJob
 from smart_unpacker.repair.pipeline.module import RepairModuleSpec, RepairRoute
-from smart_unpacker.repair.pipeline.modules.archive_carrier_crop import _result_from_native, normalize_native_candidate_lengths
+from smart_unpacker.repair.pipeline.modules._common import source_input_for_job
+from smart_unpacker.repair.pipeline.modules.archive_carrier_crop import _result_from_native, attach_native_crop_patch_plans, normalize_native_candidate_lengths
 from smart_unpacker.repair.pipeline.modules._native_candidates import candidates_from_native_result
 from smart_unpacker.repair.pipeline.registry import register_repair_module
 from smart_unpacker.repair.pipeline.modules.rar._structure import walk_rar_blocks
@@ -53,6 +54,8 @@ class RarCarrierCropDeepRecovery:
     def generate_candidates(self, job: RepairJob, diagnosis: RepairDiagnosis, workspace: str, config: dict):
         result = self._run_native(job, workspace, config)
         normalize_native_candidate_lengths(result)
+        if bool(config.get("virtual_patch_candidate")):
+            attach_native_crop_patch_plans(result, job, self.spec.name)
         candidates = candidates_from_native_result(
             self.spec.name,
             result,
@@ -62,6 +65,7 @@ class RarCarrierCropDeepRecovery:
             format_hint="rar",
             default_confidence=0.86,
             default_message="RAR carrier crop produced a candidate",
+            prefer_patch_plan=bool(config.get("virtual_patch_candidate")),
         )
         return [
             _trim_rar_candidate(_isolate_candidate_path(_boost_rar_specific_candidate(candidate), workspace))
@@ -71,7 +75,7 @@ class RarCarrierCropDeepRecovery:
     def _run_native(self, job: RepairJob, workspace: str, config: dict) -> dict:
         deep = config.get("deep") if isinstance(config.get("deep"), dict) else {}
         return _native_archive_carrier_crop_recovery(
-            job.source_input,
+            source_input_for_job(job),
             "rar",
             workspace,
             float(deep.get("max_input_size_mb", 512) or 0),

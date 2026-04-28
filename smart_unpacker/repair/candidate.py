@@ -4,6 +4,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable
 
+from smart_unpacker.contracts.archive_state import ArchiveState
 from smart_unpacker.repair.result import RepairResult, RepairStatus
 from smart_unpacker.support.sevenzip_native import get_native_password_tester
 from smart_unpacker.support.sevenzip_worker import dry_run_archive
@@ -79,6 +80,7 @@ class RepairCandidate:
                 )
             ],
             score_hint=float(score_hint or 0.0),
+            plan=_result_plan(result),
         )
 
     def to_result(self, *, selection: dict[str, Any] | None = None) -> RepairResult:
@@ -98,6 +100,7 @@ class RepairCandidate:
             module_name=self.module_name,
             diagnosis=diagnosis,
             message=self.message,
+            repaired_state=_archive_state_from_plan(self.plan),
         )
 
 
@@ -421,3 +424,23 @@ def _dedupe(values: list[str]) -> list[str]:
         seen.add(text)
         output.append(text)
     return output
+
+
+def _result_plan(result: RepairResult) -> dict[str, Any]:
+    plan: dict[str, Any] = {}
+    if result.repaired_state is not None:
+        plan["archive_state"] = result.repaired_state.to_dict()
+    patch_plan = result.diagnosis.get("patch_plan") if isinstance(result.diagnosis, dict) else None
+    if isinstance(patch_plan, dict):
+        plan["patch_plan"] = dict(patch_plan)
+    return plan
+
+
+def _archive_state_from_plan(plan: dict[str, Any]) -> ArchiveState | None:
+    raw = plan.get("archive_state") if isinstance(plan, dict) else None
+    if not isinstance(raw, dict):
+        return None
+    try:
+        return ArchiveState.from_dict(raw)
+    except (TypeError, ValueError):
+        return None

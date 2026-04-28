@@ -6,7 +6,16 @@ import struct
 from smart_unpacker.repair.diagnosis import RepairDiagnosis
 from smart_unpacker.repair.job import RepairJob
 from smart_unpacker.repair.pipeline.module import RepairModuleSpec, RepairRoute
-from smart_unpacker.repair.pipeline.modules._common import load_source_bytes, patch_file, write_candidate
+from smart_unpacker.repair.pipeline.modules._common import (
+    load_job_source_bytes,
+    patch_diagnosis,
+    patch_file,
+    patch_plan_for_byte_patches,
+    patched_state_for_job,
+    should_materialize_candidate,
+    virtual_patch_repaired_input,
+    write_candidate,
+)
 from smart_unpacker.repair.pipeline.registry import register_repair_module
 from smart_unpacker.repair.result import RepairResult
 
@@ -40,7 +49,7 @@ class ZipCommentLengthFix:
         return 0.0
 
     def repair(self, job: RepairJob, diagnosis: RepairDiagnosis, workspace: str, config: dict) -> RepairResult:
-        data = load_source_bytes(job.source_input)
+        data = load_job_source_bytes(job)
         offset = data.rfind(EOCD_SIG)
         if offset < 0 or offset + 22 > len(data):
             return _failed(self.spec.name, diagnosis, "EOCD fixed header was not found")
@@ -60,22 +69,31 @@ class ZipCommentLengthFix:
             return _failed(self.spec.name, diagnosis, "ZIP comment length already matches file length")
         output_path = str(Path(workspace) / "zip_comment_length_fix.zip")
         patch = {"offset": offset + 20, "data": struct.pack("<H", actual_comment_len)}
-        if str(job.source_input.get("kind") or "file") == "file":
+        actions = ["patch_zip_eocd_comment_length"]
+        patch_plan = patch_plan_for_byte_patches(job, self.spec.name, [patch], confidence=0.86, actions=actions)
+        repaired_state = patched_state_for_job(job, patch_plan)
+        if not should_materialize_candidate(config):
+            path = ""
+            repaired_input = virtual_patch_repaired_input(repaired_state)
+        elif str(job.source_input.get("kind") or "file") == "file" and not (job.archive_state and job.archive_state.patches):
             path = patch_file(str(job.source_input["path"]), [patch], output_path)
+            repaired_input = {"kind": "file", "path": path, "format_hint": "zip"}
         else:
             repaired = bytearray(data)
             repaired[offset + 20:offset + 22] = patch["data"]
             path = write_candidate(bytes(repaired), workspace, "zip_comment_length_fix.zip")
+            repaired_input = {"kind": "file", "path": path, "format_hint": "zip"}
         return RepairResult(
             status="repaired",
             confidence=0.86,
             format="zip",
-            repaired_input={"kind": "file", "path": path, "format_hint": "zip"},
-            actions=["patch_zip_eocd_comment_length"],
+            repaired_input=repaired_input,
+            actions=actions,
             damage_flags=list(job.damage_flags),
-            workspace_paths=[path],
+            workspace_paths=[path] if path else [],
             module_name=self.spec.name,
-            diagnosis=diagnosis.as_dict(),
+            diagnosis=patch_diagnosis(diagnosis.as_dict(), patch_plan, repaired_state),
+            repaired_state=repaired_state,
         )
 
 

@@ -3,7 +3,15 @@ from __future__ import annotations
 from smart_unpacker.repair.diagnosis import RepairDiagnosis
 from smart_unpacker.repair.job import RepairJob
 from smart_unpacker.repair.pipeline.module import RepairModuleSpec, RepairRoute
-from smart_unpacker.repair.pipeline.modules._common import load_source_bytes, write_candidate
+from smart_unpacker.repair.pipeline.modules._common import (
+    load_job_source_bytes,
+    patch_diagnosis,
+    patch_plan_for_truncate_append,
+    patched_state_for_job,
+    should_materialize_candidate,
+    virtual_patch_repaired_input,
+    write_candidate,
+)
 from smart_unpacker.repair.pipeline.registry import register_repair_module
 from smart_unpacker.repair.result import RepairResult
 
@@ -35,7 +43,7 @@ class ZipCentralDirectoryOffsetFix:
         return 0.0
 
     def repair(self, job: RepairJob, diagnosis: RepairDiagnosis, workspace: str, config: dict) -> RepairResult:
-        data = load_source_bytes(job.source_input)
+        data = load_job_source_bytes(job)
         eocd = find_eocd(data, allow_trailing_junk=True)
         cd = find_valid_central_directory(data)
         if eocd is None or cd is None:
@@ -56,17 +64,27 @@ class ZipCentralDirectoryOffsetFix:
                 diagnosis=diagnosis.as_dict(),
                 message="central directory offset already matches parsed central directory",
             )
-        path = write_candidate(rewrite_eocd(data, cd, comment=eocd.comment), workspace, "zip_central_directory_offset_fix.zip")
+        repaired = rewrite_eocd(data, cd, comment=eocd.comment)
+        actions = ["scan_central_directory", "rewrite_eocd_cd_offset_size_count"]
+        patch_plan = patch_plan_for_truncate_append(job, self.spec.name, cd.end, repaired[cd.end:], confidence=0.9, actions=actions)
+        repaired_state = patched_state_for_job(job, patch_plan)
+        if should_materialize_candidate(config):
+            path = write_candidate(repaired, workspace, "zip_central_directory_offset_fix.zip")
+            repaired_input = {"kind": "file", "path": path, "format_hint": "zip"}
+        else:
+            path = ""
+            repaired_input = virtual_patch_repaired_input(repaired_state)
         return RepairResult(
             status="repaired",
             confidence=0.9,
             format="zip",
-            repaired_input={"kind": "file", "path": path, "format_hint": "zip"},
-            actions=["scan_central_directory", "rewrite_eocd_cd_offset_size_count"],
+            repaired_input=repaired_input,
+            actions=actions,
             damage_flags=list(job.damage_flags),
-            workspace_paths=[path],
+            workspace_paths=[path] if path else [],
             module_name=self.spec.name,
-            diagnosis=diagnosis.as_dict(),
+            diagnosis=patch_diagnosis(diagnosis.as_dict(), patch_plan, repaired_state),
+            repaired_state=repaired_state,
         )
 
 

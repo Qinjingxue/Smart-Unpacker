@@ -235,15 +235,21 @@ class SingleArchiveExtractor:
 
     def _resolve_password(self, task: ArchiveTask, archive_path: str, part_paths: list[str]):
         fact_bag = getattr(task, "fact_bag", None)
-        archive_input = fact_bag.get("archive.input") if fact_bag is not None and hasattr(fact_bag, "get") else None
-        if archive_input:
-            known_password = (
-                fact_bag.get("archive.password")
-            )
-            if known_password is not None:
-                return PasswordResolution(password=str(known_password), archive_key=task.key)
-            if not self.password_store.has_candidates() and not self._facts_require_password(fact_bag):
+        known_password = fact_bag.get("archive.password") if fact_bag is not None and hasattr(fact_bag, "get") else None
+        if known_password is not None:
+            return PasswordResolution(password=str(known_password), archive_key=task.key)
+        archive_state = task.archive_state() if hasattr(task, "archive_state") else None
+        if archive_state is not None and archive_state.patches:
+            if not self._facts_require_password(fact_bag):
                 return PasswordResolution(password="", archive_key=task.key, encrypted=False)
+            return PasswordResolution(
+                password=None,
+                archive_key=task.key,
+                encrypted=True,
+                error_text="password verification is unsupported for patched archive state without a resolved password",
+            )
+        if not self.password_store.has_candidates() and not self._facts_require_password(fact_bag):
+            return PasswordResolution(password="", archive_key=task.key, encrypted=False)
         password_tester = self.password_resolver.password_tester
         if not password_tester.passwords:
             return PasswordResolution(password="", archive_key=task.key, encrypted=False)

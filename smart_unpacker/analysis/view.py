@@ -1,9 +1,13 @@
 import os
+import math
 from binascii import crc32
 from dataclasses import dataclass
+from collections import Counter
 
 from smart_unpacker_native import AnalysisBinaryView as _NativeAnalysisBinaryView
 from smart_unpacker_native import AnalysisMultiVolumeView as _NativeAnalysisMultiVolumeView
+from smart_unpacker.contracts.archive_state import ArchiveState
+from smart_unpacker.support.archive_state_view import ArchiveStateByteView
 
 
 @dataclass(frozen=True)
@@ -182,6 +186,111 @@ class MultiVolumeBinaryView:
             int(ngram_top_k),
             int(max_ngram_sample_bytes),
         ))
+
+
+class PatchedBinaryView:
+    """Random-access analysis view over ArchiveState patch stacks."""
+
+    def __init__(self, state: ArchiveState):
+        self.state = state
+        self.path = state.source.entry_path
+        self._view = ArchiveStateByteView(state)
+        self.size = int(self._view.size)
+
+    def read_at(self, offset: int, size: int) -> bytes:
+        return self._view.read_at(offset, size)
+
+    def read_tail(self, size: int) -> bytes:
+        return self._view.read_tail(size)
+
+    def stats(self) -> ReadStats:
+        stats = self._view.stats()
+        return ReadStats(read_bytes=int(stats.read_bytes), cache_hits=int(stats.cache_hits))
+
+    def signature_prepass(self, *, head_bytes: int, tail_bytes: int) -> dict | None:
+        head_len = min(max(0, int(head_bytes)), self.size)
+        tail_len = min(max(0, int(tail_bytes)), self.size)
+        head = self.read_at(0, head_len)
+        tail_offset = max(0, self.size - tail_len)
+        tail = self.read_at(tail_offset, tail_len)
+        hits = []
+        for name, signature in _KNOWN_SIGNATURES.items():
+            for offset in _find_all(head, signature):
+                hits.append({"name": name, "offset": int(offset), "source": "head"})
+            tail_start = 257 if name == "tar_ustar" else 0
+            for offset in _find_all(tail[tail_start:], signature):
+                absolute = tail_offset + tail_start + offset
+                if absolute < head_len and any(hit["name"] == name and hit["offset"] == absolute for hit in hits):
+                    continue
+                hits.append({"name": name, "offset": int(absolute), "source": "tail"})
+        hits.sort(key=lambda item: (int(item["offset"]), str(item["name"])))
+        formats = sorted(_formats_from_hits(hits))
+        return {
+            "size": self.size,
+            "head_bytes": len(head),
+            "tail_bytes": len(tail),
+            "hits": hits,
+            "formats": formats,
+            "patched": True,
+            "patch_digest": self.state.effective_patch_digest(),
+        }
+
+    def probe_zip(self, *, eocd_offset: int, max_cd_entries_to_walk: int = 64) -> dict | None:
+        return _probe_zip_view(self, int(eocd_offset), int(max_cd_entries_to_walk))
+
+    def probe_rar(self, *, start_offset: int, max_blocks_to_walk: int = 4096) -> dict | None:
+        return _probe_rar_view(self, int(start_offset), int(max_blocks_to_walk))
+
+    def probe_seven_zip(self, *, start_offset: int, max_next_header_check_bytes: int = 1024 * 1024) -> dict | None:
+        return _probe_seven_zip_view(self, int(start_offset), int(max_next_header_check_bytes))
+
+    def probe_tar(self, *, start_offset: int = 0, max_entries_to_walk: int = 64) -> dict | None:
+        return _probe_tar_view(self, int(start_offset), int(max_entries_to_walk))
+
+    def probe_compression_stream(self, *, format: str) -> dict | None:
+        return _probe_compression_stream_view(self, str(format))
+
+    def probe_compressed_tar(self, *, format: str, max_probe_bytes: int = 4 * 1024 * 1024) -> dict | None:
+        result = _probe_compression_stream_view(self, str(format))
+        result["tar_plausible"] = False
+        return result
+
+    def fuzzy_binary_profile(
+        self,
+        *,
+        window_bytes: int = 64 * 1024,
+        max_windows: int = 8,
+        max_sample_bytes: int = 1024 * 1024,
+        entropy_high_threshold: float = 6.8,
+        entropy_low_threshold: float = 3.5,
+        entropy_jump_threshold: float = 1.25,
+        ngram_top_k: int = 8,
+        max_ngram_sample_bytes: int = 256 * 1024,
+    ) -> dict:
+        sample_size = min(self.size, max(1024, int(max_sample_bytes)))
+        sample = self.read_at(0, sample_size)
+        tail = self.read_tail(min(sample_size, max(1024, int(window_bytes))))
+        entropy = _entropy(sample)
+        return {
+            "entropy_profile": {
+                "avg_entropy": entropy,
+                "head_entropy": _entropy(sample[:min(len(sample), int(window_bytes))]),
+                "tail_entropy": _entropy(tail),
+                "overall_high_entropy": entropy >= float(entropy_high_threshold),
+                "head_low_entropy": _entropy(sample[:min(len(sample), int(window_bytes))]) <= float(entropy_low_threshold),
+                "tail_low_entropy": _entropy(tail) <= float(entropy_low_threshold),
+            },
+            "byte_class_profile": {
+                "head": _byte_class(sample[:min(len(sample), int(window_bytes))]),
+                "tail": _byte_class(tail),
+                "average": _byte_class(sample),
+            },
+            "window_anomalies": [],
+            "run_profile": _run_profile(tail, self.size - len(tail)),
+            "ngram_sketch": {"byte_histogram_top": _byte_histogram(sample, int(ngram_top_k)), "magic_like_hits": []},
+            "hints": [],
+            "patched": True,
+        }
 
 
 def _normalize_volume_paths(paths) -> list[str]:
@@ -435,6 +544,130 @@ def _probe_rar5_view(view, result: dict, start_offset: int, max_blocks: int) -> 
 
 def _probe_base(fmt: str, start_offset: int) -> dict:
     return {"format": fmt, "plausible": False, "magic_matched": False, "strong_accept": False, "error": "", "archive_offset": start_offset, "evidence": []}
+
+
+def _probe_tar_view(view, start_offset: int, max_entries: int) -> dict:
+    result = _probe_base("tar", start_offset)
+    cursor = start_offset
+    entries = 0
+    for _ in range(max_entries):
+        block = view.read_at(cursor, 512)
+        if len(block) < 512:
+            result["error"] = "tar_header_out_of_range"
+            break
+        if block == b"\x00" * 512:
+            next_block = view.read_at(cursor + 512, 512)
+            result.update({
+                "magic_matched": entries > 0,
+                "plausible": entries > 0,
+                "strong_accept": entries > 0 and next_block == b"\x00" * 512,
+                "end_zero_blocks": next_block == b"\x00" * 512,
+                "entries_checked": entries,
+                "segment_end": cursor + (1024 if next_block == b"\x00" * 512 else 512),
+                "evidence": ["tar:header", "tar:end_zero_blocks"] if entries > 0 else [],
+                "error": "",
+            })
+            return result
+        if block[257:262] != b"ustar":
+            result["error"] = "tar_ustar_not_found" if entries == 0 else "tar_next_header_missing"
+            break
+        entries += 1
+        size = _tar_octal(block[124:136])
+        data_blocks = (size + 511) // 512
+        cursor += 512 + data_blocks * 512
+    result.update({
+        "magic_matched": entries > 0,
+        "plausible": entries > 0,
+        "entries_checked": entries,
+        "segment_end": cursor if entries else 0,
+        "evidence": ["tar:header"] if entries else [],
+    })
+    return result
+
+
+def _probe_compression_stream_view(view, fmt: str) -> dict:
+    signatures = {
+        "gzip": b"\x1f\x8b\x08",
+        "bzip2": b"BZh",
+        "xz": b"\xfd7zXZ\x00",
+        "zstd": b"\x28\xb5\x2f\xfd",
+    }
+    signature = signatures.get(fmt, b"")
+    head = view.read_at(0, max(8, len(signature)))
+    matched = bool(signature and head.startswith(signature))
+    return {
+        "format": fmt,
+        "magic_matched": matched,
+        "plausible": matched,
+        "confidence": 0.78 if matched else 0.0,
+        "evidence": [f"{fmt}:signature"] if matched else [],
+        "error": "" if matched else "signature_not_found",
+    }
+
+
+def _tar_octal(data: bytes) -> int:
+    text = data.split(b"\x00", 1)[0].strip() or b"0"
+    try:
+        return int(text, 8)
+    except ValueError:
+        return 0
+
+
+def _entropy(data: bytes) -> float:
+    if not data:
+        return 0.0
+    total = len(data)
+    counts = Counter(data)
+    return -sum((count / total) * math.log2(count / total) for count in counts.values())
+
+
+def _byte_class(data: bytes) -> dict:
+    if not data:
+        return {"printable_ratio": 0.0, "zero_ratio": 0.0, "ff_ratio": 0.0}
+    total = len(data)
+    printable = sum(1 for byte in data if byte in (9, 10, 13) or 32 <= byte <= 126)
+    return {
+        "printable_ratio": printable / total,
+        "zero_ratio": data.count(0) / total,
+        "ff_ratio": data.count(0xFF) / total,
+    }
+
+
+def _run_profile(data: bytes, base_offset: int) -> dict:
+    zero = _longest_run(data, 0, base_offset)
+    ff = _longest_run(data, 0xFF, base_offset)
+    tail = zero if zero.get("offset", 0) + zero.get("length", 0) >= base_offset + len(data) else {}
+    return {
+        "longest_zero_run": zero,
+        "longest_ff_run": ff,
+        "tail_run": tail,
+        "tail_padding_likely": int(tail.get("length", 0) or 0) >= 1024,
+    }
+
+
+def _longest_run(data: bytes, value: int, base_offset: int) -> dict:
+    best_offset = 0
+    best_length = 0
+    current_offset = 0
+    current_length = 0
+    for index, byte in enumerate(data):
+        if byte == value:
+            if current_length == 0:
+                current_offset = index
+            current_length += 1
+            if current_length > best_length:
+                best_offset = current_offset
+                best_length = current_length
+        else:
+            current_length = 0
+    return {"offset": base_offset + best_offset, "length": best_length}
+
+
+def _byte_histogram(data: bytes, top_k: int) -> list[dict]:
+    return [
+        {"byte": byte, "count": count}
+        for byte, count in Counter(data).most_common(max(1, int(top_k)))
+    ]
 
 
 _KNOWN_SIGNATURES = {

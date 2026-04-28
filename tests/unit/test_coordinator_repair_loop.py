@@ -32,9 +32,9 @@ def test_extraction_failure_repair_reanalysis_loop_runs_until_success(tmp_path):
 
     assert outcome.success is True
     assert runner.analysis_stage.calls == 2
-    archive_input = task.fact_bag.get("archive.input")
-    assert archive_input["entry_path"].endswith("round_02_fake_repair.zip")
-    assert Path(archive_input["entry_path"]).read_bytes() == fixed_2.read_bytes()
+    archive_input = task.archive_input()
+    assert archive_input.entry_path.endswith("round_02_fake_repair.zip")
+    assert Path(archive_input.entry_path).read_bytes() == fixed_2.read_bytes()
     rounds = task.fact_bag.get("repair.loop.rounds")
     assert len(rounds) == 2
     assert rounds[0]["output_path"].endswith("round_01_fake_repair.zip")
@@ -71,7 +71,7 @@ def test_analysis_scheduler_reanalyzes_repaired_archive_input_file(tmp_path):
     source.write_bytes(b"broken")
     repaired.write_bytes(b"fixed")
     task = _task(source)
-    task.fact_bag.set("archive.input", {
+    task.set_archive_input({
         "kind": "archive_input",
         "entry_path": str(repaired),
         "open_mode": "file",
@@ -124,9 +124,9 @@ def test_verification_repair_uses_beam_to_select_complete_candidate(tmp_path):
 
     assert outcome.success is True
     assert outcome.verification.decision_hint == "accept"
-    selected_input = task.fact_bag.get("archive.input")
-    assert selected_input["entry_path"].endswith("round_01_good_candidate.zip")
-    assert Path(selected_input["entry_path"]).read_bytes() == good.read_bytes()
+    selected_input = task.archive_input()
+    assert selected_input.entry_path.endswith("round_01_good_candidate.zip")
+    assert Path(selected_input.entry_path).read_bytes() == good.read_bytes()
     assert (out_dir / "good.txt").exists()
 
 
@@ -240,7 +240,7 @@ class _FakeRepairStage:
     def repair_after_extraction_failure_result(self, task, result):
         path = self.paths.pop(0)
         path.write_bytes(f"fixed:{path.name}".encode("ascii"))
-        task.fact_bag.set("archive.input", {
+        task.set_archive_input({
             "kind": "archive_input",
             "entry_path": str(path),
             "open_mode": "file",

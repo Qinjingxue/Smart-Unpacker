@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, List
 
 from smart_unpacker.contracts.run_context import RunContext
+from smart_unpacker.contracts.archive_state import ArchiveState
 from smart_unpacker.contracts.tasks import ArchiveTask
 from smart_unpacker.coordinator.analysis_stage import ArchiveAnalysisStage
 from smart_unpacker.coordinator.repair_beam import RepairBeamCandidate, RepairBeamLoop, RepairBeamState
@@ -307,6 +308,7 @@ class ExtractionBatchRunner:
         initial = RepairBeamState(
             source_input=dict(job.source_input),
             format=job.format,
+            archive_state=job.archive_state.to_dict() if job.archive_state is not None else {},
             confidence=job.confidence,
             damage_flags=list(job.damage_flags),
             archive_key=job.archive_key,
@@ -362,19 +364,28 @@ class ExtractionBatchRunner:
         runtime_scheduler: ConcurrencyScheduler,
         evaluated: dict[str, tuple[RepairCandidate, ExtractionResult, VerificationResult, str]],
     ) -> VerificationResult:
-        original = task.archive_input()
+        original_state = task.archive_state()
         digest = _source_input_digest(item.candidate.repaired_input)
+        if isinstance(item.candidate.plan, dict) and item.candidate.plan.get("archive_state"):
+            digest = _source_input_digest({"archive_state": item.candidate.plan.get("archive_state")})
         temp_dir = f"{out_dir}.beam_{len(evaluated) + 1:02d}_{item.candidate.module_name}"
         shutil.rmtree(temp_dir, ignore_errors=True)
         try:
-            descriptor = self.repair_stage._descriptor_from_repaired_input(task, item.candidate.repaired_input)
-            task.set_archive_input(descriptor or item.candidate.repaired_input)
+            archive_state = item.candidate.plan.get("archive_state") if isinstance(item.candidate.plan, dict) else None
+            if isinstance(archive_state, dict):
+                task.set_archive_state(archive_state, sync_compat=False)
+            else:
+                descriptor = self.repair_stage._descriptor_from_repaired_input(task, item.candidate.repaired_input)
+                if descriptor is not None:
+                    task.set_archive_state(ArchiveState.from_archive_input(descriptor), sync_compat=False)
+                else:
+                    task.set_archive_input(item.candidate.repaired_input)
             extracted = self.extractor.extract(task, temp_dir, runtime_scheduler=runtime_scheduler)
             assessed = self.verifier.verify(task, extracted)
             evaluated[digest] = (item.candidate, extracted, assessed, temp_dir)
             return assessed
         finally:
-            task.set_archive_input(original)
+            task.set_archive_state(original_state, sync_compat=False)
 
     def _promote_beam_output(self, result: ExtractionResult, temp_dir: str, out_dir: str) -> ExtractionResult:
         if os.path.abspath(temp_dir) != os.path.abspath(out_dir):

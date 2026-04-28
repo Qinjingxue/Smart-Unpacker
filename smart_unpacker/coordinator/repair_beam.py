@@ -5,6 +5,7 @@ import json
 from dataclasses import dataclass, field, replace
 from typing import Any, Callable
 
+from smart_unpacker.contracts.archive_state import ArchiveState
 from smart_unpacker.repair.candidate import CandidateSelector, RepairCandidate, materialize_candidate
 from smart_unpacker.repair.job import RepairJob
 from smart_unpacker.repair.scheduler import RepairScheduler
@@ -32,6 +33,7 @@ AssessFn = Callable[["RepairBeamCandidate"], VerificationResult | dict[str, Any]
 class RepairBeamState:
     source_input: dict[str, Any]
     format: str
+    archive_state: dict[str, Any] = field(default_factory=dict)
     confidence: float = 0.0
     damage_flags: list[str] = field(default_factory=list)
     archive_key: str = ""
@@ -51,6 +53,7 @@ class RepairBeamState:
     def digest(self) -> str:
         payload = {
             "source_input": self.source_input,
+            "archive_state": self.archive_state,
             "format": self.format,
         }
         return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode("utf-8")).hexdigest()
@@ -72,6 +75,7 @@ class RepairBeamState:
                 self.job_template,
                 source_input=dict(self.source_input),
                 format=self.format,
+                archive_state=_state_from_dict(self.archive_state) or self.job_template.archive_state,
                 confidence=self.confidence,
                 extraction_failure=extraction_failure or self.job_template.extraction_failure,
                 damage_flags=list(self.damage_flags),
@@ -81,6 +85,7 @@ class RepairBeamState:
         return RepairJob(
             source_input=dict(self.source_input),
             format=self.format,
+            archive_state=_state_from_dict(self.archive_state),
             confidence=self.confidence,
             extraction_failure=extraction_failure,
             damage_flags=list(self.damage_flags),
@@ -229,9 +234,11 @@ class RepairBeamLoop:
         seen: set[str] = set()
         for item in candidates:
             repaired_input = item.candidate.repaired_input
+            candidate_state = _candidate_archive_state(item.candidate)
             state = RepairBeamState(
                 source_input=dict(repaired_input),
                 format=item.candidate.format or item.state.format,
+                archive_state=candidate_state or dict(item.state.archive_state),
                 confidence=max(
                     float(item.candidate.confidence or 0.0),
                     float(item.analyze.get("confidence", 0.0) or 0.0),
@@ -276,6 +283,22 @@ def _candidate_pre_score(candidate: RepairCandidate, state: RepairBeamState) -> 
     prior_score = min(1.0, max(0.0, state.score)) * 0.03
     prior_completeness = min(1.0, max(0.0, state.completeness)) * 0.04
     return selector_score + progress_score * 0.08 + prior_score + prior_completeness
+
+
+def _candidate_archive_state(candidate: RepairCandidate) -> dict[str, Any]:
+    if not isinstance(candidate.plan, dict):
+        return {}
+    raw = candidate.plan.get("archive_state")
+    return dict(raw) if isinstance(raw, dict) else {}
+
+
+def _state_from_dict(raw: dict[str, Any]) -> ArchiveState | None:
+    if not isinstance(raw, dict) or not raw:
+        return None
+    try:
+        return ArchiveState.from_dict(raw)
+    except (TypeError, ValueError):
+        return None
 
 
 def _materialize_beam_items(items: list[RepairBeamCandidate]) -> list[RepairBeamCandidate]:

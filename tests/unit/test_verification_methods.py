@@ -1,9 +1,9 @@
 import json
+import zipfile
 
 from smart_unpacker.contracts.detection import FactBag
 from smart_unpacker.contracts.tasks import ArchiveTask
 from smart_unpacker.extraction.result import ExtractionResult
-from smart_unpacker.support import sevenzip_native as native
 from smart_unpacker.verification import VerificationScheduler
 
 
@@ -123,33 +123,21 @@ def test_expected_name_presence_weak_damaged_source_sets_recoverable_upper_bound
     assert verification.decision_hint == "accept_partial"
 
 
-def test_archive_test_crc_compares_archive_manifest_to_output_files(tmp_path, monkeypatch):
+def test_archive_test_crc_compares_archive_state_manifest_to_output_files(tmp_path, monkeypatch):
     archive = tmp_path / "sample.zip"
-    archive.write_bytes(b"zip")
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("good.txt", "hello")
+        zf.writestr("bad.txt", "expected")
+        zf.writestr("missing.txt", "not extracted")
     out_dir = tmp_path / "out"
     out_dir.mkdir()
     (out_dir / "good.txt").write_text("hello", encoding="utf-8")
     (out_dir / "bad.txt").write_text("oops", encoding="utf-8")
-    task = _task(tmp_path)
+    task = ArchiveTask(fact_bag=FactBag(), score=10, key="sample", main_path=str(archive), all_parts=[str(archive)], detected_ext="zip")
     result = ExtractionResult(success=True, archive=str(archive), out_dir=str(out_dir), all_parts=[str(archive)])
 
     from smart_unpacker.verification.methods import archive_test_crc as module
 
-    monkeypatch.setattr(module, "cached_read_archive_crc_manifest", lambda *args, **kwargs: native.NativeArchiveCrcManifest(
-        status=native.STATUS_OK,
-        is_archive=True,
-        encrypted=False,
-        damaged=False,
-        checksum_error=False,
-        item_count=3,
-        file_count=3,
-        files=[
-            {"path": "good.txt", "size": 5, "has_crc": True, "crc32": 907060870},
-            {"path": "bad.txt", "size": 4, "has_crc": True, "crc32": 1},
-            {"path": "missing.txt", "size": 10, "has_crc": True, "crc32": 2},
-        ],
-        message="ok",
-    ))
     monkeypatch.setattr(module, "_compute_directory_crc_manifest", lambda output_dir, max_items: {
         "status": "ok",
         "files": [

@@ -5,7 +5,7 @@ import math
 from smart_unpacker.repair.diagnosis import RepairDiagnosis
 from smart_unpacker.repair.job import RepairJob
 from smart_unpacker.repair.pipeline.module import RepairModuleSpec, RepairRoute
-from smart_unpacker.repair.pipeline.modules._common import load_source_bytes, write_candidate
+from smart_unpacker.repair.pipeline.modules._common import load_job_source_bytes, patch_plan_for_byte_patches, patch_repair_result
 from smart_unpacker.repair.pipeline.registry import register_repair_module
 from smart_unpacker.repair.result import RepairResult
 
@@ -36,27 +36,33 @@ class TarHeaderChecksumFix:
         return 0.0
 
     def repair(self, job: RepairJob, diagnosis: RepairDiagnosis, workspace: str, config: dict) -> RepairResult:
-        data = bytearray(load_source_bytes(job.source_input))
+        data = bytearray(load_job_source_bytes(job))
         fixed = 0
+        patches = []
         for offset in _tar_header_offsets(data):
             stored = _parse_octal(data[offset + 148:offset + 156])
             computed = _tar_checksum(data[offset:offset + 512])
             if stored != computed:
-                data[offset + 148:offset + 156] = _format_checksum(computed)
+                checksum = _format_checksum(computed)
+                data[offset + 148:offset + 156] = checksum
+                patches.append({"offset": offset + 148, "data": checksum})
                 fixed += 1
         if fixed <= 0:
             return RepairResult(status="unrepairable", confidence=0.0, format="tar", module_name=self.spec.name, diagnosis=diagnosis.as_dict(), message="no TAR header checksum mismatch was found")
-        path = write_candidate(bytes(data), workspace, "tar_header_checksum_fix.tar")
-        return RepairResult(
-            status="repaired",
-            confidence=0.88,
-            format="tar",
-            repaired_input={"kind": "file", "path": path, "format_hint": "tar"},
-            actions=["recompute_tar_header_checksum"],
-            damage_flags=list(job.damage_flags),
-            workspace_paths=[path],
+        actions = ["recompute_tar_header_checksum"]
+        patch_plan = patch_plan_for_byte_patches(job, self.spec.name, patches, confidence=0.88, actions=actions)
+        return patch_repair_result(
+            job=job,
+            diagnosis=diagnosis,
             module_name=self.spec.name,
-            diagnosis=diagnosis.as_dict(),
+            fmt="tar",
+            patch_plan=patch_plan,
+            confidence=0.88,
+            actions=actions,
+            workspace=workspace,
+            filename="tar_header_checksum_fix.tar",
+            config=config,
+            materialized_data=bytes(data),
         )
 
 

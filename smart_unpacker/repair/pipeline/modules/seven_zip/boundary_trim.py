@@ -3,9 +3,8 @@ from __future__ import annotations
 from smart_unpacker.repair.diagnosis import RepairDiagnosis
 from smart_unpacker.repair.job import RepairJob
 from smart_unpacker.repair.pipeline.module import RepairModuleSpec, RepairRoute
-from pathlib import Path
 
-from smart_unpacker.repair.pipeline.modules._common import copy_source_prefix_to_file, load_source_bytes
+from smart_unpacker.repair.pipeline.modules._common import load_job_source_bytes, patch_plan_for_truncate, patch_repair_result
 from smart_unpacker.repair.pipeline.registry import register_repair_module
 from smart_unpacker.repair.result import RepairResult
 
@@ -38,29 +37,29 @@ class SevenZipBoundaryTrim:
         return 0.0
 
     def repair(self, job: RepairJob, diagnosis: RepairDiagnosis, workspace: str, config: dict) -> RepairResult:
-        data = load_source_bytes(job.source_input)
+        data = load_job_source_bytes(job)
         header = parse_start_header(data)
         if header is None or not header.start_crc_ok:
             return RepairResult(status="unrepairable", confidence=0.0, format="7z", module_name=self.spec.name, diagnosis=diagnosis.as_dict(), message="7z boundary is not trusted without a valid start header")
         if header.archive_end == len(data):
             return RepairResult(status="unrepairable", confidence=0.0, format="7z", module_name=self.spec.name, diagnosis=diagnosis.as_dict(), message="no trailing bytes after 7z archive end")
-        path = copy_source_prefix_to_file(
-            job.source_input,
-            header.archive_end,
-            str(Path(workspace) / "seven_zip_boundary_trim.7z"),
-        )
         warnings = [] if header.next_header_crc_ok else ["next header CRC is invalid; trim only repaired outer boundary"]
-        return RepairResult(
-            status="repaired",
-            confidence=0.9 if header.next_header_crc_ok else 0.68,
-            format="7z",
-            repaired_input={"kind": "file", "path": path, "format_hint": "7z"},
-            actions=["trim_after_7z_next_header"],
-            damage_flags=list(job.damage_flags),
-            warnings=warnings,
-            workspace_paths=[path],
+        confidence = 0.9 if header.next_header_crc_ok else 0.68
+        actions = ["trim_after_7z_next_header"]
+        patch_plan = patch_plan_for_truncate(job, self.spec.name, header.archive_end, confidence=confidence, actions=actions)
+        return patch_repair_result(
+            job=job,
+            diagnosis=diagnosis,
             module_name=self.spec.name,
-            diagnosis=diagnosis.as_dict(),
+            fmt="7z",
+            patch_plan=patch_plan,
+            confidence=confidence,
+            actions=actions,
+            warnings=warnings,
+            workspace=workspace,
+            filename="seven_zip_boundary_trim.7z",
+            config=config,
+            materialized_data=data[:header.archive_end],
         )
 
 

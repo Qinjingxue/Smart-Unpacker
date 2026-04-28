@@ -121,6 +121,15 @@ struct ExtractInputRange {
     bool has_end = false;
 };
 
+struct ExtractPatchOperation {
+    std::wstring op;
+    std::wstring target = L"logical";
+    unsigned long long offset = 0;
+    unsigned long long size = 0;
+    bool has_size = false;
+    std::vector<unsigned char> data;
+};
+
 bool is_backend_available(const std::wstring& seven_zip_dll_path);
 
 PasswordTestResult test_password(
@@ -175,6 +184,19 @@ ExtractArchiveResult extract_archive_with_ranges(
     const std::wstring& seven_zip_dll_path,
     const std::wstring& archive_path,
     const std::vector<ExtractInputRange>& ranges,
+    const std::wstring& format_hint,
+    const std::wstring& password,
+    const std::wstring& output_dir,
+    ExtractProgressCallback progress = {},
+    bool dry_run = false
+);
+
+ExtractArchiveResult extract_archive_with_patches(
+    const std::wstring& seven_zip_dll_path,
+    const std::wstring& archive_path,
+    const std::vector<std::wstring>& part_paths,
+    const std::vector<ExtractInputRange>& ranges,
+    const std::vector<ExtractPatchOperation>& patches,
     const std::wstring& format_hint,
     const std::wstring& password,
     const std::wstring& output_dir,

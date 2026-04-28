@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 import math
-from pathlib import Path
 
 from smart_unpacker.repair.diagnosis import RepairDiagnosis
 from smart_unpacker.repair.job import RepairJob
 from smart_unpacker.repair.pipeline.module import RepairModuleSpec, RepairRoute
-from smart_unpacker.repair.pipeline.modules._common import copy_source_prefix_to_file, load_source_bytes, write_candidate
+from smart_unpacker.repair.pipeline.modules._common import load_job_source_bytes, patch_plan_for_truncate, patch_plan_for_truncate_append, patch_repair_result
 from smart_unpacker.repair.pipeline.registry import register_repair_module
 from smart_unpacker.repair.result import RepairResult
 
@@ -38,7 +37,7 @@ class TarTrailingZeroBlockRepair:
         return 0.0
 
     def repair(self, job: RepairJob, diagnosis: RepairDiagnosis, workspace: str, config: dict) -> RepairResult:
-        data = load_source_bytes(job.source_input)
+        data = load_job_source_bytes(job)
         payload_end = _walk_payload_end(data)
         if payload_end is None:
             return RepairResult(status="unrepairable", confidence=0.0, format="tar", module_name=self.spec.name, diagnosis=diagnosis.as_dict(), message="TAR entries could not be walked safely")
@@ -47,25 +46,25 @@ class TarTrailingZeroBlockRepair:
         missing_zeros = max(0, 1024 - min(1024, zero_bytes_present))
         if end == len(data) and missing_zeros == 0:
             return RepairResult(status="unrepairable", confidence=0.0, format="tar", module_name=self.spec.name, diagnosis=diagnosis.as_dict(), message="TAR already has canonical zero block ending")
+        actions = ["trim_or_append_tar_zero_blocks"]
         if missing_zeros == 0:
-            path = copy_source_prefix_to_file(
-                job.source_input,
-                end,
-                str(Path(workspace) / "tar_trailing_zero_block_repair.tar"),
-            )
+            repaired = data[:end]
+            patch_plan = patch_plan_for_truncate(job, self.spec.name, end, confidence=0.84, actions=actions)
         else:
             repaired = data[:end] + (b"\0" * missing_zeros)
-            path = write_candidate(repaired, workspace, "tar_trailing_zero_block_repair.tar")
-        return RepairResult(
-            status="repaired",
-            confidence=0.84,
-            format="tar",
-            repaired_input={"kind": "file", "path": path, "format_hint": "tar"},
-            actions=["trim_or_append_tar_zero_blocks"],
-            damage_flags=list(job.damage_flags),
-            workspace_paths=[path],
+            patch_plan = patch_plan_for_truncate_append(job, self.spec.name, end, b"\0" * missing_zeros, confidence=0.84, actions=actions)
+        return patch_repair_result(
+            job=job,
+            diagnosis=diagnosis,
             module_name=self.spec.name,
-            diagnosis=diagnosis.as_dict(),
+            fmt="tar",
+            patch_plan=patch_plan,
+            confidence=0.84,
+            actions=actions,
+            workspace=workspace,
+            filename="tar_trailing_zero_block_repair.tar",
+            config=config,
+            materialized_data=repaired,
         )
 
 

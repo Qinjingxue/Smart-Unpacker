@@ -2,6 +2,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from smart_unpacker.contracts.archive_input import ArchiveInputDescriptor
+from smart_unpacker.contracts.archive_state import ArchiveState
 
 
 RepairStatus = Literal[
@@ -30,12 +31,15 @@ class RepairResult:
     diagnosis: dict[str, Any] = field(default_factory=dict)
     message: str = ""
     repaired_descriptor: ArchiveInputDescriptor | None = None
+    repaired_state: ArchiveState | None = None
 
     @property
     def ok(self) -> bool:
         return self.status in {"repaired", "partial"} and self.repaired_input is not None
 
     def archive_input(self, *, archive_path: str = "", part_paths: list[str] | None = None) -> ArchiveInputDescriptor | None:
+        if self.repaired_state is not None:
+            return self.repaired_state.to_archive_input_descriptor()
         if self.repaired_descriptor is not None:
             return self.repaired_descriptor
         if not isinstance(self.repaired_input, dict):

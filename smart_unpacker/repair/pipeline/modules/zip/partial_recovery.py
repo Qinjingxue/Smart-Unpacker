@@ -5,6 +5,7 @@ from pathlib import Path
 from smart_unpacker.repair.diagnosis import RepairDiagnosis
 from smart_unpacker.repair.job import RepairJob
 from smart_unpacker.repair.pipeline.module import RepairModuleSpec, RepairRoute
+from smart_unpacker.repair.pipeline.modules._common import source_input_for_job
 from smart_unpacker.repair.pipeline.registry import register_repair_module
 from smart_unpacker.repair.result import RepairResult
 from smart_unpacker.repair.coverage import coverage_view_from_job
@@ -62,7 +63,7 @@ class ZipPartialRecovery:
                 message="payload checksum damage requires deep ZIP partial recovery",
             )
         candidate = Path(workspace) / "zip_partial_recovery.zip"
-        scan = rebuild_zip_from_source(job.source_input, candidate, config=config)
+        scan = rebuild_zip_from_source(source_input_for_job(job), candidate, config=config)
         if not scan.entries:
             return RepairResult(
                 status="unrepairable",

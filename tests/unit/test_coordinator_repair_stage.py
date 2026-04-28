@@ -37,10 +37,9 @@ def test_repair_stage_repairs_medium_confidence_analysis(tmp_path):
     assert scheduler.jobs[0].format == "zip"
     assert scheduler.jobs[0].source_input["kind"] == "file_range"
     assert task.fact_bag.get("archive.repaired") is True
-    archive_input = task.fact_bag.get("archive.input")
-    assert archive_input["kind"] == "archive_input"
-    assert archive_input["open_mode"] == "file"
-    assert archive_input["entry_path"] == str(repaired)
+    archive_input = task.archive_input()
+    assert archive_input.open_mode == "file"
+    assert archive_input.entry_path == str(repaired)
 
 
 def test_repair_stage_repairs_after_extraction_failure(tmp_path):
@@ -82,7 +81,7 @@ def test_repair_stage_repairs_after_extraction_failure(tmp_path):
     assert scheduler.jobs[0].extraction_failure["failure_kind"] == "structure_recognition"
     assert scheduler.jobs[0].extraction_failure["native_diagnostics"]["input_trace"]["mode"] == "file"
     assert scheduler.jobs[0].extraction_diagnostics["result"]["native_status"] == "damaged"
-    assert task.fact_bag.get("archive.input")["entry_path"] == str(repaired)
+    assert task.archive_state().source.entry_path == str(repaired)
 
 
 def test_repair_stage_passes_partial_output_progress_to_repair_job(tmp_path):

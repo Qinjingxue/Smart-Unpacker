@@ -3,6 +3,7 @@ from __future__ import annotations
 from smart_unpacker.repair.diagnosis import RepairDiagnosis
 from smart_unpacker.repair.job import RepairJob
 from smart_unpacker.repair.pipeline.module import RepairModuleSpec, RepairRoute
+from smart_unpacker.repair.pipeline.modules._common import source_input_for_job
 from smart_unpacker.repair.pipeline.modules.archive_carrier_crop import _result_from_native
 from smart_unpacker.repair.pipeline.modules._native_candidates import candidates_from_native_result
 from smart_unpacker.repair.pipeline.registry import register_repair_module
@@ -57,7 +58,7 @@ class SevenZipCrcFieldRepair:
     def _run_native(self, job: RepairJob, workspace: str, config: dict) -> dict:
         deep = config.get("deep") if isinstance(config.get("deep"), dict) else {}
         return _native_seven_zip_crc_field_repair(
-            job.source_input,
+            source_input_for_job(job),
             workspace,
             float(deep.get("max_input_size_mb", 512) or 0),
             int(deep.get("max_candidates_per_module", 8) or 1),

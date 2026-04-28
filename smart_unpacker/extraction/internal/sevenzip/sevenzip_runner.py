@@ -224,13 +224,32 @@ class SevenZipRunner:
         if selected_codepage:
             job["codepage"] = selected_codepage
 
-        archive_input = self._archive_input(task, archive_path, part_paths)
-        if archive_input:
-            descriptor_payload = archive_input.to_dict()
-            job["archive_input"] = descriptor_payload
-            if descriptor_payload.get("format_hint"):
-                job["format_hint"] = descriptor_payload.get("format_hint")
+        archive_state = self._archive_state(task)
+        if archive_state:
+            job["archive_state"] = archive_state
+            source = archive_state.get("source") if isinstance(archive_state.get("source"), dict) else {}
+            if archive_state.get("format_hint") or source.get("format_hint"):
+                job["format_hint"] = archive_state.get("format_hint") or source.get("format_hint")
+        else:
+            archive_input = self._archive_input(task, archive_path, part_paths)
+            if archive_input:
+                descriptor_payload = archive_input.to_dict()
+                job["archive_input"] = descriptor_payload
+                if descriptor_payload.get("format_hint"):
+                    job["format_hint"] = descriptor_payload.get("format_hint")
         return job
+
+    def _archive_state(self, task: ArchiveTask) -> dict | None:
+        fact_bag = getattr(task, "fact_bag", None)
+        raw = fact_bag.get("archive.state") if fact_bag is not None and hasattr(fact_bag, "get") else None
+        if isinstance(raw, dict):
+            return dict(raw)
+        if hasattr(task, "archive_state"):
+            try:
+                return task.archive_state().to_dict()
+            except Exception:
+                return None
+        return None
 
     def _archive_input(self, task: ArchiveTask, archive_path: str, part_paths: list[str]) -> ArchiveInputDescriptor | None:
         if hasattr(task, "archive_input"):

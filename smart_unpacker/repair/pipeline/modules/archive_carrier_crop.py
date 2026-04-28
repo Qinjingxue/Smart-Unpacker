@@ -5,6 +5,7 @@ from pathlib import Path
 from smart_unpacker.repair.diagnosis import RepairDiagnosis
 from smart_unpacker.repair.job import RepairJob
 from smart_unpacker.repair.pipeline.module import RepairModuleSpec, RepairRoute
+from smart_unpacker.repair.pipeline.modules._common import patch_plan_for_crop, source_input_for_job
 from smart_unpacker.repair.pipeline.modules._native_candidates import candidates_from_native_result
 from smart_unpacker.repair.pipeline.modules._native_validation import validate_with_native_probe
 from smart_unpacker.repair.pipeline.registry import register_repair_module
@@ -49,6 +50,8 @@ class ArchiveCarrierCropDeepRecovery:
     def generate_candidates(self, job: RepairJob, diagnosis: RepairDiagnosis, workspace: str, config: dict):
         result = self._run_native(job, diagnosis, workspace, config)
         normalize_native_candidate_lengths(result)
+        if bool(config.get("virtual_patch_candidate")):
+            attach_native_crop_patch_plans(result, job, self.spec.name)
         return candidates_from_native_result(
             self.spec.name,
             result,
@@ -57,12 +60,13 @@ class ArchiveCarrierCropDeepRecovery:
             native_key="native_archive_deep_repair",
             default_confidence=0.78,
             default_message="archive carrier crop produced a candidate",
+            prefer_patch_plan=bool(config.get("virtual_patch_candidate")),
         )
 
     def _run_native(self, job: RepairJob, diagnosis: RepairDiagnosis, workspace: str, config: dict) -> dict:
         deep = config.get("deep") if isinstance(config.get("deep"), dict) else {}
         return _native_archive_carrier_crop_recovery(
-            job.source_input,
+            source_input_for_job(job),
             diagnosis.format or job.format or "archive",
             workspace,
             float(deep.get("max_input_size_mb", 512) or 0),
@@ -154,3 +158,26 @@ def _truncate_if_longer(path: str, output_bytes: int) -> None:
             handle.truncate(output_bytes)
     except OSError:
         return
+
+
+def attach_native_crop_patch_plans(result: dict, job: RepairJob, module_name: str) -> None:
+    for item in result.get("candidates") or []:
+        if not isinstance(item, dict) or isinstance(item.get("patch_plan"), dict):
+            continue
+        try:
+            start = int(item.get("offset") or 0)
+            end = int(item.get("end_offset") or item.get("output_bytes") or 0)
+        except (TypeError, ValueError):
+            continue
+        if end <= start:
+            continue
+        actions = list(item.get("actions") or result.get("actions") or [])
+        confidence = float(item.get("confidence", result.get("confidence", 0.0)) or 0.0)
+        item["patch_plan"] = patch_plan_for_crop(
+            job,
+            module_name,
+            start,
+            end,
+            confidence=confidence,
+            actions=actions,
+        ).to_dict()

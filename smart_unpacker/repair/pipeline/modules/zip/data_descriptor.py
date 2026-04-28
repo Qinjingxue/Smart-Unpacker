@@ -5,6 +5,7 @@ from pathlib import Path
 from smart_unpacker.repair.diagnosis import RepairDiagnosis
 from smart_unpacker.repair.job import RepairJob
 from smart_unpacker.repair.pipeline.module import RepairModuleSpec, RepairRoute
+from smart_unpacker.repair.pipeline.modules._common import source_input_for_job
 from smart_unpacker.repair.pipeline.registry import register_repair_module
 from smart_unpacker.repair.result import RepairResult
 from smart_unpacker.repair.coverage import coverage_view_from_job
@@ -46,7 +47,7 @@ class ZipDataDescriptorRecovery:
 
     def repair(self, job: RepairJob, diagnosis: RepairDiagnosis, workspace: str, config: dict) -> RepairResult:
         candidate = Path(workspace) / "zip_data_descriptor_recovery.zip"
-        scan = rebuild_zip_from_source(job.source_input, candidate, require_data_descriptor=True, config=config)
+        scan = rebuild_zip_from_source(source_input_for_job(job), candidate, require_data_descriptor=True, config=config)
         if not scan.entries or scan.descriptor_entries <= 0:
             return RepairResult(
                 status="unrepairable",

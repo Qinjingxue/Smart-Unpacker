@@ -104,7 +104,11 @@ class ResourcePreflightInspector:
 
     @staticmethod
     def _needs_offset_detection(task: ArchiveTask) -> bool:
-        return isinstance(task.fact_bag.get("archive.input"), dict)
+        try:
+            descriptor = task.archive_state().to_archive_input_descriptor()
+        except (TypeError, ValueError):
+            return False
+        return bool(task.archive_state().patches) or descriptor.open_mode != "file"
 
     def _password_for(self, task: ArchiveTask) -> str:
         if self.password_session is None:

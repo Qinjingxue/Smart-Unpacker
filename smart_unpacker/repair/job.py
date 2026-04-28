@@ -2,6 +2,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from smart_unpacker.contracts.archive_input import ArchiveInputDescriptor
+from smart_unpacker.contracts.archive_state import ArchiveState
 
 
 @dataclass(frozen=True)
@@ -20,12 +21,15 @@ class RepairJob:
     workspace: str = ""
     attempts: int = 0
     source_descriptor: ArchiveInputDescriptor | None = None
+    archive_state: ArchiveState | None = None
 
     @property
     def has_extraction_failure(self) -> bool:
         return bool(self.extraction_failure)
 
     def archive_input(self) -> ArchiveInputDescriptor:
+        if self.archive_state is not None:
+            return self.archive_state.to_archive_input_descriptor()
         if self.source_descriptor is not None:
             return self.source_descriptor
         return ArchiveInputDescriptor.from_any(
