@@ -27,7 +27,6 @@ class CompressionStreamPartialRecovery:
             routes=(
                 RepairRoute(
                     formats=self.aliases,
-                    require_any_categories=("boundary_repair",),
                     require_any_flags=(
                         "probably_truncated",
                         "stream_truncated",
@@ -51,8 +50,6 @@ class CompressionStreamPartialRecovery:
             "unexpected_eof",
         }:
             return 0.94
-        if "boundary_repair" in diagnosis.categories and flags & {"checksum_error", "crc_error"}:
-            return 0.68
         return 0.0
 
     def repair(self, job: RepairJob, diagnosis: RepairDiagnosis, workspace: str, config: dict) -> RepairResult:

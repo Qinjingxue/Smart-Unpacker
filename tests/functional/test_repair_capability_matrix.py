@@ -370,6 +370,24 @@ def _build_zip_descriptor_payload_bad_keeps_other_descriptor_entry(root: Path) -
     )
 
 
+def _build_zip64_descriptor_payload_bad_keeps_other_descriptor_entry(root: Path) -> MatrixFixture:
+    bad_payload = b"bad zip64 descriptor payload"
+    corrupted = bytearray(bad_payload)
+    corrupted[5] ^= 0x55
+    good_payload = b"good zip64 descriptor payload"
+    data = b"".join([
+        _descriptor_zip_entry_fragment("bad-zip64-dd.txt", bad_payload, zip64=True, stored_payload=bytes(corrupted)),
+        _descriptor_zip_entry_fragment("good-zip64-dd.txt", good_payload, zip64=True),
+        b"PK\x01\x02BROKEN-CENTRAL-DIR",
+    ])
+    return _fixture_from_bytes(
+        root,
+        "zip64-descriptor-one-payload-bad.zip",
+        data,
+        zip_entries={"good-zip64-dd.txt": good_payload},
+    )
+
+
 def _build_zip_multi_structure_and_payload_bad(root: Path) -> MatrixFixture:
     entries = {"bad.txt": b"bad payload", "good.txt": b"good payload"}
     data = bytearray(_zip_bytes(entries))
@@ -676,6 +694,12 @@ def _build_tar_checksum_and_missing_zero_blocks(root: Path) -> MatrixFixture:
     return _fixture_from_bytes(root, "tar-checksum-missing-zero.tar", bytes(data), tar_entries=_tar_entries())
 
 
+def _build_tar_checksum_and_trailing_junk(root: Path) -> MatrixFixture:
+    data = bytearray(_tar_bytes(_tar_entries()) + b"JUNK")
+    data[148:156] = b"000000\0 "
+    return _fixture_from_bytes(root, "tar-checksum-tail.tar", bytes(data), tar_entries=_tar_entries())
+
+
 def _build_tar_missing_zero_blocks(root: Path) -> MatrixFixture:
     data = _tar_bytes(_tar_entries())
     return _fixture_from_bytes(root, "tar-missing-zero.tar", data[:1024], tar_entries=_tar_entries())
@@ -691,11 +715,33 @@ def _build_tar_payload_truncated(root: Path) -> MatrixFixture:
     return _fixture_from_bytes(root, "tar-payload-truncated.tar", data[:700])
 
 
+def _build_tar_gzip_truncated_keeps_complete_member(root: Path) -> MatrixFixture:
+    entries = {
+        "complete.txt": b"complete payload",
+        "truncated.bin": bytes(range(256)) * 8,
+    }
+    tar_data = _tar_bytes(entries)
+    compressed = gzip.compress(tar_data)
+    return _fixture_from_bytes(
+        root,
+        "tar-gzip-truncated.tgz",
+        compressed[:100],
+        tar_entries={"complete.txt": b"complete payload"},
+    )
+
+
 def _build_gzip_footer_bad(root: Path) -> MatrixFixture:
     payload = b"gzip payload"
     data = bytearray(gzip.compress(payload))
     data[-8:] = b"\0" * 8
     return _fixture_from_bytes(root, "gzip-footer.gz", bytes(data), stream_payload=payload)
+
+
+def _build_gzip_footer_bad_with_trailing_junk(root: Path) -> MatrixFixture:
+    payload = b"gzip payload"
+    data = bytearray(gzip.compress(payload))
+    data[-8:] = b"\0" * 8
+    return _fixture_from_bytes(root, "gzip-footer-tail.gz", bytes(data) + b"JUNK", stream_payload=payload)
 
 
 def _build_gzip_trailing_junk(root: Path) -> MatrixFixture:
@@ -758,6 +804,7 @@ MATRIX = [
     MatrixCase("zip_one_bad_payload_one_good", "zip", ("checksum_error", "crc_error", "damaged"), _build_zip_one_bad_payload_one_good, ("partial",), "zip_deep_partial_recovery", _verify_zip),
     MatrixCase("zip_missing_cd_multiple_local_headers_one_bad_payload", "zip", ("central_directory_bad", "local_header_recovery", "checksum_error", "crc_error", "damaged"), _build_zip_missing_cd_multiple_local_headers_one_bad_payload, ("partial",), "zip_central_directory_rebuild", _verify_zip),
     MatrixCase("zip_descriptor_payload_bad_keeps_other_descriptor_entry", "zip", ("data_descriptor", "compressed_size_bad", "checksum_error", "crc_error", "damaged"), _build_zip_descriptor_payload_bad_keeps_other_descriptor_entry, ("partial",), "zip_deep_partial_recovery", _verify_zip),
+    MatrixCase("zip64_descriptor_payload_bad_keeps_other_descriptor_entry", "zip", ("data_descriptor", "compressed_size_bad", "checksum_error", "crc_error", "damaged"), _build_zip64_descriptor_payload_bad_keeps_other_descriptor_entry, ("partial",), "zip_deep_partial_recovery", _verify_zip),
     MatrixCase("zip_multi_structure_and_payload_bad", "zip", ("checksum_error", "crc_error", "damaged", "central_directory_offset_bad", "central_directory_count_bad", "comment_length_bad", "trailing_junk", "central_directory_bad"), _build_zip_multi_structure_and_payload_bad, ("partial",), "zip_central_directory_rebuild", _verify_zip),
     MatrixCase("7z_trailing_junk_v04", "7z", ("trailing_junk",), _build_7z_trailing_junk_v04, ("repaired",), "seven_zip_boundary_trim", _verify_bytes),
     MatrixCase("7z_start_crc_bad_v03", "7z", ("start_header_crc_bad",), _build_7z_start_crc_bad_v03, ("repaired",), "seven_zip_start_header_crc_fix", _verify_bytes),
@@ -786,7 +833,9 @@ MATRIX = [
     MatrixCase("tar_missing_zero_blocks", "tar", ("missing_end_block", "probably_truncated"), _build_tar_missing_zero_blocks, ("repaired",), "tar_trailing_zero_block_repair", _verify_tar),
     MatrixCase("tar_trailing_junk", "tar", ("trailing_junk",), _build_tar_trailing_junk, ("repaired",), "tar_trailing_junk_trim", _verify_tar),
     MatrixCase("tar_payload_truncated", "tar", ("checksum_error", "damaged", "input_truncated"), _build_tar_payload_truncated, UNREPAIRABLE, None),
+    MatrixCase("tar_gzip_truncated_keeps_complete_member", "tar.gz", ("input_truncated", "probably_truncated", "unexpected_end", "damaged"), _build_tar_gzip_truncated_keeps_complete_member, ("partial", "repaired"), "tar_gzip_truncated_partial_recovery", _verify_tar),
     MatrixCase("gzip_footer_bad", "gzip", ("gzip_footer_bad",), _build_gzip_footer_bad, ("repaired",), "gzip_footer_fix", _verify_gzip),
+    MatrixCase("gzip_footer_bad_with_trailing_junk", "gzip", ("gzip_footer_bad", "trailing_junk", "checksum_error"), _build_gzip_footer_bad_with_trailing_junk, ("repaired",), "gzip_footer_fix", _verify_gzip),
     MatrixCase("gzip_trailing_junk", "gzip", ("trailing_junk",), _build_gzip_trailing_junk, ("repaired",), "gzip_trailing_junk_trim", _verify_gzip),
     MatrixCase("gzip_payload_bad", "gzip", ("checksum_error", "damaged", "data_error"), _build_gzip_payload_bad, UNREPAIRABLE, None),
     MatrixCase("bzip2_trailing_junk", "bzip2", ("trailing_junk",), _build_bzip2_trailing_junk, ("repaired",), "bzip2_trailing_junk_trim", _verify_bzip2),
@@ -824,6 +873,16 @@ MULTI_ROUND_MATRIX = [
         (
             RepairRound(("tar_checksum_bad", "missing_end_block", "probably_truncated"), ("repaired",), "tar_header_checksum_fix"),
             RepairRound(("missing_end_block", "probably_truncated"), ("repaired",), "tar_trailing_zero_block_repair"),
+        ),
+        _verify_tar,
+    ),
+    MultiRoundCase(
+        "tar_checksum_then_trailing_junk",
+        "tar",
+        _build_tar_checksum_and_trailing_junk,
+        (
+            RepairRound(("tar_checksum_bad", "trailing_junk"), ("repaired",), "tar_header_checksum_fix"),
+            RepairRound(("trailing_junk", "boundary_unreliable"), ("repaired",), "tar_trailing_junk_trim"),
         ),
         _verify_tar,
     ),
