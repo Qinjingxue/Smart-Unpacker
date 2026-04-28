@@ -30,8 +30,15 @@ def test_extraction_failure_repair_reanalysis_loop_runs_until_success(tmp_path):
 
     assert outcome.success is True
     assert runner.analysis_stage.calls == 2
-    assert task.fact_bag.get("archive.input")["entry_path"] == str(fixed_2)
-    assert len(task.fact_bag.get("repair.loop.rounds")) == 2
+    archive_input = task.fact_bag.get("archive.input")
+    assert archive_input["entry_path"].endswith("round_02_fake_repair.zip")
+    assert Path(archive_input["entry_path"]).read_bytes() == fixed_2.read_bytes()
+    rounds = task.fact_bag.get("repair.loop.rounds")
+    assert len(rounds) == 2
+    assert rounds[0]["output_path"].endswith("round_01_fake_repair.zip")
+    assert rounds[0]["module"] == "fake_repair"
+    assert rounds[0]["actions"] == ["fake_fix"]
+    assert rounds[1]["output_path"].endswith("round_02_fake_repair.zip")
     assert not task.fact_bag.get("repair.loop.terminal_reason")
 
 

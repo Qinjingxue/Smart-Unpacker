@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import shutil
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -80,24 +81,36 @@ class RepairLoopState:
             return False
 
         previous_digest = self.current_digest
+        round_number = self.round_count + 1
         round_payload = {
-            "round": self.round_count + 1,
+            "round": round_number,
             "trigger": trigger,
             "input_digest": previous_digest,
             "status": result.status,
             "module": result.module_name,
             "actions": list(result.actions),
+            "format": result.format,
+            "confidence": float(result.confidence or 0.0),
+            "partial": bool(result.partial),
             "message": result.message,
+            "workspace_paths": list(result.workspace_paths),
         }
-        self._add_generated_paths(result)
 
         if result.status in TERMINAL_REPAIR_STATUSES:
+            self._add_generated_paths(result)
             self._append_round(round_payload)
             self.stop(f"repair_{result.status}", trigger=trigger, result=result)
             return False
         if not result.ok:
+            self._add_generated_paths(result)
             self._append_round(round_payload)
             return False
+
+        snapshot_path = self._snapshot_repaired_file(result, round_number)
+        if snapshot_path:
+            round_payload["output_path"] = snapshot_path
+            round_payload["workspace_paths"] = _dedupe([*round_payload["workspace_paths"], snapshot_path])
+        self._add_generated_paths(result, extra_paths=[snapshot_path] if snapshot_path else [])
 
         next_digest = input_digest(self.task)
         round_payload["output_digest"] = next_digest
@@ -117,6 +130,7 @@ class RepairLoopState:
         self._add_seen_input_digest(next_digest)
         self.task.fact_bag.set("repair.loop.current_digest", next_digest)
         self._append_round(round_payload)
+        LOGGER.info("archive repair round completed: %s", round_payload)
         return True
 
     @property
@@ -191,8 +205,55 @@ class RepairLoopState:
         values.append(signature)
         self.task.fact_bag.set("repair.loop.seen_action_signatures", _dedupe(values))
 
-    def _add_generated_paths(self, result: RepairResult) -> None:
+    def _snapshot_repaired_file(self, result: RepairResult, round_number: int) -> str:
+        repaired_input = result.repaired_input if isinstance(result.repaired_input, dict) else {}
+        kind = str(repaired_input.get("kind") or "file").lower()
+        source_path = str(repaired_input.get("path") or repaired_input.get("archive_path") or "")
+        if kind != "file" or not source_path:
+            return ""
+        source = Path(source_path)
+        if not source.is_file():
+            return ""
+        target = self._round_snapshot_path(source, result, round_number)
+        if source.resolve() != target.resolve():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, target)
+        format_hint = str(repaired_input.get("format_hint") or repaired_input.get("format") or result.format or "")
+        self.task.set_archive_input({
+            "kind": "archive_input",
+            "entry_path": str(target),
+            "open_mode": "file",
+            "format_hint": format_hint,
+            "logical_name": str(self.task.logical_name or ""),
+            "parts": [{"path": str(target), "role": "main"}],
+            "analysis": {
+                "source": "repair_loop",
+                "module": result.module_name,
+                "actions": list(result.actions),
+                "round": int(round_number),
+            },
+        })
+        return str(target)
+
+    def _round_snapshot_path(self, source: Path, result: RepairResult, round_number: int) -> Path:
+        module = _safe_name(result.module_name or "repair")
+        suffix = source.suffix
+        if not suffix:
+            suffix = _suffix_for_format(result.format)
+        filename = f"round_{round_number:02d}_{module}{suffix}"
+        target = source.parent / filename
+        if not target.exists() or target.resolve() == source.resolve():
+            return target
+        index = 2
+        while True:
+            candidate = source.parent / f"round_{round_number:02d}_{module}_{index}{suffix}"
+            if not candidate.exists():
+                return candidate
+            index += 1
+
+    def _add_generated_paths(self, result: RepairResult, *, extra_paths: list[str] | None = None) -> None:
         paths = set(result.workspace_paths or [])
+        paths.update(str(path) for path in (extra_paths or []) if path)
         repaired_input = result.repaired_input if isinstance(result.repaired_input, dict) else {}
         repaired_path = repaired_input.get("path") or repaired_input.get("archive_path") or repaired_input.get("entry_path")
         if repaired_path:
@@ -247,9 +308,8 @@ def terminal_failure_reason(result: ExtractionResult) -> str:
 def input_digest(task: ArchiveTask) -> str:
     raw = task.fact_bag.get("archive.input")
     descriptor = _descriptor_from_task(task, raw)
-    descriptor_payload = descriptor.to_dict() if descriptor is not None else {}
     h = hashlib.sha256()
-    h.update(_stable_json(descriptor_payload).encode("utf-8"))
+    h.update(_stable_json(_descriptor_shape(descriptor)).encode("utf-8"))
     if descriptor is None:
         for path in list(task.all_parts or [task.main_path]):
             _hash_path(h, path)
@@ -270,6 +330,29 @@ def input_digest(task: ArchiveTask) -> str:
     return h.hexdigest()
 
 
+def _descriptor_shape(descriptor: ArchiveInputDescriptor | None) -> dict[str, Any]:
+    if descriptor is None:
+        return {"open_mode": "task_paths"}
+    return {
+        "open_mode": descriptor.open_mode,
+        "format_hint": descriptor.format_hint,
+        "parts": [
+            {
+                "role": part.role,
+                "volume_number": part.volume_number,
+                "start": part.range.start if part.range is not None else None,
+                "end": part.range.end if part.range is not None else None,
+            }
+            for part in descriptor.parts
+        ],
+        "ranges": [
+            {"start": item.start, "end": item.end}
+            for item in descriptor.ranges
+        ],
+        "segment": descriptor.segment.to_dict() if descriptor.segment is not None else None,
+    }
+
+
 def _descriptor_from_task(task: ArchiveTask, raw: Any) -> ArchiveInputDescriptor | None:
     if not isinstance(raw, dict):
         return None
@@ -286,7 +369,6 @@ def _descriptor_from_task(task: ArchiveTask, raw: Any) -> ArchiveInputDescriptor
 def _hash_path(h: Any, path: str) -> None:
     text = str(path or "")
     h.update(b"\0path\0")
-    h.update(text.encode("utf-8", errors="surrogatepass"))
     try:
         item = Path(text)
         h.update(str(item.stat().st_size).encode("ascii"))
@@ -295,13 +377,13 @@ def _hash_path(h: Any, path: str) -> None:
                 h.update(chunk)
     except OSError:
         h.update(b"\0missing\0")
+        h.update(text.encode("utf-8", errors="surrogatepass"))
 
 
 def _hash_range(h: Any, path: str, start: int, end: int | None) -> None:
     text = str(path or "")
     start = max(0, int(start or 0))
     h.update(b"\0range\0")
-    h.update(text.encode("utf-8", errors="surrogatepass"))
     h.update(str(start).encode("ascii"))
     h.update(str(end).encode("ascii") if end is not None else b"")
     try:
@@ -319,6 +401,7 @@ def _hash_range(h: Any, path: str, start: int, end: int | None) -> None:
                 remaining -= len(chunk)
     except OSError:
         h.update(b"\0missing\0")
+        h.update(text.encode("utf-8", errors="surrogatepass"))
 
 
 def _action_signature(result: RepairResult, input_digest_value: str) -> str:
@@ -333,6 +416,25 @@ def _action_signature(result: RepairResult, input_digest_value: str) -> str:
 
 def _stable_json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _safe_name(value: str) -> str:
+    text = "".join(ch if ch.isalnum() or ch in "-_." else "_" for ch in str(value or "repair"))
+    return text.strip("._") or "repair"
+
+
+def _suffix_for_format(value: str) -> str:
+    fmt = str(value or "").lower().lstrip(".")
+    return {
+        "7z": ".7z",
+        "bzip2": ".bz2",
+        "gzip": ".gz",
+        "rar": ".rar",
+        "tar": ".tar",
+        "xz": ".xz",
+        "zip": ".zip",
+        "zstd": ".zst",
+    }.get(fmt, ".bin")
 
 
 def _dedupe(values: list[str]) -> list[str]:

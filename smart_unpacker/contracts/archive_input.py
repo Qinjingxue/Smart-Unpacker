@@ -103,6 +103,84 @@ class ArchiveInputDescriptor:
             payload["analysis"] = dict(self.analysis)
         return payload
 
+    def to_legacy_source_input(self) -> dict[str, Any]:
+        if self.open_mode == "file":
+            return {"kind": "file", "path": self.entry_path, "format_hint": self.format_hint}
+        if self.open_mode == "file_range":
+            item_range = self._primary_range()
+            if item_range is None:
+                return {"kind": "file", "path": self.entry_path, "format_hint": self.format_hint}
+            payload: dict[str, Any] = {
+                "kind": "file_range",
+                "path": item_range.path,
+                "start": int(item_range.start),
+                "format_hint": self.format_hint,
+            }
+            if item_range.end is not None:
+                payload["end"] = int(item_range.end)
+            return payload
+        if self.open_mode == "concat_ranges" and self.ranges:
+            return {
+                "kind": "concat_ranges",
+                "ranges": [item.to_dict() for item in self.ranges],
+                "format_hint": self.format_hint,
+            }
+        if self.parts:
+            return {
+                "kind": "concat_ranges",
+                "ranges": [
+                    {"path": part.path, "start": 0, "end": None}
+                    for part in self.parts
+                ],
+                "format_hint": self.format_hint,
+            }
+        return {"kind": "file", "path": self.entry_path, "format_hint": self.format_hint}
+
+    def part_paths(self) -> list[str]:
+        if self.open_mode == "concat_ranges" and self.ranges:
+            return list(dict.fromkeys(item.path for item in self.ranges if item.path))
+        if self.parts:
+            return list(dict.fromkeys(part.path for part in self.parts if part.path))
+        return [self.entry_path] if self.entry_path else []
+
+    def with_path_mapping(self, mapper) -> "ArchiveInputDescriptor":
+        parts = [
+            ArchiveInputPart(
+                path=mapper(part.path),
+                role=part.role,
+                volume_number=part.volume_number,
+                range=ArchiveInputRange(
+                    path=mapper(part.range.path),
+                    start=part.range.start,
+                    end=part.range.end,
+                ) if part.range is not None else None,
+            )
+            for part in self.parts
+        ]
+        ranges = [
+            ArchiveInputRange(path=mapper(item.path), start=item.start, end=item.end)
+            for item in self.ranges
+        ]
+        return ArchiveInputDescriptor(
+            entry_path=mapper(self.entry_path),
+            open_mode=self.open_mode,
+            format_hint=self.format_hint,
+            logical_name=self.logical_name,
+            parts=parts,
+            ranges=ranges,
+            segment=self.segment,
+            analysis=dict(self.analysis),
+        )
+
+    def _primary_range(self) -> ArchiveInputRange | None:
+        if self.parts:
+            part = self.parts[0]
+            if part.range is not None:
+                return part.range
+        if self.segment is not None:
+            return ArchiveInputRange(path=self.entry_path, start=self.segment.start, end=self.segment.end)
+        return None
+
     @classmethod
     def from_dict(cls, raw: dict[str, Any], *, archive_path: str = "", part_paths: list[str] | None = None) -> "ArchiveInputDescriptor":
         open_mode = str(raw.get("open_mode") or raw.get("kind") or "file")
@@ -229,3 +307,123 @@ class ArchiveInputDescriptor:
                 for index, path in enumerate(paths)
             ],
         )
+
+    @classmethod
+    def from_any(
+        cls,
+        raw: dict[str, Any] | None,
+        *,
+        archive_path: str,
+        part_paths: list[str] | None = None,
+        format_hint: str = "",
+        logical_name: str = "",
+    ) -> "ArchiveInputDescriptor":
+        if isinstance(raw, dict):
+            if raw.get("kind") == "archive_input" or raw.get("open_mode"):
+                descriptor = cls.from_dict(raw, archive_path=archive_path, part_paths=part_paths)
+            else:
+                descriptor = cls.from_legacy(raw, archive_path=archive_path, part_paths=part_paths)
+            if not descriptor.format_hint and format_hint:
+                return cls(
+                    entry_path=descriptor.entry_path,
+                    open_mode=descriptor.open_mode,
+                    format_hint=format_hint,
+                    logical_name=descriptor.logical_name or logical_name,
+                    parts=list(descriptor.parts),
+                    ranges=list(descriptor.ranges),
+                    segment=descriptor.segment,
+                    analysis=dict(descriptor.analysis),
+                )
+            return descriptor
+        return cls.from_parts(
+            archive_path=archive_path,
+            part_paths=part_paths,
+            format_hint=format_hint,
+            logical_name=logical_name,
+        )
+
+
+@dataclass(frozen=True)
+class ArchiveFormatState:
+    detected: str = ""
+    selected: str = ""
+    hint: str = ""
+    confidence: float = 0.0
+    status: str = ""
+
+
+@dataclass(frozen=True)
+class ArchiveRelationState:
+    kind: str = "file"
+    is_split: bool = False
+    is_sfx: bool = False
+    volumes_complete: bool | None = None
+    missing_indices: list[int] = field(default_factory=list)
+    missing_reason: str = ""
+
+
+@dataclass(frozen=True)
+class ArchiveLayoutState:
+    start_offset: int = 0
+    end_offset: int | None = None
+    has_prefix: bool = False
+    has_suffix: bool = False
+    embedded: bool = False
+
+
+@dataclass(frozen=True)
+class ArchiveIntegrityState:
+    damage_flags: list[str] = field(default_factory=list)
+    checksum_error: bool = False
+    payload_error: bool = False
+    partial: bool = False
+
+
+@dataclass(frozen=True)
+class ArchiveSecurityState:
+    encrypted: bool = False
+    password_required: bool = False
+    wrong_password: bool = False
+    password: str = ""
+
+
+@dataclass(frozen=True)
+class ArchiveRepairState:
+    repaired: bool = False
+    rounds: list[dict[str, Any]] = field(default_factory=list)
+    terminal_reason: str = ""
+
+
+@dataclass(frozen=True)
+class ArchiveRuntimeState:
+    output_dir: str = ""
+    codepage: str = ""
+    diagnostics: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ArchiveDescriptor:
+    id: str
+    logical_name: str
+    source: ArchiveInputDescriptor
+    format: ArchiveFormatState = field(default_factory=ArchiveFormatState)
+    relation: ArchiveRelationState = field(default_factory=ArchiveRelationState)
+    layout: ArchiveLayoutState = field(default_factory=ArchiveLayoutState)
+    integrity: ArchiveIntegrityState = field(default_factory=ArchiveIntegrityState)
+    security: ArchiveSecurityState = field(default_factory=ArchiveSecurityState)
+    repair: ArchiveRepairState = field(default_factory=ArchiveRepairState)
+    runtime: ArchiveRuntimeState = field(default_factory=ArchiveRuntimeState)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "logical_name": self.logical_name,
+            "source": self.source.to_dict(),
+            "format": self.format.__dict__,
+            "relation": self.relation.__dict__,
+            "layout": self.layout.__dict__,
+            "integrity": self.integrity.__dict__,
+            "security": self.security.__dict__,
+            "repair": self.repair.__dict__,
+            "runtime": self.runtime.__dict__,
+        }

@@ -1,5 +1,13 @@
 from dataclasses import dataclass, field
 from typing import Optional, List
+from smart_unpacker.contracts.archive_input import (
+    ArchiveDescriptor,
+    ArchiveFormatState,
+    ArchiveInputDescriptor,
+    ArchiveIntegrityState,
+    ArchiveRelationState,
+    ArchiveRepairState,
+)
 from smart_unpacker.contracts.detection import FactBag
 from smart_unpacker.support.path_keys import normalized_path, path_key
 
@@ -116,3 +124,91 @@ class ArchiveTask:
         self.fact_bag.set("file.split_members", [path for path in self.all_parts if path != self.main_path])
         if self.split_info.volumes:
             self.fact_bag.set("relation.split_volumes", list(self.split_info.volumes))
+        raw_archive_input = self.fact_bag.get("archive.input")
+        if isinstance(raw_archive_input, dict):
+            self.set_archive_input(self.archive_input().with_path_mapping(mapped))
+
+    def archive_input(self) -> ArchiveInputDescriptor:
+        return ArchiveInputDescriptor.from_any(
+            self.fact_bag.get("archive.input"),
+            archive_path=self.main_path,
+            part_paths=list(self.all_parts or [self.main_path]),
+            format_hint=self._format_hint(),
+            logical_name=str(self.logical_name or ""),
+        )
+
+    def set_archive_input(self, descriptor: ArchiveInputDescriptor | dict, *, sync_compat: bool = True) -> None:
+        if isinstance(descriptor, dict):
+            descriptor = ArchiveInputDescriptor.from_any(
+                descriptor,
+                archive_path=self.main_path,
+                part_paths=list(self.all_parts or [self.main_path]),
+                format_hint=self._format_hint(),
+                logical_name=str(self.logical_name or ""),
+            )
+        self.fact_bag.set("archive.input", descriptor.to_dict())
+        self.fact_bag.set("archive.descriptor.source", descriptor.to_dict())
+        if not sync_compat:
+            return
+        self.fact_bag.set("archive.current_entry_path", descriptor.entry_path)
+        self.fact_bag.set("archive.current_member_paths", descriptor.part_paths())
+        if descriptor.format_hint:
+            self.fact_bag.set("archive.format_hint", descriptor.format_hint)
+
+    def archive_descriptor(self) -> ArchiveDescriptor:
+        source = self.archive_input()
+        selected_format = str(self.fact_bag.get("analysis.selected_format") or "")
+        confidence = 0.0
+        evidence = self.fact_bag.get("analysis.segment")
+        if isinstance(evidence, dict):
+            confidence = float(evidence.get("confidence", 0.0) or 0.0)
+        damage_flags = []
+        if isinstance(evidence, dict):
+            damage_flags.extend(evidence.get("damage_flags") or [])
+        repair_rounds = self.fact_bag.get("repair.loop.rounds")
+        relation = ArchiveRelationState(
+            kind=str(self.fact_bag.get("candidate.kind") or ("split_archive" if self.split_info.is_split else "file")),
+            is_split=bool(self.split_info.is_split),
+            is_sfx=bool(self.split_info.is_sfx_stub),
+            volumes_complete=self.fact_bag.get("relation.split_group_complete"),
+            missing_indices=list(self.fact_bag.get("relation.split_missing_indices") or []),
+            missing_reason=str(self.fact_bag.get("relation.split_missing_reason") or ""),
+        )
+        return ArchiveDescriptor(
+            id=str(self.key or self.main_path),
+            logical_name=str(self.logical_name or ""),
+            source=source,
+            format=ArchiveFormatState(
+                detected=str(self.detected_ext or ""),
+                selected=selected_format,
+                hint=source.format_hint,
+                confidence=confidence,
+                status=str(self.fact_bag.get("analysis.status") or ""),
+            ),
+            relation=relation,
+            integrity=ArchiveIntegrityState(damage_flags=_dedupe([str(item) for item in damage_flags])),
+            repair=ArchiveRepairState(
+                repaired=bool(self.fact_bag.get("archive.repaired")),
+                rounds=list(repair_rounds) if isinstance(repair_rounds, list) else [],
+                terminal_reason=str(self.fact_bag.get("repair.loop.terminal_reason") or ""),
+            ),
+        )
+
+    def _format_hint(self) -> str:
+        return str(
+            self.fact_bag.get("archive.format_hint")
+            or self.fact_bag.get("analysis.selected_format")
+            or self.detected_ext
+            or ""
+        ).lstrip(".")
+
+
+def _dedupe(values: list[str]) -> list[str]:
+    output = []
+    seen = set()
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        output.append(value)
+    return output

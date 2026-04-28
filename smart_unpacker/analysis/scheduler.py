@@ -56,9 +56,12 @@ class ArchiveAnalysisScheduler:
         raw = fact_bag.get("archive.input") if fact_bag is not None and hasattr(fact_bag, "get") else None
         if not isinstance(raw, dict):
             return None
-        descriptor = self._normalize_archive_input(raw, task)
-        if descriptor is None:
-            return None
+        if hasattr(task, "archive_input"):
+            descriptor = task.archive_input()
+        else:
+            descriptor = self._normalize_archive_input(raw, task)
+            if descriptor is None:
+                return None
         if descriptor.open_mode == "file" and descriptor.entry_path:
             return self.analyze_path(descriptor.entry_path)
         if descriptor.open_mode in {"native_volumes", "staged_volumes", "sfx_with_volumes"} and descriptor.parts:

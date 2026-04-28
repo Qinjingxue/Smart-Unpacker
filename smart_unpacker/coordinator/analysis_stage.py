@@ -110,7 +110,7 @@ class ArchiveAnalysisStage:
         task.fact_bag.set("analysis.segment_index", index)
         task.fact_bag.set("analysis.segment", segment_payload)
         if archive_input:
-            task.fact_bag.set("archive.input", archive_input.to_dict())
+            task.set_archive_input(archive_input)
 
     def _record_report(self, task: ArchiveTask, report: ArchiveAnalysisReport) -> None:
         task.fact_bag.set("analysis.status", "extractable" if report.has_extractable else "not_extractable")

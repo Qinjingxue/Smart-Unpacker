@@ -233,6 +233,10 @@ class SevenZipRunner:
         return job
 
     def _archive_input(self, task: ArchiveTask, archive_path: str, part_paths: list[str]) -> ArchiveInputDescriptor | None:
+        if hasattr(task, "archive_input"):
+            raw = task.fact_bag.get("archive.input") if getattr(task, "fact_bag", None) is not None else None
+            if isinstance(raw, dict):
+                return task.archive_input()
         fact_bag = getattr(task, "fact_bag", None)
         raw = fact_bag.get("archive.input") if fact_bag is not None and hasattr(fact_bag, "get") else None
         if isinstance(raw, dict):
