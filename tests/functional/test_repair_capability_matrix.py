@@ -41,8 +41,35 @@ class MatrixCase:
     verify: VerifyFn | None = None
 
 
+@dataclass(frozen=True)
+class RepairRound:
+    flags: tuple[str, ...]
+    expected_statuses: tuple[str, ...]
+    expected_module: str
+
+
+@dataclass(frozen=True)
+class MultiRoundCase:
+    case_id: str
+    fmt: str
+    build: BuildFn
+    rounds: tuple[RepairRound, ...]
+    verify: VerifyFn
+
+
 def _run_matrix_repair(tmp_path: Path, case: MatrixCase, fixture: MatrixFixture) -> RepairResult:
-    scheduler = RepairScheduler({
+    scheduler = _repair_scheduler(tmp_path)
+    return scheduler.repair(RepairJob(
+        source_input=fixture.source_input,
+        format=case.fmt,
+        confidence=0.82,
+        damage_flags=list(case.flags),
+        archive_key=case.case_id,
+    ))
+
+
+def _repair_scheduler(tmp_path: Path) -> RepairScheduler:
+    return RepairScheduler({
         "repair": {
             "workspace": str(tmp_path / "repair-workspace"),
             "max_modules_per_job": 8,
@@ -53,13 +80,6 @@ def _run_matrix_repair(tmp_path: Path, case: MatrixCase, fixture: MatrixFixture)
             },
         }
     })
-    return scheduler.repair(RepairJob(
-        source_input=fixture.source_input,
-        format=case.fmt,
-        confidence=0.82,
-        damage_flags=list(case.flags),
-        archive_key=case.case_id,
-    ))
 
 
 def _fixture_from_bytes(root: Path, name: str, data: bytes, **kwargs) -> MatrixFixture:
@@ -217,6 +237,22 @@ def _build_zip_multiple_directory_fields(root: Path) -> MatrixFixture:
     return _fixture_from_bytes(root, "zip-multi-cd.zip", bytes(data), zip_entries=_zip_entries())
 
 
+def _build_zip_eocd_four_field_combo(root: Path) -> MatrixFixture:
+    original = _zip_bytes()
+    data = bytearray(original)
+    eocd = _zip_eocd_offset(data)
+    struct.pack_into("<HH", data, eocd + 8, 1, 1)
+    struct.pack_into("<I", data, eocd + 16, 0)
+    struct.pack_into("<H", data, eocd + 20, 0)
+    return _fixture_from_bytes(
+        root,
+        "zip-eocd-four-field-combo.zip",
+        bytes(data) + b"JUNK",
+        expected_bytes=original,
+        zip_entries=_zip_entries(),
+    )
+
+
 def _build_zip_split_trailing_junk(root: Path) -> MatrixFixture:
     original = _zip_bytes()
     return _fixture_from_ranges(
@@ -337,6 +373,13 @@ def _build_7z_start_and_next_crc_bad(root: Path) -> MatrixFixture:
     data = _patch_7z_next_crc(original, 0, recompute_start_crc=False)
     data = data[:8] + b"\0\0\0\0" + data[12:]
     return _fixture_from_bytes(root, "seven-two-crc.7z", data, expected_bytes=original)
+
+
+def _build_7z_crc_fields_and_trailing_junk(root: Path) -> MatrixFixture:
+    original = _seven_zip_bytes(minor=4)
+    data = _patch_7z_next_crc(original, 0, recompute_start_crc=False)
+    data = data[:8] + b"\0\0\0\0" + data[12:] + b"JUNK"
+    return _fixture_from_bytes(root, "seven-crc-fields-tail.7z", data, expected_bytes=original)
 
 
 def _build_7z_sfx_prefix_tail(root: Path) -> MatrixFixture:
@@ -480,6 +523,12 @@ def _build_tar_bad_checksum(root: Path) -> MatrixFixture:
     return _fixture_from_bytes(root, "tar-bad-checksum.tar", bytes(data), tar_entries=_tar_entries())
 
 
+def _build_tar_checksum_and_missing_zero_blocks(root: Path) -> MatrixFixture:
+    data = bytearray(_tar_bytes(_tar_entries())[:1024])
+    data[148:156] = b"000000\0 "
+    return _fixture_from_bytes(root, "tar-checksum-missing-zero.tar", bytes(data), tar_entries=_tar_entries())
+
+
 def _build_tar_missing_zero_blocks(root: Path) -> MatrixFixture:
     data = _tar_bytes(_tar_entries())
     return _fixture_from_bytes(root, "tar-missing-zero.tar", data[:1024], tar_entries=_tar_entries())
@@ -551,6 +600,7 @@ MATRIX = [
     MatrixCase("zip_data_descriptor", "zip", ("data_descriptor", "compressed_size_bad"), _build_zip_descriptor, ("repaired",), "zip_data_descriptor_recovery", _verify_zip),
     MatrixCase("zip64_data_descriptor", "zip", ("data_descriptor", "compressed_size_bad"), _build_zip64_descriptor, ("repaired",), "zip_data_descriptor_recovery", _verify_zip),
     MatrixCase("zip_multiple_directory_fields", "zip", ("central_directory_offset_bad", "central_directory_count_bad", "central_directory_bad"), _build_zip_multiple_directory_fields, ("repaired",), "zip_eocd_repair", _verify_zip),
+    MatrixCase("zip_eocd_four_field_combo", "zip", ("central_directory_offset_bad", "central_directory_count_bad", "comment_length_bad", "trailing_junk", "central_directory_bad"), _build_zip_eocd_four_field_combo, ("repaired",), "zip_eocd_repair", _verify_zip),
     MatrixCase("zip_split_trailing_junk", "zip", ("trailing_junk", "boundary_unreliable"), _build_zip_split_trailing_junk, ("repaired",), "zip_trailing_junk_trim", _verify_zip),
     MatrixCase("zip_sfx_prefix_tail", "zip", ("carrier_archive", "sfx", "boundary_unreliable", "trailing_junk"), _build_zip_sfx_prefix_tail, ("repaired", "partial"), "zip_deep_partial_recovery", _verify_zip),
     MatrixCase("zip_sfx_split_prefix_tail", "zip", ("carrier_archive", "sfx", "boundary_unreliable", "trailing_junk"), _build_zip_sfx_split_prefix_tail, ("repaired", "partial"), "zip_deep_partial_recovery", _verify_zip),
@@ -560,6 +610,7 @@ MATRIX = [
     MatrixCase("7z_start_crc_bad_v03", "7z", ("start_header_crc_bad",), _build_7z_start_crc_bad_v03, ("repaired",), "seven_zip_start_header_crc_fix", _verify_bytes),
     MatrixCase("7z_next_crc_bad", "7z", ("next_header_crc_bad",), _build_7z_next_crc_bad, ("repaired",), "seven_zip_crc_field_repair", _verify_bytes),
     MatrixCase("7z_start_and_next_crc_bad", "7z", ("start_header_crc_bad", "next_header_crc_bad"), _build_7z_start_and_next_crc_bad, ("repaired",), "seven_zip_crc_field_repair", _verify_bytes),
+    MatrixCase("7z_crc_fields_and_trailing_junk", "7z", ("start_header_crc_bad", "next_header_crc_bad", "trailing_junk"), _build_7z_crc_fields_and_trailing_junk, ("repaired",), "seven_zip_crc_field_repair", _verify_bytes),
     MatrixCase("7z_sfx_prefix_tail", "7z", ("carrier_archive", "sfx", "boundary_unreliable", "trailing_junk"), _build_7z_sfx_prefix_tail, ("repaired",), "seven_zip_precise_boundary_repair", _verify_bytes),
     MatrixCase("7z_split_trailing_junk", "7z", ("trailing_junk", "boundary_unreliable"), _build_7z_split_trailing_junk, ("repaired",), "seven_zip_boundary_trim", _verify_bytes),
     MatrixCase("7z_sfx_split_prefix_tail", "7z", ("carrier_archive", "sfx", "boundary_unreliable", "trailing_junk"), _build_7z_sfx_split_prefix_tail, ("repaired",), "seven_zip_precise_boundary_repair", _verify_bytes),
@@ -588,11 +639,28 @@ MATRIX = [
 ]
 
 
+MULTI_ROUND_MATRIX = [
+    MultiRoundCase(
+        "tar_checksum_then_missing_zero_blocks",
+        "tar",
+        _build_tar_checksum_and_missing_zero_blocks,
+        (
+            RepairRound(("tar_checksum_bad", "missing_end_block", "probably_truncated"), ("repaired",), "tar_header_checksum_fix"),
+            RepairRound(("missing_end_block", "probably_truncated"), ("repaired",), "tar_trailing_zero_block_repair"),
+        ),
+        _verify_tar,
+    ),
+]
+
+
 def test_repair_matrix_is_large_enough_to_cover_format_and_damage_axes():
     formats = {case.fmt for case in MATRIX}
     assert {"zip", "7z", "rar", "tar", "gzip", "bzip2", "xz"} <= formats
     assert len(MATRIX) >= 30
     assert any(case.expected_statuses == ("unrepairable", "unsupported") for case in MATRIX)
+    assert any(len(case.flags) >= 4 for case in MATRIX)
+    assert any(len(case.flags) == 3 for case in MATRIX)
+    assert any(len(round_spec.flags) == 2 for case in MULTI_ROUND_MATRIX for round_spec in case.rounds)
 
 
 @pytest.mark.parametrize("case", MATRIX, ids=lambda case: case.case_id)
@@ -614,3 +682,30 @@ def test_repair_layer_routes_and_repairs_format_damage_matrix(tmp_path, case: Ma
 
     assert result.ok is False
     assert result.repaired_input is None
+
+
+@pytest.mark.parametrize("case", MULTI_ROUND_MATRIX, ids=lambda case: case.case_id)
+def test_repair_layer_composes_multi_error_repairs_across_rounds(tmp_path, case: MultiRoundCase):
+    fixture = case.build(tmp_path / case.case_id)
+    scheduler = _repair_scheduler(tmp_path)
+    source_input = fixture.source_input
+    result = None
+
+    for index, round_spec in enumerate(case.rounds, start=1):
+        result = scheduler.repair(RepairJob(
+            source_input=source_input,
+            format=case.fmt,
+            confidence=0.82,
+            damage_flags=list(round_spec.flags),
+            archive_key=f"{case.case_id}_round_{index}",
+            attempts=index - 1,
+        ))
+        assert result.status in round_spec.expected_statuses
+        assert result.module_name == round_spec.expected_module
+        assert result.ok is True
+        assert isinstance(result.repaired_input, dict)
+        assert Path(result.repaired_input["path"]).is_file()
+        source_input = {"kind": "file", "path": result.repaired_input["path"]}
+
+    assert result is not None
+    case.verify(result, fixture)
