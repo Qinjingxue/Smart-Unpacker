@@ -95,6 +95,27 @@ def test_repair_beam_ranks_verification_completeness_over_module_confidence():
     assert round_result.accepted_states[0].decision_hint == "accept"
 
 
+def test_repair_beam_verified_low_confidence_beats_unverified_high_confidence():
+    scheduler = _FakeCandidateScheduler([
+        _candidate("unverified_high_confidence", confidence=0.95),
+        _verified_candidate("verified_low_confidence", confidence=0.2),
+    ])
+    loop = RepairBeamLoop(
+        scheduler,
+        beam_width=1,
+        max_analyze_candidates=1,
+        max_assess_candidates=1,
+    )
+
+    round_result = loop.expand_round([
+        RepairBeamState(source_input={"kind": "file", "path": "broken.zip"}, format="zip", archive_key="broken")
+    ], round_index=1)
+
+    assert len(round_result.candidates) == 1
+    assert round_result.candidates[0].candidate.module_name == "verified_low_confidence"
+    assert round_result.states_out[0].history[-1]["module"] == "verified_low_confidence"
+
+
 def test_repair_beam_run_stops_on_accepted_state():
     scheduler = _FakeCandidateScheduler([
         _candidate("complete", confidence=0.5),
@@ -228,6 +249,31 @@ def _candidate(module_name, *, confidence, path=None):
         confidence=confidence,
         actions=[module_name],
         validations=[CandidateValidation(name="module_result", accepted=True, score=confidence)],
+    )
+
+
+def _verified_candidate(module_name, *, confidence, path=None):
+    return RepairCandidate(
+        module_name=module_name,
+        format="zip",
+        repaired_input={"kind": "file", "path": path or f"{module_name}.zip", "format_hint": "zip"},
+        confidence=confidence,
+        actions=[module_name],
+        validations=[
+            CandidateValidation(name="module_result", accepted=True, score=confidence),
+            CandidateValidation(
+                name="native_candidate_validation",
+                accepted=True,
+                score=1.0,
+                details={
+                    "probe": {"is_archive": True, "is_broken": False},
+                    "test": {"ok": True},
+                    "dry_run": {"ok": True, "files_written": 1, "bytes_written": 12},
+                    "resource_analysis": {"ok": True},
+                    "archive_coverage": {"completeness": 1.0},
+                },
+            ),
+        ],
     )
 
 
