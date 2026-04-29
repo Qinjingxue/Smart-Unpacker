@@ -1,10 +1,10 @@
 from pathlib import Path
 
-from packrelic.contracts.archive_input import ArchiveInputDescriptor, ArchiveInputPart, ArchiveInputRange
-from packrelic.contracts.archive_state import ArchiveState, PatchOperation, PatchPlan
-from packrelic.contracts.detection import FactBag
-from packrelic.contracts.tasks import ArchiveTask
-from packrelic.repair.job import RepairJob
+from sunpack.contracts.archive_input import ArchiveInputDescriptor, ArchiveInputPart, ArchiveInputRange
+from sunpack.contracts.archive_state import ArchiveState, PatchOperation, PatchPlan
+from sunpack.contracts.detection import FactBag
+from sunpack.contracts.tasks import ArchiveTask
+from sunpack.repair.job import RepairJob
 
 
 def test_archive_task_exposes_default_descriptor_from_task_paths(tmp_path):

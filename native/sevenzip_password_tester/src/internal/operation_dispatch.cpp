@@ -6,7 +6,7 @@
 #include <cwctype>
 #include <filesystem>
 
-namespace packrelic::sevenzip {
+namespace sunpack::sevenzip {
 
 namespace {
 
@@ -154,4 +154,4 @@ ArchiveOperationResult run_archive_operation(const ArchiveOperationRequest& requ
     }
 }
 
-}  // namespace packrelic::sevenzip
+}  // namespace sunpack::sevenzip

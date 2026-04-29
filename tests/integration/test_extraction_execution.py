@@ -4,11 +4,11 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from packrelic.detection.nested_scan_policy import NestedOutputScanPolicy as OutputScanPolicy
-from packrelic.config.schema import normalize_config
-from packrelic.extraction.scheduler import ExtractionScheduler
-from packrelic.contracts.detection import FactBag
-from packrelic.contracts.tasks import ArchiveTask
+from sunpack.detection.nested_scan_policy import NestedOutputScanPolicy as OutputScanPolicy
+from sunpack.config.schema import normalize_config
+from sunpack.extraction.scheduler import ExtractionScheduler
+from sunpack.contracts.detection import FactBag
+from sunpack.contracts.tasks import ArchiveTask
 from tests.helpers.detection_config import with_detection_pipeline
 
 
@@ -245,7 +245,7 @@ class ExtractionExecutionTests(unittest.TestCase):
             self.assertTrue(good_path.exists())
             self.assertTrue(partial_path.exists())
             self.assertEqual(result.progress_manifest, "")
-            self.assertFalse((out_dir / ".packrelic" / "extraction_manifest.json").exists())
+            self.assertFalse((out_dir / ".sunpack" / "extraction_manifest.json").exists())
             manifest = result.progress_manifest_payload
             self.assertIsInstance(manifest, dict)
             by_archive_path = {item["archive_path"]: item for item in manifest["files"]}

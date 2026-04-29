@@ -10,7 +10,7 @@
 #include <filesystem>
 #include <limits>
 
-namespace packrelic::sevenzip {
+namespace sunpack::sevenzip {
 
 namespace {
 
@@ -256,4 +256,4 @@ std::vector<EmbeddedSevenZipCandidate> find_embedded_seven_zip_candidates(
     return candidates;
 }
 
-}  // namespace packrelic::sevenzip
+}  // namespace sunpack::sevenzip

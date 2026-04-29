@@ -17,8 +17,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
-from packrelic.contracts.archive_input import ArchiveInputDescriptor
-from packrelic.contracts.archive_state import PatchOperation, PatchPlan
+from sunpack.contracts.archive_input import ArchiveInputDescriptor
+from sunpack.contracts.archive_state import PatchOperation, PatchPlan
 
 
 ArchiveFormat = Literal["zip", "tar", "gzip", "bzip2", "xz", "7z", "rar"]
@@ -135,7 +135,7 @@ class CorruptionCase:
             ] or None,
             format_hint=self.format,
         )
-        from packrelic.contracts.archive_state import ArchiveState
+        from sunpack.contracts.archive_state import ArchiveState
 
         return ArchiveState.from_archive_input(descriptor, patches=[self.patch_plan])
 

@@ -87,13 +87,13 @@ def run_measured(name: str, fn: Callable[[], object]) -> object:
 
 
 def load_runtime_config() -> dict:
-    from packrelic.config.loader import load_config
+    from sunpack.config.loader import load_config
 
     return load_config()
 
 
 def cmd_dir_config(target: str, depth: int | None) -> None:
-    from packrelic.filesystem.directory_scanner import DirectoryScanner
+    from sunpack.filesystem.directory_scanner import DirectoryScanner
 
     snapshot = run_measured(
         "DirectoryScanner configured",
@@ -103,7 +103,7 @@ def cmd_dir_config(target: str, depth: int | None) -> None:
 
 
 def cmd_dir_empty(target: str, depth: int | None) -> None:
-    from packrelic.filesystem.directory_scanner import DirectoryScanner
+    from sunpack.filesystem.directory_scanner import DirectoryScanner
 
     snapshot = run_measured(
         "DirectoryScanner empty-config",
@@ -113,7 +113,7 @@ def cmd_dir_empty(target: str, depth: int | None) -> None:
 
 
 def cmd_scene_snapshot(target: str, depth: int) -> None:
-    from packrelic.detection.internal.scan_session import DetectionScanSession
+    from sunpack.detection.internal.scan_session import DetectionScanSession
 
     session = DetectionScanSession(config=load_runtime_config())
     snapshot = run_measured(
@@ -124,9 +124,9 @@ def cmd_scene_snapshot(target: str, depth: int) -> None:
 
 
 def cmd_scene_markers(target: str, depth: int) -> None:
-    from packrelic.detection.internal.scan_session import DetectionScanSession
-    from packrelic.detection.pipeline.facts.collectors.scene_markers import _collect_scene_markers_for_directory
-    from packrelic.detection.scene.definitions import scene_rules
+    from sunpack.detection.internal.scan_session import DetectionScanSession
+    from sunpack.detection.pipeline.facts.collectors.scene_markers import _collect_scene_markers_for_directory
+    from sunpack.detection.scene.definitions import scene_rules
 
     session = DetectionScanSession(config=load_runtime_config())
     rules = scene_rules({})
@@ -140,8 +140,8 @@ def cmd_scene_markers(target: str, depth: int) -> None:
 
 
 def cmd_relations(target: str, depth: int | None) -> None:
-    from packrelic.filesystem.directory_scanner import DirectoryScanner
-    from packrelic.relations.scheduler import RelationsScheduler
+    from sunpack.filesystem.directory_scanner import DirectoryScanner
+    from sunpack.relations.scheduler import RelationsScheduler
 
     snapshot = DirectoryScanner(target, max_depth=depth, config=load_runtime_config()).scan()
     print(summarize_snapshot(snapshot))
@@ -153,7 +153,7 @@ def cmd_relations(target: str, depth: int | None) -> None:
 
 
 def cmd_fact_bags(target: str) -> None:
-    from packrelic.detection.internal.scan_session import DetectionScanSession
+    from sunpack.detection.internal.scan_session import DetectionScanSession
 
     session = DetectionScanSession(config=load_runtime_config())
     bags = run_measured(
@@ -168,9 +168,9 @@ class MemoryStop(RuntimeError):
 
 
 def cmd_evaluate_watch(target: str, rss_stop_mib: float | None) -> None:
-    import packrelic.filesystem.directory_scanner as directory_scanner
-    import packrelic.detection.pipeline.facts.collectors.scene_markers as scene_markers
-    from packrelic.detection.scheduler import DetectionScheduler
+    import sunpack.filesystem.directory_scanner as directory_scanner
+    import sunpack.detection.pipeline.facts.collectors.scene_markers as scene_markers
+    from sunpack.detection.scheduler import DetectionScheduler
 
     counts = Counter()
     original_scan = directory_scanner.DirectoryScanner.scan
@@ -233,13 +233,13 @@ def cmd_evaluate_watch(target: str, rss_stop_mib: float | None) -> None:
 
 
 def cmd_scene_dir_walk(target: str, limit: int | None, rss_stop_mib: float | None) -> None:
-    from packrelic.detection.internal.scan_session import DetectionScanSession
-    from packrelic.detection.pipeline.facts.collectors.scene_markers import (
+    from sunpack.detection.internal.scan_session import DetectionScanSession
+    from sunpack.detection.pipeline.facts.collectors.scene_markers import (
         _scene_snapshot_depth,
         candidate_directories,
     )
-    from packrelic.detection.scene.definitions import scene_rules
-    from packrelic.support.path_keys import normalized_path, path_key
+    from sunpack.detection.scene.definitions import scene_rules
+    from sunpack.support.path_keys import normalized_path, path_key
 
     rules = scene_rules({})
     depth = _scene_snapshot_depth(rules)

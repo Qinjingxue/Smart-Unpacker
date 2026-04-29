@@ -62,18 +62,18 @@ $env:PYTHONPATH = $repoRoot
 Invoke-TestStep -Label "Native extension smoke test" -Command @(
     $python,
     "-c",
-    "import packrelic_native as n; assert n.native_available(); assert callable(n.inspect_pe_overlay_structure); from packrelic.support.sevenzip_native import NativePasswordTester; assert NativePasswordTester().available()"
+    "import sunpack_native as n; assert n.native_available(); assert callable(n.inspect_pe_overlay_structure); from sunpack.support.sevenzip_native import NativePasswordTester; assert NativePasswordTester().available()"
 )
 Invoke-TestStep -Label "Unit tests" -Command @($python, "-m", "pytest", "-q", "tests/unit")
 Invoke-TestStep -Label "Functional tests" -Command @($python, "-m", "pytest", "-q", "tests/functional")
 Invoke-TestStep -Label "CLI contract tests" -Command @($python, "-m", "pytest", "-q", "tests/cli")
 Invoke-TestStep -Label "Data case runners" -Command @($python, "-m", "pytest", "-q", "tests/runners")
 Invoke-TestStep -Label "Archive mixed-batch acceptance" -Command @($python, "tests\performance_split_archives\split_archive_pressure.py", "--profile", "acceptance-batch", "--strict", "--no-json")
-Invoke-TestStep -Label "CLI help smoke test" -Command @($python, "pkrc.py", "--help")
-Invoke-TestStep -Label "CLI passwords smoke test" -Command @($python, "pkrc.py", "passwords", "--json")
-Invoke-TestStep -Label "CLI scan smoke test" -Command @($python, "pkrc.py", "scan", (Join-Path $repoRoot "tests"), "--json")
-Invoke-TestStep -Label "CLI inspect smoke test" -Command @($python, "pkrc.py", "inspect", (Join-Path $repoRoot "tests"), "--json")
-Invoke-TestStep -Label "CLI config smoke test" -Command @($python, "pkrc.py", "config", "--json", "show")
+Invoke-TestStep -Label "CLI help smoke test" -Command @($python, "sunpack.py", "--help")
+Invoke-TestStep -Label "CLI passwords smoke test" -Command @($python, "sunpack.py", "passwords", "--json")
+Invoke-TestStep -Label "CLI scan smoke test" -Command @($python, "sunpack.py", "scan", (Join-Path $repoRoot "tests"), "--json")
+Invoke-TestStep -Label "CLI inspect smoke test" -Command @($python, "sunpack.py", "inspect", (Join-Path $repoRoot "tests"), "--json")
+Invoke-TestStep -Label "CLI config smoke test" -Command @($python, "sunpack.py", "config", "--json", "show")
 
 Write-Host ""
 Write-Host "Summary" -ForegroundColor Cyan

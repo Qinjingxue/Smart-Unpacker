@@ -1,11 +1,11 @@
 from pathlib import Path
 
-from packrelic.contracts.detection import FactBag
-from packrelic.contracts.tasks import ArchiveTask
-from packrelic.coordinator.repair_stage import ArchiveRepairStage
-from packrelic.extraction.result import ExtractionResult
-from packrelic.repair.result import RepairResult
-from packrelic.verification.result import ArchiveCoverageSummary, VerificationResult
+from sunpack.contracts.detection import FactBag
+from sunpack.contracts.tasks import ArchiveTask
+from sunpack.coordinator.repair_stage import ArchiveRepairStage
+from sunpack.extraction.result import ExtractionResult
+from sunpack.repair.result import RepairResult
+from sunpack.verification.result import ArchiveCoverageSummary, VerificationResult
 
 
 def test_repair_stage_builds_job_from_verification_decision(tmp_path):
@@ -61,7 +61,7 @@ def test_repair_stage_passes_verification_progress_to_repair_job(tmp_path):
     repaired = tmp_path / "partial.zip"
     source.write_bytes(b"broken")
     repaired.write_bytes(b"partial")
-    manifest = tmp_path / "out" / ".packrelic" / "extraction_manifest.json"
+    manifest = tmp_path / "out" / ".sunpack" / "extraction_manifest.json"
     manifest.parent.mkdir(parents=True)
     manifest.write_text("{}", encoding="utf-8")
     task = _task(source)

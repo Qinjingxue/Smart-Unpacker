@@ -6,7 +6,7 @@
 
 
 
-namespace packrelic::sevenzip {
+namespace sunpack::sevenzip {
 
 
 
@@ -24,5 +24,5 @@ bool strict_seven_zip_headers_ok(const std::wstring& path);
 
 
 
-}  // namespace packrelic::sevenzip
+}  // namespace sunpack::sevenzip
 

@@ -6,8 +6,8 @@ from pathlib import Path
 import psutil
 import pytest
 
-from packrelic.config.schema import normalize_config
-from packrelic.coordinator.runner import PipelineRunner
+from sunpack.config.schema import normalize_config
+from sunpack.coordinator.runner import PipelineRunner
 
 
 MiB = 1024 * 1024

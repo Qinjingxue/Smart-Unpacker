@@ -3,7 +3,7 @@
 #include <string>
 #include <vector>
 
-namespace packrelic::sevenzip {
+namespace sunpack::sevenzip {
 
 struct EmbeddedSevenZipCandidate {
     std::wstring path;
@@ -17,4 +17,4 @@ std::vector<EmbeddedSevenZipCandidate> find_embedded_seven_zip_candidates(
 
 bool is_standard_seven_zip_path(const std::wstring& path);
 
-}  // namespace packrelic::sevenzip
+}  // namespace sunpack::sevenzip

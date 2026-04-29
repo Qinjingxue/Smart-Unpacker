@@ -10,7 +10,7 @@ from tests.helpers.generated_fixtures import build_cli_pipeline_fixture
 
 def run_cli(*args):
     return subprocess.run(
-        [sys.executable, "-B", "pkrc.py", *args],
+        [sys.executable, "-B", "sunpack.py", *args],
         capture_output=True,
         text=True,
         encoding="utf-8",

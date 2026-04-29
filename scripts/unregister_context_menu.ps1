@@ -2,10 +2,10 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 $keys = @(
-    "HKCU:\Software\Classes\Directory\shell\PackRelic",
-    "HKCU:\Software\Classes\Directory\Background\shell\PackRelic",
-    "HKCU:\Software\Classes\PackRelic.FolderContextMenu",
-    "HKCU:\Software\Classes\PackRelic.BackgroundContextMenu"
+    "HKCU:\Software\Classes\Directory\shell\SunPack",
+    "HKCU:\Software\Classes\Directory\Background\shell\SunPack",
+    "HKCU:\Software\Classes\SunPack.FolderContextMenu",
+    "HKCU:\Software\Classes\SunPack.BackgroundContextMenu"
 )
 
 foreach ($key in $keys) {

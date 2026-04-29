@@ -1,7 +1,7 @@
 from copy import deepcopy
 from typing import Any
 
-from packrelic.detection.scene.definitions import RECOMMENDED_SCENE_RULES_PAYLOAD
+from sunpack.detection.scene.definitions import RECOMMENDED_SCENE_RULES_PAYLOAD
 from tests.helpers.detection_config import with_detection_pipeline
 
 

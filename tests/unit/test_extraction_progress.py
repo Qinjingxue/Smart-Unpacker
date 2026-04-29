@@ -1,6 +1,6 @@
 import json
 
-from packrelic.extraction.progress import filter_extraction_manifest_payload, filter_extraction_outputs
+from sunpack.extraction.progress import filter_extraction_manifest_payload, filter_extraction_outputs
 
 
 def test_filter_extraction_outputs_discards_incomplete_when_complete_exists(tmp_path):
@@ -67,7 +67,7 @@ def test_filter_extraction_manifest_payload_does_not_require_manifest_file(tmp_p
 
 
 def _write_manifest(tmp_path, files):
-    manifest = tmp_path / ".packrelic" / "extraction_manifest.json"
+    manifest = tmp_path / ".sunpack" / "extraction_manifest.json"
     manifest.parent.mkdir()
     manifest.write_text(json.dumps({"files": files}, ensure_ascii=False), encoding="utf-8")
     return manifest

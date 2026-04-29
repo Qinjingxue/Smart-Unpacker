@@ -6,7 +6,7 @@
 
 
 
-namespace packrelic::sevenzip {
+namespace sunpack::sevenzip {
 
 
 
@@ -28,4 +28,4 @@ const char* operation_result_name(Int32 op_res);
 
 
 
-}  // namespace packrelic::sevenzip
+}  // namespace sunpack::sevenzip

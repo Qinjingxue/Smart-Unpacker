@@ -1,6 +1,6 @@
-# PackRelic
+# SunPack
 
-PackRelic 是一个 Windows-first 的智能归档处理与损坏压缩包尽力恢复工具。它不只是批量调用 7-Zip 解压，而是围绕真实文件状态建立一条可循环的 pipeline：
+SunPack 是一个 Windows-first 的智能归档处理与损坏压缩包尽力恢复工具。它不只是批量调用 7-Zip 解压，而是围绕真实文件状态建立一条可循环的 pipeline：
 
 ```text
 detection -> analysis -> extraction -> verification -> repair -> extraction -> verification
@@ -8,7 +8,7 @@ detection -> analysis -> extraction -> verification -> repair -> extraction -> v
 
 项目的目标是：在复杂下载目录、游戏/程序目录、伪装载体、分卷包、嵌套包和损坏包里，尽量找出真正应该处理的归档；解压失败时尽量恢复可用文件；恢复出多个候选时用 verification 比较完整度，保留更好的结果。
 
-当前项目的 CLI 已支持中文，默认配置文件是 `packrelic_config.json`。源码入口是 `python pkrc.py`；Windows 打包后入口是 `sunpack.exe`。
+当前项目的 CLI 已支持中文，默认配置文件是 `sunpack_config.json`。源码入口是 `python sunpack.py`；Windows 打包后入口是 `sunpack.exe`。
 
 ## 核心能力
 
@@ -25,7 +25,7 @@ detection -> analysis -> extraction -> verification -> repair -> extraction -> v
 
 ## 当前定位
 
-PackRelic 更像一个“归档恢复协调器”而不是普通解压器：
+SunPack 更像一个“归档恢复协调器”而不是普通解压器：
 
 - 对干净压缩包：批量、递归、密码、分卷、清理和扁平化。
 - 对可疑文件：通过 detection/analysis 尽量避免误判。
@@ -49,25 +49,25 @@ PackRelic 更像一个“归档恢复协调器”而不是普通解压器：
 确认 native 组件可用：
 
 ```powershell
-python -c "import packrelic_native as n; print(n.native_available(), n.scanner_version())"
-python -c "from packrelic.support.sevenzip_native import NativePasswordTester; print(NativePasswordTester().available())"
+python -c "import sunpack_native as n; print(n.native_available(), n.scanner_version())"
+python -c "from sunpack.support.sevenzip_native import NativePasswordTester; print(NativePasswordTester().available())"
 ```
 
 常用命令：
 
 ```powershell
-python pkrc.py scan D:\Downloads
-python pkrc.py inspect D:\Downloads -v
-python pkrc.py extract D:\Downloads
-python pkrc.py watch D:\Downloads --out-dir D:\Unpacked
-python pkrc.py extract D:\Archives -p 123456 --pw-file .\passwords.txt
-python pkrc.py config validate
+python sunpack.py scan D:\Downloads
+python sunpack.py inspect D:\Downloads -v
+python sunpack.py extract D:\Downloads
+python sunpack.py watch D:\Downloads --out-dir D:\Unpacked
+python sunpack.py extract D:\Archives -p 123456 --pw-file .\passwords.txt
+python sunpack.py config validate
 ```
 
 打包后的程序使用同一套命令：
 
 ```powershell
-.\dist\\packrelic\sunpack.exe extract D:\Downloads
+.\dist\\sunpack\sunpack.exe extract D:\Downloads
 ```
 
 ## 命令速览
@@ -86,10 +86,10 @@ python pkrc.py config validate
 
 ## 配置重点
 
-主配置文件是 `packrelic_config.json`。修改后建议执行：
+主配置文件是 `sunpack_config.json`。修改后建议执行：
 
 ```powershell
-python pkrc.py config validate
+python sunpack.py config validate
 ```
 
 常用配置：
@@ -132,8 +132,8 @@ app/config
 
 项目是 Python + Rust + C++ 三层协作：
 
-- `packrelic/`：配置、CLI、调度、规则、verification/repair 决策编排。
-- `native/packrelic_native/`：Rust/PyO3 热路径，包括目录扫描、二进制结构分析、repair I/O、CRC/readability、candidate matching、deep repair native 实现等。
+- `sunpack/`：配置、CLI、调度、规则、verification/repair 决策编排。
+- `native/sunpack_native/`：Rust/PyO3 热路径，包括目录扫描、二进制结构分析、repair I/O、CRC/readability、candidate matching、deep repair native 实现等。
 - `native/sevenzip_password_tester/`：C++/CMake 7z.dll wrapper，提供 probe/test、密码数组尝试和 `sevenzip_worker.exe`。
 
 运行时必须有：
@@ -187,7 +187,7 @@ pytest --run-large-archive-performance -s
 默认菜单项会执行：
 
 ```powershell
-pkrc extract <目标目录> --ask-pw --pause
+sunpack extract <目标目录> --ask-pw --pause
 ```
 
 取消注册：
@@ -212,6 +212,6 @@ Windows 打包：
 .\scripts\build_windows.ps1 -Version 1.2.3
 ```
 
-构建脚本会准备 `.venv-build`，构建 Rust wheel 和 C++ worker，用 PyInstaller 生成 `sunpack.exe`，复制 `packrelic_config.json`、`builtin_passwords.txt` 和 `tools/` 运行文件，并执行 packaged smoke test。发行包输出到 `release\packrelic-windows-<arch>-<version>.zip`。
+构建脚本会准备 `.venv-build`，构建 Rust wheel 和 C++ worker，用 PyInstaller 生成 `sunpack.exe`，复制 `sunpack_config.json`、`builtin_passwords.txt` 和 `tools/` 运行文件，并执行 packaged smoke test。发行包输出到 `release\sunpack-windows-<arch>-<version>.zip`。
 
 构建脚本支持 `-Arch x64|arm64`。`x64` 是默认值；ARM64 最终可执行文件需要在 ARM64 Windows + ARM64 Python 环境中构建，脚本会静态校验包内所有关键 PE 文件的 machine 架构。已有包可用 `.\scripts\verify_windows_package_arch.ps1 -PackageRoot <dist目录> -Arch arm64` 在任意 Windows 机器上做静态检查。

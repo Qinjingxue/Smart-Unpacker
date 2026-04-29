@@ -1,9 +1,9 @@
 from pathlib import Path
 
-from packrelic.detection.nested_scan_policy import NestedOutputScanPolicy as OutputScanPolicy
-from packrelic.coordinator.scanner import ScanOrchestrator
-from packrelic.detection import DetectionScheduler
-from packrelic.detection.scene.definitions import RECOMMENDED_SCENE_RULES_PAYLOAD
+from sunpack.detection.nested_scan_policy import NestedOutputScanPolicy as OutputScanPolicy
+from sunpack.coordinator.scanner import ScanOrchestrator
+from sunpack.detection import DetectionScheduler
+from sunpack.detection.scene.definitions import RECOMMENDED_SCENE_RULES_PAYLOAD
 from tests.helpers.detection_config import with_detection_pipeline
 
 

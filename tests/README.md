@@ -20,7 +20,7 @@
 
 当前用例类型：
 
-- `cases/cli/*.json`：通过 `tests.helpers.cli_runner` 运行 `pkrc.py`，检查 JSON 或文本命令契约。
+- `cases/cli/*.json`：通过 `tests.helpers.cli_runner` 运行 `sunpack.py`，检查 JSON 或文本命令契约。
 - `cases/detection/*.json`：构造文件和 facts，评估单个 detection 目标，检查 decision 和 fact 输出。
 - `cases/postprocess/*.json`：在临时工作区测试 cleanup、flatten 和 failed-log 动作。
 - `cases/archive_scan/*/case.json`：复制 `files/` 目录，用 `DetectionScheduler` 扫描，并检查每个文件是否应判定为归档。完整 manifest 格式见 `tests/cases/archive_scan/README.md`。

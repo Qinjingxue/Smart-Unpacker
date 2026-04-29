@@ -30,8 +30,8 @@ env/
 # Local reports and generated outputs
 reports/
 *.log
-.packrelic_cache/
-.packrelic_watch/
+.sunpack_cache/
+.sunpack_watch/
 
 # Local fixtures and private samples
 fixtures/samples/
@@ -52,7 +52,7 @@ acceptance-dataset-*/
 relationship-grouping-*/
 rpgmaker-semantic-*/
 fixtures/fakepicture.jpg
-.packrelic_repair/
+.sunpack_repair/
 testfiles/
 test_pipeline_run/
 test_extract/
@@ -60,5 +60,5 @@ GEMINI.md
 test_extract_folder/
 test_targz/
 AGENTS.md
-native/packrelic_native/target/
+native/sunpack_native/target/
 native/sevenzip_password_tester/build-x64/

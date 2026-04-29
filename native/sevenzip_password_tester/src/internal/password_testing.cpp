@@ -16,7 +16,7 @@
 
 
 
-namespace packrelic::sevenzip {
+namespace sunpack::sevenzip {
 
 
 
@@ -892,5 +892,5 @@ PasswordTestResult test_passwords_with_ranges(
 
 
 
-}  // namespace packrelic::sevenzip
+}  // namespace sunpack::sevenzip
 

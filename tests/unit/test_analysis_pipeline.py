@@ -7,11 +7,11 @@ import lzma
 from binascii import crc32
 from io import BytesIO
 
-from packrelic.analysis.result import ArchiveFormatEvidence
-from packrelic.analysis.scheduler import ArchiveAnalysisScheduler
-from packrelic.analysis.structure_pipeline.module import AnalysisModuleSpec
-from packrelic.analysis.structure_pipeline.registry import get_analysis_module_registry
-from packrelic.analysis.view import SharedBinaryView
+from sunpack.analysis.result import ArchiveFormatEvidence
+from sunpack.analysis.scheduler import ArchiveAnalysisScheduler
+from sunpack.analysis.structure_pipeline.module import AnalysisModuleSpec
+from sunpack.analysis.structure_pipeline.registry import get_analysis_module_registry
+from sunpack.analysis.view import SharedBinaryView
 
 
 def _zip_bytes(tmp_path):

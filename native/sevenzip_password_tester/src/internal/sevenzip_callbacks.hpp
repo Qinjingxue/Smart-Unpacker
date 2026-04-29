@@ -30,7 +30,7 @@
 
 
 
-namespace packrelic::sevenzip {
+namespace sunpack::sevenzip {
 
 
 
@@ -1242,4 +1242,4 @@ private:
 
 
 
-}  // namespace packrelic::sevenzip
+}  // namespace sunpack::sevenzip

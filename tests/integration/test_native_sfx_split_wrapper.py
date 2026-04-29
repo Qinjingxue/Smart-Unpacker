@@ -1,6 +1,6 @@
 import pytest
 
-from packrelic.support.sevenzip_native import get_native_password_tester
+from sunpack.support.sevenzip_native import get_native_password_tester
 from tests.helpers.real_archives import ArchiveFixtureFactory
 from tests.helpers.tool_config import get_optional_rar, require_7z
 

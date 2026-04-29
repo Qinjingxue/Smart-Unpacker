@@ -146,7 +146,7 @@ function Invoke-FileDownload {
     Write-Host "Downloading $Description from $Uri" -ForegroundColor Yellow
     $client = New-Object System.Net.WebClient
     try {
-        $client.Headers["User-Agent"] = "PackRelic dev bootstrap"
+        $client.Headers["User-Agent"] = "SunPack dev bootstrap"
         $client.DownloadFile($Uri, $DestinationPath)
     } finally {
         $client.Dispose()
@@ -159,7 +159,7 @@ function Get-7ZipWindowsDownloadInfo {
     $downloadPageUri = "https://www.7-zip.org/download.html"
     $client = New-Object System.Net.WebClient
     try {
-        $client.Headers["User-Agent"] = "PackRelic dev bootstrap"
+        $client.Headers["User-Agent"] = "SunPack dev bootstrap"
         $html = $client.DownloadString($downloadPageUri)
     } finally {
         $client.Dispose()
@@ -220,7 +220,7 @@ function Ensure-Bundled7ZipAssets {
     }
 
     $downloadInfo = Get-7ZipWindowsDownloadInfo -BuildArch $BuildArch
-    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("packrelic-dev-7zip-" + [guid]::NewGuid().ToString("N"))
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("sunpack-dev-7zip-" + [guid]::NewGuid().ToString("N"))
     $installerPath = Join-Path $tempRoot ("7zip-" + $BuildArch + "-installer.exe")
     $installRoot = Join-Path $tempRoot "installed"
 
@@ -388,7 +388,7 @@ function Test-NativeImport {
     param([string]$PythonPath)
 
     $code = @"
-import packrelic_native as n
+import sunpack_native as n
 required = [
     'native_available', 'scanner_version',
     'scan_directory_entries', 'list_regular_files_in_directory',
@@ -427,7 +427,7 @@ function Test-SevenZipWrapper {
 
     Invoke-Native -FilePath $PythonPath -Arguments @(
         "-c",
-        "from packrelic.support.sevenzip_native import NativePasswordTester; tester = NativePasswordTester(); assert tester.available(), (tester.wrapper_path, tester.seven_zip_dll_path)"
+        "from sunpack.support.sevenzip_native import NativePasswordTester; tester = NativePasswordTester(); assert tester.available(), (tester.wrapper_path, tester.seven_zip_dll_path)"
     )
 }
 
@@ -436,7 +436,7 @@ function Test-SevenZipWorker {
 
     Invoke-Native -FilePath $PythonPath -Arguments @(
         "-c",
-        "from packrelic.support.resources import get_7z_dll_path, get_sevenzip_worker_path; import os; assert os.path.exists(get_sevenzip_worker_path()); assert os.path.exists(get_7z_dll_path())"
+        "from sunpack.support.resources import get_7z_dll_path, get_sevenzip_worker_path; import os; assert os.path.exists(get_sevenzip_worker_path()); assert os.path.exists(get_7z_dll_path())"
     )
 }
 
@@ -525,7 +525,7 @@ $venvPython = Join-Path $venvPath "Scripts\python.exe"
 $venvScripts = Join-Path $venvPath "Scripts"
 $requirementsPath = Join-Path $repoRoot "requirements.txt"
 $buildRequirementsPath = Join-Path $repoRoot "requirements-build.txt"
-$nativeCrateRoot = Join-Path $repoRoot "native\packrelic_native"
+$nativeCrateRoot = Join-Path $repoRoot "native\sunpack_native"
 $nativeCargoToml = Join-Path $nativeCrateRoot "Cargo.toml"
 $sevenZipWrapperRoot = Join-Path $repoRoot "native\sevenzip_password_tester"
 $sevenZipWrapperBuildDir = Join-Path $sevenZipWrapperRoot ("build-" + $buildArch)
@@ -536,7 +536,7 @@ $sevenZipDllPath = Join-Path $toolsRoot "7z.dll"
 $sevenZipLicensePath = Join-Path $repoRoot "licenses\7zip-license.txt"
 
 Assert-PathExists -LiteralPath $requirementsPath -Description "requirements.txt"
-Assert-PathExists -LiteralPath $nativeCargoToml -Description "packrelic_native Cargo manifest"
+Assert-PathExists -LiteralPath $nativeCargoToml -Description "sunpack_native Cargo manifest"
 Assert-CommandExists -Command "cargo" -Description "Rust toolchain"
 if ($IncludeBuildDeps) {
     Assert-PathExists -LiteralPath $buildRequirementsPath -Description "requirements-build.txt"
@@ -585,7 +585,7 @@ Test-SevenZipWrapper -PythonPath $venvPython
 Test-SevenZipWorker -PythonPath $venvPython
 
 Write-Step "Verifying local source execution"
-Invoke-Native -FilePath $venvPython -Arguments @("pkrc.py", "--help")
+Invoke-Native -FilePath $venvPython -Arguments @("sunpack.py", "--help")
 Invoke-Native -FilePath $venvPython -Arguments @("-m", "pytest", "--version")
 
 Write-Host ""

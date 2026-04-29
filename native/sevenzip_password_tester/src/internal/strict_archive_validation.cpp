@@ -9,7 +9,7 @@
 #include <vector>
 #endif
 
-namespace packrelic::sevenzip {
+namespace sunpack::sevenzip {
 
 #ifdef _WIN32
 
@@ -175,4 +175,4 @@ bool strict_seven_zip_headers_ok(const std::wstring& path) {
 
 #endif
 
-}  // namespace packrelic::sevenzip
+}  // namespace sunpack::sevenzip

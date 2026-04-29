@@ -1,15 +1,15 @@
-from packrelic.config.schema import normalize_config
-from packrelic.contracts.detection import FactBag
-from packrelic.contracts.tasks import ArchiveTask
-from packrelic.extraction.result import ExtractionResult
-from packrelic.passwords import PasswordSession
-from packrelic.verification import (
+from sunpack.config.schema import normalize_config
+from sunpack.contracts.detection import FactBag
+from sunpack.contracts.tasks import ArchiveTask
+from sunpack.extraction.result import ExtractionResult
+from sunpack.passwords import PasswordSession
+from sunpack.verification import (
     FileVerificationObservation,
     VerificationScheduler,
     VerificationStepResult,
     register_verification_method,
 )
-from packrelic.verification.result import VerificationIssue
+from sunpack.verification.result import VerificationIssue
 
 
 CALLS = []

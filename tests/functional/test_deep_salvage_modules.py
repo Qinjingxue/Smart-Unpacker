@@ -11,8 +11,8 @@ import zlib
 
 import pytest
 
-from packrelic.repair import RepairJob, RepairScheduler
-from packrelic.support.sevenzip_worker import dry_run_archive
+from sunpack.repair import RepairJob, RepairScheduler
+from sunpack.support.sevenzip_worker import dry_run_archive
 from tests.helpers.real_archives import ArchiveFixtureFactory, apply_split_issue
 from tests.helpers.tool_config import get_optional_rar
 

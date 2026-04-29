@@ -2,9 +2,9 @@ from pathlib import Path
 
 import pytest
 
-from packrelic.coordinator.reporting import RunReporter
-from packrelic.config.schema import normalize_config
-from packrelic.postprocess.actions import PostProcessActions
+from sunpack.coordinator.reporting import RunReporter
+from sunpack.config.schema import normalize_config
+from sunpack.postprocess.actions import PostProcessActions
 from tests.helpers.assertions import assert_case_expectations
 from tests.helpers.case_loader import case_id, load_json_cases
 from tests.helpers.fs_builder import build_files

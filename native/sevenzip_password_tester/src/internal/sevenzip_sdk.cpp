@@ -12,7 +12,7 @@
 
 
 
-namespace packrelic::sevenzip {
+namespace sunpack::sevenzip {
 
 
 
@@ -128,5 +128,5 @@ CreateObjectFunc cached_create_object(const std::wstring& seven_zip_dll_path) {
 
 
 
-}  // namespace packrelic::sevenzip
+}  // namespace sunpack::sevenzip
 

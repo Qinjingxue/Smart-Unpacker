@@ -14,7 +14,7 @@
 
 
 
-namespace packrelic::sevenzip {
+namespace sunpack::sevenzip {
 
 
 
@@ -416,5 +416,5 @@ UInt64 archive_input_size(const std::wstring& archive_path, const std::vector<st
 
 
 
-}  // namespace packrelic::sevenzip
+}  // namespace sunpack::sevenzip
 

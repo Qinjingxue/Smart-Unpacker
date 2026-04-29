@@ -26,7 +26,7 @@
 
 
 
-namespace packrelic::sevenzip {
+namespace sunpack::sevenzip {
 
 
 
@@ -926,4 +926,4 @@ ExtractArchiveResult extract_archive_with_patches(
 
 
 
-}  // namespace packrelic::sevenzip
+}  // namespace sunpack::sevenzip

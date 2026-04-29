@@ -3,8 +3,8 @@ import json
 
 import pytest
 
-from packrelic.repair import RepairJob, RepairScheduler
-from packrelic.support.archive_state_view import archive_state_to_bytes
+from sunpack.repair import RepairJob, RepairScheduler
+from sunpack.support.archive_state_view import archive_state_to_bytes
 from tests.helpers.binary_corruptor import (
     BinaryCorruptor,
     CorruptionCase,

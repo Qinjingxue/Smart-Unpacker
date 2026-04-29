@@ -4,9 +4,9 @@ import zlib
 
 import pytest
 
-from packrelic.coordinator.scanner import ScanOrchestrator
-from packrelic.coordinator.runner import PipelineRunner
-from packrelic.detection.scheduler import DetectionScheduler
+from sunpack.coordinator.scanner import ScanOrchestrator
+from sunpack.coordinator.runner import PipelineRunner
+from sunpack.detection.scheduler import DetectionScheduler
 from tests.helpers.detection_config import with_detection_pipeline
 
 

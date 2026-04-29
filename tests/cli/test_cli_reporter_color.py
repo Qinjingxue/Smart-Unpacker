@@ -1,5 +1,5 @@
-from packrelic.app.cli_reporter import CliReporter
-from packrelic.app.cli_types import CliCommandResult
+from sunpack.app.cli_reporter import CliReporter
+from sunpack.app.cli_types import CliCommandResult
 
 
 def test_reporter_applies_color_when_forced(capsys):

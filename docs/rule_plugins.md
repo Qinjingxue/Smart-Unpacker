@@ -11,15 +11,15 @@
 3. 规则读取 facts 和自身配置，返回预检接受/拒绝、加减分或确认结果。
 4. 最终分数和确认结果决定文件是否进入解压任务。
 
-默认配置见 `packrelic_config.json` 的 `detection.rule_pipeline`。
+默认配置见 `sunpack_config.json` 的 `detection.rule_pipeline`。
 
 ## 规则插件
 
 规则类继承 `RuleBase`，并用 `@register_rule(name=..., layer=...)` 注册：
 
 ```python
-from packrelic.detection.pipeline.rules.base import RuleBase, RuleEffect
-from packrelic.detection.pipeline.rules.registry import register_rule
+from sunpack.detection.pipeline.rules.base import RuleBase, RuleEffect
+from sunpack.detection.pipeline.rules.registry import register_rule
 
 
 @register_rule(name="my_rule", layer="scoring")
@@ -43,7 +43,7 @@ class MyRule(RuleBase):
 
 - `required_facts`：规则运行前必须具备的事实名。
 - `produced_facts`：规则会写回 `FactBag` 的事实名，主要用于元数据和校验。
-- `config_schema`：允许出现在 `packrelic_config.json` 里的规则配置字段。
+- `config_schema`：允许出现在 `sunpack_config.json` 里的规则配置字段。
 - `fact_requirements`：仅 scoring 层使用的条件式事实需求，用来避免不必要的昂贵扫描。
 
 可注册的 `layer`：
@@ -54,7 +54,7 @@ class MyRule(RuleBase):
 
 ## 配置 Schema
 
-`config_schema` 会被 `pkrc config validate` 校验。支持的字段类型包括：
+`config_schema` 会被 `sunpack config validate` 校验。支持的字段类型包括：
 
 - `any`
 - `str`
@@ -89,7 +89,7 @@ config_schema = {
 scoring 规则可以通过 `fact_requirements` 限定某些事实只在特定候选上采集。例如嵌入式压缩包分析只对图片、PDF、GIF、WebP 或可疑资源扩展名有意义：
 
 ```python
-from packrelic.detection.pipeline.rules.fact_requirements import FactRequirement, PathExtensionInConfig
+from sunpack.detection.pipeline.rules.fact_requirements import FactRequirement, PathExtensionInConfig
 
 
 fact_requirements = [
@@ -113,7 +113,7 @@ fact_requirements = [
 采集器用 `@register_fact(...)` 注册，负责从候选路径直接产生一个事实：
 
 ```python
-from packrelic.detection.pipeline.facts.registry import register_fact
+from sunpack.detection.pipeline.facts.registry import register_fact
 
 
 @register_fact(
@@ -134,7 +134,7 @@ def collect_example(path: str) -> str:
 处理器把已有 facts 组合成派生 facts，注册方式如下：
 
 ```python
-from packrelic.detection.pipeline.processors.registry import register_processor
+from sunpack.detection.pipeline.processors.registry import register_processor
 
 
 @register_processor(
@@ -212,14 +212,14 @@ def process_my_archive_structure(context):
 | `zip.local_header_offset` | `int` | ZIP 局部文件头检查偏移。 |
 | `zip.local_header_error` | `str` | ZIP 局部文件头不可信时的原因。 |
 
-完整事实名以 `packrelic/detection/pipeline/facts/schema.py`、各插件注册结果和 `python pkrc.py config validate --json` 的 `registered_facts` 为准。
+完整事实名以 `sunpack/detection/pipeline/facts/schema.py`、各插件注册结果和 `python sunpack.py config validate --json` 的 `registered_facts` 为准。
 
 ## 开发和校验
 
 新增规则、采集器或处理器后，建议执行：
 
 ```powershell
-python pkrc.py config validate --json
+python sunpack.py config validate --json
 pytest tests/unit/test_rule_plugin_contract.py
 pytest tests/functional/test_rule_pipeline.py
 ```

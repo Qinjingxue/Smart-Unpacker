@@ -1,10 +1,10 @@
 import json
 import zipfile
 
-from packrelic.contracts.detection import FactBag
-from packrelic.contracts.tasks import ArchiveTask
-from packrelic.extraction.result import ExtractionResult
-from packrelic.verification import VerificationScheduler
+from sunpack.contracts.detection import FactBag
+from sunpack.contracts.tasks import ArchiveTask
+from sunpack.extraction.result import ExtractionResult
+from sunpack.verification import VerificationScheduler
 
 
 def test_extraction_exit_signal_reports_unusable_failed_extraction(tmp_path):
@@ -163,7 +163,7 @@ def test_output_presence_uses_worker_manifest_progress_as_completeness(tmp_path)
     partial = out_dir / "partial.bin"
     complete.write_text("ok", encoding="utf-8")
     partial.write_bytes(b"12345")
-    manifest = out_dir / ".packrelic" / "extraction_manifest.json"
+    manifest = out_dir / ".sunpack" / "extraction_manifest.json"
     manifest.parent.mkdir(parents=True)
     manifest.write_text(json.dumps({
         "files": [

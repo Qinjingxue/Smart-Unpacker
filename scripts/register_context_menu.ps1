@@ -17,7 +17,7 @@ function Resolve-Launcher {
 
     if ($PreferredAppPath) {
         $resolvedApp = (Resolve-Path -LiteralPath $PreferredAppPath).Path
-        $appIcon = Resolve-PackRelicIcon -RepoRoot $RepoRoot -FallbackPath $resolvedApp
+        $appIcon = Resolve-SunPackIcon -RepoRoot $RepoRoot -FallbackPath $resolvedApp
         return @{
             Mode = "app"
             AppPath = $resolvedApp
@@ -27,16 +27,13 @@ function Resolve-Launcher {
 
     $exeCandidates = @(
         (Join-Path $RepoRoot "sunpack.exe"),
-        (Join-Path $RepoRoot "dist\\packrelic\sunpack.exe"),
-        (Join-Path $RepoRoot "dist\sunpack.exe"),
-        (Join-Path $RepoRoot "pkrc.exe"),
-        (Join-Path $RepoRoot "dist\\packrelic\pkrc.exe"),
-        (Join-Path $RepoRoot "dist\pkrc.exe")
+        (Join-Path $RepoRoot "dist\sunpack\sunpack.exe"),
+        (Join-Path $RepoRoot "dist\sunpack.exe")
     )
     foreach ($candidate in $exeCandidates) {
         if (Test-Path -LiteralPath $candidate) {
             $resolvedExe = (Resolve-Path -LiteralPath $candidate).Path
-            $appIcon = Resolve-PackRelicIcon -RepoRoot $RepoRoot -FallbackPath $resolvedExe
+            $appIcon = Resolve-SunPackIcon -RepoRoot $RepoRoot -FallbackPath $resolvedExe
             return @{
                 Mode = "app"
                 AppPath = $resolvedExe
@@ -45,9 +42,9 @@ function Resolve-Launcher {
         }
     }
 
-    $defaultScript = Join-Path $RepoRoot "pkrc.py"
+    $defaultScript = Join-Path $RepoRoot "sunpack.py"
     if (-not (Test-Path -LiteralPath $defaultScript)) {
-        throw "No usable script entry was found. Expected pkrc.py at the repository root."
+        throw "No usable script entry was found. Expected sunpack.py at the repository root."
     }
     $resolvedScript = (Resolve-Path -LiteralPath $defaultScript).Path
 
@@ -66,7 +63,7 @@ function Resolve-Launcher {
     foreach ($candidate in $pythonCandidates) {
         if (Test-Path -LiteralPath $candidate) {
             $resolvedPython = (Resolve-Path -LiteralPath $candidate).Path
-            $appIcon = Resolve-PackRelicIcon -RepoRoot $RepoRoot -FallbackPath $resolvedPython
+            $appIcon = Resolve-SunPackIcon -RepoRoot $RepoRoot -FallbackPath $resolvedPython
             return @{
                 Mode = "python"
                 AppPath = $resolvedPython
@@ -79,13 +76,13 @@ function Resolve-Launcher {
     throw "No usable Python interpreter was found. Please pass -PythonPath explicitly."
 }
 
-function Resolve-PackRelicIcon {
+function Resolve-SunPackIcon {
     param(
         [string]$RepoRoot,
         [string]$FallbackPath
     )
 
-    $iconPath = Join-Path $RepoRoot "packrelic.ico"
+    $iconPath = Join-Path $RepoRoot "sunpack.ico"
     if (Test-Path -LiteralPath $iconPath) {
         return (Resolve-Path -LiteralPath $iconPath).Path
     }
@@ -150,9 +147,9 @@ function Set-ContextMenuCommand {
 function Get-DefaultMenuText {
     param([string]$RepoRoot)
 
-    $configPath = Join-Path $RepoRoot "packrelic_config.json"
+    $configPath = Join-Path $RepoRoot "sunpack_config.json"
     if (-not (Test-Path -LiteralPath $configPath)) {
-        return "PackRelic"
+        return "SunPack"
     }
 
     try {
@@ -163,7 +160,7 @@ function Get-DefaultMenuText {
         }
     } catch {
     }
-    return "PackRelic"
+    return "SunPack"
 }
 
 function New-ChineseMenuText {
@@ -202,10 +199,10 @@ $launcher = Resolve-Launcher -RepoRoot $repoRoot -PreferredAppPath $AppPath -Pre
 $resolvedIconPath = if ($IconPath) { (Resolve-Path -LiteralPath $IconPath).Path } else { $launcher.IconPath }
 $resolvedMenuText = if ($MenuText) { $MenuText } else { Get-DefaultMenuText -RepoRoot $repoRoot }
 
-$folderKey = "HKCU:\Software\Classes\Directory\shell\PackRelic"
-$backgroundKey = "HKCU:\Software\Classes\Directory\Background\shell\PackRelic"
-$folderSubCommandsName = "PackRelic.FolderContextMenu"
-$backgroundSubCommandsName = "PackRelic.BackgroundContextMenu"
+$folderKey = "HKCU:\Software\Classes\Directory\shell\SunPack"
+$backgroundKey = "HKCU:\Software\Classes\Directory\Background\shell\SunPack"
+$folderSubCommandsName = "SunPack.FolderContextMenu"
+$backgroundSubCommandsName = "SunPack.BackgroundContextMenu"
 $folderSubCommandsKey = "HKCU:\Software\Classes\$folderSubCommandsName"
 $backgroundSubCommandsKey = "HKCU:\Software\Classes\$backgroundSubCommandsName"
 $subMenuTexts = Get-SubMenuTexts -MenuText $resolvedMenuText

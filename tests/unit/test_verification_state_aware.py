@@ -1,12 +1,12 @@
 import io
 import zipfile
 
-from packrelic.contracts.archive_input import ArchiveInputDescriptor
-from packrelic.contracts.archive_state import ArchiveState, PatchOperation, PatchPlan
-from packrelic.contracts.detection import FactBag
-from packrelic.contracts.tasks import ArchiveTask
-from packrelic.extraction.result import ExtractionResult
-from packrelic.verification import VerificationScheduler
+from sunpack.contracts.archive_input import ArchiveInputDescriptor
+from sunpack.contracts.archive_state import ArchiveState, PatchOperation, PatchPlan
+from sunpack.contracts.detection import FactBag
+from sunpack.contracts.tasks import ArchiveTask
+from sunpack.extraction.result import ExtractionResult
+from sunpack.verification import VerificationScheduler
 
 
 def test_archive_crc_reads_patched_state_not_raw_archive_path(tmp_path):

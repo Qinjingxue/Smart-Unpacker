@@ -96,14 +96,14 @@ jobs:
       - name: Verify package architecture
         shell: pwsh
         run: |
-          $packageRoot = if ("${{ matrix.arch }}" -eq "x64") { "dist\packrelic" } else { "dist\packrelic-${{ matrix.arch }}" }
+          $packageRoot = if ("${{ matrix.arch }}" -eq "x64") { "dist\sunpack" } else { "dist\sunpack-${{ matrix.arch }}" }
           .\scripts\verify_windows_package_arch.ps1 -PackageRoot $packageRoot -Arch ${{ matrix.arch }}
 
       - name: Upload package artifact
         uses: actions/upload-artifact@v4
         with:
-          name: packrelic-windows-${{ matrix.arch }}
-          path: release/packrelic-windows-${{ matrix.arch }}-*.zip
+          name: sunpack-windows-${{ matrix.arch }}
+          path: release/sunpack-windows-${{ matrix.arch }}-*.zip
           if-no-files-found: error
 
   release:
@@ -129,13 +129,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mapfile -t packages < <(find artifacts -type f -name 'packrelic-windows-*.zip' | sort)
+          mapfile -t packages < <(find artifacts -type f -name 'sunpack-windows-*.zip' | sort)
           if [ "${#packages[@]}" -eq 0 ]; then
             echo "No release packages found." >&2
             exit 1
           fi
 
-          notes="Automated PackRelic Windows build for ${TAG_NAME}."
+          notes="Automated SunPack Windows build for ${TAG_NAME}."
           if gh release view "${TAG_NAME}" >/dev/null 2>&1; then
             gh release upload "${TAG_NAME}" "${packages[@]}" --clobber
           else

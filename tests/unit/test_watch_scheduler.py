@@ -3,8 +3,8 @@ from __future__ import annotations
 import zipfile
 from pathlib import Path
 
-import packrelic.watch.scheduler as scheduler_module
-from packrelic.watch.scheduler import WatchScheduler
+import sunpack.watch.scheduler as scheduler_module
+from sunpack.watch.scheduler import WatchScheduler
 
 
 class FakeObserver:

@@ -1,6 +1,6 @@
-from packrelic.contracts.detection import FactBag
-from packrelic.contracts.tasks import ArchiveTask
-from packrelic.extraction.internal.workflow.output_paths import default_output_dir_for_task
+from sunpack.contracts.detection import FactBag
+from sunpack.contracts.tasks import ArchiveTask
+from sunpack.extraction.internal.workflow.output_paths import default_output_dir_for_task
 
 
 def _task(path):

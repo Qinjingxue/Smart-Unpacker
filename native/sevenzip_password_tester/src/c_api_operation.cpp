@@ -7,10 +7,10 @@
 
 namespace {
 
-using packrelic::sevenzip::ArchiveOperationRequest;
-using packrelic::sevenzip::ArchiveOperationResult;
-using packrelic::sevenzip::ExtractInputRange;
-using packrelic::sevenzip::PasswordTestStatus;
+using sunpack::sevenzip::ArchiveOperationRequest;
+using sunpack::sevenzip::ArchiveOperationResult;
+using sunpack::sevenzip::ExtractInputRange;
+using sunpack::sevenzip::PasswordTestStatus;
 
 void init_result(Sup7zOperationResult* result) {
     if (!result) {
@@ -66,7 +66,7 @@ ArchiveOperationRequest to_request(const Sup7zOperationRequest& request) {
     operation.operation = static_cast<Sup7zOperationKind>(request.operation);
     operation.seven_zip_dll_path = request.seven_zip_dll_path ? request.seven_zip_dll_path : L"";
     operation.archive_path = request.archive_path ? request.archive_path : L"";
-    operation.part_paths = packrelic::sevenzip::capi::collect_part_paths(
+    operation.part_paths = sunpack::sevenzip::capi::collect_part_paths(
         request.archive_path,
         request.part_paths,
         request.part_count);
@@ -91,8 +91,8 @@ void copy_result(const ArchiveOperationResult& source, Sup7zOperationResult* des
     destination->attempts = source.attempts;
     destination->archive_offset = source.archive_offset;
     destination->item_count = source.item_count;
-    packrelic::sevenzip::capi::copy_wide(destination->archive_type, 64, source.archive_type);
-    packrelic::sevenzip::capi::copy_message(destination->message, 512, source.message);
+    sunpack::sevenzip::capi::copy_wide(destination->archive_type, 64, source.archive_type);
+    sunpack::sevenzip::capi::copy_message(destination->message, 512, source.message);
 }
 
 }  // namespace
@@ -106,7 +106,7 @@ SUP7Z_API int sup7z_run_operation(
         return static_cast<int>(PasswordTestStatus::Error);
     }
 
-    const ArchiveOperationResult operation_result = packrelic::sevenzip::run_archive_operation(to_request(*request));
+    const ArchiveOperationResult operation_result = sunpack::sevenzip::run_archive_operation(to_request(*request));
     copy_result(operation_result, result);
     return static_cast<int>(operation_result.status);
 }

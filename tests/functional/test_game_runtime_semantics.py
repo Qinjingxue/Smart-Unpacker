@@ -2,9 +2,9 @@ from pathlib import Path
 
 import pytest
 
-from packrelic.contracts.detection import FactBag
-from packrelic.detection import DetectionScheduler
-from packrelic.detection.scene.definitions import RECOMMENDED_SCENE_RULES_PAYLOAD
+from sunpack.contracts.detection import FactBag
+from sunpack.detection import DetectionScheduler
+from sunpack.detection.scene.definitions import RECOMMENDED_SCENE_RULES_PAYLOAD
 from tests.helpers.detection_config import with_detection_pipeline
 from tests.helpers.fs_builder import make_zip
 

@@ -1,13 +1,13 @@
 import struct
 import zlib
 
-from packrelic.analysis.scheduler import ArchiveAnalysisScheduler
-from packrelic.analysis.result import ArchiveAnalysisReport, ArchiveFormatEvidence, ArchiveSegment
-from packrelic.contracts.archive_input import ArchiveInputDescriptor
-from packrelic.contracts.archive_state import ArchiveState, PatchOperation, PatchPlan
-from packrelic.contracts.detection import FactBag
-from packrelic.contracts.tasks import ArchiveTask, SplitArchiveInfo
-from packrelic.coordinator.analysis_stage import ArchiveAnalysisStage
+from sunpack.analysis.scheduler import ArchiveAnalysisScheduler
+from sunpack.analysis.result import ArchiveAnalysisReport, ArchiveFormatEvidence, ArchiveSegment
+from sunpack.contracts.archive_input import ArchiveInputDescriptor
+from sunpack.contracts.archive_state import ArchiveState, PatchOperation, PatchPlan
+from sunpack.contracts.detection import FactBag
+from sunpack.contracts.tasks import ArchiveTask, SplitArchiveInfo
+from sunpack.coordinator.analysis_stage import ArchiveAnalysisStage
 
 
 class _FakeAnalysisScheduler:

@@ -1,5 +1,5 @@
-from packrelic.contracts.detection import FactBag
-from packrelic.contracts.tasks import ArchiveTask
+from sunpack.contracts.detection import FactBag
+from sunpack.contracts.tasks import ArchiveTask
 
 
 def _bag(path: str, logical_name: str, *, split: bool = False) -> FactBag:

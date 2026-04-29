@@ -1,8 +1,8 @@
-from packrelic.app.cli_runtime import (
+from sunpack.app.cli_runtime import (
     apply_runtime_config_overrides,
     build_effective_config,
 )
-from packrelic.config.config_validator import validate_config_payload
+from sunpack.config.config_validator import validate_config_payload
 from tests.helpers.detection_config import with_detection_pipeline
 
 

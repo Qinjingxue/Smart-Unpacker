@@ -14,7 +14,7 @@
 
 
 
-namespace packrelic::sevenzip {
+namespace sunpack::sevenzip {
 
 
 
@@ -32,5 +32,5 @@ std::vector<GUID> candidate_formats_for_hint(const std::wstring& format_hint, co
 
 
 
-}  // namespace packrelic::sevenzip
+}  // namespace sunpack::sevenzip
 

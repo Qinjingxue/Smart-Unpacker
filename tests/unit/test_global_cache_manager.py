@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 
-from packrelic.support.global_cache_manager import cached_readonly_command, clear_cache_namespace
+from sunpack.support.global_cache_manager import cached_readonly_command, clear_cache_namespace
 
 
 def test_cached_readonly_command_reuses_result_for_unchanged_file(tmp_path):

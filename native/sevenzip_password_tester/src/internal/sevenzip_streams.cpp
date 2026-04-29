@@ -2,7 +2,7 @@
 
 
 
-namespace packrelic::sevenzip {
+namespace sunpack::sevenzip {
 
 
 
@@ -122,4 +122,4 @@ std::wstring callback_archive_path(const std::wstring& archive_path, const std::
 
 
 
-}  // namespace packrelic::sevenzip
+}  // namespace sunpack::sevenzip

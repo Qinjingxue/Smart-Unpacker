@@ -16,7 +16,7 @@ import zlib
 
 import pytest
 
-from packrelic.repair import RepairJob, RepairResult, RepairScheduler
+from sunpack.repair import RepairJob, RepairResult, RepairScheduler
 
 
 VerifyFn = Callable[[RepairResult, "MatrixFixture"], None]

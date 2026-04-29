@@ -1,4 +1,4 @@
-from packrelic.coordinator.scanner import ScanOrchestrator
+from sunpack.coordinator.scanner import ScanOrchestrator
 from tests.helpers.detection_config import with_detection_pipeline
 
 

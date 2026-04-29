@@ -9,7 +9,7 @@
 #include <utility>
 #endif
 
-namespace packrelic::sevenzip {
+namespace sunpack::sevenzip {
 
 #ifdef _WIN32
 
@@ -90,4 +90,4 @@ void apply_plan_metadata(PasswordTestResult& result, const ArchiveOpenPlan& plan
 
 #endif
 
-}  // namespace packrelic::sevenzip
+}  // namespace sunpack::sevenzip

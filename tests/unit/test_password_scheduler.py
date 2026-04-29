@@ -1,10 +1,10 @@
 from types import SimpleNamespace
 
-from packrelic.passwords.cache import PasswordAttemptCache
-from packrelic.passwords.candidates import PasswordCandidatePipeline
-from packrelic.passwords.job import PasswordJob
-from packrelic.passwords.scheduler import PasswordScheduler
-from packrelic.passwords.verifier import PasswordBatchVerification, PasswordVerifierChain
+from sunpack.passwords.cache import PasswordAttemptCache
+from sunpack.passwords.candidates import PasswordCandidatePipeline
+from sunpack.passwords.job import PasswordJob
+from sunpack.passwords.scheduler import PasswordScheduler
+from sunpack.passwords.verifier import PasswordBatchVerification, PasswordVerifierChain
 
 
 class FakeVerifier:

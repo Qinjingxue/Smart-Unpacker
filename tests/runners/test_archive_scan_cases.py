@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from packrelic.detection import DetectionScheduler
+from sunpack.detection import DetectionScheduler
 from tests.helpers.archive_scan_case_loader import (
     archive_scan_case_id,
     load_archive_scan_cases,

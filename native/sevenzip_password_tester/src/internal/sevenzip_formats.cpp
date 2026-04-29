@@ -9,7 +9,7 @@
 #include <vector>
 #endif
 
-namespace packrelic::sevenzip {
+namespace sunpack::sevenzip {
 
 #ifdef _WIN32
 
@@ -221,4 +221,4 @@ std::wstring archive_type_for_path(const std::wstring& path) {
 
 #endif
 
-}  // namespace packrelic::sevenzip
+}  // namespace sunpack::sevenzip

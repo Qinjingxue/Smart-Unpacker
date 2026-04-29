@@ -3,9 +3,9 @@ from pathlib import Path
 
 import pytest
 
-from packrelic.config.schema import normalize_config
-from packrelic.coordinator.runner import PipelineRunner
-from packrelic.support.resources import get_7z_dll_path, get_sevenzip_worker_path
+from sunpack.config.schema import normalize_config
+from sunpack.coordinator.runner import PipelineRunner
+from sunpack.support.resources import get_7z_dll_path, get_sevenzip_worker_path
 from tests.helpers.detection_config import with_detection_pipeline
 
 

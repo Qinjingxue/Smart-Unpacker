@@ -1,7 +1,7 @@
-from packrelic.contracts.detection import FactBag
-from packrelic.contracts.tasks import ArchiveTask
-from packrelic.extraction.result import ExtractionResult
-from packrelic.verification import VerificationScheduler
+from sunpack.contracts.detection import FactBag
+from sunpack.contracts.tasks import ArchiveTask
+from sunpack.extraction.result import ExtractionResult
+from sunpack.verification import VerificationScheduler
 
 
 def test_expected_name_matching_is_case_and_path_normalized(tmp_path):

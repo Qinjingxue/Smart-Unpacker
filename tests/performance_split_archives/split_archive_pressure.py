@@ -14,10 +14,10 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from packrelic.config.schema import normalize_config
-from packrelic.coordinator.runner import PipelineRunner
-from packrelic.coordinator.scanner import ScanOrchestrator
-from packrelic.coordinator.scheduling.executor import TaskExecutor
+from sunpack.config.schema import normalize_config
+from sunpack.coordinator.runner import PipelineRunner
+from sunpack.coordinator.scanner import ScanOrchestrator
+from sunpack.coordinator.scheduling.executor import TaskExecutor
 from tests.helpers.detection_config import with_detection_pipeline
 from tests.helpers.real_archives import ArchiveCase, ArchiveFixtureFactory, normalize_archive_format
 from tests.helpers.tool_config import get_optional_rar, require_7z
@@ -505,7 +505,7 @@ def build_cases(root: Path, requested_formats: list[str], profile: str) -> list[
                 [],
                 "skip",
                 0.0,
-                "RAR generator is not configured. Set packrelic_TEST_RAR or tests/test_tools.json rar_exe.",
+                "RAR generator is not configured. Set sunpack_TEST_RAR or tests/test_tools.json rar_exe.",
             ))
             continue
         if profile == "acceptance":
@@ -809,7 +809,7 @@ def main() -> int:
     args = parser.parse_args()
 
     require_7z()
-    with tempfile.TemporaryDirectory(prefix="packrelic_archive_pressure_") as temp:
+    with tempfile.TemporaryDirectory(prefix="sunpack_archive_pressure_") as temp:
         root = Path(temp)
         cases = build_cases(root, args.formats, args.profile)
         if args.profile == "acceptance-batch":

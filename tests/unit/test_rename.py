@@ -1,6 +1,6 @@
-from packrelic.contracts.detection import FactBag
-from packrelic.contracts.tasks import ArchiveTask
-from packrelic.rename.scheduler import RenameScheduler
+from sunpack.contracts.detection import FactBag
+from sunpack.contracts.tasks import ArchiveTask
+from sunpack.rename.scheduler import RenameScheduler
 
 
 def test_rename_planner_and_executor_apply_disguised_archive_extensions(tmp_path):

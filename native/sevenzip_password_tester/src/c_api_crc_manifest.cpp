@@ -48,7 +48,7 @@ std::wstring json_escape(const std::wstring& text) {
     return out.str();
 }
 
-std::wstring manifest_json(const packrelic::sevenzip::CrcManifestResult& result) {
+std::wstring manifest_json(const sunpack::sevenzip::CrcManifestResult& result) {
     std::wstringstream out;
     out << L"{";
     out << L"\"is_archive\":" << (result.is_archive ? L"true" : L"false") << L",";
@@ -87,8 +87,8 @@ int read_manifest(
     wchar_t* message,
     int message_chars
 ) {
-    using namespace packrelic::sevenzip;
-    using namespace packrelic::sevenzip::capi;
+    using namespace sunpack::sevenzip;
+    using namespace sunpack::sevenzip::capi;
     if (!seven_zip_dll_path || !archive_path) {
         copy_message(message, message_chars, "missing required path");
         copy_wide(manifest_json_buffer, manifest_json_chars, L"{}");

@@ -10,7 +10,7 @@ def run_cli(repo_root: Path, args: list[str], timeout: int = 20) -> dict[str, An
     env = os.environ.copy()
     env["PYTHONPATH"] = str(repo_root)
     result = subprocess.run(
-        [sys.executable, "-B", "pkrc.py", *args],
+        [sys.executable, "-B", "sunpack.py", *args],
         cwd=repo_root,
         capture_output=True,
         text=True,

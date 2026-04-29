@@ -4,11 +4,11 @@ import time
 import os
 from types import SimpleNamespace
 
-from packrelic.contracts.detection import FactBag
-from packrelic.contracts.tasks import ArchiveTask
-from packrelic.coordinator.scheduling.concurrency import ConcurrencyScheduler
-from packrelic.coordinator.scheduling.executor import TaskExecutor
-from packrelic.coordinator.scheduling.resource_model import build_resource_profile_key, estimate_resource_demand
+from sunpack.contracts.detection import FactBag
+from sunpack.contracts.tasks import ArchiveTask
+from sunpack.coordinator.scheduling.concurrency import ConcurrencyScheduler
+from sunpack.coordinator.scheduling.executor import TaskExecutor
+from sunpack.coordinator.scheduling.resource_model import build_resource_profile_key, estimate_resource_demand
 
 
 def test_resource_demand_estimation_distinguishes_heavy_lzma_archive():
@@ -356,7 +356,7 @@ def test_process_sample_pressure_feeds_next_scheduler_adjustment():
 
 
 def test_profile_calibration_persists_to_project_cache_path(tmp_path):
-    cache_path = tmp_path / ".packrelic_cache" / "profile_calibration.json"
+    cache_path = tmp_path / ".sunpack_cache" / "profile_calibration.json"
     profile_key = "7z|lzma|solid|dict>=256m|size>=4g|files<1k"
     scheduler = ConcurrencyScheduler(
         {
@@ -402,7 +402,7 @@ def test_profile_calibration_persists_to_project_cache_path(tmp_path):
 
 
 def test_profile_calibration_ignores_corrupt_project_cache(tmp_path):
-    cache_path = tmp_path / ".packrelic_cache" / "profile_calibration.json"
+    cache_path = tmp_path / ".sunpack_cache" / "profile_calibration.json"
     cache_path.parent.mkdir(parents=True)
     cache_path.write_text("{not-json", encoding="utf-8")
 

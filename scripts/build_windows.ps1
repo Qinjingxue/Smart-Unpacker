@@ -254,7 +254,7 @@ function Test-NativeImport {
     param([string]$PythonPath)
 
     $code = @"
-import packrelic_native as n
+import sunpack_native as n
 required = [
     'native_available', 'scanner_version',
     'scan_directory_entries', 'list_regular_files_in_directory',
@@ -293,7 +293,7 @@ function Test-SevenZipWrapper {
 
     Invoke-Native -FilePath $PythonPath -Arguments @(
         "-c",
-        "from packrelic.support.sevenzip_native import NativePasswordTester; tester = NativePasswordTester(); assert tester.available(), (tester.wrapper_path, tester.seven_zip_dll_path)"
+        "from sunpack.support.sevenzip_native import NativePasswordTester; tester = NativePasswordTester(); assert tester.available(), (tester.wrapper_path, tester.seven_zip_dll_path)"
     )
 }
 
@@ -302,7 +302,7 @@ function Test-SevenZipWorker {
 
     Invoke-Native -FilePath $PythonPath -Arguments @(
         "-c",
-        "from packrelic.support.resources import get_7z_dll_path, get_sevenzip_worker_path; import os; assert os.path.exists(get_sevenzip_worker_path()); assert os.path.exists(get_7z_dll_path())"
+        "from sunpack.support.resources import get_7z_dll_path, get_sevenzip_worker_path; import os; assert os.path.exists(get_sevenzip_worker_path()); assert os.path.exists(get_7z_dll_path())"
     )
 }
 
@@ -353,17 +353,17 @@ function Assert-PackagedNativeExtension {
 
     $nativeExtension = Get-ChildItem -LiteralPath $PackageRoot -Recurse -File -ErrorAction SilentlyContinue |
         Where-Object {
-            $_.Name -like "packrelic_native*.pyd" -or
-            $_.Name -like "packrelic_native*.dll"
+            $_.Name -like "sunpack_native*.pyd" -or
+            $_.Name -like "sunpack_native*.dll"
         } |
         Select-Object -First 1
 
     if ($null -eq $nativeExtension) {
-        throw "Packaged packrelic_native extension not found under: $PackageRoot"
+        throw "Packaged sunpack_native extension not found under: $PackageRoot"
     }
 
     Write-Host ("Packaged native extension: {0}" -f $nativeExtension.FullName) -ForegroundColor Green
-    Assert-PeMachine -LiteralPath $nativeExtension.FullName -BuildArch $BuildArch -Description "Packaged packrelic_native extension"
+    Assert-PeMachine -LiteralPath $nativeExtension.FullName -BuildArch $BuildArch -Description "Packaged sunpack_native extension"
 }
 
 function Test-PythonImports {
@@ -508,11 +508,11 @@ $pythonCommand = Get-PythonCommand
 $venvPath = Join-Path $repoRoot ".venv-build"
 $venvPython = Join-Path $venvPath "Scripts\python.exe"
 $venvScripts = Join-Path $venvPath "Scripts"
-$specPath = Join-Path $repoRoot "PackRelic.spec"
+$specPath = Join-Path $repoRoot "SunPack.spec"
 $requirementsPath = Join-Path $repoRoot "requirements.txt"
 $buildRequirementsPath = Join-Path $repoRoot "requirements-build.txt"
-$iconPath = Join-Path $repoRoot "packrelic.ico"
-$nativeCrateRoot = Join-Path $repoRoot "native\packrelic_native"
+$iconPath = Join-Path $repoRoot "sunpack.ico"
+$nativeCrateRoot = Join-Path $repoRoot "native\sunpack_native"
 $nativeCargoToml = Join-Path $nativeCrateRoot "Cargo.toml"
 $sevenZipWrapperRoot = Join-Path $repoRoot "native\sevenzip_password_tester"
 $sevenZipWrapperBuildDir = Join-Path $sevenZipWrapperRoot ("build-" + $buildArch)
@@ -526,7 +526,7 @@ $distRoot = Join-Path $repoRoot "dist"
 $buildRoot = Join-Path $repoRoot "build"
 $nativeWheelRoot = Join-Path $buildRoot ("native-wheels-" + $buildArch)
 $releaseRoot = Join-Path $repoRoot "release"
-$distFolderName = if ($buildArch -eq "x64") { "packrelic" } else { "packrelic-" + $buildArch }
+$distFolderName = if ($buildArch -eq "x64") { "sunpack" } else { "sunpack-" + $buildArch }
 $appExeName = "sunpack.exe"
 $distAppRoot = Join-Path $distRoot $distFolderName
 $distExePath = Join-Path $distAppRoot $appExeName
@@ -534,7 +534,7 @@ $distInternalRoot = Join-Path $distAppRoot "_internal"
 $distToolsRoot = Join-Path $distAppRoot "tools"
 $distLicensesRoot = Join-Path $distAppRoot "licenses"
 $versionValue = Get-ReleaseVersion -ExplicitVersion $Version -RepoRoot $repoRoot
-$releaseZipName = "packrelic-windows-{0}-{1}.zip" -f $buildArch, $versionValue
+$releaseZipName = "sunpack-windows-{0}-{1}.zip" -f $buildArch, $versionValue
 $releaseZipPath = Join-Path $releaseRoot $releaseZipName
 $runAcceptanceTests = -not $SkipTests
 
@@ -545,8 +545,8 @@ if ($promptForAcceptanceTests) {
 Assert-PathExists -LiteralPath $requirementsPath -Description "requirements.txt"
 Assert-PathExists -LiteralPath $buildRequirementsPath -Description "requirements-build.txt"
 Assert-PathExists -LiteralPath $specPath -Description "PyInstaller spec"
-Assert-PathExists -LiteralPath $iconPath -Description "PackRelic icon"
-Assert-PathExists -LiteralPath $nativeCargoToml -Description "packrelic_native Cargo manifest"
+Assert-PathExists -LiteralPath $iconPath -Description "SunPack icon"
+Assert-PathExists -LiteralPath $nativeCargoToml -Description "sunpack_native Cargo manifest"
 Assert-PathExists -LiteralPath (Join-Path $sevenZipWrapperRoot "CMakeLists.txt") -Description "7z wrapper CMake project"
 Assert-PathExists -LiteralPath $sevenZipPath -Description "Bundled 7-Zip executable"
 Assert-PathExists -LiteralPath $sevenZipDllPath -Description "Bundled 7-Zip runtime DLL"
@@ -612,8 +612,8 @@ if ($runAcceptanceTests) {
 }
 
 Write-Step "Building Windows release with PyInstaller"
-$env:PACKRELIC_DIST_NAME = $distFolderName
-$env:PACKRELIC_EXE_NAME = [System.IO.Path]::GetFileNameWithoutExtension($appExeName)
+$env:SUNPACK_DIST_NAME = $distFolderName
+$env:SUNPACK_EXE_NAME = [System.IO.Path]::GetFileNameWithoutExtension($appExeName)
 Invoke-Native -FilePath $venvPython -Arguments @("-m", "PyInstaller", "--noconfirm", $specPath)
 
 Write-Step "Validating packaged outputs"
@@ -622,17 +622,17 @@ Assert-PeMachine -LiteralPath $distExePath -BuildArch $buildArch -Description "P
 Assert-PathExists -LiteralPath $distInternalRoot -Description "PyInstaller internal resource directory"
 Assert-PackagedNativeExtension -PackageRoot $distAppRoot -BuildArch $buildArch
 Assert-PathMissing -LiteralPath (Join-Path $distInternalRoot "builtin_passwords.txt") -Description "Duplicate internal password file"
-Assert-PathMissing -LiteralPath (Join-Path $distInternalRoot "packrelic_config.json") -Description "Duplicate internal config file"
+Assert-PathMissing -LiteralPath (Join-Path $distInternalRoot "sunpack_config.json") -Description "Duplicate internal config file"
 
 Write-Step "Adding release metadata and helper scripts"
 $distPasswordPath = Join-Path $distAppRoot "builtin_passwords.txt"
-$distConfigPath = Join-Path $distAppRoot "packrelic_config.json"
-$distAdvancedConfigPath = Join-Path $distAppRoot "packrelic_advanced_config.json"
-$distIconPath = Join-Path $distAppRoot "packrelic.ico"
+$distConfigPath = Join-Path $distAppRoot "sunpack_config.json"
+$distAdvancedConfigPath = Join-Path $distAppRoot "sunpack_advanced_config.json"
+$distIconPath = Join-Path $distAppRoot "sunpack.ico"
 Copy-Item -LiteralPath (Join-Path $repoRoot "builtin_passwords.txt") -Destination $distPasswordPath -Force
-Copy-Item -LiteralPath (Join-Path $repoRoot "packrelic_config.json") -Destination $distConfigPath -Force
+Copy-Item -LiteralPath (Join-Path $repoRoot "sunpack_config.json") -Destination $distConfigPath -Force
 Copy-Item -LiteralPath $iconPath -Destination $distIconPath -Force
-Copy-IfExists -Source (Join-Path $repoRoot "packrelic_advanced_config.json") -Destination $distAdvancedConfigPath
+Copy-IfExists -Source (Join-Path $repoRoot "sunpack_advanced_config.json") -Destination $distAdvancedConfigPath
 Copy-Item -LiteralPath $toolsRoot -Destination $distToolsRoot -Recurse -Force
 
 New-Item -ItemType Directory -Path $distLicensesRoot -Force | Out-Null
@@ -660,7 +660,7 @@ $versionFilePath = Join-Path $distAppRoot "VERSION.txt"
 $gitCommit = Get-GitCommit -RepoRoot $repoRoot
 $pythonVersion = (& $venvPython --version).Trim()
 $metadata = @(
-    "product=PackRelic"
+    "product=SunPack"
     "version=$versionValue"
     "arch=$buildArch"
     "git_commit=$gitCommit"

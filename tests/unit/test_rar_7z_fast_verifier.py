@@ -3,8 +3,8 @@ import zlib
 
 import pytest
 
-from packrelic.passwords.verifier.rar_fast import RarFastVerifier
-from packrelic.passwords.verifier.seven_zip_fast import SevenZipFastVerifier
+from sunpack.passwords.verifier.rar_fast import RarFastVerifier
+from sunpack.passwords.verifier.seven_zip_fast import SevenZipFastVerifier
 from tests.helpers.tool_config import get_test_tools
 
 

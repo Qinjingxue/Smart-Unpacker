@@ -88,17 +88,17 @@ function Assert-PeMachine {
 $root = (Resolve-Path -LiteralPath $PackageRoot).Path
 $nativeExtension = Get-ChildItem -LiteralPath $root -Recurse -File -ErrorAction SilentlyContinue |
     Where-Object {
-        $_.Name -like "packrelic_native*.pyd" -or
-        $_.Name -like "packrelic_native*.dll"
+        $_.Name -like "sunpack_native*.pyd" -or
+        $_.Name -like "sunpack_native*.dll"
     } |
     Select-Object -First 1
 
 if ($null -eq $nativeExtension) {
-    throw "packrelic_native extension not found under: $root"
+    throw "sunpack_native extension not found under: $root"
 }
 
 Assert-PeMachine -LiteralPath (Join-Path $root "sunpack.exe") -BuildArch $Arch -Description "sunpack.exe"
-Assert-PeMachine -LiteralPath $nativeExtension.FullName -BuildArch $Arch -Description "packrelic_native extension"
+Assert-PeMachine -LiteralPath $nativeExtension.FullName -BuildArch $Arch -Description "sunpack_native extension"
 Assert-PeMachine -LiteralPath (Join-Path $root "tools\7z.exe") -BuildArch $Arch -Description "tools\7z.exe"
 Assert-PeMachine -LiteralPath (Join-Path $root "tools\7z.dll") -BuildArch $Arch -Description "tools\7z.dll"
 Assert-PeMachine -LiteralPath (Join-Path $root "tools\sevenzip_password_tester_capi.dll") -BuildArch $Arch -Description "tools\sevenzip_password_tester_capi.dll"

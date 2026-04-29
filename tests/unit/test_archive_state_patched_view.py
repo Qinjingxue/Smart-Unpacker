@@ -4,22 +4,22 @@ import gzip
 import io
 import tarfile
 
-from packrelic.analysis.scheduler import ArchiveAnalysisScheduler
-from packrelic.contracts.archive_input import ArchiveInputDescriptor
-from packrelic.contracts.archive_state import ArchiveState, PatchOperation, PatchPlan
-from packrelic.contracts.detection import FactBag
-from packrelic.contracts.tasks import ArchiveTask
-from packrelic.repair.diagnosis import RepairDiagnosis
-from packrelic.repair.diagnosis import diagnose_repair_job
-from packrelic.repair.job import RepairJob
-from packrelic.repair.pipeline.modules.archive_carrier_crop import attach_native_crop_patch_plans
-from packrelic.repair.pipeline.modules.gzip.trailing_junk_trim import GzipTrailingJunkTrim
-from packrelic.repair.pipeline.modules._native_candidates import candidates_from_native_result
-from packrelic.repair.pipeline.modules._common import source_input_for_job
-from packrelic.repair.pipeline.modules.tar.checksum_fix import TarHeaderChecksumFix
-from packrelic.repair.pipeline.modules.zip._rebuild import rebuild_zip_from_source
-from packrelic.repair.pipeline.modules.zip.trailing_junk_trim import ZipTrailingJunkTrim
-from packrelic.support.archive_state_view import ArchiveStateByteView
+from sunpack.analysis.scheduler import ArchiveAnalysisScheduler
+from sunpack.contracts.archive_input import ArchiveInputDescriptor
+from sunpack.contracts.archive_state import ArchiveState, PatchOperation, PatchPlan
+from sunpack.contracts.detection import FactBag
+from sunpack.contracts.tasks import ArchiveTask
+from sunpack.repair.diagnosis import RepairDiagnosis
+from sunpack.repair.diagnosis import diagnose_repair_job
+from sunpack.repair.job import RepairJob
+from sunpack.repair.pipeline.modules.archive_carrier_crop import attach_native_crop_patch_plans
+from sunpack.repair.pipeline.modules.gzip.trailing_junk_trim import GzipTrailingJunkTrim
+from sunpack.repair.pipeline.modules._native_candidates import candidates_from_native_result
+from sunpack.repair.pipeline.modules._common import source_input_for_job
+from sunpack.repair.pipeline.modules.tar.checksum_fix import TarHeaderChecksumFix
+from sunpack.repair.pipeline.modules.zip._rebuild import rebuild_zip_from_source
+from sunpack.repair.pipeline.modules.zip.trailing_junk_trim import ZipTrailingJunkTrim
+from sunpack.support.archive_state_view import ArchiveStateByteView
 
 
 def test_archive_state_byte_view_applies_replace_truncate_append(tmp_path):

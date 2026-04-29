@@ -2,8 +2,8 @@ from pathlib import Path
 
 import pytest
 
-from packrelic.contracts.detection import FactBag
-from packrelic.detection import DetectionScheduler
+from sunpack.contracts.detection import FactBag
+from sunpack.detection import DetectionScheduler
 from tests.helpers.assertions import MISSING, assert_case_expectations, get_path
 from tests.helpers.case_loader import case_id, load_json_cases
 from tests.helpers.config_factory import get_config

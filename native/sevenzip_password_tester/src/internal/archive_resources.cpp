@@ -7,7 +7,7 @@
 #include "sevenzip_status.hpp"
 #include "sevenzip_streams.hpp"
 
-namespace packrelic::sevenzip {
+namespace sunpack::sevenzip {
 
 
 #ifdef _WIN32
@@ -181,4 +181,4 @@ ResourceAnalysisResult analyze_archive_resources_with_parts(
 }
 
 
-}  // namespace packrelic::sevenzip
+}  // namespace sunpack::sevenzip

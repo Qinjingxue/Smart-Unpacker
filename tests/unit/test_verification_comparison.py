@@ -1,5 +1,5 @@
-from packrelic.verification.comparison import RecoveryAttempt, compare_attempts, rank_attempts
-from packrelic.verification.result import (
+from sunpack.verification.comparison import RecoveryAttempt, compare_attempts, rank_attempts
+from sunpack.verification.result import (
     ASSESSMENT_COMPLETE,
     ASSESSMENT_PARTIAL,
     ArchiveCoverageSummary,

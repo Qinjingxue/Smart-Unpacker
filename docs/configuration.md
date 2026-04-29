@@ -1,17 +1,17 @@
 # 配置文件说明
 
-主配置文件为 `packrelic_config.json`。源码运行时通常读取仓库根目录或当前工作目录中的配置；打包版本优先读取可执行文件旁边的外部配置，因此用户可以在不重新打包的情况下调整行为。
+主配置文件为 `sunpack_config.json`。源码运行时通常读取仓库根目录或当前工作目录中的配置；打包版本优先读取可执行文件旁边的外部配置，因此用户可以在不重新打包的情况下调整行为。
 
 检查配置：
 
 ```powershell
-python pkrc.py config validate
+python sunpack.py config validate
 ```
 
 查看配置：
 
 ```powershell
-python pkrc.py config show
+python sunpack.py config show
 ```
 
 ## 顶层结构
@@ -242,7 +242,7 @@ CLI 可用 `--recur` 临时覆盖。
 
 ```powershell
 @'
-from packrelic.repair.pipeline.registry import discover_repair_modules, get_repair_module_registry
+from sunpack.repair.pipeline.registry import discover_repair_modules, get_repair_module_registry
 discover_repair_modules()
 print(sorted(get_repair_module_registry().all()))
 '@ | python -
@@ -358,4 +358,4 @@ print(sorted(get_repair_module_registry().all()))
 - 想提高召回率：优先调 `extension`、结构 identity、`embedded_payload_identity` 和阈值。
 - 想控制修复成本：调 `repair.max_repair_*`、`deep`、`auto_deep` 和 `beam`。
 - 想看为什么失败或为什么接受：跑 `inspect -v`，再看 recovery report 和 verification coverage。
-- 修改后运行 `python pkrc.py config validate`。
+- 修改后运行 `python sunpack.py config validate`。

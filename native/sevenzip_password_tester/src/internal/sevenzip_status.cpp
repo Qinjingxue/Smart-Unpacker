@@ -2,7 +2,7 @@
 
 
 
-namespace packrelic::sevenzip {
+namespace sunpack::sevenzip {
 
 
 
@@ -128,4 +128,4 @@ const char* status_name(PasswordTestStatus status) {
 
 
 
-}  // namespace packrelic::sevenzip
+}  // namespace sunpack::sevenzip

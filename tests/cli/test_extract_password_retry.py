@@ -2,9 +2,9 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
-from packrelic.app.cli_context import CliContext
-from packrelic.app.cli_reporter import CliReporter
-from packrelic.app.commands import extract
+from sunpack.app.cli_context import CliContext
+from sunpack.app.cli_reporter import CliReporter
+from sunpack.app.commands import extract
 
 
 def test_wrong_password_failure_detection():

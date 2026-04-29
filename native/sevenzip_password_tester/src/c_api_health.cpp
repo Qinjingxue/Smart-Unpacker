@@ -13,8 +13,8 @@ SUP7Z_API int sup7z_check_archive_health(
     wchar_t* message,
     int message_chars
 ) {
-    using namespace packrelic::sevenzip;
-    using namespace packrelic::sevenzip::capi;
+    using namespace sunpack::sevenzip;
+    using namespace sunpack::sevenzip::capi;
     if (health) {
         *health = Sup7zArchiveHealth{};
     }
@@ -56,8 +56,8 @@ SUP7Z_API int sup7z_check_archive_health_with_parts(
     wchar_t* message,
     int message_chars
 ) {
-    using namespace packrelic::sevenzip;
-    using namespace packrelic::sevenzip::capi;
+    using namespace sunpack::sevenzip;
+    using namespace sunpack::sevenzip::capi;
     if (health) {
         *health = Sup7zArchiveHealth{};
     }

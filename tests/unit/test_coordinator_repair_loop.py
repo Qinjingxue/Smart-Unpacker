@@ -1,14 +1,14 @@
 from pathlib import Path
 
-from packrelic.analysis.result import ArchiveAnalysisReport
-from packrelic.analysis.scheduler import ArchiveAnalysisScheduler
-from packrelic.contracts.detection import FactBag
-from packrelic.contracts.run_context import RunContext
-from packrelic.contracts.tasks import ArchiveTask
-from packrelic.coordinator.extraction_batch import ExtractionBatchRunner
-from packrelic.extraction.result import ExtractionResult
-from packrelic.repair.candidate import RepairCandidate, RepairCandidateBatch
-from packrelic.verification.result import ArchiveCoverageSummary, VerificationResult
+from sunpack.analysis.result import ArchiveAnalysisReport
+from sunpack.analysis.scheduler import ArchiveAnalysisScheduler
+from sunpack.contracts.detection import FactBag
+from sunpack.contracts.run_context import RunContext
+from sunpack.contracts.tasks import ArchiveTask
+from sunpack.coordinator.extraction_batch import ExtractionBatchRunner
+from sunpack.extraction.result import ExtractionResult
+from sunpack.repair.candidate import RepairCandidate, RepairCandidateBatch
+from sunpack.verification.result import ArchiveCoverageSummary, VerificationResult
 
 
 def test_extraction_failure_repair_reanalysis_loop_skips_reanalysis_after_accepted_candidate(tmp_path):

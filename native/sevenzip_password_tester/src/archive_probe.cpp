@@ -99,20 +99,20 @@ SUP7Z_API int sup7z_probe_archive(
     }
     if (!seven_zip_dll_path || !archive_path) {
         copy_ascii(message, message_chars, "missing required path");
-        return static_cast<int>(packrelic::sevenzip::PasswordTestStatus::Error);
+        return static_cast<int>(sunpack::sevenzip::PasswordTestStatus::Error);
     }
 
     const std::wstring archive_path_text(archive_path);
 
-    const auto result = packrelic::sevenzip::test_password(seven_zip_dll_path, archive_path_text, L"");
+    const auto result = sunpack::sevenzip::test_password(seven_zip_dll_path, archive_path_text, L"");
     const std::wstring type = result.archive_type.empty() ? archive_type_for_path(archive_path_text) : result.archive_type;
     copy_text(archive_type, archive_type_chars, type);
-    const bool encrypted_result = result.status == packrelic::sevenzip::PasswordTestStatus::WrongPassword ||
-        (result.status == packrelic::sevenzip::PasswordTestStatus::Unsupported && lower_extension(archive_path_text) == L".7z");
-    const bool damaged_result = result.status == packrelic::sevenzip::PasswordTestStatus::Damaged;
+    const bool encrypted_result = result.status == sunpack::sevenzip::PasswordTestStatus::WrongPassword ||
+        (result.status == sunpack::sevenzip::PasswordTestStatus::Unsupported && lower_extension(archive_path_text) == L".7z");
+    const bool damaged_result = result.status == sunpack::sevenzip::PasswordTestStatus::Damaged;
 
     if (is_archive) {
-        *is_archive = (result.status == packrelic::sevenzip::PasswordTestStatus::Ok ||
+        *is_archive = (result.status == sunpack::sevenzip::PasswordTestStatus::Ok ||
             encrypted_result ||
             damaged_result ||
             is_archive_type(type)) ? 1 : 0;
@@ -130,7 +130,7 @@ SUP7Z_API int sup7z_probe_archive(
         *offset = result.archive_offset;
     }
     if (item_count) {
-        *item_count = result.status == packrelic::sevenzip::PasswordTestStatus::Ok ? 1 : 0;
+        *item_count = result.status == sunpack::sevenzip::PasswordTestStatus::Ok ? 1 : 0;
     }
     copy_ascii(message, message_chars, result.message);
     return static_cast<int>(result.status);

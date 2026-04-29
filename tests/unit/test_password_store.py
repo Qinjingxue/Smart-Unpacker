@@ -1,9 +1,9 @@
 from types import SimpleNamespace
 
-from packrelic.contracts.detection import FactBag
-from packrelic.passwords.job import PasswordJob
-from packrelic.passwords.scheduler import PasswordSearchResult
-from packrelic.passwords import PasswordResolver, PasswordSession, PasswordStore
+from sunpack.contracts.detection import FactBag
+from sunpack.passwords.job import PasswordJob
+from sunpack.passwords.scheduler import PasswordSearchResult
+from sunpack.passwords import PasswordResolver, PasswordSession, PasswordStore
 
 
 def test_password_store_orders_user_recent_builtin_and_dedupes():

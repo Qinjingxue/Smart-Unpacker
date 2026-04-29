@@ -1,6 +1,6 @@
 # 开发边界说明
 
-本文档是 PackRelic 当前架构的边界约定。项目已经进入 native-first、verification-driven repair loop 和模块流水线阶段：扫描、关系、检测、结构分析、密码、解压、校验、修复、后处理、watch 和 CLI 都应保持清晰职责。
+本文档是 SunPack 当前架构的边界约定。项目已经进入 native-first、verification-driven repair loop 和模块流水线阶段：扫描、关系、检测、结构分析、密码、解压、校验、修复、后处理、watch 和 CLI 都应保持清晰职责。
 
 ## 总原则
 
@@ -68,7 +68,7 @@ postprocess
 
 filesystem / relations / rename
   -> contracts
-  -> packrelic_native narrow helpers
+  -> sunpack_native narrow helpers
 
 passwords
   -> support.sevenzip_native
@@ -85,7 +85,7 @@ contracts
 
 | 领域 | 公开入口 | 职责 |
 | ---- | -------- | ---- |
-| CLI | `packrelic.app.cli.main` | 命令行入口。 |
+| CLI | `sunpack.app.cli.main` | 命令行入口。 |
 | 配置 | `config.loader.load_config` / `config.schema` | 配置读取、校验、归一化。 |
 | 契约 | `contracts.*` | 跨模块共享数据结构，包括 `RunContext`。 |
 | 文件系统 | `filesystem.directory_scanner.DirectoryScanner` | 目录扫描和过滤。 |
@@ -93,7 +93,7 @@ contracts
 | 检测 | `detection.DetectionScheduler` / `ArchiveTaskProvider` | 候选 facts、规则判断、任务生成。 |
 | 递归策略 | `detection.NestedOutputScanPolicy` | 判断输出目录是否进入下一轮扫描。 |
 | 结构分析 | `analysis.ArchiveAnalysisScheduler` | 对已确认候选做结构分析和边界标注。 |
-| 密码 | `packrelic.passwords` | 密码候选、调度、fast verifier、7z.dll 最终确认。 |
+| 密码 | `sunpack.passwords` | 密码候选、调度、fast verifier、7z.dll 最终确认。 |
 | 解压 | `extraction.scheduler.ExtractionScheduler` | 单归档输出目录、密码解析、worker 解压。 |
 | 校验 | `verification.VerificationScheduler` | 解压结果完整度、来源完整性和下一步决策。 |
 | 修复 | `repair.RepairScheduler` | 根据 verification repair 决策生成修复候选。 |
@@ -181,7 +181,7 @@ contracts
 
 ### native
 
-`native/packrelic_native` 承接跨平台热点：目录扫描、二进制视图、signature prepass、格式 probe、carrier scan、repair I/O、输出 CRC/readability、输出文件索引匹配、deep repair native 实现、密码 fast verifier 等。
+`native/sunpack_native` 承接跨平台热点：目录扫描、二进制视图、signature prepass、格式 probe、carrier scan、repair I/O、输出 CRC/readability、输出文件索引匹配、deep repair native 实现、密码 fast verifier 等。
 
 `native/sevenzip_password_tester` 承接 Windows 7z.dll ABI：archive probe/test、密码数组尝试、archive state manifest 和 `sevenzip_worker.exe` 解压。
 
@@ -190,7 +190,7 @@ contracts
 以下写法通常表示边界坏掉：
 
 ```python
-from packrelic.some_domain.internal import ...
+from sunpack.some_domain.internal import ...
 ```
 
 跨领域不要依赖 internal。补 public facade 或把共享契约移到 `contracts`。
@@ -202,13 +202,13 @@ facts = bag._facts
 不要读取私有状态。使用 `FactBag.to_dict()` 或补公开方法。
 
 ```python
-from packrelic.coordinator.runner import PipelineRunner  # inside watch scheduler
+from sunpack.coordinator.runner import PipelineRunner  # inside watch scheduler
 ```
 
 `watch` 不直接绑定 coordinator runner，由 app 注入 runner factory。
 
 ```python
-from packrelic.detection.pipeline.processors.modules... import SOME_RULE_DEFAULT
+from sunpack.detection.pipeline.processors.modules... import SOME_RULE_DEFAULT
 ```
 
 规则层不要依赖 processor 实现模块。共享默认值放到 `detection.pipeline.format_defaults` 或配置声明。
@@ -218,8 +218,8 @@ from packrelic.detection.pipeline.processors.modules... import SOME_RULE_DEFAULT
 每次改动后至少运行：
 
 ```powershell
-rg "from packrelic\.[^.]+\.internal" packrelic tests
-rg "\._facts|FactBag\._facts" packrelic tests
+rg "from sunpack\.[^.]+\.internal" sunpack tests
+rg "\._facts|FactBag\._facts" sunpack tests
 powershell -ExecutionPolicy Bypass -File scripts\run_ci_tests.ps1
 ```
 
@@ -237,7 +237,7 @@ powershell -ExecutionPolicy Bypass -File scripts\run_ci_tests.ps1
 ## 当前结构速览
 
 ```text
-packrelic/
+sunpack/
   app/          CLI 命令、参数、输出和运行时适配
   analysis/     压缩包结构分析和边界标注
   config/       配置读取、校验、归一化和领域配置视图

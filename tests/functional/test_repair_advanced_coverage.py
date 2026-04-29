@@ -11,20 +11,20 @@ import zlib
 
 import pytest
 
-from packrelic.contracts.archive_state import ArchiveState, PatchOperation, PatchPlan
-from packrelic.contracts.detection import FactBag
-from packrelic.contracts.run_context import RunContext
-from packrelic.contracts.tasks import ArchiveTask
-from packrelic.config.schema import normalize_config
-from packrelic.coordinator.extraction_batch import ExtractionBatchRunner
-from packrelic.coordinator.repair_beam import RepairBeamLoop, RepairBeamState
-from packrelic.coordinator.runner import PipelineRunner
-from packrelic.detection import NestedOutputScanPolicy
-from packrelic.extraction.result import ExtractionResult
-from packrelic.extraction.scheduler import ExtractionScheduler
-from packrelic.repair import RepairJob, RepairScheduler
-from packrelic.repair.candidate import RepairCandidate, RepairCandidateBatch
-from packrelic.verification import VerificationScheduler
+from sunpack.contracts.archive_state import ArchiveState, PatchOperation, PatchPlan
+from sunpack.contracts.detection import FactBag
+from sunpack.contracts.run_context import RunContext
+from sunpack.contracts.tasks import ArchiveTask
+from sunpack.config.schema import normalize_config
+from sunpack.coordinator.extraction_batch import ExtractionBatchRunner
+from sunpack.coordinator.repair_beam import RepairBeamLoop, RepairBeamState
+from sunpack.coordinator.runner import PipelineRunner
+from sunpack.detection import NestedOutputScanPolicy
+from sunpack.extraction.result import ExtractionResult
+from sunpack.extraction.scheduler import ExtractionScheduler
+from sunpack.repair import RepairJob, RepairScheduler
+from sunpack.repair.candidate import RepairCandidate, RepairCandidateBatch
+from sunpack.verification import VerificationScheduler
 from tests.helpers.detection_config import with_detection_pipeline
 from tests.helpers.tool_config import get_optional_rar
 
@@ -582,7 +582,7 @@ def test_deep_candidate_cap_limits_nested_payload_salvage_outputs(tmp_path):
 
 
 def test_deep_output_size_limit_rejects_candidate_and_removes_temp_files(tmp_path):
-    from packrelic_native import zip_deep_partial_recovery
+    from sunpack_native import zip_deep_partial_recovery
 
     source = tmp_path / "oversized-output.zip"
     source.write_bytes(_raw_stored_local_entry("large.bin", b"x" * 2048))
@@ -607,7 +607,7 @@ def test_deep_output_size_limit_rejects_candidate_and_removes_temp_files(tmp_pat
 
 
 def test_deep_time_budget_returns_without_candidates(tmp_path):
-    from packrelic_native import zip_deep_partial_recovery
+    from sunpack_native import zip_deep_partial_recovery
 
     source = tmp_path / "many-local-headers.zip"
     source.write_bytes(b"".join(

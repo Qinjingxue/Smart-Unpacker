@@ -1,7 +1,7 @@
-from packrelic.contracts.archive_input import ArchiveInputDescriptor
-from packrelic.contracts.archive_state import ArchiveState, PatchOperation, PatchPlan
-from packrelic.coordinator.repair_beam import RepairBeamLoop, RepairBeamState
-from packrelic.repair.candidate import CandidateValidation, RepairCandidate, RepairCandidateBatch
+from sunpack.contracts.archive_input import ArchiveInputDescriptor
+from sunpack.contracts.archive_state import ArchiveState, PatchOperation, PatchPlan
+from sunpack.coordinator.repair_beam import RepairBeamLoop, RepairBeamState
+from sunpack.repair.candidate import CandidateValidation, RepairCandidate, RepairCandidateBatch
 
 
 def test_repair_beam_expands_candidates_and_keeps_top_states():

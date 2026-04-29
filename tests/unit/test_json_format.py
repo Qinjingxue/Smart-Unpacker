@@ -1,4 +1,4 @@
-from packrelic.support.json_format import (
+from sunpack.support.json_format import (
     json_safe,
     load_json_file,
     parse_jsonish,
