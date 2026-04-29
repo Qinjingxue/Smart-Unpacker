@@ -1,2 +1,0 @@
-sevenzip_password_tester_smoke 1 0.009594
----

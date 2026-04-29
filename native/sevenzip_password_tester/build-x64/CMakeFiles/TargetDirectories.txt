@@ -1,7 +1,0 @@
-C:/Users/29402/Desktop/SUNPACK/smart_unpacker-2/native/sevenzip_password_tester/build-x64/CMakeFiles/sevenzip_password_tester.dir
-C:/Users/29402/Desktop/SUNPACK/smart_unpacker-2/native/sevenzip_password_tester/build-x64/CMakeFiles/sevenzip_password_tester_capi.dir
-C:/Users/29402/Desktop/SUNPACK/smart_unpacker-2/native/sevenzip_password_tester/build-x64/CMakeFiles/sevenzip_password_tester_smoke.dir
-C:/Users/29402/Desktop/SUNPACK/smart_unpacker-2/native/sevenzip_password_tester/build-x64/CMakeFiles/sevenzip_worker.dir
-C:/Users/29402/Desktop/SUNPACK/smart_unpacker-2/native/sevenzip_password_tester/build-x64/CMakeFiles/RUN_TESTS.dir
-C:/Users/29402/Desktop/SUNPACK/smart_unpacker-2/native/sevenzip_password_tester/build-x64/CMakeFiles/ALL_BUILD.dir
-C:/Users/29402/Desktop/SUNPACK/smart_unpacker-2/native/sevenzip_password_tester/build-x64/CMakeFiles/ZERO_CHECK.dir
