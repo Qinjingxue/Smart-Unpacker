@@ -1,139 +1,90 @@
 # Smart Unpacker
 
-Smart Unpacker 是一个面向 Windows 的智能批量解压CLI工具。它会先扫描文件和目录，结合扩展名、文件头、嵌入式压缩包证据、分卷关系、目录场景和 7-Zip 确认结果，尽量只解压真正应该解压的归档文件，使用codex开发。
+Smart Unpacker 是一个 Windows-first 的智能归档处理与损坏压缩包尽力恢复工具。它不只是批量调用 7-Zip 解压，而是围绕真实文件状态建立一条可循环的 pipeline：
 
-主要功能是一键批量解压处理复杂的压缩包文件，该项目可以轻松处理各种压缩包脏数据，包括嵌套压缩，伪装carrier压缩包，分卷压缩，自解压，也能应对损坏，缺失分卷的压缩包。推荐注册为windows右键菜单使用
+```text
+detection -> analysis -> extraction -> verification -> repair -> extraction -> verification
+```
 
-当前项目的 CLI 已支持中文，默认配置文件是 `smart_unpacker_config.json`。源码运行入口是 `python sunpack_cli.py`；Windows 打包后入口是 `sunpack.exe`。
+项目的目标是：在复杂下载目录、游戏/程序目录、伪装载体、分卷包、嵌套包和损坏包里，尽量找出真正应该处理的归档；解压失败时尽量恢复可用文件；恢复出多个候选时用 verification 比较完整度，保留更好的结果。
 
-## 主要能力
+当前项目的 CLI 已支持中文，默认配置文件是 `smart_unpacker_config.json`。源码入口是 `python sunpack_cli.py`；Windows 打包后入口是 `sunpack.exe`。
 
-- 批量扫描目录和文件，自动生成解压任务。
-- 识别常见压缩包、分卷压缩包和部分伪装/嵌入式压缩包。
-- 对游戏、程序目录中的资源包进行保护，降低误解压风险。
-- 支持密码列表、交互输入密码和内置高频密码表。
-- 支持递归解压、单目录扁平化、成功后保留/回收站/删除原压缩包。
-- 支持目录扫描黑名单、目录剪枝、最小检测大小和仅扫描当前目录模式。
-- 递归解压会按输出目录内容和强场景目录保护策略决定是否继续扫描。
-- 提供 `scan`、`inspect`、`config validate` 等诊断命令。
-- 提供 `watch` 命令，基于 watchdog 监控目录并自动处理稳定归档文件。
-- 提供 Windows 右键菜单注册脚本，便于对文件夹直接执行解压。
+## 核心能力
 
-## 环境准备
+- **智能候选识别**：结合扩展名、magic bytes、ZIP/7z/RAR/TAR 结构事实、embedded payload、PE overlay、目录场景和 7z.dll probe/test 判断文件是否值得解压。
+- **场景保护**：识别游戏、程序、资源目录，降低把 `.dll`、模型权重、Office 容器、资源包等误当普通压缩包处理的概率。
+- **分卷与虚拟输入**：识别标准分卷、编号卷、RAR/7z 分卷和 SFX companion；analysis 可产出 `file_range`、`concat_ranges` 等虚拟输入供 worker 解压。
+- **真实 worker 解压**：最终解压由 `sevenzip_worker.exe` 调用 `7z.dll` 完成，不走 `7z.exe x` 文本封装。
+- **verification 驱动结果判断**：不只看 worker 成功/失败，而是检查输出目录、manifest、归档条目、CRC、样本可读性、文件完整度和部分恢复进度。
+- **repair beam 循环**：修复模块生成 patch plan，候选会重新解压并进入 verification；比较算法按完整度、失败数、patch 成本、来源完整性等选择更优结果，没有提升时主动停止。
+- **损坏包尽力恢复**：支持 ZIP central directory/local header 修复、entry quarantine、deep partial recovery、conflict resolver；TAR checksum/trailing/PAX/GNU longname/sparse 修复；gzip/bzip2/xz/zstd 截断和尾部垃圾处理；7z start/next header/边界/CRC/solid block salvage；RAR block/end/carrier/file quarantine 修复。
+- **嵌套与载体恢复**：可从损坏外壳或 carrier 中扫描内层 ZIP/7z/RAR/TAR/gzip 等载荷，并把内层包送回 pipeline。
+- **Native-first 热路径**：Rust 承接目录扫描、二进制视图、signature prepass、结构 probe、carrier scan、repair I/O、CRC/readability、候选匹配索引和密码 fast verifier；C++ 承接 7z.dll ABI 与 worker。
+- **适合右键菜单和 watch**：提供 Windows 右键菜单脚本，也支持 `watch` 目录监控，文件稳定后自动处理。
 
-建议使用 Windows 和 Python 3.10 或更新版本。开发环境需要这些工具：
+## 当前定位
 
-- Python 3.10+
-- Rust toolchain，提供 `cargo`
-- Visual Studio Build Tools 2022 或等价 C++17 编译器
-- CMake 3.25+
-- PowerShell 5+
+Smart Unpacker 更像一个“归档恢复协调器”而不是普通解压器：
 
-Python 运行依赖在 `requirements.txt`，包括 `psutil`、`send2trash`、`watchdog` 和 `zstandard`；构建依赖在 `requirements-build.txt`。构建脚本会安装 PyInstaller、maturin 和 CMake，但不会安装 Rust 或 Visual Studio C++ 编译器。
+- 对干净压缩包：批量、递归、密码、分卷、清理和扁平化。
+- 对可疑文件：通过 detection/analysis 尽量避免误判。
+- 对损坏压缩包：先提取可用部分，再让 repair 生成候选，最后由 verification 比较产物质量。
+- 对大批量任务：通过 scheduler profile、resource guard、analysis cache、worker 复用和 Rust 热路径控制性能。
 
-推荐在 Windows 下直接执行开发环境脚本：
+## 快速开始
+
+准备开发环境：
 
 ```powershell
 .\scripts\setup_windows_dev.ps1
 ```
 
-脚本会创建 `.venv`、安装运行依赖和 pytest、准备 `tools\7z.exe` / `tools\7z.dll` 等 7-Zip 文件，用 `maturin` 构建/安装 Rust 原生扩展，并用 CMake 构建 `7z.dll` C++ wrapper 到 `tools\sevenzip_password_tester_capi.dll`。需要同时准备 PyInstaller 等构建依赖时：
+包含打包依赖：
 
 ```powershell
 .\scripts\setup_windows_dev.ps1 -IncludeBuildDeps
 ```
 
-手动准备时可以按下面的步骤执行：
-
-```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt
-python -m pip install -r requirements-build.txt pytest
-python -m maturin build --manifest-path native\smart_unpacker_native\Cargo.toml --release --out build\native-wheels-dev
-$wheel = Get-ChildItem build\native-wheels-dev\smart_unpacker_native-*.whl | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1 -ExpandProperty FullName
-python -m pip install --force-reinstall $wheel
-cmake -S native\sevenzip_password_tester -B native\sevenzip_password_tester\build
-cmake --build native\sevenzip_password_tester\build --config Release
-ctest --test-dir native\sevenzip_password_tester\build -C Release --output-on-failure
-Copy-Item native\sevenzip_password_tester\build\Release\sevenzip_password_tester_capi.dll tools\sevenzip_password_tester_capi.dll -Force
-Copy-Item native\sevenzip_password_tester\build\Release\sevenzip_worker.exe tools\sevenzip_worker.exe -Force
-```
-
-Windows 下解压后端要求存在 `tools\sevenzip_worker.exe`、`tools\sevenzip_password_tester_capi.dll` 和 `tools\7z.dll`，缺失时直接报错。`tools\7z.exe` 仍作为开发 fixture、手工诊断和 7-Zip 文件来源保留，但项目后端不再依赖 `7z.exe x` 来执行解压。
-
-确认原生扩展可用：
+确认 native 组件可用：
 
 ```powershell
 python -c "import smart_unpacker_native as n; print(n.native_available(), n.scanner_version())"
 python -c "from smart_unpacker.support.sevenzip_native import NativePasswordTester; print(NativePasswordTester().available())"
 ```
 
-## 快速使用
-
-查看帮助：
-
-```powershell
-python sunpack_cli.py --help
-```
-
-扫描目录但不解压：
+常用命令：
 
 ```powershell
 python sunpack_cli.py scan D:\Downloads
-```
-
-查看详细判定过程：
-
-```powershell
 python sunpack_cli.py inspect D:\Downloads -v
-```
-
-执行解压：
-
-```powershell
 python sunpack_cli.py extract D:\Downloads
-```
-
-监控目录并自动解压稳定归档：
-
-```powershell
 python sunpack_cli.py watch D:\Downloads --out-dir D:\Unpacked
-```
-
-带密码解压：
-
-```powershell
 python sunpack_cli.py extract D:\Archives -p 123456 --pw-file .\passwords.txt
-```
-
-输出 JSON：
-
-```powershell
-python sunpack_cli.py scan D:\Downloads --json
+python sunpack_cli.py config validate
 ```
 
 打包后的程序使用同一套命令：
 
 ```powershell
-.\dist\sunpack\sunpack.exe inspect D:\Downloads --json
+.\dist\sunpack\sunpack.exe extract D:\Downloads
 ```
 
-## 常用命令
+## 命令速览
 
-| 命令              | 说明                           |
-| ----------------- | ------------------------------ |
-| `extract`         | 执行预检查、扫描、解压和清理。 |
-| `watch`           | 监控文件夹，发现稳定压缩文件后自动解压。 |
-| `scan`            | 只生成可解压任务，不修改文件。 |
-| `inspect`         | 输出每个文件的检测详情。       |
-| `passwords`       | 查看会参与尝试的密码列表。     |
-| `config show`     | 打印当前配置。                 |
-| `config validate` | 校验配置和规则插件声明。       |
+| 命令 | 说明 |
+| --- | --- |
+| `extract` | 扫描、analysis、解压、verification、repair 循环、后处理。 |
+| `watch` | 监控目录，发现稳定归档后自动进入 extract pipeline。 |
+| `scan` | 只生成候选任务，不修改文件。 |
+| `inspect` | 输出检测、analysis 和规则判定细节。 |
+| `passwords` | 查看本次会参与尝试的密码列表。 |
+| `config show` | 打印当前配置。 |
+| `config validate` | 校验 JSON、规则、verification method 和 fact schema。 |
 
 详细参数见 [CLI 参数说明](docs/cli_parameters.md)。
 
-## 配置
+## 配置重点
 
 主配置文件是 `smart_unpacker_config.json`。修改后建议执行：
 
@@ -141,56 +92,99 @@ python sunpack_cli.py scan D:\Downloads --json
 python sunpack_cli.py config validate
 ```
 
-常调配置：
+常用配置：
 
-- `cli.language`：CLI 语言，中文可设为 `zh`。
-- `thresholds`：压缩包判定阈值；中间可疑区间会自动进入确认层。
-- `recursive_extract`：递归解压模式，`*` 无限递归，正整数为轮数，`?` 每轮询问。
-- `post_extract.archive_cleanup_mode`：成功后 `d` 删除、`r` 回收站或 `k` 不动。
-- `post_extract.flatten_single_directory`：是否扁平化单一顶层目录。
-- `filesystem.directory_scan_mode`：`*` 递归扫描，`-` 只扫描当前目录。
-- `filesystem.scan_filters`：目录扫描阶段的黑名单、剪枝目录、阻止扩展名和最小检测大小。
-- `performance.scheduler_profile`：`auto`、`conservative` 或 `aggressive`。
-- `performance.max_extract_task_seconds` / `performance.process_no_progress_timeout_seconds`：限制单个解压任务总时长和无进展超时，`0` 表示关闭限制。
-- `verification`：解压结果校验、失败重试和失败输出清理策略；仓库默认配置已启用基础校验。
-- `detection.rule_pipeline`：检测规则流水线。
+- `filesystem.scan_filters`：目录剪枝、黑名单、最小检测大小。
+- `detection.rule_pipeline`：候选识别、场景保护、结构打分和确认层。
+- `analysis`：结构分析、signature prepass、fuzzy binary profile、批量 analysis cache。
+- `verification`：输出存在性、manifest、归档 CRC、可读性抽样、部分恢复阈值。
+- `repair`：repair stages、安全策略、deep 限制、auto deep、beam、模块开关和资源上限。
+- `performance`：scheduler profile、worker 超时、profile calibration、resource guard。
+- `recursive_extract`：递归解压策略，`*` 无限递归，正整数为轮数，`?` 每轮询问。
+- `post_extract.archive_cleanup_mode`：成功后 `d` 删除、`r` 回收站、`k` 保留。
 
 完整说明见 [配置文件说明](docs/configuration.md)。
 
-## 规则插件
+## 架构速览
 
-扫描和检测由 filesystem scan filters、Fact 采集器、处理器和三层规则组成：
+```text
+app/config
+  -> coordinator
+     -> detection -> analysis -> extraction -> verification
+                                      ^              |
+                                      |              v
+                                      +---- repair <-+
+     -> postprocess
+```
 
-- `filesystem.directory_scan_mode`：控制扫描目标目录时是否递归进入已有子目录。
-- `filesystem.scan_filters`：在目录扫描阶段过滤黑名单路径、过小文件等明显不需要进入检测的条目。
-- `precheck`：场景保护、高置信快速放行等需要检测事实的预检规则。
-- `scoring`：扩展名、真实内容身份、场景扣分等打分规则。
-- `confirmation`：7-Zip 探测和测试规则。
+重要边界：
 
-插件接口见 [规则插件说明](docs/rule_plugins.md)。
+- `detection` 只判断候选是否应处理。
+- `analysis` 只描述结构、边界、损坏标志和可用输入视图。
+- `extraction` 只执行 worker 解压。
+- `verification` 只评价结果质量和下一步建议。
+- `repair` 只生成候选或 patch plan，不直接宣称成功。
+- `coordinator` 负责循环、比较、资源限制、summary 和最终归档处理。
 
-## 开发文档
-
-开发环境、构建脚本和依赖说明见 [开发环境和构建说明](docs/development_setup.md)。模块边界、依赖方向和重构约束见 [开发边界说明](docs/development_boundaries.md)。
+详细约束见 [开发边界说明](docs/development_boundaries.md)。
 
 ## 原生组件
 
-项目包含两个原生组件：
+项目是 Python + Rust + C++ 三层协作：
 
-- `native\smart_unpacker_native`：Rust/PyO3 扩展，用于目录扫描、二进制视图、signature prepass、轻量格式结构解析、carrier 扫描、ZIP central directory 文件名采样、PE overlay 解析、修复层二进制 I/O 和密码 fast verifier 等热点。
-- `native\sevenzip_password_tester`：C++/CMake wrapper，用于通过 `7z.dll` 执行 archive probe/test、密码数组尝试，以及 `sevenzip_worker.exe` 流式解压任务。
+- `smart_unpacker/`：配置、CLI、调度、规则、verification/repair 决策编排。
+- `native/smart_unpacker_native/`：Rust/PyO3 热路径，包括目录扫描、二进制结构分析、repair I/O、CRC/readability、candidate matching、deep repair native 实现等。
+- `native/sevenzip_password_tester/`：C++/CMake 7z.dll wrapper，提供 probe/test、密码数组尝试和 `sevenzip_worker.exe`。
 
-Python 层仍负责配置、规则判断、任务调度、分卷语义、analysis/repair 流水线编排和 worker 调度。最终解压由 `sevenzip_worker.exe` 通过 `7z.dll` 执行，支持 analysis 层标注出的 `file_range` / `concat_ranges` 虚拟输入。
+运行时必须有：
+
+```text
+tools\7z.exe
+tools\7z.dll
+tools\sevenzip_password_tester_capi.dll
+tools\sevenzip_worker.exe
+```
+
+`7z.exe` 主要保留给开发 fixture、手工诊断和 7-Zip 文件来源；正式解压后端是 `sevenzip_worker.exe` + `7z.dll`。
+
+## 开发与测试
+
+运行默认测试：
+
+```powershell
+pytest
+```
+
+验收测试：
+
+```powershell
+.\run_acceptance_tests.ps1
+```
+
+本地 CI 风格检查：
+
+```powershell
+.\scripts\run_ci_tests.ps1
+```
+
+慢速真实归档/性能测试默认不跑，可显式打开：
+
+```powershell
+pytest --run-slow-real-archives
+pytest --run-large-archive-performance -s
+```
+
+开发环境和构建说明见 [development_setup.md](docs/development_setup.md)。
 
 ## Windows 右键菜单
 
-开发环境或发行目录下都可以注册当前用户的目录右键菜单：
+注册当前用户右键菜单：
 
 ```powershell
 .\scripts\register_context_menu.ps1
 ```
 
-脚本会优先使用 `sunpack.exe`，找不到时回退到 `python sunpack_cli.py`。默认菜单项会执行：
+默认菜单项会执行：
 
 ```powershell
 sunpack extract <目标目录> --ask-pw --pause
@@ -202,31 +196,13 @@ sunpack extract <目标目录> --ask-pw --pause
 .\scripts\unregister_context_menu.ps1
 ```
 
-## 测试
-
-该项目为保证功能延续性，有较为完善的测试系统
-
-运行单元和功能测试：
-
-```powershell
-pytest
-```
-
-运行项目自带冒烟/验收脚本：
-
-```powershell
-.\run_acceptance_tests.ps1
-```
-
 ## 构建
 
-Windows 打包脚本：
+Windows 打包：
 
 ```powershell
 .\scripts\build_windows.ps1
 ```
-
-构建脚本会创建独立的 `.venv-build`，安装运行和构建依赖，使用 `maturin` 构建 `smart_unpacker_native` wheel，使用 CMake 构建 `sevenzip_password_tester_capi.dll` 和 `sevenzip_worker.exe`，再用 PyInstaller 打包 `sunpack.exe`。打包后脚本会检查 Rust `.pyd`、`7z.exe`、`7z.dll`、C++ wrapper DLL 和 worker 已进入发行目录，并运行基础 smoke test。
 
 常用参数：
 
@@ -236,4 +212,4 @@ Windows 打包脚本：
 .\scripts\build_windows.ps1 -Version 1.2.3
 ```
 
-构建产物会使用外部 `smart_unpacker_config.json`，方便用户在不重新打包的情况下调整规则和行为。发行包输出到 `release\sunpack-windows-x64-<version>.zip`。
+构建脚本会准备 `.venv-build`，构建 Rust wheel 和 C++ worker，用 PyInstaller 生成 `sunpack.exe`，复制 `smart_unpacker_config.json`、`builtin_passwords.txt` 和 `tools/` 运行文件，并执行 packaged smoke test。发行包输出到 `release\sunpack-windows-x64-<version>.zip`。

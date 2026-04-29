@@ -1,6 +1,6 @@
 # 开发边界说明
 
-本文档是 Smart Unpacker 当前架构的边界约定。项目已经进入 native-first 和模块流水线阶段：扫描、关系、检测、结构分析、密码、解压、修复、校验、后处理、watch 和 CLI 都应保持清晰职责。
+本文档是 Smart Unpacker 当前架构的边界约定。项目已经进入 native-first、verification-driven repair loop 和模块流水线阶段：扫描、关系、检测、结构分析、密码、解压、校验、修复、后处理、watch 和 CLI 都应保持清晰职责。
 
 ## 总原则
 
@@ -29,8 +29,8 @@ coordinator
   -> detection
   -> analysis
   -> extraction
-  -> repair
   -> verification
+  -> repair
   -> postprocess
   -> rename
   -> contracts
@@ -95,8 +95,8 @@ contracts
 | 结构分析 | `analysis.ArchiveAnalysisScheduler` | 对已确认候选做结构分析和边界标注。 |
 | 密码 | `smart_unpacker.passwords` | 密码候选、调度、fast verifier、7z.dll 最终确认。 |
 | 解压 | `extraction.scheduler.ExtractionScheduler` | 单归档输出目录、密码解析、worker 解压。 |
-| 修复 | `repair.RepairScheduler` | 根据 analysis/extraction 错误运行修复流水线。 |
-| 校验 | `verification.VerificationScheduler` | 解压结果评分式校验。 |
+| 校验 | `verification.VerificationScheduler` | 解压结果完整度、来源完整性和下一步决策。 |
+| 修复 | `repair.RepairScheduler` | 根据 verification repair 决策生成修复候选。 |
 | 后处理 | `postprocess.actions.PostProcessActions` | 成功后清理和扁平化。 |
 | Watch | `watch.WatchScheduler` | watchdog 事件、稳定文件队列和自动处理。 |
 | Native ABI | `support.sevenzip_native` | C++ 7z.dll wrapper 绑定和缓存。 |
@@ -157,11 +157,11 @@ contracts
 
 ### repair
 
-`repair` 是损坏结构修复流水线。输入来自 analysis 的中等置信度结果或 extraction 的错误证据。每个格式一个模块目录，修复模块通过 registry 注册。读写二进制必须走 native repair I/O，避免 Python 大文件读写 fallback。
+`repair` 是损坏结构修复候选生成层。它不再由 analysis 中等置信度直接触发，而是响应 verification 的 `repair` 决策。每个格式一个模块目录，修复模块通过 registry 注册，返回候选文件、虚拟输入或 patch plan。读写二进制必须走 native repair I/O，避免 Python 大文件读写 fallback。
 
 ### verification
 
-`verification` 是解压结果校验黑盒。它从 `ArchiveTask`、`ExtractionResult` 和 `PasswordSession` 构建证据，按配置执行 method 并返回评分结果。是否重试、是否清理失败输出，由 coordinator 决定。
+`verification` 是解压结果校验和候选比较的事实来源。它从 `ArchiveTask`、`ExtractionResult`、`ArchiveState` 和 `PasswordSession` 构建证据，按配置执行 method，返回完整度、文件观察、source integrity、recoverable upper bound 和 decision hint。是否重试、是否清理失败输出、是否进入 repair loop，由 coordinator 决定。
 
 ### postprocess
 
@@ -169,7 +169,7 @@ contracts
 
 ### coordinator
 
-`coordinator` 负责流程顺序、递归轮次、批量调度、资源 token、verification retry 和 summary。它不自己识别候选、不执行 7z、不删除归档、不直接实现修复算法。
+`coordinator` 负责流程顺序、递归轮次、批量调度、资源 token、verification retry、repair beam、候选比较和 summary。它不自己识别候选、不执行 7z、不直接实现修复算法。归档清理通过 postprocess 公开动作完成。
 
 ### watch
 
@@ -181,9 +181,9 @@ contracts
 
 ### native
 
-`native/smart_unpacker_native` 承接跨平台热点：目录扫描、二进制视图、signature prepass、格式 probe、carrier scan、repair I/O、输出 CRC/readability、密码 fast verifier 等。
+`native/smart_unpacker_native` 承接跨平台热点：目录扫描、二进制视图、signature prepass、格式 probe、carrier scan、repair I/O、输出 CRC/readability、输出文件索引匹配、deep repair native 实现、密码 fast verifier 等。
 
-`native/sevenzip_password_tester` 承接 Windows 7z.dll ABI：archive probe/test、密码数组尝试、CRC manifest 和 `sevenzip_worker.exe` 解压。
+`native/sevenzip_password_tester` 承接 Windows 7z.dll ABI：archive probe/test、密码数组尝试、archive state manifest 和 `sevenzip_worker.exe` 解压。
 
 ## 禁止清单
 
@@ -229,8 +229,9 @@ powershell -ExecutionPolicy Bypass -File scripts\run_ci_tests.ps1
 - coordinator 是否仍只是编排？
 - relation 能力是否通过 `RelationsScheduler` 暴露？
 - analysis 是否负责结构和边界，extraction 是否只执行解压？
+- verification 是否先于 repair 给出完整度、source integrity 和 repair 决策？
 - repair 是否通过 native I/O 处理二进制？
-- verification 是否只描述校验结果，不做清理或重试决策？
+- repair 候选是否重新进入 extraction + verification，而不是直接标记成功？
 - support 是否没有混入业务策略？
 
 ## 当前结构速览

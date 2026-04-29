@@ -143,12 +143,18 @@ Copy-Item native\sevenzip_password_tester\build\Release\sevenzip_worker.exe tool
 - ZIP central directory 文件名采样
 - 轻量格式结构解析
 - PE overlay 解析
+- analysis binary view、signature prepass 和 fuzzy binary profile
+- repair 层二进制 I/O、range copy/concat/patch 写入
+- ZIP/TAR/压缩流/7z/RAR 部分深度修复的 native 实现
+- verification 输出目录 CRC/readability 扫描和 path/basename 索引匹配
+- ZIP/RAR/7z/password fast verifier 热路径
 
 `sevenzip_password_tester_capi.dll` 负责 Windows 7z.dll 热点：
 
 - archive probe，替代检测路径中的 `7z l`
 - archive test，替代检测路径中的 `7z t`
 - 密码数组尝试，避免为每个密码启动 `7z.exe`
-- worker 解压，接收 JSON job，调用 7z.dll 处理普通文件、file range 和 concat range 虚拟输入
+- archive state manifest，供 verification 比较归档条目和输出文件
+- worker 解压，接收 JSON job，调用 7z.dll 处理普通文件、file range、concat range、native/staged volumes 和 patch-plan 虚拟输入
 
 最终解压由 `sevenzip_worker.exe` 通过 `7z.dll` 执行。`7z.exe` 仍保留在工具目录中，主要用于开发 fixture、手工诊断和 7-Zip 文件来源。

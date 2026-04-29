@@ -15,6 +15,7 @@ sunpack.exe <command> [options] [paths...]
 顶层命令：
 
 - `extract`：预检查、扫描、解压、后处理和清理。
+- `watch`：监控目录，文件稳定后自动进入 extract pipeline。
 - `scan`：只扫描可解压任务，不修改文件。
 - `inspect`：输出每个文件的检测细节，不修改文件。
 - `passwords`：查看实际会参与尝试的密码列表。
@@ -127,6 +128,25 @@ python sunpack_cli.py inspect D:\Downloads
 python sunpack_cli.py inspect D:\Downloads --archives-only
 python sunpack_cli.py inspect D:\Downloads --json
 python sunpack_cli.py inspect D:\Downloads -v
+```
+
+## watch
+
+用法：
+
+```powershell
+python sunpack_cli.py watch [options] <paths...>
+```
+
+`watch` 会监听一个或多个文件夹。发现候选归档后先等待文件大小稳定，再把路径交给同一套 `extract` pipeline，因此 detection、analysis、verification、repair、递归和后处理能力都与普通 `extract` 保持一致。
+
+常用参数与 `extract` 基本一致，包括密码、输出目录、递归、调度档位、清理策略、JSON/quiet/verbose/pause 等。
+
+示例：
+
+```powershell
+python sunpack_cli.py watch D:\Downloads --out-dir D:\Unpacked
+python sunpack_cli.py watch D:\Incoming -p 123456 --cleanup r --recur *
 ```
 
 ## passwords

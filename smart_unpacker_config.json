@@ -42,7 +42,73 @@
   "performance": {
     "scheduler_profile": "auto",
     "max_extract_task_seconds": 1800,
-    "process_no_progress_timeout_seconds": 180
+    "process_no_progress_timeout_seconds": 180,
+    "process_sample_interval_ms": 500,
+    "persistent_workers": true,
+    "profile_calibration_window_size": 4,
+    "profile_regression_ratio": 0.8,
+    "profile_improvement_ratio": 1.2,
+    "profile_calibration_max_delta": 1,
+    "profile_calibration_min_parallel": 2,
+    "profile_calibration_cache_enabled": true,
+    "resource_guard": {
+      "enabled": false,
+      "max_file_count": 0,
+      "max_total_unpacked_size": 0,
+      "max_largest_item_size": 0,
+      "max_compression_ratio": 0
+    }
+  },
+  "analysis": {
+    "enabled": true,
+    "task_parallel": true,
+    "task_max_workers": 4,
+    "cache_size": 512,
+    "parallel": true,
+    "max_workers": 3,
+    "max_concurrent_reads": 1,
+    "shared_cache_mb": 64,
+    "max_read_mb_per_archive": 256,
+    "prepass": {
+      "enabled": true,
+      "head_bytes": 1048576,
+      "tail_bytes": 1048576
+    },
+    "fuzzy": {
+      "enabled": true,
+      "modules": [
+        {
+          "name": "binary_profile",
+          "enabled": true,
+          "window_bytes": 65536,
+          "max_windows": 8,
+          "max_sample_bytes": 1048576,
+          "entropy_high_threshold": 6.8,
+          "entropy_low_threshold": 3.5,
+          "entropy_jump_threshold": 1.25,
+          "ngram_top_k": 8,
+          "max_ngram_sample_bytes": 262144
+        }
+      ]
+    },
+    "thresholds": {
+      "extractable_confidence": 0.85,
+      "repair_confidence": 0.35
+    },
+    "modules": [
+      {"name": "zip", "enabled": true, "max_cd_entries_to_walk": 64},
+      {"name": "rar", "enabled": true, "max_blocks_to_walk": 4096},
+      {"name": "seven_zip", "enabled": true, "max_next_header_check_bytes": 1048576},
+      {"name": "tar", "enabled": true, "max_entries_to_walk": 64},
+      {"name": "gzip", "enabled": true, "max_probe_bytes": 4194304},
+      {"name": "bzip2", "enabled": true, "max_probe_bytes": 4194304},
+      {"name": "xz", "enabled": true, "max_probe_bytes": 4194304},
+      {"name": "zstd", "enabled": true, "max_probe_bytes": 4194304},
+      {"name": "tar_gz", "enabled": true, "max_probe_bytes": 4194304},
+      {"name": "tar_bz2", "enabled": true, "max_probe_bytes": 4194304},
+      {"name": "tar_xz", "enabled": true, "max_probe_bytes": 4194304},
+      {"name": "tar_zst", "enabled": true, "max_probe_bytes": 4194304}
+    ]
   },
   "verification": {
     "enabled": true,
@@ -53,21 +119,25 @@
     "complete_accept_threshold": 0.999,
     "partial_accept_threshold": 0.2,
     "retry_on_verification_failure": true,
-      "methods": [
-        {"name": "extraction_exit_signal", "enabled": true},
-        {"name": "output_presence", "enabled": true},
-        {"name": "expected_name_presence", "enabled": true},
-        {"name": "manifest_size_match", "enabled": true},
-        {"name": "archive_test_crc", "enabled": false},
-        {"name": "sample_readability", "enabled": false}
-      ]
-    },
+    "methods": [
+      {"name": "extraction_exit_signal", "enabled": true},
+      {"name": "output_presence", "enabled": true},
+      {"name": "expected_name_presence", "enabled": true, "max_expected_names": 50},
+      {"name": "manifest_size_match", "enabled": true, "max_expected_names": 2000},
+      {"name": "archive_test_crc", "enabled": true, "max_items": 200000, "max_reported_items": 20},
+      {"name": "sample_readability", "enabled": true, "max_samples": 64, "read_bytes": 4096, "max_reported_items": 20}
+    ]
+  },
   "repair": {
     "enabled": true,
     "workspace": ".smart_unpacker_repair",
     "keep_candidates": false,
     "max_modules_per_job": 4,
     "max_attempts_per_task": 1,
+    "max_repair_rounds_per_task": 3,
+    "max_repair_seconds_per_task": 120,
+    "max_repair_generated_files_per_task": 16,
+    "max_repair_generated_mb_per_task": 2048,
     "stages": {
       "targeted": true,
       "safe_repair": true,
@@ -102,7 +172,55 @@
       "max_assess_candidates": 4,
       "max_rounds": 3,
       "min_improvement": 0.01
-    }
+    },
+    "modules": [
+      {"name": "zip_eocd_repair", "enabled": true},
+      {"name": "zip_comment_length_fix", "enabled": true},
+      {"name": "zip_central_directory_count_fix", "enabled": true},
+      {"name": "zip_central_directory_offset_fix", "enabled": true},
+      {"name": "zip64_field_repair", "enabled": true},
+      {"name": "zip_local_header_field_repair", "enabled": true},
+      {"name": "zip_trailing_junk_trim", "enabled": true},
+      {"name": "zip_central_directory_rebuild", "enabled": true},
+      {"name": "zip_data_descriptor_recovery", "enabled": true},
+      {"name": "zip_entry_quarantine_rebuild", "enabled": true},
+      {"name": "zip_partial_recovery", "enabled": true},
+      {"name": "zip_deep_partial_recovery", "enabled": true},
+      {"name": "zip_conflict_resolver_rebuild", "enabled": true},
+      {"name": "tar_header_checksum_fix", "enabled": true},
+      {"name": "tar_metadata_downgrade_recovery", "enabled": true},
+      {"name": "tar_sparse_pax_longname_repair", "enabled": true},
+      {"name": "tar_trailing_junk_trim", "enabled": true},
+      {"name": "tar_trailing_zero_block_repair", "enabled": true},
+      {"name": "gzip_trailing_junk_trim", "enabled": true},
+      {"name": "gzip_footer_fix", "enabled": true},
+      {"name": "gzip_deflate_member_resync", "enabled": true},
+      {"name": "gzip_truncated_partial_recovery", "enabled": true},
+      {"name": "tar_gzip_truncated_partial_recovery", "enabled": true},
+      {"name": "bzip2_trailing_junk_trim", "enabled": true},
+      {"name": "bzip2_truncated_partial_recovery", "enabled": true},
+      {"name": "tar_bzip2_truncated_partial_recovery", "enabled": true},
+      {"name": "xz_trailing_junk_trim", "enabled": true},
+      {"name": "xz_truncated_partial_recovery", "enabled": true},
+      {"name": "tar_xz_truncated_partial_recovery", "enabled": true},
+      {"name": "zstd_trailing_junk_trim", "enabled": true},
+      {"name": "zstd_frame_salvage", "enabled": true},
+      {"name": "zstd_truncated_partial_recovery", "enabled": true},
+      {"name": "tar_zstd_truncated_partial_recovery", "enabled": true},
+      {"name": "archive_carrier_crop_deep_recovery", "enabled": true},
+      {"name": "archive_nested_payload_salvage", "enabled": true},
+      {"name": "seven_zip_start_header_crc_fix", "enabled": true},
+      {"name": "seven_zip_next_header_field_repair", "enabled": true},
+      {"name": "seven_zip_boundary_trim", "enabled": true},
+      {"name": "seven_zip_precise_boundary_repair", "enabled": true},
+      {"name": "seven_zip_crc_field_repair", "enabled": true},
+      {"name": "seven_zip_solid_block_partial_salvage", "enabled": true},
+      {"name": "rar_trailing_junk_trim", "enabled": true},
+      {"name": "rar_carrier_crop_deep_recovery", "enabled": true},
+      {"name": "rar_block_chain_trim", "enabled": true},
+      {"name": "rar_end_block_repair", "enabled": true},
+      {"name": "rar_file_quarantine_rebuild", "enabled": true}
+    ]
   },
   "detection": {
     "fact_collectors": [
