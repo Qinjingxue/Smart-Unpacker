@@ -2,6 +2,21 @@ name: Build and Release
 
 on:
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Release tag/version to publish, for example v0.1.0. Leave empty to build artifacts only."
+        required: false
+        type: string
+      publish_release:
+        description: "Create or update a GitHub Release when release_tag is set."
+        required: false
+        default: true
+        type: boolean
+      prerelease:
+        description: "Mark a manually published release as a prerelease."
+        required: false
+        default: false
+        type: boolean
   push:
     tags:
       - "v*"
@@ -65,7 +80,18 @@ jobs:
       - name: Build Windows package
         shell: pwsh
         run: |
-          .\scripts\build_windows.ps1 -SkipTests -Arch ${{ matrix.arch }}
+          $version = ""
+          if ("${{ github.event_name }}" -eq "workflow_dispatch" -and "${{ inputs.release_tag }}" -ne "") {
+            $version = "${{ inputs.release_tag }}"
+          } elseif ("${{ startsWith(github.ref, 'refs/tags/') }}" -eq "true") {
+            $version = "${{ github.ref_name }}"
+          }
+
+          $buildArgs = @("-SkipTests", "-Arch", "${{ matrix.arch }}")
+          if ($version -ne "") {
+            $buildArgs += @("-Version", $version)
+          }
+          .\scripts\build_windows.ps1 @buildArgs
 
       - name: Verify package architecture
         shell: pwsh
@@ -82,7 +108,7 @@ jobs:
 
   release:
     name: Publish GitHub Release
-    if: startsWith(github.ref, 'refs/tags/')
+    if: ${{ startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.publish_release && inputs.release_tag != '') }}
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -97,7 +123,9 @@ jobs:
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG_NAME: ${{ github.ref_name }}
+          TAG_NAME: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || inputs.release_tag }}
+          RELEASE_TARGET: ${{ github.sha }}
+          PRERELEASE: ${{ github.event_name == 'workflow_dispatch' && inputs.prerelease || false }}
         shell: bash
         run: |
           set -euo pipefail
@@ -111,5 +139,9 @@ jobs:
           if gh release view "${TAG_NAME}" >/dev/null 2>&1; then
             gh release upload "${TAG_NAME}" "${packages[@]}" --clobber
           else
-            gh release create "${TAG_NAME}" "${packages[@]}" --title "${TAG_NAME}" --notes "${notes}"
+            release_args=(release create "${TAG_NAME}" "${packages[@]}" --title "${TAG_NAME}" --notes "${notes}" --target "${RELEASE_TARGET}")
+            if [ "${PRERELEASE}" = "true" ]; then
+              release_args+=(--prerelease)
+            fi
+            gh "${release_args[@]}"
           fi
