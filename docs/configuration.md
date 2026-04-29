@@ -103,12 +103,12 @@ CLI 可用 `--recur` 临时覆盖。
 
 `whitelist` 使用 `allowed_files` 和 `allowed_extensions` 表示允许的完整文件名和扩展名。每个 whitelist 字段为空时表示该维度不限制；多个非空字段会同时作为约束。`blacklist` 使用 `blocked_files` 和 `blocked_extensions` 表示禁止的完整文件名和扩展名。
 
+`scene_semantics` 的 `prune_dir_globs` / `path_globs` 用于目录语义剪枝；命中的目录子树不会进入后续过滤器。`blacklist` 现在只负责具体文件名和扩展名过滤。
+
 `blacklist` 常用字段：
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
-| `path_globs` | `list[str]` | 路径 glob，使用 `/` 作为分隔符，例如 `.git/**`、`$RECYCLE.BIN/**`。 |
-| `prune_dir_globs` | `list[str]` | 目录名 glob，命中后剪枝整个子树，例如 `.venv`、`node_modules`。 |
 | `blocked_files` | `list[str]` | 完整文件名精确匹配，例如 `Thumbs.db`、`desktop.ini`。 |
 | `blocked_extensions` | `list[str]` | 阻止扫描的文件扩展名。 |
 
@@ -410,6 +410,46 @@ print(sorted(get_repair_module_registry().all()))
 | `seven_zip_validation` | confirmation | 用 7z.dll test 确认中间分候选。 |
 
 历史 `magic_bytes`、`embedded_archive` scoring 规则已移出 active 规则包；当前主流水线由格式结构规则消费 magic/结构 fact，由 `embedded_payload_identity` 统一消费 embedded 和 overlay 事实。
+
+### embedded_payload_scan_level
+
+`embedded_payload_identity` 支持用 `embedded_payload_scan_level` 控制嵌入载荷扫描成本。该字段写在规则配置对象里，而不是全局 detection 配置里。简化配置和高级配置都可以写，简化配置优先级更高。
+
+当前默认推荐值是：
+
+```json
+{
+  "detection": {
+    "rule_pipeline": {
+      "scoring": [
+        {
+          "name": "embedded_payload_identity",
+          "embedded_payload_scan_level": "balanced"
+        }
+      ]
+    }
+  }
+}
+```
+
+可选值：
+
+| 值 | 说明 |
+| --- | --- |
+| `light` | 最省资源。主要扫较小尾部窗口，适合大目录批量扫描、降低磁盘读取和内存压力。可能漏掉藏得较深的 carrier payload。 |
+| `balanced` | 默认推荐。兼顾性能和召回，适合日常扫描；会扫常见 carrier 尾部窗口，但避免对大文件做激进全文件扫描。 |
+| `deep` | 更高召回。扩大 carrier 前后窗口和 loose scan 范围，适合怀疑有伪装压缩包、carrier 样本或漏检时使用。扫描大文件会更慢。 |
+| `manual` | 完全使用同一个规则对象里的高级细项，例如 `carrier_scan_tail_window_bytes`、`loose_scan_full_scan_max_bytes` 等。只有选择 `manual` 时，高级细项才不会被档位覆盖。 |
+
+简单理解：普通用户调 `light / balanced / deep` 即可；只有需要精确控制扫描窗口时再用 `manual`。例如临时提高召回率：
+
+```json
+{
+  "name": "embedded_payload_identity",
+  "enabled": true,
+  "embedded_payload_scan_level": "deep"
+}
+```
 
 ## 密码文件
 

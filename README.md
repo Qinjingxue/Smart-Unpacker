@@ -98,6 +98,7 @@ python sunpack.py config validate
 
 - `filesystem.scan_filters_enabled` / `filesystem.scan_filters`：过滤器总开关、目录剪枝、黑名单、最小检测大小。
 - `detection.enabled` / `detection.rule_pipeline`：detection 层总开关、候选识别、场景保护、结构打分和确认层。
+- `embedded_payload_identity.embedded_payload_scan_level`：嵌入载荷扫描档位，默认 `balanced`；可改为 `light` 降低成本，或 `deep` 提高伪装压缩包召回。
 - `extract --direct-file <file>`：明确指定文件，跳过初始扫描和 detection，直接进入 analysis 及后续解压/校验/修复/后处理。
 - `analysis`：结构分析、signature prepass、fuzzy binary profile、批量 analysis cache。
 - `verification`：输出存在性、manifest、归档 CRC、可读性抽样、部分恢复阈值。
