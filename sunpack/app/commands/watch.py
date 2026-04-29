@@ -27,8 +27,8 @@ COMMAND = "watch"
 ORDER = 15
 TEXTS = {
     "en": {
-        "help": "Watch folders and automatically extract stable archive files.",
-        "paths": "Folders or archive files to watch.",
+        "help": "Watch folders and send stable files through the extraction pipeline.",
+        "paths": "Folders or files to watch.",
         "started": "[WATCH] Watching {count} path(s). Output root: {out_dir}",
         "tick": "[WATCH] processed={processed} success={succeeded} failed={failed} pending={pending}",
         "stopped": "[WATCH] Stopped.",
@@ -37,13 +37,13 @@ TEXTS = {
         "state": "Path to watcher state JSON file.",
         "once": "Run one polling pass and exit.",
         "no_recursive": "Only watch direct children of each folder.",
-        "no_initial_scan": "Do not enqueue existing archive files when the watcher starts.",
+        "no_initial_scan": "Do not enqueue existing files when the watcher starts.",
         "max_folders": "Maximum number of folders/files accepted by one watcher.",
         "too_many_folders": "watch accepts at most {max_count} path(s).",
     },
     "zh": {
-        "help": "监控文件夹，发现稳定的压缩文件后自动解压。",
-        "paths": "要监控的文件夹或压缩文件。",
+        "help": "监控文件夹，发现稳定文件后送入解压主流程。",
+        "paths": "要监控的文件夹或文件。",
         "started": "[WATCH] 正在监控 {count} 个路径。输出根目录：{out_dir}",
         "tick": "[WATCH] processed={processed} success={succeeded} failed={failed} pending={pending}",
         "stopped": "[WATCH] 已停止。",
@@ -52,7 +52,7 @@ TEXTS = {
         "state": "watcher 状态 JSON 文件路径。",
         "once": "只处理一轮事件队列后退出。",
         "no_recursive": "只监控每个文件夹的直接子项。",
-        "no_initial_scan": "启动时不把已有压缩文件加入队列。",
+        "no_initial_scan": "启动时不把已有文件加入队列。",
         "max_folders": "单个 watcher 最多接受的监控路径数量。",
         "too_many_folders": "watch 最多接受 {max_count} 个路径。",
     },
@@ -115,7 +115,7 @@ def handle(args, ctx):
     out_dir = config["output"]["root"]
     state_path = args.state_path or os.path.join(out_dir, ".sunpack_watch", "state.json")
     try:
-        from sunpack.watch import WatchScheduler
+        from sunpack.filesystem.watcher import WatchScheduler
 
         watcher = WatchScheduler(
             config,
@@ -126,7 +126,6 @@ def handle(args, ctx):
             stable_seconds=stable_seconds,
             recursive=recursive,
             initial_scan=initial_scan,
-            archive_suffixes=watch_config.get("archive_suffixes") if isinstance(watch_config.get("archive_suffixes"), list) else None,
             observer_stop_timeout_seconds=float(watch_config.get("observer_stop_timeout_seconds", 5.0)),
             runner_factory=PipelineRunner,
         )

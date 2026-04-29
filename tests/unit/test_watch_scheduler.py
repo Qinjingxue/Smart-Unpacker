@@ -3,8 +3,8 @@ from __future__ import annotations
 import zipfile
 from pathlib import Path
 
-import sunpack.watch.scheduler as scheduler_module
-from sunpack.watch.scheduler import WatchScheduler
+import sunpack.filesystem.watcher.scheduler as scheduler_module
+from sunpack.filesystem.watcher.scheduler import WatchScheduler
 
 
 class FakeObserver:
@@ -72,7 +72,7 @@ def test_watch_scheduler_uses_watchdog_observer_and_initial_scan(tmp_path, monke
     assert FakeObserver.stopped_count == 1
 
 
-def test_watch_scheduler_uses_configured_suffixes_and_stop_timeout(tmp_path, monkeypatch):
+def test_watch_scheduler_uses_stop_timeout_without_suffix_prefilter(tmp_path, monkeypatch):
     FakeObserver.started_count = 0
     FakeObserver.stopped_count = 0
     FakeObserver.join_timeouts = []
@@ -90,7 +90,6 @@ def test_watch_scheduler_uses_configured_suffixes_and_stop_timeout(tmp_path, mon
         state_path=str(tmp_path / "state.json"),
         stable_seconds=0,
         initial_scan=False,
-        archive_suffixes=[".rar"],
         observer_stop_timeout_seconds=1.25,
     )
 
@@ -100,10 +99,80 @@ def test_watch_scheduler_uses_configured_suffixes_and_stop_timeout(tmp_path, mon
 
     pending_paths = set(watcher._pending)
     assert any(path.endswith("sample.rar") for path in pending_paths)
-    assert not any(path.endswith("sample.zip") for path in pending_paths)
+    assert any(path.endswith("sample.zip") for path in pending_paths)
 
     watcher.stop()
     assert FakeObserver.join_timeouts == [1.25]
+
+
+def test_watch_scheduler_uses_filesystem_filters_for_candidates(tmp_path, monkeypatch):
+    FakeObserver.started_count = 0
+    FakeObserver.stopped_count = 0
+    FakeObserver.join_timeouts = []
+    monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
+
+    watch_root = tmp_path / "in"
+    watch_root.mkdir()
+    keep = watch_root / "keep.weird"
+    blocked = watch_root / "blocked.zip"
+    keep.write_bytes(b"PK\x03\x04payload")
+    blocked.write_bytes(b"PK\x03\x04payload")
+
+    watcher = WatchScheduler(
+        {
+            "filesystem": {
+                "scan_filters": [
+                    {"name": "blacklist", "enabled": True, "blocked_files": ["blocked.zip"]},
+                    {"name": "size_range", "enabled": True, "range": "r >= 1 B"},
+                ],
+            }
+        },
+        [str(watch_root)],
+        out_dir=str(tmp_path / "out"),
+        state_path=str(tmp_path / "state.json"),
+        stable_seconds=0,
+        initial_scan=False,
+    )
+
+    watcher.enqueue(str(keep))
+    watcher.enqueue(str(blocked))
+
+    pending_paths = set(watcher._pending)
+    assert any(path.endswith("keep.weird") for path in pending_paths)
+    assert not any(path.endswith("blocked.zip") for path in pending_paths)
+
+
+def test_watch_scheduler_rechecks_filesystem_filters_before_processing(tmp_path, monkeypatch):
+    monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
+
+    watch_root = tmp_path / "in"
+    watch_root.mkdir()
+    archive = watch_root / "sample.zip"
+    archive.write_bytes(b"PK\x03\x04payload")
+
+    watcher = WatchScheduler(
+        {"filesystem": {"scan_filters": []}},
+        [str(watch_root)],
+        out_dir=str(tmp_path / "out"),
+        state_path=str(tmp_path / "state.json"),
+        stable_seconds=0,
+        initial_scan=False,
+    )
+    watcher.enqueue(str(archive))
+    assert watcher.pending_count == 1
+
+    watcher.filters = scheduler_module.build_filters({
+        "filesystem": {
+            "scan_filters": [
+                {"name": "blacklist", "enabled": True, "blocked_files": ["sample.zip"]},
+            ],
+        }
+    })
+
+    result = watcher.run_once()
+
+    assert result.processed == 0
+    assert watcher.pending_count == 0
 
 
 def test_watch_scheduler_processes_stable_candidate_with_watch_root_common_root(tmp_path, monkeypatch):
@@ -142,6 +211,41 @@ def test_watch_scheduler_processes_stable_candidate_with_watch_root_common_root(
     assert captured["paths"] == [str(archive_path.resolve())]
     assert captured["config"]["output"]["root"] == str((tmp_path / "out").resolve())
     assert captured["config"]["output"]["common_root"] == str(watch_root.resolve())
+
+
+def test_watch_scheduler_sends_stable_nonstandard_extension_to_main_pipeline(tmp_path, monkeypatch):
+    monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
+    captured = {}
+
+    class FakePipelineRunner:
+        def __init__(self, config):
+            captured["config"] = config
+
+        def run_targets(self, paths):
+            captured["paths"] = paths
+            return FakeSummary()
+
+    watch_root = tmp_path / "in"
+    watch_root.mkdir()
+    target = watch_root / "payload.weird"
+    target.write_bytes(b"PK\x03\x04payload")
+
+    watcher = WatchScheduler(
+        {"filesystem": {"scan_filters": []}},
+        [str(watch_root)],
+        out_dir=str(tmp_path / "out"),
+        state_path=str(tmp_path / "state.json"),
+        stable_seconds=0,
+        initial_scan=False,
+        runner_factory=FakePipelineRunner,
+    )
+    watcher.enqueue(str(target))
+
+    result = watcher.run_once()
+
+    assert result.processed == 1
+    assert result.succeeded == 1
+    assert captured["paths"] == [str(target.resolve())]
 
 
 def test_watch_scheduler_ignores_output_root_events(tmp_path, monkeypatch):

@@ -3,11 +3,6 @@ from typing import Any
 from sunpack.config.schema import ConfigField
 
 
-DEFAULT_WATCH_ARCHIVE_SUFFIXES = [
-    ".zip", ".rar", ".7z", ".gz", ".bz2", ".xz", ".zst", ".tar",
-    ".tgz", ".tbz", ".tbz2", ".txz", ".tzst", ".001", ".exe",
-]
-
 DEFAULT_WATCH_CONFIG = {
     "interval_seconds": 5.0,
     "stable_seconds": 10.0,
@@ -15,7 +10,6 @@ DEFAULT_WATCH_CONFIG = {
     "initial_scan": True,
     "max_folders": 16,
     "observer_stop_timeout_seconds": 5.0,
-    "archive_suffixes": DEFAULT_WATCH_ARCHIVE_SUFFIXES,
 }
 
 
@@ -32,7 +26,6 @@ def normalize_watch_config(value: Any) -> dict[str, Any]:
     config["initial_scan"] = bool(config.get("initial_scan", True))
     config["max_folders"] = max(1, _int_field(config, "max_folders"))
     config["observer_stop_timeout_seconds"] = max(0.0, _float_field(config, "observer_stop_timeout_seconds"))
-    config["archive_suffixes"] = _normalize_suffixes(config.get("archive_suffixes"))
     return config
 
 
@@ -48,20 +41,6 @@ def _int_field(config: dict[str, Any], name: str) -> int:
         return int(config.get(name))
     except (TypeError, ValueError) as exc:
         raise ValueError(f"watch.{name} must be an integer") from exc
-
-
-def _normalize_suffixes(value: Any) -> list[str]:
-    if not isinstance(value, list):
-        raise ValueError("watch.archive_suffixes must be a list")
-    suffixes = []
-    for item in value:
-        suffix = str(item or "").strip().lower()
-        if not suffix:
-            continue
-        if not suffix.startswith("."):
-            suffix = f".{suffix}"
-        suffixes.append(suffix)
-    return list(dict.fromkeys(suffixes))
 
 
 CONFIG_FIELDS = (

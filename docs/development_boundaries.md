@@ -1,6 +1,6 @@
 # 开发边界说明
 
-本文档是 SunPack 当前架构的边界约定。项目已经进入 native-first、verification-driven repair loop 和模块流水线阶段：扫描、关系、检测、结构分析、密码、解压、校验、修复、后处理、watch 和 CLI 都应保持清晰职责。
+本文档是 SunPack 当前架构的边界约定。项目已经进入 native-first、verification-driven repair loop 和模块流水线阶段：文件系统扫描/监控、关系、检测、结构分析、密码、解压、校验、修复、后处理和 CLI 都应保持清晰职责。
 
 ## 总原则
 
@@ -19,11 +19,7 @@ app
   -> config
   -> coordinator
   -> passwords
-  -> watch
-
-watch
-  -> injected runner factory
-  -> watch scanner/state
+  -> filesystem.watcher
 
 coordinator
   -> detection
@@ -98,14 +94,14 @@ contracts
 | 校验 | `verification.VerificationScheduler` | 解压结果完整度、来源完整性和下一步决策。 |
 | 修复 | `repair.RepairScheduler` | 根据 verification repair 决策生成修复候选。 |
 | 后处理 | `postprocess.actions.PostProcessActions` | 成功后清理和扁平化。 |
-| Watch | `watch.WatchScheduler` | watchdog 事件、稳定文件队列和自动处理。 |
+| 文件系统监控 | `filesystem.watcher.WatchScheduler` | watchdog 事件、稳定文件队列和自动处理。 |
 | Native ABI | `support.sevenzip_native` | C++ 7z.dll wrapper 绑定和缓存。 |
 
 ## 领域边界
 
 ### app
 
-`app` 只负责 CLI 适配：参数解析、密码交互、配置覆盖、结果输出和退出码。它可以调用 coordinator、watch、passwords 和 config 的公开入口，不直接导入 detection/extraction/repair 的内部实现。
+`app` 只负责 CLI 适配：参数解析、密码交互、配置覆盖、结果输出和退出码。它可以调用 coordinator、filesystem.watcher、passwords 和 config 的公开入口，不直接导入 detection/extraction/repair 的内部实现。
 
 ### config
 
@@ -117,7 +113,7 @@ contracts
 
 ### filesystem
 
-`filesystem` 只做目录遍历、过滤和 `DirectorySnapshot` 构建。目录扫描使用 native helper，过滤器无法映射到 native 参数时应显性失败，不做 Python fallback。
+`filesystem` 负责目录遍历、过滤、`DirectorySnapshot` 构建，以及 watchdog 监控能力。watcher 复用 `filesystem.scan_filters`，稳定文件直接交给调用方注入的主流程 runner；它不按扩展名自行判断归档。
 
 ### relations
 
@@ -171,10 +167,6 @@ contracts
 
 `coordinator` 负责流程顺序、递归轮次、批量调度、资源 token、verification retry、repair beam、候选比较和 summary。它不自己识别候选、不执行 7z、不直接实现修复算法。归档清理通过 postprocess 公开动作完成。
 
-### watch
-
-`watch` 负责 watchdog 事件、稳定文件判断、状态文件和输出根路径映射。它不直接导入 `coordinator.runner`；CLI 或调用方通过 `runner_factory` 注入执行器。
-
 ### support
 
 `support` 放资源查找、JSON、缓存、路径 helper 和 7z.dll wrapper 绑定。不要把检测策略、输出目录策略、密码解析或清理策略塞进 support。
@@ -202,10 +194,10 @@ facts = bag._facts
 不要读取私有状态。使用 `FactBag.to_dict()` 或补公开方法。
 
 ```python
-from sunpack.coordinator.runner import PipelineRunner  # inside watch scheduler
+from sunpack.coordinator.runner import PipelineRunner  # inside filesystem watcher scheduler
 ```
 
-`watch` 不直接绑定 coordinator runner，由 app 注入 runner factory。
+`filesystem.watcher` 不直接绑定 coordinator runner，由 app 注入 runner factory。
 
 ```python
 from sunpack.detection.pipeline.processors.modules... import SOME_RULE_DEFAULT
@@ -245,7 +237,7 @@ sunpack/
   coordinator/  pipeline 编排、批量调度和递归
   detection/    候选检测、fact pipeline、规则判断、scene 策略
   extraction/   worker 解压黑盒和解压结果
-  filesystem/   通用目录扫描
+  filesystem/   通用目录扫描、过滤和 watcher 监控能力
   passwords/    密码候选、调度和 verifier
   postprocess/  解压成功后的清理和扁平化
   relations/    文件关系、分卷和候选组
@@ -253,5 +245,4 @@ sunpack/
   repair/       损坏容器修复流水线
   support/      资源、JSON、缓存、7z.dll ABI 绑定等基础设施
   verification/ 解压结果校验流水线
-  watch/        watchdog 目录监控和自动解压触发
 ```

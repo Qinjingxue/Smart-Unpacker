@@ -8,9 +8,12 @@ from pathlib import Path
 from typing import Iterable
 
 from sunpack.config.fields.watch import DEFAULT_WATCH_CONFIG
-from sunpack.watch.scanner import WatchCandidate, looks_like_archive, scan_watch_candidates
-from sunpack.watch.state import WatchStateStore
-from sunpack_native import watch_candidate_for_path as _native_watch_candidate_for_path
+from sunpack.contracts.filesystem import FileEntry
+from sunpack.filesystem.directory_scanner import apply_ordered_filters_to_entries
+from sunpack.filesystem.filters import build_filters
+from sunpack.filesystem.watcher.scanner import WatchCandidate, scan_watch_candidates
+from sunpack.filesystem.watcher.scanner import _candidate_for as _watch_candidate_for_path
+from sunpack.filesystem.watcher.state import WatchStateStore
 
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
@@ -37,7 +40,6 @@ class WatchScheduler:
         stable_seconds: float | None = None,
         recursive: bool | None = None,
         initial_scan: bool | None = None,
-        archive_suffixes: list[str] | None = None,
         observer_stop_timeout_seconds: float | None = None,
         runner_factory=None,
     ):
@@ -48,7 +50,6 @@ class WatchScheduler:
         self.stable_seconds = max(0.0, float(DEFAULT_WATCH_CONFIG["stable_seconds"] if stable_seconds is None else stable_seconds))
         self.recursive = bool(DEFAULT_WATCH_CONFIG["recursive"] if recursive is None else recursive)
         self.initial_scan = bool(DEFAULT_WATCH_CONFIG["initial_scan"] if initial_scan is None else initial_scan)
-        self.archive_suffixes = list(archive_suffixes) if archive_suffixes is not None else None
         self.observer_stop_timeout_seconds = max(
             0.0,
             float(
@@ -57,6 +58,7 @@ class WatchScheduler:
                 else observer_stop_timeout_seconds
             ),
         )
+        self.filters = build_filters(config)
         self.state = WatchStateStore(state_path)
         self._lock = threading.Lock()
         self._pending: dict[str, WatchCandidate] = {}
@@ -68,14 +70,14 @@ class WatchScheduler:
     def start(self):
         if self._started:
             return
-        handler = _ArchiveEventHandler(self)
+        handler = _WatchEventHandler(self)
         for root in self.watch_roots:
             watch_path = root if os.path.isdir(root) else os.path.dirname(root)
             self._observer.schedule(handler, watch_path, recursive=self.recursive and os.path.isdir(root))
         self._observer.start()
         self._started = True
         if self.initial_scan:
-            for candidate in scan_watch_candidates(self.watch_roots, recursive=self.recursive, archive_suffixes=self.archive_suffixes):
+            for candidate in scan_watch_candidates(self.watch_roots, recursive=self.recursive):
                 self.enqueue(candidate.path)
 
     def stop(self):
@@ -113,12 +115,14 @@ class WatchScheduler:
             return len(self._pending)
 
     def enqueue(self, path: str):
-        candidate = _candidate_for_event_path(path, archive_suffixes=self.archive_suffixes)
+        candidate = _candidate_for_event_path(path)
         if candidate is None:
             return
         if not self._is_under_watched_root(candidate.path):
             return
         if self._is_under_output_root(candidate.path):
+            return
+        if not self._passes_filesystem_filters(candidate):
             return
         if self.state.is_done(candidate.path, candidate.size, candidate.mtime):
             return
@@ -139,6 +143,10 @@ class WatchScheduler:
             for path, candidate in list(self._pending.items()):
                 refreshed = _candidate_for_event_path(path)
                 if refreshed is None:
+                    self._pending.pop(path, None)
+                    self._stable_since.pop(path, None)
+                    continue
+                if not self._passes_filesystem_filters(refreshed):
                     self._pending.pop(path, None)
                     self._stable_since.pop(path, None)
                     continue
@@ -186,8 +194,14 @@ class WatchScheduler:
     def _is_under_output_root(self, path: str) -> bool:
         return _is_relative_to(os.path.abspath(path), self.out_dir)
 
+    def _passes_filesystem_filters(self, candidate: WatchCandidate) -> bool:
+        if not self.filters:
+            return True
+        entry = _file_entry_from_watch_candidate(candidate)
+        return bool(apply_ordered_filters_to_entries([entry], self.filters))
 
-class _ArchiveEventHandler(FileSystemEventHandler):
+
+class _WatchEventHandler(FileSystemEventHandler):
     def __init__(self, scheduler: WatchScheduler):
         self.scheduler = scheduler
 
@@ -210,18 +224,20 @@ class _ArchiveEventHandler(FileSystemEventHandler):
             self.scheduler.enqueue(src_path)
 
 
-def _candidate_for_event_path(path: str, *, archive_suffixes: list[str] | None = None) -> WatchCandidate | None:
-    if not path or not looks_like_archive(path, archive_suffixes=archive_suffixes):
+def _candidate_for_event_path(path: str) -> WatchCandidate | None:
+    if not path:
         return None
-    item = _native_watch_candidate_for_path(str(path))
-    if item is None:
-        return None
-    return WatchCandidate(
-        path=str(item.get("path") or ""),
-        size=int(item.get("size", 0) or 0),
-        mtime=float(item.get("mtime", 0.0) or 0.0),
-    )
+    return _watch_candidate_for_path(path)
 
+
+def _file_entry_from_watch_candidate(candidate: WatchCandidate) -> FileEntry:
+    path = Path(candidate.path)
+    return FileEntry(
+        path=path,
+        is_dir=False,
+        size=int(candidate.size),
+        mtime_ns=int(candidate.mtime * 1_000_000_000),
+    )
 
 def _longest_matching_root(path: str, roots: list[str]) -> str | None:
     matches = [root for root in roots if _is_relative_to(path, root)]

@@ -178,7 +178,8 @@ CLI 可用 `--recur` 临时覆盖。
 | `initial_scan` | `bool` | 启动 watcher 时是否扫描已有文件。 |
 | `max_folders` | `int` | 单次 watch 接受的最大路径数量。 |
 | `observer_stop_timeout_seconds` | `float` | 停止 watchdog observer 时等待线程退出的超时。 |
-| `archive_suffixes` | `list[str]` | watch 认为可能是归档的后缀列表。 |
+
+watch 不再按扩展名判断“是否归档”。稳定文件先经过 `filesystem.scan_filters`，然后直接进入主流程，由 detection 判断是否应该解压。
 
 ## extraction
 

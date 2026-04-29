@@ -80,11 +80,7 @@
     "recursive": true,
     "initial_scan": true,
     "max_folders": 16,
-    "observer_stop_timeout_seconds": 5.0,
-    "archive_suffixes": [
-      ".zip", ".rar", ".7z", ".gz", ".bz2", ".xz", ".zst", ".tar",
-      ".tgz", ".tbz", ".tbz2", ".txz", ".tzst", ".001", ".exe"
-    ]
+    "observer_stop_timeout_seconds": 5.0
   },
   "extraction": {
     "write_progress_manifest": false

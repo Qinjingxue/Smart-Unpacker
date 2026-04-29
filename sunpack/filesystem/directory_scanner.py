@@ -91,39 +91,48 @@ class DirectoryScanner:
         }
 
     def _apply_ordered_filters(self, entries: list[FileEntry]) -> list[FileEntry]:
-        if not self.filters:
-            return entries
-
-        current = entries
-        for scan_filter in self.filters:
-            current = self._apply_ordered_filter(current, scan_filter)
-        return current
-
-    def _apply_ordered_filter(self, entries: list[FileEntry], scan_filter: ScanFilter) -> list[FileEntry]:
-        kept: list[FileEntry] = []
-        pruned_dirs: list[Path] = []
-        for entry in sorted(entries, key=lambda item: (len(item.path.parts), str(item.path).lower())):
-            if self._under_any(entry.path, pruned_dirs):
-                continue
-            decision = scan_filter.evaluate(ScanCandidate(
-                path=entry.path,
-                kind="dir" if entry.is_dir else "file",
-                size=entry.size,
-                mtime_ns=entry.mtime_ns,
-            ))
-            if decision.prune_dir and entry.is_dir:
-                pruned_dirs.append(entry.path)
-            if decision.reject_entry:
-                continue
-            kept.append(entry)
-        return kept
+        return apply_ordered_filters_to_entries(entries, self.filters)
 
     @staticmethod
     def _under_any(path: Path, parents: list[Path]) -> bool:
-        for parent in parents:
-            try:
-                path.relative_to(parent)
-            except ValueError:
-                continue
-            return path != parent
-        return False
+        return _under_any(path, parents)
+
+
+def apply_ordered_filters_to_entries(entries: list[FileEntry], filters: list[ScanFilter]) -> list[FileEntry]:
+    if not filters:
+        return entries
+
+    current = entries
+    for scan_filter in filters:
+        current = apply_filter_to_entries(current, scan_filter)
+    return current
+
+
+def apply_filter_to_entries(entries: list[FileEntry], scan_filter: ScanFilter) -> list[FileEntry]:
+    kept: list[FileEntry] = []
+    pruned_dirs: list[Path] = []
+    for entry in sorted(entries, key=lambda item: (len(item.path.parts), str(item.path).lower())):
+        if _under_any(entry.path, pruned_dirs):
+            continue
+        decision = scan_filter.evaluate(ScanCandidate(
+            path=entry.path,
+            kind="dir" if entry.is_dir else "file",
+            size=entry.size,
+            mtime_ns=entry.mtime_ns,
+        ))
+        if decision.prune_dir and entry.is_dir:
+            pruned_dirs.append(entry.path)
+        if decision.reject_entry:
+            continue
+        kept.append(entry)
+    return kept
+
+
+def _under_any(path: Path, parents: list[Path]) -> bool:
+    for parent in parents:
+        try:
+            path.relative_to(parent)
+        except ValueError:
+            continue
+        return path != parent
+    return False
