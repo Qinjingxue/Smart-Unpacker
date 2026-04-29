@@ -97,11 +97,10 @@ pub(crate) fn relations_build_candidate_groups(
         if !dir_files.contains_key(&parent) {
             dir_order.push(parent.clone());
         }
-        dir_files.entry(parent.clone()).or_default().push(RelationInput {
-            path,
-            name,
-            size,
-        });
+        dir_files
+            .entry(parent.clone())
+            .or_default()
+            .push(RelationInput { path, name, size });
     }
 
     let mut groups = Vec::new();
@@ -128,7 +127,10 @@ pub(crate) fn relations_build_candidate_groups(
                 if !logical_groups.contains_key(&relation.logical_name) {
                     logical_order.push(relation.logical_name.clone());
                 }
-                logical_groups.entry(relation.logical_name.clone()).or_default().push(entry);
+                logical_groups
+                    .entry(relation.logical_name.clone())
+                    .or_default()
+                    .push(entry);
             }
         }
 
@@ -199,7 +201,9 @@ fn native_group_to_dict(
     if group_entries.len() > 1 {
         is_split_candidate = allow_multi_split_candidate;
         expand_misnamed = true;
-        if detect_split_role(&head.name) == Some("first") || head.name.to_ascii_lowercase().ends_with(".exe") {
+        if detect_split_role(&head.name) == Some("first")
+            || head.name.to_ascii_lowercase().ends_with(".exe")
+        {
             relation.split_role = Some("first".to_string());
         }
     } else if detect_split_role(&head.name) == Some("first") {
@@ -446,7 +450,10 @@ fn split_sort_key(path: &str) -> (u8, u32, String) {
     }
     let lower_name = basename(path).to_ascii_lowercase();
     if let Some(captures) = old_rar_member_re().captures(&lower_name) {
-        if let Some(number) = captures.get(1).and_then(|value| value.as_str().parse::<u32>().ok()) {
+        if let Some(number) = captures
+            .get(1)
+            .and_then(|value| value.as_str().parse::<u32>().ok())
+        {
             return (1, number + 2, path.to_ascii_lowercase());
         }
     }
@@ -467,7 +474,11 @@ fn has_split_companions_in_dir(lower_names: &HashSet<String>, base_name: &str) -
         RegexBuilder::new(pattern)
             .case_insensitive(true)
             .build()
-            .map(|regex| lower_names.iter().any(|candidate| regex.is_match(candidate)))
+            .map(|regex| {
+                lower_names
+                    .iter()
+                    .any(|candidate| regex.is_match(candidate))
+            })
             .unwrap_or(false)
     })
 }

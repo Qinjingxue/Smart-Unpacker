@@ -75,7 +75,12 @@ pub(crate) fn fuzzy_binary_profile_for_paths(
         ngram_top_k: ngram_top_k.max(1),
         max_ngram_sample_bytes,
     };
-    fuzzy_binary_profile(py, volumes.size, |offset, size| volumes.read_at(offset, size), config)
+    fuzzy_binary_profile(
+        py,
+        volumes.size,
+        |offset, size| volumes.read_at(offset, size),
+        config,
+    )
 }
 
 #[derive(Clone)]

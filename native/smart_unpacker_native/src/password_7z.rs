@@ -23,15 +23,20 @@ pub(crate) fn seven_zip_fast_verify_passwords(
     };
 
     let mut signature = [0u8; 6];
-    if Cursor::new(&file_data).read_exact(&mut signature).is_err()
-        || signature != SEVEN_Z_SIGNATURE
+    if Cursor::new(&file_data).read_exact(&mut signature).is_err() || signature != SEVEN_Z_SIGNATURE
     {
         return status(py, "unsupported_method", -1, 0, "7z signature not found");
     }
 
     match read_archive_header_from_reader(Cursor::new(&file_data), "") {
         HeaderRead::Ok => {
-            return status(py, "unsupported_method", -1, 0, "7z header is readable without password");
+            return status(
+                py,
+                "unsupported_method",
+                -1,
+                0,
+                "7z header is readable without password",
+            );
         }
         HeaderRead::WrongPasswordOrPasswordRequired => {}
         HeaderRead::Unsupported(message) => {
@@ -45,7 +50,13 @@ pub(crate) fn seven_zip_fast_verify_passwords(
     for (index, password) in candidates.iter().enumerate() {
         match read_archive_header_from_reader(Cursor::new(&file_data), password) {
             HeaderRead::Ok => {
-                return status(py, "match", index as i32, (index + 1) as i32, "7z encrypted header opened");
+                return status(
+                    py,
+                    "match",
+                    index as i32,
+                    (index + 1) as i32,
+                    "7z encrypted header opened",
+                );
             }
             HeaderRead::WrongPasswordOrPasswordRequired => {}
             HeaderRead::Unsupported(message) => {
@@ -57,7 +68,13 @@ pub(crate) fn seven_zip_fast_verify_passwords(
         }
     }
 
-    status(py, "no_match", -1, candidates.len() as i32, "7z encrypted header did not open")
+    status(
+        py,
+        "no_match",
+        -1,
+        candidates.len() as i32,
+        "7z encrypted header did not open",
+    )
 }
 
 #[pyfunction]
@@ -83,7 +100,13 @@ pub(crate) fn seven_zip_fast_verify_passwords_from_ranges(
 
     match read_archive_header_from_reader(VirtualRangeReader::new(parsed.clone()), "") {
         HeaderRead::Ok => {
-            return status(py, "unsupported_method", -1, 0, "7z header is readable without password");
+            return status(
+                py,
+                "unsupported_method",
+                -1,
+                0,
+                "7z header is readable without password",
+            );
         }
         HeaderRead::WrongPasswordOrPasswordRequired => {}
         HeaderRead::Unsupported(message) => {
@@ -97,7 +120,13 @@ pub(crate) fn seven_zip_fast_verify_passwords_from_ranges(
     for (index, password) in candidates.iter().enumerate() {
         match read_archive_header_from_reader(VirtualRangeReader::new(parsed.clone()), password) {
             HeaderRead::Ok => {
-                return status(py, "match", index as i32, (index + 1) as i32, "7z encrypted header opened");
+                return status(
+                    py,
+                    "match",
+                    index as i32,
+                    (index + 1) as i32,
+                    "7z encrypted header opened",
+                );
             }
             HeaderRead::WrongPasswordOrPasswordRequired => {}
             HeaderRead::Unsupported(message) => {
@@ -109,7 +138,13 @@ pub(crate) fn seven_zip_fast_verify_passwords_from_ranges(
         }
     }
 
-    status(py, "no_match", -1, candidates.len() as i32, "7z encrypted header did not open")
+    status(
+        py,
+        "no_match",
+        -1,
+        candidates.len() as i32,
+        "7z encrypted header did not open",
+    )
 }
 
 enum HeaderRead {
@@ -127,17 +162,29 @@ fn read_archive_header_from_reader<R: Read + Seek>(mut reader: R, password: &str
         }
         Err(SevenZipError::BadSignature(_))
         | Err(SevenZipError::UnsupportedVersion { .. })
-        | Err(SevenZipError::NextHeaderCrcMismatch) => HeaderRead::Damaged("7z header is damaged".to_string()),
+        | Err(SevenZipError::NextHeaderCrcMismatch) => {
+            HeaderRead::Damaged("7z header is damaged".to_string())
+        }
         Err(SevenZipError::Unsupported(message)) => HeaderRead::Unsupported(message.to_string()),
-        Err(SevenZipError::UnsupportedCompressionMethod(message)) => HeaderRead::Unsupported(message),
+        Err(SevenZipError::UnsupportedCompressionMethod(message)) => {
+            HeaderRead::Unsupported(message)
+        }
         Err(SevenZipError::ExternalUnsupported) => {
             HeaderRead::Unsupported("7z external compression method is unsupported".to_string())
         }
-        Err(error) => HeaderRead::Unsupported(format!("7z header-only verifier could not classify error: {error}")),
+        Err(error) => HeaderRead::Unsupported(format!(
+            "7z header-only verifier could not classify error: {error}"
+        )),
     }
 }
 
-fn status(py: Python<'_>, status: &str, matched_index: i32, attempts: i32, message: &str) -> PyResult<Py<PyAny>> {
+fn status(
+    py: Python<'_>,
+    status: &str,
+    matched_index: i32,
+    attempts: i32,
+    message: &str,
+) -> PyResult<Py<PyAny>> {
     let result = PyDict::new(py);
     result.set_item("status", status)?;
     result.set_item("matched_index", matched_index)?;

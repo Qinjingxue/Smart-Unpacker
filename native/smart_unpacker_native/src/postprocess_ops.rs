@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 const WATCH_ARCHIVE_SUFFIXES: &[&str] = &[
-    ".zip", ".rar", ".7z", ".gz", ".bz2", ".xz", ".zst", ".tar", ".tgz", ".tbz", ".tbz2",
-    ".txz", ".tzst", ".001", ".exe",
+    ".zip", ".rar", ".7z", ".gz", ".bz2", ".xz", ".zst", ".tar", ".tgz", ".tbz", ".tbz2", ".txz",
+    ".tzst", ".001", ".exe",
 ];
 
 #[pyfunction]
@@ -48,7 +48,10 @@ pub(crate) fn watch_candidate_for_path(py: Python<'_>, path: &str) -> PyResult<O
 }
 
 #[pyfunction]
-pub(crate) fn flatten_single_branch_directories(py: Python<'_>, base: &str) -> PyResult<Py<PyDict>> {
+pub(crate) fn flatten_single_branch_directories(
+    py: Python<'_>,
+    base: &str,
+) -> PyResult<Py<PyDict>> {
     let base_path = PathBuf::from(base);
     let result = PyDict::new(py);
     result.set_item("moved", 0usize)?;
@@ -73,7 +76,12 @@ pub(crate) fn delete_files_batch(py: Python<'_>, paths: Vec<String>) -> PyResult
         let path = PathBuf::from(&raw);
         let item = PyDict::new(py);
         item.set_item("path", normalize_path(&path))?;
-        item.set_item("filename", path.file_name().and_then(|name| name.to_str()).unwrap_or(""))?;
+        item.set_item(
+            "filename",
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or(""),
+        )?;
         if !path.exists() {
             item.set_item("status", "missing")?;
             item.set_item("error", "")?;
@@ -241,9 +249,12 @@ fn flatten_single_branch(root: &Path, stats: &mut FlattenStats) {
         let dst = unique_destination(root, name);
         match fs::rename(&src, &dst) {
             Ok(()) => stats.moved += 1,
-            Err(error) => stats
-                .errors
-                .push(format!("{} -> {}: {}", normalize_path(&src), normalize_path(&dst), error)),
+            Err(error) => stats.errors.push(format!(
+                "{} -> {}: {}",
+                normalize_path(&src),
+                normalize_path(&dst),
+                error
+            )),
         }
     }
     match fs::remove_dir(&child) {
@@ -260,8 +271,14 @@ fn unique_destination(root: &Path, name: &std::ffi::OsStr) -> PathBuf {
         return direct;
     }
     let path = Path::new(name);
-    let stem = path.file_stem().and_then(|value| value.to_str()).unwrap_or("item");
-    let extension = path.extension().and_then(|value| value.to_str()).unwrap_or("");
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("item");
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("");
     for count in 1usize.. {
         let candidate_name = if extension.is_empty() {
             format!("{stem} ({count})")

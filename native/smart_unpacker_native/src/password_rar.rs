@@ -42,7 +42,13 @@ pub(crate) fn rar_fast_verify_passwords(
         return verify_rar4(py, &data, &candidates);
     }
     if data.starts_with(b"Rar!") {
-        return status(py, "damaged", -1, 0, "rar signature is incomplete or unknown");
+        return status(
+            py,
+            "damaged",
+            -1,
+            0,
+            "rar signature is incomplete or unknown",
+        );
     }
     status(py, "unsupported_method", -1, 0, "rar signature not found")
 }
@@ -66,7 +72,13 @@ pub(crate) fn rar_fast_verify_passwords_from_ranges(
         return verify_rar4(py, &data, &candidates);
     }
     if data.starts_with(b"Rar!") {
-        return status(py, "damaged", -1, 0, "rar signature is incomplete or unknown");
+        return status(
+            py,
+            "damaged",
+            -1,
+            0,
+            "rar signature is incomplete or unknown",
+        );
     }
     status(py, "unsupported_method", -1, 0, "rar signature not found")
 }
@@ -200,17 +212,41 @@ struct Rar4Header {
 
 fn verify_rar5(py: Python<'_>, data: &[u8], candidates: &[String]) -> PyResult<Py<PyAny>> {
     let Some(header) = find_rar5_encryption_header(data) else {
-        return status(py, "unknown_need_fallback", -1, 0, "rar5 password check header not found");
+        return status(
+            py,
+            "unknown_need_fallback",
+            -1,
+            0,
+            "rar5 password check header not found",
+        );
     };
     if !header.has_password_check {
-        return status(py, "unknown_need_fallback", -1, 0, "rar5 encryption header has no password check");
+        return status(
+            py,
+            "unknown_need_fallback",
+            -1,
+            0,
+            "rar5 encryption header has no password check",
+        );
     }
     for (index, password) in candidates.iter().enumerate() {
         if rar5_password_check_matches(password, &header) {
-            return status(py, "match", index as i32, (index + 1) as i32, "rar5 password check matched");
+            return status(
+                py,
+                "match",
+                index as i32,
+                (index + 1) as i32,
+                "rar5 password check matched",
+            );
         }
     }
-    status(py, "no_match", -1, candidates.len() as i32, "rar5 password check did not match")
+    status(
+        py,
+        "no_match",
+        -1,
+        candidates.len() as i32,
+        "rar5 password check did not match",
+    )
 }
 
 struct Rar5EncryptionHeader {
@@ -256,7 +292,11 @@ fn find_rar5_encryption_header(data: &[u8]) -> Option<Rar5EncryptionHeader> {
     None
 }
 
-fn parse_rar5_encryption_body(data: &[u8], mut offset: usize, end: usize) -> Option<Rar5EncryptionHeader> {
+fn parse_rar5_encryption_body(
+    data: &[u8],
+    mut offset: usize,
+    end: usize,
+) -> Option<Rar5EncryptionHeader> {
     let (version, next) = read_vint(data, offset)?;
     if version != 0 {
         return None;
@@ -332,7 +372,13 @@ fn rar5_password_check_matches(password: &str, header: &Rar5EncryptionHeader) ->
     derived_check == header.password_check.as_slice()
 }
 
-fn status(py: Python<'_>, status: &str, matched_index: i32, attempts: i32, message: &str) -> PyResult<Py<PyAny>> {
+fn status(
+    py: Python<'_>,
+    status: &str,
+    matched_index: i32,
+    attempts: i32,
+    message: &str,
+) -> PyResult<Py<PyAny>> {
     let result = PyDict::new(py);
     result.set_item("status", status)?;
     result.set_item("matched_index", matched_index)?;

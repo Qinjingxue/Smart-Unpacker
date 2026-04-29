@@ -9,10 +9,10 @@ from smart_unpacker.support.sevenzip_native import (
 )
 from smart_unpacker.verification.archive_state_manifest import archive_state_manifest_for_evidence
 from smart_unpacker.verification.evidence import VerificationEvidence
-from smart_unpacker.verification.methods._archive_output_match import coverage_details, coverage_from_archive_and_output
 from smart_unpacker.verification.registry import register_verification_method
 from smart_unpacker.verification.result import (
     DECISION_REPAIR,
+    FileVerificationObservation,
     SOURCE_INTEGRITY_COMPLETE,
     SOURCE_INTEGRITY_DAMAGED,
     SOURCE_INTEGRITY_PAYLOAD_DAMAGED,
@@ -20,7 +20,7 @@ from smart_unpacker.verification.result import (
     VerificationStepResult,
 )
 
-from smart_unpacker_native import compute_directory_crc_manifest as _compute_directory_crc_manifest
+from smart_unpacker_native import match_archive_output_crc_coverage as _match_archive_output_crc_coverage
 
 
 @register_verification_method("archive_test_crc")
@@ -38,30 +38,17 @@ class ArchiveTestCrcMethod:
         archive_files = [item for item in archive_manifest.files if isinstance(item, dict) and item.get("path")]
         if not archive_files:
             return VerificationStepResult(method=self.name, status="skipped")
-        output_manifest = _compute_directory_crc_manifest(evidence.output_dir, max_items)
+        match_result = dict(_match_archive_output_crc_coverage(archive_files, evidence.output_dir, max_items))
 
-        status = str(output_manifest.get("status") or "")
+        status = str(match_result.get("status") or "")
         if status != "ok":
             return VerificationStepResult(method=self.name, status="skipped")
 
         source_integrity = _manifest_source_integrity(archive_manifest)
-        mismatches = []
-        missing = []
+        mismatches = list(match_result.get("mismatches") or [])
+        missing = list(match_result.get("missing") or [])
+        coverage = dict(match_result.get("coverage") or {})
         issue_by_path: dict[str, list[VerificationIssue]] = {}
-        for item in archive_files:
-            expected_path = str(item.get("path") or "")
-            output_item = _output_by_path_or_name(output_manifest.get("files") or [], expected_path)
-            if output_item is None:
-                missing.append(expected_path)
-            elif bool(item.get("has_crc", False)) and item.get("crc32") is not None and output_item.get("crc32") is not None:
-                expected_crc = _as_u32(item.get("crc32"))
-                actual_crc = _as_u32(output_item.get("crc32"))
-                if expected_crc != actual_crc:
-                    mismatches.append({
-                        "path": expected_path,
-                        "expected_crc32": expected_crc,
-                        "actual_crc32": actual_crc,
-                    })
 
         issues: list[VerificationIssue] = []
         if mismatches:
@@ -89,26 +76,22 @@ class ArchiveTestCrcMethod:
             for path in missing:
                 issue_by_path.setdefault(str(path), []).append(issue)
 
-        coverage = coverage_from_archive_and_output(
-            archive_files,
-            list(output_manifest.get("files") or []),
-            method=self.name,
-            issues_by_path=issue_by_path,
-        )
+        observations = _native_observations(match_result.get("observations") or [], issue_by_path, self.name)
+        completeness = _coverage_float(coverage, "completeness", 1.0)
 
         if not issues:
             return VerificationStepResult(
                 method=self.name,
                 status="passed",
-                completeness_hint=coverage.completeness,
+                completeness_hint=completeness,
                 source_integrity_hint=source_integrity,
-                file_observations=coverage.observations,
+                file_observations=observations,
                 issues=[VerificationIssue(
                     method=self.name,
                     code="info.archive_output_coverage",
                     message="Archive-state files were matched against extraction output",
                     path=evidence.output_dir,
-                    expected=coverage.expected_files,
+                    expected=int(coverage.get("expected_files", len(archive_files)) or 0),
                     actual=_coverage_actual(coverage, archive_manifest, evidence),
                 )],
             )
@@ -117,18 +100,18 @@ class ArchiveTestCrcMethod:
             code="info.archive_output_coverage",
             message="Archive-state files were matched against extraction output",
             path=evidence.output_dir,
-            expected=coverage.expected_files,
+            expected=int(coverage.get("expected_files", len(archive_files)) or 0),
             actual=_coverage_actual(coverage, archive_manifest, evidence),
         ))
         return VerificationStepResult(
             method=self.name,
             status="failed",
             issues=issues,
-            completeness_hint=coverage.completeness,
+            completeness_hint=completeness,
             source_integrity_hint=source_integrity,
-            recoverable_upper_bound_hint=coverage.completeness if source_integrity != SOURCE_INTEGRITY_COMPLETE else None,
+            recoverable_upper_bound_hint=completeness if source_integrity != SOURCE_INTEGRITY_COMPLETE else None,
             decision_hint=DECISION_REPAIR if source_integrity == SOURCE_INTEGRITY_COMPLETE else "none",
-            file_observations=coverage.observations,
+            file_observations=observations,
         )
 
     def _archive_status_result(self, archive_manifest, evidence: VerificationEvidence) -> VerificationStepResult | None:
@@ -190,8 +173,21 @@ class ArchiveTestCrcMethod:
         )
 
 
-def _coverage_actual(coverage, archive_manifest, evidence: VerificationEvidence) -> dict[str, Any]:
-    actual = coverage_details(coverage)
+def _coverage_actual(coverage: dict[str, Any], archive_manifest, evidence: VerificationEvidence) -> dict[str, Any]:
+    actual = {
+        "completeness": round(_coverage_float(coverage, "completeness", 1.0), 6),
+        "file_coverage": round(_coverage_float(coverage, "file_coverage", 1.0), 6),
+        "byte_coverage": round(_coverage_float(coverage, "byte_coverage", 1.0), 6),
+        "expected_files": int(coverage.get("expected_files", 0) or 0),
+        "matched_files": int(coverage.get("matched_files", 0) or 0),
+        "complete_files": int(coverage.get("complete_files", 0) or 0),
+        "partial_files": int(coverage.get("partial_files", 0) or 0),
+        "failed_files": int(coverage.get("failed_files", 0) or 0),
+        "missing_files": int(coverage.get("missing_files", 0) or 0),
+        "expected_bytes": int(coverage.get("expected_bytes", 0) or 0),
+        "matched_bytes": int(coverage.get("matched_bytes", 0) or 0),
+        "complete_bytes": int(coverage.get("complete_bytes", 0) or 0),
+    }
     actual.update({
         "state_aware": True,
         "patch_digest": evidence.patch_digest,
@@ -199,6 +195,32 @@ def _coverage_actual(coverage, archive_manifest, evidence: VerificationEvidence)
         "source_integrity": _manifest_source_integrity(archive_manifest),
     })
     return actual
+
+
+def _native_observations(
+    raw_observations: list[Any],
+    issues_by_path: dict[str, list[VerificationIssue]],
+    method: str,
+) -> list[FileVerificationObservation]:
+    observations: list[FileVerificationObservation] = []
+    for raw in raw_observations:
+        if not isinstance(raw, dict):
+            continue
+        archive_path = str(raw.get("archive_path") or raw.get("path") or "")
+        observations.append(FileVerificationObservation(
+            path=str(raw.get("path") or archive_path),
+            archive_path=archive_path,
+            state=str(raw.get("state") or "unverified"),
+            method=method,
+            bytes_written=int(raw.get("bytes_written", 0) or 0),
+            expected_size=_optional_int(raw.get("expected_size")),
+            progress=_optional_float(raw.get("progress")),
+            crc_expected=_optional_crc(raw.get("crc_expected")),
+            crc_actual=_optional_crc(raw.get("crc_actual")),
+            issues=list(issues_by_path.get(archive_path) or []),
+            details=dict(raw.get("details") or {}),
+        ))
+    return observations
 
 
 def _manifest_source_integrity(archive_manifest) -> str:
@@ -209,26 +231,35 @@ def _manifest_source_integrity(archive_manifest) -> str:
     return SOURCE_INTEGRITY_COMPLETE
 
 
-def _output_by_path_or_name(files: list[dict], expected_path: str) -> dict | None:
-    from smart_unpacker.support.path_names import clean_relative_archive_path, normalize_match_name, normalize_match_path
-    import os
-
-    normalized = normalize_match_path(clean_relative_archive_path(expected_path))
-    basename = normalize_match_name(os.path.basename(normalized))
-    name_matches = []
-    for item in files:
-        if not isinstance(item, dict):
-            continue
-        path = clean_relative_archive_path(item.get("path"))
-        if normalize_match_path(path) == normalized:
-            return item
-        if normalize_match_name(os.path.basename(path)) == basename:
-            name_matches.append(item)
-    return name_matches[0] if len(name_matches) == 1 else None
+def _coverage_float(coverage: dict[str, Any], key: str, default: float) -> float:
+    try:
+        return float(coverage.get(key, default))
+    except (TypeError, ValueError):
+        return default
 
 
-def _as_u32(value: Any) -> int:
+def _optional_int(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _optional_float(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _optional_crc(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
     try:
         return int(value or 0) & 0xFFFFFFFF
     except (TypeError, ValueError):
-        return 0
+        return None

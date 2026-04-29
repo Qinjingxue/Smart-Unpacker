@@ -1,8 +1,8 @@
 use pyo3::prelude::*;
 
 mod analysis;
-mod archive_state_ops;
 mod archive_deep_repair;
+mod archive_state_ops;
 mod binary_profile;
 mod carrier;
 mod compression_stream_repair;
@@ -16,8 +16,8 @@ mod password_rar;
 mod password_zip;
 mod pe_overlay;
 mod postprocess_ops;
-mod repair_io;
 mod relations;
+mod repair_io;
 mod util;
 mod zip_deep_repair;
 mod zip_names;
@@ -72,10 +72,7 @@ fn smart_unpacker_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(directory_scan::batch_file_head_facts, m)?)?;
-    m.add_function(wrap_pyfunction!(
-        relations::relations_detect_split_role,
-        m
-    )?)?;
+    m.add_function(wrap_pyfunction!(relations::relations_detect_split_role, m)?)?;
     m.add_function(wrap_pyfunction!(relations::relations_logical_name, m)?)?;
     m.add_function(wrap_pyfunction!(
         relations::relations_parse_numbered_volume,
@@ -89,6 +86,10 @@ fn smart_unpacker_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(directory_scan::scan_output_tree, m)?)?;
     m.add_function(wrap_pyfunction!(
         file_crc::compute_directory_crc_manifest,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        file_crc::match_archive_output_crc_coverage,
         m
     )?)?;
     m.add_function(wrap_pyfunction!(file_crc::sample_directory_readability, m)?)?;
@@ -125,7 +126,10 @@ fn smart_unpacker_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(postprocess_ops::scan_watch_candidates, m)?)?;
-    m.add_function(wrap_pyfunction!(postprocess_ops::watch_candidate_for_path, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        postprocess_ops::watch_candidate_for_path,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(
         postprocess_ops::flatten_single_branch_directories,
         m

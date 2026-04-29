@@ -125,7 +125,10 @@ fn parse_local_header(bytes: &[u8], offset: usize) -> Option<ZipLocalHeader> {
     let name_len = le_u16(bytes, offset + 26)? as usize;
     let extra_len = le_u16(bytes, offset + 28)? as usize;
     let extra_offset = offset.checked_add(30)?.checked_add(name_len)?;
-    let data_offset = offset.checked_add(30)?.checked_add(name_len)?.checked_add(extra_len)?;
+    let data_offset = offset
+        .checked_add(30)?
+        .checked_add(name_len)?
+        .checked_add(extra_len)?;
     if data_offset > bytes.len() {
         return None;
     }
@@ -171,7 +174,10 @@ fn verify_winzip_aes(
         result.set_item("status", "damaged")?;
         result.set_item("matched_index", -1)?;
         result.set_item("attempts", 0)?;
-        result.set_item("message", "winzip aes salt or password verifier is incomplete")?;
+        result.set_item(
+            "message",
+            "winzip aes salt or password verifier is incomplete",
+        )?;
         return Ok(result.into());
     }
     let salt = &salt_and_verifier[..salt_len];
@@ -222,7 +228,12 @@ fn aes_lengths(strength: u8) -> Option<(usize, usize)> {
     }
 }
 
-fn winzip_aes_verifier_matches(password: &[u8], salt: &[u8], verifier: &[u8], key_len: usize) -> bool {
+fn winzip_aes_verifier_matches(
+    password: &[u8],
+    salt: &[u8],
+    verifier: &[u8],
+    key_len: usize,
+) -> bool {
     let mut derived = vec![0u8; key_len * 2 + 2];
     pbkdf2_hmac::<Sha1>(password, salt, 1000, &mut derived);
     &derived[key_len * 2..key_len * 2 + 2] == verifier
@@ -283,11 +294,16 @@ fn crc32_update(crc: u32, byte: u8) -> u32 {
 }
 
 fn find_signature(bytes: &[u8], signature: &[u8]) -> Option<usize> {
-    bytes.windows(signature.len()).position(|window| window == signature)
+    bytes
+        .windows(signature.len())
+        .position(|window| window == signature)
 }
 
 fn le_u16(bytes: &[u8], offset: usize) -> Option<u16> {
-    Some(u16::from_le_bytes([*bytes.get(offset)?, *bytes.get(offset + 1)?]))
+    Some(u16::from_le_bytes([
+        *bytes.get(offset)?,
+        *bytes.get(offset + 1)?,
+    ]))
 }
 
 fn le_u32(bytes: &[u8], offset: usize) -> Option<u32> {

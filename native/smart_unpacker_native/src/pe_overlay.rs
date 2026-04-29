@@ -114,7 +114,11 @@ pub(crate) fn inspect_pe_overlay_structure(
     result.set_item("detected_ext", detected_ext)?;
     result.set_item(
         "confidence",
-        if relative_offset == 0 { "strong" } else { "medium" },
+        if relative_offset == 0 {
+            "strong"
+        } else {
+            "medium"
+        },
     )?;
     evidence.append(if relative_offset == 0 {
         "overlay:archive_magic_at_start"
@@ -182,7 +186,9 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     if needle.is_empty() || needle.len() > haystack.len() {
         return None;
     }
-    haystack.windows(needle.len()).position(|window| window == needle)
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
 }
 
 fn u16_le(bytes: &[u8], offset: usize) -> u16 {

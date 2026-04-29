@@ -94,7 +94,10 @@ impl Segment {
     }
 }
 
-fn build_segments(source: &Bound<'_, PyDict>, patches: &Bound<'_, PyList>) -> PyResult<Vec<Segment>> {
+fn build_segments(
+    source: &Bound<'_, PyDict>,
+    patches: &Bound<'_, PyList>,
+) -> PyResult<Vec<Segment>> {
     let mut segments = source_segments(source)?;
     for patch in patches.iter() {
         let patch = patch.cast::<PyDict>()?;
@@ -104,12 +107,15 @@ fn build_segments(source: &Bound<'_, PyDict>, patches: &Bound<'_, PyList>) -> Py
         let operations = operations_obj.cast::<PyList>()?;
         for operation in operations.iter() {
             let operation = operation.cast::<PyDict>()?;
-            if optional_string(operation, "target")?.unwrap_or_else(|| "logical".to_string()) != "logical" {
+            if optional_string(operation, "target")?.unwrap_or_else(|| "logical".to_string())
+                != "logical"
+            {
                 return Err(pyo3::exceptions::PyValueError::new_err(
                     "unsupported patch target for native archive state view",
                 ));
             }
-            let op = optional_string(operation, "op")?.unwrap_or_else(|| "replace_range".to_string());
+            let op =
+                optional_string(operation, "op")?.unwrap_or_else(|| "replace_range".to_string());
             let offset = optional_u64(operation, "offset")?.unwrap_or(0);
             match op.as_str() {
                 "replace_range" => {
@@ -159,7 +165,10 @@ fn build_segments(source: &Bound<'_, PyDict>, patches: &Bound<'_, PyList>) -> Py
             }
         }
     }
-    Ok(segments.into_iter().filter(|segment| segment.len() > 0).collect())
+    Ok(segments
+        .into_iter()
+        .filter(|segment| segment.len() > 0)
+        .collect())
 }
 
 fn source_segments(source: &Bound<'_, PyDict>) -> PyResult<Vec<Segment>> {
@@ -377,7 +386,10 @@ fn zip_manifest_from_bytes<'py>(
         result.set_item("item_count", 0)?;
         result.set_item("file_count", 0)?;
         result.set_item("files", PyList::empty(py))?;
-        result.set_item("message", "Patched archive state is not a readable ZIP: EOCD not found")?;
+        result.set_item(
+            "message",
+            "Patched archive state is not a readable ZIP: EOCD not found",
+        )?;
         return Ok(result);
     };
     let mut cursor = eocd.cd_offset as usize;
@@ -391,7 +403,8 @@ fn zip_manifest_from_bytes<'py>(
     while cursor + 46 <= data.len() && cursor < expected_end {
         if &data[cursor..cursor + 4] != CD_SIG {
             damaged = true;
-            message = "Patched archive state ZIP central directory stopped before expected end".to_string();
+            message = "Patched archive state ZIP central directory stopped before expected end"
+                .to_string();
             break;
         }
         let flags = u16_le(data, cursor + 8);
@@ -425,7 +438,16 @@ fn zip_manifest_from_bytes<'py>(
             file_count += 1;
         }
         if flags & 0x1 == 0 || password.is_some() {
-            if matches!(method, 0 | 8) && !verify_zip_payload(data, local_offset, method, crc32, compressed_size, uncompressed_size) {
+            if matches!(method, 0 | 8)
+                && !verify_zip_payload(
+                    data,
+                    local_offset,
+                    method,
+                    crc32,
+                    compressed_size,
+                    uncompressed_size,
+                )
+            {
                 damaged = true;
                 checksum_error = true;
                 message = format!("Patched archive state ZIP payload CRC failed at: {name}");
@@ -514,7 +536,9 @@ fn verify_deflate(input: &[u8], expected_crc: u32, expected_size: u64) -> bool {
         if input_offset > input.len() {
             return false;
         }
-        let Ok(status) = decompressor.decompress_vec(&input[input_offset..], &mut output, FlushDecompress::None) else {
+        let Ok(status) =
+            decompressor.decompress_vec(&input[input_offset..], &mut output, FlushDecompress::None)
+        else {
             return false;
         };
         if output.len() > before_len {
@@ -538,7 +562,9 @@ fn verify_deflate(input: &[u8], expected_crc: u32, expected_size: u64) -> bool {
 }
 
 fn looks_like_zip(data: &[u8]) -> bool {
-    data.starts_with(LFH_SIG) || data.starts_with(EOCD_SIG) || find_last(data, EOCD_SIG, data.len()).is_some()
+    data.starts_with(LFH_SIG)
+        || data.starts_with(EOCD_SIG)
+        || find_last(data, EOCD_SIG, data.len()).is_some()
 }
 
 struct Crc32 {
@@ -621,7 +647,10 @@ fn ensure_parent(path: &Path) -> PyResult<()> {
 }
 
 fn temp_path(path: &Path) -> PathBuf {
-    let name = path.file_name().and_then(|value| value.to_str()).unwrap_or("candidate");
+    let name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("candidate");
     path.with_file_name(format!(".{name}.tmp"))
 }
 

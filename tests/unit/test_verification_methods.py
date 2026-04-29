@@ -123,7 +123,7 @@ def test_expected_name_presence_weak_damaged_source_sets_recoverable_upper_bound
     assert verification.decision_hint == "accept_partial"
 
 
-def test_archive_test_crc_compares_archive_state_manifest_to_output_files(tmp_path, monkeypatch):
+def test_archive_test_crc_compares_archive_state_manifest_to_output_files(tmp_path):
     archive = tmp_path / "sample.zip"
     with zipfile.ZipFile(archive, "w") as zf:
         zf.writestr("good.txt", "hello")
@@ -135,16 +135,6 @@ def test_archive_test_crc_compares_archive_state_manifest_to_output_files(tmp_pa
     (out_dir / "bad.txt").write_text("oops", encoding="utf-8")
     task = ArchiveTask(fact_bag=FactBag(), score=10, key="sample", main_path=str(archive), all_parts=[str(archive)], detected_ext="zip")
     result = ExtractionResult(success=True, archive=str(archive), out_dir=str(out_dir), all_parts=[str(archive)])
-
-    from smart_unpacker.verification.methods import archive_test_crc as module
-
-    monkeypatch.setattr(module, "_compute_directory_crc_manifest", lambda output_dir, max_items: {
-        "status": "ok",
-        "files": [
-            {"path": "good.txt", "size": 5, "crc32": 907060870},
-            {"path": "bad.txt", "size": 4, "crc32": 1234},
-        ],
-    })
 
     verification = _scheduler([{"name": "archive_test_crc"}]).verify(task, result)
 

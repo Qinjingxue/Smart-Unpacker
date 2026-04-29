@@ -174,7 +174,10 @@ impl FileHeadRecord {
 fn file_head_record(path: String, magic_size: usize) -> FileHeadRecord {
     let path_buf = PathBuf::from(&path);
     let metadata = fs::metadata(&path_buf).ok();
-    let is_file = metadata.as_ref().map(|item| item.is_file()).unwrap_or(false);
+    let is_file = metadata
+        .as_ref()
+        .map(|item| item.is_file())
+        .unwrap_or(false);
     let mut magic = Vec::new();
     if is_file && magic_size > 0 {
         if let Ok(mut handle) = fs::File::open(&path_buf) {

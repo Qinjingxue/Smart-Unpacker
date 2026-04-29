@@ -18,7 +18,9 @@ pub(crate) fn parse_ranges(ranges: &Bound<'_, PyList>) -> PyResult<Vec<RangeSpec
         let dict = item.cast::<PyDict>()?;
         let path = dict
             .get_item("path")?
-            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>("range path is required"))?
+            .ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>("range path is required")
+            })?
             .extract::<String>()?;
         let start = dict
             .get_item("start")?
@@ -31,11 +33,15 @@ pub(crate) fn parse_ranges(ranges: &Bound<'_, PyList>) -> PyResult<Vec<RangeSpec
             .transpose()?;
         let file_len = std::fs::metadata(&path)?.len();
         if start > file_len {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("range start is beyond file length"));
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "range start is beyond file length",
+            ));
         }
         let effective_end = end.unwrap_or(file_len).min(file_len);
         if effective_end < start {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("range end is before start"));
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "range end is before start",
+            ));
         }
         let len = effective_end - start;
         if len == 0 {
@@ -53,10 +59,16 @@ pub(crate) fn parse_ranges(ranges: &Bound<'_, PyList>) -> PyResult<Vec<RangeSpec
 }
 
 pub(crate) fn ranges_total_len(ranges: &[RangeSpec]) -> u64 {
-    ranges.last().map(|item| item.virtual_start + item.len).unwrap_or(0)
+    ranges
+        .last()
+        .map(|item| item.virtual_start + item.len)
+        .unwrap_or(0)
 }
 
-pub(crate) fn read_prefix_from_ranges(ranges: &[RangeSpec], max_len: usize) -> std::io::Result<Vec<u8>> {
+pub(crate) fn read_prefix_from_ranges(
+    ranges: &[RangeSpec],
+    max_len: usize,
+) -> std::io::Result<Vec<u8>> {
     let mut reader = VirtualRangeReader::new(ranges.to_vec());
     let mut data = vec![0u8; max_len.min(ranges_total_len(ranges) as usize)];
     let len = reader.read(&mut data)?;
@@ -81,9 +93,9 @@ impl VirtualRangeReader {
     }
 
     fn current_range(&self) -> Option<&RangeSpec> {
-        self.ranges
-            .iter()
-            .find(|range| self.position >= range.virtual_start && self.position < range.virtual_start + range.len)
+        self.ranges.iter().find(|range| {
+            self.position >= range.virtual_start && self.position < range.virtual_start + range.len
+        })
     }
 }
 
@@ -123,7 +135,10 @@ impl Seek for VirtualRangeReader {
             SeekFrom::Current(value) => self.position as i128 + value as i128,
         };
         if next < 0 {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "negative seek"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "negative seek",
+            ));
         }
         self.position = (next as u64).min(self.total_len);
         Ok(self.position)

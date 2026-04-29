@@ -1,8 +1,10 @@
-use crate::binary_profile::{fuzzy_binary_profile as build_fuzzy_binary_profile, BinaryProfileConfig};
-use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyDict, PyList};
+use crate::binary_profile::{
+    fuzzy_binary_profile as build_fuzzy_binary_profile, BinaryProfileConfig,
+};
 use bzip2::read::BzDecoder;
 use flate2::read::GzDecoder;
+use pyo3::prelude::*;
+use pyo3::types::{PyBytes, PyDict, PyList};
 use std::collections::{HashMap, VecDeque};
 use std::fs::File;
 use std::io::{Cursor, Read, Seek, SeekFrom};
@@ -23,14 +25,8 @@ const ZSTD: &[u8] = b"\x28\xb5\x2f\xfd";
 const TAR_USTAR: &[u8] = b"ustar";
 const TAR_BLOCK_SIZE: usize = 512;
 
-const ANALYSIS_SIGNATURES_P: &[(&str, &[u8])] = &[
-    ("zip_local", ZIP_LOCAL),
-    ("zip_eocd", ZIP_EOCD),
-];
-const ANALYSIS_SIGNATURES_R: &[(&str, &[u8])] = &[
-    ("rar4", RAR4),
-    ("rar5", RAR5),
-];
+const ANALYSIS_SIGNATURES_P: &[(&str, &[u8])] = &[("zip_local", ZIP_LOCAL), ("zip_eocd", ZIP_EOCD)];
+const ANALYSIS_SIGNATURES_R: &[(&str, &[u8])] = &[("rar4", RAR4), ("rar5", RAR5)];
 const ANALYSIS_SIGNATURES_7: &[(&str, &[u8])] = &[("7z", SEVEN_ZIP)];
 const ANALYSIS_SIGNATURES_GZIP: &[(&str, &[u8])] = &[("gzip", GZIP)];
 const ANALYSIS_SIGNATURES_BZIP2: &[(&str, &[u8])] = &[("bzip2", BZIP2)];
@@ -140,7 +136,12 @@ impl AnalysisBinaryView {
         Ok(self.lock()?.path.clone())
     }
 
-    fn read_at<'py>(&self, py: Python<'py>, offset: u64, size: usize) -> PyResult<Bound<'py, PyBytes>> {
+    fn read_at<'py>(
+        &self,
+        py: Python<'py>,
+        offset: u64,
+        size: usize,
+    ) -> PyResult<Bound<'py, PyBytes>> {
         let data = self.read_at_bytes(offset, size)?;
         Ok(PyBytes::new(py, &data))
     }
@@ -241,13 +242,14 @@ impl AnalysisBinaryView {
             return Ok(result.unbind());
         }
         result.set_item("central_directory_present", true)?;
-        let (entries_checked, cd_ok, links_checked, links_ok, error) = self.walk_zip_central_directory(
-            archive_offset,
-            physical_central_offset,
-            central_directory_size,
-            total_entries as usize,
-            max_cd_entries_to_walk,
-        )?;
+        let (entries_checked, cd_ok, links_checked, links_ok, error) = self
+            .walk_zip_central_directory(
+                archive_offset,
+                physical_central_offset,
+                central_directory_size,
+                total_entries as usize,
+                max_cd_entries_to_walk,
+            )?;
         result.set_item("central_directory_entries_checked", entries_checked)?;
         result.set_item("central_directory_walk_ok", cd_ok)?;
         result.set_item("local_header_links_checked", links_checked)?;
@@ -359,7 +361,10 @@ impl AnalysisBinaryView {
         let stored_start_crc = u32_le(&header, 8);
         let start_header = &header[12..32];
         let computed_start_crc = crc32(start_header);
-        result.set_item("start_header_crc_ok", stored_start_crc == computed_start_crc)?;
+        result.set_item(
+            "start_header_crc_ok",
+            stored_start_crc == computed_start_crc,
+        )?;
         if stored_start_crc != computed_start_crc {
             result.set_item("error", "start_header_crc_mismatch")?;
             return Ok(result.unbind());
@@ -431,11 +436,7 @@ impl AnalysisBinaryView {
         Ok(result.unbind())
     }
 
-    fn probe_compression_stream(
-        &self,
-        py: Python<'_>,
-        format: &str,
-    ) -> PyResult<Py<PyDict>> {
+    fn probe_compression_stream(&self, py: Python<'_>, format: &str) -> PyResult<Py<PyDict>> {
         let result = self.probe_compression(py, format)?;
         Ok(result.unbind())
     }
@@ -453,7 +454,11 @@ impl AnalysisBinaryView {
         stream.set_item("inner_tar_verified", false)?;
         stream.set_item("tar_plausible", false)?;
         stream.set_item("tar_probe_error", "")?;
-        if !stream.get_item("magic_matched")?.unwrap().extract::<bool>()? {
+        if !stream
+            .get_item("magic_matched")?
+            .unwrap()
+            .extract::<bool>()?
+        {
             return Ok(stream.unbind());
         }
         let read_size = (self.lock()?.size as usize).min(max_probe_bytes);
@@ -464,7 +469,8 @@ impl AnalysisBinaryView {
                     stream.set_item("tar_probe_error", "inner_sample_too_small")?;
                     return Ok(stream.unbind());
                 }
-                let (ok, error, member_size, ustar) = tar_header_plausible(&sample[..TAR_BLOCK_SIZE]);
+                let (ok, error, member_size, ustar) =
+                    tar_header_plausible(&sample[..TAR_BLOCK_SIZE]);
                 stream.set_item("inner_tar_verified", ok)?;
                 stream.set_item("tar_plausible", ok)?;
                 stream.set_item("tar_probe_error", error)?;
@@ -512,7 +518,12 @@ impl AnalysisBinaryView {
             ngram_top_k: ngram_top_k.max(1),
             max_ngram_sample_bytes,
         };
-        build_fuzzy_binary_profile(py, file_size, |offset, size| self.read_at_bytes(offset, size), config)
+        build_fuzzy_binary_profile(
+            py,
+            file_size,
+            |offset, size| self.read_at_bytes(offset, size),
+            config,
+        )
     }
 
     #[pyo3(signature = (head_bytes=1048576, tail_bytes=1048576))]
@@ -531,7 +542,12 @@ impl AnalysisBinaryView {
         let tail_end = size;
         let (scan_start, scan_len, scanned_head, scanned_tail) = if tail_start <= head_end {
             let end = head_end.max(tail_end);
-            (scan_start, end.saturating_sub(scan_start) as usize, head_len, tail_len)
+            (
+                scan_start,
+                end.saturating_sub(scan_start) as usize,
+                head_len,
+                tail_len,
+            )
         } else {
             (0u64, head_len, head_len, 0usize)
         };
@@ -566,7 +582,14 @@ impl AnalysisBinaryView {
         dict.set_item("hits", py_hits)?;
         dict.set_item("formats", formats)?;
         dict.set_item("head_bytes", scanned_head)?;
-        dict.set_item("tail_bytes", if scanned_tail == 0 { tail_len } else { scanned_tail })?;
+        dict.set_item(
+            "tail_bytes",
+            if scanned_tail == 0 {
+                tail_len
+            } else {
+                scanned_tail
+            },
+        )?;
         Ok(dict.unbind())
     }
 }
@@ -594,9 +617,9 @@ impl AnalysisMultiVolumeView {
         let mut volumes = Vec::with_capacity(paths.len());
         for path in &paths {
             let size = std::fs::metadata(path)?.len();
-            let end = cursor
-                .checked_add(size)
-                .ok_or_else(|| pyo3::exceptions::PyOverflowError::new_err("multi-volume archive size overflow"))?;
+            let end = cursor.checked_add(size).ok_or_else(|| {
+                pyo3::exceptions::PyOverflowError::new_err("multi-volume archive size overflow")
+            })?;
             volumes.push(VolumeRange {
                 start: cursor,
                 end,
@@ -635,7 +658,12 @@ impl AnalysisMultiVolumeView {
         Ok(self.lock()?.path.clone())
     }
 
-    fn read_at<'py>(&self, py: Python<'py>, offset: u64, size: usize) -> PyResult<Bound<'py, PyBytes>> {
+    fn read_at<'py>(
+        &self,
+        py: Python<'py>,
+        offset: u64,
+        size: usize,
+    ) -> PyResult<Bound<'py, PyBytes>> {
         let data = self.read_at_bytes(offset, size)?;
         Ok(PyBytes::new(py, &data))
     }
@@ -690,7 +718,12 @@ impl AnalysisMultiVolumeView {
             ngram_top_k: ngram_top_k.max(1),
             max_ngram_sample_bytes,
         };
-        build_fuzzy_binary_profile(py, file_size, |offset, size| self.read_at_bytes(offset, size), config)
+        build_fuzzy_binary_profile(
+            py,
+            file_size,
+            |offset, size| self.read_at_bytes(offset, size),
+            config,
+        )
     }
 
     #[pyo3(signature = (head_bytes=1048576, tail_bytes=1048576))]
@@ -745,9 +778,9 @@ impl AnalysisMultiVolumeView {
 
 impl AnalysisBinaryView {
     fn lock(&self) -> PyResult<MutexGuard<'_, AnalysisBinaryViewInner>> {
-        self.inner
-            .lock()
-            .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("analysis binary view lock poisoned"))
+        self.inner.lock().map_err(|_| {
+            pyo3::exceptions::PyRuntimeError::new_err("analysis binary view lock poisoned")
+        })
     }
 
     fn read_at_bytes(&self, offset: u64, size: usize) -> PyResult<Vec<u8>> {
@@ -805,11 +838,23 @@ impl AnalysisBinaryView {
         let mut links_checked = 0usize;
         for index in 0..limit {
             if cursor + 46 > end {
-                return Ok((index, false, links_checked, false, "central_directory_entry_out_of_range"));
+                return Ok((
+                    index,
+                    false,
+                    links_checked,
+                    false,
+                    "central_directory_entry_out_of_range",
+                ));
             }
             let header = self.read_at_bytes(cursor, 46)?;
             if header.len() < 46 || &header[0..4] != ZIP_CENTRAL {
-                return Ok((index, false, links_checked, false, "bad_central_directory_entry_signature"));
+                return Ok((
+                    index,
+                    false,
+                    links_checked,
+                    false,
+                    "bad_central_directory_entry_signature",
+                ));
             }
             let filename_len = u16_le(&header, 28) as u64;
             let extra_len = u16_le(&header, 30) as u64;
@@ -817,12 +862,24 @@ impl AnalysisBinaryView {
             let local_header_offset = u32_le(&header, 42) as u64;
             let entry_size = 46 + filename_len + extra_len + comment_len;
             if cursor + entry_size > end {
-                return Ok((index, false, links_checked, false, "central_directory_variable_fields_out_of_range"));
+                return Ok((
+                    index,
+                    false,
+                    links_checked,
+                    false,
+                    "central_directory_variable_fields_out_of_range",
+                ));
             }
             if links_checked < max_entries {
                 let local_sig = self.read_at_bytes(archive_offset + local_header_offset, 4)?;
                 if local_sig.len() < 4 || local_sig.as_slice() != ZIP_LOCAL {
-                    return Ok((index + 1, true, links_checked, false, "local_header_link_mismatch"));
+                    return Ok((
+                        index + 1,
+                        true,
+                        links_checked,
+                        false,
+                        "local_header_link_mismatch",
+                    ));
                 }
                 links_checked += 1;
             }
@@ -1087,7 +1144,17 @@ impl AnalysisBinaryView {
                     result.set_item("end_zero_blocks", true)?;
                     result.set_item("segment_end", cursor)?;
                     result.set_item("boundary_confidence", "high")?;
-                    result.set_item("evidence", PyList::new(py, ["tar:header_checksum", "tar:block_walk", "tar:end_zero_blocks"])?)?;
+                    result.set_item(
+                        "evidence",
+                        PyList::new(
+                            py,
+                            [
+                                "tar:header_checksum",
+                                "tar:block_walk",
+                                "tar:end_zero_blocks",
+                            ],
+                        )?,
+                    )?;
                     return Ok(result);
                 }
                 continue;
@@ -1102,7 +1169,10 @@ impl AnalysisBinaryView {
                     result.set_item("entry_walk_ok", true)?;
                     result.set_item("segment_end", cursor)?;
                     result.set_item("boundary_confidence", "medium")?;
-                    result.set_item("evidence", PyList::new(py, ["tar:header_checksum", "tar:block_walk_prefix"])?)?;
+                    result.set_item(
+                        "evidence",
+                        PyList::new(py, ["tar:header_checksum", "tar:block_walk_prefix"])?,
+                    )?;
                 }
                 return Ok(result);
             }
@@ -1110,7 +1180,17 @@ impl AnalysisBinaryView {
             cursor += TAR_BLOCK_SIZE as u64 + member_size + tar_padding(member_size);
             result.set_item(
                 "evidence",
-                PyList::new(py, ["tar:header_checksum", if ustar { "tar:ustar_magic" } else { "tar:v7_header" }])?,
+                PyList::new(
+                    py,
+                    [
+                        "tar:header_checksum",
+                        if ustar {
+                            "tar:ustar_magic"
+                        } else {
+                            "tar:v7_header"
+                        },
+                    ],
+                )?,
             )?;
         }
         if checked > 0 {
@@ -1120,12 +1200,19 @@ impl AnalysisBinaryView {
             result.set_item("segment_end", cursor)?;
             result.set_item("boundary_confidence", "medium")?;
             result.set_item("error", "tar_end_zero_blocks_not_found")?;
-            result.set_item("evidence", PyList::new(py, ["tar:header_checksum", "tar:block_walk_prefix"])?)?;
+            result.set_item(
+                "evidence",
+                PyList::new(py, ["tar:header_checksum", "tar:block_walk_prefix"])?,
+            )?;
         }
         Ok(result)
     }
 
-    fn probe_compression<'py>(&self, py: Python<'py>, format: &str) -> PyResult<Bound<'py, PyDict>> {
+    fn probe_compression<'py>(
+        &self,
+        py: Python<'py>,
+        format: &str,
+    ) -> PyResult<Bound<'py, PyDict>> {
         let result = PyDict::new(py);
         result.set_item("format", format)?;
         result.set_item("magic_matched", false)?;
@@ -1149,7 +1236,10 @@ impl AnalysisBinaryView {
                 }
                 result.set_item("plausible", true)?;
                 result.set_item("confidence", 0.90f64)?;
-                let evidence = PyList::new(py, ["gzip:magic", "gzip:method:deflate", "gzip:flags_valid"])?;
+                let evidence = PyList::new(
+                    py,
+                    ["gzip:magic", "gzip:method:deflate", "gzip:flags_valid"],
+                )?;
                 if self.lock()?.size >= 18 {
                     let tail = self.read_tail_bytes(4)?;
                     if tail.len() == 4 {
@@ -1175,7 +1265,10 @@ impl AnalysisBinaryView {
                 }
                 result.set_item("plausible", true)?;
                 result.set_item("confidence", 0.92f64)?;
-                result.set_item("evidence", PyList::new(py, ["bzip2:magic", "bzip2:block_marker"])?)?;
+                result.set_item(
+                    "evidence",
+                    PyList::new(py, ["bzip2:magic", "bzip2:block_marker"])?,
+                )?;
             }
             "xz" => {
                 if !header.starts_with(XZ) {
@@ -1188,7 +1281,10 @@ impl AnalysisBinaryView {
                     result.set_item("plausible", true)?;
                     result.set_item("confidence", 0.95f64)?;
                     result.set_item("boundary_confidence", "high")?;
-                    result.set_item("evidence", PyList::new(py, ["xz:magic", "xz:footer_magic"])?)?;
+                    result.set_item(
+                        "evidence",
+                        PyList::new(py, ["xz:magic", "xz:footer_magic"])?,
+                    )?;
                 } else {
                     result.set_item("plausible", true)?;
                     result.set_item("confidence", 0.72f64)?;
@@ -1208,7 +1304,10 @@ impl AnalysisBinaryView {
                 }
                 result.set_item("plausible", true)?;
                 result.set_item("confidence", 0.88f64)?;
-                result.set_item("evidence", PyList::new(py, ["zstd:magic", "zstd:frame_descriptor"])?)?;
+                result.set_item(
+                    "evidence",
+                    PyList::new(py, ["zstd:magic", "zstd:frame_descriptor"])?,
+                )?;
             }
             _ => {
                 result.set_item("error", "unsupported_compression_format")?;
@@ -1220,9 +1319,9 @@ impl AnalysisBinaryView {
 
 impl AnalysisMultiVolumeView {
     fn lock(&self) -> PyResult<MutexGuard<'_, AnalysisMultiVolumeViewInner>> {
-        self.inner
-            .lock()
-            .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("analysis multi-volume view lock poisoned"))
+        self.inner.lock().map_err(|_| {
+            pyo3::exceptions::PyRuntimeError::new_err("analysis multi-volume view lock poisoned")
+        })
     }
 
     fn read_at_bytes(&self, offset: u64, size: usize) -> PyResult<Vec<u8>> {
@@ -1324,15 +1423,13 @@ impl AnalysisMultiVolumeViewInner {
 
 impl ReadGate {
     fn acquire(&self) -> PyResult<ReadPermit<'_>> {
-        let mut active = self
-            .active
-            .lock()
-            .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("analysis read gate lock poisoned"))?;
+        let mut active = self.active.lock().map_err(|_| {
+            pyo3::exceptions::PyRuntimeError::new_err("analysis read gate lock poisoned")
+        })?;
         while *active >= self.limit {
-            active = self
-                .available
-                .wait(active)
-                .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("analysis read gate lock poisoned"))?;
+            active = self.available.wait(active).map_err(|_| {
+                pyo3::exceptions::PyRuntimeError::new_err("analysis read gate lock poisoned")
+            })?;
         }
         *active += 1;
         Ok(ReadPermit { gate: self })
@@ -1458,7 +1555,9 @@ fn parse_octal(field: &[u8]) -> Option<u64> {
     if text.is_empty() {
         return Some(0);
     }
-    std::str::from_utf8(&text).ok().and_then(|value| u64::from_str_radix(value.trim(), 8).ok())
+    std::str::from_utf8(&text)
+        .ok()
+        .and_then(|value| u64::from_str_radix(value.trim(), 8).ok())
 }
 
 fn tar_checksum(header: &[u8]) -> u64 {
@@ -1476,13 +1575,23 @@ fn tar_padding(size: u64) -> u64 {
     }
 }
 
-fn decompress_sample(format: &str, data: &[u8], max_output: usize) -> Result<Vec<u8>, &'static str> {
+fn decompress_sample(
+    format: &str,
+    data: &[u8],
+    max_output: usize,
+) -> Result<Vec<u8>, &'static str> {
     let cursor = Cursor::new(data);
     let mut output = Vec::new();
     let result = match format {
-        "gzip" => GzDecoder::new(cursor).take(max_output as u64).read_to_end(&mut output),
-        "bzip2" => BzDecoder::new(cursor).take(max_output as u64).read_to_end(&mut output),
-        "xz" => XzDecoder::new(cursor).take(max_output as u64).read_to_end(&mut output),
+        "gzip" => GzDecoder::new(cursor)
+            .take(max_output as u64)
+            .read_to_end(&mut output),
+        "bzip2" => BzDecoder::new(cursor)
+            .take(max_output as u64)
+            .read_to_end(&mut output),
+        "xz" => XzDecoder::new(cursor)
+            .take(max_output as u64)
+            .read_to_end(&mut output),
         "zstd" => {
             let decoder = ZstdDecoder::new(cursor).map_err(|_| "zstd_decoder_init_failed")?;
             decoder.take(max_output as u64).read_to_end(&mut output)

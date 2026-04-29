@@ -59,7 +59,10 @@ pub(crate) fn inspect_zip_local_header(
         result.set_item("error", "unsupported_version")?;
         return Ok(result.unbind());
     }
-    if !matches!(compression_method, 0 | 1 | 6 | 8 | 9 | 12 | 14 | 95 | 96 | 98 | 99) {
+    if !matches!(
+        compression_method,
+        0 | 1 | 6 | 8 | 9 | 12 | 14 | 95 | 96 | 98 | 99
+    ) {
         result.set_item("error", "unknown_compression_method")?;
         return Ok(result.unbind());
     }
@@ -236,7 +239,10 @@ pub(crate) fn inspect_seven_zip_structure(
     result.set_item("next_header_offset", next_header_offset)?;
     result.set_item("next_header_size", next_header_size)?;
     result.set_item("next_header_crc", next_header_crc)?;
-    result.set_item("start_header_crc_ok", stored_start_crc == computed_start_crc)?;
+    result.set_item(
+        "start_header_crc_ok",
+        stored_start_crc == computed_start_crc,
+    )?;
     result.set_item("next_header_crc_checked", false)?;
     result.set_item("next_header_crc_ok", false)?;
     result.set_item("next_header_nid", 0)?;
@@ -254,7 +260,8 @@ pub(crate) fn inspect_seven_zip_structure(
         result.set_item("error", "start_header_crc_mismatch")?;
         return Ok(result.unbind());
     }
-    let Some(next_header_start) = (SEVEN_Z_HEADER_SIZE as u64).checked_add(next_header_offset) else {
+    let Some(next_header_start) = (SEVEN_Z_HEADER_SIZE as u64).checked_add(next_header_offset)
+    else {
         result.set_item("error", "next_header_out_of_range")?;
         return Ok(result.unbind());
     };
@@ -391,7 +398,10 @@ pub(crate) fn inspect_tar_header_structure(
     result.set_item("stored_checksum", stored_checksum.unwrap_or(0))?;
     result.set_item("computed_checksum", computed)?;
     result.set_item("member_size", member_size.unwrap_or(0))?;
-    result.set_item("ustar_magic", matches!(&header[257..263], b"ustar\x00" | b"ustar "))?;
+    result.set_item(
+        "ustar_magic",
+        matches!(&header[257..263], b"ustar\x00" | b"ustar "),
+    )?;
     if stored_checksum.is_none() {
         result.set_item("error", "invalid_checksum_field")?;
         return Ok(result.unbind());
@@ -425,7 +435,10 @@ pub(crate) fn inspect_tar_header_structure(
 }
 
 #[pyfunction]
-pub(crate) fn inspect_compression_stream_structure(py: Python<'_>, path: &str) -> PyResult<Py<PyDict>> {
+pub(crate) fn inspect_compression_stream_structure(
+    py: Python<'_>,
+    path: &str,
+) -> PyResult<Py<PyDict>> {
     let Ok((file_size, header)) = read_at(path, 0, 32) else {
         return compression_empty(py, "os_error", "", "", false);
     };
@@ -445,7 +458,10 @@ pub(crate) fn inspect_compression_stream_structure(py: Python<'_>, path: &str) -
 }
 
 #[pyfunction]
-pub(crate) fn inspect_archive_container_structure(py: Python<'_>, path: &str) -> PyResult<Py<PyDict>> {
+pub(crate) fn inspect_archive_container_structure(
+    py: Python<'_>,
+    path: &str,
+) -> PyResult<Py<PyDict>> {
     let Ok((file_size, header)) = read_at(path, 0, 4096) else {
         return container_empty(py, "os_error");
     };
@@ -504,7 +520,13 @@ fn walk_zip_central_directory(
     max_entries: usize,
 ) -> PyResult<(usize, bool, usize, bool, &'static str)> {
     if total_entries == 0 || central_directory_size == 0 {
-        return Ok((0, total_entries == 0 && central_directory_size == 0, 0, false, ""));
+        return Ok((
+            0,
+            total_entries == 0 && central_directory_size == 0,
+            0,
+            false,
+            "",
+        ));
     }
     let limit = total_entries.min(max_entries);
     if limit == 0 {
@@ -523,32 +545,67 @@ fn walk_zip_central_directory(
         file.seek(SeekFrom::Start(cursor))?;
         file.read_exact(&mut header)?;
         if &header[0..4] != ZIP_CENTRAL_DIRECTORY_SIGNATURE {
-            return Ok((checked, false, checked, false, "bad_central_entry_signature"));
+            return Ok((
+                checked,
+                false,
+                checked,
+                false,
+                "bad_central_entry_signature",
+            ));
         }
         let filename_len = u16_le(&header, 28) as u64;
         let extra_len = u16_le(&header, 30) as u64;
         let comment_len = u16_le(&header, 32) as u64;
         let disk_start = u16_le(&header, 34);
         let local_header_offset = u32_le(&header, 42) as u64;
-        let entry_size = ZIP_CENTRAL_DIRECTORY_HEADER_SIZE as u64 + filename_len + extra_len + comment_len;
+        let entry_size =
+            ZIP_CENTRAL_DIRECTORY_HEADER_SIZE as u64 + filename_len + extra_len + comment_len;
         if disk_start != 0 {
             return Ok((checked, false, checked, false, "central_entry_multi_disk"));
         }
         if filename_len == 0 || filename_len > 4096 {
-            return Ok((checked, false, checked, false, "central_entry_invalid_filename_length"));
+            return Ok((
+                checked,
+                false,
+                checked,
+                false,
+                "central_entry_invalid_filename_length",
+            ));
         }
-        if entry_size <= ZIP_CENTRAL_DIRECTORY_HEADER_SIZE as u64 || cursor + entry_size > central_end {
-            return Ok((checked, false, checked, false, "central_entry_size_out_of_range"));
+        if entry_size <= ZIP_CENTRAL_DIRECTORY_HEADER_SIZE as u64
+            || cursor + entry_size > central_end
+        {
+            return Ok((
+                checked,
+                false,
+                checked,
+                false,
+                "central_entry_size_out_of_range",
+            ));
         }
         let local_header_position = archive_offset + local_header_offset;
-        if local_header_position < archive_offset || local_header_position + 4 > central_directory_offset {
-            return Ok((checked, false, checked, false, "local_header_offset_out_of_range"));
+        if local_header_position < archive_offset
+            || local_header_position + 4 > central_directory_offset
+        {
+            return Ok((
+                checked,
+                false,
+                checked,
+                false,
+                "local_header_offset_out_of_range",
+            ));
         }
         let mut sig = [0u8; 4];
         file.seek(SeekFrom::Start(local_header_position))?;
         file.read_exact(&mut sig)?;
         if &sig != b"PK\x03\x04" {
-            return Ok((checked, false, checked, false, "local_header_link_bad_signature"));
+            return Ok((
+                checked,
+                false,
+                checked,
+                false,
+                "local_header_link_bad_signature",
+            ));
         }
         checked += 1;
         cursor += entry_size;
@@ -688,7 +745,10 @@ fn inspect_rar4(py: Python<'_>, data: &[u8], file_size: u64) -> PyResult<Py<PyDi
         }
     }
     let second_offset = first_header_offset + header_size as usize;
-    if header_type == 0x73 && d.get_item("header_crc_ok")?.unwrap().extract::<bool>()? && second_offset < file_size as usize {
+    if header_type == 0x73
+        && d.get_item("header_crc_ok")?.unwrap().extract::<bool>()?
+        && second_offset < file_size as usize
+    {
         let second = inspect_rar4_block(data, second_offset, file_size);
         d.set_item("second_block_checked", true)?;
         d.set_item("second_block_ok", second.0)?;
@@ -703,7 +763,8 @@ fn inspect_rar4(py: Python<'_>, data: &[u8], file_size: u64) -> PyResult<Py<PyDi
     }
     if header_type == 0x73
         && d.get_item("header_crc_ok")?.unwrap().extract::<bool>()?
-        && (second_offset >= file_size as usize || d.get_item("block_walk_ok")?.unwrap().extract::<bool>()?)
+        && (second_offset >= file_size as usize
+            || d.get_item("block_walk_ok")?.unwrap().extract::<bool>()?)
     {
         d.set_item("strong_accept", true)?;
     }
@@ -719,23 +780,51 @@ fn inspect_rar4_block(data: &[u8], offset: usize, file_size: u64) -> (bool, u8, 
     let header_flags = u16_le(data, offset + 3);
     let header_size = u16_le(data, offset + 5) as u64;
     if !matches!(header_type, 0x73..=0x7B) {
-        return (false, header_type, header_size, "rar4_second_block_unknown_type");
+        return (
+            false,
+            header_type,
+            header_size,
+            "rar4_second_block_unknown_type",
+        );
     }
-    if header_size < 7 || offset as u64 + header_size > file_size || data.len() < offset + header_size as usize {
-        return (false, header_type, header_size, "rar4_second_block_size_out_of_range");
+    if header_size < 7
+        || offset as u64 + header_size > file_size
+        || data.len() < offset + header_size as usize
+    {
+        return (
+            false,
+            header_type,
+            header_size,
+            "rar4_second_block_size_out_of_range",
+        );
     }
     let full_header = &data[offset..offset + header_size as usize];
     if (crc32(&full_header[2..]) & 0xFFFF) != header_crc as u32 {
-        return (false, header_type, header_size, "rar4_second_block_crc_mismatch");
+        return (
+            false,
+            header_type,
+            header_size,
+            "rar4_second_block_crc_mismatch",
+        );
     }
     let mut block_size = header_size;
     if header_flags & 0x8000 != 0 {
         if header_size < 11 {
-            return (false, header_type, block_size, "rar4_second_block_add_size_missing");
+            return (
+                false,
+                header_type,
+                block_size,
+                "rar4_second_block_add_size_missing",
+            );
         }
         block_size += u32_le(full_header, 7) as u64;
         if offset as u64 + block_size > file_size {
-            return (false, header_type, block_size, "rar4_second_block_payload_out_of_range");
+            return (
+                false,
+                header_type,
+                block_size,
+                "rar4_second_block_payload_out_of_range",
+            );
         }
     }
     (true, header_type, block_size, "")
@@ -772,7 +861,8 @@ fn inspect_rar5(py: Python<'_>, data: &[u8], file_size: u64) -> PyResult<Py<PyDi
     evidence.append("rar5:first_header")?;
     if data.len() >= first_header_offset + first_header_total_size as usize {
         let stored_crc = u32_le(data, first_header_offset);
-        let header_data = &data[first_header_offset + 4..first_header_offset + first_header_total_size as usize];
+        let header_data =
+            &data[first_header_offset + 4..first_header_offset + first_header_total_size as usize];
         let crc_ok = crc32(header_data) == stored_crc;
         d.set_item("header_crc_checked", true)?;
         d.set_item("header_crc_ok", crc_ok)?;
@@ -783,7 +873,10 @@ fn inspect_rar5(py: Python<'_>, data: &[u8], file_size: u64) -> PyResult<Py<PyDi
         }
     }
     let second_offset = first_header_offset + first_header_total_size as usize;
-    if header_type == 1 && d.get_item("header_crc_ok")?.unwrap().extract::<bool>()? && second_offset < file_size as usize {
+    if header_type == 1
+        && d.get_item("header_crc_ok")?.unwrap().extract::<bool>()?
+        && second_offset < file_size as usize
+    {
         let second = inspect_rar5_block(data, second_offset, file_size);
         d.set_item("second_block_checked", true)?;
         d.set_item("second_block_ok", second.0)?;
@@ -798,14 +891,19 @@ fn inspect_rar5(py: Python<'_>, data: &[u8], file_size: u64) -> PyResult<Py<PyDi
     }
     if header_type == 1
         && d.get_item("header_crc_ok")?.unwrap().extract::<bool>()?
-        && (second_offset >= file_size as usize || d.get_item("block_walk_ok")?.unwrap().extract::<bool>()?)
+        && (second_offset >= file_size as usize
+            || d.get_item("block_walk_ok")?.unwrap().extract::<bool>()?)
     {
         d.set_item("strong_accept", true)?;
     }
     Ok(d.unbind())
 }
 
-fn inspect_rar5_block(data: &[u8], offset: usize, file_size: u64) -> (bool, u64, u64, &'static str) {
+fn inspect_rar5_block(
+    data: &[u8],
+    offset: usize,
+    file_size: u64,
+) -> (bool, u64, u64, &'static str) {
     if offset >= file_size as usize || data.len() < offset + 6 {
         return (false, 0, 0, "rar5_second_header_too_small");
     }
@@ -813,19 +911,42 @@ fn inspect_rar5_block(data: &[u8], offset: usize, file_size: u64) -> (bool, u64,
         return (false, 0, 0, "rar5_second_header_size_vint_missing");
     };
     let Some((header_type, _)) = read_vint(data, after_size) else {
-        return (false, 0, header_size, "rar5_second_header_type_vint_missing");
+        return (
+            false,
+            0,
+            header_size,
+            "rar5_second_header_type_vint_missing",
+        );
     };
     if !matches!(header_type, 1..=5) {
-        return (false, header_type, header_size, "rar5_second_header_unknown_type");
+        return (
+            false,
+            header_type,
+            header_size,
+            "rar5_second_header_unknown_type",
+        );
     }
     let header_total_size = 4 + (after_size - (offset + 4)) as u64 + header_size;
-    if header_size == 0 || offset as u64 + header_total_size > file_size || data.len() < offset + header_total_size as usize {
-        return (false, header_type, header_size, "rar5_second_header_size_out_of_range");
+    if header_size == 0
+        || offset as u64 + header_total_size > file_size
+        || data.len() < offset + header_total_size as usize
+    {
+        return (
+            false,
+            header_type,
+            header_size,
+            "rar5_second_header_size_out_of_range",
+        );
     }
     let stored_crc = u32_le(data, offset);
     let header_data = &data[offset + 4..offset + header_total_size as usize];
     if crc32(header_data) != stored_crc {
-        return (false, header_type, header_size, "rar5_second_header_crc_mismatch");
+        return (
+            false,
+            header_type,
+            header_size,
+            "rar5_second_header_crc_mismatch",
+        );
     }
     (true, header_type, header_total_size, "")
 }
@@ -835,16 +956,31 @@ fn tar_empty<'py>(py: Python<'py>, error: &str) -> PyResult<Bound<'py, PyDict>> 
     d.set_item("plausible", false)?;
     d.set_item("error", error)?;
     d.set_item("format", "")?;
-    for key in ["stored_checksum", "computed_checksum", "file_size", "member_size", "entries_checked"] {
+    for key in [
+        "stored_checksum",
+        "computed_checksum",
+        "file_size",
+        "member_size",
+        "entries_checked",
+    ] {
         d.set_item(key, 0)?;
     }
-    for key in ["ustar_magic", "zero_block", "entry_walk_ok", "end_zero_blocks"] {
+    for key in [
+        "ustar_magic",
+        "zero_block",
+        "entry_walk_ok",
+        "end_zero_blocks",
+    ] {
         d.set_item(key, false)?;
     }
     Ok(d)
 }
 
-fn walk_tar(file: &mut File, file_size: u64, max_entries: usize) -> PyResult<(usize, bool, bool, &'static str)> {
+fn walk_tar(
+    file: &mut File,
+    file_size: u64,
+    max_entries: usize,
+) -> PyResult<(usize, bool, bool, &'static str)> {
     if max_entries == 0 {
         return Ok((0, false, false, ""));
     }
@@ -868,7 +1004,8 @@ fn walk_tar(file: &mut File, file_size: u64, max_entries: usize) -> PyResult<(us
         if !ok {
             return Ok((checked, false, false, error));
         }
-        let next_offset = offset + TAR_BLOCK_SIZE as u64 + member_size + padding_for_size(member_size);
+        let next_offset =
+            offset + TAR_BLOCK_SIZE as u64 + member_size + padding_for_size(member_size);
         if next_offset > file_size {
             return Ok((checked, false, false, "member_payload_out_of_range"));
         }
@@ -904,7 +1041,13 @@ fn tar_header_plausible(header: &[u8]) -> (bool, &'static str, u64, bool) {
     )
 }
 
-fn compression_empty(py: Python<'_>, error: &str, format: &str, ext: &str, magic: bool) -> PyResult<Py<PyDict>> {
+fn compression_empty(
+    py: Python<'_>,
+    error: &str,
+    format: &str,
+    ext: &str,
+    magic: bool,
+) -> PyResult<Py<PyDict>> {
     let d = dict(py)?;
     d.set_item("plausible", false)?;
     d.set_item("error", error)?;
@@ -920,7 +1063,13 @@ fn compression_empty(py: Python<'_>, error: &str, format: &str, ext: &str, magic
     Ok(d.unbind())
 }
 
-fn compression_ok(py: Python<'_>, format: &str, ext: &str, confidence: &str, evidence_items: &[&str]) -> PyResult<Py<PyDict>> {
+fn compression_ok(
+    py: Python<'_>,
+    format: &str,
+    ext: &str,
+    confidence: &str,
+    evidence_items: &[&str],
+) -> PyResult<Py<PyDict>> {
     let d = dict(py)?;
     d.set_item("plausible", true)?;
     d.set_item("error", "")?;
@@ -937,7 +1086,13 @@ fn inspect_gzip(py: Python<'_>, header: &[u8], file_size: u64) -> PyResult<Py<Py
         return compression_empty(py, "gzip_too_small", "gzip", ".gz", true);
     }
     if header.len() < 10 {
-        return compression_empty(py, "short_gzip_header", "gzip", ".gz", header.starts_with(b"\x1f\x8b"));
+        return compression_empty(
+            py,
+            "short_gzip_header",
+            "gzip",
+            ".gz",
+            header.starts_with(b"\x1f\x8b"),
+        );
     }
     if !header.starts_with(b"\x1f\x8b\x08") {
         return compression_empty(py, "gzip_magic_not_found", "", "", false);
@@ -945,7 +1100,13 @@ fn inspect_gzip(py: Python<'_>, header: &[u8], file_size: u64) -> PyResult<Py<Py
     if header[3] & 0xE0 != 0 {
         return compression_empty(py, "gzip_reserved_flags_set", "gzip", ".gz", true);
     }
-    compression_ok(py, "gzip", ".gz", "medium", &["gzip:magic", "gzip:method:deflate", "gzip:flags_valid"])
+    compression_ok(
+        py,
+        "gzip",
+        ".gz",
+        "medium",
+        &["gzip:magic", "gzip:method:deflate", "gzip:flags_valid"],
+    )
 }
 
 fn inspect_bzip2(py: Python<'_>, header: &[u8], file_size: u64) -> PyResult<Py<PyDict>> {
@@ -953,15 +1114,36 @@ fn inspect_bzip2(py: Python<'_>, header: &[u8], file_size: u64) -> PyResult<Py<P
         return compression_empty(py, "bzip2_too_small", "bzip2", ".bz2", true);
     }
     if header.len() < 10 {
-        return compression_empty(py, "short_bzip2_header", "bzip2", ".bz2", header.starts_with(b"BZh"));
+        return compression_empty(
+            py,
+            "short_bzip2_header",
+            "bzip2",
+            ".bz2",
+            header.starts_with(b"BZh"),
+        );
     }
     if !header.starts_with(b"BZh") || !b"123456789".contains(&header[3]) {
-        return compression_empty(py, "bzip2_magic_not_found", "bzip2", ".bz2", header.starts_with(b"BZh"));
+        return compression_empty(
+            py,
+            "bzip2_magic_not_found",
+            "bzip2",
+            ".bz2",
+            header.starts_with(b"BZh"),
+        );
     }
-    if !matches!(&header[4..10], b"\x31\x41\x59\x26\x53\x59" | b"\x17\x72\x45\x38\x50\x90") {
+    if !matches!(
+        &header[4..10],
+        b"\x31\x41\x59\x26\x53\x59" | b"\x17\x72\x45\x38\x50\x90"
+    ) {
         return compression_empty(py, "bzip2_block_marker_not_found", "bzip2", ".bz2", true);
     }
-    compression_ok(py, "bzip2", ".bz2", "strong", &["bzip2:magic", "bzip2:block_marker"])
+    compression_ok(
+        py,
+        "bzip2",
+        ".bz2",
+        "strong",
+        &["bzip2:magic", "bzip2:block_marker"],
+    )
 }
 
 fn inspect_xz(py: Python<'_>, path: &str, header: &[u8], file_size: u64) -> PyResult<Py<PyDict>> {
@@ -969,7 +1151,13 @@ fn inspect_xz(py: Python<'_>, path: &str, header: &[u8], file_size: u64) -> PyRe
         return compression_empty(py, "xz_too_small", "xz", ".xz", true);
     }
     if header.len() < 12 || !header.starts_with(XZ_MAGIC) {
-        return compression_empty(py, "xz_magic_not_found", "xz", ".xz", header.starts_with(XZ_MAGIC));
+        return compression_empty(
+            py,
+            "xz_magic_not_found",
+            "xz",
+            ".xz",
+            header.starts_with(XZ_MAGIC),
+        );
     }
     let stream_flags = &header[6..8];
     if u32_le(header, 8) != crc32(stream_flags) {
@@ -987,7 +1175,13 @@ fn inspect_xz(py: Python<'_>, path: &str, header: &[u8], file_size: u64) -> PyRe
     if &footer[8..10] != stream_flags {
         return compression_empty(py, "xz_stream_flags_mismatch", "xz", ".xz", true);
     }
-    compression_ok(py, "xz", ".xz", "strong", &["xz:magic", "xz:header_crc", "xz:footer_crc"])
+    compression_ok(
+        py,
+        "xz",
+        ".xz",
+        "strong",
+        &["xz:magic", "xz:header_crc", "xz:footer_crc"],
+    )
 }
 
 fn inspect_zstd(py: Python<'_>, header: &[u8], file_size: u64) -> PyResult<Py<PyDict>> {
@@ -1003,7 +1197,13 @@ fn inspect_zstd(py: Python<'_>, header: &[u8], file_size: u64) -> PyResult<Py<Py
     if header[4] & 0x20 == 0 && header.len() < 6 {
         return compression_empty(py, "zstd_window_descriptor_missing", "zstd", ".zst", true);
     }
-    compression_ok(py, "zstd", ".zst", "medium", &["zstd:magic", "zstd:frame_descriptor"])
+    compression_ok(
+        py,
+        "zstd",
+        ".zst",
+        "medium",
+        &["zstd:magic", "zstd:frame_descriptor"],
+    )
 }
 
 fn container_empty(py: Python<'_>, error: &str) -> PyResult<Py<PyDict>> {
@@ -1017,7 +1217,12 @@ fn container_empty(py: Python<'_>, error: &str) -> PyResult<Py<PyDict>> {
     Ok(d.unbind())
 }
 
-fn container_ok(py: Python<'_>, format: &str, ext: &str, evidence_items: &[&str]) -> PyResult<Py<PyDict>> {
+fn container_ok(
+    py: Python<'_>,
+    format: &str,
+    ext: &str,
+    evidence_items: &[&str],
+) -> PyResult<Py<PyDict>> {
     let d = dict(py)?;
     d.set_item("plausible", true)?;
     d.set_item("error", "")?;
@@ -1116,7 +1321,9 @@ fn parse_octal(field: &[u8]) -> Option<u64> {
 }
 
 fn parse_hex(field: &[u8]) -> Option<u64> {
-    std::str::from_utf8(field).ok().and_then(|s| u64::from_str_radix(s, 16).ok())
+    std::str::from_utf8(field)
+        .ok()
+        .and_then(|s| u64::from_str_radix(s, 16).ok())
 }
 
 fn tar_checksum(header: &[u8]) -> u64 {
