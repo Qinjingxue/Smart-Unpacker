@@ -97,7 +97,7 @@ if ($null -eq $nativeExtension) {
     throw "packrelic_native extension not found under: $root"
 }
 
-Assert-PeMachine -LiteralPath (Join-Path $root "pkrc.exe") -BuildArch $Arch -Description "pkrc.exe"
+Assert-PeMachine -LiteralPath (Join-Path $root "sunpack.exe") -BuildArch $Arch -Description "sunpack.exe"
 Assert-PeMachine -LiteralPath $nativeExtension.FullName -BuildArch $Arch -Description "packrelic_native extension"
 Assert-PeMachine -LiteralPath (Join-Path $root "tools\7z.exe") -BuildArch $Arch -Description "tools\7z.exe"
 Assert-PeMachine -LiteralPath (Join-Path $root "tools\7z.dll") -BuildArch $Arch -Description "tools\7z.dll"

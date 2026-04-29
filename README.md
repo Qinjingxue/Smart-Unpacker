@@ -8,7 +8,7 @@ detection -> analysis -> extraction -> verification -> repair -> extraction -> v
 
 项目的目标是：在复杂下载目录、游戏/程序目录、伪装载体、分卷包、嵌套包和损坏包里，尽量找出真正应该处理的归档；解压失败时尽量恢复可用文件；恢复出多个候选时用 verification 比较完整度，保留更好的结果。
 
-当前项目的 CLI 已支持中文，默认配置文件是 `packrelic_config.json`。源码入口是 `python pkrc.py`；Windows 打包后入口是 `pkrc.exe`。
+当前项目的 CLI 已支持中文，默认配置文件是 `packrelic_config.json`。源码入口是 `python pkrc.py`；Windows 打包后入口是 `sunpack.exe`。
 
 ## 核心能力
 
@@ -67,7 +67,7 @@ python pkrc.py config validate
 打包后的程序使用同一套命令：
 
 ```powershell
-.\dist\\packrelic\pkrc.exe extract D:\Downloads
+.\dist\\packrelic\sunpack.exe extract D:\Downloads
 ```
 
 ## 命令速览
@@ -212,6 +212,6 @@ Windows 打包：
 .\scripts\build_windows.ps1 -Version 1.2.3
 ```
 
-构建脚本会准备 `.venv-build`，构建 Rust wheel 和 C++ worker，用 PyInstaller 生成 `pkrc.exe`，复制 `packrelic_config.json`、`builtin_passwords.txt` 和 `tools/` 运行文件，并执行 packaged smoke test。发行包输出到 `release\packrelic-windows-<arch>-<version>.zip`。
+构建脚本会准备 `.venv-build`，构建 Rust wheel 和 C++ worker，用 PyInstaller 生成 `sunpack.exe`，复制 `packrelic_config.json`、`builtin_passwords.txt` 和 `tools/` 运行文件，并执行 packaged smoke test。发行包输出到 `release\packrelic-windows-<arch>-<version>.zip`。
 
 构建脚本支持 `-Arch x64|arm64`。`x64` 是默认值；ARM64 最终可执行文件需要在 ARM64 Windows + ARM64 Python 环境中构建，脚本会静态校验包内所有关键 PE 文件的 machine 架构。已有包可用 `.\scripts\verify_windows_package_arch.ps1 -PackageRoot <dist目录> -Arch arm64` 在任意 Windows 机器上做静态检查。

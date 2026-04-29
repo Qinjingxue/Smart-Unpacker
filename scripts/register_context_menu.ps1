@@ -26,6 +26,9 @@ function Resolve-Launcher {
     }
 
     $exeCandidates = @(
+        (Join-Path $RepoRoot "sunpack.exe"),
+        (Join-Path $RepoRoot "dist\\packrelic\sunpack.exe"),
+        (Join-Path $RepoRoot "dist\sunpack.exe"),
         (Join-Path $RepoRoot "pkrc.exe"),
         (Join-Path $RepoRoot "dist\\packrelic\pkrc.exe"),
         (Join-Path $RepoRoot "dist\pkrc.exe")

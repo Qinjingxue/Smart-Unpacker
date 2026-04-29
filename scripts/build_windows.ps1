@@ -501,7 +501,7 @@ if ($env:OS -ne "Windows_NT") {
 Write-Host "Requested architecture: $buildArch"
 Write-Host "Build Python/process architecture: $processArch"
 if ($processArch -ne $buildArch) {
-    throw "Windows PyInstaller/PyO3 final executable builds must run under a target-architecture Python. This machine/process is '$processArch', so it cannot produce a real '$buildArch' pkrc.exe. Use an ARM64 Windows Python environment for -Arch arm64; use static PE validation on the resulting package."
+    throw "Windows PyInstaller/PyO3 final executable builds must run under a target-architecture Python. This machine/process is '$processArch', so it cannot produce a real '$buildArch' sunpack.exe. Use an ARM64 Windows Python environment for -Arch arm64; use static PE validation on the resulting package."
 }
 
 $pythonCommand = Get-PythonCommand
@@ -527,8 +527,9 @@ $buildRoot = Join-Path $repoRoot "build"
 $nativeWheelRoot = Join-Path $buildRoot ("native-wheels-" + $buildArch)
 $releaseRoot = Join-Path $repoRoot "release"
 $distFolderName = if ($buildArch -eq "x64") { "packrelic" } else { "packrelic-" + $buildArch }
+$appExeName = "sunpack.exe"
 $distAppRoot = Join-Path $distRoot $distFolderName
-$distExePath = Join-Path $distAppRoot "pkrc.exe"
+$distExePath = Join-Path $distAppRoot $appExeName
 $distInternalRoot = Join-Path $distAppRoot "_internal"
 $distToolsRoot = Join-Path $distAppRoot "tools"
 $distLicensesRoot = Join-Path $distAppRoot "licenses"
@@ -612,11 +613,12 @@ if ($runAcceptanceTests) {
 
 Write-Step "Building Windows release with PyInstaller"
 $env:PACKRELIC_DIST_NAME = $distFolderName
+$env:PACKRELIC_EXE_NAME = [System.IO.Path]::GetFileNameWithoutExtension($appExeName)
 Invoke-Native -FilePath $venvPython -Arguments @("-m", "PyInstaller", "--noconfirm", $specPath)
 
 Write-Step "Validating packaged outputs"
-Assert-PathExists -LiteralPath $distExePath -Description "Packaged pkrc executable"
-Assert-PeMachine -LiteralPath $distExePath -BuildArch $buildArch -Description "Packaged pkrc executable"
+Assert-PathExists -LiteralPath $distExePath -Description "Packaged sunpack executable"
+Assert-PeMachine -LiteralPath $distExePath -BuildArch $buildArch -Description "Packaged sunpack executable"
 Assert-PathExists -LiteralPath $distInternalRoot -Description "PyInstaller internal resource directory"
 Assert-PackagedNativeExtension -PackageRoot $distAppRoot -BuildArch $buildArch
 Assert-PathMissing -LiteralPath (Join-Path $distInternalRoot "builtin_passwords.txt") -Description "Duplicate internal password file"

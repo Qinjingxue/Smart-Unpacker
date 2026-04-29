@@ -8,6 +8,7 @@ from PyInstaller.utils.hooks import collect_submodules
 project_root = Path(SPECPATH)
 icon_path = project_root / "packrelic.ico"
 dist_name = os.environ.get("PACKRELIC_DIST_NAME", "packrelic")
+exe_name = os.environ.get("PACKRELIC_EXE_NAME", "sunpack")
 
 hiddenimports = ["packrelic_native"]
 for package in (
@@ -59,7 +60,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name="pkrc",
+    name=exe_name,
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

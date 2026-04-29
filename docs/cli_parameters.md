@@ -9,7 +9,7 @@ python pkrc.py <command> [options] [paths...]
 打包后的 Windows 程序通常可直接使用：
 
 ```powershell
-pkrc.exe <command> [options] [paths...]
+sunpack.exe <command> [options] [paths...]
 ```
 
 顶层命令：
@@ -218,4 +218,4 @@ python pkrc.py config validate --json
 .\scripts\unregister_context_menu.ps1
 ```
 
-注册脚本会优先寻找 `pkrc.exe`，找不到时使用 `python pkrc.py`。默认菜单项对文件夹或目录空白处执行 `extract <目标> --ask-pw --pause`，适合给非终端使用场景保留暂停窗口。
+注册脚本会优先寻找 `sunpack.exe`，找不到时使用 `python pkrc.py`。默认菜单项对文件夹或目录空白处执行 `extract <目标> --ask-pw --pause`，适合给非终端使用场景保留暂停窗口。
