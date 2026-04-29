@@ -139,6 +139,16 @@ def _verify_xz(result: RepairResult, fixture: MatrixFixture) -> None:
     assert lzma.decompress(Path(result.repaired_input["path"]).read_bytes()) == fixture.stream_payload
 
 
+def _verify_zstd(result: RepairResult, fixture: MatrixFixture) -> None:
+    zstd = pytest.importorskip("zstandard")
+    assert _zstd_decompress_all(zstd, Path(result.repaired_input["path"]).read_bytes()) == fixture.stream_payload
+
+
+def _zstd_decompress_all(zstd, data: bytes) -> bytes:
+    with zstd.ZstdDecompressor().stream_reader(io.BytesIO(data)) as reader:
+        return reader.read()
+
+
 def _zip_entries() -> dict[str, bytes]:
     return {
         "alpha.txt": b"alpha payload",
@@ -209,6 +219,27 @@ def _build_zip_missing_cd(root: Path) -> MatrixFixture:
     return _fixture_from_bytes(root, "zip-missing-cd.zip", data[:_zip_cd_offset(data)], zip_entries=_zip_entries())
 
 
+def _build_zip_local_name_len_bad(root: Path) -> MatrixFixture:
+    original = _zip_bytes({"local-name.txt": b"payload"})
+    data = bytearray(original)
+    struct.pack_into("<H", data, 26, len("local-name.txt") - 1)
+    return _fixture_from_bytes(root, "zip-local-name-len-bad.zip", bytes(data), expected_bytes=original, zip_entries={"local-name.txt": b"payload"})
+
+
+def _build_zip_local_size_crc_bad(root: Path) -> MatrixFixture:
+    original = _zip_bytes({"local-size.txt": b"size payload"})
+    data = bytearray(original)
+    struct.pack_into("<III", data, 14, 0, 0, 0)
+    return _fixture_from_bytes(root, "zip-local-size-crc-bad.zip", bytes(data), expected_bytes=original, zip_entries={"local-size.txt": b"size payload"})
+
+
+def _build_zip_local_bit3_flag_bad(root: Path) -> MatrixFixture:
+    original = _descriptor_zip_with_central("bit3.txt", b"bit3 payload")
+    data = bytearray(original)
+    struct.pack_into("<H", data, 6, 0)
+    return _fixture_from_bytes(root, "zip-local-bit3-bad.zip", bytes(data), expected_bytes=original, zip_entries={"bit3.txt": b"bit3 payload"})
+
+
 def _build_zip_descriptor(root: Path) -> MatrixFixture:
     payload = b"descriptor payload"
     return _fixture_from_bytes(
@@ -227,6 +258,37 @@ def _build_zip64_descriptor(root: Path) -> MatrixFixture:
         _descriptor_zip_fragment("zip64.txt", payload, zip64=True),
         zip_entries={"zip64.txt": payload},
     )
+
+
+def _build_zip64_missing_locator(root: Path) -> MatrixFixture:
+    original = _zip64_bytes()
+    locator_offset = original.find(b"PK\x06\x07")
+    eocd = _zip_eocd_offset(original)
+    assert locator_offset >= 0
+    damaged = original[:locator_offset] + original[eocd:]
+    return _fixture_from_bytes(root, "zip64-missing-locator.zip", damaged, expected_bytes=original, zip_entries={"zip64.txt": b"zip64 payload"})
+
+
+def _build_zip64_bad_record_fields(root: Path) -> MatrixFixture:
+    original = _zip64_bytes()
+    data = bytearray(original)
+    zip64_offset = original.find(b"PK\x06\x06")
+    assert zip64_offset >= 0
+    struct.pack_into("<QQQ", data, zip64_offset + 24, 2, 2, 1)
+    struct.pack_into("<Q", data, zip64_offset + 48, 0)
+    return _fixture_from_bytes(root, "zip64-bad-record-fields.zip", bytes(data), expected_bytes=original, zip_entries={"zip64.txt": b"zip64 payload"})
+
+
+def _build_zip64_bad_central_extra(root: Path) -> MatrixFixture:
+    original = _zip64_bytes()
+    data = bytearray(original)
+    cd = data.find(b"PK\x01\x02")
+    name_len, _extra_len = struct.unpack_from("<HH", data, cd + 28)
+    extra_offset = cd + 46 + name_len
+    assert data[extra_offset:extra_offset + 4] == b"\x01\0\x18\0"
+    struct.pack_into("<Q", data, extra_offset + 4, 1)
+    struct.pack_into("<Q", data, extra_offset + 20, 99)
+    return _fixture_from_bytes(root, "zip64-bad-central-extra.zip", bytes(data), expected_bytes=original, zip_entries={"zip64.txt": b"zip64 payload"})
 
 
 def _build_zip_multiple_directory_fields(root: Path) -> MatrixFixture:
@@ -330,6 +392,27 @@ def _build_zip_one_bad_payload_one_good(root: Path) -> MatrixFixture:
     data = bytearray(_zip_bytes(entries))
     data[_zip_payload_offset(data, "bad.txt")] ^= 0x55
     return _fixture_from_bytes(root, "zip-one-bad-payload.zip", bytes(data), zip_entries={"good.txt": b"good payload"})
+
+
+def _build_zip_entry_quarantine_two_bad_two_good(root: Path) -> MatrixFixture:
+    entries = {
+        "bad-1.txt": b"bad payload one" * 20,
+        "good-1.txt": b"good payload one" * 20,
+        "bad-2.txt": b"bad payload two" * 20,
+        "good-2.txt": b"good payload two" * 20,
+    }
+    data = bytearray(_zip_bytes(entries))
+    data[_zip_payload_offset(data, "bad-1.txt") + 2] ^= 0x55
+    data[_zip_payload_offset(data, "bad-2.txt") + 3] ^= 0x55
+    return _fixture_from_bytes(
+        root,
+        "zip-quarantine-two-bad.zip",
+        bytes(data),
+        zip_entries={
+            "good-1.txt": entries["good-1.txt"],
+            "good-2.txt": entries["good-2.txt"],
+        },
+    )
 
 
 def _build_zip_missing_cd_multiple_local_headers_one_bad_payload(root: Path) -> MatrixFixture:
@@ -442,6 +525,96 @@ def _descriptor_zip_fragment(name: str, payload: bytes, *, zip64: bool = False) 
     ])
 
 
+def _descriptor_zip_with_central(name: str, payload: bytes) -> bytes:
+    encoded = name.encode("utf-8")
+    crc32 = zlib.crc32(payload) & 0xFFFFFFFF
+    local = struct.pack(
+        "<IHHHHHIIIHH",
+        0x04034B50,
+        20,
+        0x08,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        len(encoded),
+        0,
+    ) + encoded + payload + struct.pack("<IIII", 0x08074B50, crc32, len(payload), len(payload))
+    cd_offset = len(local)
+    central = struct.pack(
+        "<IHHHHHHIIIHHHHHII",
+        0x02014B50,
+        20,
+        20,
+        0x08,
+        0,
+        0,
+        0,
+        crc32,
+        len(payload),
+        len(payload),
+        len(encoded),
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+    ) + encoded
+    eocd = struct.pack("<IHHHHIIH", 0x06054B50, 0, 0, 1, 1, len(central), cd_offset, 0)
+    return local + central + eocd
+
+
+def _zip64_bytes() -> bytes:
+    name = b"zip64.txt"
+    payload = b"zip64 payload"
+    crc32 = zlib.crc32(payload) & 0xFFFFFFFF
+    local_extra = struct.pack("<HHQQ", 0x0001, 16, len(payload), len(payload))
+    local = struct.pack(
+        "<IHHHHHIIIHH",
+        0x04034B50,
+        45,
+        0,
+        0,
+        0,
+        0,
+        crc32,
+        0xFFFFFFFF,
+        0xFFFFFFFF,
+        len(name),
+        len(local_extra),
+    ) + name + local_extra + payload
+    cd_offset = len(local)
+    central_extra = struct.pack("<HHQQQ", 0x0001, 24, len(payload), len(payload), 0)
+    central = struct.pack(
+        "<IHHHHHHIIIHHHHHII",
+        0x02014B50,
+        45,
+        45,
+        0,
+        0,
+        0,
+        0,
+        crc32,
+        0xFFFFFFFF,
+        0xFFFFFFFF,
+        len(name),
+        len(central_extra),
+        0,
+        0,
+        0,
+        0,
+        0xFFFFFFFF,
+    ) + name + central_extra
+    zip64_offset = cd_offset + len(central)
+    zip64_eocd = struct.pack("<IQHHIIQQQQ", 0x06064B50, 44, 45, 45, 0, 0, 1, 1, len(central), cd_offset)
+    locator = struct.pack("<IIQI", 0x07064B50, 0, zip64_offset, 1)
+    eocd = struct.pack("<IHHHHIIH", 0x06054B50, 0, 0, 0xFFFF, 0xFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0)
+    return local + central + zip64_eocd + locator + eocd
+
+
 def _seven_zip_bytes(*, minor: int = 4, gap: bytes = b"abcde", next_header: bytes = b"\x01") -> bytes:
     start_header = struct.pack("<QQI", len(gap), len(next_header), zlib.crc32(next_header) & 0xFFFFFFFF)
     return (
@@ -478,6 +651,22 @@ def _build_7z_next_crc_bad(root: Path) -> MatrixFixture:
     original = _seven_zip_bytes(minor=4)
     data = _patch_7z_next_crc(original, 0, recompute_start_crc=True)
     return _fixture_from_bytes(root, "seven-next-crc.7z", data, expected_bytes=original)
+
+
+def _build_7z_next_header_offset_bad(root: Path) -> MatrixFixture:
+    original = _seven_zip_bytes(gap=b"abcdefgh", next_header=b"\x01\x02\x03")
+    data = bytearray(original)
+    struct.pack_into("<Q", data, 12, 0)
+    struct.pack_into("<I", data, 8, zlib.crc32(data[12:32]) & 0xFFFFFFFF)
+    return _fixture_from_bytes(root, "seven-next-offset-bad.7z", bytes(data), expected_bytes=original)
+
+
+def _build_7z_next_header_size_bad(root: Path) -> MatrixFixture:
+    original = _seven_zip_bytes(gap=b"abcdefgh", next_header=b"\x17\x02\x03\x04")
+    data = bytearray(original)
+    struct.pack_into("<Q", data, 20, 1)
+    struct.pack_into("<I", data, 8, zlib.crc32(data[12:32]) & 0xFFFFFFFF)
+    return _fixture_from_bytes(root, "seven-next-size-bad.7z", bytes(data), expected_bytes=original)
 
 
 def _build_7z_start_and_next_crc_bad(root: Path) -> MatrixFixture:
@@ -540,6 +729,32 @@ def _build_7z_missing_middle_volume_plus_crc_noise(root: Path) -> MatrixFixture:
     noisy = _patch_7z_next_crc(original, 0, recompute_start_crc=False)
     noisy = noisy[:8] + b"\0\0\0\0" + noisy[12:]
     return _fixture_from_bytes(root, "seven-missing-middle-crc-noise.7z.001", noisy[:28] + b"CRC-NOISE")
+
+
+def _build_zstd_frame_salvage(root: Path) -> MatrixFixture:
+    zstd = pytest.importorskip("zstandard")
+    first = zstd.ZstdCompressor(level=0).compress(b"bad frame payload" * 8)
+    second_payload = b"good frame one" * 8
+    third_payload = b"good frame two" * 8
+    second = zstd.ZstdCompressor(level=0).compress(second_payload)
+    third = zstd.ZstdCompressor(level=0).compress(third_payload)
+    damaged = bytearray(first)
+    damaged[4:12] = b"\xff" * 8
+    return _fixture_from_bytes(
+        root,
+        "zstd-frame-salvage.zst",
+        bytes(damaged) + second + third,
+        stream_payload=second_payload + third_payload,
+    )
+
+
+def _build_gzip_deflate_member_resync(root: Path) -> MatrixFixture:
+    first = bytearray(gzip.compress(b"bad gzip member" * 16))
+    first[len(first) // 2] ^= 0x55
+    second_payload = b"good gzip member one" * 8
+    third_payload = b"good gzip member two" * 8
+    data = bytes(first) + gzip.compress(second_payload) + gzip.compress(third_payload)
+    return _fixture_from_bytes(root, "gzip-member-resync.gz", data, stream_payload=second_payload + third_payload)
 
 
 RAR4_MAGIC = b"Rar!\x1a\x07\x00"
@@ -715,6 +930,19 @@ def _build_tar_payload_truncated(root: Path) -> MatrixFixture:
     return _fixture_from_bytes(root, "tar-payload-truncated.tar", data[:700])
 
 
+def _build_tar_metadata_downgrade(root: Path) -> MatrixFixture:
+    payload = b"tar metadata downgrade payload"
+    pax_payload = b"25 path=ignored-long-name.txt\n"
+    data = b"".join([
+        _tar_raw_header("./PaxHeaders.0/payload.txt", len(pax_payload), b"x"),
+        pax_payload + (b"\0" * ((512 - len(pax_payload) % 512) % 512)),
+        _tar_raw_header("payload.txt", len(payload), b"0"),
+        payload + (b"\0" * ((512 - len(payload) % 512) % 512)),
+        b"\0" * 1024,
+    ])
+    return _fixture_from_bytes(root, "tar-metadata-downgrade.tar", data, tar_entries={"payload.txt": payload})
+
+
 def _build_tar_gzip_truncated_keeps_complete_member(root: Path) -> MatrixFixture:
     entries = {
         "complete.txt": b"complete payload",
@@ -728,6 +956,24 @@ def _build_tar_gzip_truncated_keeps_complete_member(root: Path) -> MatrixFixture
         compressed[:100],
         tar_entries={"complete.txt": b"complete payload"},
     )
+
+
+def _tar_raw_header(name: str, size: int, typeflag: bytes) -> bytes:
+    header = bytearray(512)
+    encoded = name.encode("utf-8")[:100]
+    header[:len(encoded)] = encoded
+    header[100:108] = b"0000644\0"
+    header[108:116] = b"0000000\0"
+    header[116:124] = b"0000000\0"
+    header[124:136] = f"{size:011o}\0".encode("ascii")
+    header[136:148] = b"00000000000\0"
+    header[148:156] = b"        "
+    header[156:157] = typeflag
+    header[257:263] = b"ustar\0"
+    header[263:265] = b"00"
+    checksum = sum(header)
+    header[148:156] = f"{checksum:06o}\0 ".encode("ascii")
+    return bytes(header)
 
 
 def _build_gzip_footer_bad(root: Path) -> MatrixFixture:
@@ -790,8 +1036,14 @@ MATRIX = [
     MatrixCase("zip_bad_cd_count", "zip", ("central_directory_count_bad",), _build_zip_bad_cd_count, ("repaired",), "zip_central_directory_count_fix", _verify_zip),
     MatrixCase("zip_missing_eocd", "zip", ("eocd_bad", "central_directory_bad"), _build_zip_missing_eocd, ("repaired",), "zip_eocd_repair", _verify_zip),
     MatrixCase("zip_missing_central_directory", "zip", ("central_directory_bad", "local_header_recovery"), _build_zip_missing_cd, ("repaired", "partial"), "zip_central_directory_rebuild", _verify_zip),
+    MatrixCase("zip_local_name_len_bad", "zip", ("local_header_bad", "local_header_length_bad"), _build_zip_local_name_len_bad, ("repaired",), "zip_local_header_field_repair", _verify_zip),
+    MatrixCase("zip_local_size_crc_bad", "zip", ("local_header_bad", "local_header_size_bad"), _build_zip_local_size_crc_bad, ("repaired",), "zip_local_header_field_repair", _verify_zip),
+    MatrixCase("zip_local_bit3_flag_bad", "zip", ("local_header_bad", "bit3_data_descriptor", "data_descriptor"), _build_zip_local_bit3_flag_bad, ("repaired",), "zip_local_header_field_repair", _verify_zip),
     MatrixCase("zip_data_descriptor", "zip", ("data_descriptor", "compressed_size_bad"), _build_zip_descriptor, ("repaired",), "zip_data_descriptor_recovery", _verify_zip),
     MatrixCase("zip64_data_descriptor", "zip", ("data_descriptor", "compressed_size_bad"), _build_zip64_descriptor, ("repaired",), "zip_data_descriptor_recovery", _verify_zip),
+    MatrixCase("zip64_missing_locator", "zip", ("zip64", "zip64_locator_bad", "central_directory_bad"), _build_zip64_missing_locator, ("repaired",), "zip64_field_repair", _verify_zip),
+    MatrixCase("zip64_bad_record_fields", "zip", ("zip64", "zip64_eocd_bad", "central_directory_bad"), _build_zip64_bad_record_fields, ("repaired",), "zip64_field_repair", _verify_zip),
+    MatrixCase("zip64_bad_central_extra", "zip", ("zip64", "zip64_extra_bad", "central_directory_bad"), _build_zip64_bad_central_extra, ("repaired",), "zip64_field_repair", _verify_zip),
     MatrixCase("zip_multiple_directory_fields", "zip", ("central_directory_offset_bad", "central_directory_count_bad", "central_directory_bad"), _build_zip_multiple_directory_fields, ("repaired",), "zip_eocd_repair", _verify_zip),
     MatrixCase("zip_eocd_four_field_combo", "zip", ("central_directory_offset_bad", "central_directory_count_bad", "comment_length_bad", "trailing_junk", "central_directory_bad"), _build_zip_eocd_four_field_combo, ("repaired",), "zip_eocd_repair", _verify_zip),
     MatrixCase("zip_split_trailing_junk", "zip", ("trailing_junk", "boundary_unreliable"), _build_zip_split_trailing_junk, ("repaired",), "zip_trailing_junk_trim", _verify_zip),
@@ -801,7 +1053,8 @@ MATRIX = [
     MatrixCase("zip_sfx_split_prefix_tail_bad_cd", "zip", ("carrier_archive", "sfx", "boundary_unreliable", "trailing_junk", "central_directory_offset_bad", "central_directory_count_bad", "central_directory_bad"), _build_zip_sfx_split_prefix_tail_bad_cd, ("repaired",), "zip_central_directory_rebuild", _verify_zip),
     MatrixCase("zip_fake_local_header_before_real_sfx", "zip", ("carrier_archive", "sfx", "boundary_unreliable", "trailing_junk", "local_header_recovery"), _build_zip_fake_local_header_before_real_sfx, ("repaired", "partial"), "zip_central_directory_rebuild", _verify_zip),
     MatrixCase("zip_single_payload_crc_bad", "zip", ("checksum_error", "crc_error", "damaged"), _build_zip_single_payload_crc_bad, UNREPAIRABLE, None),
-    MatrixCase("zip_one_bad_payload_one_good", "zip", ("checksum_error", "crc_error", "damaged"), _build_zip_one_bad_payload_one_good, ("partial",), "zip_deep_partial_recovery", _verify_zip),
+    MatrixCase("zip_one_bad_payload_one_good", "zip", ("checksum_error", "crc_error", "damaged"), _build_zip_one_bad_payload_one_good, ("partial",), "zip_entry_quarantine_rebuild", _verify_zip),
+    MatrixCase("zip_entry_quarantine_two_bad_two_good", "zip", ("entry_payload_bad", "checksum_error", "crc_error", "damaged"), _build_zip_entry_quarantine_two_bad_two_good, ("partial",), "zip_entry_quarantine_rebuild", _verify_zip),
     MatrixCase("zip_missing_cd_multiple_local_headers_one_bad_payload", "zip", ("central_directory_bad", "local_header_recovery", "checksum_error", "crc_error", "damaged"), _build_zip_missing_cd_multiple_local_headers_one_bad_payload, ("partial",), "zip_central_directory_rebuild", _verify_zip),
     MatrixCase("zip_descriptor_payload_bad_keeps_other_descriptor_entry", "zip", ("data_descriptor", "compressed_size_bad", "checksum_error", "crc_error", "damaged"), _build_zip_descriptor_payload_bad_keeps_other_descriptor_entry, ("partial",), "zip_deep_partial_recovery", _verify_zip),
     MatrixCase("zip64_descriptor_payload_bad_keeps_other_descriptor_entry", "zip", ("data_descriptor", "compressed_size_bad", "checksum_error", "crc_error", "damaged"), _build_zip64_descriptor_payload_bad_keeps_other_descriptor_entry, ("partial",), "zip_deep_partial_recovery", _verify_zip),
@@ -809,6 +1062,8 @@ MATRIX = [
     MatrixCase("7z_trailing_junk_v04", "7z", ("trailing_junk",), _build_7z_trailing_junk_v04, ("repaired",), "seven_zip_boundary_trim", _verify_bytes),
     MatrixCase("7z_start_crc_bad_v03", "7z", ("start_header_crc_bad",), _build_7z_start_crc_bad_v03, ("repaired",), "seven_zip_start_header_crc_fix", _verify_bytes),
     MatrixCase("7z_next_crc_bad", "7z", ("next_header_crc_bad",), _build_7z_next_crc_bad, ("repaired",), "seven_zip_crc_field_repair", _verify_bytes),
+    MatrixCase("7z_next_header_offset_bad", "7z", ("next_header_offset_bad", "start_header_corrupt"), _build_7z_next_header_offset_bad, ("repaired",), "seven_zip_next_header_field_repair", _verify_bytes),
+    MatrixCase("7z_next_header_size_bad", "7z", ("next_header_size_bad", "start_header_corrupt"), _build_7z_next_header_size_bad, ("repaired",), "seven_zip_next_header_field_repair", _verify_bytes),
     MatrixCase("7z_start_and_next_crc_bad", "7z", ("start_header_crc_bad", "next_header_crc_bad"), _build_7z_start_and_next_crc_bad, ("repaired",), "seven_zip_crc_field_repair", _verify_bytes),
     MatrixCase("7z_crc_fields_and_trailing_junk", "7z", ("start_header_crc_bad", "next_header_crc_bad", "trailing_junk"), _build_7z_crc_fields_and_trailing_junk, ("repaired",), "seven_zip_crc_field_repair", _verify_bytes),
     MatrixCase("7z_v03_start_next_crc_and_trailing_junk", "7z", ("start_header_crc_bad", "next_header_crc_bad", "trailing_junk"), _build_7z_v03_start_next_crc_and_trailing_junk, ("repaired",), "seven_zip_crc_field_repair", _verify_bytes),
@@ -832,16 +1087,19 @@ MATRIX = [
     MatrixCase("tar_bad_checksum", "tar", ("tar_checksum_bad",), _build_tar_bad_checksum, ("repaired",), "tar_header_checksum_fix", _verify_tar),
     MatrixCase("tar_missing_zero_blocks", "tar", ("missing_end_block", "probably_truncated"), _build_tar_missing_zero_blocks, ("repaired",), "tar_trailing_zero_block_repair", _verify_tar),
     MatrixCase("tar_trailing_junk", "tar", ("trailing_junk",), _build_tar_trailing_junk, ("repaired",), "tar_trailing_junk_trim", _verify_tar),
+    MatrixCase("tar_metadata_downgrade", "tar", ("pax_header_bad", "tar_metadata_bad"), _build_tar_metadata_downgrade, ("partial",), "tar_metadata_downgrade_recovery", _verify_tar),
     MatrixCase("tar_payload_truncated", "tar", ("checksum_error", "damaged", "input_truncated"), _build_tar_payload_truncated, UNREPAIRABLE, None),
     MatrixCase("tar_gzip_truncated_keeps_complete_member", "tar.gz", ("input_truncated", "probably_truncated", "unexpected_end", "damaged"), _build_tar_gzip_truncated_keeps_complete_member, ("partial", "repaired"), "tar_gzip_truncated_partial_recovery", _verify_tar),
     MatrixCase("gzip_footer_bad", "gzip", ("gzip_footer_bad",), _build_gzip_footer_bad, ("repaired",), "gzip_footer_fix", _verify_gzip),
     MatrixCase("gzip_footer_bad_with_trailing_junk", "gzip", ("gzip_footer_bad", "trailing_junk", "checksum_error"), _build_gzip_footer_bad_with_trailing_junk, ("repaired",), "gzip_footer_fix", _verify_gzip),
     MatrixCase("gzip_trailing_junk", "gzip", ("trailing_junk",), _build_gzip_trailing_junk, ("repaired",), "gzip_trailing_junk_trim", _verify_gzip),
+    MatrixCase("gzip_deflate_member_resync", "gzip", ("deflate_resync", "damaged", "data_error"), _build_gzip_deflate_member_resync, ("partial",), "gzip_deflate_member_resync", _verify_gzip),
     MatrixCase("gzip_payload_bad", "gzip", ("checksum_error", "damaged", "data_error"), _build_gzip_payload_bad, UNREPAIRABLE, None),
     MatrixCase("bzip2_trailing_junk", "bzip2", ("trailing_junk",), _build_bzip2_trailing_junk, ("repaired",), "bzip2_trailing_junk_trim", _verify_bzip2),
     MatrixCase("bzip2_payload_bad", "bzip2", ("checksum_error", "damaged", "data_error"), _build_bzip2_payload_bad, UNREPAIRABLE, None),
     MatrixCase("xz_trailing_junk", "xz", ("trailing_junk",), _build_xz_trailing_junk, ("repaired",), "xz_trailing_junk_trim", _verify_xz),
     MatrixCase("xz_payload_bad", "xz", ("checksum_error", "damaged", "data_error"), _build_xz_payload_bad, UNREPAIRABLE, None),
+    MatrixCase("zstd_frame_salvage", "zstd", ("frame_damaged", "damaged", "data_error"), _build_zstd_frame_salvage, ("partial",), "zstd_frame_salvage", _verify_zstd),
 ]
 
 

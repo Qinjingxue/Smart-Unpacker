@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 from pathlib import Path
 from typing import Any
 
@@ -97,6 +98,30 @@ def patch_plan_for_byte_patches(
     ]
     return PatchPlan(
         operations=operations,
+        provenance={"module": module_name, "actions": list(actions), "base_patch_digest": base_archive_state_for_job(job).effective_patch_digest()},
+        confidence=float(confidence),
+    )
+
+
+def patch_plan_for_insert(
+    job: RepairJob,
+    module_name: str,
+    offset: int,
+    data: bytes,
+    *,
+    confidence: float,
+    actions: list[str],
+) -> PatchPlan:
+    return PatchPlan(
+        operations=[
+            PatchOperation(
+                op="insert",
+                offset=int(offset),
+                size=len(data),
+                data_b64=base64.b64encode(bytes(data)).decode("ascii"),
+                details={"module": module_name},
+            )
+        ],
         provenance={"module": module_name, "actions": list(actions), "base_patch_digest": base_archive_state_for_job(job).effective_patch_digest()},
         confidence=float(confidence),
     )
