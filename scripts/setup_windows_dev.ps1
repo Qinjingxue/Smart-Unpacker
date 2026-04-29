@@ -309,9 +309,38 @@ function Build-SevenZipWrapper {
 function Test-NativeImport {
     param([string]$PythonPath)
 
+    $code = @"
+import smart_unpacker_native as n
+required = [
+    'native_available', 'scanner_version',
+    'scan_directory_entries', 'list_regular_files_in_directory',
+    'scan_carrier_archive', 'scan_magics_anywhere',
+    'scan_zip_central_directory_names', 'inspect_zip_eocd_structure',
+    'inspect_pe_overlay_structure',
+    'repair_read_file_range', 'repair_concat_ranges_to_bytes',
+    'repair_write_candidate', 'repair_copy_range_to_file',
+    'repair_concat_ranges_to_file', 'repair_patch_file',
+    'archive_state_to_bytes_native', 'archive_state_size_native',
+    'archive_state_write_to_file_native', 'archive_state_zip_manifest_native',
+    'zip_deep_partial_recovery', 'zip_rebuild_from_local_headers',
+    'zip_directory_field_repair', 'zip_conflict_resolver_rebuild',
+    'gzip_footer_fix_repair', 'gzip_deflate_member_resync_repair',
+    'zstd_frame_salvage_repair', 'tar_boundary_repair',
+    'tar_sparse_pax_longname_repair', 'compression_stream_partial_recovery',
+    'compression_stream_trailing_junk_trim', 'tar_compressed_partial_recovery',
+    'tar_metadata_downgrade_recovery', 'archive_carrier_crop_recovery',
+    'seven_zip_precise_boundary_repair', 'seven_zip_crc_field_repair',
+    'seven_zip_next_header_field_repair', 'seven_zip_solid_block_partial_salvage',
+    'rar_file_quarantine_rebuild', 'archive_nested_payload_salvage',
+    'rar_block_chain_trim_recovery', 'rar_end_block_repair',
+]
+assert n.native_available()
+missing = [name for name in required if not callable(getattr(n, name, None))]
+assert not missing, missing
+"@
     Invoke-Native -FilePath $PythonPath -Arguments @(
         "-c",
-        "import smart_unpacker_native as n; assert n.native_available(); assert n.scanner_version(); assert callable(n.scan_directory_entries); assert callable(n.list_regular_files_in_directory); assert callable(n.scan_carrier_archive); assert callable(n.scan_magics_anywhere); assert callable(n.scan_zip_central_directory_names); assert callable(n.inspect_zip_eocd_structure); assert callable(n.inspect_pe_overlay_structure); assert callable(n.repair_read_file_range); assert callable(n.repair_concat_ranges_to_bytes); assert callable(n.repair_write_candidate); assert callable(n.repair_copy_range_to_file); assert callable(n.repair_concat_ranges_to_file); assert callable(n.repair_patch_file)"
+        $code
     )
 }
 
