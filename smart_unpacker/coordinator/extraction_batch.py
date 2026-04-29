@@ -131,7 +131,8 @@ class ExtractionBatchRunner:
         if not ready_tasks:
             return skipped_results
         if len(ready_tasks) == 1:
-            if isinstance(ready_tasks[0].fact_bag.get("resource.analysis"), dict):
+            guard_enabled = bool(self._resource_guard_config().get("enabled", False))
+            if guard_enabled or isinstance(ready_tasks[0].fact_bag.get("resource.analysis"), dict):
                 self.resource_inspector.inspect(ready_tasks[0])
             else:
                 self.resource_inspector.record_estimated_single_task_profile(ready_tasks[0])

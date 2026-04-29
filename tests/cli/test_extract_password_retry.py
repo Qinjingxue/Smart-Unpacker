@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -172,3 +173,88 @@ def test_extract_normal_mode_keeps_partial_file_details_out_of_console(tmp_path,
     assert result.summary["recovered_outputs"][0]["recovery_report"] == str(report)
     assert "[partial]" not in captured.out
     assert "bad.bin" not in captured.out
+
+
+def test_extract_json_schema_includes_partial_recovery_contract(tmp_path, monkeypatch, capsys):
+    target = tmp_path / "archives"
+    target.mkdir()
+    report = tmp_path / "recovery_report.json"
+    report.write_text(
+        """{
+          "version": 1,
+          "success_kind": "partial",
+          "archive_coverage": {
+            "completeness": 0.5,
+            "expected_files": 2,
+            "complete_files": 1,
+            "failed_files": 1,
+            "sources": [{"method": "archive_test_crc"}]
+          },
+          "archive_state": {"patch_digest": "abc", "patch_stack": [{"id": "crop"}]},
+          "files": [
+            {"archive_path": "good.txt", "status": "complete", "bytes_written": 2, "user_action": "safe_to_use"},
+            {"archive_path": "bad.bin", "status": "failed", "failure_kind": "checksum_error", "user_action": "not_recovered"}
+          ]
+        }""",
+        encoding="utf-8",
+    )
+
+    class FakeRunner:
+        recent_passwords = ["secret"]
+
+        def __init__(self, _config):
+            pass
+
+        def run_targets(self, _target_paths):
+            return SimpleNamespace(
+                success_count=1,
+                failed_tasks=[],
+                processed_keys=["broken"],
+                partial_success_count=1,
+                recovered_outputs=[{
+                    "archive": "broken.zip",
+                    "out_dir": str(tmp_path / "out"),
+                    "assessment_status": "partial",
+                    "source_integrity": "payload_damaged",
+                    "archive_coverage": {
+                        "completeness": 0.5,
+                        "expected_files": 2,
+                        "complete_files": 1,
+                        "failed_files": 1,
+                    },
+                    "recovery_report": str(report),
+                }],
+            )
+
+    monkeypatch.setattr(extract, "PipelineRunner", FakeRunner)
+    args = SimpleNamespace(
+        paths=[str(target)],
+        password=["secret"],
+        password_file=None,
+        prompt_passwords=False,
+        no_builtin_passwords=True,
+        recursive_extract=None,
+        scheduler_profile=None,
+        archive_cleanup_mode=None,
+        flatten_single_directory=None,
+        json=True,
+        quiet=False,
+        verbose=False,
+    )
+    reporter = CliReporter(json_mode=True)
+    ctx = CliContext(language="en", reporter=reporter)
+
+    exit_code, result = extract.handle(args, ctx)
+    reporter.emit_result(result)
+
+    payload = json.loads(capsys.readouterr().out)
+    recovered = payload["summary"]["recovered_outputs"][0]
+
+    assert exit_code == 0
+    assert payload["command"] == "extract"
+    assert payload["summary"]["partial_success_count"] == 1
+    assert payload["summary"]["password_retry_count"] == 0
+    assert recovered["recovery_report"] == str(report)
+    assert recovered["archive_coverage"]["completeness"] == 0.5
+    assert payload["tasks"][0]["partial_success_count"] == 1
+    assert payload["items"][0]["combined_passwords"] == ["secret"]

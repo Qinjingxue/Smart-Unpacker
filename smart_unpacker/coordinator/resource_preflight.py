@@ -5,7 +5,7 @@ from smart_unpacker.contracts.tasks import ArchiveTask
 from smart_unpacker.coordinator.scheduling.resource_model import build_resource_profile_key, estimate_resource_demand
 from smart_unpacker.passwords import PasswordSession
 from smart_unpacker.rename.scheduler import RenameScheduler
-from smart_unpacker.support.sevenzip_native import cached_check_archive_health
+from smart_unpacker.support.sevenzip_native import cached_analyze_archive_resources, cached_check_archive_health
 
 
 class ResourcePreflightInspector:
@@ -26,6 +26,12 @@ class ResourcePreflightInspector:
             self.record_resource_demand(task, analysis)
             return task
         archive_size = self._archive_size(task)
+        precise_analysis = self._precise_resource_analysis(task, archive_size)
+        if precise_analysis is not None:
+            task.fact_bag.set("resource.analysis", precise_analysis)
+            analysis = SimpleNamespace(ok=not bool(precise_analysis.get("is_broken")), **precise_analysis)
+            self.record_resource_demand(task, analysis)
+            return task
         reason = (
             "estimated small-archive resource profile"
             if archive_size < self.precise_resource_min_size_bytes
@@ -101,6 +107,41 @@ class ResourcePreflightInspector:
             })
         except Exception:
             pass
+
+    def _precise_resource_analysis(self, task: ArchiveTask, archive_size: int) -> dict | None:
+        if archive_size < self.precise_resource_min_size_bytes:
+            return None
+        if self._needs_offset_detection(task):
+            return None
+        try:
+            part_paths = (task.all_parts if task.all_parts and len(task.all_parts) > 1 else None) or None
+            analysis = cached_analyze_archive_resources(
+                task.main_path,
+                password=self._password_for(task),
+                part_paths=part_paths,
+            )
+        except Exception:
+            return None
+        if not getattr(analysis, "is_archive", False):
+            return None
+        return {
+            "status": int(getattr(analysis, "status", 0) or 0),
+            "is_archive": bool(getattr(analysis, "is_archive", False)),
+            "is_encrypted": bool(getattr(analysis, "is_encrypted", False)),
+            "is_broken": bool(getattr(analysis, "is_broken", False)),
+            "solid": bool(getattr(analysis, "solid", False)),
+            "item_count": int(getattr(analysis, "item_count", 0) or 0),
+            "file_count": int(getattr(analysis, "file_count", 0) or 0),
+            "dir_count": int(getattr(analysis, "dir_count", 0) or 0),
+            "archive_size": int(getattr(analysis, "archive_size", 0) or archive_size),
+            "total_unpacked_size": int(getattr(analysis, "total_unpacked_size", 0) or 0),
+            "total_packed_size": int(getattr(analysis, "total_packed_size", 0) or archive_size),
+            "largest_item_size": int(getattr(analysis, "largest_item_size", 0) or 0),
+            "largest_dictionary_size": int(getattr(analysis, "largest_dictionary_size", 0) or 0),
+            "archive_type": str(getattr(analysis, "archive_type", "") or self._archive_type_for(task)),
+            "dominant_method": str(getattr(analysis, "dominant_method", "") or ""),
+            "message": str(getattr(analysis, "message", "") or "precise native resource analysis"),
+        }
 
     @staticmethod
     def _needs_offset_detection(task: ArchiveTask) -> bool:

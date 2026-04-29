@@ -149,6 +149,47 @@ def test_worker_dry_run_reads_archive_state_with_patch_stack(tmp_path):
     assert worker_result["diagnostics"]["input_trace"]["mode"] == "virtual_patch"
 
 
+def test_worker_dry_run_reads_7z_archive_state_with_sfx_crop_patch(tmp_path):
+    worker = _require_worker_or_skip()
+    seven_zip_dll = _require_7z_dll_or_skip()
+    archive, filename = _create_7z(tmp_path, "sfx-patched", "7z patched payload")
+    prefix = b"MZ-SFX-STUB" * 17
+    carrier = tmp_path / "sfx-carrier.exe"
+    carrier.write_bytes(prefix + archive.read_bytes())
+    state = ArchiveState.from_archive_input(
+        ArchiveInputDescriptor.from_parts(archive_path=str(carrier), format_hint="7z"),
+        patches=[PatchPlan(
+            id="crop-7z-sfx-prefix",
+            operations=[PatchOperation.delete_range(offset=0, size=len(prefix))],
+            confidence=0.98,
+        )],
+    )
+    payload = {
+        "job_id": "patched-7z-state",
+        "seven_zip_dll_path": seven_zip_dll,
+        "archive_path": str(carrier),
+        "part_paths": [str(carrier)],
+        "archive_state": state.to_dict(),
+        "format_hint": "7z",
+        "dry_run": True,
+    }
+
+    result = subprocess.run(
+        [worker],
+        input=json.dumps(payload, ensure_ascii=False),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    worker_result = _worker_result(result.stdout)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert worker_result["status"] == "ok"
+    assert worker_result["diagnostics"]["input_trace"]["mode"] == "virtual_patch"
+    assert worker_result["diagnostics"]["input_trace"]["virtual_size"] == archive.stat().st_size
+    assert worker_result["diagnostics"]["output_trace"]["items"][0]["path"].endswith(filename)
+
+
 def test_worker_output_trace_includes_per_item_failure(tmp_path):
     worker = _require_worker_or_skip()
     seven_zip_dll = _require_7z_dll_or_skip()
@@ -234,6 +275,57 @@ def test_extraction_scheduler_saves_process_failure_diagnostics(tmp_path):
     assert result.diagnostics["repro"]["request"]["archive_path"] == str(archive)
 
 
+def test_extraction_scheduler_classifies_malformed_worker_output_as_process_exit(tmp_path):
+    worker = tmp_path / "malformed_worker.cmd"
+    worker.write_text("@echo not-json\r\n@exit /b 2\r\n", encoding="utf-8")
+    archive = tmp_path / "sample.7z"
+    archive.write_bytes(b"not used")
+    scheduler = ExtractionScheduler(max_retries=1, process_config={"persistent_workers": False})
+    scheduler.sevenzip_runner.worker_path = str(worker)
+
+    try:
+        result = scheduler.extract(_task(archive), str(tmp_path / "out"))
+    finally:
+        scheduler.close()
+
+    assert result.success is False
+    assert result.diagnostics["failure_stage"] == "worker_exit"
+    assert result.diagnostics["failure_kind"] == "process_exit"
+    assert result.diagnostics["process_failure"]["message"]
+
+
+def test_sevenzip_runner_observed_process_timeout_reports_process_timeout(tmp_path):
+    worker = tmp_path / "sleep_worker.cmd"
+    worker.write_text("@ping 127.0.0.1 -n 3 >nul\r\n", encoding="utf-8")
+    scheduler = ExtractionScheduler(
+        max_retries=1,
+        process_config={
+            "persistent_workers": False,
+            "max_extract_task_seconds": 0.1,
+            "process_sample_interval_ms": 10,
+        },
+    )
+    process = subprocess.Popen(
+        [str(worker)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+    )
+
+    stdout, stderr = scheduler.sevenzip_runner.communicate_observed_process(process, runtime_scheduler=None, task=_task(worker))
+    try:
+        process.wait(timeout=1.0)
+    except subprocess.TimeoutExpired:
+        process.kill()
+    finally:
+        scheduler.close()
+
+    assert stdout == ""
+    assert "timed out" in stderr
+    assert process.returncode == -101
+
+
 def _task(path, archive_input=None):
     bag = FactBag()
     bag.set("candidate.entry_path", str(path))
@@ -247,6 +339,11 @@ def _task(path, archive_input=None):
         all_parts=[str(path)],
         key=str(path),
     )
+
+
+def _worker_result(stdout: str) -> dict:
+    lines = [json.loads(line) for line in stdout.splitlines() if line.strip().startswith("{")]
+    return next(item for item in lines if item.get("type") == "result")
 
 
 def test_extraction_scheduler_uses_worker_for_file_range(tmp_path):

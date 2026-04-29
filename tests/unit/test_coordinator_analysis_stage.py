@@ -1,4 +1,10 @@
+import struct
+import zlib
+
+from smart_unpacker.analysis.scheduler import ArchiveAnalysisScheduler
 from smart_unpacker.analysis.result import ArchiveAnalysisReport, ArchiveFormatEvidence, ArchiveSegment
+from smart_unpacker.contracts.archive_input import ArchiveInputDescriptor
+from smart_unpacker.contracts.archive_state import ArchiveState, PatchOperation, PatchPlan
 from smart_unpacker.contracts.detection import FactBag
 from smart_unpacker.contracts.tasks import ArchiveTask, SplitArchiveInfo
 from smart_unpacker.coordinator.analysis_stage import ArchiveAnalysisStage
@@ -194,6 +200,30 @@ def test_analysis_stage_uses_range_input_for_embedded_password_required_archive(
     }
 
 
+def test_analysis_scheduler_understands_rar_patch_state_without_reading_carrier_prefix(tmp_path):
+    prefix = b"MZ-RAR-SFX-STUB" * 8
+    rar_payload = _rar4_bytes()
+    carrier = tmp_path / "rar-carrier.exe"
+    carrier.write_bytes(prefix + rar_payload)
+    task = _task(carrier)
+    state = ArchiveState.from_archive_input(
+        ArchiveInputDescriptor.from_parts(archive_path=str(carrier), format_hint="rar"),
+        patches=[PatchPlan(
+            id="crop-rar-sfx-prefix",
+            operations=[PatchOperation.delete_range(offset=0, size=len(prefix))],
+            confidence=0.98,
+        )],
+    )
+    task.set_archive_state(state)
+
+    report = ArchiveAnalysisScheduler().analyze_task(task)
+
+    assert task.archive_state().effective_patch_digest() == state.effective_patch_digest()
+    assert any(evidence.format == "rar" for evidence in report.evidences)
+    assert report.path == str(carrier)
+    assert report.size == len(rar_payload)
+
+
 def test_analysis_stage_maps_split_logical_segment_to_concat_ranges(tmp_path):
     part1 = tmp_path / "case.7z.001"
     part2 = tmp_path / "case.7z.002"
@@ -236,3 +266,14 @@ def test_analysis_stage_maps_split_logical_segment_to_concat_ranges(tmp_path):
     state = task.fact_bag.get("archive.state")
     assert state["source"]["open_mode"] == "concat_ranges"
     assert [item["path"] for item in state["source"]["ranges"]] == [str(part1), str(part2), str(part3)]
+
+
+def _rar4_block(header_type: int, flags: int = 0, payload: bytes = b"") -> bytes:
+    header_size = 7 + len(payload)
+    header = struct.pack("<HBHH", 0, header_type, flags, header_size)
+    crc = zlib.crc32(header[2:] + payload) & 0xFFFF
+    return struct.pack("<H", crc) + header[2:] + payload
+
+
+def _rar4_bytes() -> bytes:
+    return b"Rar!\x1a\x07\x00" + _rar4_block(0x73) + _rar4_block(0x7B)

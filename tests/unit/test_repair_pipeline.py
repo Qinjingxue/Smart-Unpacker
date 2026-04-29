@@ -5,6 +5,7 @@ import io
 import lzma
 import tarfile
 import struct
+from pathlib import Path
 from types import SimpleNamespace
 import zipfile
 import zlib
@@ -472,6 +473,73 @@ def test_candidate_selector_uses_password_to_rank_and_reject_encrypted_candidate
     assert selected.module_name == "password_validated"
     assert rejected is None
     assert rejection["accepted_count"] == 0
+
+
+def test_candidate_validation_password_matrix_keeps_wrong_password_priority(tmp_path, monkeypatch):
+    fake = _MatrixPasswordNativeTester()
+
+    def fake_dry_run(path, *, format_hint="", password="", timeout=0):
+        name = Path(path).name
+        ok = password == "secret" and "payload_bad" not in name
+        partial = password == "secret" and "payload_bad" in name
+        failure_kind = "checksum_error" if partial else "encrypted_or_wrong_password"
+        return SimpleNamespace(
+            ok=ok,
+            returncode=0 if ok else 2,
+            message="ok" if ok else ("payload checksum error" if partial else "wrong password"),
+            result={
+                "status": "ok" if ok else "failed",
+                "native_status": "ok" if ok else ("damaged" if partial else "wrong_password"),
+                "failure_stage": "" if ok else "item_extract",
+                "failure_kind": "" if ok else failure_kind,
+                "files_written": 1 if ok or partial else 0,
+                "bytes_written": 12 if ok or partial else 0,
+            },
+            diagnostics={"output_trace": {"items": [{"path": "good.txt", "bytes_written": 12}]}} if partial else {},
+        )
+
+    monkeypatch.setattr("smart_unpacker.repair.candidate.get_native_password_tester", lambda: fake)
+    monkeypatch.setattr("smart_unpacker.repair.candidate.dry_run_archive", fake_dry_run)
+
+    cases = [
+        ("correct_header_bad", "7z", "secret", False, True, "ok"),
+        ("correct_payload_bad", "zip", "secret", True, True, "checksum_error"),
+        ("wrong_complete", "zip", "wrong", False, False, "encrypted_or_wrong_password"),
+        ("wrong_structure", "zip", "wrong", False, False, "encrypted_or_wrong_password"),
+        ("unknown_encrypted", "zip", "", False, False, "encrypted_or_wrong_password"),
+    ]
+
+    for name, fmt, password, partial, should_accept, expected_failure in cases:
+        archive = tmp_path / f"{name}.{fmt}"
+        archive.write_bytes(b"candidate bytes")
+        candidate = RepairCandidate(
+            module_name=name,
+            format=fmt,
+            repaired_input={
+                "kind": "file",
+                "path": str(archive),
+                "format_hint": fmt,
+                **({"password": password} if password else {}),
+            },
+            confidence=0.9,
+            partial=partial,
+            requires_native_validation=True,
+            validations=[CandidateValidation(name="module_result", accepted=True, score=0.9)],
+        )
+
+        selected, selection = CandidateSelector().select([candidate])
+        validation = (selection.get("validations") or [{}])[-1] if should_accept else {}
+
+        if should_accept:
+            assert selected is not None, name
+            assert selected.module_name == name
+            assert validation["details"]["password_present"] is True
+            assert validation["details"]["dry_run"]["failure_kind"] in {"", expected_failure}
+            continue
+
+        assert selected is None, name
+        assert selection["accepted_count"] == 0
+        assert any("wrong password" in warning for warning in selection["warnings"])
 
 
 def test_repair_scheduler_records_module_failure_feedback_for_later_decision(tmp_path):
@@ -1384,6 +1452,50 @@ class _FakePasswordAwareNativeTester:
             total_unpacked_size=12,
             total_packed_size=8,
             message="ok",
+        )
+
+
+class _MatrixPasswordNativeTester:
+    def probe_archive(self, path):
+        return SimpleNamespace(
+            status=0,
+            is_archive=True,
+            is_encrypted=True,
+            is_broken=False,
+            checksum_error=False,
+            offset=0,
+            item_count=2,
+            archive_type=Path(path).suffix.lstrip(".") or "zip",
+            message="ok",
+        )
+
+    def test_archive(self, path, password=""):
+        ok = password == "secret" and "payload_bad" not in Path(path).name
+        payload = password == "secret" and "payload_bad" in Path(path).name
+        return SimpleNamespace(
+            status=0 if ok else 1,
+            ok=ok,
+            command_ok=ok,
+            encrypted=True,
+            checksum_error=payload,
+            archive_type=Path(path).suffix.lstrip(".") or "zip",
+            message="ok" if ok else ("payload checksum error" if payload else "wrong password"),
+        )
+
+    def analyze_archive_resources(self, path, password=""):
+        ok = password == "secret"
+        return SimpleNamespace(
+            status=0 if ok else 1,
+            ok=ok,
+            is_archive=True,
+            is_encrypted=True,
+            is_broken=False,
+            archive_type=Path(path).suffix.lstrip(".") or "zip",
+            item_count=2,
+            file_count=2,
+            total_unpacked_size=24,
+            total_packed_size=16,
+            message="ok" if ok else "wrong password",
         )
 
 

@@ -145,6 +145,30 @@ def test_binary_corruptor_unrepairable_diagnostic_report_preserves_reason_contex
     assert report["source_input"]["kind"] == "concat_ranges"
 
 
+@pytest.mark.parametrize(
+    ("seed", "builder_name", "expected_sha"),
+    [
+        (606060, "tar_header_checksum_tail", "90ac2e40928efa9f303863bd13c414e86b4af75e0281ae5861898c3b3f934f32"),
+        (606060, "bzip2_trailing_junk", "e5144d5da995cde05a707a6cc92af909e2cd7a67eabab02aecb2db1f3992ed57"),
+        (606060, "seven_zip_fake_magic_sfx", "11c14be67447e238261c68579ba01a38eb0db5c7d4953f3beb777b94d65da13e"),
+        (606060, "rar5_sfx_missing_end_tail", "89fdcb0cb7605a29bfab25527c61d7f01cfef5d68e7ca09049416fba669a71cc"),
+    ],
+)
+def test_binary_corruptor_fixed_seed_regression_cases_remain_replayable(tmp_path, seed, builder_name, expected_sha):
+    case = getattr(BinaryCorruptor(seed), builder_name)(tmp_path / builder_name)
+    result = _run_repair(tmp_path / "repair", case)
+    report = case.diagnostic_report(result)
+
+    assert case.corrupted_sha256 == expected_sha
+    assert result.status in case.expected_statuses, report
+    assert report["seed"] == seed
+    assert report["case_id"] == case.case_id
+    assert report["corrupted_sha256"] == expected_sha
+    assert report["regression_snippet"]
+    assert f"BinaryCorruptor({seed})" in report["regression_snippet"]
+    assert apply_mutations(case.clean_data, case.mutations) == case.corrupted_data
+
+
 @pytest.mark.parametrize("fmt", ["zip", "tar", "gzip"])
 def test_binary_corruptor_raw_perturbations_are_reproducible_and_do_not_crash_repair(tmp_path, fmt):
     case = BinaryCorruptor(777).raw_binary_perturbation(tmp_path / "raw", fmt, budget=6)

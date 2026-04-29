@@ -515,12 +515,12 @@ def test_unicode_reserved_and_long_zip_paths_match_archive_paths(tmp_path):
     assert set(names.values()) <= set(manifest_items)
     assert states[names["cjk"]] == "complete"
     assert states[names["combining"]] == "failed"
-    assert states[names["reserved"]] == "complete"
+    assert states[names["reserved"]] in {"failed", "blocked"}
     assert states[names["long"]] == "complete"
     assert verification.archive_coverage.expected_files == 4
-    assert verification.archive_coverage.complete_files == 3
-    assert verification.archive_coverage.failed_files == 1
-    assert verification.archive_coverage.completeness == pytest.approx(0.75, abs=0.02)
+    assert verification.archive_coverage.complete_files == 2
+    assert verification.archive_coverage.failed_files == 2
+    assert verification.archive_coverage.completeness == pytest.approx(0.5, abs=0.02)
 
 
 def test_path_safety_blocks_unsafe_entries_but_counts_them_in_recovery(tmp_path):
@@ -543,6 +543,27 @@ def test_path_safety_blocks_unsafe_entries_but_counts_them_in_recovery(tmp_path)
     assert states["C:/Windows/system32/evil.txt"] in {"failed", "blocked"}
     assert "unicode/cafe\u0301.txt" in states
     assert "unicode/caf\u00e9.txt" in states
+
+
+def test_windows_reserved_ads_and_case_conflicts_are_counted_as_blocked_or_distinct(tmp_path):
+    archive = _zip_with_windows_reserved_ads_and_case_conflicts(tmp_path)
+    out_dir = tmp_path / "out"
+
+    _completed, worker_result = _run_worker(archive, out_dir, format_hint="zip")
+    verification = _verify_worker_output(archive, out_dir, worker_result, detected_ext="zip")
+    states = {item.archive_path: item.state for item in verification.file_observations}
+    details = {item.archive_path: item.details for item in verification.file_observations}
+
+    assert verification.archive_coverage.expected_files == 6
+    assert states["safe.txt"] == "complete"
+    assert states["CON.txt"] in {"failed", "blocked"}
+    assert states["nested/NUL"] in {"failed", "blocked"}
+    assert states["ads/file.txt:stream"] in {"failed", "blocked"}
+    assert details["CON.txt"].get("failure_kind") == "output_filesystem"
+    assert details["nested/NUL"].get("failure_kind") == "output_filesystem"
+    assert details["ads/file.txt:stream"].get("failure_kind") == "output_filesystem"
+    assert "case/A.txt" in states
+    assert "case/a.txt" in states
 
 
 def test_resource_guard_blocks_many_entry_archive_as_guarded_not_generic_failure(tmp_path):
@@ -586,6 +607,47 @@ def test_resource_guard_blocks_many_entry_archive_as_guarded_not_generic_failure
     assert outcome.result.diagnostics["result"]["failure_kind"] == "resource_guard"
     assert outcome.result.diagnostics["result"]["guard_status"] == "guarded"
     assert task.fact_bag.get("resource.guard")["status"] == "guarded"
+    assert not out_dir.exists()
+
+
+def test_resource_guard_uses_native_archive_analysis_before_worker_for_zip_bomb(tmp_path):
+    _require_7z_dll_or_skip()
+    archive = _zip_high_compression_resource_guard_sample(tmp_path)
+    out_dir = tmp_path / "guarded-native-out"
+    task = _task(archive, detected_ext="zip")
+    runner = ExtractionBatchRunner(
+        RunContext(),
+        _FailIfCalledExtractor(archive, out_dir),
+        _NoNestedOutputScanPolicy(),
+        config={
+            "performance": {
+                "precise_resource_min_size_mb": 0,
+                "resource_guard": {
+                    "enabled": True,
+                    "max_total_unpacked_size": 64 * 1024,
+                    "max_largest_item_size": 64 * 1024,
+                    "max_compression_ratio": 4.0,
+                },
+            },
+            "verification": {"enabled": True, "methods": []},
+        },
+    )
+
+    [(returned_task, outcome)] = runner._execute_ready_tasks([task], lambda _task: str(out_dir))
+    analysis = task.fact_bag.get("resource.analysis")
+    guard = task.fact_bag.get("resource.guard")
+
+    assert returned_task is task
+    assert outcome.success is False
+    assert outcome.result.error == "resource_guard"
+    assert analysis["file_count"] == 1
+    assert analysis["total_unpacked_size"] >= 256 * 1024
+    assert guard["status"] == "guarded"
+    assert {item["field"] for item in guard["violations"]} >= {
+        "total_unpacked_size",
+        "largest_item_size",
+        "compression_ratio",
+    }
     assert not out_dir.exists()
 
 
@@ -717,6 +779,34 @@ def test_recovery_report_includes_failure_kind_coverage_and_patch_lineage(tmp_pa
     assert bad[0]["failure_kind"] in {"checksum_error", "data_error", "corrupted_data"}
 
 
+def test_recovery_report_schema_contract_for_partial_result(tmp_path):
+    archive, out_dir, _completed, worker_result = _run_payload_damaged_zip_worker(tmp_path)
+    verification = _verify_worker_output(archive, out_dir, worker_result, detected_ext="zip")
+    result = ExtractionResult(
+        success=False,
+        archive=str(archive),
+        out_dir=str(out_dir),
+        all_parts=[str(archive)],
+        error="payload damaged",
+        diagnostics={"result": worker_result, "partial_outputs": True},
+        partial_outputs=True,
+        progress_manifest=str(out_dir / ".sunpack" / "extraction_manifest.json"),
+    )
+    runner = ExtractionBatchRunner(
+        RunContext(),
+        _NoopExtractor(out_dir),
+        _NoNestedOutputScanPolicy(),
+        config={"verification": {"enabled": True, "methods": []}},
+    )
+
+    runner.collect_result(_task(archive, detected_ext="zip"), BatchExtractionOutcome(result=result, verification=verification))
+    report = json.loads((out_dir / ".sunpack" / "recovery_report.json").read_text(encoding="utf-8"))
+
+    _assert_recovery_report_schema(report)
+    assert report["archive_coverage"]["completeness"] == pytest.approx(0.75, abs=0.02)
+    assert any(item["archive_path"] == "bad.bin" and item["failure_kind"] for item in report["files"])
+
+
 def test_beam_dedupes_equivalent_patch_plans_and_assesses_best_coverage(tmp_path):
     source = tmp_path / "beam-source.zip"
     source.write_bytes(b"raw")
@@ -764,6 +854,61 @@ def test_beam_dedupes_equivalent_patch_plans_and_assesses_best_coverage(tmp_path
     assert run.best_state.decision_hint == "accept"
     assert run.best_state.completeness == pytest.approx(1.0)
     assert [entry["module"] for entry in run.best_state.history] == ["verified_patch"]
+
+
+def test_beam_pressure_handles_many_lazy_branches_failures_and_dedupes(tmp_path):
+    source = tmp_path / "beam-pressure.7z"
+    source.write_bytes(b"raw")
+    state = ArchiveState.from_archive_input(ArchiveInputDescriptor(
+        entry_path=str(source),
+        open_mode="file",
+        format_hint="7z",
+    ))
+    scheduler = _PressureBeamCandidateScheduler(state)
+    assessed_modules: list[str] = []
+
+    def analyze(candidate):
+        return {"confidence": candidate.confidence, "status": "damaged"}
+
+    def assess(item):
+        assessed_modules.append(item.candidate.module_name)
+        completeness = 1.0 if item.candidate.module_name == "branch_02_best" else 0.45
+        return {
+            "confidence": completeness,
+            "completeness": completeness,
+            "recoverable_upper_bound": 1.0,
+            "assessment_status": "complete" if completeness == 1.0 else "partial",
+            "source_integrity": "complete",
+            "decision_hint": "accept" if completeness == 1.0 else "repair",
+        }
+
+    run = RepairBeamLoop(
+        scheduler,
+        beam_width=4,
+        max_candidates_per_state=12,
+        max_analyze_candidates=12,
+        max_assess_candidates=5,
+        analyze=analyze,
+        assess=assess,
+    ).run([
+        RepairBeamState(
+            source_input={"kind": "file", "path": str(source), "format_hint": "7z"},
+            archive_state=state.to_dict(),
+            format="7z",
+            archive_key="beam-pressure",
+        )
+    ], max_rounds=1)
+
+    assert len(scheduler.candidates_requested) == 12
+    assert len(scheduler.materialized) <= 5
+    assert "branch_01_duplicate" not in scheduler.materialized
+    assert "branch_04_crash" in scheduler.materialized
+    assert all(not name.startswith("branch_09") for name in scheduler.materialized)
+    assert len(set(assessed_modules)) == len(assessed_modules)
+    assert len(run.rounds[0].states_out) <= 4
+    assert run.best_state is not None
+    assert run.best_state.decision_hint == "accept"
+    assert run.best_state.history[-1]["module"] == "branch_02_best"
 
 
 def test_repair_terminal_missing_volume_feedback_stops_later_repairs(tmp_path):
@@ -994,6 +1139,35 @@ def test_main_flow_outer_complete_inner_missing_volume_does_not_mix_coverage(tmp
     assert outer_manifest["summary"]["complete"] == 2
     assert "recovery" not in outer_manifest
     assert not (outer_out_dir / "inner-missing.7z" / ".sunpack" / "recovery_report.json").exists()
+
+
+def test_recursive_partial_report_survives_delete_cleanup_and_remains_discoverable(tmp_path):
+    _require_worker_or_skip()
+    _require_7z_dll_or_skip()
+    input_root = tmp_path / "input"
+    input_root.mkdir()
+    archive = _outer_zip_with_damaged_inner_zip(input_root)
+    config = _best_effort_pipeline_config(tmp_path)
+    config["post_extract"]["archive_cleanup_mode"] = "delete"
+    config["post_extract"]["flatten_single_directory"] = True
+
+    summary = PipelineRunner(config).run(str(input_root))
+
+    outer_out_dir = input_root / archive.stem
+    inner_archive = outer_out_dir / "inner.zip"
+    inner_report_path = outer_out_dir / "inner" / ".sunpack" / "recovery_report.json"
+    inner_report = json.loads(inner_report_path.read_text(encoding="utf-8"))
+
+    assert summary.success_count == 2
+    assert summary.partial_success_count == 1
+    assert not summary.failed_tasks
+    assert not archive.exists()
+    assert not inner_archive.exists()
+    assert inner_report_path.is_file()
+    assert summary.recovered_outputs[0]["recovery_report"] == str(inner_report_path)
+    assert inner_report["archive"].endswith("inner.zip")
+    assert inner_report["archive_coverage"]["complete_files"] == 3
+    assert (outer_out_dir / "inner" / "good_before.txt").read_text(encoding="utf-8") == "before"
 
 
 def test_main_flow_recurses_into_truncated_tar_gz_partial_tar_stream(tmp_path):
@@ -1657,11 +1831,30 @@ def _zip_with_unsafe_and_conflicting_paths(tmp_path: Path) -> Path:
     return archive
 
 
+def _zip_with_windows_reserved_ads_and_case_conflicts(tmp_path: Path) -> Path:
+    archive = tmp_path / "windows-path-extremes.zip"
+    with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_STORED) as zf:
+        zf.writestr("safe.txt", b"safe")
+        zf.writestr("CON.txt", b"reserved")
+        zf.writestr("nested/NUL", b"reserved")
+        zf.writestr("ads/file.txt:stream", b"ads")
+        zf.writestr("case/A.txt", b"upper")
+        zf.writestr("case/a.txt", b"lower")
+    return archive
+
+
 def _zip_with_many_entries(tmp_path: Path, *, count: int) -> Path:
     archive = tmp_path / "many-entries.zip"
     with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_STORED) as zf:
         for index in range(count):
             zf.writestr(f"items/{index:04d}.txt", b"x")
+    return archive
+
+
+def _zip_high_compression_resource_guard_sample(tmp_path: Path) -> Path:
+    archive = tmp_path / "high-compression-guard.zip"
+    with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as zf:
+        zf.writestr("bombish.bin", b"A" * (256 * 1024))
     return archive
 
 
@@ -1845,6 +2038,34 @@ def _archive_input_for_file(path: Path, format_hint: str) -> ArchiveInputDescrip
     )
 
 
+def _assert_recovery_report_schema(report: dict) -> None:
+    assert report["version"] == 1
+    for field in ("archive", "out_dir", "success_kind", "verification", "archive_coverage", "files"):
+        assert field in report
+    coverage = report["archive_coverage"]
+    for field in (
+        "completeness",
+        "file_coverage",
+        "byte_coverage",
+        "expected_files",
+        "matched_files",
+        "complete_files",
+        "partial_files",
+        "failed_files",
+        "missing_files",
+        "confidence",
+        "sources",
+    ):
+        assert field in coverage
+    assert isinstance(coverage["sources"], list)
+    assert isinstance(report["files"], list)
+    assert report["files"]
+    for item in report["files"]:
+        for field in ("archive_path", "output_path", "status", "bytes_written", "user_action"):
+            assert field in item
+        assert item["status"] in {"complete", "partial", "failed", "missing", "unverified", "discarded"}
+
+
 class _StructureFailureThenWorkerExtractor:
     password_session = None
 
@@ -1971,6 +2192,68 @@ class _LazyBeamCandidateScheduler:
         return RepairCandidate(
             module_name=module_name,
             format="zip",
+            repaired_input={},
+            confidence=confidence,
+            actions=[module_name],
+            materializer=materialize,
+            materialized=False,
+            plan={"archive_state": state.to_dict()},
+        )
+
+
+class _PressureBeamCandidateScheduler:
+    def __init__(self, source_state: ArchiveState):
+        self.source_state = source_state
+        self.materialized: list[str] = []
+        self.candidates_requested: list[str] = []
+
+    def generate_repair_candidates(self, job, lazy=True):
+        candidates = []
+        for index in range(12):
+            name = f"branch_{index:02d}"
+            if index == 1:
+                name = "branch_01_duplicate"
+                state = self._patched_state("branch_00", b"A")
+            else:
+                state = self._patched_state(name, bytes([65 + index]))
+            confidence = 0.98 - index * 0.04
+            if index == 2:
+                name = "branch_02_best"
+                confidence = 0.96
+            if index == 4:
+                name = "branch_04_crash"
+            self.candidates_requested.append(name)
+            candidates.append(self._lazy_candidate(name, state, confidence, crash=index == 4))
+        return RepairCandidateBatch(candidates=candidates)
+
+    def _patched_state(self, patch_id: str, byte: bytes) -> ArchiveState:
+        return ArchiveState.from_archive_input(
+            self.source_state.to_archive_input_descriptor(),
+            patches=[PatchPlan(
+                id=patch_id,
+                operations=[PatchOperation.replace_bytes(offset=0, data=byte)],
+                provenance={"module": patch_id},
+                confidence=0.9,
+            )],
+        )
+
+    def _lazy_candidate(self, module_name: str, state: ArchiveState, confidence: float, *, crash: bool = False) -> RepairCandidate:
+        def materialize():
+            self.materialized.append(module_name)
+            if crash:
+                raise RuntimeError("simulated materialization crash")
+            return RepairCandidate(
+                module_name=module_name,
+                format="7z",
+                repaired_input={"kind": "archive_state", "format_hint": "7z", "module": module_name},
+                confidence=confidence,
+                actions=[module_name],
+                plan={"archive_state": state.to_dict()},
+            )
+
+        return RepairCandidate(
+            module_name=module_name,
+            format="7z",
             repaired_input={},
             confidence=confidence,
             actions=[module_name],

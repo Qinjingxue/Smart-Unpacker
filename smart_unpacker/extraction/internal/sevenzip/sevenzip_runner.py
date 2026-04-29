@@ -535,7 +535,7 @@ class SevenZipRunner:
         runtime_scheduler: Any,
         task: ArchiveTask,
     ) -> tuple[str, str]:
-        return self._communicate_observed_process(process, "", runtime_scheduler, task)
+        return self._communicate_observed_process(process, runtime_scheduler, task)
 
     def _communicate_observed_process(
         self,

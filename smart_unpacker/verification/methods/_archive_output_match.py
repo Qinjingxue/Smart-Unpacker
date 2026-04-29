@@ -58,14 +58,31 @@ def coverage_from_archive_and_output(
         if expected_size is not None:
             expected_bytes += max(0, expected_size)
 
-        output_item = output_by_path.get(normalize_match_path(expected_path))
         item_issues = list(issues_by_path.get(expected_path) or [])
+        if unsafe_path:
+            failed_files += 1
+            observations.append(FileVerificationObservation(
+                path=expected_path,
+                archive_path=expected_path,
+                state="failed",
+                method=method,
+                expected_size=expected_size,
+                crc_expected=expected_crc,
+                progress=0.0,
+                issues=item_issues,
+                details={
+                    "expected_has_crc": expected_has_crc,
+                    "path_blocked": True,
+                    "raw_archive_path": item.get("raw_path") or expected_path,
+                    "failure_kind": "output_filesystem",
+                },
+            ))
+            continue
+
+        output_item = output_by_path.get(normalize_match_path(expected_path))
         if output_item is None:
-            state = "failed" if unsafe_path else "missing"
-            if unsafe_path:
-                failed_files += 1
-            else:
-                missing_files += 1
+            state = "missing"
+            missing_files += 1
             observations.append(FileVerificationObservation(
                 path=expected_path,
                 archive_path=expected_path,
@@ -77,9 +94,9 @@ def coverage_from_archive_and_output(
                 issues=item_issues,
                 details={
                     "expected_has_crc": expected_has_crc,
-                    "path_blocked": unsafe_path,
+                    "path_blocked": False,
                     "raw_archive_path": item.get("raw_path") or expected_path,
-                    "failure_kind": "output_filesystem" if unsafe_path else "",
+                    "failure_kind": "",
                 },
             ))
             continue
@@ -224,7 +241,18 @@ def _unsafe_archive_path(raw_path: str, cleaned: str) -> bool:
     parts = [part for part in text.split("/") if part]
     if any(part == ".." for part in parts):
         return True
+    if any(_windows_reserved_path_part(part) for part in parts):
+        return True
+    if any(":" in part for part in parts):
+        return True
     return bool(cleaned and cleaned != text.strip().strip("/"))
+
+
+def _windows_reserved_path_part(part: str) -> bool:
+    stem = str(part or "").split(".")[0].strip().rstrip(" .").casefold()
+    if not stem:
+        return False
+    return stem in {"con", "prn", "aux", "nul"} or stem in {f"com{index}" for index in range(1, 10)} or stem in {f"lpt{index}" for index in range(1, 10)}
 
 
 def _index_output_files(files: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
