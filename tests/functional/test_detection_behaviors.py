@@ -117,6 +117,7 @@ class DetectionBehaviorTests(unittest.TestCase):
                 {
                     "name": "embedded_payload_identity",
                     "enabled": True,
+                    "embedded_payload_scan_level": "manual",
                     "carrier_scan_tail_window_bytes": 128,
                 },
             ])).evaluate_bag(bag)
@@ -137,6 +138,7 @@ class DetectionBehaviorTests(unittest.TestCase):
                 {
                     "name": "embedded_payload_identity",
                     "enabled": True,
+                    "embedded_payload_scan_level": "manual",
                     "carrier_exts": [".jpg"],
                     "ambiguous_resource_exts": [],
                     "carrier_scan_tail_window_bytes": 128,
@@ -159,6 +161,7 @@ class DetectionBehaviorTests(unittest.TestCase):
                 {
                     "name": "embedded_payload_identity",
                     "enabled": True,
+                    "embedded_payload_scan_level": "manual",
                     "ambiguous_resource_exts": [".bin"],
                     "loose_scan_score": 5,
                     "loose_scan_min_tail_bytes": 1,
@@ -186,6 +189,7 @@ class DetectionBehaviorTests(unittest.TestCase):
                 {
                     "name": "embedded_payload_identity",
                     "enabled": True,
+                    "embedded_payload_scan_level": "manual",
                     "ambiguous_resource_exts": [".bin"],
                     "loose_scan_score": 5,
                     "loose_scan_min_tail_bytes": 1,
@@ -209,6 +213,7 @@ class DetectionBehaviorTests(unittest.TestCase):
                 {
                     "name": "embedded_payload_identity",
                     "enabled": True,
+                    "embedded_payload_scan_level": "manual",
                     "ambiguous_resource_exts": [".bin"],
                     "loose_scan_score": 5,
                     "loose_scan_min_tail_bytes": 1,
@@ -232,6 +237,7 @@ class DetectionBehaviorTests(unittest.TestCase):
                 {
                     "name": "embedded_payload_identity",
                     "enabled": True,
+                    "embedded_payload_scan_level": "manual",
                     "ambiguous_resource_exts": [".bin"],
                     "loose_scan_score": 5,
                     "loose_scan_min_tail_bytes": 1,
@@ -254,6 +260,7 @@ class DetectionBehaviorTests(unittest.TestCase):
                 {
                     "name": "embedded_payload_identity",
                     "enabled": True,
+                    "embedded_payload_scan_level": "manual",
                     "ambiguous_resource_exts": [".bin"],
                     "loose_scan_score": 5,
                     "loose_scan_min_tail_bytes": 1,

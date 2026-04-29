@@ -31,14 +31,46 @@ def _first_existing_config(filename: str) -> Path | None:
     return first_existing_path(_candidate_config_paths(filename))
 
 
-def _deep_merge_config(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+_NAMED_MODULE_LIST_PATHS = {
+    ("detection", "fact_collectors"),
+    ("detection", "processors"),
+    ("detection", "rule_pipeline", "precheck"),
+    ("detection", "rule_pipeline", "scoring"),
+    ("detection", "rule_pipeline", "confirmation"),
+}
+
+
+def _deep_merge_config(base: dict[str, Any], override: dict[str, Any], path: tuple[str, ...] = ()) -> dict[str, Any]:
     merged = dict(base)
     for key, value in override.items():
+        item_path = path + (key,)
         base_value = merged.get(key)
         if isinstance(base_value, dict) and isinstance(value, dict):
-            merged[key] = _deep_merge_config(base_value, value)
+            merged[key] = _deep_merge_config(base_value, value, item_path)
+        elif item_path in _NAMED_MODULE_LIST_PATHS and isinstance(base_value, list) and isinstance(value, list):
+            merged[key] = _merge_named_module_list(base_value, value)
         else:
             merged[key] = value
+    return merged
+
+
+def _merge_named_module_list(base: list[Any], override: list[Any]) -> list[Any]:
+    merged = list(base)
+    indexes = {
+        item.get("name"): index
+        for index, item in enumerate(merged)
+        if isinstance(item, dict) and isinstance(item.get("name"), str)
+    }
+    for item in override:
+        if not isinstance(item, dict) or not isinstance(item.get("name"), str):
+            merged.append(item)
+            continue
+        existing_index = indexes.get(item["name"])
+        if existing_index is None or not isinstance(merged[existing_index], dict):
+            indexes[item["name"]] = len(merged)
+            merged.append(item)
+            continue
+        merged[existing_index] = _deep_merge_config(merged[existing_index], item)
     return merged
 
 

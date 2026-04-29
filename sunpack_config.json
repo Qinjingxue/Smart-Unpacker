@@ -56,5 +56,15 @@
   },
   "performance": {
     "scheduler_profile": "auto"
+  },
+  "detection": {
+    "rule_pipeline": {
+      "scoring": [
+        {
+          "name": "embedded_payload_identity",
+          "embedded_payload_scan_level": "balanced"
+        }
+      ]
+    }
   }
 }

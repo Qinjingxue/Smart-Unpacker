@@ -320,6 +320,7 @@
           "loose_scan_score": 4,
           "overlay_start_score": 6,
           "overlay_near_start_score": 4,
+          "embedded_payload_scan_level": "balanced",
           "zip_plausibility_required_for_loose_scan": true,
           "zip_plausibility_required_for_carrier_tail": false,
           "carrier_exts": [".jpg", ".jpeg", ".png", ".pdf", ".gif", ".webp"],

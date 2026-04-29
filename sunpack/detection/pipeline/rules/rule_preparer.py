@@ -25,5 +25,9 @@ class RulePreparer:
 
             self.validator.validate_rule(layer, rule_name, rule_cls, rule_cfg)
             rule_instance = rule_cls()
-            prepared.append(PreparedRule(rule_name, rule_instance, dict(rule_cfg)))
+            rule_config = dict(rule_cfg)
+            prepare_config = getattr(rule_instance, "prepare_config", None)
+            if callable(prepare_config):
+                rule_config = prepare_config(rule_config)
+            prepared.append(PreparedRule(rule_name, rule_instance, rule_config))
         return prepared

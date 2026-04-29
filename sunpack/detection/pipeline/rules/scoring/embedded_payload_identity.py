@@ -16,10 +16,53 @@ DEFAULT_REQUIRE_ZIP_PLAUSIBILITY_FOR_LOOSE_SCAN = True
 DEFAULT_REQUIRE_ZIP_PLAUSIBILITY_FOR_CARRIER_TAIL = False
 DEFAULT_CARRIER_EXTS = (".jpg", ".jpeg", ".png", ".pdf", ".gif", ".webp")
 DEFAULT_AMBIGUOUS_RESOURCE_EXTS = (".dat", ".bin")
+DEFAULT_EMBEDDED_PAYLOAD_SCAN_LEVEL = "balanced"
+EMBEDDED_PAYLOAD_SCAN_LEVELS = ("light", "balanced", "deep", "manual")
+
+_MIB = 1024 * 1024
+_SCAN_LEVEL_OVERRIDES: dict[str, dict[str, Any]] = {
+    "light": {
+        "loose_scan_tail_window_bytes": 2 * _MIB,
+        "loose_scan_full_scan_max_bytes": 8 * _MIB,
+        "loose_scan_deep_scan": False,
+        "carrier_scan_tail_window_bytes": 1 * _MIB,
+        "carrier_scan_prefix_window_bytes": 0,
+        "carrier_scan_full_scan_max_bytes": 0,
+        "carrier_scan_deep_scan": False,
+    },
+    "balanced": {
+        "loose_scan_tail_window_bytes": 8 * _MIB,
+        "loose_scan_full_scan_max_bytes": 16 * _MIB,
+        "loose_scan_deep_scan": False,
+        "carrier_scan_tail_window_bytes": 2 * _MIB,
+        "carrier_scan_prefix_window_bytes": 0,
+        "carrier_scan_full_scan_max_bytes": 0,
+        "carrier_scan_deep_scan": False,
+    },
+    "deep": {
+        "loose_scan_tail_window_bytes": 8 * _MIB,
+        "loose_scan_full_scan_max_bytes": 64 * _MIB,
+        "loose_scan_deep_scan": False,
+        "carrier_scan_tail_window_bytes": 8 * _MIB,
+        "carrier_scan_prefix_window_bytes": 8 * _MIB,
+        "carrier_scan_full_scan_max_bytes": 0,
+        "carrier_scan_deep_scan": False,
+    },
+}
 
 
 def _format_from_ext(ext: str) -> str:
     return ext[1:].lower() if ext.startswith(".") else ext.lower()
+
+
+def _normalize_scan_level(value: Any) -> str:
+    if value is None:
+        return DEFAULT_EMBEDDED_PAYLOAD_SCAN_LEVEL
+    level = str(value).strip().lower()
+    if level not in EMBEDDED_PAYLOAD_SCAN_LEVELS:
+        allowed = ", ".join(EMBEDDED_PAYLOAD_SCAN_LEVELS)
+        raise ValueError(f"embedded_payload_identity.embedded_payload_scan_level must be one of: {allowed}")
+    return level
 
 
 @register_rule(name="embedded_payload_identity", layer="scoring")
@@ -85,6 +128,12 @@ class EmbeddedPayloadIdentityScoreRule(RuleBase):
             "default": DEFAULT_REQUIRE_ZIP_PLAUSIBILITY_FOR_CARRIER_TAIL,
             "description": "Require a structurally plausible ZIP local header before accepting carrier-tail ZIP hits.",
         },
+        "embedded_payload_scan_level": {
+            "type": "str",
+            "required": False,
+            "default": DEFAULT_EMBEDDED_PAYLOAD_SCAN_LEVEL,
+            "description": "Coarse scan cost level for embedded payload detection: light, balanced, deep, or manual.",
+        },
         "carrier_exts": {
             "type": "list[str]",
             "required": False,
@@ -146,6 +195,14 @@ class EmbeddedPayloadIdentityScoreRule(RuleBase):
             "description": "Allow full carrier marker scans regardless of carrier_scan_full_scan_max_bytes.",
         },
     }
+
+    def prepare_config(self, config: Dict[str, Any]) -> Dict[str, Any]:
+        level = _normalize_scan_level(config.get("embedded_payload_scan_level"))
+        prepared = dict(config)
+        prepared["embedded_payload_scan_level"] = level
+        if level != "manual":
+            prepared.update(_SCAN_LEVEL_OVERRIDES[level])
+        return prepared
 
     def _record_zip_plausibility(self, facts: FactBag, payload: Dict[str, Any]):
         zip_header = payload.get("zip_local_header") or {}
