@@ -1,7 +1,7 @@
 from copy import deepcopy
 from typing import Any
 
-from sunpack.detection.scene.definitions import RECOMMENDED_SCENE_RULES_PAYLOAD
+from tests.helpers.scene_rules import RECOMMENDED_SCENE_RULES_PAYLOAD
 from tests.helpers.detection_config import with_detection_pipeline
 
 
@@ -83,3 +83,4 @@ def deep_merge(target: dict[str, Any], source: dict[str, Any]):
             deep_merge(target[key], value)
         else:
             target[key] = deepcopy(value)
+

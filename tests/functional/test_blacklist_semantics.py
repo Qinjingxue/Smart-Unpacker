@@ -3,7 +3,7 @@ from pathlib import Path
 from sunpack.detection.nested_scan_policy import NestedOutputScanPolicy as OutputScanPolicy
 from sunpack.coordinator.scanner import ScanOrchestrator
 from sunpack.detection import DetectionScheduler
-from sunpack.detection.scene.definitions import RECOMMENDED_SCENE_RULES_PAYLOAD
+from tests.helpers.scene_rules import RECOMMENDED_SCENE_RULES_PAYLOAD
 from tests.helpers.detection_config import with_detection_pipeline
 
 
@@ -144,3 +144,4 @@ def test_scene_protect_stops_runtime_resource_archive_but_not_generic_control(tm
     assert not decisions["game/www/audio/bgm.7z"].should_extract
     assert decisions["game/www/audio/bgm.7z"].matched_rules == ["scene_protect"]
     assert decisions["generic/payload.7z"].should_extract
+

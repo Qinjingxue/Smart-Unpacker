@@ -57,6 +57,7 @@ def relation_group_to_fact_bag(group: CandidateGroup) -> FactBag:
     bag.set("relation.split_family", relation.split_family)
     bag.set("relation.split_index", relation.split_index)
     bag.set("relation.split_is_first", relation.split_role == "first")
+    _inject_scene_metadata(bag, group.head_metadata or {})
     if group.split_volumes:
         bag.set("relation.split_volumes", [
             {
@@ -73,6 +74,24 @@ def relation_group_to_fact_bag(group: CandidateGroup) -> FactBag:
     if member_paths:
         bag.set("relation.member_paths", list(member_paths))
     return bag
+
+
+def _inject_scene_metadata(bag: FactBag, metadata: dict) -> None:
+    scene = metadata.get("scene") if isinstance(metadata, dict) else None
+    if not isinstance(scene, dict):
+        return
+    for key, value in scene.items():
+        if key == "context":
+            bag.set("scene.context", value if isinstance(value, dict) else {})
+        elif key.startswith("scene."):
+            bag.set(key, value)
+        else:
+            bag.set(f"scene.{key}", value)
+    if bag.get("scene.is_protected_path") and not bag.get("scene.is_runtime_exact_path"):
+        bag.set(
+            "scene.is_runtime_resource_archive",
+            bool(bag.get("scene.protected_archive_ext_match") or bag.get("relation.is_split_related")),
+        )
 
 
 def build_candidate_fact_bags(directory: str, relations: RelationsScheduler | None = None) -> List[FactBag]:

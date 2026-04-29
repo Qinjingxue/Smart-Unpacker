@@ -18,7 +18,6 @@ class DetectionScanSession:
         self.relations = relations or RelationsScheduler()
         self.config = config or {}
         self._snapshots: dict[str, DirectorySnapshot] = {}
-        self._scene_snapshots: dict[str, DirectorySnapshot] = {}
         self._relation_groups: dict[str, List[CandidateGroup]] = {}
         self._fact_bags: dict[str, List[FactBag]] = {}
         self._file_head_facts: dict[str, dict[str, Any]] = {}
@@ -57,12 +56,6 @@ class DetectionScanSession:
         if full_key in self._snapshots:
             return self._snapshots[full_key]
         return self._snapshot_for_directory(directory, max_depth=max_depth)
-
-    def scene_snapshot_for_directory(self, directory: str, max_depth: int) -> DirectorySnapshot:
-        key = self._snapshot_key(directory, max_depth)
-        if key not in self._scene_snapshots:
-            self._scene_snapshots[key] = DirectoryScanner(directory, max_depth=max_depth, config={}).scan()
-        return self._scene_snapshots[key]
 
     def _snapshot_for_directory(self, directory: str, max_depth: int | None) -> DirectorySnapshot:
         key = self._snapshot_key(directory, max_depth)

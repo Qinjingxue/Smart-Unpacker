@@ -19,52 +19,52 @@ FACT_SCHEMA: dict[str, dict[str, Any]] = {
     },
     "scene.context": {
         "type": "dict",
-        "producer": "processors.scene_facts",
+        "producer": "filesystem.scene_semantics",
         "description": "Detected directory scene, including scene_type, target_dir, match_strength, and markers.",
     },
     "scene.relative_path": {
         "type": "str",
-        "producer": "processors.scene_facts",
+        "producer": "filesystem.scene_semantics",
         "description": "Candidate path relative to the detected scene root.",
     },
     "scene.scene_type": {
         "type": "str",
-        "producer": "processors.scene_facts",
+        "producer": "filesystem.scene_semantics",
         "description": "Detected scene type for the candidate path.",
     },
     "scene.match_strength": {
         "type": "str",
-        "producer": "processors.scene_facts",
+        "producer": "filesystem.scene_semantics",
         "description": "Detected scene match strength.",
     },
     "scene.is_runtime_exact_path": {
         "type": "bool",
-        "producer": "processors.scene_facts",
+        "producer": "filesystem.scene_semantics",
         "description": "Whether the candidate is a scene runtime exact path.",
     },
     "scene.is_protected_exact_path": {
         "type": "bool",
-        "producer": "processors.scene_facts",
+        "producer": "filesystem.scene_semantics",
         "description": "Whether the candidate matches a protected exact scene path.",
     },
     "scene.is_protected_prefix_path": {
         "type": "bool",
-        "producer": "processors.scene_facts",
+        "producer": "filesystem.scene_semantics",
         "description": "Whether the candidate is under a protected scene prefix.",
     },
     "scene.is_protected_path": {
         "type": "bool",
-        "producer": "processors.scene_facts",
+        "producer": "filesystem.scene_semantics",
         "description": "Whether the candidate is in a protected scene path.",
     },
     "scene.protected_archive_ext_match": {
         "type": "bool",
-        "producer": "processors.scene_facts",
+        "producer": "filesystem.scene_semantics",
         "description": "Whether the candidate extension is protected as a scene archive resource.",
     },
     "scene.is_runtime_resource_archive": {
         "type": "bool",
-        "producer": "processors.scene_facts",
+        "producer": "filesystem.scene_semantics",
         "description": "Whether the candidate is a protected scene runtime resource archive.",
     },
     "7z.probe": {

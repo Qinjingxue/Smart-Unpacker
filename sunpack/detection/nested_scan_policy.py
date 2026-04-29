@@ -3,7 +3,7 @@ from typing import Any, Iterable
 
 from sunpack.config.detection_view import module_config, rule_pipeline_config
 from sunpack.contracts.filesystem import FileEntry
-from sunpack.detection.scene.directory_context import (
+from sunpack.filesystem.filters.modules.scene_semantics import (
     detect_scene_context_for_directory,
     is_strong_scene_context,
 )
@@ -27,7 +27,7 @@ class NestedOutputScanPolicy:
 
     def should_scan_output_dir(self, target_dir: str) -> bool:
         snapshot = DirectoryScanner(target_dir, config=self.config).scan()
-        ctx = detect_scene_context_for_directory(target_dir, snapshot=snapshot)
+        ctx = detect_scene_context_for_directory(target_dir, entries=snapshot.entries)
         if is_strong_scene_context(ctx):
             print(
                 "[SCAN] Skipping strong scene output directory: "

@@ -5,7 +5,7 @@ import pytest
 
 from sunpack.contracts.detection import FactBag
 from sunpack.detection import DetectionScheduler
-from sunpack.detection.scene.definitions import RECOMMENDED_SCENE_RULES_PAYLOAD
+from tests.helpers.scene_rules import RECOMMENDED_SCENE_RULES_PAYLOAD
 from tests.helpers.detection_config import with_detection_pipeline
 from tests.helpers.fs_builder import make_zip
 
@@ -182,3 +182,4 @@ def test_chromium_nwjs_runtime_exe_with_embedded_payload_is_protected(tmp_path):
     assert bag.get("scene.match_strength") == "strong"
     assert bag.get("scene.is_runtime_exact_path") is True
     assert bag.get("pe.overlay_structure", {}).get("archive_like") is True
+

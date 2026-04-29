@@ -32,11 +32,16 @@ def _first_existing_config(filename: str) -> Path | None:
 
 
 _NAMED_MODULE_LIST_PATHS = {
+    ("filesystem", "scan_filters"),
     ("detection", "fact_collectors"),
     ("detection", "processors"),
     ("detection", "rule_pipeline", "precheck"),
     ("detection", "rule_pipeline", "scoring"),
     ("detection", "rule_pipeline", "confirmation"),
+}
+
+_OVERRIDE_ORDERED_NAMED_MODULE_LIST_PATHS = {
+    ("filesystem", "scan_filters"),
 }
 
 
@@ -48,13 +53,17 @@ def _deep_merge_config(base: dict[str, Any], override: dict[str, Any], path: tup
         if isinstance(base_value, dict) and isinstance(value, dict):
             merged[key] = _deep_merge_config(base_value, value, item_path)
         elif item_path in _NAMED_MODULE_LIST_PATHS and isinstance(base_value, list) and isinstance(value, list):
-            merged[key] = _merge_named_module_list(base_value, value)
+            merged[key] = _merge_named_module_list(
+                base_value,
+                value,
+                override_order=item_path in _OVERRIDE_ORDERED_NAMED_MODULE_LIST_PATHS,
+            )
         else:
             merged[key] = value
     return merged
 
 
-def _merge_named_module_list(base: list[Any], override: list[Any]) -> list[Any]:
+def _merge_named_module_list(base: list[Any], override: list[Any], *, override_order: bool = False) -> list[Any]:
     merged = list(base)
     indexes = {
         item.get("name"): index
@@ -71,6 +80,28 @@ def _merge_named_module_list(base: list[Any], override: list[Any]) -> list[Any]:
             merged.append(item)
             continue
         merged[existing_index] = _deep_merge_config(merged[existing_index], item)
+    if override_order:
+        override_names = [
+            item.get("name")
+            for item in override
+            if isinstance(item, dict) and isinstance(item.get("name"), str)
+        ]
+        by_name = {
+            item.get("name"): item
+            for item in merged
+            if isinstance(item, dict) and isinstance(item.get("name"), str)
+        }
+        ordered = [by_name[name] for name in override_names if name in by_name]
+        ordered.extend(
+            item
+            for item in merged
+            if not (
+                isinstance(item, dict)
+                and isinstance(item.get("name"), str)
+                and item["name"] in override_names
+            )
+        )
+        return ordered
     return merged
 
 

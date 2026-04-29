@@ -8,7 +8,7 @@ from pathlib import Path
 from sunpack.contracts.detection import FactBag
 from sunpack.coordinator.inspector import InspectOrchestrator
 from sunpack.detection import DetectionScheduler
-from sunpack.detection.scene.definitions import RECOMMENDED_SCENE_RULES_PAYLOAD
+from tests.helpers.scene_rules import RECOMMENDED_SCENE_RULES_PAYLOAD
 from tests.helpers.detection_config import with_detection_pipeline
 
 
@@ -451,3 +451,4 @@ class DetectionBehaviorTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

@@ -16,6 +16,16 @@
     "scan_filters_enabled": true,
     "scan_filters": [
       {
+        "name": "scene_semantics",
+        "enabled": true,
+        "protect_runtime_resources": true,
+        "prune_dir_globs": [
+          ".git", ".vscode", "__pycache__", "node_modules",
+          "site-packages", ".venv", "venv", "env",
+          ".cache", "repositories"
+        ]
+      },
+      {
         "name": "whitelist",
         "enabled": false,
         "path_globs": ["archives/**", "downloads/**"],

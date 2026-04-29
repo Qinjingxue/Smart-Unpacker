@@ -29,11 +29,22 @@ def with_detection_pipeline(
     result = dict(config or {})
     scan_filters = []
     remaining_precheck = []
+    uses_scene = False
     for rule in precheck or []:
         if isinstance(rule, dict) and rule.get("name") in {"blacklist", "size_minimum"}:
             scan_filters.append(dict(rule))
         else:
             remaining_precheck.append(rule)
+        if isinstance(rule, dict) and rule.get("name") == "scene_protect":
+            uses_scene = True
+    if any(isinstance(rule, dict) and rule.get("name") == "scene_penalty" for rule in scoring or []):
+        uses_scene = True
+    if uses_scene:
+        scan_filters.insert(0, {
+            "name": "scene_semantics",
+            "enabled": True,
+            "protect_runtime_resources": True,
+        })
     if scan_filters:
         filesystem = dict(result.get("filesystem") or {})
         filesystem["scan_filters"] = scan_filters

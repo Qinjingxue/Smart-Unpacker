@@ -5,7 +5,7 @@ import pytest
 from sunpack.contracts.detection import FactBag
 from sunpack.detection import DetectionScheduler
 from sunpack.detection.pipeline.rules.scoring.zip_structure_identity import ZipStructureIdentityScoreRule
-from sunpack.detection.scene.definitions import RECOMMENDED_SCENE_RULES_PAYLOAD
+from tests.helpers.scene_rules import RECOMMENDED_SCENE_RULES_PAYLOAD
 from tests.helpers.detection_config import with_detection_pipeline
 from tests.helpers.fs_builder import make_zip
 
@@ -84,3 +84,4 @@ def test_scoring_stops_after_archive_threshold_when_remaining_rules_cannot_reduc
     assert decision.should_extract is True
     assert decision.total_score == 5
     assert decision.matched_rules == ["extension"]
+

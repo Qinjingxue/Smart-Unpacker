@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set
 
 from sunpack.contracts.filesystem import FileEntry
 
@@ -46,6 +46,7 @@ class CandidateGroup:
     split_group_complete: bool | None = None
     split_missing_reason: str = ""
     split_missing_indices: List[int] = None
+    head_metadata: Dict[str, Any] | None = None
 
     @property
     def kind(self) -> str:

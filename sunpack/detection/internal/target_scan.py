@@ -60,7 +60,7 @@ def build_fact_bags_for_targets(
     scan_roots = list(selected_dirs)
     for file_path in selected_files:
         if not any(safe_relative_path(file_path, directory) is not None for directory in selected_dirs):
-            scan_roots.append(os.path.dirname(file_path) or os.getcwd())
+            scan_roots.append(_context_root_for_file(file_path, config or {}))
     if hasattr(session, "set_scan_roots"):
         session.set_scan_roots(scan_roots)
 
@@ -74,7 +74,7 @@ def build_fact_bags_for_targets(
         if any(safe_relative_path(file_path, directory) is not None for directory in selected_dirs):
             continue
 
-        parent = os.path.dirname(file_path) or os.getcwd()
+        parent = _context_root_for_file(file_path, config or {})
         parent_bags = session.fact_bags_for_directory(parent)
 
         selected_key = path_key(file_path)
@@ -92,3 +92,20 @@ def build_fact_bags_for_targets(
         _add_unique(fact_bags, seen_keys, matched)
 
     return fact_bags
+
+
+def _context_root_for_file(file_path: str, config: dict) -> str:
+    current = os.path.dirname(file_path) or os.getcwd()
+    depth = _scene_context_parent_depth(config)
+    while depth > 0:
+        parent = os.path.dirname(current)
+        if not parent or parent == current:
+            break
+        current = parent
+        depth -= 1
+    return current
+
+
+def _scene_context_parent_depth(config: dict) -> int:
+    return 0
+

@@ -283,7 +283,6 @@ def install_wrappers(recorder: HotspotRecorder) -> None:
     recorder.wrap(scan_session, "_native_batch_file_head_facts", "native.batch_file_head_facts")
     recorder.wrap(scan_session.DetectionScanSession, "snapshot_for_directory", "session.snapshot_for_directory")
     recorder.wrap(scan_session.DetectionScanSession, "shallow_snapshot_for_directory", "session.shallow_snapshot_for_directory")
-    recorder.wrap(scan_session.DetectionScanSession, "scene_snapshot_for_directory", "session.scene_snapshot_for_directory")
     recorder.wrap(scan_session.DetectionScanSession, "relation_groups_for_directory", "session.relation_groups_for_directory")
     recorder.wrap(scan_session.DetectionScanSession, "fact_bags_for_directory", "session.fact_bags_for_directory")
     recorder.wrap(scan_session.DetectionScanSession, "file_head_facts_for_paths", "session.file_head_facts_for_paths")

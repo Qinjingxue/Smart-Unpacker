@@ -76,6 +76,7 @@ class RelationsGroupBuilder:
             first_volume = next((volume for volume in split_volumes if volume.number == 1), None)
             if first_volume:
                 head_path = first_volume.path
+            head_entry = directory_index.by_norm_path.get(path_key(head_path)) if directory_index is not None else None
             return CandidateGroup(
                 head_path=head_path,
                 logical_name=str(raw.get("logical_name") or relation.logical_name),
@@ -87,6 +88,7 @@ class RelationsGroupBuilder:
                 split_group_complete=split_complete,
                 split_missing_reason=missing_reason,
                 split_missing_indices=missing_indices,
+                head_metadata=dict(head_entry.metadata or {}) if head_entry is not None else {},
             )
         except (TypeError, ValueError):
             return None
@@ -583,6 +585,7 @@ class RelationsGroupBuilder:
             first_volume = next((volume for volume in split_volumes if volume.number == 1), None)
             if first_volume:
                 head_path = first_volume.path
+            metadata_entry = directory_index.by_norm_path.get(path_key(head_path)) if directory_index is not None else entry
             return CandidateGroup(
                 head_path=head_path,
                 logical_name=relation.logical_name,
@@ -594,6 +597,7 @@ class RelationsGroupBuilder:
                 split_group_complete=split_complete,
                 split_missing_reason=missing_reason,
                 split_missing_indices=missing_indices,
+                head_metadata=dict(metadata_entry.metadata or {}) if metadata_entry is not None else {},
             )
 
         head_entry = None
@@ -632,6 +636,7 @@ class RelationsGroupBuilder:
         first_volume = next((volume for volume in split_volumes if volume.number == 1), None)
         if first_volume:
             head_path = first_volume.path
+        metadata_entry = directory_index.by_norm_path.get(path_key(head_path)) if directory_index is not None else head_entry
 
         return CandidateGroup(
             head_path=head_path,
@@ -644,6 +649,7 @@ class RelationsGroupBuilder:
             split_group_complete=split_complete,
             split_missing_reason=missing_reason,
             split_missing_indices=missing_indices,
+            head_metadata=dict(metadata_entry.metadata or {}) if metadata_entry is not None else {},
         )
 
     def _has_split_companions_in_dir(self, sibling_names: Set[str], base_name: str) -> bool:

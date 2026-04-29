@@ -1,7 +1,7 @@
 from sunpack.filesystem.directory_scanner import DirectoryScanner
 from sunpack.detection import DetectionScheduler
 from sunpack.detection.task_provider import ArchiveTaskProvider
-from sunpack.detection.scene.definitions import RECOMMENDED_SCENE_RULES_PAYLOAD
+from tests.helpers.scene_rules import RECOMMENDED_SCENE_RULES_PAYLOAD
 from tests.helpers.detection_config import with_detection_pipeline
 
 
@@ -542,41 +542,6 @@ def test_target_scan_reuses_session_for_duplicate_directories(tmp_path, monkeypa
     assert scan_count == 1
 
 
-def test_archive_task_provider_reuses_scan_session_for_scene_facts(tmp_path, monkeypatch):
-    target = tmp_path / "archive.7z"
-    target.write_bytes(b"7z\xbc\xaf\x27\x1c" + b"payload")
-
-    import sunpack.detection.pipeline.facts.collectors.scene_markers as scene_markers
-
-    def fail_if_directory_fallback(directory, rules):
-        raise AssertionError(f"scene facts should use scan-session snapshots, got fallback scan for {directory}")
-
-    monkeypatch.setattr(scene_markers, "collect_scene_markers_from_directory", fail_if_directory_fallback)
-
-    config = with_detection_pipeline(
-        {"thresholds": {"archive_score_threshold": 5, "maybe_archive_threshold": 3}},
-        precheck=[
-            {"name": "size_minimum", "enabled": True, "min_inspection_size_bytes": 0},
-            {
-                "name": "scene_protect",
-                "enabled": True,
-                "scene_rules": RECOMMENDED_SCENE_RULES_PAYLOAD,
-            },
-        ],
-        scoring=[
-            {
-                "name": "extension",
-                "enabled": True,
-                "extension_score_groups": [{"score": 5, "extensions": [".7z"]}],
-            },
-        ],
-    )
-
-    tasks = ArchiveTaskProvider(config).scan_targets([str(tmp_path)])
-
-    assert [task.main_path for task in tasks] == [str(target)]
-
-
 def test_archive_task_provider_detection_enabled_false_uses_standard_archive_fallback(tmp_path, monkeypatch):
     target = tmp_path / "archive.zip"
     target.write_bytes(b"PK\x03\x04payload")
@@ -603,24 +568,6 @@ def test_archive_task_provider_detection_enabled_false_uses_standard_archive_fal
     tasks = provider.scan_targets([str(tmp_path)])
 
     assert [task.main_path for task in tasks] == [str(target)]
-
-
-def test_scene_marker_directory_fallback_uses_bounded_depth(tmp_path, monkeypatch):
-    from sunpack.detection.pipeline.facts.collectors.scene_markers import _collect_scene_markers_for_directory
-
-    observed_depths = []
-    original_scan = DirectoryScanner.scan
-
-    def recording_scan(self):
-        observed_depths.append(self.max_depth)
-        return original_scan(self)
-
-    monkeypatch.setattr(DirectoryScanner, "scan", recording_scan)
-
-    markers = _collect_scene_markers_for_directory(str(tmp_path), RECOMMENDED_SCENE_RULES_PAYLOAD, snapshot=None)
-
-    assert markers == []
-    assert observed_depths == [3]
 
 
 def test_scene_context_does_not_scan_above_selected_root(tmp_path, monkeypatch):
@@ -661,3 +608,4 @@ def test_scene_context_does_not_scan_above_selected_root(tmp_path, monkeypatch):
     tasks = ArchiveTaskProvider(config).scan_targets([str(selected_root)])
 
     assert [task.main_path for task in tasks] == [str(archive)]
+

@@ -6,6 +6,7 @@ from sunpack.contracts.filesystem import DirectorySnapshot, FileEntry
 from sunpack.config.detection_view import DIRECTORY_SCAN_CURRENT_DIR_ONLY, directory_scan_mode
 from sunpack.filesystem.filters import build_filters
 from sunpack.filesystem.filters.base import ScanCandidate, ScanFilter
+from sunpack.filesystem.filters.modules.scene_semantics import annotate_scene_metadata
 
 
 class DirectoryScanner:
@@ -62,16 +63,23 @@ class DirectoryScanner:
         prune_dirs: list[str] = []
         blocked_extensions: list[str] = []
         min_size = None
+        seen_scene_semantics = False
 
         for scan_filter in self.filters:
             name = getattr(scan_filter, "name", "")
             stage = getattr(scan_filter, "stage", "")
+            if name == "scene_semantics":
+                seen_scene_semantics = True
+                continue
             if name == "blacklist" and stage == "path":
-                patterns.extend(getattr(scan_filter, "patterns", []) or [])
                 prune_dirs.extend(getattr(scan_filter, "prune_dirs", []) or [])
-                blocked_extensions.extend(getattr(scan_filter, "blocked_extensions", []) or [])
+                if not seen_scene_semantics:
+                    patterns.extend(getattr(scan_filter, "patterns", []) or [])
+                    blocked_extensions.extend(getattr(scan_filter, "blocked_extensions", []) or [])
                 continue
             if name in {"size_minimum", "size_range"} and stage == "size":
+                if seen_scene_semantics:
+                    break
                 value = getattr(scan_filter, "min_inspection_size_bytes", None)
                 if value is not None:
                     try:
@@ -91,7 +99,19 @@ class DirectoryScanner:
         }
 
     def _apply_ordered_filters(self, entries: list[FileEntry]) -> list[FileEntry]:
-        return apply_ordered_filters_to_entries(entries, self.filters)
+        if not self.filters:
+            return entries
+
+        current = entries
+        for scan_filter in self.filters:
+            if getattr(scan_filter, "name", "") == "scene_semantics":
+                current = annotate_scene_metadata(
+                    current,
+                    self.root_path.parent if self.root_path.is_file() else self.root_path,
+                    getattr(scan_filter, "config", {}) or {},
+                )
+            current = apply_filter_to_entries(current, scan_filter)
+        return current
 
     @staticmethod
     def _under_any(path: Path, parents: list[Path]) -> bool:
@@ -119,6 +139,7 @@ def apply_filter_to_entries(entries: list[FileEntry], scan_filter: ScanFilter) -
             kind="dir" if entry.is_dir else "file",
             size=entry.size,
             mtime_ns=entry.mtime_ns,
+            metadata=entry.metadata,
         ))
         if decision.prune_dir and entry.is_dir:
             pruned_dirs.append(entry.path)

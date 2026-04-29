@@ -18,6 +18,7 @@ mod pe_overlay;
 mod postprocess_ops;
 mod relations;
 mod repair_io;
+mod scene_semantics;
 mod util;
 mod zip_deep_repair;
 mod zip_names;
@@ -67,6 +68,10 @@ fn sunpack_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(directory_scan::scan_directory_entries, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        scene_semantics::scene_semantics_payloads,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(
         directory_scan::list_regular_files_in_directory,
         m
