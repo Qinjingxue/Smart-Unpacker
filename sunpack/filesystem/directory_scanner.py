@@ -130,9 +130,9 @@ def apply_ordered_filters_to_entries(entries: list[FileEntry], filters: list[Sca
 
 def apply_filter_to_entries(entries: list[FileEntry], scan_filter: ScanFilter) -> list[FileEntry]:
     kept: list[FileEntry] = []
-    pruned_dirs: list[Path] = []
+    pruned_dir_keys: set[str] = set()
     for entry in sorted(entries, key=lambda item: (len(item.path.parts), str(item.path).lower())):
-        if _under_any(entry.path, pruned_dirs):
+        if _under_any_key(entry.path, pruned_dir_keys):
             continue
         decision = scan_filter.evaluate(ScanCandidate(
             path=entry.path,
@@ -142,7 +142,7 @@ def apply_filter_to_entries(entries: list[FileEntry], scan_filter: ScanFilter) -
             metadata=entry.metadata,
         ))
         if decision.prune_dir and entry.is_dir:
-            pruned_dirs.append(entry.path)
+            pruned_dir_keys.add(_path_key(entry.path))
         if decision.reject_entry:
             continue
         kept.append(entry)
@@ -157,3 +157,18 @@ def _under_any(path: Path, parents: list[Path]) -> bool:
             continue
         return path != parent
     return False
+
+
+def _under_any_key(path: Path, parent_keys: set[str]) -> bool:
+    if not parent_keys:
+        return False
+    current = path.parent
+    while current != current.parent:
+        if _path_key(current) in parent_keys:
+            return True
+        current = current.parent
+    return _path_key(current) in parent_keys
+
+
+def _path_key(path: Path) -> str:
+    return str(path).replace("\\", "/").rstrip("/").lower()

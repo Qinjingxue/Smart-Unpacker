@@ -66,17 +66,17 @@ def _write_rpg_maker(root: Path) -> Path:
     return archive
 
 
-def test_scene_semantics_annotates_runtime_resource_before_filtering(tmp_path):
+def test_scene_semantics_prunes_matched_scene_subtree_before_later_filters(tmp_path):
+    scene_root = tmp_path / "game"
     archive = _write_rpg_maker(tmp_path / "game")
 
     config = _config()
     config["filesystem"]["scan_filters"][0]["protect_runtime_resources"] = False
     snapshot = DirectoryScanner(str(tmp_path), config=config).scan()
 
-    entry = next(item for item in snapshot.entries if item.path == archive)
-    scene = entry.metadata["scene"]
-    assert scene["scene_type"] == "rpg_maker_game"
-    assert scene["is_runtime_resource_archive"] is True
+    paths = {item.path for item in snapshot.entries}
+    assert scene_root not in paths
+    assert archive not in paths
 
 
 def test_scene_semantics_filters_runtime_resource_before_detection(tmp_path):

@@ -8,7 +8,6 @@ struct SceneEntryIndex {
     files_by_parent: HashMap<String, HashSet<String>>,
     dirs_by_parent: HashMap<String, HashSet<String>>,
     dirs_by_key: HashMap<String, String>,
-    files: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -20,11 +19,6 @@ struct SceneRule {
     nested_path_markers: HashMap<String, String>,
     match_variants: Vec<SceneVariant>,
     weak_match_variants: Vec<SceneVariant>,
-    protected_prefixes: Vec<String>,
-    protected_exact_paths: HashSet<String>,
-    protected_archive_exts: HashSet<String>,
-    runtime_exact_paths: HashSet<String>,
-    runtime_glob_paths: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -64,16 +58,13 @@ pub(crate) fn scene_semantics_payloads(
         .collect::<Vec<_>>();
     let index = build_index(root_path, entries, &prune_dir_globs)?;
     let result = PyDict::new(py);
-    let active_scene_by_dir = detect_active_scene_contexts(&index, &rules);
+    let scene_roots = detect_scene_roots(&index, &rules);
 
-    for file_path in &index.files {
-        let parent_key = path_key(&parent_path(file_path));
-        let Some(context) = active_scene_by_dir.get(&parent_key) else {
+    for (directory_key, context) in scene_roots {
+        let Some(directory_path) = index.dirs_by_key.get(&directory_key) else {
             continue;
         };
-        if let Some(payload) = scene_payload(py, file_path, context, &rules)? {
-            result.set_item(file_path, payload)?;
-        }
+        result.set_item(directory_path, scene_directory_payload(py, &context)?)?;
     }
     Ok(result.unbind())
 }
@@ -98,27 +89,6 @@ fn parse_rules(rules: Vec<Bound<'_, PyDict>>) -> PyResult<Vec<SceneRule>> {
                 .collect(),
             match_variants: get_variants(&rule, "match_variants")?,
             weak_match_variants: get_variants(&rule, "weak_match_variants")?,
-            protected_prefixes: get_string_list(&rule, "protected_prefixes")?
-                .into_iter()
-                .map(|item| normalize_relative(&item).to_ascii_lowercase())
-                .collect(),
-            protected_exact_paths: get_string_list(&rule, "protected_exact_paths")?
-                .into_iter()
-                .map(|item| normalize_relative(&item).to_ascii_lowercase())
-                .collect(),
-            protected_archive_exts: get_string_list(&rule, "protected_archive_exts")?
-                .into_iter()
-                .map(|item| normalize_extension(&item))
-                .filter(|item| !item.is_empty())
-                .collect(),
-            runtime_exact_paths: get_string_list(&rule, "runtime_exact_paths")?
-                .into_iter()
-                .map(|item| normalize_relative(&item).to_ascii_lowercase())
-                .collect(),
-            runtime_glob_paths: get_string_list(&rule, "runtime_glob_paths")?
-                .into_iter()
-                .map(|item| normalize_relative(&item).to_ascii_lowercase())
-                .collect(),
         });
     }
     Ok(parsed)
@@ -136,7 +106,6 @@ fn build_index(
         files_by_parent: HashMap::new(),
         dirs_by_parent: HashMap::new(),
         dirs_by_key: HashMap::from([(root_key, root_path.clone())]),
-        files: Vec::new(),
     };
 
     for row in entries {
@@ -166,7 +135,6 @@ fn build_index(
                 .entry(parent_key)
                 .or_default()
                 .insert(name);
-            index.files.push(path);
         }
     }
     Ok(index)
@@ -279,15 +247,22 @@ fn collect_markers_for_directory(
     markers
 }
 
-fn detect_active_scene_contexts(
+fn detect_scene_roots(
     index: &SceneEntryIndex,
     rules: &[SceneRule],
-) -> HashMap<String, SceneContext> {
+) -> Vec<(String, SceneContext)> {
     let mut directory_keys = index.dirs_by_key.keys().cloned().collect::<Vec<_>>();
     directory_keys.sort_by_key(|key| (key.matches('/').count(), key.clone()));
 
-    let mut active: HashMap<String, SceneContext> = HashMap::new();
+    let mut roots: Vec<(String, SceneContext)> = Vec::new();
     for directory_key in directory_keys {
+        if roots
+            .iter()
+            .any(|(root_key, _)| directory_key != *root_key && directory_key.starts_with(&format!("{root_key}/")))
+        {
+            continue;
+        }
+
         let mut markers = collect_markers_for_directory(index, &directory_key, rules)
             .into_iter()
             .collect::<Vec<_>>();
@@ -299,15 +274,10 @@ fn detect_active_scene_contexts(
             .unwrap_or_else(|| directory_key.clone());
         let context = context_from_markers(target_dir, &markers, rules);
         if context.scene_type != "generic" {
-            active.insert(directory_key, context);
-            continue;
-        }
-        let parent_key = parent_path(&directory_key);
-        if let Some(parent_context) = active.get(&parent_key).cloned() {
-            active.insert(directory_key, parent_context);
+            roots.push((directory_key, context));
         }
     }
-    active
+    roots
 }
 
 fn context_from_markers(target_dir: String, markers: &[String], rules: &[SceneRule]) -> SceneContext {
@@ -348,12 +318,7 @@ fn context_from_markers(target_dir: String, markers: &[String], rules: &[SceneRu
     }
 }
 
-fn scene_payload(
-    py: Python<'_>,
-    path: &str,
-    context: &SceneContext,
-    rules: &[SceneRule],
-) -> PyResult<Option<Py<PyDict>>> {
+fn scene_directory_payload(py: Python<'_>, context: &SceneContext) -> PyResult<Py<PyDict>> {
     let payload = PyDict::new(py);
     let context_dict = PyDict::new(py);
     context_dict.set_item("target_dir", &context.target_dir)?;
@@ -370,46 +335,8 @@ fn scene_payload(
     payload.set_item("is_protected_path", false)?;
     payload.set_item("protected_archive_ext_match", false)?;
     payload.set_item("is_runtime_resource_archive", false)?;
-
-    if context.scene_type == "generic" {
-        return Ok(None);
-    }
-    let Some(rule) = rules
-        .iter()
-        .find(|rule| rule.scene_type == context.scene_type)
-    else {
-        return Ok(None);
-    };
-    let Some(rel_path) = relative_to(path, &context.target_dir) else {
-        return Ok(None);
-    };
-    let rel_lower = rel_path.to_ascii_lowercase();
-    let ext = extension(path);
-    let is_runtime_exact = rule.runtime_exact_paths.contains(&rel_lower)
-        || rule
-            .runtime_glob_paths
-            .iter()
-            .any(|pattern| wildcard_path_match(pattern, &rel_lower));
-    let is_protected_exact = rule.protected_exact_paths.contains(&rel_lower);
-    let is_protected_prefix = rule
-        .protected_prefixes
-        .iter()
-        .any(|prefix| rel_lower == *prefix || rel_lower.starts_with(&format!("{prefix}/")));
-    let protected_archive_ext_match = rule.protected_archive_exts.contains(&ext);
-    let is_protected_path = is_protected_exact || is_protected_prefix;
-    let is_runtime_resource_archive = !is_runtime_exact && is_protected_path && protected_archive_ext_match;
-    if !is_runtime_exact && !is_runtime_resource_archive {
-        return Ok(None);
-    }
-
-    payload.set_item("relative_path", rel_path)?;
-    payload.set_item("is_runtime_exact_path", is_runtime_exact)?;
-    payload.set_item("is_protected_exact_path", is_protected_exact)?;
-    payload.set_item("is_protected_prefix_path", is_protected_prefix)?;
-    payload.set_item("is_protected_path", is_protected_path)?;
-    payload.set_item("protected_archive_ext_match", protected_archive_ext_match)?;
-    payload.set_item("is_runtime_resource_archive", is_runtime_resource_archive)?;
-    Ok(Some(payload.unbind()))
+    payload.set_item("prune_scene_subtree", true)?;
+    Ok(payload.unbind())
 }
 
 fn variant_matches(markers: &HashSet<String>, variant: &SceneVariant) -> bool {
@@ -506,17 +433,6 @@ fn normalize_relative(value: &str) -> String {
         .join("/")
 }
 
-fn normalize_extension(value: &str) -> String {
-    let value = value.trim().to_ascii_lowercase();
-    if value.is_empty() {
-        String::new()
-    } else if value.starts_with('.') {
-        value
-    } else {
-        format!(".{value}")
-    }
-}
-
 fn path_key(value: &str) -> String {
     normalize_path(value).to_ascii_lowercase()
 }
@@ -538,17 +454,6 @@ fn basename(value: &str) -> String {
         .next()
         .unwrap_or("")
         .to_string()
-}
-
-fn extension(value: &str) -> String {
-    let name = basename(value);
-    let Some(index) = name.rfind('.') else {
-        return String::new();
-    };
-    if index == 0 {
-        return String::new();
-    }
-    name[index..].to_ascii_lowercase()
 }
 
 fn join_key(base_key: &str, rel_path: &str) -> String {
@@ -574,10 +479,6 @@ fn relative_to(path: &str, root: &str) -> Option<String> {
     }
     let prefix_len = root_norm.len().saturating_add(1);
     path_norm.get(prefix_len..).map(|item| item.to_string())
-}
-
-fn wildcard_path_match(pattern: &str, value: &str) -> bool {
-    wildcard_match(pattern, value)
 }
 
 fn wildcard_match(pattern: &str, value: &str) -> bool {
