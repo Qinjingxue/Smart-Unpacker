@@ -5,7 +5,7 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 
-from sunpack.support.resources import candidate_resource_roots, get_7z_dll_path
+from sunpack.support.resources import candidate_resource_roots, get_7z_dll_path, tool_dir_candidates
 from sunpack.support.global_cache_manager import cached_value, file_identity
 
 
@@ -670,10 +670,11 @@ class NativePasswordTester:
     def _default_wrapper_path(self) -> str:
         candidates: list[Path] = []
         for root in candidate_resource_roots():
-            candidates.extend([
-                root / "tools" / "sevenzip_password_tester_capi.dll",
-                root / "sevenzip_password_tester_capi.dll",
-            ])
+            candidates.extend(
+                root / tool_dir / "sevenzip_password_tester_capi.dll"
+                for tool_dir in tool_dir_candidates()
+            )
+            candidates.append(root / "sevenzip_password_tester_capi.dll")
         for candidate in candidates:
             if candidate.exists():
                 return str(candidate)

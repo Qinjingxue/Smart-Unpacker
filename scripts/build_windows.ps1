@@ -262,9 +262,10 @@ function Get-CMakeCommand {
         Write-Host "Ignoring unusable venv CMake executable: $venvCMake" -ForegroundColor Yellow
     }
 
-    $globalCMake = Get-Command "cmake" -ErrorAction SilentlyContinue
-    if ($globalCMake -and (Test-CommandRuns -FilePath $globalCMake.Source)) {
-        return $globalCMake.Source
+    foreach ($globalCMake in @(Get-Command "cmake" -All -ErrorAction SilentlyContinue)) {
+        if ($globalCMake.Source -and (Test-CommandRuns -FilePath $globalCMake.Source)) {
+            return $globalCMake.Source
+        }
     }
 
     throw "cmake executable not found. Install requirements-build.txt or make CMake available in PATH."
@@ -280,9 +281,10 @@ function Get-CTestCommand {
         Write-Host "Ignoring unusable venv CTest executable: $venvCTest" -ForegroundColor Yellow
     }
 
-    $globalCTest = Get-Command "ctest" -ErrorAction SilentlyContinue
-    if ($globalCTest -and (Test-CommandRuns -FilePath $globalCTest.Source)) {
-        return $globalCTest.Source
+    foreach ($globalCTest in @(Get-Command "ctest" -All -ErrorAction SilentlyContinue)) {
+        if ($globalCTest.Source -and (Test-CommandRuns -FilePath $globalCTest.Source)) {
+            return $globalCTest.Source
+        }
     }
 
     throw "ctest executable not found. Install CMake or make CTest available in PATH."

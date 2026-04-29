@@ -299,20 +299,60 @@ function Get-MaturinCommand {
     throw "maturin executable not found. Install maturin or make it available in PATH."
 }
 
+function Test-CommandRuns {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$FilePath,
+        [string[]]$Arguments = @("--version")
+    )
+
+    if (-not (Test-Path -LiteralPath $FilePath) -and -not (Get-Command $FilePath -ErrorAction SilentlyContinue)) {
+        return $false
+    }
+    try {
+        & $FilePath @Arguments *> $null
+        return ($LASTEXITCODE -eq 0)
+    } catch {
+        return $false
+    }
+}
+
 function Get-CMakeCommand {
     param([string]$VenvScripts)
 
     $venvCMake = Join-Path $VenvScripts "cmake.exe"
-    if (Test-Path -LiteralPath $venvCMake) {
+    if ((Test-Path -LiteralPath $venvCMake) -and (Test-CommandRuns -FilePath $venvCMake)) {
         return $venvCMake
+    } elseif (Test-Path -LiteralPath $venvCMake) {
+        Write-Host "Ignoring unusable venv CMake executable: $venvCMake" -ForegroundColor Yellow
     }
 
-    $globalCMake = Get-Command "cmake" -ErrorAction SilentlyContinue
-    if ($globalCMake) {
-        return $globalCMake.Source
+    foreach ($globalCMake in @(Get-Command "cmake" -All -ErrorAction SilentlyContinue)) {
+        if ($globalCMake.Source -and (Test-CommandRuns -FilePath $globalCMake.Source)) {
+            return $globalCMake.Source
+        }
     }
 
     throw "cmake executable not found. Install CMake or make it available in PATH."
+}
+
+function Get-CTestCommand {
+    param([string]$VenvScripts)
+
+    $venvCTest = Join-Path $VenvScripts "ctest.exe"
+    if ((Test-Path -LiteralPath $venvCTest) -and (Test-CommandRuns -FilePath $venvCTest)) {
+        return $venvCTest
+    } elseif (Test-Path -LiteralPath $venvCTest) {
+        Write-Host "Ignoring unusable venv CTest executable: $venvCTest" -ForegroundColor Yellow
+    }
+
+    foreach ($globalCTest in @(Get-Command "ctest" -All -ErrorAction SilentlyContinue)) {
+        if ($globalCTest.Source -and (Test-CommandRuns -FilePath $globalCTest.Source)) {
+            return $globalCTest.Source
+        }
+    }
+
+    throw "ctest executable not found. Install CMake or make CTest available in PATH."
 }
 
 function Ensure-Maturin {
@@ -352,6 +392,8 @@ function Build-SevenZipWrapper {
         [Parameter(Mandatory = $true)]
         [string]$CMakeCommand,
         [Parameter(Mandatory = $true)]
+        [string]$CTestCommand,
+        [Parameter(Mandatory = $true)]
         [string]$WrapperRoot,
         [Parameter(Mandatory = $true)]
         [string]$BuildDir,
@@ -371,7 +413,7 @@ function Build-SevenZipWrapper {
     Invoke-Native -FilePath $CMakeCommand -Arguments @("-S", $WrapperRoot, "-B", $BuildDir, "-A", $cmakePlatform, "-DCMAKE_BUILD_TYPE=Release")
     Invoke-Native -FilePath $CMakeCommand -Arguments @("--build", $BuildDir, "--config", "Release")
     if ((Get-ProcessBuildArch) -eq $BuildArch) {
-        Invoke-Native -FilePath "ctest" -Arguments @("--test-dir", $BuildDir, "-C", "Release", "--output-on-failure")
+        Invoke-Native -FilePath $CTestCommand -Arguments @("--test-dir", $BuildDir, "-C", "Release", "--output-on-failure")
     } else {
         Write-Host "Skipping C++ smoke test because $BuildArch binaries cannot run in the current process architecture." -ForegroundColor Yellow
     }
@@ -580,7 +622,8 @@ Test-NativeImport -PythonPath $venvPython
 
 Ensure-Bundled7ZipAssets -ToolsRoot $toolsRoot -LicenseDestinationPath $sevenZipLicensePath -BuildArch $buildArch
 $cmakeCommand = Ensure-CMake -PythonPath $venvPython -VenvScripts $venvScripts
-Build-SevenZipWrapper -CMakeCommand $cmakeCommand -WrapperRoot $sevenZipWrapperRoot -BuildDir $sevenZipWrapperBuildDir -ToolsRoot $toolsRoot -SevenZipDllPath $sevenZipDllPath -BuildArch $buildArch
+$ctestCommand = Get-CTestCommand -VenvScripts $venvScripts
+Build-SevenZipWrapper -CMakeCommand $cmakeCommand -CTestCommand $ctestCommand -WrapperRoot $sevenZipWrapperRoot -BuildDir $sevenZipWrapperBuildDir -ToolsRoot $toolsRoot -SevenZipDllPath $sevenZipDllPath -BuildArch $buildArch
 Test-SevenZipWrapper -PythonPath $venvPython
 Test-SevenZipWorker -PythonPath $venvPython
 

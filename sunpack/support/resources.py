@@ -44,7 +44,7 @@ def candidate_resource_paths(filename: str) -> list[Path]:
     return [root / filename for root in candidate_resource_roots()]
 
 
-def _tool_dir_candidates() -> tuple[Path, ...]:
+def tool_dir_candidates() -> tuple[Path, ...]:
     machine = platform.machine().lower()
     if machine in {"arm64", "aarch64"}:
         return (Path("tools-arm64"), Path("tools"))
@@ -63,7 +63,7 @@ def get_7z_path() -> str:
     if sys.platform != "win32":
         raise RuntimeError("Bundled 7z.exe is only supported on Windows in this test build.")
     for root in candidate_resource_roots():
-        for relative in tuple(tool_dir / "7z.exe" for tool_dir in _tool_dir_candidates()) + (Path("7z.exe"),):
+        for relative in tuple(tool_dir / "7z.exe" for tool_dir in tool_dir_candidates()) + (Path("7z.exe"),):
             seven_z = root / relative
             if seven_z.exists():
                 return str(seven_z)
@@ -74,7 +74,7 @@ def get_sevenzip_worker_path() -> str:
     if sys.platform != "win32":
         raise RuntimeError("sevenzip_worker.exe is only supported on Windows in this test build.")
     relatives = (
-        *tuple(tool_dir / "sevenzip_worker.exe" for tool_dir in _tool_dir_candidates()),
+        *tuple(tool_dir / "sevenzip_worker.exe" for tool_dir in tool_dir_candidates()),
         Path("sevenzip_worker.exe"),
         Path("native") / "sevenzip_password_tester" / "build-x64" / "Release" / "sevenzip_worker.exe",
         Path("native") / "sevenzip_password_tester" / "build-arm64" / "Release" / "sevenzip_worker.exe",
@@ -93,7 +93,7 @@ def get_7z_dll_path() -> str:
     if sys.platform != "win32":
         raise RuntimeError("Bundled 7z.dll is only supported on Windows in this test build.")
     for root in candidate_resource_roots():
-        for relative in tuple(tool_dir / "7z.dll" for tool_dir in _tool_dir_candidates()) + (Path("7z.dll"),):
+        for relative in tuple(tool_dir / "7z.dll" for tool_dir in tool_dir_candidates()) + (Path("7z.dll"),):
             seven_z = root / relative
             if seven_z.exists():
                 return str(seven_z)

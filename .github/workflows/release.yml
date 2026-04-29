@@ -87,9 +87,12 @@ jobs:
             $version = "${{ github.ref_name }}"
           }
 
-          $buildArgs = @("-SkipTests", "-Arch", "${{ matrix.arch }}")
+          $buildArgs = @{
+            SkipTests = $true
+            Arch = "${{ matrix.arch }}"
+          }
           if ($version -ne "") {
-            $buildArgs += @("-Version", $version)
+            $buildArgs.Version = $version
           }
           .\scripts\build_windows.ps1 @buildArgs
 
