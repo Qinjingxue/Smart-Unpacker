@@ -14,8 +14,8 @@ build/
 dist/
 release/
 
+native/**/build-x64/
 # Rust native build artifacts
-native/**/target/
 
 # Virtual environments
 .venv/
@@ -60,3 +60,5 @@ GEMINI.md
 test_extract_folder/
 test_targz/
 AGENTS.md
+native/packrelic_native/target/
+native/sevenzip_password_tester/build-x64/
