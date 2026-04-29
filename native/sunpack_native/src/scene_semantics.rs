@@ -29,21 +29,17 @@ struct SceneVariant {
 
 #[derive(Debug, Clone)]
 struct SceneContext {
-    target_dir: String,
     scene_type: String,
-    match_strength: String,
-    markers: Vec<String>,
 }
 
 #[pyfunction]
 #[pyo3(signature = (root_path, entries, rules, prune_dir_globs=Vec::new()))]
-pub(crate) fn scene_semantics_payloads(
-    py: Python<'_>,
+pub(crate) fn scene_semantics_filter_entries(
     root_path: &str,
     entries: Vec<Bound<'_, PyDict>>,
     rules: Vec<Bound<'_, PyDict>>,
     prune_dir_globs: Vec<String>,
-) -> PyResult<Py<PyDict>> {
+) -> PyResult<Vec<String>> {
     let rules = parse_rules(rules)?;
     let prune_dir_globs = prune_dir_globs
         .into_iter()
@@ -56,17 +52,13 @@ pub(crate) fn scene_semantics_payloads(
             }
         })
         .collect::<Vec<_>>();
-    let index = build_index(root_path, entries, &prune_dir_globs)?;
-    let result = PyDict::new(py);
+    let (index, original_paths) = build_index(root_path, entries, &prune_dir_globs)?;
     let scene_roots = detect_scene_roots(&index, &rules);
-
-    for (directory_key, context) in scene_roots {
-        let Some(directory_path) = index.dirs_by_key.get(&directory_key) else {
-            continue;
-        };
-        result.set_item(directory_path, scene_directory_payload(py, &context)?)?;
-    }
-    Ok(result.unbind())
+    let root_keys = scene_roots;
+    Ok(original_paths
+        .into_iter()
+        .filter(|path| !is_under_or_same_scene_root(&path_key(path), &root_keys))
+        .collect())
 }
 
 fn parse_rules(rules: Vec<Bound<'_, PyDict>>) -> PyResult<Vec<SceneRule>> {
@@ -98,7 +90,7 @@ fn build_index(
     root_path: &str,
     entries: Vec<Bound<'_, PyDict>>,
     prune_dir_globs: &[String],
-) -> PyResult<SceneEntryIndex> {
+) -> PyResult<(SceneEntryIndex, Vec<String>)> {
     let root_path = normalize_path(root_path);
     let root_key = path_key(&root_path);
     let mut index = SceneEntryIndex {
@@ -107,12 +99,14 @@ fn build_index(
         dirs_by_parent: HashMap::new(),
         dirs_by_key: HashMap::from([(root_key, root_path.clone())]),
     };
+    let mut original_paths = Vec::new();
 
     for row in entries {
         let Some(path) = get_string(&row, "path")? else {
             continue;
         };
         let path = normalize_path(&path);
+        original_paths.push(path.clone());
         if is_under_pruned_scene_dir(&path, &root_path, prune_dir_globs) {
             continue;
         }
@@ -137,7 +131,7 @@ fn build_index(
                 .insert(name);
         }
     }
-    Ok(index)
+    Ok((index, original_paths))
 }
 
 fn is_under_pruned_scene_dir(path: &str, root_path: &str, prune_dir_globs: &[String]) -> bool {
@@ -247,18 +241,15 @@ fn collect_markers_for_directory(
     markers
 }
 
-fn detect_scene_roots(
-    index: &SceneEntryIndex,
-    rules: &[SceneRule],
-) -> Vec<(String, SceneContext)> {
+fn detect_scene_roots(index: &SceneEntryIndex, rules: &[SceneRule]) -> Vec<String> {
     let mut directory_keys = index.dirs_by_key.keys().cloned().collect::<Vec<_>>();
     directory_keys.sort_by_key(|key| (key.matches('/').count(), key.clone()));
 
-    let mut roots: Vec<(String, SceneContext)> = Vec::new();
+    let mut roots: Vec<String> = Vec::new();
     for directory_key in directory_keys {
         if roots
             .iter()
-            .any(|(root_key, _)| directory_key != *root_key && directory_key.starts_with(&format!("{root_key}/")))
+            .any(|root_key| directory_key != *root_key && directory_key.starts_with(&format!("{root_key}/")))
         {
             continue;
         }
@@ -267,20 +258,21 @@ fn detect_scene_roots(
             .into_iter()
             .collect::<Vec<_>>();
         markers.sort();
-        let target_dir = index
-            .dirs_by_key
-            .get(&directory_key)
-            .cloned()
-            .unwrap_or_else(|| directory_key.clone());
-        let context = context_from_markers(target_dir, &markers, rules);
+        let context = context_from_markers(&markers, rules);
         if context.scene_type != "generic" {
-            roots.push((directory_key, context));
+            roots.push(directory_key);
         }
     }
     roots
 }
 
-fn context_from_markers(target_dir: String, markers: &[String], rules: &[SceneRule]) -> SceneContext {
+fn is_under_or_same_scene_root(path_key: &str, root_keys: &[String]) -> bool {
+    root_keys
+        .iter()
+        .any(|root_key| path_key == root_key || path_key.starts_with(&format!("{root_key}/")))
+}
+
+fn context_from_markers(markers: &[String], rules: &[SceneRule]) -> SceneContext {
     let marker_set: HashSet<String> = markers.iter().cloned().collect();
     for rule in rules {
         if rule
@@ -289,10 +281,7 @@ fn context_from_markers(target_dir: String, markers: &[String], rules: &[SceneRu
             .any(|variant| variant_matches(&marker_set, variant))
         {
             return SceneContext {
-                target_dir,
                 scene_type: rule.scene_type.clone(),
-                match_strength: "strong".to_string(),
-                markers: markers.to_vec(),
             };
         }
     }
@@ -303,40 +292,13 @@ fn context_from_markers(target_dir: String, markers: &[String], rules: &[SceneRu
             .any(|variant| variant_matches(&marker_set, variant))
         {
             return SceneContext {
-                target_dir,
                 scene_type: rule.scene_type.clone(),
-                match_strength: "weak".to_string(),
-                markers: markers.to_vec(),
             };
         }
     }
     SceneContext {
-        target_dir,
         scene_type: "generic".to_string(),
-        match_strength: "none".to_string(),
-        markers: markers.to_vec(),
     }
-}
-
-fn scene_directory_payload(py: Python<'_>, context: &SceneContext) -> PyResult<Py<PyDict>> {
-    let payload = PyDict::new(py);
-    let context_dict = PyDict::new(py);
-    context_dict.set_item("target_dir", &context.target_dir)?;
-    context_dict.set_item("scene_type", &context.scene_type)?;
-    context_dict.set_item("match_strength", &context.match_strength)?;
-    context_dict.set_item("markers", PyList::new(py, &context.markers)?)?;
-    payload.set_item("context", context_dict)?;
-    payload.set_item("relative_path", "")?;
-    payload.set_item("scene_type", &context.scene_type)?;
-    payload.set_item("match_strength", &context.match_strength)?;
-    payload.set_item("is_runtime_exact_path", false)?;
-    payload.set_item("is_protected_exact_path", false)?;
-    payload.set_item("is_protected_prefix_path", false)?;
-    payload.set_item("is_protected_path", false)?;
-    payload.set_item("protected_archive_ext_match", false)?;
-    payload.set_item("is_runtime_resource_archive", false)?;
-    payload.set_item("prune_scene_subtree", true)?;
-    Ok(payload.unbind())
 }
 
 fn variant_matches(markers: &HashSet<String>, variant: &SceneVariant) -> bool {

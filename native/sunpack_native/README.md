@@ -47,11 +47,12 @@ Return value:
 [{"path": "C:/data/archive.zip", "is_dir": False, "size": 123, "mtime_ns": 123456789}]
 ```
 
-`scene_semantics_payloads(root_path, entries, rules, prune_dir_globs)` evaluates
-filesystem scene semantics from an already-scanned entry list. It does not
-touch the filesystem; Python supplies the rule payload and attaches returned
-metadata to `FileEntry` objects. `prune_dir_globs` skips matching inside
-directory-name globs such as `node_modules` or `.venv`.
+`scene_semantics_filter_entries(root_path, entries, rules, prune_dir_globs)`
+evaluates filesystem scene semantics from an already-scanned entry list and
+returns the truncated entry path list. It does not touch the filesystem; Python
+supplies the rule payload and passes the returned tree to later filters.
+`prune_dir_globs` skips matching inside directory-name globs such as
+`node_modules` or `.venv`.
 
 `list_regular_files_in_directory(directory)` lists regular files directly under
 one directory and returns path/size/mtime metadata. This is intentionally a thin
