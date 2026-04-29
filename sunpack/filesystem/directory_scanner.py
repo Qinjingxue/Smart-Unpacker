@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 
 from sunpack_native import scan_directory_entries as _NATIVE_SCAN_DIRECTORY_ENTRIES
 
@@ -6,7 +7,11 @@ from sunpack.contracts.filesystem import DirectorySnapshot, FileEntry
 from sunpack.config.detection_view import DIRECTORY_SCAN_CURRENT_DIR_ONLY, directory_scan_mode
 from sunpack.filesystem.filters import build_filters
 from sunpack.filesystem.filters.base import ScanCandidate, ScanFilter
-from sunpack.filesystem.filters.modules.scene_semantics import annotate_scene_metadata
+from sunpack.filesystem.filters.modules.scene_semantics import (
+    annotate_scene_metadata,
+    scene_path_globs,
+    scene_prune_dir_globs,
+)
 
 
 class DirectoryScanner:
@@ -69,12 +74,13 @@ class DirectoryScanner:
             name = getattr(scan_filter, "name", "")
             stage = getattr(scan_filter, "stage", "")
             if name == "scene_semantics":
+                scene_config = getattr(scan_filter, "config", {}) or {}
+                prune_dirs.extend(_dir_glob_to_regex(item) for item in scene_prune_dir_globs(scene_config))
+                patterns.extend(_path_glob_to_regex(item) for item in scene_path_globs(scene_config))
                 seen_scene_semantics = True
                 continue
             if name == "blacklist" and stage == "path":
-                prune_dirs.extend(getattr(scan_filter, "prune_dirs", []) or [])
                 if not seen_scene_semantics:
-                    patterns.extend(getattr(scan_filter, "patterns", []) or [])
                     blocked_extensions.extend(getattr(scan_filter, "blocked_extensions", []) or [])
                 continue
             if name in {"size_minimum", "size_range"} and stage == "size":
@@ -172,3 +178,42 @@ def _under_any_key(path: Path, parent_keys: set[str]) -> bool:
 
 def _path_key(path: Path) -> str:
     return str(path).replace("\\", "/").rstrip("/").lower()
+
+
+def _dir_glob_to_regex(pattern: str) -> str:
+    pattern = _normalize_glob(pattern)
+    if not pattern:
+        return r"a\A"
+    return f"^{_glob_segment_to_regex(pattern)}$"
+
+
+def _path_glob_to_regex(pattern: str) -> str:
+    pattern = _normalize_glob(pattern)
+    if not pattern:
+        return r"a\A"
+    if pattern.endswith("/**"):
+        base = pattern[:-3].rstrip("/")
+        if not base:
+            return r".*"
+        return f"(^|/){_glob_path_to_regex(base)}($|/.*)"
+    return f"(^|/){_glob_path_to_regex(pattern)}($|/.*)?"
+
+
+def _normalize_glob(pattern: str) -> str:
+    return str(pattern or "").strip().replace("\\", "/").strip("/")
+
+
+def _glob_segment_to_regex(pattern: str) -> str:
+    return "".join(_glob_char_to_regex(char, slash=False) for char in pattern)
+
+
+def _glob_path_to_regex(pattern: str) -> str:
+    return "".join(_glob_char_to_regex(char, slash=True) for char in pattern)
+
+
+def _glob_char_to_regex(char: str, *, slash: bool) -> str:
+    if char == "*":
+        return ".*" if slash else r"[^/]*"
+    if char == "?":
+        return "." if slash else r"[^/]"
+    return re.escape(char)

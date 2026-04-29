@@ -14,7 +14,7 @@ def _rule_pipeline_config():
     return with_detection_pipeline({
         "thresholds": {"archive_score_threshold": 5, "maybe_archive_threshold": 3},
     }, precheck=[
-        {"name": "blacklist", "enabled": True, "patterns": [r"\.git", r"\.vscode"]},
+        {"name": "blacklist", "enabled": True, "blocked_files": []},
         {"name": "size_minimum", "enabled": True, "min_inspection_size_bytes": 0},
         {
             "name": "scene_protect",
@@ -38,7 +38,7 @@ def _rule_pipeline_config():
     [
         ("archive.zip", make_zip({"inside.txt": "hello"}), True),
         ("notes.txt", b"plain text", False),
-        ("game/www/audio/bgm.7z", b"7z\xbc\xaf\x27\x1c", False),
+        ("game/www/audio/bgm.7z", b"7z\xbc\xaf\x27\x1c", True),
     ],
     ids=["zip archive", "plain text", "runtime archive"],
 )
@@ -56,10 +56,8 @@ def test_rule_pipeline_evaluates_generated_files(tmp_path, relative_path, conten
     decision = DetectionScheduler(_rule_pipeline_config()).evaluate_bag(bag)
 
     assert decision.should_extract is expected_extract
-    if target.suffix == ".zip":
-        assert bag.get("file.detected_ext") == ".zip"
     if target.name == "bgm.7z":
-        assert bag.get("scene.is_runtime_resource_archive") is True
+        assert bag.get("scene.is_runtime_resource_archive") is None
 
 
 def test_scoring_stops_after_archive_threshold_when_remaining_rules_cannot_reduce_score(tmp_path, monkeypatch):

@@ -32,33 +32,76 @@ struct SceneContext {
     scene_type: String,
 }
 
+#[derive(Debug, Clone, Default)]
+struct ScenePruneRules {
+    prune_dir_globs: Vec<String>,
+    path_globs: Vec<String>,
+}
+
+impl ScenePruneRules {
+    fn new(prune_dir_globs: Vec<String>, path_globs: Vec<String>) -> Self {
+        Self {
+            prune_dir_globs: prune_dir_globs
+                .into_iter()
+                .filter_map(|item| non_empty_normalized_glob(&item))
+                .collect(),
+            path_globs: path_globs
+                .into_iter()
+                .filter_map(|item| non_empty_normalized_glob(&item))
+                .collect(),
+        }
+    }
+
+    fn matches_directory(&self, path: &str, root_path: &str) -> bool {
+        let Some(rel_path) = relative_to(path, root_path) else {
+            return false;
+        };
+        let rel = normalize_relative(&rel_path).to_ascii_lowercase();
+        if rel.is_empty() {
+            return false;
+        }
+        if rel
+            .split('/')
+            .any(|part| self.prune_dir_globs.iter().any(|pattern| wildcard_match(pattern, part)))
+        {
+            return true;
+        }
+        self.path_globs
+            .iter()
+            .any(|pattern| path_glob_matches_directory(pattern, &rel))
+    }
+}
+
 #[pyfunction]
-#[pyo3(signature = (root_path, entries, rules, prune_dir_globs=Vec::new()))]
+#[pyo3(signature = (root_path, entries, rules, prune_dir_globs=Vec::new(), path_globs=Vec::new()))]
 pub(crate) fn scene_semantics_filter_entries(
     root_path: &str,
     entries: Vec<Bound<'_, PyDict>>,
     rules: Vec<Bound<'_, PyDict>>,
     prune_dir_globs: Vec<String>,
+    path_globs: Vec<String>,
 ) -> PyResult<Vec<String>> {
     let rules = parse_rules(rules)?;
-    let prune_dir_globs = prune_dir_globs
-        .into_iter()
-        .filter_map(|item| {
-            let item = normalize_relative(&item).to_ascii_lowercase();
-            if item.is_empty() {
-                None
-            } else {
-                Some(item)
-            }
-        })
-        .collect::<Vec<_>>();
-    let (index, original_paths) = build_index(root_path, entries, &prune_dir_globs)?;
+    let scene_prune = ScenePruneRules::new(prune_dir_globs, path_globs);
+    let (index, original_paths, pruned_roots) = build_index(root_path, entries, &scene_prune)?;
     let scene_roots = detect_scene_roots(&index, &rules);
-    let root_keys = scene_roots;
+    let root_keys = pruned_roots
+        .into_iter()
+        .chain(scene_roots)
+        .collect::<Vec<_>>();
     Ok(original_paths
         .into_iter()
         .filter(|path| !is_under_or_same_scene_root(&path_key(path), &root_keys))
         .collect())
+}
+
+fn non_empty_normalized_glob(value: &str) -> Option<String> {
+    let value = normalize_relative(value).to_ascii_lowercase();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
+    }
 }
 
 fn parse_rules(rules: Vec<Bound<'_, PyDict>>) -> PyResult<Vec<SceneRule>> {
@@ -89,8 +132,8 @@ fn parse_rules(rules: Vec<Bound<'_, PyDict>>) -> PyResult<Vec<SceneRule>> {
 fn build_index(
     root_path: &str,
     entries: Vec<Bound<'_, PyDict>>,
-    prune_dir_globs: &[String],
-) -> PyResult<(SceneEntryIndex, Vec<String>)> {
+    scene_prune: &ScenePruneRules,
+) -> PyResult<(SceneEntryIndex, Vec<String>, Vec<String>)> {
     let root_path = normalize_path(root_path);
     let root_key = path_key(&root_path);
     let mut index = SceneEntryIndex {
@@ -100,6 +143,7 @@ fn build_index(
         dirs_by_key: HashMap::from([(root_key, root_path.clone())]),
     };
     let mut original_paths = Vec::new();
+    let mut rows = Vec::new();
 
     for row in entries {
         let Some(path) = get_string(&row, "path")? else {
@@ -107,14 +151,23 @@ fn build_index(
         };
         let path = normalize_path(&path);
         original_paths.push(path.clone());
-        if is_under_pruned_scene_dir(&path, &root_path, prune_dir_globs) {
+        rows.push((path, get_bool(&row, "is_dir")?.unwrap_or(false)));
+    }
+
+    rows.sort_by_key(|(path, _)| (path.matches('/').count(), path.clone()));
+    let mut pruned_roots = Vec::new();
+    for (path, is_dir) in rows {
+        let key = path_key(&path);
+        if is_under_or_same_scene_root(&key, &pruned_roots) {
             continue;
         }
-        let key = path_key(&path);
+        if is_dir && scene_prune.matches_directory(&path, &root_path) {
+            pruned_roots.push(key);
+            continue;
+        }
         let parent = parent_path(&path);
         let parent_key = path_key(&parent);
         let name = basename(&path).to_ascii_lowercase();
-        let is_dir = get_bool(&row, "is_dir")?.unwrap_or(false);
         index.path_keys.insert(key.clone());
         if is_dir {
             index
@@ -131,29 +184,7 @@ fn build_index(
                 .insert(name);
         }
     }
-    Ok((index, original_paths))
-}
-
-fn is_under_pruned_scene_dir(path: &str, root_path: &str, prune_dir_globs: &[String]) -> bool {
-    if prune_dir_globs.is_empty() {
-        return false;
-    }
-    let Some(rel_path) = relative_to(path, root_path) else {
-        return false;
-    };
-    for part in normalize_relative(&rel_path)
-        .to_ascii_lowercase()
-        .split('/')
-        .filter(|part| !part.is_empty())
-    {
-        if prune_dir_globs
-            .iter()
-            .any(|pattern| wildcard_match(pattern, part))
-        {
-            return true;
-        }
-    }
-    false
+    Ok((index, original_paths, pruned_roots))
 }
 
 fn collect_markers_for_directory(
@@ -445,6 +476,14 @@ fn relative_to(path: &str, root: &str) -> Option<String> {
 
 fn wildcard_match(pattern: &str, value: &str) -> bool {
     wildcard_match_bytes(pattern.as_bytes(), value.as_bytes())
+}
+
+fn path_glob_matches_directory(pattern: &str, rel_path: &str) -> bool {
+    if let Some(base) = pattern.strip_suffix("/**") {
+        let base = base.trim_end_matches('/');
+        return rel_path == base || rel_path.starts_with(&format!("{base}/"));
+    }
+    wildcard_match(pattern, rel_path)
 }
 
 fn wildcard_match_bytes(pattern: &[u8], value: &[u8]) -> bool {

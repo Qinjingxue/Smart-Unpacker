@@ -525,6 +525,11 @@
             ],
             "runtime_exact_paths": []
           }
+        ],
+        "path_globs": [
+          ".git/**",
+          ".vscode/**",
+          "$RECYCLE.BIN/**"
         ]
       },
       {
@@ -550,23 +555,6 @@
       {
         "name": "blacklist",
         "enabled": true,
-        "path_globs": [
-          ".git/**",
-          ".vscode/**",
-          "$RECYCLE.BIN/**"
-        ],
-        "prune_dir_globs": [
-          ".git",
-          ".vscode",
-          "__pycache__",
-          "node_modules",
-          "site-packages",
-          ".venv",
-          "venv",
-          "env",
-          ".cache",
-          "repositories"
-        ],
         "blocked_files": [
           "Thumbs.db",
           "desktop.ini"

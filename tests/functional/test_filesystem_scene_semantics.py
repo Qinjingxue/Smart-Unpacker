@@ -99,8 +99,9 @@ def test_scene_semantics_prune_dir_globs_skip_scene_matching(tmp_path):
     config["filesystem"]["scan_filters"][0]["prune_dir_globs"] = ["game"]
     snapshot = DirectoryScanner(str(tmp_path), config=config).scan()
 
-    entry = next(item for item in snapshot.entries if item.path == archive)
-    assert not (entry.metadata or {}).get("scene")
+    paths = {item.path for item in snapshot.entries}
+    assert archive not in paths
+    assert tmp_path / "game" not in paths
 
 
 def test_scene_semantics_prune_dir_globs_stop_descending_into_subtree(tmp_path):
@@ -111,8 +112,25 @@ def test_scene_semantics_prune_dir_globs_stop_descending_into_subtree(tmp_path):
     config["filesystem"]["scan_filters"][0]["prune_dir_globs"] = ["ignored"]
     snapshot = DirectoryScanner(str(tmp_path), config=config).scan()
 
-    entry = next(item for item in snapshot.entries if item.path == archive)
-    assert not (entry.metadata or {}).get("scene")
+    paths = {item.path for item in snapshot.entries}
+    assert archive not in paths
+    assert tmp_path / "ignored" not in paths
+
+
+def test_scene_semantics_path_globs_stop_descending_into_subtree(tmp_path):
+    archive = _write_rpg_maker(tmp_path / "$RECYCLE.BIN" / "game")
+    keep = tmp_path / "keep.zip"
+    keep.write_bytes(b"PK\x03\x04payload")
+
+    config = _config()
+    config["filesystem"]["scan_filters"][0]["protect_runtime_resources"] = False
+    config["filesystem"]["scan_filters"][0]["path_globs"] = ["$RECYCLE.BIN/**"]
+    snapshot = DirectoryScanner(str(tmp_path), config=config).scan()
+
+    paths = {item.path for item in snapshot.entries}
+    assert archive not in paths
+    assert tmp_path / "$RECYCLE.BIN" not in paths
+    assert keep in paths
 
 
 def _scene_rules() -> list[dict]:

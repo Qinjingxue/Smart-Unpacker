@@ -40,6 +40,7 @@ def annotate_scene_metadata(
         ],
         scene_rules(scene_config),
         scene_prune_dir_globs(scene_config),
+        scene_path_globs(scene_config),
     )
     kept_keys = {_normalized_path(path).lower() for path in kept_paths}
     return [entry for entry in entries if _normalized_path(entry.path).lower() in kept_keys]
@@ -92,6 +93,13 @@ def scene_rules(config: dict[str, Any] | None = None) -> list[dict[str, Any]]:
 
 def scene_prune_dir_globs(config: dict[str, Any] | None = None) -> list[str]:
     globs = (config or {}).get("prune_dir_globs")
+    if not isinstance(globs, list):
+        return []
+    return [str(item) for item in globs if isinstance(item, str) and item.strip()]
+
+
+def scene_path_globs(config: dict[str, Any] | None = None) -> list[str]:
+    globs = (config or {}).get("path_globs")
     if not isinstance(globs, list):
         return []
     return [str(item) for item in globs if isinstance(item, str) and item.strip()]

@@ -442,7 +442,7 @@ def test_directory_scanner_whitelist_non_empty_fields_are_combined_as_constraint
     assert "other.zip" not in names
 
 
-def test_directory_scanner_blacklist_prunes_directory(tmp_path):
+def test_directory_scanner_scene_semantics_prunes_directory(tmp_path):
     blocked_dir = tmp_path / "blocked"
     blocked_dir.mkdir()
     (blocked_dir / "payload.zip").write_bytes(b"PK\x03\x04payload")
@@ -451,7 +451,7 @@ def test_directory_scanner_blacklist_prunes_directory(tmp_path):
     snapshot = DirectoryScanner(str(tmp_path), config={
         "filesystem": {
             "scan_filters": [
-                {"name": "blacklist", "enabled": True, "patterns": ["blocked"]},
+                {"name": "scene_semantics", "enabled": True, "prune_dir_globs": ["blocked"]},
             ]
         }
     }).scan()
@@ -462,7 +462,7 @@ def test_directory_scanner_blacklist_prunes_directory(tmp_path):
     assert "keep.zip" in names
 
 
-def test_directory_scanner_blacklist_supports_path_globs(tmp_path):
+def test_directory_scanner_scene_semantics_supports_path_globs(tmp_path):
     blocked_dir = tmp_path / "$RECYCLE.BIN"
     blocked_dir.mkdir()
     (blocked_dir / "payload.zip").write_bytes(b"PK\x03\x04payload")
@@ -471,7 +471,7 @@ def test_directory_scanner_blacklist_supports_path_globs(tmp_path):
     snapshot = DirectoryScanner(str(tmp_path), config={
         "filesystem": {
             "scan_filters": [
-                {"name": "blacklist", "enabled": True, "path_globs": ["$RECYCLE.BIN/**"]},
+                {"name": "scene_semantics", "enabled": True, "path_globs": ["$RECYCLE.BIN/**"]},
             ]
         }
     }).scan()
@@ -482,7 +482,7 @@ def test_directory_scanner_blacklist_supports_path_globs(tmp_path):
     assert "keep.zip" in names
 
 
-def test_directory_scanner_blacklist_supports_prune_dir_globs(tmp_path):
+def test_directory_scanner_scene_semantics_supports_prune_dir_globs(tmp_path):
     blocked_dir = tmp_path / "node_modules"
     blocked_dir.mkdir()
     (blocked_dir / "payload.zip").write_bytes(b"PK\x03\x04payload")
@@ -491,7 +491,7 @@ def test_directory_scanner_blacklist_supports_prune_dir_globs(tmp_path):
     snapshot = DirectoryScanner(str(tmp_path), config={
         "filesystem": {
             "scan_filters": [
-                {"name": "blacklist", "enabled": True, "prune_dir_globs": ["node_*"]},
+                {"name": "scene_semantics", "enabled": True, "prune_dir_globs": ["node_*"]},
             ]
         }
     }).scan()
@@ -502,7 +502,7 @@ def test_directory_scanner_blacklist_supports_prune_dir_globs(tmp_path):
     assert "keep.zip" in names
 
 
-def test_directory_scanner_blacklist_prune_dirs_is_directory_only(tmp_path):
+def test_directory_scanner_scene_semantics_prune_dir_globs_are_directory_only(tmp_path):
     blocked_dir = tmp_path / "site-packages"
     blocked_dir.mkdir()
     (blocked_dir / "payload.zip").write_bytes(b"PK\x03\x04payload")
@@ -512,7 +512,7 @@ def test_directory_scanner_blacklist_prune_dirs_is_directory_only(tmp_path):
     snapshot = DirectoryScanner(str(tmp_path), config={
         "filesystem": {
             "scan_filters": [
-                {"name": "blacklist", "enabled": True, "prune_dirs": ["^site-packages$"]},
+                {"name": "scene_semantics", "enabled": True, "prune_dir_globs": ["site-packages"]},
             ]
         }
     }).scan()
@@ -607,5 +607,5 @@ def test_scene_context_does_not_scan_above_selected_root(tmp_path, monkeypatch):
 
     tasks = ArchiveTaskProvider(config).scan_targets([str(selected_root)])
 
-    assert [task.main_path for task in tasks] == [str(archive)]
+    assert [task.main_path for task in tasks] == []
 
