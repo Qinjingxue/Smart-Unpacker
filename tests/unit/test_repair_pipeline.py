@@ -12,14 +12,14 @@ import zlib
 
 import pytest
 
-from smart_unpacker.analysis.result import ArchiveFormatEvidence, ArchiveSegment
-from smart_unpacker.config.schema import normalize_config
-from smart_unpacker.repair.config import enabled_module_configs
-from smart_unpacker.repair.candidate import CandidateSelector, CandidateValidation, RepairCandidate
-from smart_unpacker.repair import RepairJob, RepairScheduler
-from smart_unpacker.repair.pipeline.module import RepairModuleSpec, RepairRoute
-from smart_unpacker.repair.pipeline.registry import get_repair_module_registry
-from smart_unpacker.repair.result import RepairResult
+from packrelic.analysis.result import ArchiveFormatEvidence, ArchiveSegment
+from packrelic.config.schema import normalize_config
+from packrelic.repair.config import enabled_module_configs
+from packrelic.repair.candidate import CandidateSelector, CandidateValidation, RepairCandidate
+from packrelic.repair import RepairJob, RepairScheduler
+from packrelic.repair.pipeline.module import RepairModuleSpec, RepairRoute
+from packrelic.repair.pipeline.registry import get_repair_module_registry
+from packrelic.repair.result import RepairResult
 
 
 RAR4_MAGIC = b"Rar!\x1a\x07\x00"
@@ -611,8 +611,8 @@ def test_candidate_native_validation_uses_candidate_password_for_encrypted_archi
             diagnostics={},
         )
 
-    monkeypatch.setattr("smart_unpacker.repair.candidate.get_native_password_tester", lambda: fake)
-    monkeypatch.setattr("smart_unpacker.repair.candidate.dry_run_archive", fake_dry_run)
+    monkeypatch.setattr("packrelic.repair.candidate.get_native_password_tester", lambda: fake)
+    monkeypatch.setattr("packrelic.repair.candidate.dry_run_archive", fake_dry_run)
 
     candidate = RepairCandidate(
         module_name="encrypted_candidate",
@@ -650,8 +650,8 @@ def test_candidate_selector_uses_password_to_rank_and_reject_encrypted_candidate
             diagnostics={},
         )
 
-    monkeypatch.setattr("smart_unpacker.repair.candidate.get_native_password_tester", lambda: fake)
-    monkeypatch.setattr("smart_unpacker.repair.candidate.dry_run_archive", fake_dry_run)
+    monkeypatch.setattr("packrelic.repair.candidate.get_native_password_tester", lambda: fake)
+    monkeypatch.setattr("packrelic.repair.candidate.dry_run_archive", fake_dry_run)
 
     confident_unvalidated = RepairCandidate(
         module_name="confident_unvalidated",
@@ -709,8 +709,8 @@ def test_candidate_validation_password_matrix_keeps_wrong_password_priority(tmp_
             diagnostics={"output_trace": {"items": [{"path": "good.txt", "bytes_written": 12}]}} if partial else {},
         )
 
-    monkeypatch.setattr("smart_unpacker.repair.candidate.get_native_password_tester", lambda: fake)
-    monkeypatch.setattr("smart_unpacker.repair.candidate.dry_run_archive", fake_dry_run)
+    monkeypatch.setattr("packrelic.repair.candidate.get_native_password_tester", lambda: fake)
+    monkeypatch.setattr("packrelic.repair.candidate.dry_run_archive", fake_dry_run)
 
     cases = [
         ("correct_header_bad", "7z", "secret", False, True, "ok"),

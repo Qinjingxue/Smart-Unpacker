@@ -4,11 +4,11 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from smart_unpacker.detection.nested_scan_policy import NestedOutputScanPolicy as OutputScanPolicy
-from smart_unpacker.config.schema import normalize_config
-from smart_unpacker.extraction.scheduler import ExtractionScheduler
-from smart_unpacker.contracts.detection import FactBag
-from smart_unpacker.contracts.tasks import ArchiveTask
+from packrelic.detection.nested_scan_policy import NestedOutputScanPolicy as OutputScanPolicy
+from packrelic.config.schema import normalize_config
+from packrelic.extraction.scheduler import ExtractionScheduler
+from packrelic.contracts.detection import FactBag
+from packrelic.contracts.tasks import ArchiveTask
 from tests.helpers.detection_config import with_detection_pipeline
 
 

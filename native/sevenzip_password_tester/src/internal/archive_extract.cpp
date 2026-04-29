@@ -26,7 +26,7 @@
 
 
 
-namespace smart_unpacker::sevenzip {
+namespace packrelic::sevenzip {
 
 
 
@@ -926,4 +926,4 @@ ExtractArchiveResult extract_archive_with_patches(
 
 
 
-}  // namespace smart_unpacker::sevenzip
+}  // namespace packrelic::sevenzip

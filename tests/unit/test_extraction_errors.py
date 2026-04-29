@@ -1,9 +1,9 @@
 import json
 import subprocess
 
-from smart_unpacker.coordinator.repair_loop import terminal_failure_reason
-from smart_unpacker.extraction.internal.workflow.errors import classify_extract_error
-from smart_unpacker.extraction.result import ExtractionResult
+from packrelic.coordinator.repair_loop import terminal_failure_reason
+from packrelic.extraction.internal.workflow.errors import classify_extract_error
+from packrelic.extraction.result import ExtractionResult
 
 
 def test_split_worker_damage_takes_precedence_over_wrong_password_signal():

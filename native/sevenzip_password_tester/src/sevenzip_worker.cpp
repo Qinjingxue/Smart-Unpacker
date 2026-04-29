@@ -324,8 +324,8 @@ struct WorkerArchiveInput {
     std::wstring format_hint;
     std::wstring open_mode;
     std::vector<std::wstring> part_paths;
-    std::vector<smart_unpacker::sevenzip::ExtractInputRange> ranges;
-    std::vector<smart_unpacker::sevenzip::ExtractPatchOperation> patches;
+    std::vector<packrelic::sevenzip::ExtractInputRange> ranges;
+    std::vector<packrelic::sevenzip::ExtractPatchOperation> patches;
 };
 
 std::vector<unsigned char> base64_decode(const std::string& text) {
@@ -351,8 +351,8 @@ std::vector<unsigned char> base64_decode(const std::string& text) {
     return out;
 }
 
-std::vector<smart_unpacker::sevenzip::ExtractInputRange> parse_input_ranges(const std::string& request, const std::string& archive_path) {
-    using smart_unpacker::sevenzip::ExtractInputRange;
+std::vector<packrelic::sevenzip::ExtractInputRange> parse_input_ranges(const std::string& request, const std::string& archive_path) {
+    using packrelic::sevenzip::ExtractInputRange;
     std::vector<ExtractInputRange> ranges;
     const std::string kind = json_string_field(request, "kind", "file");
     if (kind == "file_range") {
@@ -388,11 +388,11 @@ std::vector<smart_unpacker::sevenzip::ExtractInputRange> parse_input_ranges(cons
     return ranges;
 }
 
-std::vector<smart_unpacker::sevenzip::ExtractInputRange> parse_ranges_from_objects(
+std::vector<packrelic::sevenzip::ExtractInputRange> parse_ranges_from_objects(
     const std::vector<std::string>& objects,
     const std::string& default_path
 ) {
-    using smart_unpacker::sevenzip::ExtractInputRange;
+    using packrelic::sevenzip::ExtractInputRange;
     std::vector<ExtractInputRange> ranges;
     for (const auto& object_json : objects) {
         unsigned long long start = 0;
@@ -413,7 +413,7 @@ std::vector<smart_unpacker::sevenzip::ExtractInputRange> parse_ranges_from_objec
     return ranges;
 }
 
-std::vector<smart_unpacker::sevenzip::ExtractPatchOperation> parse_patch_operations_from_state(const std::string& request);
+std::vector<packrelic::sevenzip::ExtractPatchOperation> parse_patch_operations_from_state(const std::string& request);
 
 WorkerArchiveInput parse_archive_input_descriptor(
     const std::string& request,
@@ -472,7 +472,7 @@ WorkerArchiveInput parse_archive_input_descriptor(
             unsigned long long end = 0;
             const bool has_start = json_uint_field_in_object(segment, "start", &start) || json_uint_field_in_object(segment, "start_offset", &start);
             const bool has_end = json_uint_field_in_object(segment, "end", &end) || json_uint_field_in_object(segment, "end_offset", &end);
-            smart_unpacker::sevenzip::ExtractInputRange range;
+            packrelic::sevenzip::ExtractInputRange range;
             range.path = utf8_to_wide(entry_path.empty() ? json_string_field(request, "archive_path", "") : entry_path);
             range.start = has_start ? start : 0;
             range.end = end;
@@ -489,8 +489,8 @@ WorkerArchiveInput parse_archive_input_descriptor(
     return input;
 }
 
-std::vector<smart_unpacker::sevenzip::ExtractPatchOperation> parse_patch_operations_from_state(const std::string& request) {
-    using smart_unpacker::sevenzip::ExtractPatchOperation;
+std::vector<packrelic::sevenzip::ExtractPatchOperation> parse_patch_operations_from_state(const std::string& request) {
+    using packrelic::sevenzip::ExtractPatchOperation;
     std::vector<ExtractPatchOperation> operations;
     const std::string state = json_object_field(request, "archive_state");
     if (state.empty()) {
@@ -524,8 +524,8 @@ void print_json_line(const std::string& json) {
     std::cout.flush();
 }
 
-std::string status_to_string(smart_unpacker::sevenzip::PasswordTestStatus status) {
-    return smart_unpacker::sevenzip::status_name(status);
+std::string status_to_string(packrelic::sevenzip::PasswordTestStatus status) {
+    return packrelic::sevenzip::status_name(status);
 }
 
 std::string hresult_hex(int value) {
@@ -535,7 +535,7 @@ std::string hresult_hex(int value) {
     return stream.str();
 }
 
-std::string input_trace_json(const smart_unpacker::sevenzip::ExtractInputTrace& trace) {
+std::string input_trace_json(const packrelic::sevenzip::ExtractInputTrace& trace) {
     return std::string("{") +
         "\"mode\":\"" + json_escape(wide_to_utf8(trace.mode)) +
         "\",\"virtual_size\":" + std::to_string(trace.virtual_size) +
@@ -558,7 +558,7 @@ std::string input_trace_json(const smart_unpacker::sevenzip::ExtractInputTrace& 
         "}}";
 }
 
-std::string output_item_traces_json(const std::vector<smart_unpacker::sevenzip::ExtractOutputItemTrace>& items) {
+std::string output_item_traces_json(const std::vector<packrelic::sevenzip::ExtractOutputItemTrace>& items) {
     std::string out = "[";
     for (std::size_t index = 0; index < items.size(); ++index) {
         const auto& item = items[index];
@@ -570,7 +570,7 @@ std::string output_item_traces_json(const std::vector<smart_unpacker::sevenzip::
             "\",\"is_dir\":" + std::string(item.is_dir ? "true" : "false") +
             ",\"bytes_written\":" + std::to_string(item.bytes_written) +
             ",\"operation_result\":" + std::to_string(item.operation_result) +
-            ",\"operation_result_name\":\"" + json_escape(smart_unpacker::sevenzip::operation_result_name(item.operation_result)) +
+            ",\"operation_result_name\":\"" + json_escape(packrelic::sevenzip::operation_result_name(item.operation_result)) +
             "\",\"hresult\":" + std::to_string(item.hresult) +
             ",\"hresult_hex\":\"" + hresult_hex(item.hresult) +
             "\",\"win32_error\":" + std::to_string(item.win32_error) +
@@ -582,7 +582,7 @@ std::string output_item_traces_json(const std::vector<smart_unpacker::sevenzip::
     return out;
 }
 
-std::string output_trace_json(const smart_unpacker::sevenzip::ExtractOutputTrace& trace) {
+std::string output_trace_json(const packrelic::sevenzip::ExtractOutputTrace& trace) {
     return std::string("{") +
         "\"total_bytes_written\":" + std::to_string(trace.total_bytes_written) +
         ",\"current_item_index\":" + std::to_string(trace.current_item_index) +
@@ -596,7 +596,7 @@ std::string output_trace_json(const smart_unpacker::sevenzip::ExtractOutputTrace
         "}";
 }
 
-std::string handler_attempts_json(const std::vector<smart_unpacker::sevenzip::ExtractHandlerAttempt>& attempts) {
+std::string handler_attempts_json(const std::vector<packrelic::sevenzip::ExtractHandlerAttempt>& attempts) {
     std::string out = "[";
     for (std::size_t index = 0; index < attempts.size(); ++index) {
         const auto& attempt = attempts[index];
@@ -615,24 +615,24 @@ std::string handler_attempts_json(const std::vector<smart_unpacker::sevenzip::Ex
     return out;
 }
 
-std::string failed_item_json(const smart_unpacker::sevenzip::ExtractArchiveResult& result) {
+std::string failed_item_json(const packrelic::sevenzip::ExtractArchiveResult& result) {
     return std::string("{") +
         "\"index\":" + std::to_string(result.failed_item_index) +
         ",\"path\":\"" + json_escape(wide_to_utf8(result.failed_item)) +
         "\",\"bytes_written\":" + std::to_string(result.failed_item_bytes_written) +
         ",\"operation_result\":" + std::to_string(result.operation_result) +
-        ",\"operation_result_name\":\"" + json_escape(smart_unpacker::sevenzip::operation_result_name(result.operation_result)) +
+        ",\"operation_result_name\":\"" + json_escape(packrelic::sevenzip::operation_result_name(result.operation_result)) +
         "\"}";
 }
 
-std::string diagnostics_json(const smart_unpacker::sevenzip::ExtractArchiveResult& result) {
+std::string diagnostics_json(const packrelic::sevenzip::ExtractArchiveResult& result) {
     return std::string("{") +
         "\"failure_stage\":\"" + json_escape(result.failure_stage) +
         "\",\"failure_kind\":\"" + json_escape(result.failure_kind) +
         "\",\"hresult\":" + std::to_string(result.hresult) +
         ",\"hresult_hex\":\"" + hresult_hex(result.hresult) +
         "\",\"operation_result\":" + std::to_string(result.operation_result) +
-        ",\"operation_result_name\":\"" + json_escape(smart_unpacker::sevenzip::operation_result_name(result.operation_result)) +
+        ",\"operation_result_name\":\"" + json_escape(packrelic::sevenzip::operation_result_name(result.operation_result)) +
         "\",\"handler_attempts\":" + handler_attempts_json(result.handler_attempts) +
         ",\"input_trace\":" + input_trace_json(result.input_trace) +
         ",\"output_trace\":" + output_trace_json(result.output_trace) +
@@ -643,7 +643,7 @@ std::string diagnostics_json(const smart_unpacker::sevenzip::ExtractArchiveResul
 }  // namespace
 
 int run_request(const std::string& request) {
-    using namespace smart_unpacker::sevenzip;
+    using namespace packrelic::sevenzip;
 
     const std::string job_id = json_string_field(request, "job_id", "");
     const std::string command = json_string_field(request, "worker_command", "");

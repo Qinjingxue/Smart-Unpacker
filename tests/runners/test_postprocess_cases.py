@@ -2,9 +2,9 @@ from pathlib import Path
 
 import pytest
 
-from smart_unpacker.coordinator.reporting import RunReporter
-from smart_unpacker.config.schema import normalize_config
-from smart_unpacker.postprocess.actions import PostProcessActions
+from packrelic.coordinator.reporting import RunReporter
+from packrelic.config.schema import normalize_config
+from packrelic.postprocess.actions import PostProcessActions
 from tests.helpers.assertions import assert_case_expectations
 from tests.helpers.case_loader import case_id, load_json_cases
 from tests.helpers.fs_builder import build_files

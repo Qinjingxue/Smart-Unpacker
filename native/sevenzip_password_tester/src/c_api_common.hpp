@@ -7,7 +7,7 @@
 #include <string>
 #include <vector>
 
-namespace smart_unpacker::sevenzip::capi {
+namespace packrelic::sevenzip::capi {
 
 inline void copy_message(wchar_t* destination, int destination_chars, const std::string& message) {
     if (!destination || destination_chars <= 0) {
@@ -51,4 +51,4 @@ inline std::vector<std::wstring> collect_part_paths(
     return parts;
 }
 
-}  // namespace smart_unpacker::sevenzip::capi
+}  // namespace packrelic::sevenzip::capi

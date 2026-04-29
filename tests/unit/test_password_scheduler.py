@@ -1,10 +1,10 @@
 from types import SimpleNamespace
 
-from smart_unpacker.passwords.cache import PasswordAttemptCache
-from smart_unpacker.passwords.candidates import PasswordCandidatePipeline
-from smart_unpacker.passwords.job import PasswordJob
-from smart_unpacker.passwords.scheduler import PasswordScheduler
-from smart_unpacker.passwords.verifier import PasswordBatchVerification, PasswordVerifierChain
+from packrelic.passwords.cache import PasswordAttemptCache
+from packrelic.passwords.candidates import PasswordCandidatePipeline
+from packrelic.passwords.job import PasswordJob
+from packrelic.passwords.scheduler import PasswordScheduler
+from packrelic.passwords.verifier import PasswordBatchVerification, PasswordVerifierChain
 
 
 class FakeVerifier:

@@ -14,8 +14,8 @@ SUP7Z_API int sup7z_try_passwords(
     wchar_t* message,
     int message_chars
 ) {
-    using namespace smart_unpacker::sevenzip;
-    using namespace smart_unpacker::sevenzip::capi;
+    using namespace packrelic::sevenzip;
+    using namespace packrelic::sevenzip::capi;
     if (matched_index) {
         *matched_index = -1;
     }
@@ -50,8 +50,8 @@ SUP7Z_API int sup7z_try_passwords_with_parts(
     wchar_t* message,
     int message_chars
 ) {
-    using namespace smart_unpacker::sevenzip;
-    using namespace smart_unpacker::sevenzip::capi;
+    using namespace packrelic::sevenzip;
+    using namespace packrelic::sevenzip::capi;
     if (matched_index) {
         *matched_index = -1;
     }

@@ -5,12 +5,12 @@ import unittest
 import zipfile
 from pathlib import Path
 
-from smart_unpacker.coordinator.runner import PipelineRunner
-from smart_unpacker.config.schema import normalize_config
-from smart_unpacker.contracts.detection import FactBag
-from smart_unpacker.contracts.tasks import ArchiveTask
-from smart_unpacker.rename.scheduler import RenameScheduler
-from smart_unpacker.detection import DetectionScheduler
+from packrelic.coordinator.runner import PipelineRunner
+from packrelic.config.schema import normalize_config
+from packrelic.contracts.detection import FactBag
+from packrelic.contracts.tasks import ArchiveTask
+from packrelic.rename.scheduler import RenameScheduler
+from packrelic.detection import DetectionScheduler
 from tests.helpers.detection_config import with_detection_pipeline
 
 
@@ -78,7 +78,7 @@ class DetectionPipelineTests(unittest.TestCase):
             root = Path(tmp)
             archive_path = root / "sample.zip"
             with zipfile.ZipFile(archive_path, "w") as archive:
-                archive.writestr("hello.txt", "hello from smart unpacker")
+                archive.writestr("hello.txt", "hello from PackRelic")
 
             summary = PipelineRunner(minimal_config()).run(str(root))
 

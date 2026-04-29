@@ -1,5 +1,5 @@
-from smart_unpacker.filesystem.directory_scanner import DirectoryScanner
-from smart_unpacker.detection import DetectionScheduler
+from packrelic.filesystem.directory_scanner import DirectoryScanner
+from packrelic.detection import DetectionScheduler
 
 
 def test_directory_scanner_captures_files_and_directories(tmp_path):
@@ -53,7 +53,7 @@ def test_directory_scanner_custom_filters_fail_without_native_mapping(tmp_path):
         stage = "path"
 
         def evaluate(self, candidate):
-            from smart_unpacker.filesystem.filters.base import keep
+            from packrelic.filesystem.filters.base import keep
             return keep()
 
     import pytest

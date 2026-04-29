@@ -1,5 +1,5 @@
-from smart_unpacker.detection.nested_scan_policy import NestedOutputScanPolicy as OutputScanPolicy
-from smart_unpacker.contracts.filesystem import FileEntry
+from packrelic.detection.nested_scan_policy import NestedOutputScanPolicy as OutputScanPolicy
+from packrelic.contracts.filesystem import FileEntry
 from tests.helpers.detection_config import with_detection_pipeline
 
 
@@ -50,7 +50,7 @@ def test_output_scan_policy_uses_file_entry_size_without_stat(tmp_path, monkeypa
     def fail_getsize(_path):
         raise AssertionError("getsize should not be called when entry size is available")
 
-    monkeypatch.setattr("smart_unpacker.detection.nested_scan_policy.os.path.getsize", fail_getsize)
+    monkeypatch.setattr("packrelic.detection.nested_scan_policy.os.path.getsize", fail_getsize)
 
     entry = FileEntry(path=candidate, is_dir=False, size=1024 * 1024)
 

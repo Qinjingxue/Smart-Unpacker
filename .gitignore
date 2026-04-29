@@ -30,7 +30,8 @@ env/
 # Local reports and generated outputs
 reports/
 *.log
-.smart_unpacker_cache/
+.packrelic_cache/
+.packrelic_watch/
 
 # Local fixtures and private samples
 fixtures/samples/
@@ -51,7 +52,7 @@ acceptance-dataset-*/
 relationship-grouping-*/
 rpgmaker-semantic-*/
 fixtures/fakepicture.jpg
-.smart_unpacker_repair/
+.packrelic_repair/
 testfiles/
 test_pipeline_run/
 test_extract/

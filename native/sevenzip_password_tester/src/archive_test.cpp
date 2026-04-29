@@ -104,12 +104,12 @@ SUP7Z_API int sup7z_test_archive(
     }
     if (!seven_zip_dll_path || !archive_path) {
         copy_ascii(message, message_chars, "missing required path");
-        return static_cast<int>(smart_unpacker::sevenzip::PasswordTestStatus::Error);
+        return static_cast<int>(packrelic::sevenzip::PasswordTestStatus::Error);
     }
 
     const std::wstring archive_path_text(archive_path);
 
-    const auto result = smart_unpacker::sevenzip::test_password(
+    const auto result = packrelic::sevenzip::test_password(
         seven_zip_dll_path,
         archive_path_text,
         password ? password : L"");
@@ -118,13 +118,13 @@ SUP7Z_API int sup7z_test_archive(
         archive_type_chars,
         result.archive_type.empty() ? archive_type_for_path(archive_path_text) : result.archive_type);
     if (command_ok) {
-        *command_ok = result.status == smart_unpacker::sevenzip::PasswordTestStatus::Ok ? 1 : 0;
+        *command_ok = result.status == packrelic::sevenzip::PasswordTestStatus::Ok ? 1 : 0;
     }
     if (encrypted) {
-        *encrypted = result.status == smart_unpacker::sevenzip::PasswordTestStatus::WrongPassword ? 1 : 0;
+        *encrypted = result.status == packrelic::sevenzip::PasswordTestStatus::WrongPassword ? 1 : 0;
     }
     if (checksum_error) {
-        *checksum_error = result.status == smart_unpacker::sevenzip::PasswordTestStatus::Damaged ? 1 : 0;
+        *checksum_error = result.status == packrelic::sevenzip::PasswordTestStatus::Damaged ? 1 : 0;
     }
     copy_ascii(message, message_chars, result.message);
     return static_cast<int>(result.status);
@@ -155,12 +155,12 @@ SUP7Z_API int sup7z_test_archive_with_parts(
     }
     if (!seven_zip_dll_path || !archive_path) {
         copy_ascii(message, message_chars, "missing required path");
-        return static_cast<int>(smart_unpacker::sevenzip::PasswordTestStatus::Error);
+        return static_cast<int>(packrelic::sevenzip::PasswordTestStatus::Error);
     }
 
     const std::wstring archive_path_text(archive_path);
 
-    const auto result = smart_unpacker::sevenzip::test_password_with_parts(
+    const auto result = packrelic::sevenzip::test_password_with_parts(
         seven_zip_dll_path,
         archive_path_text,
         collect_part_paths(archive_path, part_paths, part_count),
@@ -170,13 +170,13 @@ SUP7Z_API int sup7z_test_archive_with_parts(
         archive_type_chars,
         result.archive_type.empty() ? archive_type_for_path(archive_path_text) : result.archive_type);
     if (command_ok) {
-        *command_ok = result.status == smart_unpacker::sevenzip::PasswordTestStatus::Ok ? 1 : 0;
+        *command_ok = result.status == packrelic::sevenzip::PasswordTestStatus::Ok ? 1 : 0;
     }
     if (encrypted) {
-        *encrypted = result.status == smart_unpacker::sevenzip::PasswordTestStatus::WrongPassword ? 1 : 0;
+        *encrypted = result.status == packrelic::sevenzip::PasswordTestStatus::WrongPassword ? 1 : 0;
     }
     if (checksum_error) {
-        *checksum_error = result.status == smart_unpacker::sevenzip::PasswordTestStatus::Damaged ? 1 : 0;
+        *checksum_error = result.status == packrelic::sevenzip::PasswordTestStatus::Damaged ? 1 : 0;
     }
     copy_ascii(message, message_chars, result.message);
     return static_cast<int>(result.status);

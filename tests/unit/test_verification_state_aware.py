@@ -1,12 +1,12 @@
 import io
 import zipfile
 
-from smart_unpacker.contracts.archive_input import ArchiveInputDescriptor
-from smart_unpacker.contracts.archive_state import ArchiveState, PatchOperation, PatchPlan
-from smart_unpacker.contracts.detection import FactBag
-from smart_unpacker.contracts.tasks import ArchiveTask
-from smart_unpacker.extraction.result import ExtractionResult
-from smart_unpacker.verification import VerificationScheduler
+from packrelic.contracts.archive_input import ArchiveInputDescriptor
+from packrelic.contracts.archive_state import ArchiveState, PatchOperation, PatchPlan
+from packrelic.contracts.detection import FactBag
+from packrelic.contracts.tasks import ArchiveTask
+from packrelic.extraction.result import ExtractionResult
+from packrelic.verification import VerificationScheduler
 
 
 def test_archive_crc_reads_patched_state_not_raw_archive_path(tmp_path):

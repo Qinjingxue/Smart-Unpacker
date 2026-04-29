@@ -6,7 +6,7 @@
 #include <cwctype>
 #include <filesystem>
 
-namespace smart_unpacker::sevenzip {
+namespace packrelic::sevenzip {
 
 namespace {
 
@@ -154,4 +154,4 @@ ArchiveOperationResult run_archive_operation(const ArchiveOperationRequest& requ
     }
 }
 
-}  // namespace smart_unpacker::sevenzip
+}  // namespace packrelic::sevenzip

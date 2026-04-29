@@ -1,10 +1,10 @@
-from smart_unpacker.repair.coverage import coverage_view_from_job
-from smart_unpacker.repair.diagnosis import RepairDiagnosis
-from smart_unpacker.repair.job import RepairJob
-from smart_unpacker.repair.pipeline.modules.zip.central_directory import ZipCentralDirectoryRebuild
-from smart_unpacker.repair.pipeline.modules.zip.data_descriptor import ZipDataDescriptorRecovery
-from smart_unpacker.repair.pipeline.modules.zip.deep_partial_recovery import ZipDeepPartialRecovery
-from smart_unpacker.repair.pipeline.modules.zip.partial_recovery import ZipPartialRecovery
+from packrelic.repair.coverage import coverage_view_from_job
+from packrelic.repair.diagnosis import RepairDiagnosis
+from packrelic.repair.job import RepairJob
+from packrelic.repair.pipeline.modules.zip.central_directory import ZipCentralDirectoryRebuild
+from packrelic.repair.pipeline.modules.zip.data_descriptor import ZipDataDescriptorRecovery
+from packrelic.repair.pipeline.modules.zip.deep_partial_recovery import ZipDeepPartialRecovery
+from packrelic.repair.pipeline.modules.zip.partial_recovery import ZipPartialRecovery
 
 
 def test_archive_coverage_view_classifies_payload_damage():

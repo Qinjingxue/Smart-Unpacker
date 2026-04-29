@@ -2,7 +2,7 @@
 
 Windows C++ wrapper around the bundled `7z.dll`.
 
-This component provides the in-process 7-Zip backend used by Smart Unpacker for
+This component provides the in-process 7-Zip backend used by PackRelic for
 archive probing, archive testing, and password attempts. It avoids spawning
 `7z.exe` for high-volume detection/password checks. The final extraction step
 still uses `7z.exe x`.
@@ -49,7 +49,7 @@ The wrapper exports a narrow C ABI:
 - `sup7z_check_archive_health`
 - `sup7z_analyze_archive_resources`
 
-Python calls these through `smart_unpacker.support.sevenzip_native`.
+Python calls these through `packrelic.support.sevenzip_native`.
 
 ## Runtime Responsibility
 

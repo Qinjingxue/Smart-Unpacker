@@ -9,9 +9,9 @@ python tests\performance_split_archives\split_archive_pressure.py
 ```
 
 It dynamically creates temporary archives with 7-Zip, so it requires `tools/7z.exe`
-or `SMART_UNPACKER_TEST_7Z`. SFX cases also require `tools/7zCon.sfx` or
-`SMART_UNPACKER_TEST_7Z_SFX`. RAR cases require `rar.exe`, configured with
-`SMART_UNPACKER_TEST_RAR` or `tests/test_tools.json` as `rar_exe`; without it, the
+or `packrelic_TEST_7Z`. SFX cases also require `tools/7zCon.sfx` or
+`packrelic_TEST_7Z_SFX`. RAR cases require `rar.exe`, configured with
+`packrelic_TEST_RAR` or `tests/test_tools.json` as `rar_exe`; without it, the
 RAR matrix is reported as skipped.
 
 The script covers:

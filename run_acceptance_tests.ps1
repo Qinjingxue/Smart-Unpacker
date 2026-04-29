@@ -118,7 +118,7 @@ function Invoke-Native {
 
 function Get-NativeSmokeCode {
     return @"
-import smart_unpacker_native as n
+import packrelic_native as n
 required = [
     'native_available', 'scanner_version',
     'scan_directory_entries', 'list_regular_files_in_directory',
@@ -228,18 +228,18 @@ function Get-EnvironmentRefreshReasons {
 
     & $VenvPython -c (Get-NativeSmokeCode) *> $null
     if ($LASTEXITCODE -ne 0) {
-        $reasons.Add("smart_unpacker_native is missing new native repair APIs")
+        $reasons.Add("packrelic_native is missing new native repair APIs")
     }
 
-    $nativeOrigin = Get-ModuleOrigin -PythonPath $VenvPython -ModuleName "smart_unpacker_native"
+    $nativeOrigin = Get-ModuleOrigin -PythonPath $VenvPython -ModuleName "packrelic_native"
     if (-not $nativeOrigin -or -not (Test-Path -LiteralPath $nativeOrigin)) {
-        $reasons.Add("smart_unpacker_native is not importable from .venv")
+        $reasons.Add("packrelic_native is not importable from .venv")
     } else {
-        $nativeSourceRoot = Join-Path $RepoRoot "native\smart_unpacker_native"
+        $nativeSourceRoot = Join-Path $RepoRoot "native\packrelic_native"
         $nativeSourceNewest = Get-NewestSourceWriteTime -Root $nativeSourceRoot -Include @("*.rs", "Cargo.toml", "Cargo.lock")
         $nativeInstalledTime = (Get-Item -LiteralPath $nativeOrigin).LastWriteTimeUtc
         if ($nativeInstalledTime -lt $nativeSourceNewest) {
-            $reasons.Add("installed smart_unpacker_native is older than Rust sources")
+            $reasons.Add("installed packrelic_native is older than Rust sources")
         }
     }
 
@@ -333,11 +333,11 @@ Invoke-TestStep -Label "CLI contract tests" -Command @($python, "-m", "pytest", 
 Invoke-TestStep -Label "Data case runners" -Command @($python, "-m", "pytest", "-q", "tests/runners")
 Invoke-TestStep -Label "Split archive repair regressions" -Command @($python, "tests\performance_split_archives\split_archive_pressure.py", "--profile", "acceptance-batch", "--formats", "7z,rar", "--strict", "--no-json")
 Invoke-TestStep -Label "Archive mixed-batch acceptance" -Command @($python, "tests\performance_split_archives\split_archive_pressure.py", "--profile", "acceptance-batch", "--strict", "--no-json")
-Invoke-TestStep -Label "CLI help smoke test" -Command @($python, "sunpack_cli.py", "--help")
-Invoke-TestStep -Label "CLI passwords smoke test" -Command @($python, "sunpack_cli.py", "passwords", "--json")
-Invoke-TestStep -Label "CLI scan smoke test" -Command @($python, "sunpack_cli.py", "scan", (Join-Path $repoRoot "tests"), "--json")
-Invoke-TestStep -Label "CLI inspect smoke test" -Command @($python, "sunpack_cli.py", "inspect", (Join-Path $repoRoot "tests"), "--json")
-Invoke-TestStep -Label "CLI config smoke test" -Command @($python, "sunpack_cli.py", "config", "--json", "show")
+Invoke-TestStep -Label "CLI help smoke test" -Command @($python, "pkrc.py", "--help")
+Invoke-TestStep -Label "CLI passwords smoke test" -Command @($python, "pkrc.py", "passwords", "--json")
+Invoke-TestStep -Label "CLI scan smoke test" -Command @($python, "pkrc.py", "scan", (Join-Path $repoRoot "tests"), "--json")
+Invoke-TestStep -Label "CLI inspect smoke test" -Command @($python, "pkrc.py", "inspect", (Join-Path $repoRoot "tests"), "--json")
+Invoke-TestStep -Label "CLI config smoke test" -Command @($python, "pkrc.py", "config", "--json", "show")
 
 Write-Host ""
 Write-Host "Summary" -ForegroundColor Cyan

@@ -3,13 +3,13 @@
 入口脚本：
 
 ```powershell
-python sunpack_cli.py <command> [options] [paths...]
+python pkrc.py <command> [options] [paths...]
 ```
 
 打包后的 Windows 程序通常可直接使用：
 
 ```powershell
-sunpack.exe <command> [options] [paths...]
+pkrc.exe <command> [options] [paths...]
 ```
 
 顶层命令：
@@ -19,7 +19,7 @@ sunpack.exe <command> [options] [paths...]
 - `scan`：只扫描可解压任务，不修改文件。
 - `inspect`：输出每个文件的检测细节，不修改文件。
 - `passwords`：查看实际会参与尝试的密码列表。
-- `config`：查看或校验 `smart_unpacker_config.json`。
+- `config`：查看或校验 `packrelic_config.json`。
 
 ## 通用输出参数
 
@@ -42,7 +42,7 @@ sunpack.exe <command> [options] [paths...]
 用法：
 
 ```powershell
-python sunpack_cli.py extract [options] <paths...>
+python pkrc.py extract [options] <paths...>
 ```
 
 `paths` 可以是一个或多个文件、目录。目录会被扫描并生成解压任务。
@@ -70,10 +70,10 @@ python sunpack_cli.py extract [options] <paths...>
 示例：
 
 ```powershell
-python sunpack_cli.py extract D:\Downloads
-python sunpack_cli.py extract D:\A.7z -p 123456 -p secret
-python sunpack_cli.py extract D:\Archives --pw-file .\passwords.txt --cleanup r --sched auto
-python sunpack_cli.py extract D:\Nested --recur * --no-flatten
+python pkrc.py extract D:\Downloads
+python pkrc.py extract D:\A.7z -p 123456 -p secret
+python pkrc.py extract D:\Archives --pw-file .\passwords.txt --cleanup r --sched auto
+python pkrc.py extract D:\Nested --recur * --no-flatten
 ```
 
 退出码：
@@ -88,7 +88,7 @@ python sunpack_cli.py extract D:\Nested --recur * --no-flatten
 用法：
 
 ```powershell
-python sunpack_cli.py scan [options] <paths...>
+python pkrc.py scan [options] <paths...>
 ```
 
 `scan` 会扫描输入路径，输出识别到的解压任务、分卷关系、检测扩展名、分数和命中规则。它不会解压，也不会清理文件。
@@ -98,9 +98,9 @@ python sunpack_cli.py scan [options] <paths...>
 示例：
 
 ```powershell
-python sunpack_cli.py scan D:\Downloads
-python sunpack_cli.py scan D:\Downloads --json
-python sunpack_cli.py scan D:\Downloads -v
+python pkrc.py scan D:\Downloads
+python pkrc.py scan D:\Downloads --json
+python pkrc.py scan D:\Downloads -v
 ```
 
 ## inspect
@@ -108,7 +108,7 @@ python sunpack_cli.py scan D:\Downloads -v
 用法：
 
 ```powershell
-python sunpack_cli.py inspect [options] <paths...>
+python pkrc.py inspect [options] <paths...>
 ```
 
 `inspect` 面向诊断：它会列出候选文件的判定结果、分数、决策阶段、停止原因、确认层结果和 fact 错误。
@@ -124,10 +124,10 @@ python sunpack_cli.py inspect [options] <paths...>
 示例：
 
 ```powershell
-python sunpack_cli.py inspect D:\Downloads
-python sunpack_cli.py inspect D:\Downloads --archives-only
-python sunpack_cli.py inspect D:\Downloads --json
-python sunpack_cli.py inspect D:\Downloads -v
+python pkrc.py inspect D:\Downloads
+python pkrc.py inspect D:\Downloads --archives-only
+python pkrc.py inspect D:\Downloads --json
+python pkrc.py inspect D:\Downloads -v
 ```
 
 ## watch
@@ -135,7 +135,7 @@ python sunpack_cli.py inspect D:\Downloads -v
 用法：
 
 ```powershell
-python sunpack_cli.py watch [options] <paths...>
+python pkrc.py watch [options] <paths...>
 ```
 
 `watch` 会监听一个或多个文件夹。发现候选归档后先等待文件大小稳定，再把路径交给同一套 `extract` pipeline，因此 detection、analysis、verification、repair、递归和后处理能力都与普通 `extract` 保持一致。
@@ -145,8 +145,8 @@ python sunpack_cli.py watch [options] <paths...>
 示例：
 
 ```powershell
-python sunpack_cli.py watch D:\Downloads --out-dir D:\Unpacked
-python sunpack_cli.py watch D:\Incoming -p 123456 --cleanup r --recur *
+python pkrc.py watch D:\Downloads --out-dir D:\Unpacked
+python pkrc.py watch D:\Incoming -p 123456 --cleanup r --recur *
 ```
 
 ## passwords
@@ -154,7 +154,7 @@ python sunpack_cli.py watch D:\Incoming -p 123456 --cleanup r --recur *
 用法：
 
 ```powershell
-python sunpack_cli.py passwords [options]
+python pkrc.py passwords [options]
 ```
 
 参数：
@@ -174,9 +174,9 @@ python sunpack_cli.py passwords [options]
 示例：
 
 ```powershell
-python sunpack_cli.py passwords
-python sunpack_cli.py passwords -p 123456 --no-builtin-pw
-python sunpack_cli.py passwords --pw-file .\passwords.txt --json
+python pkrc.py passwords
+python pkrc.py passwords -p 123456 --no-builtin-pw
+python pkrc.py passwords --pw-file .\passwords.txt --json
 ```
 
 ## config
@@ -184,7 +184,7 @@ python sunpack_cli.py passwords --pw-file .\passwords.txt --json
 用法：
 
 ```powershell
-python sunpack_cli.py config [options] <show|validate>
+python pkrc.py config [options] <show|validate>
 ```
 
 子命令：
@@ -204,9 +204,9 @@ python sunpack_cli.py config [options] <show|validate>
 示例：
 
 ```powershell
-python sunpack_cli.py config show
-python sunpack_cli.py config validate
-python sunpack_cli.py config validate --json
+python pkrc.py config show
+python pkrc.py config validate
+python pkrc.py config validate --json
 ```
 
 ## Windows 右键菜单
@@ -218,4 +218,4 @@ python sunpack_cli.py config validate --json
 .\scripts\unregister_context_menu.ps1
 ```
 
-注册脚本会优先寻找 `sunpack.exe`，找不到时使用 `python sunpack_cli.py`。默认菜单项对文件夹或目录空白处执行 `extract <目标> --ask-pw --pause`，适合给非终端使用场景保留暂停窗口。
+注册脚本会优先寻找 `pkrc.exe`，找不到时使用 `python pkrc.py`。默认菜单项对文件夹或目录空白处执行 `extract <目标> --ask-pw --pause`，适合给非终端使用场景保留暂停窗口。

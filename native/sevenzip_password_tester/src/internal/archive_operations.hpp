@@ -6,7 +6,7 @@
 #include <string>
 #include <vector>
 
-namespace smart_unpacker::sevenzip {
+namespace packrelic::sevenzip {
 
 using UInt32 = std::uint32_t;
 using UInt64 = std::uint64_t;
@@ -85,4 +85,4 @@ CrcManifestResult read_archive_crc_manifest_with_parts(
 
 std::wstring archive_type_for_path(const std::wstring& path);
 
-}  // namespace smart_unpacker::sevenzip
+}  // namespace packrelic::sevenzip

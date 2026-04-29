@@ -4,7 +4,7 @@
 #include <vector>
 #include <functional>
 
-namespace smart_unpacker::sevenzip {
+namespace packrelic::sevenzip {
 
 enum class PasswordTestStatus {
     Ok,
@@ -206,7 +206,7 @@ ExtractArchiveResult extract_archive_with_patches(
 
 const char* status_name(PasswordTestStatus status);
 
-}  // namespace smart_unpacker::sevenzip
+}  // namespace packrelic::sevenzip
 
 #ifdef _WIN32
 #ifdef SUP7Z_BUILD_DLL

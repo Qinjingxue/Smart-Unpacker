@@ -1,5 +1,5 @@
-from smart_unpacker.verification.comparison import RecoveryAttempt, compare_attempts, rank_attempts
-from smart_unpacker.verification.result import (
+from packrelic.verification.comparison import RecoveryAttempt, compare_attempts, rank_attempts
+from packrelic.verification.result import (
     ASSESSMENT_COMPLETE,
     ASSESSMENT_PARTIAL,
     ArchiveCoverageSummary,

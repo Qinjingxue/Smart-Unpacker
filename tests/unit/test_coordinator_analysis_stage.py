@@ -1,13 +1,13 @@
 import struct
 import zlib
 
-from smart_unpacker.analysis.scheduler import ArchiveAnalysisScheduler
-from smart_unpacker.analysis.result import ArchiveAnalysisReport, ArchiveFormatEvidence, ArchiveSegment
-from smart_unpacker.contracts.archive_input import ArchiveInputDescriptor
-from smart_unpacker.contracts.archive_state import ArchiveState, PatchOperation, PatchPlan
-from smart_unpacker.contracts.detection import FactBag
-from smart_unpacker.contracts.tasks import ArchiveTask, SplitArchiveInfo
-from smart_unpacker.coordinator.analysis_stage import ArchiveAnalysisStage
+from packrelic.analysis.scheduler import ArchiveAnalysisScheduler
+from packrelic.analysis.result import ArchiveAnalysisReport, ArchiveFormatEvidence, ArchiveSegment
+from packrelic.contracts.archive_input import ArchiveInputDescriptor
+from packrelic.contracts.archive_state import ArchiveState, PatchOperation, PatchPlan
+from packrelic.contracts.detection import FactBag
+from packrelic.contracts.tasks import ArchiveTask, SplitArchiveInfo
+from packrelic.coordinator.analysis_stage import ArchiveAnalysisStage
 
 
 class _FakeAnalysisScheduler:

@@ -11,26 +11,26 @@ from pathlib import Path
 
 import pytest
 
-from smart_unpacker.contracts.detection import FactBag
-from smart_unpacker.contracts.archive_state import ArchiveState, PatchOperation, PatchPlan
-from smart_unpacker.contracts.run_context import RunContext
-from smart_unpacker.contracts.tasks import ArchiveTask
-from smart_unpacker.config.schema import normalize_config
-from smart_unpacker.coordinator.extraction_batch import BatchExtractionOutcome, ExtractionBatchRunner
-from smart_unpacker.coordinator.repair_beam import RepairBeamLoop, RepairBeamState
-from smart_unpacker.coordinator.runner import PipelineRunner
-from smart_unpacker.coordinator.analysis_stage import ArchiveAnalysisStage
-from smart_unpacker.contracts.archive_input import ArchiveInputDescriptor, ArchiveInputRange
-from smart_unpacker.extraction.progress import write_extraction_progress_manifest
-from smart_unpacker.extraction.result import ExtractionResult
-from smart_unpacker.repair.candidate import RepairCandidate, RepairCandidateBatch
-from smart_unpacker.repair.result import RepairResult
-from smart_unpacker.support.resources import get_7z_dll_path, get_sevenzip_worker_path
-from smart_unpacker.verification import VerificationResult, VerificationScheduler
-from smart_unpacker.verification.evidence import VerificationEvidence
-from smart_unpacker.verification.pipeline import VerificationPipeline
-from smart_unpacker.verification.registry import register_verification_method
-from smart_unpacker.verification.result import (
+from packrelic.contracts.detection import FactBag
+from packrelic.contracts.archive_state import ArchiveState, PatchOperation, PatchPlan
+from packrelic.contracts.run_context import RunContext
+from packrelic.contracts.tasks import ArchiveTask
+from packrelic.config.schema import normalize_config
+from packrelic.coordinator.extraction_batch import BatchExtractionOutcome, ExtractionBatchRunner
+from packrelic.coordinator.repair_beam import RepairBeamLoop, RepairBeamState
+from packrelic.coordinator.runner import PipelineRunner
+from packrelic.coordinator.analysis_stage import ArchiveAnalysisStage
+from packrelic.contracts.archive_input import ArchiveInputDescriptor, ArchiveInputRange
+from packrelic.extraction.progress import write_extraction_progress_manifest
+from packrelic.extraction.result import ExtractionResult
+from packrelic.repair.candidate import RepairCandidate, RepairCandidateBatch
+from packrelic.repair.result import RepairResult
+from packrelic.support.resources import get_7z_dll_path, get_sevenzip_worker_path
+from packrelic.verification import VerificationResult, VerificationScheduler
+from packrelic.verification.evidence import VerificationEvidence
+from packrelic.verification.pipeline import VerificationPipeline
+from packrelic.verification.registry import register_verification_method
+from packrelic.verification.result import (
     FileVerificationObservation,
     VerificationIssue,
     VerificationStepResult,
@@ -668,7 +668,7 @@ def test_missing_split_volume_is_not_reported_as_payload_partial(tmp_path):
     assert worker_result["wrong_password"] is False
     assert worker_result["failure_kind"] == "missing_volume"
     assert json.loads(Path(manifest).read_text(encoding="utf-8"))["partial_outputs"] is False
-    assert not any(path.is_file() and ".sunpack" not in path.parts for path in out_dir.rglob("*"))
+    assert not any(path.is_file() and ".packrelic" not in path.parts for path in out_dir.rglob("*"))
 
 
 def test_sfx_crop_patch_payload_damage_coverage_uses_virtual_zip_not_carrier(tmp_path):
@@ -755,7 +755,7 @@ def test_recovery_report_includes_failure_kind_coverage_and_patch_lineage(tmp_pa
         error="payload damaged",
         diagnostics={"result": worker_result, "partial_outputs": True},
         partial_outputs=True,
-        progress_manifest=str(out_dir / ".sunpack" / "extraction_manifest.json"),
+        progress_manifest=str(out_dir / ".packrelic" / "extraction_manifest.json"),
     )
     runner = ExtractionBatchRunner(
         RunContext(),
@@ -765,7 +765,7 @@ def test_recovery_report_includes_failure_kind_coverage_and_patch_lineage(tmp_pa
     )
 
     collected = runner.collect_result(task, BatchExtractionOutcome(result=result, verification=verification))
-    report = json.loads((out_dir / ".sunpack" / "recovery_report.json").read_text(encoding="utf-8"))
+    report = json.loads((out_dir / ".packrelic" / "recovery_report.json").read_text(encoding="utf-8"))
     bad = [item for item in report["files"] if item["archive_path"] == "bad.bin"]
 
     assert collected == str(out_dir)
@@ -790,7 +790,7 @@ def test_recovery_report_schema_contract_for_partial_result(tmp_path):
         error="payload damaged",
         diagnostics={"result": worker_result, "partial_outputs": True},
         partial_outputs=True,
-        progress_manifest=str(out_dir / ".sunpack" / "extraction_manifest.json"),
+        progress_manifest=str(out_dir / ".packrelic" / "extraction_manifest.json"),
     )
     runner = ExtractionBatchRunner(
         RunContext(),
@@ -800,7 +800,7 @@ def test_recovery_report_schema_contract_for_partial_result(tmp_path):
     )
 
     runner.collect_result(_task(archive, detected_ext="zip"), BatchExtractionOutcome(result=result, verification=verification))
-    report = json.loads((out_dir / ".sunpack" / "recovery_report.json").read_text(encoding="utf-8"))
+    report = json.loads((out_dir / ".packrelic" / "recovery_report.json").read_text(encoding="utf-8"))
 
     _assert_recovery_report_schema(report)
     assert report["archive_coverage"]["completeness"] == pytest.approx(0.75, abs=0.02)
@@ -1063,7 +1063,7 @@ def test_missing_tail_volume_partial_outputs_do_not_become_partial_success(tmp_p
     assert outcome.verification.decision_hint == "accept_partial"
     assert runner.context.partial_success_count == 0
     assert runner.context.failed_tasks
-    assert not (out_dir / ".sunpack" / "recovery_report.json").exists()
+    assert not (out_dir / ".packrelic" / "recovery_report.json").exists()
 
 
 def test_main_flow_nested_archive_keeps_outer_complete_and_inner_partial_coverage_separate(tmp_path):
@@ -1077,8 +1077,8 @@ def test_main_flow_nested_archive_keeps_outer_complete_and_inner_partial_coverag
 
     outer_out_dir = input_root / outer.stem
     inner_out_dir = outer_out_dir / "inner"
-    inner_report = json.loads((inner_out_dir / ".sunpack" / "recovery_report.json").read_text(encoding="utf-8"))
-    outer_manifest = json.loads((outer_out_dir / ".sunpack" / "extraction_manifest.json").read_text(encoding="utf-8"))
+    inner_report = json.loads((inner_out_dir / ".packrelic" / "recovery_report.json").read_text(encoding="utf-8"))
+    outer_manifest = json.loads((outer_out_dir / ".packrelic" / "extraction_manifest.json").read_text(encoding="utf-8"))
 
     assert summary.success_count == 2
     assert summary.partial_success_count == 1
@@ -1107,8 +1107,8 @@ def test_main_flow_outer_partial_and_inner_tar_gz_partial_keep_coverage_separate
 
     outer_out_dir = input_root / archive.stem
     inner_out_dir = outer_out_dir / "inner.tar"
-    outer_report = json.loads((outer_out_dir / ".sunpack" / "recovery_report.json").read_text(encoding="utf-8"))
-    inner_report = json.loads((inner_out_dir / ".sunpack" / "recovery_report.json").read_text(encoding="utf-8"))
+    outer_report = json.loads((outer_out_dir / ".packrelic" / "recovery_report.json").read_text(encoding="utf-8"))
+    inner_report = json.loads((inner_out_dir / ".packrelic" / "recovery_report.json").read_text(encoding="utf-8"))
 
     assert summary.partial_success_count == 2
     assert not summary.failed_tasks
@@ -1134,14 +1134,14 @@ def test_main_flow_outer_complete_inner_missing_volume_does_not_mix_coverage(tmp
     summary = PipelineRunner(config).run(str(input_root))
 
     outer_out_dir = input_root / archive.stem
-    outer_manifest = json.loads((outer_out_dir / ".sunpack" / "extraction_manifest.json").read_text(encoding="utf-8"))
+    outer_manifest = json.loads((outer_out_dir / ".packrelic" / "extraction_manifest.json").read_text(encoding="utf-8"))
 
     assert summary.success_count == 1
     assert summary.partial_success_count == 0
     assert any("inner-missing.7z.001" in item for item in summary.failed_tasks)
     assert outer_manifest["summary"]["complete"] == 2
     assert "recovery" not in outer_manifest
-    assert not (outer_out_dir / "inner-missing.7z" / ".sunpack" / "recovery_report.json").exists()
+    assert not (outer_out_dir / "inner-missing.7z" / ".packrelic" / "recovery_report.json").exists()
 
 
 def test_recursive_partial_report_survives_delete_cleanup_and_remains_discoverable(tmp_path):
@@ -1158,7 +1158,7 @@ def test_recursive_partial_report_survives_delete_cleanup_and_remains_discoverab
 
     outer_out_dir = input_root / archive.stem
     inner_archive = outer_out_dir / "inner.zip"
-    inner_report_path = outer_out_dir / "inner" / ".sunpack" / "recovery_report.json"
+    inner_report_path = outer_out_dir / "inner" / ".packrelic" / "recovery_report.json"
     inner_report = json.loads(inner_report_path.read_text(encoding="utf-8"))
 
     assert summary.success_count == 2
@@ -1184,7 +1184,7 @@ def test_main_flow_recurses_into_truncated_tar_gz_partial_tar_stream(tmp_path):
     summary = PipelineRunner(config).run(str(input_root))
 
     outer_out_dir = input_root / archive.stem
-    report = json.loads((outer_out_dir / ".sunpack" / "recovery_report.json").read_text(encoding="utf-8"))
+    report = json.loads((outer_out_dir / ".packrelic" / "recovery_report.json").read_text(encoding="utf-8"))
     extracted_names = {path.name for path in outer_out_dir.rglob("*.bin")}
 
     assert summary.partial_success_count == 1
@@ -1235,7 +1235,7 @@ def test_batch_flow_repair_structure_then_accepts_best_effort_payload_partial(tm
 
     outcome = runner._extract_verify_with_retries(task, str(out_dir), runtime_scheduler=None)
     collected = runner.collect_result(task, outcome)
-    report = json.loads((out_dir / ".sunpack" / "recovery_report.json").read_text(encoding="utf-8"))
+    report = json.loads((out_dir / ".packrelic" / "recovery_report.json").read_text(encoding="utf-8"))
 
     assert collected == str(out_dir)
     assert outcome.success is True
@@ -1265,7 +1265,7 @@ def test_main_flow_accepts_best_effort_payload_damage_and_reports_coverage(tmp_p
     summary = PipelineRunner(config).run(str(input_root))
 
     out_dir = input_root / archive.stem
-    report = json.loads((out_dir / ".sunpack" / "recovery_report.json").read_text(encoding="utf-8"))
+    report = json.loads((out_dir / ".packrelic" / "recovery_report.json").read_text(encoding="utf-8"))
     bad_entries = [item for item in report["files"] if item["archive_path"] == "bad.bin"]
 
     assert summary.success_count == 1

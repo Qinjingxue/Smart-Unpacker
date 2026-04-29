@@ -3,7 +3,7 @@ import zlib
 
 from pathlib import Path
 
-from smart_unpacker_native import seven_zip_next_header_field_repair
+from packrelic_native import seven_zip_next_header_field_repair
 
 
 def test_next_header_field_repair_rejects_nonterminated_crc_collision_candidate(tmp_path):

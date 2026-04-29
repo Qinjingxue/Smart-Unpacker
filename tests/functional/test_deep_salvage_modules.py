@@ -11,8 +11,8 @@ import zlib
 
 import pytest
 
-from smart_unpacker.repair import RepairJob, RepairScheduler
-from smart_unpacker.support.sevenzip_worker import dry_run_archive
+from packrelic.repair import RepairJob, RepairScheduler
+from packrelic.support.sevenzip_worker import dry_run_archive
 from tests.helpers.real_archives import ArchiveFixtureFactory, apply_split_issue
 from tests.helpers.tool_config import get_optional_rar
 

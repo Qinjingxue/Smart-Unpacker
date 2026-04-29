@@ -4,22 +4,22 @@ import gzip
 import io
 import tarfile
 
-from smart_unpacker.analysis.scheduler import ArchiveAnalysisScheduler
-from smart_unpacker.contracts.archive_input import ArchiveInputDescriptor
-from smart_unpacker.contracts.archive_state import ArchiveState, PatchOperation, PatchPlan
-from smart_unpacker.contracts.detection import FactBag
-from smart_unpacker.contracts.tasks import ArchiveTask
-from smart_unpacker.repair.diagnosis import RepairDiagnosis
-from smart_unpacker.repair.diagnosis import diagnose_repair_job
-from smart_unpacker.repair.job import RepairJob
-from smart_unpacker.repair.pipeline.modules.archive_carrier_crop import attach_native_crop_patch_plans
-from smart_unpacker.repair.pipeline.modules.gzip.trailing_junk_trim import GzipTrailingJunkTrim
-from smart_unpacker.repair.pipeline.modules._native_candidates import candidates_from_native_result
-from smart_unpacker.repair.pipeline.modules._common import source_input_for_job
-from smart_unpacker.repair.pipeline.modules.tar.checksum_fix import TarHeaderChecksumFix
-from smart_unpacker.repair.pipeline.modules.zip._rebuild import rebuild_zip_from_source
-from smart_unpacker.repair.pipeline.modules.zip.trailing_junk_trim import ZipTrailingJunkTrim
-from smart_unpacker.support.archive_state_view import ArchiveStateByteView
+from packrelic.analysis.scheduler import ArchiveAnalysisScheduler
+from packrelic.contracts.archive_input import ArchiveInputDescriptor
+from packrelic.contracts.archive_state import ArchiveState, PatchOperation, PatchPlan
+from packrelic.contracts.detection import FactBag
+from packrelic.contracts.tasks import ArchiveTask
+from packrelic.repair.diagnosis import RepairDiagnosis
+from packrelic.repair.diagnosis import diagnose_repair_job
+from packrelic.repair.job import RepairJob
+from packrelic.repair.pipeline.modules.archive_carrier_crop import attach_native_crop_patch_plans
+from packrelic.repair.pipeline.modules.gzip.trailing_junk_trim import GzipTrailingJunkTrim
+from packrelic.repair.pipeline.modules._native_candidates import candidates_from_native_result
+from packrelic.repair.pipeline.modules._common import source_input_for_job
+from packrelic.repair.pipeline.modules.tar.checksum_fix import TarHeaderChecksumFix
+from packrelic.repair.pipeline.modules.zip._rebuild import rebuild_zip_from_source
+from packrelic.repair.pipeline.modules.zip.trailing_junk_trim import ZipTrailingJunkTrim
+from packrelic.support.archive_state_view import ArchiveStateByteView
 
 
 def test_archive_state_byte_view_applies_replace_truncate_append(tmp_path):

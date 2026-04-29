@@ -5,12 +5,12 @@ import zipfile
 
 import pytest
 
-from smart_unpacker.contracts.archive_input import ArchiveInputDescriptor, ArchiveInputPart, ArchiveInputRange
-from smart_unpacker.contracts.archive_state import ArchiveState, PatchOperation, PatchPlan
-from smart_unpacker.contracts.detection import FactBag
-from smart_unpacker.contracts.tasks import ArchiveTask
-from smart_unpacker.extraction.scheduler import ExtractionScheduler
-from smart_unpacker.support.resources import get_7z_dll_path, get_sevenzip_worker_path
+from packrelic.contracts.archive_input import ArchiveInputDescriptor, ArchiveInputPart, ArchiveInputRange
+from packrelic.contracts.archive_state import ArchiveState, PatchOperation, PatchPlan
+from packrelic.contracts.detection import FactBag
+from packrelic.contracts.tasks import ArchiveTask
+from packrelic.extraction.scheduler import ExtractionScheduler
+from packrelic.support.resources import get_7z_dll_path, get_sevenzip_worker_path
 from tests.helpers.tool_config import get_test_tools
 
 

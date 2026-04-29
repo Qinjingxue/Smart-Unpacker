@@ -8,7 +8,7 @@
 
 
 
-namespace smart_unpacker::sevenzip {
+namespace packrelic::sevenzip {
 
 
 
@@ -40,5 +40,5 @@ bool fill_resource_analysis_from_open_archive(IInArchive* archive, ResourceAnaly
 
 
 
-}  // namespace smart_unpacker::sevenzip
+}  // namespace packrelic::sevenzip
 

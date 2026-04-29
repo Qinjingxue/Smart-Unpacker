@@ -9,7 +9,7 @@
 #include <vector>
 #endif
 
-namespace smart_unpacker::sevenzip {
+namespace packrelic::sevenzip {
 
 #ifdef _WIN32
 
@@ -175,4 +175,4 @@ bool strict_seven_zip_headers_ok(const std::wstring& path) {
 
 #endif
 
-}  // namespace smart_unpacker::sevenzip
+}  // namespace packrelic::sevenzip

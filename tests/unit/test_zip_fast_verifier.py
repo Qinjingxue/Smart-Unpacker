@@ -2,7 +2,7 @@ import subprocess
 
 import pytest
 
-from smart_unpacker.passwords.verifier.zip_fast import ZipFastVerifier
+from packrelic.passwords.verifier.zip_fast import ZipFastVerifier
 from tests.helpers.tool_config import get_test_tools
 
 

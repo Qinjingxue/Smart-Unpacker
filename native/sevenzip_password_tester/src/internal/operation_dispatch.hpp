@@ -5,7 +5,7 @@
 #include <string>
 #include <vector>
 
-namespace smart_unpacker::sevenzip {
+namespace packrelic::sevenzip {
 
 struct ArchiveOperationRequest {
     Sup7zOperationKind operation = SUP7Z_OPERATION_PROBE;
@@ -35,4 +35,4 @@ struct ArchiveOperationResult {
 
 ArchiveOperationResult run_archive_operation(const ArchiveOperationRequest& request);
 
-}  // namespace smart_unpacker::sevenzip
+}  // namespace packrelic::sevenzip

@@ -1,14 +1,14 @@
 from pathlib import Path
 
-from smart_unpacker.analysis.result import ArchiveAnalysisReport
-from smart_unpacker.analysis.scheduler import ArchiveAnalysisScheduler
-from smart_unpacker.contracts.detection import FactBag
-from smart_unpacker.contracts.run_context import RunContext
-from smart_unpacker.contracts.tasks import ArchiveTask
-from smart_unpacker.coordinator.extraction_batch import ExtractionBatchRunner
-from smart_unpacker.extraction.result import ExtractionResult
-from smart_unpacker.repair.candidate import RepairCandidate, RepairCandidateBatch
-from smart_unpacker.verification.result import ArchiveCoverageSummary, VerificationResult
+from packrelic.analysis.result import ArchiveAnalysisReport
+from packrelic.analysis.scheduler import ArchiveAnalysisScheduler
+from packrelic.contracts.detection import FactBag
+from packrelic.contracts.run_context import RunContext
+from packrelic.contracts.tasks import ArchiveTask
+from packrelic.coordinator.extraction_batch import ExtractionBatchRunner
+from packrelic.extraction.result import ExtractionResult
+from packrelic.repair.candidate import RepairCandidate, RepairCandidateBatch
+from packrelic.verification.result import ArchiveCoverageSummary, VerificationResult
 
 
 def test_extraction_failure_repair_reanalysis_loop_skips_reanalysis_after_accepted_candidate(tmp_path):

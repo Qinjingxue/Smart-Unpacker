@@ -6,7 +6,7 @@
 
 
 
-namespace smart_unpacker::sevenzip {
+namespace packrelic::sevenzip {
 
 
 
@@ -28,4 +28,4 @@ const char* operation_result_name(Int32 op_res);
 
 
 
-}  // namespace smart_unpacker::sevenzip
+}  // namespace packrelic::sevenzip

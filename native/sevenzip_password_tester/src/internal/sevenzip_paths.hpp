@@ -18,7 +18,7 @@
 
 
 
-namespace smart_unpacker::sevenzip {
+namespace packrelic::sevenzip {
 
 
 
@@ -62,5 +62,5 @@ UInt64 archive_input_size(const std::wstring& archive_path, const std::vector<st
 
 
 
-}  // namespace smart_unpacker::sevenzip
+}  // namespace packrelic::sevenzip
 

@@ -3,9 +3,9 @@ from pathlib import Path
 
 import pytest
 
-from smart_unpacker.config.schema import normalize_config
-from smart_unpacker.coordinator.runner import PipelineRunner
-from smart_unpacker.support.resources import get_7z_dll_path, get_sevenzip_worker_path
+from packrelic.config.schema import normalize_config
+from packrelic.coordinator.runner import PipelineRunner
+from packrelic.support.resources import get_7z_dll_path, get_sevenzip_worker_path
 from tests.helpers.detection_config import with_detection_pipeline
 
 

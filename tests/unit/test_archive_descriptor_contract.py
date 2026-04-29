@@ -1,10 +1,10 @@
 from pathlib import Path
 
-from smart_unpacker.contracts.archive_input import ArchiveInputDescriptor, ArchiveInputPart, ArchiveInputRange
-from smart_unpacker.contracts.archive_state import ArchiveState, PatchOperation, PatchPlan
-from smart_unpacker.contracts.detection import FactBag
-from smart_unpacker.contracts.tasks import ArchiveTask
-from smart_unpacker.repair.job import RepairJob
+from packrelic.contracts.archive_input import ArchiveInputDescriptor, ArchiveInputPart, ArchiveInputRange
+from packrelic.contracts.archive_state import ArchiveState, PatchOperation, PatchPlan
+from packrelic.contracts.detection import FactBag
+from packrelic.contracts.tasks import ArchiveTask
+from packrelic.repair.job import RepairJob
 
 
 def test_archive_task_exposes_default_descriptor_from_task_paths(tmp_path):

@@ -7,11 +7,11 @@ import lzma
 from binascii import crc32
 from io import BytesIO
 
-from smart_unpacker.analysis.result import ArchiveFormatEvidence
-from smart_unpacker.analysis.scheduler import ArchiveAnalysisScheduler
-from smart_unpacker.analysis.structure_pipeline.module import AnalysisModuleSpec
-from smart_unpacker.analysis.structure_pipeline.registry import get_analysis_module_registry
-from smart_unpacker.analysis.view import SharedBinaryView
+from packrelic.analysis.result import ArchiveFormatEvidence
+from packrelic.analysis.scheduler import ArchiveAnalysisScheduler
+from packrelic.analysis.structure_pipeline.module import AnalysisModuleSpec
+from packrelic.analysis.structure_pipeline.registry import get_analysis_module_registry
+from packrelic.analysis.view import SharedBinaryView
 
 
 def _zip_bytes(tmp_path):

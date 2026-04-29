@@ -4,9 +4,9 @@ import zlib
 
 import pytest
 
-from smart_unpacker.coordinator.scanner import ScanOrchestrator
-from smart_unpacker.coordinator.runner import PipelineRunner
-from smart_unpacker.detection.scheduler import DetectionScheduler
+from packrelic.coordinator.scanner import ScanOrchestrator
+from packrelic.coordinator.runner import PipelineRunner
+from packrelic.detection.scheduler import DetectionScheduler
 from tests.helpers.detection_config import with_detection_pipeline
 
 

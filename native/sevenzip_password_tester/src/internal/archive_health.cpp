@@ -7,7 +7,7 @@
 #include "sevenzip_status.hpp"
 #include "sevenzip_streams.hpp"
 
-namespace smart_unpacker::sevenzip {
+namespace packrelic::sevenzip {
 
 
 #ifdef _WIN32
@@ -257,4 +257,4 @@ HealthProbeResult check_archive_health_with_parts(
 }
 
 
-}  // namespace smart_unpacker::sevenzip
+}  // namespace packrelic::sevenzip

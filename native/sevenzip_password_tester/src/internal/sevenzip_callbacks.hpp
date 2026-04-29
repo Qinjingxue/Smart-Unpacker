@@ -30,7 +30,7 @@
 
 
 
-namespace smart_unpacker::sevenzip {
+namespace packrelic::sevenzip {
 
 
 
@@ -1242,4 +1242,4 @@ private:
 
 
 
-}  // namespace smart_unpacker::sevenzip
+}  // namespace packrelic::sevenzip

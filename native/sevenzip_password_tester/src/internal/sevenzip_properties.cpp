@@ -5,7 +5,7 @@
 #include <map>
 #endif
 
-namespace smart_unpacker::sevenzip {
+namespace packrelic::sevenzip {
 
 #ifdef _WIN32
 
@@ -180,4 +180,4 @@ bool fill_resource_analysis_from_open_archive(IInArchive* archive, ResourceAnaly
 
 #endif
 
-}  // namespace smart_unpacker::sevenzip
+}  // namespace packrelic::sevenzip

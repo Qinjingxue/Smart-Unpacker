@@ -1,10 +1,10 @@
 from pathlib import Path
 
-from smart_unpacker.coordinator.runner import PipelineRunner
-from smart_unpacker.config.schema import normalize_config
-from smart_unpacker.extraction.result import ExtractionResult
-from smart_unpacker.contracts.detection import FactBag
-from smart_unpacker.contracts.tasks import ArchiveTask
+from packrelic.coordinator.runner import PipelineRunner
+from packrelic.config.schema import normalize_config
+from packrelic.extraction.result import ExtractionResult
+from packrelic.contracts.detection import FactBag
+from packrelic.contracts.tasks import ArchiveTask
 from tests.helpers.detection_config import with_detection_pipeline
 from tests.helpers.fs_builder import make_zip
 

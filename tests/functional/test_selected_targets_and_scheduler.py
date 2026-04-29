@@ -1,7 +1,7 @@
 from pathlib import Path
 
-from smart_unpacker.coordinator.scheduling import ConcurrencyScheduler
-from smart_unpacker.detection import DetectionScheduler
+from packrelic.coordinator.scheduling import ConcurrencyScheduler
+from packrelic.detection import DetectionScheduler
 
 
 def test_selected_directory_and_file_inside_it_are_deduped(tmp_path):

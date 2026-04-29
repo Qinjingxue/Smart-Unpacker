@@ -39,7 +39,7 @@ Python 依赖：
 1. 创建 `.venv`
 2. 安装运行依赖和 pytest
 3. 安装/查找 `maturin`
-4. 构建并安装 Rust/PyO3 扩展 `smart_unpacker_native`
+4. 构建并安装 Rust/PyO3 扩展 `packrelic_native`
 5. 准备 `tools\7z.exe`、`tools\7z.dll` 和 7-Zip license
 6. 安装/查找 CMake
 7. 构建 C++ wrapper `sevenzip_password_tester_capi.dll` 和 `sevenzip_worker.exe`
@@ -64,8 +64,8 @@ Rust native：
 
 ```powershell
 python -m pip install -r requirements-build.txt
-python -m maturin build --manifest-path native\smart_unpacker_native\Cargo.toml --release --out build\native-wheels-dev
-$wheel = Get-ChildItem build\native-wheels-dev\smart_unpacker_native-*.whl | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1 -ExpandProperty FullName
+python -m maturin build --manifest-path native\packrelic_native\Cargo.toml --release --out build\native-wheels-dev
+$wheel = Get-ChildItem build\native-wheels-dev\packrelic_native-*.whl | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1 -ExpandProperty FullName
 python -m pip install --force-reinstall $wheel
 ```
 
@@ -82,8 +82,8 @@ Copy-Item native\sevenzip_password_tester\build\Release\sevenzip_worker.exe tool
 ## Smoke Checks
 
 ```powershell
-.\.venv\Scripts\python.exe -c "import smart_unpacker_native as n; print(n.native_available(), n.scanner_version())"
-.\.venv\Scripts\python.exe -c "from smart_unpacker.support.sevenzip_native import NativePasswordTester; print(NativePasswordTester().available())"
+.\.venv\Scripts\python.exe -c "import packrelic_native as n; print(n.native_available(), n.scanner_version())"
+.\.venv\Scripts\python.exe -c "from packrelic.support.sevenzip_native import NativePasswordTester; print(NativePasswordTester().available())"
 ```
 
 第一个命令确认 Rust native 可导入。第二个命令确认 `tools\sevenzip_password_tester_capi.dll` 和 `tools\7z.dll` 都可被找到。
@@ -116,13 +116,13 @@ Copy-Item native\sevenzip_password_tester\build\Release\sevenzip_worker.exe tool
 
 1. 创建 `.venv-build`
 2. 安装运行和构建依赖
-3. 构建/安装 `smart_unpacker_native`
+3. 构建/安装 `packrelic_native`
 4. 构建 `sevenzip_password_tester_capi.dll` 并复制到 `tools\`
 5. 可选运行验收测试
-6. 使用 PyInstaller 构建 `sunpack.exe`
+6. 使用 PyInstaller 构建 `pkrc.exe`
 7. 将 `tools\7z.exe`、`tools\7z.dll`、`tools\sevenzip_password_tester_capi.dll`、`tools\sevenzip_worker.exe` 和 license 复制到发行目录
 8. 运行 packaged smoke tests
-9. 生成 `release\sunpack-windows-x64-<version>.zip`
+9. 生成 `release\packrelic-windows-x64-<version>.zip`
 
 常用参数：
 
@@ -134,7 +134,7 @@ Copy-Item native\sevenzip_password_tester\build\Release\sevenzip_worker.exe tool
 
 ## 原生组件职责
 
-`smart_unpacker_native` 负责跨平台热点：
+`packrelic_native` 负责跨平台热点：
 
 - 目录扫描
 - 单目录普通文件枚举

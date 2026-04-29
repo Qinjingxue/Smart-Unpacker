@@ -2,10 +2,10 @@ import threading
 import time
 from pathlib import Path
 
-from smart_unpacker.contracts.detection import FactBag
-from smart_unpacker.contracts.run_context import RunContext
-from smart_unpacker.contracts.tasks import ArchiveTask
-from smart_unpacker.coordinator.extraction_batch import ExtractionBatchRunner
+from packrelic.contracts.detection import FactBag
+from packrelic.contracts.run_context import RunContext
+from packrelic.contracts.tasks import ArchiveTask
+from packrelic.coordinator.extraction_batch import ExtractionBatchRunner
 
 
 def test_preflight_inspect_uses_conservative_parallel_stage(tmp_path):

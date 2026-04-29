@@ -28,10 +28,10 @@ def get_test_tools() -> dict[str, Path | None]:
     if path.exists():
         config = json.loads(path.read_text(encoding="utf-8"))
 
-    seven_zip = os.environ.get("SMART_UNPACKER_TEST_7Z") or config.get("seven_zip") or "tools/7z.exe"
-    seven_zip_sfx = os.environ.get("SMART_UNPACKER_TEST_7Z_SFX") or config.get("seven_zip_sfx") or "tools/7zCon.sfx"
-    zstd_exe = os.environ.get("SMART_UNPACKER_TEST_ZSTD") or config.get("zstd_exe") or "tools/zstd.exe"
-    rar_exe = os.environ.get("SMART_UNPACKER_TEST_RAR") or config.get("rar_exe")
+    seven_zip = os.environ.get("packrelic_TEST_7Z") or config.get("seven_zip") or "tools/7z.exe"
+    seven_zip_sfx = os.environ.get("packrelic_TEST_7Z_SFX") or config.get("seven_zip_sfx") or "tools/7zCon.sfx"
+    zstd_exe = os.environ.get("packrelic_TEST_ZSTD") or config.get("zstd_exe") or "tools/zstd.exe"
+    rar_exe = os.environ.get("packrelic_TEST_RAR") or config.get("rar_exe")
 
     return {
         "seven_zip": _resolve_tool(seven_zip, repo_root),
@@ -44,14 +44,14 @@ def get_test_tools() -> dict[str, Path | None]:
 def require_7z() -> Path:
     seven_zip = get_test_tools()["seven_zip"]
     if not seven_zip or not seven_zip.is_file():
-        raise FileNotFoundError("7z.exe is required for this test. Configure tests/test_tools.json or SMART_UNPACKER_TEST_7Z.")
+        raise FileNotFoundError("7z.exe is required for this test. Configure tests/test_tools.json or packrelic_TEST_7Z.")
     return seven_zip
 
 
 def require_zstd() -> Path:
     zstd_exe = get_test_tools()["zstd_exe"]
     if not zstd_exe or not zstd_exe.is_file():
-        raise FileNotFoundError("zstd.exe is required for this test. Configure tests/test_tools.json or SMART_UNPACKER_TEST_ZSTD.")
+        raise FileNotFoundError("zstd.exe is required for this test. Configure tests/test_tools.json or packrelic_TEST_ZSTD.")
     return zstd_exe
 
 

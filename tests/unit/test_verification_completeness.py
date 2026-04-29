@@ -1,13 +1,13 @@
 import json
 from pathlib import Path
 
-from smart_unpacker.contracts.detection import FactBag
-from smart_unpacker.contracts.run_context import RunContext
-from smart_unpacker.contracts.tasks import ArchiveTask
-from smart_unpacker.coordinator.extraction_batch import ExtractionBatchRunner
-from smart_unpacker.extraction.result import ExtractionResult
-from smart_unpacker.repair.result import RepairResult
-from smart_unpacker.verification import VerificationScheduler
+from packrelic.contracts.detection import FactBag
+from packrelic.contracts.run_context import RunContext
+from packrelic.contracts.tasks import ArchiveTask
+from packrelic.coordinator.extraction_batch import ExtractionBatchRunner
+from packrelic.extraction.result import ExtractionResult
+from packrelic.repair.result import RepairResult
+from packrelic.verification import VerificationScheduler
 
 
 def test_partial_extraction_manifest_produces_accept_partial_assessment(tmp_path):
@@ -84,12 +84,12 @@ def test_repair_loop_keeps_original_partial_when_repaired_attempt_is_worse(tmp_p
     assert not (out_dir / "worse-only.txt").exists()
 
 
-def test_output_presence_ignores_sunpack_manifest_files(tmp_path):
+def test_output_presence_ignores_packrelic_manifest_files(tmp_path):
     archive = tmp_path / "sample.zip"
     archive.write_bytes(b"zip")
     out_dir = tmp_path / "out"
-    (out_dir / ".sunpack").mkdir(parents=True)
-    (out_dir / ".sunpack" / "extraction_manifest.json").write_text("{}", encoding="utf-8")
+    (out_dir / ".packrelic").mkdir(parents=True)
+    (out_dir / ".packrelic" / "extraction_manifest.json").write_text("{}", encoding="utf-8")
     result = ExtractionResult(success=True, archive=str(archive), out_dir=str(out_dir), all_parts=[str(archive)])
 
     verification = VerificationScheduler({
@@ -161,7 +161,7 @@ def test_main_flow_accepts_recoverable_partial_after_repair_has_no_candidate(tmp
     assert runner.context.partial_success_count == 1
     recovered = runner.context.recovered_outputs[0]
     assert recovered["archive_coverage"]["expected_files"] == 3
-    report_text = (out_dir / ".sunpack" / "recovery_report.json").read_text(encoding="utf-8")
+    report_text = (out_dir / ".packrelic" / "recovery_report.json").read_text(encoding="utf-8")
     assert "\n" not in report_text
     report = json.loads(report_text)
     assert report["success_kind"] == "partial"
@@ -312,7 +312,7 @@ def _write_manifest(out_dir, archive, files):
     summary = {"complete": 0, "partial": 0, "failed": 0, "skipped": 0, "unverified": 0, "total": len(files)}
     for item in files:
         summary[item["status"]] += 1
-    manifest = out_dir / ".sunpack" / "extraction_manifest.json"
+    manifest = out_dir / ".packrelic" / "extraction_manifest.json"
     manifest.parent.mkdir(parents=True, exist_ok=True)
     manifest.write_text(json.dumps({
         "version": 1,

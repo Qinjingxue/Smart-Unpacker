@@ -25,9 +25,9 @@ function Resolve-Launcher {
     }
 
     $exeCandidates = @(
-        (Join-Path $RepoRoot "sunpack.exe"),
-        (Join-Path $RepoRoot "dist\sunpack\sunpack.exe"),
-        (Join-Path $RepoRoot "dist\sunpack.exe")
+        (Join-Path $RepoRoot "pkrc.exe"),
+        (Join-Path $RepoRoot "dist\\packrelic\pkrc.exe"),
+        (Join-Path $RepoRoot "dist\pkrc.exe")
     )
     foreach ($candidate in $exeCandidates) {
         if (Test-Path -LiteralPath $candidate) {
@@ -40,9 +40,9 @@ function Resolve-Launcher {
         }
     }
 
-    $defaultScript = Join-Path $RepoRoot "sunpack_cli.py"
+    $defaultScript = Join-Path $RepoRoot "pkrc.py"
     if (-not (Test-Path -LiteralPath $defaultScript)) {
-        throw "No usable script entry was found. Expected sunpack_cli.py at the repository root."
+        throw "No usable script entry was found. Expected pkrc.py at the repository root."
     }
     $resolvedScript = (Resolve-Path -LiteralPath $defaultScript).Path
 
@@ -131,9 +131,9 @@ function Set-ContextMenuCommand {
 function Get-DefaultMenuText {
     param([string]$RepoRoot)
 
-    $configPath = Join-Path $RepoRoot "smart_unpacker_config.json"
+    $configPath = Join-Path $RepoRoot "packrelic_config.json"
     if (-not (Test-Path -LiteralPath $configPath)) {
-        return "Smart Unpacker"
+        return "PackRelic"
     }
 
     try {
@@ -144,7 +144,7 @@ function Get-DefaultMenuText {
         }
     } catch {
     }
-    return "Smart Unpacker"
+    return "PackRelic"
 }
 
 function New-ChineseMenuText {
@@ -183,10 +183,10 @@ $launcher = Resolve-Launcher -RepoRoot $repoRoot -PreferredAppPath $AppPath -Pre
 $resolvedIconPath = if ($IconPath) { (Resolve-Path -LiteralPath $IconPath).Path } else { $launcher.IconPath }
 $resolvedMenuText = if ($MenuText) { $MenuText } else { Get-DefaultMenuText -RepoRoot $repoRoot }
 
-$folderKey = "HKCU:\Software\Classes\Directory\shell\SmartUnpacker"
-$backgroundKey = "HKCU:\Software\Classes\Directory\Background\shell\SmartUnpacker"
-$folderSubCommandsName = "SmartUnpacker.FolderContextMenu"
-$backgroundSubCommandsName = "SmartUnpacker.BackgroundContextMenu"
+$folderKey = "HKCU:\Software\Classes\Directory\shell\PackRelic"
+$backgroundKey = "HKCU:\Software\Classes\Directory\Background\shell\PackRelic"
+$folderSubCommandsName = "PackRelic.FolderContextMenu"
+$backgroundSubCommandsName = "PackRelic.BackgroundContextMenu"
 $folderSubCommandsKey = "HKCU:\Software\Classes\$folderSubCommandsName"
 $backgroundSubCommandsKey = "HKCU:\Software\Classes\$backgroundSubCommandsName"
 $subMenuTexts = Get-SubMenuTexts -MenuText $resolvedMenuText

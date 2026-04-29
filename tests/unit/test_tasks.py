@@ -1,5 +1,5 @@
-from smart_unpacker.contracts.detection import FactBag
-from smart_unpacker.contracts.tasks import ArchiveTask
+from packrelic.contracts.detection import FactBag
+from packrelic.contracts.tasks import ArchiveTask
 
 
 def _bag(path: str, logical_name: str, *, split: bool = False) -> FactBag:

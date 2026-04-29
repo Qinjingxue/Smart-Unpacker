@@ -16,7 +16,7 @@
 
 
 
-namespace smart_unpacker::sevenzip {
+namespace packrelic::sevenzip {
 
 
 
@@ -892,5 +892,5 @@ PasswordTestResult test_passwords_with_ranges(
 
 
 
-}  // namespace smart_unpacker::sevenzip
+}  // namespace packrelic::sevenzip
 

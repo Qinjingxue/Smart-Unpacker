@@ -3,8 +3,8 @@ from pathlib import Path
 
 import pytest
 
-from smart_unpacker.coordinator.runner import PipelineRunner
-from smart_unpacker.config.schema import normalize_config
+from packrelic.coordinator.runner import PipelineRunner
+from packrelic.config.schema import normalize_config
 from tests.helpers.real_archives import ArchiveCase, ArchiveFixtureFactory
 from tests.helpers.detection_config import with_detection_pipeline
 from tests.helpers.tool_config import get_optional_rar, require_7z, require_zstd

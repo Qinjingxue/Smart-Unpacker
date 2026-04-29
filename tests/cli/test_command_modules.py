@@ -1,6 +1,6 @@
-from smart_unpacker.app.cli import build_cli_parser
-from smart_unpacker.app.cli_commands import discover_command_modules
-from smart_unpacker.app.cli_context import CliContext
+from packrelic.app.cli import build_cli_parser
+from packrelic.app.cli_commands import discover_command_modules
+from packrelic.app.cli_context import CliContext
 
 
 def test_cli_discovers_builtin_command_modules_in_order():
@@ -40,5 +40,5 @@ def test_cli_parser_uses_command_module_language_text():
     help_text = parser.format_help()
 
     assert "执行预检查、扫描、解压和清理" in help_text
-    assert "查看或校验 smart_unpacker_config.json" in help_text
+    assert "查看或校验 packrelic_config.json" in help_text
     assert "选项" in help_text

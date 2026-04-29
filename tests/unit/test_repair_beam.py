@@ -1,7 +1,7 @@
-from smart_unpacker.contracts.archive_input import ArchiveInputDescriptor
-from smart_unpacker.contracts.archive_state import ArchiveState, PatchOperation, PatchPlan
-from smart_unpacker.coordinator.repair_beam import RepairBeamLoop, RepairBeamState
-from smart_unpacker.repair.candidate import CandidateValidation, RepairCandidate, RepairCandidateBatch
+from packrelic.contracts.archive_input import ArchiveInputDescriptor
+from packrelic.contracts.archive_state import ArchiveState, PatchOperation, PatchPlan
+from packrelic.coordinator.repair_beam import RepairBeamLoop, RepairBeamState
+from packrelic.repair.candidate import CandidateValidation, RepairCandidate, RepairCandidateBatch
 
 
 def test_repair_beam_expands_candidates_and_keeps_top_states():

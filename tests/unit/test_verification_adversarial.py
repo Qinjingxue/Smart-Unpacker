@@ -1,7 +1,7 @@
-from smart_unpacker.contracts.detection import FactBag
-from smart_unpacker.contracts.tasks import ArchiveTask
-from smart_unpacker.extraction.result import ExtractionResult
-from smart_unpacker.verification import VerificationScheduler
+from packrelic.contracts.detection import FactBag
+from packrelic.contracts.tasks import ArchiveTask
+from packrelic.extraction.result import ExtractionResult
+from packrelic.verification import VerificationScheduler
 
 
 def test_expected_name_matching_is_case_and_path_normalized(tmp_path):

@@ -1,6 +1,6 @@
 import json
 
-from smart_unpacker.extraction.progress import filter_extraction_outputs
+from packrelic.extraction.progress import filter_extraction_outputs
 
 
 def test_filter_extraction_outputs_discards_incomplete_when_complete_exists(tmp_path):
@@ -48,7 +48,7 @@ def test_filter_extraction_outputs_keeps_best_partial_without_complete(tmp_path)
 
 
 def _write_manifest(tmp_path, files):
-    manifest = tmp_path / ".sunpack" / "extraction_manifest.json"
+    manifest = tmp_path / ".packrelic" / "extraction_manifest.json"
     manifest.parent.mkdir()
     manifest.write_text(json.dumps({"files": files}, ensure_ascii=False), encoding="utf-8")
     return manifest

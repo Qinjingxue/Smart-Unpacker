@@ -2,7 +2,7 @@ import time
 import zipfile
 from pathlib import Path
 
-from smart_unpacker.coordinator.scanner import ScanOrchestrator
+from packrelic.coordinator.scanner import ScanOrchestrator
 from tests.helpers.detection_config import with_detection_pipeline
 from tests.helpers.fs_builder import make_zip
 

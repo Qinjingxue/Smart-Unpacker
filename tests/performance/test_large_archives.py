@@ -6,8 +6,8 @@ from pathlib import Path
 import psutil
 import pytest
 
-from smart_unpacker.config.schema import normalize_config
-from smart_unpacker.coordinator.runner import PipelineRunner
+from packrelic.config.schema import normalize_config
+from packrelic.coordinator.runner import PipelineRunner
 
 
 MiB = 1024 * 1024

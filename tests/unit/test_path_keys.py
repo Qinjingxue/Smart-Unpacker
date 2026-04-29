@@ -1,6 +1,6 @@
 import os
 
-from smart_unpacker.support.path_keys import absolute_path_key, normalized_path, path_key, safe_relative_path
+from packrelic.support.path_keys import absolute_path_key, normalized_path, path_key, safe_relative_path
 
 
 def test_path_key_matches_normcase_normpath():

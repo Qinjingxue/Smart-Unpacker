@@ -1,5 +1,5 @@
-from smart_unpacker.app.cli_reporter import CliReporter
-from smart_unpacker.app.cli_types import CliCommandResult
+from packrelic.app.cli_reporter import CliReporter
+from packrelic.app.cli_types import CliCommandResult
 
 
 def test_reporter_applies_color_when_forced(capsys):

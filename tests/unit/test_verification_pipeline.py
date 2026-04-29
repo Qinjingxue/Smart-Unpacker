@@ -1,15 +1,15 @@
-from smart_unpacker.config.schema import normalize_config
-from smart_unpacker.contracts.detection import FactBag
-from smart_unpacker.contracts.tasks import ArchiveTask
-from smart_unpacker.extraction.result import ExtractionResult
-from smart_unpacker.passwords import PasswordSession
-from smart_unpacker.verification import (
+from packrelic.config.schema import normalize_config
+from packrelic.contracts.detection import FactBag
+from packrelic.contracts.tasks import ArchiveTask
+from packrelic.extraction.result import ExtractionResult
+from packrelic.passwords import PasswordSession
+from packrelic.verification import (
     FileVerificationObservation,
     VerificationScheduler,
     VerificationStepResult,
     register_verification_method,
 )
-from smart_unpacker.verification.result import VerificationIssue
+from packrelic.verification.result import VerificationIssue
 
 
 CALLS = []

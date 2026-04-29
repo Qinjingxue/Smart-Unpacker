@@ -9,11 +9,11 @@ namespace {
 
 void fill_analysis(
     Sup7zArchiveResourceAnalysis* analysis,
-    const smart_unpacker::sevenzip::ResourceAnalysisResult& result,
+    const packrelic::sevenzip::ResourceAnalysisResult& result,
     const std::wstring& archive_path
 ) {
-    using namespace smart_unpacker::sevenzip;
-    using namespace smart_unpacker::sevenzip::capi;
+    using namespace packrelic::sevenzip;
+    using namespace packrelic::sevenzip::capi;
     if (!analysis) {
         return;
     }
@@ -44,8 +44,8 @@ SUP7Z_API int sup7z_analyze_archive_resources(
     wchar_t* message,
     int message_chars
 ) {
-    using namespace smart_unpacker::sevenzip;
-    using namespace smart_unpacker::sevenzip::capi;
+    using namespace packrelic::sevenzip;
+    using namespace packrelic::sevenzip::capi;
     if (analysis) {
         *analysis = Sup7zArchiveResourceAnalysis{};
     }
@@ -78,8 +78,8 @@ SUP7Z_API int sup7z_analyze_archive_resources_with_parts(
     wchar_t* message,
     int message_chars
 ) {
-    using namespace smart_unpacker::sevenzip;
-    using namespace smart_unpacker::sevenzip::capi;
+    using namespace packrelic::sevenzip;
+    using namespace packrelic::sevenzip::capi;
     if (analysis) {
         *analysis = Sup7zArchiveResourceAnalysis{};
     }

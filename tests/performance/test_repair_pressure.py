@@ -6,8 +6,8 @@ import zipfile
 from pathlib import Path
 from typing import Callable
 
-from smart_unpacker.config.schema import normalize_config
-from smart_unpacker.coordinator.runner import PipelineRunner
+from packrelic.config.schema import normalize_config
+from packrelic.coordinator.runner import PipelineRunner
 from tests.helpers.detection_config import with_detection_pipeline
 from tests.helpers.tool_config import require_7z
 
@@ -173,7 +173,7 @@ def test_repair_pipeline_mixed_batch_pressure(tmp_path, request, record_property
     expected_partial_floor = repetitions
     expected_failure_floor = repetitions
     repaired_outputs = sorted(path for path in tmp_path.glob("*_cd_repair/*.txt"))
-    partial_reports = sorted(tmp_path.glob("*_partial_payload/.sunpack/recovery_report.json"))
+    partial_reports = sorted(tmp_path.glob("*_partial_payload/.packrelic/recovery_report.json"))
 
     record_property("repetitions", repetitions)
     record_property("payload_size_kb", payload_size // KiB)
@@ -285,7 +285,7 @@ def test_many_small_files_partial_report_pressure(tmp_path, request, record_prop
         timer.restore()
     elapsed = time.perf_counter() - started
 
-    report = tmp_path / "many-small-partial" / ".sunpack" / "recovery_report.json"
+    report = tmp_path / "many-small-partial" / ".packrelic" / "recovery_report.json"
     record_property("file_count", file_count)
     record_property("elapsed_seconds", round(elapsed, 3))
     record_property("success_count", summary.success_count)

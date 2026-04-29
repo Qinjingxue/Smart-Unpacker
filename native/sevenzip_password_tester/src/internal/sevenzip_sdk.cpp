@@ -12,7 +12,7 @@
 
 
 
-namespace smart_unpacker::sevenzip {
+namespace packrelic::sevenzip {
 
 
 
@@ -128,5 +128,5 @@ CreateObjectFunc cached_create_object(const std::wstring& seven_zip_dll_path) {
 
 
 
-}  // namespace smart_unpacker::sevenzip
+}  // namespace packrelic::sevenzip
 

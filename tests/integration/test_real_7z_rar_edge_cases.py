@@ -2,9 +2,9 @@ from pathlib import Path
 
 import pytest
 
-from smart_unpacker.contracts.detection import FactBag
-from smart_unpacker.contracts.tasks import ArchiveTask
-from smart_unpacker.extraction.scheduler import ExtractionScheduler
+from packrelic.contracts.detection import FactBag
+from packrelic.contracts.tasks import ArchiveTask
+from packrelic.extraction.scheduler import ExtractionScheduler
 from tests.helpers.real_archives import ArchiveFixtureFactory
 from tests.helpers.tool_config import get_optional_rar
 

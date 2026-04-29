@@ -1,7 +1,7 @@
 from pathlib import Path
 
-from smart_unpacker.relations.scheduler import RelationsScheduler
-from smart_unpacker.filesystem.directory_scanner import DirectoryScanner
+from packrelic.relations.scheduler import RelationsScheduler
+from packrelic.filesystem.directory_scanner import DirectoryScanner
 
 
 def test_relation_group_builder_groups_split_volumes(tmp_path):

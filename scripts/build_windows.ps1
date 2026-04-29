@@ -126,7 +126,7 @@ function Test-NativeImport {
     param([string]$PythonPath)
 
     $code = @"
-import smart_unpacker_native as n
+import packrelic_native as n
 required = [
     'native_available', 'scanner_version',
     'scan_directory_entries', 'list_regular_files_in_directory',
@@ -165,7 +165,7 @@ function Test-SevenZipWrapper {
 
     Invoke-Native -FilePath $PythonPath -Arguments @(
         "-c",
-        "from smart_unpacker.support.sevenzip_native import NativePasswordTester; tester = NativePasswordTester(); assert tester.available(), (tester.wrapper_path, tester.seven_zip_dll_path)"
+        "from packrelic.support.sevenzip_native import NativePasswordTester; tester = NativePasswordTester(); assert tester.available(), (tester.wrapper_path, tester.seven_zip_dll_path)"
     )
 }
 
@@ -174,7 +174,7 @@ function Test-SevenZipWorker {
 
     Invoke-Native -FilePath $PythonPath -Arguments @(
         "-c",
-        "from smart_unpacker.support.resources import get_7z_dll_path, get_sevenzip_worker_path; import os; assert os.path.exists(get_sevenzip_worker_path()); assert os.path.exists(get_7z_dll_path())"
+        "from packrelic.support.resources import get_7z_dll_path, get_sevenzip_worker_path; import os; assert os.path.exists(get_sevenzip_worker_path()); assert os.path.exists(get_7z_dll_path())"
     )
 }
 
@@ -212,13 +212,13 @@ function Assert-PackagedNativeExtension {
 
     $nativeExtension = Get-ChildItem -LiteralPath $PackageRoot -Recurse -File -ErrorAction SilentlyContinue |
         Where-Object {
-            $_.Name -like "smart_unpacker_native*.pyd" -or
-            $_.Name -like "smart_unpacker_native*.dll"
+            $_.Name -like "packrelic_native*.pyd" -or
+            $_.Name -like "packrelic_native*.dll"
         } |
         Select-Object -First 1
 
     if ($null -eq $nativeExtension) {
-        throw "Packaged smart_unpacker_native extension not found under: $PackageRoot"
+        throw "Packaged packrelic_native extension not found under: $PackageRoot"
     }
 
     Write-Host ("Packaged native extension: {0}" -f $nativeExtension.FullName) -ForegroundColor Green
@@ -358,10 +358,10 @@ $pythonCommand = Get-PythonCommand
 $venvPath = Join-Path $repoRoot ".venv-build"
 $venvPython = Join-Path $venvPath "Scripts\python.exe"
 $venvScripts = Join-Path $venvPath "Scripts"
-$specPath = Join-Path $repoRoot "SmartUnpacker.spec"
+$specPath = Join-Path $repoRoot "PackRelic.spec"
 $requirementsPath = Join-Path $repoRoot "requirements.txt"
 $buildRequirementsPath = Join-Path $repoRoot "requirements-build.txt"
-$nativeCrateRoot = Join-Path $repoRoot "native\smart_unpacker_native"
+$nativeCrateRoot = Join-Path $repoRoot "native\packrelic_native"
 $nativeCargoToml = Join-Path $nativeCrateRoot "Cargo.toml"
 $sevenZipWrapperRoot = Join-Path $repoRoot "native\sevenzip_password_tester"
 $sevenZipWrapperBuildDir = Join-Path $sevenZipWrapperRoot "build"
@@ -375,13 +375,13 @@ $distRoot = Join-Path $repoRoot "dist"
 $buildRoot = Join-Path $repoRoot "build"
 $nativeWheelRoot = Join-Path $buildRoot "native-wheels"
 $releaseRoot = Join-Path $repoRoot "release"
-$distAppRoot = Join-Path $distRoot "sunpack"
-$distExePath = Join-Path $distAppRoot "sunpack.exe"
+$distAppRoot = Join-Path $distRoot "packrelic"
+$distExePath = Join-Path $distAppRoot "pkrc.exe"
 $distInternalRoot = Join-Path $distAppRoot "_internal"
 $distToolsRoot = Join-Path $distAppRoot "tools"
 $distLicensesRoot = Join-Path $distAppRoot "licenses"
 $versionValue = Get-ReleaseVersion -ExplicitVersion $Version -RepoRoot $repoRoot
-$releaseZipName = "sunpack-windows-x64-{0}.zip" -f $versionValue
+$releaseZipName = "packrelic-windows-x64-{0}.zip" -f $versionValue
 $releaseZipPath = Join-Path $releaseRoot $releaseZipName
 $runAcceptanceTests = -not $SkipTests
 
@@ -392,7 +392,7 @@ if ($promptForAcceptanceTests) {
 Assert-PathExists -LiteralPath $requirementsPath -Description "requirements.txt"
 Assert-PathExists -LiteralPath $buildRequirementsPath -Description "requirements-build.txt"
 Assert-PathExists -LiteralPath $specPath -Description "PyInstaller spec"
-Assert-PathExists -LiteralPath $nativeCargoToml -Description "smart_unpacker_native Cargo manifest"
+Assert-PathExists -LiteralPath $nativeCargoToml -Description "packrelic_native Cargo manifest"
 Assert-PathExists -LiteralPath (Join-Path $sevenZipWrapperRoot "CMakeLists.txt") -Description "7z wrapper CMake project"
 Assert-PathExists -LiteralPath $sevenZipPath -Description "Bundled 7-Zip executable"
 Assert-PathExists -LiteralPath $sevenZipDllPath -Description "Bundled 7-Zip runtime DLL"
@@ -458,19 +458,19 @@ Write-Step "Building Windows release with PyInstaller"
 Invoke-Native -FilePath $venvPython -Arguments @("-m", "PyInstaller", "--noconfirm", $specPath)
 
 Write-Step "Validating packaged outputs"
-Assert-PathExists -LiteralPath $distExePath -Description "Packaged sunpack executable"
+Assert-PathExists -LiteralPath $distExePath -Description "Packaged pkrc executable"
 Assert-PathExists -LiteralPath $distInternalRoot -Description "PyInstaller internal resource directory"
 Assert-PackagedNativeExtension -PackageRoot $distAppRoot
 Assert-PathMissing -LiteralPath (Join-Path $distInternalRoot "builtin_passwords.txt") -Description "Duplicate internal password file"
-Assert-PathMissing -LiteralPath (Join-Path $distInternalRoot "smart_unpacker_config.json") -Description "Duplicate internal config file"
+Assert-PathMissing -LiteralPath (Join-Path $distInternalRoot "packrelic_config.json") -Description "Duplicate internal config file"
 
 Write-Step "Adding release metadata and helper scripts"
 $distPasswordPath = Join-Path $distAppRoot "builtin_passwords.txt"
-$distConfigPath = Join-Path $distAppRoot "smart_unpacker_config.json"
-$distAdvancedConfigPath = Join-Path $distAppRoot "smart_unpacker_advanced_config.json"
+$distConfigPath = Join-Path $distAppRoot "packrelic_config.json"
+$distAdvancedConfigPath = Join-Path $distAppRoot "packrelic_advanced_config.json"
 Copy-Item -LiteralPath (Join-Path $repoRoot "builtin_passwords.txt") -Destination $distPasswordPath -Force
-Copy-Item -LiteralPath (Join-Path $repoRoot "smart_unpacker_config.json") -Destination $distConfigPath -Force
-Copy-IfExists -Source (Join-Path $repoRoot "smart_unpacker_advanced_config.json") -Destination $distAdvancedConfigPath
+Copy-Item -LiteralPath (Join-Path $repoRoot "packrelic_config.json") -Destination $distConfigPath -Force
+Copy-IfExists -Source (Join-Path $repoRoot "packrelic_advanced_config.json") -Destination $distAdvancedConfigPath
 Copy-Item -LiteralPath $toolsRoot -Destination $distToolsRoot -Recurse -Force
 
 New-Item -ItemType Directory -Path $distLicensesRoot -Force | Out-Null
@@ -493,7 +493,7 @@ $versionFilePath = Join-Path $distAppRoot "VERSION.txt"
 $gitCommit = Get-GitCommit -RepoRoot $repoRoot
 $pythonVersion = (& $venvPython --version).Trim()
 $metadata = @(
-    "product=SmartUnpacker"
+    "product=PackRelic"
     "version=$versionValue"
     "git_commit=$gitCommit"
     "python=$pythonVersion"

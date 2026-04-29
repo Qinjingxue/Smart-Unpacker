@@ -5,10 +5,10 @@ import unittest
 import zipfile
 from pathlib import Path
 
-from smart_unpacker.contracts.detection import FactBag
-from smart_unpacker.coordinator.inspector import InspectOrchestrator
-from smart_unpacker.detection import DetectionScheduler
-from smart_unpacker.detection.scene.definitions import RECOMMENDED_SCENE_RULES_PAYLOAD
+from packrelic.contracts.detection import FactBag
+from packrelic.coordinator.inspector import InspectOrchestrator
+from packrelic.detection import DetectionScheduler
+from packrelic.detection.scene.definitions import RECOMMENDED_SCENE_RULES_PAYLOAD
 from tests.helpers.detection_config import with_detection_pipeline
 
 
