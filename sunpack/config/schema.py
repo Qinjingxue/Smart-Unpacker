@@ -21,6 +21,7 @@ class ConfigField:
 
 CONFIG_FIELD_PROVIDER_MODULES = (
     "sunpack.config.fields.coordinator",
+    "sunpack.config.fields.detection",
     "sunpack.config.fields.filesystem",
     "sunpack.config.fields.postprocess",
     "sunpack.config.fields.repair",

@@ -23,6 +23,12 @@ def normalize_directory_scan_mode(value: Any) -> str:
 
 CONFIG_FIELDS = (
     ConfigField(
+        path=("filesystem", "scan_filters_enabled"),
+        default=True,
+        normalize=bool,
+        owner=__name__,
+    ),
+    ConfigField(
         path=("filesystem", "directory_scan_mode"),
         default="*",
         normalize=normalize_directory_scan_mode,

@@ -3,6 +3,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 
 from tests.helpers.generated_fixtures import build_cli_pipeline_fixture
@@ -134,7 +135,35 @@ class CliBasicTests(unittest.TestCase):
         self.assertIn("--cleanup", result.stdout)
         self.assertIn("--out-dir", result.stdout)
         self.assertIn("--write-manifest", result.stdout)
+        self.assertIn("--direct-file", result.stdout)
         self.assertNotIn("--min-size", result.stdout)
+
+    def test_extract_direct_file_bypasses_initial_scan(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            archive = root / "payload.bin"
+            with zipfile.ZipFile(archive, "w") as zf:
+                zf.writestr("marker.txt", "direct")
+            out_dir = root / "out"
+
+            result = run_cli(
+                "extract",
+                "--json",
+                "--direct-file",
+                "--out-dir",
+                str(out_dir),
+                "--cleanup",
+                "k",
+                "--recur",
+                "1",
+                str(archive),
+                "--no-pause",
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout[result.stdout.find("{"):])
+        self.assertTrue(payload["inputs"]["direct_file"])
+        self.assertEqual(payload["summary"]["success_count"], 1)
 
     def test_inspect_help_documents_analyze_option(self):
         result = run_cli("inspect", "-h")

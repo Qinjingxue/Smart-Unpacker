@@ -9,6 +9,7 @@ from sunpack.config.fields.filesystem import (
 
 
 DIRECTORY_SCAN_MODE_PATH = ("filesystem", "directory_scan_mode")
+SCAN_FILTERS_ENABLED_PATH = ("filesystem", "scan_filters_enabled")
 
 
 def detection_config(config: dict[str, Any]) -> dict[str, Any]:
@@ -44,8 +45,17 @@ def directory_scan_mode(config: dict[str, Any]) -> str:
 
 
 def scan_filters_config(config: dict[str, Any]) -> list[dict[str, Any]]:
+    if not scan_filters_enabled(config):
+        return []
     filters = filesystem_config(config).get("scan_filters")
     return filters if isinstance(filters, list) else []
+
+
+def scan_filters_enabled(config: dict[str, Any]) -> bool:
+    value = filesystem_config(config).get("scan_filters_enabled")
+    if value is None:
+        return True
+    return bool(value)
 
 
 def scan_filter_config(config: dict[str, Any], name: str) -> dict[str, Any]:

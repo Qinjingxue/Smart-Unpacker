@@ -76,6 +76,9 @@ class PipelineRunner:
     def _scan_targets(self, scan_roots: List[str]) -> List[ArchiveTask]:
         return self.task_scanner.scan_targets(scan_roots)
 
+    def _direct_file_tasks(self, file_paths: List[str]) -> List[ArchiveTask]:
+        return self.task_scanner.direct_file_tasks(file_paths)
+
     def _prepare_tasks(self, tasks: List[ArchiveTask]):
         self.batch_runner.prepare_tasks(tasks)
 
@@ -129,6 +132,34 @@ class PipelineRunner:
         )
         self.extractor.close()
         
+        return RunSummary(
+            success_count=self.context.success_count,
+            failed_tasks=self.context.failed_tasks,
+            processed_keys=list(self.context.processed_keys),
+            partial_success_count=self.context.partial_success_count,
+            recovered_outputs=list(self.context.recovered_outputs),
+        )
+
+    def run_direct_files(self, file_paths: List[str]) -> RunSummary:
+        start_time = time.time()
+        first_target = file_paths[0] if file_paths else os.getcwd()
+        monitor_root = os.path.dirname(first_target) if os.path.isfile(first_target) else os.getcwd()
+        self.space_guard.bind_root(monitor_root)
+        self.disk_monitor = self.space_guard.disk_monitor
+
+        print(self.text("\n[PIPELINE] Starting direct file extraction", "\n[PIPELINE] 开始直接文件解压"))
+        self._execute_tasks(self._direct_file_tasks(file_paths))
+        self._apply_postprocess_actions()
+
+        self.logger.log_final_summary(
+            monitor_root,
+            start_time,
+            self.context.success_count,
+            self.context.failed_tasks,
+            recovered_outputs=self.context.recovered_outputs,
+        )
+        self.extractor.close()
+
         return RunSummary(
             success_count=self.context.success_count,
             failed_tasks=self.context.failed_tasks,

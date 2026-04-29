@@ -58,6 +58,7 @@ python sunpack.py extract [options] <paths...>
 | `--recur VALUE` | 覆盖递归解压设置。当前解析器接受正整数、`*`、`?`。 |
 | `--sched {auto,conservative,aggressive}` | 覆盖并发调度档位。 |
 | `--cleanup VALUE` | 覆盖成功解压后的原压缩包处理方式：`d` 删除，`r` 回收站，`k` 不动。 |
+| `--direct-file` | 把每个输入路径当作归档文件，跳过初始目录扫描和 detection，直接进入 analysis -> extraction -> verification/repair -> postprocess。只适合明确指定文件。 |
 | `--flatten` | 解压后扁平化单一顶层目录。 |
 | `--no-flatten` | 保留解压目录结构。 |
 
@@ -74,6 +75,7 @@ python sunpack.py extract D:\Downloads
 python sunpack.py extract D:\A.7z -p 123456 -p secret
 python sunpack.py extract D:\Archives --pw-file .\passwords.txt --cleanup r --sched auto
 python sunpack.py extract D:\Nested --recur * --no-flatten
+python sunpack.py extract --direct-file D:\MaybeArchive.bin
 ```
 
 退出码：
@@ -93,7 +95,7 @@ python sunpack.py scan [options] <paths...>
 
 `scan` 会扫描输入路径，输出识别到的解压任务、分卷关系、检测扩展名、分数和命中规则。它不会解压，也不会清理文件。
 
-目录扫描范围受 `filesystem.directory_scan_mode` 和 `filesystem.scan_filters` 影响；被黑名单、目录剪枝、阻止扩展名或最小大小过滤掉的文件不会进入 detection。
+目录扫描范围受 `filesystem.directory_scan_mode`、`filesystem.scan_filters_enabled` 和 `filesystem.scan_filters` 影响；被黑名单、目录剪枝、阻止扩展名或最小大小过滤掉的文件不会进入 detection。
 
 示例：
 

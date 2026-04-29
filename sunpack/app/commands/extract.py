@@ -28,6 +28,7 @@ TEXTS = {
     "en": {
         "help": "Run precheck, scan, extraction, and cleanup.",
         "paths": "Files or directories to process.",
+        "direct_file": "Treat each path as an archive file and skip initial filesystem/detection scanning.",
         "target_paths": "[CLI] Target paths:",
         "common_root": "[CLI] Common root: {root}",
         "retry_round": "[CLI] Running another extraction round with newly entered passwords.",
@@ -36,6 +37,7 @@ TEXTS = {
     "zh": {
         "help": "执行预检查、扫描、解压和清理。",
         "paths": "要处理的文件或目录。",
+        "direct_file": "将每个路径当作压缩文件直接送入分析层，跳过初始文件系统/检测扫描。",
         "target_paths": "[CLI] 目标路径：",
         "common_root": "[CLI] 公共根目录：{root}",
         "retry_round": "[CLI] 使用新输入的密码再解压一轮。",
@@ -53,6 +55,7 @@ def register(subparsers, ctx):
         formatter_class=CliHelpFormatter,
     )
     localize_help_action(parser, ctx)
+    parser.add_argument("--direct-file", dest="direct_file", action="store_true", help=ctx.t(TEXTS, "direct_file"))
     parser.add_argument("paths", nargs="+", help=ctx.t(TEXTS, "paths"))
 
 
@@ -89,6 +92,7 @@ def handle(args, ctx):
             passwords,
             use_builtin_passwords=not args.no_builtin_passwords,
             target_paths=target_paths,
+            direct_file=bool(getattr(args, "direct_file", False)),
         )
         failed_tasks = list(summary.failed_tasks)
         processed_keys = list(summary.processed_keys)
@@ -134,6 +138,7 @@ def handle(args, ctx):
             "quiet": args.quiet,
             "verbose": args.verbose,
             "config_overrides": config_overrides,
+            "direct_file": bool(getattr(args, "direct_file", False)),
         },
         summary={
             "success_count": summary.success_count,
@@ -151,13 +156,13 @@ def handle(args, ctx):
     return (EXIT_TASK_FAILED if failed_tasks else 0), result
 
 
-def _run_extract_attempt(config: dict, passwords: list[str], *, use_builtin_passwords: bool, target_paths: list[str]):
+def _run_extract_attempt(config: dict, passwords: list[str], *, use_builtin_passwords: bool, target_paths: list[str], direct_file: bool = False):
     password_summary = build_password_summary(passwords, use_builtin_passwords=use_builtin_passwords)
     run_config = dict(config)
     run_config["user_passwords"] = password_summary.user_passwords
     run_config["builtin_passwords"] = password_summary.builtin_passwords
     runner = PipelineRunner(run_config)
-    summary = runner.run_targets(target_paths)
+    summary = runner.run_direct_files(target_paths) if direct_file else runner.run_targets(target_paths)
     password_summary = build_password_summary(
         passwords,
         use_builtin_passwords=use_builtin_passwords,

@@ -109,6 +109,23 @@ def test_directory_scanner_path_filter_skips_file_before_stat(tmp_path, monkeypa
     assert "keep.zip" in names
 
 
+def test_directory_scanner_scan_filters_global_switch_disables_filters(tmp_path):
+    blocked = tmp_path / "skip.py"
+    blocked.write_text("print('keep when filters are globally disabled')", encoding="utf-8")
+
+    snapshot = DirectoryScanner(str(tmp_path), config={
+        "filesystem": {
+            "scan_filters_enabled": False,
+            "scan_filters": [
+                {"name": "blacklist", "enabled": True, "blocked_extensions": [".py"]},
+            ],
+        }
+    }).scan()
+
+    names = {entry.path.name for entry in snapshot.entries}
+    assert "skip.py" in names
+
+
 def test_directory_scanner_blacklist_prunes_directory(tmp_path):
     blocked_dir = tmp_path / "blocked"
     blocked_dir.mkdir()
@@ -200,6 +217,34 @@ def test_archive_task_provider_reuses_scan_session_for_scene_facts(tmp_path, mon
     )
 
     tasks = ArchiveTaskProvider(config).scan_targets([str(tmp_path)])
+
+    assert [task.main_path for task in tasks] == [str(target)]
+
+
+def test_archive_task_provider_detection_enabled_false_uses_standard_archive_fallback(tmp_path, monkeypatch):
+    target = tmp_path / "archive.zip"
+    target.write_bytes(b"PK\x03\x04payload")
+
+    provider = ArchiveTaskProvider({
+        "detection": {
+            "enabled": False,
+            "fact_collectors": [{"name": "file_facts", "enabled": True}],
+            "processors": [{"name": "zip_structure", "enabled": True}],
+            "rule_pipeline": {
+                "precheck": [{"name": "zip_structure_accept", "enabled": True}],
+                "scoring": [{"name": "extension", "enabled": True}],
+                "confirmation": [],
+            },
+        },
+        "filesystem": {"scan_filters": []},
+    })
+
+    def fail_if_rules_run(*_args, **_kwargs):
+        raise AssertionError("detection.enabled=false should not evaluate detection rules")
+
+    monkeypatch.setattr(provider.detector, "evaluate_bags", fail_if_rules_run)
+
+    tasks = provider.scan_targets([str(tmp_path)])
 
     assert [task.main_path for task in tasks] == [str(target)]
 

@@ -94,8 +94,9 @@ python sunpack.py config validate
 
 常用配置：
 
-- `filesystem.scan_filters`：目录剪枝、黑名单、最小检测大小。
-- `detection.rule_pipeline`：候选识别、场景保护、结构打分和确认层。
+- `filesystem.scan_filters_enabled` / `filesystem.scan_filters`：过滤器总开关、目录剪枝、黑名单、最小检测大小。
+- `detection.enabled` / `detection.rule_pipeline`：detection 层总开关、候选识别、场景保护、结构打分和确认层。
+- `extract --direct-file <file>`：明确指定文件，跳过初始扫描和 detection，直接进入 analysis 及后续解压/校验/修复/后处理。
 - `analysis`：结构分析、signature prepass、fuzzy binary profile、批量 analysis cache。
 - `verification`：输出存在性、manifest、归档 CRC、可读性抽样、部分恢复阈值。
 - `repair`：repair stages、安全策略、deep 限制、auto deep、beam、模块开关和资源上限。

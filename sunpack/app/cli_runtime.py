@@ -5,7 +5,7 @@ from typing import Any
 from sunpack.app.cli_constants import EXIT_USAGE
 from sunpack.app.cli_types import CliCommandResult, CliPasswordSummary
 from sunpack.config.schema import normalize_config_value
-from sunpack.config.detection_view import directory_scan_mode, rule_pipeline_config, scan_filter_config
+from sunpack.config.detection_view import directory_scan_mode, rule_pipeline_config, scan_filter_config, scan_filters_enabled
 from sunpack.coordinator.scheduling import build_scheduler_profile_config
 from sunpack.passwords import dedupe_passwords, get_builtin_passwords, PasswordStore, read_password_file
 
@@ -29,6 +29,7 @@ def build_effective_config(config: dict) -> dict[str, Any]:
             config.get("performance", {}).get("scheduler_profile", "auto")
         ),
         "detection": {
+            "enabled": bool(config.get("detection", {}).get("enabled", True)),
             "rule_pipeline": {
                 layer: [
                     {"name": rule.get("name"), "enabled": rule.get("enabled", False)}
@@ -40,6 +41,7 @@ def build_effective_config(config: dict) -> dict[str, Any]:
         },
         "filesystem": {
             "directory_scan_mode": directory_scan_mode(config),
+            "scan_filters_enabled": scan_filters_enabled(config),
             "scan_filters": [
                 {"name": item.get("name"), "enabled": item.get("enabled", False)}
                 for item in config.get("filesystem", {}).get("scan_filters", [])

@@ -60,6 +60,8 @@ class ArchiveTaskProvider:
 
     def _detection_pipeline_disabled(self) -> bool:
         detector_config = detection_config(self.config)
+        if detector_config.get("enabled") is False:
+            return True
         if self._has_enabled_modules(detector_config.get("fact_collectors")):
             return False
         if self._has_enabled_modules(detector_config.get("processors")):

@@ -80,6 +80,8 @@ CLI 可用 `--recur` 临时覆盖。
 
 ### scan_filters
 
+`scan_filters_enabled` 是扫描过滤器总开关。设为 `false` 时保留 `scan_filters` 配置但不应用任何过滤器，适合临时排查是否被黑名单、最小大小或目录剪枝挡掉。
+
 扫描过滤器在目录遍历阶段执行，被过滤的条目不会进入 relation、detection 或 analysis。
 
 `blacklist` 常用字段：
@@ -260,6 +262,12 @@ print(sorted(get_repair_module_registry().all()))
 | nested/carrier | carrier crop deep recovery、nested payload salvage。 |
 
 旧键 `repair.trigger_on_medium_confidence`、`repair.trigger_on_extraction_failure` 和 `repair.thresholds` 已移除；配置中出现这些键会直接报错。
+
+## detection
+
+| 字段 | 类型 | 默认 | 说明 |
+| --- | --- | --- | --- |
+| `enabled` | `bool` | `true` | detection 层总开关。设为 `false` 时不执行 detection 规则，只对常规归档扩展名/分卷入口生成任务；需要完全绕过初始扫描时使用 `extract --direct-file <file>`。 |
 
 ## detection.fact_collectors
 

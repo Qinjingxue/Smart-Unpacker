@@ -13,6 +13,7 @@
   },
   "filesystem": {
     "directory_scan_mode": "*",
+    "scan_filters_enabled": true,
     "scan_filters": [
       {
         "name": "blacklist",
@@ -223,6 +224,7 @@
     ]
   },
   "detection": {
+    "enabled": true,
     "fact_collectors": [
       {"name": "file_facts", "enabled": true},
       {"name": "magic_bytes", "enabled": true},

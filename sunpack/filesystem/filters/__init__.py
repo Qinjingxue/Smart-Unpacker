@@ -2,6 +2,7 @@ import importlib
 import pkgutil
 from typing import Any
 
+from sunpack.config.detection_view import scan_filters_enabled
 from sunpack.filesystem.filters.base import ScanFilter
 
 
@@ -31,6 +32,8 @@ def discover_filters():
 
 def build_filters(config: dict[str, Any] | None = None) -> list[ScanFilter]:
     discover_filters()
+    if isinstance(config, dict) and not scan_filters_enabled(config):
+        return []
     filters_config = []
     if isinstance(config, dict):
         filesystem_config = config.get("filesystem")
