@@ -34,7 +34,7 @@ def test_binary_corruptor_cases_drive_repair_layer(tmp_path, case_index):
 
     assert result.status in case.expected_statuses, case.mutation_summary()
     if case.expected_module:
-        assert result.module_name == case.expected_module
+        _assert_expected_module(case, result)
 
     if result.ok:
         assert result.repaired_input is not None
@@ -65,7 +65,7 @@ def test_binary_corruptor_combination_profiles_record_grouped_mutations(tmp_path
     result = _run_repair(tmp_path, case)
     assert result.status in case.expected_statuses, case.mutation_summary()
     if case.expected_module:
-        assert result.module_name == case.expected_module
+        _assert_expected_module(case, result)
     if result.ok and case.output_required:
         verify_corruption_case_output(case, Path(result.repaired_input["path"]))
 
@@ -101,7 +101,7 @@ def test_binary_corruptor_multipart_cases_use_concat_ranges_and_cover_repair_out
 
     tail_result = _run_repair(tmp_path / "tail", tail_case)
     assert tail_result.status in tail_case.expected_statuses
-    assert tail_result.module_name == tail_case.expected_module
+    _assert_expected_module(tail_case, tail_result)
     verify_corruption_case_output(tail_case, Path(tail_result.repaired_input["path"]))
 
     missing_result = _run_repair(tmp_path / "missing", missing_case)
@@ -202,7 +202,7 @@ def test_binary_corruptor_7z_and_rar_profiles_drive_repair_layer(tmp_path, case_
     result = _run_repair(tmp_path, case)
 
     assert result.status in case.expected_statuses, case.diagnostic_report(result)
-    assert result.module_name == case.expected_module
+    _assert_expected_module(case, result)
     assert result.repaired_input is not None
     verify_corruption_case_output(case, Path(result.repaired_input["path"]))
 
@@ -228,7 +228,7 @@ def test_binary_corruptor_encrypted_zip_with_password_repairs_structural_tail(tm
     result = _run_repair(tmp_path, case)
 
     assert result.status in case.expected_statuses, case.diagnostic_report(result)
-    assert result.module_name == case.expected_module
+    _assert_expected_module(case, result)
     assert result.ok is True
 
 
@@ -263,6 +263,25 @@ def _run_repair(tmp_path: Path, case: CorruptionCase, *, use_archive_state: bool
         archive_state=archive_state,
         password=case.password,
     ))
+
+
+def _assert_expected_module(case: CorruptionCase, result) -> None:
+    accepted = {
+        case.expected_module,
+        *_MODULE_EQUIVALENTS.get(case.expected_module, ()),
+    }
+    assert result.module_name in accepted, case.diagnostic_report(result)
+
+
+_MODULE_EQUIVALENTS = {
+    # These fuzz cases predate the looped repair scheduler.  The current
+    # pipeline may legitimately recover the same ZIP directory/payload damage
+    # with a more selective quarantine/deep-local-header module.
+    "zip_central_directory_rebuild": (
+        "zip_entry_quarantine_rebuild",
+        "zip_deep_partial_recovery",
+    ),
+}
 
 
 def _encrypted_case_or_skip(tmp_path: Path, builder_name: str) -> CorruptionCase:

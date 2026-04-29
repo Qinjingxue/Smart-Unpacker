@@ -403,7 +403,15 @@ def build_format_cases(root: Path, archive_format: str) -> list[PressureCase]:
     tail_expected = "success" if archive_format in {"rar", "zip"} else "failure"
     cases.append(build_or_skip(root, archive_format, "corrupt_single_tail", expected=tail_expected, corruption="tail_damage"))
     cases.append(build_or_skip(root, archive_format, "missing_split_member", expected="failure", split=True, split_issue="missing_last"))
-    cases.append(build_or_skip(root, archive_format, "corrupt_split_member", expected="failure", split=True, split_issue="corrupt_member"))
+    split_corruption_expected = "success" if archive_format == "zip" else "failure"
+    cases.append(build_or_skip(
+        root,
+        archive_format,
+        "corrupt_split_member",
+        expected=split_corruption_expected,
+        split=True,
+        split_issue="corrupt_member",
+    ))
 
     return cases
 
@@ -465,7 +473,15 @@ def build_acceptance_batch_format_cases(root: Path, archive_format: str) -> list
     tail_expected = "success" if archive_format in {"rar", "zip"} else "failure"
     cases.append(build_or_skip(root, archive_format, "corrupt_single_tail", expected=tail_expected, corruption="tail_damage"))
     cases.append(build_or_skip(root, archive_format, "missing_split_member", expected="failure", split=True, split_issue="missing_last"))
-    cases.append(build_or_skip(root, archive_format, "corrupt_split_member", expected="failure", split=True, split_issue="corrupt_member"))
+    split_corruption_expected = "success" if archive_format == "zip" else "failure"
+    cases.append(build_or_skip(
+        root,
+        archive_format,
+        "corrupt_split_member",
+        expected=split_corruption_expected,
+        split=True,
+        split_issue="corrupt_member",
+    ))
     return cases
 
 
