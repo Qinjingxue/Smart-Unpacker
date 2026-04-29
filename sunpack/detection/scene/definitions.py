@@ -108,6 +108,7 @@ RECOMMENDED_SCENE_RULES_PAYLOAD: List[Dict[str, Any]] = [
         "protected_exact_paths": ["package.nw"],
         "protected_archive_exts": [".nw"] + list(COMMON_PROTECTED_ARCHIVE_EXTS),
         "runtime_exact_paths": ["nw.exe"],
+        "runtime_glob_paths": ["*.exe"],
     },
     {
         "scene_type": "electron_app_game",

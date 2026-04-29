@@ -1,4 +1,5 @@
 import os
+from fnmatch import fnmatch
 from typing import Any, Dict
 
 from sunpack.detection.pipeline.processors.context import FactProcessorContext
@@ -76,7 +77,12 @@ def _analyze_scene_path_uncached(context: FactProcessorContext, path: str) -> di
         return result
 
     ext = os.path.splitext(path)[1].lower()
-    is_runtime_exact = rel_path in rule.get("runtime_exact_paths", [])
+    rel_path_lower = rel_path.lower()
+    runtime_exact_paths = {str(item).lower() for item in rule.get("runtime_exact_paths", [])}
+    is_runtime_exact = rel_path_lower in runtime_exact_paths or _matches_any_glob(
+        rel_path_lower,
+        rule.get("runtime_glob_paths", []),
+    )
     is_protected_exact = rel_path in rule.get("protected_exact_paths", [])
     is_protected_prefix = _is_under_prefix(rel_path, rule.get("protected_prefixes", []))
     is_protected_path = is_protected_exact or is_protected_prefix
@@ -106,6 +112,10 @@ def _analyze_scene_path_uncached(context: FactProcessorContext, path: str) -> di
 
 def _scene_analysis_value(context: FactProcessorContext, key: str):
     return analyze_scene_path(context).get(key)
+
+
+def _matches_any_glob(rel_path: str, patterns: list) -> bool:
+    return any(fnmatch(rel_path, str(pattern).lower()) for pattern in patterns)
 
 
 SCENE_OUTPUT_SCHEMAS = {

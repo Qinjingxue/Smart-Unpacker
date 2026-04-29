@@ -13,7 +13,9 @@ class SceneProtectRule(RuleBase):
         "scene.context",
         "scene.scene_type",
         "scene.match_strength",
+        "scene.is_runtime_exact_path",
         "scene.is_runtime_resource_archive",
+        "pe.overlay_structure",
     }
     config_schema = {
         "scene_rules": {
@@ -35,7 +37,11 @@ class SceneProtectRule(RuleBase):
     }
 
     def evaluate(self, facts: FactBag, config: Dict[str, Any]) -> RuleEffect:
-        if not facts.get("scene.is_runtime_resource_archive"):
+        protects_runtime_embedded_payload = bool(
+            facts.get("scene.is_runtime_exact_path")
+            and _has_embedded_payload(facts)
+        )
+        if not facts.get("scene.is_runtime_resource_archive") and not protects_runtime_embedded_payload:
             return RuleEffect.pass_()
 
         match_strength = facts.get("scene.match_strength") or "none"
@@ -43,6 +49,17 @@ class SceneProtectRule(RuleBase):
             return RuleEffect.pass_()
 
         scene_type = facts.get("scene.scene_type") or "generic"
+        if protects_runtime_embedded_payload:
+            return RuleEffect.reject(
+                reason=f"Scene Protect: {scene_type} runtime executable embedded payload ({match_strength} match)"
+            )
         return RuleEffect.reject(
             reason=f"Scene Protect: {scene_type} runtime resource archive ({match_strength} match)"
         )
+
+
+def _has_embedded_payload(facts: FactBag) -> bool:
+    if facts.get("file.embedded_archive_found"):
+        return True
+    overlay = facts.get("pe.overlay_structure")
+    return bool(isinstance(overlay, dict) and overlay.get("archive_like"))

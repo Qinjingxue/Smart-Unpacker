@@ -1,4 +1,5 @@
 from pathlib import Path
+import struct
 
 import pytest
 
@@ -83,6 +84,34 @@ def _write_nwjs_chromium_runtime(root: Path) -> Path:
     return protected
 
 
+def _write_nwjs_chromium_runtime_exe_with_embedded_payload(root: Path) -> Path:
+    root.mkdir(parents=True)
+    (root / "locales").mkdir()
+    runtime = root / "CustomGame.exe"
+    runtime.write_bytes(_minimal_pe_with_overlay(make_zip({"index.html": "<html></html>"})))
+    (root / "nw.pak").write_bytes(b"pak")
+    (root / "icudtl.dat").write_bytes(b"icu")
+    (root / "ffmpegsumo.dll").write_bytes(b"dll")
+    return runtime
+
+
+def _minimal_pe_with_overlay(overlay: bytes) -> bytes:
+    pe_offset = 0x80
+    section_table_offset = pe_offset + 24
+    raw_pointer = 0x200
+    raw_size = 0x200
+    image = bytearray(raw_pointer + raw_size)
+    image[0:2] = b"MZ"
+    struct.pack_into("<I", image, 0x3C, pe_offset)
+    image[pe_offset:pe_offset + 4] = b"PE\0\0"
+    struct.pack_into("<H", image, pe_offset + 6, 1)
+    struct.pack_into("<H", image, pe_offset + 20, 0)
+    image[section_table_offset:section_table_offset + 8] = b".text\0\0\0"
+    struct.pack_into("<I", image, section_table_offset + 16, raw_size)
+    struct.pack_into("<I", image, section_table_offset + 20, raw_pointer)
+    return bytes(image) + overlay
+
+
 def _write_electron(root: Path) -> Path:
     (root / "resources" / "app.asar.unpacked").mkdir(parents=True)
     (root / "app.exe").write_bytes(b"MZ")
@@ -118,7 +147,7 @@ def test_runtime_semantics_keep_generic_controls_extractable(tmp_path):
     generic_zip.write_bytes(make_zip({"payload.txt": "hello"}))
 
     disguised = tmp_path / "generic_controls" / "fakepicture.jpg"
-    disguised.write_bytes(b"\xff\xd8synthetic image\xff\xd9" + b"7z\xbc\xaf\x27\x1c")
+    disguised.write_bytes(b"\xff\xd8synthetic image\xff\xd9" + make_zip({"payload.txt": "hello"}))
 
     zip_decision, zip_bag = _evaluate(generic_zip)
     disguised_decision, disguised_bag = _evaluate(disguised)
@@ -140,3 +169,16 @@ def test_chromium_nwjs_runtime_layout_is_recognized(tmp_path):
     assert bag.get("scene.scene_type") == "nwjs_game"
     assert bag.get("scene.match_strength") == "strong"
     assert bag.get("scene.is_runtime_resource_archive") is True
+
+
+def test_chromium_nwjs_runtime_exe_with_embedded_payload_is_protected(tmp_path):
+    runtime = _write_nwjs_chromium_runtime_exe_with_embedded_payload(tmp_path / "chromium_nwjs")
+
+    decision, bag = _evaluate(runtime)
+
+    assert decision.should_extract is False
+    assert decision.stop_reason.startswith("Scene Protect")
+    assert bag.get("scene.scene_type") == "nwjs_game"
+    assert bag.get("scene.match_strength") == "strong"
+    assert bag.get("scene.is_runtime_exact_path") is True
+    assert bag.get("pe.overlay_structure", {}).get("archive_like") is True

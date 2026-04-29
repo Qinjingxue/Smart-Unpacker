@@ -1,3 +1,4 @@
+import os
 from typing import Any, List
 
 from sunpack_native import batch_file_head_facts as _native_batch_file_head_facts
@@ -28,7 +29,10 @@ class DetectionScanSession:
         self._scan_roots = []
         seen: set[str] = set()
         for root in roots:
-            normalized = normalized_path(root)
+            raw_root = str(root or "")
+            if not raw_root:
+                continue
+            normalized = normalized_path(os.path.abspath(raw_root))
             key = path_key(normalized)
             if not normalized or key in seen:
                 continue
