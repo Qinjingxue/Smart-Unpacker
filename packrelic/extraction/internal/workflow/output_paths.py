@@ -17,9 +17,7 @@ def default_output_dir_for_task(task: ArchiveTask, output_config: dict | None = 
         out_dir = os.path.join(os.path.dirname(path), os.path.basename(out_name))
     if normalized_path(out_dir) == normalized_path(path):
         out_dir += "_extracted"
-    if os.path.isfile(out_dir):
-        out_dir += "_extracted"
-    return out_dir
+    return _non_existing_output_dir(out_dir)
 
 
 def _relative_parent(path: str, common_root: str | None) -> str:
@@ -42,3 +40,19 @@ def _safe_path_component(value: str) -> str:
     drive, tail = os.path.splitdrive(os.path.abspath(value))
     text = (drive.rstrip(":") + "_" + tail.strip(os.sep)).strip("_")
     return "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in text) or "input"
+
+
+def _non_existing_output_dir(path: str) -> str:
+    if not os.path.exists(path):
+        return path
+
+    base = f"{path}_extracted"
+    if not os.path.exists(base):
+        return base
+
+    index = 2
+    while True:
+        candidate = f"{base}_{index}"
+        if not os.path.exists(candidate):
+            return candidate
+        index += 1

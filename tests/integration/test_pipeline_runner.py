@@ -87,7 +87,7 @@ def test_pipeline_runner_exposes_recent_passwords_without_password_manager():
     assert runner.recent_passwords == ["secret"]
 
 
-def test_batch_skips_stale_nested_output_tasks_in_same_round(tmp_path, monkeypatch):
+def test_batch_does_not_treat_existing_same_name_directory_as_output(tmp_path, monkeypatch):
     archive = tmp_path / "payload.zip"
     nested = tmp_path / "payload" / "inner.zip"
     archive.write_bytes(b"parent")
@@ -117,7 +117,7 @@ def test_batch_skips_stale_nested_output_tasks_in_same_round(tmp_path, monkeypat
     monkeypatch.setattr(runner.extractor, "extract", fake_extract)
     runner.batch_runner.execute([task_for(archive), task_for(nested)])
 
-    assert extracted == [str(archive)]
+    assert extracted == [str(archive), str(nested)]
 
 
 def test_output_root_preserves_tree_and_recursive_scan_uses_success_outputs(tmp_path, monkeypatch):
