@@ -19,7 +19,7 @@ def collect_scene_directory_markers(context) -> list[dict]:
     start_dir = os.path.dirname(os.path.abspath(base_path)) if os.path.isfile(base_path) else os.path.abspath(base_path)
     max_depth = int((context.fact_config or {}).get("scene_context_max_parent_depth", 4))
     scan_session = getattr(context, "scan_session", None)
-    directories = candidate_directories(start_dir, max_depth)
+    directories = _directories_within_scan_scope(scan_session, candidate_directories(start_dir, max_depth))
     snapshots = {
         directory: _scene_snapshot_for_directory(scan_session, directory, rules)
         for directory in directories
@@ -55,7 +55,7 @@ def collect_scene_directory_markers_batch(context):
             continue
         start_dir = os.path.dirname(os.path.abspath(base_path)) if os.path.isfile(base_path) else os.path.abspath(base_path)
         candidates = []
-        for directory in candidate_directories(start_dir, max_depth):
+        for directory in _directories_within_scan_scope(context.scan_session, candidate_directories(start_dir, max_depth)):
             normalized = normalized_path(directory)
             cache_key = (path_key(normalized), rules_key)
             markers = directory_markers.get(cache_key)
@@ -115,6 +115,16 @@ def candidate_directories(start_dir: str, max_depth: int) -> list[str]:
         current = parent
         depth += 1
     return directories
+
+
+def _directories_within_scan_scope(scan_session, directories: list[str]) -> list[str]:
+    if scan_session is None or not hasattr(scan_session, "is_within_scan_scope"):
+        return directories
+    return [
+        directory
+        for directory in directories
+        if scan_session.is_within_scan_scope(directory)
+    ]
 
 
 def _scene_snapshot_for_directory(scan_session, directory: str, rules: list[dict]):

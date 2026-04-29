@@ -7,7 +7,7 @@ from packrelic.contracts.filesystem import DirectorySnapshot
 from packrelic.detection.internal.target_groups import relation_group_to_fact_bag
 from packrelic.filesystem.directory_scanner import DirectoryScanner
 from packrelic.relations import CandidateGroup, RelationsScheduler
-from packrelic.support.path_keys import normalized_path, path_key
+from packrelic.support.path_keys import normalized_path, path_key, safe_relative_path
 
 
 class DetectionScanSession:
@@ -22,6 +22,28 @@ class DetectionScanSession:
         self._fact_bags: dict[str, List[FactBag]] = {}
         self._file_head_facts: dict[str, dict[str, Any]] = {}
         self._directory_identities: dict[str, tuple[str, int, tuple]] = {}
+        self._scan_roots: list[str] = []
+
+    def set_scan_roots(self, roots: list[str]) -> None:
+        self._scan_roots = []
+        seen: set[str] = set()
+        for root in roots:
+            normalized = normalized_path(root)
+            key = path_key(normalized)
+            if not normalized or key in seen:
+                continue
+            seen.add(key)
+            self._scan_roots.append(normalized)
+
+    def is_within_scan_scope(self, path: str) -> bool:
+        if not self._scan_roots:
+            return True
+        path = normalized_path(path)
+        path_scope_key = path_key(path)
+        for root in self._scan_roots:
+            if path_scope_key == path_key(root) or safe_relative_path(path, root) is not None:
+                return True
+        return False
 
     def snapshot_for_directory(self, directory: str) -> DirectorySnapshot:
         return self._snapshot_for_directory(directory, max_depth=None)

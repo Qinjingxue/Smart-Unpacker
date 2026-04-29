@@ -57,6 +57,13 @@ def build_fact_bags_for_targets(
         elif os.path.isfile(path):
             selected_files.append(path)
 
+    scan_roots = list(selected_dirs)
+    for file_path in selected_files:
+        if not any(safe_relative_path(file_path, directory) is not None for directory in selected_dirs):
+            scan_roots.append(os.path.dirname(file_path) or os.getcwd())
+    if hasattr(session, "set_scan_roots"):
+        session.set_scan_roots(scan_roots)
+
     fact_bags: List[FactBag] = []
     seen_keys: set[str] = set()
 

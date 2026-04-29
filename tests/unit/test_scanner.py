@@ -220,3 +220,43 @@ def test_scene_marker_directory_fallback_uses_bounded_depth(tmp_path, monkeypatc
 
     assert markers == []
     assert observed_depths == [3]
+
+
+def test_scene_context_does_not_scan_above_selected_root(tmp_path, monkeypatch):
+    selected_root = tmp_path / "selected"
+    archive = selected_root / "game" / "www" / "audio" / "bgm.7z"
+    archive.parent.mkdir(parents=True)
+    archive.write_bytes(b"7z\xbc\xaf\x27\x1c" + b"payload")
+
+    original_scan = DirectoryScanner.scan
+
+    def fail_if_outside_selected_root(self):
+        root = self.root_path
+        if root != selected_root and not str(root).startswith(str(selected_root) + "\\"):
+            raise AssertionError(f"scene scan escaped selected root: {root}")
+        return original_scan(self)
+
+    monkeypatch.setattr(DirectoryScanner, "scan", fail_if_outside_selected_root)
+
+    config = with_detection_pipeline(
+        {"thresholds": {"archive_score_threshold": 5, "maybe_archive_threshold": 3}},
+        precheck=[
+            {"name": "size_minimum", "enabled": True, "min_inspection_size_bytes": 0},
+            {
+                "name": "scene_protect",
+                "enabled": True,
+                "scene_rules": RECOMMENDED_SCENE_RULES_PAYLOAD,
+            },
+        ],
+        scoring=[
+            {
+                "name": "extension",
+                "enabled": True,
+                "extension_score_groups": [{"score": 5, "extensions": [".7z"]}],
+            },
+        ],
+    )
+
+    tasks = ArchiveTaskProvider(config).scan_targets([str(selected_root)])
+
+    assert [task.main_path for task in tasks] == [str(archive)]
