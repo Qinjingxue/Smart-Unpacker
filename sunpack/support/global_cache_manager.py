@@ -71,7 +71,7 @@ def file_identity(path: str) -> tuple[str, int, int]:
 
 def directory_identity(path: str) -> tuple[str, int, tuple]:
     norm_path = path_key(path)
-    rows = _native_scan_directory_entries(norm_path, 0, [], [], [], None)
+    rows = _native_scan_directory_entries(norm_path, 0, [], [], [], None, [], [])
     if not rows:
         return norm_path, 0, ()
     entries = []

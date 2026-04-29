@@ -369,6 +369,36 @@ def test_directory_scanner_whitelist_keeps_only_allowed_path_globs(tmp_path):
     assert "skip.zip" not in names
 
 
+def test_directory_scanner_pushes_whitelist_directory_rules_to_native(tmp_path, monkeypatch):
+    captured = {}
+
+    def fake_scan(root_path, max_depth, patterns, prune_dirs, blocked_extensions, min_size, whitelist_patterns, whitelist_prune_dirs):
+        captured["whitelist_patterns"] = whitelist_patterns
+        captured["whitelist_prune_dirs"] = whitelist_prune_dirs
+        return []
+
+    monkeypatch.setattr(
+        "sunpack.filesystem.directory_scanner._NATIVE_SCAN_DIRECTORY_ENTRIES",
+        fake_scan,
+    )
+
+    DirectoryScanner(str(tmp_path), config={
+        "filesystem": {
+            "scan_filters": [
+                {
+                    "name": "whitelist",
+                    "enabled": True,
+                    "path_globs": ["archives/**"],
+                    "prune_dir_globs": ["downloads"],
+                },
+            ]
+        }
+    }).scan()
+
+    assert captured["whitelist_patterns"] == [r"(^|/)archives($|/.*)"]
+    assert captured["whitelist_prune_dirs"] == [r"^downloads$"]
+
+
 def test_directory_scanner_whitelist_then_blacklist_both_apply(tmp_path):
     (tmp_path / "keep.zip").write_bytes(b"PK\x03\x04payload")
     (tmp_path / "skip.py").write_text("print('skip')", encoding="utf-8")

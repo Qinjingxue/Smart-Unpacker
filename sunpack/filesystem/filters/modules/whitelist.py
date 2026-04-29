@@ -18,9 +18,19 @@ class WhitelistScanFilter:
         path_globs=None,
         prune_dir_globs=None,
     ):
+        self.path_globs = [
+            str(pattern).strip()
+            for pattern in (path_globs or [])
+            if isinstance(pattern, str) and pattern.strip()
+        ]
+        self.prune_dir_globs = [
+            str(pattern).strip()
+            for pattern in (prune_dir_globs or [])
+            if isinstance(pattern, str) and pattern.strip()
+        ]
         self.path_patterns = [
             *[str(pattern) for pattern in (patterns or []) if isinstance(pattern, str)],
-            *[_path_glob_to_regex(pattern) for pattern in (path_globs or []) if isinstance(pattern, str) and pattern.strip()],
+            *[_path_glob_to_regex(pattern) for pattern in self.path_globs],
         ]
         self.file_patterns = [
             *[_file_name_to_regex(name) for name in (allowed_files or []) if isinstance(name, str) and name.strip()],
@@ -28,7 +38,7 @@ class WhitelistScanFilter:
         self.patterns = [*self.path_patterns, *self.file_patterns]
         self.prune_dirs = [
             *[str(pattern) for pattern in (prune_dirs or []) if isinstance(pattern, str)],
-            *[_dir_glob_to_regex(pattern) for pattern in (prune_dir_globs or []) if isinstance(pattern, str) and pattern.strip()],
+            *[_dir_glob_to_regex(pattern) for pattern in self.prune_dir_globs],
         ]
         self.allowed_extensions = {
             ext if ext.startswith(".") else f".{ext}"

@@ -44,6 +44,8 @@ class DirectoryScanner:
             options["prune_dirs"],
             options["blocked_extensions"],
             options["min_size"],
+            options["whitelist_patterns"],
+            options["whitelist_prune_dirs"],
         )
 
         root_path = self.root_path.parent if self.root_path.is_file() else self.root_path
@@ -66,6 +68,8 @@ class DirectoryScanner:
 
         patterns: list[str] = []
         prune_dirs: list[str] = []
+        whitelist_patterns: list[str] = []
+        whitelist_prune_dirs: list[str] = []
         blocked_extensions: list[str] = []
         min_size = None
         seen_scene_semantics = False
@@ -94,12 +98,24 @@ class DirectoryScanner:
                         return None
                 continue
             if name in {"whitelist", "mtime_range"}:
+                if name == "whitelist" and not seen_scene_semantics:
+                    whitelist_patterns.extend(
+                        _path_glob_to_regex(item)
+                        for item in (getattr(scan_filter, "path_globs", []) or [])
+                    )
+                    whitelist_prune_dirs.extend(
+                        _dir_glob_to_regex(item)
+                        for item in (getattr(scan_filter, "prune_dir_globs", []) or [])
+                    )
+                    continue
                 break
             return None
 
         return {
             "patterns": patterns,
             "prune_dirs": prune_dirs,
+            "whitelist_patterns": whitelist_patterns,
+            "whitelist_prune_dirs": whitelist_prune_dirs,
             "blocked_extensions": blocked_extensions,
             "min_size": min_size,
         }

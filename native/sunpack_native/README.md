@@ -35,7 +35,7 @@ tests to confirm the extension was imported.
 
 `scanner_version()` returns the crate package version.
 
-`scan_directory_entries(root_path, max_depth, patterns, prune_dirs, blocked_extensions, min_size)`
+`scan_directory_entries(root_path, max_depth, patterns, prune_dirs, blocked_extensions, min_size, whitelist_patterns, whitelist_prune_dirs)`
 walks a directory tree and returns basic entry metadata after applying the
 built-in filesystem scan filters. Python still owns `DirectorySnapshot` /
 `FileEntry` construction. Custom filters must be expressible through native

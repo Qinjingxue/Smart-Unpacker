@@ -18,6 +18,8 @@ struct DirectoryEntryRecord {
 struct DirectoryScanOptions {
     patterns: Vec<regex::Regex>,
     prune_dirs: Vec<regex::Regex>,
+    whitelist_patterns: Vec<regex::Regex>,
+    whitelist_prune_dirs: Vec<regex::Regex>,
     blocked_extensions: HashSet<String>,
     min_size: Option<u64>,
 }
@@ -37,12 +39,16 @@ impl DirectoryScanOptions {
     fn new(
         patterns: Vec<String>,
         prune_dirs: Vec<String>,
+        whitelist_patterns: Vec<String>,
+        whitelist_prune_dirs: Vec<String>,
         blocked_extensions: Vec<String>,
         min_size: Option<u64>,
     ) -> PyResult<Self> {
         Ok(Self {
             patterns: compile_case_insensitive_regexes(patterns)?,
             prune_dirs: compile_case_insensitive_regexes(prune_dirs)?,
+            whitelist_patterns: compile_case_insensitive_regexes(whitelist_patterns)?,
+            whitelist_prune_dirs: compile_case_insensitive_regexes(whitelist_prune_dirs)?,
             blocked_extensions: normalize_extensions(blocked_extensions),
             min_size,
         })
@@ -50,7 +56,7 @@ impl DirectoryScanOptions {
 }
 
 #[pyfunction]
-#[pyo3(signature = (root_path, max_depth, patterns, prune_dirs, blocked_extensions, min_size))]
+#[pyo3(signature = (root_path, max_depth, patterns, prune_dirs, blocked_extensions, min_size, whitelist_patterns=Vec::new(), whitelist_prune_dirs=Vec::new()))]
 pub(crate) fn scan_directory_entries(
     py: Python<'_>,
     root_path: &str,
@@ -59,8 +65,17 @@ pub(crate) fn scan_directory_entries(
     prune_dirs: Vec<String>,
     blocked_extensions: Vec<String>,
     min_size: Option<u64>,
+    whitelist_patterns: Vec<String>,
+    whitelist_prune_dirs: Vec<String>,
 ) -> PyResult<Vec<Py<PyDict>>> {
-    let options = DirectoryScanOptions::new(patterns, prune_dirs, blocked_extensions, min_size)?;
+    let options = DirectoryScanOptions::new(
+        patterns,
+        prune_dirs,
+        whitelist_patterns,
+        whitelist_prune_dirs,
+        blocked_extensions,
+        min_size,
+    )?;
     let entries = scan_directory(root_path, max_depth, &options)?;
     entries
         .into_iter()
@@ -396,7 +411,9 @@ fn file_record_if_accepted(
 
 fn dir_rejected(path: &Path, options: &DirectoryScanOptions) -> bool {
     let candidates = path_candidates(path);
-    regex_matches(&options.prune_dirs, &candidates) || regex_matches(&options.patterns, &candidates)
+    regex_matches(&options.prune_dirs, &candidates)
+        || regex_matches(&options.patterns, &candidates)
+        || !dir_allowed_by_whitelist(&candidates, options)
 }
 
 fn file_rejected_by_path(path: &Path, options: &DirectoryScanOptions) -> bool {
@@ -406,7 +423,23 @@ fn file_rejected_by_path(path: &Path, options: &DirectoryScanOptions) -> bool {
             return true;
         }
     }
-    regex_matches(&options.patterns, &path_candidates(path))
+    let candidates = path_candidates(path);
+    regex_matches(&options.patterns, &candidates) || !file_allowed_by_whitelist(&candidates, options)
+}
+
+fn dir_allowed_by_whitelist(candidates: &[String], options: &DirectoryScanOptions) -> bool {
+    if options.whitelist_patterns.is_empty() && options.whitelist_prune_dirs.is_empty() {
+        return true;
+    }
+    regex_matches(&options.whitelist_patterns, candidates)
+        || regex_matches(&options.whitelist_prune_dirs, candidates)
+}
+
+fn file_allowed_by_whitelist(candidates: &[String], options: &DirectoryScanOptions) -> bool {
+    if options.whitelist_patterns.is_empty() {
+        return true;
+    }
+    regex_matches(&options.whitelist_patterns, candidates)
 }
 
 fn regex_matches(regexes: &[regex::Regex], candidates: &[String]) -> bool {
