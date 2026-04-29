@@ -1,6 +1,6 @@
+use flate2::read::GzDecoder;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList};
-use flate2::read::GzDecoder;
 use sevenz_rust2::{Archive, BlockDecoder, Password};
 use std::fs::{self, File};
 use std::io::{Cursor, Read, Seek, SeekFrom, Write};
@@ -76,7 +76,10 @@ pub(crate) fn archive_carrier_crop_recovery(
         let output_bytes = match write_slice_candidate(&data[candidate.offset..], &output_path) {
             Ok(bytes) => bytes,
             Err(err) => {
-                write_warnings.push(format!("candidate at offset {} could not be written: {err}", candidate.offset));
+                write_warnings.push(format!(
+                    "candidate at offset {} could not be written: {err}",
+                    candidate.offset
+                ));
                 continue;
             }
         };
@@ -148,7 +151,8 @@ pub(crate) fn seven_zip_precise_boundary_repair(
             return status_dict(py, "skipped", "", "7z", &message, &[], 0, 0, 0, 0.0, &[])
         }
     };
-    let candidates = scan_archive_signatures(&data, TargetFormat::SevenZip, false, max_candidates.max(1));
+    let candidates =
+        scan_archive_signatures(&data, TargetFormat::SevenZip, false, max_candidates.max(1));
     let mut written = Vec::new();
     let mut write_warnings = Vec::new();
     for candidate in candidates.into_iter().filter(|candidate| {
@@ -161,10 +165,16 @@ pub(crate) fn seven_zip_precise_boundary_repair(
             "seven_zip_precise_boundary_repair_{:08x}.7z",
             candidate.offset
         ));
-        let output_bytes = match write_slice_candidate(&data[candidate.offset..candidate.archive_end], &output_path) {
+        let output_bytes = match write_slice_candidate(
+            &data[candidate.offset..candidate.archive_end],
+            &output_path,
+        ) {
             Ok(bytes) => bytes,
             Err(err) => {
-                write_warnings.push(format!("candidate at offset {} could not be written: {err}", candidate.offset));
+                write_warnings.push(format!(
+                    "candidate at offset {} could not be written: {err}",
+                    candidate.offset
+                ));
                 continue;
             }
         };
@@ -250,7 +260,9 @@ pub(crate) fn seven_zip_crc_field_repair(
         let output_bytes = match write_slice_candidate(&repair.bytes, &output_path) {
             Ok(bytes) => bytes,
             Err(err) => {
-                write_warnings.push(format!("candidate at offset {offset} could not be written: {err}"));
+                write_warnings.push(format!(
+                    "candidate at offset {offset} could not be written: {err}"
+                ));
                 continue;
             }
         };
@@ -325,7 +337,8 @@ pub(crate) fn seven_zip_next_header_field_repair(
             return status_dict(py, "skipped", "", "7z", &message, &[], 0, 0, 0, 0.0, &[])
         }
     };
-    let Some((next_offset, next_size)) = find_next_header_candidate(&data, max_scan_bytes.max(1)) else {
+    let Some((next_offset, next_size)) = find_next_header_candidate(&data, max_scan_bytes.max(1))
+    else {
         return status_dict(
             py,
             "unrepairable",
@@ -349,7 +362,8 @@ pub(crate) fn seven_zip_next_header_field_repair(
     start_header[16..20].copy_from_slice(&next_crc.to_le_bytes());
     let start_crc = crc32(&start_header);
     let current_start_crc = u32_le(&data, 8);
-    if current_offset == next_offset && current_size == next_size && current_start_crc == start_crc {
+    if current_offset == next_offset && current_size == next_size && current_start_crc == start_crc
+    {
         return status_dict(
             py,
             "unrepairable",
@@ -413,7 +427,10 @@ pub(crate) fn seven_zip_next_header_field_repair(
         candidate.len() as u64,
         output_bytes,
         0.9,
-        &["repair_7z_next_header_offset_size", "recompute_7z_start_header_crc"],
+        &[
+            "repair_7z_next_header_offset_size",
+            "recompute_7z_start_header_crc",
+        ],
         &[selected.clone()],
     )
 }
@@ -470,7 +487,10 @@ pub(crate) fn rar_block_chain_trim_recovery(
             match write_slice_candidate(&data[walk.offset..walk.last_complete_end], &output_path) {
                 Ok(bytes) => bytes,
                 Err(err) => {
-                    write_warnings.push(format!("candidate at offset {} could not be written: {err}", walk.offset));
+                    write_warnings.push(format!(
+                        "candidate at offset {} could not be written: {err}",
+                        walk.offset
+                    ));
                     continue;
                 }
             };
@@ -590,7 +610,10 @@ pub(crate) fn rar_end_block_repair(
         let output_bytes = match write_slice_candidate(&candidate, &output_path) {
             Ok(bytes) => bytes,
             Err(err) => {
-                skipped_warnings.push(format!("candidate at offset {} could not be written: {err}", walk.offset));
+                skipped_warnings.push(format!(
+                    "candidate at offset {} could not be written: {err}",
+                    walk.offset
+                ));
                 continue;
             }
         };
@@ -670,20 +693,63 @@ pub(crate) fn seven_zip_solid_block_partial_salvage(
 ) -> PyResult<Py<PyDict>> {
     let data = match read_source_input(source_input, mb_to_bytes(max_input_size_mb)) {
         Ok(data) => data,
-        Err(message) => return status_dict(py, "skipped", "", "zip", &message, &[], 0, 0, 0, 0.0, &[]),
+        Err(message) => {
+            return status_dict(py, "skipped", "", "zip", &message, &[], 0, 0, 0, 0.0, &[])
+        }
     };
     let recovered = match recover_seven_zip_entries_by_block(&data, max_entries.max(1)) {
         Ok(entries) => entries,
-        Err(message) => return status_dict(py, "unrepairable", "", "zip", &message, &[], 0, data.len() as u64, 0, 0.0, &[]),
+        Err(message) => {
+            return status_dict(
+                py,
+                "unrepairable",
+                "",
+                "zip",
+                &message,
+                &[],
+                0,
+                data.len() as u64,
+                0,
+                0.0,
+                &[],
+            )
+        }
     };
     if recovered.is_empty() {
-        return status_dict(py, "unrepairable", "", "zip", "no decodable 7z block entries were recoverable", &[], 0, data.len() as u64, 0, 0.0, &[]);
+        return status_dict(
+            py,
+            "unrepairable",
+            "",
+            "zip",
+            "no decodable 7z block entries were recoverable",
+            &[],
+            0,
+            data.len() as u64,
+            0,
+            0.0,
+            &[],
+        );
     }
     let output_path = Path::new(workspace).join("seven_zip_solid_block_partial_salvage.zip");
-    let output_bytes = match write_stored_zip_entries(&recovered, &output_path, mb_to_bytes(max_output_size_mb)) {
-        Ok(bytes) => bytes,
-        Err(message) => return status_dict(py, "unrepairable", "", "zip", &message, &[], 0, data.len() as u64, 0, 0.0, &[]),
-    };
+    let output_bytes =
+        match write_stored_zip_entries(&recovered, &output_path, mb_to_bytes(max_output_size_mb)) {
+            Ok(bytes) => bytes,
+            Err(message) => {
+                return status_dict(
+                    py,
+                    "unrepairable",
+                    "",
+                    "zip",
+                    &message,
+                    &[],
+                    0,
+                    data.len() as u64,
+                    0,
+                    0.0,
+                    &[],
+                )
+            }
+        };
     let selected = WrittenArchiveCandidate {
         name: "seven_zip_solid_block_partial_salvage".to_string(),
         path: output_path.to_string_lossy().to_string(),
@@ -736,13 +802,32 @@ pub(crate) fn rar_file_quarantine_rebuild(
 ) -> PyResult<Py<PyDict>> {
     let data = match read_source_input(source_input, mb_to_bytes(max_input_size_mb)) {
         Ok(data) => data,
-        Err(message) => return status_dict(py, "skipped", "", "rar", &message, &[], 0, 0, 0, 0.0, &[]),
+        Err(message) => {
+            return status_dict(py, "skipped", "", "rar", &message, &[], 0, 0, 0, 0.0, &[])
+        }
     };
-    let candidates = rebuild_rar_file_quarantine_candidates(&data, workspace, max_candidates.max(1));
+    let candidates =
+        rebuild_rar_file_quarantine_candidates(&data, workspace, max_candidates.max(1));
     let Some(selected) = candidates.first() else {
-        return status_dict(py, "unrepairable", "", "rar", "no complete RAR file blocks were available for quarantine rebuild", &[], 0, data.len() as u64, 0, 0.0, &[]);
+        return status_dict(
+            py,
+            "unrepairable",
+            "",
+            "rar",
+            "no complete RAR file blocks were available for quarantine rebuild",
+            &[],
+            0,
+            data.len() as u64,
+            0,
+            0.0,
+            &[],
+        );
     };
-    let action_refs = selected.actions.iter().map(String::as_str).collect::<Vec<_>>();
+    let action_refs = selected
+        .actions
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
     status_dict_with_candidates(
         py,
         &selected.status,
@@ -775,13 +860,43 @@ pub(crate) fn archive_nested_payload_salvage(
 ) -> PyResult<Py<PyDict>> {
     let data = match read_source_input(source_input, mb_to_bytes(max_input_size_mb)) {
         Ok(data) => data,
-        Err(message) => return status_dict(py, "skipped", "", "archive", &message, &[], 0, 0, 0, 0.0, &[]),
+        Err(message) => {
+            return status_dict(
+                py,
+                "skipped",
+                "",
+                "archive",
+                &message,
+                &[],
+                0,
+                0,
+                0,
+                0.0,
+                &[],
+            )
+        }
     };
     let candidates = nested_archive_candidates(&data, workspace, max_candidates.max(1));
     let Some(selected) = candidates.first() else {
-        return status_dict(py, "unrepairable", "", "archive", "no nested archive payload candidate was found", &[], 0, data.len() as u64, 0, 0.0, &[]);
+        return status_dict(
+            py,
+            "unrepairable",
+            "",
+            "archive",
+            "no nested archive payload candidate was found",
+            &[],
+            0,
+            data.len() as u64,
+            0,
+            0.0,
+            &[],
+        );
     };
-    let action_refs = selected.actions.iter().map(String::as_str).collect::<Vec<_>>();
+    let action_refs = selected
+        .actions
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
     status_dict_with_candidates(
         py,
         "partial",
@@ -1378,6 +1493,7 @@ fn walk_rar5_blocks(data: &[u8], offset: usize) -> Option<RarWalk> {
 
 struct Rar5Block {
     block_type: u64,
+    flags: u64,
     archive_flags: u64,
     end: usize,
     crc_ok: bool,
@@ -1418,6 +1534,7 @@ fn parse_rar5_block(data: &[u8], offset: usize) -> Option<Rar5Block> {
     let crc_ok = crc32(&data[offset + 4..fields_end]) == stored_crc;
     Some(Rar5Block {
         block_type,
+        flags,
         archive_flags,
         end,
         crc_ok,
@@ -1430,6 +1547,10 @@ fn rar4_end_block() -> Vec<u8> {
 
 fn rar5_end_block() -> Vec<u8> {
     rar5_block(5, 0, &[])
+}
+
+fn rar5_main_block(archive_flags: u64) -> Vec<u8> {
+    rar5_header_block(1, 0, &write_vint(archive_flags), &[])
 }
 
 fn rar4_block(header_type: u8, flags: u16, payload: &[u8]) -> Vec<u8> {
@@ -1453,6 +1574,10 @@ fn rar4_block(header_type: u8, flags: u16, payload: &[u8]) -> Vec<u8> {
 }
 
 fn rar5_block(block_type: u64, flags: u64, data: &[u8]) -> Vec<u8> {
+    rar5_header_block(block_type, flags, &[], data)
+}
+
+fn rar5_header_block(block_type: u64, flags: u64, tail_fields: &[u8], data: &[u8]) -> Vec<u8> {
     let mut effective_flags = flags;
     let mut fields = Vec::new();
     fields.extend_from_slice(&write_vint(block_type));
@@ -1463,6 +1588,7 @@ fn rar5_block(block_type: u64, flags: u64, data: &[u8]) -> Vec<u8> {
     if !data.is_empty() {
         fields.extend_from_slice(&write_vint(data.len() as u64));
     }
+    fields.extend_from_slice(tail_fields);
     let mut header_data = write_vint(fields.len() as u64);
     header_data.extend_from_slice(&fields);
     let mut output = Vec::with_capacity(4 + header_data.len() + data.len());
@@ -1532,7 +1658,11 @@ fn rebuild_rar_file_quarantine_candidates(
     let offsets = find_all(data, RAR4_MAGIC)
         .into_iter()
         .map(|offset| (offset, RarVersion::Rar4))
-        .chain(find_all(data, RAR5_MAGIC).into_iter().map(|offset| (offset, RarVersion::Rar5)))
+        .chain(
+            find_all(data, RAR5_MAGIC)
+                .into_iter()
+                .map(|offset| (offset, RarVersion::Rar5)),
+        )
         .collect::<Vec<_>>();
     for (offset, version) in offsets {
         if candidates.len() >= max_candidates {
@@ -1548,7 +1678,8 @@ fn rebuild_rar_file_quarantine_candidates(
         if kept == 0 || skipped == 0 {
             continue;
         }
-        let output_path = Path::new(workspace).join(format!("rar_file_quarantine_{offset:08x}.rar"));
+        let output_path =
+            Path::new(workspace).join(format!("rar_file_quarantine_{offset:08x}.rar"));
         let output_bytes = match write_slice_candidate(&bytes, &output_path) {
             Ok(bytes) => bytes,
             Err(_) => continue,
@@ -1567,7 +1698,9 @@ fn rebuild_rar_file_quarantine_candidates(
                 "drop_incomplete_or_untrusted_file_blocks".to_string(),
                 "rebuild_rar_with_recoverable_file_blocks".to_string(),
             ],
-            warnings: vec![format!("kept {kept} complete RAR file blocks and skipped {skipped}")],
+            warnings: vec![format!(
+                "kept {kept} complete RAR file blocks and skipped {skipped}"
+            )],
         });
     }
     candidates
@@ -1588,7 +1721,8 @@ fn rebuild_rar4_quarantine(data: &[u8], offset: usize) -> Option<(Vec<u8>, usize
         let header_type = data[pos + 2];
         let flags = u16_le(data, pos + 3);
         let header_size = u16_le(data, pos + 5) as usize;
-        if !matches!(header_type, 0x73..=0x7b) || header_size < 7 || pos + header_size > data.len() {
+        if !matches!(header_type, 0x73..=0x7b) || header_size < 7 || pos + header_size > data.len()
+        {
             break;
         }
         let header = &data[pos..pos + header_size];
@@ -1647,21 +1781,47 @@ fn rebuild_rar5_quarantine(data: &[u8], offset: usize) -> Option<(Vec<u8>, usize
     while pos < data.len() {
         let Some(block) = parse_rar5_block(data, pos) else {
             skipped += 1;
+            if let Some(next_pos) = find_next_valid_rar5_block(data, pos.saturating_add(1)) {
+                pos = next_pos;
+                continue;
+            }
             break;
         };
-        if block.end > data.len() || !block.crc_ok {
+        if block.end > data.len() {
             skipped += 1;
             break;
         }
-        if block.block_type == 1 && !saw_main {
-            output.extend_from_slice(&data[pos..block.end]);
+        if !block.crc_ok {
+            skipped += 1;
+            if let Some(next_pos) = find_next_valid_rar5_block(data, pos.saturating_add(1)) {
+                pos = next_pos;
+                continue;
+            }
+            break;
+        }
+        if block.block_type == 1 {
+            if !saw_main {
+                // Rebuild as a single-volume archive. Copying the original main
+                // header from a split volume keeps the volume flag and makes the
+                // quarantine candidate unopenable as a standalone RAR.
+                output.extend_from_slice(&rar5_main_block(0));
+            } else {
+                skipped += 1;
+            }
             saw_main = true;
         } else if block.block_type == 2 {
-            output.extend_from_slice(&data[pos..block.end]);
-            kept += 1;
+            if block.flags & 0x0018 != 0 {
+                // RAR5 uses split-before/split-after block flags for file data
+                // continued across volumes. Those blocks are not independently
+                // extractable, so keep scanning for later complete file blocks.
+                skipped += 1;
+            } else {
+                output.extend_from_slice(&data[pos..block.end]);
+                kept += 1;
+            }
         } else if block.block_type == 5 {
-            output.extend_from_slice(&data[pos..block.end]);
             end_offset = block.end;
+            output.extend_from_slice(&rar5_end_block());
             return Some((output, kept, skipped, end_offset));
         } else {
             skipped += 1;
@@ -1675,6 +1835,19 @@ fn rebuild_rar5_quarantine(data: &[u8], offset: usize) -> Option<(Vec<u8>, usize
     } else {
         None
     }
+}
+
+fn find_next_valid_rar5_block(data: &[u8], start: usize) -> Option<usize> {
+    let mut pos = start;
+    while pos < data.len() {
+        if let Some(block) = parse_rar5_block(data, pos) {
+            if block.end <= data.len() && block.crc_ok {
+                return Some(pos);
+            }
+        }
+        pos = pos.saturating_add(1);
+    }
+    None
 }
 
 fn nested_archive_candidates(
@@ -1698,7 +1871,8 @@ fn nested_archive_candidates(
             "gzip" => ".gz",
             _ => ".bin",
         };
-        let output_path = Path::new(workspace).join(format!("archive_nested_payload_{offset:08x}{ext}"));
+        let output_path =
+            Path::new(workspace).join(format!("archive_nested_payload_{offset:08x}{ext}"));
         let output_bytes = match write_slice_candidate(&data[offset..end], &output_path) {
             Ok(bytes) => bytes,
             Err(_) => continue,
@@ -1745,7 +1919,12 @@ fn collect_nested_archive_ranges<'a>(
             return;
         }
         if let Some(walk) = walk_rar4_blocks(data, offset) {
-            output.push((offset, walk.last_complete_end, "rar", if walk.end_block_found { 0.86 } else { 0.72 }));
+            output.push((
+                offset,
+                walk.last_complete_end,
+                "rar",
+                if walk.end_block_found { 0.86 } else { 0.72 },
+            ));
         }
     }
     for offset in find_all(data, RAR5_MAGIC) {
@@ -1753,7 +1932,12 @@ fn collect_nested_archive_ranges<'a>(
             return;
         }
         if let Some(walk) = walk_rar5_blocks(data, offset) {
-            output.push((offset, walk.last_complete_end, "rar", if walk.end_block_found { 0.86 } else { 0.72 }));
+            output.push((
+                offset,
+                walk.last_complete_end,
+                "rar",
+                if walk.end_block_found { 0.86 } else { 0.72 },
+            ));
         }
     }
     for offset in find_all(data, b"\x1f\x8b\x08") {
@@ -1780,7 +1964,8 @@ fn collect_nested_archive_ranges<'a>(
 }
 
 fn nested_zip_end(data: &[u8], offset: usize) -> Option<usize> {
-    let mut pos = memchr::memmem::find(&data[offset..], b"PK\x05\x06").map(|value| offset + value)?;
+    let mut pos =
+        memchr::memmem::find(&data[offset..], b"PK\x05\x06").map(|value| offset + value)?;
     loop {
         if pos + 22 <= data.len() {
             let comment_len = u16_le(data, pos + 20) as usize;
@@ -1835,34 +2020,55 @@ fn write_stored_zip_entries(
                 return Err("recovered entry exceeds ZIP32 limits".to_string());
             }
             let local_offset = file.stream_position().map_err(|err| err.to_string())?;
-            file.write_all(&0x0403_4B50u32.to_le_bytes()).map_err(|err| err.to_string())?;
-            file.write_all(&20u16.to_le_bytes()).map_err(|err| err.to_string())?;
-            file.write_all(&0u16.to_le_bytes()).map_err(|err| err.to_string())?;
-            file.write_all(&0u16.to_le_bytes()).map_err(|err| err.to_string())?;
-            file.write_all(&0u16.to_le_bytes()).map_err(|err| err.to_string())?;
-            file.write_all(&0u16.to_le_bytes()).map_err(|err| err.to_string())?;
-            file.write_all(&entry.crc32.to_le_bytes()).map_err(|err| err.to_string())?;
-            file.write_all(&(entry.data.len() as u32).to_le_bytes()).map_err(|err| err.to_string())?;
-            file.write_all(&(entry.data.len() as u32).to_le_bytes()).map_err(|err| err.to_string())?;
-            file.write_all(&(entry.name.len() as u16).to_le_bytes()).map_err(|err| err.to_string())?;
-            file.write_all(&0u16.to_le_bytes()).map_err(|err| err.to_string())?;
+            file.write_all(&0x0403_4B50u32.to_le_bytes())
+                .map_err(|err| err.to_string())?;
+            file.write_all(&20u16.to_le_bytes())
+                .map_err(|err| err.to_string())?;
+            file.write_all(&0u16.to_le_bytes())
+                .map_err(|err| err.to_string())?;
+            file.write_all(&0u16.to_le_bytes())
+                .map_err(|err| err.to_string())?;
+            file.write_all(&0u16.to_le_bytes())
+                .map_err(|err| err.to_string())?;
+            file.write_all(&0u16.to_le_bytes())
+                .map_err(|err| err.to_string())?;
+            file.write_all(&entry.crc32.to_le_bytes())
+                .map_err(|err| err.to_string())?;
+            file.write_all(&(entry.data.len() as u32).to_le_bytes())
+                .map_err(|err| err.to_string())?;
+            file.write_all(&(entry.data.len() as u32).to_le_bytes())
+                .map_err(|err| err.to_string())?;
+            file.write_all(&(entry.name.len() as u16).to_le_bytes())
+                .map_err(|err| err.to_string())?;
+            file.write_all(&0u16.to_le_bytes())
+                .map_err(|err| err.to_string())?;
             file.write_all(&entry.name).map_err(|err| err.to_string())?;
             file.write_all(&entry.data).map_err(|err| err.to_string())?;
             append_stored_zip_cd(&mut cd, entry, local_offset as u32);
-            if max_output_bytes.is_some_and(|limit| file.stream_position().unwrap_or(u64::MAX) > limit) {
+            if max_output_bytes
+                .is_some_and(|limit| file.stream_position().unwrap_or(u64::MAX) > limit)
+            {
                 return Err("candidate output exceeds repair.deep.max_output_size_mb".to_string());
             }
         }
         let cd_offset = file.stream_position().map_err(|err| err.to_string())?;
         file.write_all(&cd).map_err(|err| err.to_string())?;
-        file.write_all(&0x0605_4B50u32.to_le_bytes()).map_err(|err| err.to_string())?;
-        file.write_all(&0u16.to_le_bytes()).map_err(|err| err.to_string())?;
-        file.write_all(&0u16.to_le_bytes()).map_err(|err| err.to_string())?;
-        file.write_all(&(entries.len() as u16).to_le_bytes()).map_err(|err| err.to_string())?;
-        file.write_all(&(entries.len() as u16).to_le_bytes()).map_err(|err| err.to_string())?;
-        file.write_all(&(cd.len() as u32).to_le_bytes()).map_err(|err| err.to_string())?;
-        file.write_all(&(cd_offset as u32).to_le_bytes()).map_err(|err| err.to_string())?;
-        file.write_all(&0u16.to_le_bytes()).map_err(|err| err.to_string())?;
+        file.write_all(&0x0605_4B50u32.to_le_bytes())
+            .map_err(|err| err.to_string())?;
+        file.write_all(&0u16.to_le_bytes())
+            .map_err(|err| err.to_string())?;
+        file.write_all(&0u16.to_le_bytes())
+            .map_err(|err| err.to_string())?;
+        file.write_all(&(entries.len() as u16).to_le_bytes())
+            .map_err(|err| err.to_string())?;
+        file.write_all(&(entries.len() as u16).to_le_bytes())
+            .map_err(|err| err.to_string())?;
+        file.write_all(&(cd.len() as u32).to_le_bytes())
+            .map_err(|err| err.to_string())?;
+        file.write_all(&(cd_offset as u32).to_le_bytes())
+            .map_err(|err| err.to_string())?;
+        file.write_all(&0u16.to_le_bytes())
+            .map_err(|err| err.to_string())?;
         file.flush().map_err(|err| err.to_string())?;
         let size = file.stream_position().map_err(|err| err.to_string())?;
         if max_output_bytes.is_some_and(|limit| size > limit) {
@@ -1919,8 +2125,15 @@ fn plausible_tar_header(header: &[u8]) -> bool {
     if header.len() != 512 {
         return false;
     }
-    let name_end = header[0..100].iter().position(|byte| *byte == 0).unwrap_or(100);
-    if name_end == 0 || !header[..name_end].iter().all(|byte| (0x20..=0x7e).contains(byte)) {
+    let name_end = header[0..100]
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(100);
+    if name_end == 0
+        || !header[..name_end]
+            .iter()
+            .all(|byte| (0x20..=0x7e).contains(byte))
+    {
         return false;
     }
     parse_tar_number(&header[124..136]).is_some()
@@ -1970,7 +2183,10 @@ fn read_source_input(
                 .get_item("data")
                 .map_err(|err| err.to_string())?
                 .ok_or_else(|| "missing bytes repair input data".to_string())?;
-            let data = data_obj.cast::<PyBytes>().map_err(|err| err.to_string())?.as_bytes();
+            let data = data_obj
+                .cast::<PyBytes>()
+                .map_err(|err| err.to_string())?
+                .as_bytes();
             if max_bytes.is_some_and(|limit| data.len() as u64 > limit) {
                 return Err("archive deep repair input exceeds max_input_size_mb".to_string());
             }

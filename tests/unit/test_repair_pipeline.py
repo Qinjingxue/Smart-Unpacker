@@ -133,6 +133,31 @@ def test_default_repair_config_routes_salvage_modules_without_module_override(
     assert module_name in selected_after_primary
 
 
+def test_auto_deep_prefers_rar_file_quarantine_over_generic_carrier_crop_for_split_damage(tmp_path):
+    source = tmp_path / "damaged.part1.rar"
+    source.write_bytes(b"Rar!\x1a\x07\x01\x00" + b"x" * 128)
+    scheduler = RepairScheduler({"repair": {"workspace": str(tmp_path / "repair")}})
+    job = RepairJob(
+        source_input={"kind": "file", "path": str(source), "format_hint": "rar"},
+        format="rar",
+        confidence=0.97,
+        damage_flags=["damaged", "missing_entries", "checksum_error", "crc_error"],
+        extraction_failure={
+            "failure_stage": "verification",
+            "failure_kind": "structure_recognition",
+            "decision_hint": "repair",
+        },
+        archive_key="damaged.part1.rar",
+    )
+
+    batch = scheduler.generate_repair_candidates(job, lazy=True)
+
+    selected_modules = [candidate.module_name for candidate in batch.candidates]
+    assert selected_modules
+    assert selected_modules[0] == "rar_file_quarantine_rebuild"
+    assert "rar_file_quarantine_rebuild" in selected_modules
+
+
 def test_repair_diagnosis_combines_analysis_and_extraction_evidence(tmp_path):
     evidence = ArchiveFormatEvidence(
         format="zip",

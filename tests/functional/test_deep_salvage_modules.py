@@ -12,6 +12,9 @@ import zlib
 import pytest
 
 from smart_unpacker.repair import RepairJob, RepairScheduler
+from smart_unpacker.support.sevenzip_worker import dry_run_archive
+from tests.helpers.real_archives import ArchiveFixtureFactory, apply_split_issue
+from tests.helpers.tool_config import get_optional_rar
 
 
 RAR5_MAGIC = b"Rar!\x1a\x07\x01\x00"
@@ -104,9 +107,50 @@ def test_rar_file_quarantine_rebuild_keeps_complete_rar5_file_block(tmp_path):
     repaired = Path(result.repaired_input["path"]).read_bytes()
     assert result.status == "partial"
     assert result.module_name == "rar_file_quarantine_rebuild"
-    assert repaired.startswith(complete_prefix)
+    assert repaired.startswith(RAR5_MAGIC)
+    assert payload in repaired
     assert repaired.endswith(_rar5_block(5))
     assert b"BROKEN-RAR5-BLOCK" not in repaired
+
+
+def test_rar_file_quarantine_rebuild_resyncs_damaged_split_volume(tmp_path):
+    if get_optional_rar() is None:
+        pytest.skip("RAR generator is not configured")
+    case = ArchiveFixtureFactory().create(
+        tmp_path / "fixtures",
+        "rar_split_quarantine",
+        "rar",
+        split=True,
+        payload_size=180 * 1024,
+    )
+    apply_split_issue(case, "corrupt_member")
+    parts = sorted(str(path) for path in case.archive_dir.iterdir() if path.is_file())
+    scheduler = RepairScheduler({
+        "repair": {
+            "workspace": str(tmp_path / "repair"),
+            "stages": {"deep": True},
+            "modules": [{"name": "rar_file_quarantine_rebuild", "enabled": True}],
+        }
+    })
+
+    result = scheduler.repair(RepairJob(
+        source_input={
+            "kind": "concat_ranges",
+            "ranges": [{"path": path, "start": 0} for path in parts],
+            "format_hint": "rar",
+        },
+        format="rar",
+        confidence=0.97,
+        damage_flags=["damaged", "file_block_bad", "data_error"],
+        extraction_failure={"failure_kind": "structure_recognition", "decision_hint": "repair"},
+        archive_key=case.case_id,
+    ))
+
+    assert result.status == "partial"
+    assert result.module_name == "rar_file_quarantine_rebuild"
+    dry_run = dry_run_archive(result.repaired_input["path"], format_hint="rar", timeout=10)
+    assert dry_run.ok
+    assert int(dry_run.result.get("files_written", 0) or 0) >= 1
 
 
 def test_seven_zip_solid_block_partial_salvage_repackages_decodable_entries_as_zip(tmp_path):

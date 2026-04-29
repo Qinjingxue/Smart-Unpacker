@@ -8,6 +8,8 @@ from smart_unpacker.verification.pipeline import VerificationPipeline
 from smart_unpacker.verification.result import (
     ASSESSMENT_DISABLED,
     DECISION_ACCEPT,
+    DECISION_REPAIR,
+    SOURCE_INTEGRITY_DAMAGED,
     SOURCE_INTEGRITY_UNKNOWN,
     VerificationResult,
 )
@@ -41,6 +43,14 @@ class VerificationScheduler:
     def verify(self, task: ArchiveTask, extraction_result: ExtractionResult) -> VerificationResult:
         evidence = build_verification_evidence(task, extraction_result, self.password_session)
         if not self.config.get("enabled", False):
+            if not extraction_result.success:
+                return VerificationResult(
+                    completeness=0.0,
+                    recoverable_upper_bound=1.0,
+                    assessment_status=ASSESSMENT_DISABLED,
+                    source_integrity=SOURCE_INTEGRITY_DAMAGED,
+                    decision_hint=DECISION_REPAIR,
+                )
             return VerificationResult(
                 completeness=1.0,
                 recoverable_upper_bound=1.0,

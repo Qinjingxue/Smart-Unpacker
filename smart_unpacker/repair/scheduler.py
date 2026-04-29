@@ -180,8 +180,9 @@ class RepairScheduler:
     ) -> tuple[list[RepairCandidate], list[str], RepairCapabilityDecision]:
         warnings: list[str] = []
         repair_candidates: list[RepairCandidate] = []
-        for score, module, route_score in modules:
+        for score, module, route_score, fine_score in modules:
             module_config = self._module_runtime_config(module.spec.name, module_configs, auto_deep=auto_deep)
+            score_hint = max(score, route_score, fine_score)
             if lazy:
                 repair_candidates.append(_lazy_module_candidate(
                     module,
@@ -189,7 +190,7 @@ class RepairScheduler:
                     diagnosis,
                     str(workspace),
                     module_config,
-                    score_hint=max(score, route_score),
+                    score_hint=score_hint,
                 ))
                 continue
             try:
@@ -214,7 +215,7 @@ class RepairScheduler:
                         candidate = _with_job_password_candidate(candidate, job)
                         repair_candidates.append(replace(
                             candidate,
-                            score_hint=max(score, route_score, candidate.score_hint),
+                            score_hint=max(score_hint, candidate.score_hint),
                             stage=candidate.stage or module.spec.stage,
                         ))
                     continue
@@ -233,7 +234,7 @@ class RepairScheduler:
             if result.ok:
                 candidate = RepairCandidate.from_result(
                     _with_job_password_result(result, job),
-                    score_hint=max(score, route_score),
+                    score_hint=score_hint,
                     stage=module.spec.stage,
                 )
                 if candidate is not None:
@@ -334,10 +335,10 @@ class RepairScheduler:
                 route_score=route_score,
                 fine_score=fine_score,
             ))
-            candidates.append((score, module, route_score))
-        candidates.sort(key=lambda item: self._module_sort_key(item[0], item[1], item[2]))
+            candidates.append((score, module, route_score, fine_score))
+        candidates.sort(key=lambda item: self._module_sort_key(item[0], item[1], item[2], item[3], diagnosis.format))
         limit = self._module_limit(auto_deep=auto_deep)
-        selected_names = {module.spec.name for _, module, _ in candidates[:limit]}
+        selected_names = {module.spec.name for _, module, _, _ in candidates[:limit]}
         if selected_names:
             decisions = [
                 replace(
@@ -360,10 +361,12 @@ class RepairScheduler:
         )
         return candidates[:limit], decision
 
-    def _module_sort_key(self, score: float, module, route_score: float) -> tuple:
+    def _module_sort_key(self, score: float, module, route_score: float, fine_score: float, diagnosis_format: str = "") -> tuple:
         return (
             -float(score or 0.0),
+            -float(fine_score or 0.0),
             -float(route_score or 0.0),
+            _format_specificity_penalty(diagnosis_format, module.spec.formats),
             -_route_specificity(module.spec.routes),
             -_stage_rank(module.spec.stage),
             0 if module.spec.safe else 1,
@@ -628,6 +631,16 @@ def _route_specificity(routes: tuple[RepairRoute, ...]) -> int:
         + len(route.reject_any_failure_kinds)
         for route in routes
     )
+
+
+def _format_specificity_penalty(fmt: str, expected) -> int:
+    normalized = _normalize_format(fmt)
+    formats = {_normalize_format(item) for item in expected}
+    if normalized in formats:
+        return 0
+    if "archive" in formats:
+        return 1
+    return 2
 
 
 def _stage_rank(stage: str) -> int:

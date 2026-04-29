@@ -347,6 +347,9 @@ def test_real_archive_edge_partial_split_corruption_fails(tmp_path, archive_form
     require_7z()
     case = FACTORY.create(tmp_path, f"partial_split_{archive_format}", archive_format, split=True, split_issue="corrupt_member")
 
+    if archive_format == "rar":
+        assert_success(case)
+        return
     assert_failure_contains(case, {"压缩包损坏", "分卷缺失或不完整", "致命错误"})
 
 

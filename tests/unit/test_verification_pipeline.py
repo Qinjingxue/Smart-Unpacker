@@ -87,6 +87,31 @@ def test_verification_scheduler_disabled_returns_disabled_assessment(tmp_path):
     assert CALLS == []
 
 
+def test_verification_scheduler_disabled_routes_failed_extraction_to_repair(tmp_path):
+    CALLS.clear()
+    task, result = _task_and_result(tmp_path)
+    result = ExtractionResult(
+        success=False,
+        archive=result.archive,
+        out_dir=result.out_dir,
+        all_parts=result.all_parts,
+        error="fatal archive damage",
+    )
+    scheduler = VerificationScheduler({
+        "verification": {
+            "enabled": False,
+            "methods": [{"name": "unit_complete_observation", "enabled": True}],
+        }
+    })
+
+    verification = scheduler.verify(task, result)
+
+    assert verification.assessment_status == "disabled"
+    assert verification.decision_hint == "repair"
+    assert verification.completeness == 0.0
+    assert CALLS == []
+
+
 def test_verification_pipeline_aggregates_completeness_and_decision(tmp_path):
     CALLS.clear()
     task, result = _task_and_result(tmp_path)

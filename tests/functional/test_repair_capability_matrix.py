@@ -977,6 +977,12 @@ def _rar5_block(header_type: int, flags: int = 0, data: bytes = b"") -> bytes:
     return zlib.crc32(header_data).to_bytes(4, "little") + header_data + data
 
 
+def _rar5_main_block(archive_flags: int = 0) -> bytes:
+    fields = _rar5_vint(1) + _rar5_vint(0) + _rar5_vint(archive_flags)
+    header_data = _rar5_vint(len(fields)) + fields
+    return zlib.crc32(header_data).to_bytes(4, "little") + header_data
+
+
 def _rar5_bytes(*, file_payload: bytes = b"") -> bytes:
     file_block = _rar5_block(2, data=file_payload) if file_payload else b""
     return RAR5_MAGIC + _rar5_block(1) + file_block + _rar5_block(5)
@@ -1072,7 +1078,7 @@ def _build_rar5_missing_split_volume(root: Path) -> MatrixFixture:
 def _build_rar5_file_quarantine(root: Path) -> MatrixFixture:
     payload = b"rar payload"
     complete_prefix = RAR5_MAGIC + _rar5_block(1) + _rar5_block(2, data=payload)
-    expected = complete_prefix + _rar5_block(5)
+    expected = RAR5_MAGIC + _rar5_main_block() + _rar5_block(2, data=payload) + _rar5_block(5)
     return _fixture_from_bytes(
         root,
         "rar5-file-quarantine.rar",
@@ -1084,7 +1090,7 @@ def _build_rar5_file_quarantine(root: Path) -> MatrixFixture:
 def _build_rar5_carrier_then_file_quarantine(root: Path) -> MatrixFixture:
     payload = b"rar payload"
     complete_prefix = RAR5_MAGIC + _rar5_block(1) + _rar5_block(2, data=payload)
-    expected = complete_prefix + _rar5_block(5)
+    expected = RAR5_MAGIC + _rar5_main_block() + _rar5_block(2, data=payload) + _rar5_block(5)
     return _fixture_from_bytes(
         root,
         "rar5-carrier-then-quarantine.exe",
