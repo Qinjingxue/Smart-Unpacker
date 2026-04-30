@@ -51,6 +51,7 @@ class ArchiveRepairStage:
         task.fact_bag.set("repair.last_trigger", trigger)
         result = self.scheduler.repair(job)
         task.fact_bag.set("repair.last_result", self._result_payload(result))
+        self._append_repair_history(task, result)
         _append_candidate_log_from_result(task, result, phase="scheduler_repair", trigger=trigger)
         if not result.ok:
             return result
@@ -120,6 +121,11 @@ class ArchiveRepairStage:
                 for item in verification.file_observations
             ],
         })
+        previous_actions, previous_modules = self._previous_repair_path(task)
+        if previous_actions:
+            failure["previous_actions"] = previous_actions
+        if previous_modules:
+            failure["previous_modules"] = previous_modules
         return RepairJob(
             source_input=source_input,
             format=self._format_from_task(task),
@@ -141,6 +147,38 @@ class ArchiveRepairStage:
             source_descriptor=task.archive_input(),
             archive_state=task.archive_state(),
         )
+
+    def _append_repair_history(self, task: ArchiveTask, result: RepairResult) -> None:
+        history = list(task.fact_bag.get("repair.history") or [])
+        item = self._result_payload(result)
+        history.append(item)
+        task.fact_bag.set("repair.history", history)
+        actions: list[str] = []
+        modules: list[str] = []
+        for entry in history:
+            if not isinstance(entry, dict) or not entry.get("ok"):
+                continue
+            actions.extend(str(action) for action in entry.get("actions") or [])
+            module = str(entry.get("module_name") or "")
+            if module:
+                modules.append(module)
+        task.fact_bag.set("repair.previous_actions", actions)
+        task.fact_bag.set("repair.previous_modules", modules)
+
+    def _previous_repair_path(self, task: ArchiveTask) -> tuple[list[str], list[str]]:
+        actions = [str(action) for action in task.fact_bag.get("repair.previous_actions") or []]
+        modules = [str(module) for module in task.fact_bag.get("repair.previous_modules") or []]
+        if actions or modules:
+            return actions, modules
+        history = list(task.fact_bag.get("repair.history") or [])
+        for entry in history:
+            if not isinstance(entry, dict) or not entry.get("ok"):
+                continue
+            actions.extend(str(action) for action in entry.get("actions") or [])
+            module = str(entry.get("module_name") or "")
+            if module:
+                modules.append(module)
+        return actions, modules
 
     def _source_input_from_task(self, task: ArchiveTask, *, format_hint: str = "") -> dict[str, Any] | None:
         descriptor = task.archive_state().to_archive_input_descriptor()

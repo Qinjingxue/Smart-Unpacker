@@ -13,6 +13,7 @@ from sunpack.repair.pipeline.module import RepairRoute
 from sunpack.repair.pipeline.modules._common import job_source_size
 from sunpack.repair.pipeline.registry import discover_repair_modules, get_repair_module_registry
 from sunpack.repair.result import RepairResult
+from sunpack.support import repair_trace
 
 
 class RepairScheduler:
@@ -27,6 +28,12 @@ class RepairScheduler:
         batch = self.generate_repair_candidates(job)
         if batch.terminal_result is not None:
             self._write_telemetry(job, batch, batch.terminal_result, {})
+            repair_trace.write_event("repair_terminal_result", {
+                "job": repair_trace.job_payload(job),
+                "result": repair_trace.result_payload(batch.terminal_result),
+                "diagnosis": batch.diagnosis,
+                "warnings": list(batch.warnings),
+            })
             return batch.terminal_result
         selector = CandidateSelector(self.config)
         warnings = list(batch.warnings)
@@ -39,6 +46,13 @@ class RepairScheduler:
                 if warnings:
                     result = replace(result, warnings=_dedupe([*result.warnings, *warnings]))
                 self._write_telemetry(job, batch, result, selection)
+                repair_trace.write_event("repair_selected_result", {
+                    "job": repair_trace.job_payload(job),
+                    "result": repair_trace.result_payload(result),
+                    "selection": selection,
+                    "candidate": candidate_feature_payload(selected),
+                    "candidate_count": len(batch.candidates),
+                })
                 return result
             warnings.extend(selection.get("warnings") or [])
             warnings.append("repair candidates were produced but none passed selection")
@@ -52,6 +66,14 @@ class RepairScheduler:
                     if selected is not None:
                         result = selected.to_result(selection=_merge_candidate_selections(primary_selection, selection))
                         self._write_telemetry(job, batch, result, result.diagnosis.get("candidate_selection", {}))
+                        repair_trace.write_event("repair_selected_result", {
+                            "job": repair_trace.job_payload(job),
+                            "result": repair_trace.result_payload(result),
+                            "selection": result.diagnosis.get("candidate_selection", {}),
+                            "candidate": candidate_feature_payload(selected),
+                            "candidate_count": len(batch.candidates),
+                            "auto_deep": True,
+                        })
                         return replace(result, warnings=_dedupe([*result.warnings, *warnings]))
                     warnings.extend(selection.get("warnings") or [])
                     warnings.append("auto_deep candidates were produced but none passed selection")
@@ -65,21 +87,43 @@ class RepairScheduler:
             message=batch.message or "registered repair modules did not produce a candidate",
         )
         self._write_telemetry(job, batch, result, selection)
+        repair_trace.write_event("repair_unrepairable_result", {
+            "job": repair_trace.job_payload(job),
+            "result": repair_trace.result_payload(result),
+            "selection": selection,
+            "candidate_count": len(batch.candidates),
+        })
         return result
 
     def generate_repair_candidates(self, job: RepairJob, *, lazy: bool = False) -> RepairCandidateBatch:
         diagnosis = self.diagnose(job)
         context = build_repair_context(job, diagnosis)
         if not self.config.get("enabled", True):
+            result = self._result("skipped", job, diagnosis, "repair layer is disabled")
+            repair_trace.write_event("repair_candidates_terminal", {
+                "job": repair_trace.job_payload(job),
+                "lazy": bool(lazy),
+                "diagnosis": diagnosis.as_dict(),
+                "result": repair_trace.result_payload(result),
+                "message": "repair layer is disabled",
+            })
             return RepairCandidateBatch(
-                terminal_result=self._result("skipped", job, diagnosis, "repair layer is disabled"),
+                terminal_result=result,
                 diagnosis=diagnosis.as_dict(),
                 message="repair layer is disabled",
             )
         if not diagnosis.repairable:
             message = "; ".join(diagnosis.notes) or "repair is blocked"
+            result = self._result("unrepairable", job, diagnosis, message)
+            repair_trace.write_event("repair_candidates_terminal", {
+                "job": repair_trace.job_payload(job),
+                "lazy": bool(lazy),
+                "diagnosis": diagnosis.as_dict(),
+                "result": repair_trace.result_payload(result),
+                "message": message,
+            })
             return RepairCandidateBatch(
-                terminal_result=self._result("unrepairable", job, diagnosis, message),
+                terminal_result=result,
                 diagnosis=diagnosis.as_dict(),
                 message=message,
             )
@@ -93,6 +137,14 @@ class RepairScheduler:
             if not modules:
                 status = "unrepairable" if capability.automatic_unrepairable else "unsupported"
                 result = self._result(status, job, diagnosis, capability.message(), capability)
+                repair_trace.write_event("repair_candidates_terminal", {
+                    "job": repair_trace.job_payload(job),
+                    "lazy": bool(lazy),
+                    "diagnosis": diagnosis.as_dict(),
+                    "capability_decision": capability.as_dict() if hasattr(capability, "as_dict") else {},
+                    "result": repair_trace.result_payload(result),
+                    "message": result.message,
+                })
                 return RepairCandidateBatch(
                     terminal_result=result,
                     diagnosis=result.diagnosis,
@@ -135,6 +187,16 @@ class RepairScheduler:
         ]
         if auto_deep_attempted:
             warnings.append("auto_deep: escalated to limited deep repair after primary stages produced no candidates")
+        repair_trace.write_event("repair_candidates_generated", {
+            "job": repair_trace.job_payload(job),
+            "lazy": bool(lazy),
+            "diagnosis": diagnosis.as_dict(),
+            "capability_decision": capability.as_dict() if hasattr(capability, "as_dict") else {},
+            "candidate_count": len(repair_candidates),
+            "candidates": [candidate_feature_payload(candidate) for candidate in repair_candidates],
+            "warnings": _dedupe(warnings),
+            "auto_deep_attempted": bool(auto_deep_attempted),
+        })
         return RepairCandidateBatch(
             candidates=repair_candidates,
             warnings=_dedupe(warnings),

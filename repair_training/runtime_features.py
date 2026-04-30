@@ -29,8 +29,11 @@ def build_runtime_feature_record(
     runtime_state_summary: dict[str, Any] | None = None,
     repair_prior: RepairPrior | dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    payload = candidate_feature_payload(candidate)
+    payload = candidate_feature_payload(candidate) if candidate is not None else {}
     prior_payload = _repair_prior_payload(repair_prior, payload)
+    failure = job.extraction_failure if isinstance(job.extraction_failure, dict) else {}
+    path_actions = previous_actions if previous_actions is not None else failure.get("previous_actions")
+    path_modules = previous_modules if previous_modules is not None else failure.get("previous_modules")
     return {
         "feature_contract_version": FEATURE_CONTRACT_VERSION,
         "runtime_context": {
@@ -38,10 +41,10 @@ def build_runtime_feature_record(
             "extraction_summary": _extraction_summary(job),
             "verification_summary": _verification_summary(job),
             "repair_hints": _repair_hints(job),
-            "previous_actions": list(previous_actions or []),
-            "previous_action_count": len(previous_actions or []),
-            "previous_modules": list(previous_modules or []),
-            "previous_module_count": len(previous_modules or []),
+            "previous_actions": list(path_actions or []),
+            "previous_action_count": len(path_actions or []),
+            "previous_modules": list(path_modules or []),
+            "previous_module_count": len(path_modules or []),
             "runtime_state_summary": _runtime_state_summary(runtime_state_summary or {}),
             "job_summary": _job_summary(job),
         },

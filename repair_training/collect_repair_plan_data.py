@@ -162,7 +162,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-pretty", action="store_false", dest="pretty", help="Only write compact JSONL.")
     parser.add_argument("--limit", type=int, default=0, help="Collect at most N manifest records.")
     parser.add_argument("--max-rounds", type=int, default=3, help="Maximum repair rounds per damaged sample.")
-    parser.add_argument("--rollout-mode", choices=("greedy", "beam", "counterfactual"), default="greedy", help="Repair-state rollout strategy for multi-step training collection.")
+    parser.add_argument("--rollout-mode", choices=("greedy", "greedy_current_selector", "beam", "counterfactual"), default="greedy", help="Repair-state rollout strategy for multi-step training collection.")
     parser.add_argument("--beam-size", type=int, default=1, help="Maximum active next states retained per rollout depth.")
     parser.add_argument("--branch-top-k", type=int, default=2, help="Maximum branch candidates advanced from one state in beam/counterfactual mode.")
     parser.add_argument("--counterfactual-extra", type=int, default=2, help="Additional risky/high-value branches considered in counterfactual mode.")
@@ -173,6 +173,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--materialize-top-k-per-round", type=int, default=2, help="Materialize at most K pre-ranked candidates per round in lazy proposal mode.")
     parser.add_argument("--materialize-selected-only", action="store_true", help="In lazy proposal mode, materialize only the pre-ranked top candidate.")
     parser.add_argument("--skip-unmaterialized-labels", action=argparse.BooleanOptionalAction, default=True, help="Do not write proposal-only rows without oracle labels.")
+    parser.add_argument("--repair-max-modules-per-job", type=int, default=64, help="Repair scheduler module routing cap used during collection.")
     parser.add_argument("--case-timeout-seconds", type=float, default=45.0, help="Terminate one sample after this timeout. Use 0 to disable.")
     parser.add_argument("--stream-large-size-mb", type=float, default=0.0, help="If >0, apply large-stream budgets to gzip/bzip2/xz/zstd samples at or above this source size.")
     parser.add_argument("--stream-large-case-timeout-seconds", type=float, default=0.0, help="Per-sample timeout for large stream samples. Use 0 to keep --case-timeout-seconds.")
@@ -475,12 +476,14 @@ def _collect_sample_rows(record: dict[str, Any], args: argparse.Namespace, debug
                 source_input=source_input,
                 format=fmt,
                 confidence=0.82,
+                analysis_evidence=_record_analysis_evidence(record, fmt),
                 analysis_prepass=_record_analysis_prepass(record, fmt),
                 fuzzy_profile=_record_fuzzy_profile(record, fmt),
                 extraction_failure=_runtime_extraction_failure(record, state, before_state=None),
                 extraction_diagnostics=_runtime_extraction_diagnostics(record, state),
                 damage_flags=damage_flags,
                 archive_key=f"{record.get('sample_id')}:round:{state_round}:beam:{state.get('beam_id', 0)}",
+                attempts=state_round,
             )
             phase_started = time.perf_counter()
             lazy_mode = str(args.proposal_mode or "lazy") == "lazy"
@@ -499,16 +502,19 @@ def _collect_sample_rows(record: dict[str, Any], args: argparse.Namespace, debug
                 print(f"  CANDIDATES {record.get('sample_id')} round={state_round} count={len(batch.candidates)} warnings={len(batch.warnings or [])}", flush=True)
             phase_started = time.perf_counter()
             before_state = _state_summary(record, source_input, fmt, damage_flags)
+            before_state["runtime_verification"] = dict(state.get("runtime_verification") or {}) or _terminal_verification_summary_from_state(record, before_state)
             job = RepairJob(
                 source_input=source_input,
                 format=fmt,
                 confidence=0.82,
+                analysis_evidence=_record_analysis_evidence(record, fmt),
                 analysis_prepass=_record_analysis_prepass(record, fmt),
                 fuzzy_profile=_record_fuzzy_profile(record, fmt),
                 extraction_failure=_runtime_extraction_failure(record, state, before_state=before_state),
                 extraction_diagnostics=_runtime_extraction_diagnostics(record, state),
                 damage_flags=damage_flags,
                 archive_key=f"{record.get('sample_id')}:round:{state_round}:beam:{state.get('beam_id', 0)}",
+                attempts=state_round,
             )
             debug_events.write("phase", record, round=state_round, query_id=query_id, phase="before_state", elapsed_seconds=round(time.perf_counter() - phase_started, 3))
             state_features = _state_features(record, job, batch, state_round, previous_actions, previous_modules, best_completeness, before_state)
@@ -543,7 +549,12 @@ def _collect_sample_rows(record: dict[str, Any], args: argparse.Namespace, debug
                 if _candidate_id(candidate) not in accepted_ids
             ]
             ranked = [*accepted, *rejected]
-            selected_candidate = accepted[0][2] if accepted else None
+            selected_candidate = None
+            if rollout_mode == "greedy_current_selector":
+                selected_candidate, selector_selection = selector.select(list(validated))
+                debug_events.write("phase", record, round=state_round, query_id=query_id, phase="selector_select", selected_module=getattr(selected_candidate, "module_name", ""), selection=selector_selection)
+            elif accepted:
+                selected_candidate = accepted[0][2]
             selected_id = _candidate_id(selected_candidate)
             debug_events.write("phase", record, round=state_round, query_id=query_id, phase="rank_candidates", elapsed_seconds=round(time.perf_counter() - phase_started, 3), accepted_count=len(accepted), rejected_count=len(rejected))
             if not validated:
@@ -643,6 +654,7 @@ def _collect_sample_rows(record: dict[str, Any], args: argparse.Namespace, debug
                 if int(label_info.get("label", 0) or 0) == 3:
                     rows.append(_rollout_terminal_row(record, state, "complete", "branch reached complete repair", after_by_id.get(candidate_id), parent_action_row_id=entry["action_row_id"], parent_candidate_id=candidate_id, terminal_label=3))
                     continue
+                child_runtime_verification = _terminal_verification_summary_from_state(record, after_by_id.get(candidate_id, {}))
                 child_state = {
                     "episode_id": state["episode_id"],
                     "state_id": f"{record.get('sample_id')}:r{state_round + 1}:b{next_beam_id}",
@@ -652,13 +664,15 @@ def _collect_sample_rows(record: dict[str, Any], args: argparse.Namespace, debug
                     "parent_candidate_id": candidate_id,
                     "parent_action_row_id": entry["action_row_id"],
                     "source_input": dict(selected_result.repaired_input),
-                    "damage_flags": list(selected_result.damage_flags or damage_flags),
+                    "damage_flags": _next_state_damage_flags(selected_result, damage_flags, child_runtime_verification),
                     "previous_actions": [*previous_actions, *[str(action) for action in candidate.actions]],
                     "previous_modules": [*previous_modules, str(candidate.module_name)],
                     "best_completeness": max(best_completeness, float(label_info.get("completeness", 0.0) or 0.0)),
                     "path_score": float(state.get("path_score", 0.0) or 0.0) + float(int(label_info.get("label", 0) or 0)),
                     "path_actions": [*list(state.get("path_actions") or []), *[str(action) for action in candidate.actions]],
                     "path_modules": [*list(state.get("path_modules") or []), str(candidate.module_name)],
+                    "runtime_verification": child_runtime_verification,
+                    "runtime_extraction_diagnostics": _diagnostics_from_runtime_verification(child_runtime_verification),
                     "rollout_mode": rollout_mode,
                 }
                 next_beam_id += 1
@@ -697,20 +711,58 @@ def _root_rollout_state(record: dict[str, Any], fmt: str, rollout_mode: str) -> 
         "parent_candidate_id": None,
         "parent_action_row_id": None,
         "source_input": dict(record.get("damaged_input") or {"path": record.get("damaged_path"), "format_hint": fmt}),
-        "damage_flags": list(record.get("damage_flags") or []),
+        "damage_flags": _runtime_initial_damage_flags(record),
         "previous_actions": [],
         "previous_modules": [],
         "best_completeness": 0.0,
         "path_score": 0.0,
         "path_actions": [],
         "path_modules": [],
+        "runtime_verification": dict(record.get("runtime_initial_verification") or {}),
         "rollout_mode": rollout_mode,
+    }
+
+
+def _runtime_initial_damage_flags(record: dict[str, Any]) -> list[str]:
+    explicit = record.get("runtime_damage_flags")
+    if isinstance(explicit, list):
+        return [str(item) for item in explicit if str(item)]
+    raw = {str(item) for item in (record.get("damage_flags") or [])}
+    visible: list[str] = []
+    for flag in ("missing_volume", "wrong_password", "truncated", "input_truncated", "probably_truncated", "trailing_junk", "boundary_unreliable", "checksum_error", "crc_error", "damaged"):
+        if flag in raw:
+            visible.append(flag)
+    if raw and "damaged" not in visible:
+        visible.append("damaged")
+    return visible
+
+
+def _next_state_damage_flags(result: RepairResult, current_flags: list[str], runtime_verification: dict[str, Any]) -> list[str]:
+    if str(runtime_verification.get("assessment_status") or "") == "complete":
+        return []
+    if str(runtime_verification.get("source_integrity") or "") == "complete":
+        return []
+    return list(result.damage_flags or current_flags)
+
+
+def _diagnostics_from_runtime_verification(runtime_verification: dict[str, Any]) -> dict[str, Any]:
+    coverage = runtime_verification.get("archive_coverage") if isinstance(runtime_verification.get("archive_coverage"), dict) else {}
+    complete = str(runtime_verification.get("assessment_status") or "") == "complete"
+    return {
+        "failure_stage": "" if complete else "verification",
+        "failure_kind": "",
+        "result": {
+            "status": "success" if complete else "failed",
+            "native_status": "success" if complete else "crc_error",
+            "files_written": int(coverage.get("complete_files") or runtime_verification.get("complete_files") or 0),
+            "bytes_written": int(coverage.get("complete_bytes") or 0),
+        },
     }
 
 
 def _rollout_query_id(record: dict[str, Any], state: dict[str, Any]) -> str:
     sample_id = str(record.get("sample_id") or state.get("episode_id") or "sample")
-    if str(state.get("rollout_mode") or "greedy") == "greedy":
+    if str(state.get("rollout_mode") or "greedy") in {"greedy", "greedy_current_selector"}:
         return f"{sample_id}:{int(state.get('round', 0) or 0)}"
     return f"{sample_id}:r{int(state.get('round', 0) or 0)}:b{int(state.get('beam_id', 0) or 0)}"
 
@@ -746,7 +798,7 @@ def _candidate_has_output(candidate: Any) -> bool:
 def _branch_entries(entries: list[dict[str, Any]], selected_id: str, rollout_mode: str, args: argparse.Namespace) -> list[dict[str, Any]]:
     if not entries:
         return []
-    if rollout_mode == "greedy":
+    if rollout_mode in {"greedy", "greedy_current_selector"}:
         selected = [entry for entry in entries if _candidate_id(entry["candidate"]) == selected_id]
         return selected[:1]
     by_id: dict[str, dict[str, Any]] = {}
@@ -788,7 +840,7 @@ def _branch_entries(entries: list[dict[str, Any]], selected_id: str, rollout_mod
 def _trim_frontier(frontier: list[dict[str, Any]], args: argparse.Namespace) -> list[dict[str, Any]]:
     if not frontier:
         return []
-    beam_size = 1 if str(getattr(args, "rollout_mode", "greedy") or "greedy") == "greedy" else max(1, int(getattr(args, "beam_size", 2) or 2))
+    beam_size = 1 if str(getattr(args, "rollout_mode", "greedy") or "greedy") in {"greedy", "greedy_current_selector"} else max(1, int(getattr(args, "beam_size", 2) or 2))
     return sorted(frontier, key=lambda state: float(state.get("path_score", 0.0) or 0.0), reverse=True)[:beam_size]
 
 
@@ -920,7 +972,8 @@ def _terminal_verification_summary_from_state(record: dict[str, Any], terminal_s
             else:
                 extract_status = {"success": False, "failure_kind": "missing_terminal_archive", "error": "terminal archive path is missing", "files_written": 0, "bytes_written": 0}
                 result_archive = str(source_archive)
-            task = _verification_task_from_record(record, source_archive)
+            task_archive = archive_path if archive_path.is_file() else source_archive
+            task = _verification_task_from_record(record, task_archive)
             result = ExtractionResult(
                 success=extract_status.get("success", False),
                 archive=result_archive,
@@ -990,14 +1043,8 @@ def _verification_task_from_record(record: dict[str, Any], source_archive: Path)
     bag.set("file.detected_ext", fmt)
     bag.set("archive.format_hint", fmt)
     bag.set("analysis.selected_format", fmt)
-    bag.set("analysis.status", "complete")
+    bag.set("analysis.status", "selected")
     bag.set("analysis.confidence", 1.0)
-    oracle = record.get("oracle") if isinstance(record.get("oracle"), dict) else {}
-    expected_files = oracle.get("expected_files")
-    if isinstance(expected_files, list):
-        bag.set("analysis.expected_names", [str(item.get("name") or item.get("path") or "") for item in expected_files if isinstance(item, dict)])
-        bag.set("analysis.file_count", len(expected_files))
-        bag.set("analysis.total_unpacked_size", sum(int(item.get("size", 0) or 0) for item in expected_files if isinstance(item, dict)))
     task = ArchiveTask(
         fact_bag=bag,
         score=10,
@@ -1060,10 +1107,13 @@ def _verification_result_payload(verification: Any) -> dict[str, Any]:
         "missing_files": int(getattr(verification, "missing_files", 0) or 0),
         "unverified_files": int(getattr(verification, "unverified_files", 0) or 0),
         "methods_run": list(getattr(verification, "methods_run", []) or []),
+        "repair_hints": dict(getattr(verification, "repair_hints", {}) or {}),
         "archive_coverage": {
             "completeness": float(getattr(coverage, "completeness", 0.0) or 0.0) if coverage is not None else 0.0,
             "file_coverage": float(getattr(coverage, "file_coverage", 0.0) or 0.0) if coverage is not None else 0.0,
             "byte_coverage": float(getattr(coverage, "byte_coverage", 0.0) or 0.0) if coverage is not None else 0.0,
+            "complete_bytes": int(getattr(coverage, "complete_bytes", 0) or 0) if coverage is not None else 0,
+            "expected_bytes": int(getattr(coverage, "expected_bytes", 0) or 0) if coverage is not None else 0,
             "expected_files": int(getattr(coverage, "expected_files", 0) or 0) if coverage is not None else 0,
             "matched_files": int(getattr(coverage, "matched_files", 0) or 0) if coverage is not None else 0,
             "complete_files": int(getattr(coverage, "complete_files", 0) or 0) if coverage is not None else 0,
@@ -1344,7 +1394,7 @@ def _materialize_for_collection(candidates: list[Any], selector: CandidateSelect
     )
     budget = 1 if bool(args.materialize_selected_only) else max(1, int(args.materialize_top_k_per_round or 1))
     budget = min(budget, max(1, _effective_max_candidates(record, args)))
-    if _is_zip_deceptive_record(record):
+    if _normalize_format(str(record.get("material_format") or record.get("format") or "")) == "zip":
         selected = _balanced_zip_materialization_selection(ranked, budget)
     else:
         selected = ranked[:budget]
@@ -1394,17 +1444,19 @@ def _balanced_zip_materialization_selection(ranked: list[tuple[float, int, Any]]
         module = str(getattr(entry[2], "module_name", "") or "")
         actions = " ".join(str(action) for action in getattr(entry[2], "actions", []) or [])
         text = f"{module} {actions}".lower()
-        if "deep" in text or "partial" in text or "quarantine" in text:
+        if "quarantine" in text or "partial_recovery" in text or "deep_partial" in text:
             return "deep_partial"
-        if "rebuild" in text or "directory" in text or "eocd" in text or "central_directory" in text:
-            return "directory"
         if "crc" in text or "offset" in text or "comment" in text or "descriptor" in text:
             return "risk"
+        if "rebuild" in text or "directory" in text or "eocd" in text or "central_directory" in text:
+            return "directory"
+        if "trim" in text or "boundary" in text or "trailing" in text:
+            return "boundary"
         return "other"
 
-    for entry in ranked[:2]:
+    for entry in ranked[:1]:
         add(entry)
-    quotas = (("directory", 2), ("deep_partial", 1), ("risk", 1))
+    quotas = (("directory", 2), ("deep_partial", 2), ("risk", 2), ("boundary", 1))
     for wanted, count in quotas:
         added = 0
         for entry in ranked:
@@ -1427,7 +1479,7 @@ def _scheduler(args: argparse.Namespace) -> RepairScheduler:
     return RepairScheduler({
         "repair": {
             "workspace": str(Path(args.workspace)),
-            "max_modules_per_job": 64,
+            "max_modules_per_job": max(1, int(getattr(args, "repair_max_modules_per_job", 64) or 64)),
             "max_attempts_per_task": 8,
             "stages": {"deep": True},
             "deep": {
@@ -1446,6 +1498,14 @@ def _state_features(record: dict[str, Any], job: RepairJob, batch, round_index: 
     capability = diagnosis.get("capability_decision") if isinstance(diagnosis.get("capability_decision"), dict) else {}
     source_derivation = record.get("source_derivation") if isinstance(record.get("source_derivation"), dict) else {}
     runtime_state = _runtime_state_summary(before_state or {})
+    runtime_features = build_runtime_feature_record(
+        job=job,
+        candidate=None,
+        previous_actions=list(previous_actions),
+        previous_modules=list(previous_modules),
+        runtime_state_summary=None,
+        repair_prior=None,
+    )
     return {
         "feature_contract_version": FEATURE_CONTRACT_VERSION,
         "format": job.format or record.get("format"),
@@ -1458,6 +1518,7 @@ def _state_features(record: dict[str, Any], job: RepairJob, batch, round_index: 
         "best_runtime_score": float(runtime_state.get("runtime_score", 0.0) or 0.0),
         "state_summary": runtime_state,
         "runtime_state_summary": runtime_state,
+        "runtime_context": runtime_features["runtime_context"],
         "diagnosis": _compact_diagnosis(diagnosis),
         "capability": {
             "selected_modules": list(capability.get("selected_modules") or []),
@@ -1499,7 +1560,7 @@ def _action_row(
         candidate=candidate,
         previous_actions=list(state_features.get("previous_actions") or []),
         previous_modules=list(state_features.get("previous_modules") or []),
-        runtime_state_summary=before_runtime_state,
+        runtime_state_summary=None,
         repair_prior=repair_prior,
     )
     return {
@@ -1576,7 +1637,12 @@ def _label_candidate(
     verified["before_state"] = before_state or {}
     verified["after_state"] = after_state or {}
     verified["delta_features"] = delta_features or {}
-    if _is_zip_hard_negative(record, candidate, verified):
+    if _is_zip_positive_progress_exception(record, candidate, verified, before_state or {}, after_state or {}, delta_features or {}, previous_completeness):
+        verified["label"] = 2
+        verified["status"] = "state_progress"
+        verified["progress_reasons"] = _progress_reasons(delta_features or {}, previous_completeness) or ["zip_structural_progress_on_deceptive_profile"]
+        verified["completeness"] = max(completeness, float((after_state or {}).get("completeness", 0.0) or 0.0))
+    elif _is_zip_hard_negative(record, candidate, verified):
         verified["label"] = -1
         verified["status"] = "hard_negative"
         verified["hard_negative_reasons"] = _zip_hard_negative_reasons(record, candidate, verified)
@@ -1592,6 +1658,42 @@ def _label_candidate(
         verified["progress_reasons"] = ["zip_directory_visible_without_hash_match"]
         verified["completeness"] = max(completeness, float((after_state or {}).get("completeness", 0.0) or 0.0))
     return verified
+
+
+def _is_zip_positive_progress_exception(
+    record: dict[str, Any],
+    candidate,
+    verified: dict[str, Any],
+    before_state: dict[str, Any],
+    after_state: dict[str, Any],
+    delta_features: dict[str, Any],
+    previous_completeness: float,
+) -> bool:
+    if _normalize_format(str(record.get("material_format") or record.get("format") or "")) != "zip":
+        return False
+    if not _record_has_hard_negative_oracle(record):
+        return False
+    if int(verified.get("label", 0) or 0) >= 3:
+        return False
+    if str(verified.get("status") or "") == "hard_negative" and int(verified.get("wrong_files", 0) or 0) > 0:
+        return False
+    module = str(getattr(candidate, "module_name", "") or "").lower()
+    actions = " ".join(str(action) for action in getattr(candidate, "actions", []) or []).lower()
+    text = f"{module} {actions}"
+    if any(token in text for token in ("quarantine", "partial_recovery", "deep_partial", "payload", "crc_repair_masks")):
+        return False
+    structural = any(token in text for token in ("central_directory", "directory", "eocd", "offset", "comment", "descriptor", "trailing", "trim", "boundary"))
+    if not structural:
+        return False
+    if _progress_reasons(delta_features, previous_completeness):
+        return True
+    if bool(after_state.get("directory_detected")) and not bool(before_state.get("directory_detected")):
+        return True
+    if int(after_state.get("entry_count", 0) or 0) > int(before_state.get("entry_count", 0) or 0):
+        return True
+    if bool(after_state.get("boundary_trusted")) and not bool(before_state.get("boundary_trusted")):
+        return True
+    return False
 
 
 def _runtime_state_summary(summary: dict[str, Any]) -> dict[str, Any]:
@@ -1900,10 +2002,23 @@ def _record_has_hard_negative_oracle(record: dict[str, Any]) -> bool:
     )
 
 
+def _record_analysis_evidence(record: dict[str, Any], fmt: str):
+    try:
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            format=fmt or record.get("format") or record.get("material_format") or "",
+            confidence=0.82,
+            status="selected",
+        )
+    except Exception:
+        return None
+
+
 def _record_analysis_prepass(record: dict[str, Any], fmt: str) -> dict[str, Any]:
     source_derivation = record.get("source_derivation") if isinstance(record.get("source_derivation"), dict) else {}
     return {
-        "status": "training_material",
+        "status": "selected",
         "format": fmt or record.get("format") or record.get("material_format") or "",
         "selected_format": fmt or record.get("format") or record.get("material_format") or "",
         "confidence": 0.82,
@@ -1913,7 +2028,7 @@ def _record_analysis_prepass(record: dict[str, Any], fmt: str) -> dict[str, Any]
 
 def _record_fuzzy_profile(record: dict[str, Any], fmt: str) -> dict[str, Any]:
     return {
-        "status": "training_material",
+        "status": "selected",
         "archive_type": fmt or record.get("format") or record.get("material_format") or "",
         "confidence": 0.82,
     }
@@ -1922,10 +2037,11 @@ def _record_fuzzy_profile(record: dict[str, Any], fmt: str) -> dict[str, Any]:
 def _runtime_extraction_failure(record: dict[str, Any], state: dict[str, Any], before_state: dict[str, Any] | None) -> dict[str, Any]:
     before_state = before_state if isinstance(before_state, dict) else {}
     oracle = _record_terminal_or_current_verification(record, before_state)
+    hints = oracle.get("repair_hints") if isinstance(oracle.get("repair_hints"), dict) else _runtime_repair_hints(record, state, before_state)
     return {
         "status": "verification_failed" if before_state else "damaged_input",
         "failure_stage": "verification" if before_state else "analysis",
-        "failure_kind": _failure_kind_from_flags(list(state.get("damage_flags") or record.get("damage_flags") or [])),
+        "failure_kind": str(oracle.get("failure_kind") or ""),
         "assessment_status": oracle.get("assessment_status"),
         "source_integrity": oracle.get("source_integrity"),
         "decision_hint": oracle.get("decision_hint"),
@@ -1937,16 +2053,22 @@ def _runtime_extraction_failure(record: dict[str, Any], state: dict[str, Any], b
         "missing_files": oracle.get("missing_files"),
         "unverified_files": oracle.get("unverified_files"),
         "archive_coverage": dict(oracle.get("archive_coverage") or {}),
-        "repair_hints": _runtime_repair_hints(record, state, before_state),
+        "repair_hints": hints,
+        "error": str(oracle.get("error") or "repair required") if str(oracle.get("assessment_status") or "") not in {"complete", "accepted"} else "",
     }
 
 
 def _runtime_extraction_diagnostics(record: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+    explicit = state.get("runtime_extraction_diagnostics")
+    if isinstance(explicit, dict):
+        return dict(explicit)
+    runtime_verification = state.get("runtime_verification") if isinstance(state.get("runtime_verification"), dict) else {}
+    native_status = "success" if str(runtime_verification.get("assessment_status") or "") == "complete" else "crc_error"
     return {
         "failure_stage": "verification",
-        "failure_kind": _failure_kind_from_flags(list(state.get("damage_flags") or record.get("damage_flags") or [])),
+        "failure_kind": "",
         "result": {
-            "native_status": "training_probe",
+            "native_status": native_status,
             "files_written": 0,
             "bytes_written": 0,
         },
@@ -1954,6 +2076,9 @@ def _runtime_extraction_diagnostics(record: dict[str, Any], state: dict[str, Any
 
 
 def _record_terminal_or_current_verification(record: dict[str, Any], before_state: dict[str, Any]) -> dict[str, Any]:
+    runtime_verification = before_state.get("runtime_verification") if isinstance(before_state.get("runtime_verification"), dict) else {}
+    if runtime_verification:
+        return dict(runtime_verification)
     completeness = float(before_state.get("completeness", 0.0) or 0.0)
     entry_count = int(before_state.get("entry_count", 0) or 0)
     matched = int(before_state.get("matched_entry_count", 0) or 0)
@@ -1990,6 +2115,8 @@ def _expected_file_count(record: dict[str, Any]) -> int:
     expected = oracle.get("expected_files")
     if isinstance(expected, list):
         return len(expected)
+    if isinstance(expected, dict):
+        return len(expected)
     try:
         return int(oracle.get("expected_file_count") or 0)
     except Exception:
@@ -2001,7 +2128,7 @@ def _runtime_repair_hints(record: dict[str, Any], state: dict[str, Any], before_
     fmt = str(record.get("format") or record.get("material_format") or "")
     return {
         "selected_format": fmt,
-        "analysis_status": "training_material",
+        "analysis_status": "selected",
         "analysis_confidence": 0.82,
         "source_integrity": "payload_damaged" if "payload_damaged" in flags or "data_error" in flags else "damaged",
         "likely_truncated": bool(flags.intersection({"truncated", "input_truncated", "probably_truncated"})),
@@ -2237,6 +2364,7 @@ def _label_status(label: int, status: str, completeness: float) -> dict[str, Any
 
 def _round_empty_row(record: dict[str, Any], round_index: int, state_features: dict[str, Any], batch) -> dict[str, Any]:
     source_derivation = record.get("source_derivation") if isinstance(record.get("source_derivation"), dict) else {}
+    runtime_context = state_features.get("runtime_context") if isinstance(state_features.get("runtime_context"), dict) else {}
     return {
         "schema_version": 1,
         "source": "repair_plan_corpus",
@@ -2253,7 +2381,13 @@ def _round_empty_row(record: dict[str, Any], round_index: int, state_features: d
         "selected_by_current_system": False,
         "label": 0,
         "label_status": "no_candidates",
-        "stable_features": {"state": state_features, "candidate": {}},
+        "stable_features": {
+            "state": state_features,
+            "runtime_context": runtime_context,
+            "candidate_proposal": {},
+            "repair_prior_features": {},
+            "candidate": {},
+        },
         "teacher_features": {},
         "debug_features": {"warnings": list(batch.warnings or []), "message": batch.message},
     }

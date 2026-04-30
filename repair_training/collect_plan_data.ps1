@@ -10,7 +10,7 @@ param(
     [int]$CollectorWorkers = 1,
     [int]$MaxRounds = 3,
     [int]$MaxCandidatesPerRound = 10,
-    [ValidateSet("greedy", "beam", "counterfactual")]
+    [ValidateSet("greedy", "greedy_current_selector", "beam", "counterfactual")]
     [string]$RolloutMode = "greedy",
     [int]$BeamSize = 1,
     [int]$BranchTopK = 2,

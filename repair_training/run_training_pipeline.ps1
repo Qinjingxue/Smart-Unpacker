@@ -12,7 +12,7 @@ param(
     [string]$Seed = "random",
     [int]$MaxRounds = 2,
     [int]$MaxCandidatesPerRound = 6,
-    [ValidateSet("greedy", "beam", "counterfactual")]
+    [ValidateSet("greedy", "greedy_current_selector", "beam", "counterfactual")]
     [string]$RolloutMode = "greedy",
     [int]$BeamSize = 1,
     [int]$BranchTopK = 2,
