@@ -16,7 +16,7 @@ import tarfile
 import tempfile
 import time
 import zipfile
-from collections import Counter
+from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
@@ -168,6 +168,10 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--counterfactual-extra", type=int, default=2, help="Additional risky/high-value branches considered in counterfactual mode.")
     parser.add_argument("--max-total-states-per-sample", type=int, default=6, help="Hard cap on states created for one damaged sample, including the root state.")
     parser.add_argument("--future-label-discount", type=float, default=0.8, help="Discount used when backfilling future labels from descendant states.")
+    parser.add_argument("--rl-discount", type=float, default=0.95, help="Discount used for offline RL future_return backfill.")
+    parser.add_argument("--rl-step-cost", type=float, default=0.01, help="Per-action cost subtracted from offline RL rewards.")
+    parser.add_argument("--rl-no-output-penalty", type=float, default=0.05, help="Penalty applied to no-output/dead-end actions for offline RL evaluation.")
+    parser.add_argument("--rl-hard-negative-penalty", type=float, default=0.10, help="Penalty applied to hard-negative actions for offline RL evaluation.")
     parser.add_argument("--max-candidates-per-round", type=int, default=10, help="Maximum candidates logged per round.")
     parser.add_argument("--proposal-mode", choices=("lazy", "eager"), default="lazy", help="Use lazy repair plans or eager repair execution while collecting candidates.")
     parser.add_argument("--materialize-top-k-per-round", type=int, default=2, help="Materialize at most K pre-ranked candidates per round in lazy proposal mode.")
@@ -701,6 +705,7 @@ def _collect_sample_rows(record: dict[str, Any], args: argparse.Namespace, debug
             break
 
     _backfill_future_labels(rows, float(getattr(args, "future_label_discount", 0.8) or 0.8))
+    _backfill_rl_transitions(rows, args)
     terminal_rows = [row for row in rows if row.get("row_type") == "terminal"]
     terminal_status_counts = Counter(str(item.get("terminal_status") or item.get("label_status") or "unknown") for item in terminal_rows)
     for row in rows:
@@ -1325,6 +1330,228 @@ def _backfill_future_labels(rows: list[dict[str, Any]], discount: float) -> None
             "risk_class": details["risk_class"],
             "hard_negative_weight": details["hard_negative_weight"],
         }
+
+
+def _backfill_rl_transitions(rows: list[dict[str, Any]], args: argparse.Namespace) -> None:
+    gamma = float(getattr(args, "rl_discount", 0.95) or 0.95)
+    step_cost = float(getattr(args, "rl_step_cost", 0.01) or 0.01)
+    no_output_penalty = float(getattr(args, "rl_no_output_penalty", 0.05) or 0.05)
+    hard_negative_penalty = float(getattr(args, "rl_hard_negative_penalty", 0.10) or 0.10)
+
+    action_rows = [row for row in rows if row.get("row_type") != "terminal" and row.get("action_row_id")]
+    terminal_rows = [row for row in rows if row.get("row_type") == "terminal"]
+    children_by_parent: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    terminals_by_parent: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    state_rows: dict[str, dict[str, Any]] = {}
+    actions_by_state: dict[str, list[dict[str, Any]]] = defaultdict(list)
+
+    for row in action_rows:
+        state_id = str(row.get("state_id") or "")
+        if state_id:
+            state_rows.setdefault(state_id, row)
+            actions_by_state[state_id].append(row)
+        parent = str(row.get("parent_action_row_id") or "")
+        if parent:
+            children_by_parent[parent].append(row)
+    for terminal in terminal_rows:
+        parent = str(terminal.get("parent_action_row_id") or "")
+        if parent:
+            terminals_by_parent[parent].append(terminal)
+        terminal["rl"] = _terminal_rl_payload(terminal, gamma, step_cost, no_output_penalty, hard_negative_penalty)
+
+    for row in action_rows:
+        row_id = str(row.get("action_row_id") or "")
+        current_ratio = _runtime_recovery_ratio_from_action_row(row)
+        child = _first_child_state_row(children_by_parent.get(row_id, []))
+        terminal = _best_terminal_row(terminals_by_parent.get(row_id, []))
+        if child is not None:
+            next_state_id = str(child.get("state_id") or "")
+            next_summary = _rl_runtime_state_summary_from_action_row(child)
+            next_ratio = _runtime_recovery_ratio_from_action_row(child)
+            done = False
+            terminal_status = ""
+            terminal_ratio = None
+            terminal_state_id = None
+        elif terminal is not None:
+            next_state_id = str(terminal.get("terminal_state_id") or terminal.get("state_id") or "")
+            next_summary = _rl_runtime_state_summary_from_terminal_row(terminal)
+            next_ratio = _terminal_row_recovery_ratio(terminal)
+            done = True
+            terminal_status = str(terminal.get("terminal_status") or terminal.get("label_status") or "")
+            terminal_ratio = next_ratio
+            terminal_state_id = next_state_id
+        else:
+            next_state_id = None
+            next_summary = {}
+            done = True
+            terminal_status = _rl_terminal_status_for_unobserved_action(row)
+            next_ratio = 0.0 if terminal_status in {"no_output", "dead_end", "no_candidates"} else current_ratio
+            terminal_ratio = next_ratio
+            terminal_state_id = None
+
+        immediate_reward = float(next_ratio - current_ratio - step_cost)
+        action_penalty = _rl_action_penalty(row, terminal_status, no_output_penalty, hard_negative_penalty)
+        row["rl"] = {
+            "schema_version": 1,
+            "state_id": row.get("state_id"),
+            "action_id": row_id,
+            "next_state_id": next_state_id,
+            "done": bool(done),
+            "observed_transition": bool(child is not None or terminal is not None or done),
+            "state_features": _rl_state_features(row),
+            "action_features": _rl_action_features(row),
+            "current_state_recovery_ratio": current_ratio,
+            "next_state_recovery_ratio": next_ratio,
+            "next_state_summary": next_summary,
+            "immediate_reward": immediate_reward,
+            "action_penalty": action_penalty,
+            "reward": immediate_reward - action_penalty,
+            "future_return": immediate_reward - action_penalty,
+            "terminal_reward": terminal_ratio,
+            "terminal_status": terminal_status,
+            "terminal_state_id": terminal_state_id,
+            "discount": gamma,
+            "step_cost": step_cost,
+            "no_output_penalty": no_output_penalty,
+            "hard_negative_penalty": hard_negative_penalty,
+        }
+
+    memo: dict[str, float] = {}
+    visiting: set[str] = set()
+
+    def future_return_for_action(row: dict[str, Any]) -> float:
+        row_id = str(row.get("action_row_id") or "")
+        if not row_id:
+            return 0.0
+        if row_id in memo:
+            return memo[row_id]
+        if row_id in visiting:
+            return float(_nested(row, "rl", "reward") or 0.0)
+        visiting.add(row_id)
+        rl = row.get("rl") if isinstance(row.get("rl"), dict) else {}
+        reward = float(rl.get("reward", 0.0) or 0.0)
+        value = reward
+        if not bool(rl.get("done")):
+            next_state_id = str(rl.get("next_state_id") or "")
+            child_actions = actions_by_state.get(next_state_id, [])
+            if child_actions:
+                value += gamma * max(future_return_for_action(child) for child in child_actions)
+        visiting.discard(row_id)
+        memo[row_id] = value
+        return value
+
+    for row in action_rows:
+        rl = row.get("rl") if isinstance(row.get("rl"), dict) else {}
+        future_return = future_return_for_action(row)
+        rl["future_return"] = future_return
+        rl["episode_return"] = future_return
+        row["rl"] = rl
+
+
+def _terminal_rl_payload(row: dict[str, Any], gamma: float, step_cost: float, no_output_penalty: float, hard_negative_penalty: float) -> dict[str, Any]:
+    terminal_ratio = _terminal_row_recovery_ratio(row)
+    return {
+        "schema_version": 1,
+        "state_id": row.get("state_id"),
+        "action_id": None,
+        "next_state_id": None,
+        "done": True,
+        "observed_transition": True,
+        "state_features": {},
+        "action_features": {},
+        "current_state_recovery_ratio": terminal_ratio,
+        "next_state_recovery_ratio": terminal_ratio,
+        "next_state_summary": _rl_runtime_state_summary_from_terminal_row(row),
+        "immediate_reward": 0.0,
+        "action_penalty": 0.0,
+        "reward": 0.0,
+        "future_return": terminal_ratio,
+        "episode_return": terminal_ratio,
+        "terminal_reward": terminal_ratio,
+        "terminal_status": str(row.get("terminal_status") or row.get("label_status") or ""),
+        "terminal_state_id": row.get("terminal_state_id") or row.get("state_id"),
+        "discount": gamma,
+        "step_cost": step_cost,
+        "no_output_penalty": no_output_penalty,
+        "hard_negative_penalty": hard_negative_penalty,
+    }
+
+
+def _first_child_state_row(children: list[dict[str, Any]]) -> dict[str, Any] | None:
+    if not children:
+        return None
+    return sorted(children, key=lambda row: (int(row.get("round", 0) or 0), int(row.get("beam_id", 0) or 0), str(row.get("action_row_id") or "")))[0]
+
+
+def _best_terminal_row(terminals: list[dict[str, Any]]) -> dict[str, Any] | None:
+    if not terminals:
+        return None
+    return sorted(terminals, key=lambda row: (_terminal_row_recovery_ratio(row), int(row.get("label", 0) or 0)), reverse=True)[0]
+
+
+def _runtime_recovery_ratio_from_action_row(row: dict[str, Any]) -> float:
+    runtime = _nested(row, "stable_features", "runtime_context", "verification_summary")
+    if not isinstance(runtime, dict):
+        runtime = _nested(row, "stable_features", "state", "runtime_context", "verification_summary")
+    if isinstance(runtime, dict):
+        return _terminal_recovery_ratio(runtime)
+    return 0.0
+
+
+def _terminal_row_recovery_ratio(row: dict[str, Any]) -> float:
+    if row.get("terminal_recovery_ratio") is not None:
+        return max(0.0, min(1.0, _as_float(row.get("terminal_recovery_ratio"))))
+    terminal_verification = row.get("terminal_verification_summary") if isinstance(row.get("terminal_verification_summary"), dict) else {}
+    if terminal_verification:
+        return _terminal_recovery_ratio(terminal_verification)
+    return max(0.0, min(1.0, _as_float(row.get("terminal_reward"))))
+
+
+def _rl_runtime_state_summary_from_action_row(row: dict[str, Any]) -> dict[str, Any]:
+    stable = row.get("stable_features") if isinstance(row.get("stable_features"), dict) else {}
+    before_state = stable.get("before_state") if isinstance(stable.get("before_state"), dict) else {}
+    return dict(before_state)
+
+
+def _rl_runtime_state_summary_from_terminal_row(row: dict[str, Any]) -> dict[str, Any]:
+    terminal_state = row.get("terminal_state") if isinstance(row.get("terminal_state"), dict) else {}
+    return _runtime_state_summary(terminal_state)
+
+
+def _rl_state_features(row: dict[str, Any]) -> dict[str, Any]:
+    stable = row.get("stable_features") if isinstance(row.get("stable_features"), dict) else {}
+    runtime_context = stable.get("runtime_context") if isinstance(stable.get("runtime_context"), dict) else {}
+    return {
+        "feature_contract_version": FEATURE_CONTRACT_VERSION,
+        "runtime_context": runtime_context,
+    }
+
+
+def _rl_action_features(row: dict[str, Any]) -> dict[str, Any]:
+    stable = row.get("stable_features") if isinstance(row.get("stable_features"), dict) else {}
+    return {
+        "candidate_proposal": stable.get("candidate_proposal") if isinstance(stable.get("candidate_proposal"), dict) else {},
+        "repair_prior_features": stable.get("repair_prior_features") if isinstance(stable.get("repair_prior_features"), dict) else {},
+    }
+
+
+def _rl_terminal_status_for_unobserved_action(row: dict[str, Any]) -> str:
+    status = str(row.get("label_status") or "")
+    if status:
+        return status
+    if not bool(row.get("branchable")):
+        return "no_output"
+    return "unobserved_action"
+
+
+def _rl_action_penalty(row: dict[str, Any], terminal_status: str, no_output_penalty: float, hard_negative_penalty: float) -> float:
+    status = str(row.get("label_status") or terminal_status or "")
+    penalty = 0.0
+    if status in {"no_output", "dead_end", "no_candidates"}:
+        penalty += no_output_penalty
+    if status == "hard_negative" or int(row.get("label", 0) or 0) < 0:
+        penalty += hard_negative_penalty
+    return penalty
 
 
 def _risk_class(immediate_label: int, terminal_label: int, terminal_status: str | None) -> str:
@@ -2215,6 +2442,15 @@ def _as_float(value: Any) -> float:
         return float(value)
     except Exception:
         return 0.0
+
+
+def _nested(value: Any, *keys: str) -> Any:
+    current = value
+    for key in keys:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(key)
+    return current
 
 
 def _verify_output_against_oracle(path: Path, fmt: str, oracle: dict[str, Any]) -> dict[str, Any]:

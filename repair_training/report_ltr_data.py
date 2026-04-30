@@ -12,12 +12,13 @@ from typing import Any
 DEFAULT_DATASET_DIR = Path("repair_training") / "datasets"
 DEFAULT_MODEL_ROOT = Path("repair_training") / "models"
 DEFAULT_OUTPUT = DEFAULT_DATASET_DIR / "ltr_data_quality_report.json"
+DEFAULT_POLICY_REPORT = DEFAULT_DATASET_DIR / "offline_policy_evaluation.json"
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     rows = _load_rows(_input_paths(args.input, Path(args.dataset_dir)))
-    report = _build_report(rows, Path(args.model_root))
+    report = _build_report(rows, Path(args.model_root), _policy_report_paths(args.policy_report))
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True, default=str), encoding="utf-8")
@@ -33,8 +34,14 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--input", action="append", default=[], help="Input JSONL file. Repeatable; defaults to --dataset-dir/*.jsonl.")
     parser.add_argument("--model-root", default=str(DEFAULT_MODEL_ROOT), help="Root containing trained LTR model summaries.")
     parser.add_argument("--output", default=str(DEFAULT_OUTPUT), help="JSON report output path.")
+    parser.add_argument("--policy-report", action="append", default=[], help="Optional offline policy evaluator JSON output. Repeatable; defaults to repair_training/datasets/offline_policy_evaluation.json if present.")
     parser.add_argument("--markdown", action="store_true", help="Also write a compact Markdown report next to --output.")
     return parser
+
+
+def _policy_report_paths(values: list[str]) -> list[Path]:
+    paths = [Path(value) for value in values if value] if values else [DEFAULT_POLICY_REPORT]
+    return [path for path in paths if path.is_file()]
 
 
 def _input_paths(inputs: list[str], dataset_dir: Path) -> list[Path]:
@@ -70,7 +77,7 @@ def _load_rows(paths: list[Path]) -> list[dict[str, Any]]:
     return rows
 
 
-def _build_report(rows: list[dict[str, Any]], model_root: Path) -> dict[str, Any]:
+def _build_report(rows: list[dict[str, Any]], model_root: Path, policy_report_paths: list[Path] | None = None) -> dict[str, Any]:
     terminal_rows = [row for row in rows if row.get("row_type") == "terminal"]
     rows = [row for row in rows if row.get("row_type") != "terminal"]
     query_groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -121,11 +128,13 @@ def _build_report(rows: list[dict[str, Any]], model_root: Path) -> dict[str, Any
         },
         "format_detection_quality": _format_detection_quality(rows),
         "rollout": rollout,
+        "rl_dataset": _rl_dataset_report(rows, terminal_rows),
         "difficulty": difficulty,
         "terminal_recovery": recovery,
         "per_format": _per_format_report(rows, model_metrics),
         "model_metric_comparison": model_metrics,
         "model_top3_comparison": _model_top3_comparison(model_metrics),
+        "policy_comparison": _policy_comparison(policy_report_paths or []),
         "repair_prior_dependency": _repair_prior_dependency(model_metrics),
     }
     report["warnings"] = _quality_warnings(report)
@@ -231,6 +240,51 @@ def _rollout_report(rows: list[dict[str, Any]], query_groups: dict[str, list[dic
         "state_progress_terminal_recovery_success_rate": label2_terminal_recovery_success / max(1, label2_rows),
         "hard_negative_future_failure_rate": hard_negative_future_failure / max(1, hard_negative_rows),
     }
+
+
+def _rl_dataset_report(rows: list[dict[str, Any]], terminal_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    rl_rows = [row for row in rows if isinstance(row.get("rl"), dict)]
+    if not rl_rows and not any(isinstance(row.get("rl"), dict) for row in terminal_rows):
+        return {
+            "available": False,
+            "episode_count": 0,
+            "transition_count": 0,
+        }
+    episodes = {str(row.get("episode_id") or row.get("sample_id") or "") for row in rl_rows if row.get("episode_id") or row.get("sample_id")}
+    states = {str(_nested(row, "rl", "state_id") or row.get("state_id") or "") for row in rl_rows if _nested(row, "rl", "state_id") or row.get("state_id")}
+    next_states = {str(_nested(row, "rl", "next_state_id") or "") for row in rl_rows if _nested(row, "rl", "next_state_id")}
+    done_count = sum(1 for row in rl_rows if bool(_nested(row, "rl", "done")))
+    observed_count = sum(1 for row in rl_rows if bool(_nested(row, "rl", "observed_transition")))
+    terminal_ratios = [_as_float(_nested(row, "rl", "terminal_reward")) for row in rl_rows if _nested(row, "rl", "terminal_reward") is not None]
+    immediate_rewards = [_as_float(_nested(row, "rl", "immediate_reward")) for row in rl_rows]
+    rewards = [_as_float(_nested(row, "rl", "reward")) for row in rl_rows]
+    future_returns = [_as_float(_nested(row, "rl", "future_return")) for row in rl_rows]
+    return {
+        "available": True,
+        "episode_count": len(episodes),
+        "state_count": len(states),
+        "transition_count": len(rl_rows),
+        "terminal_row_count": len(terminal_rows),
+        "done_ratio": done_count / max(1, len(rl_rows)),
+        "observed_transition_ratio": observed_count / max(1, len(rl_rows)),
+        "observed_next_state_count": len(next_states),
+        "immediate_reward": _series_summary_float(immediate_rewards),
+        "reward": _series_summary_float(rewards),
+        "future_return": _series_summary_float(future_returns),
+        "terminal_recovery_ratio": _series_summary_float(terminal_ratios),
+    }
+
+
+def _policy_comparison(paths: list[Path]) -> dict[str, Any]:
+    output: dict[str, Any] = {}
+    for path in paths:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        key = str(payload.get("name") or path.stem)
+        output[key] = payload
+    return output
 
 
 def _recovery_ratio_report(rows: list[dict[str, Any]], query_groups: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
@@ -1071,9 +1125,11 @@ def _markdown_report(report: dict[str, Any]) -> str:
         f"- Candidate count: `{json.dumps(report['query_candidate_count'], ensure_ascii=False, sort_keys=True)}`",
         f"- Quality ratios: `{json.dumps(report['quality_ratios'], ensure_ascii=False, sort_keys=True)}`",
         f"- Rollout: `{json.dumps(report.get('rollout', {}), ensure_ascii=False, sort_keys=True)}`",
+        f"- RL dataset: `{json.dumps(report.get('rl_dataset', {}), ensure_ascii=False, sort_keys=True)}`",
         f"- Difficulty: `{json.dumps(report.get('difficulty', {}), ensure_ascii=False, sort_keys=True)}`",
         f"- Terminal recovery: `{json.dumps(report.get('terminal_recovery', {}), ensure_ascii=False, sort_keys=True)}`",
         f"- Model top3: `{json.dumps(report.get('model_top3_comparison', {}), ensure_ascii=False, sort_keys=True)}`",
+        f"- Policy comparison: `{json.dumps(report.get('policy_comparison', {}), ensure_ascii=False, sort_keys=True)}`",
         f"- Format detection: `{json.dumps(report.get('format_detection_quality', {}), ensure_ascii=False, sort_keys=True)}`",
         f"- Warnings: `{json.dumps(report.get('warnings', []), ensure_ascii=False, sort_keys=True)}`",
         "",
