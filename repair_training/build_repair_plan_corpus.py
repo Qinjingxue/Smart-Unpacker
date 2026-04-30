@@ -28,8 +28,21 @@ DEFAULT_MANIFEST = DEFAULT_OUTPUT_DIR / "repair_plan_manifest.jsonl"
 PROFILE_LAYERS = (
     ("structural", 0.30, ("structural_boundary", "structural_header_tail", "structural_footer_tail")),
     ("structural_directory", 0.30, ("structural_directory", "structural_metadata", "structural_index")),
-    ("partial_recoverable", 0.25, ("partial_truncate", "partial_missing_directory", "partial_missing_volume")),
+    ("partial_recoverable", 0.25, (
+        "zip_single_entry_payload_damage",
+        "zip_drop_central_directory_keep_local_headers",
+        "tar_truncate_last_member",
+        "tar_damage_one_member_payload",
+        "seven_zip_non_solid_one_file_damage",
+        "rar_non_solid_one_file_damage",
+    )),
     ("hard_negative", 0.15, ("hard_negative_payload", "hard_negative_block_tail", "hard_negative_multi")),
+)
+DEFAULT_LAYER_BUDGET = (
+    ("structural", 3),
+    ("structural_directory", 2),
+    ("partial_recoverable", 3),
+    ("hard_negative", 2),
 )
 
 
@@ -93,8 +106,8 @@ def _material_build(args: argparse.Namespace, material_root: Path) -> int:
             for source_index, source in enumerate(sample_sources):
                 source_archive_id = _source_archive_id(source)
                 source_derivation = _load_source_derivation(source)
-                for variant_index in range(max(0, int(args.per_sample))):
-                    layer, layer_weight, profile = _choose_damage_profile(rng, fmt)
+                layer_plan = _damage_layer_plan(rng, fmt, max(0, int(args.per_sample)))
+                for variant_index, (requested_layer, layer, layer_weight, profile, skip_reason) in enumerate(layer_plan):
                     variant_seed = rng.randrange(1, 2**31 - 1)
                     case_root = damaged_root / source.stem / f"v{variant_index:03d}"
                     damage_json_path = case_root / f"{source.stem}_{variant_index:03d}.damage.json"
@@ -117,7 +130,11 @@ def _material_build(args: argparse.Namespace, material_root: Path) -> int:
                             damage_json_path=str(damage_json_path),
                         )
                         record["damage_layer"] = layer
+                        record["requested_damage_layer"] = requested_layer
+                        record["actual_damage_layer"] = layer
                         record["damage_layer_weight"] = layer_weight
+                        if skip_reason:
+                            record["skip_reason"] = skip_reason
                         if source_derivation:
                             record["source_derivation"] = source_derivation
                         damage_json_path.parent.mkdir(parents=True, exist_ok=True)
@@ -125,7 +142,7 @@ def _material_build(args: argparse.Namespace, material_root: Path) -> int:
                         records.append(record)
                         summary["generated"] += 1
                     except Exception as exc:
-                        records.append(_skipped_record(source, fmt, source_archive_id, variant_index, profile, exc, format_dir.name, sample_dir.name, damage_layer=layer, damage_layer_weight=layer_weight))
+                        records.append(_skipped_record(source, fmt, source_archive_id, variant_index, profile, exc, format_dir.name, sample_dir.name, damage_layer=layer, damage_layer_weight=layer_weight, requested_damage_layer=requested_layer, actual_damage_layer=layer, skip_reason=skip_reason))
                         summary["skipped"] += 1
             _write_sample_manifest(sample_dir, records, bool(args.pretty))
     print(json.dumps(summary, ensure_ascii=False, sort_keys=True))
@@ -150,8 +167,8 @@ def _legacy_build(args: argparse.Namespace) -> int:
         if fmt is None:
             continue
         source_archive_id = _source_archive_id(source)
-        for variant_index in range(max(0, per_source)):
-            layer, layer_weight, profile = _choose_damage_profile(rng, fmt)
+        layer_plan = _damage_layer_plan(rng, fmt, max(0, per_source))
+        for variant_index, (requested_layer, layer, layer_weight, profile, skip_reason) in enumerate(layer_plan):
             case_root = damaged_dir / source_archive_id / f"v{variant_index:03d}"
             try:
                 case = build_corpus_corruption_case(
@@ -163,11 +180,15 @@ def _legacy_build(args: argparse.Namespace) -> int:
                     damage_profile=profile,
                 )
             except Exception as exc:
-                records.append(_skipped_record(source, fmt, source_archive_id, variant_index, profile, exc, damage_layer=layer, damage_layer_weight=layer_weight))
+                records.append(_skipped_record(source, fmt, source_archive_id, variant_index, profile, exc, damage_layer=layer, damage_layer_weight=layer_weight, requested_damage_layer=requested_layer, actual_damage_layer=layer, skip_reason=skip_reason))
                 continue
             record = case.corpus_manifest_record(source_archive_id=source_archive_id, source_path=str(source), damage_profile=profile, variant_index=variant_index)
             record["damage_layer"] = layer
+            record["requested_damage_layer"] = requested_layer
+            record["actual_damage_layer"] = layer
             record["damage_layer_weight"] = layer_weight
+            if skip_reason:
+                record["skip_reason"] = skip_reason
             records.append(record)
     mode = "a" if args.append else "w"
     with manifest_path.open(mode, encoding="utf-8") as handle:
@@ -306,11 +327,67 @@ def _choose_damage_profile(rng: random.Random, fmt: str = "") -> tuple[str, floa
 
 
 def _compatible_damage_profile(rng: random.Random, layer: str, weight: float, profiles: tuple[str, ...], fmt: str) -> tuple[str, float, str]:
-    normalized = str(fmt or "").lower()
-    if layer == "partial_recoverable" and normalized in {"gzip", "bzip2", "xz", "zstd"}:
+    normalized = _normalized_material_format(fmt)
+    if layer == "partial_recoverable" and not _supports_entry_partial(normalized):
         structural = next(item for item in PROFILE_LAYERS if item[0] == "structural")
         return structural[0], float(structural[1]), str(rng.choice(structural[2]))
-    return layer, weight, str(rng.choice(profiles))
+    compatible = _profiles_for_format(layer, profiles, normalized)
+    return layer, weight, str(rng.choice(compatible or profiles))
+
+
+def _damage_layer_plan(rng: random.Random, fmt: str, per_sample: int) -> list[tuple[str, str, float, str, str]]:
+    if per_sample <= 0:
+        return []
+    requested_layers: list[str] = []
+    for layer, count in DEFAULT_LAYER_BUDGET:
+        requested_layers.extend([layer] * int(count))
+    while len(requested_layers) < per_sample:
+        requested_layers.append(_choose_damage_profile(rng, fmt)[0])
+    requested_layers = requested_layers[:per_sample]
+    rng.shuffle(requested_layers)
+    output: list[tuple[str, str, float, str, str]] = []
+    layer_seen: dict[str, int] = {}
+    for requested_layer in requested_layers:
+        layer_item = next((item for item in PROFILE_LAYERS if item[0] == requested_layer), PROFILE_LAYERS[0])
+        layer, weight, profiles = layer_item
+        actual_layer = layer
+        skip_reason = ""
+        if layer == "partial_recoverable" and not _supports_entry_partial(fmt):
+            actual_layer = "structural_directory"
+            skip_reason = "entry_partial_unavailable_for_format"
+            layer_item = next(item for item in PROFILE_LAYERS if item[0] == actual_layer)
+            _, weight, profiles = layer_item
+        compatible = _profiles_for_format(actual_layer, profiles, fmt)
+        choices = compatible or profiles
+        seen = int(layer_seen.get(actual_layer, 0) or 0)
+        layer_seen[actual_layer] = seen + 1
+        profile = str(choices[seen % len(choices)])
+        output.append((requested_layer, actual_layer, float(weight), profile, skip_reason))
+    return output
+
+
+def _normalized_material_format(fmt: str) -> str:
+    return str(fmt or "").strip().lower().replace("_", ".")
+
+
+def _supports_entry_partial(fmt: str) -> bool:
+    normalized = _normalized_material_format(fmt)
+    return normalized in {"zip", "tar"}
+
+
+def _profiles_for_format(layer: str, profiles: tuple[str, ...], fmt: str) -> tuple[str, ...]:
+    normalized = _normalized_material_format(fmt)
+    if layer != "partial_recoverable":
+        return profiles
+    if normalized == "zip":
+        return tuple(item for item in profiles if item.startswith("zip_"))
+    if normalized == "tar":
+        return tuple(item for item in profiles if item.startswith("tar_"))
+    if normalized == "7z":
+        return tuple(item for item in profiles if item.startswith("seven_zip_"))
+    if normalized == "rar":
+        return tuple(item for item in profiles if item.startswith("rar_"))
+    return ()
 
 
 def _source_archive_id(path: Path) -> str:
@@ -362,6 +439,9 @@ def _skipped_record(
     *,
     damage_layer: str = "",
     damage_layer_weight: float = 0.0,
+    requested_damage_layer: str = "",
+    actual_damage_layer: str = "",
+    skip_reason: str = "",
 ) -> dict[str, Any]:
     record = {
         "schema_version": 1,
@@ -375,7 +455,10 @@ def _skipped_record(
         "variant_index": variant_index,
         "damage_profile": profile,
         "damage_layer": damage_layer,
+        "requested_damage_layer": requested_damage_layer or damage_layer,
+        "actual_damage_layer": actual_damage_layer or damage_layer,
         "damage_layer_weight": damage_layer_weight,
+        "skip_reason": skip_reason,
         "error": str(exc),
     }
     source_derivation = _load_source_derivation(source)

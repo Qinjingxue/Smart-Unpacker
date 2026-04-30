@@ -110,6 +110,12 @@ class CorruptionCase:
     output_required: bool = True
     builder_call: str = ""
     password: str | None = None
+    oracle_strength: str = ""
+    profile_capability: str = ""
+    partial_target_entry: str = ""
+    partial_expected_recoverable_entries: list[str] = field(default_factory=list)
+    partial_expected_damaged_entries: list[str] = field(default_factory=list)
+    expected_file_metadata: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     @property
     def patch_plan(self) -> PatchPlan:
@@ -148,6 +154,8 @@ class CorruptionCase:
                 "expected_payload_bytes": len(self.expected_payload),
                 "expected_bytes": len(self.expected_bytes),
                 "password_present": self.password is not None,
+                "oracle_strength": self.oracle_strength,
+                "profile_capability": self.profile_capability,
             },
             "mutations": self.mutation_summary(),
             "patch_plan": self.patch_plan.to_dict(),
@@ -188,6 +196,11 @@ class CorruptionCase:
             "seed": self.seed,
             "variant_index": int(variant_index),
             "damage_profile": damage_profile,
+            "profile_capability": self.profile_capability,
+            "oracle_strength": self.oracle_strength,
+            "partial_target_entry": self.partial_target_entry,
+            "partial_expected_recoverable_entries": list(self.partial_expected_recoverable_entries),
+            "partial_expected_damaged_entries": list(self.partial_expected_damaged_entries),
             "clean_sha256": hashlib.sha256(self.clean_data).hexdigest(),
             "corrupted_sha256": self.corrupted_sha256,
             "clean_input": _source_input_summary(self.clean_source_input),
@@ -204,8 +217,10 @@ class CorruptionCase:
             "output_required": self.output_required,
             "expected_files": {
                 name: {
+                    "name": name,
                     "size": len(payload),
                     "sha256": hashlib.sha256(payload).hexdigest(),
+                    **dict(self.expected_file_metadata.get(name) or {}),
                 }
                 for name, payload in sorted(self.expected_files.items())
             },
@@ -965,6 +980,7 @@ def build_corpus_corruption_case(
     mutations, damage_flags = _corpus_profile_mutations(clean, fmt, randomizer, damage_profile)
     corrupted = apply_mutations(clean, mutations)
     oracle = _oracle_from_clean_bytes(clean, fmt)
+    profile_meta = _profile_metadata(fmt, damage_profile, mutations, oracle)
     case_id = f"{source_path.stem}_{damage_profile}_{variant_index}"
     safe_case_id = "".join(ch if ch.isalnum() or ch in {"_", "-"} else "_" for ch in case_id)
     return _write_corpus_case(
@@ -980,6 +996,12 @@ def build_corpus_corruption_case(
         expected_files=oracle.get("files", {}),
         expected_payload=oracle.get("payload", b""),
         expected_bytes=clean if oracle.get("bytes_exact") else b"",
+        oracle_strength=str(oracle.get("oracle_strength") or "bytes_exact"),
+        profile_capability=str(profile_meta.get("profile_capability") or "structural_only"),
+        partial_target_entry=str(profile_meta.get("partial_target_entry") or ""),
+        partial_expected_recoverable_entries=list(profile_meta.get("partial_expected_recoverable_entries") or []),
+        partial_expected_damaged_entries=list(profile_meta.get("partial_expected_damaged_entries") or []),
+        expected_file_metadata=dict(oracle.get("files_meta") or {}),
         output_required=False,
         builder_call="build_corpus_corruption_case(...)",
     )
@@ -1049,21 +1071,30 @@ def _corpus_profile_mutations(
 def _zip_corpus_mutations(data: bytes, randomizer: random.Random, profile: str) -> tuple[list[BinaryMutation], list[str]]:
     mutations: list[BinaryMutation] = []
     layer = _damage_layer(profile)
+    entry_infos = _zip_entry_infos(data)
     eocd = data.rfind(b"PK\x05\x06")
     if eocd >= 0 and eocd + 22 <= len(data):
-        if layer in {"structural", "structural_directory", "hard_negative"}:
+        if profile == "zip_drop_central_directory_keep_local_headers":
+            mutations.append(_truncate("corpus_zip_drop_central_directory_keep_local_headers", eocd, "zip.central_directory", "central directory is missing but local headers remain"))
+        elif layer in {"structural", "structural_directory", "hard_negative"}:
             mutations.extend([
                 _replace_bytes("corpus_zip_bad_eocd_counts", eocd + 8, struct.pack("<HH", 1, 99), "zip.eocd.entry_counts", "directory entry counts conflict"),
                 _replace_bytes("corpus_zip_bad_eocd_cd_offset", eocd + 16, struct.pack("<I", 0), "zip.eocd.cd_offset", "central directory offset points at start"),
             ])
-        if layer == "partial_recoverable":
+        elif layer == "partial_recoverable":
             mutations.append(_truncate("corpus_zip_drop_central_directory", eocd, "zip.central_directory", "central directory is missing but local headers remain"))
     else:
         mutations.append(_truncate("corpus_zip_drop_tail_directory", max(1, len(data) * 4 // 5), "zip.central_directory", "tail directory is truncated"))
+    if profile == "zip_single_entry_payload_damage" and entry_infos:
+        target = _choose_middle_entry(entry_infos, randomizer)
+        if target.get("compressed_size", 0) > 0:
+            payload_offset = int(target["payload_offset"]) + max(0, int(target["compressed_size"]) // 2)
+            if 0 <= payload_offset < len(data):
+                mutations.append(_replace_byte("corpus_zip_single_entry_payload_damage", payload_offset, data[payload_offset] ^ 0x41, "zip.local_payload", f"entry payload damaged: {target['name']}"))
     if layer == "hard_negative":
         payload_offset = _middle_offset(data, randomizer)
         mutations.append(_replace_byte("corpus_zip_flip_payload_byte", payload_offset, data[payload_offset] ^ 0x41, "zip.local_payload", "payload checksum may fail"))
-    if ("missing_volume" in profile or layer == "partial_recoverable") and len(data) > 128:
+    if ("missing_volume" in profile or (layer == "partial_recoverable" and not profile.startswith("zip_"))) and len(data) > 128:
         mutations.append(_delete("corpus_zip_delete_middle_volume_bytes", max(1, len(data) // 3), max(8, len(data) // 20), "zip.missing_volume", "middle archive bytes are missing"))
     if layer in {"structural", "hard_negative"}:
         mutations.append(_append("corpus_zip_append_tail_junk", _random_junk(randomizer, "ZIPTAIL", 12, 48), "archive.tail", "extra bytes after archive"))
@@ -1074,17 +1105,30 @@ def _zip_corpus_mutations(data: bytes, randomizer: random.Random, profile: str) 
         flags.extend(["checksum_error", "crc_error", "damaged"])
     if any(mutation.zone in {"archive.tail", "zip.sfx.prefix"} for mutation in mutations):
         flags.extend(["trailing_junk", "boundary_unreliable"])
-    if layer == "partial_recoverable":
+    if any(mutation.zone == "zip.missing_volume" for mutation in mutations):
         flags.extend(["missing_volume", "input_truncated"])
+    elif layer == "partial_recoverable" and any(mutation.operation.op == "truncate" for mutation in mutations):
+        flags.append("input_truncated")
     return mutations, _dedupe_list(flags)
 
 
 def _tar_corpus_mutations(data: bytes, randomizer: random.Random, profile: str) -> tuple[list[BinaryMutation], list[str]]:
     mutations: list[BinaryMutation] = []
     layer = _damage_layer(profile)
+    entry_infos = _tar_entry_infos(data)
     if len(data) >= 512:
         mutations.append(_replace_bytes("corpus_tar_zero_header_checksum", 148, b"000000\0 ", "tar.header.checksum", "header checksum must be recomputed"))
-    if layer in {"partial_recoverable", "structural_directory"} and len(data) > 2048:
+    if profile == "tar_truncate_last_member" and entry_infos:
+        target = entry_infos[-1]
+        truncate_at = int(target["offset_data"]) + max(0, int(target["size"]) // 2)
+        mutations.append(_truncate("corpus_tar_truncate_last_member", max(512, truncate_at), "tar.member_payload", f"last member is truncated: {target['name']}"))
+    elif profile == "tar_damage_one_member_payload" and entry_infos:
+        target = _choose_middle_entry(entry_infos, randomizer)
+        if int(target["size"]) > 0:
+            payload_offset = int(target["offset_data"]) + max(0, int(target["size"]) // 2)
+            if 0 <= payload_offset < len(data):
+                mutations.append(_replace_byte("corpus_tar_damage_one_member_payload", payload_offset, data[payload_offset] ^ 0x23, "tar.payload", f"member payload damaged: {target['name']}"))
+    elif layer in {"partial_recoverable", "structural_directory"} and len(data) > 2048:
         mutations.append(_truncate("corpus_tar_drop_zero_blocks_or_member_tail", max(512, len(data) - 1024), "tar.trailing_zero_blocks", "tar end marker or final member is truncated"))
     elif layer in {"structural", "hard_negative"}:
         mutations.append(_append("corpus_tar_append_tail_junk", _random_junk(randomizer, "TARTAIL", 8, 32), "archive.tail", "extra bytes after tar stream"))
@@ -1208,6 +1252,15 @@ def _damage_layer(profile: str) -> str:
     for layer in ("structural_directory", "partial_recoverable", "hard_negative", "structural"):
         if layer in text:
             return layer
+    if text in {
+        "zip_single_entry_payload_damage",
+        "zip_drop_central_directory_keep_local_headers",
+        "tar_truncate_last_member",
+        "tar_damage_one_member_payload",
+        "seven_zip_non_solid_one_file_damage",
+        "rar_non_solid_one_file_damage",
+    }:
+        return "partial_recoverable"
     if "payload" in text or "block" in text:
         return "hard_negative"
     if "partial" in text or "truncate" in text or "missing" in text:
@@ -1225,14 +1278,104 @@ def _dedupe_list(values: list[str]) -> list[str]:
     return output
 
 
+def _profile_metadata(fmt: ArchiveFormat, profile: str, mutations: list[BinaryMutation], oracle: dict[str, Any]) -> dict[str, Any]:
+    files = oracle.get("files") if isinstance(oracle.get("files"), dict) else {}
+    entry_names = sorted(str(name) for name in files)
+    layer = _damage_layer(profile)
+    target_entry = ""
+    for mutation in mutations:
+        effect = str(mutation.expected_effect or "")
+        if ": " in effect:
+            maybe = effect.rsplit(": ", 1)[-1]
+            if maybe in files:
+                target_entry = maybe
+                break
+    damaged_entries = [target_entry] if target_entry else []
+    recoverable_entries = [name for name in entry_names if name not in set(damaged_entries)]
+    base_fmt = _base_archive_format(fmt)
+    oracle_strength = str(oracle.get("oracle_strength") or "")
+    if layer == "partial_recoverable" and files and (base_fmt in {"zip", "tar"}):
+        capability = "entry_partial" if (damaged_entries or "central_directory" in profile or "last_member" in profile) else "structural_partial"
+    elif layer == "partial_recoverable":
+        capability = "structural_partial" if oracle_strength.startswith("entry") else "structural_only"
+    else:
+        capability = "structural_only"
+    if "central_directory" in profile and not damaged_entries:
+        damaged_entries = []
+        recoverable_entries = entry_names
+    if "last_member" in profile and entry_names and not damaged_entries:
+        damaged_entries = [entry_names[-1]]
+        recoverable_entries = entry_names[:-1]
+        target_entry = entry_names[-1]
+    return {
+        "profile_capability": capability,
+        "partial_target_entry": target_entry,
+        "partial_expected_recoverable_entries": recoverable_entries if layer == "partial_recoverable" else [],
+        "partial_expected_damaged_entries": damaged_entries if layer == "partial_recoverable" else [],
+    }
+
+
+def _zip_entry_infos(data: bytes) -> list[dict[str, Any]]:
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            output = []
+            for info in archive.infolist():
+                if info.is_dir():
+                    continue
+                header_offset = int(info.header_offset)
+                if header_offset + 30 > len(data):
+                    continue
+                name_len, extra_len = struct.unpack_from("<HH", data, header_offset + 26)
+                payload_offset = header_offset + 30 + int(name_len) + int(extra_len)
+                if payload_offset >= len(data):
+                    continue
+                output.append({
+                    "name": info.filename,
+                    "header_offset": header_offset,
+                    "payload_offset": payload_offset,
+                    "size": int(info.file_size),
+                    "compressed_size": int(info.compress_size),
+                    "crc": int(info.CRC),
+                })
+            return output
+    except Exception:
+        return []
+
+
+def _tar_entry_infos(data: bytes) -> list[dict[str, Any]]:
+    try:
+        with tarfile.open(fileobj=io.BytesIO(data)) as archive:
+            output = []
+            for item in archive.getmembers():
+                if not item.isfile():
+                    continue
+                output.append({
+                    "name": item.name,
+                    "offset": int(item.offset),
+                    "offset_data": int(item.offset_data),
+                    "size": int(item.size),
+                })
+            return output
+    except Exception:
+        return []
+
+
+def _choose_middle_entry(entries: list[dict[str, Any]], randomizer: random.Random) -> dict[str, Any]:
+    if len(entries) <= 2:
+        return randomizer.choice(entries)
+    return randomizer.choice(entries[1:-1])
+
+
 def _oracle_from_clean_bytes(data: bytes, fmt: ArchiveFormat) -> dict[str, Any]:
     base_fmt = _base_archive_format(fmt)
     if base_fmt == "zip":
         try:
             with zipfile.ZipFile(io.BytesIO(data)) as archive:
-                return {"files": {name: archive.read(name) for name in archive.namelist() if not name.endswith("/")}}
+                files = {name: archive.read(name) for name in archive.namelist() if not name.endswith("/")}
+                infos = {item["name"]: item for item in _zip_entry_infos(data)}
+                return {"files": files, "files_meta": infos, "oracle_strength": "entry_hash"}
         except Exception:
-            return {"bytes_exact": True}
+            return {"bytes_exact": True, "oracle_strength": "bytes_exact"}
     if base_fmt == "tar":
         try:
             with tarfile.open(fileobj=io.BytesIO(data)) as archive:
@@ -1243,25 +1386,26 @@ def _oracle_from_clean_bytes(data: bytes, fmt: ArchiveFormat) -> dict[str, Any]:
                     member = archive.extractfile(item)
                     if member is not None:
                         files[item.name] = member.read()
-                return {"files": files}
+                infos = {item["name"]: item for item in _tar_entry_infos(data)}
+                return {"files": files, "files_meta": infos, "oracle_strength": "entry_hash"}
         except Exception:
-            return {"bytes_exact": True}
+            return {"bytes_exact": True, "oracle_strength": "bytes_exact"}
     if base_fmt == "gzip":
         try:
-            return {"payload": gzip.decompress(data)}
+            return {"payload": gzip.decompress(data), "oracle_strength": "payload_hash"}
         except Exception:
-            return {"bytes_exact": True}
+            return {"bytes_exact": True, "oracle_strength": "bytes_exact"}
     if base_fmt == "bzip2":
         try:
-            return {"payload": bz2.decompress(data)}
+            return {"payload": bz2.decompress(data), "oracle_strength": "payload_hash"}
         except Exception:
-            return {"bytes_exact": True}
+            return {"bytes_exact": True, "oracle_strength": "bytes_exact"}
     if base_fmt == "xz":
         try:
-            return {"payload": lzma.decompress(data)}
+            return {"payload": lzma.decompress(data), "oracle_strength": "payload_hash"}
         except Exception:
-            return {"bytes_exact": True}
-    return {"bytes_exact": True}
+            return {"bytes_exact": True, "oracle_strength": "bytes_exact"}
+    return {"bytes_exact": True, "oracle_strength": "structural"}
 
 
 def _write_corpus_case(
@@ -1280,6 +1424,12 @@ def _write_corpus_case(
     expected_bytes: bytes = b"",
     output_required: bool = False,
     builder_call: str = "",
+    oracle_strength: str = "",
+    profile_capability: str = "",
+    partial_target_entry: str = "",
+    partial_expected_recoverable_entries: list[str] | None = None,
+    partial_expected_damaged_entries: list[str] | None = None,
+    expected_file_metadata: dict[str, dict[str, Any]] | None = None,
 ) -> CorruptionCase:
     root.mkdir(parents=True, exist_ok=True)
     ext = _extension_for_format(fmt)
@@ -1303,6 +1453,12 @@ def _write_corpus_case(
         expected_bytes=expected_bytes,
         output_required=output_required,
         builder_call=builder_call,
+        oracle_strength=oracle_strength,
+        profile_capability=profile_capability,
+        partial_target_entry=partial_target_entry,
+        partial_expected_recoverable_entries=list(partial_expected_recoverable_entries or []),
+        partial_expected_damaged_entries=list(partial_expected_damaged_entries or []),
+        expected_file_metadata=dict(expected_file_metadata or {}),
     )
 
 

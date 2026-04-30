@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import bz2
 import gzip
+import hashlib
+import io
 import json
 import lzma
 import multiprocessing as mp
@@ -48,6 +50,12 @@ def main(argv: list[str] | None = None) -> int:
         "timeouts": 0,
         "failed": 0,
         "skipped": 0,
+        "label_counts": {},
+        "sample_best_label_counts": {},
+        "oracle_strength_counts": {},
+        "damage_layer_counts": {},
+        "state_progress_count": 0,
+        "partial_count": 0,
         "success_output": str(success_output),
         "failure_output": str(failure_output),
     }
@@ -79,6 +87,7 @@ def main(argv: list[str] | None = None) -> int:
             last_progress = time.perf_counter()
             for row in rows:
                 row["elapsed_sample_seconds"] = elapsed
+            _update_summary_counts(summary, record, rows)
             is_success = any(int(row.get("label", 0) or 0) > 0 for row in rows)
             target = success_handle if is_success else failure_handle
             for row in rows:
@@ -141,6 +150,28 @@ def _load_records(args: argparse.Namespace) -> list[dict[str, Any]]:
         if fallback.is_file():
             return _load_manifest(fallback, args.limit)
     return records
+
+
+def _update_summary_counts(summary: dict[str, Any], record: dict[str, Any], rows: list[dict[str, Any]]) -> None:
+    label_counts = summary.setdefault("label_counts", {})
+    for row in rows:
+        label = str(int(row.get("label", 0) or 0))
+        label_counts[label] = int(label_counts.get(label, 0) or 0) + 1
+        status = str(row.get("label_status") or "")
+        if status == "state_progress":
+            summary["state_progress_count"] = int(summary.get("state_progress_count", 0) or 0) + 1
+        if status == "partial" or int(row.get("label", 0) or 0) == 1:
+            summary["partial_count"] = int(summary.get("partial_count", 0) or 0) + 1
+    best = max((int(row.get("label", 0) or 0) for row in rows), default=0)
+    best_counts = summary.setdefault("sample_best_label_counts", {})
+    best_counts[str(best)] = int(best_counts.get(str(best), 0) or 0) + 1
+    oracle = record.get("oracle") if isinstance(record.get("oracle"), dict) else {}
+    oracle_strength = str(record.get("oracle_strength") or oracle.get("oracle_strength") or "unknown")
+    oracle_counts = summary.setdefault("oracle_strength_counts", {})
+    oracle_counts[oracle_strength] = int(oracle_counts.get(oracle_strength, 0) or 0) + 1
+    layer = str(record.get("actual_damage_layer") or record.get("damage_layer") or "unknown")
+    layer_counts = summary.setdefault("damage_layer_counts", {})
+    layer_counts[layer] = int(layer_counts.get(layer, 0) or 0) + 1
 
 
 def _material_manifests(material_root: Path, formats: set[str], samples: set[str]) -> list[Path]:
@@ -253,7 +284,8 @@ def _collect_sample_rows(record: dict[str, Any], args: argparse.Namespace) -> li
         batch = scheduler.generate_repair_candidates(job)
         if args.progress:
             print(f"  CANDIDATES {record.get('sample_id')} round={round_index} count={len(batch.candidates)} warnings={len(batch.warnings or [])}", flush=True)
-        state_features = _state_features(record, batch, round_index, previous_actions, best_completeness)
+        before_state = _state_summary(record, source_input, fmt, damage_flags)
+        state_features = _state_features(record, batch, round_index, previous_actions, best_completeness, before_state)
         candidates = materialize_candidates(list(batch.candidates))
         validated = [selector._with_native_validation(candidate) for candidate in candidates]  # noqa: SLF001
         accepted = sorted(
@@ -277,7 +309,10 @@ def _collect_sample_rows(record: dict[str, Any], args: argparse.Namespace) -> li
         for rank, (_, original_index, candidate) in enumerate(ranked):
             if logged >= int(args.max_candidates_per_round or 0):
                 break
-            label_info = _label_candidate(record, candidate, best_completeness)
+            payload = candidate_feature_payload(candidate)
+            after_state = _state_summary(record, candidate.repaired_input if isinstance(candidate.repaired_input, dict) else {}, fmt, list(candidate.damage_flags or damage_flags), payload)
+            delta_features = _state_delta(before_state, after_state)
+            label_info = _label_candidate(record, candidate, best_completeness, before_state, after_state, delta_features)
             rows.append(_action_row(
                 record,
                 round_index,
@@ -285,6 +320,9 @@ def _collect_sample_rows(record: dict[str, Any], args: argparse.Namespace) -> li
                 rank,
                 candidate,
                 state_features,
+                before_state,
+                after_state,
+                delta_features,
                 batch,
                 label_info,
                 selected=_candidate_id(candidate) == selected_id,
@@ -295,7 +333,10 @@ def _collect_sample_rows(record: dict[str, Any], args: argparse.Namespace) -> li
         selected_result = selected_candidate.to_result(selection={"selected_module": selected_candidate.module_name})
         if not selected_result.ok or not selected_result.repaired_input:
             break
-        selected_label = _label_candidate(record, selected_candidate, best_completeness)
+        selected_payload = candidate_feature_payload(selected_candidate)
+        selected_after_state = _state_summary(record, selected_candidate.repaired_input if isinstance(selected_candidate.repaired_input, dict) else {}, fmt, list(selected_candidate.damage_flags or damage_flags), selected_payload)
+        selected_delta = _state_delta(before_state, selected_after_state)
+        selected_label = _label_candidate(record, selected_candidate, best_completeness, before_state, selected_after_state, selected_delta)
         best_completeness = max(best_completeness, float(selected_label.get("completeness", 0.0) or 0.0))
         previous_actions.extend(str(action) for action in selected_candidate.actions)
         source_input = dict(selected_result.repaired_input)
@@ -321,7 +362,7 @@ def _scheduler() -> RepairScheduler:
     })
 
 
-def _state_features(record: dict[str, Any], batch, round_index: int, previous_actions: list[str], best_completeness: float) -> dict[str, Any]:
+def _state_features(record: dict[str, Any], batch, round_index: int, previous_actions: list[str], best_completeness: float, before_state: dict[str, Any] | None = None) -> dict[str, Any]:
     diagnosis = batch.diagnosis if isinstance(batch.diagnosis, dict) else {}
     capability = diagnosis.get("capability_decision") if isinstance(diagnosis.get("capability_decision"), dict) else {}
     source_derivation = record.get("source_derivation") if isinstance(record.get("source_derivation"), dict) else {}
@@ -336,6 +377,7 @@ def _state_features(record: dict[str, Any], batch, round_index: int, previous_ac
         "previous_actions": list(previous_actions),
         "previous_action_count": len(previous_actions),
         "best_completeness": float(best_completeness or 0.0),
+        "state_summary": dict(before_state or {}),
         "diagnosis": _compact_diagnosis(diagnosis),
         "capability": {
             "selected_modules": list(capability.get("selected_modules") or []),
@@ -351,6 +393,9 @@ def _action_row(
     rank: int,
     candidate,
     state_features: dict[str, Any],
+    before_state: dict[str, Any],
+    after_state: dict[str, Any],
+    delta_features: dict[str, Any],
     batch,
     label_info: dict[str, Any],
     *,
@@ -383,6 +428,9 @@ def _action_row(
         "label_details": label_info,
         "stable_features": {
             "state": state_features,
+            "before_state": before_state,
+            "after_state": after_state,
+            "delta_features": delta_features,
             "candidate": {
                 key: payload.get(key)
                 for key in (
@@ -423,7 +471,14 @@ def _action_row(
     }
 
 
-def _label_candidate(record: dict[str, Any], candidate, previous_completeness: float) -> dict[str, Any]:
+def _label_candidate(
+    record: dict[str, Any],
+    candidate,
+    previous_completeness: float,
+    before_state: dict[str, Any] | None = None,
+    after_state: dict[str, Any] | None = None,
+    delta_features: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     repaired_input = candidate.repaired_input if isinstance(candidate.repaired_input, dict) else {}
     path = Path(str(repaired_input.get("path") or ""))
     if not path.is_file():
@@ -432,10 +487,104 @@ def _label_candidate(record: dict[str, Any], candidate, previous_completeness: f
     fmt = str(record.get("format") or repaired_input.get("format_hint") or "")
     verified = _verify_output_against_oracle(path, fmt, oracle)
     completeness = float(verified.get("completeness", 0.0) or 0.0)
-    if int(verified.get("label", 0) or 0) <= 0 and completeness > previous_completeness + 0.05:
+    verified["before_state"] = before_state or {}
+    verified["after_state"] = after_state or {}
+    verified["delta_features"] = delta_features or {}
+    if int(verified.get("label", 0) or 0) <= 0 and int(verified.get("label", 0) or 0) != -1 and _has_state_progress(delta_features or {}, previous_completeness):
         verified["label"] = 2
         verified["status"] = "state_progress"
+        verified["progress_reasons"] = _progress_reasons(delta_features or {}, previous_completeness)
+        verified["completeness"] = max(completeness, float((after_state or {}).get("completeness", 0.0) or 0.0))
     return verified
+
+
+def _state_summary(
+    record: dict[str, Any],
+    source_input: dict[str, Any],
+    fmt: str,
+    damage_flags: list[str],
+    candidate_payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    path = Path(str(source_input.get("path") or ""))
+    oracle = record.get("oracle") if isinstance(record.get("oracle"), dict) else {}
+    payload = candidate_payload if isinstance(candidate_payload, dict) else {}
+    summary = {
+        "format_detected": bool(fmt or source_input.get("format_hint")),
+        "boundary_trusted": not any(flag in set(damage_flags or []) for flag in ("trailing_junk", "boundary_unreliable", "input_truncated", "probably_truncated")),
+        "directory_detected": False,
+        "entry_count": 0,
+        "readable_entry_count": 0,
+        "matched_entry_count": 0,
+        "wrong_entry_count": 0,
+        "completeness": 0.0,
+        "damage_flags": list(damage_flags or []),
+        "verification_status": "missing_output" if not path.is_file() else "unverified",
+        "native_validation_score": payload.get("native_validation_score"),
+    }
+    if not path.is_file():
+        return summary
+    verified = _verify_output_against_oracle(path, fmt, oracle)
+    summary["verification_status"] = verified.get("status")
+    summary["completeness"] = float(verified.get("completeness", 0.0) or 0.0)
+    summary["matched_entry_count"] = int(verified.get("matched_files", 0) or 0)
+    summary["wrong_entry_count"] = int(verified.get("wrong_files", 0) or 0)
+    try:
+        recovered = _read_archive_hash_info(path, fmt)
+        summary["entry_count"] = len(recovered.get("entries", []))
+        summary["readable_entry_count"] = len(recovered.get("hashes", {}))
+        summary["directory_detected"] = len(recovered.get("entries", [])) > 0
+    except Exception:
+        summary["directory_detected"] = False
+    original_path = str((record.get("damaged_input") or {}).get("path") or record.get("damaged_path") or "")
+    if original_path and str(path) == original_path and any(flag in set(damage_flags or []) for flag in ("central_directory_bad", "central_directory_offset_bad", "central_directory_count_bad")):
+        summary["directory_detected"] = False
+        summary["entry_count"] = 0
+        summary["readable_entry_count"] = 0
+    return summary
+
+
+def _state_delta(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
+    before_score = _as_float(before.get("native_validation_score"))
+    after_score = _as_float(after.get("native_validation_score"))
+    return {
+        "completeness_gain": _as_float(after.get("completeness")) - _as_float(before.get("completeness")),
+        "entry_count_gain": int(after.get("entry_count", 0) or 0) - int(before.get("entry_count", 0) or 0),
+        "matched_entry_gain": int(after.get("matched_entry_count", 0) or 0) - int(before.get("matched_entry_count", 0) or 0),
+        "directory_recovered": bool(after.get("directory_detected")) and not bool(before.get("directory_detected")),
+        "boundary_became_trusted": bool(after.get("boundary_trusted")) and not bool(before.get("boundary_trusted")),
+        "damage_flag_reduction": max(0, len(before.get("damage_flags") or []) - len(after.get("damage_flags") or [])),
+        "verification_score_gain": after_score - before_score,
+    }
+
+
+def _has_state_progress(delta: dict[str, Any], previous_completeness: float) -> bool:
+    return bool(_progress_reasons(delta, previous_completeness))
+
+
+def _progress_reasons(delta: dict[str, Any], previous_completeness: float) -> list[str]:
+    reasons: list[str] = []
+    if _as_float(delta.get("completeness_gain")) >= 0.15 or (_as_float(delta.get("completeness_gain")) > 0.05 and previous_completeness <= 0.0):
+        reasons.append("completeness_gain")
+    if int(delta.get("matched_entry_gain", 0) or 0) >= 1:
+        reasons.append("matched_entry_gain")
+    if bool(delta.get("directory_recovered")):
+        reasons.append("directory_recovered")
+    if int(delta.get("entry_count_gain", 0) or 0) >= 1:
+        reasons.append("entry_count_gain")
+    if bool(delta.get("boundary_became_trusted")):
+        reasons.append("boundary_became_trusted")
+    if _as_float(delta.get("verification_score_gain")) >= 0.20:
+        reasons.append("verification_score_gain")
+    return reasons
+
+
+def _as_float(value: Any) -> float:
+    try:
+        if value is None:
+            return 0.0
+        return float(value)
+    except Exception:
+        return 0.0
 
 
 def _verify_output_against_oracle(path: Path, fmt: str, oracle: dict[str, Any]) -> dict[str, Any]:
@@ -454,46 +603,101 @@ def _verify_output_against_oracle(path: Path, fmt: str, oracle: dict[str, Any]) 
             return _label_status(3 if complete else (1 if 0.0 < completeness < 1.0 else -1), "complete" if complete else ("partial" if completeness > 0 else "hard_negative"), completeness)
         expected_files = oracle.get("expected_files") if isinstance(oracle.get("expected_files"), dict) else {}
         if expected_files:
-            recovered = _read_archive_hashes(path, fmt)
+            recovered_info = _read_archive_hash_info(path, fmt)
+            recovered = recovered_info.get("hashes", {})
             matched = sum(1 for name, meta in expected_files.items() if recovered.get(name) == meta.get("sha256"))
             wrong_overlap = any(name in expected_files and recovered[name] != expected_files[name].get("sha256") for name in recovered)
+            wrong_files = sum(1 for name in recovered if name in expected_files and recovered[name] != expected_files[name].get("sha256"))
+            unreadable_files = len([name for name in recovered_info.get("entries", []) if name in expected_files and name not in recovered])
+            entry_count = len(recovered_info.get("entries", []))
             completeness = matched / max(1, len(expected_files))
             if completeness >= 0.999:
-                return {**_label_status(3, "complete", completeness), "matched_files": matched, "expected_files": len(expected_files)}
+                return {**_label_status(3, "complete", completeness), "matched_files": matched, "wrong_files": wrong_files, "unreadable_files": unreadable_files, "entry_count": entry_count, "expected_files": len(expected_files)}
             if completeness > 0:
-                return {**_label_status(1, "partial", completeness), "matched_files": matched, "expected_files": len(expected_files)}
-            return {**_label_status(-1 if wrong_overlap else 0, "hard_negative" if wrong_overlap else "no_progress", 0.0), "matched_files": matched, "expected_files": len(expected_files)}
+                return {**_label_status(1, "partial", completeness), "matched_files": matched, "wrong_files": wrong_files, "unreadable_files": unreadable_files, "entry_count": entry_count, "expected_files": len(expected_files)}
+            status = "hard_negative" if wrong_overlap else ("directory_only" if entry_count else "no_progress")
+            return {**_label_status(-1 if wrong_overlap else 0, status, 0.0), "matched_files": matched, "wrong_files": wrong_files, "unreadable_files": unreadable_files, "entry_count": entry_count, "expected_files": len(expected_files)}
     except Exception as exc:
         return {"status": "hard_negative", "label": -1, "completeness": 0.0, "error": str(exc)}
     return _label_status(0, "no_oracle", 0.0)
 
 
 def _read_archive_hashes(path: Path, fmt: str) -> dict[str, str]:
-    if fmt == "zip":
+    return _read_archive_hash_info(path, fmt)["hashes"]
+
+
+def _read_archive_hash_info(path: Path, fmt: str) -> dict[str, Any]:
+    normalized = _normalize_format(fmt)
+    if normalized == "zip":
         with zipfile.ZipFile(path) as archive:
-            return {name: _sha256(archive.read(name)) for name in archive.namelist() if not name.endswith("/")}
-    if fmt == "tar":
+            entries = [name for name in archive.namelist() if not name.endswith("/")]
+            hashes = {}
+            errors = {}
+            for name in entries:
+                try:
+                    hashes[name] = _sha256(archive.read(name))
+                except Exception as exc:
+                    errors[name] = str(exc)
+            return {"entries": entries, "hashes": hashes, "errors": errors}
+    if normalized == "tar":
         with tarfile.open(path) as archive:
-            output = {}
-            for item in archive.getmembers():
-                if not item.isfile():
-                    continue
-                member = archive.extractfile(item)
-                if member is not None:
-                    output[item.name] = _sha256(member.read())
-            return output
-    return {}
+            return _tar_hash_info_from_archive(archive)
+    if normalized in {"tar.gz", "tar.bz2", "tar.xz"}:
+        payload = _decompress_payload(path, normalized)
+        with tarfile.open(fileobj=io.BytesIO(payload)) as archive:
+            return _tar_hash_info_from_archive(archive)
+    return {"entries": [], "hashes": {}, "errors": {}}
+
+
+def _read_tar_hashes(path: Path) -> dict[str, str]:
+    with tarfile.open(path) as archive:
+        return _tar_hashes_from_archive(archive)
+
+
+def _tar_hashes_from_archive(archive: tarfile.TarFile) -> dict[str, str]:
+    return _tar_hash_info_from_archive(archive)["hashes"]
+
+
+def _tar_hash_info_from_archive(archive: tarfile.TarFile) -> dict[str, Any]:
+    output = {}
+    entries = []
+    errors = {}
+    for item in archive.getmembers():
+        if not item.isfile():
+            continue
+        entries.append(item.name)
+        try:
+            member = archive.extractfile(item)
+            if member is not None:
+                output[item.name] = _sha256(member.read())
+        except Exception as exc:
+            errors[item.name] = str(exc)
+    return {"entries": entries, "hashes": output, "errors": errors}
 
 
 def _decompress_payload(path: Path, fmt: str) -> bytes:
     raw = path.read_bytes()
-    if fmt in {"gzip", "gz", "tar.gz", "tgz"}:
+    normalized = _normalize_format(fmt)
+    if normalized in {"gzip", "tar.gz"}:
         return gzip.decompress(raw)
-    if fmt in {"bzip2", "bz2", "tar.bz2", "tbz2", "tbz"}:
+    if normalized in {"bzip2", "tar.bz2"}:
         return bz2.decompress(raw)
-    if fmt in {"xz", "tar.xz", "txz"}:
+    if normalized in {"xz", "tar.xz"}:
         return lzma.decompress(raw)
     return raw
+
+
+def _normalize_format(fmt: str) -> str:
+    value = str(fmt or "").strip().lower().replace("_", ".")
+    aliases = {
+        "gz": "gzip",
+        "bz2": "bzip2",
+        "tbz": "tar.bz2",
+        "tbz2": "tar.bz2",
+        "tgz": "tar.gz",
+        "txz": "tar.xz",
+    }
+    return aliases.get(value, value)
 
 
 def _label_status(label: int, status: str, completeness: float) -> dict[str, Any]:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gzip
+import io
 import json
 import subprocess
 import sys
@@ -45,6 +46,67 @@ def test_training_corruption_oracle_marks_wrong_content_hard_negative(tmp_path):
 
     assert result["label"] == -1
     assert result["status"] == "hard_negative"
+
+
+def test_zip_entry_partial_profile_records_entry_oracle(tmp_path):
+    source = tmp_path / "source.zip"
+    _write_clean_zip(source)
+    from repair_training.training_corruption import build_corpus_corruption_case
+
+    case = build_corpus_corruption_case(
+        tmp_path / "case",
+        source_path=source,
+        fmt="zip",
+        seed=123,
+        variant_index=0,
+        damage_profile="zip_single_entry_payload_damage",
+    )
+    record = case.corpus_manifest_record(
+        source_archive_id="source-zip",
+        source_path=str(source),
+        damage_profile="zip_single_entry_payload_damage",
+        variant_index=0,
+    )
+
+    assert record["profile_capability"] == "entry_partial"
+    assert record["oracle_strength"] == "entry_hash"
+    assert record["partial_target_entry"]
+    assert record["partial_expected_recoverable_entries"]
+    assert record["oracle"]["expected_files"]
+
+
+def test_tar_entry_partial_profile_records_recoverable_entries(tmp_path):
+    source = tmp_path / "source.tar"
+    with tarfile.open(source, "w") as archive:
+        for name, payload in {
+            "a.txt": b"alpha",
+            "b.txt": b"bravo",
+            "c.txt": b"charlie",
+        }.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(payload)
+            archive.addfile(info, fileobj=io.BytesIO(payload))
+    from repair_training.training_corruption import build_corpus_corruption_case
+
+    case = build_corpus_corruption_case(
+        tmp_path / "case",
+        source_path=source,
+        fmt="tar",
+        seed=456,
+        variant_index=0,
+        damage_profile="tar_truncate_last_member",
+    )
+    record = case.corpus_manifest_record(
+        source_archive_id="source-tar",
+        source_path=str(source),
+        damage_profile="tar_truncate_last_member",
+        variant_index=0,
+    )
+
+    assert record["profile_capability"] == "entry_partial"
+    assert record["partial_target_entry"] == "c.txt"
+    assert record["partial_expected_recoverable_entries"] == ["a.txt", "b.txt"]
+    assert set(record["oracle"]["expected_files"]) == {"a.txt", "b.txt", "c.txt"}
 
 
 def test_repair_plan_corpus_scripts_generate_and_collect_state_action_rows(tmp_path):
