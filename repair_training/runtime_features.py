@@ -177,6 +177,8 @@ def _candidate_proposal(payload: dict[str, Any]) -> dict[str, Any]:
         )
         if key in payload
     }
+    if str(output.get("plan_kind") or "") == "materialized":
+        output.pop("plan_kind", None)
     for group, safe_names in _SAFE_BREAKDOWNS.items():
         breakdown = payload.get(group)
         if isinstance(breakdown, dict):
@@ -207,6 +209,8 @@ def _candidate_proposal(payload: dict[str, Any]) -> dict[str, Any]:
             )
             if key in ltr
         }
+        if str(output["proposal_ltr"].get("plan_kind") or "") == "materialized":
+            output["proposal_ltr"].pop("plan_kind", None)
     return output
 
 
