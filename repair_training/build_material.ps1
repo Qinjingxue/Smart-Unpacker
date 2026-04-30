@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [string]$MaterialRoot = "repair_training\material",
-    [int]$PerSample = 50,
+    [int]$PerSample = 10,
     [string]$Seed = "random",
     [string]$Formats = "",
     [string]$Sample = "",
@@ -60,4 +60,3 @@ Write-Host ("    MaterialRoot: " + $MaterialRoot) -ForegroundColor DarkGray
 if ($LASTEXITCODE -ne 0) {
     throw "repair training material build failed (exit code $LASTEXITCODE)"
 }
-

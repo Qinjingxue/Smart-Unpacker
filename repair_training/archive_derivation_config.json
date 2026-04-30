@@ -8,6 +8,13 @@
     "workers": 0,
     "task_timeout_seconds": 120
   },
+  "derivation": {
+    "random_mode": {
+      "enabled": true,
+      "archives_per_sample": 5,
+      "seed": "random"
+    }
+  },
   "formats": {
     "zip": {
       "enabled": true,

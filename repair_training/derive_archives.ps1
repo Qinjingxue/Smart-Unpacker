@@ -6,6 +6,10 @@ param(
     [string[]]$Sample = @(),
     [int]$Workers = -1,
     [double]$TaskTimeoutSeconds = 0,
+    [switch]$RandomMode,
+    [switch]$NoRandomMode,
+    [int]$ArchivesPerSample = 0,
+    [string]$Seed = "",
     [switch]$NoPretty,
     [string[]]$ExtraArgs = @()
 )
@@ -41,6 +45,18 @@ if ($Workers -ge 0) {
 }
 if ($TaskTimeoutSeconds -gt 0) {
     $ArgsList += @("--task-timeout-seconds", "$TaskTimeoutSeconds")
+}
+if ($RandomMode) {
+    $ArgsList += "--random-mode"
+}
+if ($NoRandomMode) {
+    $ArgsList += "--no-random-mode"
+}
+if ($ArchivesPerSample -gt 0) {
+    $ArgsList += @("--archives-per-sample", "$ArchivesPerSample")
+}
+if ($Seed) {
+    $ArgsList += @("--seed", $Seed)
 }
 if ($NoPretty) {
     $ArgsList += "--no-pretty"

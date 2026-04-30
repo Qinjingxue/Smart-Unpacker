@@ -25,12 +25,11 @@ from repair_training.training_corruption import (
 DEFAULT_MATERIAL_ROOT = Path("repair_training") / "material"
 DEFAULT_OUTPUT_DIR = Path(".sunpack") / "corpus"
 DEFAULT_MANIFEST = DEFAULT_OUTPUT_DIR / "repair_plan_manifest.jsonl"
-PROFILE_POOL = (
-    "boundary+directory+payload",
-    "header+tail+payload",
-    "stream+tail+payload",
-    "boundary+sfx+tail",
-    "missing_volume+directory+payload",
+PROFILE_LAYERS = (
+    ("structural", 0.30, ("structural_boundary", "structural_header_tail", "structural_footer_tail")),
+    ("structural_directory", 0.30, ("structural_directory", "structural_metadata", "structural_index")),
+    ("partial_recoverable", 0.25, ("partial_truncate", "partial_missing_directory", "partial_missing_volume")),
+    ("hard_negative", 0.15, ("hard_negative_payload", "hard_negative_block_tail", "hard_negative_multi")),
 )
 
 
@@ -51,7 +50,7 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Build multi-damage repair-plan material from clean archives.")
     parser.add_argument("--init-material", action="store_true", help="Create repair_training/material format directories and exit.")
     parser.add_argument("--material-root", default=str(DEFAULT_MATERIAL_ROOT), help="Root containing <format>/<sample_id> material folders.")
-    parser.add_argument("--per-sample", type=int, default=50, help="Damaged variants per source archive inside each material sample folder.")
+    parser.add_argument("--per-sample", type=int, default=10, help="Damaged variants per source archive inside each material sample folder.")
     parser.add_argument("--seed", default="random", help="Random seed. Use 'random' for a fresh seed each run.")
     parser.add_argument("--formats", default="", help="Optional comma-separated material format directory allowlist.")
     parser.add_argument("--sample", action="append", default=[], help="Optional sample folder name filter. Repeatable.")
@@ -95,7 +94,7 @@ def _material_build(args: argparse.Namespace, material_root: Path) -> int:
                 source_archive_id = _source_archive_id(source)
                 source_derivation = _load_source_derivation(source)
                 for variant_index in range(max(0, int(args.per_sample))):
-                    profile = rng.choice(PROFILE_POOL)
+                    layer, layer_weight, profile = _choose_damage_profile(rng, fmt)
                     variant_seed = rng.randrange(1, 2**31 - 1)
                     case_root = damaged_root / source.stem / f"v{variant_index:03d}"
                     damage_json_path = case_root / f"{source.stem}_{variant_index:03d}.damage.json"
@@ -117,6 +116,8 @@ def _material_build(args: argparse.Namespace, material_root: Path) -> int:
                             material_sample_id=sample_dir.name,
                             damage_json_path=str(damage_json_path),
                         )
+                        record["damage_layer"] = layer
+                        record["damage_layer_weight"] = layer_weight
                         if source_derivation:
                             record["source_derivation"] = source_derivation
                         damage_json_path.parent.mkdir(parents=True, exist_ok=True)
@@ -124,7 +125,7 @@ def _material_build(args: argparse.Namespace, material_root: Path) -> int:
                         records.append(record)
                         summary["generated"] += 1
                     except Exception as exc:
-                        records.append(_skipped_record(source, fmt, source_archive_id, variant_index, profile, exc, format_dir.name, sample_dir.name))
+                        records.append(_skipped_record(source, fmt, source_archive_id, variant_index, profile, exc, format_dir.name, sample_dir.name, damage_layer=layer, damage_layer_weight=layer_weight))
                         summary["skipped"] += 1
             _write_sample_manifest(sample_dir, records, bool(args.pretty))
     print(json.dumps(summary, ensure_ascii=False, sort_keys=True))
@@ -150,7 +151,7 @@ def _legacy_build(args: argparse.Namespace) -> int:
             continue
         source_archive_id = _source_archive_id(source)
         for variant_index in range(max(0, per_source)):
-            profile = rng.choice(PROFILE_POOL)
+            layer, layer_weight, profile = _choose_damage_profile(rng, fmt)
             case_root = damaged_dir / source_archive_id / f"v{variant_index:03d}"
             try:
                 case = build_corpus_corruption_case(
@@ -162,9 +163,12 @@ def _legacy_build(args: argparse.Namespace) -> int:
                     damage_profile=profile,
                 )
             except Exception as exc:
-                records.append(_skipped_record(source, fmt, source_archive_id, variant_index, profile, exc))
+                records.append(_skipped_record(source, fmt, source_archive_id, variant_index, profile, exc, damage_layer=layer, damage_layer_weight=layer_weight))
                 continue
-            records.append(case.corpus_manifest_record(source_archive_id=source_archive_id, source_path=str(source), damage_profile=profile, variant_index=variant_index))
+            record = case.corpus_manifest_record(source_archive_id=source_archive_id, source_path=str(source), damage_profile=profile, variant_index=variant_index)
+            record["damage_layer"] = layer
+            record["damage_layer_weight"] = layer_weight
+            records.append(record)
     mode = "a" if args.append else "w"
     with manifest_path.open(mode, encoding="utf-8") as handle:
         for record in records:
@@ -290,6 +294,25 @@ def _resolve_seed(raw: str) -> int:
     return int(raw)
 
 
+def _choose_damage_profile(rng: random.Random, fmt: str = "") -> tuple[str, float, str]:
+    roll = rng.random()
+    cumulative = 0.0
+    for layer, weight, profiles in PROFILE_LAYERS:
+        cumulative += float(weight)
+        if roll <= cumulative:
+            return _compatible_damage_profile(rng, layer, float(weight), profiles, fmt)
+    layer, weight, profiles = PROFILE_LAYERS[-1]
+    return _compatible_damage_profile(rng, layer, float(weight), profiles, fmt)
+
+
+def _compatible_damage_profile(rng: random.Random, layer: str, weight: float, profiles: tuple[str, ...], fmt: str) -> tuple[str, float, str]:
+    normalized = str(fmt or "").lower()
+    if layer == "partial_recoverable" and normalized in {"gzip", "bzip2", "xz", "zstd"}:
+        structural = next(item for item in PROFILE_LAYERS if item[0] == "structural")
+        return structural[0], float(structural[1]), str(rng.choice(structural[2]))
+    return layer, weight, str(rng.choice(profiles))
+
+
 def _source_archive_id(path: Path) -> str:
     digest = hashlib.sha256(path.read_bytes()).hexdigest()[:16]
     stem = "".join(ch if ch.isalnum() or ch in {"_", "-"} else "_" for ch in path.stem)[:48]
@@ -327,7 +350,19 @@ def _load_source_derivation(path: Path) -> dict[str, Any]:
     }
 
 
-def _skipped_record(source: Path, fmt: str, source_archive_id: str, variant_index: int, profile: str, exc: Exception, material_format: str = "", material_sample_id: str = "") -> dict[str, Any]:
+def _skipped_record(
+    source: Path,
+    fmt: str,
+    source_archive_id: str,
+    variant_index: int,
+    profile: str,
+    exc: Exception,
+    material_format: str = "",
+    material_sample_id: str = "",
+    *,
+    damage_layer: str = "",
+    damage_layer_weight: float = 0.0,
+) -> dict[str, Any]:
     record = {
         "schema_version": 1,
         "status": "skipped",
@@ -339,6 +374,8 @@ def _skipped_record(source: Path, fmt: str, source_archive_id: str, variant_inde
         "format": fmt,
         "variant_index": variant_index,
         "damage_profile": profile,
+        "damage_layer": damage_layer,
+        "damage_layer_weight": damage_layer_weight,
         "error": str(exc),
     }
     source_derivation = _load_source_derivation(source)

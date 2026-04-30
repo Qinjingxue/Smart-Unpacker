@@ -97,6 +97,8 @@ def test_repair_plan_corpus_scripts_generate_and_collect_state_action_rows(tmp_p
     manifest_rows = [json.loads(line) for line in manifest.read_text(encoding="utf-8").splitlines()]
     assert len(manifest_rows) == 3
     assert all(len(row["corruption_plan"]) >= 2 for row in manifest_rows)
+    assert all(row["damage_layer"] for row in manifest_rows)
+    assert all(row["damage_layer_weight"] > 0 for row in manifest_rows)
     assert all(row["material_format"] == "zip" for row in manifest_rows)
     assert all(row["material_sample_id"] == "sample_a" for row in manifest_rows)
     damage_jsons = sorted((sample_dir / "damaged").rglob("*.damage.json"))
@@ -309,6 +311,70 @@ def test_derive_archives_generates_material_from_source_folders(tmp_path):
     assert collected_rows
     assert all(row["source_derivation"]["source_material_dir"] == str(sample) for row in collected_rows)
     assert all(row["stable_features"]["state"]["source_derivation"]["material_format"] == "tar" for row in collected_rows)
+
+
+def test_derive_archives_random_mode_limits_and_seed_controls_selection(tmp_path):
+    source_root = tmp_path / "source_material"
+    material_root = tmp_path / "material"
+    sample = source_root / "sample_random"
+    sample.mkdir(parents=True)
+    (sample / "alpha.txt").write_text("alpha payload", encoding="utf-8")
+    config = tmp_path / "archive_derivation_config.json"
+    config.write_text(
+        json.dumps(
+            {
+                "derivation": {"random_mode": {"enabled": True, "archives_per_sample": 2, "seed": "1234"}},
+                "formats": {
+                    "zip": {"enabled": False},
+                    "7z": {"enabled": False},
+                    "rar": {"enabled": False},
+                    "zstd": {"enabled": False},
+                    "tar": {"enabled": True},
+                    "gzip": {"enabled": True, "levels": [1, 6]},
+                    "bzip2": {"enabled": True, "levels": [1]},
+                    "xz": {"enabled": True, "levels": [0]},
+                    "tar_gz": {"enabled": False},
+                    "tar_bz2": {"enabled": False},
+                    "tar_xz": {"enabled": False},
+                    "tar_zst": {"enabled": False},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def run(extra: list[str]) -> tuple[dict, list[dict]]:
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "repair_training/derive_archives.py",
+                "--source-root",
+                str(source_root),
+                "--material-root",
+                str(material_root),
+                "--config",
+                str(config),
+                "--no-pretty",
+                *extra,
+            ],
+            cwd=Path.cwd(),
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        return json.loads(completed.stdout.strip()), _jsonl(sample / "derived_manifest.jsonl")
+
+    summary, rows = run([])
+    assert summary["available_tasks"] == 5
+    assert summary["generated"] == 2
+    first_selection = [row["output_name"] for row in rows]
+
+    _, rows = run([])
+    assert [row["output_name"] for row in rows] == first_selection
+
+    summary, rows = run(["--no-random-mode"])
+    assert summary["generated"] == 5
+    assert len(rows) == 5
 
 
 def test_derive_archives_organizes_direct_source_material_files(tmp_path):

@@ -9,6 +9,7 @@ import io
 import json
 import lzma
 import os
+import random
 import shutil
 import subprocess
 import sys
@@ -39,6 +40,13 @@ DEFAULT_CONFIG_DATA: dict[str, Any] = {
     "parallel": {
         "workers": 0,
         "task_timeout_seconds": 120,
+    },
+    "derivation": {
+        "random_mode": {
+            "enabled": True,
+            "archives_per_sample": 5,
+            "seed": "random",
+        },
     },
     "formats": {
         "zip": {"enabled": True, "levels": [0, 5, 9], "methods": ["deflate", "store"]},
@@ -93,7 +101,11 @@ def main(argv: list[str] | None = None) -> int:
     manifest_paths = {sample.name: sample / "derived_manifest.jsonl" for sample in source_samples}
     for sample in source_samples:
         _clear_previous_derived(sample, material_root)
+    random_mode = _random_mode_config(config, args)
     tasks, skipped = _build_tasks(source_samples, material_root, config, tools, formats)
+    all_task_count = len(tasks)
+    if random_mode["enabled"]:
+        tasks = _sample_tasks_by_source(tasks, int(random_mode["archives_per_sample"]), random_mode["seed"])
     workers = _resolve_workers(workers_setting, len(tasks))
     records = list(skipped)
     started = time.perf_counter()
@@ -120,6 +132,8 @@ def main(argv: list[str] | None = None) -> int:
         "samples": len(source_samples),
         "organized_root_files": organized,
         "tasks": len(tasks),
+        "available_tasks": all_task_count,
+        "random_mode": random_mode,
         "workers": workers,
         "generated": sum(1 for record in records if record.get("status") == "generated"),
         "skipped": sum(1 for record in records if record.get("status") == "skipped"),
@@ -140,6 +154,10 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--sample", action="append", default=[], help="Optional source sample folder name filter. Repeatable.")
     parser.add_argument("--workers", type=int, default=None, help="Parallel workers. 0 means auto; defaults to config.")
     parser.add_argument("--task-timeout-seconds", type=float, default=0, help="Per external tool task timeout; defaults to config.")
+    parser.add_argument("--random-mode", action="store_true", default=None, help="Randomly sample archive derivations per source sample.")
+    parser.add_argument("--no-random-mode", action="store_false", dest="random_mode", help="Generate every enabled format/algorithm/level combination.")
+    parser.add_argument("--archives-per-sample", type=int, default=0, help="Random mode archive budget per source sample; defaults to config.")
+    parser.add_argument("--seed", default="", help="Random mode seed. Use 'random' for a fresh seed; defaults to config.")
     parser.set_defaults(pretty=True)
     parser.add_argument("--pretty", action="store_true", help="Also write formatted derived_manifest.pretty.json. Enabled by default.")
     parser.add_argument("--no-pretty", action="store_false", dest="pretty", help="Only write JSONL manifests.")
@@ -160,10 +178,12 @@ def _load_or_create_config(path: Path) -> dict[str, Any]:
 
 def _merged_config(loaded: dict[str, Any]) -> dict[str, Any]:
     merged = json.loads(json.dumps(DEFAULT_CONFIG_DATA))
-    for key in ("tools", "parallel", "formats"):
+    for key in ("tools", "parallel", "derivation", "formats"):
         if isinstance(loaded.get(key), dict):
             for item_key, item_value in loaded[key].items():
                 if key == "formats" and isinstance(item_value, dict) and isinstance(merged[key].get(item_key), dict):
+                    merged[key][item_key].update(item_value)
+                elif key == "derivation" and item_key == "random_mode" and isinstance(item_value, dict) and isinstance(merged[key].get(item_key), dict):
                     merged[key][item_key].update(item_value)
                 else:
                     merged[key][item_key] = item_value
@@ -288,6 +308,39 @@ def _build_tasks(source_samples: list[Path], material_root: Path, config: dict[s
             tasks.extend(new_tasks)
             skipped.extend(new_skipped)
     return tasks, skipped
+
+
+def _random_mode_config(config: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
+    derivation = config.get("derivation") if isinstance(config.get("derivation"), dict) else {}
+    random_mode = derivation.get("random_mode") if isinstance(derivation.get("random_mode"), dict) else {}
+    enabled = bool(random_mode.get("enabled", True))
+    if args.random_mode is not None:
+        enabled = bool(args.random_mode)
+    archives_per_sample = int(args.archives_per_sample or random_mode.get("archives_per_sample") or 5)
+    seed = str(args.seed or random_mode.get("seed") or "random")
+    return {
+        "enabled": enabled,
+        "archives_per_sample": max(0, archives_per_sample),
+        "seed": seed,
+    }
+
+
+def _sample_tasks_by_source(tasks: list[DeriveTask], archives_per_sample: int, raw_seed: str) -> list[DeriveTask]:
+    if archives_per_sample <= 0:
+        return []
+    seed = _resolve_seed(raw_seed)
+    output: list[DeriveTask] = []
+    by_sample: dict[str, list[DeriveTask]] = {}
+    for task in tasks:
+        by_sample.setdefault(task.sample_id, []).append(task)
+    for sample_id, sample_tasks in sorted(by_sample.items()):
+        if len(sample_tasks) <= archives_per_sample:
+            output.extend(sample_tasks)
+            continue
+        sample_seed = f"{seed}:{sample_id}"
+        rng = random.Random(sample_seed)
+        output.extend(sorted(rng.sample(sample_tasks, archives_per_sample), key=lambda item: (item.material_format, item.output_path.name)))
+    return output
 
 
 def _zip_tasks(sample: Path, material_root: Path, cfg: dict[str, Any], tools: dict[str, Path]) -> tuple[list[DeriveTask], list[dict[str, Any]]]:
@@ -601,6 +654,12 @@ def _as_list(value: Any) -> list[Any]:
 
 def _csv_filter(raw: str) -> set[str]:
     return {item.strip().lower() for item in str(raw or "").split(",") if item.strip()}
+
+
+def _resolve_seed(raw: str) -> int:
+    if str(raw).strip().lower() in {"", "random", "none"}:
+        return random.SystemRandom().randrange(1, 2**31 - 1) ^ int(time.time_ns() & 0x7FFFFFFF)
+    return int(raw)
 
 
 def _resolve_workers(workers: int, task_count: int) -> int:

@@ -1038,7 +1038,7 @@ def _corpus_profile_mutations(
     if base_fmt == "tar":
         return _tar_corpus_mutations(data, randomizer, profile)
     if base_fmt in {"gzip", "bzip2", "xz", "zstd"}:
-        return _stream_corpus_mutations(data, base_fmt, randomizer, profile)
+        return _stream_corpus_mutations(data, fmt, randomizer, profile)
     if base_fmt == "7z":
         return _seven_zip_corpus_mutations(data, randomizer, profile)
     if base_fmt == "rar":
@@ -1048,86 +1048,181 @@ def _corpus_profile_mutations(
 
 def _zip_corpus_mutations(data: bytes, randomizer: random.Random, profile: str) -> tuple[list[BinaryMutation], list[str]]:
     mutations: list[BinaryMutation] = []
+    layer = _damage_layer(profile)
     eocd = data.rfind(b"PK\x05\x06")
     if eocd >= 0 and eocd + 22 <= len(data):
-        mutations.extend([
-            _replace_bytes("corpus_zip_bad_eocd_counts", eocd + 8, struct.pack("<HH", 1, 99), "zip.eocd.entry_counts", "directory entry counts conflict"),
-            _replace_bytes("corpus_zip_bad_eocd_cd_offset", eocd + 16, struct.pack("<I", 0), "zip.eocd.cd_offset", "central directory offset points at start"),
-        ])
+        if layer in {"structural", "structural_directory", "hard_negative"}:
+            mutations.extend([
+                _replace_bytes("corpus_zip_bad_eocd_counts", eocd + 8, struct.pack("<HH", 1, 99), "zip.eocd.entry_counts", "directory entry counts conflict"),
+                _replace_bytes("corpus_zip_bad_eocd_cd_offset", eocd + 16, struct.pack("<I", 0), "zip.eocd.cd_offset", "central directory offset points at start"),
+            ])
+        if layer == "partial_recoverable":
+            mutations.append(_truncate("corpus_zip_drop_central_directory", eocd, "zip.central_directory", "central directory is missing but local headers remain"))
     else:
         mutations.append(_truncate("corpus_zip_drop_tail_directory", max(1, len(data) * 4 // 5), "zip.central_directory", "tail directory is truncated"))
-    payload_offset = _middle_offset(data, randomizer)
-    mutations.append(_replace_byte("corpus_zip_flip_payload_byte", payload_offset, data[payload_offset] ^ 0x41, "zip.local_payload", "payload checksum may fail"))
-    if "missing_volume" in profile and len(data) > 128:
+    if layer == "hard_negative":
+        payload_offset = _middle_offset(data, randomizer)
+        mutations.append(_replace_byte("corpus_zip_flip_payload_byte", payload_offset, data[payload_offset] ^ 0x41, "zip.local_payload", "payload checksum may fail"))
+    if ("missing_volume" in profile or layer == "partial_recoverable") and len(data) > 128:
         mutations.append(_delete("corpus_zip_delete_middle_volume_bytes", max(1, len(data) // 3), max(8, len(data) // 20), "zip.missing_volume", "middle archive bytes are missing"))
-    mutations.append(_append("corpus_zip_append_tail_junk", _random_junk(randomizer, "ZIPTAIL", 12, 48), "archive.tail", "extra bytes after archive"))
+    if layer in {"structural", "hard_negative"}:
+        mutations.append(_append("corpus_zip_append_tail_junk", _random_junk(randomizer, "ZIPTAIL", 12, 48), "archive.tail", "extra bytes after archive"))
     if "boundary" in profile or "sfx" in profile:
         mutations.append(_insert("corpus_zip_insert_sfx_prefix", 0, b"MZ-SUNPACK-CORPUS" + _random_junk(randomizer, "SFX", 8, 24), "zip.sfx.prefix", "archive is embedded behind a carrier prefix"))
-    return mutations, ["central_directory_bad", "central_directory_offset_bad", "central_directory_count_bad", "checksum_error", "crc_error", "damaged", "trailing_junk", "boundary_unreliable"]
+    flags = ["central_directory_bad", "central_directory_offset_bad", "central_directory_count_bad"]
+    if layer == "hard_negative":
+        flags.extend(["checksum_error", "crc_error", "damaged"])
+    if any(mutation.zone in {"archive.tail", "zip.sfx.prefix"} for mutation in mutations):
+        flags.extend(["trailing_junk", "boundary_unreliable"])
+    if layer == "partial_recoverable":
+        flags.extend(["missing_volume", "input_truncated"])
+    return mutations, _dedupe_list(flags)
 
 
 def _tar_corpus_mutations(data: bytes, randomizer: random.Random, profile: str) -> tuple[list[BinaryMutation], list[str]]:
     mutations: list[BinaryMutation] = []
+    layer = _damage_layer(profile)
     if len(data) >= 512:
         mutations.append(_replace_bytes("corpus_tar_zero_header_checksum", 148, b"000000\0 ", "tar.header.checksum", "header checksum must be recomputed"))
-    if len(data) > 2048:
+    if layer in {"partial_recoverable", "structural_directory"} and len(data) > 2048:
         mutations.append(_truncate("corpus_tar_drop_zero_blocks_or_member_tail", max(512, len(data) - 1024), "tar.trailing_zero_blocks", "tar end marker or final member is truncated"))
-    else:
+    elif layer in {"structural", "hard_negative"}:
         mutations.append(_append("corpus_tar_append_tail_junk", _random_junk(randomizer, "TARTAIL", 8, 32), "archive.tail", "extra bytes after tar stream"))
-    payload = _middle_offset(data, randomizer)
-    mutations.append(_replace_byte("corpus_tar_flip_payload_byte", payload, data[payload] ^ 0x23, "tar.payload", "member payload may be damaged"))
+    if layer == "hard_negative":
+        payload = _middle_offset(data, randomizer)
+        mutations.append(_replace_byte("corpus_tar_flip_payload_byte", payload, data[payload] ^ 0x23, "tar.payload", "member payload may be damaged"))
     if "boundary" in profile:
         mutations.append(_append("corpus_tar_append_boundary_junk", _random_junk(randomizer, "TARBOUND", 8, 32), "archive.tail", "boundary has trailing junk"))
-    return mutations, ["tar_checksum_bad", "missing_end_block", "probably_truncated", "checksum_error", "damaged", "trailing_junk", "boundary_unreliable"]
+    flags = ["tar_checksum_bad"]
+    if any(mutation.operation.op == "truncate" for mutation in mutations):
+        flags.extend(["missing_end_block", "probably_truncated"])
+    if any(mutation.zone == "archive.tail" for mutation in mutations):
+        flags.extend(["trailing_junk", "boundary_unreliable"])
+    if layer == "hard_negative":
+        flags.extend(["checksum_error", "damaged"])
+    return mutations, _dedupe_list(flags)
 
 
 def _stream_corpus_mutations(data: bytes, fmt: ArchiveFormat, randomizer: random.Random, profile: str) -> tuple[list[BinaryMutation], list[str]]:
     mutations: list[BinaryMutation] = []
-    if fmt == "gzip" and len(data) > 16:
+    layer = _damage_layer(profile)
+    base_fmt = _base_archive_format(fmt)
+    is_tar_wrapped = str(fmt).startswith("tar.")
+    if layer == "partial_recoverable" and not is_tar_wrapped:
+        layer = "structural"
+    if base_fmt == "gzip" and len(data) > 16 and layer in {"structural", "structural_directory", "hard_negative"}:
         mutations.append(_replace_bytes("corpus_gzip_zero_footer", len(data) - 8, b"\0" * 8, "gzip.footer", "footer CRC/ISIZE is invalid"))
-    payload_offset = _middle_offset(data, randomizer)
-    mutations.append(_replace_byte(f"corpus_{fmt}_flip_payload_byte", payload_offset, data[payload_offset] ^ 0x35, f"{fmt}.payload", "compressed payload may be damaged"))
-    if len(data) > 64:
-        mutations.append(_truncate(f"corpus_{fmt}_truncate_stream_tail", max(1, len(data) * 9 // 10), f"{fmt}.stream_tail", "compressed stream tail is truncated"))
-    mutations.append(_append(f"corpus_{fmt}_append_tail_junk", _random_junk(randomizer, f"{fmt.upper()}TAIL", 8, 32), "archive.tail", "extra bytes after compressed stream"))
-    return mutations, ["input_truncated", "probably_truncated", "unexpected_end", "checksum_error", "crc_error", "damaged", "data_error", "trailing_junk"]
+    if layer == "hard_negative":
+        payload_offset = _middle_offset(data, randomizer)
+        mutations.append(_replace_byte(f"corpus_{base_fmt}_flip_payload_byte", payload_offset, data[payload_offset] ^ 0x35, f"{base_fmt}.payload", "compressed payload may be damaged"))
+    if len(data) > 64 and layer in {"partial_recoverable", "hard_negative"}:
+        mutations.append(_truncate(f"corpus_{base_fmt}_truncate_stream_tail", max(1, len(data) * 9 // 10), f"{base_fmt}.stream_tail", "compressed stream tail is truncated"))
+    if layer in {"structural", "hard_negative"}:
+        mutations.append(_append(f"corpus_{base_fmt}_append_tail_junk", _random_junk(randomizer, f"{base_fmt.upper()}TAIL", 8, 32), "archive.tail", "extra bytes after compressed stream"))
+    if "boundary" in profile:
+        mutations.append(_insert(f"corpus_{base_fmt}_insert_carrier_prefix", 0, b"MZ-SUNPACK-STREAM" + _random_junk(randomizer, "SFX", 8, 24), f"{base_fmt}.sfx.prefix", "compressed stream is embedded behind a carrier prefix"))
+    if not mutations:
+        mutations.append(_append(f"corpus_{base_fmt}_append_tail_junk", _random_junk(randomizer, f"{base_fmt.upper()}TAIL", 8, 32), "archive.tail", "extra bytes after compressed stream"))
+    flags: list[str] = []
+    if any(mutation.operation.op == "truncate" for mutation in mutations):
+        flags.extend(["input_truncated", "probably_truncated", "unexpected_end"])
+    if layer == "hard_negative":
+        flags.extend(["checksum_error", "crc_error", "damaged", "data_error"])
+    elif base_fmt == "gzip" and any(mutation.zone == "gzip.footer" for mutation in mutations):
+        flags.extend(["gzip_footer_bad", "checksum_error"])
+    if any(mutation.zone == "archive.tail" or "sfx" in mutation.zone for mutation in mutations):
+        flags.extend(["trailing_junk", "boundary_unreliable"])
+    return mutations, _dedupe_list(flags or ["damaged"])
 
 
 def _seven_zip_corpus_mutations(data: bytes, randomizer: random.Random, profile: str) -> tuple[list[BinaryMutation], list[str]]:
     mutations: list[BinaryMutation] = []
+    layer = _damage_layer(profile)
     if len(data) > 32:
         mutations.append(_replace_bytes("corpus_7z_bad_start_crc", 8, b"\0\0\0\0", "7z.start_header_crc", "start header CRC is invalid"))
-        mutations.append(_replace_bytes("corpus_7z_bad_next_crc", 28, b"\0\0\0\0", "7z.next_header_crc", "next header CRC is invalid"))
-    payload_offset = _middle_offset(data, randomizer)
-    mutations.append(_replace_byte("corpus_7z_flip_payload_byte", payload_offset, data[payload_offset] ^ 0x17, "7z.payload", "packed stream may be damaged"))
-    mutations.append(_append("corpus_7z_append_tail_junk", _random_junk(randomizer, "7ZTAIL", 8, 32), "archive.tail", "extra bytes after 7z stream"))
+        if layer in {"structural_directory", "hard_negative"}:
+            mutations.append(_replace_bytes("corpus_7z_bad_next_crc", 28, b"\0\0\0\0", "7z.next_header_crc", "next header CRC is invalid"))
+    if layer == "hard_negative":
+        payload_offset = _middle_offset(data, randomizer)
+        mutations.append(_replace_byte("corpus_7z_flip_payload_byte", payload_offset, data[payload_offset] ^ 0x17, "7z.payload", "packed stream may be damaged"))
+    if layer in {"structural", "hard_negative"}:
+        mutations.append(_append("corpus_7z_append_tail_junk", _random_junk(randomizer, "7ZTAIL", 8, 32), "archive.tail", "extra bytes after 7z stream"))
+    if layer == "partial_recoverable" and len(data) > 64:
+        mutations.append(_truncate("corpus_7z_drop_stream_tail", max(1, len(data) - 32), "7z.stream_tail", "7z stream tail is truncated"))
     if "sfx" in profile or "boundary" in profile:
         mutations.append(_insert("corpus_7z_insert_sfx_prefix", 0, b"MZ-SUNPACK-7Z" + _random_junk(randomizer, "SFX", 8, 24), "7z.sfx.prefix", "7z payload is embedded behind a carrier prefix"))
-    return mutations, ["start_header_crc_bad", "next_header_crc_bad", "packed_stream_bad", "checksum_error", "damaged", "data_error", "trailing_junk", "boundary_unreliable"]
+    if not mutations:
+        mutations.append(_append("corpus_7z_append_tail_junk", _random_junk(randomizer, "7ZTAIL", 8, 32), "archive.tail", "extra bytes after 7z stream"))
+    flags = ["start_header_crc_bad"]
+    if any(mutation.zone == "7z.next_header_crc" for mutation in mutations):
+        flags.append("next_header_crc_bad")
+    if layer == "hard_negative":
+        flags.extend(["packed_stream_bad", "checksum_error", "damaged", "data_error"])
+    if layer == "partial_recoverable":
+        flags.extend(["input_truncated", "probably_truncated"])
+    if any(mutation.zone in {"archive.tail", "7z.sfx.prefix"} for mutation in mutations):
+        flags.extend(["trailing_junk", "boundary_unreliable"])
+    return mutations, _dedupe_list(flags)
 
 
 def _rar_corpus_mutations(data: bytes, randomizer: random.Random, profile: str) -> tuple[list[BinaryMutation], list[str]]:
-    payload_offset = _middle_offset(data, randomizer)
-    mutations = [
-        _replace_byte("corpus_rar_flip_file_block_byte", payload_offset, data[payload_offset] ^ 0x29, "rar.file_block", "file block may be damaged"),
-        _append("corpus_rar_append_tail_junk", _random_junk(randomizer, "RARTAIL", 8, 32), "archive.tail", "extra bytes after rar stream"),
-    ]
-    if len(data) > 64:
+    layer = _damage_layer(profile)
+    mutations: list[BinaryMutation] = []
+    if layer == "hard_negative":
+        payload_offset = _middle_offset(data, randomizer)
+        mutations.append(_replace_byte("corpus_rar_flip_file_block_byte", payload_offset, data[payload_offset] ^ 0x29, "rar.file_block", "file block may be damaged"))
+    if layer in {"structural", "hard_negative"}:
+        mutations.append(_append("corpus_rar_append_tail_junk", _random_junk(randomizer, "RARTAIL", 8, 32), "archive.tail", "extra bytes after rar stream"))
+    if len(data) > 64 and layer in {"partial_recoverable", "hard_negative", "structural_directory"}:
         mutations.append(_truncate("corpus_rar_drop_end_block", max(1, len(data) - 32), "rar.end_block", "end block may be missing"))
     if "sfx" in profile or "boundary" in profile:
         mutations.append(_insert("corpus_rar_insert_sfx_prefix", 0, b"MZ-SUNPACK-RAR" + _random_junk(randomizer, "SFX", 8, 24), "rar.sfx.prefix", "rar payload is embedded behind a carrier prefix"))
-    return mutations, ["file_block_bad", "missing_end_block", "checksum_error", "damaged", "data_error", "trailing_junk", "boundary_unreliable"]
+    if not mutations:
+        mutations.append(_append("corpus_rar_append_tail_junk", _random_junk(randomizer, "RARTAIL", 8, 32), "archive.tail", "extra bytes after rar stream"))
+    flags: list[str] = []
+    if layer == "hard_negative":
+        flags.extend(["file_block_bad", "checksum_error", "damaged", "data_error"])
+    if any(mutation.operation.op == "truncate" for mutation in mutations):
+        flags.append("missing_end_block")
+    if any(mutation.zone in {"archive.tail", "rar.sfx.prefix"} for mutation in mutations):
+        flags.extend(["trailing_junk", "boundary_unreliable"])
+    return mutations, _dedupe_list(flags)
 
 
 def _raw_corpus_mutations(data: bytes, fmt: ArchiveFormat, randomizer: random.Random, profile: str) -> tuple[list[BinaryMutation], list[str]]:
+    layer = _damage_layer(profile)
     header_offset = min(len(data) - 1, max(0, len(data) // 16))
-    payload_offset = _middle_offset(data, randomizer)
     mutations = [
         _replace_byte(f"corpus_{fmt}_flip_header_byte", header_offset, data[header_offset] ^ 0x11, f"{fmt}.header", "header byte changed"),
-        _replace_byte(f"corpus_{fmt}_flip_payload_byte", payload_offset, data[payload_offset] ^ 0x22, f"{fmt}.payload", "payload byte changed"),
-        _append(f"corpus_{fmt}_append_tail_junk", _random_junk(randomizer, "TAIL", 8, 32), "archive.tail", "extra bytes after archive"),
     ]
+    if layer == "hard_negative":
+        payload_offset = _middle_offset(data, randomizer)
+        mutations.append(_replace_byte(f"corpus_{fmt}_flip_payload_byte", payload_offset, data[payload_offset] ^ 0x22, f"{fmt}.payload", "payload byte changed"))
+    if layer in {"structural", "hard_negative"}:
+        mutations.append(_append(f"corpus_{fmt}_append_tail_junk", _random_junk(randomizer, "TAIL", 8, 32), "archive.tail", "extra bytes after archive"))
     return mutations, ["damaged", "checksum_error", "boundary_unreliable"]
+
+
+def _damage_layer(profile: str) -> str:
+    text = str(profile or "").lower()
+    for layer in ("structural_directory", "partial_recoverable", "hard_negative", "structural"):
+        if layer in text:
+            return layer
+    if "payload" in text or "block" in text:
+        return "hard_negative"
+    if "partial" in text or "truncate" in text or "missing" in text:
+        return "partial_recoverable"
+    if "directory" in text or "metadata" in text or "index" in text:
+        return "structural_directory"
+    return "structural"
+
+
+def _dedupe_list(values: list[str]) -> list[str]:
+    output: list[str] = []
+    for value in values:
+        if value not in output:
+            output.append(value)
+    return output
 
 
 def _oracle_from_clean_bytes(data: bytes, fmt: ArchiveFormat) -> dict[str, Any]:
