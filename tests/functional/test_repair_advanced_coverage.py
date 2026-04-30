@@ -29,6 +29,31 @@ from tests.helpers.detection_config import with_detection_pipeline
 from tests.helpers.tool_config import get_optional_rar
 
 
+def _verification_config(methods: list[dict] | None = None, **overrides) -> dict:
+    normalized_methods = []
+    for method in methods or [
+        {"name": "extraction_exit_signal"},
+        {"name": "output_presence"},
+        {"name": "archive_test_crc"},
+    ]:
+        item = dict(method)
+        item.setdefault("enabled", True)
+        normalized_methods.append(item)
+    config = {
+        "enabled": True,
+        "max_retries": 2,
+        "cleanup_failed_output": True,
+        "accept_partial_when_source_damaged": True,
+        "partial_min_completeness": 0.2,
+        "complete_accept_threshold": 0.999,
+        "partial_accept_threshold": 0.2,
+        "retry_on_verification_failure": True,
+        "methods": normalized_methods,
+    }
+    config.update(overrides)
+    return config
+
+
 def test_coordinator_real_repair_then_worker_extraction_for_prefixed_7z(tmp_path):
     _require_worker_or_skip()
     inner = _build_7z_archive(tmp_path, {"ok.txt": b"ok"})
@@ -48,14 +73,7 @@ def test_coordinator_real_repair_then_worker_extraction_for_prefixed_7z(tmp_path
             "modules": [{"name": "archive_carrier_crop_deep_recovery", "enabled": True}],
             "beam": {"enabled": True, "max_rounds": 1},
         },
-        "verification": {
-            "enabled": True,
-            "methods": [
-                {"name": "extraction_exit_signal"},
-                {"name": "output_presence"},
-                {"name": "archive_test_crc"},
-            ],
-        },
+        "verification": _verification_config(),
     }
     runner = ExtractionBatchRunner(RunContext(), extractor, NestedOutputScanPolicy({}), config=config)
 
@@ -1140,16 +1158,7 @@ def _pipeline_runner_repair_config(tmp_path: Path, *, modules: list[dict], exten
             "modules": modules,
             "beam": {"enabled": True, "max_rounds": 2},
         },
-        "verification": {
-            "enabled": True,
-            "methods": [
-                {"name": "extraction_exit_signal"},
-                {"name": "output_presence"},
-                {"name": "archive_test_crc"},
-            ],
-            "partial_min_completeness": 0.2,
-            "partial_accept_threshold": 0.2,
-        },
+        "verification": _verification_config(),
     }, precheck=[
         {"name": "size_minimum", "enabled": True, "min_inspection_size_bytes": 0},
     ], scoring=[
@@ -1182,16 +1191,7 @@ def _nested_salvage_pipeline_config(tmp_path: Path) -> dict:
             ],
             "beam": {"enabled": True, "max_rounds": 2},
         },
-        "verification": {
-            "enabled": True,
-            "methods": [
-                {"name": "extraction_exit_signal"},
-                {"name": "output_presence"},
-                {"name": "archive_test_crc"},
-            ],
-            "partial_min_completeness": 0.2,
-            "partial_accept_threshold": 0.2,
-        },
+        "verification": _verification_config(),
     }, precheck=[
         {"name": "size_minimum", "enabled": True, "min_inspection_size_bytes": 0},
     ], scoring=[

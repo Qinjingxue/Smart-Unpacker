@@ -138,13 +138,6 @@ class CandidateSelector:
         scored = [(self.generation_priority(candidate), candidate) for candidate in accepted]
         scored.sort(key=lambda item: item[0], reverse=True)
         priority, selected = scored[0]
-        selected = replace(
-            selected,
-            diagnosis={
-                **selected.diagnosis,
-                "candidate_features": candidate_feature_payload(selected),
-            },
-        )
         return selected, {
             "candidate_count": len(validated),
             "accepted_count": len(accepted),
@@ -409,11 +402,11 @@ def candidate_ranking_breakdown(candidate: RepairCandidate) -> dict[str, Any]:
     cost = _weighted_component_sum(cost_breakdown)
     risk = _weighted_component_sum(risk_breakdown)
     module_bias = _module_generation_bias(candidate)
-    raw_score = benefit * 0.55 + evidence * 0.25 + module_bias - cost * 0.25 - risk * 0.15
+    raw_score = benefit * 0.55 + evidence * 0.25 + module_bias - cost * 0.18 - risk * 0.15
     priority = _clamp01(raw_score)
     return {
         "version": 1,
-        "formula": "benefit*0.55 + evidence*0.25 + module_bias - cost*0.25 - risk*0.15",
+        "formula": "benefit*0.55 + evidence*0.25 + module_bias - cost*0.18 - risk*0.15",
         "generation_priority": priority,
         "raw_score": raw_score,
         "benefit_score": benefit,
@@ -424,7 +417,7 @@ def candidate_ranking_breakdown(candidate: RepairCandidate) -> dict[str, Any]:
         "weights": {
             "benefit": 0.55,
             "evidence": 0.25,
-            "cost": -0.25,
+            "cost": -0.18,
             "risk": -0.15,
             "module_bias": 1.0,
             "history": 0.0,
@@ -432,7 +425,7 @@ def candidate_ranking_breakdown(candidate: RepairCandidate) -> dict[str, Any]:
         "contributions": {
             "benefit": benefit * 0.55,
             "evidence": evidence * 0.25,
-            "cost": cost * -0.25,
+            "cost": cost * -0.18,
             "risk": risk * -0.15,
             "module_bias": module_bias,
             "history": 0.0,
@@ -873,6 +866,15 @@ def _patch_plan_priority(candidate: RepairCandidate) -> float:
 
 def _module_generation_bias(candidate: RepairCandidate) -> float:
     module_name = str(candidate.module_name or "")
+    flags = {str(flag) for flag in candidate.damage_flags}
+    if module_name == "zip_trailing_junk_trim" and "trailing_junk" in flags:
+        if flags & {"checksum_error", "crc_error", "entry_payload_bad", "damaged", "content_integrity_bad_or_unknown"}:
+            return -0.02
+        return 0.03
+    if module_name == "zip_entry_quarantine_rebuild" and flags & {"checksum_error", "crc_error", "entry_payload_bad", "damaged"}:
+        return 0.05
+    if module_name == "zip_deep_partial_recovery" and flags & {"checksum_error", "crc_error", "entry_payload_bad", "damaged"}:
+        return 0.05
     if module_name == "zip64_field_repair":
         return 0.16
     if module_name == "zip_eocd_repair":
@@ -880,10 +882,9 @@ def _module_generation_bias(candidate: RepairCandidate) -> float:
     if module_name == "seven_zip_crc_field_repair":
         return 0.1
     if module_name == "zip_central_directory_rebuild":
-        flags = {str(flag) for flag in candidate.damage_flags}
         if "eocd_bad" in flags and not (flags & {"central_directory_bad", "directory_integrity_bad_or_unknown", "local_header_recovery"}):
             return 0.0
-        return 0.08
+        return 0.11
     return 0.0
 
 

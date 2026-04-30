@@ -817,6 +817,17 @@ def test_repair_scheduler_blocks_process_level_failures(tmp_path):
 def test_repair_config_is_normalized_by_config_schema():
     config = normalize_config({
         "recursive_extract": "1",
+        "verification": {
+            "enabled": True,
+            "max_retries": "2",
+            "cleanup_failed_output": True,
+            "accept_partial_when_source_damaged": True,
+            "partial_min_completeness": "0.2",
+            "complete_accept_threshold": "0.999",
+            "partial_accept_threshold": "0.2",
+            "retry_on_verification_failure": True,
+            "methods": [],
+        },
         "repair": {
             "safety": {"allow_unsafe": True, "allow_partial": "false"},
             "deep": {
@@ -849,6 +860,9 @@ def test_repair_config_is_normalized_by_config_schema():
     assert config["repair"]["auto_deep"]["max_modules"] == 1
     assert config["repair"]["auto_deep"]["max_input_size_mb"] == 32.0
     assert config["repair"]["beam"]["enabled"] is True
+    assert config["verification"]["max_retries"] == 2
+    assert config["verification"]["partial_min_completeness"] == 0.2
+    assert config["verification"]["complete_accept_threshold"] == 0.999
 
 
 def test_repair_config_rejects_removed_analysis_repair_settings():
