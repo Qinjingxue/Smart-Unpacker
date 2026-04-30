@@ -87,6 +87,7 @@ def _build_report(rows: list[dict[str, Any]], model_root: Path) -> dict[str, Any
     partial_rows = sum(1 for row in rows if int(row.get("label", 0) or 0) == 1 or str(row.get("label_status") or "") == "partial")
     state_progress_rows = sum(1 for row in rows if int(row.get("label", 0) or 0) == 2 or str(row.get("label_status") or "") == "state_progress")
     total = max(1, len(rows))
+    model_metrics = _model_metrics(model_root, source_counts, len(rows))
     report = {
         "dataset": {
             "row_count": len(rows),
@@ -111,7 +112,9 @@ def _build_report(rows: list[dict[str, Any]], model_root: Path) -> dict[str, Any
             "timeout_rows": timeout_rows,
             "failed_or_timeout_rows": failed_rows,
         },
-        "model_metric_comparison": _model_metrics(model_root, source_counts, len(rows)),
+        "format_detection_quality": _format_detection_quality(rows),
+        "per_format": _per_format_report(rows, model_metrics),
+        "model_metric_comparison": model_metrics,
     }
     report["warnings"] = _quality_warnings(report)
     return report
@@ -123,6 +126,138 @@ def _row_format(row: dict[str, Any]) -> str:
     stable = row.get("stable_features") if isinstance(row.get("stable_features"), dict) else {}
     state = stable.get("state") if isinstance(stable.get("state"), dict) else {}
     return str(row.get("format") or state.get("format") or "unknown")
+
+
+def _per_format_report(rows: list[dict[str, Any]], model_metrics: dict[str, Any]) -> dict[str, Any]:
+    by_format: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        by_format[_row_format(row)].append(row)
+    output: dict[str, Any] = {}
+    for fmt, items in sorted(by_format.items()):
+        groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for row in items:
+            groups[str(row.get("query_id") or row.get("sample_id") or "")].append(row)
+        query_sizes = [len(values) for values in groups.values()]
+        labels = Counter(str(int(row.get("label", 0) or 0)) for row in items)
+        statuses = Counter(str(row.get("label_status") or "unknown") for row in items)
+        modules = Counter(str(row.get("module") or "<none>") for row in items)
+        output[fmt] = {
+            "row_count": len(items),
+            "query_count": len(groups),
+            "label_distribution": dict(sorted(labels.items(), key=lambda item: int(item[0]))),
+            "label_status_distribution": dict(sorted(statuses.items())),
+            "query_candidate_count": _series_summary(query_sizes),
+            "query_candidate_count_distribution": dict(sorted(Counter(str(size) for size in query_sizes).items(), key=lambda item: int(item[0]))),
+            "quality_ratios": _quality_ratios(items),
+            "module_distribution_top10": dict(modules.most_common(10)),
+            "trainability": _format_trainability(items, groups),
+            "model_metrics": _metrics_for_format(model_metrics, fmt),
+        }
+    return output
+
+
+def _quality_ratios(rows: list[dict[str, Any]]) -> dict[str, float]:
+    total = max(1, len(rows))
+    return {
+        "partial_row_ratio": sum(1 for row in rows if int(row.get("label", 0) or 0) == 1 or str(row.get("label_status") or "") == "partial") / total,
+        "state_progress_row_ratio": sum(1 for row in rows if int(row.get("label", 0) or 0) == 2 or str(row.get("label_status") or "") == "state_progress") / total,
+        "complete_row_ratio": sum(1 for row in rows if int(row.get("label", 0) or 0) == 3 or str(row.get("label_status") or "") == "complete") / total,
+        "hard_negative_row_ratio": sum(1 for row in rows if int(row.get("label", 0) or 0) == -1 or str(row.get("label_status") or "") == "hard_negative") / total,
+    }
+
+
+def _format_trainability(rows: list[dict[str, Any]], groups: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
+    candidate_groups = {query: items for query, items in groups.items() if len(items) >= 2}
+    gains = {_label_gain(row.get("label")) for row in rows}
+    reasons = []
+    if len(candidate_groups) < 30:
+        reasons.append("too_few_queries")
+    if len(gains) < 2:
+        reasons.append("label_single_class")
+    if not candidate_groups:
+        reasons.append("candidate_competition_too_low")
+    return {
+        "trainable": not reasons,
+        "reasons": reasons,
+        "candidate_query_count": len(candidate_groups),
+        "label_gain_count": len(gains),
+    }
+
+
+def _label_gain(label: Any) -> int:
+    try:
+        raw = int(label or 0)
+    except Exception:
+        raw = 0
+    return {-1: 0, 0: 0, 1: 1, 2: 2, 3: 4}.get(raw, 0)
+
+
+def _metrics_for_format(model_metrics: dict[str, Any], fmt: str) -> dict[str, Any]:
+    prefix = f"{fmt}/"
+    output = {}
+    for key, value in model_metrics.items():
+        if key.startswith(prefix):
+            output[key[len(prefix):]] = value
+    return output
+
+
+def _format_detection_quality(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    mismatches = []
+    compared_top = 0
+    matched_top = 0
+    compared_state = 0
+    matched_state = 0
+    for row in rows:
+        material = _normalize_format_name(row.get("material_format"))
+        if not material:
+            continue
+        top = _normalize_format_name(row.get("format"))
+        state = _normalize_format_name(_nested(row, "stable_features", "state", "format"))
+        if top:
+            compared_top += 1
+            matched_top += 1 if top == material else 0
+        if state:
+            compared_state += 1
+            matched_state += 1 if state == material else 0
+        if (top and top != material) or (state and state != material):
+            mismatches.append({
+                "query_id": row.get("query_id"),
+                "sample_id": row.get("sample_id"),
+                "material_format": row.get("material_format"),
+                "top_format": row.get("format"),
+                "state_format": _nested(row, "stable_features", "state", "format"),
+            })
+    return {
+        "top_format_compared": compared_top,
+        "top_format_match_ratio": matched_top / max(1, compared_top),
+        "state_format_compared": compared_state,
+        "state_format_match_ratio": matched_state / max(1, compared_state),
+        "mismatch_count": len(mismatches),
+        "mismatches_sample": mismatches[:50],
+    }
+
+
+def _normalize_format_name(value: Any) -> str:
+    normalized = str(value or "").strip().lower().replace(".", "_").replace("-", "_")
+    aliases = {
+        "tgz": "tar_gz",
+        "tar_gzip": "tar_gz",
+        "tbz": "tar_bz2",
+        "tbz2": "tar_bz2",
+        "tar_bzip2": "tar_bz2",
+        "txz": "tar_xz",
+        "seven_zip": "7z",
+    }
+    return aliases.get(normalized, normalized)
+
+
+def _nested(row: dict[str, Any], *keys: str) -> Any:
+    current: Any = row
+    for key in keys:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(key)
+    return current
 
 
 def _series_summary(values: list[int]) -> dict[str, Any]:
@@ -160,17 +295,42 @@ def _model_metrics(model_root: Path, source_counts: Counter[str], row_count: int
         key = str(summary_path.parent.relative_to(model_root)).replace("\\", "/")
         summary_sources = {_normalize_path(path) for path in summary.get("input_files", []) if path}
         summary_row_count = int(summary.get("row_count") or 0)
+        format_scope = str(summary.get("format_scope") or "all")
         stale_reasons = []
         if current_sources and summary_sources and current_sources != summary_sources:
             stale_reasons.append("input_files_differ")
-        if row_count and summary_row_count and row_count != summary_row_count:
+        if format_scope == "all" and row_count and summary_row_count and row_count != summary_row_count:
             stale_reasons.append("row_count_differs")
         output[key] = {
             "feature_view": view,
+            "format_scope": format_scope,
             "row_count": summary.get("row_count"),
             "query_count": summary.get("query_count"),
             "feature_count": summary.get("feature_count"),
             "metrics": summary.get("metrics", {}),
+            "matches_current_dataset": not stale_reasons,
+            "stale_reasons": stale_reasons,
+        }
+    for summary_path in sorted(model_root.rglob("skip_summary.json")):
+        try:
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        view = str(summary.get("feature_view") or summary_path.parent.name)
+        key = str(summary_path.parent.relative_to(model_root)).replace("\\", "/")
+        summary_sources = {_normalize_path(path) for path in summary.get("input_files", []) if path}
+        stale_reasons = []
+        if current_sources and summary_sources and current_sources != summary_sources:
+            stale_reasons.append("input_files_differ")
+        output[key] = {
+            "feature_view": view,
+            "format_scope": str(summary.get("format_scope") or "all"),
+            "status": "skipped",
+            "skip_reason": summary.get("skip_reason"),
+            "row_count": summary.get("row_count"),
+            "query_count": summary.get("query_count"),
+            "feature_count": 0,
+            "metrics": {},
             "matches_current_dataset": not stale_reasons,
             "stale_reasons": stale_reasons,
         }
@@ -220,6 +380,20 @@ def _quality_warnings(report: dict[str, Any]) -> list[str]:
     teacher = _model_ndcg(metrics, "teacher_only_baseline")
     if stable is not None and teacher is not None and stable > 0.95 and abs(stable - teacher) < 0.05:
         warnings.append("dataset_may_be_too_easy")
+    per_format = report.get("per_format", {}) if isinstance(report.get("per_format"), dict) else {}
+    for fmt, item in per_format.items():
+        if not isinstance(item, dict):
+            continue
+        trainability = item.get("trainability") if isinstance(item.get("trainability"), dict) else {}
+        for reason in trainability.get("reasons", []) or []:
+            if reason == "too_few_queries":
+                warnings.append(f"format_too_few_queries:{fmt}")
+            elif reason == "label_single_class":
+                warnings.append(f"format_label_single_class:{fmt}")
+            elif reason == "candidate_competition_too_low":
+                warnings.append(f"format_low_candidate_competition:{fmt}")
+        if not trainability.get("trainable", False):
+            warnings.append(f"format_not_trainable:{fmt}")
     return warnings
 
 
@@ -252,10 +426,17 @@ def _markdown_report(report: dict[str, Any]) -> str:
         f"- Formats: `{json.dumps(report['format_distribution'], ensure_ascii=False, sort_keys=True)}`",
         f"- Candidate count: `{json.dumps(report['query_candidate_count'], ensure_ascii=False, sort_keys=True)}`",
         f"- Quality ratios: `{json.dumps(report['quality_ratios'], ensure_ascii=False, sort_keys=True)}`",
+        f"- Format detection: `{json.dumps(report.get('format_detection_quality', {}), ensure_ascii=False, sort_keys=True)}`",
         f"- Warnings: `{json.dumps(report.get('warnings', []), ensure_ascii=False, sort_keys=True)}`",
         "",
-        "## Model Metrics",
+        "## Per Format",
     ]
+    for fmt, item in report.get("per_format", {}).items():
+        lines.append(f"- `{fmt}`: rows={item.get('row_count')} queries={item.get('query_count')} labels=`{json.dumps(item.get('label_distribution', {}), ensure_ascii=False, sort_keys=True)}` trainable=`{json.dumps(item.get('trainability', {}), ensure_ascii=False, sort_keys=True)}`")
+    lines.extend([
+        "",
+        "## Model Metrics",
+    ])
     for name, item in report.get("model_metric_comparison", {}).items():
         lines.append(f"- `{name}`: `{json.dumps(item.get('metrics', {}), ensure_ascii=False, sort_keys=True)}`")
     lines.append("")

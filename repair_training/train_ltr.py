@@ -17,23 +17,31 @@ if str(REPO_ROOT) not in sys.path:
 DEFAULT_DATASET_DIR = Path("repair_training") / "datasets"
 DEFAULT_OUTPUT_DIR = Path("repair_training") / "models" / "baseline_ltr"
 FEATURE_VIEWS = {"stable_only", "stable_plus_teacher", "teacher_only_baseline"}
+FORMAT_SCOPES = {"all", "zip", "tar", "tar_gz", "tar_bz2", "tar_xz", "gzip", "bzip2", "xz", "zstd", "7z", "rar"}
 LABEL_GAIN = {-1: 0, 0: 0, 1: 1, 2: 2, 3: 4}
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    output_dir = Path(args.output_dir)
     _ensure_training_imports()
     from joblib import dump
     from lightgbm import LGBMRanker
     from sklearn.feature_extraction import DictVectorizer
 
-    rows = _load_rows(args.input)
+    source_rows = _load_rows(args.input)
+    rows = _filter_rows_by_format(source_rows, args.format_scope)
     if not rows:
-        raise SystemExit("no LTR rows found")
+        _write_skip_summary(output_dir, args, source_rows, rows, "no_rows_for_format_scope")
+        return 0
     raw_grouped = _group_rows(rows)
     grouped = _filter_groups(raw_grouped, args)
     if not grouped:
-        raise SystemExit("no non-empty LTR query groups found")
+        _write_skip_summary(output_dir, args, source_rows, rows, "candidate_competition_too_low", raw_grouped=raw_grouped, grouped=grouped)
+        return 0
+    if len(grouped) < int(args.min_trainable_queries):
+        _write_skip_summary(output_dir, args, source_rows, rows, "too_few_queries", raw_grouped=raw_grouped, grouped=grouped)
+        return 0
 
     train_queries, eval_queries = _split_queries(sorted(grouped), int(args.seed))
     eval_skipped = not eval_queries
@@ -43,7 +51,7 @@ def main(argv: list[str] | None = None) -> int:
     row_refs = []
     for query_id in train_queries:
         for row in grouped[query_id]:
-            feature_rows.append(_row_features(row, args.feature_view))
+            feature_rows.append(_row_features(row, args.feature_view, args.format_scope))
             labels.append(_gain(row.get("label")))
             query_ids.append(query_id)
             row_refs.append(row)
@@ -62,10 +70,10 @@ def main(argv: list[str] | None = None) -> int:
         verbosity=-1,
     )
     if len(set(y_train)) <= 1:
-        raise SystemExit("training labels have only one class; collect more varied rows first")
+        _write_skip_summary(output_dir, args, source_rows, rows, "label_single_class", raw_grouped=raw_grouped, grouped=grouped)
+        return 0
     ranker.fit(x_train, y_train, group=train_group)
 
-    output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     ranker.booster_.save_model(str(output_dir / "model.txt"))
     dump(vectorizer, output_dir / "vectorizer.joblib")
@@ -73,7 +81,7 @@ def main(argv: list[str] | None = None) -> int:
     (output_dir / "feature_names.json").write_text(json.dumps(feature_names, ensure_ascii=False, indent=2), encoding="utf-8")
 
     eval_rows = [row for query in (eval_queries or train_queries) for row in grouped[query]]
-    eval_features = [_row_features(row, args.feature_view) for row in eval_rows]
+    eval_features = [_row_features(row, args.feature_view, args.format_scope) for row in eval_rows]
     eval_x = vectorizer.transform(eval_features)
     scores = list(ranker.predict(eval_x))
     metrics = _metrics(eval_rows, scores, eval_skipped=eval_skipped)
@@ -82,8 +90,10 @@ def main(argv: list[str] | None = None) -> int:
     (output_dir / "metrics.json").write_text(json.dumps(metrics, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
     summary = {
         "feature_view": args.feature_view,
+        "format_scope": args.format_scope,
         "input_files": [str(path) for path in _input_paths(args.input)],
         "output_dir": str(output_dir),
+        "source_row_count": len(source_rows),
         "row_count": len(rows),
         "query_count": len(grouped),
         "unfiltered_query_count": len(raw_grouped),
@@ -107,6 +117,7 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Train a baseline repair-plan LTR ranker from JSONL rows.")
     parser.add_argument("--input", action="append", default=[], help="Input JSONL file. Repeatable; defaults to repair_training/datasets/*.jsonl.")
     parser.add_argument("--feature-view", choices=sorted(FEATURE_VIEWS), default="stable_only")
+    parser.add_argument("--format-scope", choices=sorted(FORMAT_SCOPES), default="all", help="Train on one material format, or all rows for the legacy unified baseline.")
     parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR))
     parser.add_argument("--seed", type=int, default=2026)
     parser.add_argument("--n-estimators", type=int, default=80)
@@ -115,6 +126,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-child-samples", type=int, default=3)
     parser.add_argument("--min-candidates-per-query", type=int, default=2, help="Filter query groups with fewer candidates. Defaults to 2.")
     parser.add_argument("--include-single-candidate-queries", action="store_true", help="Disable low-value single-candidate query filtering.")
+    parser.add_argument("--min-trainable-queries", type=int, default=30, help="Skip training and write skip_summary.json when fewer query groups remain.")
     return parser
 
 
@@ -160,6 +172,34 @@ def _load_rows(inputs: list[str]) -> list[dict[str, Any]]:
                 if isinstance(row, dict) and "query_id" in row and "label" in row:
                     rows.append(row)
     return rows
+
+
+def _filter_rows_by_format(rows: list[dict[str, Any]], format_scope: str) -> list[dict[str, Any]]:
+    if format_scope == "all":
+        return rows
+    return [row for row in rows if _row_format_scope(row) == format_scope]
+
+
+def _row_format_scope(row: dict[str, Any]) -> str:
+    value = row.get("material_format")
+    if not value:
+        value = row.get("format") or _nested(row, "stable_features", "state", "format")
+    return _normalize_format_scope(str(value or ""))
+
+
+def _normalize_format_scope(value: str) -> str:
+    normalized = value.strip().lower().replace(".", "_").replace("-", "_")
+    aliases = {
+        "tgz": "tar_gz",
+        "tar_gzip": "tar_gz",
+        "tbz": "tar_bz2",
+        "tbz2": "tar_bz2",
+        "tar_bzip2": "tar_bz2",
+        "txz": "tar_xz",
+        "tar_zst": "tar_zst",
+        "seven_zip": "7z",
+    }
+    return aliases.get(normalized, normalized)
 
 
 def _group_rows(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
@@ -215,10 +255,11 @@ def _gain(label: Any) -> int:
     return int(LABEL_GAIN.get(raw, 0))
 
 
-def _row_features(row: dict[str, Any], view: str) -> dict[str, Any]:
+def _row_features(row: dict[str, Any], view: str, format_scope: str = "all") -> dict[str, Any]:
     features: dict[str, Any] = {}
-    _put_scalar(features, "top.material_format", row.get("material_format"))
-    _put_scalar(features, "top.format", row.get("format") or _nested(row, "stable_features", "state", "format"))
+    if format_scope == "all":
+        _put_scalar(features, "top.material_format", row.get("material_format"))
+        _put_scalar(features, "top.format", row.get("format") or _nested(row, "stable_features", "state", "format"))
     _put_scalar(features, "top.damage_profile", _nested(row, "stable_features", "state", "damage_profile"))
     _put_scalar(features, "top.round", row.get("round"))
     if view in {"stable_only", "stable_plus_teacher"}:
@@ -229,6 +270,48 @@ def _row_features(row: dict[str, Any], view: str) -> dict[str, Any]:
     if view in {"stable_plus_teacher", "teacher_only_baseline"}:
         _flatten(features, "teacher", row.get("teacher_features"))
     return features
+
+
+def _write_skip_summary(
+    output_dir: Path,
+    args: argparse.Namespace,
+    source_rows: list[dict[str, Any]],
+    rows: list[dict[str, Any]],
+    reason: str,
+    *,
+    raw_grouped: dict[str, list[dict[str, Any]]] | None = None,
+    grouped: dict[str, list[dict[str, Any]]] | None = None,
+) -> None:
+    raw_grouped = raw_grouped if raw_grouped is not None else _group_rows(rows)
+    grouped = grouped if grouped is not None else _filter_groups(raw_grouped, args)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    for stale in ("model.txt", "vectorizer.joblib", "feature_names.json", "metrics.json", "predictions.jsonl", "training_summary.json"):
+        path = output_dir / stale
+        if path.exists():
+            path.unlink()
+    label_values = [int(row.get("label", 0) or 0) for row in rows]
+    summary = {
+        "skipped": True,
+        "skip_reason": reason,
+        "feature_view": args.feature_view,
+        "format_scope": args.format_scope,
+        "input_files": [str(path) for path in _input_paths(args.input)],
+        "output_dir": str(output_dir),
+        "source_row_count": len(source_rows),
+        "row_count": len(rows),
+        "raw_query_count": len(raw_grouped),
+        "query_count": len(grouped),
+        "filtered_query_count": max(0, len(raw_grouped) - len(grouped)),
+        "filtered_row_count": max(0, sum(len(items) for items in raw_grouped.values()) - sum(len(items) for items in grouped.values())),
+        "min_candidates_per_query": _min_candidates(args),
+        "min_trainable_queries": int(args.min_trainable_queries),
+        "raw_label_counts": dict(sorted(Counter(str(value) for value in label_values).items())),
+        "label_gain_counts": dict(sorted(Counter(str(_gain(value)) for value in label_values).items())),
+        "has_multiple_labels": len(set(_gain(value) for value in label_values)) > 1,
+        "has_candidate_competition": any(len(items) >= _min_candidates(args) for items in raw_grouped.values()),
+    }
+    (output_dir / "skip_summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    print(json.dumps(summary, ensure_ascii=False, sort_keys=True))
 
 
 def _flatten(output: dict[str, Any], prefix: str, value: Any) -> None:

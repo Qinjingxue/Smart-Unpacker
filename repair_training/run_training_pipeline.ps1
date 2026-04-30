@@ -3,7 +3,8 @@ param(
     [string]$SourceRoot = "repair_training\source_material",
     [string]$MaterialRoot = "repair_training\material",
     [string]$DatasetDir = "repair_training\datasets",
-    [string]$ModelRoot = "repair_training\models\baseline_ltr_pipeline",
+    [string]$ModelRoot = "repair_training\models\by_format_pipeline",
+    [string]$UnifiedModelRoot = "repair_training\models\baseline_ltr_pipeline",
     [string]$Formats = "",
     [string[]]$Sample = @(),
     [int]$ArchivesPerSample = 5,
@@ -32,6 +33,8 @@ param(
     [switch]$SkipBuild,
     [switch]$SkipCollect,
     [switch]$SkipTrain,
+    [bool]$TrainByFormat = $true,
+    [switch]$TrainUnifiedBaseline,
     [switch]$NoInstallTrainDeps,
     [switch]$NoPretty
 )
@@ -126,14 +129,27 @@ try {
     }
 
     if (-not $SkipTrain) {
-        $trainArgs = @{
-            AllFeatureViews = $true
-            OutputDir = $ModelRoot
-            InputPath = @($successOutput, $failureOutput)
+        if ($TrainByFormat) {
+            $formatTrainArgs = @{
+                OutputDir = $ModelRoot
+                InputPath = @($successOutput, $failureOutput)
+            }
+            if ($Formats) { $formatTrainArgs["Formats"] = $Formats }
+            if ($NoInstallTrainDeps) { $formatTrainArgs["NoInstallDeps"] = $true }
+            & (Join-Path $RepoRoot "repair_training\train_format_ltr.ps1") @formatTrainArgs
+            if ($LASTEXITCODE -ne 0) { throw "format LTR training failed" }
         }
-        if ($NoInstallTrainDeps) { $trainArgs["NoInstallDeps"] = $true }
-        & (Join-Path $RepoRoot "repair_training\train_ltr.ps1") @trainArgs
-        if ($LASTEXITCODE -ne 0) { throw "train step failed" }
+        if ($TrainUnifiedBaseline) {
+            $trainArgs = @{
+                AllFeatureViews = $true
+                FormatScope = "all"
+                OutputDir = $UnifiedModelRoot
+                InputPath = @($successOutput, $failureOutput)
+            }
+            if ($NoInstallTrainDeps) { $trainArgs["NoInstallDeps"] = $true }
+            & (Join-Path $RepoRoot "repair_training\train_ltr.ps1") @trainArgs
+            if ($LASTEXITCODE -ne 0) { throw "unified LTR training failed" }
+        }
     }
 
     & (Join-Path $RepoRoot "repair_training\report_ltr_data.ps1") -InputPath @($successOutput, $failureOutput) -ModelRoot $ModelRoot -Output $reportOutput -Markdown

@@ -4,6 +4,8 @@ param(
     [string[]]$InputPath = @(),
     [ValidateSet("stable_only", "stable_plus_teacher", "teacher_only_baseline")]
     [string]$FeatureView = "stable_only",
+    [ValidateSet("all", "zip", "tar", "tar_gz", "tar_bz2", "tar_xz", "gzip", "bzip2", "xz", "zstd", "7z", "rar")]
+    [string]$FormatScope = "all",
     [switch]$AllFeatureViews,
     [string]$OutputDir = "repair_training\models\baseline_ltr",
     [int]$Seed = 2026,
@@ -62,6 +64,7 @@ try {
         $ArgsList = @(
             "repair_training\train_ltr.py",
             "--feature-view", $view,
+            "--format-scope", $FormatScope,
             "--output-dir", $viewOutput,
             "--seed", "$Seed"
         )
