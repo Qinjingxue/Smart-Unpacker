@@ -1,6 +1,5 @@
 from typing import Any
 
-from sunpack.config.fields.verification import DEFAULT_VERIFICATION_CONFIG
 from sunpack.contracts.tasks import ArchiveTask
 from sunpack.extraction.result import ExtractionResult
 from sunpack.passwords import PasswordSession
@@ -43,7 +42,5 @@ class VerificationScheduler:
 
     def _verification_config(self, config: dict[str, Any]) -> dict:
         if "verification" in config and isinstance(config.get("verification"), dict):
-            config = config["verification"]
-        merged = dict(DEFAULT_VERIFICATION_CONFIG)
-        merged.update(config or {})
-        return merged
+            return dict(config["verification"])
+        return dict(config or {})

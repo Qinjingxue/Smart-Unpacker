@@ -8,6 +8,23 @@ def _write_json(path, payload):
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 
+def _verification_config():
+    return {
+        "enabled": True,
+        "max_retries": 2,
+        "cleanup_failed_output": True,
+        "accept_partial_when_source_damaged": True,
+        "partial_min_completeness": 0.2,
+        "complete_accept_threshold": 0.999,
+        "partial_accept_threshold": 0.2,
+        "retry_on_verification_failure": True,
+        "methods": [
+            {"name": "extraction_exit_signal", "enabled": True},
+            {"name": "output_presence", "enabled": True},
+        ],
+    }
+
+
 def _layered_config_paths(simple, advanced):
     def candidate_paths(filename):
         return [simple if filename == loader.SIMPLE_CONFIG_FILENAME else advanced]
@@ -40,6 +57,7 @@ def test_load_config_merges_simple_config_over_advanced_config(tmp_path, monkeyp
             "scheduler_profile": "auto",
             "max_extract_task_seconds": 1800,
         },
+        "verification": _verification_config(),
         "detection": {
             "enabled": True,
             "fact_collectors": [{"name": "file_facts", "enabled": True}],
@@ -71,6 +89,34 @@ def test_load_config_merges_simple_config_over_advanced_config(tmp_path, monkeyp
     assert config["detection"]["enabled"] is True
 
 
+def test_load_config_requires_external_verification_config(tmp_path, monkeypatch):
+    simple = tmp_path / "sunpack_config.json"
+    advanced = tmp_path / "sunpack_advanced_config.json"
+    _write_json(advanced, {
+        "thresholds": {"archive_score_threshold": 6, "maybe_archive_threshold": 3},
+        "recursive_extract": "*",
+        "post_extract": {"archive_cleanup_mode": "r", "flatten_single_directory": True},
+        "filesystem": {"directory_scan_mode": "*", "scan_filters": []},
+        "detection": {
+            "enabled": True,
+            "rule_pipeline": {
+                "precheck": [],
+                "scoring": [{"name": "extension", "enabled": True}],
+                "confirmation": [],
+            },
+        },
+    })
+    _write_json(simple, {})
+    monkeypatch.setattr(loader, "_candidate_config_paths", _layered_config_paths(simple, advanced))
+
+    try:
+        loader.load_effective_config_payload()
+    except loader.ConfigError as exc:
+        assert "verification" in str(exc)
+    else:
+        raise AssertionError("missing verification config should be rejected")
+
+
 def test_effective_config_payload_returns_merged_external_config(tmp_path, monkeypatch):
     simple = tmp_path / "sunpack_config.json"
     advanced = tmp_path / "sunpack_advanced_config.json"
@@ -79,6 +125,7 @@ def test_effective_config_payload_returns_merged_external_config(tmp_path, monke
         "recursive_extract": "*",
         "post_extract": {"archive_cleanup_mode": "r", "flatten_single_directory": True},
         "filesystem": {"directory_scan_mode": "*", "scan_filters": []},
+        "verification": _verification_config(),
         "detection": {
             "enabled": True,
             "rule_pipeline": {
@@ -107,6 +154,7 @@ def test_embedded_payload_scan_level_simple_config_overrides_advanced_details(tm
         "recursive_extract": "*",
         "post_extract": {"archive_cleanup_mode": "r", "flatten_single_directory": True},
         "filesystem": {"directory_scan_mode": "*", "scan_filters": []},
+        "verification": _verification_config(),
         "detection": {
             "enabled": True,
             "processors": [
@@ -169,6 +217,7 @@ def test_embedded_payload_scan_level_manual_preserves_detailed_parameters(tmp_pa
         "recursive_extract": "*",
         "post_extract": {"archive_cleanup_mode": "r", "flatten_single_directory": True},
         "filesystem": {"directory_scan_mode": "*", "scan_filters": []},
+        "verification": _verification_config(),
         "detection": {
             "enabled": True,
             "processors": [
@@ -220,6 +269,7 @@ def test_embedded_payload_scan_level_does_not_apply_when_rule_is_disabled(tmp_pa
         "recursive_extract": "*",
         "post_extract": {"archive_cleanup_mode": "r", "flatten_single_directory": True},
         "filesystem": {"directory_scan_mode": "*", "scan_filters": []},
+        "verification": _verification_config(),
         "detection": {
             "enabled": True,
             "processors": [
