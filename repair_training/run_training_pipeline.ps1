@@ -13,15 +13,21 @@ param(
     [int]$MaxCandidatesPerRound = 6,
     [ValidateSet("lazy", "eager")]
     [string]$ProposalMode = "lazy",
-    [int]$MaterializeTopKPerRound = 2,
+    [int]$MaterializeTopKPerRound = 4,
     [switch]$MaterializeSelectedOnly,
     [double]$CaseTimeoutSeconds = 12.0,
     [double]$StreamLargeSizeMb = 32,
     [double]$StreamLargeCaseTimeoutSeconds = 3,
     [int]$StreamLargeMaxCandidatesPerRound = 1,
     [switch]$SkipLargeStreamSamples,
+    [switch]$IncludeLargeStreamSamples,
     [double]$TotalTimeoutSeconds = 0,
     [string]$DebugEvents = "",
+    [int]$CollectWorkers = 16,
+    [ValidateSet("pool", "static")]
+    [string]$CollectScheduling = "pool",
+    [int]$CollectQueueBatchSize = 1,
+    [switch]$DisableParallelCollect,
     [switch]$SkipDerive,
     [switch]$SkipBuild,
     [switch]$SkipCollect,
@@ -100,14 +106,22 @@ try {
             StreamLargeMaxCandidatesPerRound = $StreamLargeMaxCandidatesPerRound
         }
         if ($MaterializeSelectedOnly) { $collectArgs["MaterializeSelectedOnly"] = $true }
-        if ($SkipLargeStreamSamples) { $collectArgs["SkipLargeStreamSamples"] = $true }
+        if ($SkipLargeStreamSamples -or -not $IncludeLargeStreamSamples) { $collectArgs["SkipLargeStreamSamples"] = $true }
         if ($TotalTimeoutSeconds -gt 0) { $collectArgs["TotalTimeoutSeconds"] = $TotalTimeoutSeconds }
         if ($DebugEvents) { $collectArgs["DebugEvents"] = $DebugEvents }
         if ($Formats) { $collectArgs["Formats"] = $Formats }
         $expandedSamples = Expand-TrainingList $Sample
         if ($expandedSamples.Count -gt 0) { $collectArgs["Sample"] = ($expandedSamples -join ",") }
         if ($NoPretty) { $collectArgs["NoPretty"] = $true }
-        & (Join-Path $RepoRoot "repair_training\collect_plan_data.ps1") @collectArgs
+        if (-not $DisableParallelCollect -and $CollectWorkers -gt 1) {
+            $collectArgs["CollectWorkers"] = $CollectWorkers
+            $collectArgs["Scheduling"] = $CollectScheduling
+            $collectArgs["QueueBatchSize"] = $CollectQueueBatchSize
+            $collectArgs["ParallelSummaryOutput"] = (Join-Path $DatasetDir "collect_parallel_summary.json")
+            & (Join-Path $RepoRoot "repair_training\collect_plan_data_parallel.ps1") @collectArgs
+        } else {
+            & (Join-Path $RepoRoot "repair_training\collect_plan_data.ps1") @collectArgs
+        }
         if ($LASTEXITCODE -ne 0) { throw "collect step failed" }
     }
 

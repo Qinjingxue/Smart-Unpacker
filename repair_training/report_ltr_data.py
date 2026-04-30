@@ -111,7 +111,7 @@ def _build_report(rows: list[dict[str, Any]], model_root: Path) -> dict[str, Any
             "timeout_rows": timeout_rows,
             "failed_or_timeout_rows": failed_rows,
         },
-        "model_metric_comparison": _model_metrics(model_root),
+        "model_metric_comparison": _model_metrics(model_root, source_counts, len(rows)),
     }
     report["warnings"] = _quality_warnings(report)
     return report
@@ -146,10 +146,11 @@ def _percentile(ordered: list[int], ratio: float) -> float:
     return float(ordered[index])
 
 
-def _model_metrics(model_root: Path) -> dict[str, Any]:
+def _model_metrics(model_root: Path, source_counts: Counter[str], row_count: int) -> dict[str, Any]:
     output: dict[str, Any] = {}
     if not model_root.is_dir():
         return output
+    current_sources = {_normalize_path(path) for path in source_counts if path}
     for summary_path in sorted(model_root.rglob("training_summary.json")):
         try:
             summary = json.loads(summary_path.read_text(encoding="utf-8"))
@@ -157,14 +158,30 @@ def _model_metrics(model_root: Path) -> dict[str, Any]:
             continue
         view = str(summary.get("feature_view") or summary_path.parent.name)
         key = str(summary_path.parent.relative_to(model_root)).replace("\\", "/")
+        summary_sources = {_normalize_path(path) for path in summary.get("input_files", []) if path}
+        summary_row_count = int(summary.get("row_count") or 0)
+        stale_reasons = []
+        if current_sources and summary_sources and current_sources != summary_sources:
+            stale_reasons.append("input_files_differ")
+        if row_count and summary_row_count and row_count != summary_row_count:
+            stale_reasons.append("row_count_differs")
         output[key] = {
             "feature_view": view,
             "row_count": summary.get("row_count"),
             "query_count": summary.get("query_count"),
             "feature_count": summary.get("feature_count"),
             "metrics": summary.get("metrics", {}),
+            "matches_current_dataset": not stale_reasons,
+            "stale_reasons": stale_reasons,
         }
     return output
+
+
+def _normalize_path(value: str) -> str:
+    try:
+        return str(Path(value).resolve()).replace("\\", "/").lower()
+    except Exception:
+        return str(value).replace("\\", "/").lower()
 
 
 def _quality_warnings(report: dict[str, Any]) -> list[str]:
@@ -177,7 +194,11 @@ def _quality_warnings(report: dict[str, Any]) -> list[str]:
     for fmt, count in formats.items():
         if int(count or 0) / row_count < 0.05:
             warnings.append(f"format_underrepresented:{fmt}")
+    stream_rows = sum(int(formats.get(fmt, 0) or 0) for fmt in ("gzip", "bzip2", "xz", "zstd"))
     labels = report.get("label_distribution", {}) if isinstance(report.get("label_distribution"), dict) else {}
+    positive_rows = sum(int(labels.get(str(label), 0) or 0) for label in (1, 2, 3))
+    if stream_rows / row_count > 0.3 and positive_rows == 0:
+        warnings.append("stream_rows_no_positive_labels")
     negative_ratio = (int(labels.get("-1", 0) or 0) + int(labels.get("0", 0) or 0)) / row_count
     if negative_ratio < 0.15:
         warnings.append("negative_labels_too_sparse")
@@ -186,10 +207,15 @@ def _quality_warnings(report: dict[str, Any]) -> list[str]:
     single_ratio = int(candidate_distribution.get("1", 0) or 0) / query_count
     if single_ratio > 0.1:
         warnings.append("too_many_single_candidate_queries")
+    candidate_summary = report.get("query_candidate_count", {}) if isinstance(report.get("query_candidate_count"), dict) else {}
+    if float(candidate_summary.get("p90", 0.0) or 0.0) <= 2.0:
+        warnings.append("low_candidate_competition")
     ratios = report.get("quality_ratios", {}) if isinstance(report.get("quality_ratios"), dict) else {}
     if float(ratios.get("timeout_or_failed_row_ratio", 0.0) or 0.0) > 0.02:
         warnings.append("timeouts_present")
     metrics = report.get("model_metric_comparison", {}) if isinstance(report.get("model_metric_comparison"), dict) else {}
+    if any(isinstance(item, dict) and not item.get("matches_current_dataset", True) for item in metrics.values()):
+        warnings.append("model_metrics_stale")
     stable = _model_ndcg(metrics, "stable_only")
     teacher = _model_ndcg(metrics, "teacher_only_baseline")
     if stable is not None and teacher is not None and stable > 0.95 and abs(stable - teacher) < 0.05:
@@ -200,6 +226,8 @@ def _quality_warnings(report: dict[str, Any]) -> list[str]:
 def _model_ndcg(metrics: dict[str, Any], view: str) -> float | None:
     for item in metrics.values():
         if not isinstance(item, dict) or item.get("feature_view") != view:
+            continue
+        if not item.get("matches_current_dataset", True):
             continue
         inner = item.get("metrics") if isinstance(item.get("metrics"), dict) else {}
         try:

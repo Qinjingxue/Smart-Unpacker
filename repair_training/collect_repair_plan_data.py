@@ -58,6 +58,9 @@ def main(argv: list[str] | None = None) -> int:
         "partial_count": 0,
         "success_output": str(success_output),
         "failure_output": str(failure_output),
+        "collector_shard": args.collector_shard,
+        "collector_workers": args.collector_workers,
+        "workspace": args.workspace,
     }
     started_all = time.perf_counter()
     last_progress = started_all
@@ -81,6 +84,7 @@ def main(argv: list[str] | None = None) -> int:
             if args.skip_large_stream_samples and _is_large_stream_sample(record, args):
                 row = _terminal_row(record, "skipped_budget", "large stream sample skipped by collect budget")
                 row["elapsed_sample_seconds"] = 0.0
+                _attach_collector_context(row, args)
                 _update_summary_counts(summary, record, [row])
                 failure_handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True, default=str) + "\n")
                 if args.pretty:
@@ -99,6 +103,7 @@ def main(argv: list[str] | None = None) -> int:
             last_progress = time.perf_counter()
             for row in rows:
                 row["elapsed_sample_seconds"] = elapsed
+                _attach_collector_context(row, args)
             _update_summary_counts(summary, record, rows)
             is_success = any(int(row.get("label", 0) or 0) > 0 for row in rows)
             target = success_handle if is_success else failure_handle
@@ -118,8 +123,12 @@ def main(argv: list[str] | None = None) -> int:
         _pretty_path(failure_output).write_text(json.dumps(failure_pretty_records, ensure_ascii=False, indent=2, sort_keys=True, default=str), encoding="utf-8")
         summary["success_pretty_output"] = str(_pretty_path(success_output))
         summary["failure_pretty_output"] = str(_pretty_path(failure_output))
+    if args.summary_output:
+        summary_path = Path(args.summary_output)
+        summary_path.parent.mkdir(parents=True, exist_ok=True)
+        summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True, default=str), encoding="utf-8")
     print(json.dumps(summary, ensure_ascii=False, sort_keys=True))
-    return 1 if summary["timeouts"] or summary["failed"] else 0
+    return 1 if summary["failed"] else 0
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -130,6 +139,10 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--sample", action="append", default=[], help="Optional material sample folder name filter. Repeatable.")
     parser.add_argument("--success-output", default=str(DEFAULT_SUCCESS_OUTPUT), help="Rows for samples with useful/complete actions.")
     parser.add_argument("--failure-output", default=str(DEFAULT_FAILURE_OUTPUT), help="Rows for samples without useful actions.")
+    parser.add_argument("--summary-output", default="", help="Optional JSON file for the final collector summary.")
+    parser.add_argument("--workspace", default=str(Path(".sunpack") / "repair-plan-workspace"), help="Repair workspace used by this collector.")
+    parser.add_argument("--collector-shard", type=int, default=-1, help="Collector shard id written into emitted rows.")
+    parser.add_argument("--collector-workers", type=int, default=1, help="Total collector worker count written into emitted rows.")
     parser.add_argument("--append", action="store_true", help="Append instead of overwriting output files.")
     parser.set_defaults(pretty=True)
     parser.add_argument("--pretty", action="store_true", help="Also write formatted .pretty.json files. Enabled by default.")
@@ -192,6 +205,16 @@ def _update_summary_counts(summary: dict[str, Any], record: dict[str, Any], rows
     layer = str(record.get("actual_damage_layer") or record.get("damage_layer") or "unknown")
     layer_counts = summary.setdefault("damage_layer_counts", {})
     layer_counts[layer] = int(layer_counts.get(layer, 0) or 0) + 1
+
+
+def _attach_collector_context(row: dict[str, Any], args: argparse.Namespace) -> None:
+    raw_shard = getattr(args, "collector_shard", -1)
+    raw_workers = getattr(args, "collector_workers", 1)
+    shard = -1 if raw_shard is None else int(raw_shard)
+    workers = 1 if raw_workers is None else int(raw_workers)
+    if shard >= 0:
+        row["collector_shard"] = shard
+    row["collector_workers"] = max(1, workers)
 
 
 def _material_manifests(material_root: Path, formats: set[str], samples: set[str]) -> list[Path]:
@@ -358,7 +381,7 @@ def _collect_sample(record: dict[str, Any], args: argparse.Namespace, debug_even
 
 
 def _collect_sample_rows(record: dict[str, Any], args: argparse.Namespace, debug_events: "_DebugEvents") -> list[dict[str, Any]]:
-    scheduler = _scheduler()
+    scheduler = _scheduler(args)
     selector = CandidateSelector(scheduler.config)
     source_input = dict(record.get("damaged_input") or {})
     fmt = str(record.get("format") or source_input.get("format_hint") or "")
@@ -521,10 +544,10 @@ def _materialize_for_collection(candidates: list[Any], selector: CandidateSelect
     }
 
 
-def _scheduler() -> RepairScheduler:
+def _scheduler(args: argparse.Namespace) -> RepairScheduler:
     return RepairScheduler({
         "repair": {
-            "workspace": str(Path(".sunpack") / "repair-plan-workspace"),
+            "workspace": str(Path(args.workspace)),
             "max_modules_per_job": 64,
             "max_attempts_per_task": 8,
             "stages": {"deep": True},

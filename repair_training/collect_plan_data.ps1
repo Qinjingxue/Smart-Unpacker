@@ -4,6 +4,10 @@ param(
     [string]$Manifest = "",
     [string]$SuccessOutput = "repair_training\datasets\repair_plan_ltr_success.jsonl",
     [string]$FailureOutput = "repair_training\datasets\repair_plan_ltr_failure.jsonl",
+    [string]$SummaryOutput = "",
+    [string]$Workspace = ".sunpack\repair-plan-workspace",
+    [int]$CollectorShard = -1,
+    [int]$CollectorWorkers = 1,
     [int]$MaxRounds = 3,
     [int]$MaxCandidatesPerRound = 10,
     [ValidateSet("lazy", "eager")]
@@ -57,6 +61,9 @@ $argsList = @(
     "repair_training\collect_repair_plan_data.py",
     "--success-output", $SuccessOutput,
     "--failure-output", $FailureOutput,
+    "--workspace", $Workspace,
+    "--collector-shard", "$CollectorShard",
+    "--collector-workers", "$CollectorWorkers",
     "--max-rounds", "$MaxRounds",
     "--max-candidates-per-round", "$MaxCandidatesPerRound",
     "--proposal-mode", $ProposalMode,
@@ -69,6 +76,9 @@ $argsList = @(
 )
 if ($TotalTimeoutSeconds -gt 0) {
     $argsList += @("--total-timeout-seconds", "$TotalTimeoutSeconds")
+}
+if ($SummaryOutput) {
+    $argsList += @("--summary-output", $SummaryOutput)
 }
 if ($IdleTimeoutSeconds -gt 0) {
     $argsList += @("--idle-timeout-seconds", "$IdleTimeoutSeconds")
