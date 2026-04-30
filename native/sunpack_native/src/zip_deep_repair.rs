@@ -573,6 +573,7 @@ pub(crate) fn zip_verified_entry_salvage(
             repair_name,
             central_local_mismatch_count(&data),
             exclude.len(),
+            &scan,
         );
     }
     let actions = match repair_name {
@@ -622,6 +623,7 @@ pub(crate) fn zip_verified_entry_salvage(
             repair_name,
             central_local_mismatch_count(&data),
             exclude.len(),
+            &scan,
         ),
         Err(message) => salvage_status_dict(
             py,
@@ -638,6 +640,118 @@ pub(crate) fn zip_verified_entry_salvage(
             repair_name,
             central_local_mismatch_count(&data),
             exclude.len(),
+            &scan,
+        ),
+    }
+}
+
+#[pyfunction]
+#[pyo3(signature = (
+    source_input,
+    workspace,
+    max_entries=20000,
+    max_input_size_mb=512.0,
+    max_output_size_mb=2048.0,
+    max_entry_uncompressed_mb=512.0,
+    max_seconds=30.0
+))]
+pub(crate) fn zip_cd_local_header_reconcile_salvage(
+    py: Python<'_>,
+    source_input: &Bound<'_, PyDict>,
+    workspace: &str,
+    max_entries: usize,
+    max_input_size_mb: f64,
+    max_output_size_mb: f64,
+    max_entry_uncompressed_mb: f64,
+    max_seconds: f64,
+) -> PyResult<Py<PyDict>> {
+    let started = Instant::now();
+    let options = DeepZipOptions {
+        max_candidates: 1,
+        max_entries: max_entries.max(1),
+        max_input_bytes: mb_to_bytes(max_input_size_mb),
+        max_output_bytes: mb_to_bytes(max_output_size_mb),
+        max_entry_uncompressed_bytes: mb_to_bytes(max_entry_uncompressed_mb),
+        max_duration: duration_from_seconds(max_seconds),
+        verify_candidates: true,
+    };
+    let data = match read_source_input(source_input, options.max_input_bytes) {
+        Ok(data) => data,
+        Err(message) => return status_dict(py, "skipped", "", &message, &[], &[], 0, 0, 0.0),
+    };
+    let scan = scan_entries(&data, &options, started);
+    let (indices, corrected_offsets) = cd_local_reconcile_indices(&data, &scan.entries);
+    if indices.is_empty() {
+        return salvage_status_dict(
+            py,
+            "unrepairable",
+            "",
+            "no verified ZIP entries could be reconciled against local headers",
+            &scan.warnings,
+            scan.skipped_offsets.len(),
+            scan.encrypted_entries,
+            0,
+            0,
+            0,
+            scan.timed_out,
+            "zip_cd_local_header_reconcile_rebuild",
+            corrected_offsets,
+            0,
+            &scan,
+        );
+    }
+    let plan = make_plan(
+        "zip_cd_local_header_reconcile_rebuild",
+        indices,
+        &scan.entries,
+        0.93,
+        vec![
+            "parse_central_directory_entries",
+            "match_cd_entries_to_verified_local_headers",
+            "rewrite_zip_from_reconciled_local_headers",
+        ],
+    );
+    let output_path = Path::new(workspace).join("zip_cd_local_header_reconcile_rebuild.zip");
+    match write_candidate_zip(
+        &data,
+        &scan.entries,
+        &plan,
+        &output_path,
+        options.max_output_bytes,
+    ) {
+        Ok(stats) => salvage_status_dict(
+            py,
+            "partial",
+            &output_path.to_string_lossy(),
+            "ZIP central directory entries were reconciled against verified local headers",
+            &scan.warnings,
+            scan.skipped_offsets.len(),
+            scan.encrypted_entries,
+            stats.entries,
+            stats.verified_entries,
+            stats.descriptor_entries,
+            scan.timed_out,
+            "zip_cd_local_header_reconcile_rebuild",
+            corrected_offsets,
+            0,
+            &scan,
+        ),
+        Err(message) => salvage_status_dict(
+            py,
+            "unrepairable",
+            "",
+            &message,
+            &scan.warnings,
+            scan.skipped_offsets.len(),
+            scan.encrypted_entries,
+            0,
+            0,
+            0,
+            scan.timed_out,
+            "zip_cd_local_header_reconcile_rebuild",
+            corrected_offsets,
+            0,
+            &scan,
         ),
     }
 }
@@ -656,6 +770,7 @@ struct DeepZipOptions {
 #[derive(Debug, Clone)]
 struct RecoveredEntry {
     name: Vec<u8>,
+    local_header_offset: usize,
     version_needed: u16,
     flags: u16,
     method: u16,
@@ -666,9 +781,12 @@ struct RecoveredEntry {
     uncompressed_size: u64,
     data_start: usize,
     data_end: usize,
+    payload_override: Option<Vec<u8>>,
     verified: bool,
     descriptor: bool,
     passthrough: bool,
+    boundary_source: BoundarySource,
+    experimental_deflate_resync: bool,
 }
 
 #[derive(Debug, Default)]
@@ -679,7 +797,22 @@ struct ScanResult {
     encrypted_entries: usize,
     unsupported_entries: usize,
     descriptor_entries: usize,
+    lfh_scanned: usize,
+    next_lfh_boundary_entries: usize,
+    deflate_consumed_boundary_entries: usize,
+    descriptor_signature_entries: usize,
+    descriptor_no_signature_entries: usize,
+    deflate_resync_partial_entries: usize,
     timed_out: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BoundarySource {
+    HeaderSize,
+    NextRecord,
+    DeflateConsumed,
+    Descriptor,
+    DeflateResync,
 }
 
 #[derive(Debug)]
@@ -724,6 +857,7 @@ struct DeflateInfo {
 fn scan_entries(data: &[u8], options: &DeepZipOptions, started: Instant) -> ScanResult {
     let mut result = ScanResult::default();
     for offset in memmem::find_iter(data, LFH_SIG).take(options.max_entries) {
+        result.lfh_scanned += 1;
         if timed_out(started, options.max_duration) {
             result.timed_out = true;
             result
@@ -738,6 +872,22 @@ fn scan_entries(data: &[u8], options: &DeepZipOptions, started: Instant) -> Scan
                 }
                 if entry.passthrough {
                     result.unsupported_entries += 1;
+                }
+                if entry.boundary_source == BoundarySource::NextRecord {
+                    result.next_lfh_boundary_entries += 1;
+                }
+                if entry.boundary_source == BoundarySource::DeflateConsumed {
+                    result.deflate_consumed_boundary_entries += 1;
+                }
+                if entry.boundary_source == BoundarySource::Descriptor {
+                    if descriptor_at(data, entry.data_end, entry.crc32, entry.compressed_size, entry.uncompressed_size) {
+                        result.descriptor_signature_entries += 1;
+                    } else {
+                        result.descriptor_no_signature_entries += 1;
+                    }
+                }
+                if entry.experimental_deflate_resync {
+                    result.deflate_resync_partial_entries += 1;
                 }
                 result.entries.push(entry);
             }
@@ -797,6 +947,7 @@ fn parse_entry(data: &[u8], offset: usize, options: &DeepZipOptions) -> EntryOut
     if flags & 0x08 != 0 {
         return parse_descriptor_entry(
             data,
+            offset,
             data_start,
             name,
             version_needed,
@@ -818,6 +969,7 @@ fn parse_entry(data: &[u8], offset: usize, options: &DeepZipOptions) -> EntryOut
             "ZIP64-sized entries are not rewritten by deep recovery yet".to_string(),
         );
     }
+    let mut boundary_source = BoundarySource::HeaderSize;
     let data_end = match data_start.checked_add(compressed_size as usize) {
         Some(end) if end <= data.len() => end,
         Some(_) if method == 8 && options.verify_candidates => {
@@ -829,8 +981,20 @@ fn parse_entry(data: &[u8], offset: usize, options: &DeepZipOptions) -> EntryOut
                 uncompressed_size,
                 options,
             ) {
-                Some(end) => end,
+                Some((end, source)) => {
+                    boundary_source = source;
+                    end
+                }
                 None => return EntryOutcome::Skipped("entry payload is truncated".to_string()),
+            }
+        }
+        Some(_) if method == 0 && options.verify_candidates => {
+            match verified_store_payload_end(data, data_start, header_crc32, uncompressed_size) {
+                Some((end, source)) => {
+                    boundary_source = source;
+                    end
+                }
+                None => return EntryOutcome::Skipped("stored entry payload is truncated".to_string()),
             }
         }
         Some(_) => return EntryOutcome::Skipped("entry payload is truncated".to_string()),
@@ -839,20 +1003,34 @@ fn parse_entry(data: &[u8], offset: usize, options: &DeepZipOptions) -> EntryOut
         }
     };
     let data_end = if method == 8 && options.verify_candidates {
-        verified_deflate_payload_end(
+        match verified_deflate_payload_end(
             data,
             data_start,
             Some(data_end),
             header_crc32,
             uncompressed_size,
             options,
-        )
-        .unwrap_or(data_end)
+        ) {
+            Some((end, source)) => {
+                boundary_source = source;
+                end
+            }
+            None => data_end,
+        }
+    } else if method == 0 && options.verify_candidates {
+        match verified_store_payload_end(data, data_start, header_crc32, uncompressed_size) {
+            Some((end, source)) => {
+                boundary_source = source;
+                end
+            }
+            None => data_end,
+        }
     } else {
         data_end
     };
     classify_entry(
         data,
+        offset,
         data_start,
         data_end,
         name,
@@ -865,6 +1043,7 @@ fn parse_entry(data: &[u8], offset: usize, options: &DeepZipOptions) -> EntryOut
         compressed_size,
         uncompressed_size,
         false,
+        boundary_source,
         options,
     )
 }
@@ -872,6 +1051,7 @@ fn parse_entry(data: &[u8], offset: usize, options: &DeepZipOptions) -> EntryOut
 #[allow(clippy::too_many_arguments)]
 fn parse_descriptor_entry(
     data: &[u8],
+    local_header_offset: usize,
     data_start: usize,
     name: Vec<u8>,
     version_needed: u16,
@@ -900,6 +1080,7 @@ fn parse_descriptor_entry(
                 );
                 return EntryOutcome::Recovered(RecoveredEntry {
                     name,
+                    local_header_offset,
                     version_needed,
                     flags,
                     method,
@@ -910,12 +1091,29 @@ fn parse_descriptor_entry(
                     uncompressed_size: info.uncompressed_size,
                     data_start,
                     data_end,
+                    payload_override: None,
                     verified: true,
                     descriptor: true,
                     passthrough: false,
+                    boundary_source: BoundarySource::DeflateConsumed,
+                    experimental_deflate_resync: false,
                 });
             }
-            Err(_) => {}
+            Err(_) => {
+                if let Some(entry) = deflate_resync_partial_entry(
+                    data,
+                    local_header_offset,
+                    data_start,
+                    name.clone(),
+                    version_needed,
+                    flags,
+                    mod_time,
+                    mod_date,
+                    options,
+                ) {
+                    return EntryOutcome::Recovered(entry);
+                }
+            }
         }
     }
 
@@ -928,6 +1126,7 @@ fn parse_descriptor_entry(
     if method == 0 {
         return classify_entry(
             data,
+            local_header_offset,
             data_start,
             data_end,
             name,
@@ -940,6 +1139,7 @@ fn parse_descriptor_entry(
             compressed_size,
             uncompressed_size,
             true,
+            BoundarySource::Descriptor,
             options,
         );
     }
@@ -948,6 +1148,7 @@ fn parse_descriptor_entry(
     }
     EntryOutcome::Recovered(RecoveredEntry {
         name,
+        local_header_offset,
         version_needed,
         flags,
         method,
@@ -958,15 +1159,19 @@ fn parse_descriptor_entry(
         uncompressed_size,
         data_start,
         data_end,
+        payload_override: None,
         verified: false,
         descriptor: true,
         passthrough: true,
+        boundary_source: BoundarySource::Descriptor,
+        experimental_deflate_resync: false,
     })
 }
 
 #[allow(clippy::too_many_arguments)]
 fn classify_entry(
     data: &[u8],
+    local_header_offset: usize,
     data_start: usize,
     data_end: usize,
     name: Vec<u8>,
@@ -979,6 +1184,7 @@ fn classify_entry(
     compressed_size: u64,
     uncompressed_size: u64,
     descriptor: bool,
+    boundary_source: BoundarySource,
     options: &DeepZipOptions,
 ) -> EntryOutcome {
     let payload = &data[data_start..data_end];
@@ -1009,6 +1215,7 @@ fn classify_entry(
     if !verified && !known_zip_method(method) {
         return EntryOutcome::Recovered(RecoveredEntry {
             name,
+            local_header_offset,
             version_needed,
             flags,
             method,
@@ -1019,14 +1226,18 @@ fn classify_entry(
             uncompressed_size,
             data_start,
             data_end,
+            payload_override: None,
             verified: false,
             descriptor,
             passthrough: true,
+            boundary_source,
+            experimental_deflate_resync: false,
         });
     }
     if !verified && !options.verify_candidates {
         return EntryOutcome::Recovered(RecoveredEntry {
             name,
+            local_header_offset,
             version_needed,
             flags,
             method,
@@ -1037,13 +1248,17 @@ fn classify_entry(
             uncompressed_size,
             data_start,
             data_end,
+            payload_override: None,
             verified: false,
             descriptor,
             passthrough: true,
+            boundary_source,
+            experimental_deflate_resync: false,
         });
     }
     EntryOutcome::Recovered(RecoveredEntry {
         name,
+        local_header_offset,
         version_needed,
         flags,
         method,
@@ -1054,9 +1269,12 @@ fn classify_entry(
         uncompressed_size,
         data_start,
         data_end,
+        payload_override: None,
         verified,
         descriptor,
         passthrough: !verified,
+        boundary_source,
+        experimental_deflate_resync: false,
     })
 }
 
@@ -1322,7 +1540,10 @@ fn write_candidate_zip(
             if local_offset > u32::MAX as u64 {
                 return Err("candidate exceeds ZIP32 offset limits".to_string());
             }
-            let payload = &source[entry.data_start..entry.data_end];
+            let payload = entry
+                .payload_override
+                .as_deref()
+                .unwrap_or(&source[entry.data_start..entry.data_end]);
             write_local_header(&mut file, entry).map_err(|err| err.to_string())?;
             file.write_all(payload).map_err(|err| err.to_string())?;
             append_central_directory(&mut central_directory, entry, local_offset as u32);
@@ -1488,6 +1709,112 @@ fn verify_deflate(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn deflate_resync_partial_entry(
+    data: &[u8],
+    local_header_offset: usize,
+    data_start: usize,
+    name: Vec<u8>,
+    version_needed: u16,
+    flags: u16,
+    mod_time: u16,
+    mod_date: u16,
+    options: &DeepZipOptions,
+) -> Option<RecoveredEntry> {
+    let decoded = decode_deflate_prefix_for_partial(
+        data.get(data_start..)?,
+        options.max_entry_uncompressed_bytes,
+        options.max_duration,
+    )?;
+    if decoded.len() < 4096 {
+        return None;
+    }
+    let mut output_name = b"__sunpack_partial/".to_vec();
+    output_name.extend_from_slice(&safe_partial_name(&name));
+    output_name.extend_from_slice(b".partial");
+    if output_name.len() > MAX_NAME_LEN {
+        output_name.truncate(MAX_NAME_LEN);
+    }
+    let crc32 = crc32_bytes(&decoded);
+    Some(RecoveredEntry {
+        name: output_name,
+        local_header_offset,
+        version_needed: version_needed.max(20),
+        flags: flags & !0x08,
+        method: 0,
+        mod_time,
+        mod_date,
+        crc32,
+        compressed_size: decoded.len() as u64,
+        uncompressed_size: decoded.len() as u64,
+        data_start,
+        data_end: data_start,
+        payload_override: Some(decoded),
+        verified: true,
+        descriptor: false,
+        passthrough: false,
+        boundary_source: BoundarySource::DeflateResync,
+        experimental_deflate_resync: true,
+    })
+}
+
+fn decode_deflate_prefix_for_partial(
+    input: &[u8],
+    max_output_bytes: Option<u64>,
+    max_duration: Option<Duration>,
+) -> Option<Vec<u8>> {
+    let started = Instant::now();
+    let mut decompressor = Decompress::new(false);
+    let mut output = Vec::with_capacity(64 * 1024);
+    loop {
+        if max_duration.is_some_and(|duration| started.elapsed() >= duration) {
+            break;
+        }
+        let before_in = decompressor.total_in();
+        let before_out = decompressor.total_out();
+        let before_len = output.len();
+        let input_offset = before_in as usize;
+        if input_offset >= input.len() {
+            break;
+        }
+        match decompressor.decompress_vec(&input[input_offset..], &mut output, FlushDecompress::None) {
+            Ok(Status::StreamEnd) => break,
+            Ok(_) => {
+                if output.len() > before_len {
+                    if let Some(limit) = max_output_bytes {
+                        if output.len() as u64 > limit {
+                            output.truncate(limit as usize);
+                            break;
+                        }
+                    }
+                }
+                if decompressor.total_in() == before_in && decompressor.total_out() == before_out {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    (!output.is_empty()).then_some(output)
+}
+
+fn safe_partial_name(name: &[u8]) -> Vec<u8> {
+    let mut output = Vec::with_capacity(name.len());
+    for byte in name {
+        match *byte {
+            b'/' | b'\\' => output.push(b'_'),
+            0 | b':' | b'*' | b'?' | b'"' | b'<' | b'>' | b'|' => output.push(b'_'),
+            value if value < 0x20 => output.push(b'_'),
+            value => output.push(value),
+        }
+    }
+    if output.is_empty() {
+        b"entry".to_vec()
+    } else {
+        output
+    }
+}
+
 fn descriptor_at(
     data: &[u8],
     offset: usize,
@@ -1585,20 +1912,20 @@ fn verified_deflate_payload_end(
     expected_crc32: u32,
     expected_size: u64,
     options: &DeepZipOptions,
-) -> Option<usize> {
+) -> Option<(usize, BoundarySource)> {
     let mut ends = Vec::new();
     if let Some(end) = header_end.filter(|end| *end <= data.len() && *end > data_start) {
-        ends.push(end);
+        ends.push((end, BoundarySource::HeaderSize));
     }
     if let Some(next) = find_next_zip_record(data, data_start) {
-        if next > data_start && !ends.contains(&next) {
-            ends.push(next);
+        if next > data_start && !ends.iter().any(|(end, _)| *end == next) {
+            ends.push((next, BoundarySource::NextRecord));
         }
     }
     if data_start < data.len() && ends.is_empty() {
-        ends.push(data.len());
+        ends.push((data.len(), BoundarySource::NextRecord));
     }
-    for end in ends {
+    for (end, source) in ends {
         let candidate = &data[data_start..end];
         if let Ok(info) = verify_deflate(
             candidate,
@@ -1608,11 +1935,44 @@ fn verified_deflate_payload_end(
             false,
         ) {
             if info.consumed > 0 && data_start + info.consumed <= end {
-                return Some(data_start + info.consumed);
+                let actual_end = data_start + info.consumed;
+                let actual_source = if actual_end == end {
+                    source
+                } else {
+                    BoundarySource::DeflateConsumed
+                };
+                return Some((actual_end, actual_source));
             }
         }
     }
     None
+}
+
+fn verified_store_payload_end(
+    data: &[u8],
+    data_start: usize,
+    expected_crc32: u32,
+    expected_size: u64,
+) -> Option<(usize, BoundarySource)> {
+    let expected_len = usize::try_from(expected_size).ok()?;
+    if let Some(end) = data_start.checked_add(expected_len) {
+        if end <= data.len() {
+            let payload = &data[data_start..end];
+            if crc32_bytes(payload) == expected_crc32 {
+                return Some((end, BoundarySource::HeaderSize));
+            }
+        }
+    }
+    let next = find_next_zip_record(data, data_start)?;
+    if next <= data_start {
+        return None;
+    }
+    let payload = &data[data_start..next];
+    if payload.len() as u64 == expected_size && crc32_bytes(payload) == expected_crc32 {
+        Some((next, BoundarySource::NextRecord))
+    } else {
+        None
+    }
 }
 
 fn find_next_zip_record(data: &[u8], start: usize) -> Option<usize> {
@@ -1859,6 +2219,7 @@ fn salvage_status_dict(
     repair_name: &str,
     central_local_mismatches: usize,
     excluded_name_count: usize,
+    scan: &ScanResult,
 ) -> PyResult<Py<PyDict>> {
     let result = PyDict::new(py);
     result.set_item("status", status)?;
@@ -1877,6 +2238,25 @@ fn salvage_status_dict(
     result.set_item("timed_out", timed_out)?;
     result.set_item("central_local_mismatches", central_local_mismatches)?;
     result.set_item("excluded_name_count", excluded_name_count)?;
+    result.set_item("lfh_scanned", scan.lfh_scanned)?;
+    result.set_item("next_lfh_boundary_entries", scan.next_lfh_boundary_entries)?;
+    result.set_item(
+        "deflate_consumed_boundary_entries",
+        scan.deflate_consumed_boundary_entries,
+    )?;
+    result.set_item("descriptor_signature_entries", scan.descriptor_signature_entries)?;
+    result.set_item(
+        "descriptor_no_signature_entries",
+        scan.descriptor_no_signature_entries,
+    )?;
+    result.set_item(
+        "deflate_resync_experimental",
+        scan.deflate_resync_partial_entries > 0,
+    )?;
+    result.set_item(
+        "deflate_resync_partial_entries",
+        scan.deflate_resync_partial_entries,
+    )?;
     result.set_item(
         "actions",
         PyList::new(
@@ -2749,6 +3129,114 @@ fn find_local_for_central(data: &[u8], entry: &CentralEntry) -> Option<LocalHead
         };
         pos = next_start + next;
     }
+}
+
+fn cd_local_reconcile_indices(data: &[u8], entries: &[RecoveredEntry]) -> (Vec<usize>, usize) {
+    let verified = entries
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| entry.verified)
+        .collect::<Vec<_>>();
+    if verified.is_empty() {
+        return (Vec::new(), 0);
+    }
+    let central_entries = parse_best_central_entries(data);
+    if central_entries.is_empty() {
+        return (
+            verified.into_iter().map(|(index, _)| index).collect::<Vec<_>>(),
+            0,
+        );
+    }
+    let mut selected = Vec::new();
+    let mut used = std::collections::HashSet::new();
+    let mut corrected_offsets = 0usize;
+    for central in &central_entries {
+        let mut best: Option<(i64, usize, bool)> = None;
+        for (index, local) in entries.iter().enumerate() {
+            if !local.verified || used.contains(&index) {
+                continue;
+            }
+            let score = reconcile_score(central, local);
+            if score <= 0 {
+                continue;
+            }
+            let corrected = central.local_header_offset as usize != local.local_header_offset;
+            let key = (score, std::cmp::Reverse(local.local_header_offset));
+            let replace = best
+                .as_ref()
+                .map(|(best_score, best_index, _)| {
+                    key > (*best_score, std::cmp::Reverse(entries[*best_index].local_header_offset))
+                })
+                .unwrap_or(true);
+            if replace {
+                best = Some((score, index, corrected));
+            }
+        }
+        if let Some((_, index, corrected)) = best {
+            used.insert(index);
+            selected.push(index);
+            if corrected {
+                corrected_offsets += 1;
+            }
+        }
+    }
+    if selected.is_empty() {
+        selected = entries
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| entry.verified.then_some(index))
+            .collect();
+    }
+    selected.sort_by_key(|index| entries[*index].local_header_offset);
+    (selected, corrected_offsets)
+}
+
+fn parse_best_central_entries(data: &[u8]) -> Vec<CentralEntry> {
+    if let Some(eocd) = find_eocd_record(data, true) {
+        let cd_end = (eocd.cd_offset as usize).saturating_add(eocd.cd_size as usize);
+        let entries = parse_central_directory_entries(data, eocd.cd_offset as usize, cd_end);
+        if !entries.is_empty() {
+            return entries;
+        }
+    }
+    if let Some(cd) = find_valid_central_directory(data) {
+        return parse_central_directory_entries(data, cd.offset, cd.end);
+    }
+    Vec::new()
+}
+
+fn reconcile_score(central: &CentralEntry, local: &RecoveredEntry) -> i64 {
+    let mut score = 0i64;
+    if central.name == local.name {
+        score += 1000;
+    } else if entry_name_key(&central.name) == entry_name_key(&local.name) {
+        score += 700;
+    } else {
+        return 0;
+    }
+    if central.method == local.method {
+        score += 120;
+    }
+    if central.crc32 == local.crc32 {
+        score += 180;
+    }
+    if central.compressed_size as u64 == local.compressed_size {
+        score += 80;
+    }
+    if central.uncompressed_size as u64 == local.uncompressed_size {
+        score += 80;
+    }
+    if central.local_header_offset as usize == local.local_header_offset {
+        score += 40;
+    } else {
+        score += 20;
+    }
+    if local.boundary_source == BoundarySource::DeflateConsumed
+        || local.boundary_source == BoundarySource::NextRecord
+    {
+        score += 30;
+    }
+    score
 }
 
 fn central_local_mismatch_count(data: &[u8]) -> usize {

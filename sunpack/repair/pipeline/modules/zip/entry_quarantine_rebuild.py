@@ -36,6 +36,10 @@ class ZipEntryQuarantineRebuild:
         flags = set(job.damage_flags)
         if flags & {"data_descriptor", "duplicate_entries", "overlapping_entries", "local_header_conflict"}:
             return 0.0
+        if flags & {"central_directory_bad", "central_directory_offset_bad", "central_directory_count_bad", "comment_length_bad"}:
+            if verification_problem_names(job):
+                return 0.9
+            return 0.78
         coverage = coverage_view_from_job(job)
         if coverage.mixed_damage_suspected or coverage.payload_only_suspected:
             return 0.99
@@ -83,7 +87,16 @@ class ZipEntryQuarantineRebuild:
                 message="ZIP quarantine rebuild requires at least one good entry and one skipped damaged entry",
             )
         coverage = coverage_view_from_job(job)
-        confidence = min(0.995, max(0.99, float(result.get("confidence") or 0.74) + coverage.score_hint(payload=0.04, mixed=0.04, partial=0.02)))
+        structural_flags = {
+            "central_directory_bad",
+            "central_directory_offset_bad",
+            "central_directory_count_bad",
+            "comment_length_bad",
+        }
+        if set(job.damage_flags) & structural_flags and not problem_names:
+            confidence = min(0.86, float(result.get("confidence") or 0.74) + coverage.score_hint(payload=0.02, mixed=0.02, partial=0.01))
+        else:
+            confidence = min(0.995, max(0.99, float(result.get("confidence") or 0.74) + coverage.score_hint(payload=0.04, mixed=0.04, partial=0.02)))
         return RepairResult(
             status="partial",
             confidence=confidence,

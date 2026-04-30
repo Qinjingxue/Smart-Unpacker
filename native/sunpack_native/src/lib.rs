@@ -213,6 +213,10 @@ fn sunpack_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(
+        zip_deep_repair::zip_cd_local_header_reconcile_salvage,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
         compression_stream_repair::gzip_footer_fix_repair,
         m
     )?)?;

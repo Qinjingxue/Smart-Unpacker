@@ -45,6 +45,13 @@ class ZipCentralDirectoryRebuild:
             return 0.94
         if coverage.mixed_damage_suspected:
             return 0.82
+        if flags & {"central_directory_bad", "central_directory_offset_bad", "central_directory_count_bad"} and flags & {
+            "checksum_error",
+            "crc_error",
+            "damaged",
+            "entry_payload_bad",
+        }:
+            return 0.97
         if flags & {"central_directory_offset_bad", "central_directory_count_bad"} and not (
             flags & {"central_directory_bad", "directory_integrity_bad_or_unknown", "local_header_recovery"}
         ):
