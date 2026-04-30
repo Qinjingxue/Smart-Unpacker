@@ -500,6 +500,148 @@ pub(crate) fn zip_conflict_resolver_rebuild(
     )
 }
 
+#[pyfunction]
+#[pyo3(signature = (
+    source_input,
+    workspace,
+    repair_name,
+    exclude_names,
+    max_entries=20000,
+    max_input_size_mb=512.0,
+    max_output_size_mb=2048.0,
+    max_entry_uncompressed_mb=512.0,
+    max_seconds=30.0
+))]
+pub(crate) fn zip_verified_entry_salvage(
+    py: Python<'_>,
+    source_input: &Bound<'_, PyDict>,
+    workspace: &str,
+    repair_name: &str,
+    exclude_names: Vec<String>,
+    max_entries: usize,
+    max_input_size_mb: f64,
+    max_output_size_mb: f64,
+    max_entry_uncompressed_mb: f64,
+    max_seconds: f64,
+) -> PyResult<Py<PyDict>> {
+    let started = Instant::now();
+    let options = DeepZipOptions {
+        max_candidates: 1,
+        max_entries: max_entries.max(1),
+        max_input_bytes: mb_to_bytes(max_input_size_mb),
+        max_output_bytes: mb_to_bytes(max_output_size_mb),
+        max_entry_uncompressed_bytes: mb_to_bytes(max_entry_uncompressed_mb),
+        max_duration: duration_from_seconds(max_seconds),
+        verify_candidates: true,
+    };
+    let data = match read_source_input(source_input, options.max_input_bytes) {
+        Ok(data) => data,
+        Err(message) => return status_dict(py, "skipped", "", &message, &[], &[], 0, 0, 0.0),
+    };
+    let scan = scan_entries(&data, &options, started);
+    let exclude = exclude_names
+        .iter()
+        .map(|name| normalize_zip_name_key(name))
+        .collect::<std::collections::HashSet<_>>();
+    let indices = scan
+        .entries
+        .iter()
+        .enumerate()
+        .filter_map(|(index, entry)| {
+            if !entry.verified {
+                return None;
+            }
+            if exclude.contains(&entry_name_key(&entry.name)) {
+                return None;
+            }
+            Some(index)
+        })
+        .collect::<Vec<_>>();
+    if indices.is_empty() {
+        return salvage_status_dict(
+            py,
+            "unrepairable",
+            "",
+            "no verified ZIP entries remained after salvage filters",
+            &scan.warnings,
+            scan.skipped_offsets.len(),
+            scan.encrypted_entries,
+            0,
+            0,
+            0,
+            scan.timed_out,
+            repair_name,
+            central_local_mismatch_count(&data),
+            exclude.len(),
+        );
+    }
+    let actions = match repair_name {
+        "zip_cd_local_header_reconcile_rebuild" => vec![
+            "cross_check_central_directory_against_local_headers",
+            "ignore_untrusted_central_directory_offsets",
+            "write_verified_local_header_zip",
+        ],
+        "zip_entry_quarantine_rebuild" => vec![
+            "apply_verification_failed_entry_quarantine",
+            "scan_local_file_headers",
+            "write_verified_local_header_zip",
+        ],
+        _ => vec![
+            "scan_local_file_headers",
+            "skip_unverified_payloads",
+            "write_verified_local_header_zip",
+        ],
+    };
+    let plan = make_plan(
+        "zip_verified_entry_salvage",
+        indices,
+        &scan.entries,
+        0.91,
+        actions,
+    );
+    let output_path = Path::new(workspace).join(format!("{repair_name}.zip"));
+    match write_candidate_zip(
+        &data,
+        &scan.entries,
+        &plan,
+        &output_path,
+        options.max_output_bytes,
+    ) {
+        Ok(stats) => salvage_status_dict(
+            py,
+            "partial",
+            &output_path.to_string_lossy(),
+            "ZIP verified entry salvage produced a candidate",
+            &scan.warnings,
+            scan.skipped_offsets.len(),
+            scan.encrypted_entries,
+            stats.entries,
+            stats.verified_entries,
+            stats.descriptor_entries,
+            scan.timed_out,
+            repair_name,
+            central_local_mismatch_count(&data),
+            exclude.len(),
+        ),
+        Err(message) => salvage_status_dict(
+            py,
+            "unrepairable",
+            "",
+            &message,
+            &scan.warnings,
+            scan.skipped_offsets.len(),
+            scan.encrypted_entries,
+            0,
+            0,
+            0,
+            scan.timed_out,
+            repair_name,
+            central_local_mismatch_count(&data),
+            exclude.len(),
+        ),
+    }
+}
+
 #[derive(Debug, Clone)]
 struct DeepZipOptions {
     max_candidates: usize,
@@ -1637,6 +1779,73 @@ fn rebuild_status_dict(
     Ok(result.unbind())
 }
 
+#[allow(clippy::too_many_arguments)]
+fn salvage_status_dict(
+    py: Python<'_>,
+    status: &str,
+    path: &str,
+    message: &str,
+    warnings: &[String],
+    skipped_entries: usize,
+    encrypted_entries: usize,
+    recovered_entries: usize,
+    verified_entries: usize,
+    descriptor_entries: usize,
+    timed_out: bool,
+    repair_name: &str,
+    central_local_mismatches: usize,
+    excluded_name_count: usize,
+) -> PyResult<Py<PyDict>> {
+    let result = PyDict::new(py);
+    result.set_item("status", status)?;
+    result.set_item("selected_path", path)?;
+    result.set_item("path", path)?;
+    result.set_item("selected_candidate", repair_name)?;
+    result.set_item("confidence", if verified_entries > 0 { 0.91 } else { 0.0 })?;
+    result.set_item("format", "zip")?;
+    result.set_item("message", message)?;
+    result.set_item("warnings", PyList::new(py, warnings)?)?;
+    result.set_item("skipped_entries", skipped_entries)?;
+    result.set_item("encrypted_entries", encrypted_entries)?;
+    result.set_item("descriptor_entries", descriptor_entries)?;
+    result.set_item("recovered_entries", recovered_entries)?;
+    result.set_item("verified_entries", verified_entries)?;
+    result.set_item("timed_out", timed_out)?;
+    result.set_item("central_local_mismatches", central_local_mismatches)?;
+    result.set_item("excluded_name_count", excluded_name_count)?;
+    result.set_item(
+        "actions",
+        PyList::new(
+            py,
+            match repair_name {
+                "zip_cd_local_header_reconcile_rebuild" => vec![
+                    "cross_check_central_directory_against_local_headers",
+                    "ignore_untrusted_central_directory_offsets",
+                    "write_verified_local_header_zip",
+                ],
+                "zip_entry_quarantine_rebuild" => vec![
+                    "apply_verification_failed_entry_quarantine",
+                    "scan_local_file_headers",
+                    "write_verified_local_header_zip",
+                ],
+                _ => vec![
+                    "scan_local_file_headers",
+                    "skip_unverified_payloads",
+                    "write_verified_local_header_zip",
+                ],
+            },
+        )?,
+    )?;
+    result.set_item("candidates", PyList::empty(py))?;
+    let workspace_paths = if path.is_empty() {
+        Vec::new()
+    } else {
+        vec![path]
+    };
+    result.set_item("workspace_paths", PyList::new(py, workspace_paths)?)?;
+    Ok(result.unbind())
+}
+
 fn ensure_parent(path: &Path) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
@@ -2476,6 +2685,36 @@ fn find_local_for_central(data: &[u8], entry: &CentralEntry) -> Option<LocalHead
         };
         pos = next_start + next;
     }
+}
+
+fn central_local_mismatch_count(data: &[u8]) -> usize {
+    let Some(eocd) = find_eocd_record(data, true) else {
+        return 0;
+    };
+    let cd_end = (eocd.cd_offset as usize).saturating_add(eocd.cd_size as usize);
+    let entries = parse_central_directory_entries(data, eocd.cd_offset as usize, cd_end);
+    entries
+        .iter()
+        .filter(|entry| {
+            let Some(local) = find_local_for_central(data, entry) else {
+                return true;
+            };
+            local.name != entry.name
+                || local.method != entry.method
+                || (entry.flags & 0x08 == 0
+                    && (local.crc32 != entry.crc32
+                        || local.compressed_size != entry.compressed_size
+                        || local.uncompressed_size != entry.uncompressed_size))
+        })
+        .count()
+}
+
+fn entry_name_key(raw: &[u8]) -> String {
+    normalize_zip_name_key(&String::from_utf8_lossy(raw))
+}
+
+fn normalize_zip_name_key(name: &str) -> String {
+    name.replace('\\', "/").trim_start_matches("./").to_lowercase()
 }
 
 fn expected_zip64_values(

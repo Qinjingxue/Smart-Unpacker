@@ -9,6 +9,8 @@ from sunpack.repair.pipeline.registry import register_repair_module
 from sunpack.repair.result import RepairResult
 from sunpack_native import zip_deep_partial_recovery as _native_zip_deep_partial_recovery
 
+from ._entry_salvage import run_verified_entry_salvage, verification_problem_names
+
 
 class ZipEntryQuarantineRebuild:
     spec = RepairModuleSpec(
@@ -44,6 +46,18 @@ class ZipEntryQuarantineRebuild:
         return 0.0
 
     def repair(self, job: RepairJob, diagnosis: RepairDiagnosis, workspace: str, config: dict) -> RepairResult:
+        problem_names = verification_problem_names(job)
+        if problem_names:
+            return run_verified_entry_salvage(
+                module_name=self.spec.name,
+                job=job,
+                diagnosis=diagnosis,
+                workspace=workspace,
+                config=config,
+                exclude_names=problem_names,
+                confidence=0.93,
+                message="rebuilt ZIP from verified entries after quarantining names reported by verification",
+            )
         deep = config.get("deep") if isinstance(config.get("deep"), dict) else {}
         result = dict(_native_zip_deep_partial_recovery(
             source_input_for_job(job),
