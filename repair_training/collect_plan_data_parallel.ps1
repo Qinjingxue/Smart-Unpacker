@@ -24,6 +24,7 @@ param(
     [ValidateSet("lazy", "eager")]
     [string]$ProposalMode = "lazy",
     [int]$MaterializeTopKPerRound = 2,
+    [int]$RepairMaxModulesPerJob = 64,
     [switch]$MaterializeSelectedOnly,
     [switch]$IncludeUnmaterializedLabels,
     [double]$CaseTimeoutSeconds = 45.0,
@@ -173,6 +174,7 @@ function New-CollectorArgs {
         "-FutureLabelDiscount", "$FutureLabelDiscount",
         "-ProposalMode", $ProposalMode,
         "-MaterializeTopKPerRound", "$MaterializeTopKPerRound",
+        "-RepairMaxModulesPerJob", "$RepairMaxModulesPerJob",
         "-CaseTimeoutSeconds", "$CaseTimeoutSeconds",
         "-StreamLargeSizeMb", "$StreamLargeSizeMb",
         "-StreamLargeCaseTimeoutSeconds", "$StreamLargeCaseTimeoutSeconds",
@@ -387,6 +389,7 @@ foreach ($shard in $shards) {
         "-FutureLabelDiscount", "$FutureLabelDiscount",
         "-ProposalMode", $ProposalMode,
         "-MaterializeTopKPerRound", "$MaterializeTopKPerRound",
+        "-RepairMaxModulesPerJob", "$RepairMaxModulesPerJob",
         "-CaseTimeoutSeconds", "$CaseTimeoutSeconds",
         "-StreamLargeSizeMb", "$StreamLargeSizeMb",
         "-StreamLargeCaseTimeoutSeconds", "$StreamLargeCaseTimeoutSeconds",

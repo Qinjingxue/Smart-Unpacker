@@ -6,8 +6,8 @@ param(
     [string]$FeatureView = "runtime_only",
     [ValidateSet("all", "zip", "tar", "tar_gz", "tar_bz2", "tar_xz", "gzip", "bzip2", "xz", "zstd", "7z", "rar")]
     [string]$FormatScope = "all",
-    [ValidateSet("immediate", "future", "discounted", "blended", "strategy", "terminal_recovery_ratio", "discounted_terminal_recovery_ratio", "strategy_recovery_ratio")]
-    [string]$LabelTarget = "strategy_recovery_ratio",
+    [ValidateSet("immediate", "future", "discounted", "blended", "terminal_recovery_ratio", "discounted_terminal_recovery_ratio")]
+    [string]$LabelTarget = "terminal_recovery_ratio",
     [ValidateSet("query", "episode", "source_sample", "source_profile", "profile_holdout")]
     [string]$SplitBy = "query",
     [switch]$AllFeatureViews,

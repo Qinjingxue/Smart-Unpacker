@@ -187,7 +187,7 @@ def _rollout_report(rows: list[dict[str, Any]], query_groups: dict[str, list[dic
     selected_rows = []
     selected_future_hits = 0
     label2_rows = 0
-    label2_future_success = 0
+    label2_terminal_recovery_success = 0
     hard_negative_rows = 0
     hard_negative_future_failure = 0
     for row in rows:
@@ -205,8 +205,8 @@ def _rollout_report(rows: list[dict[str, Any]], query_groups: dict[str, list[dic
             selected_rows.append(row)
         if immediate == 2:
             label2_rows += 1
-            if future == 3 or bool(details.get("terminal_success")):
-                label2_future_success += 1
+            if _row_best_terminal_recovery_ratio(row) >= 0.999:
+                label2_terminal_recovery_success += 1
         if immediate == -1:
             hard_negative_rows += 1
             if future <= 0:
@@ -227,7 +227,7 @@ def _rollout_report(rows: list[dict[str, Any]], query_groups: dict[str, list[dic
         "future_best_label_distribution": dict(sorted(future_labels.items(), key=lambda item: int(item[0]))),
         "immediate_future_disagreement_ratio": immediate_future_disagreements / max(1, len(rows)),
         "selected_path_future_best_hit_rate": selected_future_hits / max(1, len(query_groups)),
-        "label2_future_success_rate": label2_future_success / max(1, label2_rows),
+        "state_progress_terminal_recovery_success_rate": label2_terminal_recovery_success / max(1, label2_rows),
         "hard_negative_future_failure_rate": hard_negative_future_failure / max(1, hard_negative_rows),
     }
 
@@ -258,13 +258,13 @@ def _recovery_ratio_report(rows: list[dict[str, Any]], query_groups: dict[str, l
 
 def _row_recovery_ratio(row: dict[str, Any]) -> float:
     targets = row.get("training_targets") if isinstance(row.get("training_targets"), dict) else {}
-    for key in ("strategy_recovery_ratio", "terminal_recovery_ratio", "subtree_best_terminal_recovery_ratio"):
+    for key in ("terminal_recovery_ratio", "subtree_best_terminal_recovery_ratio"):
         if targets.get(key) is not None:
             return _clamp01(_as_float(targets.get(key)))
     if row.get("terminal_recovery_ratio") is not None:
         return _clamp01(_as_float(row.get("terminal_recovery_ratio")))
     details = row.get("label_details") if isinstance(row.get("label_details"), dict) else {}
-    for key in ("strategy_recovery_ratio", "terminal_recovery_ratio", "subtree_best_terminal_recovery_ratio"):
+    for key in ("terminal_recovery_ratio", "subtree_best_terminal_recovery_ratio"):
         if details.get(key) is not None:
             return _clamp01(_as_float(details.get(key)))
     label = int(row.get("label", 0) or 0)
@@ -339,40 +339,43 @@ def _difficulty_report(rows: list[dict[str, Any]], query_groups: dict[str, list[
     selected_future_hits = 0
     selected_considered = 0
     label2_rows = 0
-    label2_future_complete = 0
+    label2_terminal_recovery_complete = 0
     two_step_rows = 0
     two_step_success_rows = 0
+    two_step_success_by_recovery_rows = 0
     deceptive_hard_negative_rows = 0
     profile_module_labels: dict[tuple[str, str], Counter[str]] = defaultdict(Counter)
     for row in rows:
-        target = _strategy_target_label(row)
+        target = _terminal_target_label(row)
         tags = _difficulty_tags(row)
         details = row.get("label_details") if isinstance(row.get("label_details"), dict) else {}
-        profile = str(_nested(row, "stable_features", "state", "damage_profile") or row.get("damage_profile") or "")
+        profile = _damage_profile(row)
         module = str(row.get("module") or _nested(row, "stable_features", "candidate", "module") or "")
         profile_module_labels[(profile, module)][str(int(row.get("label", 0) or 0))] += 1
         if int(row.get("label", 0) or 0) == 2:
             label2_rows += 1
-            if int(details.get("future_best_label", 0) or 0) >= 3 or bool(details.get("terminal_success")):
-                label2_future_complete += 1
-        if "two_step_repair" in tags:
+            if _row_best_terminal_recovery_ratio(row) >= 0.999:
+                label2_terminal_recovery_complete += 1
+        if "two_step_repair" in tags or "two_step" in profile:
             two_step_rows += 1
             if int(details.get("future_best_label", row.get("label", 0)) or 0) >= 3:
                 two_step_success_rows += 1
+            if _row_best_terminal_recovery_ratio(row) >= 0.999:
+                two_step_success_by_recovery_rows += 1
         if "deceptive_structural_success" in tags or "hash_mismatch_risk" in tags or int(row.get("label", 0) or 0) < 0:
             if target <= 0 or int(row.get("label", 0) or 0) < 0:
                 deceptive_hard_negative_rows += 1
     for query, items in query_groups.items():
         if not items:
             continue
-        targets = [_strategy_target_label(row) for row in items]
+        targets = [_terminal_target_label(row) for row in items]
         unique = set(targets)
         target_unique_counts.append(len(unique))
         if len(unique) >= 2:
             mixed_target_queries += 1
         entropies.append(_entropy(targets))
         has_hard = any(_is_hard_negative(row) for row in items)
-        has_positive = any(_strategy_target_label(row) > 1 for row in items)
+        has_positive = any(_terminal_target_label(row) > 1 for row in items)
         has_partial = any(int(row.get("label", 0) or 0) == 1 or str(row.get("label_status") or "") == "partial" for row in items)
         if has_hard and has_positive:
             hard_positive_queries += 1
@@ -403,13 +406,14 @@ def _difficulty_report(rows: list[dict[str, Any]], query_groups: dict[str, list[
         "hard_negative_vs_positive_same_query_ratio": hard_positive_queries / query_count,
         "hard_negative_vs_partial_same_query_count": hard_partial_queries,
         "hard_negative_vs_partial_same_query_ratio": hard_partial_queries / query_count,
-        "state_progress_to_complete_count": label2_future_complete,
-        "label2_future_complete_rate": label2_future_complete / max(1, label2_rows),
+        "state_progress_terminal_recovery_complete_count": label2_terminal_recovery_complete,
+        "state_progress_terminal_recovery_complete_rate": label2_terminal_recovery_complete / max(1, label2_rows),
         "teacher_top1_wrong_but_future_best_exists_count": teacher_wrong_future_best,
         "teacher_top1_wrong_but_future_best_exists_ratio": teacher_wrong_future_best / max(1, teacher_considered),
         "selected_path_future_best_hit_rate": selected_future_hits / max(1, selected_considered),
         "two_step_row_count": two_step_rows,
         "two_step_success_row_count": two_step_success_rows,
+        "two_step_success_by_recovery_row_count": two_step_success_by_recovery_rows,
         "deceptive_hard_negative_row_count": deceptive_hard_negative_rows,
         "profile_module_label_purity": _series_summary_float(purities),
     }
@@ -425,7 +429,44 @@ def _difficulty_tags(row: dict[str, Any]) -> list[str]:
     if isinstance(candidate, dict):
         values.extend(candidate.get("difficulty_tags") or [])
     values.extend(row.get("difficulty_tags") or [])
+    profile = _damage_profile(row)
+    if "two_step" in profile:
+        values.append("two_step_repair")
     return [str(value) for value in values if value]
+
+
+def _damage_profile(row: dict[str, Any]) -> str:
+    explicit = str(_nested(row, "stable_features", "state", "damage_profile") or row.get("damage_profile") or "")
+    if explicit:
+        return explicit
+    sample = str(row.get("sample_id") or row.get("episode_id") or "")
+    known = (
+        "zip_two_step_boundary_then_cd_rebuild",
+        "zip_two_step_comment_fix_then_eocd_repair",
+        "zip_two_step_local_header_then_cd_offset",
+        "zip_two_step_drop_cd_with_eocd_noise",
+        "zip_directory_only_bad_payload",
+        "zip_rebuild_directory_keeps_bad_payload",
+        "zip_quarantine_keeps_corrupted_entry",
+        "zip_wrong_local_offset_extracts_valid_other_entry",
+        "zip_eocd_cd_half_damaged",
+    )
+    for item in known:
+        if item in sample:
+            return item
+    return ""
+
+
+def _row_best_terminal_recovery_ratio(row: dict[str, Any]) -> float:
+    details = row.get("label_details") if isinstance(row.get("label_details"), dict) else {}
+    targets = row.get("training_targets") if isinstance(row.get("training_targets"), dict) else {}
+    for key in ("subtree_best_terminal_recovery_ratio", "terminal_recovery_ratio"):
+        if details.get(key) is not None:
+            return _as_float(details.get(key))
+    for key in ("subtree_best_terminal_recovery_ratio", "terminal_recovery_ratio"):
+        if targets.get(key) is not None:
+            return _as_float(targets.get(key))
+    return _as_float(row.get("terminal_recovery_ratio"))
 
 
 def _is_hard_negative(row: dict[str, Any]) -> bool:
@@ -433,25 +474,17 @@ def _is_hard_negative(row: dict[str, Any]) -> bool:
     return int(row.get("label", 0) or 0) < 0 or str(targets.get("risk_class") or "").startswith("hard_negative")
 
 
-def _strategy_target_label(row: dict[str, Any]) -> int:
-    if _is_hard_negative(row):
-        return 0
-    targets = row.get("training_targets") if isinstance(row.get("training_targets"), dict) else {}
-    value = targets.get("strategy_gain")
-    if value is None:
-        details = row.get("label_details") if isinstance(row.get("label_details"), dict) else {}
-        value = details.get("strategy_gain")
-    try:
-        gain = float(value)
-    except Exception:
-        gain = float(_label_gain(row.get("label")))
-    if gain <= 0:
-        return 1
-    if gain < 2:
-        return 2
-    if gain < 3:
+def _terminal_target_label(row: dict[str, Any]) -> int:
+    ratio = _row_recovery_ratio(row)
+    if ratio >= 0.999:
+        return 4
+    if ratio >= 0.67:
         return 3
-    return 5
+    if ratio >= 0.34:
+        return 2
+    if ratio > 0:
+        return 1
+    return 0
 
 
 def _future_value(row: dict[str, Any]) -> int:
@@ -739,7 +772,7 @@ def _quality_warnings(report: dict[str, Any]) -> list[str]:
     entropy = difficulty.get("query_target_entropy") if isinstance(difficulty.get("query_target_entropy"), dict) else {}
     if float(entropy.get("mean", 0.0) or 0.0) < 0.35:
         warnings.append("dataset_too_easy_target_entropy_low")
-    if float(difficulty.get("label2_future_complete_rate", 0.0) or 0.0) < 0.05 or int(difficulty.get("state_progress_to_complete_count", 0) or 0) <= 0:
+    if float(difficulty.get("state_progress_terminal_recovery_complete_rate", 0.0) or 0.0) < 0.05 or int(difficulty.get("state_progress_terminal_recovery_complete_count", 0) or 0) <= 0:
         warnings.append("too_few_two_step_success_cases")
     if int(difficulty.get("deceptive_hard_negative_row_count", 0) or 0) <= 0:
         warnings.append("too_few_deceptive_hard_negatives")

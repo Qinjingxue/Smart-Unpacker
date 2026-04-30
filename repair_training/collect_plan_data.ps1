@@ -20,6 +20,7 @@ param(
     [ValidateSet("lazy", "eager")]
     [string]$ProposalMode = "lazy",
     [int]$MaterializeTopKPerRound = 2,
+    [int]$RepairMaxModulesPerJob = 64,
     [switch]$MaterializeSelectedOnly,
     [switch]$IncludeUnmaterializedLabels,
     [double]$CaseTimeoutSeconds = 45.0,
@@ -81,6 +82,7 @@ $argsList = @(
     "--future-label-discount", "$FutureLabelDiscount",
     "--proposal-mode", $ProposalMode,
     "--materialize-top-k-per-round", "$MaterializeTopKPerRound",
+    "--repair-max-modules-per-job", "$RepairMaxModulesPerJob",
     "--case-timeout-seconds", "$CaseTimeoutSeconds",
     "--stream-large-size-mb", "$StreamLargeSizeMb",
     "--stream-large-case-timeout-seconds", "$StreamLargeCaseTimeoutSeconds",

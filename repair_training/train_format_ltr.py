@@ -20,7 +20,7 @@ DEFAULT_INPUTS = [
 DEFAULT_OUTPUT_DIR = Path("repair_training") / "models" / "by_format"
 FORMATS = ("zip", "tar", "tar_gz", "tar_bz2", "tar_xz", "gzip", "bzip2", "xz", "zstd", "7z", "rar")
 FEATURE_VIEWS = ("runtime_only", "runtime_plus_repair_prior", "teacher_only_baseline")
-LABEL_TARGETS = {"immediate", "future", "discounted", "blended", "strategy", "terminal_recovery_ratio", "discounted_terminal_recovery_ratio", "strategy_recovery_ratio"}
+LABEL_TARGETS = {"immediate", "future", "discounted", "blended", "terminal_recovery_ratio", "discounted_terminal_recovery_ratio"}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -87,7 +87,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR))
     parser.add_argument("--formats", default="", help="Comma-separated material formats. Defaults to all supported training formats.")
     parser.add_argument("--feature-views", default="", help="Comma-separated feature views. Defaults to all views.")
-    parser.add_argument("--label-target", choices=sorted(LABEL_TARGETS), default="strategy_recovery_ratio")
+    parser.add_argument("--label-target", choices=sorted(LABEL_TARGETS), default="terminal_recovery_ratio")
     parser.add_argument("--split-by", choices=("query", "episode", "source_sample", "source_profile", "profile_holdout"), default="source_sample")
     parser.add_argument("--seed", type=int, default=2026)
     parser.add_argument("--min-trainable-queries", type=int, default=30)

@@ -22,6 +22,7 @@ param(
     [ValidateSet("lazy", "eager")]
     [string]$ProposalMode = "lazy",
     [int]$MaterializeTopKPerRound = 4,
+    [int]$RepairMaxModulesPerJob = 64,
     [switch]$MaterializeSelectedOnly,
     [double]$CaseTimeoutSeconds = 12.0,
     [double]$StreamLargeSizeMb = 32,
@@ -43,8 +44,8 @@ param(
     [switch]$SkipBuild,
     [switch]$SkipCollect,
     [switch]$SkipTrain,
-    [ValidateSet("immediate", "future", "discounted", "blended", "strategy", "terminal_recovery_ratio", "discounted_terminal_recovery_ratio", "strategy_recovery_ratio")]
-    [string]$LabelTarget = "strategy_recovery_ratio",
+    [ValidateSet("immediate", "future", "discounted", "blended", "terminal_recovery_ratio", "discounted_terminal_recovery_ratio")]
+    [string]$LabelTarget = "terminal_recovery_ratio",
     [ValidateSet("query", "episode", "source_sample", "source_profile", "profile_holdout")]
     [string]$SplitBy = "source_sample",
     [bool]$TrainByFormat = $true,
@@ -137,6 +138,7 @@ try {
             FutureLabelDiscount = $FutureLabelDiscount
             ProposalMode = $ProposalMode
             MaterializeTopKPerRound = $MaterializeTopKPerRound
+            RepairMaxModulesPerJob = $RepairMaxModulesPerJob
             CaseTimeoutSeconds = $CaseTimeoutSeconds
             StreamLargeSizeMb = $StreamLargeSizeMb
             StreamLargeCaseTimeoutSeconds = $StreamLargeCaseTimeoutSeconds

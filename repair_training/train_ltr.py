@@ -27,7 +27,7 @@ FEATURE_VIEWS = {
     "runtime_plus_repair_prior",
 }
 FORMAT_SCOPES = {"all", "zip", "tar", "tar_gz", "tar_bz2", "tar_xz", "gzip", "bzip2", "xz", "zstd", "7z", "rar"}
-LABEL_TARGETS = {"immediate", "future", "discounted", "blended", "strategy", "terminal_recovery_ratio", "discounted_terminal_recovery_ratio", "strategy_recovery_ratio"}
+LABEL_TARGETS = {"immediate", "future", "discounted", "blended", "terminal_recovery_ratio", "discounted_terminal_recovery_ratio"}
 SPLIT_BY = {"query", "episode", "source_sample", "source_profile", "profile_holdout"}
 LABEL_GAIN = {-1: 0, 0: 0, 1: 1, 2: 2, 3: 4}
 LEAKAGE_EXCLUDED_KEYS = {
@@ -242,7 +242,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--input", action="append", default=[], help="Input JSONL file. Repeatable; defaults to repair_training/datasets/*.jsonl.")
     parser.add_argument("--feature-view", choices=sorted(FEATURE_VIEWS), default="runtime_only")
     parser.add_argument("--format-scope", choices=sorted(FORMAT_SCOPES), default="all", help="Train on one material format, or all rows for the legacy unified baseline.")
-    parser.add_argument("--label-target", choices=sorted(LABEL_TARGETS), default="strategy_recovery_ratio", help="Which collected label target to optimize.")
+    parser.add_argument("--label-target", choices=sorted(LABEL_TARGETS), default="terminal_recovery_ratio", help="Which collected label target to optimize.")
     parser.add_argument("--split-by", choices=sorted(SPLIT_BY), default="query", help="Split train/eval by query, episode, or source material sample.")
     parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR))
     parser.add_argument("--seed", type=int, default=2026)
@@ -455,7 +455,7 @@ def _gain(label: Any) -> int:
 def _target_gain(row: dict[str, Any], target: str) -> int:
     target = str(target or "immediate")
     targets = row.get("training_targets") if isinstance(row.get("training_targets"), dict) else {}
-    if target in {"terminal_recovery_ratio", "discounted_terminal_recovery_ratio", "strategy_recovery_ratio"}:
+    if target in {"terminal_recovery_ratio", "discounted_terminal_recovery_ratio"}:
         return _ratio_rank_label(row, targets.get(target), target)
     if target == "future":
         return int(_gain(targets.get("future_gain", row.get("label"))))
@@ -468,18 +468,10 @@ def _target_gain(row: dict[str, Any], target: str) -> int:
     if target == "blended":
         value = targets.get("blended_gain")
         return _rank_label_from_gain_float(_gain_float(value, fallback=row.get("label")))
-    if target == "strategy":
-        value = targets.get("strategy_gain")
-        if value is None:
-            details = row.get("label_details") if isinstance(row.get("label_details"), dict) else {}
-            value = details.get("strategy_gain")
-        return _strategy_rank_label(row, value)
     return int(_gain(row.get("label")))
 
 
 def _ratio_rank_label(row: dict[str, Any], value: Any, target: str) -> int:
-    if int(row.get("label", 0) or 0) < 0:
-        return 0
     if value is None:
         details = row.get("label_details") if isinstance(row.get("label_details"), dict) else {}
         value = details.get(target)
@@ -518,31 +510,7 @@ def _label_ratio_rank_label(label: int) -> int:
     return 0
 
 
-def _strategy_rank_label(row: dict[str, Any], value: Any) -> int:
-    targets = row.get("training_targets") if isinstance(row.get("training_targets"), dict) else {}
-    risk_class = str(targets.get("risk_class") or "")
-    if risk_class.startswith("hard_negative") or int(row.get("label", 0) or 0) < 0:
-        return 0
-    gain = _gain_float(value, fallback=row.get("label"))
-    if gain <= 0:
-        return 1
-    if gain < 2:
-        return 2
-    if gain < 3:
-        return 3
-    return 5
-
-
 def _target_weight(row: dict[str, Any], target: str) -> float:
-    if str(target or "") not in {"strategy", "strategy_recovery_ratio"}:
-        return 1.0
-    targets = row.get("training_targets") if isinstance(row.get("training_targets"), dict) else {}
-    try:
-        hard_weight = float(targets.get("hard_negative_weight", 0.0) or 0.0)
-    except Exception:
-        hard_weight = 0.0
-    if hard_weight > 0:
-        return 1.0 + hard_weight
     return 1.0
 
 

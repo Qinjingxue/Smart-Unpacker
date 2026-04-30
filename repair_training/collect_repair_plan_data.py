@@ -931,10 +931,8 @@ def _rollout_terminal_row(
             "future_gain": label,
             "discounted_gain": float(label),
             "blended_gain": float(label),
-            "strategy_gain": _strategy_gain(label, label, 0, label == 3, status),
             "terminal_recovery_ratio": terminal_recovery_ratio,
             "discounted_terminal_recovery_ratio": terminal_recovery_ratio,
-            "strategy_recovery_ratio": _strategy_recovery_ratio(label, terminal_recovery_ratio, 0, label == 3, status),
             "risk_class": _risk_class(label, label, status),
             "hard_negative_weight": _hard_negative_weight(label, label, status),
         },
@@ -1158,36 +1156,6 @@ def _label_to_recovery_ratio(label: int) -> float:
     return 0.0
 
 
-def _strategy_gain(immediate_label: int, terminal_label: int, steps_to_terminal: int, terminal_success: bool, terminal_status: str | None) -> float:
-    terminal_label = int(terminal_label or 0)
-    immediate_label = int(immediate_label or 0)
-    if immediate_label < 0:
-        return -1.0
-    if terminal_label < 0:
-        return -1.0
-    steps = max(0, int(steps_to_terminal or 0))
-    terminal_component = float(terminal_label) * (0.9 ** steps)
-    immediate_component = 0.1 * float(immediate_label)
-    success_bonus = 0.5 if terminal_success else 0.0
-    status_penalty = 0.0
-    if str(terminal_status or "") in {"dead_end", "no_candidates", "budget_exhausted"}:
-        status_penalty = 0.25
-    return max(-1.0, terminal_component + immediate_component + success_bonus - status_penalty)
-
-
-def _strategy_recovery_ratio(immediate_label: int, terminal_recovery_ratio: float, steps_to_terminal: int, terminal_success: bool, terminal_status: str | None) -> float:
-    if int(immediate_label or 0) < 0 or str(terminal_status or "") == "hard_negative":
-        return -1.0
-    steps = max(0, int(steps_to_terminal or 0))
-    ratio = max(0.0, min(1.0, float(terminal_recovery_ratio or 0.0)))
-    value = ratio * (0.9 ** steps)
-    if terminal_success:
-        value += 0.05
-    if str(terminal_status or "") in {"dead_end", "no_candidates", "budget_exhausted"}:
-        value -= 0.05
-    return max(-1.0, min(1.05, value))
-
-
 def _backfill_future_labels(rows: list[dict[str, Any]], discount: float) -> None:
     rows_by_id = {str(row.get("action_row_id")): row for row in rows if row.get("action_row_id")}
     children: dict[str, list[dict[str, Any]]] = {}
@@ -1296,9 +1264,7 @@ def _backfill_future_labels(rows: list[dict[str, Any]], discount: float) -> None
         steps_to_terminal = int(future.get("steps_to_terminal", 0) or 0)
         selected_terminal_ratio = float(future.get("selected_path_terminal_recovery_ratio", _label_to_recovery_ratio(selected_terminal_label)) or 0.0)
         best_terminal_ratio = float(future.get("subtree_best_terminal_recovery_ratio", _label_to_recovery_ratio(future_label)) or 0.0)
-        strategy_gain = _strategy_gain(immediate_label, selected_terminal_label, steps_to_terminal, bool(terminal_success), selected_terminal_status)
         discounted_terminal_ratio = best_terminal_ratio * (float(discount) ** int(steps_to_best))
-        strategy_recovery_ratio = _strategy_recovery_ratio(immediate_label, selected_terminal_ratio, steps_to_terminal, bool(terminal_success), selected_terminal_status)
         details = row.get("label_details") if isinstance(row.get("label_details"), dict) else {}
         details["immediate_label"] = immediate_label
         details["future_best_label"] = future_label
@@ -1312,11 +1278,9 @@ def _backfill_future_labels(rows: list[dict[str, Any]], discount: float) -> None
         details["selected_path_terminal_status"] = selected_terminal_status
         details["selected_path_terminal_state_id"] = future.get("selected_path_terminal_state_id")
         details["steps_to_terminal"] = steps_to_terminal
-        details["strategy_gain"] = strategy_gain
         details["terminal_recovery_ratio"] = selected_terminal_ratio
         details["subtree_best_terminal_recovery_ratio"] = best_terminal_ratio
         details["discounted_terminal_recovery_ratio"] = discounted_terminal_ratio
-        details["strategy_recovery_ratio"] = strategy_recovery_ratio
         details["risk_class"] = _risk_class(immediate_label, selected_terminal_label, selected_terminal_status)
         details["hard_negative_weight"] = _hard_negative_weight(immediate_label, selected_terminal_label, selected_terminal_status)
         row["label_details"] = details
@@ -1327,11 +1291,9 @@ def _backfill_future_labels(rows: list[dict[str, Any]], discount: float) -> None
             "subtree_best_label": future_label,
             "subtree_terminal_success": bool(terminal_success),
             "steps_to_terminal": steps_to_terminal,
-            "strategy_gain": strategy_gain,
             "terminal_recovery_ratio": selected_terminal_ratio,
             "subtree_best_terminal_recovery_ratio": best_terminal_ratio,
             "discounted_terminal_recovery_ratio": discounted_terminal_ratio,
-            "strategy_recovery_ratio": strategy_recovery_ratio,
             "risk_class": details["risk_class"],
             "hard_negative_weight": details["hard_negative_weight"],
         }
@@ -1342,11 +1304,9 @@ def _backfill_future_labels(rows: list[dict[str, Any]], discount: float) -> None
             "future_gain": future_label,
             "discounted_gain": discounted,
             "blended_gain": blended,
-            "strategy_gain": strategy_gain,
             "terminal_recovery_ratio": selected_terminal_ratio,
             "subtree_best_terminal_recovery_ratio": best_terminal_ratio,
             "discounted_terminal_recovery_ratio": discounted_terminal_ratio,
-            "strategy_recovery_ratio": strategy_recovery_ratio,
             "risk_class": details["risk_class"],
             "hard_negative_weight": details["hard_negative_weight"],
         }
