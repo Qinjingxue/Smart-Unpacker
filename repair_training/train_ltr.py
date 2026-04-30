@@ -30,8 +30,8 @@ def main(argv: list[str] | None = None) -> int:
     rows = _load_rows(args.input)
     if not rows:
         raise SystemExit("no LTR rows found")
-    grouped = _group_rows(rows)
-    grouped = {query: items for query, items in grouped.items() if items}
+    raw_grouped = _group_rows(rows)
+    grouped = _filter_groups(raw_grouped, args)
     if not grouped:
         raise SystemExit("no non-empty LTR query groups found")
 
@@ -86,6 +86,10 @@ def main(argv: list[str] | None = None) -> int:
         "output_dir": str(output_dir),
         "row_count": len(rows),
         "query_count": len(grouped),
+        "unfiltered_query_count": len(raw_grouped),
+        "filtered_query_count": max(0, len(raw_grouped) - len(grouped)),
+        "filtered_row_count": max(0, sum(len(items) for items in raw_grouped.values()) - sum(len(items) for items in grouped.values())),
+        "min_candidates_per_query": _min_candidates(args),
         "train_query_count": len(train_queries),
         "eval_query_count": len(eval_queries),
         "eval_skipped": eval_skipped,
@@ -109,6 +113,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--learning-rate", type=float, default=0.05)
     parser.add_argument("--num-leaves", type=int, default=15)
     parser.add_argument("--min-child-samples", type=int, default=3)
+    parser.add_argument("--min-candidates-per-query", type=int, default=2, help="Filter query groups with fewer candidates. Defaults to 2.")
+    parser.add_argument("--include-single-candidate-queries", action="store_true", help="Disable low-value single-candidate query filtering.")
     return parser
 
 
@@ -161,6 +167,17 @@ def _group_rows(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
     for row in rows:
         grouped[str(row.get("query_id") or row.get("sample_id") or "")].append(row)
     return dict(grouped)
+
+
+def _filter_groups(grouped: dict[str, list[dict[str, Any]]], args: argparse.Namespace) -> dict[str, list[dict[str, Any]]]:
+    minimum = _min_candidates(args)
+    return {query: items for query, items in grouped.items() if items and len(items) >= minimum}
+
+
+def _min_candidates(args: argparse.Namespace) -> int:
+    if bool(getattr(args, "include_single_candidate_queries", False)):
+        return 1
+    return max(1, int(getattr(args, "min_candidates_per_query", 2) or 2))
 
 
 def _split_queries(queries: list[str], seed: int) -> tuple[list[str], list[str]]:

@@ -25,7 +25,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from sunpack.repair import RepairJob, RepairResult, RepairScheduler
-from sunpack.repair.candidate import CandidateSelector, candidate_feature_payload, materialize_candidates
+from sunpack.repair.candidate import CandidateSelector, candidate_feature_payload, materialize_candidate
 
 
 DEFAULT_MANIFEST = Path(".sunpack") / "corpus" / "repair_plan_manifest.jsonl"
@@ -78,6 +78,18 @@ def main(argv: list[str] | None = None) -> int:
             if record.get("status") == "skipped":
                 summary["skipped"] += 1
                 continue
+            if args.skip_large_stream_samples and _is_large_stream_sample(record, args):
+                row = _terminal_row(record, "skipped_budget", "large stream sample skipped by collect budget")
+                row["elapsed_sample_seconds"] = 0.0
+                _update_summary_counts(summary, record, [row])
+                failure_handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True, default=str) + "\n")
+                if args.pretty:
+                    failure_pretty_records.append(row)
+                summary["samples"] += 1
+                summary["failure_rows"] += 1
+                summary["skipped"] += 1
+                debug_events.write("sample_skipped_budget", record, record_index=record_index, total_records=len(records), budget=_sample_budget(record, args))
+                continue
             if args.progress:
                 print(f"START {record_index}/{len(records)} {record.get('sample_id')} fmt={record.get('material_format') or record.get('format')} source={record.get('source_archive_name')}", flush=True)
             debug_events.write("sample_start", record, record_index=record_index, total_records=len(records))
@@ -126,7 +138,15 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-rounds", type=int, default=3, help="Maximum repair rounds per damaged sample.")
     parser.add_argument("--beam-size", type=int, default=1, help="Reserved interface for beam collection; v1 advances the top current-system path.")
     parser.add_argument("--max-candidates-per-round", type=int, default=10, help="Maximum candidates logged per round.")
+    parser.add_argument("--proposal-mode", choices=("lazy", "eager"), default="lazy", help="Use lazy repair plans or eager repair execution while collecting candidates.")
+    parser.add_argument("--materialize-top-k-per-round", type=int, default=2, help="Materialize at most K pre-ranked candidates per round in lazy proposal mode.")
+    parser.add_argument("--materialize-selected-only", action="store_true", help="In lazy proposal mode, materialize only the pre-ranked top candidate.")
+    parser.add_argument("--skip-unmaterialized-labels", action=argparse.BooleanOptionalAction, default=True, help="Do not write proposal-only rows without oracle labels.")
     parser.add_argument("--case-timeout-seconds", type=float, default=45.0, help="Terminate one sample after this timeout. Use 0 to disable.")
+    parser.add_argument("--stream-large-size-mb", type=float, default=0.0, help="If >0, apply large-stream budgets to gzip/bzip2/xz/zstd samples at or above this source size.")
+    parser.add_argument("--stream-large-case-timeout-seconds", type=float, default=0.0, help="Per-sample timeout for large stream samples. Use 0 to keep --case-timeout-seconds.")
+    parser.add_argument("--stream-large-max-candidates-per-round", type=int, default=0, help="Candidate logging cap for large stream samples. Use 0 to keep --max-candidates-per-round.")
+    parser.add_argument("--skip-large-stream-samples", action="store_true", help="Skip gzip/bzip2/xz/zstd samples matched by --stream-large-size-mb instead of spending collect time on low-value stream cases.")
     parser.add_argument("--total-timeout-seconds", type=float, default=0.0, help="Stop collection after this wall-clock budget. Use 0 to disable.")
     parser.add_argument("--idle-timeout-seconds", type=float, default=0.0, help="Stop if no sample completes for this many seconds. Use 0 to disable.")
     parser.add_argument("--heartbeat-seconds", type=float, default=5.0, help="While waiting for a sample worker, emit heartbeat progress every N seconds.")
@@ -138,7 +158,7 @@ def _parser() -> argparse.ArgumentParser:
 def _load_records(args: argparse.Namespace) -> list[dict[str, Any]]:
     if args.manifest:
         return _load_manifest(Path(args.manifest), args.limit)
-    manifests = _material_manifests(Path(args.material_root), _csv_filter(args.formats), set(args.sample or []))
+    manifests = _material_manifests(Path(args.material_root), _csv_filter(args.formats), _sample_filter(args.sample or []))
     records: list[dict[str, Any]] = []
     for manifest in manifests:
         remaining = max(0, int(args.limit or 0) - len(records)) if args.limit else 0
@@ -216,10 +236,80 @@ def _csv_filter(raw: str) -> set[str]:
     return {item.strip().lower() for item in str(raw or "").split(",") if item.strip()}
 
 
-def _collect_sample_with_timeout(record: dict[str, Any], args: argparse.Namespace, debug_events: "_DebugEvents", record_index: int, total_records: int) -> tuple[str, list[dict[str, Any]]]:
+def _sample_filter(raw_items: list[str]) -> set[str]:
+    output: set[str] = set()
+    for raw in raw_items:
+        for item in str(raw or "").split(","):
+            value = item.strip()
+            if value:
+                output.add(value)
+    return output
+
+
+def _sample_budget(record: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
+    return {
+        "base_case_timeout_seconds": float(args.case_timeout_seconds or 0),
+        "effective_case_timeout_seconds": _effective_case_timeout(record, args),
+        "base_max_candidates_per_round": int(args.max_candidates_per_round or 0),
+        "effective_max_candidates_per_round": _effective_max_candidates(record, args),
+        "is_large_stream_sample": _is_large_stream_sample(record, args),
+        "stream_large_size_mb": float(args.stream_large_size_mb or 0),
+        "sample_size_mb": round(_record_size_mb(record), 3),
+    }
+
+
+def _effective_case_timeout(record: dict[str, Any], args: argparse.Namespace) -> float:
     timeout = float(args.case_timeout_seconds or 0)
+    stream_timeout = float(args.stream_large_case_timeout_seconds or 0)
+    if timeout > 0 and stream_timeout > 0 and _is_large_stream_sample(record, args):
+        return min(timeout, stream_timeout)
+    return timeout
+
+
+def _effective_max_candidates(record: dict[str, Any], args: argparse.Namespace) -> int:
+    base = max(0, int(args.max_candidates_per_round or 0))
+    stream_cap = int(args.stream_large_max_candidates_per_round or 0)
+    if base > 0 and stream_cap > 0 and _is_large_stream_sample(record, args):
+        return max(1, min(base, stream_cap))
+    return base
+
+
+def _is_large_stream_sample(record: dict[str, Any], args: argparse.Namespace) -> bool:
+    threshold = float(args.stream_large_size_mb or 0)
+    if threshold <= 0:
+        return False
+    fmt = _normalize_format(str(record.get("material_format") or record.get("format") or ""))
+    if fmt not in {"gzip", "bzip2", "xz", "zstd"}:
+        return False
+    return _record_size_mb(record) >= threshold
+
+
+def _record_size_mb(record: dict[str, Any]) -> float:
+    source_derivation = record.get("source_derivation") if isinstance(record.get("source_derivation"), dict) else {}
+    for value in (
+        source_derivation.get("size"),
+        record.get("source_size"),
+        record.get("damaged_size"),
+        (record.get("damaged_input") or {}).get("size") if isinstance(record.get("damaged_input"), dict) else None,
+    ):
+        try:
+            if value is not None:
+                return float(value) / (1024 * 1024)
+        except Exception:
+            pass
+    for key in ("damaged_path",):
+        raw = record.get(key)
+        if raw:
+            path = Path(str(raw))
+            if path.is_file():
+                return path.stat().st_size / (1024 * 1024)
+    return 0.0
+
+
+def _collect_sample_with_timeout(record: dict[str, Any], args: argparse.Namespace, debug_events: "_DebugEvents", record_index: int, total_records: int) -> tuple[str, list[dict[str, Any]]]:
+    timeout = _effective_case_timeout(record, args)
     if timeout <= 0:
-        return _collect_sample(record, args)
+        return _collect_sample(record, args, debug_events)
     with tempfile.TemporaryDirectory(prefix=f"sunpack-plan-worker-{record.get('sample_id', 'sample')}-") as raw_tmp:
         result_path = Path(raw_tmp) / "result.pkl"
         process = mp.Process(target=_collect_worker, args=(record, args, str(result_path)), daemon=True)
@@ -250,19 +340,24 @@ def _collect_sample_with_timeout(record: dict[str, Any], args: argparse.Namespac
 
 
 def _collect_worker(record: dict[str, Any], args: argparse.Namespace, result_path: str) -> None:
-    result = _collect_sample(record, args)
+    debug_events = _DebugEvents(Path(args.debug_events) if args.debug_events else None, truncate=False)
+    debug_events.write("worker_start", record, pid=os.getpid(), budget=_sample_budget(record, args))
+    result = _collect_sample(record, args, debug_events)
+    debug_events.write("worker_done", record, pid=os.getpid(), status=result[0], rows=len(result[1]))
     with Path(result_path).open("wb") as handle:
         pickle.dump(result, handle)
 
 
-def _collect_sample(record: dict[str, Any], args: argparse.Namespace) -> tuple[str, list[dict[str, Any]]]:
+def _collect_sample(record: dict[str, Any], args: argparse.Namespace, debug_events: "_DebugEvents | None" = None) -> tuple[str, list[dict[str, Any]]]:
     try:
-        return "ok", _collect_sample_rows(record, args)
+        return "ok", _collect_sample_rows(record, args, debug_events or _DebugEvents(None, truncate=False))
     except Exception as exc:
+        if debug_events is not None:
+            debug_events.write("worker_exception", record, error=str(exc))
         return "failed", [_terminal_row(record, "failed", str(exc))]
 
 
-def _collect_sample_rows(record: dict[str, Any], args: argparse.Namespace) -> list[dict[str, Any]]:
+def _collect_sample_rows(record: dict[str, Any], args: argparse.Namespace, debug_events: "_DebugEvents") -> list[dict[str, Any]]:
     scheduler = _scheduler()
     selector = CandidateSelector(scheduler.config)
     source_input = dict(record.get("damaged_input") or {})
@@ -271,6 +366,8 @@ def _collect_sample_rows(record: dict[str, Any], args: argparse.Namespace) -> li
     previous_actions: list[str] = []
     rows: list[dict[str, Any]] = []
     best_completeness = 0.0
+    max_candidates_per_round = _effective_max_candidates(record, args)
+    debug_events.write("sample_budget", record, budget=_sample_budget(record, args))
     for round_index in range(max(1, int(args.max_rounds or 1))):
         if args.progress:
             print(f"  ROUND {round_index} {record.get('sample_id')} fmt={fmt}", flush=True)
@@ -281,13 +378,40 @@ def _collect_sample_rows(record: dict[str, Any], args: argparse.Namespace) -> li
             damage_flags=damage_flags,
             archive_key=f"{record.get('sample_id')}:round:{round_index}",
         )
-        batch = scheduler.generate_repair_candidates(job)
+        phase_started = time.perf_counter()
+        lazy_mode = str(args.proposal_mode or "lazy") == "lazy"
+        batch = scheduler.generate_repair_candidates(job, lazy=lazy_mode)
+        debug_events.write(
+            "phase",
+            record,
+            round=round_index,
+            phase="generate_candidates",
+            elapsed_seconds=round(time.perf_counter() - phase_started, 3),
+            candidate_count=len(batch.candidates),
+            warning_count=len(batch.warnings or []),
+        )
         if args.progress:
             print(f"  CANDIDATES {record.get('sample_id')} round={round_index} count={len(batch.candidates)} warnings={len(batch.warnings or [])}", flush=True)
+        phase_started = time.perf_counter()
         before_state = _state_summary(record, source_input, fmt, damage_flags)
+        debug_events.write("phase", record, round=round_index, phase="before_state", elapsed_seconds=round(time.perf_counter() - phase_started, 3))
         state_features = _state_features(record, batch, round_index, previous_actions, best_completeness, before_state)
-        candidates = materialize_candidates(list(batch.candidates))
+        phase_started = time.perf_counter()
+        candidates, materialization_meta = _materialize_for_collection(list(batch.candidates), selector, args, record)
+        debug_events.write(
+            "phase",
+            record,
+            round=round_index,
+            phase="materialize_candidates",
+            elapsed_seconds=round(time.perf_counter() - phase_started, 3),
+            candidate_count=len(candidates),
+            proposal_count=len(batch.candidates),
+            materialization_budget=materialization_meta["budget"],
+        )
+        phase_started = time.perf_counter()
         validated = [selector._with_native_validation(candidate) for candidate in candidates]  # noqa: SLF001
+        debug_events.write("phase", record, round=round_index, phase="native_validation", elapsed_seconds=round(time.perf_counter() - phase_started, 3), candidate_count=len(validated))
+        phase_started = time.perf_counter()
         accepted = sorted(
             [(selector.generation_priority(candidate), index, candidate) for index, candidate in enumerate(validated) if selector._accepted(candidate)],  # noqa: SLF001
             key=lambda item: item[0],
@@ -302,13 +426,18 @@ def _collect_sample_rows(record: dict[str, Any], args: argparse.Namespace) -> li
         ranked = [*accepted, *rejected]
         selected_candidate = accepted[0][2] if accepted else None
         selected_id = _candidate_id(selected_candidate)
+        debug_events.write("phase", record, round=round_index, phase="rank_candidates", elapsed_seconds=round(time.perf_counter() - phase_started, 3), accepted_count=len(accepted), rejected_count=len(rejected))
         if not validated:
             rows.append(_round_empty_row(record, round_index, state_features, batch))
             break
         logged = 0
+        phase_started = time.perf_counter()
         for rank, (_, original_index, candidate) in enumerate(ranked):
-            if logged >= int(args.max_candidates_per_round or 0):
+            if logged >= max_candidates_per_round:
                 break
+            materialized_for_label = bool(materialization_meta["materialized_ids"].get(_candidate_id(candidate), True))
+            if args.skip_unmaterialized_labels and not materialized_for_label:
+                continue
             payload = candidate_feature_payload(candidate)
             after_state = _state_summary(record, candidate.repaired_input if isinstance(candidate.repaired_input, dict) else {}, fmt, list(candidate.damage_flags or damage_flags), payload)
             delta_features = _state_delta(before_state, after_state)
@@ -326,17 +455,28 @@ def _collect_sample_rows(record: dict[str, Any], args: argparse.Namespace) -> li
                 batch,
                 label_info,
                 selected=_candidate_id(candidate) == selected_id,
+                proposal_only=not materialized_for_label,
+                materialized_for_label=materialized_for_label,
+                materialization_rank=materialization_meta["ranks"].get(_candidate_id(candidate)),
+                materialization_budget=materialization_meta["budget"],
             ))
             logged += 1
+        debug_events.write("phase", record, round=round_index, phase="label_candidates", elapsed_seconds=round(time.perf_counter() - phase_started, 3), logged_count=logged)
         if selected_candidate is None:
             break
+        phase_started = time.perf_counter()
         selected_result = selected_candidate.to_result(selection={"selected_module": selected_candidate.module_name})
+        debug_events.write("phase", record, round=round_index, phase="selected_to_result", elapsed_seconds=round(time.perf_counter() - phase_started, 3), selected_module=selected_candidate.module_name)
         if not selected_result.ok or not selected_result.repaired_input:
             break
+        phase_started = time.perf_counter()
         selected_payload = candidate_feature_payload(selected_candidate)
         selected_after_state = _state_summary(record, selected_candidate.repaired_input if isinstance(selected_candidate.repaired_input, dict) else {}, fmt, list(selected_candidate.damage_flags or damage_flags), selected_payload)
+        debug_events.write("phase", record, round=round_index, phase="selected_after_state", elapsed_seconds=round(time.perf_counter() - phase_started, 3), selected_module=selected_candidate.module_name)
+        phase_started = time.perf_counter()
         selected_delta = _state_delta(before_state, selected_after_state)
         selected_label = _label_candidate(record, selected_candidate, best_completeness, before_state, selected_after_state, selected_delta)
+        debug_events.write("phase", record, round=round_index, phase="selected_label", elapsed_seconds=round(time.perf_counter() - phase_started, 3), selected_module=selected_candidate.module_name, selected_label=selected_label.get("label"))
         best_completeness = max(best_completeness, float(selected_label.get("completeness", 0.0) or 0.0))
         previous_actions.extend(str(action) for action in selected_candidate.actions)
         source_input = dict(selected_result.repaired_input)
@@ -344,6 +484,41 @@ def _collect_sample_rows(record: dict[str, Any], args: argparse.Namespace) -> li
         if int(selected_label.get("label", 0) or 0) == 3:
             break
     return rows
+
+
+def _materialize_for_collection(candidates: list[Any], selector: CandidateSelector, args: argparse.Namespace, record: dict[str, Any]) -> tuple[list[Any], dict[str, Any]]:
+    if str(args.proposal_mode or "lazy") != "lazy":
+        materialized: list[Any] = []
+        for candidate in candidates:
+            materialized.extend(materialize_candidate(candidate))
+        ids = {_candidate_id(candidate): True for candidate in materialized}
+        return materialized, {
+            "budget": len(candidates),
+            "materialized_ids": ids,
+            "ranks": {_candidate_id(candidate): index for index, candidate in enumerate(materialized)},
+        }
+
+    ranked = sorted(
+        [(selector.generation_priority(candidate), index, candidate) for index, candidate in enumerate(candidates)],
+        key=lambda item: item[0],
+        reverse=True,
+    )
+    budget = 1 if bool(args.materialize_selected_only) else max(1, int(args.materialize_top_k_per_round or 1))
+    budget = min(budget, max(1, _effective_max_candidates(record, args)))
+    selected = ranked[:budget]
+    materialized = []
+    ranks: dict[str, int] = {}
+    for materialization_rank, (_, _, candidate) in enumerate(selected):
+        produced = materialize_candidate(candidate)
+        for item in produced:
+            materialized.append(item)
+            ranks[_candidate_id(item)] = materialization_rank
+    return materialized, {
+        "budget": budget,
+        "materialized_ids": {_candidate_id(candidate): True for candidate in materialized},
+        "ranks": ranks,
+        "proposal_count": len(candidates),
+    }
 
 
 def _scheduler() -> RepairScheduler:
@@ -356,7 +531,9 @@ def _scheduler() -> RepairScheduler:
             "deep": {
                 "max_candidates_per_module": 4,
                 "verify_candidates": False,
-                "max_seconds_per_module": 8.0,
+                "max_seconds_per_module": 3.0,
+                "max_stream_trim_probe_attempts": 8,
+                "max_stream_trim_decode_mb": 32,
             },
         }
     })
@@ -400,6 +577,10 @@ def _action_row(
     label_info: dict[str, Any],
     *,
     selected: bool,
+    proposal_only: bool = False,
+    materialized_for_label: bool = True,
+    materialization_rank: int | None = None,
+    materialization_budget: int | None = None,
 ) -> dict[str, Any]:
     payload = candidate_feature_payload(candidate)
     module_decision = _module_decision(batch, candidate.module_name)
@@ -423,6 +604,10 @@ def _action_row(
         "candidate_id": payload.get("candidate_id"),
         "module": candidate.module_name,
         "selected_by_current_system": bool(selected),
+        "proposal_only": bool(proposal_only),
+        "materialized_for_label": bool(materialized_for_label),
+        "materialization_rank": materialization_rank,
+        "materialization_budget": materialization_budget,
         "label": int(label_info.get("label", 0) or 0),
         "label_status": label_info.get("status"),
         "label_details": label_info,
@@ -451,6 +636,9 @@ def _action_row(
                     "validation_count",
                     "requires_native_validation",
                     "has_archive_state_plan",
+                    "requires_materialization",
+                    "plan_kind",
+                    "estimated_cost",
                 )
                 if key in payload
             },
@@ -816,11 +1004,12 @@ def _pretty_path(path: Path) -> Path:
 
 
 class _DebugEvents:
-    def __init__(self, path: Path | None):
+    def __init__(self, path: Path | None, *, truncate: bool = True):
         self.path = path
         if self.path is not None:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            self.path.write_text("", encoding="utf-8")
+            if truncate:
+                self.path.write_text("", encoding="utf-8")
 
     def write(self, event: str, record: dict[str, Any], **extra: Any) -> None:
         if self.path is None:

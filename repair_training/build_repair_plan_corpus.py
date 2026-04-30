@@ -39,10 +39,10 @@ PROFILE_LAYERS = (
     ("hard_negative", 0.15, ("hard_negative_payload", "hard_negative_block_tail", "hard_negative_multi")),
 )
 DEFAULT_LAYER_BUDGET = (
-    ("structural", 3),
+    ("structural", 2),
     ("structural_directory", 2),
     ("partial_recoverable", 3),
-    ("hard_negative", 2),
+    ("hard_negative", 3),
 )
 
 

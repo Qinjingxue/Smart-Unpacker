@@ -113,6 +113,7 @@ def _build_report(rows: list[dict[str, Any]], model_root: Path) -> dict[str, Any
         },
         "model_metric_comparison": _model_metrics(model_root),
     }
+    report["warnings"] = _quality_warnings(report)
     return report
 
 
@@ -166,6 +167,48 @@ def _model_metrics(model_root: Path) -> dict[str, Any]:
     return output
 
 
+def _quality_warnings(report: dict[str, Any]) -> list[str]:
+    warnings: list[str] = []
+    row_count = max(1, int(report.get("dataset", {}).get("row_count", 0) or 0))
+    formats = report.get("format_distribution", {}) if isinstance(report.get("format_distribution"), dict) else {}
+    zip_ratio = int(formats.get("zip", 0) or 0) / row_count
+    if zip_ratio > 0.5:
+        warnings.append("zip_dominates_dataset")
+    for fmt, count in formats.items():
+        if int(count or 0) / row_count < 0.05:
+            warnings.append(f"format_underrepresented:{fmt}")
+    labels = report.get("label_distribution", {}) if isinstance(report.get("label_distribution"), dict) else {}
+    negative_ratio = (int(labels.get("-1", 0) or 0) + int(labels.get("0", 0) or 0)) / row_count
+    if negative_ratio < 0.15:
+        warnings.append("negative_labels_too_sparse")
+    candidate_distribution = report.get("query_candidate_count_distribution", {}) if isinstance(report.get("query_candidate_count_distribution"), dict) else {}
+    query_count = max(1, int(report.get("dataset", {}).get("query_count", 0) or 0))
+    single_ratio = int(candidate_distribution.get("1", 0) or 0) / query_count
+    if single_ratio > 0.1:
+        warnings.append("too_many_single_candidate_queries")
+    ratios = report.get("quality_ratios", {}) if isinstance(report.get("quality_ratios"), dict) else {}
+    if float(ratios.get("timeout_or_failed_row_ratio", 0.0) or 0.0) > 0.02:
+        warnings.append("timeouts_present")
+    metrics = report.get("model_metric_comparison", {}) if isinstance(report.get("model_metric_comparison"), dict) else {}
+    stable = _model_ndcg(metrics, "stable_only")
+    teacher = _model_ndcg(metrics, "teacher_only_baseline")
+    if stable is not None and teacher is not None and stable > 0.95 and abs(stable - teacher) < 0.05:
+        warnings.append("dataset_may_be_too_easy")
+    return warnings
+
+
+def _model_ndcg(metrics: dict[str, Any], view: str) -> float | None:
+    for item in metrics.values():
+        if not isinstance(item, dict) or item.get("feature_view") != view:
+            continue
+        inner = item.get("metrics") if isinstance(item.get("metrics"), dict) else {}
+        try:
+            return float(inner.get("ndcg@1"))
+        except Exception:
+            return None
+    return None
+
+
 def _markdown_path(path: Path) -> Path:
     return path.with_suffix(".md")
 
@@ -181,6 +224,7 @@ def _markdown_report(report: dict[str, Any]) -> str:
         f"- Formats: `{json.dumps(report['format_distribution'], ensure_ascii=False, sort_keys=True)}`",
         f"- Candidate count: `{json.dumps(report['query_candidate_count'], ensure_ascii=False, sort_keys=True)}`",
         f"- Quality ratios: `{json.dumps(report['quality_ratios'], ensure_ascii=False, sort_keys=True)}`",
+        f"- Warnings: `{json.dumps(report.get('warnings', []), ensure_ascii=False, sort_keys=True)}`",
         "",
         "## Model Metrics",
     ]

@@ -1007,6 +1007,13 @@ def _lazy_module_candidate(
             "stage": module.spec.stage,
             "workspace": workspace,
             "lazy": True,
+            "plan_kind": "probe_then_run" if module.spec.stage == "deep" else "lazy_repair",
+            "requires_materialization": True,
+            "estimated_cost": {
+                "targeted": 0.25,
+                "safe_repair": 0.35,
+                "deep": 0.75,
+            }.get(str(module.spec.stage or ""), 0.5),
         },
     )
 

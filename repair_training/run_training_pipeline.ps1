@@ -11,8 +11,17 @@ param(
     [string]$Seed = "random",
     [int]$MaxRounds = 2,
     [int]$MaxCandidatesPerRound = 6,
+    [ValidateSet("lazy", "eager")]
+    [string]$ProposalMode = "lazy",
+    [int]$MaterializeTopKPerRound = 2,
+    [switch]$MaterializeSelectedOnly,
     [double]$CaseTimeoutSeconds = 12.0,
+    [double]$StreamLargeSizeMb = 32,
+    [double]$StreamLargeCaseTimeoutSeconds = 3,
+    [int]$StreamLargeMaxCandidatesPerRound = 1,
+    [switch]$SkipLargeStreamSamples,
     [double]$TotalTimeoutSeconds = 0,
+    [string]$DebugEvents = "",
     [switch]$SkipDerive,
     [switch]$SkipBuild,
     [switch]$SkipCollect,
@@ -83,9 +92,17 @@ try {
             FailureOutput = $failureOutput
             MaxRounds = $MaxRounds
             MaxCandidatesPerRound = $MaxCandidatesPerRound
+            ProposalMode = $ProposalMode
+            MaterializeTopKPerRound = $MaterializeTopKPerRound
             CaseTimeoutSeconds = $CaseTimeoutSeconds
+            StreamLargeSizeMb = $StreamLargeSizeMb
+            StreamLargeCaseTimeoutSeconds = $StreamLargeCaseTimeoutSeconds
+            StreamLargeMaxCandidatesPerRound = $StreamLargeMaxCandidatesPerRound
         }
+        if ($MaterializeSelectedOnly) { $collectArgs["MaterializeSelectedOnly"] = $true }
+        if ($SkipLargeStreamSamples) { $collectArgs["SkipLargeStreamSamples"] = $true }
         if ($TotalTimeoutSeconds -gt 0) { $collectArgs["TotalTimeoutSeconds"] = $TotalTimeoutSeconds }
+        if ($DebugEvents) { $collectArgs["DebugEvents"] = $DebugEvents }
         if ($Formats) { $collectArgs["Formats"] = $Formats }
         $expandedSamples = Expand-TrainingList $Sample
         if ($expandedSamples.Count -gt 0) { $collectArgs["Sample"] = ($expandedSamples -join ",") }

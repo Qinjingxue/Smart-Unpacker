@@ -157,6 +157,71 @@ class CandidateSelector:
             ],
         }
 
+    def select_budgeted(
+        self,
+        candidates: list[RepairCandidate],
+        *,
+        materialize_top_k: int = 3,
+    ) -> tuple[RepairCandidate | None, dict[str, Any]]:
+        pre_scored = sorted(
+            [(self.generation_priority(candidate), index, candidate) for index, candidate in enumerate(candidates)],
+            key=lambda item: item[0],
+            reverse=True,
+        )
+        top_k = max(1, int(materialize_top_k or 1))
+        selected_ids = {candidate_digest(candidate) for _, _, candidate in pre_scored[:top_k]}
+        materialized: list[RepairCandidate] = []
+        for _, _, candidate in pre_scored[:top_k]:
+            materialized.extend(materialize_candidate(candidate))
+        validated = [self._with_native_validation(candidate) for candidate in materialized]
+        accepted = [candidate for candidate in validated if self._accepted(candidate)]
+        if not accepted:
+            return None, {
+                "candidate_count": len(validated),
+                "proposal_count": len(candidates),
+                "accepted_count": 0,
+                "materialization_budget": top_k,
+                "message": "no accepted repair candidates",
+                "warnings": _selection_warnings(validated),
+                "candidates": [
+                    {
+                        **candidate_feature_payload(candidate),
+                        "materialized_for_selection": candidate_digest(candidate) in selected_ids,
+                    }
+                    for _, _, candidate in pre_scored
+                ],
+            }
+        scored = [(self.generation_priority(candidate), candidate) for candidate in accepted]
+        scored.sort(key=lambda item: item[0], reverse=True)
+        priority, selected = scored[0]
+        return selected, {
+            "candidate_count": len(validated),
+            "proposal_count": len(candidates),
+            "accepted_count": len(accepted),
+            "materialization_budget": top_k,
+            "selected_module": selected.module_name,
+            "selected_format": selected.format,
+            "generation_priority": priority,
+            "candidates": [candidate_feature_payload(candidate) for candidate in validated],
+            "proposal_candidates": [
+                {
+                    **candidate_feature_payload(candidate),
+                    "materialized_for_selection": candidate_digest(candidate) in selected_ids,
+                }
+                for _, _, candidate in pre_scored
+            ],
+            "validations": [
+                {
+                    "name": validation.name,
+                    "accepted": validation.accepted,
+                    "score": validation.score,
+                    "warnings": list(validation.warnings),
+                    "details": dict(validation.details),
+                }
+                for validation in selected.validations
+            ],
+        }
+
     def _with_native_validation(self, candidate: RepairCandidate) -> RepairCandidate:
         if not candidate.requires_native_validation:
             return candidate
@@ -339,6 +404,9 @@ def candidate_feature_payload(candidate: RepairCandidate) -> dict[str, Any]:
         "lazy": bool(candidate.is_lazy),
         "materialized": bool(candidate.materialized),
         "requires_native_validation": bool(candidate.requires_native_validation),
+        "requires_materialization": bool(candidate.is_lazy),
+        "plan_kind": _candidate_plan_kind(candidate),
+        "estimated_cost": _candidate_estimated_cost(candidate),
         "actions": list(candidate.actions),
         "damage_flags": list(candidate.damage_flags),
         "patch_cost": _patch_plan_cost(candidate),
@@ -556,6 +624,9 @@ def candidate_ltr_features(
         "lazy": 1 if candidate.is_lazy else 0,
         "materialized": 1 if candidate.materialized else 0,
         "requires_native_validation": 1 if candidate.requires_native_validation else 0,
+        "requires_materialization": 1 if candidate.is_lazy else 0,
+        "plan_kind": _candidate_plan_kind(candidate),
+        "estimated_cost": _candidate_estimated_cost(candidate),
         "has_archive_state_plan": 1 if _has_archive_state_plan(candidate) else 0,
         "validation_count": len(candidate.validations),
         "damage_flag_count": len(candidate.damage_flags),
@@ -694,6 +765,35 @@ def _patch_plan_cost(candidate: RepairCandidate) -> float:
 def _candidate_input_kind(candidate: RepairCandidate) -> str:
     repaired_input = candidate.repaired_input if isinstance(candidate.repaired_input, dict) else {}
     return str(repaired_input.get("kind") or repaired_input.get("open_mode") or "")
+
+
+def _candidate_plan_kind(candidate: RepairCandidate) -> str:
+    plan = candidate.plan if isinstance(candidate.plan, dict) else {}
+    if str(plan.get("plan_kind") or ""):
+        return str(plan.get("plan_kind"))
+    if candidate.is_lazy:
+        return "probe_then_run" if candidate.stage == "deep" else "lazy_repair"
+    if _has_archive_state_plan(candidate):
+        return "byte_patch"
+    if candidate.repaired_input:
+        return "materialized"
+    return ""
+
+
+def _candidate_estimated_cost(candidate: RepairCandidate) -> float:
+    plan = candidate.plan if isinstance(candidate.plan, dict) else {}
+    try:
+        if plan.get("estimated_cost") is not None:
+            return _clamp01(float(plan.get("estimated_cost") or 0.0))
+    except (TypeError, ValueError):
+        pass
+    if candidate.is_lazy:
+        return {
+            "targeted": 0.25,
+            "safe_repair": 0.35,
+            "deep": 0.75,
+        }.get(str(candidate.stage or ""), 0.5)
+    return candidate_cost_penalty(candidate)
 
 
 def _has_archive_state_plan(candidate: RepairCandidate) -> bool:

@@ -8,6 +8,7 @@ import hashlib
 import io
 import json
 import lzma
+import math
 import os
 import random
 import shutil
@@ -44,8 +45,23 @@ DEFAULT_CONFIG_DATA: dict[str, Any] = {
     "derivation": {
         "random_mode": {
             "enabled": True,
+            "strategy": "balanced_format",
             "archives_per_sample": 5,
             "seed": "random",
+            "format_weights": {
+                "tar": 1.4,
+                "tar_gz": 1.3,
+                "tar_bz2": 1.2,
+                "tar_xz": 1.2,
+                "zip": 0.8,
+                "gzip": 0.8,
+                "bzip2": 0.8,
+                "xz": 0.8,
+                "zstd": 0.8,
+                "7z": 0.3,
+                "rar": 0.3,
+            },
+            "max_format_ratio": {"zip": 0.5},
         },
     },
     "formats": {
@@ -104,8 +120,9 @@ def main(argv: list[str] | None = None) -> int:
     random_mode = _random_mode_config(config, args)
     tasks, skipped = _build_tasks(source_samples, material_root, config, tools, formats)
     all_task_count = len(tasks)
+    available_format_counts = _format_counts(tasks)
     if random_mode["enabled"]:
-        tasks = _sample_tasks_by_source(tasks, int(random_mode["archives_per_sample"]), random_mode["seed"])
+        tasks = _sample_tasks_by_source(tasks, int(random_mode["archives_per_sample"]), random_mode)
     workers = _resolve_workers(workers_setting, len(tasks))
     records = list(skipped)
     started = time.perf_counter()
@@ -133,6 +150,8 @@ def main(argv: list[str] | None = None) -> int:
         "organized_root_files": organized,
         "tasks": len(tasks),
         "available_tasks": all_task_count,
+        "available_format_counts": available_format_counts,
+        "selected_format_counts": _format_counts(tasks),
         "random_mode": random_mode,
         "workers": workers,
         "generated": sum(1 for record in records if record.get("status") == "generated"),
@@ -158,6 +177,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-random-mode", action="store_false", dest="random_mode", help="Generate every enabled format/algorithm/level combination.")
     parser.add_argument("--archives-per-sample", type=int, default=0, help="Random mode archive budget per source sample; defaults to config.")
     parser.add_argument("--seed", default="", help="Random mode seed. Use 'random' for a fresh seed; defaults to config.")
+    parser.add_argument("--random-strategy", choices=("combo_uniform", "balanced_format"), default="", help="Random mode sampling strategy; defaults to config.")
     parser.set_defaults(pretty=True)
     parser.add_argument("--pretty", action="store_true", help="Also write formatted derived_manifest.pretty.json. Enabled by default.")
     parser.add_argument("--no-pretty", action="store_false", dest="pretty", help="Only write JSONL manifests.")
@@ -318,17 +338,22 @@ def _random_mode_config(config: dict[str, Any], args: argparse.Namespace) -> dic
         enabled = bool(args.random_mode)
     archives_per_sample = int(args.archives_per_sample or random_mode.get("archives_per_sample") or 5)
     seed = str(args.seed or random_mode.get("seed") or "random")
+    strategy = str(args.random_strategy or random_mode.get("strategy") or "balanced_format")
     return {
         "enabled": enabled,
+        "strategy": strategy if strategy in {"combo_uniform", "balanced_format"} else "balanced_format",
         "archives_per_sample": max(0, archives_per_sample),
         "seed": seed,
+        "format_weights": _float_map(random_mode.get("format_weights")),
+        "max_format_ratio": _float_map(random_mode.get("max_format_ratio")),
     }
 
 
-def _sample_tasks_by_source(tasks: list[DeriveTask], archives_per_sample: int, raw_seed: str) -> list[DeriveTask]:
+def _sample_tasks_by_source(tasks: list[DeriveTask], archives_per_sample: int, random_mode: dict[str, Any]) -> list[DeriveTask]:
     if archives_per_sample <= 0:
         return []
-    seed = _resolve_seed(raw_seed)
+    seed = _resolve_seed(str(random_mode.get("seed") or "random"))
+    strategy = str(random_mode.get("strategy") or "balanced_format")
     output: list[DeriveTask] = []
     by_sample: dict[str, list[DeriveTask]] = {}
     for task in tasks:
@@ -339,8 +364,68 @@ def _sample_tasks_by_source(tasks: list[DeriveTask], archives_per_sample: int, r
             continue
         sample_seed = f"{seed}:{sample_id}"
         rng = random.Random(sample_seed)
-        output.extend(sorted(rng.sample(sample_tasks, archives_per_sample), key=lambda item: (item.material_format, item.output_path.name)))
+        if strategy == "combo_uniform":
+            selected = rng.sample(sample_tasks, archives_per_sample)
+        else:
+            selected = _sample_balanced_format(sample_tasks, archives_per_sample, rng, random_mode)
+        output.extend(sorted(selected, key=lambda item: (item.material_format, item.output_path.name)))
     return output
+
+
+def _sample_balanced_format(tasks: list[DeriveTask], archives_per_sample: int, rng: random.Random, random_mode: dict[str, Any]) -> list[DeriveTask]:
+    by_format: dict[str, list[DeriveTask]] = {}
+    for task in tasks:
+        by_format.setdefault(task.material_format, []).append(task)
+    for values in by_format.values():
+        rng.shuffle(values)
+    selected: list[DeriveTask] = []
+    used_counts: dict[str, int] = {}
+    weights = dict(random_mode.get("format_weights") or {})
+    max_ratio = dict(random_mode.get("max_format_ratio") or {})
+    round_index = 0
+    while len(selected) < archives_per_sample and any(by_format.values()):
+        available = []
+        for fmt, values in by_format.items():
+            if not values:
+                continue
+            max_count = _max_count_for_format(fmt, archives_per_sample, max_ratio)
+            if used_counts.get(fmt, 0) >= max_count:
+                continue
+            if round_index == 0 and used_counts.get(fmt, 0) > 0:
+                continue
+            available.append(fmt)
+        if not available:
+            round_index += 1
+            available = [
+                fmt
+                for fmt, values in by_format.items()
+                if values and used_counts.get(fmt, 0) < _max_count_for_format(fmt, archives_per_sample, max_ratio)
+            ]
+        if not available:
+            break
+        fmt = _weighted_choice(available, weights, rng)
+        selected.append(by_format[fmt].pop())
+        used_counts[fmt] = used_counts.get(fmt, 0) + 1
+    return selected
+
+
+def _max_count_for_format(fmt: str, total: int, max_ratio: dict[str, float]) -> int:
+    ratio = float(max_ratio.get(fmt, 1.0) or 1.0)
+    return max(1, min(total, int(math.floor(float(total) * ratio + 1e-9)) or 1))
+
+
+def _weighted_choice(items: list[str], weights: dict[str, float], rng: random.Random) -> str:
+    weighted = [(item, max(0.0, float(weights.get(item, 1.0) or 0.0))) for item in items]
+    total = sum(weight for _, weight in weighted)
+    if total <= 0:
+        return rng.choice(items)
+    roll = rng.random() * total
+    cumulative = 0.0
+    for item, weight in weighted:
+        cumulative += weight
+        if roll <= cumulative:
+            return item
+    return weighted[-1][0]
 
 
 def _zip_tasks(sample: Path, material_root: Path, cfg: dict[str, Any], tools: dict[str, Path]) -> tuple[list[DeriveTask], list[dict[str, Any]]]:
@@ -654,6 +739,25 @@ def _as_list(value: Any) -> list[Any]:
 
 def _csv_filter(raw: str) -> set[str]:
     return {item.strip().lower() for item in str(raw or "").split(",") if item.strip()}
+
+
+def _float_map(value: Any) -> dict[str, float]:
+    if not isinstance(value, dict):
+        return {}
+    output = {}
+    for key, item in value.items():
+        try:
+            output[str(key)] = float(item)
+        except Exception:
+            continue
+    return output
+
+
+def _format_counts(tasks: list[DeriveTask]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for task in tasks:
+        counts[task.material_format] = counts.get(task.material_format, 0) + 1
+    return dict(sorted(counts.items()))
 
 
 def _resolve_seed(raw: str) -> int:

@@ -6,13 +6,23 @@ param(
     [string]$FailureOutput = "repair_training\datasets\repair_plan_ltr_failure.jsonl",
     [int]$MaxRounds = 3,
     [int]$MaxCandidatesPerRound = 10,
+    [ValidateSet("lazy", "eager")]
+    [string]$ProposalMode = "lazy",
+    [int]$MaterializeTopKPerRound = 2,
+    [switch]$MaterializeSelectedOnly,
+    [switch]$IncludeUnmaterializedLabels,
     [double]$CaseTimeoutSeconds = 45.0,
+    [double]$StreamLargeSizeMb = 0,
+    [double]$StreamLargeCaseTimeoutSeconds = 0,
+    [int]$StreamLargeMaxCandidatesPerRound = 0,
+    [switch]$SkipLargeStreamSamples,
     [double]$TotalTimeoutSeconds = 0,
     [double]$IdleTimeoutSeconds = 0,
     [double]$HeartbeatSeconds = 5.0,
     [string]$DebugEvents = "",
     [string]$Formats = "",
     [string]$Sample = "",
+    [int]$Limit = 0,
     [switch]$Append,
     [switch]$NoPretty,
     [switch]$Progress,
@@ -49,7 +59,12 @@ $argsList = @(
     "--failure-output", $FailureOutput,
     "--max-rounds", "$MaxRounds",
     "--max-candidates-per-round", "$MaxCandidatesPerRound",
+    "--proposal-mode", $ProposalMode,
+    "--materialize-top-k-per-round", "$MaterializeTopKPerRound",
     "--case-timeout-seconds", "$CaseTimeoutSeconds",
+    "--stream-large-size-mb", "$StreamLargeSizeMb",
+    "--stream-large-case-timeout-seconds", "$StreamLargeCaseTimeoutSeconds",
+    "--stream-large-max-candidates-per-round", "$StreamLargeMaxCandidatesPerRound",
     "--heartbeat-seconds", "$HeartbeatSeconds"
 )
 if ($TotalTimeoutSeconds -gt 0) {
@@ -60,6 +75,15 @@ if ($IdleTimeoutSeconds -gt 0) {
 }
 if ($DebugEvents) {
     $argsList += @("--debug-events", $DebugEvents)
+}
+if ($SkipLargeStreamSamples) {
+    $argsList += "--skip-large-stream-samples"
+}
+if ($MaterializeSelectedOnly) {
+    $argsList += "--materialize-selected-only"
+}
+if ($IncludeUnmaterializedLabels) {
+    $argsList += "--no-skip-unmaterialized-labels"
 }
 
 if ($Manifest) {
@@ -72,6 +96,9 @@ if ($Formats) {
 }
 if ($Sample) {
     $argsList += @("--sample", $Sample)
+}
+if ($Limit -gt 0) {
+    $argsList += @("--limit", "$Limit")
 }
 if ($Append) {
     $argsList += "--append"

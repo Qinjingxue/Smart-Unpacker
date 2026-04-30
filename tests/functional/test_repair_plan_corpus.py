@@ -385,7 +385,7 @@ def test_derive_archives_random_mode_limits_and_seed_controls_selection(tmp_path
     config.write_text(
         json.dumps(
             {
-                "derivation": {"random_mode": {"enabled": True, "archives_per_sample": 2, "seed": "1234"}},
+                "derivation": {"random_mode": {"enabled": True, "strategy": "balanced_format", "archives_per_sample": 2, "seed": "1234"}},
                 "formats": {
                     "zip": {"enabled": False},
                     "7z": {"enabled": False},
@@ -429,6 +429,7 @@ def test_derive_archives_random_mode_limits_and_seed_controls_selection(tmp_path
     summary, rows = run([])
     assert summary["available_tasks"] == 5
     assert summary["generated"] == 2
+    assert summary["random_mode"]["strategy"] == "balanced_format"
     first_selection = [row["output_name"] for row in rows]
 
     _, rows = run([])
@@ -437,6 +438,70 @@ def test_derive_archives_random_mode_limits_and_seed_controls_selection(tmp_path
     summary, rows = run(["--no-random-mode"])
     assert summary["generated"] == 5
     assert len(rows) == 5
+
+
+def test_derive_archives_balanced_format_limits_zip_dominance(tmp_path):
+    source_root = tmp_path / "source_material"
+    material_root = tmp_path / "material"
+    sample = source_root / "sample_balance"
+    sample.mkdir(parents=True)
+    (sample / "alpha.txt").write_text("alpha payload", encoding="utf-8")
+    config = tmp_path / "archive_derivation_config.json"
+    config.write_text(
+        json.dumps(
+            {
+                "derivation": {
+                    "random_mode": {
+                        "enabled": True,
+                        "strategy": "balanced_format",
+                        "archives_per_sample": 2,
+                        "seed": "42",
+                        "max_format_ratio": {"zip": 0.5},
+                    }
+                },
+                "formats": {
+                    "zip": {"enabled": True, "levels": [0, 5, 9], "methods": ["deflate", "store"]},
+                    "tar": {"enabled": True},
+                    "7z": {"enabled": False},
+                    "rar": {"enabled": False},
+                    "zstd": {"enabled": False},
+                    "gzip": {"enabled": False},
+                    "bzip2": {"enabled": False},
+                    "xz": {"enabled": False},
+                    "tar_gz": {"enabled": False},
+                    "tar_bz2": {"enabled": False},
+                    "tar_xz": {"enabled": False},
+                    "tar_zst": {"enabled": False},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "repair_training/derive_archives.py",
+            "--source-root",
+            str(source_root),
+            "--material-root",
+            str(material_root),
+            "--config",
+            str(config),
+            "--no-pretty",
+        ],
+        cwd=Path.cwd(),
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+
+    summary = json.loads(completed.stdout.strip())
+    rows = _jsonl(sample / "derived_manifest.jsonl")
+    assert summary["available_format_counts"]["zip"] == 6
+    assert summary["available_format_counts"]["tar"] == 1
+    assert summary["selected_format_counts"] == {"tar": 1, "zip": 1}
+    assert {row["material_format"] for row in rows} == {"zip", "tar"}
 
 
 def test_derive_archives_organizes_direct_source_material_files(tmp_path):
@@ -525,6 +590,36 @@ def test_ltr_feature_views_do_not_leak_labels_or_after_state():
     teacher = _row_features(row, "teacher_only_baseline")
     assert any(key.startswith("teacher.") for key in teacher)
     assert not any(key.startswith("candidate.") for key in teacher)
+
+
+def test_ltr_group_filter_removes_single_candidate_queries():
+    from argparse import Namespace
+
+    from repair_training.train_ltr import _filter_groups
+
+    grouped = {
+        "single": [{"query_id": "single", "label": 3}],
+        "multi": [{"query_id": "multi", "label": 0}, {"query_id": "multi", "label": 3}],
+    }
+    args = Namespace(min_candidates_per_query=2, include_single_candidate_queries=False)
+    assert sorted(_filter_groups(grouped, args)) == ["multi"]
+
+    args.include_single_candidate_queries = True
+    assert sorted(_filter_groups(grouped, args)) == ["multi", "single"]
+
+
+def test_ltr_report_warns_about_zip_dominance_and_sparse_negatives():
+    from repair_training.report_ltr_data import _build_report
+
+    rows = [
+        {"query_id": "q1", "label": 3, "material_format": "zip", "module": "zip_a"},
+        {"query_id": "q1", "label": 1, "material_format": "zip", "module": "zip_b"},
+        {"query_id": "q2", "label": 3, "material_format": "zip", "module": "zip_a"},
+        {"query_id": "q3", "label": 1, "material_format": "tar", "module": "tar_a"},
+    ]
+    report = _build_report(rows, Path("missing-model-root"))
+    assert "zip_dominates_dataset" in report["warnings"]
+    assert "negative_labels_too_sparse" in report["warnings"]
 
 
 def _write_clean_zip(path: Path) -> None:

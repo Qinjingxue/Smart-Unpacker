@@ -11,8 +11,25 @@
   "derivation": {
     "random_mode": {
       "enabled": true,
+      "strategy": "balanced_format",
       "archives_per_sample": 5,
-      "seed": "random"
+      "seed": "random",
+      "format_weights": {
+        "tar": 1.4,
+        "tar_gz": 1.3,
+        "tar_bz2": 1.2,
+        "tar_xz": 1.2,
+        "zip": 0.8,
+        "gzip": 0.8,
+        "bzip2": 0.8,
+        "xz": 0.8,
+        "zstd": 0.8,
+        "7z": 0.3,
+        "rar": 0.3
+      },
+      "max_format_ratio": {
+        "zip": 0.5
+      }
     }
   },
   "formats": {

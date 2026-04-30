@@ -1,6 +1,7 @@
 use bzip2::read::BzDecoder;
 use bzip2::write::BzEncoder;
 use bzip2::Compression as Bzip2Compression;
+use crc32fast::hash as crc32_hash;
 use flate2::read::{DeflateDecoder, GzDecoder};
 use flate2::write::GzEncoder;
 use flate2::{Compression as GzipCompression, Decompress, FlushDecompress, Status};
@@ -589,7 +590,10 @@ pub(crate) fn tar_truncated_partial_recovery(
     format,
     workspace,
     max_input_size_mb=512.0,
-    max_probe_junk_bytes=1048576
+    max_probe_junk_bytes=1048576,
+    max_seconds=30.0,
+    max_probe_attempts=32,
+    max_decode_size_mb=64.0
 ))]
 pub(crate) fn compression_stream_trailing_junk_trim(
     py: Python<'_>,
@@ -598,6 +602,9 @@ pub(crate) fn compression_stream_trailing_junk_trim(
     workspace: &str,
     max_input_size_mb: f64,
     max_probe_junk_bytes: usize,
+    max_seconds: f64,
+    max_probe_attempts: usize,
+    max_decode_size_mb: f64,
 ) -> PyResult<Py<PyDict>> {
     let Some(format) = StreamFormat::from_name(format) else {
         return stream_trim_status(
@@ -617,18 +624,42 @@ pub(crate) fn compression_stream_trailing_junk_trim(
             return stream_trim_status(py, "skipped", format.name(), "", &message, 0, 0, 0.0)
         }
     };
-    let Some(stream_end) = find_complete_stream_prefix(&data, format, max_probe_junk_bytes.max(1))
-    else {
-        return stream_trim_status(
-            py,
-            "unrepairable",
-            format.name(),
-            "",
-            &format!("no trailing junk after complete {} stream", format.name()),
-            0,
-            data.len() as u64,
-            0.0,
-        );
+    let deadline = duration_from_seconds(max_seconds);
+    let max_decode_bytes = mb_to_bytes(max_decode_size_mb).unwrap_or(u64::MAX) as usize;
+    let stream_end = match find_complete_stream_prefix(
+        &data,
+        format,
+        max_probe_junk_bytes.max(1),
+        Instant::now(),
+        deadline,
+        max_probe_attempts.max(1),
+        max_decode_bytes,
+    ) {
+        StreamPrefixSearch::Found(end) => end,
+        StreamPrefixSearch::TimedOut => {
+            return stream_trim_status(
+                py,
+                "skipped",
+                format.name(),
+                "",
+                &format!("{} stream trim probe exceeded budget", format.name()),
+                0,
+                data.len() as u64,
+                0.0,
+            )
+        }
+        StreamPrefixSearch::NotFound => {
+            return stream_trim_status(
+                py,
+                "unrepairable",
+                format.name(),
+                "",
+                &format!("no trailing junk after complete {} stream", format.name()),
+                0,
+                data.len() as u64,
+                0.0,
+            )
+        }
     };
     if stream_end >= data.len() {
         return stream_trim_status(
@@ -792,18 +823,31 @@ pub(crate) fn tar_metadata_downgrade_recovery(
 }
 
 #[pyfunction]
-#[pyo3(signature = (source_input, workspace, max_input_size_mb=512.0))]
+#[pyo3(signature = (
+    source_input,
+    workspace,
+    max_input_size_mb=512.0,
+    max_seconds=30.0,
+    max_decode_size_mb=32.0
+))]
 pub(crate) fn gzip_footer_fix_repair(
     py: Python<'_>,
     source_input: &Bound<'_, PyDict>,
     workspace: &str,
     max_input_size_mb: f64,
+    max_seconds: f64,
+    max_decode_size_mb: f64,
 ) -> PyResult<Py<PyDict>> {
     let data = match read_source_input(source_input, mb_to_bytes(max_input_size_mb)) {
         Ok(data) => data,
         Err(message) => return stream_trim_status(py, "skipped", "gzip", "", &message, 0, 0, 0.0),
     };
-    let repair = match repair_gzip_footer(&data) {
+    let repair = match repair_gzip_footer(
+        &data,
+        Instant::now(),
+        duration_from_seconds(max_seconds),
+        mb_to_bytes(max_decode_size_mb).unwrap_or(u64::MAX) as usize,
+    ) {
         Ok(repair) => repair,
         Err(message) => {
             return stream_trim_status(
@@ -1800,22 +1844,60 @@ fn write_tar_name(header: &mut [u8], name: &str) {
     }
 }
 
+enum StreamPrefixSearch {
+    Found(usize),
+    NotFound,
+    TimedOut,
+}
+
 fn find_complete_stream_prefix(
     data: &[u8],
     format: StreamFormat,
     max_probe_junk_bytes: usize,
-) -> Option<usize> {
+    started: Instant,
+    max_duration: Option<Duration>,
+    max_probe_attempts: usize,
+    max_decode_bytes: usize,
+) -> StreamPrefixSearch {
     if data.is_empty() {
-        return None;
+        return StreamPrefixSearch::NotFound;
+    }
+    if data.len() > max_decode_bytes {
+        return StreamPrefixSearch::TimedOut;
+    }
+    if decode_stream_exact(data, format).is_ok() {
+        return StreamPrefixSearch::Found(data.len());
+    }
+    if timed_out_at(started, max_duration) {
+        return StreamPrefixSearch::TimedOut;
     }
     let probe_window = max_probe_junk_bytes.max(1).min(4096);
     let min_end = data.len().saturating_sub(probe_window);
-    for end in (min_end..=data.len()).rev() {
+    let attempts = max_probe_attempts.max(1).min(probe_window);
+    let mut checked = 0usize;
+    let mut previous_end = data.len();
+    for attempt in 0..attempts {
+        if timed_out_at(started, max_duration) {
+            return StreamPrefixSearch::TimedOut;
+        }
+        let offset = 1 + (attempt * probe_window / attempts);
+        let end = data.len().saturating_sub(offset).max(min_end);
+        if end == previous_end {
+            continue;
+        }
+        previous_end = end;
+        checked += 1;
         if decode_stream_exact(&data[..end], format).is_ok() {
-            return Some(end);
+            return StreamPrefixSearch::Found(end);
         }
     }
-    None
+    if checked == 0 {
+        let end = data.len().saturating_sub(1).max(min_end);
+        if decode_stream_exact(&data[..end], format).is_ok() {
+            return StreamPrefixSearch::Found(end);
+        }
+    }
+    StreamPrefixSearch::NotFound
 }
 
 fn decode_stream_exact(data: &[u8], format: StreamFormat) -> Result<u64, String> {
@@ -1915,12 +1997,26 @@ struct TarRepair {
     message: String,
 }
 
-fn repair_gzip_footer(data: &[u8]) -> Result<GzipFooterRepair, String> {
+fn repair_gzip_footer(
+    data: &[u8],
+    started: Instant,
+    max_duration: Option<Duration>,
+    max_decode_bytes: usize,
+) -> Result<GzipFooterRepair, String> {
+    if data.len() > max_decode_bytes {
+        return Err("gzip footer fix skipped because input exceeds decode budget".to_string());
+    }
+    if timed_out_at(started, max_duration) {
+        return Err("gzip footer fix exceeded time budget".to_string());
+    }
     let header_end = gzip_header_end(data).ok_or_else(|| "invalid gzip header".to_string())?;
     if data.len() < header_end + 8 {
         return Err("invalid gzip header".to_string());
     }
     let (payload, consumed) = find_gzip_deflate_payload(data, header_end)?;
+    if timed_out_at(started, max_duration) {
+        return Err("gzip footer fix exceeded time budget".to_string());
+    }
     let stream_end = header_end + consumed;
     let mut footer = [0u8; 8];
     footer[0..4].copy_from_slice(&crc32(&payload).to_le_bytes());
@@ -2264,15 +2360,7 @@ fn canonical_tar_end(data: &[u8], payload_end: usize) -> usize {
 }
 
 fn crc32(bytes: &[u8]) -> u32 {
-    let mut crc = 0xffff_ffffu32;
-    for byte in bytes {
-        crc ^= *byte as u32;
-        for _ in 0..8 {
-            let mask = (crc & 1).wrapping_neg();
-            crc = (crc >> 1) ^ (0xedb8_8320 & mask);
-        }
-    }
-    !crc
+    crc32_hash(bytes)
 }
 
 fn write_tar_repair_candidate(

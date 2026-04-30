@@ -26,13 +26,25 @@ def native_stream_trailing_trim_result(
     config: dict,
 ) -> RepairResult:
     deep = config.get("deep") if isinstance(config.get("deep"), dict) else {}
-    result = dict(_native_stream_trim(
-        source_input_for_job(job),
-        fmt,
-        workspace,
-        float(deep.get("max_input_size_mb", 512) or 0),
-        int(deep.get("max_trailing_junk_probe_bytes", 1024 * 1024) or 1024 * 1024),
-    ))
+    try:
+        result = dict(_native_stream_trim(
+            source_input_for_job(job),
+            fmt,
+            workspace,
+            float(deep.get("max_input_size_mb", 512) or 0),
+            int(deep.get("max_trailing_junk_probe_bytes", 1024 * 1024) or 1024 * 1024),
+            float(deep.get("max_seconds_per_module", 30.0) or 0),
+            int(deep.get("max_stream_trim_probe_attempts", 32) or 32),
+            float(deep.get("max_stream_trim_decode_mb", 64) or 0),
+        ))
+    except TypeError:
+        result = dict(_native_stream_trim(
+            source_input_for_job(job),
+            fmt,
+            workspace,
+            float(deep.get("max_input_size_mb", 512) or 0),
+            int(deep.get("max_trailing_junk_probe_bytes", 1024 * 1024) or 1024 * 1024),
+        ))
     status = str(result.get("status") or "unrepairable")
     if status != "repaired":
         return RepairResult(
