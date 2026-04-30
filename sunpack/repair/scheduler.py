@@ -567,7 +567,7 @@ class RepairScheduler:
         records = _telemetry_records(job, batch, result, selection)
         if not records:
             return
-        target = Path(".sunpack") / "datasets" / "repair_candidates_runtime.jsonl"
+        target = _telemetry_target(result)
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
             with target.open("a", encoding="utf-8") as handle:
@@ -619,6 +619,11 @@ def _telemetry_records(
             "features": dict(item.get("ltr_features") or {}),
         })
     return records
+
+
+def _telemetry_target(result: RepairResult) -> Path:
+    suffix = "success" if result.ok and result.status in {"repaired", "partial"} else "failure"
+    return Path(".sunpack") / "datasets" / f"repair_candidates_runtime_{suffix}.jsonl"
 
 
 def _telemetry_candidate_features(batch: RepairCandidateBatch, selection: dict[str, Any]) -> list[dict[str, Any]]:

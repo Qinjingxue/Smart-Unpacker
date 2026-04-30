@@ -420,15 +420,56 @@ def test_repair_scheduler_telemetry_writes_compact_ltr_records(tmp_path, monkeyp
         if previous is not None:
             registry.register(previous)
 
-    target = tmp_path / ".sunpack" / "datasets" / "repair_candidates_runtime.jsonl"
+    target = tmp_path / ".sunpack" / "datasets" / "repair_candidates_runtime_success.jsonl"
+    failure_target = tmp_path / ".sunpack" / "datasets" / "repair_candidates_runtime_failure.jsonl"
     rows = [json.loads(line) for line in target.read_text(encoding="utf-8").splitlines()]
     assert result.ok is True
+    assert not failure_target.exists()
     assert len(rows) == 2
     assert {row["source"] for row in rows} == {"runtime.repair.telemetry"}
     assert {row["query_id"] for row in rows} == {"telemetry:0"}
     assert sum(1 for row in rows if row["candidate_selected"]) == 1
     assert sum(1 for row in rows if row["label"] == 2) == 1
     assert all("features" in row and "generation_priority" in row["features"] for row in rows)
+
+
+def test_repair_scheduler_telemetry_splits_failed_repair_records(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    module = _DummyRejectedBoundaryModule()
+    registry = get_repair_module_registry()
+    previous = registry.get(module.spec.name)
+    registry.register(module)
+    try:
+        scheduler = RepairScheduler({
+            "repair": {
+                "workspace": str(tmp_path / "repair"),
+                "telemetry": {"enabled": True},
+                "modules": [{"name": module.spec.name, "enabled": True}],
+            }
+        })
+        result = scheduler.repair(RepairJob(
+            source_input={"kind": "file", "path": str(tmp_path / "source.zip")},
+            format="zip",
+            confidence=0.7,
+            damage_flags=["boundary_unreliable"],
+            archive_key="telemetry-failed",
+        ))
+    finally:
+        if previous is not None:
+            registry.register(previous)
+
+    success_target = tmp_path / ".sunpack" / "datasets" / "repair_candidates_runtime_success.jsonl"
+    failure_target = tmp_path / ".sunpack" / "datasets" / "repair_candidates_runtime_failure.jsonl"
+    rows = [json.loads(line) for line in failure_target.read_text(encoding="utf-8").splitlines()]
+    assert result.ok is False
+    assert not success_target.exists()
+    assert len(rows) == 1
+    assert rows[0]["source"] == "runtime.repair.telemetry"
+    assert rows[0]["query_id"] == "telemetry-failed:0"
+    assert rows[0]["result_status"] == "unrepairable"
+    assert rows[0]["repair_success"] is False
+    assert rows[0]["label"] == 0
+    assert rows[0]["features"]["module"] == module.spec.name
 
 
 def test_repair_scheduler_exposes_generated_candidate_batch(tmp_path):
