@@ -20,6 +20,7 @@ DEFAULT_INPUTS = [
 DEFAULT_OUTPUT_DIR = Path("repair_training") / "models" / "by_format"
 FORMATS = ("zip", "tar", "tar_gz", "tar_bz2", "tar_xz", "gzip", "bzip2", "xz", "zstd", "7z", "rar")
 FEATURE_VIEWS = ("stable_only", "stable_plus_teacher", "teacher_only_baseline")
+LABEL_TARGETS = {"immediate", "future", "discounted", "blended", "strategy"}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -47,6 +48,10 @@ def main(argv: list[str] | None = None) -> int:
                 view,
                 "--format-scope",
                 fmt,
+                "--label-target",
+                args.label_target,
+                "--split-by",
+                args.split_by,
                 "--output-dir",
                 str(view_dir),
                 "--seed",
@@ -82,6 +87,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR))
     parser.add_argument("--formats", default="", help="Comma-separated material formats. Defaults to all supported training formats.")
     parser.add_argument("--feature-views", default="", help="Comma-separated feature views. Defaults to all views.")
+    parser.add_argument("--label-target", choices=sorted(LABEL_TARGETS), default="strategy")
+    parser.add_argument("--split-by", choices=("query", "episode", "source_sample"), default="source_sample")
     parser.add_argument("--seed", type=int, default=2026)
     parser.add_argument("--min-trainable-queries", type=int, default=30)
     parser.add_argument("--min-candidates-per-query", type=int, default=2)
@@ -109,7 +116,9 @@ def _view_status(view_dir: Path) -> dict[str, Any]:
             "row_count": summary.get("row_count"),
             "query_count": summary.get("query_count"),
             "feature_count": summary.get("feature_count"),
+            "label_target": summary.get("label_target"),
             "raw_label_counts": summary.get("raw_label_counts", {}),
+            "label_target": summary.get("label_target"),
             "metrics": summary.get("metrics", {}),
         }
     if skip_summary.is_file():

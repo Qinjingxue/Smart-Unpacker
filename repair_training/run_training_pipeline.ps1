@@ -12,6 +12,13 @@ param(
     [string]$Seed = "random",
     [int]$MaxRounds = 2,
     [int]$MaxCandidatesPerRound = 6,
+    [ValidateSet("greedy", "beam", "counterfactual")]
+    [string]$RolloutMode = "greedy",
+    [int]$BeamSize = 1,
+    [int]$BranchTopK = 2,
+    [int]$CounterfactualExtra = 2,
+    [int]$MaxTotalStatesPerSample = 6,
+    [double]$FutureLabelDiscount = 0.8,
     [ValidateSet("lazy", "eager")]
     [string]$ProposalMode = "lazy",
     [int]$MaterializeTopKPerRound = 4,
@@ -28,11 +35,18 @@ param(
     [ValidateSet("pool", "static")]
     [string]$CollectScheduling = "pool",
     [int]$CollectQueueBatchSize = 1,
+    [int]$MaxActiveCollectors = 6,
+    [int]$CollectLaunchDelayMilliseconds = 150,
+    [switch]$ZipStrategyDefaults,
     [switch]$DisableParallelCollect,
     [switch]$SkipDerive,
     [switch]$SkipBuild,
     [switch]$SkipCollect,
     [switch]$SkipTrain,
+    [ValidateSet("immediate", "future", "discounted", "blended", "strategy")]
+    [string]$LabelTarget = "strategy",
+    [ValidateSet("query", "episode", "source_sample")]
+    [string]$SplitBy = "source_sample",
     [bool]$TrainByFormat = $true,
     [switch]$TrainUnifiedBaseline,
     [switch]$NoInstallTrainDeps,
@@ -65,6 +79,20 @@ function Expand-TrainingList {
 
 Push-Location $RepoRoot
 try {
+    if ($ZipStrategyDefaults) {
+        $Formats = "zip"
+        $RolloutMode = "counterfactual"
+        $MaxRounds = 3
+        $BeamSize = 3
+        $BranchTopK = 3
+        $CounterfactualExtra = 2
+        $MaterializeTopKPerRound = 6
+        $MaxTotalStatesPerSample = 10
+        $CaseTimeoutSeconds = 20.0
+        $MaxActiveCollectors = 4
+        $CollectQueueBatchSize = 3
+        $SplitBy = "source_sample"
+    }
     if (-not $SkipDerive) {
         $deriveArgs = @{
             SourceRoot = $SourceRoot
@@ -101,6 +129,12 @@ try {
             FailureOutput = $failureOutput
             MaxRounds = $MaxRounds
             MaxCandidatesPerRound = $MaxCandidatesPerRound
+            RolloutMode = $RolloutMode
+            BeamSize = $BeamSize
+            BranchTopK = $BranchTopK
+            CounterfactualExtra = $CounterfactualExtra
+            MaxTotalStatesPerSample = $MaxTotalStatesPerSample
+            FutureLabelDiscount = $FutureLabelDiscount
             ProposalMode = $ProposalMode
             MaterializeTopKPerRound = $MaterializeTopKPerRound
             CaseTimeoutSeconds = $CaseTimeoutSeconds
@@ -120,6 +154,8 @@ try {
             $collectArgs["CollectWorkers"] = $CollectWorkers
             $collectArgs["Scheduling"] = $CollectScheduling
             $collectArgs["QueueBatchSize"] = $CollectQueueBatchSize
+            $collectArgs["MaxActiveCollectors"] = $MaxActiveCollectors
+            $collectArgs["LaunchDelayMilliseconds"] = $CollectLaunchDelayMilliseconds
             $collectArgs["ParallelSummaryOutput"] = (Join-Path $DatasetDir "collect_parallel_summary.json")
             & (Join-Path $RepoRoot "repair_training\collect_plan_data_parallel.ps1") @collectArgs
         } else {
@@ -133,6 +169,8 @@ try {
             $formatTrainArgs = @{
                 OutputDir = $ModelRoot
                 InputPath = @($successOutput, $failureOutput)
+                LabelTarget = $LabelTarget
+                SplitBy = $SplitBy
             }
             if ($Formats) { $formatTrainArgs["Formats"] = $Formats }
             if ($NoInstallTrainDeps) { $formatTrainArgs["NoInstallDeps"] = $true }
@@ -145,6 +183,7 @@ try {
                 FormatScope = "all"
                 OutputDir = $UnifiedModelRoot
                 InputPath = @($successOutput, $failureOutput)
+                LabelTarget = $LabelTarget
             }
             if ($NoInstallTrainDeps) { $trainArgs["NoInstallDeps"] = $true }
             & (Join-Path $RepoRoot "repair_training\train_ltr.ps1") @trainArgs

@@ -16,7 +16,7 @@ import tarfile
 import tempfile
 import time
 import zipfile
-from dataclasses import replace
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -56,6 +56,14 @@ def main(argv: list[str] | None = None) -> int:
         "damage_layer_counts": {},
         "state_progress_count": 0,
         "partial_count": 0,
+        "rollout_mode_counts": {},
+        "state_count": 0,
+        "expanded_state_count": 0,
+        "branch_count": 0,
+        "future_label_counts": {},
+        "terminal_status_counts": {},
+        "terminal_success_count": 0,
+        "rollout_budget_exhausted": 0,
         "success_output": str(success_output),
         "failure_output": str(failure_output),
         "collector_shard": args.collector_shard,
@@ -149,7 +157,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-pretty", action="store_false", dest="pretty", help="Only write compact JSONL.")
     parser.add_argument("--limit", type=int, default=0, help="Collect at most N manifest records.")
     parser.add_argument("--max-rounds", type=int, default=3, help="Maximum repair rounds per damaged sample.")
-    parser.add_argument("--beam-size", type=int, default=1, help="Reserved interface for beam collection; v1 advances the top current-system path.")
+    parser.add_argument("--rollout-mode", choices=("greedy", "beam", "counterfactual"), default="greedy", help="Repair-state rollout strategy for multi-step training collection.")
+    parser.add_argument("--beam-size", type=int, default=1, help="Maximum active next states retained per rollout depth.")
+    parser.add_argument("--branch-top-k", type=int, default=2, help="Maximum branch candidates advanced from one state in beam/counterfactual mode.")
+    parser.add_argument("--counterfactual-extra", type=int, default=2, help="Additional risky/high-value branches considered in counterfactual mode.")
+    parser.add_argument("--max-total-states-per-sample", type=int, default=6, help="Hard cap on states created for one damaged sample, including the root state.")
+    parser.add_argument("--future-label-discount", type=float, default=0.8, help="Discount used when backfilling future labels from descendant states.")
     parser.add_argument("--max-candidates-per-round", type=int, default=10, help="Maximum candidates logged per round.")
     parser.add_argument("--proposal-mode", choices=("lazy", "eager"), default="lazy", help="Use lazy repair plans or eager repair execution while collecting candidates.")
     parser.add_argument("--materialize-top-k-per-round", type=int, default=2, help="Materialize at most K pre-ranked candidates per round in lazy proposal mode.")
@@ -187,17 +200,51 @@ def _load_records(args: argparse.Namespace) -> list[dict[str, Any]]:
 
 def _update_summary_counts(summary: dict[str, Any], record: dict[str, Any], rows: list[dict[str, Any]]) -> None:
     label_counts = summary.setdefault("label_counts", {})
+    seen_states: set[str] = set()
+    seen_expanded: set[str] = set()
+    seen_branches: set[str] = set()
+    terminal_success = False
+    budget_exhausted = False
     for row in rows:
+        if row.get("row_type") == "terminal":
+            terminal_counts = summary.setdefault("terminal_status_counts", {})
+            terminal_status = str(row.get("terminal_status") or row.get("label_status") or "unknown")
+            terminal_counts[terminal_status] = int(terminal_counts.get(terminal_status, 0) or 0) + 1
+            continue
         label = str(int(row.get("label", 0) or 0))
         label_counts[label] = int(label_counts.get(label, 0) or 0) + 1
+        mode = str(row.get("rollout_mode") or "greedy")
+        mode_counts = summary.setdefault("rollout_mode_counts", {})
+        mode_counts[mode] = int(mode_counts.get(mode, 0) or 0) + 1
+        state_id = str(row.get("state_id") or "")
+        if state_id:
+            seen_states.add(state_id)
+            seen_expanded.add(state_id)
+        parent_action = str(row.get("parent_action_row_id") or "")
+        if parent_action:
+            seen_branches.add(parent_action)
         status = str(row.get("label_status") or "")
         if status == "state_progress":
             summary["state_progress_count"] = int(summary.get("state_progress_count", 0) or 0) + 1
         if status == "partial" or int(row.get("label", 0) or 0) == 1:
             summary["partial_count"] = int(summary.get("partial_count", 0) or 0) + 1
+        details = row.get("label_details") if isinstance(row.get("label_details"), dict) else {}
+        future_label = str(int(details.get("future_best_label", row.get("label", 0)) or 0))
+        future_counts = summary.setdefault("future_label_counts", {})
+        future_counts[future_label] = int(future_counts.get(future_label, 0) or 0) + 1
+        terminal_success = terminal_success or bool(details.get("terminal_success")) or int(row.get("label", 0) or 0) == 3
+        rollout_summary = row.get("rollout_summary") if isinstance(row.get("rollout_summary"), dict) else {}
+        budget_exhausted = budget_exhausted or bool(rollout_summary.get("rollout_budget_exhausted"))
     best = max((int(row.get("label", 0) or 0) for row in rows), default=0)
     best_counts = summary.setdefault("sample_best_label_counts", {})
     best_counts[str(best)] = int(best_counts.get(str(best), 0) or 0) + 1
+    summary["state_count"] = int(summary.get("state_count", 0) or 0) + len(seen_states)
+    summary["expanded_state_count"] = int(summary.get("expanded_state_count", 0) or 0) + len(seen_expanded)
+    summary["branch_count"] = int(summary.get("branch_count", 0) or 0) + len(seen_branches)
+    if terminal_success:
+        summary["terminal_success_count"] = int(summary.get("terminal_success_count", 0) or 0) + 1
+    if budget_exhausted:
+        summary["rollout_budget_exhausted"] = int(summary.get("rollout_budget_exhausted", 0) or 0) + 1
     oracle = record.get("oracle") if isinstance(record.get("oracle"), dict) else {}
     oracle_strength = str(record.get("oracle_strength") or oracle.get("oracle_strength") or "unknown")
     oracle_counts = summary.setdefault("oracle_strength_counts", {})
@@ -385,128 +432,604 @@ def _collect_sample_rows(record: dict[str, Any], args: argparse.Namespace, debug
     selector = CandidateSelector(scheduler.config)
     source_input = dict(record.get("damaged_input") or {})
     fmt = str(record.get("format") or source_input.get("format_hint") or "")
-    damage_flags = list(record.get("damage_flags") or [])
-    previous_actions: list[str] = []
     rows: list[dict[str, Any]] = []
-    best_completeness = 0.0
     max_candidates_per_round = _effective_max_candidates(record, args)
     debug_events.write("sample_budget", record, budget=_sample_budget(record, args))
-    for round_index in range(max(1, int(args.max_rounds or 1))):
-        if args.progress:
-            print(f"  ROUND {round_index} {record.get('sample_id')} fmt={fmt}", flush=True)
-        job = RepairJob(
-            source_input=source_input,
-            format=fmt,
-            confidence=0.82,
-            damage_flags=damage_flags,
-            archive_key=f"{record.get('sample_id')}:round:{round_index}",
-        )
-        phase_started = time.perf_counter()
-        lazy_mode = str(args.proposal_mode or "lazy") == "lazy"
-        batch = scheduler.generate_repair_candidates(job, lazy=lazy_mode)
-        debug_events.write(
-            "phase",
-            record,
-            round=round_index,
-            phase="generate_candidates",
-            elapsed_seconds=round(time.perf_counter() - phase_started, 3),
-            candidate_count=len(batch.candidates),
-            warning_count=len(batch.warnings or []),
-        )
-        if args.progress:
-            print(f"  CANDIDATES {record.get('sample_id')} round={round_index} count={len(batch.candidates)} warnings={len(batch.warnings or [])}", flush=True)
-        phase_started = time.perf_counter()
-        before_state = _state_summary(record, source_input, fmt, damage_flags)
-        debug_events.write("phase", record, round=round_index, phase="before_state", elapsed_seconds=round(time.perf_counter() - phase_started, 3))
-        state_features = _state_features(record, batch, round_index, previous_actions, best_completeness, before_state)
-        phase_started = time.perf_counter()
-        candidates, materialization_meta = _materialize_for_collection(list(batch.candidates), selector, args, record)
-        debug_events.write(
-            "phase",
-            record,
-            round=round_index,
-            phase="materialize_candidates",
-            elapsed_seconds=round(time.perf_counter() - phase_started, 3),
-            candidate_count=len(candidates),
-            proposal_count=len(batch.candidates),
-            materialization_budget=materialization_meta["budget"],
-        )
-        phase_started = time.perf_counter()
-        validated = [selector._with_native_validation(candidate) for candidate in candidates]  # noqa: SLF001
-        debug_events.write("phase", record, round=round_index, phase="native_validation", elapsed_seconds=round(time.perf_counter() - phase_started, 3), candidate_count=len(validated))
-        phase_started = time.perf_counter()
-        accepted = sorted(
-            [(selector.generation_priority(candidate), index, candidate) for index, candidate in enumerate(validated) if selector._accepted(candidate)],  # noqa: SLF001
-            key=lambda item: item[0],
-            reverse=True,
-        )
-        accepted_ids = {_candidate_id(candidate) for _, _, candidate in accepted}
-        rejected = [
-            (None, index, candidate)
-            for index, candidate in enumerate(validated)
-            if _candidate_id(candidate) not in accepted_ids
-        ]
-        ranked = [*accepted, *rejected]
-        selected_candidate = accepted[0][2] if accepted else None
-        selected_id = _candidate_id(selected_candidate)
-        debug_events.write("phase", record, round=round_index, phase="rank_candidates", elapsed_seconds=round(time.perf_counter() - phase_started, 3), accepted_count=len(accepted), rejected_count=len(rejected))
-        if not validated:
-            rows.append(_round_empty_row(record, round_index, state_features, batch))
+
+    rollout_mode = str(getattr(args, "rollout_mode", "greedy") or "greedy")
+    root_state = _root_rollout_state(record, fmt, rollout_mode)
+    frontier: list[dict[str, Any]] = [root_state]
+    next_beam_id = 1
+    created_state_count = 1
+    expanded_state_count = 0
+    branch_count = 0
+    budget_exhausted = False
+    max_rounds = max(1, int(args.max_rounds or 1))
+    max_total_states = max(1, int(getattr(args, "max_total_states_per_sample", 6) or 6))
+
+    for round_index in range(max_rounds):
+        if not frontier:
             break
-        logged = 0
-        phase_started = time.perf_counter()
-        for rank, (_, original_index, candidate) in enumerate(ranked):
-            if logged >= max_candidates_per_round:
+        next_frontier: list[dict[str, Any]] = []
+        for state in frontier:
+            if expanded_state_count >= max_total_states:
+                budget_exhausted = True
+                rows.append(_rollout_terminal_row(record, state, "budget_exhausted", "rollout state budget exhausted", None))
                 break
-            materialized_for_label = bool(materialization_meta["materialized_ids"].get(_candidate_id(candidate), True))
-            if args.skip_unmaterialized_labels and not materialized_for_label:
-                continue
-            payload = candidate_feature_payload(candidate)
-            after_state = _state_summary(record, candidate.repaired_input if isinstance(candidate.repaired_input, dict) else {}, fmt, list(candidate.damage_flags or damage_flags), payload)
-            delta_features = _state_delta(before_state, after_state)
-            label_info = _label_candidate(record, candidate, best_completeness, before_state, after_state, delta_features)
-            rows.append(_action_row(
+            source_input = dict(state.get("source_input") or {})
+            damage_flags = list(state.get("damage_flags") or [])
+            previous_actions = list(state.get("previous_actions") or [])
+            previous_modules = list(state.get("previous_modules") or [])
+            best_completeness = float(state.get("best_completeness", 0.0) or 0.0)
+            state_round = int(state.get("round", round_index) or round_index)
+            query_id = _rollout_query_id(record, state)
+            expanded_state_count += 1
+            if args.progress:
+                print(f"  ROUND {state_round} {record.get('sample_id')} fmt={fmt} query={query_id}", flush=True)
+            job = RepairJob(
+                source_input=source_input,
+                format=fmt,
+                confidence=0.82,
+                damage_flags=damage_flags,
+                archive_key=f"{record.get('sample_id')}:round:{state_round}:beam:{state.get('beam_id', 0)}",
+            )
+            phase_started = time.perf_counter()
+            lazy_mode = str(args.proposal_mode or "lazy") == "lazy"
+            batch = scheduler.generate_repair_candidates(job, lazy=lazy_mode)
+            debug_events.write(
+                "phase",
                 record,
-                round_index,
-                original_index,
-                rank,
-                candidate,
-                state_features,
-                before_state,
-                after_state,
-                delta_features,
-                batch,
-                label_info,
-                selected=_candidate_id(candidate) == selected_id,
-                proposal_only=not materialized_for_label,
-                materialized_for_label=materialized_for_label,
-                materialization_rank=materialization_meta["ranks"].get(_candidate_id(candidate)),
+                round=state_round,
+                query_id=query_id,
+                phase="generate_candidates",
+                elapsed_seconds=round(time.perf_counter() - phase_started, 3),
+                candidate_count=len(batch.candidates),
+                warning_count=len(batch.warnings or []),
+            )
+            if args.progress:
+                print(f"  CANDIDATES {record.get('sample_id')} round={state_round} count={len(batch.candidates)} warnings={len(batch.warnings or [])}", flush=True)
+            phase_started = time.perf_counter()
+            before_state = _state_summary(record, source_input, fmt, damage_flags)
+            debug_events.write("phase", record, round=state_round, query_id=query_id, phase="before_state", elapsed_seconds=round(time.perf_counter() - phase_started, 3))
+            state_features = _state_features(record, batch, state_round, previous_actions, best_completeness, before_state)
+            state_features["previous_modules"] = previous_modules
+            state_features["previous_module_count"] = len(previous_modules)
+            phase_started = time.perf_counter()
+            candidates, materialization_meta = _materialize_for_collection(list(batch.candidates), selector, args, record)
+            debug_events.write(
+                "phase",
+                record,
+                round=state_round,
+                query_id=query_id,
+                phase="materialize_candidates",
+                elapsed_seconds=round(time.perf_counter() - phase_started, 3),
+                candidate_count=len(candidates),
+                proposal_count=len(batch.candidates),
                 materialization_budget=materialization_meta["budget"],
-            ))
-            logged += 1
-        debug_events.write("phase", record, round=round_index, phase="label_candidates", elapsed_seconds=round(time.perf_counter() - phase_started, 3), logged_count=logged)
-        if selected_candidate is None:
+            )
+            phase_started = time.perf_counter()
+            validated = [selector._with_native_validation(candidate) for candidate in candidates]  # noqa: SLF001
+            debug_events.write("phase", record, round=state_round, query_id=query_id, phase="native_validation", elapsed_seconds=round(time.perf_counter() - phase_started, 3), candidate_count=len(validated))
+            phase_started = time.perf_counter()
+            accepted = sorted(
+                [(selector.generation_priority(candidate), index, candidate) for index, candidate in enumerate(validated) if selector._accepted(candidate)],  # noqa: SLF001
+                key=lambda item: item[0],
+                reverse=True,
+            )
+            accepted_ids = {_candidate_id(candidate) for _, _, candidate in accepted}
+            rejected = [
+                (None, index, candidate)
+                for index, candidate in enumerate(validated)
+                if _candidate_id(candidate) not in accepted_ids
+            ]
+            ranked = [*accepted, *rejected]
+            selected_candidate = accepted[0][2] if accepted else None
+            selected_id = _candidate_id(selected_candidate)
+            debug_events.write("phase", record, round=state_round, query_id=query_id, phase="rank_candidates", elapsed_seconds=round(time.perf_counter() - phase_started, 3), accepted_count=len(accepted), rejected_count=len(rejected))
+            if not validated:
+                empty = _round_empty_row(record, state_round, state_features, batch)
+                _attach_rollout_context(empty, state, None, rollout_mode, query_id, "")
+                rows.append(empty)
+                rows.append(_rollout_terminal_row(record, state, "no_candidates", "no materialized repair candidates", before_state))
+                continue
+            logged = 0
+            phase_started = time.perf_counter()
+            row_entries: list[dict[str, Any]] = []
+            label_by_id: dict[str, dict[str, Any]] = {}
+            after_by_id: dict[str, dict[str, Any]] = {}
+            delta_by_id: dict[str, dict[str, Any]] = {}
+            rank_by_id: dict[str, int] = {}
+            for rank, (_, original_index, candidate) in enumerate(ranked):
+                if logged >= max_candidates_per_round:
+                    break
+                candidate_id = _candidate_id(candidate)
+                materialized_for_label = bool(materialization_meta["materialized_ids"].get(candidate_id, True))
+                if args.skip_unmaterialized_labels and not materialized_for_label:
+                    continue
+                payload = candidate_feature_payload(candidate)
+                after_state = _state_summary(record, candidate.repaired_input if isinstance(candidate.repaired_input, dict) else {}, fmt, list(candidate.damage_flags or damage_flags), payload)
+                delta_features = _state_delta(before_state, after_state)
+                label_info = _label_candidate(record, candidate, best_completeness, before_state, after_state, delta_features)
+                row = _action_row(
+                    record,
+                    state_round,
+                    original_index,
+                    rank,
+                    candidate,
+                    state_features,
+                    before_state,
+                    after_state,
+                    delta_features,
+                    batch,
+                    label_info,
+                    selected=candidate_id == selected_id,
+                    proposal_only=not materialized_for_label,
+                    materialized_for_label=materialized_for_label,
+                    materialization_rank=materialization_meta["ranks"].get(candidate_id),
+                    materialization_budget=materialization_meta["budget"],
+                )
+                action_row_id = _action_row_id(query_id, candidate_id, original_index)
+                _attach_rollout_context(row, state, candidate, rollout_mode, query_id, action_row_id)
+                rows.append(row)
+                row_entries.append({
+                    "row": row,
+                    "candidate": candidate,
+                    "label_info": label_info,
+                    "rank": rank,
+                    "priority": selector.generation_priority(candidate),
+                    "action_row_id": action_row_id,
+                })
+                label_by_id[candidate_id] = label_info
+                after_by_id[candidate_id] = after_state
+                delta_by_id[candidate_id] = delta_features
+                rank_by_id[candidate_id] = rank
+                logged += 1
+            debug_events.write("phase", record, round=state_round, query_id=query_id, phase="label_candidates", elapsed_seconds=round(time.perf_counter() - phase_started, 3), logged_count=logged)
+
+            branch_entries = _branch_entries(row_entries, selected_id, rollout_mode, args)
+            if state_round + 1 >= max_rounds:
+                rows.append(_rollout_terminal_row(record, state, "max_rounds", "maximum repair rounds reached", before_state))
+                continue
+            if not branch_entries:
+                rows.append(_rollout_terminal_row(record, state, "dead_end", "no branchable repair candidate", before_state))
+                continue
+            for entry in branch_entries:
+                if created_state_count >= max_total_states:
+                    budget_exhausted = True
+                    rows.append(_rollout_terminal_row(record, state, "budget_exhausted", "rollout state budget exhausted", before_state))
+                    break
+                candidate = entry["candidate"]
+                candidate_id = _candidate_id(candidate)
+                selected_result = candidate.to_result(selection={"selected_module": candidate.module_name})
+                if not selected_result.ok or not selected_result.repaired_input:
+                    rows.append(_rollout_terminal_row(record, state, "dead_end", "selected branch produced no repaired input", after_by_id.get(candidate_id), parent_action_row_id=entry["action_row_id"], parent_candidate_id=candidate_id))
+                    continue
+                label_info = label_by_id.get(candidate_id, {})
+                if int(label_info.get("label", 0) or 0) == 3:
+                    rows.append(_rollout_terminal_row(record, state, "complete", "branch reached complete repair", after_by_id.get(candidate_id), parent_action_row_id=entry["action_row_id"], parent_candidate_id=candidate_id, terminal_label=3))
+                    continue
+                child_state = {
+                    "episode_id": state["episode_id"],
+                    "state_id": f"{record.get('sample_id')}:r{state_round + 1}:b{next_beam_id}",
+                    "round": state_round + 1,
+                    "beam_id": next_beam_id,
+                    "parent_query_id": query_id,
+                    "parent_candidate_id": candidate_id,
+                    "parent_action_row_id": entry["action_row_id"],
+                    "source_input": dict(selected_result.repaired_input),
+                    "damage_flags": list(selected_result.damage_flags or damage_flags),
+                    "previous_actions": [*previous_actions, *[str(action) for action in candidate.actions]],
+                    "previous_modules": [*previous_modules, str(candidate.module_name)],
+                    "best_completeness": max(best_completeness, float(label_info.get("completeness", 0.0) or 0.0)),
+                    "path_score": float(state.get("path_score", 0.0) or 0.0) + float(int(label_info.get("label", 0) or 0)),
+                    "path_actions": [*list(state.get("path_actions") or []), *[str(action) for action in candidate.actions]],
+                    "path_modules": [*list(state.get("path_modules") or []), str(candidate.module_name)],
+                    "rollout_mode": rollout_mode,
+                }
+                next_beam_id += 1
+                created_state_count += 1
+                branch_count += 1
+                next_frontier.append(child_state)
+            if budget_exhausted:
+                break
+        frontier = _trim_frontier(next_frontier, args)
+        if budget_exhausted:
             break
-        phase_started = time.perf_counter()
-        selected_result = selected_candidate.to_result(selection={"selected_module": selected_candidate.module_name})
-        debug_events.write("phase", record, round=round_index, phase="selected_to_result", elapsed_seconds=round(time.perf_counter() - phase_started, 3), selected_module=selected_candidate.module_name)
-        if not selected_result.ok or not selected_result.repaired_input:
-            break
-        phase_started = time.perf_counter()
-        selected_payload = candidate_feature_payload(selected_candidate)
-        selected_after_state = _state_summary(record, selected_candidate.repaired_input if isinstance(selected_candidate.repaired_input, dict) else {}, fmt, list(selected_candidate.damage_flags or damage_flags), selected_payload)
-        debug_events.write("phase", record, round=round_index, phase="selected_after_state", elapsed_seconds=round(time.perf_counter() - phase_started, 3), selected_module=selected_candidate.module_name)
-        phase_started = time.perf_counter()
-        selected_delta = _state_delta(before_state, selected_after_state)
-        selected_label = _label_candidate(record, selected_candidate, best_completeness, before_state, selected_after_state, selected_delta)
-        debug_events.write("phase", record, round=round_index, phase="selected_label", elapsed_seconds=round(time.perf_counter() - phase_started, 3), selected_module=selected_candidate.module_name, selected_label=selected_label.get("label"))
-        best_completeness = max(best_completeness, float(selected_label.get("completeness", 0.0) or 0.0))
-        previous_actions.extend(str(action) for action in selected_candidate.actions)
-        source_input = dict(selected_result.repaired_input)
-        damage_flags = list(selected_result.damage_flags or damage_flags)
-        if int(selected_label.get("label", 0) or 0) == 3:
-            break
+
+    _backfill_future_labels(rows, float(getattr(args, "future_label_discount", 0.8) or 0.8))
+    terminal_rows = [row for row in rows if row.get("row_type") == "terminal"]
+    terminal_status_counts = Counter(str(item.get("terminal_status") or item.get("label_status") or "unknown") for item in terminal_rows)
+    for row in rows:
+        row["rollout_summary"] = {
+            "state_count": created_state_count,
+            "expanded_state_count": expanded_state_count,
+            "branch_count": branch_count,
+            "rollout_budget_exhausted": bool(budget_exhausted),
+            "terminal_count": len(terminal_rows),
+            "terminal_status_counts": dict(sorted(terminal_status_counts.items())),
+        }
     return rows
+
+
+def _root_rollout_state(record: dict[str, Any], fmt: str, rollout_mode: str) -> dict[str, Any]:
+    sample_id = str(record.get("sample_id") or record.get("source_archive_id") or "sample")
+    return {
+        "episode_id": sample_id,
+        "state_id": f"{sample_id}:r0:b0",
+        "round": 0,
+        "beam_id": 0,
+        "parent_query_id": None,
+        "parent_candidate_id": None,
+        "parent_action_row_id": None,
+        "source_input": dict(record.get("damaged_input") or {"path": record.get("damaged_path"), "format_hint": fmt}),
+        "damage_flags": list(record.get("damage_flags") or []),
+        "previous_actions": [],
+        "previous_modules": [],
+        "best_completeness": 0.0,
+        "path_score": 0.0,
+        "path_actions": [],
+        "path_modules": [],
+        "rollout_mode": rollout_mode,
+    }
+
+
+def _rollout_query_id(record: dict[str, Any], state: dict[str, Any]) -> str:
+    sample_id = str(record.get("sample_id") or state.get("episode_id") or "sample")
+    if str(state.get("rollout_mode") or "greedy") == "greedy":
+        return f"{sample_id}:{int(state.get('round', 0) or 0)}"
+    return f"{sample_id}:r{int(state.get('round', 0) or 0)}:b{int(state.get('beam_id', 0) or 0)}"
+
+
+def _action_row_id(query_id: str, candidate_id: str, candidate_index: int) -> str:
+    return f"{query_id}|{candidate_index}|{candidate_id}"
+
+
+def _attach_rollout_context(row: dict[str, Any], state: dict[str, Any], candidate: Any, rollout_mode: str, query_id: str, action_row_id: str) -> None:
+    row["query_id"] = query_id
+    row["episode_id"] = state.get("episode_id")
+    row["state_id"] = state.get("state_id")
+    row["parent_query_id"] = state.get("parent_query_id")
+    row["parent_candidate_id"] = state.get("parent_candidate_id")
+    row["parent_action_row_id"] = state.get("parent_action_row_id")
+    row["beam_id"] = int(state.get("beam_id", 0) or 0)
+    row["path_actions"] = list(state.get("path_actions") or [])
+    row["path_modules"] = list(state.get("path_modules") or [])
+    row["path_score"] = float(state.get("path_score", 0.0) or 0.0)
+    row["rollout_mode"] = rollout_mode
+    if action_row_id:
+        row["action_row_id"] = action_row_id
+    if candidate is not None:
+        row["branchable"] = _candidate_has_output(candidate)
+
+
+def _candidate_has_output(candidate: Any) -> bool:
+    repaired_input = candidate.repaired_input if isinstance(getattr(candidate, "repaired_input", None), dict) else {}
+    path = str(repaired_input.get("path") or "")
+    return bool(path and Path(path).is_file())
+
+
+def _branch_entries(entries: list[dict[str, Any]], selected_id: str, rollout_mode: str, args: argparse.Namespace) -> list[dict[str, Any]]:
+    if not entries:
+        return []
+    if rollout_mode == "greedy":
+        selected = [entry for entry in entries if _candidate_id(entry["candidate"]) == selected_id]
+        return selected[:1]
+    by_id: dict[str, dict[str, Any]] = {}
+
+    def add(entry: dict[str, Any]) -> None:
+        candidate = entry["candidate"]
+        if not _candidate_has_output(candidate):
+            return
+        by_id.setdefault(_candidate_id(candidate), entry)
+
+    for entry in entries:
+        if _candidate_id(entry["candidate"]) == selected_id:
+            add(entry)
+            break
+    for entry in sorted(entries, key=lambda item: float(item.get("priority", 0.0) or 0.0), reverse=True):
+        add(entry)
+        if len(by_id) >= max(1, int(getattr(args, "branch_top_k", 2) or 2)):
+            break
+    if rollout_mode == "counterfactual":
+        for entry in sorted(entries, key=lambda item: int((item.get("label_info") or {}).get("label", 0) or 0), reverse=True):
+            add(entry)
+            if len(by_id) >= max(1, int(getattr(args, "branch_top_k", 2) or 2)) + max(0, int(getattr(args, "counterfactual_extra", 2) or 2)):
+                break
+        risky = [
+            entry for entry in entries
+            if int((entry.get("label_info") or {}).get("label", 0) or 0) < 0
+            or _as_float((candidate_feature_payload(entry["candidate"]).get("risk_penalty"))) > 0.0
+        ]
+        for entry in sorted(risky, key=lambda item: _as_float(candidate_feature_payload(item["candidate"]).get("risk_penalty")), reverse=True):
+            add(entry)
+            if len(by_id) >= max(1, int(getattr(args, "branch_top_k", 2) or 2)) + max(0, int(getattr(args, "counterfactual_extra", 2) or 2)):
+                break
+    limit = max(1, int(getattr(args, "branch_top_k", 2) or 2))
+    if rollout_mode == "counterfactual":
+        limit += max(0, int(getattr(args, "counterfactual_extra", 2) or 2))
+    return list(by_id.values())[:limit]
+
+
+def _trim_frontier(frontier: list[dict[str, Any]], args: argparse.Namespace) -> list[dict[str, Any]]:
+    if not frontier:
+        return []
+    beam_size = 1 if str(getattr(args, "rollout_mode", "greedy") or "greedy") == "greedy" else max(1, int(getattr(args, "beam_size", 2) or 2))
+    return sorted(frontier, key=lambda state: float(state.get("path_score", 0.0) or 0.0), reverse=True)[:beam_size]
+
+
+def _rollout_terminal_row(
+    record: dict[str, Any],
+    state: dict[str, Any],
+    status: str,
+    message: str,
+    terminal_state: dict[str, Any] | None,
+    *,
+    parent_action_row_id: str | None = None,
+    parent_candidate_id: str | None = None,
+    terminal_label: int | None = None,
+) -> dict[str, Any]:
+    source_derivation = record.get("source_derivation") if isinstance(record.get("source_derivation"), dict) else {}
+    state_round = int(state.get("round", 0) or 0)
+    terminal_state = terminal_state if isinstance(terminal_state, dict) else {}
+    label = int(terminal_label if terminal_label is not None else _terminal_label_from_state(status, terminal_state))
+    row = {
+        "schema_version": 1,
+        "source": "repair_plan_corpus",
+        "row_type": "terminal",
+        "query_id": f"{state.get('episode_id')}:terminal:{state.get('beam_id', 0)}:{status}",
+        "sample_id": record.get("sample_id"),
+        "source_archive_id": record.get("source_archive_id"),
+        "material_format": record.get("material_format"),
+        "material_sample_id": record.get("material_sample_id"),
+        "source_archive_name": record.get("source_archive_name"),
+        "source_derivation": _compact_source_derivation(source_derivation),
+        "damaged_file_name": record.get("damaged_file_name"),
+        "damaged_path": record.get("damaged_path"),
+        "damage_json_path": record.get("damage_json_path"),
+        "round": state_round,
+        "candidate_id": None,
+        "module": "",
+        "selected_by_current_system": False,
+        "label": label,
+        "label_status": status,
+        "episode_id": state.get("episode_id"),
+        "state_id": state.get("state_id"),
+        "terminal_state_id": state.get("state_id"),
+        "parent_query_id": state.get("parent_query_id"),
+        "parent_candidate_id": parent_candidate_id or state.get("parent_candidate_id"),
+        "parent_action_row_id": parent_action_row_id or state.get("parent_action_row_id"),
+        "beam_id": int(state.get("beam_id", 0) or 0),
+        "path_actions": list(state.get("path_actions") or []),
+        "path_modules": list(state.get("path_modules") or []),
+        "path_score": float(state.get("path_score", 0.0) or 0.0),
+        "rollout_mode": state.get("rollout_mode") or "greedy",
+        "terminal_status": status,
+        "terminal_label": label,
+        "terminal_state": terminal_state,
+        "stable_features": {
+            "state": {
+                "format": record.get("format"),
+                "damage_profile": record.get("damage_profile"),
+                "difficulty_tags": list(record.get("difficulty_tags") or []),
+                "source_derivation": _compact_source_derivation(source_derivation),
+                "terminal_status": status,
+                "terminal_state": terminal_state,
+            },
+            "candidate": {},
+        },
+        "teacher_features": {},
+        "debug_features": {"message": message},
+        "label_details": {
+            "immediate_label": label,
+            "future_best_label": label,
+            "terminal_success": label == 3,
+            "steps_to_best": 0,
+            "subtree_best_label": label,
+            "subtree_terminal_success": label == 3,
+            "subtree_best_terminal_state_id": state.get("state_id"),
+            "selected_path_terminal_label": label,
+            "selected_path_terminal_status": status,
+            "steps_to_terminal": 0,
+        },
+        "training_targets": {
+            "immediate_gain": label,
+            "future_gain": label,
+            "discounted_gain": float(label),
+            "blended_gain": float(label),
+            "strategy_gain": _strategy_gain(label, label, 0, label == 3, status),
+            "risk_class": _risk_class(label, label, status),
+            "hard_negative_weight": _hard_negative_weight(label, label, status),
+        },
+    }
+    return row
+
+
+def _terminal_label_from_state(status: str, terminal_state: dict[str, Any]) -> int:
+    if status == "complete":
+        return 3
+    verification_status = str(terminal_state.get("verification_status") or "")
+    if verification_status == "complete" or _as_float(terminal_state.get("completeness")) >= 0.999:
+        return 3
+    if verification_status == "partial" or int(terminal_state.get("matched_entry_count", 0) or 0) > 0:
+        return 1
+    if verification_status == "state_progress" or bool(terminal_state.get("directory_detected")) or _as_float(terminal_state.get("completeness")) >= 0.15:
+        return 2
+    if verification_status == "hard_negative":
+        return -1
+    return 0
+
+
+def _strategy_gain(immediate_label: int, terminal_label: int, steps_to_terminal: int, terminal_success: bool, terminal_status: str | None) -> float:
+    terminal_label = int(terminal_label or 0)
+    immediate_label = int(immediate_label or 0)
+    if immediate_label < 0:
+        return -1.0
+    if terminal_label < 0:
+        return -1.0
+    steps = max(0, int(steps_to_terminal or 0))
+    terminal_component = float(terminal_label) * (0.9 ** steps)
+    immediate_component = 0.1 * float(immediate_label)
+    success_bonus = 0.5 if terminal_success else 0.0
+    status_penalty = 0.0
+    if str(terminal_status or "") in {"dead_end", "no_candidates", "budget_exhausted"}:
+        status_penalty = 0.25
+    return max(-1.0, terminal_component + immediate_component + success_bonus - status_penalty)
+
+
+def _backfill_future_labels(rows: list[dict[str, Any]], discount: float) -> None:
+    rows_by_id = {str(row.get("action_row_id")): row for row in rows if row.get("action_row_id")}
+    children: dict[str, list[dict[str, Any]]] = {}
+    terminals: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        parent_id = str(row.get("parent_action_row_id") or "")
+        if parent_id:
+            if row.get("row_type") == "terminal":
+                terminals.setdefault(parent_id, []).append(row)
+            else:
+                children.setdefault(parent_id, []).append(row)
+    memo: dict[str, dict[str, Any]] = {}
+
+    def best_from(row_id: str) -> dict[str, Any]:
+        if row_id in memo:
+            return memo[row_id]
+        row = rows_by_id.get(row_id, {})
+        own_label = int(row.get("label", 0) or 0)
+        result = {
+            "subtree_best_label": own_label,
+            "subtree_terminal_success": own_label == 3,
+            "subtree_best_terminal_state_id": row.get("state_id"),
+            "steps_to_best": 0,
+            "selected_path_terminal_label": own_label,
+            "selected_path_terminal_status": str(row.get("label_status") or ""),
+            "selected_path_terminal_state_id": row.get("state_id"),
+            "steps_to_terminal": 0,
+        }
+        for terminal in terminals.get(row_id, []):
+            terminal_label = int(terminal.get("label", 0) or 0)
+            terminal_status = str(terminal.get("label_status") or "")
+            terminal_state_id = terminal.get("terminal_state_id") or terminal.get("state_id")
+            if terminal_label > int(result["subtree_best_label"]):
+                result["subtree_best_label"] = terminal_label
+                result["subtree_best_terminal_state_id"] = terminal_state_id
+                result["steps_to_best"] = 1
+            result["subtree_terminal_success"] = bool(result["subtree_terminal_success"]) or terminal_label == 3
+            if terminal_label > int(result["selected_path_terminal_label"]):
+                result["selected_path_terminal_label"] = terminal_label
+                result["selected_path_terminal_status"] = terminal_status
+                result["selected_path_terminal_state_id"] = terminal_state_id
+                result["steps_to_terminal"] = 1
+        for child in children.get(row_id, []):
+            child_id = str(child.get("action_row_id") or "")
+            child_result = best_from(child_id) if child_id else {
+                "subtree_best_label": int(child.get("label", 0) or 0),
+                "subtree_terminal_success": int(child.get("label", 0) or 0) == 3,
+                "subtree_best_terminal_state_id": child.get("state_id"),
+                "steps_to_best": 0,
+                "selected_path_terminal_label": int(child.get("label", 0) or 0),
+                "selected_path_terminal_status": str(child.get("label_status") or ""),
+                "selected_path_terminal_state_id": child.get("state_id"),
+                "steps_to_terminal": 0,
+            }
+            candidate_steps = int(child_result.get("steps_to_best", 0) or 0) + 1
+            child_best = int(child_result.get("subtree_best_label", 0) or 0)
+            result["subtree_terminal_success"] = bool(result["subtree_terminal_success"]) or bool(child_result.get("subtree_terminal_success"))
+            if child_best > int(result["subtree_best_label"]) or (child_best == int(result["subtree_best_label"]) and candidate_steps < int(result["steps_to_best"])):
+                result["subtree_best_label"] = child_best
+                result["steps_to_best"] = candidate_steps
+                result["subtree_best_terminal_state_id"] = child_result.get("subtree_best_terminal_state_id")
+            selected_label = int(child_result.get("selected_path_terminal_label", 0) or 0)
+            if selected_label > int(result["selected_path_terminal_label"]):
+                result["selected_path_terminal_label"] = selected_label
+                result["selected_path_terminal_status"] = child_result.get("selected_path_terminal_status")
+                result["selected_path_terminal_state_id"] = child_result.get("selected_path_terminal_state_id")
+                result["steps_to_terminal"] = int(child_result.get("steps_to_terminal", 0) or 0) + 1
+        memo[row_id] = result
+        return memo[row_id]
+
+    for row in rows:
+        if row.get("row_type") == "terminal":
+            continue
+        row_id = str(row.get("action_row_id") or "")
+        immediate_label = int(row.get("label", 0) or 0)
+        future = best_from(row_id) if row_id else {
+            "subtree_best_label": immediate_label,
+            "subtree_terminal_success": immediate_label == 3,
+            "subtree_best_terminal_state_id": row.get("state_id"),
+            "steps_to_best": 0,
+            "selected_path_terminal_label": immediate_label,
+            "selected_path_terminal_status": str(row.get("label_status") or ""),
+            "selected_path_terminal_state_id": row.get("state_id"),
+            "steps_to_terminal": 0,
+        }
+        future_label = int(future.get("subtree_best_label", immediate_label) or 0)
+        steps_to_best = int(future.get("steps_to_best", 0) or 0)
+        terminal_success = bool(future.get("subtree_terminal_success"))
+        discounted = float(future_label) * (float(discount) ** int(steps_to_best))
+        blended = 0.2 * float(immediate_label) + 0.8 * discounted
+        selected_terminal_label = int(future.get("selected_path_terminal_label", immediate_label) or 0)
+        selected_terminal_status = str(future.get("selected_path_terminal_status") or "")
+        steps_to_terminal = int(future.get("steps_to_terminal", 0) or 0)
+        strategy_gain = _strategy_gain(immediate_label, selected_terminal_label, steps_to_terminal, bool(terminal_success), selected_terminal_status)
+        details = row.get("label_details") if isinstance(row.get("label_details"), dict) else {}
+        details["immediate_label"] = immediate_label
+        details["future_best_label"] = future_label
+        details["terminal_success"] = bool(terminal_success)
+        details["steps_to_best"] = int(steps_to_best)
+        details["discounted_future_gain"] = discounted
+        details["subtree_best_label"] = future_label
+        details["subtree_terminal_success"] = bool(terminal_success)
+        details["subtree_best_terminal_state_id"] = future.get("subtree_best_terminal_state_id")
+        details["selected_path_terminal_label"] = selected_terminal_label
+        details["selected_path_terminal_status"] = selected_terminal_status
+        details["selected_path_terminal_state_id"] = future.get("selected_path_terminal_state_id")
+        details["steps_to_terminal"] = steps_to_terminal
+        details["strategy_gain"] = strategy_gain
+        details["risk_class"] = _risk_class(immediate_label, selected_terminal_label, selected_terminal_status)
+        details["hard_negative_weight"] = _hard_negative_weight(immediate_label, selected_terminal_label, selected_terminal_status)
+        row["label_details"] = details
+        row["strategy_outcome"] = {
+            "terminal_label": selected_terminal_label,
+            "terminal_status": selected_terminal_status,
+            "terminal_state_id": future.get("selected_path_terminal_state_id"),
+            "subtree_best_label": future_label,
+            "subtree_terminal_success": bool(terminal_success),
+            "steps_to_terminal": steps_to_terminal,
+            "strategy_gain": strategy_gain,
+            "risk_class": details["risk_class"],
+            "hard_negative_weight": details["hard_negative_weight"],
+        }
+        row["training_targets"] = {
+            "immediate_gain": immediate_label,
+            "future_gain": future_label,
+            "discounted_gain": discounted,
+            "blended_gain": blended,
+            "strategy_gain": strategy_gain,
+            "risk_class": details["risk_class"],
+            "hard_negative_weight": details["hard_negative_weight"],
+        }
+
+
+def _risk_class(immediate_label: int, terminal_label: int, terminal_status: str | None) -> str:
+    if int(immediate_label or 0) < 0:
+        return "hard_negative_immediate"
+    if int(terminal_label or 0) < 0 or str(terminal_status or "") == "hard_negative":
+        return "hard_negative_terminal"
+    if str(terminal_status or "") in {"dead_end", "no_candidates", "budget_exhausted"}:
+        return "terminal_failure"
+    if int(terminal_label or 0) > 0:
+        return "terminal_useful"
+    return "neutral"
+
+
+def _hard_negative_weight(immediate_label: int, terminal_label: int, terminal_status: str | None) -> float:
+    risk = _risk_class(immediate_label, terminal_label, terminal_status)
+    if risk == "hard_negative_immediate":
+        return 2.0
+    if risk == "hard_negative_terminal":
+        return 1.5
+    if risk == "terminal_failure":
+        return 0.5
+    return 0.0
 
 
 def _materialize_for_collection(candidates: list[Any], selector: CandidateSelector, args: argparse.Namespace, record: dict[str, Any]) -> tuple[list[Any], dict[str, Any]]:
@@ -569,6 +1092,7 @@ def _state_features(record: dict[str, Any], batch, round_index: int, previous_ac
     return {
         "format": record.get("format"),
         "damage_profile": record.get("damage_profile"),
+        "difficulty_tags": list(record.get("difficulty_tags") or []),
         "damage_flags": list(record.get("damage_flags") or []),
         "source_derivation": _compact_source_derivation(source_derivation),
         "corruption_zones": sorted({item.get("zone") for item in record.get("corruption_plan") or [] if item.get("zone")}),
@@ -701,12 +1225,92 @@ def _label_candidate(
     verified["before_state"] = before_state or {}
     verified["after_state"] = after_state or {}
     verified["delta_features"] = delta_features or {}
-    if int(verified.get("label", 0) or 0) <= 0 and int(verified.get("label", 0) or 0) != -1 and _has_state_progress(delta_features or {}, previous_completeness):
+    if _is_zip_hard_negative(record, candidate, verified):
+        verified["label"] = -1
+        verified["status"] = "hard_negative"
+        verified["hard_negative_reasons"] = _zip_hard_negative_reasons(record, candidate, verified)
+        verified["completeness"] = 0.0
+    elif int(verified.get("label", 0) or 0) <= 0 and int(verified.get("label", 0) or 0) != -1 and _has_state_progress(delta_features or {}, previous_completeness):
         verified["label"] = 2
         verified["status"] = "state_progress"
         verified["progress_reasons"] = _progress_reasons(delta_features or {}, previous_completeness)
         verified["completeness"] = max(completeness, float((after_state or {}).get("completeness", 0.0) or 0.0))
+    elif _is_zip_directory_progress(record, verified, before_state or {}, after_state or {}):
+        verified["label"] = 2
+        verified["status"] = "state_progress"
+        verified["progress_reasons"] = ["zip_directory_visible_without_hash_match"]
+        verified["completeness"] = max(completeness, float((after_state or {}).get("completeness", 0.0) or 0.0))
     return verified
+
+
+def _is_zip_hard_negative(record: dict[str, Any], candidate, verified: dict[str, Any]) -> bool:
+    if _normalize_format(str(record.get("material_format") or record.get("format") or "")) != "zip":
+        return False
+    if int(verified.get("label", 0) or 0) > 0:
+        return False
+    if not _record_has_any_damage_flag(record, {"hard_negative_target", "payload_hash_mismatch"}):
+        return False
+    repaired_input = candidate.repaired_input if isinstance(candidate.repaired_input, dict) else {}
+    if not Path(str(repaired_input.get("path") or "")).is_file():
+        return False
+    candidate_status = str(getattr(candidate, "status", "") or "")
+    if candidate_status not in {"repaired", "partial"}:
+        return False
+    profile = str(record.get("damage_profile") or "")
+    if profile in {"zip_all_entry_payload_damage_with_directory", "zip_wrong_offset_content_overlap"}:
+        return True
+    if int(verified.get("wrong_files", 0) or 0) > 0:
+        return True
+    return False
+
+
+def _zip_hard_negative_reasons(record: dict[str, Any], candidate, verified: dict[str, Any]) -> list[str]:
+    reasons = ["zip_payload_hash_mismatch_profile"]
+    if int(verified.get("wrong_files", 0) or 0) > 0:
+        reasons.append("wrong_entry_hash")
+    if str(getattr(candidate, "status", "") or "") in {"repaired", "partial"}:
+        reasons.append("candidate_claimed_structural_success")
+    profile = str(record.get("damage_profile") or "")
+    if profile == "zip_wrong_offset_content_overlap":
+        reasons.append("wrong_offset_overlap_profile")
+    return reasons
+
+
+def _is_zip_directory_progress(record: dict[str, Any], verified: dict[str, Any], before_state: dict[str, Any], after_state: dict[str, Any]) -> bool:
+    if _normalize_format(str(record.get("material_format") or record.get("format") or "")) != "zip":
+        return False
+    if int(verified.get("label", 0) or 0) != 0:
+        return False
+    if str(verified.get("status") or "") not in {"directory_only", "no_progress"}:
+        return False
+    candidate_progress_status = str((after_state or {}).get("verification_status") or verified.get("status") or "")
+    profile = str(record.get("damage_profile") or "")
+    if profile == "zip_directory_only_bad_payload" and candidate_progress_status in {"no_progress", "directory_only"}:
+        return True
+    if int(verified.get("entry_count", 0) or 0) <= 0 and int((after_state or {}).get("entry_count", 0) or 0) <= 0:
+        return False
+    if int(verified.get("matched_files", 0) or 0) > 0:
+        return False
+    profile_capability = str(record.get("profile_capability") or "")
+    if profile.startswith("zip_") and ("directory" in profile or "eocd" in profile or profile_capability == "structural_partial"):
+        return True
+    return bool(after_state.get("directory_detected")) and not bool(before_state.get("directory_detected"))
+
+
+def _record_has_any_damage_flag(record: dict[str, Any], flags: set[str]) -> bool:
+    values: set[str] = set()
+    for key in ("damage_flags", "expected_damage_flags"):
+        raw = record.get(key)
+        if isinstance(raw, list):
+            values.update(str(item) for item in raw)
+    state = record.get("stable_features") if isinstance(record.get("stable_features"), dict) else {}
+    if isinstance(state, dict):
+        nested = state.get("state") if isinstance(state.get("state"), dict) else {}
+        raw = nested.get("damage_flags")
+        if isinstance(raw, list):
+            values.update(str(item) for item in raw)
+    return bool(values.intersection(flags))
+
 
 
 def _state_summary(
@@ -961,7 +1565,7 @@ def _terminal_row(record: dict[str, Any], status: str, message: str) -> dict[str
         "selected_by_current_system": False,
         "label": 0,
         "label_status": status,
-        "stable_features": {"state": {"format": record.get("format"), "damage_profile": record.get("damage_profile"), "source_derivation": _compact_source_derivation(source_derivation)}, "candidate": {}},
+        "stable_features": {"state": {"format": record.get("format"), "damage_profile": record.get("damage_profile"), "difficulty_tags": list(record.get("difficulty_tags") or []), "source_derivation": _compact_source_derivation(source_derivation)}, "candidate": {}},
         "teacher_features": {},
         "debug_features": {"message": message},
     }

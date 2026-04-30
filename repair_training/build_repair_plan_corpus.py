@@ -27,7 +27,21 @@ DEFAULT_OUTPUT_DIR = Path(".sunpack") / "corpus"
 DEFAULT_MANIFEST = DEFAULT_OUTPUT_DIR / "repair_plan_manifest.jsonl"
 PROFILE_LAYERS = (
     ("structural", 0.30, ("structural_boundary", "structural_header_tail", "structural_footer_tail")),
-    ("structural_directory", 0.30, ("structural_directory", "structural_metadata", "structural_index")),
+    ("structural_directory", 0.30, (
+        "zip_eocd_cd_half_damaged",
+        "zip_directory_only_bad_payload",
+        "zip_cd_offset_near_valid_wrong_entry",
+        "zip_eocd_counts_wrong_but_cd_readable",
+        "zip_local_header_crc_wrong_cd_correct",
+        "zip_cd_crc_wrong_local_payload_correct",
+        "zip_comment_overlap_eocd_shifted",
+        "zip_duplicate_entries_conflicting_crc",
+        "zip_data_descriptor_conflict",
+        "zip_partial_cd_rebuild_then_payload_mismatch",
+        "structural_directory",
+        "structural_metadata",
+        "structural_index",
+    )),
     ("partial_recoverable", 0.25, (
         "zip_single_entry_payload_damage",
         "zip_drop_central_directory_keep_local_headers",
@@ -36,13 +50,39 @@ PROFILE_LAYERS = (
         "seven_zip_non_solid_one_file_damage",
         "rar_non_solid_one_file_damage",
     )),
-    ("hard_negative", 0.15, ("hard_negative_payload", "hard_negative_block_tail", "hard_negative_multi")),
+    ("hard_negative", 0.15, (
+        "zip_all_entry_payload_damage_with_directory",
+        "zip_wrong_offset_content_overlap",
+        "hard_negative_payload",
+        "hard_negative_block_tail",
+        "hard_negative_multi",
+    )),
+    ("two_step_repair", 0.20, (
+        "zip_two_step_boundary_then_cd_rebuild",
+        "zip_two_step_comment_fix_then_eocd_repair",
+        "zip_two_step_local_header_then_cd_offset",
+        "zip_two_step_drop_cd_with_eocd_noise",
+    )),
+    ("deceptive_hard_negative", 0.30, (
+        "zip_rebuild_directory_keeps_bad_payload",
+        "zip_quarantine_keeps_corrupted_entry",
+        "zip_wrong_local_offset_extracts_valid_other_entry",
+        "zip_crc_repair_masks_payload_mismatch",
+        "zip_partial_recovery_wrong_hash_same_name",
+    )),
 )
 DEFAULT_LAYER_BUDGET = (
     ("structural", 2),
     ("structural_directory", 2),
     ("partial_recoverable", 3),
     ("hard_negative", 3),
+)
+ZIP_LAYER_BUDGET = (
+    ("structural", 1),
+    ("structural_directory", 2),
+    ("partial_recoverable", 2),
+    ("two_step_repair", 2),
+    ("deceptive_hard_negative", 3),
 )
 
 
@@ -318,8 +358,9 @@ def _resolve_seed(raw: str) -> int:
 def _choose_damage_profile(rng: random.Random, fmt: str = "") -> tuple[str, float, str]:
     roll = rng.random()
     cumulative = 0.0
+    total_weight = sum(max(0.0, float(weight)) for _, weight, _ in PROFILE_LAYERS) or 1.0
     for layer, weight, profiles in PROFILE_LAYERS:
-        cumulative += float(weight)
+        cumulative += max(0.0, float(weight)) / total_weight
         if roll <= cumulative:
             return _compatible_damage_profile(rng, layer, float(weight), profiles, fmt)
     layer, weight, profiles = PROFILE_LAYERS[-1]
@@ -331,6 +372,11 @@ def _compatible_damage_profile(rng: random.Random, layer: str, weight: float, pr
     if layer == "partial_recoverable" and not _supports_entry_partial(normalized):
         structural = next(item for item in PROFILE_LAYERS if item[0] == "structural")
         return structural[0], float(structural[1]), str(rng.choice(structural[2]))
+    if layer in {"two_step_repair", "deceptive_hard_negative"} and normalized != "zip":
+        fallback_name = "structural_directory" if layer == "two_step_repair" else "hard_negative"
+        fallback = next(item for item in PROFILE_LAYERS if item[0] == fallback_name)
+        compatible_fallback = _profiles_for_format(fallback[0], fallback[2], normalized)
+        return fallback[0], float(fallback[1]), str(rng.choice(compatible_fallback or fallback[2]))
     compatible = _profiles_for_format(layer, profiles, normalized)
     return layer, weight, str(rng.choice(compatible or profiles))
 
@@ -339,7 +385,7 @@ def _damage_layer_plan(rng: random.Random, fmt: str, per_sample: int) -> list[tu
     if per_sample <= 0:
         return []
     requested_layers: list[str] = []
-    for layer, count in DEFAULT_LAYER_BUDGET:
+    for layer, count in _layer_budget_for_format(fmt):
         requested_layers.extend([layer] * int(count))
     while len(requested_layers) < per_sample:
         requested_layers.append(_choose_damage_profile(rng, fmt)[0])
@@ -357,6 +403,11 @@ def _damage_layer_plan(rng: random.Random, fmt: str, per_sample: int) -> list[tu
             skip_reason = "entry_partial_unavailable_for_format"
             layer_item = next(item for item in PROFILE_LAYERS if item[0] == actual_layer)
             _, weight, profiles = layer_item
+        if layer in {"two_step_repair", "deceptive_hard_negative"} and _normalized_material_format(fmt) != "zip":
+            actual_layer = "structural_directory" if layer == "two_step_repair" else "hard_negative"
+            skip_reason = f"{layer}_zip_only"
+            layer_item = next(item for item in PROFILE_LAYERS if item[0] == actual_layer)
+            _, weight, profiles = layer_item
         compatible = _profiles_for_format(actual_layer, profiles, fmt)
         choices = compatible or profiles
         seen = int(layer_seen.get(actual_layer, 0) or 0)
@@ -364,6 +415,12 @@ def _damage_layer_plan(rng: random.Random, fmt: str, per_sample: int) -> list[tu
         profile = str(choices[seen % len(choices)])
         output.append((requested_layer, actual_layer, float(weight), profile, skip_reason))
     return output
+
+
+def _layer_budget_for_format(fmt: str) -> tuple[tuple[str, int], ...]:
+    if _normalized_material_format(fmt) == "zip":
+        return ZIP_LAYER_BUDGET
+    return DEFAULT_LAYER_BUDGET
 
 
 def _normalized_material_format(fmt: str) -> str:
@@ -377,10 +434,11 @@ def _supports_entry_partial(fmt: str) -> bool:
 
 def _profiles_for_format(layer: str, profiles: tuple[str, ...], fmt: str) -> tuple[str, ...]:
     normalized = _normalized_material_format(fmt)
-    if layer != "partial_recoverable":
-        return profiles
     if normalized == "zip":
-        return tuple(item for item in profiles if item.startswith("zip_"))
+        zip_profiles = tuple(item for item in profiles if item.startswith("zip_"))
+        return zip_profiles or profiles
+    if layer != "partial_recoverable":
+        return tuple(item for item in profiles if not item.startswith("zip_")) or profiles
     if normalized == "tar":
         return tuple(item for item in profiles if item.startswith("tar_"))
     if normalized == "7z":

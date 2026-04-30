@@ -6,6 +6,10 @@ param(
     [string]$FeatureView = "stable_only",
     [ValidateSet("all", "zip", "tar", "tar_gz", "tar_bz2", "tar_xz", "gzip", "bzip2", "xz", "zstd", "7z", "rar")]
     [string]$FormatScope = "all",
+    [ValidateSet("immediate", "future", "discounted", "blended", "strategy")]
+    [string]$LabelTarget = "strategy",
+    [ValidateSet("query", "episode", "source_sample")]
+    [string]$SplitBy = "query",
     [switch]$AllFeatureViews,
     [string]$OutputDir = "repair_training\models\baseline_ltr",
     [int]$Seed = 2026,
@@ -65,6 +69,8 @@ try {
             "repair_training\train_ltr.py",
             "--feature-view", $view,
             "--format-scope", $FormatScope,
+            "--label-target", $LabelTarget,
+            "--split-by", $SplitBy,
             "--output-dir", $viewOutput,
             "--seed", "$Seed"
         )

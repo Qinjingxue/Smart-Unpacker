@@ -112,6 +112,7 @@ class CorruptionCase:
     password: str | None = None
     oracle_strength: str = ""
     profile_capability: str = ""
+    difficulty_tags: list[str] = field(default_factory=list)
     partial_target_entry: str = ""
     partial_expected_recoverable_entries: list[str] = field(default_factory=list)
     partial_expected_damaged_entries: list[str] = field(default_factory=list)
@@ -156,6 +157,7 @@ class CorruptionCase:
                 "password_present": self.password is not None,
                 "oracle_strength": self.oracle_strength,
                 "profile_capability": self.profile_capability,
+                "difficulty_tags": list(self.difficulty_tags),
             },
             "mutations": self.mutation_summary(),
             "patch_plan": self.patch_plan.to_dict(),
@@ -197,6 +199,7 @@ class CorruptionCase:
             "variant_index": int(variant_index),
             "damage_profile": damage_profile,
             "profile_capability": self.profile_capability,
+            "difficulty_tags": list(self.difficulty_tags),
             "oracle_strength": self.oracle_strength,
             "partial_target_entry": self.partial_target_entry,
             "partial_expected_recoverable_entries": list(self.partial_expected_recoverable_entries),
@@ -998,6 +1001,7 @@ def build_corpus_corruption_case(
         expected_bytes=clean if oracle.get("bytes_exact") else b"",
         oracle_strength=str(oracle.get("oracle_strength") or "bytes_exact"),
         profile_capability=str(profile_meta.get("profile_capability") or "structural_only"),
+        difficulty_tags=list(profile_meta.get("difficulty_tags") or []),
         partial_target_entry=str(profile_meta.get("partial_target_entry") or ""),
         partial_expected_recoverable_entries=list(profile_meta.get("partial_expected_recoverable_entries") or []),
         partial_expected_damaged_entries=list(profile_meta.get("partial_expected_damaged_entries") or []),
@@ -1073,10 +1077,78 @@ def _zip_corpus_mutations(data: bytes, randomizer: random.Random, profile: str) 
     layer = _damage_layer(profile)
     entry_infos = _zip_entry_infos(data)
     eocd = data.rfind(b"PK\x05\x06")
+    cd_offset = _safe_zip_cd_offset(data)
+    cd_headers = _zip_central_directory_header_offsets(data, cd_offset, eocd)
     if eocd >= 0 and eocd + 22 <= len(data):
         if profile == "zip_drop_central_directory_keep_local_headers":
             mutations.append(_truncate("corpus_zip_drop_central_directory_keep_local_headers", eocd, "zip.central_directory", "central directory is missing but local headers remain"))
-        elif layer in {"structural", "structural_directory", "hard_negative"}:
+        elif profile == "zip_eocd_cd_half_damaged":
+            mutations.extend(_zip_eocd_directory_conflict_mutations(eocd))
+            if cd_headers:
+                mutations.append(_replace_bytes("corpus_zip_cd_first_crc_zero", cd_headers[0] + 16, b"\0\0\0\0", "zip.central_directory.crc", "central directory entry CRC is untrusted"))
+        elif profile == "zip_cd_offset_near_valid_wrong_entry":
+            mutations.extend(_zip_eocd_count_mutations(eocd, count_delta=1))
+            mutations.extend(_zip_cd_offset_near_valid_mutations(data, cd_headers, entry_infos))
+        elif profile == "zip_eocd_counts_wrong_but_cd_readable":
+            mutations.extend(_zip_eocd_count_mutations(eocd, count_delta=2))
+            mutations.append(_append("corpus_zip_counts_wrong_tail_marker", _random_junk(randomizer, "ZIPCOUNT", 8, 24), "archive.tail", "counts are wrong while central directory bytes remain readable"))
+        elif profile == "zip_local_header_crc_wrong_cd_correct":
+            mutations.extend(_zip_local_crc_mutations(entry_infos, randomizer))
+            mutations.append(_replace_bytes("corpus_zip_eocd_comment_len_zero", eocd + 20, struct.pack("<H", 0), "zip.eocd.comment_length", "EOCD boundary needs validation after local header repair"))
+        elif profile == "zip_cd_crc_wrong_local_payload_correct":
+            mutations.extend(_zip_cd_crc_mutations(cd_headers, randomizer))
+            mutations.extend(_zip_eocd_count_mutations(eocd, count_delta=1))
+        elif profile == "zip_comment_overlap_eocd_shifted":
+            comment = _random_junk(randomizer, "ZIPCOMMENT", 18, 40)
+            mutations.append(_replace_bytes("corpus_zip_eocd_comment_len_overlap", eocd + 20, struct.pack("<H", min(65535, len(comment) + 16)), "zip.eocd.comment_length", "comment length overlaps the archive tail"))
+            mutations.append(_append("corpus_zip_shifted_comment_bytes", comment, "zip.eocd.comment", "comment bytes shift EOCD boundary probing"))
+        elif profile == "zip_duplicate_entries_conflicting_crc":
+            mutations.extend(_zip_duplicate_entry_conflict_mutations(data, cd_headers, entry_infos, randomizer))
+        elif profile == "zip_data_descriptor_conflict":
+            mutations.extend(_zip_data_descriptor_conflict_mutations(data, cd_headers, entry_infos, randomizer))
+        elif profile == "zip_partial_cd_rebuild_then_payload_mismatch":
+            mutations.append(_truncate("corpus_zip_partial_cd_rebuild_drop_directory", eocd, "zip.central_directory", "directory must be rebuilt from local headers"))
+            mutations.extend(_zip_damage_payloads(data, entry_infos, randomizer, all_entries=False, name="corpus_zip_partial_cd_rebuild_payload_mismatch", expected_effect="rebuilt directory may expose a bad payload"))
+        elif profile == "zip_directory_only_bad_payload":
+            mutations.extend(_zip_eocd_directory_conflict_mutations(eocd))
+            mutations.extend(_zip_damage_payloads(data, entry_infos, randomizer, all_entries=True, name="corpus_zip_directory_only_payload_unreadable", expected_effect="payload bytes are damaged while directory recovery remains possible"))
+        elif profile == "zip_wrong_offset_content_overlap":
+            mutations.extend(_zip_eocd_directory_conflict_mutations(eocd))
+            if cd_headers and len(entry_infos) >= 2:
+                first = entry_infos[0]
+                second = entry_infos[1]
+                mutations.append(_replace_bytes("corpus_zip_cd_local_header_offset_points_to_wrong_entry", cd_headers[0] + 42, struct.pack("<I", int(second["header_offset"])), "zip.central_directory.local_header_offset", f"central directory for {first['name']} points to {second['name']}"))
+            mutations.extend(_zip_damage_payloads(data, entry_infos, randomizer, all_entries=True, name="corpus_zip_wrong_offset_payload_damage", expected_effect="all recovered overlapping entries should fail hash verification"))
+        elif profile == "zip_two_step_boundary_then_cd_rebuild":
+            mutations.append(_append("corpus_zip_two_step_boundary_junk", _random_junk(randomizer, "ZIP2BOUND", 16, 64), "archive.tail", "boundary must be trusted before rebuilding the central directory"))
+            mutations.append(_truncate("corpus_zip_two_step_drop_cd", eocd, "zip.central_directory", "central directory rebuild is needed after boundary trim"))
+        elif profile == "zip_two_step_comment_fix_then_eocd_repair":
+            comment = _random_junk(randomizer, "ZIP2COMMENT", 24, 60)
+            mutations.append(_replace_bytes("corpus_zip_two_step_bad_comment_len", eocd + 20, struct.pack("<H", min(65535, len(comment) + 32)), "zip.eocd.comment_length", "comment length must be normalized first"))
+            mutations.append(_append("corpus_zip_two_step_comment_noise", comment, "zip.eocd.comment", "comment noise hides the real EOCD boundary"))
+            mutations.append(_replace_bytes("corpus_zip_two_step_bad_counts", eocd + 8, struct.pack("<HH", 0, 99), "zip.eocd.entry_counts", "EOCD counts need a second repair"))
+        elif profile == "zip_two_step_local_header_then_cd_offset":
+            mutations.extend(_zip_local_crc_mutations(entry_infos, randomizer))
+            mutations.extend(_zip_cd_offset_near_valid_mutations(data, cd_headers, entry_infos))
+        elif profile == "zip_two_step_drop_cd_with_eocd_noise":
+            mutations.append(_append("corpus_zip_two_step_eocd_noise", b"PK\x05\x06" + _random_junk(randomizer, "ZIP2NOISE", 22, 48), "archive.tail", "false EOCD marker should be ignored"))
+            mutations.append(_truncate("corpus_zip_two_step_drop_directory_with_noise", eocd, "zip.central_directory", "local headers remain but directory and noisy boundary both need repair"))
+        elif profile == "zip_rebuild_directory_keeps_bad_payload":
+            mutations.append(_truncate("corpus_zip_rebuild_directory_keeps_bad_payload_drop_cd", eocd, "zip.central_directory", "directory rebuild appears structurally successful"))
+            mutations.extend(_zip_damage_payloads(data, entry_infos, randomizer, all_entries=False, name="corpus_zip_rebuild_directory_keeps_bad_payload", expected_effect="rebuilt entry payload hash should not match"))
+        elif profile == "zip_quarantine_keeps_corrupted_entry":
+            mutations.extend(_zip_eocd_count_mutations(eocd, count_delta=1))
+            mutations.extend(_zip_damage_payloads(data, entry_infos, randomizer, all_entries=True, name="corpus_zip_quarantine_keeps_corrupted_entry", expected_effect="quarantine may preserve corrupted entries with known names"))
+        elif profile == "zip_wrong_local_offset_extracts_valid_other_entry":
+            mutations.extend(_zip_cd_offset_near_valid_mutations(data, cd_headers, entry_infos))
+            mutations.extend(_zip_cd_crc_mutations(cd_headers, randomizer))
+        elif profile == "zip_crc_repair_masks_payload_mismatch":
+            mutations.extend(_zip_damage_payloads(data, entry_infos, randomizer, all_entries=False, name="corpus_zip_crc_repair_masks_payload_mismatch", expected_effect="CRC repair may hide a payload mismatch"))
+            mutations.extend(_zip_cd_crc_mutations(cd_headers, randomizer, value=b"\xff\xff\xff\xff"))
+        elif profile == "zip_partial_recovery_wrong_hash_same_name":
+            mutations.append(_truncate("corpus_zip_partial_recovery_wrong_hash_drop_tail", max(1, eocd), "zip.central_directory", "partial recovery uses local names"))
+            mutations.extend(_zip_damage_payloads(data, entry_infos, randomizer, all_entries=False, name="corpus_zip_partial_recovery_wrong_hash_same_name", expected_effect="partial output has the expected name but wrong hash"))
+        elif layer in {"structural", "structural_directory", "hard_negative", "two_step_repair", "deceptive_hard_negative"}:
             mutations.extend([
                 _replace_bytes("corpus_zip_bad_eocd_counts", eocd + 8, struct.pack("<HH", 1, 99), "zip.eocd.entry_counts", "directory entry counts conflict"),
                 _replace_bytes("corpus_zip_bad_eocd_cd_offset", eocd + 16, struct.pack("<I", 0), "zip.eocd.cd_offset", "central directory offset points at start"),
@@ -1091,25 +1163,194 @@ def _zip_corpus_mutations(data: bytes, randomizer: random.Random, profile: str) 
             payload_offset = int(target["payload_offset"]) + max(0, int(target["compressed_size"]) // 2)
             if 0 <= payload_offset < len(data):
                 mutations.append(_replace_byte("corpus_zip_single_entry_payload_damage", payload_offset, data[payload_offset] ^ 0x41, "zip.local_payload", f"entry payload damaged: {target['name']}"))
-    if layer == "hard_negative":
+    if profile == "zip_all_entry_payload_damage_with_directory":
+        if eocd >= 0 and eocd + 22 <= len(data):
+            mutations.extend(_zip_eocd_directory_conflict_mutations(eocd))
+        mutations.extend(_zip_damage_payloads(data, entry_infos, randomizer, all_entries=True, name="corpus_zip_all_entry_payload_damage", expected_effect="all entry payloads are damaged but names may remain recoverable"))
+    if layer in {"hard_negative", "deceptive_hard_negative"}:
         payload_offset = _middle_offset(data, randomizer)
         mutations.append(_replace_byte("corpus_zip_flip_payload_byte", payload_offset, data[payload_offset] ^ 0x41, "zip.local_payload", "payload checksum may fail"))
     if ("missing_volume" in profile or (layer == "partial_recoverable" and not profile.startswith("zip_"))) and len(data) > 128:
         mutations.append(_delete("corpus_zip_delete_middle_volume_bytes", max(1, len(data) // 3), max(8, len(data) // 20), "zip.missing_volume", "middle archive bytes are missing"))
-    if layer in {"structural", "hard_negative"}:
+    if layer in {"structural", "hard_negative", "deceptive_hard_negative"}:
         mutations.append(_append("corpus_zip_append_tail_junk", _random_junk(randomizer, "ZIPTAIL", 12, 48), "archive.tail", "extra bytes after archive"))
     if "boundary" in profile or "sfx" in profile:
         mutations.append(_insert("corpus_zip_insert_sfx_prefix", 0, b"MZ-SUNPACK-CORPUS" + _random_junk(randomizer, "SFX", 8, 24), "zip.sfx.prefix", "archive is embedded behind a carrier prefix"))
     flags = ["central_directory_bad", "central_directory_offset_bad", "central_directory_count_bad"]
-    if layer == "hard_negative":
+    if layer in {"hard_negative", "deceptive_hard_negative"}:
         flags.extend(["checksum_error", "crc_error", "damaged"])
+    if profile in {"zip_directory_only_bad_payload", "zip_eocd_cd_half_damaged"}:
+        flags.extend(["directory_untrusted", "metadata_inconsistent"])
+    if profile in {"zip_all_entry_payload_damage_with_directory", "zip_wrong_offset_content_overlap"}:
+        flags.extend(["hard_negative_target", "payload_hash_mismatch"])
+    if layer == "two_step_repair":
+        flags.extend(["two_step_repair", "multi_round_repair_expected"])
+    if layer == "deceptive_hard_negative":
+        flags.extend(["hard_negative_target", "payload_hash_mismatch", "deceptive_structural_success"])
     if any(mutation.zone in {"archive.tail", "zip.sfx.prefix"} for mutation in mutations):
         flags.extend(["trailing_junk", "boundary_unreliable"])
     if any(mutation.zone == "zip.missing_volume" for mutation in mutations):
         flags.extend(["missing_volume", "input_truncated"])
     elif layer == "partial_recoverable" and any(mutation.operation.op == "truncate" for mutation in mutations):
         flags.append("input_truncated")
+    mutations = _ensure_minimum_zip_mutations(data, mutations, randomizer)
     return mutations, _dedupe_list(flags)
+
+
+def _zip_eocd_directory_conflict_mutations(eocd: int) -> list[BinaryMutation]:
+    return [
+        _replace_bytes("corpus_zip_bad_eocd_counts", eocd + 8, struct.pack("<HH", 1, 99), "zip.eocd.entry_counts", "directory entry counts conflict"),
+        _replace_bytes("corpus_zip_bad_eocd_cd_offset", eocd + 16, struct.pack("<I", 0), "zip.eocd.cd_offset", "central directory offset points at start"),
+        _replace_bytes("corpus_zip_bad_eocd_comment_length", eocd + 20, struct.pack("<H", 0), "zip.eocd.comment_length", "comment boundary is untrusted"),
+    ]
+
+
+def _zip_eocd_count_mutations(eocd: int, *, count_delta: int) -> list[BinaryMutation]:
+    if eocd < 0:
+        return []
+    current = max(1, int(count_delta))
+    return [
+        _replace_bytes("corpus_zip_eocd_disk_entry_count_near_wrong", eocd + 8, struct.pack("<H", current), "zip.eocd.entry_count_disk", "EOCD disk entry count is plausible but wrong"),
+        _replace_bytes("corpus_zip_eocd_total_entry_count_near_wrong", eocd + 10, struct.pack("<H", current + 3), "zip.eocd.entry_count_total", "EOCD total entry count is plausible but wrong"),
+    ]
+
+
+def _zip_cd_offset_near_valid_mutations(data: bytes, cd_headers: list[int], entry_infos: list[dict[str, Any]]) -> list[BinaryMutation]:
+    if not cd_headers or not entry_infos:
+        return []
+    target = entry_infos[1] if len(entry_infos) >= 2 else entry_infos[0]
+    wrong_offset = int(target.get("header_offset", 0) or 0)
+    if len(entry_infos) < 2:
+        wrong_offset = max(0, wrong_offset + 4)
+    wrong_offset = min(max(0, wrong_offset), max(0, len(data) - 4))
+    return [
+        _replace_bytes("corpus_zip_cd_offset_near_valid_wrong_entry", cd_headers[0] + 42, struct.pack("<I", wrong_offset), "zip.central_directory.local_header_offset", "central directory points near a valid local header but not the intended entry"),
+        _replace_bytes("corpus_zip_cd_compressed_size_near_valid", cd_headers[0] + 20, struct.pack("<I", max(0, int(target.get("compressed_size", 0) or 0))), "zip.central_directory.compressed_size", "directory size fields remain plausible"),
+    ]
+
+
+def _zip_local_crc_mutations(entry_infos: list[dict[str, Any]], randomizer: random.Random) -> list[BinaryMutation]:
+    target = _choose_middle_entry(entry_infos, randomizer) if entry_infos else {}
+    offset = int(target.get("header_offset", -1) or -1)
+    if offset < 0:
+        return []
+    crc = (int(target.get("crc", 0) or 0) ^ 0xA5A5A5A5) & 0xFFFFFFFF
+    return [
+        _replace_bytes("corpus_zip_local_header_crc_wrong_cd_correct", offset + 14, struct.pack("<I", crc), "zip.local_header.crc", f"local header CRC is wrong while central directory may remain correct: {target.get('name', '')}"),
+        _replace_bytes("corpus_zip_local_header_size_hint_wrong", offset + 18, struct.pack("<I", max(0, int(target.get("compressed_size", 0) or 0) + 1)), "zip.local_header.compressed_size", "local size hint conflicts with directory metadata"),
+    ]
+
+
+def _zip_cd_crc_mutations(cd_headers: list[int], randomizer: random.Random, *, value: bytes | None = None) -> list[BinaryMutation]:
+    if not cd_headers:
+        return []
+    header = cd_headers[randomizer.randrange(0, len(cd_headers))]
+    payload = value if value is not None else struct.pack("<I", randomizer.randrange(1, 0xFFFFFFFF))
+    return [
+        _replace_bytes("corpus_zip_cd_crc_wrong_local_payload_correct", header + 16, payload[:4].ljust(4, b"\0"), "zip.central_directory.crc", "central directory CRC conflicts with local payload"),
+        _replace_bytes("corpus_zip_cd_external_attr_noise", header + 38, b"\0\0\0\0", "zip.central_directory.external_attributes", "directory metadata remains structurally readable"),
+    ]
+
+
+def _zip_duplicate_entry_conflict_mutations(data: bytes, cd_headers: list[int], entry_infos: list[dict[str, Any]], randomizer: random.Random) -> list[BinaryMutation]:
+    if len(cd_headers) < 2 or len(entry_infos) < 2:
+        return _zip_cd_crc_mutations(cd_headers, randomizer)
+    first = entry_infos[0]
+    second = entry_infos[1]
+    first_name = str(first.get("name", "")).encode("utf-8", errors="ignore")
+    second_header = cd_headers[1]
+    try:
+        second_name_len = int(struct.unpack_from("<H", data, second_header + 28)[0])
+    except Exception:
+        second_name_len = 0
+    replacement = first_name[:second_name_len].ljust(second_name_len, b"_")
+    return [
+        _replace_bytes("corpus_zip_duplicate_entry_name_conflict", second_header + 46, replacement, "zip.central_directory.filename", f"duplicate entry name conflicts with CRC: {first.get('name', '')} vs {second.get('name', '')}"),
+        _replace_bytes("corpus_zip_duplicate_entry_crc_conflict", second_header + 16, struct.pack("<I", (int(first.get("crc", 0) or 0) ^ 0xFFFFFFFF) & 0xFFFFFFFF), "zip.central_directory.crc", "duplicate-looking entry has conflicting CRC"),
+    ]
+
+
+def _zip_data_descriptor_conflict_mutations(data: bytes, cd_headers: list[int], entry_infos: list[dict[str, Any]], randomizer: random.Random) -> list[BinaryMutation]:
+    target = _choose_middle_entry(entry_infos, randomizer) if entry_infos else {}
+    local = int(target.get("header_offset", -1) or -1)
+    output: list[BinaryMutation] = []
+    if local >= 0:
+        try:
+            flags = int(struct.unpack_from("<H", data, local + 6)[0]) | 0x08
+        except Exception:
+            flags = 0x08
+        output.append(_replace_bytes("corpus_zip_local_data_descriptor_flag_set", local + 6, struct.pack("<H", flags), "zip.local_header.flags", "local header claims a data descriptor is present"))
+    if cd_headers:
+        header = cd_headers[0]
+        try:
+            flags = int(struct.unpack_from("<H", data, header + 8)[0]) ^ 0x08
+        except Exception:
+            flags = 0
+        output.append(_replace_bytes("corpus_zip_cd_data_descriptor_flag_conflict", header + 8, struct.pack("<H", flags), "zip.central_directory.flags", "central directory disagrees about data descriptor usage"))
+    payload_offset = int(target.get("payload_offset", 0) or 0) + int(target.get("compressed_size", 0) or 0)
+    if 0 <= payload_offset <= len(data):
+        output.append(_insert("corpus_zip_fake_data_descriptor", payload_offset, b"PK\x07\x08" + _random_junk(randomizer, "DD", 12, 12), "zip.data_descriptor", "fake data descriptor conflicts with metadata"))
+    return output
+
+
+def _ensure_minimum_zip_mutations(data: bytes, mutations: list[BinaryMutation], randomizer: random.Random) -> list[BinaryMutation]:
+    output = list(mutations)
+    if len(output) >= 2:
+        return output
+    eocd = data.rfind(b"PK\x05\x06")
+    if eocd >= 0 and eocd + 20 <= len(data):
+        output.extend(_zip_eocd_count_mutations(eocd, count_delta=1))
+    while len(output) < 2 and data:
+        offset = _middle_offset(data, randomizer)
+        output.append(_replace_byte(f"corpus_zip_fallback_complexity_{len(output)}", offset, data[offset] ^ 0x5A, "zip.fallback", "fallback mutation keeps difficult profile non-trivial"))
+    return output
+
+
+def _zip_damage_payloads(
+    data: bytes,
+    entry_infos: list[dict[str, Any]],
+    randomizer: random.Random,
+    *,
+    all_entries: bool,
+    name: str,
+    expected_effect: str,
+) -> list[BinaryMutation]:
+    mutations: list[BinaryMutation] = []
+    targets = entry_infos if all_entries else ([_choose_middle_entry(entry_infos, randomizer)] if entry_infos else [])
+    for index, target in enumerate(targets):
+        compressed_size = int(target.get("compressed_size", 0) or 0)
+        if compressed_size <= 0:
+            continue
+        payload_offset = int(target["payload_offset"]) + max(0, compressed_size // 2)
+        if 0 <= payload_offset < len(data):
+            mutations.append(_replace_byte(f"{name}_{index}", payload_offset, data[payload_offset] ^ 0x41, "zip.local_payload", f"{expected_effect}: {target['name']}"))
+    return mutations
+
+
+def _safe_zip_cd_offset(data: bytes) -> int:
+    try:
+        eocd = data.rfind(b"PK\x05\x06")
+        if eocd < 0 or eocd + 20 > len(data):
+            return -1
+        return int(struct.unpack_from("<I", data, eocd + 16)[0])
+    except Exception:
+        return -1
+
+
+def _zip_central_directory_header_offsets(data: bytes, cd_offset: int, eocd: int) -> list[int]:
+    if cd_offset < 0:
+        return []
+    end = eocd if eocd > cd_offset else len(data)
+    offsets = []
+    cursor = cd_offset
+    while cursor + 46 <= end and data[cursor:cursor + 4] == b"PK\x01\x02":
+        offsets.append(cursor)
+        try:
+            name_len, extra_len, comment_len = struct.unpack_from("<HHH", data, cursor + 28)
+        except Exception:
+            break
+        cursor += 46 + int(name_len) + int(extra_len) + int(comment_len)
+    return offsets
 
 
 def _tar_corpus_mutations(data: bytes, randomizer: random.Random, profile: str) -> tuple[list[BinaryMutation], list[str]]:
@@ -1249,7 +1490,7 @@ def _raw_corpus_mutations(data: bytes, fmt: ArchiveFormat, randomizer: random.Ra
 
 def _damage_layer(profile: str) -> str:
     text = str(profile or "").lower()
-    for layer in ("structural_directory", "partial_recoverable", "hard_negative", "structural"):
+    for layer in ("deceptive_hard_negative", "two_step_repair", "structural_directory", "partial_recoverable", "hard_negative", "structural"):
         if layer in text:
             return layer
     if text in {
@@ -1261,6 +1502,39 @@ def _damage_layer(profile: str) -> str:
         "rar_non_solid_one_file_damage",
     }:
         return "partial_recoverable"
+    if text in {
+        "zip_eocd_cd_half_damaged",
+        "zip_directory_only_bad_payload",
+        "zip_cd_offset_near_valid_wrong_entry",
+        "zip_eocd_counts_wrong_but_cd_readable",
+        "zip_local_header_crc_wrong_cd_correct",
+        "zip_cd_crc_wrong_local_payload_correct",
+        "zip_comment_overlap_eocd_shifted",
+        "zip_duplicate_entries_conflicting_crc",
+        "zip_data_descriptor_conflict",
+        "zip_partial_cd_rebuild_then_payload_mismatch",
+    }:
+        return "structural_directory"
+    if text in {
+        "zip_two_step_boundary_then_cd_rebuild",
+        "zip_two_step_comment_fix_then_eocd_repair",
+        "zip_two_step_local_header_then_cd_offset",
+        "zip_two_step_drop_cd_with_eocd_noise",
+    }:
+        return "two_step_repair"
+    if text in {
+        "zip_rebuild_directory_keeps_bad_payload",
+        "zip_quarantine_keeps_corrupted_entry",
+        "zip_wrong_local_offset_extracts_valid_other_entry",
+        "zip_crc_repair_masks_payload_mismatch",
+        "zip_partial_recovery_wrong_hash_same_name",
+    }:
+        return "deceptive_hard_negative"
+    if text in {
+        "zip_all_entry_payload_damage_with_directory",
+        "zip_wrong_offset_content_overlap",
+    }:
+        return "hard_negative"
     if "payload" in text or "block" in text:
         return "hard_negative"
     if "partial" in text or "truncate" in text or "missing" in text:
@@ -1294,10 +1568,15 @@ def _profile_metadata(fmt: ArchiveFormat, profile: str, mutations: list[BinaryMu
     recoverable_entries = [name for name in entry_names if name not in set(damaged_entries)]
     base_fmt = _base_archive_format(fmt)
     oracle_strength = str(oracle.get("oracle_strength") or "")
+    difficulty_tags = _difficulty_tags_for_profile(profile, layer, mutations)
     if layer == "partial_recoverable" and files and (base_fmt in {"zip", "tar"}):
         capability = "entry_partial" if (damaged_entries or "central_directory" in profile or "last_member" in profile) else "structural_partial"
     elif layer == "partial_recoverable":
         capability = "structural_partial" if oracle_strength.startswith("entry") else "structural_only"
+    elif layer == "two_step_repair":
+        capability = "structural_partial" if files else "structural_only"
+    elif layer == "deceptive_hard_negative":
+        capability = "entry_partial" if files else "structural_only"
     else:
         capability = "structural_only"
     if "central_directory" in profile and not damaged_entries:
@@ -1309,10 +1588,29 @@ def _profile_metadata(fmt: ArchiveFormat, profile: str, mutations: list[BinaryMu
         target_entry = entry_names[-1]
     return {
         "profile_capability": capability,
+        "difficulty_tags": difficulty_tags,
         "partial_target_entry": target_entry,
-        "partial_expected_recoverable_entries": recoverable_entries if layer == "partial_recoverable" else [],
-        "partial_expected_damaged_entries": damaged_entries if layer == "partial_recoverable" else [],
+        "partial_expected_recoverable_entries": recoverable_entries if layer in {"partial_recoverable", "two_step_repair"} else [],
+        "partial_expected_damaged_entries": damaged_entries if layer in {"partial_recoverable", "two_step_repair", "deceptive_hard_negative"} else [],
     }
+
+
+def _difficulty_tags_for_profile(profile: str, layer: str, mutations: list[BinaryMutation]) -> list[str]:
+    text = str(profile or "").lower()
+    tags: list[str] = []
+    if layer in {"structural_directory", "two_step_repair"} or any("central_directory" in mutation.zone or "eocd" in mutation.zone for mutation in mutations):
+        tags.append("near_valid_directory")
+    if layer == "two_step_repair" or text.startswith("zip_two_step_"):
+        tags.append("two_step_repair")
+    if layer == "deceptive_hard_negative" or "wrong_hash" in text or "bad_payload" in text or "payload_mismatch" in text:
+        tags.extend(["deceptive_structural_success", "hash_mismatch_risk"])
+    if "wrong_entry" in text or "wrong_local_offset" in text or "duplicate_entries" in text:
+        tags.append("ambiguous_entry_mapping")
+    if "data_descriptor" in text:
+        tags.append("metadata_semantics_conflict")
+    if "comment" in text:
+        tags.append("boundary_comment_ambiguity")
+    return _dedupe_list(tags)
 
 
 def _zip_entry_infos(data: bytes) -> list[dict[str, Any]]:
@@ -1426,6 +1724,7 @@ def _write_corpus_case(
     builder_call: str = "",
     oracle_strength: str = "",
     profile_capability: str = "",
+    difficulty_tags: list[str] | None = None,
     partial_target_entry: str = "",
     partial_expected_recoverable_entries: list[str] | None = None,
     partial_expected_damaged_entries: list[str] | None = None,
@@ -1455,6 +1754,7 @@ def _write_corpus_case(
         builder_call=builder_call,
         oracle_strength=oracle_strength,
         profile_capability=profile_capability,
+        difficulty_tags=list(difficulty_tags or []),
         partial_target_entry=partial_target_entry,
         partial_expected_recoverable_entries=list(partial_expected_recoverable_entries or []),
         partial_expected_damaged_entries=list(partial_expected_damaged_entries or []),

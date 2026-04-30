@@ -71,6 +71,8 @@ def _load_rows(paths: list[Path]) -> list[dict[str, Any]]:
 
 
 def _build_report(rows: list[dict[str, Any]], model_root: Path) -> dict[str, Any]:
+    terminal_rows = [row for row in rows if row.get("row_type") == "terminal"]
+    rows = [row for row in rows if row.get("row_type") != "terminal"]
     query_groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
         query_groups[str(row.get("query_id") or row.get("sample_id") or "")].append(row)
@@ -88,12 +90,16 @@ def _build_report(rows: list[dict[str, Any]], model_root: Path) -> dict[str, Any
     state_progress_rows = sum(1 for row in rows if int(row.get("label", 0) or 0) == 2 or str(row.get("label_status") or "") == "state_progress")
     total = max(1, len(rows))
     model_metrics = _model_metrics(model_root, source_counts, len(rows))
+    rollout = _rollout_report(rows, query_groups)
+    difficulty = _difficulty_report(rows, query_groups)
     report = {
         "dataset": {
             "row_count": len(rows),
+            "terminal_row_count": len(terminal_rows),
             "query_count": len(query_groups),
             "source_files": dict(sorted(source_counts.items())),
         },
+        "terminal_status_distribution": dict(sorted(Counter(str(row.get("terminal_status") or row.get("label_status") or "unknown") for row in terminal_rows).items())),
         "label_distribution": dict(sorted(label_counts.items(), key=lambda item: int(item[0]))),
         "sample_best_label_distribution": dict(sorted(Counter(str(label) for label in best_labels).items(), key=lambda item: int(item[0]))),
         "label_status_distribution": dict(sorted(status_counts.items())),
@@ -113,6 +119,8 @@ def _build_report(rows: list[dict[str, Any]], model_root: Path) -> dict[str, Any
             "failed_or_timeout_rows": failed_rows,
         },
         "format_detection_quality": _format_detection_quality(rows),
+        "rollout": rollout,
+        "difficulty": difficulty,
         "per_format": _per_format_report(rows, model_metrics),
         "model_metric_comparison": model_metrics,
     }
@@ -149,6 +157,8 @@ def _per_format_report(rows: list[dict[str, Any]], model_metrics: dict[str, Any]
             "query_candidate_count": _series_summary(query_sizes),
             "query_candidate_count_distribution": dict(sorted(Counter(str(size) for size in query_sizes).items(), key=lambda item: int(item[0]))),
             "quality_ratios": _quality_ratios(items),
+            "rollout": _rollout_report(items, groups),
+            "difficulty": _difficulty_report(items, groups),
             "module_distribution_top10": dict(modules.most_common(10)),
             "trainability": _format_trainability(items, groups),
             "model_metrics": _metrics_for_format(model_metrics, fmt),
@@ -164,6 +174,215 @@ def _quality_ratios(rows: list[dict[str, Any]]) -> dict[str, float]:
         "complete_row_ratio": sum(1 for row in rows if int(row.get("label", 0) or 0) == 3 or str(row.get("label_status") or "") == "complete") / total,
         "hard_negative_row_ratio": sum(1 for row in rows if int(row.get("label", 0) or 0) == -1 or str(row.get("label_status") or "") == "hard_negative") / total,
     }
+
+
+def _rollout_report(rows: list[dict[str, Any]], query_groups: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
+    episodes: dict[str, set[str]] = defaultdict(set)
+    future_labels = Counter()
+    immediate_future_disagreements = 0
+    selected_rows = []
+    selected_future_hits = 0
+    label2_rows = 0
+    label2_future_success = 0
+    hard_negative_rows = 0
+    hard_negative_future_failure = 0
+    for row in rows:
+        episode_id = str(row.get("episode_id") or row.get("sample_id") or "")
+        state_id = str(row.get("state_id") or row.get("query_id") or "")
+        if episode_id and state_id:
+            episodes[episode_id].add(state_id)
+        details = row.get("label_details") if isinstance(row.get("label_details"), dict) else {}
+        immediate = int(details.get("immediate_label", row.get("label", 0)) or 0)
+        future = int(details.get("future_best_label", immediate) or 0)
+        future_labels[str(future)] += 1
+        if immediate != future:
+            immediate_future_disagreements += 1
+        if bool(row.get("selected_by_current_system")):
+            selected_rows.append(row)
+        if immediate == 2:
+            label2_rows += 1
+            if future == 3 or bool(details.get("terminal_success")):
+                label2_future_success += 1
+        if immediate == -1:
+            hard_negative_rows += 1
+            if future <= 0:
+                hard_negative_future_failure += 1
+    for query, items in query_groups.items():
+        if not items:
+            continue
+        best_future = max(int(((row.get("label_details") if isinstance(row.get("label_details"), dict) else {}) or {}).get("future_best_label", row.get("label", 0)) or 0) for row in items)
+        selected = [row for row in items if bool(row.get("selected_by_current_system"))]
+        if selected and int(((selected[0].get("label_details") if isinstance(selected[0].get("label_details"), dict) else {}) or {}).get("future_best_label", selected[0].get("label", 0)) or 0) == best_future:
+            selected_future_hits += 1
+    state_counts = [len(states) for states in episodes.values()]
+    multi_round_queries = sum(1 for query in query_groups if ":r" in query and ":b" in query)
+    return {
+        "episode_count": len(episodes),
+        "states_per_episode": _series_summary(state_counts),
+        "multi_round_query_ratio": multi_round_queries / max(1, len(query_groups)),
+        "future_best_label_distribution": dict(sorted(future_labels.items(), key=lambda item: int(item[0]))),
+        "immediate_future_disagreement_ratio": immediate_future_disagreements / max(1, len(rows)),
+        "selected_path_future_best_hit_rate": selected_future_hits / max(1, len(query_groups)),
+        "label2_future_success_rate": label2_future_success / max(1, label2_rows),
+        "hard_negative_future_failure_rate": hard_negative_future_failure / max(1, hard_negative_rows),
+    }
+
+
+def _difficulty_report(rows: list[dict[str, Any]], query_groups: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
+    entropies: list[float] = []
+    target_unique_counts: list[int] = []
+    mixed_target_queries = 0
+    hard_positive_queries = 0
+    hard_partial_queries = 0
+    teacher_wrong_future_best = 0
+    teacher_considered = 0
+    selected_future_hits = 0
+    selected_considered = 0
+    label2_rows = 0
+    label2_future_complete = 0
+    two_step_rows = 0
+    two_step_success_rows = 0
+    deceptive_hard_negative_rows = 0
+    for row in rows:
+        target = _strategy_target_label(row)
+        tags = _difficulty_tags(row)
+        details = row.get("label_details") if isinstance(row.get("label_details"), dict) else {}
+        if int(row.get("label", 0) or 0) == 2:
+            label2_rows += 1
+            if int(details.get("future_best_label", 0) or 0) >= 3 or bool(details.get("terminal_success")):
+                label2_future_complete += 1
+        if "two_step_repair" in tags:
+            two_step_rows += 1
+            if int(details.get("future_best_label", row.get("label", 0)) or 0) >= 3:
+                two_step_success_rows += 1
+        if "deceptive_structural_success" in tags or "hash_mismatch_risk" in tags or int(row.get("label", 0) or 0) < 0:
+            if target <= 0 or int(row.get("label", 0) or 0) < 0:
+                deceptive_hard_negative_rows += 1
+    for query, items in query_groups.items():
+        if not items:
+            continue
+        targets = [_strategy_target_label(row) for row in items]
+        unique = set(targets)
+        target_unique_counts.append(len(unique))
+        if len(unique) >= 2:
+            mixed_target_queries += 1
+        entropies.append(_entropy(targets))
+        has_hard = any(_is_hard_negative(row) for row in items)
+        has_positive = any(_strategy_target_label(row) > 1 for row in items)
+        has_partial = any(int(row.get("label", 0) or 0) == 1 or str(row.get("label_status") or "") == "partial" for row in items)
+        if has_hard and has_positive:
+            hard_positive_queries += 1
+        if has_hard and has_partial:
+            hard_partial_queries += 1
+        best_future = max(_future_value(row) for row in items)
+        teacher_row = _teacher_top_row(items)
+        if teacher_row is not None:
+            teacher_considered += 1
+            if _future_value(teacher_row) < best_future:
+                teacher_wrong_future_best += 1
+        selected = [row for row in items if bool(row.get("selected_by_current_system"))]
+        if selected:
+            selected_considered += 1
+            if _future_value(selected[0]) >= best_future:
+                selected_future_hits += 1
+    query_count = max(1, len(query_groups))
+    return {
+        "query_target_entropy": _series_summary_float(entropies),
+        "candidate_target_unique_count_distribution": dict(sorted(Counter(str(value) for value in target_unique_counts).items(), key=lambda item: int(item[0]))),
+        "mixed_target_query_ratio": mixed_target_queries / query_count,
+        "hard_negative_vs_positive_same_query_count": hard_positive_queries,
+        "hard_negative_vs_positive_same_query_ratio": hard_positive_queries / query_count,
+        "hard_negative_vs_partial_same_query_count": hard_partial_queries,
+        "hard_negative_vs_partial_same_query_ratio": hard_partial_queries / query_count,
+        "state_progress_to_complete_count": label2_future_complete,
+        "label2_future_complete_rate": label2_future_complete / max(1, label2_rows),
+        "teacher_top1_wrong_but_future_best_exists_count": teacher_wrong_future_best,
+        "teacher_top1_wrong_but_future_best_exists_ratio": teacher_wrong_future_best / max(1, teacher_considered),
+        "selected_path_future_best_hit_rate": selected_future_hits / max(1, selected_considered),
+        "two_step_row_count": two_step_rows,
+        "two_step_success_row_count": two_step_success_rows,
+        "deceptive_hard_negative_row_count": deceptive_hard_negative_rows,
+    }
+
+
+def _difficulty_tags(row: dict[str, Any]) -> list[str]:
+    state = _nested(row, "stable_features", "state")
+    candidate = _nested(row, "stable_features", "candidate")
+    values: list[Any] = []
+    if isinstance(state, dict):
+        values.extend(state.get("difficulty_tags") or [])
+        values.append(state.get("damage_profile"))
+    if isinstance(candidate, dict):
+        values.extend(candidate.get("difficulty_tags") or [])
+    values.extend(row.get("difficulty_tags") or [])
+    return [str(value) for value in values if value]
+
+
+def _is_hard_negative(row: dict[str, Any]) -> bool:
+    targets = row.get("training_targets") if isinstance(row.get("training_targets"), dict) else {}
+    return int(row.get("label", 0) or 0) < 0 or str(targets.get("risk_class") or "").startswith("hard_negative")
+
+
+def _strategy_target_label(row: dict[str, Any]) -> int:
+    if _is_hard_negative(row):
+        return 0
+    targets = row.get("training_targets") if isinstance(row.get("training_targets"), dict) else {}
+    value = targets.get("strategy_gain")
+    if value is None:
+        details = row.get("label_details") if isinstance(row.get("label_details"), dict) else {}
+        value = details.get("strategy_gain")
+    try:
+        gain = float(value)
+    except Exception:
+        gain = float(_label_gain(row.get("label")))
+    if gain <= 0:
+        return 1
+    if gain < 2:
+        return 2
+    if gain < 3:
+        return 3
+    return 5
+
+
+def _future_value(row: dict[str, Any]) -> int:
+    details = row.get("label_details") if isinstance(row.get("label_details"), dict) else {}
+    targets = row.get("training_targets") if isinstance(row.get("training_targets"), dict) else {}
+    raw = targets.get("future_gain", details.get("future_best_label", row.get("label", 0)))
+    try:
+        return int(raw or 0)
+    except Exception:
+        return int(row.get("label", 0) or 0)
+
+
+def _teacher_top_row(items: list[dict[str, Any]]) -> dict[str, Any] | None:
+    if not items:
+        return None
+    ranked: list[tuple[float, dict[str, Any]]] = []
+    for row in items:
+        teacher = row.get("teacher_features") if isinstance(row.get("teacher_features"), dict) else {}
+        score = teacher.get("generation_priority")
+        if score is None:
+            score = teacher.get("ranking_raw_score")
+        if score is None:
+            score = 1.0 if bool(row.get("selected_by_current_system")) else 0.0
+        try:
+            ranked.append((float(score), row))
+        except Exception:
+            ranked.append((0.0, row))
+    return sorted(ranked, key=lambda item: item[0], reverse=True)[0][1]
+
+
+def _entropy(values: list[int]) -> float:
+    if not values:
+        return 0.0
+    counts = Counter(values)
+    total = float(sum(counts.values()) or 1)
+    result = 0.0
+    for count in counts.values():
+        probability = float(count) / total
+        if probability > 0:
+            result -= probability * math.log2(probability)
+    return result
 
 
 def _format_trainability(rows: list[dict[str, Any]], groups: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
@@ -274,7 +493,28 @@ def _series_summary(values: list[int]) -> dict[str, Any]:
     }
 
 
+def _series_summary_float(values: list[float]) -> dict[str, Any]:
+    if not values:
+        return {"count": 0, "min": 0.0, "p50": 0.0, "p90": 0.0, "max": 0.0, "mean": 0.0}
+    ordered = sorted(float(value) for value in values)
+    return {
+        "count": len(values),
+        "min": ordered[0],
+        "p50": _percentile_float(ordered, 0.50),
+        "p90": _percentile_float(ordered, 0.90),
+        "max": ordered[-1],
+        "mean": statistics.mean(ordered),
+    }
+
+
 def _percentile(ordered: list[int], ratio: float) -> float:
+    if not ordered:
+        return 0.0
+    index = min(len(ordered) - 1, max(0, int(math.ceil(len(ordered) * ratio) - 1)))
+    return float(ordered[index])
+
+
+def _percentile_float(ordered: list[float], ratio: float) -> float:
     if not ordered:
         return 0.0
     index = min(len(ordered) - 1, max(0, int(math.ceil(len(ordered) * ratio) - 1)))
@@ -380,6 +620,18 @@ def _quality_warnings(report: dict[str, Any]) -> list[str]:
     teacher = _model_ndcg(metrics, "teacher_only_baseline")
     if stable is not None and teacher is not None and stable > 0.95 and abs(stable - teacher) < 0.05:
         warnings.append("dataset_may_be_too_easy")
+    difficulty = report.get("difficulty", {}) if isinstance(report.get("difficulty"), dict) else {}
+    entropy = difficulty.get("query_target_entropy") if isinstance(difficulty.get("query_target_entropy"), dict) else {}
+    if float(entropy.get("mean", 0.0) or 0.0) < 0.35:
+        warnings.append("dataset_too_easy_target_entropy_low")
+    if float(difficulty.get("label2_future_complete_rate", 0.0) or 0.0) < 0.05 or int(difficulty.get("state_progress_to_complete_count", 0) or 0) <= 0:
+        warnings.append("too_few_two_step_success_cases")
+    if int(difficulty.get("deceptive_hard_negative_row_count", 0) or 0) <= 0:
+        warnings.append("too_few_deceptive_hard_negatives")
+    if float(difficulty.get("teacher_top1_wrong_but_future_best_exists_ratio", 0.0) or 0.0) < 0.20:
+        warnings.append("teacher_top1_too_aligned")
+    if int(formats.get("zip", 0) or 0) > 0:
+        warnings.append("source_split_recommended")
     per_format = report.get("per_format", {}) if isinstance(report.get("per_format"), dict) else {}
     for fmt, item in per_format.items():
         if not isinstance(item, dict):
@@ -426,13 +678,15 @@ def _markdown_report(report: dict[str, Any]) -> str:
         f"- Formats: `{json.dumps(report['format_distribution'], ensure_ascii=False, sort_keys=True)}`",
         f"- Candidate count: `{json.dumps(report['query_candidate_count'], ensure_ascii=False, sort_keys=True)}`",
         f"- Quality ratios: `{json.dumps(report['quality_ratios'], ensure_ascii=False, sort_keys=True)}`",
+        f"- Rollout: `{json.dumps(report.get('rollout', {}), ensure_ascii=False, sort_keys=True)}`",
+        f"- Difficulty: `{json.dumps(report.get('difficulty', {}), ensure_ascii=False, sort_keys=True)}`",
         f"- Format detection: `{json.dumps(report.get('format_detection_quality', {}), ensure_ascii=False, sort_keys=True)}`",
         f"- Warnings: `{json.dumps(report.get('warnings', []), ensure_ascii=False, sort_keys=True)}`",
         "",
         "## Per Format",
     ]
     for fmt, item in report.get("per_format", {}).items():
-        lines.append(f"- `{fmt}`: rows={item.get('row_count')} queries={item.get('query_count')} labels=`{json.dumps(item.get('label_distribution', {}), ensure_ascii=False, sort_keys=True)}` trainable=`{json.dumps(item.get('trainability', {}), ensure_ascii=False, sort_keys=True)}`")
+        lines.append(f"- `{fmt}`: rows={item.get('row_count')} queries={item.get('query_count')} labels=`{json.dumps(item.get('label_distribution', {}), ensure_ascii=False, sort_keys=True)}` rollout=`{json.dumps(item.get('rollout', {}), ensure_ascii=False, sort_keys=True)}` trainable=`{json.dumps(item.get('trainability', {}), ensure_ascii=False, sort_keys=True)}`")
     lines.extend([
         "",
         "## Model Metrics",

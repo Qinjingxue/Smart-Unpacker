@@ -10,8 +10,17 @@ param(
     [ValidateSet("pool", "static")]
     [string]$Scheduling = "pool",
     [int]$QueueBatchSize = 1,
+    [int]$MaxActiveCollectors = 6,
+    [int]$LaunchDelayMilliseconds = 150,
     [int]$MaxRounds = 3,
     [int]$MaxCandidatesPerRound = 10,
+    [ValidateSet("greedy", "beam", "counterfactual")]
+    [string]$RolloutMode = "greedy",
+    [int]$BeamSize = 1,
+    [int]$BranchTopK = 2,
+    [int]$CounterfactualExtra = 2,
+    [int]$MaxTotalStatesPerSample = 6,
+    [double]$FutureLabelDiscount = 0.8,
     [ValidateSet("lazy", "eager")]
     [string]$ProposalMode = "lazy",
     [int]$MaterializeTopKPerRound = 2,
@@ -54,6 +63,15 @@ function Split-TrainingCsv {
         }
     }
     return $output
+}
+
+function Add-TrainingCountMap {
+    param([hashtable]$Target, [object]$Source)
+    if ($null -eq $Source) { return }
+    foreach ($prop in $Source.PSObject.Properties) {
+        $key = [string]$prop.Name
+        $Target[$key] = [int]($Target[$key]) + [int]($prop.Value)
+    }
 }
 
 function Get-ManifestLines {
@@ -102,6 +120,8 @@ if ($records.Count -eq 0) {
 
 $workerCount = [Math]::Max(1, [Math]::Min([int]$CollectWorkers, $records.Count))
 $batchSize = [Math]::Max(1, [int]$QueueBatchSize)
+$activeLimit = [Math]::Max(1, [Math]::Min([int]$MaxActiveCollectors, $workerCount))
+$launchDelayMs = [Math]::Max(0, [int]$LaunchDelayMilliseconds)
 $datasetDir = Split-Path -Parent $SuccessOutput
 if (-not $datasetDir) { $datasetDir = "repair_training\datasets" }
 $shardRoot = Join-Path $datasetDir ".collect_shards"
@@ -145,6 +165,12 @@ function New-CollectorArgs {
         "-CollectorWorkers", "$workerCount",
         "-MaxRounds", "$MaxRounds",
         "-MaxCandidatesPerRound", "$MaxCandidatesPerRound",
+        "-RolloutMode", $RolloutMode,
+        "-BeamSize", "$BeamSize",
+        "-BranchTopK", "$BranchTopK",
+        "-CounterfactualExtra", "$CounterfactualExtra",
+        "-MaxTotalStatesPerSample", "$MaxTotalStatesPerSample",
+        "-FutureLabelDiscount", "$FutureLabelDiscount",
         "-ProposalMode", $ProposalMode,
         "-MaterializeTopKPerRound", "$MaterializeTopKPerRound",
         "-CaseTimeoutSeconds", "$CaseTimeoutSeconds",
@@ -196,7 +222,7 @@ if ($Scheduling -eq "pool") {
     $pending = New-Object System.Collections.Generic.Queue[object]
     foreach ($task in $tasks) { $pending.Enqueue($task) }
     $freeSlots = New-Object System.Collections.Generic.Queue[int]
-    for ($slot = 0; $slot -lt $workerCount; $slot++) { $freeSlots.Enqueue($slot) }
+    for ($slot = 0; $slot -lt $activeLimit; $slot++) { $freeSlots.Enqueue($slot) }
     $running = New-Object System.Collections.Generic.List[object]
     $completed = New-Object System.Collections.Generic.List[object]
 
@@ -208,6 +234,9 @@ if ($Scheduling -eq "pool") {
             $argsList = New-CollectorArgs -Unit $task -Slot $slot -EventsPath $eventsPath
             $process = Start-Process -FilePath "powershell.exe" -ArgumentList ([string[]]$argsList) -PassThru -WindowStyle Hidden -RedirectStandardOutput (Join-Path $repoRoot $task.Stdout) -RedirectStandardError (Join-Path $repoRoot $task.Stderr)
             $running.Add([PSCustomObject]@{ Task = $task; Slot = $slot; Process = $process }) | Out-Null
+            if ($launchDelayMs -gt 0) {
+                Start-Sleep -Milliseconds $launchDelayMs
+            }
         }
 
         Start-Sleep -Milliseconds 200
@@ -258,6 +287,8 @@ if ($Scheduling -eq "pool") {
         scheduling = "pool"
         collect_workers = $workerCount
         requested_collect_workers = $CollectWorkers
+        max_active_collectors = $activeLimit
+        launch_delay_milliseconds = $launchDelayMs
         queue_batch_size = $batchSize
         task_count = $tasks.Count
         records = $records.Count
@@ -274,12 +305,25 @@ if ($Scheduling -eq "pool") {
         timeouts = 0
         failed = 0
         skipped = 0
+        state_count = 0
+        expanded_state_count = 0
+        branch_count = 0
+        terminal_success_count = 0
+        rollout_budget_exhausted = 0
+        label_counts = @{}
+        future_label_counts = @{}
+        rollout_mode_counts = @{}
+        terminal_status_counts = @{}
         shards = $summaries
     }
     foreach ($summary in $summaries) {
-        foreach ($name in @("samples", "success_rows", "failure_rows", "timeouts", "failed", "skipped")) {
+        foreach ($name in @("samples", "success_rows", "failure_rows", "timeouts", "failed", "skipped", "state_count", "expanded_state_count", "branch_count", "terminal_success_count", "rollout_budget_exhausted")) {
             $aggregate[$name] = [int]$aggregate[$name] + [int]($summary.$name)
         }
+        Add-TrainingCountMap $aggregate["label_counts"] $summary.label_counts
+        Add-TrainingCountMap $aggregate["future_label_counts"] $summary.future_label_counts
+        Add-TrainingCountMap $aggregate["rollout_mode_counts"] $summary.rollout_mode_counts
+        Add-TrainingCountMap $aggregate["terminal_status_counts"] $summary.terminal_status_counts
     }
 
     New-Item -ItemType Directory -Path (Split-Path -Parent $ParallelSummaryOutput) -Force | Out-Null
@@ -335,6 +379,12 @@ foreach ($shard in $shards) {
         "-CollectorWorkers", "$workerCount",
         "-MaxRounds", "$MaxRounds",
         "-MaxCandidatesPerRound", "$MaxCandidatesPerRound",
+        "-RolloutMode", $RolloutMode,
+        "-BeamSize", "$BeamSize",
+        "-BranchTopK", "$BranchTopK",
+        "-CounterfactualExtra", "$CounterfactualExtra",
+        "-MaxTotalStatesPerSample", "$MaxTotalStatesPerSample",
+        "-FutureLabelDiscount", "$FutureLabelDiscount",
         "-ProposalMode", $ProposalMode,
         "-MaterializeTopKPerRound", "$MaterializeTopKPerRound",
         "-CaseTimeoutSeconds", "$CaseTimeoutSeconds",
@@ -397,6 +447,8 @@ foreach ($entry in $processes | Sort-Object { $_.Shard.Id }) {
 $aggregate = [ordered]@{
     collect_workers = $workerCount
     requested_collect_workers = $CollectWorkers
+    max_active_collectors = $workerCount
+    launch_delay_milliseconds = 0
     records = $records.Count
     failed_shards = $failed
     shard_count = $shards.Count
@@ -410,12 +462,25 @@ $aggregate = [ordered]@{
     timeouts = 0
     failed = 0
     skipped = 0
+    state_count = 0
+    expanded_state_count = 0
+    branch_count = 0
+    terminal_success_count = 0
+    rollout_budget_exhausted = 0
+    label_counts = @{}
+    future_label_counts = @{}
+    rollout_mode_counts = @{}
+    terminal_status_counts = @{}
     shards = $summaries
 }
 foreach ($summary in $summaries) {
-    foreach ($name in @("samples", "success_rows", "failure_rows", "timeouts", "failed", "skipped")) {
+    foreach ($name in @("samples", "success_rows", "failure_rows", "timeouts", "failed", "skipped", "state_count", "expanded_state_count", "branch_count", "terminal_success_count", "rollout_budget_exhausted")) {
         $aggregate[$name] = [int]$aggregate[$name] + [int]($summary.$name)
     }
+    Add-TrainingCountMap $aggregate["label_counts"] $summary.label_counts
+    Add-TrainingCountMap $aggregate["future_label_counts"] $summary.future_label_counts
+    Add-TrainingCountMap $aggregate["rollout_mode_counts"] $summary.rollout_mode_counts
+    Add-TrainingCountMap $aggregate["terminal_status_counts"] $summary.terminal_status_counts
 }
 
 New-Item -ItemType Directory -Path (Split-Path -Parent $ParallelSummaryOutput) -Force | Out-Null

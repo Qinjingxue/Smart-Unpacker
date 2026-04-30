@@ -5,6 +5,10 @@ param(
     [string]$OutputDir = "repair_training\models\by_format",
     [string]$Formats = "",
     [string]$FeatureViews = "",
+    [ValidateSet("immediate", "future", "discounted", "blended", "strategy")]
+    [string]$LabelTarget = "strategy",
+    [ValidateSet("query", "episode", "source_sample")]
+    [string]$SplitBy = "source_sample",
     [int]$Seed = 2026,
     [int]$MinTrainableQueries = 30,
     [int]$MinCandidatesPerQuery = 2,
@@ -49,6 +53,8 @@ try {
     $ArgsList = @(
         "repair_training\train_format_ltr.py",
         "--output-dir", $OutputDir,
+        "--label-target", $LabelTarget,
+        "--split-by", $SplitBy,
         "--seed", "$Seed",
         "--min-trainable-queries", "$MinTrainableQueries",
         "--min-candidates-per-query", "$MinCandidatesPerQuery"

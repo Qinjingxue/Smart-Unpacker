@@ -18,6 +18,8 @@ DEFAULT_DATASET_DIR = Path("repair_training") / "datasets"
 DEFAULT_OUTPUT_DIR = Path("repair_training") / "models" / "baseline_ltr"
 FEATURE_VIEWS = {"stable_only", "stable_plus_teacher", "teacher_only_baseline"}
 FORMAT_SCOPES = {"all", "zip", "tar", "tar_gz", "tar_bz2", "tar_xz", "gzip", "bzip2", "xz", "zstd", "7z", "rar"}
+LABEL_TARGETS = {"immediate", "future", "discounted", "blended", "strategy"}
+SPLIT_BY = {"query", "episode", "source_sample"}
 LABEL_GAIN = {-1: 0, 0: 0, 1: 1, 2: 2, 3: 4}
 
 
@@ -43,16 +45,18 @@ def main(argv: list[str] | None = None) -> int:
         _write_skip_summary(output_dir, args, source_rows, rows, "too_few_queries", raw_grouped=raw_grouped, grouped=grouped)
         return 0
 
-    train_queries, eval_queries = _split_queries(sorted(grouped), int(args.seed))
+    train_queries, eval_queries, split_info = _split_groups(grouped, args)
     eval_skipped = not eval_queries
     feature_rows = []
     labels = []
+    sample_weights = []
     query_ids = []
     row_refs = []
     for query_id in train_queries:
         for row in grouped[query_id]:
             feature_rows.append(_row_features(row, args.feature_view, args.format_scope))
-            labels.append(_gain(row.get("label")))
+            labels.append(_target_gain(row, args.label_target))
+            sample_weights.append(_target_weight(row, args.label_target))
             query_ids.append(query_id)
             row_refs.append(row)
     vectorizer = DictVectorizer(sparse=True)
@@ -72,7 +76,7 @@ def main(argv: list[str] | None = None) -> int:
     if len(set(y_train)) <= 1:
         _write_skip_summary(output_dir, args, source_rows, rows, "label_single_class", raw_grouped=raw_grouped, grouped=grouped)
         return 0
-    ranker.fit(x_train, y_train, group=train_group)
+    ranker.fit(x_train, y_train, group=train_group, sample_weight=sample_weights)
 
     output_dir.mkdir(parents=True, exist_ok=True)
     ranker.booster_.save_model(str(output_dir / "model.txt"))
@@ -84,13 +88,14 @@ def main(argv: list[str] | None = None) -> int:
     eval_features = [_row_features(row, args.feature_view, args.format_scope) for row in eval_rows]
     eval_x = vectorizer.transform(eval_features)
     scores = list(ranker.predict(eval_x))
-    metrics = _metrics(eval_rows, scores, eval_skipped=eval_skipped)
-    predictions = _prediction_rows(eval_rows, scores)
+    metrics = _metrics(eval_rows, scores, eval_skipped=eval_skipped, label_target=args.label_target)
+    predictions = _prediction_rows(eval_rows, scores, args.label_target)
     _write_jsonl(output_dir / "predictions.jsonl", predictions)
     (output_dir / "metrics.json").write_text(json.dumps(metrics, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
     summary = {
         "feature_view": args.feature_view,
         "format_scope": args.format_scope,
+        "label_target": args.label_target,
         "input_files": [str(path) for path in _input_paths(args.input)],
         "output_dir": str(output_dir),
         "source_row_count": len(source_rows),
@@ -103,9 +108,13 @@ def main(argv: list[str] | None = None) -> int:
         "train_query_count": len(train_queries),
         "eval_query_count": len(eval_queries),
         "eval_skipped": eval_skipped,
+        **split_info,
         "feature_count": len(feature_names),
-        "label_counts": dict(sorted(Counter(str(_gain(row.get("label"))) for row in rows).items())),
+        "label_target": args.label_target,
+        "label_counts": dict(sorted(Counter(str(_target_gain(row, args.label_target)) for row in rows).items())),
         "raw_label_counts": dict(sorted(Counter(str(int(row.get("label", 0) or 0)) for row in rows).items())),
+        "target_label_counts": dict(sorted(Counter(str(_target_gain(row, args.label_target)) for row in rows).items())),
+        "target_weight_counts": dict(sorted(Counter(str(_target_weight(row, args.label_target)) for row in rows).items())),
         "metrics": metrics,
     }
     (output_dir / "training_summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
@@ -118,6 +127,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--input", action="append", default=[], help="Input JSONL file. Repeatable; defaults to repair_training/datasets/*.jsonl.")
     parser.add_argument("--feature-view", choices=sorted(FEATURE_VIEWS), default="stable_only")
     parser.add_argument("--format-scope", choices=sorted(FORMAT_SCOPES), default="all", help="Train on one material format, or all rows for the legacy unified baseline.")
+    parser.add_argument("--label-target", choices=sorted(LABEL_TARGETS), default="immediate", help="Which collected label target to optimize.")
+    parser.add_argument("--split-by", choices=sorted(SPLIT_BY), default="query", help="Split train/eval by query, episode, or source material sample.")
     parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR))
     parser.add_argument("--seed", type=int, default=2026)
     parser.add_argument("--n-estimators", type=int, default=80)
@@ -169,7 +180,7 @@ def _load_rows(inputs: list[str]) -> list[dict[str, Any]]:
                     row = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                if isinstance(row, dict) and "query_id" in row and "label" in row:
+                if isinstance(row, dict) and "query_id" in row and "label" in row and row.get("row_type") != "terminal":
                     rows.append(row)
     return rows
 
@@ -220,14 +231,79 @@ def _min_candidates(args: argparse.Namespace) -> int:
     return max(1, int(getattr(args, "min_candidates_per_query", 2) or 2))
 
 
-def _split_queries(queries: list[str], seed: int) -> tuple[list[str], list[str]]:
-    if len(queries) < 5:
-        return queries, []
-    ordered = sorted(queries, key=lambda query: hashlib.sha256(f"{seed}:{query}".encode("utf-8")).hexdigest())
+def _split_groups(grouped: dict[str, list[dict[str, Any]]], args: argparse.Namespace) -> tuple[list[str], list[str], dict[str, Any]]:
+    split_by = str(getattr(args, "split_by", "query") or "query")
+    seed = int(getattr(args, "seed", 2026) or 2026)
+    queries = sorted(grouped)
+    if split_by == "query":
+        train, eval_ = _split_keys(queries, seed)
+        return train, eval_, {
+            "split_by": "query",
+            "split_fallback": "",
+            "train_source_count": 0,
+            "eval_source_count": 0,
+            "train_sources": [],
+            "eval_sources": [],
+        }
+    query_to_source: dict[str, str] = {}
+    source_to_queries: dict[str, list[str]] = defaultdict(list)
+    for query in queries:
+        rows = grouped.get(query) or []
+        source = _split_source_key(rows[0] if rows else {}, split_by)
+        query_to_source[query] = source
+        source_to_queries[source].append(query)
+    sources = sorted(source_to_queries)
+    if len(sources) < 2:
+        train, eval_ = _split_keys(queries, seed)
+        return train, eval_, {
+            "split_by": split_by,
+            "split_fallback": "query_too_few_sources",
+            "train_source_count": len(set(query_to_source.get(query, "") for query in train)),
+            "eval_source_count": len(set(query_to_source.get(query, "") for query in eval_)),
+            "train_sources": sorted(set(query_to_source.get(query, "") for query in train))[:200],
+            "eval_sources": sorted(set(query_to_source.get(query, "") for query in eval_))[:200],
+        }
+    train_sources, eval_sources = _split_keys(sources, seed)
+    if not eval_sources:
+        train_sources, eval_sources = sources, []
+    train_set = set(train_sources)
+    eval_set = set(eval_sources)
+    train = sorted(query for query in queries if query_to_source.get(query) in train_set)
+    eval_ = sorted(query for query in queries if query_to_source.get(query) in eval_set)
+    return train, eval_, {
+        "split_by": split_by,
+        "split_fallback": "",
+        "train_source_count": len(train_sources),
+        "eval_source_count": len(eval_sources),
+        "train_sources": train_sources[:200],
+        "eval_sources": eval_sources[:200],
+    }
+
+
+def _split_keys(keys: list[str], seed: int) -> tuple[list[str], list[str]]:
+    if len(keys) < 5:
+        return sorted(keys), []
+    ordered = sorted(keys, key=lambda key: hashlib.sha256(f"{seed}:{key}".encode("utf-8")).hexdigest())
     split = max(1, int(len(ordered) * 0.8))
     if split >= len(ordered):
         return ordered, []
     return sorted(ordered[:split]), sorted(ordered[split:])
+
+
+def _split_source_key(row: dict[str, Any], split_by: str) -> str:
+    if split_by == "episode":
+        value = row.get("episode_id") or row.get("sample_id") or row.get("query_id")
+        return str(value or "unknown")
+    if split_by == "source_sample":
+        value = row.get("material_sample_id")
+        if not value:
+            derivation = row.get("source_derivation") if isinstance(row.get("source_derivation"), dict) else {}
+            value = derivation.get("sample_id") or derivation.get("source_sample_id")
+        if not value:
+            episode = str(row.get("episode_id") or row.get("sample_id") or row.get("query_id") or "")
+            value = episode.split(":")[0].split("_zip_")[0] if episode else ""
+        return str(value or "unknown")
+    return str(row.get("query_id") or "unknown")
 
 
 def _group_sizes(query_ids: list[str]) -> list[int]:
@@ -253,6 +329,83 @@ def _gain(label: Any) -> int:
     except Exception:
         raw = 0
     return int(LABEL_GAIN.get(raw, 0))
+
+
+def _target_gain(row: dict[str, Any], target: str) -> int:
+    target = str(target or "immediate")
+    targets = row.get("training_targets") if isinstance(row.get("training_targets"), dict) else {}
+    if target == "future":
+        return int(_gain(targets.get("future_gain", row.get("label"))))
+    if target == "discounted":
+        value = targets.get("discounted_gain")
+        if value is None:
+            details = row.get("label_details") if isinstance(row.get("label_details"), dict) else {}
+            value = details.get("discounted_future_gain")
+        return _rank_label_from_gain_float(_gain_float(value, fallback=row.get("label")))
+    if target == "blended":
+        value = targets.get("blended_gain")
+        return _rank_label_from_gain_float(_gain_float(value, fallback=row.get("label")))
+    if target == "strategy":
+        value = targets.get("strategy_gain")
+        if value is None:
+            details = row.get("label_details") if isinstance(row.get("label_details"), dict) else {}
+            value = details.get("strategy_gain")
+        return _strategy_rank_label(row, value)
+    return int(_gain(row.get("label")))
+
+
+def _strategy_rank_label(row: dict[str, Any], value: Any) -> int:
+    targets = row.get("training_targets") if isinstance(row.get("training_targets"), dict) else {}
+    risk_class = str(targets.get("risk_class") or "")
+    if risk_class.startswith("hard_negative") or int(row.get("label", 0) or 0) < 0:
+        return 0
+    gain = _gain_float(value, fallback=row.get("label"))
+    if gain <= 0:
+        return 1
+    if gain < 2:
+        return 2
+    if gain < 3:
+        return 3
+    return 5
+
+
+def _target_weight(row: dict[str, Any], target: str) -> float:
+    if str(target or "") != "strategy":
+        return 1.0
+    targets = row.get("training_targets") if isinstance(row.get("training_targets"), dict) else {}
+    try:
+        hard_weight = float(targets.get("hard_negative_weight", 0.0) or 0.0)
+    except Exception:
+        hard_weight = 0.0
+    if hard_weight > 0:
+        return 1.0 + hard_weight
+    return 1.0
+
+
+def _rank_label_from_gain_float(value: float) -> int:
+    if value <= 0:
+        return 0
+    return max(0, min(4, int(math.ceil(float(value)))))
+
+
+def _gain_float(value: Any, *, fallback: Any = 0) -> float:
+    try:
+        if value is None:
+            return float(_gain(fallback))
+        raw = float(value)
+    except Exception:
+        return float(_gain(fallback))
+    # Stored future targets use raw labels; map integer labels to LambdaMART gains
+    # while preserving discounted/blended fractional distance.
+    if raw in LABEL_GAIN:
+        return float(LABEL_GAIN[int(raw)])
+    lower = math.floor(raw)
+    upper = math.ceil(raw)
+    if lower == upper:
+        return float(LABEL_GAIN.get(int(lower), 0))
+    low_gain = float(LABEL_GAIN.get(int(lower), 0))
+    high_gain = float(LABEL_GAIN.get(int(upper), low_gain))
+    return low_gain + (high_gain - low_gain) * (raw - lower)
 
 
 def _row_features(row: dict[str, Any], view: str, format_scope: str = "all") -> dict[str, Any]:
@@ -295,6 +448,7 @@ def _write_skip_summary(
         "skip_reason": reason,
         "feature_view": args.feature_view,
         "format_scope": args.format_scope,
+        "split_by": str(getattr(args, "split_by", "query") or "query"),
         "input_files": [str(path) for path in _input_paths(args.input)],
         "output_dir": str(output_dir),
         "source_row_count": len(source_rows),
@@ -306,8 +460,9 @@ def _write_skip_summary(
         "min_candidates_per_query": _min_candidates(args),
         "min_trainable_queries": int(args.min_trainable_queries),
         "raw_label_counts": dict(sorted(Counter(str(value) for value in label_values).items())),
-        "label_gain_counts": dict(sorted(Counter(str(_gain(value)) for value in label_values).items())),
-        "has_multiple_labels": len(set(_gain(value) for value in label_values)) > 1,
+        "label_gain_counts": dict(sorted(Counter(str(_target_gain(row, args.label_target)) for row in rows).items())),
+        "target_weight_counts": dict(sorted(Counter(str(_target_weight(row, args.label_target)) for row in rows).items())),
+        "has_multiple_labels": len(set(_target_gain(row, args.label_target) for row in rows)) > 1,
         "has_candidate_competition": any(len(items) >= _min_candidates(args) for items in raw_grouped.values()),
     }
     (output_dir / "skip_summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
@@ -317,7 +472,7 @@ def _write_skip_summary(
 def _flatten(output: dict[str, Any], prefix: str, value: Any) -> None:
     if isinstance(value, dict):
         for key, item in value.items():
-            if key in {"after_state", "delta_features", "label_details"}:
+            if key in {"after_state", "delta_features", "label_details", "difficulty_tags"}:
                 continue
             _flatten(output, f"{prefix}.{key}", item)
         return
@@ -358,7 +513,7 @@ def _nested(row: dict[str, Any], *keys: str) -> Any:
     return current
 
 
-def _metrics(rows: list[dict[str, Any]], scores: list[float], *, eval_skipped: bool) -> dict[str, Any]:
+def _metrics(rows: list[dict[str, Any]], scores: list[float], *, eval_skipped: bool, label_target: str) -> dict[str, Any]:
     by_query: dict[str, list[tuple[dict[str, Any], float]]] = defaultdict(list)
     for row, score in zip(rows, scores):
         by_query[str(row.get("query_id") or "")].append((row, float(score)))
@@ -368,7 +523,7 @@ def _metrics(rows: list[dict[str, Any]], scores: list[float], *, eval_skipped: b
     top1_hits = []
     for items in by_query.values():
         ranked = sorted(items, key=lambda item: item[1], reverse=True)
-        labels = [_gain(row.get("label")) for row, _ in ranked]
+        labels = [_target_gain(row, label_target) for row, _ in ranked]
         ideal = sorted(labels, reverse=True)
         ndcg1.append(_ndcg_at(labels, ideal, 1))
         ndcg3.append(_ndcg_at(labels, ideal, 3))
@@ -380,7 +535,10 @@ def _metrics(rows: list[dict[str, Any]], scores: list[float], *, eval_skipped: b
         "eval_skipped": bool(eval_skipped),
         "query_count": len(by_query),
         "row_count": len(rows),
+        "label_target": label_target,
         "label_counts": dict(sorted(Counter(str(int(row.get("label", 0) or 0)) for row in rows).items())),
+        "target_label_counts": dict(sorted(Counter(str(_target_gain(row, label_target)) for row in rows).items())),
+        "target_weight_counts": dict(sorted(Counter(str(_target_weight(row, label_target)) for row in rows).items())),
         "ndcg@1": _mean(ndcg1),
         "ndcg@3": _mean(ndcg3),
         "top1_label_mean": _mean(top1_labels),
@@ -404,7 +562,7 @@ def _mean(values: list[float | int]) -> float:
     return float(sum(float(value) for value in values) / len(values))
 
 
-def _prediction_rows(rows: list[dict[str, Any]], scores: list[float]) -> list[dict[str, Any]]:
+def _prediction_rows(rows: list[dict[str, Any]], scores: list[float], label_target: str) -> list[dict[str, Any]]:
     output = []
     for row, score in sorted(zip(rows, scores), key=lambda item: (str(item[0].get("query_id") or ""), -float(item[1]))):
         output.append({
@@ -412,6 +570,8 @@ def _prediction_rows(rows: list[dict[str, Any]], scores: list[float]) -> list[di
             "sample_id": row.get("sample_id"),
             "module": row.get("module"),
             "label": row.get("label"),
+            "target_gain": _target_gain(row, label_target),
+            "target_weight": _target_weight(row, label_target),
             "label_status": row.get("label_status"),
             "score": float(score),
             "selected_by_current_system": bool(row.get("selected_by_current_system")),
