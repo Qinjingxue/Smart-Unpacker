@@ -34,6 +34,7 @@ def build_runtime_feature_record(
     failure = job.extraction_failure if isinstance(job.extraction_failure, dict) else {}
     path_actions = previous_actions if previous_actions is not None else failure.get("previous_actions")
     path_modules = previous_modules if previous_modules is not None else failure.get("previous_modules")
+    runtime_state = _runtime_state_summary(runtime_state_summary or {})
     return {
         "feature_contract_version": FEATURE_CONTRACT_VERSION,
         "runtime_context": {
@@ -45,10 +46,10 @@ def build_runtime_feature_record(
             "previous_action_count": len(path_actions or []),
             "previous_modules": list(path_modules or []),
             "previous_module_count": len(path_modules or []),
-            "runtime_state_summary": _runtime_state_summary(runtime_state_summary or {}),
+            "runtime_state_summary": runtime_state,
             "job_summary": _job_summary(job),
         },
-        "candidate_proposal": _candidate_proposal(payload),
+        "candidate_proposal": _candidate_proposal(payload, job=job, runtime_state_summary=runtime_state),
         "repair_prior_features": prior_payload,
     }
 
@@ -154,7 +155,7 @@ def _job_summary(job: RepairJob) -> dict[str, Any]:
     }
 
 
-def _candidate_proposal(payload: dict[str, Any]) -> dict[str, Any]:
+def _candidate_proposal(payload: dict[str, Any], *, job: RepairJob | None = None, runtime_state_summary: dict[str, Any] | None = None) -> dict[str, Any]:
     output = {
         key: payload.get(key)
         for key in (
@@ -174,6 +175,9 @@ def _candidate_proposal(payload: dict[str, Any]) -> dict[str, Any]:
             "input_kind",
             "partial",
             "lazy",
+            "patch_span_count",
+            "patch_operation_count",
+            "affected_entry_count",
         )
         if key in payload
     }
@@ -211,7 +215,91 @@ def _candidate_proposal(payload: dict[str, Any]) -> dict[str, Any]:
         }
         if str(output["proposal_ltr"].get("plan_kind") or "") == "materialized":
             output["proposal_ltr"].pop("plan_kind", None)
+    output.update(_zip_plan_risk_features(payload, job=job, runtime_state_summary=runtime_state_summary or {}))
     return output
+
+
+def _zip_plan_risk_features(payload: dict[str, Any], *, job: RepairJob | None, runtime_state_summary: dict[str, Any]) -> dict[str, Any]:
+    module = str(payload.get("module") or "").lower()
+    actions = [str(action).lower() for action in payload.get("actions") or []]
+    text = " ".join([module, *actions])
+    hints = _repair_hints(job) if job is not None else {}
+    raw_damage_flags = payload.get("damage_flags") or (getattr(job, "damage_flags", None) if job is not None else None) or []
+    damage_flags = {str(flag).lower() for flag in raw_damage_flags}
+    context_flags = {str(flag).lower() for flag in runtime_state_summary.get("damage_flags") or []}
+    all_flags = damage_flags | context_flags
+    directory_detected = bool(runtime_state_summary.get("directory_detected"))
+    entry_count = _int(runtime_state_summary.get("entry_count"))
+    boundary_untrusted = bool(hints.get("boundary_untrusted")) or "boundary_unreliable" in all_flags or "trailing_junk" in all_flags
+    likely_payload_damage = bool(hints.get("likely_payload_damage")) or "payload_damage" in all_flags or "crc_error" in all_flags or "checksum_error" in all_flags
+
+    requires_existing_cd = any(token in text for token in ("comment_length", "central_directory_offset", "central_directory_count", "data_descriptor"))
+    requires_valid_eocd = any(token in text for token in ("eocd", "comment_length", "central_directory_offset", "central_directory_count"))
+    uses_data_descriptor = "data_descriptor" in text or "descriptor" in text
+    touches_payload = any(token in text for token in ("payload", "partial", "deep", "quarantine", "descriptor"))
+    directory_rewrite = any(token in text for token in ("central_directory", "directory", "eocd", "rebuild", "comment_length"))
+    boundary_trim = any(token in text for token in ("trim", "trailing", "boundary"))
+
+    expected_output_kind = "generic"
+    if boundary_trim:
+        expected_output_kind = "boundary_trim"
+    elif "quarantine" in text:
+        expected_output_kind = "partial_quarantine"
+    elif "partial" in text or "deep" in text:
+        expected_output_kind = "partial_deep"
+    elif directory_rewrite:
+        expected_output_kind = "directory_repair"
+    elif uses_data_descriptor:
+        expected_output_kind = "descriptor_recovery"
+
+    directory_confidence = 0.0
+    if directory_detected:
+        directory_confidence += 0.55
+    if entry_count > 0:
+        directory_confidence += 0.25
+    if requires_valid_eocd and boundary_untrusted:
+        directory_confidence -= 0.25
+    if "missing_directory" in all_flags or "central_directory_damaged" in all_flags:
+        directory_confidence -= 0.20
+    directory_confidence = _clamp01(directory_confidence)
+
+    offset_confidence = 0.45
+    if directory_detected:
+        offset_confidence += 0.20
+    if boundary_untrusted:
+        offset_confidence -= 0.20
+    if "offset" in text:
+        offset_confidence -= 0.10
+    offset_confidence = _clamp01(offset_confidence)
+
+    risk = 0.0
+    if requires_existing_cd and not directory_detected:
+        risk += 0.28
+    if requires_valid_eocd and boundary_untrusted:
+        risk += 0.18
+    if uses_data_descriptor and entry_count <= 0:
+        risk += 0.20
+    if touches_payload and likely_payload_damage:
+        risk += 0.18
+    if boundary_trim and not boundary_untrusted:
+        risk += 0.12
+    if "comment_length" in text:
+        risk += 0.08
+    no_output_risk_score = _clamp01(risk)
+
+    return {
+        "plan_requires_existing_cd": requires_existing_cd,
+        "plan_requires_valid_eocd": requires_valid_eocd,
+        "plan_uses_data_descriptor": uses_data_descriptor,
+        "plan_touches_payload": touches_payload,
+        "plan_expected_output_kind": expected_output_kind,
+        "plan_directory_rewrite": directory_rewrite,
+        "plan_boundary_trim": boundary_trim,
+        "offset_confidence": offset_confidence,
+        "directory_confidence": directory_confidence,
+        "no_output_prone_candidate": no_output_risk_score >= 0.35,
+        "no_output_risk_score": no_output_risk_score,
+    }
 
 
 def _repair_prior_payload(repair_prior: RepairPrior | dict[str, Any] | None, payload: dict[str, Any]) -> dict[str, Any]:
@@ -274,6 +362,10 @@ def _float(value: Any, *, default: float = 0.0) -> float:
         return float(value)
     except Exception:
         return float(default)
+
+
+def _clamp01(value: float) -> float:
+    return max(0.0, min(1.0, float(value or 0.0)))
 
 
 def _optional_float(value: Any) -> float | None:

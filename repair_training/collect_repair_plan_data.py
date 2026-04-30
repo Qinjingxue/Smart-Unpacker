@@ -347,7 +347,22 @@ def _effective_max_candidates(record: dict[str, Any], args: argparse.Namespace) 
     stream_cap = int(args.stream_large_max_candidates_per_round or 0)
     if base > 0 and stream_cap > 0 and _is_large_stream_sample(record, args):
         return max(1, min(base, stream_cap))
+    if _is_zip_high_recovery_competition_record(record):
+        return max(base, 8)
     return base
+
+
+def _is_zip_high_recovery_competition_record(record: dict[str, Any]) -> bool:
+    if _normalize_format(str(record.get("material_format") or record.get("format") or "")) != "zip":
+        return False
+    profile = str(record.get("damage_profile") or "")
+    return profile in {
+        "zip_wrong_local_offset_extracts_valid_other_entry",
+        "zip_eocd_cd_half_damaged",
+        "zip_quarantine_keeps_corrupted_entry",
+        "zip_drop_central_directory_keep_local_headers",
+        "zip_rebuild_directory_keeps_bad_payload",
+    }
 
 
 def _is_large_stream_sample(record: dict[str, Any], args: argparse.Namespace) -> bool:
@@ -651,7 +666,7 @@ def _collect_sample_rows(record: dict[str, Any], args: argparse.Namespace, debug
                     rows.append(_rollout_terminal_row(record, state, "dead_end", "selected branch produced no repaired input", after_by_id.get(candidate_id), parent_action_row_id=entry["action_row_id"], parent_candidate_id=candidate_id))
                     continue
                 label_info = label_by_id.get(candidate_id, {})
-                if int(label_info.get("label", 0) or 0) == 3:
+                if int(label_info.get("label", 0) or 0) == 3 and rollout_mode != "greedy_current_selector":
                     rows.append(_rollout_terminal_row(record, state, "complete", "branch reached complete repair", after_by_id.get(candidate_id), parent_action_row_id=entry["action_row_id"], parent_candidate_id=candidate_id, terminal_label=3))
                     continue
                 child_runtime_verification = _terminal_verification_summary_from_state(record, after_by_id.get(candidate_id, {}))
@@ -1355,7 +1370,7 @@ def _materialize_for_collection(candidates: list[Any], selector: CandidateSelect
     budget = 1 if bool(args.materialize_selected_only) else max(1, int(args.materialize_top_k_per_round or 1))
     budget = min(budget, max(1, _effective_max_candidates(record, args)))
     if _normalize_format(str(record.get("material_format") or record.get("format") or "")) == "zip":
-        selected = _balanced_zip_materialization_selection(ranked, budget)
+        selected = _balanced_zip_materialization_selection(ranked, budget, record)
     else:
         selected = ranked[:budget]
     materialized = []
@@ -1387,7 +1402,7 @@ def _is_zip_deceptive_record(record: dict[str, Any]) -> bool:
     )
 
 
-def _balanced_zip_materialization_selection(ranked: list[tuple[float, int, Any]], budget: int) -> list[tuple[float, int, Any]]:
+def _balanced_zip_materialization_selection(ranked: list[tuple[float, int, Any]], budget: int, record: dict[str, Any]) -> list[tuple[float, int, Any]]:
     selected: list[tuple[float, int, Any]] = []
     seen: set[str] = set()
 
@@ -1416,7 +1431,10 @@ def _balanced_zip_materialization_selection(ranked: list[tuple[float, int, Any]]
 
     for entry in ranked[:1]:
         add(entry)
-    quotas = (("directory", 2), ("deep_partial", 2), ("risk", 2), ("boundary", 1))
+    if _is_zip_high_recovery_competition_record(record):
+        quotas = (("directory", 2), ("deep_partial", 2), ("boundary", 1), ("risk", 2))
+    else:
+        quotas = (("directory", 2), ("deep_partial", 2), ("risk", 2), ("boundary", 1))
     for wanted, count in quotas:
         added = 0
         for entry in ranked:

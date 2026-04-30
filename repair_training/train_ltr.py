@@ -846,18 +846,84 @@ def _prediction_rows(rows: list[dict[str, Any]], scores: list[float], label_targ
         output.append({
             "query_id": row.get("query_id"),
             "sample_id": row.get("sample_id"),
+            "candidate_id": row.get("candidate_id"),
+            "material_format": row.get("material_format"),
+            "damage_profile": _prediction_damage_profile(row),
             "module": row.get("module"),
             "label": row.get("label"),
             "target_gain": _target_gain(row, label_target),
             "target_weight": _target_weight(row, label_target),
+            "terminal_recovery_ratio": _prediction_terminal_recovery_ratio(row),
             "best_label_count": sum(1 for value in targets if value == best),
             "target_unique_count": len(set(targets)),
             "hard_negative_positive_competition": bool(has_hard and has_positive),
             "label_status": row.get("label_status"),
+            "is_hard_negative": _prediction_is_hard_negative(row),
             "score": float(score),
             "selected_by_current_system": bool(row.get("selected_by_current_system")),
         })
     return output
+
+
+def _prediction_terminal_recovery_ratio(row: dict[str, Any]) -> float:
+    targets = row.get("training_targets") if isinstance(row.get("training_targets"), dict) else {}
+    details = row.get("label_details") if isinstance(row.get("label_details"), dict) else {}
+    for value in (
+        targets.get("terminal_recovery_ratio"),
+        row.get("terminal_recovery_ratio"),
+        details.get("terminal_recovery_ratio"),
+        targets.get("subtree_best_terminal_recovery_ratio"),
+        details.get("subtree_best_terminal_recovery_ratio"),
+    ):
+        if value is not None:
+            return _ratio_float(value)
+    label = int(row.get("label", 0) or 0)
+    if label >= 3:
+        return 1.0
+    if label == 2:
+        return 0.5
+    if label == 1:
+        return 0.25
+    return 0.0
+
+
+def _prediction_is_hard_negative(row: dict[str, Any]) -> bool:
+    return bool(int(row.get("label", 0) or 0) < 0 or str(row.get("label_status") or "") == "hard_negative")
+
+
+def _prediction_damage_profile(row: dict[str, Any]) -> str:
+    explicit = str(_nested(row, "stable_features", "state", "damage_profile") or row.get("damage_profile") or "")
+    if explicit:
+        return explicit
+    sample = str(row.get("sample_id") or row.get("episode_id") or "")
+    known = (
+        "zip_two_step_boundary_then_cd_rebuild",
+        "zip_two_step_comment_fix_then_eocd_repair",
+        "zip_two_step_local_header_then_cd_offset",
+        "zip_two_step_drop_cd_with_eocd_noise",
+        "zip_drop_central_directory_keep_local_headers",
+        "zip_cd_offset_near_valid_wrong_entry",
+        "zip_eocd_counts_wrong_but_cd_readable",
+        "zip_local_header_crc_wrong_cd_correct",
+        "zip_cd_crc_wrong_local_payload_correct",
+        "zip_comment_overlap_eocd_shifted",
+        "zip_duplicate_entries_conflicting_crc",
+        "zip_data_descriptor_conflict",
+        "zip_partial_cd_rebuild_then_payload_mismatch",
+        "zip_directory_only_bad_payload",
+        "zip_wrong_local_offset_extracts_valid_other_entry",
+        "zip_rebuild_directory_keeps_bad_payload",
+        "zip_quarantine_keeps_corrupted_entry",
+        "zip_eocd_cd_half_damaged",
+        "zip_single_entry_payload_damage",
+        "structural_boundary",
+        "structural_header_tail",
+        "structural_footer_tail",
+    )
+    for profile in known:
+        if profile in sample:
+            return profile
+    return "unknown"
 
 
 def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:

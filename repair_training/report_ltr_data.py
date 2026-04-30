@@ -125,6 +125,7 @@ def _build_report(rows: list[dict[str, Any]], model_root: Path) -> dict[str, Any
         "terminal_recovery": recovery,
         "per_format": _per_format_report(rows, model_metrics),
         "model_metric_comparison": model_metrics,
+        "model_top3_comparison": _model_top3_comparison(model_metrics),
         "repair_prior_dependency": _repair_prior_dependency(model_metrics),
     }
     report["warnings"] = _quality_warnings(report)
@@ -740,6 +741,10 @@ def _series_summary_float(values: list[float]) -> dict[str, Any]:
     }
 
 
+def _mean(values: list[float | int]) -> float:
+    return float(statistics.mean(values)) if values else 0.0
+
+
 def _percentile(ordered: list[int], ratio: float) -> float:
     if not ordered:
         return 0.0
@@ -785,6 +790,7 @@ def _model_metrics(model_root: Path, source_counts: Counter[str], row_count: int
             "query_count": summary.get("query_count"),
             "feature_count": summary.get("feature_count"),
             "metrics": summary.get("metrics", {}),
+            "top3_metrics": _prediction_top3_metrics(summary_path.parent / "predictions.jsonl"),
             "matches_current_dataset": not stale_reasons,
             "stale_reasons": stale_reasons,
         }
@@ -811,6 +817,141 @@ def _model_metrics(model_root: Path, source_counts: Counter[str], row_count: int
             "matches_current_dataset": not stale_reasons,
             "stale_reasons": stale_reasons,
         }
+    return output
+
+
+def _prediction_top3_metrics(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        return {}
+    groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    row_count = 0
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(row, dict):
+                continue
+            groups[str(row.get("query_id") or "")].append(row)
+            row_count += 1
+    if not groups:
+        return {"query_count": 0, "prediction_row_count": row_count}
+    top3_means: list[float] = []
+    top3_best_values: list[float] = []
+    contains_hard_negative = 0
+    wasted_slot_ratios: list[float] = []
+    oracle_best_covered = 0
+    no_output_wasted_by_module: Counter[str] = Counter()
+    no_output_wasted_by_profile: Counter[str] = Counter()
+    no_output_wasted_by_profile_module: Counter[str] = Counter()
+    wasted_by_module: Counter[str] = Counter()
+    wasted_by_profile: Counter[str] = Counter()
+    for items in groups.values():
+        ranked = sorted(items, key=lambda item: _as_float(item.get("score")), reverse=True)
+        top3 = ranked[:3]
+        if not top3:
+            continue
+        all_recoveries = [_prediction_recovery_ratio(item) for item in ranked]
+        top3_recoveries = [_prediction_recovery_ratio(item) for item in top3]
+        oracle_best = max(all_recoveries, default=0.0)
+        top3_best = max(top3_recoveries, default=0.0)
+        top3_means.append(statistics.mean(top3_recoveries))
+        top3_best_values.append(top3_best)
+        if any(_prediction_is_hard_negative(item) for item in top3):
+            contains_hard_negative += 1
+        wasted_slot_ratios.append(sum(1 for item in top3 if _prediction_is_wasted_slot(item)) / max(1, len(top3)))
+        for item in top3:
+            if not _prediction_is_wasted_slot(item):
+                continue
+            module = _prediction_module(item)
+            profile = _prediction_profile(item)
+            wasted_by_module[module] += 1
+            wasted_by_profile[profile] += 1
+            if str(item.get("label_status") or "") == "no_output":
+                no_output_wasted_by_module[module] += 1
+                no_output_wasted_by_profile[profile] += 1
+                no_output_wasted_by_profile_module[f"{profile}|{module}"] += 1
+        if top3_best >= oracle_best - 1e-9:
+            oracle_best_covered += 1
+    query_count = max(1, len(groups))
+    return {
+        "query_count": len(groups),
+        "prediction_row_count": row_count,
+        "top3_terminal_recovery_mean": _mean(top3_means),
+        "top3_best_terminal_recovery_mean": _mean(top3_best_values),
+        "top3_contains_hard_negative_ratio": contains_hard_negative / query_count,
+        "top3_wasted_slot_ratio": _mean(wasted_slot_ratios),
+        "top3_oracle_best_covered_ratio": oracle_best_covered / query_count,
+        "top3_wasted_by_module_top20": dict(wasted_by_module.most_common(20)),
+        "top3_wasted_by_profile_top20": dict(wasted_by_profile.most_common(20)),
+        "top3_no_output_wasted_by_module_top20": dict(no_output_wasted_by_module.most_common(20)),
+        "top3_no_output_wasted_by_profile_top20": dict(no_output_wasted_by_profile.most_common(20)),
+        "top3_no_output_wasted_by_profile_module_top20": dict(no_output_wasted_by_profile_module.most_common(20)),
+    }
+
+
+def _prediction_recovery_ratio(row: dict[str, Any]) -> float:
+    if row.get("terminal_recovery_ratio") is not None:
+        return _clamp01(_as_float(row.get("terminal_recovery_ratio")))
+    gain = int(_as_float(row.get("target_gain")))
+    if gain >= 4:
+        return 1.0
+    if gain == 3:
+        return 0.67
+    if gain == 2:
+        return 0.34
+    if gain == 1:
+        return 0.20
+    return 0.0
+
+
+def _prediction_is_hard_negative(row: dict[str, Any]) -> bool:
+    return bool(row.get("is_hard_negative") or str(row.get("label_status") or "") == "hard_negative" or int(_as_float(row.get("label"))) < 0)
+
+
+def _prediction_is_wasted_slot(row: dict[str, Any]) -> bool:
+    status = str(row.get("label_status") or "")
+    return bool(_prediction_recovery_ratio(row) <= 0.0 or status in {"hard_negative", "no_candidates", "no_progress", "no_output"})
+
+
+def _prediction_module(row: dict[str, Any]) -> str:
+    return str(row.get("module") or "<none>")
+
+
+def _prediction_profile(row: dict[str, Any]) -> str:
+    return str(row.get("damage_profile") or "unknown")
+
+
+def _model_top3_comparison(model_metrics: dict[str, Any]) -> dict[str, Any]:
+    output: dict[str, Any] = {}
+    grouped: dict[str, dict[str, Any]] = defaultdict(dict)
+    for key, item in model_metrics.items():
+        if not isinstance(item, dict):
+            continue
+        view = str(item.get("feature_view") or Path(str(key)).name)
+        scope = str(key).rsplit("/", 1)[0] if "/" in str(key) else str(item.get("format_scope") or "all")
+        grouped[scope][view] = item.get("top3_metrics", {})
+    for scope, views in grouped.items():
+        if not views:
+            continue
+        teacher = views.get("teacher_only_baseline") if isinstance(views.get("teacher_only_baseline"), dict) else {}
+        scope_output: dict[str, Any] = {}
+        for view, metrics in views.items():
+            if not isinstance(metrics, dict) or not metrics:
+                continue
+            entry = dict(metrics)
+            if teacher:
+                entry["model_top3_vs_teacher_top3_recovery_delta"] = (
+                    float(metrics.get("top3_terminal_recovery_mean", 0.0) or 0.0)
+                    - float(teacher.get("top3_terminal_recovery_mean", 0.0) or 0.0)
+                )
+            scope_output[view] = entry
+        if scope_output:
+            output[scope] = scope_output
     return output
 
 
@@ -932,6 +1073,7 @@ def _markdown_report(report: dict[str, Any]) -> str:
         f"- Rollout: `{json.dumps(report.get('rollout', {}), ensure_ascii=False, sort_keys=True)}`",
         f"- Difficulty: `{json.dumps(report.get('difficulty', {}), ensure_ascii=False, sort_keys=True)}`",
         f"- Terminal recovery: `{json.dumps(report.get('terminal_recovery', {}), ensure_ascii=False, sort_keys=True)}`",
+        f"- Model top3: `{json.dumps(report.get('model_top3_comparison', {}), ensure_ascii=False, sort_keys=True)}`",
         f"- Format detection: `{json.dumps(report.get('format_detection_quality', {}), ensure_ascii=False, sort_keys=True)}`",
         f"- Warnings: `{json.dumps(report.get('warnings', []), ensure_ascii=False, sort_keys=True)}`",
         "",
@@ -944,7 +1086,7 @@ def _markdown_report(report: dict[str, Any]) -> str:
         "## Model Metrics",
     ])
     for name, item in report.get("model_metric_comparison", {}).items():
-        lines.append(f"- `{name}`: `{json.dumps(item.get('metrics', {}), ensure_ascii=False, sort_keys=True)}`")
+        lines.append(f"- `{name}`: metrics=`{json.dumps(item.get('metrics', {}), ensure_ascii=False, sort_keys=True)}` top3=`{json.dumps(item.get('top3_metrics', {}), ensure_ascii=False, sort_keys=True)}`")
     lines.append("")
     return "\n".join(lines)
 

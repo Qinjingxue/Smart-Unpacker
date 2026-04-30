@@ -65,7 +65,7 @@ def main(argv: list[str] | None = None) -> int:
         material_format="zip",
         material_sample_id="runtime_alignment",
     )
-    record["runtime_damage_flags"] = ["damaged"]
+    record["runtime_damage_flags"] = _alignment_runtime_damage_flags(case)
     record["runtime_initial_verification"] = _verification_summary_payload(_initial_verification(case))
     manifest.write_text(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8")
 
@@ -108,6 +108,13 @@ def _write_clean_zip(path: Path) -> None:
     with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         for name, payload in payloads.items():
             archive.writestr(name, payload)
+
+
+def _alignment_runtime_damage_flags(case) -> list[str]:
+    flags = [str(flag) for flag in getattr(case, "damage_flags", []) or [] if str(flag)]
+    if "damaged" not in flags:
+        flags.append("damaged")
+    return flags
 
 
 def _run_training_collector(root: Path, manifest: Path, args: argparse.Namespace) -> dict[str, Any]:

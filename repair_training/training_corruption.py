@@ -1084,6 +1084,7 @@ def _zip_corpus_mutations(data: bytes, randomizer: random.Random, profile: str) 
             mutations.append(_truncate("corpus_zip_drop_central_directory_keep_local_headers", eocd, "zip.central_directory", "central directory is missing but local headers remain"))
         elif profile == "zip_eocd_cd_half_damaged":
             mutations.extend(_zip_eocd_directory_conflict_mutations(eocd))
+            mutations.extend(_zip_cd_offset_near_valid_mutations(data, cd_headers, entry_infos))
             if cd_headers:
                 mutations.append(_replace_bytes("corpus_zip_cd_first_crc_zero", cd_headers[0] + 16, b"\0\0\0\0", "zip.central_directory.crc", "central directory entry CRC is untrusted"))
         elif profile == "zip_cd_offset_near_valid_wrong_entry":
@@ -1139,11 +1140,16 @@ def _zip_corpus_mutations(data: bytes, randomizer: random.Random, profile: str) 
         elif profile == "zip_quarantine_keeps_corrupted_entry":
             mutations.extend(_zip_eocd_count_mutations(eocd, count_delta=1))
             mutations.extend(_zip_cd_offset_near_valid_mutations(data, cd_headers, entry_infos))
-            mutations.extend(_zip_damage_payloads(data, entry_infos, randomizer, all_entries=False, name="corpus_zip_quarantine_keeps_corrupted_entry", expected_effect="quarantine may preserve a corrupted entry with a known name"))
+            if randomizer.random() < 0.45:
+                mutations.extend(_zip_damage_payloads(data, entry_infos, randomizer, all_entries=False, name="corpus_zip_quarantine_keeps_corrupted_entry", expected_effect="quarantine may preserve a corrupted entry with a known name"))
+            else:
+                mutations.extend(_zip_local_crc_mutations(entry_infos, randomizer))
         elif profile == "zip_wrong_local_offset_extracts_valid_other_entry":
             mutations.extend(_zip_cd_offset_near_valid_mutations(data, cd_headers, entry_infos))
             mutations.extend(_zip_cd_crc_mutations(cd_headers, randomizer))
             mutations.extend(_zip_eocd_count_mutations(eocd, count_delta=1))
+            if randomizer.random() < 0.35:
+                mutations.append(_append("corpus_zip_wrong_local_offset_tail_probe_noise", _random_junk(randomizer, "ZIPWROFF", 8, 32), "archive.tail", "boundary probe can distract offset repair"))
         elif profile == "zip_crc_repair_masks_payload_mismatch":
             mutations.extend(_zip_damage_payloads(data, entry_infos, randomizer, all_entries=False, name="corpus_zip_crc_repair_masks_payload_mismatch", expected_effect="CRC repair may hide a payload mismatch"))
             mutations.extend(_zip_cd_crc_mutations(cd_headers, randomizer, value=b"\xff\xff\xff\xff"))

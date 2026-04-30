@@ -391,6 +391,7 @@ def candidate_feature_payload(candidate: RepairCandidate) -> dict[str, Any]:
     native_validation = _native_validation(candidate.validations)
     ranking = candidate_ranking_breakdown(candidate)
     history = candidate_history_features(candidate)
+    plan_metrics = _candidate_plan_metrics(candidate)
     return {
         "candidate_id": candidate_digest(candidate),
         "module": candidate.module_name,
@@ -410,6 +411,9 @@ def candidate_feature_payload(candidate: RepairCandidate) -> dict[str, Any]:
         "actions": list(candidate.actions),
         "damage_flags": list(candidate.damage_flags),
         "patch_cost": _patch_plan_cost(candidate),
+        "patch_span_count": plan_metrics["patch_span_count"],
+        "patch_operation_count": plan_metrics["patch_operation_count"],
+        "affected_entry_count": plan_metrics["affected_entry_count"],
         "benefit_score": ranking["benefit_score"],
         "evidence_score": ranking["evidence_score"],
         "cost_penalty": ranking["cost_penalty"],
@@ -843,6 +847,36 @@ def _plan_shape(plan: dict[str, Any]) -> dict[str, Any]:
         "patch_count": len(patches),
         "patch_operation_count": operation_count,
         "patch_digest": archive_state.get("patch_digest") or plan.get("patch_digest") or "",
+    }
+
+
+def _candidate_plan_metrics(candidate: RepairCandidate) -> dict[str, int]:
+    archive_state = candidate.plan.get("archive_state") if isinstance(candidate.plan, dict) else {}
+    if not isinstance(archive_state, dict):
+        archive_state = {}
+    patches = archive_state.get("patches") or archive_state.get("patch_stack") or []
+    operation_count = 0
+    touched_offsets: set[int] = set()
+    for patch in patches:
+        if not isinstance(patch, dict):
+            continue
+        for operation in patch.get("operations") or []:
+            if not isinstance(operation, dict):
+                continue
+            operation_count += 1
+            try:
+                touched_offsets.add(int(operation.get("offset", 0) or 0))
+            except Exception:
+                pass
+    actions = [str(action).lower() for action in candidate.actions or []]
+    affected_entry_count = 0
+    for action in actions:
+        if "entry" in action or "file" in action or "payload" in action:
+            affected_entry_count = max(affected_entry_count, 1)
+    return {
+        "patch_span_count": len(touched_offsets) if touched_offsets else operation_count,
+        "patch_operation_count": operation_count,
+        "affected_entry_count": affected_entry_count,
     }
 
 
