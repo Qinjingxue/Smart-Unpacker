@@ -65,3 +65,5 @@ native/sevenzip_password_tester/build-x64/
 native/sevenzip_password_tester/build-pkrc/
 tests/cases/archive_scan/r3961_jpg_carrier_encrypted_rar
 .sunpack/
+models/
+datasets/

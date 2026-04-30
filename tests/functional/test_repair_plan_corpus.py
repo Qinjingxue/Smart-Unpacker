@@ -496,6 +496,37 @@ def test_derive_archives_organizes_direct_source_material_files(tmp_path):
     assert (material_root / "tar" / "loose" / rows[0]["output_name"]).is_file()
 
 
+def test_ltr_feature_views_do_not_leak_labels_or_after_state():
+    from repair_training.train_ltr import _row_features
+
+    row = {
+        "material_format": "zip",
+        "round": 0,
+        "selected_by_current_system": True,
+        "label": 3,
+        "label_details": {"completeness": 1.0},
+        "stable_features": {
+            "state": {"format": "zip", "damage_profile": "zip_single_entry_payload_damage"},
+            "candidate": {"module": "zip_central_directory_rebuild", "patch_cost": 0.5},
+            "before_state": {"entry_count": 0},
+            "after_state": {"entry_count": 7},
+            "delta_features": {"entry_count_gain": 7},
+        },
+        "teacher_features": {"route_score": 0.9, "selected_by_current_system": True},
+    }
+
+    stable = _row_features(row, "stable_only")
+    assert not any("teacher" in key for key in stable)
+    assert not any("after_state" in key for key in stable)
+    assert not any("delta_features" in key for key in stable)
+    assert not any("label_details" in key for key in stable)
+    assert not any("selected_by_current_system" in key for key in stable)
+
+    teacher = _row_features(row, "teacher_only_baseline")
+    assert any(key.startswith("teacher.") for key in teacher)
+    assert not any(key.startswith("candidate.") for key in teacher)
+
+
 def _write_clean_zip(path: Path) -> None:
     with zipfile.ZipFile(path, "w") as archive:
         archive.writestr("alpha.txt", b"alpha payload")

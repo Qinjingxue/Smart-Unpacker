@@ -3,7 +3,8 @@ param(
     [string]$MaterialRoot = "repair_training\material",
     [string]$Formats = "",
     [string[]]$Sample = @(),
-    [switch]$RemoveFormatDirectories
+    [switch]$RemoveFormatDirectories,
+    [switch]$KeepRepairWorkspace
 )
 
 $ErrorActionPreference = "Stop"
@@ -52,6 +53,7 @@ $formatSet = ConvertTo-NameSet @($Formats)
 $sampleSet = ConvertTo-NameSet $Sample
 $summary = [ordered]@{
     material_root = $MaterialPath
+    repair_workspace = [System.IO.Path]::GetFullPath((Join-Path $RepoRoot ".sunpack\repair-plan-workspace"))
     removed = 0
     skipped = 0
     preserved_format_dirs = -not [bool]$RemoveFormatDirectories
@@ -91,6 +93,10 @@ foreach ($formatDir in $formatDirs) {
 
     $children = Get-ChildItem -LiteralPath $formatDir.FullName -Force
     foreach ($child in $children) {
+        if ($child.Name -in @(".gitkeep", ".gitignore")) {
+            $summary.skipped++
+            continue
+        }
         if ($sampleSet.Count -gt 0) {
             $sampleKey = $child.BaseName.ToLowerInvariant()
             if ($child.PSIsContainer) {
@@ -110,9 +116,24 @@ foreach ($formatDir in $formatDirs) {
 
 $rootFiles = Get-ChildItem -LiteralPath $materialResolved -File -Force
 foreach ($file in $rootFiles) {
+    if ($file.Name -in @(".gitkeep", ".gitignore")) {
+        $summary.skipped++
+        continue
+    }
     if ($PSCmdlet.ShouldProcess($file.FullName, "remove root material file")) {
         Remove-Item -LiteralPath $file.FullName -Force
         $summary.removed++
+    }
+}
+
+if (-not $KeepRepairWorkspace) {
+    $workspace = [System.IO.Path]::GetFullPath((Join-Path $RepoRoot ".sunpack\repair-plan-workspace"))
+    $sunpackRoot = [System.IO.Path]::GetFullPath((Join-Path $RepoRoot ".sunpack"))
+    if ((Test-Path -LiteralPath $workspace) -and (Test-PathInside -Child $workspace -Parent $sunpackRoot)) {
+        if ($PSCmdlet.ShouldProcess($workspace, "remove repair plan workspace")) {
+            Remove-Item -LiteralPath $workspace -Recurse -Force
+            $summary.removed++
+        }
     }
 }
 
