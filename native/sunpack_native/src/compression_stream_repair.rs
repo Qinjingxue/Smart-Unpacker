@@ -110,6 +110,131 @@ pub(crate) fn compression_stream_partial_recovery(
     source_input,
     format,
     workspace,
+    strategy="block_salvage",
+    max_input_size_mb=512.0,
+    max_output_size_mb=2048.0,
+    max_seconds=30.0
+))]
+pub(crate) fn compression_stream_block_salvage(
+    py: Python<'_>,
+    source_input: &Bound<'_, PyDict>,
+    format: &str,
+    workspace: &str,
+    strategy: &str,
+    max_input_size_mb: f64,
+    max_output_size_mb: f64,
+    max_seconds: f64,
+) -> PyResult<Py<PyDict>> {
+    let Some(format) = StreamFormat::from_name(format) else {
+        return status_dict(
+            py,
+            "unsupported",
+            "",
+            "",
+            "unsupported compression stream format",
+            &[],
+            format,
+            0,
+            0,
+            0.0,
+        );
+    };
+    let options = StreamRepairOptions {
+        max_input_bytes: mb_to_bytes(max_input_size_mb),
+        max_output_bytes: mb_to_bytes(max_output_size_mb),
+        max_duration: duration_from_seconds(max_seconds),
+    };
+    let data = match read_source_input(source_input, options.max_input_bytes) {
+        Ok(data) => data,
+        Err(message) => {
+            return status_dict(
+                py,
+                "skipped",
+                "",
+                "",
+                &message,
+                &[],
+                format.name(),
+                0,
+                0,
+                0.0,
+            )
+        }
+    };
+    let safe_strategy = sanitize_strategy_name(strategy);
+    let output_path = Path::new(workspace).join(format!(
+        "{}_{}{}",
+        format.name(),
+        safe_strategy,
+        format.ext()
+    ));
+    match recover_stream_prefix(&data, format, &output_path, &options) {
+        Ok(recovered) => {
+            let result = PyDict::new(py);
+            result.set_item("status", "partial")?;
+            result.set_item("selected_path", output_path.to_string_lossy().to_string())?;
+            result.set_item("format", format.name())?;
+            result.set_item("confidence", confidence_for_size(recovered.decoded_bytes))?;
+            result.set_item(
+                "message",
+                match safe_strategy.as_str() {
+                    "deflate_prefix_salvage" => {
+                        "gzip deflate prefix was salvaged before the damaged payload"
+                    }
+                    "block_salvage" => {
+                        "compression stream block/prefix salvage produced a decodable candidate"
+                    }
+                    _ => "compression stream salvage produced a decodable candidate",
+                },
+            )?;
+            result.set_item("decoder_error", recovered.error.as_deref().unwrap_or(""))?;
+            result.set_item("decoded_bytes", recovered.decoded_bytes)?;
+            result.set_item("output_bytes", recovered.output_bytes)?;
+            let actions = match safe_strategy.as_str() {
+                "deflate_prefix_salvage" => vec![
+                    "decode_deflate_until_error",
+                    "drop_damaged_deflate_suffix",
+                    "recompress_recovered_prefix",
+                ],
+                "block_salvage" => vec![
+                    "decode_stream_blocks_until_error",
+                    "drop_damaged_stream_suffix",
+                    "recompress_recovered_prefix",
+                ],
+                _ => vec![
+                    "decode_stream_until_error",
+                    "drop_damaged_suffix",
+                    "recompress_recovered_prefix",
+                ],
+            };
+            result.set_item("actions", PyList::new(py, actions)?)?;
+            result.set_item("warnings", PyList::new(py, &recovered.warnings)?)?;
+            result.set_item(
+                "workspace_paths",
+                PyList::new(py, &[output_path.to_string_lossy().to_string()])?,
+            )?;
+            Ok(result.unbind())
+        }
+        Err(message) => status_dict(
+            py,
+            "unrepairable",
+            "",
+            "",
+            &message,
+            &[],
+            format.name(),
+            0,
+            0,
+            0.0,
+        ),
+    }
+}
+
+#[pyfunction]
+#[pyo3(signature = (
+    source_input,
+    format,
+    workspace,
     max_input_size_mb=512.0,
     max_output_size_mb=2048.0,
     max_seconds=30.0,
@@ -305,6 +430,141 @@ pub(crate) fn tar_compressed_partial_recovery(
         tar.truncated_members,
         tar_confidence(tar.members, decoded.decoded_bytes),
         &actions,
+    )
+}
+
+#[pyfunction]
+#[pyo3(signature = (
+    source_input,
+    workspace,
+    max_input_size_mb=512.0,
+    max_output_size_mb=2048.0,
+    max_entries=20000
+))]
+pub(crate) fn tar_truncated_partial_recovery(
+    py: Python<'_>,
+    source_input: &Bound<'_, PyDict>,
+    workspace: &str,
+    max_input_size_mb: f64,
+    max_output_size_mb: f64,
+    max_entries: usize,
+) -> PyResult<Py<PyDict>> {
+    let options = StreamRepairOptions {
+        max_input_bytes: mb_to_bytes(max_input_size_mb),
+        max_output_bytes: mb_to_bytes(max_output_size_mb),
+        max_duration: None,
+    };
+    let data = match read_source_input(source_input, options.max_input_bytes) {
+        Ok(data) => data,
+        Err(message) => {
+            return tar_status_dict(
+                py,
+                "skipped",
+                "",
+                "",
+                &message,
+                &[],
+                "tar",
+                "",
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0.0,
+                &[],
+            )
+        }
+    };
+    let tar = match repair_tar_prefix(&data, &options, max_entries) {
+        Ok(tar) => tar,
+        Err(message) => {
+            return tar_status_dict(
+                py,
+                "unrepairable",
+                "",
+                "",
+                &message,
+                &[],
+                "tar",
+                "",
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0.0,
+                &[],
+            )
+        }
+    };
+    if !tar.changed || tar.truncated_members == 0 {
+        return tar_status_dict(
+            py,
+            "unrepairable",
+            "",
+            "",
+            "TAR stream already looks canonical or has no truncated member",
+            &tar.warnings,
+            "tar",
+            "",
+            data.len() as u64,
+            tar.tar_bytes,
+            0,
+            tar.members,
+            tar.checksum_fixes,
+            tar.truncated_members,
+            0.0,
+            &[],
+        );
+    }
+    let output_path = Path::new(workspace).join("tar_truncated_partial_recovery.tar");
+    let output_bytes = match write_prefix_atomic(&tar.bytes, tar.bytes.len(), &output_path) {
+        Ok(bytes) => bytes,
+        Err(message) => {
+            return tar_status_dict(
+                py,
+                "unrepairable",
+                "",
+                "",
+                &format!("TAR partial candidate could not be written: {message}"),
+                &tar.warnings,
+                "tar",
+                "",
+                data.len() as u64,
+                tar.tar_bytes,
+                0,
+                tar.members,
+                tar.checksum_fixes,
+                tar.truncated_members,
+                0.0,
+                &[],
+            )
+        }
+    };
+    tar_status_dict(
+        py,
+        "partial",
+        &output_path.to_string_lossy(),
+        "",
+        "truncated TAR member was dropped and complete members were repacked",
+        &tar.warnings,
+        "tar",
+        "",
+        data.len() as u64,
+        tar.tar_bytes,
+        output_bytes,
+        tar.members,
+        tar.checksum_fixes,
+        tar.truncated_members,
+        tar_confidence(tar.members, data.len() as u64),
+        &[
+            "walk_tar_members",
+            "drop_truncated_tar_member",
+            "append_tar_zero_blocks",
+        ],
     )
 }
 
@@ -2515,6 +2775,25 @@ fn confidence_for_size(decoded_bytes: u64) -> f64 {
         0.72
     } else {
         0.62
+    }
+}
+
+fn sanitize_strategy_name(value: &str) -> String {
+    let text = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    let trimmed = text.trim_matches('_');
+    if trimmed.is_empty() {
+        "block_salvage".to_string()
+    } else {
+        trimmed.to_string()
     }
 }
 

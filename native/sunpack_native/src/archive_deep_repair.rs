@@ -791,6 +791,121 @@ pub(crate) fn seven_zip_solid_block_partial_salvage(
     source_input,
     workspace,
     max_input_size_mb=512.0,
+    max_output_size_mb=2048.0,
+    max_entries=20000
+))]
+pub(crate) fn seven_zip_non_solid_partial_salvage(
+    py: Python<'_>,
+    source_input: &Bound<'_, PyDict>,
+    workspace: &str,
+    max_input_size_mb: f64,
+    max_output_size_mb: f64,
+    max_entries: usize,
+) -> PyResult<Py<PyDict>> {
+    let data = match read_source_input(source_input, mb_to_bytes(max_input_size_mb)) {
+        Ok(data) => data,
+        Err(message) => {
+            return status_dict(py, "skipped", "", "zip", &message, &[], 0, 0, 0, 0.0, &[])
+        }
+    };
+    let recovered = match recover_seven_zip_entries_by_block(&data, max_entries.max(1)) {
+        Ok(entries) => entries,
+        Err(message) => {
+            return status_dict(
+                py,
+                "unrepairable",
+                "",
+                "zip",
+                &message,
+                &[],
+                0,
+                data.len() as u64,
+                0,
+                0.0,
+                &[],
+            )
+        }
+    };
+    if recovered.is_empty() {
+        return status_dict(
+            py,
+            "unrepairable",
+            "",
+            "zip",
+            "no independently decodable non-solid 7z entries were recoverable",
+            &[],
+            0,
+            data.len() as u64,
+            0,
+            0.0,
+            &[],
+        );
+    }
+    let output_path = Path::new(workspace).join("seven_zip_non_solid_partial_salvage.zip");
+    let output_bytes =
+        match write_stored_zip_entries(&recovered, &output_path, mb_to_bytes(max_output_size_mb)) {
+            Ok(bytes) => bytes,
+            Err(message) => {
+                return status_dict(
+                    py,
+                    "unrepairable",
+                    "",
+                    "zip",
+                    &message,
+                    &[],
+                    0,
+                    data.len() as u64,
+                    0,
+                    0.0,
+                    &[],
+                )
+            }
+        };
+    let selected = WrittenArchiveCandidate {
+        name: "seven_zip_non_solid_partial_salvage".to_string(),
+        path: output_path.to_string_lossy().to_string(),
+        format: "zip".to_string(),
+        status: "partial".to_string(),
+        offset: 0,
+        end_offset: data.len() as u64,
+        output_bytes,
+        confidence: (0.62 + recovered.len() as f64 * 0.05).min(0.92),
+        actions: vec![
+            "parse_7z_folder_streams".to_string(),
+            "decode_independent_7z_entries".to_string(),
+            "quarantine_failed_7z_entries".to_string(),
+            "repack_recoverable_entries_as_zip".to_string(),
+        ],
+        warnings: vec![
+            "7z non-solid salvage output is a ZIP containing recovered files only".to_string(),
+        ],
+    };
+    status_dict_with_candidates(
+        py,
+        "partial",
+        &selected.path,
+        "zip",
+        "7z non-solid partial salvage recovered independently decodable entries into a ZIP candidate",
+        &selected.warnings,
+        0,
+        data.len() as u64,
+        output_bytes,
+        selected.confidence,
+        &[
+            "parse_7z_folder_streams",
+            "decode_independent_7z_entries",
+            "quarantine_failed_7z_entries",
+            "repack_recoverable_entries_as_zip",
+        ],
+        &[selected.clone()],
+    )
+}
+
+#[pyfunction]
+#[pyo3(signature = (
+    source_input,
+    workspace,
+    max_input_size_mb=512.0,
     max_candidates=8
 ))]
 pub(crate) fn rar_file_quarantine_rebuild(

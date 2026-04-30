@@ -563,11 +563,19 @@
         "enabled": true
       },
       {
+        "name": "zip_missing_volume_partial_salvage",
+        "enabled": true
+      },
+      {
         "name": "zip_conflict_resolver_rebuild",
         "enabled": true
       },
       {
         "name": "tar_header_checksum_fix",
+        "enabled": true
+      },
+      {
+        "name": "tar_truncated_partial_recovery",
         "enabled": true
       },
       {
@@ -599,6 +607,10 @@
         "enabled": true
       },
       {
+        "name": "gzip_deflate_prefix_salvage",
+        "enabled": true
+      },
+      {
         "name": "gzip_truncated_partial_recovery",
         "enabled": true
       },
@@ -611,6 +623,10 @@
         "enabled": true
       },
       {
+        "name": "bzip2_block_salvage",
+        "enabled": true
+      },
+      {
         "name": "bzip2_truncated_partial_recovery",
         "enabled": true
       },
@@ -620,6 +636,10 @@
       },
       {
         "name": "xz_trailing_junk_trim",
+        "enabled": true
+      },
+      {
+        "name": "xz_block_salvage",
         "enabled": true
       },
       {
@@ -679,6 +699,10 @@
         "enabled": true
       },
       {
+        "name": "seven_zip_non_solid_partial_salvage",
+        "enabled": true
+      },
+      {
         "name": "rar_trailing_junk_trim",
         "enabled": true
       },
@@ -696,6 +720,10 @@
       },
       {
         "name": "rar_file_quarantine_rebuild",
+        "enabled": true
+      },
+      {
+        "name": "rar4_file_quarantine_rebuild",
         "enabled": true
       }
     ]

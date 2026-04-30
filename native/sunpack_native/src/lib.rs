@@ -233,11 +233,19 @@ fn sunpack_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(
+        compression_stream_repair::compression_stream_block_salvage,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
         compression_stream_repair::compression_stream_trailing_junk_trim,
         m
     )?)?;
     m.add_function(wrap_pyfunction!(
         compression_stream_repair::tar_compressed_partial_recovery,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        compression_stream_repair::tar_truncated_partial_recovery,
         m
     )?)?;
     m.add_function(wrap_pyfunction!(
@@ -262,6 +270,10 @@ fn sunpack_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     m.add_function(wrap_pyfunction!(
         archive_deep_repair::seven_zip_solid_block_partial_salvage,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        archive_deep_repair::seven_zip_non_solid_partial_salvage,
         m
     )?)?;
     m.add_function(wrap_pyfunction!(

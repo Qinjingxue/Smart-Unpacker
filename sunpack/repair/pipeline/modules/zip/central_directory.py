@@ -24,6 +24,7 @@ class ZipCentralDirectoryRebuild:
                 formats=("zip",),
                 require_any_flags=("central_directory_bad", "directory_integrity_bad_or_unknown", "local_header_recovery"),
                 require_any_failure_kinds=("structure_recognition", "corrupted_data"),
+                reject_any_flags=("missing_volume",),
                 base_score=0.84,
             ),
         ),
@@ -31,6 +32,8 @@ class ZipCentralDirectoryRebuild:
 
     def can_handle(self, job: RepairJob, diagnosis: RepairDiagnosis, config: dict) -> float:
         flags = set(job.damage_flags)
+        if "missing_volume" in flags:
+            return 0.0
         coverage = coverage_view_from_job(job)
         if "eocd_bad" in flags and "local_header_recovery" not in flags:
             return 0.0

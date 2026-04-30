@@ -229,12 +229,18 @@ def _repairability(job: RepairJob, flags: set[str]) -> tuple[bool, list[str], li
         return False, [], ["password must be resolved before structural repair"]
     if flags & {"output_filesystem", "process_failure"}:
         return False, [], ["failure is outside archive repair scope"]
-    if "missing_volume" in flags:
+    if "missing_volume" in flags and not _missing_volume_partial_salvage_allowed(job, flags):
         return False, ["volume_synthesis"], ["missing archive volume must be supplied before repair"]
     unsafe: list[str] = []
     if job.attempts >= 2:
         return False, unsafe, ["repair attempt limit reached"]
     return True, unsafe, []
+
+
+def _missing_volume_partial_salvage_allowed(job: RepairJob, flags: set[str]) -> bool:
+    if str(job.format or "").lower().lstrip(".") not in {"zip"}:
+        return False
+    return "local_header_recovery" in flags
 
 
 def _coverage_flags(coverage: dict[str, Any]) -> list[str]:
