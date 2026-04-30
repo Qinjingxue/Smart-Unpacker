@@ -1419,6 +1419,7 @@ def _verification_summary(verification: VerificationResult | Any) -> dict[str, A
         "partial_files": int(getattr(verification, "partial_files", 0) or 0),
         "failed_files": int(getattr(verification, "failed_files", 0) or 0),
         "missing_files": int(getattr(verification, "missing_files", 0) or 0),
+        "repair_hints": dict(getattr(verification, "repair_hints", {}) or {}),
         "archive_coverage": {
             "completeness": float(getattr(coverage, "completeness", 0.0) or 0.0) if coverage is not None else 0.0,
             "expected_files": int(getattr(coverage, "expected_files", 0) or 0) if coverage is not None else 0,
@@ -1575,6 +1576,7 @@ def _verification_payload(verification: VerificationResult) -> dict[str, Any]:
         "assessment_status": verification.assessment_status,
         "source_integrity": verification.source_integrity,
         "decision_hint": verification.decision_hint,
+        "repair_hints": dict(getattr(verification, "repair_hints", {}) or {}),
         "archive_coverage": _coverage_payload(verification),
         "files": _file_recovery_items(verification),
     }

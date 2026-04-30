@@ -78,6 +78,9 @@ class ArchiveRepairStage:
         if source_input is None:
             return None
         failure = self._failure_payload(task, result)
+        repair_hints = _verification_repair_hints(verification)
+        if repair_hints:
+            _merge_repair_hints_into_failure(failure, repair_hints)
         failure.update({
             "status": "verification_failed",
             "failure_stage": "verification",
@@ -92,6 +95,7 @@ class ArchiveRepairStage:
             "missing_files": verification.missing_files,
             "unverified_files": verification.unverified_files,
             "archive_coverage": asdict(verification.archive_coverage),
+            "repair_hints": repair_hints,
             "issues": [
                 {
                     "method": item.method,
@@ -128,6 +132,7 @@ class ArchiveRepairStage:
             damage_flags=_dedupe([
                 *self._flags_from_failure_text(result.error),
                 *self._flags_from_verification(verification),
+                *_flags_from_repair_hints(repair_hints),
             ]),
             password=result.password_used if result.password_used is not None else self._password_from_task(task),
             archive_key=task.key,
@@ -446,3 +451,41 @@ def _append_candidate_log_from_result(task: ArchiveTask, result: RepairResult, *
         },
     })
     task.fact_bag.set("repair.candidate_log", log[-200:])
+
+
+def _verification_repair_hints(verification: VerificationResult) -> dict[str, Any]:
+    hints = getattr(verification, "repair_hints", None)
+    return dict(hints) if isinstance(hints, dict) else {}
+
+
+def _merge_repair_hints_into_failure(failure: dict[str, Any], hints: dict[str, Any]) -> None:
+    if not hints:
+        return
+    if hints.get("failure_stage") and failure.get("failure_stage"):
+        failure.setdefault("underlying_failure_stage", failure.get("failure_stage"))
+    if hints.get("failure_kind") and failure.get("failure_kind"):
+        failure.setdefault("underlying_failure_kind", failure.get("failure_kind"))
+    for key in ("failure_kind", "native_status", "analysis_status", "selected_format"):
+        if hints.get(key) and not failure.get(key):
+            failure[key] = hints[key]
+    if hints.get("failure_stage") and not failure.get("failure_stage"):
+        failure["failure_stage"] = hints["failure_stage"]
+    if hints.get("segment_start") is not None or hints.get("segment_end") is not None:
+        failure["analysis_segment"] = {
+            "start": hints.get("segment_start"),
+            "end": hints.get("segment_end"),
+        }
+
+
+def _flags_from_repair_hints(hints: dict[str, Any]) -> list[str]:
+    flags = [str(item) for item in hints.get("damage_flags") or [] if str(item or "")]
+    failure_kind = str(hints.get("failure_kind") or "").lower()
+    native_status = str(hints.get("native_status") or "").lower()
+    analysis_status = str(hints.get("analysis_status") or "").lower()
+    if failure_kind in {"unexpected_end", "input_truncated", "stream_truncated"}:
+        flags.append("probably_truncated")
+    if failure_kind in {"checksum_error", "corrupted_data", "data_error", "crc_error"}:
+        flags.extend(["damaged", "checksum_error"])
+    if native_status == "damaged" or analysis_status in {"damaged", "weak"}:
+        flags.append("damaged")
+    return _dedupe(flags)

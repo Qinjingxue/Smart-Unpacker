@@ -98,6 +98,7 @@ class VerificationPipeline:
             upper_bound_hints=upper_bound_hints,
             source_hints=source_hints,
             decision_hints=decision_hints,
+            repair_hints=evidence.repair_hints,
         )
 
     def _build_result(
@@ -111,6 +112,7 @@ class VerificationPipeline:
         upper_bound_hints: list[float],
         source_hints: list[str],
         decision_hints: list[str],
+        repair_hints: dict | None = None,
     ) -> VerificationResult:
         file_observations = _dedupe_observations(file_observations)
         archive_coverage = _archive_coverage_summary(issues, file_observations)
@@ -151,6 +153,7 @@ class VerificationPipeline:
             unverified_files=counts["unverified"],
             archive_coverage=archive_coverage,
             file_observations=file_observations,
+            repair_hints=dict(repair_hints or {}),
         )
 
 

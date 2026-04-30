@@ -108,6 +108,7 @@ class VerificationResult:
     unverified_files: int = 0
     archive_coverage: ArchiveCoverageSummary = field(default_factory=ArchiveCoverageSummary)
     file_observations: list[FileVerificationObservation] = field(default_factory=list)
+    repair_hints: dict[str, Any] = field(default_factory=dict)
 
     @property
     def failures(self) -> list[VerificationIssue]:

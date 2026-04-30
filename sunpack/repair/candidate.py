@@ -316,28 +316,7 @@ class CandidateSelector:
 
     @staticmethod
     def generation_priority(candidate: RepairCandidate) -> float:
-        confidence = _clamp01(float(candidate.confidence or 0.0))
-        score_hint = _clamp01(float(candidate.score_hint or 0.0))
-        native_validation = _native_validation(candidate.validations)
-        validation_score = max([_clamp01(float(item.score or 0.0)) for item in candidate.validations] or [0.0])
-
-        if native_validation is not None and not _native_validation_skipped(native_validation):
-            score = confidence * 0.06
-            score += _native_validation_strength(native_validation) * 0.6
-            score += validation_score * 0.06
-        else:
-            score = confidence * 0.45
-            score += validation_score * 0.1
-        score += score_hint * 0.12
-        score += _patch_plan_priority(candidate) * 0.18
-        score += _module_generation_bias(candidate)
-        if candidate.stage == "deep":
-            score -= 0.08
-        if candidate.partial:
-            score -= 0.01
-        if _content_damage_candidate(candidate) and not candidate.partial and native_validation is None:
-            score = min(score, 0.45)
-        return _clamp01(score)
+        return float(candidate_ranking_breakdown(candidate)["generation_priority"])
 
 
 def candidate_feature_payload(candidate: RepairCandidate) -> dict[str, Any]:
@@ -352,6 +331,8 @@ def candidate_feature_payload(candidate: RepairCandidate) -> dict[str, Any]:
         for validation in candidate.validations
     ]
     native_validation = _native_validation(candidate.validations)
+    ranking = candidate_ranking_breakdown(candidate)
+    history = candidate_history_features(candidate)
     return {
         "candidate_id": candidate_digest(candidate),
         "module": candidate.module_name,
@@ -360,7 +341,7 @@ def candidate_feature_payload(candidate: RepairCandidate) -> dict[str, Any]:
         "stage": candidate.stage,
         "confidence": float(candidate.confidence or 0.0),
         "score_hint": float(candidate.score_hint or 0.0),
-        "generation_priority": CandidateSelector.generation_priority(candidate),
+        "generation_priority": ranking["generation_priority"],
         "partial": bool(candidate.partial),
         "lazy": bool(candidate.is_lazy),
         "materialized": bool(candidate.materialized),
@@ -368,6 +349,17 @@ def candidate_feature_payload(candidate: RepairCandidate) -> dict[str, Any]:
         "actions": list(candidate.actions),
         "damage_flags": list(candidate.damage_flags),
         "patch_cost": _patch_plan_cost(candidate),
+        "benefit_score": ranking["benefit_score"],
+        "evidence_score": ranking["evidence_score"],
+        "cost_penalty": ranking["cost_penalty"],
+        "risk_penalty": ranking["risk_penalty"],
+        "ranking_breakdown": ranking,
+        "benefit_breakdown": ranking["benefit_breakdown"],
+        "evidence_breakdown": ranking["evidence_breakdown"],
+        "cost_breakdown": ranking["cost_breakdown"],
+        "risk_breakdown": ranking["risk_breakdown"],
+        "history_features": history,
+        "ltr_features": candidate_ltr_features(candidate, ranking=ranking, history=history),
         "input_kind": _candidate_input_kind(candidate),
         "has_archive_state_plan": _has_archive_state_plan(candidate),
         "validation_count": len(candidate.validations),
@@ -388,6 +380,215 @@ def candidate_digest(candidate: RepairCandidate) -> str:
         "plan": _plan_shape(candidate.plan),
     }
     return hashlib.sha256(json.dumps(payload, ensure_ascii=True, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+
+
+def candidate_benefit_score(candidate: RepairCandidate) -> float:
+    return _weighted_component_sum(candidate_benefit_breakdown(candidate))
+
+
+def candidate_evidence_score(candidate: RepairCandidate) -> float:
+    return _weighted_component_sum(candidate_evidence_breakdown(candidate))
+
+
+def candidate_cost_penalty(candidate: RepairCandidate) -> float:
+    return _weighted_component_sum(candidate_cost_breakdown(candidate))
+
+
+def candidate_risk_penalty(candidate: RepairCandidate) -> float:
+    return _weighted_component_sum(candidate_risk_breakdown(candidate))
+
+
+def candidate_ranking_breakdown(candidate: RepairCandidate) -> dict[str, Any]:
+    benefit_breakdown = candidate_benefit_breakdown(candidate)
+    evidence_breakdown = candidate_evidence_breakdown(candidate)
+    cost_breakdown = candidate_cost_breakdown(candidate)
+    risk_breakdown = candidate_risk_breakdown(candidate)
+    history = candidate_history_features(candidate)
+    benefit = _weighted_component_sum(benefit_breakdown)
+    evidence = _weighted_component_sum(evidence_breakdown)
+    cost = _weighted_component_sum(cost_breakdown)
+    risk = _weighted_component_sum(risk_breakdown)
+    module_bias = _module_generation_bias(candidate)
+    raw_score = benefit * 0.55 + evidence * 0.25 + module_bias - cost * 0.25 - risk * 0.15
+    priority = _clamp01(raw_score)
+    return {
+        "version": 1,
+        "formula": "benefit*0.55 + evidence*0.25 + module_bias - cost*0.25 - risk*0.15",
+        "generation_priority": priority,
+        "raw_score": raw_score,
+        "benefit_score": benefit,
+        "evidence_score": evidence,
+        "cost_penalty": cost,
+        "risk_penalty": risk,
+        "module_bias": module_bias,
+        "weights": {
+            "benefit": 0.55,
+            "evidence": 0.25,
+            "cost": -0.25,
+            "risk": -0.15,
+            "module_bias": 1.0,
+            "history": 0.0,
+        },
+        "contributions": {
+            "benefit": benefit * 0.55,
+            "evidence": evidence * 0.25,
+            "cost": cost * -0.25,
+            "risk": risk * -0.15,
+            "module_bias": module_bias,
+            "history": 0.0,
+        },
+        "benefit_breakdown": benefit_breakdown,
+        "evidence_breakdown": evidence_breakdown,
+        "cost_breakdown": cost_breakdown,
+        "risk_breakdown": risk_breakdown,
+        "history_features": history,
+    }
+
+
+def candidate_benefit_breakdown(candidate: RepairCandidate) -> dict[str, dict[str, float]]:
+    native_validation = _native_validation(candidate.validations)
+    native_strength = (
+        _native_validation_strength(native_validation)
+        if native_validation is not None and not _native_validation_skipped(native_validation)
+        else 0.0
+    )
+    return _component_breakdown({
+        "confidence": {"value": _clamp01(float(candidate.confidence or 0.0)), "weight": 0.24},
+        "score_hint": {"value": _clamp01(float(candidate.score_hint or 0.0)), "weight": 0.12},
+        "validation_score": {"value": _candidate_validation_score(candidate), "weight": 0.18},
+        "native_strength": {"value": native_strength, "weight": 0.26},
+        "progress": {"value": candidate_progress_score(candidate), "weight": 0.12},
+        "coverage": {"value": _candidate_validation_completeness(candidate) or 0.0, "weight": 0.08},
+    })
+
+
+def candidate_evidence_breakdown(candidate: RepairCandidate) -> dict[str, dict[str, float]]:
+    native_validation = _native_validation(candidate.validations)
+    native_strength = (
+        _native_validation_strength(native_validation)
+        if native_validation is not None and not _native_validation_skipped(native_validation)
+        else 0.0
+    )
+    return _component_breakdown({
+        "validation_score": {"value": _candidate_validation_score(candidate), "weight": 0.24},
+        "native_strength": {"value": native_strength, "weight": 0.32},
+        "progress": {"value": candidate_progress_score(candidate), "weight": 0.18},
+        "patch_quality": {"value": _patch_plan_priority(candidate), "weight": 0.16},
+        "accepted_ratio": {"value": _candidate_validation_acceptance_ratio(candidate), "weight": 0.1},
+    })
+
+
+def candidate_cost_breakdown(candidate: RepairCandidate) -> dict[str, dict[str, float]]:
+    stage_cost = {
+        "targeted": 0.05,
+        "safe_repair": 0.15,
+        "deep": 0.35,
+    }.get(str(candidate.stage or ""), 0.18)
+    return _component_breakdown({
+        "stage": {"value": 1.0, "weight": stage_cost},
+        "lazy_materialization": {"value": 1.0 if candidate.is_lazy else 0.0, "weight": 0.08},
+        "not_materialized": {"value": 1.0 if not candidate.materialized else 0.0, "weight": 0.05},
+        "native_validation": {"value": 1.0 if candidate.requires_native_validation else 0.0, "weight": 0.12},
+        "patch_complexity": {"value": _patch_plan_cost(candidate), "weight": 0.35},
+    })
+
+
+def candidate_risk_breakdown(candidate: RepairCandidate) -> dict[str, dict[str, float]]:
+    content_damage = _content_damage_candidate(candidate)
+    native_validation_missing = content_damage and _native_validation(candidate.validations) is None
+    return _component_breakdown({
+        "partial_candidate": {"value": 1.0 if candidate.partial else 0.0, "weight": 0.06},
+        "partial_status": {"value": 1.0 if candidate.status == "partial" else 0.0, "weight": 0.04},
+        "content_damage": {"value": 1.0 if content_damage else 0.0, "weight": 0.08},
+        "content_damage_without_native_validation": {"value": 1.0 if native_validation_missing else 0.0, "weight": 0.16},
+        "deep_without_native_validation": {"value": 1.0 if candidate.stage == "deep" and not candidate.requires_native_validation else 0.0, "weight": 0.08},
+        "rejected_validation": {"value": 1.0 if any(not validation.accepted for validation in candidate.validations) else 0.0, "weight": 0.12},
+        "missing_repaired_input": {"value": 1.0 if not candidate.repaired_input and not candidate.is_lazy else 0.0, "weight": 0.2},
+    })
+
+
+def candidate_history_features(candidate: RepairCandidate) -> dict[str, Any]:
+    return {
+        "enabled": False,
+        "available": False,
+        "key": _history_key(candidate),
+        "module": candidate.module_name,
+        "stage": candidate.stage,
+        "format": candidate.format,
+        "sample_count": 0,
+        "attempts": 0,
+        "accepted": 0,
+        "success_rate": None,
+        "avg_completeness_gain": None,
+        "avg_cost_ms": None,
+        "score": 0.5,
+        "source": "reserved",
+    }
+
+
+def candidate_ltr_features(
+    candidate: RepairCandidate,
+    *,
+    ranking: dict[str, Any] | None = None,
+    history: dict[str, Any] | None = None,
+) -> dict[str, float | int | str | None]:
+    ranking = ranking or candidate_ranking_breakdown(candidate)
+    history = history or candidate_history_features(candidate)
+    native_validation = _native_validation(candidate.validations)
+    predicted_completeness = candidate_predicted_completeness(candidate)
+    return {
+        "module": candidate.module_name,
+        "format": candidate.format,
+        "stage": candidate.stage,
+        "status": candidate.status,
+        "confidence": _clamp01(float(candidate.confidence or 0.0)),
+        "score_hint": _clamp01(float(candidate.score_hint or 0.0)),
+        "benefit_score": float(ranking["benefit_score"]),
+        "evidence_score": float(ranking["evidence_score"]),
+        "cost_penalty": float(ranking["cost_penalty"]),
+        "risk_penalty": float(ranking["risk_penalty"]),
+        "module_bias": float(ranking["module_bias"]),
+        "generation_priority": float(ranking["generation_priority"]),
+        "ranking_raw_score": float(ranking["raw_score"]),
+        "patch_cost": _patch_plan_cost(candidate),
+        "patch_quality": _patch_plan_priority(candidate),
+        "progress_score": candidate_progress_score(candidate),
+        "predicted_completeness": predicted_completeness,
+        "validation_score": _candidate_validation_score(candidate),
+        "validation_acceptance_ratio": _candidate_validation_acceptance_ratio(candidate),
+        "native_validation_score": float(native_validation.score or 0.0) if native_validation is not None else None,
+        "native_validation_present": 1 if native_validation is not None else 0,
+        "native_validation_strength": _native_validation_strength(native_validation) if native_validation is not None else 0.0,
+        "partial": 1 if candidate.partial else 0,
+        "lazy": 1 if candidate.is_lazy else 0,
+        "materialized": 1 if candidate.materialized else 0,
+        "requires_native_validation": 1 if candidate.requires_native_validation else 0,
+        "has_archive_state_plan": 1 if _has_archive_state_plan(candidate) else 0,
+        "validation_count": len(candidate.validations),
+        "damage_flag_count": len(candidate.damage_flags),
+        "action_count": len(candidate.actions),
+        "history_available": 1 if history.get("available") else 0,
+        "history_sample_count": int(history.get("sample_count") or 0),
+        "history_success_rate": history.get("success_rate"),
+        "history_score": float(history.get("score", 0.5) or 0.5),
+    }
+
+
+def candidate_progress_score(candidate: RepairCandidate) -> float:
+    return _candidate_progress_score(candidate)
+
+
+def candidate_predicted_completeness(candidate: RepairCandidate) -> float | None:
+    values = []
+    completeness = _candidate_validation_completeness(candidate)
+    if completeness is not None:
+        values.append(completeness)
+    progress = candidate_progress_score(candidate)
+    if progress > 0:
+        values.append(progress)
+    if not values:
+        return None
+    return _clamp01(max(values))
 
 
 def _compact_validation_details(details: dict[str, Any]) -> dict[str, Any]:
@@ -437,6 +638,62 @@ def _compact_validation_details(details: dict[str, Any]) -> dict[str, Any]:
     return output
 
 
+def _candidate_validation_score(candidate: RepairCandidate) -> float:
+    return max([_clamp01(float(item.score or 0.0)) for item in candidate.validations] or [0.0])
+
+
+def _component_breakdown(components: dict[str, dict[str, float]]) -> dict[str, dict[str, float]]:
+    output: dict[str, dict[str, float]] = {}
+    for name, component in components.items():
+        value = _clamp01(float(component.get("value", 0.0) or 0.0))
+        weight = float(component.get("weight", 0.0) or 0.0)
+        output[name] = {
+            "value": value,
+            "weight": weight,
+            "contribution": value * weight,
+        }
+    return output
+
+
+def _weighted_component_sum(components: dict[str, dict[str, float]]) -> float:
+    return _clamp01(sum(float(item.get("contribution", 0.0) or 0.0) for item in components.values()))
+
+
+def _candidate_validation_acceptance_ratio(candidate: RepairCandidate) -> float:
+    if not candidate.validations:
+        return 0.5
+    accepted = sum(1 for item in candidate.validations if item.accepted)
+    return _clamp01(accepted / max(1, len(candidate.validations)))
+
+
+def _candidate_validation_completeness(candidate: RepairCandidate) -> float | None:
+    values: list[float] = []
+    for validation in candidate.validations:
+        details = validation.details if isinstance(validation.details, dict) else {}
+        coverage = details.get("archive_coverage") if isinstance(details.get("archive_coverage"), dict) else {}
+        if "completeness" not in coverage:
+            continue
+        try:
+            values.append(_clamp01(float(coverage.get("completeness") or 0.0)))
+        except (TypeError, ValueError):
+            continue
+    return max(values) if values else None
+
+
+def _candidate_progress_score(candidate: RepairCandidate) -> float:
+    best = 0.0
+    for validation in candidate.validations:
+        details = validation.details if isinstance(validation.details, dict) else {}
+        dry_run = details.get("dry_run") if isinstance(details.get("dry_run"), dict) else {}
+        if dry_run.get("ok"):
+            best = max(best, 1.0)
+        elif int(dry_run.get("files_written", 0) or 0) > 0:
+            best = max(best, 0.55)
+        elif int(dry_run.get("bytes_written", 0) or 0) > 0:
+            best = max(best, 0.35)
+    return best
+
+
 def _patch_plan_cost(candidate: RepairCandidate) -> float:
     return _clamp01(1.0 - _patch_plan_priority(candidate))
 
@@ -449,6 +706,18 @@ def _candidate_input_kind(candidate: RepairCandidate) -> str:
 def _has_archive_state_plan(candidate: RepairCandidate) -> bool:
     plan = candidate.plan if isinstance(candidate.plan, dict) else {}
     return isinstance(plan.get("archive_state"), dict)
+
+
+def _history_key(candidate: RepairCandidate) -> str:
+    flags = ",".join(sorted(str(flag) for flag in candidate.damage_flags))
+    input_kind = _candidate_input_kind(candidate)
+    return "|".join([
+        str(candidate.format or ""),
+        str(candidate.module_name or ""),
+        str(candidate.stage or ""),
+        flags,
+        input_kind,
+    ])
 
 
 def _source_input_shape(raw: dict[str, Any]) -> dict[str, Any]:

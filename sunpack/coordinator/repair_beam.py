@@ -6,7 +6,15 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Callable
 
 from sunpack.contracts.archive_state import ArchiveState
-from sunpack.repair.candidate import CandidateSelector, RepairCandidate, materialize_candidate
+from sunpack.repair.candidate import (
+    CandidateSelector,
+    RepairCandidate,
+    candidate_cost_penalty,
+    candidate_predicted_completeness,
+    candidate_progress_score,
+    candidate_risk_penalty,
+    materialize_candidate,
+)
 from sunpack.repair.job import RepairJob
 from sunpack.repair.scheduler import RepairScheduler
 from sunpack.verification.result import (
@@ -312,10 +320,28 @@ class RepairBeamLoop:
 
 def _candidate_pre_score(candidate: RepairCandidate, state: RepairBeamState) -> float:
     selector_score = CandidateSelector.generation_priority(candidate)
-    progress_score = _candidate_progress_score(candidate)
+    progress_score = candidate_progress_score(candidate)
+    cost_penalty = candidate_cost_penalty(candidate)
+    risk_penalty = candidate_risk_penalty(candidate)
+    state_completeness = min(1.0, max(0.0, float(state.completeness or 0.0)))
+    predicted_completeness = candidate_predicted_completeness(candidate)
+    if predicted_completeness is None:
+        predicted_gain = progress_score * max(0.1, 1.0 - state_completeness)
+    else:
+        predicted_gain = max(0.0, predicted_completeness - state_completeness)
     prior_score = min(1.0, max(0.0, state.score)) * 0.03
-    prior_completeness = min(1.0, max(0.0, state.completeness)) * 0.04
-    return selector_score + progress_score * 0.08 + prior_score + prior_completeness
+    prior_completeness = state_completeness * 0.04
+    low_gain_penalty = 0.08 if state_completeness >= 0.2 and predicted_gain <= 0.01 and cost_penalty > 0.25 else 0.0
+    return (
+        selector_score
+        + progress_score * 0.05
+        + predicted_gain * 0.18
+        + prior_score
+        + prior_completeness
+        - cost_penalty * 0.08
+        - risk_penalty * 0.04
+        - low_gain_penalty
+    )
 
 
 def _candidate_archive_state(candidate: RepairCandidate) -> dict[str, Any]:

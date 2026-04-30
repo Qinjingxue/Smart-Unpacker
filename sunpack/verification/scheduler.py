@@ -30,6 +30,7 @@ class VerificationScheduler:
                     assessment_status=ASSESSMENT_DISABLED,
                     source_integrity=SOURCE_INTEGRITY_DAMAGED,
                     decision_hint=DECISION_REPAIR,
+                    repair_hints=dict(evidence.repair_hints),
                 )
             return VerificationResult(
                 completeness=1.0,
@@ -37,6 +38,7 @@ class VerificationScheduler:
                 assessment_status=ASSESSMENT_DISABLED,
                 source_integrity=SOURCE_INTEGRITY_UNKNOWN,
                 decision_hint=DECISION_ACCEPT,
+                repair_hints=dict(evidence.repair_hints),
             )
         return VerificationPipeline(self.config).run(evidence)
 

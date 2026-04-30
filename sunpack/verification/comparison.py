@@ -220,6 +220,7 @@ def _verification_from_payload(payload: dict[str, Any]) -> VerificationResult:
         missing_files=_as_int(payload.get("missing_files", coverage.missing_files)),
         unverified_files=_as_int(payload.get("unverified_files", coverage.unverified_files)),
         archive_coverage=coverage,
+        repair_hints=dict(payload.get("repair_hints") or {}) if isinstance(payload.get("repair_hints"), dict) else {},
     )
 
 
