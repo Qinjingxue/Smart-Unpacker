@@ -237,21 +237,57 @@ def _recovery_ratio_report(rows: list[dict[str, Any]], query_groups: dict[str, l
     best_ratios: list[float] = []
     top1_ratios: list[float] = []
     regrets: list[float] = []
+    spreads: list[float] = []
+    variable_queries = 0
+    profile_counts: Counter[str] = Counter()
+    best_module_counts: Counter[str] = Counter()
+    worst_module_counts: Counter[str] = Counter()
+    profile_module_regret: dict[tuple[str, str], list[float]] = defaultdict(list)
+    profile_regret: dict[str, list[float]] = defaultdict(list)
     for items in query_groups.values():
         if not items:
             continue
-        best = max(_row_recovery_ratio(row) for row in items)
+        ranked = sorted(items, key=_row_recovery_ratio, reverse=True)
+        best_row = ranked[0]
+        worst_row = ranked[-1]
+        best = _row_recovery_ratio(best_row)
+        worst = _row_recovery_ratio(worst_row)
+        spread = max(0.0, best - worst)
         selected = [row for row in items if bool(row.get("selected_by_current_system"))]
         top = selected[0] if selected else items[0]
         top_ratio = _row_recovery_ratio(top)
+        regret = max(0.0, best - top_ratio)
         best_ratios.append(best)
         top1_ratios.append(top_ratio)
-        regrets.append(max(0.0, best - top_ratio))
+        regrets.append(regret)
+        spreads.append(spread)
+        if spread > 1e-9:
+            variable_queries += 1
+            profile = _damage_profile(best_row) or _damage_profile(worst_row) or "unknown"
+            profile_counts[profile] += 1
+            best_module_counts[_row_module(best_row)] += 1
+            worst_module_counts[_row_module(worst_row)] += 1
+            profile_regret[profile].append(regret)
+            profile_module_regret[(profile, _row_module(top))].append(regret)
     return {
         "row_terminal_recovery_ratio": _series_summary_float(ratios),
         "query_best_recovery_ratio": _series_summary_float(best_ratios),
         "query_top1_recovery_ratio": _series_summary_float(top1_ratios),
         "query_top1_regret": _series_summary_float(regrets),
+        "query_terminal_recovery_regret": _series_summary_float(regrets),
+        "query_terminal_recovery_spread": _series_summary_float(spreads),
+        "variable_terminal_recovery_query_count": variable_queries,
+        "variable_terminal_recovery_query_ratio": variable_queries / max(1, len(query_groups)),
+        "terminal_recovery_spread_distribution": _spread_distribution(spreads),
+        "query_best_terminal_recovery_mean": statistics.mean(best_ratios) if best_ratios else 0.0,
+        "query_top1_terminal_recovery_mean": statistics.mean(top1_ratios) if top1_ratios else 0.0,
+        "query_terminal_recovery_regret_mean": statistics.mean(regrets) if regrets else 0.0,
+        "query_terminal_recovery_regret_p90": _percentile_float(sorted(regrets), 0.90) if regrets else 0.0,
+        "variable_recovery_profiles_top20": dict(profile_counts.most_common(20)),
+        "best_recovery_modules_top20": dict(best_module_counts.most_common(20)),
+        "worst_recovery_modules_top20": dict(worst_module_counts.most_common(20)),
+        "profile_regret_top20": _regret_items(profile_regret),
+        "profile_module_regret_top20": _regret_items(profile_module_regret),
         "positive_recovery_row_ratio": sum(1 for value in ratios if value > 0.0) / max(1, len(ratios)),
     }
 
@@ -275,6 +311,44 @@ def _row_recovery_ratio(row: dict[str, Any]) -> float:
     if label == 1:
         return 0.2
     return 0.0
+
+
+def _row_module(row: dict[str, Any]) -> str:
+    return str(row.get("module") or _nested(row, "stable_features", "candidate", "module") or "<none>")
+
+
+def _spread_distribution(values: list[float]) -> dict[str, int]:
+    buckets = Counter()
+    for value in values:
+        if value >= 0.999:
+            buckets[">=1.0"] += 1
+        elif value >= 0.5:
+            buckets[">=0.5"] += 1
+        elif value >= 0.2:
+            buckets[">=0.2"] += 1
+        elif value > 0:
+            buckets[">0"] += 1
+        else:
+            buckets["0"] += 1
+    return dict(buckets)
+
+
+def _regret_items(groups: dict[Any, list[float]]) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for key, values in groups.items():
+        if not values:
+            continue
+        if isinstance(key, tuple):
+            name = "|".join(str(part) for part in key)
+        else:
+            name = str(key)
+        items.append({
+            "key": name,
+            "count": len(values),
+            "mean_regret": statistics.mean(values),
+            "p90_regret": _percentile_float(sorted(values), 0.90),
+        })
+    return sorted(items, key=lambda item: (float(item["mean_regret"]), int(item["count"])), reverse=True)[:20]
 
 
 def _repair_prior_dependency(model_metrics: dict[str, Any]) -> dict[str, Any]:
@@ -445,10 +519,26 @@ def _damage_profile(row: dict[str, Any]) -> str:
         "zip_two_step_comment_fix_then_eocd_repair",
         "zip_two_step_local_header_then_cd_offset",
         "zip_two_step_drop_cd_with_eocd_noise",
+        "zip_drop_central_directory_keep_local_headers",
+        "zip_cd_offset_near_valid_wrong_entry",
+        "zip_eocd_counts_wrong_but_cd_readable",
+        "zip_local_header_crc_wrong_cd_correct",
+        "zip_cd_crc_wrong_local_payload_correct",
+        "zip_comment_overlap_eocd_shifted",
+        "zip_duplicate_entries_conflicting_crc",
+        "zip_data_descriptor_conflict",
+        "zip_partial_cd_rebuild_then_payload_mismatch",
+        "structural_boundary",
+        "structural_header_tail",
+        "structural_footer_tail",
         "zip_directory_only_bad_payload",
         "zip_rebuild_directory_keeps_bad_payload",
         "zip_quarantine_keeps_corrupted_entry",
         "zip_wrong_local_offset_extracts_valid_other_entry",
+        "zip_crc_repair_masks_payload_mismatch",
+        "zip_partial_recovery_wrong_hash_same_name",
+        "zip_all_entry_payload_damage_with_directory",
+        "zip_wrong_offset_content_overlap",
         "zip_eocd_cd_half_damaged",
     )
     for item in known:
@@ -781,6 +871,9 @@ def _quality_warnings(report: dict[str, Any]) -> list[str]:
     profile_purity = difficulty.get("profile_module_label_purity") if isinstance(difficulty.get("profile_module_label_purity"), dict) else {}
     if float(profile_purity.get("mean", 0.0) or 0.0) > 0.75:
         warnings.append("profile_module_label_purity_too_high")
+    recovery = report.get("terminal_recovery", {}) if isinstance(report.get("terminal_recovery"), dict) else {}
+    if float(recovery.get("variable_terminal_recovery_query_ratio", 0.0) or 0.0) < 0.40:
+        warnings.append("terminal_recovery_competition_too_low")
     if float(difficulty.get("hard_negative_vs_positive_same_query_ratio", 0.0) or 0.0) < 0.10 and int(labels.get("-1", 0) or 0) > 0 and positive_rows > 0:
         warnings.append("too_few_hard_negative_positive_competition")
     if proposal is not None and teacher is not None and proposal >= 0.999 and teacher >= 0.999:
@@ -838,6 +931,7 @@ def _markdown_report(report: dict[str, Any]) -> str:
         f"- Quality ratios: `{json.dumps(report['quality_ratios'], ensure_ascii=False, sort_keys=True)}`",
         f"- Rollout: `{json.dumps(report.get('rollout', {}), ensure_ascii=False, sort_keys=True)}`",
         f"- Difficulty: `{json.dumps(report.get('difficulty', {}), ensure_ascii=False, sort_keys=True)}`",
+        f"- Terminal recovery: `{json.dumps(report.get('terminal_recovery', {}), ensure_ascii=False, sort_keys=True)}`",
         f"- Format detection: `{json.dumps(report.get('format_detection_quality', {}), ensure_ascii=False, sort_keys=True)}`",
         f"- Warnings: `{json.dumps(report.get('warnings', []), ensure_ascii=False, sort_keys=True)}`",
         "",

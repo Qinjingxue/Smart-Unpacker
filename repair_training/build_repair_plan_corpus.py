@@ -28,8 +28,12 @@ DEFAULT_MANIFEST = DEFAULT_OUTPUT_DIR / "repair_plan_manifest.jsonl"
 PROFILE_LAYERS = (
     ("structural", 0.30, ("structural_boundary", "structural_header_tail", "structural_footer_tail")),
     ("structural_directory", 0.30, (
+        "zip_drop_central_directory_keep_local_headers",
         "zip_eocd_cd_half_damaged",
         "zip_directory_only_bad_payload",
+        "zip_wrong_local_offset_extracts_valid_other_entry",
+        "zip_rebuild_directory_keeps_bad_payload",
+        "zip_quarantine_keeps_corrupted_entry",
         "zip_cd_offset_near_valid_wrong_entry",
         "zip_eocd_counts_wrong_but_cd_readable",
         "zip_local_header_crc_wrong_cd_correct",
@@ -65,8 +69,10 @@ PROFILE_LAYERS = (
     )),
     ("deceptive_hard_negative", 0.30, (
         "zip_rebuild_directory_keeps_bad_payload",
-        "zip_quarantine_keeps_corrupted_entry",
         "zip_wrong_local_offset_extracts_valid_other_entry",
+        "zip_directory_only_bad_payload",
+        "zip_quarantine_keeps_corrupted_entry",
+        "zip_eocd_cd_half_damaged",
         "zip_crc_repair_masks_payload_mismatch",
         "zip_partial_recovery_wrong_hash_same_name",
     )),
@@ -79,10 +85,10 @@ DEFAULT_LAYER_BUDGET = (
 )
 ZIP_LAYER_BUDGET = (
     ("structural", 1),
-    ("structural_directory", 2),
-    ("partial_recoverable", 2),
-    ("two_step_repair", 2),
-    ("deceptive_hard_negative", 3),
+    ("structural_directory", 3),
+    ("partial_recoverable", 1),
+    ("two_step_repair", 1),
+    ("deceptive_hard_negative", 4),
 )
 
 

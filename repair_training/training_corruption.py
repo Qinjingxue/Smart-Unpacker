@@ -1111,7 +1111,7 @@ def _zip_corpus_mutations(data: bytes, randomizer: random.Random, profile: str) 
             mutations.extend(_zip_damage_payloads(data, entry_infos, randomizer, all_entries=False, name="corpus_zip_partial_cd_rebuild_payload_mismatch", expected_effect="rebuilt directory may expose a bad payload"))
         elif profile == "zip_directory_only_bad_payload":
             mutations.extend(_zip_eocd_directory_conflict_mutations(eocd))
-            mutations.extend(_zip_damage_payloads(data, entry_infos, randomizer, all_entries=True, name="corpus_zip_directory_only_payload_unreadable", expected_effect="payload bytes are damaged while directory recovery remains possible"))
+            mutations.extend(_zip_damage_payloads(data, entry_infos, randomizer, all_entries=False, name="corpus_zip_directory_only_payload_unreadable", expected_effect="one payload is damaged while directory recovery remains possible"))
         elif profile == "zip_wrong_offset_content_overlap":
             mutations.extend(_zip_eocd_directory_conflict_mutations(eocd))
             if cd_headers and len(entry_infos) >= 2:
@@ -1138,10 +1138,12 @@ def _zip_corpus_mutations(data: bytes, randomizer: random.Random, profile: str) 
             mutations.extend(_zip_damage_payloads(data, entry_infos, randomizer, all_entries=False, name="corpus_zip_rebuild_directory_keeps_bad_payload", expected_effect="rebuilt entry payload hash should not match"))
         elif profile == "zip_quarantine_keeps_corrupted_entry":
             mutations.extend(_zip_eocd_count_mutations(eocd, count_delta=1))
-            mutations.extend(_zip_damage_payloads(data, entry_infos, randomizer, all_entries=True, name="corpus_zip_quarantine_keeps_corrupted_entry", expected_effect="quarantine may preserve corrupted entries with known names"))
+            mutations.extend(_zip_cd_offset_near_valid_mutations(data, cd_headers, entry_infos))
+            mutations.extend(_zip_damage_payloads(data, entry_infos, randomizer, all_entries=False, name="corpus_zip_quarantine_keeps_corrupted_entry", expected_effect="quarantine may preserve a corrupted entry with a known name"))
         elif profile == "zip_wrong_local_offset_extracts_valid_other_entry":
             mutations.extend(_zip_cd_offset_near_valid_mutations(data, cd_headers, entry_infos))
             mutations.extend(_zip_cd_crc_mutations(cd_headers, randomizer))
+            mutations.extend(_zip_eocd_count_mutations(eocd, count_delta=1))
         elif profile == "zip_crc_repair_masks_payload_mismatch":
             mutations.extend(_zip_damage_payloads(data, entry_infos, randomizer, all_entries=False, name="corpus_zip_crc_repair_masks_payload_mismatch", expected_effect="CRC repair may hide a payload mismatch"))
             mutations.extend(_zip_cd_crc_mutations(cd_headers, randomizer, value=b"\xff\xff\xff\xff"))
