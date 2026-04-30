@@ -454,6 +454,26 @@ def _build_zip_missing_volume_keeps_complete_entry(root: Path) -> MatrixFixture:
     )
 
 
+def _build_zip_missing_volume_keeps_two_complete_entries(root: Path) -> MatrixFixture:
+    entries = {
+        "complete-a.txt": b"complete payload a",
+        "complete-b.txt": b"complete payload b",
+        "missing.bin": _pseudo_random_payload(4096),
+    }
+    data = _zip_bytes(entries)
+    missing_payload = _zip_payload_offset(data, "missing.bin")
+    damaged = data[:missing_payload + 256]
+    return _fixture_from_bytes(
+        root,
+        "zip-missing-volume-two-complete.zip.001",
+        damaged,
+        zip_entries={
+            "complete-a.txt": b"complete payload a",
+            "complete-b.txt": b"complete payload b",
+        },
+    )
+
+
 def _build_zip_sfx_prefix_tail(root: Path) -> MatrixFixture:
     original = _zip_bytes()
     prefix = b"MZ\x90\x00SUNPACK-SFX-STUB"
@@ -1208,6 +1228,21 @@ def _build_rar4_file_quarantine(root: Path) -> MatrixFixture:
     )
 
 
+def _build_rar4_carrier_then_file_quarantine(root: Path) -> MatrixFixture:
+    payload = b"good rar4 payload behind sfx"
+    good = _rar4_block(0x74, flags=0x8000, payload=payload)
+    bad = bytearray(_rar4_block(0x74, flags=0x8000, payload=b"bad rar4 payload behind sfx"))
+    bad[1] ^= 0x55
+    main = _rar4_block(0x73)
+    expected = RAR4_MAGIC + main + good + _rar4_block(0x7B)
+    return _fixture_from_bytes(
+        root,
+        "rar4-carrier-then-quarantine.exe",
+        b"MZ-RAR4-SFX" + RAR4_MAGIC + main + good + bytes(bad) + _rar4_block(0x7B) + b"TAIL",
+        expected_bytes=expected,
+    )
+
+
 def _build_rar5_missing_split_volume(root: Path) -> MatrixFixture:
     data = RAR5_MAGIC + _rar5_block(1) + _rar5_block(2, data=b"payload")
     return _fixture_from_bytes(root, "rar5-missing-volume.part1.rar", data)
@@ -1487,6 +1522,12 @@ def _build_gzip_truncated_partial_with_trailing_junk(root: Path) -> MatrixFixtur
     return _fixture_from_bytes(root, "gzip-truncated-tail.gz", data[:len(data) * 9 // 10] + b"JUNK", stream_payload=payload)
 
 
+def _build_gzip_truncated_partial_with_padding(root: Path) -> MatrixFixture:
+    payload = _pseudo_random_payload(512 * 1024)
+    data = gzip.compress(payload)
+    return _fixture_from_bytes(root, "gzip-truncated-padding.gz", data[:len(data) * 9 // 10] + (b"\0" * 32), stream_payload=payload)
+
+
 def _build_gzip_payload_bad(root: Path) -> MatrixFixture:
     payload = _pseudo_random_payload(512 * 1024)
     data = bytearray(gzip.compress(payload))
@@ -1627,6 +1668,7 @@ MATRIX = [
     MatrixCase("zip_split_trailing_junk", "zip", ("trailing_junk", "boundary_unreliable"), _build_zip_split_trailing_junk, ("repaired",), "zip_trailing_junk_trim", _verify_zip),
     MatrixCase("zip_missing_split_volume_with_extra_damage", "zip", ("missing_volume", "input_truncated", "trailing_junk", "central_directory_bad", "checksum_error"), _build_zip_missing_split_volume_with_extra_damage, UNREPAIRABLE, None),
     MatrixCase("zip_missing_volume_keeps_complete_entry", "zip", ("missing_volume", "input_truncated", "central_directory_bad", "local_header_recovery"), _build_zip_missing_volume_keeps_complete_entry, ("partial",), "zip_missing_volume_partial_salvage", _verify_zip, modules=("zip_missing_volume_partial_salvage",)),
+    MatrixCase("zip_missing_volume_keeps_two_complete_entries", "zip", ("missing_volume", "input_truncated", "central_directory_bad", "local_header_recovery", "damaged"), _build_zip_missing_volume_keeps_two_complete_entries, ("partial",), "zip_missing_volume_partial_salvage", _verify_zip, modules=("zip_missing_volume_partial_salvage",)),
     MatrixCase("zip_sfx_prefix_tail", "zip", ("carrier_archive", "sfx", "boundary_unreliable", "trailing_junk"), _build_zip_sfx_prefix_tail, ("repaired", "partial"), "zip_deep_partial_recovery", _verify_zip),
     MatrixCase("zip_sfx_split_prefix_tail", "zip", ("carrier_archive", "sfx", "boundary_unreliable", "trailing_junk"), _build_zip_sfx_split_prefix_tail, ("repaired", "partial"), "zip_deep_partial_recovery", _verify_zip),
     MatrixCase("zip_sfx_split_prefix_tail_bad_cd", "zip", ("carrier_archive", "sfx", "boundary_unreliable", "trailing_junk", "central_directory_offset_bad", "central_directory_count_bad", "central_directory_bad"), _build_zip_sfx_split_prefix_tail_bad_cd, ("repaired",), "zip_central_directory_rebuild", _verify_zip),
@@ -1674,6 +1716,7 @@ MATRIX = [
     MatrixCase("rar4_block_chain_trim", "rar", ("trailing_junk", "boundary_unreliable"), _build_rar4_block_chain_trim, ("repaired", "partial"), "rar_block_chain_trim", _verify_bytes, modules=("rar_block_chain_trim",)),
     MatrixCase("rar4_payload_bad", "rar", ("checksum_error", "content_integrity_bad_or_unknown", "damaged"), _build_rar4_payload_bad, UNREPAIRABLE, None),
     MatrixCase("rar4_file_quarantine_rebuild", "rar", ("rar4", "file_block_bad", "damaged", "data_error"), _build_rar4_file_quarantine, ("partial",), "rar4_file_quarantine_rebuild", _verify_bytes, modules=("rar4_file_quarantine_rebuild",)),
+    MatrixCase("rar4_carrier_then_file_quarantine_direct_module", "rar", ("carrier_archive", "sfx", "file_block_bad", "damaged", "data_error"), _build_rar4_carrier_then_file_quarantine, ("partial",), "rar4_file_quarantine_rebuild", _verify_bytes, modules=("rar4_file_quarantine_rebuild",)),
     MatrixCase("rar5_missing_split_volume", "rar", ("missing_volume", "unexpected_end"), _build_rar5_missing_split_volume, UNREPAIRABLE, None),
     MatrixCase("rar5_file_quarantine_rebuild", "rar", ("file_block_bad", "damaged", "data_error"), _build_rar5_file_quarantine, ("partial",), "rar_file_quarantine_rebuild", _verify_bytes, modules=("rar_file_quarantine_rebuild",)),
     MatrixCase("tar_bad_checksum", "tar", ("tar_checksum_bad",), _build_tar_bad_checksum, ("repaired",), "tar_header_checksum_fix", _verify_tar),
@@ -1699,6 +1742,7 @@ MATRIX = [
     MatrixCase("gzip_truncated_partial_recovery", "gzip", ("input_truncated", "probably_truncated", "unexpected_end"), _build_gzip_truncated_partial, ("partial",), "gzip_truncated_partial_recovery", _verify_gzip_prefix, modules=("gzip_truncated_partial_recovery",)),
     MatrixCase("gzip_deflate_prefix_salvage_truncated", "gzip", ("input_truncated", "damaged", "data_error"), _build_gzip_truncated_partial, ("partial",), "gzip_deflate_prefix_salvage", _verify_gzip_prefix, modules=("gzip_deflate_prefix_salvage",)),
     MatrixCase("gzip_deflate_prefix_salvage_rejects_truncated_tail", "gzip", ("input_truncated", "damaged", "data_error", "trailing_junk"), _build_gzip_truncated_partial_with_trailing_junk, UNREPAIRABLE, None, modules=("gzip_deflate_prefix_salvage",)),
+    MatrixCase("gzip_deflate_prefix_salvage_rejects_truncated_padding", "gzip", ("input_truncated", "damaged", "data_error", "trailing_padding", "boundary_unreliable"), _build_gzip_truncated_partial_with_padding, UNREPAIRABLE, None, modules=("gzip_deflate_prefix_salvage",)),
     MatrixCase("gzip_deflate_member_resync", "gzip", ("deflate_resync", "damaged", "data_error"), _build_gzip_deflate_member_resync, ("partial",), "gzip_deflate_member_resync", _verify_gzip),
     MatrixCase("gzip_payload_bad", "gzip", ("checksum_error", "damaged", "data_error"), _build_gzip_payload_bad, UNREPAIRABLE, None, modules=("gzip_deflate_prefix_salvage",)),
     MatrixCase("gzip_payload_bad_with_trailing_junk", "gzip", ("checksum_error", "damaged", "data_error", "trailing_junk"), _build_gzip_payload_bad_with_trailing_junk, UNREPAIRABLE, None, modules=("gzip_deflate_prefix_salvage",)),
@@ -1761,6 +1805,16 @@ MULTI_ROUND_MATRIX = [
         (
             RepairRound(("carrier_archive", "sfx", "boundary_unreliable"), ("repaired", "partial"), "rar_carrier_crop_deep_recovery", modules=("rar_carrier_crop_deep_recovery",)),
             RepairRound(("file_block_bad", "damaged", "data_error"), ("partial",), "rar_file_quarantine_rebuild", modules=("rar_file_quarantine_rebuild",)),
+        ),
+        _verify_bytes,
+    ),
+    MultiRoundCase(
+        "rar4_carrier_then_file_quarantine",
+        "rar",
+        _build_rar4_carrier_then_file_quarantine,
+        (
+            RepairRound(("carrier_archive", "sfx", "boundary_unreliable"), ("repaired",), "rar_carrier_crop_deep_recovery", modules=("rar_carrier_crop_deep_recovery",)),
+            RepairRound(("rar4", "file_block_bad", "damaged", "data_error"), ("partial",), "rar4_file_quarantine_rebuild", modules=("rar4_file_quarantine_rebuild",)),
         ),
         _verify_bytes,
     ),
