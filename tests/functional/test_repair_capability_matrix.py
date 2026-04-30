@@ -257,16 +257,48 @@ def _build_zip_bad_comment_length(root: Path) -> MatrixFixture:
     return _fixture_from_bytes(root, "zip-comment-len.zip", bytes(data), zip_entries=_zip_entries())
 
 
+def _build_zip_comment_length_overreported_with_tail(root: Path) -> MatrixFixture:
+    original = _zip_bytes()
+    data = bytearray(original + b"SHORTTAIL")
+    struct.pack_into("<H", data, _zip_eocd_offset(data) + 20, 32)
+    return _fixture_from_bytes(
+        root,
+        "zip-comment-len-overreported-tail.zip",
+        bytes(data),
+        expected_bytes=original,
+        zip_entries=_zip_entries(),
+    )
+
+
 def _build_zip_bad_cd_offset(root: Path) -> MatrixFixture:
     data = bytearray(_zip_bytes())
     struct.pack_into("<I", data, _zip_eocd_offset(data) + 16, 0)
     return _fixture_from_bytes(root, "zip-cd-offset.zip", bytes(data), zip_entries=_zip_entries())
 
 
+def _build_zip_cd_offset_shifted_back(root: Path) -> MatrixFixture:
+    data = bytearray(_zip_bytes())
+    cd_offset = _zip_cd_offset(data)
+    struct.pack_into("<I", data, _zip_eocd_offset(data) + 16, cd_offset - 7)
+    return _fixture_from_bytes(root, "zip-cd-offset-shifted-back.zip", bytes(data), zip_entries=_zip_entries())
+
+
+def _build_zip_cd_offset_past_end(root: Path) -> MatrixFixture:
+    data = bytearray(_zip_bytes())
+    struct.pack_into("<I", data, _zip_eocd_offset(data) + 16, len(data) + 4096)
+    return _fixture_from_bytes(root, "zip-cd-offset-past-end.zip", bytes(data), zip_entries=_zip_entries())
+
+
 def _build_zip_bad_cd_count(root: Path) -> MatrixFixture:
     data = bytearray(_zip_bytes())
     struct.pack_into("<HH", data, _zip_eocd_offset(data) + 8, 1, 1)
     return _fixture_from_bytes(root, "zip-cd-count.zip", bytes(data), zip_entries=_zip_entries())
+
+
+def _build_zip_cd_count_overreported(root: Path) -> MatrixFixture:
+    data = bytearray(_zip_bytes())
+    struct.pack_into("<HH", data, _zip_eocd_offset(data) + 8, 99, 99)
+    return _fixture_from_bytes(root, "zip-cd-count-overreported.zip", bytes(data), zip_entries=_zip_entries())
 
 
 def _build_zip_missing_eocd(root: Path) -> MatrixFixture:
@@ -286,11 +318,25 @@ def _build_zip_local_name_len_bad(root: Path) -> MatrixFixture:
     return _fixture_from_bytes(root, "zip-local-name-len-bad.zip", bytes(data), expected_bytes=original, zip_entries={"local-name.txt": b"payload"})
 
 
+def _build_zip_local_name_len_too_large(root: Path) -> MatrixFixture:
+    original = _zip_bytes({"local-name-large.txt": b"payload"})
+    data = bytearray(original)
+    struct.pack_into("<H", data, 26, len("local-name-large.txt") + 4)
+    return _fixture_from_bytes(root, "zip-local-name-len-too-large.zip", bytes(data), expected_bytes=original, zip_entries={"local-name-large.txt": b"payload"})
+
+
 def _build_zip_local_size_crc_bad(root: Path) -> MatrixFixture:
     original = _zip_bytes({"local-size.txt": b"size payload"})
     data = bytearray(original)
     struct.pack_into("<III", data, 14, 0, 0, 0)
     return _fixture_from_bytes(root, "zip-local-size-crc-bad.zip", bytes(data), expected_bytes=original, zip_entries={"local-size.txt": b"size payload"})
+
+
+def _build_zip_local_size_too_large(root: Path) -> MatrixFixture:
+    original = _zip_bytes({"local-size-large.txt": b"size payload"})
+    data = bytearray(original)
+    struct.pack_into("<II", data, 18, 9999, 9999)
+    return _fixture_from_bytes(root, "zip-local-size-too-large.zip", bytes(data), expected_bytes=original, zip_entries={"local-size-large.txt": b"size payload"})
 
 
 def _build_zip_local_bit3_flag_bad(root: Path) -> MatrixFixture:
@@ -551,6 +597,32 @@ def _build_zip_multi_structure_and_payload_bad(root: Path) -> MatrixFixture:
         root,
         "zip-multi-structure-payload-bad.zip",
         bytes(data) + b"JUNK",
+        zip_entries={"good.txt": b"good payload"},
+    )
+
+
+def _build_zip_cd_offset_and_payload_bad(root: Path) -> MatrixFixture:
+    entries = {"bad.txt": b"bad payload", "good.txt": b"good payload"}
+    data = bytearray(_zip_bytes(entries))
+    data[_zip_payload_offset(data, "bad.txt") + 1] ^= 0x55
+    struct.pack_into("<I", data, _zip_eocd_offset(data) + 16, 0)
+    return _fixture_from_bytes(
+        root,
+        "zip-cd-offset-and-payload-bad.zip",
+        bytes(data),
+        zip_entries={"good.txt": b"good payload"},
+    )
+
+
+def _build_zip_cd_count_and_payload_bad(root: Path) -> MatrixFixture:
+    entries = {"bad.txt": b"bad payload", "good.txt": b"good payload"}
+    data = bytearray(_zip_bytes(entries))
+    data[_zip_payload_offset(data, "bad.txt") + 2] ^= 0x55
+    struct.pack_into("<HH", data, _zip_eocd_offset(data) + 8, 99, 99)
+    return _fixture_from_bytes(
+        root,
+        "zip-cd-count-and-payload-bad.zip",
+        bytes(data),
         zip_entries={"good.txt": b"good payload"},
     )
 
@@ -1355,12 +1427,18 @@ UNREPAIRABLE = ("unrepairable", "unsupported")
 MATRIX = [
     MatrixCase("zip_trailing_junk", "zip", ("trailing_junk",), _build_zip_trailing_junk, ("repaired",), "zip_trailing_junk_trim", _verify_zip),
     MatrixCase("zip_bad_comment_length", "zip", ("comment_length_bad",), _build_zip_bad_comment_length, ("repaired",), "zip_comment_length_fix", _verify_zip),
+    MatrixCase("zip_comment_length_overreported_with_tail", "zip", ("comment_length_bad", "trailing_junk"), _build_zip_comment_length_overreported_with_tail, ("repaired",), "zip_comment_length_fix", _verify_zip),
     MatrixCase("zip_bad_cd_offset", "zip", ("central_directory_offset_bad",), _build_zip_bad_cd_offset, ("repaired",), "zip_central_directory_offset_fix", _verify_zip),
+    MatrixCase("zip_cd_offset_shifted_back", "zip", ("central_directory_offset_bad",), _build_zip_cd_offset_shifted_back, ("repaired",), "zip_central_directory_offset_fix", _verify_zip),
+    MatrixCase("zip_cd_offset_past_end", "zip", ("central_directory_offset_bad",), _build_zip_cd_offset_past_end, ("repaired",), "zip_central_directory_offset_fix", _verify_zip),
     MatrixCase("zip_bad_cd_count", "zip", ("central_directory_count_bad",), _build_zip_bad_cd_count, ("repaired",), "zip_central_directory_count_fix", _verify_zip),
+    MatrixCase("zip_cd_count_overreported", "zip", ("central_directory_count_bad",), _build_zip_cd_count_overreported, ("repaired",), "zip_central_directory_count_fix", _verify_zip),
     MatrixCase("zip_missing_eocd", "zip", ("eocd_bad", "central_directory_bad"), _build_zip_missing_eocd, ("repaired",), "zip_eocd_repair", _verify_zip),
     MatrixCase("zip_missing_central_directory", "zip", ("central_directory_bad", "local_header_recovery"), _build_zip_missing_cd, ("repaired", "partial"), "zip_central_directory_rebuild", _verify_zip),
     MatrixCase("zip_local_name_len_bad", "zip", ("local_header_bad", "local_header_length_bad"), _build_zip_local_name_len_bad, ("repaired",), "zip_local_header_field_repair", _verify_zip),
+    MatrixCase("zip_local_name_len_too_large", "zip", ("local_header_bad", "local_header_length_bad"), _build_zip_local_name_len_too_large, ("repaired",), "zip_local_header_field_repair", _verify_zip),
     MatrixCase("zip_local_size_crc_bad", "zip", ("local_header_bad", "local_header_size_bad"), _build_zip_local_size_crc_bad, ("repaired",), "zip_local_header_field_repair", _verify_zip),
+    MatrixCase("zip_local_size_too_large", "zip", ("local_header_bad", "local_header_size_bad", "compressed_size_bad"), _build_zip_local_size_too_large, ("repaired",), "zip_local_header_field_repair", _verify_zip),
     MatrixCase("zip_local_bit3_flag_bad", "zip", ("local_header_bad", "bit3_data_descriptor", "data_descriptor"), _build_zip_local_bit3_flag_bad, ("repaired",), "zip_local_header_field_repair", _verify_zip),
     MatrixCase("zip_data_descriptor", "zip", ("data_descriptor", "compressed_size_bad"), _build_zip_descriptor, ("repaired",), "zip_data_descriptor_recovery", _verify_zip),
     MatrixCase("zip64_data_descriptor", "zip", ("data_descriptor", "compressed_size_bad"), _build_zip64_descriptor, ("repaired",), "zip_data_descriptor_recovery", _verify_zip),
@@ -1383,6 +1461,8 @@ MATRIX = [
     MatrixCase("zip_descriptor_payload_bad_keeps_other_descriptor_entry", "zip", ("data_descriptor", "compressed_size_bad", "checksum_error", "crc_error", "damaged"), _build_zip_descriptor_payload_bad_keeps_other_descriptor_entry, ("partial",), "zip_deep_partial_recovery", _verify_zip),
     MatrixCase("zip64_descriptor_payload_bad_keeps_other_descriptor_entry", "zip", ("data_descriptor", "compressed_size_bad", "checksum_error", "crc_error", "damaged"), _build_zip64_descriptor_payload_bad_keeps_other_descriptor_entry, ("partial",), "zip_deep_partial_recovery", _verify_zip),
     MatrixCase("zip_multi_structure_and_payload_bad", "zip", ("checksum_error", "crc_error", "damaged", "central_directory_offset_bad", "central_directory_count_bad", "comment_length_bad", "trailing_junk", "central_directory_bad"), _build_zip_multi_structure_and_payload_bad, ("partial",), "zip_central_directory_rebuild", _verify_zip),
+    MatrixCase("zip_cd_offset_and_payload_bad", "zip", ("central_directory_offset_bad", "central_directory_bad", "checksum_error", "crc_error", "damaged"), _build_zip_cd_offset_and_payload_bad, ("partial",), "zip_central_directory_rebuild", _verify_zip),
+    MatrixCase("zip_cd_count_and_payload_bad", "zip", ("central_directory_count_bad", "central_directory_bad", "checksum_error", "crc_error", "damaged"), _build_zip_cd_count_and_payload_bad, ("partial",), "zip_central_directory_rebuild", _verify_zip),
     MatrixCase("zip_duplicate_conflict_resolver", "zip", ("duplicate_entries", "overlapping_entries", "damaged"), _build_zip_duplicate_conflict, ("partial",), "zip_conflict_resolver_rebuild", _verify_zip, modules=("zip_conflict_resolver_rebuild",)),
     MatrixCase("archive_nested_zip_payload_salvage", "zip", ("outer_container_bad", "nested_archive", "damaged"), _build_nested_zip_payload, ("partial",), "archive_nested_payload_salvage", _verify_zip, modules=("archive_nested_payload_salvage",)),
     MatrixCase("7z_trailing_junk_v04", "7z", ("trailing_junk",), _build_7z_trailing_junk_v04, ("repaired",), "seven_zip_boundary_trim", _verify_bytes),

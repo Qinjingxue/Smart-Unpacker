@@ -11,6 +11,16 @@ from sunpack_native import zip_directory_field_repair as _native_zip_directory_f
 from ._native_field_result import repair_result_from_native_zip_field
 
 
+CONTENT_DAMAGE_FLAGS = {
+    "checksum_error",
+    "crc_error",
+    "entry_payload_bad",
+    "damaged",
+    "content_integrity_bad_or_unknown",
+    "data_error",
+}
+
+
 class ZipCentralDirectoryCountFix:
     spec = RepairModuleSpec(
         name="zip_central_directory_count_fix",
@@ -22,6 +32,7 @@ class ZipCentralDirectoryCountFix:
                 formats=("zip",),
                 require_any_flags=("central_directory_count_bad", "central_directory_bad"),
                 require_any_failure_kinds=("structure_recognition",),
+                reject_any_flags=tuple(sorted(CONTENT_DAMAGE_FLAGS)),
                 base_score=0.78,
             ),
         ),
@@ -29,6 +40,8 @@ class ZipCentralDirectoryCountFix:
 
     def can_handle(self, job: RepairJob, diagnosis: RepairDiagnosis, config: dict) -> float:
         flags = set(job.damage_flags)
+        if flags & CONTENT_DAMAGE_FLAGS:
+            return 0.0
         if flags & {"central_directory_count_bad", "central_directory_bad"}:
             return 0.88
         return 0.0

@@ -22,7 +22,19 @@ class ZipEocdRepair:
                 formats=("zip",),
                 require_any_flags=("eocd_bad", "central_directory_bad", "directory_integrity_bad_or_unknown"),
                 require_any_failure_kinds=("structure_recognition", "corrupted_data"),
-                reject_any_flags=("wrong_password", "carrier_archive", "sfx", "embedded_archive", "carrier_prefix"),
+                reject_any_flags=(
+                    "wrong_password",
+                    "carrier_archive",
+                    "sfx",
+                    "embedded_archive",
+                    "carrier_prefix",
+                    "checksum_error",
+                    "crc_error",
+                    "entry_payload_bad",
+                    "damaged",
+                    "content_integrity_bad_or_unknown",
+                    "data_error",
+                ),
                 base_score=0.82,
             ),
         ),
@@ -31,6 +43,8 @@ class ZipEocdRepair:
     def can_handle(self, job: RepairJob, diagnosis: RepairDiagnosis, config: dict) -> float:
         flags = set(job.damage_flags)
         if flags & {"carrier_archive", "sfx", "embedded_archive", "carrier_prefix"}:
+            return 0.0
+        if flags & {"checksum_error", "crc_error", "entry_payload_bad", "damaged", "content_integrity_bad_or_unknown", "data_error"}:
             return 0.0
         if flags & {"eocd_bad", "central_directory_bad", "directory_integrity_bad_or_unknown"}:
             return 0.97 if "eocd_bad" in flags else 0.9
