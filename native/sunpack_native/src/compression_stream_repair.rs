@@ -170,6 +170,21 @@ pub(crate) fn compression_stream_block_salvage(
     ));
     match recover_stream_prefix(&data, format, &output_path, &options) {
         Ok(recovered) => {
+            if !is_trusted_prefix_salvage(&recovered) {
+                let _ = fs::remove_file(&output_path);
+                return status_dict(
+                    py,
+                    "unrepairable",
+                    "",
+                    recovered.error.as_deref().unwrap_or(""),
+                    "stream decoder reported data/checksum damage after emitting bytes; refusing an unverifiable corrupt-prefix candidate",
+                    &recovered.warnings,
+                    format.name(),
+                    recovered.decoded_bytes,
+                    0,
+                    0.0,
+                );
+            }
             let result = PyDict::new(py);
             result.set_item("status", "partial")?;
             result.set_item("selected_path", output_path.to_string_lossy().to_string())?;
@@ -2776,6 +2791,25 @@ fn confidence_for_size(decoded_bytes: u64) -> f64 {
     } else {
         0.62
     }
+}
+
+fn is_trusted_prefix_salvage(stats: &RecoveryStats) -> bool {
+    if stats
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("time budget reached"))
+    {
+        return true;
+    }
+    let Some(error) = stats.error.as_deref() else {
+        return false;
+    };
+    let lower = error.to_ascii_lowercase();
+    lower.contains("eof")
+        || lower.contains("end of file")
+        || lower.contains("unexpected end")
+        || lower.contains("truncated")
+        || lower.contains("decompression not finished")
 }
 
 fn sanitize_strategy_name(value: &str) -> String {
