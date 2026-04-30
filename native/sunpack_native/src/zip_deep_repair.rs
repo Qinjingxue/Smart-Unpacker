@@ -818,12 +818,39 @@ fn parse_entry(data: &[u8], offset: usize, options: &DeepZipOptions) -> EntryOut
             "ZIP64-sized entries are not rewritten by deep recovery yet".to_string(),
         );
     }
-    let Some(data_end) = data_start.checked_add(compressed_size as usize) else {
-        return EntryOutcome::Skipped("compressed size overflows input range".to_string());
+    let data_end = match data_start.checked_add(compressed_size as usize) {
+        Some(end) if end <= data.len() => end,
+        Some(_) if method == 8 && options.verify_candidates => {
+            match verified_deflate_payload_end(
+                data,
+                data_start,
+                None,
+                header_crc32,
+                uncompressed_size,
+                options,
+            ) {
+                Some(end) => end,
+                None => return EntryOutcome::Skipped("entry payload is truncated".to_string()),
+            }
+        }
+        Some(_) => return EntryOutcome::Skipped("entry payload is truncated".to_string()),
+        None => {
+            return EntryOutcome::Skipped("compressed size overflows input range".to_string());
+        }
     };
-    if data_end > data.len() {
-        return EntryOutcome::Skipped("entry payload is truncated".to_string());
-    }
+    let data_end = if method == 8 && options.verify_candidates {
+        verified_deflate_payload_end(
+            data,
+            data_start,
+            Some(data_end),
+            header_crc32,
+            uncompressed_size,
+            options,
+        )
+        .unwrap_or(data_end)
+    } else {
+        data_end
+    };
     classify_entry(
         data,
         data_start,
@@ -1546,6 +1573,43 @@ fn descriptor_before_next_record(data: &[u8], data_start: usize) -> Option<(usiz
         };
         if compressed == (descriptor_start - data_start) as u64 {
             return Some((descriptor_start, crc32, compressed, uncompressed));
+        }
+    }
+    None
+}
+
+fn verified_deflate_payload_end(
+    data: &[u8],
+    data_start: usize,
+    header_end: Option<usize>,
+    expected_crc32: u32,
+    expected_size: u64,
+    options: &DeepZipOptions,
+) -> Option<usize> {
+    let mut ends = Vec::new();
+    if let Some(end) = header_end.filter(|end| *end <= data.len() && *end > data_start) {
+        ends.push(end);
+    }
+    if let Some(next) = find_next_zip_record(data, data_start) {
+        if next > data_start && !ends.contains(&next) {
+            ends.push(next);
+        }
+    }
+    if data_start < data.len() && ends.is_empty() {
+        ends.push(data.len());
+    }
+    for end in ends {
+        let candidate = &data[data_start..end];
+        if let Ok(info) = verify_deflate(
+            candidate,
+            Some(expected_crc32),
+            Some(expected_size),
+            options.max_entry_uncompressed_bytes,
+            false,
+        ) {
+            if info.consumed > 0 && data_start + info.consumed <= end {
+                return Some(data_start + info.consumed);
+            }
         }
     }
     None

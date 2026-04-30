@@ -45,6 +45,15 @@ def repair_result_from_native_zip_field(
     ]
     actions = list(result.get("actions") or [])
     confidence = float(result.get("confidence") or 0.0)
+    payload_damage_flags = {
+        "checksum_error",
+        "crc_error",
+        "damaged",
+        "entry_payload_bad",
+        "payload_bad",
+        "data_error",
+    }
+    partial = bool(set(job.damage_flags) & payload_damage_flags)
     if result.get("truncate_at") is not None:
         if patches:
             patch_plan = patch_plan_for_truncate_append(
@@ -75,7 +84,7 @@ def repair_result_from_native_zip_field(
         repaired_input = virtual_patch_repaired_input(repaired_state)
         workspace_paths = []
     return RepairResult(
-        status="repaired",
+        status="partial" if partial else "repaired",
         confidence=confidence,
         format="zip",
         repaired_input=repaired_input,
@@ -83,6 +92,7 @@ def repair_result_from_native_zip_field(
         damage_flags=list(job.damage_flags),
         warnings=list(result.get("warnings") or []),
         workspace_paths=workspace_paths,
+        partial=partial,
         module_name=module_name,
         diagnosis=patch_diagnosis(
             {**diagnosis.as_dict(), "native_zip_directory_field_repair": dict(result)},

@@ -80,7 +80,20 @@ class ZipCentralDirectoryRebuild:
             )
 
         coverage = coverage_view_from_job(job)
-        partial = not scan.complete or (coverage.known and scan.entries and coverage.has_missing_entries)
+        payload_damage_flags = {
+            "checksum_error",
+            "crc_error",
+            "damaged",
+            "entry_payload_bad",
+            "payload_bad",
+            "data_error",
+        }
+        partial = (
+            not scan.complete
+            or (coverage.known and scan.entries and coverage.has_missing_entries)
+            or coverage.has_payload_damage
+            or bool(flags & payload_damage_flags)
+        )
         confidence = 0.72 if partial else 0.92
         confidence += coverage.score_hint(directory=0.04, mixed=-0.04, payload=-0.12)
         confidence = max(0.1, min(0.98, confidence))

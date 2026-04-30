@@ -551,6 +551,14 @@
         "enabled": true
       },
       {
+        "name": "zip_local_header_verified_salvage",
+        "enabled": true
+      },
+      {
+        "name": "zip_cd_local_header_reconcile_rebuild",
+        "enabled": true
+      },
+      {
         "name": "zip_entry_quarantine_rebuild",
         "enabled": true
       },

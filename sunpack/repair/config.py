@@ -60,6 +60,8 @@ DEFAULT_REPAIR_CONFIG = {
         {"name": "zip_trailing_junk_trim", "enabled": True},
         {"name": "zip_central_directory_rebuild", "enabled": True},
         {"name": "zip_data_descriptor_recovery", "enabled": True},
+        {"name": "zip_local_header_verified_salvage", "enabled": True},
+        {"name": "zip_cd_local_header_reconcile_rebuild", "enabled": True},
         {"name": "zip_entry_quarantine_rebuild", "enabled": True},
         {"name": "zip_partial_recovery", "enabled": True},
         {"name": "zip_deep_partial_recovery", "enabled": True},
