@@ -43,9 +43,9 @@ param(
     [switch]$SkipBuild,
     [switch]$SkipCollect,
     [switch]$SkipTrain,
-    [ValidateSet("immediate", "future", "discounted", "blended", "strategy")]
-    [string]$LabelTarget = "strategy",
-    [ValidateSet("query", "episode", "source_sample")]
+    [ValidateSet("immediate", "future", "discounted", "blended", "strategy", "terminal_recovery_ratio", "discounted_terminal_recovery_ratio", "strategy_recovery_ratio")]
+    [string]$LabelTarget = "strategy_recovery_ratio",
+    [ValidateSet("query", "episode", "source_sample", "source_profile", "profile_holdout")]
     [string]$SplitBy = "source_sample",
     [bool]$TrainByFormat = $true,
     [switch]$TrainUnifiedBaseline,

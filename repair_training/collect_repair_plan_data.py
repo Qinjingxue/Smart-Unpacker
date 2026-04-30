@@ -26,6 +26,11 @@ if str(REPO_ROOT) not in sys.path:
 
 from sunpack.repair import RepairJob, RepairResult, RepairScheduler
 from sunpack.repair.candidate import CandidateSelector, candidate_feature_payload, materialize_candidate
+from sunpack.contracts.detection import FactBag
+from sunpack.contracts.tasks import ArchiveTask
+from sunpack.extraction.result import ExtractionResult
+from sunpack.verification import VerificationScheduler
+from repair_training.runtime_features import FEATURE_CONTRACT_VERSION, RepairPrior, build_runtime_feature_record
 
 
 DEFAULT_MANIFEST = Path(".sunpack") / "corpus" / "repair_plan_manifest.jsonl"
@@ -470,6 +475,10 @@ def _collect_sample_rows(record: dict[str, Any], args: argparse.Namespace, debug
                 source_input=source_input,
                 format=fmt,
                 confidence=0.82,
+                analysis_prepass=_record_analysis_prepass(record, fmt),
+                fuzzy_profile=_record_fuzzy_profile(record, fmt),
+                extraction_failure=_runtime_extraction_failure(record, state, before_state=None),
+                extraction_diagnostics=_runtime_extraction_diagnostics(record, state),
                 damage_flags=damage_flags,
                 archive_key=f"{record.get('sample_id')}:round:{state_round}:beam:{state.get('beam_id', 0)}",
             )
@@ -490,8 +499,19 @@ def _collect_sample_rows(record: dict[str, Any], args: argparse.Namespace, debug
                 print(f"  CANDIDATES {record.get('sample_id')} round={state_round} count={len(batch.candidates)} warnings={len(batch.warnings or [])}", flush=True)
             phase_started = time.perf_counter()
             before_state = _state_summary(record, source_input, fmt, damage_flags)
+            job = RepairJob(
+                source_input=source_input,
+                format=fmt,
+                confidence=0.82,
+                analysis_prepass=_record_analysis_prepass(record, fmt),
+                fuzzy_profile=_record_fuzzy_profile(record, fmt),
+                extraction_failure=_runtime_extraction_failure(record, state, before_state=before_state),
+                extraction_diagnostics=_runtime_extraction_diagnostics(record, state),
+                damage_flags=damage_flags,
+                archive_key=f"{record.get('sample_id')}:round:{state_round}:beam:{state.get('beam_id', 0)}",
+            )
             debug_events.write("phase", record, round=state_round, query_id=query_id, phase="before_state", elapsed_seconds=round(time.perf_counter() - phase_started, 3))
-            state_features = _state_features(record, batch, state_round, previous_actions, best_completeness, before_state)
+            state_features = _state_features(record, job, batch, state_round, previous_actions, previous_modules, best_completeness, before_state)
             state_features["previous_modules"] = previous_modules
             state_features["previous_module_count"] = len(previous_modules)
             phase_started = time.perf_counter()
@@ -561,6 +581,7 @@ def _collect_sample_rows(record: dict[str, Any], args: argparse.Namespace, debug
                     after_state,
                     delta_features,
                     batch,
+                    job,
                     label_info,
                     selected=candidate_id == selected_id,
                     proposal_only=not materialized_for_label,
@@ -588,7 +609,21 @@ def _collect_sample_rows(record: dict[str, Any], args: argparse.Namespace, debug
 
             branch_entries = _branch_entries(row_entries, selected_id, rollout_mode, args)
             if state_round + 1 >= max_rounds:
-                rows.append(_rollout_terminal_row(record, state, "max_rounds", "maximum repair rounds reached", before_state))
+                terminal_entries = branch_entries or row_entries[:1]
+                if terminal_entries:
+                    for entry in terminal_entries:
+                        candidate_id = _candidate_id(entry["candidate"])
+                        rows.append(_rollout_terminal_row(
+                            record,
+                            state,
+                            "max_rounds",
+                            "maximum repair rounds reached",
+                            after_by_id.get(candidate_id, before_state),
+                            parent_action_row_id=entry["action_row_id"],
+                            parent_candidate_id=candidate_id,
+                        ))
+                else:
+                    rows.append(_rollout_terminal_row(record, state, "max_rounds", "maximum repair rounds reached", before_state))
                 continue
             if not branch_entries:
                 rows.append(_rollout_terminal_row(record, state, "dead_end", "no branchable repair candidate", before_state))
@@ -772,6 +807,10 @@ def _rollout_terminal_row(
     state_round = int(state.get("round", 0) or 0)
     terminal_state = terminal_state if isinstance(terminal_state, dict) else {}
     label = int(terminal_label if terminal_label is not None else _terminal_label_from_state(status, terminal_state))
+    terminal_verification = _terminal_verification_summary_from_state(record, terminal_state)
+    terminal_coverage = terminal_verification.get("archive_coverage") if isinstance(terminal_verification.get("archive_coverage"), dict) else {}
+    terminal_recovery_ratio = _terminal_recovery_ratio(terminal_verification)
+    terminal_ratio_source = _terminal_recovery_ratio_source(terminal_verification)
     row = {
         "schema_version": 1,
         "source": "repair_plan_corpus",
@@ -806,6 +845,10 @@ def _rollout_terminal_row(
         "terminal_status": status,
         "terminal_label": label,
         "terminal_state": terminal_state,
+        "terminal_verification_summary": terminal_verification,
+        "terminal_archive_coverage": terminal_coverage,
+        "terminal_recovery_ratio": terminal_recovery_ratio,
+        "terminal_recovery_ratio_source": terminal_ratio_source,
         "stable_features": {
             "state": {
                 "format": record.get("format"),
@@ -837,6 +880,9 @@ def _rollout_terminal_row(
             "discounted_gain": float(label),
             "blended_gain": float(label),
             "strategy_gain": _strategy_gain(label, label, 0, label == 3, status),
+            "terminal_recovery_ratio": terminal_recovery_ratio,
+            "discounted_terminal_recovery_ratio": terminal_recovery_ratio,
+            "strategy_recovery_ratio": _strategy_recovery_ratio(label, terminal_recovery_ratio, 0, label == 3, status),
             "risk_class": _risk_class(label, label, status),
             "hard_negative_weight": _hard_negative_weight(label, label, status),
         },
@@ -859,6 +905,209 @@ def _terminal_label_from_state(status: str, terminal_state: dict[str, Any]) -> i
     return 0
 
 
+def _terminal_verification_summary_from_state(record: dict[str, Any], terminal_state: dict[str, Any]) -> dict[str, Any]:
+    archive_path = Path(str(terminal_state.get("source_path") or ""))
+    source_archive = Path(str(record.get("source_path") or ""))
+    if not source_archive.is_file():
+        return _verification_result_payload(_failed_terminal_verification("missing_source_archive"))
+    try:
+        with tempfile.TemporaryDirectory(prefix="sunpack_verify_terminal_") as tmp:
+            output_dir = Path(tmp) / "out"
+            output_dir.mkdir(parents=True, exist_ok=True)
+            if archive_path.is_file():
+                extract_status = _extract_archive_for_terminal_verification(archive_path, str(record.get("format") or record.get("material_format") or ""), output_dir)
+                result_archive = str(archive_path)
+            else:
+                extract_status = {"success": False, "failure_kind": "missing_terminal_archive", "error": "terminal archive path is missing", "files_written": 0, "bytes_written": 0}
+                result_archive = str(source_archive)
+            task = _verification_task_from_record(record, source_archive)
+            result = ExtractionResult(
+                success=extract_status.get("success", False),
+                archive=result_archive,
+                out_dir=str(output_dir),
+                all_parts=[str(archive_path)],
+                error=str(extract_status.get("error") or ""),
+                diagnostics={
+                    "failure_stage": "" if extract_status.get("success") else "terminal_verification_extract",
+                    "failure_kind": str(extract_status.get("failure_kind") or ""),
+                    "result": {
+                        "native_status": "ok" if extract_status.get("success") else "failed",
+                        "files_written": int(extract_status.get("files_written", 0) or 0),
+                        "bytes_written": int(extract_status.get("bytes_written", 0) or 0),
+                    },
+                },
+                partial_outputs=bool(extract_status.get("files_written", 0)),
+            )
+            verification = _terminal_verifier().verify(task, result)
+            return _verification_result_payload(verification)
+    except Exception as exc:
+        return _verification_result_payload(_failed_terminal_verification(str(exc)))
+
+
+def _terminal_recovery_ratio(verification: dict[str, Any]) -> float:
+    coverage = verification.get("archive_coverage") if isinstance(verification.get("archive_coverage"), dict) else {}
+    if coverage.get("completeness") is not None:
+        return max(0.0, min(1.0, _as_float(coverage.get("completeness"))))
+    if verification.get("completeness") is not None:
+        return max(0.0, min(1.0, _as_float(verification.get("completeness"))))
+    expected = int(coverage.get("expected_files", 0) or 0)
+    complete = int(coverage.get("complete_files", 0) or 0)
+    if expected > 0:
+        return max(0.0, min(1.0, complete / expected))
+    return 0.0
+
+
+def _terminal_recovery_ratio_source(verification: dict[str, Any]) -> str:
+    coverage = verification.get("archive_coverage") if isinstance(verification.get("archive_coverage"), dict) else {}
+    if coverage.get("completeness") is not None:
+        return "verification.archive_coverage.completeness"
+    if verification.get("completeness") is not None:
+        return "verification.completeness"
+    return "matched_files/expected_files"
+
+
+def _terminal_verifier() -> VerificationScheduler:
+    return VerificationScheduler({
+        "verification": {
+            "enabled": True,
+            "complete_accept_threshold": 0.999,
+            "partial_accept_threshold": 0.2,
+            "methods": [
+                {"name": "archive_test_crc", "enabled": True, "max_items": 200000},
+                {"name": "manifest_size_match", "enabled": True, "max_expected_names": 200000},
+                {"name": "output_presence", "enabled": True},
+            ],
+        }
+    })
+
+
+def _verification_task_from_record(record: dict[str, Any], source_archive: Path) -> ArchiveTask:
+    fmt = str(record.get("format") or record.get("material_format") or source_archive.suffix.lstrip("."))
+    bag = FactBag()
+    bag.set("candidate.entry_path", str(source_archive))
+    bag.set("candidate.member_paths", [str(source_archive)])
+    bag.set("candidate.logical_name", source_archive.stem)
+    bag.set("file.detected_ext", fmt)
+    bag.set("archive.format_hint", fmt)
+    bag.set("analysis.selected_format", fmt)
+    bag.set("analysis.status", "complete")
+    bag.set("analysis.confidence", 1.0)
+    oracle = record.get("oracle") if isinstance(record.get("oracle"), dict) else {}
+    expected_files = oracle.get("expected_files")
+    if isinstance(expected_files, list):
+        bag.set("analysis.expected_names", [str(item.get("name") or item.get("path") or "") for item in expected_files if isinstance(item, dict)])
+        bag.set("analysis.file_count", len(expected_files))
+        bag.set("analysis.total_unpacked_size", sum(int(item.get("size", 0) or 0) for item in expected_files if isinstance(item, dict)))
+    task = ArchiveTask(
+        fact_bag=bag,
+        score=10,
+        key=str(record.get("source_archive_id") or source_archive.name),
+        main_path=str(source_archive),
+        all_parts=[str(source_archive)],
+        logical_name=str(record.get("source_archive_name") or source_archive.stem),
+        detected_ext=fmt,
+    )
+    task.ensure_archive_state()
+    return task
+
+
+def _extract_archive_for_terminal_verification(archive_path: Path, fmt: str, output_dir: Path) -> dict[str, Any]:
+    fmt = _normalize_format(fmt)
+    files_written = 0
+    bytes_written = 0
+    try:
+        if fmt == "zip":
+            with zipfile.ZipFile(archive_path, "r") as archive:
+                for info in archive.infolist():
+                    if info.is_dir():
+                        continue
+                    target = output_dir / info.filename
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    data = archive.read(info)
+                    target.write_bytes(data)
+                    files_written += 1
+                    bytes_written += len(data)
+        elif fmt == "tar":
+            with tarfile.open(archive_path, "r:*") as archive:
+                for member in archive.getmembers():
+                    if not member.isfile():
+                        continue
+                    target = output_dir / member.name
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    source = archive.extractfile(member)
+                    data = source.read() if source is not None else b""
+                    target.write_bytes(data)
+                    files_written += 1
+                    bytes_written += len(data)
+        else:
+            return {"success": False, "failure_kind": "unsupported_terminal_format", "files_written": 0, "bytes_written": 0}
+        return {"success": files_written > 0, "files_written": files_written, "bytes_written": bytes_written}
+    except Exception as exc:
+        return {"success": files_written > 0, "failure_kind": "extract_error", "error": str(exc), "files_written": files_written, "bytes_written": bytes_written}
+
+
+def _verification_result_payload(verification: Any) -> dict[str, Any]:
+    coverage = getattr(verification, "archive_coverage", None)
+    return {
+        "assessment_status": getattr(verification, "assessment_status", ""),
+        "decision_hint": getattr(verification, "decision_hint", ""),
+        "source_integrity": getattr(verification, "source_integrity", ""),
+        "completeness": float(getattr(verification, "completeness", 0.0) or 0.0),
+        "recoverable_upper_bound": float(getattr(verification, "recoverable_upper_bound", 1.0) or 1.0),
+        "complete_files": int(getattr(verification, "complete_files", 0) or 0),
+        "partial_files": int(getattr(verification, "partial_files", 0) or 0),
+        "failed_files": int(getattr(verification, "failed_files", 0) or 0),
+        "missing_files": int(getattr(verification, "missing_files", 0) or 0),
+        "unverified_files": int(getattr(verification, "unverified_files", 0) or 0),
+        "methods_run": list(getattr(verification, "methods_run", []) or []),
+        "archive_coverage": {
+            "completeness": float(getattr(coverage, "completeness", 0.0) or 0.0) if coverage is not None else 0.0,
+            "file_coverage": float(getattr(coverage, "file_coverage", 0.0) or 0.0) if coverage is not None else 0.0,
+            "byte_coverage": float(getattr(coverage, "byte_coverage", 0.0) or 0.0) if coverage is not None else 0.0,
+            "expected_files": int(getattr(coverage, "expected_files", 0) or 0) if coverage is not None else 0,
+            "matched_files": int(getattr(coverage, "matched_files", 0) or 0) if coverage is not None else 0,
+            "complete_files": int(getattr(coverage, "complete_files", 0) or 0) if coverage is not None else 0,
+            "partial_files": int(getattr(coverage, "partial_files", 0) or 0) if coverage is not None else 0,
+            "failed_files": int(getattr(coverage, "failed_files", 0) or 0) if coverage is not None else 0,
+            "missing_files": int(getattr(coverage, "missing_files", 0) or 0) if coverage is not None else 0,
+            "confidence": float(getattr(coverage, "confidence", 0.0) or 0.0) if coverage is not None else 0.0,
+        },
+    }
+
+
+def _failed_terminal_verification(message: str):
+    from sunpack.verification.result import (
+        ArchiveCoverageSummary,
+        DECISION_REPAIR,
+        SOURCE_INTEGRITY_DAMAGED,
+        ASSESSMENT_UNUSABLE,
+        VerificationIssue,
+        VerificationResult,
+    )
+
+    return VerificationResult(
+        methods_run=["terminal_verification"],
+        issues=[VerificationIssue(method="terminal_verification", code="fail.terminal_verification", message=message)],
+        completeness=0.0,
+        recoverable_upper_bound=0.0,
+        assessment_status=ASSESSMENT_UNUSABLE,
+        source_integrity=SOURCE_INTEGRITY_DAMAGED,
+        decision_hint=DECISION_REPAIR,
+        archive_coverage=ArchiveCoverageSummary(completeness=0.0, confidence=1.0),
+    )
+
+
+def _label_to_recovery_ratio(label: int) -> float:
+    label = int(label or 0)
+    if label >= 3:
+        return 1.0
+    if label == 2:
+        return 0.35
+    if label == 1:
+        return 0.2
+    return 0.0
+
+
 def _strategy_gain(immediate_label: int, terminal_label: int, steps_to_terminal: int, terminal_success: bool, terminal_status: str | None) -> float:
     terminal_label = int(terminal_label or 0)
     immediate_label = int(immediate_label or 0)
@@ -874,6 +1123,19 @@ def _strategy_gain(immediate_label: int, terminal_label: int, steps_to_terminal:
     if str(terminal_status or "") in {"dead_end", "no_candidates", "budget_exhausted"}:
         status_penalty = 0.25
     return max(-1.0, terminal_component + immediate_component + success_bonus - status_penalty)
+
+
+def _strategy_recovery_ratio(immediate_label: int, terminal_recovery_ratio: float, steps_to_terminal: int, terminal_success: bool, terminal_status: str | None) -> float:
+    if int(immediate_label or 0) < 0 or str(terminal_status or "") == "hard_negative":
+        return -1.0
+    steps = max(0, int(steps_to_terminal or 0))
+    ratio = max(0.0, min(1.0, float(terminal_recovery_ratio or 0.0)))
+    value = ratio * (0.9 ** steps)
+    if terminal_success:
+        value += 0.05
+    if str(terminal_status or "") in {"dead_end", "no_candidates", "budget_exhausted"}:
+        value -= 0.05
+    return max(-1.0, min(1.05, value))
 
 
 def _backfill_future_labels(rows: list[dict[str, Any]], discount: float) -> None:
@@ -896,52 +1158,63 @@ def _backfill_future_labels(rows: list[dict[str, Any]], discount: float) -> None
         own_label = int(row.get("label", 0) or 0)
         result = {
             "subtree_best_label": own_label,
+            "subtree_best_terminal_recovery_ratio": _label_to_recovery_ratio(own_label),
             "subtree_terminal_success": own_label == 3,
             "subtree_best_terminal_state_id": row.get("state_id"),
             "steps_to_best": 0,
             "selected_path_terminal_label": own_label,
             "selected_path_terminal_status": str(row.get("label_status") or ""),
             "selected_path_terminal_state_id": row.get("state_id"),
+            "selected_path_terminal_recovery_ratio": _label_to_recovery_ratio(own_label),
             "steps_to_terminal": 0,
         }
         for terminal in terminals.get(row_id, []):
             terminal_label = int(terminal.get("label", 0) or 0)
             terminal_status = str(terminal.get("label_status") or "")
             terminal_state_id = terminal.get("terminal_state_id") or terminal.get("state_id")
-            if terminal_label > int(result["subtree_best_label"]):
+            terminal_ratio = float(terminal.get("terminal_recovery_ratio", _label_to_recovery_ratio(terminal_label)) or 0.0)
+            if terminal_ratio > float(result["subtree_best_terminal_recovery_ratio"]) or (terminal_ratio == float(result["subtree_best_terminal_recovery_ratio"]) and terminal_label > int(result["subtree_best_label"])):
                 result["subtree_best_label"] = terminal_label
+                result["subtree_best_terminal_recovery_ratio"] = terminal_ratio
                 result["subtree_best_terminal_state_id"] = terminal_state_id
                 result["steps_to_best"] = 1
             result["subtree_terminal_success"] = bool(result["subtree_terminal_success"]) or terminal_label == 3
-            if terminal_label > int(result["selected_path_terminal_label"]):
+            if terminal_ratio > float(result["selected_path_terminal_recovery_ratio"]) or (terminal_ratio == float(result["selected_path_terminal_recovery_ratio"]) and terminal_label > int(result["selected_path_terminal_label"])):
                 result["selected_path_terminal_label"] = terminal_label
                 result["selected_path_terminal_status"] = terminal_status
                 result["selected_path_terminal_state_id"] = terminal_state_id
+                result["selected_path_terminal_recovery_ratio"] = terminal_ratio
                 result["steps_to_terminal"] = 1
         for child in children.get(row_id, []):
             child_id = str(child.get("action_row_id") or "")
             child_result = best_from(child_id) if child_id else {
                 "subtree_best_label": int(child.get("label", 0) or 0),
+                "subtree_best_terminal_recovery_ratio": _label_to_recovery_ratio(int(child.get("label", 0) or 0)),
                 "subtree_terminal_success": int(child.get("label", 0) or 0) == 3,
                 "subtree_best_terminal_state_id": child.get("state_id"),
                 "steps_to_best": 0,
                 "selected_path_terminal_label": int(child.get("label", 0) or 0),
                 "selected_path_terminal_status": str(child.get("label_status") or ""),
                 "selected_path_terminal_state_id": child.get("state_id"),
+                "selected_path_terminal_recovery_ratio": _label_to_recovery_ratio(int(child.get("label", 0) or 0)),
                 "steps_to_terminal": 0,
             }
             candidate_steps = int(child_result.get("steps_to_best", 0) or 0) + 1
             child_best = int(child_result.get("subtree_best_label", 0) or 0)
+            child_ratio = float(child_result.get("subtree_best_terminal_recovery_ratio", _label_to_recovery_ratio(child_best)) or 0.0)
             result["subtree_terminal_success"] = bool(result["subtree_terminal_success"]) or bool(child_result.get("subtree_terminal_success"))
-            if child_best > int(result["subtree_best_label"]) or (child_best == int(result["subtree_best_label"]) and candidate_steps < int(result["steps_to_best"])):
+            if child_ratio > float(result["subtree_best_terminal_recovery_ratio"]) or (child_ratio == float(result["subtree_best_terminal_recovery_ratio"]) and candidate_steps < int(result["steps_to_best"])):
                 result["subtree_best_label"] = child_best
+                result["subtree_best_terminal_recovery_ratio"] = child_ratio
                 result["steps_to_best"] = candidate_steps
                 result["subtree_best_terminal_state_id"] = child_result.get("subtree_best_terminal_state_id")
             selected_label = int(child_result.get("selected_path_terminal_label", 0) or 0)
-            if selected_label > int(result["selected_path_terminal_label"]):
+            selected_ratio = float(child_result.get("selected_path_terminal_recovery_ratio", _label_to_recovery_ratio(selected_label)) or 0.0)
+            if selected_ratio > float(result["selected_path_terminal_recovery_ratio"]) or (selected_ratio == float(result["selected_path_terminal_recovery_ratio"]) and selected_label > int(result["selected_path_terminal_label"])):
                 result["selected_path_terminal_label"] = selected_label
                 result["selected_path_terminal_status"] = child_result.get("selected_path_terminal_status")
                 result["selected_path_terminal_state_id"] = child_result.get("selected_path_terminal_state_id")
+                result["selected_path_terminal_recovery_ratio"] = selected_ratio
                 result["steps_to_terminal"] = int(child_result.get("steps_to_terminal", 0) or 0) + 1
         memo[row_id] = result
         return memo[row_id]
@@ -953,12 +1226,14 @@ def _backfill_future_labels(rows: list[dict[str, Any]], discount: float) -> None
         immediate_label = int(row.get("label", 0) or 0)
         future = best_from(row_id) if row_id else {
             "subtree_best_label": immediate_label,
+            "subtree_best_terminal_recovery_ratio": _label_to_recovery_ratio(immediate_label),
             "subtree_terminal_success": immediate_label == 3,
             "subtree_best_terminal_state_id": row.get("state_id"),
             "steps_to_best": 0,
             "selected_path_terminal_label": immediate_label,
             "selected_path_terminal_status": str(row.get("label_status") or ""),
             "selected_path_terminal_state_id": row.get("state_id"),
+            "selected_path_terminal_recovery_ratio": _label_to_recovery_ratio(immediate_label),
             "steps_to_terminal": 0,
         }
         future_label = int(future.get("subtree_best_label", immediate_label) or 0)
@@ -969,7 +1244,11 @@ def _backfill_future_labels(rows: list[dict[str, Any]], discount: float) -> None
         selected_terminal_label = int(future.get("selected_path_terminal_label", immediate_label) or 0)
         selected_terminal_status = str(future.get("selected_path_terminal_status") or "")
         steps_to_terminal = int(future.get("steps_to_terminal", 0) or 0)
+        selected_terminal_ratio = float(future.get("selected_path_terminal_recovery_ratio", _label_to_recovery_ratio(selected_terminal_label)) or 0.0)
+        best_terminal_ratio = float(future.get("subtree_best_terminal_recovery_ratio", _label_to_recovery_ratio(future_label)) or 0.0)
         strategy_gain = _strategy_gain(immediate_label, selected_terminal_label, steps_to_terminal, bool(terminal_success), selected_terminal_status)
+        discounted_terminal_ratio = best_terminal_ratio * (float(discount) ** int(steps_to_best))
+        strategy_recovery_ratio = _strategy_recovery_ratio(immediate_label, selected_terminal_ratio, steps_to_terminal, bool(terminal_success), selected_terminal_status)
         details = row.get("label_details") if isinstance(row.get("label_details"), dict) else {}
         details["immediate_label"] = immediate_label
         details["future_best_label"] = future_label
@@ -984,6 +1263,10 @@ def _backfill_future_labels(rows: list[dict[str, Any]], discount: float) -> None
         details["selected_path_terminal_state_id"] = future.get("selected_path_terminal_state_id")
         details["steps_to_terminal"] = steps_to_terminal
         details["strategy_gain"] = strategy_gain
+        details["terminal_recovery_ratio"] = selected_terminal_ratio
+        details["subtree_best_terminal_recovery_ratio"] = best_terminal_ratio
+        details["discounted_terminal_recovery_ratio"] = discounted_terminal_ratio
+        details["strategy_recovery_ratio"] = strategy_recovery_ratio
         details["risk_class"] = _risk_class(immediate_label, selected_terminal_label, selected_terminal_status)
         details["hard_negative_weight"] = _hard_negative_weight(immediate_label, selected_terminal_label, selected_terminal_status)
         row["label_details"] = details
@@ -995,15 +1278,25 @@ def _backfill_future_labels(rows: list[dict[str, Any]], discount: float) -> None
             "subtree_terminal_success": bool(terminal_success),
             "steps_to_terminal": steps_to_terminal,
             "strategy_gain": strategy_gain,
+            "terminal_recovery_ratio": selected_terminal_ratio,
+            "subtree_best_terminal_recovery_ratio": best_terminal_ratio,
+            "discounted_terminal_recovery_ratio": discounted_terminal_ratio,
+            "strategy_recovery_ratio": strategy_recovery_ratio,
             "risk_class": details["risk_class"],
             "hard_negative_weight": details["hard_negative_weight"],
         }
+        row["terminal_recovery_ratio"] = selected_terminal_ratio
+        row["terminal_recovery_ratio_source"] = "verification.archive_coverage.completeness"
         row["training_targets"] = {
             "immediate_gain": immediate_label,
             "future_gain": future_label,
             "discounted_gain": discounted,
             "blended_gain": blended,
             "strategy_gain": strategy_gain,
+            "terminal_recovery_ratio": selected_terminal_ratio,
+            "subtree_best_terminal_recovery_ratio": best_terminal_ratio,
+            "discounted_terminal_recovery_ratio": discounted_terminal_ratio,
+            "strategy_recovery_ratio": strategy_recovery_ratio,
             "risk_class": details["risk_class"],
             "hard_negative_weight": details["hard_negative_weight"],
         }
@@ -1051,7 +1344,10 @@ def _materialize_for_collection(candidates: list[Any], selector: CandidateSelect
     )
     budget = 1 if bool(args.materialize_selected_only) else max(1, int(args.materialize_top_k_per_round or 1))
     budget = min(budget, max(1, _effective_max_candidates(record, args)))
-    selected = ranked[:budget]
+    if _is_zip_deceptive_record(record):
+        selected = _balanced_zip_materialization_selection(ranked, budget)
+    else:
+        selected = ranked[:budget]
     materialized = []
     ranks: dict[str, int] = {}
     for materialization_rank, (_, _, candidate) in enumerate(selected):
@@ -1065,6 +1361,66 @@ def _materialize_for_collection(candidates: list[Any], selector: CandidateSelect
         "ranks": ranks,
         "proposal_count": len(candidates),
     }
+
+
+def _is_zip_deceptive_record(record: dict[str, Any]) -> bool:
+    if _normalize_format(str(record.get("material_format") or record.get("format") or "")) != "zip":
+        return False
+    tags = set(str(item) for item in record.get("difficulty_tags") or [])
+    profile = str(record.get("damage_profile") or "")
+    flags = set(str(item) for item in record.get("damage_flags") or [])
+    return bool(
+        tags.intersection({"deceptive_structural_success", "hash_mismatch_risk", "two_step_repair"})
+        or flags.intersection({"hard_negative_target", "payload_hash_mismatch", "two_step_repair"})
+        or profile.startswith("zip_two_step_")
+        or profile in {"zip_rebuild_directory_keeps_bad_payload", "zip_wrong_local_offset_extracts_valid_other_entry", "zip_quarantine_keeps_corrupted_entry"}
+    )
+
+
+def _balanced_zip_materialization_selection(ranked: list[tuple[float, int, Any]], budget: int) -> list[tuple[float, int, Any]]:
+    selected: list[tuple[float, int, Any]] = []
+    seen: set[str] = set()
+
+    def add(entry: tuple[float, int, Any]) -> None:
+        if len(selected) >= budget:
+            return
+        candidate_id = _candidate_id(entry[2])
+        if candidate_id in seen:
+            return
+        seen.add(candidate_id)
+        selected.append(entry)
+
+    def category(entry: tuple[float, int, Any]) -> str:
+        module = str(getattr(entry[2], "module_name", "") or "")
+        actions = " ".join(str(action) for action in getattr(entry[2], "actions", []) or [])
+        text = f"{module} {actions}".lower()
+        if "deep" in text or "partial" in text or "quarantine" in text:
+            return "deep_partial"
+        if "rebuild" in text or "directory" in text or "eocd" in text or "central_directory" in text:
+            return "directory"
+        if "crc" in text or "offset" in text or "comment" in text or "descriptor" in text:
+            return "risk"
+        return "other"
+
+    for entry in ranked[:2]:
+        add(entry)
+    quotas = (("directory", 2), ("deep_partial", 1), ("risk", 1))
+    for wanted, count in quotas:
+        added = 0
+        for entry in ranked:
+            if category(entry) != wanted:
+                continue
+            before = len(selected)
+            add(entry)
+            if len(selected) > before:
+                added += 1
+            if added >= count:
+                break
+    for entry in ranked:
+        add(entry)
+        if len(selected) >= budget:
+            break
+    return selected[:budget]
 
 
 def _scheduler(args: argparse.Namespace) -> RepairScheduler:
@@ -1085,23 +1441,23 @@ def _scheduler(args: argparse.Namespace) -> RepairScheduler:
     })
 
 
-def _state_features(record: dict[str, Any], batch, round_index: int, previous_actions: list[str], best_completeness: float, before_state: dict[str, Any] | None = None) -> dict[str, Any]:
+def _state_features(record: dict[str, Any], job: RepairJob, batch, round_index: int, previous_actions: list[str], previous_modules: list[str], best_completeness: float, before_state: dict[str, Any] | None = None) -> dict[str, Any]:
     diagnosis = batch.diagnosis if isinstance(batch.diagnosis, dict) else {}
     capability = diagnosis.get("capability_decision") if isinstance(diagnosis.get("capability_decision"), dict) else {}
     source_derivation = record.get("source_derivation") if isinstance(record.get("source_derivation"), dict) else {}
+    runtime_state = _runtime_state_summary(before_state or {})
     return {
-        "format": record.get("format"),
-        "damage_profile": record.get("damage_profile"),
-        "difficulty_tags": list(record.get("difficulty_tags") or []),
-        "damage_flags": list(record.get("damage_flags") or []),
+        "feature_contract_version": FEATURE_CONTRACT_VERSION,
+        "format": job.format or record.get("format"),
         "source_derivation": _compact_source_derivation(source_derivation),
-        "corruption_zones": sorted({item.get("zone") for item in record.get("corruption_plan") or [] if item.get("zone")}),
-        "corruption_kinds": sorted({item.get("kind") for item in record.get("corruption_plan") or [] if item.get("kind")}),
         "round": round_index,
         "previous_actions": list(previous_actions),
         "previous_action_count": len(previous_actions),
-        "best_completeness": float(best_completeness or 0.0),
-        "state_summary": dict(before_state or {}),
+        "previous_modules": list(previous_modules),
+        "previous_module_count": len(previous_modules),
+        "best_runtime_score": float(runtime_state.get("runtime_score", 0.0) or 0.0),
+        "state_summary": runtime_state,
+        "runtime_state_summary": runtime_state,
         "diagnosis": _compact_diagnosis(diagnosis),
         "capability": {
             "selected_modules": list(capability.get("selected_modules") or []),
@@ -1121,6 +1477,7 @@ def _action_row(
     after_state: dict[str, Any],
     delta_features: dict[str, Any],
     batch,
+    job: RepairJob,
     label_info: dict[str, Any],
     *,
     selected: bool,
@@ -1132,6 +1489,19 @@ def _action_row(
     payload = candidate_feature_payload(candidate)
     module_decision = _module_decision(batch, candidate.module_name)
     source_derivation = record.get("source_derivation") if isinstance(record.get("source_derivation"), dict) else {}
+    before_runtime_state = _runtime_state_summary(before_state)
+    after_runtime_state = _runtime_state_summary(after_state)
+    before_oracle_state = _oracle_state_summary(before_state)
+    after_oracle_state = _oracle_state_summary(after_state)
+    repair_prior = _repair_prior_from_candidate(payload, module_decision, rank)
+    runtime_features = build_runtime_feature_record(
+        job=job,
+        candidate=candidate,
+        previous_actions=list(state_features.get("previous_actions") or []),
+        previous_modules=list(state_features.get("previous_modules") or []),
+        runtime_state_summary=before_runtime_state,
+        repair_prior=repair_prior,
+    )
     return {
         "schema_version": 1,
         "source": "repair_plan_corpus",
@@ -1160,35 +1530,16 @@ def _action_row(
         "label_details": label_info,
         "stable_features": {
             "state": state_features,
-            "before_state": before_state,
-            "after_state": after_state,
+            "runtime_context": runtime_features["runtime_context"],
+            "candidate_proposal": runtime_features["candidate_proposal"],
+            "repair_prior_features": runtime_features["repair_prior_features"],
+            "before_state": before_runtime_state,
+            "after_state": after_runtime_state,
+            "oracle_before_state": before_oracle_state,
+            "oracle_after_state": after_oracle_state,
             "delta_features": delta_features,
-            "candidate": {
-                key: payload.get(key)
-                for key in (
-                    "module",
-                    "format",
-                    "stage",
-                    "status",
-                    "actions",
-                    "damage_flags",
-                    "patch_cost",
-                    "risk_penalty",
-                    "cost_penalty",
-                    "evidence_score",
-                    "benefit_score",
-                    "native_validation_score",
-                    "native_validation_strength",
-                    "predicted_completeness",
-                    "validation_count",
-                    "requires_native_validation",
-                    "has_archive_state_plan",
-                    "requires_materialization",
-                    "plan_kind",
-                    "estimated_cost",
-                )
-                if key in payload
-            },
+            "candidate": _runtime_candidate_features(payload),
+            "oracle_candidate": _oracle_candidate_features(payload),
         },
         "teacher_features": {
             "route_score": module_decision.get("route_score"),
@@ -1243,12 +1594,207 @@ def _label_candidate(
     return verified
 
 
+def _runtime_state_summary(summary: dict[str, Any]) -> dict[str, Any]:
+    entry_count = int(summary.get("entry_count", 0) or 0)
+    readable_entry_count = int(summary.get("readable_entry_count", 0) or 0)
+    directory_detected = bool(summary.get("directory_detected"))
+    boundary_trusted = bool(summary.get("boundary_trusted"))
+    format_detected = bool(summary.get("format_detected"))
+    runtime_score = 0.0
+    if format_detected:
+        runtime_score += 0.12
+    if boundary_trusted:
+        runtime_score += 0.18
+    if directory_detected:
+        runtime_score += 0.25
+    if entry_count > 0:
+        runtime_score += min(0.20, entry_count / 50.0)
+    if readable_entry_count > 0:
+        runtime_score += min(0.20, readable_entry_count / max(1, entry_count) * 0.20)
+    runtime_status = "unknown"
+    if readable_entry_count > 0:
+        runtime_status = "readable_entries"
+    elif directory_detected or entry_count > 0:
+        runtime_status = "directory_visible"
+    elif boundary_trusted:
+        runtime_status = "boundary_visible"
+    elif format_detected:
+        runtime_status = "format_visible"
+    return {
+        "format_detected": format_detected,
+        "boundary_trusted": boundary_trusted,
+        "directory_detected": directory_detected,
+        "entry_count": entry_count,
+        "readable_entry_count": readable_entry_count,
+        "damage_flags": list(summary.get("damage_flags") or []),
+        "runtime_status": runtime_status,
+        "runtime_score": max(0.0, min(1.0, runtime_score)),
+    }
+
+
+def _oracle_state_summary(summary: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "matched_entry_count": int(summary.get("matched_entry_count", 0) or 0),
+        "wrong_entry_count": int(summary.get("wrong_entry_count", 0) or 0),
+        "completeness": float(summary.get("completeness", 0.0) or 0.0),
+    }
+
+
+def _runtime_candidate_features(payload: dict[str, Any]) -> dict[str, Any]:
+    output = {
+        key: payload.get(key)
+        for key in (
+            "module",
+            "format",
+            "stage",
+            "confidence",
+            "score_hint",
+            "actions",
+            "damage_flags",
+            "patch_cost",
+            "risk_penalty",
+            "cost_penalty",
+            "evidence_score",
+            "benefit_score",
+            "requires_native_validation",
+            "has_archive_state_plan",
+            "requires_materialization",
+            "plan_kind",
+            "estimated_cost",
+            "input_kind",
+        )
+        if key in payload
+    }
+    safe_breakdowns = {
+        "benefit_breakdown": {"confidence", "score_hint"},
+        "evidence_breakdown": {"patch_quality"},
+        "cost_breakdown": {"stage", "lazy_materialization", "native_validation", "patch_complexity"},
+        "risk_breakdown": {
+            "partial_candidate",
+            "content_damage",
+            "content_damage_without_native_validation",
+            "deep_without_native_validation",
+        },
+    }
+    for group, safe_names in safe_breakdowns.items():
+        breakdown = payload.get(group)
+        if isinstance(breakdown, dict):
+            safe_breakdown = _runtime_breakdown_features(breakdown, safe_names)
+            if safe_breakdown:
+                output[group] = safe_breakdown
+    ltr = payload.get("ltr_features")
+    if isinstance(ltr, dict):
+        output["ltr_features"] = {
+            key: ltr.get(key)
+            for key in (
+                "module",
+                "format",
+                "stage",
+                "confidence",
+                "score_hint",
+                "benefit_score",
+                "evidence_score",
+                "cost_penalty",
+                "risk_penalty",
+                "module_bias",
+                "generation_priority",
+                "ranking_raw_score",
+                "patch_cost",
+                "patch_quality",
+                "partial",
+                "lazy",
+                "requires_native_validation",
+                "requires_materialization",
+                "plan_kind",
+                "estimated_cost",
+                "has_archive_state_plan",
+                "damage_flag_count",
+                "action_count",
+                "history_available",
+                "history_sample_count",
+                "history_score",
+            )
+            if key in ltr
+        }
+    history = payload.get("history_features")
+    if isinstance(history, dict):
+        output["history_features"] = {
+            key: history.get(key)
+            for key in ("available", "sample_count", "attempts", "accepted", "score", "stage", "format", "module")
+            if key in history
+        }
+    return output
+
+
+def _runtime_breakdown_features(breakdown: dict[str, Any], safe_names: set[str]) -> dict[str, dict[str, Any]]:
+    output: dict[str, dict[str, Any]] = {}
+    for key, value in breakdown.items():
+        if key not in safe_names or not isinstance(value, dict):
+            continue
+        output[key] = {
+            inner_key: inner_value
+            for inner_key, inner_value in dict(value or {}).items()
+            if inner_key in {"value", "weight", "contribution"}
+        }
+    return output
+
+
+def _repair_prior_from_candidate(payload: dict[str, Any], module_decision: dict[str, Any], rank: int) -> RepairPrior:
+    return RepairPrior(
+        route_score=_optional_float(module_decision.get("route_score")),
+        fine_score=_optional_float(module_decision.get("fine_score")),
+        generation_priority=_optional_float(payload.get("generation_priority")),
+        current_selector_rank=rank,
+        module_selected_by_router=bool(module_decision.get("selected")) if "selected" in module_decision else None,
+        proposal_breakdowns={
+            group: _runtime_breakdown_features(payload.get(group) if isinstance(payload.get(group), dict) else {}, names)
+            for group, names in {
+                "benefit_breakdown": {"confidence", "score_hint"},
+                "evidence_breakdown": {"patch_quality"},
+                "cost_breakdown": {"stage", "lazy_materialization", "native_validation", "patch_complexity"},
+                "risk_breakdown": {
+                    "partial_candidate",
+                    "content_damage",
+                    "content_damage_without_native_validation",
+                    "deep_without_native_validation",
+                },
+            }.items()
+        },
+    )
+
+
+def _optional_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except Exception:
+        return None
+
+
+def _oracle_candidate_features(payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: payload.get(key)
+        for key in (
+            "status",
+            "native_validation_score",
+            "native_validation_strength",
+            "predicted_completeness",
+            "validation_count",
+            "validations",
+            "materialized",
+        )
+        if key in payload
+    }
+
+
 def _is_zip_hard_negative(record: dict[str, Any], candidate, verified: dict[str, Any]) -> bool:
     if _normalize_format(str(record.get("material_format") or record.get("format") or "")) != "zip":
         return False
-    if int(verified.get("label", 0) or 0) > 0:
+    label = int(verified.get("label", 0) or 0)
+    if label >= 3:
         return False
-    if not _record_has_any_damage_flag(record, {"hard_negative_target", "payload_hash_mismatch"}):
+    if not _record_has_hard_negative_oracle(record):
         return False
     repaired_input = candidate.repaired_input if isinstance(candidate.repaired_input, dict) else {}
     if not Path(str(repaired_input.get("path") or "")).is_file():
@@ -1261,6 +1807,17 @@ def _is_zip_hard_negative(record: dict[str, Any], candidate, verified: dict[str,
         return True
     if int(verified.get("wrong_files", 0) or 0) > 0:
         return True
+    if _record_has_any_difficulty_tag(record, {"deceptive_structural_success", "hash_mismatch_risk"}):
+        matched = int(verified.get("matched_files", 0) or 0)
+        expected = int(verified.get("expected_files", 0) or 0)
+        entry_count = int(verified.get("entry_count", 0) or 0)
+        status = str(verified.get("status") or "")
+        if matched > 0 and expected > matched:
+            return True
+        if status in {"directory_only", "partial"} and entry_count > 0 and matched <= 0:
+            return True
+        if status == "partial" and matched > 0:
+            return True
     return False
 
 
@@ -1273,6 +1830,16 @@ def _zip_hard_negative_reasons(record: dict[str, Any], candidate, verified: dict
     profile = str(record.get("damage_profile") or "")
     if profile == "zip_wrong_offset_content_overlap":
         reasons.append("wrong_offset_overlap_profile")
+    if _record_has_any_difficulty_tag(record, {"deceptive_structural_success"}):
+        reasons.append("deceptive_structural_success_profile")
+    if _record_has_any_difficulty_tag(record, {"hash_mismatch_risk"}):
+        reasons.append("hash_mismatch_risk_profile")
+    matched = int(verified.get("matched_files", 0) or 0)
+    expected = int(verified.get("expected_files", 0) or 0)
+    if matched > 0 and expected > matched:
+        reasons.append("partial_output_from_deceptive_profile")
+    if str(verified.get("status") or "") == "directory_only":
+        reasons.append("directory_visible_without_trusted_payload")
     return reasons
 
 
@@ -1312,6 +1879,148 @@ def _record_has_any_damage_flag(record: dict[str, Any], flags: set[str]) -> bool
     return bool(values.intersection(flags))
 
 
+def _record_has_any_difficulty_tag(record: dict[str, Any], tags: set[str]) -> bool:
+    values: set[str] = set()
+    raw = record.get("difficulty_tags")
+    if isinstance(raw, list):
+        values.update(str(item) for item in raw)
+    state = record.get("stable_features") if isinstance(record.get("stable_features"), dict) else {}
+    if isinstance(state, dict):
+        nested = state.get("state") if isinstance(state.get("state"), dict) else {}
+        nested_tags = nested.get("difficulty_tags")
+        if isinstance(nested_tags, list):
+            values.update(str(item) for item in nested_tags)
+    return bool(values.intersection(tags))
+
+
+def _record_has_hard_negative_oracle(record: dict[str, Any]) -> bool:
+    return (
+        _record_has_any_damage_flag(record, {"hard_negative_target", "payload_hash_mismatch", "deceptive_structural_success"})
+        or _record_has_any_difficulty_tag(record, {"deceptive_structural_success", "hash_mismatch_risk"})
+    )
+
+
+def _record_analysis_prepass(record: dict[str, Any], fmt: str) -> dict[str, Any]:
+    source_derivation = record.get("source_derivation") if isinstance(record.get("source_derivation"), dict) else {}
+    return {
+        "status": "training_material",
+        "format": fmt or record.get("format") or record.get("material_format") or "",
+        "selected_format": fmt or record.get("format") or record.get("material_format") or "",
+        "confidence": 0.82,
+        "source_size": int(record.get("source_size") or source_derivation.get("size") or 0),
+    }
+
+
+def _record_fuzzy_profile(record: dict[str, Any], fmt: str) -> dict[str, Any]:
+    return {
+        "status": "training_material",
+        "archive_type": fmt or record.get("format") or record.get("material_format") or "",
+        "confidence": 0.82,
+    }
+
+
+def _runtime_extraction_failure(record: dict[str, Any], state: dict[str, Any], before_state: dict[str, Any] | None) -> dict[str, Any]:
+    before_state = before_state if isinstance(before_state, dict) else {}
+    oracle = _record_terminal_or_current_verification(record, before_state)
+    return {
+        "status": "verification_failed" if before_state else "damaged_input",
+        "failure_stage": "verification" if before_state else "analysis",
+        "failure_kind": _failure_kind_from_flags(list(state.get("damage_flags") or record.get("damage_flags") or [])),
+        "assessment_status": oracle.get("assessment_status"),
+        "source_integrity": oracle.get("source_integrity"),
+        "decision_hint": oracle.get("decision_hint"),
+        "completeness": oracle.get("completeness"),
+        "recoverable_upper_bound": oracle.get("recoverable_upper_bound"),
+        "complete_files": oracle.get("complete_files"),
+        "partial_files": oracle.get("partial_files"),
+        "failed_files": oracle.get("failed_files"),
+        "missing_files": oracle.get("missing_files"),
+        "unverified_files": oracle.get("unverified_files"),
+        "archive_coverage": dict(oracle.get("archive_coverage") or {}),
+        "repair_hints": _runtime_repair_hints(record, state, before_state),
+    }
+
+
+def _runtime_extraction_diagnostics(record: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "failure_stage": "verification",
+        "failure_kind": _failure_kind_from_flags(list(state.get("damage_flags") or record.get("damage_flags") or [])),
+        "result": {
+            "native_status": "training_probe",
+            "files_written": 0,
+            "bytes_written": 0,
+        },
+    }
+
+
+def _record_terminal_or_current_verification(record: dict[str, Any], before_state: dict[str, Any]) -> dict[str, Any]:
+    completeness = float(before_state.get("completeness", 0.0) or 0.0)
+    entry_count = int(before_state.get("entry_count", 0) or 0)
+    matched = int(before_state.get("matched_entry_count", 0) or 0)
+    wrong = int(before_state.get("wrong_entry_count", 0) or 0)
+    expected = _expected_file_count(record)
+    failed = max(0, expected - matched)
+    status = "complete" if completeness >= 0.999 else ("partial" if matched > 0 else "failed")
+    decision = "accept" if status == "complete" else ("accept_partial" if status == "partial" else "repair")
+    source_integrity = "payload_damaged" if wrong > 0 else ("damaged" if completeness < 0.999 else "trusted")
+    return {
+        "assessment_status": status,
+        "source_integrity": source_integrity,
+        "decision_hint": decision,
+        "completeness": completeness,
+        "recoverable_upper_bound": 1.0,
+        "complete_files": matched,
+        "partial_files": max(0, entry_count - matched - wrong),
+        "failed_files": failed,
+        "missing_files": 0,
+        "unverified_files": max(0, entry_count - matched - wrong),
+        "archive_coverage": {
+            "completeness": completeness,
+            "expected_files": expected,
+            "complete_files": matched,
+            "partial_files": max(0, entry_count - matched - wrong),
+            "failed_files": failed,
+            "missing_files": 0,
+        },
+    }
+
+
+def _expected_file_count(record: dict[str, Any]) -> int:
+    oracle = record.get("oracle") if isinstance(record.get("oracle"), dict) else {}
+    expected = oracle.get("expected_files")
+    if isinstance(expected, list):
+        return len(expected)
+    try:
+        return int(oracle.get("expected_file_count") or 0)
+    except Exception:
+        return 0
+
+
+def _runtime_repair_hints(record: dict[str, Any], state: dict[str, Any], before_state: dict[str, Any]) -> dict[str, Any]:
+    flags = set(str(item) for item in (state.get("damage_flags") or record.get("damage_flags") or []))
+    fmt = str(record.get("format") or record.get("material_format") or "")
+    return {
+        "selected_format": fmt,
+        "analysis_status": "training_material",
+        "analysis_confidence": 0.82,
+        "source_integrity": "payload_damaged" if "payload_damaged" in flags or "data_error" in flags else "damaged",
+        "likely_truncated": bool(flags.intersection({"truncated", "input_truncated", "probably_truncated"})),
+        "likely_payload_damage": bool(flags.intersection({"payload_damaged", "data_error", "checksum_error"})),
+        "boundary_untrusted": bool(flags.intersection({"trailing_junk", "boundary_unreliable"})) or not bool(before_state.get("boundary_trusted", True)),
+    }
+
+
+def _failure_kind_from_flags(flags: list[str]) -> str:
+    values = set(str(item) for item in flags)
+    if values.intersection({"truncated", "input_truncated", "probably_truncated"}):
+        return "truncated"
+    if values.intersection({"payload_damaged", "data_error", "checksum_error"}):
+        return "payload_damaged"
+    if values.intersection({"trailing_junk", "boundary_unreliable"}):
+        return "boundary"
+    return "damaged"
+
+
 
 def _state_summary(
     record: dict[str, Any],
@@ -1335,6 +2044,7 @@ def _state_summary(
         "damage_flags": list(damage_flags or []),
         "verification_status": "missing_output" if not path.is_file() else "unverified",
         "native_validation_score": payload.get("native_validation_score"),
+        "source_path": str(path) if path else "",
     }
     if not path.is_file():
         return summary
@@ -1428,10 +2138,12 @@ def _verify_output_against_oracle(path: Path, fmt: str, oracle: dict[str, Any]) 
             completeness = matched / max(1, len(expected_files))
             if completeness >= 0.999:
                 return {**_label_status(3, "complete", completeness), "matched_files": matched, "wrong_files": wrong_files, "unreadable_files": unreadable_files, "entry_count": entry_count, "expected_files": len(expected_files)}
+            if wrong_overlap:
+                return {**_label_status(-1, "hard_negative", 0.0), "matched_files": matched, "wrong_files": wrong_files, "unreadable_files": unreadable_files, "entry_count": entry_count, "expected_files": len(expected_files)}
             if completeness > 0:
                 return {**_label_status(1, "partial", completeness), "matched_files": matched, "wrong_files": wrong_files, "unreadable_files": unreadable_files, "entry_count": entry_count, "expected_files": len(expected_files)}
-            status = "hard_negative" if wrong_overlap else ("directory_only" if entry_count else "no_progress")
-            return {**_label_status(-1 if wrong_overlap else 0, status, 0.0), "matched_files": matched, "wrong_files": wrong_files, "unreadable_files": unreadable_files, "entry_count": entry_count, "expected_files": len(expected_files)}
+            status = "directory_only" if entry_count else "no_progress"
+            return {**_label_status(0, status, 0.0), "matched_files": matched, "wrong_files": wrong_files, "unreadable_files": unreadable_files, "entry_count": entry_count, "expected_files": len(expected_files)}
     except Exception as exc:
         return {"status": "hard_negative", "label": -1, "completeness": 0.0, "error": str(exc)}
     return _label_status(0, "no_oracle", 0.0)
@@ -1582,7 +2294,7 @@ def _module_decision(batch, module_name: str) -> dict[str, Any]:
 
 def _compact_diagnosis(diagnosis: dict[str, Any]) -> dict[str, Any]:
     return {
-        "status": diagnosis.get("status"),
+        "diagnosis_status": diagnosis.get("status"),
         "format": diagnosis.get("format"),
         "confidence": diagnosis.get("confidence"),
         "repairable": diagnosis.get("repairable"),

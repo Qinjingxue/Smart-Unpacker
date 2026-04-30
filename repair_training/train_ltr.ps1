@@ -2,13 +2,13 @@
 param(
     [Alias("Input")]
     [string[]]$InputPath = @(),
-    [ValidateSet("stable_only", "stable_plus_teacher", "teacher_only_baseline")]
-    [string]$FeatureView = "stable_only",
+    [ValidateSet("stable_only", "stable_plus_teacher", "teacher_only_baseline", "proposal_only", "proposal_plus_teacher_preselect", "proposal_module_blind", "runtime_only", "runtime_plus_repair_prior")]
+    [string]$FeatureView = "runtime_only",
     [ValidateSet("all", "zip", "tar", "tar_gz", "tar_bz2", "tar_xz", "gzip", "bzip2", "xz", "zstd", "7z", "rar")]
     [string]$FormatScope = "all",
-    [ValidateSet("immediate", "future", "discounted", "blended", "strategy")]
-    [string]$LabelTarget = "strategy",
-    [ValidateSet("query", "episode", "source_sample")]
+    [ValidateSet("immediate", "future", "discounted", "blended", "strategy", "terminal_recovery_ratio", "discounted_terminal_recovery_ratio", "strategy_recovery_ratio")]
+    [string]$LabelTarget = "strategy_recovery_ratio",
+    [ValidateSet("query", "episode", "source_sample", "source_profile", "profile_holdout")]
     [string]$SplitBy = "query",
     [switch]$AllFeatureViews,
     [string]$OutputDir = "repair_training\models\baseline_ltr",
@@ -54,7 +54,7 @@ try {
     }
 
     $views = if ($AllFeatureViews) {
-        @("stable_only", "stable_plus_teacher", "teacher_only_baseline")
+        @("runtime_only", "runtime_plus_repair_prior", "teacher_only_baseline")
     } else {
         @($FeatureView)
     }

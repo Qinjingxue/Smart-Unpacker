@@ -16,11 +16,115 @@ if str(REPO_ROOT) not in sys.path:
 
 DEFAULT_DATASET_DIR = Path("repair_training") / "datasets"
 DEFAULT_OUTPUT_DIR = Path("repair_training") / "models" / "baseline_ltr"
-FEATURE_VIEWS = {"stable_only", "stable_plus_teacher", "teacher_only_baseline"}
+FEATURE_VIEWS = {
+    "stable_only",
+    "stable_plus_teacher",
+    "teacher_only_baseline",
+    "proposal_only",
+    "proposal_plus_teacher_preselect",
+    "proposal_module_blind",
+    "runtime_only",
+    "runtime_plus_repair_prior",
+}
 FORMAT_SCOPES = {"all", "zip", "tar", "tar_gz", "tar_bz2", "tar_xz", "gzip", "bzip2", "xz", "zstd", "7z", "rar"}
-LABEL_TARGETS = {"immediate", "future", "discounted", "blended", "strategy"}
-SPLIT_BY = {"query", "episode", "source_sample"}
+LABEL_TARGETS = {"immediate", "future", "discounted", "blended", "strategy", "terminal_recovery_ratio", "discounted_terminal_recovery_ratio", "strategy_recovery_ratio"}
+SPLIT_BY = {"query", "episode", "source_sample", "source_profile", "profile_holdout"}
 LABEL_GAIN = {-1: 0, 0: 0, 1: 1, 2: 2, 3: 4}
+LEAKAGE_EXCLUDED_KEYS = {
+    "after_state",
+    "best_completeness",
+    "best_oracle_completeness",
+    "completeness",
+    "corruption_kinds",
+    "corruption_zones",
+    "damage_profile",
+    "delta_features",
+    "label_details",
+    "difficulty_tags",
+    "matched_entry_count",
+    "oracle_after_state",
+    "oracle_before_state",
+    "oracle_candidate",
+    "oracle_state_summary",
+    "status",
+    "validation_count",
+    "validations",
+    "verification_status",
+    "native_validation_score",
+    "native_validation_strength",
+    "predicted_completeness",
+    "validation_acceptance_ratio",
+    "validation_score",
+    "wrong_entry_count",
+    "materialized",
+    "materialized_for_label",
+    "repaired",
+    "repaired_input",
+    "proposal_only",
+    "label",
+    "label_status",
+    "selected_by_current_system",
+    "source_derivation",
+}
+PROPOSAL_STATE_EXCLUDED_KEYS = {
+    "damage_profile",
+    "difficulty_tags",
+    "source_derivation",
+    "corruption_zones",
+    "corruption_kinds",
+}
+PROPOSAL_CANDIDATE_ALLOWED_KEYS = {
+    "actions",
+    "accepted",
+    "action_count",
+    "available",
+    "benefit_breakdown",
+    "benefit_score",
+    "confidence",
+    "content_damage",
+    "content_damage_without_native_validation",
+    "contribution",
+    "cost_breakdown",
+    "cost_penalty",
+    "damage_flags",
+    "damage_flag_count",
+    "deep_without_native_validation",
+    "estimated_cost",
+    "evidence_breakdown",
+    "evidence_score",
+    "format",
+    "generation_priority",
+    "has_archive_state_plan",
+    "history_available",
+    "history_features",
+    "history_sample_count",
+    "history_score",
+    "input_kind",
+    "lazy",
+    "lazy_materialization",
+    "ltr_features",
+    "module",
+    "module_bias",
+    "module_name",
+    "native_validation",
+    "partial",
+    "partial_candidate",
+    "patch_cost",
+    "patch_complexity",
+    "patch_quality",
+    "plan_kind",
+    "ranking_raw_score",
+    "requires_materialization",
+    "requires_native_validation",
+    "risk_penalty",
+    "risk_breakdown",
+    "sample_count",
+    "score",
+    "score_hint",
+    "stage",
+    "value",
+    "weight",
+}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -82,6 +186,12 @@ def main(argv: list[str] | None = None) -> int:
     ranker.booster_.save_model(str(output_dir / "model.txt"))
     dump(vectorizer, output_dir / "vectorizer.joblib")
     feature_names = list(vectorizer.get_feature_names_out())
+    leakage_audit = _feature_leakage_audit(rows, args.feature_view)
+    runtime_parity_audit = _runtime_parity_audit(feature_names, args.feature_view)
+    if runtime_parity_audit["fatal_leakage"]:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "runtime_parity_audit.json").write_text(json.dumps(runtime_parity_audit, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+        raise SystemExit(f"runtime feature leakage detected for {args.feature_view}: {runtime_parity_audit['forbidden_features'][:8]}")
     (output_dir / "feature_names.json").write_text(json.dumps(feature_names, ensure_ascii=False, indent=2), encoding="utf-8")
 
     eval_rows = [row for query in (eval_queries or train_queries) for row in grouped[query]]
@@ -110,6 +220,11 @@ def main(argv: list[str] | None = None) -> int:
         "eval_skipped": eval_skipped,
         **split_info,
         "feature_count": len(feature_names),
+        "feature_contract_version": 1,
+        "feature_leakage_audit": leakage_audit,
+        "runtime_parity_audit": runtime_parity_audit,
+        "terminal_recovery_ratio_source": "verification.archive_coverage.completeness",
+        "not_representative_for_strategy_model": _not_representative_for_strategy_model(rows, metrics, args.feature_view),
         "label_target": args.label_target,
         "label_counts": dict(sorted(Counter(str(_target_gain(row, args.label_target)) for row in rows).items())),
         "raw_label_counts": dict(sorted(Counter(str(int(row.get("label", 0) or 0)) for row in rows).items())),
@@ -125,9 +240,9 @@ def main(argv: list[str] | None = None) -> int:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Train a baseline repair-plan LTR ranker from JSONL rows.")
     parser.add_argument("--input", action="append", default=[], help="Input JSONL file. Repeatable; defaults to repair_training/datasets/*.jsonl.")
-    parser.add_argument("--feature-view", choices=sorted(FEATURE_VIEWS), default="stable_only")
+    parser.add_argument("--feature-view", choices=sorted(FEATURE_VIEWS), default="runtime_only")
     parser.add_argument("--format-scope", choices=sorted(FORMAT_SCOPES), default="all", help="Train on one material format, or all rows for the legacy unified baseline.")
-    parser.add_argument("--label-target", choices=sorted(LABEL_TARGETS), default="immediate", help="Which collected label target to optimize.")
+    parser.add_argument("--label-target", choices=sorted(LABEL_TARGETS), default="strategy_recovery_ratio", help="Which collected label target to optimize.")
     parser.add_argument("--split-by", choices=sorted(SPLIT_BY), default="query", help="Split train/eval by query, episode, or source material sample.")
     parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR))
     parser.add_argument("--seed", type=int, default=2026)
@@ -294,6 +409,12 @@ def _split_source_key(row: dict[str, Any], split_by: str) -> str:
     if split_by == "episode":
         value = row.get("episode_id") or row.get("sample_id") or row.get("query_id")
         return str(value or "unknown")
+    if split_by == "profile_holdout":
+        return str(_nested(row, "stable_features", "state", "damage_profile") or row.get("damage_profile") or "unknown_profile")
+    if split_by == "source_profile":
+        source = _split_source_key(row, "source_sample")
+        profile = str(_nested(row, "stable_features", "state", "damage_profile") or row.get("damage_profile") or "unknown_profile")
+        return f"{source}|{profile}"
     if split_by == "source_sample":
         value = row.get("material_sample_id")
         if not value:
@@ -334,6 +455,8 @@ def _gain(label: Any) -> int:
 def _target_gain(row: dict[str, Any], target: str) -> int:
     target = str(target or "immediate")
     targets = row.get("training_targets") if isinstance(row.get("training_targets"), dict) else {}
+    if target in {"terminal_recovery_ratio", "discounted_terminal_recovery_ratio", "strategy_recovery_ratio"}:
+        return _ratio_rank_label(row, targets.get(target), target)
     if target == "future":
         return int(_gain(targets.get("future_gain", row.get("label"))))
     if target == "discounted":
@@ -354,6 +477,47 @@ def _target_gain(row: dict[str, Any], target: str) -> int:
     return int(_gain(row.get("label")))
 
 
+def _ratio_rank_label(row: dict[str, Any], value: Any, target: str) -> int:
+    if int(row.get("label", 0) or 0) < 0:
+        return 0
+    if value is None:
+        details = row.get("label_details") if isinstance(row.get("label_details"), dict) else {}
+        value = details.get(target)
+    if value is None:
+        value = row.get("terminal_recovery_ratio")
+    if value is None:
+        return _label_ratio_rank_label(int(row.get("label", 0) or 0))
+    ratio = _ratio_float(value)
+    if ratio >= 0.999:
+        return 4
+    if ratio >= 0.67:
+        return 3
+    if ratio >= 0.34:
+        return 2
+    if ratio > 0:
+        return 1
+    return 0
+
+
+def _ratio_float(value: Any) -> float:
+    try:
+        raw = float(value)
+    except Exception:
+        return 0.0
+    return max(0.0, min(1.0, raw))
+
+
+def _label_ratio_rank_label(label: int) -> int:
+    label = int(label or 0)
+    if label >= 3:
+        return 4
+    if label == 2:
+        return 2
+    if label == 1:
+        return 1
+    return 0
+
+
 def _strategy_rank_label(row: dict[str, Any], value: Any) -> int:
     targets = row.get("training_targets") if isinstance(row.get("training_targets"), dict) else {}
     risk_class = str(targets.get("risk_class") or "")
@@ -370,7 +534,7 @@ def _strategy_rank_label(row: dict[str, Any], value: Any) -> int:
 
 
 def _target_weight(row: dict[str, Any], target: str) -> float:
-    if str(target or "") != "strategy":
+    if str(target or "") not in {"strategy", "strategy_recovery_ratio"}:
         return 1.0
     targets = row.get("training_targets") if isinstance(row.get("training_targets"), dict) else {}
     try:
@@ -410,18 +574,32 @@ def _gain_float(value: Any, *, fallback: Any = 0) -> float:
 
 def _row_features(row: dict[str, Any], view: str, format_scope: str = "all") -> dict[str, Any]:
     features: dict[str, Any] = {}
+    proposal_view = view in {"proposal_only", "proposal_plus_teacher_preselect", "proposal_module_blind"}
+    runtime_view = view in {"runtime_only", "runtime_plus_repair_prior"}
     if format_scope == "all":
-        _put_scalar(features, "top.material_format", row.get("material_format"))
-        _put_scalar(features, "top.format", row.get("format") or _nested(row, "stable_features", "state", "format"))
-    _put_scalar(features, "top.damage_profile", _nested(row, "stable_features", "state", "damage_profile"))
+        _put_scalar(features, "top.detected_format", _nested(row, "stable_features", "runtime_context", "analysis_summary", "format") or _nested(row, "stable_features", "state", "diagnosis", "format"))
     _put_scalar(features, "top.round", row.get("round"))
     if view in {"stable_only", "stable_plus_teacher"}:
         stable = row.get("stable_features") if isinstance(row.get("stable_features"), dict) else {}
-        _flatten(features, "state", stable.get("state"))
-        _flatten(features, "candidate", stable.get("candidate"))
-        _flatten(features, "before_state", stable.get("before_state"))
-    if view in {"stable_plus_teacher", "teacher_only_baseline"}:
-        _flatten(features, "teacher", row.get("teacher_features"))
+        _flatten(features, "state", stable.get("state"), mode="stable")
+        _flatten(features, "candidate", stable.get("candidate"), mode="stable")
+        _flatten(features, "before_state", stable.get("before_state"), mode="stable")
+    if proposal_view:
+        stable = row.get("stable_features") if isinstance(row.get("stable_features"), dict) else {}
+        _flatten(features, "state", stable.get("state"), mode="proposal_state")
+        _flatten(features, "before_state", stable.get("before_state"), mode="proposal_state")
+        candidate = stable.get("candidate")
+        if view == "proposal_module_blind":
+            candidate = _without_module_fields(candidate)
+        _flatten(features, "candidate", candidate, mode="proposal_candidate")
+    if runtime_view:
+        stable = row.get("stable_features") if isinstance(row.get("stable_features"), dict) else {}
+        _flatten(features, "runtime_context", stable.get("runtime_context"), mode="runtime")
+        _flatten(features, "candidate_proposal", stable.get("candidate_proposal"), mode="runtime")
+        if view == "runtime_plus_repair_prior":
+            _flatten(features, "repair_prior", stable.get("repair_prior_features"), mode="repair_prior")
+    if view in {"stable_plus_teacher", "teacher_only_baseline", "proposal_plus_teacher_preselect"}:
+        _flatten(features, "teacher", row.get("teacher_features"), mode="teacher_preselect")
     return features
 
 
@@ -469,12 +647,13 @@ def _write_skip_summary(
     print(json.dumps(summary, ensure_ascii=False, sort_keys=True))
 
 
-def _flatten(output: dict[str, Any], prefix: str, value: Any) -> None:
+def _flatten(output: dict[str, Any], prefix: str, value: Any, *, mode: str = "stable") -> None:
     if isinstance(value, dict):
         for key, item in value.items():
-            if key in {"after_state", "delta_features", "label_details", "difficulty_tags"}:
+            path = f"{prefix}.{key}"
+            if _exclude_feature_key(key, mode, path):
                 continue
-            _flatten(output, f"{prefix}.{key}", item)
+            _flatten(output, path, item, mode=mode)
         return
     if isinstance(value, list):
         for item in value:
@@ -502,6 +681,38 @@ def _put_scalar(output: dict[str, Any], key: str, value: Any) -> None:
     text = str(value)
     if text:
         output[f"{key}={text}"] = 1
+
+
+def _exclude_feature_key(key: str, mode: str, path: str = "") -> bool:
+    normalized = str(key or "")
+    full_path = str(path or normalized)
+    if mode == "runtime" and _runtime_allowed_leakage_name(normalized, full_path):
+        return False
+    if normalized in LEAKAGE_EXCLUDED_KEYS:
+        return True
+    if mode.startswith("proposal_state") and normalized in PROPOSAL_STATE_EXCLUDED_KEYS:
+        return True
+    if mode == "proposal_candidate" and normalized not in PROPOSAL_CANDIDATE_ALLOWED_KEYS:
+        return True
+    if mode == "teacher_preselect" and normalized in {"selected_by_current_system"}:
+        return True
+    return False
+
+
+def _runtime_allowed_leakage_name(key: str, path: str) -> bool:
+    if key != "completeness":
+        return False
+    return path.startswith("runtime_context.verification_summary.")
+
+
+def _without_module_fields(value: Any) -> Any:
+    if not isinstance(value, dict):
+        return value
+    return {
+        key: item
+        for key, item in value.items()
+        if str(key) not in {"module", "module_name"}
+    }
 
 
 def _nested(row: dict[str, Any], *keys: str) -> Any:
@@ -562,9 +773,108 @@ def _mean(values: list[float | int]) -> float:
     return float(sum(float(value) for value in values) / len(values))
 
 
+def _feature_leakage_audit(rows: list[dict[str, Any]], view: str) -> dict[str, Any]:
+    counters: Counter[str] = Counter()
+    for row in rows:
+        stable = row.get("stable_features") if isinstance(row.get("stable_features"), dict) else {}
+        for section in ("state", "candidate", "before_state", "after_state", "delta_features"):
+            _audit_excluded_keys(stable.get(section), section, counters, view)
+        _audit_excluded_keys(row.get("teacher_features"), "teacher", counters, view)
+    return {
+        "feature_view": view,
+        "excluded_key_counts": dict(sorted(counters.items())),
+        "excluded_total": int(sum(counters.values())),
+    }
+
+
+def _runtime_parity_audit(feature_names: list[str], view: str) -> dict[str, Any]:
+    forbidden_tokens = [
+        "oracle_",
+        "after_state",
+        "delta_features",
+        "label_details",
+        "terminal_",
+        "strategy_outcome",
+        "training_targets",
+        "damage_profile",
+        "difficulty_tags",
+        "source_derivation",
+        "corruption_",
+        "selected_by_current_system",
+        "matched_entry_count",
+        "wrong_entry_count",
+        "native_validation_score",
+        "validation_count",
+        "validations",
+        "materialized",
+        "repaired_input",
+    ]
+    forbidden = [name for name in feature_names if any(token in name for token in forbidden_tokens)]
+    applies = view in {"runtime_only", "runtime_plus_repair_prior"}
+    return {
+        "feature_view": view,
+        "applies": applies,
+        "fatal_leakage": bool(applies and forbidden),
+        "forbidden_features": forbidden,
+        "feature_count": len(feature_names),
+    }
+
+
+def _audit_excluded_keys(value: Any, prefix: str, counters: Counter[str], view: str) -> None:
+    if isinstance(value, dict):
+        mode = "stable"
+        if view in {"proposal_only", "proposal_plus_teacher_preselect", "proposal_module_blind"}:
+            mode = "proposal_candidate" if prefix == "candidate" else "proposal_state"
+        for key, item in value.items():
+            path = f"{prefix}.{key}"
+            if _exclude_feature_key(str(key), mode, path):
+                counters[path] += 1
+                continue
+            _audit_excluded_keys(item, path, counters, view)
+    elif isinstance(value, list):
+        for item in value:
+            _audit_excluded_keys(item, prefix, counters, view)
+
+
+def _not_representative_for_strategy_model(rows: list[dict[str, Any]], metrics: dict[str, Any], view: str) -> bool:
+    if view not in {"proposal_only", "proposal_plus_teacher_preselect", "proposal_module_blind"}:
+        return False
+    by_query: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        by_query[str(row.get("query_id") or "")].append(row)
+    hard_positive = 0
+    profile_module_purities: list[float] = []
+    profile_module_labels: dict[tuple[str, str], Counter[str]] = defaultdict(Counter)
+    for items in by_query.values():
+        if any(int(row.get("label", 0) or 0) < 0 for row in items) and any(int(row.get("label", 0) or 0) > 0 for row in items):
+            hard_positive += 1
+    for row in rows:
+        profile = str(_nested(row, "stable_features", "state", "damage_profile") or "")
+        module = str(row.get("module") or _nested(row, "stable_features", "candidate", "module") or "")
+        profile_module_labels[(profile, module)][str(int(row.get("label", 0) or 0))] += 1
+    for labels in profile_module_labels.values():
+        total = sum(labels.values())
+        if total:
+            profile_module_purities.append(max(labels.values()) / total)
+    hard_positive_ratio = hard_positive / max(1, len(by_query))
+    purity_mean = _mean(profile_module_purities)
+    return bool(
+        float(metrics.get("ndcg@1", 0.0) or 0.0) >= 0.999
+        and (hard_positive_ratio < 0.10 or purity_mean > 0.75)
+    )
+
+
 def _prediction_rows(rows: list[dict[str, Any]], scores: list[float], label_target: str) -> list[dict[str, Any]]:
     output = []
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        grouped[str(row.get("query_id") or "")].append(row)
     for row, score in sorted(zip(rows, scores), key=lambda item: (str(item[0].get("query_id") or ""), -float(item[1]))):
+        peers = grouped.get(str(row.get("query_id") or ""), [])
+        targets = [_target_gain(peer, label_target) for peer in peers]
+        best = max(targets, default=0)
+        has_hard = any(int(peer.get("label", 0) or 0) < 0 for peer in peers)
+        has_positive = any(_target_gain(peer, label_target) > 1 for peer in peers)
         output.append({
             "query_id": row.get("query_id"),
             "sample_id": row.get("sample_id"),
@@ -572,6 +882,9 @@ def _prediction_rows(rows: list[dict[str, Any]], scores: list[float], label_targ
             "label": row.get("label"),
             "target_gain": _target_gain(row, label_target),
             "target_weight": _target_weight(row, label_target),
+            "best_label_count": sum(1 for value in targets if value == best),
+            "target_unique_count": len(set(targets)),
+            "hard_negative_positive_competition": bool(has_hard and has_positive),
             "label_status": row.get("label_status"),
             "score": float(score),
             "selected_by_current_system": bool(row.get("selected_by_current_system")),

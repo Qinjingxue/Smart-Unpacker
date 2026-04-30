@@ -89,9 +89,10 @@ def _build_report(rows: list[dict[str, Any]], model_root: Path) -> dict[str, Any
     partial_rows = sum(1 for row in rows if int(row.get("label", 0) or 0) == 1 or str(row.get("label_status") or "") == "partial")
     state_progress_rows = sum(1 for row in rows if int(row.get("label", 0) or 0) == 2 or str(row.get("label_status") or "") == "state_progress")
     total = max(1, len(rows))
-    model_metrics = _model_metrics(model_root, source_counts, len(rows))
+    model_metrics = _model_metrics(model_root, source_counts, len(rows), format_counts)
     rollout = _rollout_report(rows, query_groups)
     difficulty = _difficulty_report(rows, query_groups)
+    recovery = _recovery_ratio_report(rows, query_groups)
     report = {
         "dataset": {
             "row_count": len(rows),
@@ -121,8 +122,10 @@ def _build_report(rows: list[dict[str, Any]], model_root: Path) -> dict[str, Any
         "format_detection_quality": _format_detection_quality(rows),
         "rollout": rollout,
         "difficulty": difficulty,
+        "terminal_recovery": recovery,
         "per_format": _per_format_report(rows, model_metrics),
         "model_metric_comparison": model_metrics,
+        "repair_prior_dependency": _repair_prior_dependency(model_metrics),
     }
     report["warnings"] = _quality_warnings(report)
     return report
@@ -159,6 +162,7 @@ def _per_format_report(rows: list[dict[str, Any]], model_metrics: dict[str, Any]
             "quality_ratios": _quality_ratios(items),
             "rollout": _rollout_report(items, groups),
             "difficulty": _difficulty_report(items, groups),
+            "terminal_recovery": _recovery_ratio_report(items, groups),
             "module_distribution_top10": dict(modules.most_common(10)),
             "trainability": _format_trainability(items, groups),
             "model_metrics": _metrics_for_format(model_metrics, fmt),
@@ -228,6 +232,102 @@ def _rollout_report(rows: list[dict[str, Any]], query_groups: dict[str, list[dic
     }
 
 
+def _recovery_ratio_report(rows: list[dict[str, Any]], query_groups: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
+    ratios = [_row_recovery_ratio(row) for row in rows]
+    best_ratios: list[float] = []
+    top1_ratios: list[float] = []
+    regrets: list[float] = []
+    for items in query_groups.values():
+        if not items:
+            continue
+        best = max(_row_recovery_ratio(row) for row in items)
+        selected = [row for row in items if bool(row.get("selected_by_current_system"))]
+        top = selected[0] if selected else items[0]
+        top_ratio = _row_recovery_ratio(top)
+        best_ratios.append(best)
+        top1_ratios.append(top_ratio)
+        regrets.append(max(0.0, best - top_ratio))
+    return {
+        "row_terminal_recovery_ratio": _series_summary_float(ratios),
+        "query_best_recovery_ratio": _series_summary_float(best_ratios),
+        "query_top1_recovery_ratio": _series_summary_float(top1_ratios),
+        "query_top1_regret": _series_summary_float(regrets),
+        "positive_recovery_row_ratio": sum(1 for value in ratios if value > 0.0) / max(1, len(ratios)),
+    }
+
+
+def _row_recovery_ratio(row: dict[str, Any]) -> float:
+    targets = row.get("training_targets") if isinstance(row.get("training_targets"), dict) else {}
+    for key in ("strategy_recovery_ratio", "terminal_recovery_ratio", "subtree_best_terminal_recovery_ratio"):
+        if targets.get(key) is not None:
+            return _clamp01(_as_float(targets.get(key)))
+    if row.get("terminal_recovery_ratio") is not None:
+        return _clamp01(_as_float(row.get("terminal_recovery_ratio")))
+    details = row.get("label_details") if isinstance(row.get("label_details"), dict) else {}
+    for key in ("strategy_recovery_ratio", "terminal_recovery_ratio", "subtree_best_terminal_recovery_ratio"):
+        if details.get(key) is not None:
+            return _clamp01(_as_float(details.get(key)))
+    label = int(row.get("label", 0) or 0)
+    if label >= 3:
+        return 1.0
+    if label == 2:
+        return 0.35
+    if label == 1:
+        return 0.2
+    return 0.0
+
+
+def _repair_prior_dependency(model_metrics: dict[str, Any]) -> dict[str, Any]:
+    grouped: dict[str, dict[str, Any]] = defaultdict(dict)
+    for key, metrics in model_metrics.items():
+        if not isinstance(metrics, dict):
+            continue
+        view = str(metrics.get("feature_view") or Path(str(key)).name)
+        scope = str(key).rsplit("/", 1)[0] if "/" in str(key) else str(metrics.get("format_scope") or "all")
+        grouped[scope][view] = metrics
+    output: dict[str, Any] = {}
+    for scope, views in grouped.items():
+        runtime = _model_ndcg_for_view(views, "runtime_only")
+        prior = _model_ndcg_for_view(views, "runtime_plus_repair_prior")
+        if runtime is None and prior is None:
+            continue
+        diff = None if runtime is None or prior is None else prior - runtime
+        output[scope] = {
+            "runtime_only_ndcg@1": runtime,
+            "runtime_plus_repair_prior_ndcg@1": prior,
+            "prior_minus_runtime_ndcg@1": diff,
+            "prior_dependency_warning": bool(diff is not None and diff > 0.15),
+        }
+    return output
+
+
+def _model_ndcg_for_view(metrics: dict[str, Any], view: str) -> float | None:
+    item = metrics.get(view) if isinstance(metrics.get(view), dict) else {}
+    if not item:
+        return None
+    metric = item.get("metrics") if isinstance(item.get("metrics"), dict) else item
+    if not isinstance(metric, dict):
+        return None
+    value = metric.get("ndcg@1")
+    try:
+        return None if value is None else float(value)
+    except Exception:
+        return None
+
+
+def _as_float(value: Any) -> float:
+    try:
+        if value is None:
+            return 0.0
+        return float(value)
+    except Exception:
+        return 0.0
+
+
+def _clamp01(value: float) -> float:
+    return max(0.0, min(1.0, float(value or 0.0)))
+
+
 def _difficulty_report(rows: list[dict[str, Any]], query_groups: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
     entropies: list[float] = []
     target_unique_counts: list[int] = []
@@ -243,10 +343,14 @@ def _difficulty_report(rows: list[dict[str, Any]], query_groups: dict[str, list[
     two_step_rows = 0
     two_step_success_rows = 0
     deceptive_hard_negative_rows = 0
+    profile_module_labels: dict[tuple[str, str], Counter[str]] = defaultdict(Counter)
     for row in rows:
         target = _strategy_target_label(row)
         tags = _difficulty_tags(row)
         details = row.get("label_details") if isinstance(row.get("label_details"), dict) else {}
+        profile = str(_nested(row, "stable_features", "state", "damage_profile") or row.get("damage_profile") or "")
+        module = str(row.get("module") or _nested(row, "stable_features", "candidate", "module") or "")
+        profile_module_labels[(profile, module)][str(int(row.get("label", 0) or 0))] += 1
         if int(row.get("label", 0) or 0) == 2:
             label2_rows += 1
             if int(details.get("future_best_label", 0) or 0) >= 3 or bool(details.get("terminal_success")):
@@ -285,6 +389,11 @@ def _difficulty_report(rows: list[dict[str, Any]], query_groups: dict[str, list[
             selected_considered += 1
             if _future_value(selected[0]) >= best_future:
                 selected_future_hits += 1
+    purities: list[float] = []
+    for labels in profile_module_labels.values():
+        total = sum(labels.values())
+        if total:
+            purities.append(max(labels.values()) / total)
     query_count = max(1, len(query_groups))
     return {
         "query_target_entropy": _series_summary_float(entropies),
@@ -302,6 +411,7 @@ def _difficulty_report(rows: list[dict[str, Any]], query_groups: dict[str, list[
         "two_step_row_count": two_step_rows,
         "two_step_success_row_count": two_step_success_rows,
         "deceptive_hard_negative_row_count": deceptive_hard_negative_rows,
+        "profile_module_label_purity": _series_summary_float(purities),
     }
 
 
@@ -521,7 +631,7 @@ def _percentile_float(ordered: list[float], ratio: float) -> float:
     return float(ordered[index])
 
 
-def _model_metrics(model_root: Path, source_counts: Counter[str], row_count: int) -> dict[str, Any]:
+def _model_metrics(model_root: Path, source_counts: Counter[str], row_count: int, format_counts: Counter[str] | None = None) -> dict[str, Any]:
     output: dict[str, Any] = {}
     if not model_root.is_dir():
         return output
@@ -541,6 +651,10 @@ def _model_metrics(model_root: Path, source_counts: Counter[str], row_count: int
             stale_reasons.append("input_files_differ")
         if format_scope == "all" and row_count and summary_row_count and row_count != summary_row_count:
             stale_reasons.append("row_count_differs")
+        if format_scope != "all" and format_counts:
+            expected_rows = int(format_counts.get(format_scope, 0) or 0)
+            if expected_rows and summary_row_count and expected_rows != summary_row_count:
+                stale_reasons.append("format_row_count_differs")
         output[key] = {
             "feature_view": view,
             "format_scope": format_scope,
@@ -617,6 +731,7 @@ def _quality_warnings(report: dict[str, Any]) -> list[str]:
     if any(isinstance(item, dict) and not item.get("matches_current_dataset", True) for item in metrics.values()):
         warnings.append("model_metrics_stale")
     stable = _model_ndcg(metrics, "stable_only")
+    proposal = _model_ndcg(metrics, "proposal_only")
     teacher = _model_ndcg(metrics, "teacher_only_baseline")
     if stable is not None and teacher is not None and stable > 0.95 and abs(stable - teacher) < 0.05:
         warnings.append("dataset_may_be_too_easy")
@@ -630,8 +745,18 @@ def _quality_warnings(report: dict[str, Any]) -> list[str]:
         warnings.append("too_few_deceptive_hard_negatives")
     if float(difficulty.get("teacher_top1_wrong_but_future_best_exists_ratio", 0.0) or 0.0) < 0.20:
         warnings.append("teacher_top1_too_aligned")
+    profile_purity = difficulty.get("profile_module_label_purity") if isinstance(difficulty.get("profile_module_label_purity"), dict) else {}
+    if float(profile_purity.get("mean", 0.0) or 0.0) > 0.75:
+        warnings.append("profile_module_label_purity_too_high")
+    if float(difficulty.get("hard_negative_vs_positive_same_query_ratio", 0.0) or 0.0) < 0.10 and int(labels.get("-1", 0) or 0) > 0 and positive_rows > 0:
+        warnings.append("too_few_hard_negative_positive_competition")
+    if proposal is not None and teacher is not None and proposal >= 0.999 and teacher >= 0.999:
+        warnings.append("dataset_still_too_deterministic")
     if int(formats.get("zip", 0) or 0) > 0:
         warnings.append("source_split_recommended")
+    dependency = report.get("repair_prior_dependency", {}) if isinstance(report.get("repair_prior_dependency"), dict) else {}
+    if any(isinstance(item, dict) and item.get("prior_dependency_warning") for item in dependency.values()):
+        warnings.append("repair_prior_dependency_high")
     per_format = report.get("per_format", {}) if isinstance(report.get("per_format"), dict) else {}
     for fmt, item in per_format.items():
         if not isinstance(item, dict):
