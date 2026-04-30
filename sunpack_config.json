@@ -59,6 +59,11 @@
   "performance": {
     "scheduler_profile": "auto"
   },
+  "repair": {
+    "telemetry": {
+      "enabled": false
+    }
+  },
   "detection": {
     "rule_pipeline": {
       "scoring": [

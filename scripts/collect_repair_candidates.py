@@ -18,39 +18,90 @@ from sunpack.repair.candidate import candidate_feature_payload
 from tests.functional import test_repair_capability_matrix as matrix
 
 
-DEFAULT_OUTPUT = Path(".sunpack") / "datasets" / "repair_candidates_from_tests.jsonl"
+DEFAULT_LTR_OUTPUT = Path(".sunpack") / "datasets" / "repair_candidates_ltr_from_tests.jsonl"
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     cases = _selected_cases(args.case, args.limit)
-    output = Path(args.output)
-    output.parent.mkdir(parents=True, exist_ok=True)
+    ltr_output = Path(args.output or args.ltr_output)
+    debug_output = Path(args.debug_output) if args.debug_output else None
+    ltr_output.parent.mkdir(parents=True, exist_ok=True)
+    if debug_output is not None:
+        debug_output.parent.mkdir(parents=True, exist_ok=True)
     mode = "a" if args.append else "w"
 
     summary = {
         "cases": 0,
-        "records": 0,
+        "ltr_records": 0,
+        "debug_records": 0,
         "verified": 0,
         "failed": 0,
         "skipped": 0,
-        "output": str(output),
+        "ltr_output": str(ltr_output),
     }
-    with output.open(mode, encoding="utf-8") as handle:
-        for case in cases:
-            case_summary, records = _collect_case(case)
-            summary["cases"] += 1
-            summary["records"] += len(records)
-            summary["verified"] += 1 if case_summary["verified_by_test"] else 0
-            summary["failed"] += 1 if case_summary["collection_status"] == "failed" else 0
-            summary["skipped"] += 1 if case_summary["collection_status"] == "skipped" else 0
-            for record in records:
-                handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True, default=str) + "\n")
-            if args.verbose:
-                print(_case_line(case_summary, len(records)))
+    ltr_pretty_records: list[dict[str, Any]] = []
+    debug_pretty_records: list[dict[str, Any]] = []
+    debug_handle = debug_output.open(mode, encoding="utf-8") if debug_output is not None else None
+    try:
+        ltr_handle = ltr_output.open(mode, encoding="utf-8")
+        try:
+            _collect_to_outputs(
+                cases,
+                args,
+                ltr_handle,
+                debug_handle,
+                ltr_pretty_records,
+                debug_pretty_records,
+                summary,
+            )
+        finally:
+            ltr_handle.close()
+    finally:
+        if debug_handle is not None:
+            debug_handle.close()
+    if args.pretty:
+        ltr_pretty = _pretty_path(ltr_output)
+        ltr_pretty.write_text(json.dumps(ltr_pretty_records, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+        summary["ltr_pretty_output"] = str(ltr_pretty)
+        if debug_output is not None:
+            debug_pretty = _pretty_path(debug_output)
+            debug_pretty.write_text(json.dumps(debug_pretty_records, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+            summary["debug_pretty_output"] = str(debug_pretty)
 
     print(json.dumps(summary, ensure_ascii=False, sort_keys=True))
     return 1 if summary["failed"] else 0
+
+
+def _collect_to_outputs(
+    cases: list[Any],
+    args: argparse.Namespace,
+    ltr_handle,
+    debug_handle,
+    ltr_pretty_records: list[dict[str, Any]],
+    debug_pretty_records: list[dict[str, Any]],
+    summary: dict[str, Any],
+) -> None:
+    for case in cases:
+        case_summary, debug_records = _collect_case(case)
+        ltr_records = [_ltr_record(record) for record in debug_records]
+        if args.pretty:
+            ltr_pretty_records.extend(ltr_records)
+            if debug_handle is not None:
+                debug_pretty_records.extend(debug_records)
+        summary["cases"] += 1
+        summary["ltr_records"] += len(ltr_records)
+        summary["debug_records"] += len(debug_records) if debug_handle is not None else 0
+        summary["verified"] += 1 if case_summary["verified_by_test"] else 0
+        summary["failed"] += 1 if case_summary["collection_status"] == "failed" else 0
+        summary["skipped"] += 1 if case_summary["collection_status"] == "skipped" else 0
+        for record in ltr_records:
+            ltr_handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True, default=str) + "\n")
+        if debug_handle is not None:
+            for record in debug_records:
+                debug_handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True, default=str) + "\n")
+        if args.verbose:
+            print(_case_line(case_summary, len(debug_records)))
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -59,10 +110,21 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--output",
-        default=str(DEFAULT_OUTPUT),
-        help="JSONL target path. Defaults to .sunpack/datasets/repair_candidates_from_tests.jsonl.",
+        default=None,
+        help="LTR JSONL target path. Alias for --ltr-output.",
+    )
+    parser.add_argument(
+        "--ltr-output",
+        default=str(DEFAULT_LTR_OUTPUT),
+        help="Compact LTR JSONL target path.",
+    )
+    parser.add_argument(
+        "--debug-output",
+        default=None,
+        help="Optional debug JSONL target path with candidate explanations. Omitted by default.",
     )
     parser.add_argument("--append", action="store_true", help="Append instead of overwriting the JSONL file.")
+    parser.add_argument("--pretty", action="store_true", help="Also write formatted .pretty.json files for manual inspection.")
     parser.add_argument("--case", action="append", default=[], help="Collect only a specific matrix case id. Repeatable.")
     parser.add_argument("--limit", type=int, default=0, help="Collect at most N cases after case filtering.")
     parser.add_argument("--verbose", action="store_true", help="Print one summary line per case.")
@@ -80,6 +142,13 @@ def _selected_cases(case_ids: list[str], limit: int) -> list[Any]:
     if limit and limit > 0:
         selected = selected[:limit]
     return selected
+
+
+def _pretty_path(path: Path) -> Path:
+    suffix = "".join(path.suffixes)
+    if suffix:
+        return path.with_name(path.name.removesuffix(suffix) + ".pretty.json")
+    return path.with_name(path.name + ".pretty.json")
 
 
 def _collect_case(case) -> tuple[dict[str, Any], list[dict[str, Any]]]:
@@ -179,13 +248,44 @@ def _records_from_case(case, job: RepairJob, generated_batch, result, case_summa
             "format": case.fmt,
             "damage_flags": list(case.flags),
             "selection_summary": _selection_summary(result),
-            "generation_summary": {
-                "candidate_count": len(generated_batch.candidates),
-                "terminal_result": _terminal_result_summary(generated_batch.terminal_result),
-                "diagnosis": _compact_json(generated_batch.diagnosis),
-            },
+            "generation_summary": _generation_summary(generated_batch),
         })
     return records
+
+
+def _ltr_record(record: dict[str, Any]) -> dict[str, Any]:
+    features = record.get("validated_candidate_features") or record.get("candidate_features") or {}
+    ltr_features = dict(features.get("ltr_features") or {}) if isinstance(features, dict) else {}
+    label = _ltr_label(record)
+    return {
+        "schema_version": 1,
+        "source": record.get("source"),
+        "query_id": record.get("attempt_id"),
+        "case_id": record.get("case_id"),
+        "candidate_id": record.get("candidate_id"),
+        "candidate_index": record.get("candidate_index"),
+        "label": label,
+        "candidate_selected": bool(record.get("candidate_selected")),
+        "candidate_is_expected_module": bool(record.get("candidate_is_expected_module")),
+        "expected_module": record.get("expected_module"),
+        "actual_selected": record.get("actual_selected"),
+        "result_status": record.get("result_status"),
+        "repair_success": bool(record.get("repair_success")),
+        "verified_by_test": bool(record.get("verified_by_test")),
+        "format": record.get("format"),
+        "damage_flags": list(record.get("damage_flags") or []),
+        "features": ltr_features,
+    }
+
+
+def _ltr_label(record: dict[str, Any]) -> int:
+    selected = bool(record.get("candidate_selected"))
+    expected = bool(record.get("candidate_is_expected_module"))
+    if selected and expected and record.get("repair_success"):
+        return 2
+    if selected or expected:
+        return 1
+    return 0
 
 
 def _validated_features_by_id(result) -> dict[str, dict[str, Any]]:
@@ -271,6 +371,42 @@ def _empty_record(case, job, result, case_summary: dict[str, Any]) -> dict[str, 
         "damage_flags": list(case.flags),
         "selection_summary": _selection_summary(result),
         "generation_summary": {"candidate_count": 0},
+    }
+
+
+def _generation_summary(generated_batch) -> dict[str, Any]:
+    diagnosis = generated_batch.diagnosis if isinstance(generated_batch.diagnosis, dict) else {}
+    generation = diagnosis.get("candidate_generation") if isinstance(diagnosis.get("candidate_generation"), dict) else {}
+    decision = diagnosis.get("capability_decision") if isinstance(diagnosis.get("capability_decision"), dict) else {}
+    modules = decision.get("modules") if isinstance(decision.get("modules"), list) else []
+    selected_modules = decision.get("selected_modules")
+    if not isinstance(selected_modules, list):
+        selected_modules = [
+            item.get("name")
+            for item in modules
+            if isinstance(item, dict) and item.get("selected")
+        ]
+    return {
+        "candidate_count": len(generated_batch.candidates),
+        "terminal_result": _terminal_result_summary(generated_batch.terminal_result),
+        "warnings": list(getattr(generated_batch, "warnings", []) or []),
+        "message": str(getattr(generated_batch, "message", "") or ""),
+        "candidate_generation": {
+            "candidate_count": generation.get("candidate_count", len(generated_batch.candidates)),
+            "auto_deep_attempted": bool(generation.get("auto_deep_attempted", False)),
+            "warnings": list(generation.get("warnings") or []),
+        },
+        "capability_decision": {
+            "format": decision.get("format"),
+            "categories": list(decision.get("categories") or []),
+            "selected_modules": selected_modules,
+            "module_count": len(modules),
+            "no_candidate_modules": [
+                item.get("name")
+                for item in modules
+                if isinstance(item, dict) and "no_candidates" in set(item.get("dynamic_reasons") or [])
+            ],
+        },
     }
 
 

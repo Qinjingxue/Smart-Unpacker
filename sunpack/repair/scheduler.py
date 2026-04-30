@@ -1,4 +1,5 @@
 from dataclasses import replace
+import json
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +26,7 @@ class RepairScheduler:
     def repair(self, job: RepairJob) -> RepairResult:
         batch = self.generate_repair_candidates(job)
         if batch.terminal_result is not None:
+            self._write_telemetry(job, batch, batch.terminal_result, {})
             return batch.terminal_result
         selector = CandidateSelector(self.config)
         warnings = list(batch.warnings)
@@ -36,6 +38,7 @@ class RepairScheduler:
                 result = selected.to_result(selection=selection)
                 if warnings:
                     result = replace(result, warnings=_dedupe([*result.warnings, *warnings]))
+                self._write_telemetry(job, batch, result, selection)
                 return result
             warnings.extend(selection.get("warnings") or [])
             warnings.append("repair candidates were produced but none passed selection")
@@ -48,11 +51,12 @@ class RepairScheduler:
                     selected, selection = selector.select(_with_job_password_candidates(auto_batch.candidates, job))
                     if selected is not None:
                         result = selected.to_result(selection=_merge_candidate_selections(primary_selection, selection))
+                        self._write_telemetry(job, batch, result, result.diagnosis.get("candidate_selection", {}))
                         return replace(result, warnings=_dedupe([*result.warnings, *warnings]))
                     warnings.extend(selection.get("warnings") or [])
                     warnings.append("auto_deep candidates were produced but none passed selection")
         diagnosis = _diagnosis_with_candidate_selection(batch.diagnosis, selection)
-        return RepairResult(
+        result = RepairResult(
             status="unrepairable",
             confidence=float(diagnosis.get("confidence", 0.0) or 0.0),
             format=str(diagnosis.get("format") or job.format),
@@ -60,6 +64,8 @@ class RepairScheduler:
             diagnosis=diagnosis,
             message=batch.message or "registered repair modules did not produce a candidate",
         )
+        self._write_telemetry(job, batch, result, selection)
+        return result
 
     def generate_repair_candidates(self, job: RepairJob, *, lazy: bool = False) -> RepairCandidateBatch:
         diagnosis = self.diagnose(job)
@@ -548,10 +554,114 @@ class RepairScheduler:
             message=message,
         )
 
+    def _write_telemetry(
+        self,
+        job: RepairJob,
+        batch: RepairCandidateBatch,
+        result: RepairResult,
+        selection: dict[str, Any],
+    ) -> None:
+        telemetry = self.config.get("telemetry") if isinstance(self.config.get("telemetry"), dict) else {}
+        if not bool(telemetry.get("enabled", False)):
+            return
+        records = _telemetry_records(job, batch, result, selection)
+        if not records:
+            return
+        target = Path(".sunpack") / "datasets" / "repair_candidates_runtime.jsonl"
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with target.open("a", encoding="utf-8") as handle:
+                for record in records:
+                    handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True, default=str) + "\n")
+        except OSError:
+            return
+
 
 def _safe_key(value: str) -> str:
     text = "".join(ch if ch.isalnum() or ch in "-_." else "_" for ch in str(value or "archive"))
     return text[-120:] or "archive"
+
+
+def _telemetry_records(
+    job: RepairJob,
+    batch: RepairCandidateBatch,
+    result: RepairResult,
+    selection: dict[str, Any],
+) -> list[dict[str, Any]]:
+    features = _telemetry_candidate_features(batch, selection)
+    if not features:
+        return []
+    selected_ids = _telemetry_selected_ids(features, result, selection)
+    repair_success = bool(result.ok and result.status in {"repaired", "partial"})
+    query_id = f"{job.archive_key or 'repair'}:{int(job.attempts or 0)}"
+    records = []
+    for index, item in enumerate(features):
+        candidate_id = str(item.get("candidate_id") or "")
+        selected = candidate_id in selected_ids
+        records.append({
+            "schema_version": 1,
+            "source": "runtime.repair.telemetry",
+            "query_id": query_id,
+            "archive_key": job.archive_key,
+            "candidate_id": candidate_id,
+            "candidate_index": index,
+            "label": 2 if selected and repair_success else 0,
+            "label_source": "runtime_weak",
+            "candidate_selected": selected,
+            "candidate_is_expected_module": None,
+            "expected_module": None,
+            "actual_selected": result.module_name,
+            "result_status": result.status,
+            "repair_success": repair_success,
+            "verified_by_test": False,
+            "format": result.format or job.format,
+            "damage_flags": list(job.damage_flags),
+            "features": dict(item.get("ltr_features") or {}),
+        })
+    return records
+
+
+def _telemetry_candidate_features(batch: RepairCandidateBatch, selection: dict[str, Any]) -> list[dict[str, Any]]:
+    selected_features = selection.get("candidates") if isinstance(selection.get("candidates"), list) else []
+    output = [dict(item) for item in selected_features if isinstance(item, dict) and item.get("ltr_features")]
+    if output:
+        return output
+    return [
+        candidate_feature_payload(candidate)
+        for candidate in batch.candidates
+        if candidate.repaired_input or candidate.is_lazy
+    ]
+
+
+def _telemetry_selected_ids(
+    features: list[dict[str, Any]],
+    result: RepairResult,
+    selection: dict[str, Any],
+) -> set[str]:
+    selected_module = str(selection.get("selected_module") or result.module_name or "")
+    selected_priority = selection.get("generation_priority")
+    selected = set()
+    for item in features:
+        if str(item.get("module") or "") != selected_module:
+            continue
+        if selected_priority is None or _float_equal(item.get("generation_priority"), selected_priority):
+            candidate_id = str(item.get("candidate_id") or "")
+            if candidate_id:
+                selected.add(candidate_id)
+    if selected:
+        return selected
+    return {
+        str(item.get("candidate_id") or "")
+        for item in features
+        if str(item.get("module") or "") == selected_module and item.get("candidate_id")
+    }
+
+
+def _float_equal(left: Any, right: Any) -> bool:
+    try:
+        return abs(float(left) - float(right)) <= 1e-12
+    except (TypeError, ValueError):
+        return left == right
 
 
 def _module_decision(

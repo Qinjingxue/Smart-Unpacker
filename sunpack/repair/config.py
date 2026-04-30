@@ -47,6 +47,9 @@ DEFAULT_REPAIR_CONFIG = {
         "max_rounds": 3,
         "min_improvement": 0.01,
     },
+    "telemetry": {
+        "enabled": False,
+    },
     "modules": [
         {"name": "zip_eocd_repair", "enabled": True},
         {"name": "zip_comment_length_fix", "enabled": True},
@@ -138,6 +141,7 @@ def normalize_repair_config(value: Any) -> dict[str, Any]:
     config["deep"] = _normalize_deep(config.get("deep"))
     config["auto_deep"] = _normalize_auto_deep(config.get("auto_deep"))
     config["beam"] = _normalize_beam(config.get("beam"))
+    config["telemetry"] = _normalize_telemetry(config.get("telemetry"))
     config["modules"] = _normalize_modules(config.get("modules"))
     return config
 
@@ -233,6 +237,14 @@ def _normalize_beam(value: Any) -> dict[str, Any]:
         "max_assess_candidates": _int_at_least(value, "max_assess_candidates", 1),
         "max_rounds": _int_at_least(value, "max_rounds", 0),
         "min_improvement": _float_at_least(value, "min_improvement", 0.0),
+    }
+
+
+def _normalize_telemetry(value: Any) -> dict[str, bool]:
+    if not isinstance(value, dict):
+        raise ValueError("repair.telemetry must be an object")
+    return {
+        "enabled": _bool_value(value.get("enabled", False), "repair.telemetry.enabled"),
     }
 
 

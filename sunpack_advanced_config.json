@@ -510,6 +510,9 @@
       "max_rounds": 3,
       "min_improvement": 0.01
     },
+    "telemetry": {
+      "enabled": false
+    },
     "modules": [
       {
         "name": "zip_eocd_repair",

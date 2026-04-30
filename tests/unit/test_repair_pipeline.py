@@ -2,6 +2,7 @@ from dataclasses import dataclass
 import bz2
 import gzip
 import io
+import json
 import lzma
 import tarfile
 import struct
@@ -390,6 +391,44 @@ def test_repair_scheduler_selects_best_generated_candidate(tmp_path):
     assert result.actions == ["generated_best"]
     assert result.diagnosis["candidate_selection"]["candidate_count"] == 2
     assert result.diagnosis["candidate_selection"]["selected_module"] == module.spec.name
+
+
+def test_repair_scheduler_telemetry_writes_compact_ltr_records(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    module = _DummyGeneratedCandidatesModule()
+    registry = get_repair_module_registry()
+    previous = registry.get(module.spec.name)
+    registry.register(module)
+    try:
+        scheduler = RepairScheduler({
+            "repair": {
+                "workspace": str(tmp_path / "repair"),
+                "telemetry": {"enabled": True},
+                "stages": {"deep": True},
+                "deep": {"verify_candidates": False},
+                "modules": [{"name": module.spec.name, "enabled": True}],
+            }
+        })
+        result = scheduler.repair(RepairJob(
+            source_input={"kind": "file", "path": str(tmp_path / "source.zip")},
+            format="zip",
+            confidence=0.7,
+            damage_flags=["boundary_unreliable"],
+            archive_key="telemetry",
+        ))
+    finally:
+        if previous is not None:
+            registry.register(previous)
+
+    target = tmp_path / ".sunpack" / "datasets" / "repair_candidates_runtime.jsonl"
+    rows = [json.loads(line) for line in target.read_text(encoding="utf-8").splitlines()]
+    assert result.ok is True
+    assert len(rows) == 2
+    assert {row["source"] for row in rows} == {"runtime.repair.telemetry"}
+    assert {row["query_id"] for row in rows} == {"telemetry:0"}
+    assert sum(1 for row in rows if row["candidate_selected"]) == 1
+    assert sum(1 for row in rows if row["label"] == 2) == 1
+    assert all("features" in row and "generation_priority" in row["features"] for row in rows)
 
 
 def test_repair_scheduler_exposes_generated_candidate_batch(tmp_path):
@@ -845,6 +884,7 @@ def test_repair_config_is_normalized_by_config_schema():
                 "max_candidates_per_module": "1",
                 "max_input_size_mb": "32",
             },
+            "telemetry": {"enabled": "true"},
         },
     })
 
@@ -860,6 +900,7 @@ def test_repair_config_is_normalized_by_config_schema():
     assert config["repair"]["auto_deep"]["max_modules"] == 1
     assert config["repair"]["auto_deep"]["max_input_size_mb"] == 32.0
     assert config["repair"]["beam"]["enabled"] is True
+    assert config["repair"]["telemetry"]["enabled"] is True
     assert config["verification"]["max_retries"] == 2
     assert config["verification"]["partial_min_completeness"] == 0.2
     assert config["verification"]["complete_accept_threshold"] == 0.999
