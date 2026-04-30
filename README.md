@@ -74,15 +74,15 @@ python sunpack.py config validate
 
 ## 命令速览
 
-| 命令 | 说明 |
-| --- | --- |
-| `extract` | 扫描、analysis、解压、verification、repair 循环、后处理。 |
-| `watch` | 监控目录，发现稳定归档后自动进入 extract pipeline。 |
-| `scan` | 只生成候选任务，不修改文件。 |
-| `inspect` | 输出检测、analysis 和规则判定细节。 |
-| `passwords` | 查看本次会参与尝试的密码列表。 |
-| `config show` | 打印当前配置。 |
-| `config validate` | 校验 JSON、规则、verification method 和 fact schema。 |
+| 命令              | 说明                                                      |
+| ----------------- | --------------------------------------------------------- |
+| `extract`         | 扫描、analysis、解压、verification、repair 循环、后处理。 |
+| `watch`           | 监控目录，发现稳定归档后自动进入 extract pipeline。       |
+| `scan`            | 只生成候选任务，不修改文件。                              |
+| `inspect`         | 输出检测、analysis 和规则判定细节。                       |
+| `passwords`       | 查看本次会参与尝试的密码列表。                            |
+| `config show`     | 打印当前配置。                                            |
+| `config validate` | 校验 JSON、规则、verification method 和 fact schema。     |
 
 详细参数见 [CLI 参数说明](docs/cli_parameters.md)。
 
@@ -219,3 +219,7 @@ Windows 打包：
 构建脚本会准备 `.venv-build`，构建 Rust wheel 和 C++ worker，用 PyInstaller 生成 `sunpack.exe`，复制 `sunpack_config.json`、`builtin_passwords.txt` 和 `tools/` 运行文件，并执行 packaged smoke test。发行包输出到 `release\sunpack-windows-<arch>-<version>.zip`。
 
 构建脚本支持 `-Arch x64|arm64`。`x64` 是默认值；ARM64 最终可执行文件需要在 ARM64 Windows + ARM64 Python 环境中构建，脚本会静态校验包内所有关键 PE 文件的 machine 架构。已有包可用 `.\scripts\verify_windows_package_arch.ps1 -PackageRoot <dist目录> -Arch arm64` 在任意 Windows 机器上做静态检查。
+
+## 开发计划
+
+引入机器学习系统，训练一个简单的可自动修复压缩包的AI决策层，提高对于复杂压缩包损坏的修复能力
