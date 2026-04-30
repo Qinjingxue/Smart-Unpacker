@@ -158,6 +158,42 @@ def test_material_build_seed_controls_reproducibility(tmp_path):
     assert random_first != random_second
 
 
+def test_material_build_organizes_direct_format_root_archives(tmp_path):
+    material_root = tmp_path / "material"
+    zip_root = material_root / "zip"
+    zip_root.mkdir(parents=True)
+    direct_source = zip_root / "direct.zip"
+    _write_clean_zip(direct_source)
+
+    subprocess.run(
+        [
+            sys.executable,
+            "repair_training/build_repair_plan_corpus.py",
+            "--material-root",
+            str(material_root),
+            "--per-sample",
+            "2",
+            "--seed",
+            "2024",
+            "--no-pretty",
+        ],
+        cwd=Path.cwd(),
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+
+    sample_dir = zip_root / "direct"
+    moved_source = sample_dir / "direct.zip"
+    assert not direct_source.exists()
+    assert moved_source.exists()
+    assert (sample_dir / "damaged").is_dir()
+    rows = _jsonl(sample_dir / "damage_manifest.jsonl")
+    assert len(rows) == 2
+    assert {row["material_sample_id"] for row in rows} == {"direct"}
+    assert {row["source_archive_name"] for row in rows} == {"direct.zip"}
+
+
 def _write_clean_zip(path: Path) -> None:
     with zipfile.ZipFile(path, "w") as archive:
         archive.writestr("alpha.txt", b"alpha payload")

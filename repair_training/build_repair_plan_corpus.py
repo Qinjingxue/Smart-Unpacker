@@ -71,11 +71,12 @@ def _material_build(args: argparse.Namespace, material_root: Path) -> int:
     rng = random.Random(base_seed)
     formats = _format_filter(args.formats)
     sample_filter = set(args.sample or [])
-    summary = {"material_root": str(material_root), "seed": base_seed, "samples": 0, "sources": 0, "generated": 0, "skipped": 0}
+    summary = {"material_root": str(material_root), "seed": base_seed, "organized": 0, "samples": 0, "sources": 0, "generated": 0, "skipped": 0}
     for format_dir in _format_dirs(material_root, formats):
         fmt = material_dir_to_format(format_dir.name)
         if fmt is None:
             continue
+        summary["organized"] += _organize_root_sources(format_dir, fmt, sample_filter)
         for sample_dir in sorted(item for item in format_dir.iterdir() if item.is_dir()):
             if sample_dir.name == "damaged":
                 continue
@@ -221,6 +222,45 @@ def _sample_sources(sample_dir: Path, fmt: str) -> list[Path]:
     return output
 
 
+def _organize_root_sources(format_dir: Path, fmt: str, sample_filter: set[str]) -> int:
+    moved = 0
+    for path in sorted(format_dir.iterdir()):
+        if not path.is_file():
+            continue
+        if path.name == ".gitkeep":
+            continue
+        if detect_archive_format(path) != fmt:
+            continue
+        sample_name = _safe_sample_name(path.stem)
+        if sample_filter and sample_name not in sample_filter:
+            continue
+        sample_dir = _sample_dir_for_root_source(format_dir, sample_name, path.name)
+        sample_dir.mkdir(parents=True, exist_ok=True)
+        target = sample_dir / path.name
+        if target.exists():
+            raise RuntimeError(f"refusing to overwrite existing material source: {target}")
+        shutil.move(str(path), str(target))
+        moved += 1
+    return moved
+
+
+def _sample_dir_for_root_source(format_dir: Path, sample_name: str, filename: str) -> Path:
+    candidate = format_dir / sample_name
+    if not (candidate / filename).exists():
+        return candidate
+    index = 2
+    while True:
+        candidate = format_dir / f"{sample_name}_{index}"
+        if not (candidate / filename).exists():
+            return candidate
+        index += 1
+
+
+def _safe_sample_name(raw: str) -> str:
+    value = "".join(ch if ch.isalnum() or ch in {"_", "-"} else "_" for ch in str(raw or "").strip())
+    return value or "sample"
+
+
 def _source_archives(input_dir: Path, formats: set[str]) -> list[Path]:
     if not input_dir.is_dir():
         raise SystemExit(f"input directory does not exist: {input_dir}")
@@ -278,4 +318,3 @@ def _pretty_path(path: Path) -> Path:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
