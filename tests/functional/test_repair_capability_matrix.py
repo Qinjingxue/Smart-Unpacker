@@ -42,6 +42,7 @@ class MatrixCase:
     expected_module: str | None
     verify: VerifyFn | None = None
     modules: tuple[str, ...] = ()
+    competition_modules: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -76,6 +77,7 @@ def _repair_scheduler(tmp_path: Path, *, modules: tuple[str, ...] = ()) -> Repai
     repair_config = {
         "workspace": str(tmp_path / "repair-workspace"),
         "max_modules_per_job": 8,
+        "max_attempts_per_task": 6,
         "stages": {"deep": True},
         "deep": {
             "max_candidates_per_module": 4,
@@ -509,6 +511,23 @@ def _build_zip_sfx_split_prefix_tail_bad_cd(root: Path) -> MatrixFixture:
     )
 
 
+def _build_zip_sfx_bad_cd_and_payload_bad(root: Path) -> MatrixFixture:
+    entries = {"bad.txt": b"bad payload in sfx", "good.txt": b"good payload in sfx"}
+    data = bytearray(_zip_bytes(entries))
+    data[_zip_payload_offset(data, "bad.txt") + 3] ^= 0x55
+    eocd = _zip_eocd_offset(data)
+    struct.pack_into("<HH", data, eocd + 8, 1, 99)
+    struct.pack_into("<I", data, eocd + 16, 0)
+    struct.pack_into("<H", data, eocd + 20, 0)
+    prefix = b"MZ\x90\x00SFX-BAD-CD-PAYLOAD"
+    return _fixture_from_bytes(
+        root,
+        "zip-sfx-bad-cd-payload.exe",
+        prefix + bytes(data) + b"TAIL",
+        zip_entries={"good.txt": b"good payload in sfx"},
+    )
+
+
 def _build_zip_fake_local_header_before_real_sfx(root: Path) -> MatrixFixture:
     original = _zip_bytes()
     fake_header = b"PK\x03\x04" + b"\x14\x00" + b"FAKE-LOCAL-HEADER-NO-PAYLOAD"
@@ -677,6 +696,13 @@ def _build_zip_eocd_then_entry_quarantine(root: Path) -> MatrixFixture:
         bytes(data) + b"TAILJUNK",
         zip_entries={"good.txt": b"good payload"},
     )
+
+
+def _build_zip_carrier_then_eocd_then_entry_quarantine(root: Path) -> MatrixFixture:
+    fixture = _build_zip_eocd_then_entry_quarantine(root)
+    path = Path(fixture.source_input["path"])
+    path.write_bytes(b"MZ-THREE-ROUND-ZIP" + path.read_bytes() + b"CARRIER-TAIL")
+    return MatrixFixture(source_input={"kind": "file", "path": str(path)}, zip_entries=fixture.zip_entries)
 
 
 def _build_zip_duplicate_conflict(root: Path) -> MatrixFixture:
@@ -1022,6 +1048,18 @@ def _build_7z_non_solid_partial_salvage(root: Path) -> MatrixFixture:
         stderr=subprocess.DEVNULL,
     )
     return MatrixFixture(source_input={"kind": "file", "path": str(source)}, zip_entries=entries)
+
+
+def _build_7z_non_solid_with_trailing_junk(root: Path) -> MatrixFixture:
+    fixture = _build_7z_non_solid_partial_salvage(root)
+    path = Path(fixture.source_input["path"])
+    original = path.read_bytes()
+    path.write_bytes(original + b"TAIL")
+    return MatrixFixture(
+        source_input=fixture.source_input,
+        expected_bytes=original,
+        zip_entries=fixture.zip_entries,
+    )
 
 
 def _build_7z_non_solid_with_start_crc_bad(root: Path) -> MatrixFixture:
@@ -1402,6 +1440,19 @@ def _build_tar_gzip_truncated_keeps_complete_member(root: Path) -> MatrixFixture
     )
 
 
+def _build_tar_gzip_checksum_and_truncated_member(root: Path) -> MatrixFixture:
+    first = bytearray(_tar_member("complete.txt", b"complete gzip tar payload"))
+    first[148:156] = b"000000\0 "
+    second = _tar_member("truncated.bin", _pseudo_random_payload(8192))
+    compressed = gzip.compress(bytes(first) + second[:512 + 257])
+    return _fixture_from_bytes(
+        root,
+        "tar-gzip-checksum-and-truncated.tgz",
+        compressed,
+        tar_entries={"complete.txt": b"complete gzip tar payload"},
+    )
+
+
 def _build_tar_bzip2_truncated_keeps_complete_member(root: Path) -> MatrixFixture:
     entries = {
         "complete.txt": b"complete payload",
@@ -1417,6 +1468,19 @@ def _build_tar_bzip2_truncated_keeps_complete_member(root: Path) -> MatrixFixtur
     )
 
 
+def _build_tar_bzip2_checksum_and_truncated_member(root: Path) -> MatrixFixture:
+    first = bytearray(_tar_member("complete.txt", b"complete bzip2 tar payload"))
+    first[148:156] = b"000000\0 "
+    second = _tar_member("truncated.bin", _pseudo_random_payload(8192))
+    compressed = bz2.compress(bytes(first) + second[:512 + 257])
+    return _fixture_from_bytes(
+        root,
+        "tar-bzip2-checksum-and-truncated.tbz2",
+        compressed,
+        tar_entries={"complete.txt": b"complete bzip2 tar payload"},
+    )
+
+
 def _build_tar_xz_truncated_keeps_complete_member(root: Path) -> MatrixFixture:
     tar_prefix = _partial_tar_prefix()
     compressed = lzma.compress(tar_prefix, format=lzma.FORMAT_XZ)
@@ -1425,6 +1489,19 @@ def _build_tar_xz_truncated_keeps_complete_member(root: Path) -> MatrixFixture:
         "tar-xz-truncated.txz",
         compressed[:-12],
         tar_entries={"first.bin": b"first payload"},
+    )
+
+
+def _build_tar_xz_checksum_and_truncated_member(root: Path) -> MatrixFixture:
+    first = bytearray(_tar_member("complete.txt", b"complete xz tar payload"))
+    first[148:156] = b"000000\0 "
+    second = _tar_member("truncated.bin", _pseudo_random_payload(8192))
+    compressed = lzma.compress(bytes(first) + second[:512 + 257], format=lzma.FORMAT_XZ)
+    return _fixture_from_bytes(
+        root,
+        "tar-xz-checksum-and-truncated.txz",
+        compressed,
+        tar_entries={"complete.txt": b"complete xz tar payload"},
     )
 
 
@@ -1641,6 +1718,47 @@ def _build_zstd_truncated_partial(root: Path) -> MatrixFixture:
 
 UNREPAIRABLE = ("unrepairable", "unsupported")
 
+ZIP_COMPETITION_MODULES = (
+    "zip_central_directory_rebuild",
+    "zip_deep_partial_recovery",
+    "zip_entry_quarantine_rebuild",
+    "zip_partial_recovery",
+)
+
+SEVEN_ZIP_COMPETITION_MODULES = (
+    "seven_zip_boundary_trim",
+    "seven_zip_precise_boundary_repair",
+    "seven_zip_crc_field_repair",
+    "seven_zip_solid_block_partial_salvage",
+    "seven_zip_non_solid_partial_salvage",
+)
+
+RAR_COMPETITION_MODULES = (
+    "rar_carrier_crop_deep_recovery",
+    "rar_block_chain_trim",
+    "rar_file_quarantine_rebuild",
+    "rar4_file_quarantine_rebuild",
+    "rar_trailing_junk_trim",
+)
+
+TAR_GZIP_COMPETITION_MODULES = (
+    "tar_gzip_truncated_partial_recovery",
+    "gzip_deflate_prefix_salvage",
+    "gzip_truncated_partial_recovery",
+)
+
+TAR_BZIP2_COMPETITION_MODULES = (
+    "tar_bzip2_truncated_partial_recovery",
+    "bzip2_block_salvage",
+    "bzip2_truncated_partial_recovery",
+)
+
+TAR_XZ_COMPETITION_MODULES = (
+    "tar_xz_truncated_partial_recovery",
+    "xz_block_salvage",
+    "xz_truncated_partial_recovery",
+)
+
 
 MATRIX = [
     MatrixCase("zip_trailing_junk", "zip", ("trailing_junk",), _build_zip_trailing_junk, ("repaired",), "zip_trailing_junk_trim", _verify_zip),
@@ -1672,6 +1790,8 @@ MATRIX = [
     MatrixCase("zip_sfx_prefix_tail", "zip", ("carrier_archive", "sfx", "boundary_unreliable", "trailing_junk"), _build_zip_sfx_prefix_tail, ("repaired", "partial"), "zip_deep_partial_recovery", _verify_zip),
     MatrixCase("zip_sfx_split_prefix_tail", "zip", ("carrier_archive", "sfx", "boundary_unreliable", "trailing_junk"), _build_zip_sfx_split_prefix_tail, ("repaired", "partial"), "zip_deep_partial_recovery", _verify_zip),
     MatrixCase("zip_sfx_split_prefix_tail_bad_cd", "zip", ("carrier_archive", "sfx", "boundary_unreliable", "trailing_junk", "central_directory_offset_bad", "central_directory_count_bad", "central_directory_bad"), _build_zip_sfx_split_prefix_tail_bad_cd, ("repaired",), "zip_central_directory_rebuild", _verify_zip),
+    MatrixCase("zip_sfx_bad_cd_and_payload_bad", "zip", ("carrier_archive", "sfx", "boundary_unreliable", "trailing_junk", "central_directory_offset_bad", "central_directory_count_bad", "central_directory_bad", "checksum_error", "crc_error", "damaged"), _build_zip_sfx_bad_cd_and_payload_bad, ("partial",), "zip_central_directory_rebuild", _verify_zip),
+    MatrixCase("zip_competition_cd_deep_quarantine", "zip", ("carrier_archive", "sfx", "boundary_unreliable", "trailing_junk", "central_directory_offset_bad", "central_directory_count_bad", "central_directory_bad", "checksum_error", "crc_error", "damaged"), _build_zip_sfx_bad_cd_and_payload_bad, ("partial",), "zip_central_directory_rebuild", _verify_zip, modules=("zip_central_directory_rebuild",), competition_modules=ZIP_COMPETITION_MODULES),
     MatrixCase("zip_fake_local_header_before_real_sfx", "zip", ("carrier_archive", "sfx", "boundary_unreliable", "trailing_junk", "local_header_recovery"), _build_zip_fake_local_header_before_real_sfx, ("repaired", "partial"), "zip_central_directory_rebuild", _verify_zip),
     MatrixCase("zip_single_payload_crc_bad", "zip", ("checksum_error", "crc_error", "damaged"), _build_zip_single_payload_crc_bad, UNREPAIRABLE, None),
     MatrixCase("zip_one_bad_payload_one_good", "zip", ("checksum_error", "crc_error", "damaged"), _build_zip_one_bad_payload_one_good, ("partial",), "zip_entry_quarantine_rebuild", _verify_zip),
@@ -1703,6 +1823,8 @@ MATRIX = [
     MatrixCase("7z_missing_middle_volume_plus_crc_noise", "7z", ("missing_volume", "input_truncated", "start_header_crc_bad", "next_header_crc_bad", "trailing_junk"), _build_7z_missing_middle_volume_plus_crc_noise, UNREPAIRABLE, None),
     MatrixCase("7z_solid_block_partial_salvage", "7z", ("solid_block_damaged", "packed_stream_bad", "damaged"), _build_7z_solid_block_salvage, ("partial",), "seven_zip_solid_block_partial_salvage", _verify_zip, modules=("seven_zip_solid_block_partial_salvage",)),
     MatrixCase("7z_non_solid_partial_salvage", "7z", ("non_solid", "packed_stream_bad", "damaged", "data_error"), _build_7z_non_solid_partial_salvage, ("partial",), "seven_zip_non_solid_partial_salvage", _verify_zip, modules=("seven_zip_non_solid_partial_salvage",)),
+    MatrixCase("7z_competition_boundary_crc_salvage", "7z", ("non_solid", "trailing_junk", "boundary_unreliable", "packed_stream_bad", "damaged", "data_error"), _build_7z_non_solid_with_trailing_junk, ("repaired",), "seven_zip_boundary_trim", _verify_bytes, modules=("seven_zip_boundary_trim",), competition_modules=SEVEN_ZIP_COMPETITION_MODULES),
+    MatrixCase("7z_competition_solid_vs_non_solid_salvage", "7z", ("non_solid", "packed_stream_bad", "damaged", "data_error"), _build_7z_non_solid_partial_salvage, ("partial",), "seven_zip_non_solid_partial_salvage", _verify_zip, modules=("seven_zip_non_solid_partial_salvage",), competition_modules=SEVEN_ZIP_COMPETITION_MODULES),
     MatrixCase("7z_non_solid_start_crc_bad_salvage", "7z", ("non_solid", "start_header_crc_bad", "packed_stream_bad", "damaged"), _build_7z_non_solid_with_start_crc_bad, UNREPAIRABLE, None, modules=("seven_zip_non_solid_partial_salvage",)),
     MatrixCase("7z_non_solid_generic_folder_bad", "7z", ("folder_bad", "packed_stream_bad", "damaged", "data_error"), _build_7z_non_solid_partial_salvage, ("partial",), "seven_zip_non_solid_partial_salvage", _verify_zip, modules=("seven_zip_non_solid_partial_salvage",)),
     MatrixCase("rar4_trailing_junk", "rar", ("trailing_junk",), _build_rar4_trailing_junk, ("repaired",), "rar_trailing_junk_trim", _verify_bytes),
@@ -1717,6 +1839,7 @@ MATRIX = [
     MatrixCase("rar4_payload_bad", "rar", ("checksum_error", "content_integrity_bad_or_unknown", "damaged"), _build_rar4_payload_bad, UNREPAIRABLE, None),
     MatrixCase("rar4_file_quarantine_rebuild", "rar", ("rar4", "file_block_bad", "damaged", "data_error"), _build_rar4_file_quarantine, ("partial",), "rar4_file_quarantine_rebuild", _verify_bytes, modules=("rar4_file_quarantine_rebuild",)),
     MatrixCase("rar4_carrier_then_file_quarantine_direct_module", "rar", ("carrier_archive", "sfx", "file_block_bad", "damaged", "data_error"), _build_rar4_carrier_then_file_quarantine, ("partial",), "rar4_file_quarantine_rebuild", _verify_bytes, modules=("rar4_file_quarantine_rebuild",)),
+    MatrixCase("rar_competition_carrier_block_quarantine", "rar", ("rar4", "carrier_archive", "sfx", "trailing_junk", "boundary_unreliable", "file_block_bad", "damaged", "data_error"), _build_rar4_carrier_then_file_quarantine, ("partial",), "rar4_file_quarantine_rebuild", _verify_bytes, modules=("rar4_file_quarantine_rebuild",), competition_modules=RAR_COMPETITION_MODULES),
     MatrixCase("rar5_missing_split_volume", "rar", ("missing_volume", "unexpected_end"), _build_rar5_missing_split_volume, UNREPAIRABLE, None),
     MatrixCase("rar5_file_quarantine_rebuild", "rar", ("file_block_bad", "damaged", "data_error"), _build_rar5_file_quarantine, ("partial",), "rar_file_quarantine_rebuild", _verify_bytes, modules=("rar_file_quarantine_rebuild",)),
     MatrixCase("tar_bad_checksum", "tar", ("tar_checksum_bad",), _build_tar_bad_checksum, ("repaired",), "tar_header_checksum_fix", _verify_tar),
@@ -1730,8 +1853,14 @@ MATRIX = [
     MatrixCase("tar_payload_truncated", "tar", ("checksum_error", "damaged", "input_truncated"), _build_tar_payload_truncated, UNREPAIRABLE, None),
     MatrixCase("tar_truncated_keeps_complete_member", "tar", ("input_truncated", "probably_truncated", "unexpected_end", "damaged"), _build_tar_truncated_keeps_complete_member, ("partial",), "tar_truncated_partial_recovery", _verify_tar, modules=("tar_truncated_partial_recovery",)),
     MatrixCase("tar_gzip_truncated_keeps_complete_member", "tar.gz", ("input_truncated", "probably_truncated", "unexpected_end", "damaged"), _build_tar_gzip_truncated_keeps_complete_member, ("partial", "repaired"), "tar_gzip_truncated_partial_recovery", _verify_tar, modules=("tar_gzip_truncated_partial_recovery",)),
+    MatrixCase("tar_gzip_checksum_and_truncated_member", "tar.gz", ("tar_checksum_bad", "input_truncated", "probably_truncated", "unexpected_end", "damaged"), _build_tar_gzip_checksum_and_truncated_member, ("partial", "repaired"), "tar_gzip_truncated_partial_recovery", _verify_tar, modules=("tar_gzip_truncated_partial_recovery",)),
+    MatrixCase("tar_gzip_competition_stream_vs_tar_partial", "tar.gz", ("input_truncated", "probably_truncated", "unexpected_end", "damaged", "data_error"), _build_tar_gzip_truncated_keeps_complete_member, ("partial", "repaired"), "tar_gzip_truncated_partial_recovery", _verify_tar, modules=("tar_gzip_truncated_partial_recovery",), competition_modules=TAR_GZIP_COMPETITION_MODULES),
     MatrixCase("tar_bzip2_truncated_keeps_complete_member", "tar.bz2", ("input_truncated", "probably_truncated", "unexpected_end", "damaged"), _build_tar_bzip2_truncated_keeps_complete_member, ("partial", "repaired"), "tar_bzip2_truncated_partial_recovery", _verify_tar, modules=("tar_bzip2_truncated_partial_recovery",)),
+    MatrixCase("tar_bzip2_checksum_and_truncated_member", "tar.bz2", ("tar_checksum_bad", "input_truncated", "probably_truncated", "unexpected_end", "damaged"), _build_tar_bzip2_checksum_and_truncated_member, ("partial", "repaired"), "tar_bzip2_truncated_partial_recovery", _verify_tar, modules=("tar_bzip2_truncated_partial_recovery",)),
+    MatrixCase("tar_bzip2_competition_stream_vs_tar_partial", "tar.bz2", ("input_truncated", "probably_truncated", "unexpected_end", "damaged", "data_error"), _build_tar_bzip2_truncated_keeps_complete_member, ("partial", "repaired"), "tar_bzip2_truncated_partial_recovery", _verify_tar, modules=("tar_bzip2_truncated_partial_recovery",), competition_modules=TAR_BZIP2_COMPETITION_MODULES),
     MatrixCase("tar_xz_truncated_keeps_complete_member", "tar.xz", ("input_truncated", "probably_truncated", "unexpected_end", "damaged"), _build_tar_xz_truncated_keeps_complete_member, ("partial", "repaired"), "tar_xz_truncated_partial_recovery", _verify_tar, modules=("tar_xz_truncated_partial_recovery",)),
+    MatrixCase("tar_xz_checksum_and_truncated_member", "tar.xz", ("tar_checksum_bad", "input_truncated", "probably_truncated", "unexpected_end", "damaged"), _build_tar_xz_checksum_and_truncated_member, ("partial", "repaired"), "tar_xz_truncated_partial_recovery", _verify_tar, modules=("tar_xz_truncated_partial_recovery",)),
+    MatrixCase("tar_xz_competition_stream_vs_tar_partial", "tar.xz", ("input_truncated", "probably_truncated", "unexpected_end", "damaged", "data_error"), _build_tar_xz_truncated_keeps_complete_member, ("partial", "repaired"), "tar_xz_truncated_partial_recovery", _verify_tar, modules=("tar_xz_truncated_partial_recovery",), competition_modules=TAR_XZ_COMPETITION_MODULES),
     MatrixCase("tar_zstd_truncated_keeps_complete_member", "tar.zst", ("input_truncated", "probably_truncated", "unexpected_end", "damaged"), _build_tar_zstd_truncated_keeps_complete_member, ("partial", "repaired"), "tar_zstd_truncated_partial_recovery", _verify_tar_zstd, modules=("tar_zstd_truncated_partial_recovery",)),
     MatrixCase("gzip_footer_bad", "gzip", ("gzip_footer_bad",), _build_gzip_footer_bad, ("repaired",), "gzip_footer_fix", _verify_gzip),
     MatrixCase("gzip_footer_crc_bad", "gzip", ("gzip_footer_bad", "crc_error", "checksum_error"), _build_gzip_footer_crc_bad, ("repaired",), "gzip_footer_fix", _verify_gzip),
@@ -1775,6 +1904,16 @@ MULTI_ROUND_MATRIX = [
         (
             RepairRound(("central_directory_offset_bad", "central_directory_count_bad", "comment_length_bad", "trailing_junk", "central_directory_bad"), ("repaired",), "zip_eocd_repair", modules=("zip_eocd_repair",)),
             RepairRound(("entry_payload_bad", "checksum_error", "crc_error", "damaged"), ("partial",), "zip_entry_quarantine_rebuild", modules=("zip_entry_quarantine_rebuild",)),
+        ),
+        _verify_zip,
+    ),
+    MultiRoundCase(
+        "zip_carrier_then_cd_payload_salvage",
+        "zip",
+        _build_zip_carrier_then_eocd_then_entry_quarantine,
+        (
+            RepairRound(("carrier_archive", "sfx", "boundary_unreliable", "trailing_junk"), ("repaired", "partial"), "zip_deep_partial_recovery", modules=("zip_deep_partial_recovery",)),
+            RepairRound(("central_directory_offset_bad", "central_directory_count_bad", "comment_length_bad", "central_directory_bad", "entry_payload_bad", "checksum_error", "crc_error", "damaged"), ("repaired", "partial"), "zip_central_directory_rebuild", modules=("zip_central_directory_rebuild",)),
         ),
         _verify_zip,
     ),
@@ -2001,7 +2140,7 @@ def test_repair_layer_composes_multi_error_repairs_across_rounds(tmp_path, case:
             confidence=0.82,
             damage_flags=list(round_spec.flags),
             archive_key=f"{case.case_id}_round_{index}",
-            attempts=index - 1,
+            attempts=min(index - 1, 1),
         ))
         assert result.status in round_spec.expected_statuses
         assert result.module_name == round_spec.expected_module
