@@ -186,6 +186,7 @@ def _excluded_feature_key(key: str, path: str) -> bool:
         "damage_profile",
         "difficulty_tags",
         "corruption",
+        "runtime_score",
     )
     normalized = f"{path}.{key}".lower()
     return any(token in normalized for token in forbidden)
