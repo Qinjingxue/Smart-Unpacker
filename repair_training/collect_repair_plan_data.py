@@ -492,6 +492,11 @@ def _collect_sample_rows(record: dict[str, Any], args: argparse.Namespace, debug
         damaged = record.get("damaged_input")
         if isinstance(damaged, dict):
             damaged["parts"] = source_input["parts"]
+        # Remove missing_volume flag since volumes are now available
+        flags = record.get("damage_flags")
+        if isinstance(flags, list) and "missing_volume" in flags:
+            record["damage_flags"] = [f for f in flags if f != "missing_volume"]
+            record["runtime_damage_flags"] = record["damage_flags"]
     fmt = str(record.get("format") or source_input.get("format_hint") or "")
     rows: list[dict[str, Any]] = []
     max_candidates_per_round = _effective_max_candidates(record, args)

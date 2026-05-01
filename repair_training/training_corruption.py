@@ -989,7 +989,7 @@ def build_corpus_corruption_case(
     profile_meta = _profile_metadata(fmt, damage_profile, mutations, oracle)
     case_id = f"{source_path.stem}_{damage_profile}_{variant_index}"
     safe_case_id = "".join(ch if ch.isalnum() or ch in {"_", "-"} else "_" for ch in case_id)
-    return _write_corpus_case(
+    case = _write_corpus_case(
         root,
         safe_case_id,
         fmt,
@@ -1013,6 +1013,28 @@ def build_corpus_corruption_case(
         builder_call="build_corpus_corruption_case(...)",
         password=password,
     )
+    _copy_split_volumes_for_damaged(case, source_path, source_derivation or {})
+    return case
+
+
+def _copy_split_volumes_for_damaged(case: "CorruptionCase", source_path: Path, source_derivation: dict[str, Any]) -> None:
+    tags = source_derivation.get("zip_container_tags") or []
+    if "split" not in tags and "multi_volume" not in tags:
+        return
+    volumes_dir = source_path.parent / (source_path.name + ".volumes")
+    if not volumes_dir.is_dir():
+        return
+    damaged_path = Path(str(case.source_input.get("path") or ""))
+    if not damaged_path.parent.exists():
+        return
+    damaged_stem = damaged_path.stem
+    for vol in sorted(volumes_dir.iterdir()):
+        if not vol.is_file():
+            continue
+        target = damaged_path.parent / (damaged_stem + vol.suffix)
+        if not target.exists():
+            import shutil
+            shutil.copyfile(str(vol), str(target))
 
 
 def verify_repaired_output_against_oracle(case: CorruptionCase, path: Path) -> dict[str, Any]:
