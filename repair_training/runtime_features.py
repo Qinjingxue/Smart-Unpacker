@@ -48,6 +48,7 @@ def build_runtime_feature_record(
             "previous_module_count": len(path_modules or []),
             "runtime_state_summary": runtime_state,
             "job_summary": _job_summary(job),
+            "native_feedback": _native_feedback(candidate),
         },
         "candidate_proposal": _candidate_proposal(payload, job=job, runtime_state_summary=runtime_state),
         "repair_prior_features": prior_payload,
@@ -300,6 +301,38 @@ def _zip_plan_risk_features(payload: dict[str, Any], *, job: RepairJob | None, r
         "no_output_prone_candidate": no_output_risk_score >= 0.35,
         "no_output_risk_score": no_output_risk_score,
     }
+
+
+def _native_feedback(candidate: Any) -> dict[str, Any]:
+    """Extract native diagnostics from candidate's diagnosis dict.
+
+    The Rust rewrite layer now returns a `diagnostics` dict inside native result
+    sub-dicts (e.g. native_zip_deep_recovery.diagnostics, native_zip_directory_field_repair.diagnostics).
+    """
+    diagnosis = getattr(candidate, "diagnosis", None) if candidate is not None else None
+    if not isinstance(diagnosis, dict):
+        diagnosis = {}
+    
+    _NATIVE_KEYS = (
+        "native_zip_deep_recovery",
+        "native_zip_directory_field_repair",
+        "native_zip_rebuild",
+        "native_zip_conflict_resolver",
+        "native_zip_verified_entry_salvage",
+        "native_zip_cd_local_header_reconcile",
+        "native_zip_salvage_deep",
+        "native_zip_salvage_reconcile",
+        "native_zip_salvage_quarantine",
+        "native_zip_entry_quarantine",
+        "native_zip_resolve_conflicts",
+    )
+    for key in _NATIVE_KEYS:
+        native = diagnosis.get(key)
+        if isinstance(native, dict):
+            diag = native.get("diagnostics") or native.get("diagnostic")
+            if isinstance(diag, dict):
+                return dict(diag)
+    return {}
 
 
 def _repair_prior_payload(repair_prior: RepairPrior | dict[str, Any] | None, payload: dict[str, Any]) -> dict[str, Any]:

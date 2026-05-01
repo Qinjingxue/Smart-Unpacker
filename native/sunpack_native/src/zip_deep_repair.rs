@@ -53,7 +53,7 @@ pub(crate) fn zip_deep_partial_recovery(
     };
     let data = match read_source_input(source_input, options.max_input_bytes) {
         Ok(data) => data,
-        Err(message) => return status_dict(py, "skipped", "", &message, &[], &[], 0, 0, 0.0),
+        Err(message) => return status_dict(py, "skipped", "", &message, &[], &[], 0, 0, 0.0, None, Some("input_read_failed")),
     };
     let scan = scan_entries(&data, &options, started);
     let plans = candidate_plans(&scan, &options);
@@ -68,6 +68,8 @@ pub(crate) fn zip_deep_partial_recovery(
             scan.skipped_offsets.len(),
             scan.encrypted_entries,
             0.0,
+            Some(&scan),
+            Some("no_recoverable_entries"),
         );
     }
 
@@ -108,6 +110,8 @@ pub(crate) fn zip_deep_partial_recovery(
                         scan.skipped_offsets.len(),
                         scan.encrypted_entries,
                         0.0,
+                        Some(&scan),
+                        Some("candidate_write_failed"),
                     );
                 }
             }
@@ -124,6 +128,8 @@ pub(crate) fn zip_deep_partial_recovery(
             scan.skipped_offsets.len(),
             scan.encrypted_entries,
             0.0,
+            Some(&scan),
+            Some("candidate_write_failed"),
         );
     };
 
@@ -204,7 +210,7 @@ pub(crate) fn zip_rebuild_from_local_headers(
     let data = match read_source_input(source_input, options.max_input_bytes) {
         Ok(data) => data,
         Err(message) => {
-            return rebuild_status_dict(py, "skipped", "", &message, &[], 0, 0, 0, 0, 0, false)
+            return rebuild_status_dict(py, "skipped", "", &message, &[], 0, 0, 0, 0, 0, false, None, Some("input_read_failed"))
         }
     };
     let scan = scan_entries(&data, &options, started);
@@ -233,6 +239,8 @@ pub(crate) fn zip_rebuild_from_local_headers(
             0,
             0,
             scan.timed_out,
+            Some(&scan),
+            Some(if require_data_descriptor { "no_data_descriptor_entries" } else { "no_local_file_headers" }),
         );
     }
     let plan = make_plan(
@@ -277,6 +285,8 @@ pub(crate) fn zip_rebuild_from_local_headers(
             stats.entries,
             stats.verified_entries,
             scan.timed_out,
+            Some(&scan),
+            None,
         ),
         Err(message) => rebuild_status_dict(
             py,
@@ -290,6 +300,8 @@ pub(crate) fn zip_rebuild_from_local_headers(
             0,
             0,
             scan.timed_out,
+            Some(&scan),
+            Some("candidate_write_failed"),
         ),
     }
 }
@@ -305,7 +317,7 @@ pub(crate) fn zip_directory_field_repair(
 ) -> PyResult<Py<PyDict>> {
     let data = match read_source_input(source_input, mb_to_bytes(max_input_size_mb)) {
         Ok(data) => data,
-        Err(message) => return simple_repair_status(py, "skipped", "zip", "", &message, &[], 0.0),
+        Err(message) => return simple_repair_status(py, "skipped", "zip", "", &message, &[], 0.0, Some(build_field_repair_diagnostics(py, "", false, 0, "input_read_failed")?)),
     };
     let result = match repair_name {
         "zip_comment_length_fix" => repair_zip_comment_length(&data),
@@ -322,11 +334,13 @@ pub(crate) fn zip_directory_field_repair(
     let repair = match result {
         Ok(repair) => repair,
         Err(message) => {
-            return simple_repair_status(py, "unrepairable", "zip", "", &message, &[], 0.0)
+            let target = repair_name_to_target(repair_name);
+            return simple_repair_status(py, "unrepairable", "zip", "", &message, &[], 0.0, Some(build_field_repair_diagnostics(py, target, false, 0, &message)?))
         }
     };
     let output_path = Path::new(workspace).join(format!("{repair_name}.zip"));
     if let Err(message) = write_bytes_atomic(&repair.bytes, &output_path) {
+        let target = repair_name_to_target(repair_name);
         return simple_repair_status(
             py,
             "unrepairable",
@@ -335,6 +349,7 @@ pub(crate) fn zip_directory_field_repair(
             &format!("ZIP repaired candidate could not be written: {message}"),
             &[],
             0.0,
+            Some(build_field_repair_diagnostics(py, target, false, 0, &message)?),
         );
     }
     let result = PyDict::new(py);
@@ -359,6 +374,17 @@ pub(crate) fn zip_directory_field_repair(
         patches.append(item)?;
     }
     result.set_item("patches", patches)?;
+    let target = repair_name_to_target(repair_name);
+    result.set_item(
+        "diagnostics",
+        build_field_repair_diagnostics(
+            py,
+            target,
+            !repair.patches.is_empty(),
+            repair.patches.len(),
+            "",
+        )?,
+    )?;
     Ok(result.unbind())
 }
 
@@ -393,7 +419,7 @@ pub(crate) fn zip_conflict_resolver_rebuild(
     };
     let data = match read_source_input(source_input, options.max_input_bytes) {
         Ok(data) => data,
-        Err(message) => return status_dict(py, "skipped", "", &message, &[], &[], 0, 0, 0.0),
+        Err(message) => return status_dict(py, "skipped", "", &message, &[], &[], 0, 0, 0.0, None, Some("input_read_failed")),
     };
     let scan = scan_entries(&data, &options, Instant::now());
     if scan.entries.is_empty() {
@@ -407,6 +433,8 @@ pub(crate) fn zip_conflict_resolver_rebuild(
             scan.skipped_offsets.len(),
             scan.encrypted_entries,
             0.0,
+            Some(&scan),
+            Some("no_recoverable_entries"),
         );
     }
     let selected_indices = select_conflict_free_zip_entries(&scan.entries);
@@ -421,6 +449,8 @@ pub(crate) fn zip_conflict_resolver_rebuild(
             scan.skipped_offsets.len(),
             scan.encrypted_entries,
             0.0,
+            Some(&scan),
+            Some("no_conflict_free_entries"),
         );
     }
     let conflict_count = scan.entries.len().saturating_sub(selected_indices.len());
@@ -435,6 +465,8 @@ pub(crate) fn zip_conflict_resolver_rebuild(
             scan.skipped_offsets.len(),
             scan.encrypted_entries,
             0.0,
+            Some(&scan),
+            Some("no_conflicts_found"),
         );
     }
     let plan = make_plan(
@@ -459,16 +491,18 @@ pub(crate) fn zip_conflict_resolver_rebuild(
         Ok(stats) => stats,
         Err(message) => {
             return status_dict(
-                py,
-                "unrepairable",
-                "",
-                &message,
-                &scan.warnings,
-                &[],
-                scan.skipped_offsets.len(),
-                scan.encrypted_entries,
-                0.0,
-            )
+                    py,
+                    "unrepairable",
+                    "",
+                    &message,
+                    &scan.warnings,
+                    &[],
+                    scan.skipped_offsets.len(),
+                    scan.encrypted_entries,
+                    0.0,
+                    Some(&scan),
+                    Some("candidate_write_failed"),
+                )
         }
     };
     let mut warnings = scan.warnings.clone();
@@ -497,6 +531,8 @@ pub(crate) fn zip_conflict_resolver_rebuild(
         scan.skipped_offsets.len(),
         scan.encrypted_entries,
         0.91,
+        Some(&scan),
+        None,
     )
 }
 
@@ -536,7 +572,7 @@ pub(crate) fn zip_verified_entry_salvage(
     };
     let data = match read_source_input(source_input, options.max_input_bytes) {
         Ok(data) => data,
-        Err(message) => return status_dict(py, "skipped", "", &message, &[], &[], 0, 0, 0.0),
+        Err(message) => return status_dict(py, "skipped", "", &message, &[], &[], 0, 0, 0.0, None, Some("input_read_failed")),
     };
     let scan = scan_entries(&data, &options, started);
     let exclude = exclude_names
@@ -677,7 +713,7 @@ pub(crate) fn zip_cd_local_header_reconcile_salvage(
     };
     let data = match read_source_input(source_input, options.max_input_bytes) {
         Ok(data) => data,
-        Err(message) => return status_dict(py, "skipped", "", &message, &[], &[], 0, 0, 0.0),
+        Err(message) => return status_dict(py, "skipped", "", &message, &[], &[], 0, 0, 0.0, None, Some("input_read_failed")),
     };
     let scan = scan_entries(&data, &options, started);
     let (indices, corrected_offsets) = cd_local_reconcile_indices(&data, &scan.entries);
@@ -2134,6 +2170,92 @@ fn get_optional_u64(dict: &Bound<'_, PyDict>, key: &str) -> PyResult<Option<u64>
     }
 }
 
+fn build_scan_diagnostics(
+    py: Python<'_>,
+    scan: &ScanResult,
+    fail_reason: Option<&str>,
+) -> PyResult<Py<PyDict>> {
+    let diag = PyDict::new(py);
+
+    let scan_dict = PyDict::new(py);
+    scan_dict.set_item("lfh_scanned", scan.lfh_scanned)?;
+    scan_dict.set_item("entries_found", scan.entries.len())?;
+    scan_dict.set_item(
+        "entries_verified",
+        scan.entries.iter().filter(|e| e.verified).count(),
+    )?;
+    scan_dict.set_item("entries_corrupt", scan.skipped_offsets.len())?;
+    scan_dict.set_item("entries_encrypted", scan.encrypted_entries)?;
+    scan_dict.set_item("entries_descriptor", scan.descriptor_entries)?;
+    scan_dict.set_item("entries_unsupported", scan.unsupported_entries)?;
+    scan_dict.set_item("boundary_next_record", scan.next_lfh_boundary_entries)?;
+    scan_dict.set_item(
+        "boundary_deflate_consumed",
+        scan.deflate_consumed_boundary_entries,
+    )?;
+    scan_dict.set_item(
+        "boundary_descriptor_sig",
+        scan.descriptor_signature_entries,
+    )?;
+    scan_dict.set_item(
+        "boundary_descriptor_no_sig",
+        scan.descriptor_no_signature_entries,
+    )?;
+    scan_dict.set_item(
+        "boundary_deflate_resync",
+        scan.deflate_resync_partial_entries,
+    )?;
+    scan_dict.set_item("timed_out", scan.timed_out)?;
+    diag.set_item("scan", scan_dict)?;
+
+    if let Some(reason) = fail_reason {
+        diag.set_item("fail_reason", reason)?;
+    } else {
+        diag.set_item("fail_reason", py.None())?;
+    }
+
+    Ok(diag.unbind())
+}
+
+fn build_field_repair_diagnostics(
+    py: Python<'_>,
+    target_field: &str,
+    field_was_corrupt: bool,
+    patches_applied: usize,
+    fail_reason: &str,
+) -> PyResult<Py<PyDict>> {
+    let diag = PyDict::new(py);
+    let scan_dict = PyDict::new(py);
+    scan_dict.set_item("target_field", target_field)?;
+    scan_dict.set_item("field_was_corrupt", field_was_corrupt)?;
+    diag.set_item("scan", scan_dict)?;
+
+    let repair_dict = PyDict::new(py);
+    repair_dict.set_item("patches_applied", patches_applied)?;
+    diag.set_item("repair", repair_dict)?;
+
+    if fail_reason.is_empty() {
+        diag.set_item("fail_reason", py.None())?;
+    } else {
+        diag.set_item("fail_reason", fail_reason)?;
+    }
+
+    Ok(diag.unbind())
+}
+
+fn repair_name_to_target(name: &str) -> &str {
+    match name {
+        "zip_comment_length_fix" => "comment_length",
+        "zip_central_directory_count_fix" => "cd_count",
+        "zip_central_directory_offset_fix" => "cd_offset",
+        "zip_trailing_junk_trim" => "trailing_junk",
+        "zip_eocd_repair" => "eocd",
+        "zip_local_header_field_repair" => "local_header",
+        "zip64_field_repair" => "zip64",
+        _ => "",
+    }
+}
+
 fn status_dict(
     py: Python<'_>,
     status: &str,
@@ -2144,6 +2266,8 @@ fn status_dict(
     skipped_entries: usize,
     encrypted_entries: usize,
     confidence: f64,
+    scan: Option<&ScanResult>,
+    fail_reason: Option<&str>,
 ) -> PyResult<Py<PyDict>> {
     let result = PyDict::new(py);
     result.set_item("status", status)?;
@@ -2172,6 +2296,9 @@ fn status_dict(
                 .collect::<Vec<_>>(),
         )?,
     )?;
+    if let Some(s) = scan {
+        result.set_item("diagnostics", build_scan_diagnostics(py, s, fail_reason)?)?;
+    }
     Ok(result.unbind())
 }
 
@@ -2188,6 +2315,8 @@ fn rebuild_status_dict(
     recovered_entries: usize,
     verified_entries: usize,
     timed_out: bool,
+    scan: Option<&ScanResult>,
+    fail_reason: Option<&str>,
 ) -> PyResult<Py<PyDict>> {
     let result = PyDict::new(py);
     result.set_item("status", status)?;
@@ -2200,6 +2329,9 @@ fn rebuild_status_dict(
     result.set_item("recovered_entries", recovered_entries)?;
     result.set_item("verified_entries", verified_entries)?;
     result.set_item("timed_out", timed_out)?;
+    if let Some(s) = scan {
+        result.set_item("diagnostics", build_scan_diagnostics(py, s, fail_reason)?)?;
+    }
     Ok(result.unbind())
 }
 
@@ -2287,6 +2419,7 @@ fn salvage_status_dict(
         vec![path]
     };
     result.set_item("workspace_paths", PyList::new(py, workspace_paths)?)?;
+    result.set_item("diagnostics", build_scan_diagnostics(py, scan, if recovered_entries > 0 { None } else { Some("no_verified_entries") })?)?;
     Ok(result.unbind())
 }
 
@@ -3367,6 +3500,7 @@ fn simple_repair_status(
     message: &str,
     actions: &[&str],
     confidence: f64,
+    diagnostics: Option<Py<PyDict>>,
 ) -> PyResult<Py<PyDict>> {
     let result = PyDict::new(py);
     result.set_item("status", status)?;
@@ -3377,6 +3511,9 @@ fn simple_repair_status(
     result.set_item("actions", PyList::new(py, actions)?)?;
     result.set_item("warnings", PyList::empty(py))?;
     result.set_item("workspace_paths", PyList::empty(py))?;
+    if let Some(diag) = diagnostics {
+        result.set_item("diagnostics", diag)?;
+    }
     Ok(result.unbind())
 }
 

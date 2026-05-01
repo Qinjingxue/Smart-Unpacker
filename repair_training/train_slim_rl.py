@@ -23,6 +23,7 @@ KEEP_PREFIXES = (
     "state.verification_summary.",
     "state.extraction_summary.",
     "state.job_summary.",
+    "state.native_feedback.",
     "top.",
     "candidate.module",
 )
@@ -160,7 +161,7 @@ def main(argv=None):
     # Print
     print()
     print("=" * 60)
-    print("SLIM MODEL RESULTS (4 state groups, no candidate features)")
+    print("SLIM MODEL RESULTS (5 state groups, no candidate features)")
     print("=" * 60)
     print(f"Features:  {len(feat_names)}")
     print(f"Rows:      {len(rows)} (train: {len(train_idx)}, eval: {len(eval_idx)})")
@@ -177,6 +178,7 @@ def main(argv=None):
     print("COMPARISON vs FULL MODEL:")
     print(f"  Full (219 feat): R2=0.9814  MAE=0.0203  Regret=0.00072")
     print(f"  Slim ({len(feat_names):3d} feat):  R2={metrics['r2']:.4f}  MAE={metrics['mae']:.4f}  Regret={metrics['future_return_regret_mean']:.6f}")
+    print(f"      (groups: state + native_feedback + candidate.module)")
 
     return 0
 
