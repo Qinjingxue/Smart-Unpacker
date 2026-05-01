@@ -405,28 +405,27 @@ def _attach_split_volumes(source_input: dict[str, Any], record: dict[str, Any]) 
     tags = record.get("zip_container_tags") or []
     if isinstance(tags, list) and "split" not in tags and "multi_volume" not in tags:
         return
-    damaged_path = source_input.get("path") or record.get("damaged_path") or ""
-    if not damaged_path:
+    # .volumes/ dir is next to the SOURCE archive, not the damaged file copy
+    source_path = record.get("source_path") or ""
+    source_name = record.get("source_archive_name") or ""
+    if source_path:
+        source_archive = Path(source_path)
+    elif source_name:
+        # Reconstruct: material/zip/<sample>/<source_archive_name>
+        material_sample = record.get("material_sample_id") or ""
+        material_format = record.get("material_format") or "zip"
+        source_archive = Path("repair_training") / "material" / material_format / material_sample / source_name
+    else:
         return
-    damaged = Path(damaged_path)
-    volumes_dir = damaged.parent / (damaged.name + ".volumes")
+    volumes_dir = source_archive.parent / (source_archive.name + ".volumes")
     if not volumes_dir.is_dir():
-        volumes = [p for p in damaged.parent.iterdir() if p.is_file() and p.name.startswith(damaged.name + ".") and p.suffix.lower() in {".z01", ".z02", ".zip"} and p != damaged]
-        if not volumes:
-            return
-        source_input["parts"] = source_input.get("parts") or []
-        existing = {str(p.get("path", "")) for p in source_input.get("parts", []) if isinstance(p, dict)}
-        for vol in sorted(volumes):
-            vol_path = str(vol)
-            if vol_path not in existing:
-                source_input["parts"].append({"path": vol_path, "role": "volume"})
         return
     source_input["parts"] = source_input.get("parts") or []
     existing = {str(p.get("path", "")) for p in source_input.get("parts", []) if isinstance(p, dict)}
     for vol in sorted(volumes_dir.iterdir()):
         if not vol.is_file():
             continue
-        vol_path = str(vol)
+        vol_path = str(vol.resolve())
         if vol_path not in existing:
             source_input["parts"].append({"path": vol_path, "role": "volume"})
 
