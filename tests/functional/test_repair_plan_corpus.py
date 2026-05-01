@@ -498,10 +498,13 @@ def test_derive_archives_balanced_format_limits_zip_dominance(tmp_path):
 
     summary = json.loads(completed.stdout.strip())
     rows = _jsonl(sample / "derived_manifest.jsonl")
-    assert summary["available_format_counts"]["zip"] == 6
+    assert summary["available_format_counts"]["zip"] >= 11
     assert summary["available_format_counts"]["tar"] == 1
     assert summary["selected_format_counts"] == {"tar": 1, "zip": 1}
     assert {row["material_format"] for row in rows} == {"zip", "tar"}
+    zip_row = next(row for row in rows if row["material_format"] == "zip")
+    assert zip_row.get("zip_variant")
+    assert isinstance(zip_row.get("zip_container_tags"), list)
 
 
 def test_derive_archives_organizes_direct_source_material_files(tmp_path):

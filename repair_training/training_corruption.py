@@ -977,10 +977,11 @@ def build_corpus_corruption_case(
     seed: int,
     variant_index: int,
     damage_profile: str,
+    source_derivation: dict[str, Any] | None = None,
 ) -> CorruptionCase:
     clean = source_path.read_bytes()
     randomizer = random.Random(int(seed) + int(variant_index) * 1009)
-    mutations, damage_flags = _corpus_profile_mutations(clean, fmt, randomizer, damage_profile)
+    mutations, damage_flags = _corpus_profile_mutations(clean, fmt, randomizer, damage_profile, source_derivation=source_derivation or {})
     corrupted = apply_mutations(clean, mutations)
     oracle = _oracle_from_clean_bytes(clean, fmt)
     profile_meta = _profile_metadata(fmt, damage_profile, mutations, oracle)
@@ -1054,13 +1055,15 @@ def _corpus_profile_mutations(
     fmt: ArchiveFormat,
     randomizer: random.Random,
     damage_profile: str,
+    *,
+    source_derivation: dict[str, Any] | None = None,
 ) -> tuple[list[BinaryMutation], list[str]]:
     if not data:
         raise ValueError("source archive is empty")
     profile = str(damage_profile or "multi").lower()
     base_fmt = _base_archive_format(fmt)
     if base_fmt == "zip":
-        return _zip_corpus_mutations(data, randomizer, profile)
+        return _zip_corpus_mutations(data, randomizer, profile, source_derivation or {})
     if base_fmt == "tar":
         return _tar_corpus_mutations(data, randomizer, profile)
     if base_fmt in {"gzip", "bzip2", "xz", "zstd"}:
@@ -1072,15 +1075,55 @@ def _corpus_profile_mutations(
     return _raw_corpus_mutations(data, base_fmt, randomizer, profile)
 
 
-def _zip_corpus_mutations(data: bytes, randomizer: random.Random, profile: str) -> tuple[list[BinaryMutation], list[str]]:
+def _zip_corpus_mutations(data: bytes, randomizer: random.Random, profile: str, source_derivation: dict[str, Any] | None = None) -> tuple[list[BinaryMutation], list[str]]:
     mutations: list[BinaryMutation] = []
     layer = _damage_layer(profile)
+    source_derivation = source_derivation or {}
+    zip_variant = str(source_derivation.get("zip_variant") or "")
+    zip_tags = {str(item) for item in source_derivation.get("zip_container_tags") or []}
     entry_infos = _zip_entry_infos(data)
     eocd = data.rfind(b"PK\x05\x06")
     cd_offset = _safe_zip_cd_offset(data)
     cd_headers = _zip_central_directory_header_offsets(data, cd_offset, eocd)
     if eocd >= 0 and eocd + 22 <= len(data):
-        if profile == "zip_drop_central_directory_keep_local_headers":
+        if profile in {"zip_sfx_cd_damage", "zip_sfx_payload_damage", "zip_sfx_split_missing_volume"}:
+            mutations.append(_insert("corpus_zip_sfx_prefix_refresh", 0, b"MZ-SUNPACK-CORPUS" + _random_junk(randomizer, "SFX", 8, 24), "zip.sfx.prefix", "archive is embedded behind a carrier prefix"))
+            mutations.extend(_zip_eocd_directory_conflict_mutations(eocd))
+            if profile == "zip_sfx_payload_damage":
+                mutations.extend(_zip_damage_payloads(data, entry_infos, randomizer, all_entries=False, name="corpus_zip_sfx_payload_damage", expected_effect="SFX archive payload is damaged after structure repair"))
+            if profile == "zip_sfx_split_missing_volume":
+                mutations.append(_delete("corpus_zip_sfx_split_missing_volume", max(1, len(data) // 2), max(8, len(data) // 16), "zip.missing_volume", "SFX split archive is missing a volume range"))
+        elif profile == "zip_split_missing_middle_volume":
+            mutations.append(_delete("corpus_zip_split_missing_middle_volume", max(1, len(data) // 3), max(8, len(data) // 12), "zip.missing_volume", "middle split volume bytes are missing"))
+            mutations.extend(_zip_eocd_directory_conflict_mutations(eocd))
+        elif profile == "zip_split_tail_volume_truncated":
+            mutations.append(_truncate("corpus_zip_split_tail_volume_truncated", max(1, len(data) * 4 // 5), "zip.missing_volume", "tail split volume is truncated"))
+            mutations.append(_append("corpus_zip_split_tail_marker", _random_junk(randomizer, "SPLIT", 8, 24), "archive.tail", "split tail has extra boundary noise"))
+        elif profile in {"zip_data_descriptor_cd_conflict", "zip_data_descriptor_payload_bad"}:
+            mutations.extend(_zip_data_descriptor_conflict_mutations(data, cd_headers, entry_infos, randomizer))
+            mutations.extend(_zip_eocd_count_mutations(eocd, count_delta=2))
+            if profile == "zip_data_descriptor_payload_bad":
+                mutations.extend(_zip_damage_payloads(data, entry_infos, randomizer, all_entries=False, name="corpus_zip_data_descriptor_payload_bad", expected_effect="descriptor entry payload is damaged"))
+        elif profile == "zip_zip64_eocd_locator_bad":
+            mutations.extend(_zip64_locator_mutations(data, randomizer))
+            mutations.extend(_zip_eocd_count_mutations(eocd, count_delta=2))
+        elif profile == "zip_zip64_extra_size_mismatch":
+            mutations.extend(_zip64_extra_mutations(data, randomizer))
+            mutations.extend(_zip_cd_crc_mutations(cd_headers, randomizer))
+        elif profile == "zip_duplicate_entry_crc_conflict":
+            mutations.extend(_zip_duplicate_entry_conflict_mutations(data, cd_headers, entry_infos, randomizer))
+            mutations.extend(_zip_cd_crc_mutations(cd_headers, randomizer))
+        elif profile == "zip_non_utf8_filename_directory_rebuild":
+            mutations.extend(_zip_eocd_directory_conflict_mutations(eocd))
+            if cd_headers:
+                mutations.append(_replace_byte("corpus_zip_non_utf8_filename_byte", cd_headers[0] + 46, data[cd_headers[0] + 46] ^ 0x80, "zip.central_directory.filename", "directory filename encoding is ambiguous"))
+        elif profile == "zip_extra_field_length_bad":
+            mutations.extend(_zip_extra_field_length_mutations(data, entry_infos, randomizer))
+            mutations.extend(_zip_eocd_count_mutations(eocd, count_delta=1))
+        elif profile == "zip_mixed_method_one_entry_bad":
+            mutations.extend(_zip_damage_payloads(data, entry_infos, randomizer, all_entries=False, name="corpus_zip_mixed_method_one_entry_bad", expected_effect="one mixed-method entry payload is damaged"))
+            mutations.extend(_zip_eocd_count_mutations(eocd, count_delta=1))
+        elif profile == "zip_drop_central_directory_keep_local_headers":
             mutations.append(_truncate("corpus_zip_drop_central_directory_keep_local_headers", eocd, "zip.central_directory", "central directory is missing but local headers remain"))
         elif profile == "zip_eocd_cd_half_damaged":
             mutations.extend(_zip_eocd_directory_conflict_mutations(eocd))
@@ -1182,8 +1225,16 @@ def _zip_corpus_mutations(data: bytes, randomizer: random.Random, profile: str) 
         mutations.append(_delete("corpus_zip_delete_middle_volume_bytes", max(1, len(data) // 3), max(8, len(data) // 20), "zip.missing_volume", "middle archive bytes are missing"))
     if layer in {"structural", "hard_negative", "deceptive_hard_negative"}:
         mutations.append(_append("corpus_zip_append_tail_junk", _random_junk(randomizer, "ZIPTAIL", 12, 48), "archive.tail", "extra bytes after archive"))
-    if "boundary" in profile or "sfx" in profile:
+    if ("boundary" in profile or "sfx" in profile or "sfx" in zip_tags or zip_variant.startswith("sfx")) and not any(mutation.zone == "zip.sfx.prefix" for mutation in mutations):
         mutations.append(_insert("corpus_zip_insert_sfx_prefix", 0, b"MZ-SUNPACK-CORPUS" + _random_junk(randomizer, "SFX", 8, 24), "zip.sfx.prefix", "archive is embedded behind a carrier prefix"))
+    if "data_descriptor" in zip_tags and "data_descriptor" not in profile and randomizer.random() < 0.55:
+        mutations.extend(_zip_data_descriptor_conflict_mutations(data, cd_headers, entry_infos, randomizer))
+    if "zip64" in zip_tags and "zip64" not in profile and randomizer.random() < 0.45:
+        mutations.extend(_zip64_extra_mutations(data, randomizer))
+    if "split" in zip_tags and "split" not in profile and len(data) > 128:
+        mutations.append(_delete("corpus_zip_variant_split_missing_bytes", max(1, len(data) // 2), max(8, len(data) // 20), "zip.missing_volume", "split variant has a missing range"))
+    if "duplicate_entries" in zip_tags and "duplicate" not in profile:
+        mutations.extend(_zip_duplicate_entry_conflict_mutations(data, cd_headers, entry_infos, randomizer))
     flags = ["central_directory_bad", "central_directory_offset_bad", "central_directory_count_bad"]
     if layer in {"hard_negative", "deceptive_hard_negative"}:
         flags.extend(["checksum_error", "crc_error", "damaged"])
@@ -1298,6 +1349,65 @@ def _zip_data_descriptor_conflict_mutations(data: bytes, cd_headers: list[int], 
     payload_offset = int(target.get("payload_offset", 0) or 0) + int(target.get("compressed_size", 0) or 0)
     if 0 <= payload_offset <= len(data):
         output.append(_insert("corpus_zip_fake_data_descriptor", payload_offset, b"PK\x07\x08" + _random_junk(randomizer, "DD", 12, 12), "zip.data_descriptor", "fake data descriptor conflicts with metadata"))
+    return output
+
+
+def _zip64_locator_mutations(data: bytes, randomizer: random.Random) -> list[BinaryMutation]:
+    output: list[BinaryMutation] = []
+    locator = data.rfind(b"PK\x06\x07")
+    eocd64 = data.rfind(b"PK\x06\x06")
+    if locator >= 0 and locator + 20 <= len(data):
+        output.append(_replace_bytes("corpus_zip64_locator_offset_bad", locator + 8, struct.pack("<Q", 0), "zip.zip64.locator.offset", "ZIP64 EOCD locator points at the wrong offset"))
+        output.append(_replace_bytes("corpus_zip64_locator_disk_bad", locator + 4, struct.pack("<I", 1), "zip.zip64.locator.disk", "ZIP64 locator disk number is inconsistent"))
+    if eocd64 >= 0 and eocd64 + 56 <= len(data):
+        output.append(_replace_bytes("corpus_zip64_eocd_total_entries_bad", eocd64 + 32, struct.pack("<Q", randomizer.randrange(2, 16)), "zip.zip64.eocd.entry_count", "ZIP64 EOCD entry count is plausible but wrong"))
+    if output:
+        return output
+    eocd = data.rfind(b"PK\x05\x06")
+    if eocd >= 0:
+        return _zip_eocd_count_mutations(eocd, count_delta=4)
+    return []
+
+
+def _zip64_extra_mutations(data: bytes, randomizer: random.Random) -> list[BinaryMutation]:
+    offset = data.find(b"\x01\x00")
+    output: list[BinaryMutation] = []
+    while offset >= 0 and offset + 4 <= len(data):
+        try:
+            size = int(struct.unpack_from("<H", data, offset + 2)[0])
+        except Exception:
+            size = 0
+        if 8 <= size <= 32 and offset + 4 + size <= len(data):
+            output.append(_replace_bytes("corpus_zip64_extra_uncompressed_size_bad", offset + 4, struct.pack("<Q", randomizer.randrange(1, 4096)), "zip.extra.zip64.uncompressed_size", "ZIP64 extra size conflicts with actual payload"))
+            output.append(_replace_bytes("corpus_zip64_extra_length_bad", offset + 2, struct.pack("<H", max(0, size - 1)), "zip.extra.zip64.length", "ZIP64 extra field length is off by one"))
+            return output
+        offset = data.find(b"\x01\x00", offset + 1)
+    return _zip_extra_field_length_mutations(data, _zip_entry_infos(data), randomizer)
+
+
+def _zip_extra_field_length_mutations(data: bytes, entry_infos: list[dict[str, Any]], randomizer: random.Random) -> list[BinaryMutation]:
+    output: list[BinaryMutation] = []
+    target = _choose_middle_entry(entry_infos, randomizer) if entry_infos else {}
+    local = int(target.get("header_offset", -1) or -1)
+    if local >= 0 and local + 30 <= len(data):
+        try:
+            name_len, extra_len = struct.unpack_from("<HH", data, local + 26)
+        except Exception:
+            name_len, extra_len = (0, 0)
+        replacement = max(0, min(65535, int(extra_len) + 7))
+        output.append(_replace_bytes("corpus_zip_local_extra_length_bad", local + 28, struct.pack("<H", replacement), "zip.local_header.extra_length", "local header extra field length is inconsistent"))
+        if int(extra_len) > 0:
+            output.append(_replace_byte("corpus_zip_local_extra_payload_bad", local + 30 + int(name_len), data[min(len(data) - 1, local + 30 + int(name_len))] ^ 0x20, "zip.local_header.extra_field", "local header extra field payload is damaged"))
+    cd_offset = _safe_zip_cd_offset(data)
+    eocd = data.rfind(b"PK\x05\x06")
+    cd_headers = _zip_central_directory_header_offsets(data, cd_offset, eocd)
+    if cd_headers:
+        header = cd_headers[0]
+        try:
+            extra_len = int(struct.unpack_from("<H", data, header + 30)[0])
+        except Exception:
+            extra_len = 0
+        output.append(_replace_bytes("corpus_zip_cd_extra_length_bad", header + 30, struct.pack("<H", max(0, min(65535, extra_len + 5))), "zip.central_directory.extra_length", "central directory extra length is inconsistent"))
     return output
 
 
@@ -1521,6 +1631,14 @@ def _damage_layer(profile: str) -> str:
         "zip_duplicate_entries_conflicting_crc",
         "zip_data_descriptor_conflict",
         "zip_partial_cd_rebuild_then_payload_mismatch",
+        "zip_sfx_cd_damage",
+        "zip_data_descriptor_cd_conflict",
+        "zip_zip64_eocd_locator_bad",
+        "zip_zip64_extra_size_mismatch",
+        "zip_duplicate_entry_crc_conflict",
+        "zip_non_utf8_filename_directory_rebuild",
+        "zip_extra_field_length_bad",
+        "zip_mixed_method_one_entry_bad",
     }:
         return "structural_directory"
     if text in {
@@ -1536,11 +1654,16 @@ def _damage_layer(profile: str) -> str:
         "zip_wrong_local_offset_extracts_valid_other_entry",
         "zip_crc_repair_masks_payload_mismatch",
         "zip_partial_recovery_wrong_hash_same_name",
+        "zip_sfx_payload_damage",
+        "zip_data_descriptor_payload_bad",
     }:
         return "deceptive_hard_negative"
     if text in {
         "zip_all_entry_payload_damage_with_directory",
         "zip_wrong_offset_content_overlap",
+        "zip_sfx_split_missing_volume",
+        "zip_split_missing_middle_volume",
+        "zip_split_tail_volume_truncated",
     }:
         return "hard_negative"
     if "payload" in text or "block" in text:
@@ -1616,6 +1739,18 @@ def _difficulty_tags_for_profile(profile: str, layer: str, mutations: list[Binar
         tags.append("ambiguous_entry_mapping")
     if "data_descriptor" in text:
         tags.append("metadata_semantics_conflict")
+    if "sfx" in text:
+        tags.append("sfx_carrier_prefix")
+    if "split" in text or "missing_volume" in text:
+        tags.append("split_or_missing_volume")
+    if "zip64" in text:
+        tags.append("zip64_metadata")
+    if "non_utf8" in text or "filename" in text:
+        tags.append("filename_encoding_risk")
+    if "extra_field" in text:
+        tags.append("extra_field_semantics")
+    if "mixed_method" in text:
+        tags.append("mixed_compression_methods")
     if "comment" in text:
         tags.append("boundary_comment_ambiguity")
     return _dedupe_list(tags)

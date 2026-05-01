@@ -131,6 +131,7 @@ def _build_report(rows: list[dict[str, Any]], model_root: Path, policy_report_pa
         "rl_dataset": _rl_dataset_report(rows, terminal_rows),
         "difficulty": difficulty,
         "terminal_recovery": recovery,
+        "zip_structure": _zip_structure_report(rows),
         "per_format": _per_format_report(rows, model_metrics),
         "model_metric_comparison": model_metrics,
         "model_top3_comparison": _model_top3_comparison(model_metrics),
@@ -430,6 +431,69 @@ def _repair_prior_dependency(model_metrics: dict[str, Any]) -> dict[str, Any]:
     return output
 
 
+def _zip_structure_report(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    zip_rows = [row for row in rows if _row_format(row) == "zip" or _row_zip_variant(row)]
+    if not zip_rows:
+        return {
+            "available": False,
+            "zip_variant_distribution": {},
+            "zip_variant_label_distribution": {},
+            "zip_variant_terminal_recovery": {},
+            "zip_variant_oracle_zero_count": {},
+            "profile_by_zip_variant": {},
+        }
+    variant_counts: Counter[str] = Counter()
+    label_by_variant: dict[str, Counter[str]] = defaultdict(Counter)
+    recovery_by_variant: dict[str, list[float]] = defaultdict(list)
+    zero_by_variant: Counter[str] = Counter()
+    profile_by_variant: dict[str, Counter[str]] = defaultdict(Counter)
+    targeted_by_variant: dict[str, Counter[str]] = defaultdict(Counter)
+    for row in zip_rows:
+        variant = _row_zip_variant(row)
+        variant_counts[variant] += 1
+        label_by_variant[variant][str(int(row.get("label", 0) or 0))] += 1
+        ratio = _row_recovery_ratio(row)
+        recovery_by_variant[variant].append(ratio)
+        if ratio <= 0.0:
+            zero_by_variant[variant] += 1
+        profile = _damage_profile(row) or "unknown"
+        profile_by_variant[variant][profile] += 1
+        targeted_by_variant[variant][str(bool(row.get("structure_targeted_profile"))).lower()] += 1
+    return {
+        "available": True,
+        "zip_variant_distribution": dict(variant_counts.most_common()),
+        "zip_variant_label_distribution": {
+            variant: dict(sorted(counts.items(), key=lambda item: int(item[0])))
+            for variant, counts in sorted(label_by_variant.items())
+        },
+        "zip_variant_terminal_recovery": {
+            variant: _series_summary_float(values)
+            for variant, values in sorted(recovery_by_variant.items())
+        },
+        "zip_variant_oracle_zero_count": dict(sorted(zero_by_variant.items())),
+        "profile_by_zip_variant": {
+            variant: dict(counts.most_common(20))
+            for variant, counts in sorted(profile_by_variant.items())
+        },
+        "structure_targeted_profile_by_variant": {
+            variant: dict(sorted(counts.items()))
+            for variant, counts in sorted(targeted_by_variant.items())
+        },
+    }
+
+
+def _row_zip_variant(row: dict[str, Any]) -> str:
+    for value in (
+        row.get("zip_variant"),
+        _nested(row, "source_derivation", "zip_variant"),
+        _nested(row, "stable_features", "state", "source_derivation", "zip_variant"),
+        _nested(row, "debug_context", "source_derivation", "zip_variant"),
+    ):
+        if value:
+            return str(value)
+    return "unknown"
+
+
 def _model_ndcg_for_view(metrics: dict[str, Any], view: str) -> float | None:
     item = metrics.get(view) if isinstance(metrics.get(view), dict) else {}
     if not item:
@@ -595,6 +659,19 @@ def _damage_profile(row: dict[str, Any]) -> str:
         "zip_all_entry_payload_damage_with_directory",
         "zip_wrong_offset_content_overlap",
         "zip_eocd_cd_half_damaged",
+        "zip_sfx_cd_damage",
+        "zip_sfx_payload_damage",
+        "zip_sfx_split_missing_volume",
+        "zip_split_missing_middle_volume",
+        "zip_split_tail_volume_truncated",
+        "zip_data_descriptor_cd_conflict",
+        "zip_data_descriptor_payload_bad",
+        "zip_zip64_eocd_locator_bad",
+        "zip_zip64_extra_size_mismatch",
+        "zip_duplicate_entry_crc_conflict",
+        "zip_non_utf8_filename_directory_rebuild",
+        "zip_extra_field_length_bad",
+        "zip_mixed_method_one_entry_bad",
     )
     for item in known:
         if item in sample:

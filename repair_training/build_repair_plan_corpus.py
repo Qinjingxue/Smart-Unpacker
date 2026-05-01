@@ -42,6 +42,14 @@ PROFILE_LAYERS = (
         "zip_duplicate_entries_conflicting_crc",
         "zip_data_descriptor_conflict",
         "zip_partial_cd_rebuild_then_payload_mismatch",
+        "zip_sfx_cd_damage",
+        "zip_data_descriptor_cd_conflict",
+        "zip_zip64_eocd_locator_bad",
+        "zip_zip64_extra_size_mismatch",
+        "zip_duplicate_entry_crc_conflict",
+        "zip_non_utf8_filename_directory_rebuild",
+        "zip_extra_field_length_bad",
+        "zip_mixed_method_one_entry_bad",
         "structural_directory",
         "structural_metadata",
         "structural_index",
@@ -49,6 +57,8 @@ PROFILE_LAYERS = (
     ("partial_recoverable", 0.25, (
         "zip_single_entry_payload_damage",
         "zip_drop_central_directory_keep_local_headers",
+        "zip_split_missing_middle_volume",
+        "zip_split_tail_volume_truncated",
         "tar_truncate_last_member",
         "tar_damage_one_member_payload",
         "seven_zip_non_solid_one_file_damage",
@@ -75,6 +85,9 @@ PROFILE_LAYERS = (
         "zip_eocd_cd_half_damaged",
         "zip_crc_repair_masks_payload_mismatch",
         "zip_partial_recovery_wrong_hash_same_name",
+        "zip_sfx_payload_damage",
+        "zip_sfx_split_missing_volume",
+        "zip_data_descriptor_payload_bad",
     )),
 )
 DEFAULT_LAYER_BUDGET = (
@@ -154,6 +167,13 @@ def _material_build(args: argparse.Namespace, material_root: Path) -> int:
                 source_derivation = _load_source_derivation(source)
                 layer_plan = _damage_layer_plan(rng, fmt, max(0, int(args.per_sample)))
                 for variant_index, (requested_layer, layer, layer_weight, profile, skip_reason) in enumerate(layer_plan):
+                    profile, structure_targeted_profile = _zip_structure_target_profile(
+                        rng,
+                        fmt,
+                        source_derivation,
+                        layer,
+                        profile,
+                    )
                     variant_seed = rng.randrange(1, 2**31 - 1)
                     case_root = damaged_root / source.stem / f"v{variant_index:03d}"
                     damage_json_path = case_root / f"{source.stem}_{variant_index:03d}.damage.json"
@@ -165,6 +185,7 @@ def _material_build(args: argparse.Namespace, material_root: Path) -> int:
                             seed=variant_seed + source_index,
                             variant_index=variant_index,
                             damage_profile=profile,
+                            source_derivation=source_derivation,
                         )
                         record = case.corpus_manifest_record(
                             source_archive_id=source_archive_id,
@@ -179,10 +200,12 @@ def _material_build(args: argparse.Namespace, material_root: Path) -> int:
                         record["requested_damage_layer"] = requested_layer
                         record["actual_damage_layer"] = layer
                         record["damage_layer_weight"] = layer_weight
+                        record["structure_targeted_profile"] = bool(structure_targeted_profile)
                         if skip_reason:
                             record["skip_reason"] = skip_reason
                         if source_derivation:
                             record["source_derivation"] = source_derivation
+                            _copy_zip_derivation_fields(record, source_derivation)
                         damage_json_path.parent.mkdir(parents=True, exist_ok=True)
                         damage_json_path.write_text(json.dumps(record, ensure_ascii=False, indent=2, sort_keys=True, default=str), encoding="utf-8")
                         records.append(record)
@@ -294,6 +317,64 @@ def _sample_sources(sample_dir: Path, fmt: str) -> list[Path]:
         if detected == fmt:
             output.append(path)
     return output
+
+
+def _zip_structure_target_profile(
+    rng: random.Random,
+    fmt: str,
+    source_derivation: dict[str, Any],
+    layer: str,
+    fallback_profile: str,
+) -> tuple[str, bool]:
+    if _normalized_material_format(fmt) != "zip" or not source_derivation:
+        return fallback_profile, False
+    variant = str(source_derivation.get("zip_variant") or "").lower()
+    tags = {str(item).lower() for item in source_derivation.get("zip_container_tags") or []}
+    candidates: list[str] = []
+    if variant in {"sfx_stub", "sfx_split_zip"} or "sfx" in tags:
+        candidates.extend(["zip_sfx_cd_damage", "zip_sfx_payload_damage"])
+    if variant == "sfx_split_zip":
+        candidates.append("zip_sfx_split_missing_volume")
+    if variant == "split_zip" or "split" in tags:
+        candidates.extend(["zip_split_missing_middle_volume", "zip_split_tail_volume_truncated"])
+    if variant == "data_descriptor_bit3" or "data_descriptor" in tags:
+        candidates.extend(["zip_data_descriptor_cd_conflict", "zip_data_descriptor_payload_bad"])
+    if variant == "long_comment" or "long_comment" in tags or "eocd_comment" in tags:
+        candidates.append("zip_comment_overlap_eocd_shifted")
+    if variant == "zip64_forced" or "zip64" in tags:
+        candidates.extend(["zip_zip64_eocd_locator_bad", "zip_zip64_extra_size_mismatch"])
+    if variant == "duplicate_entries" or "duplicate_entries" in tags:
+        candidates.append("zip_duplicate_entry_crc_conflict")
+    if variant == "non_utf8_names" or "filename_encoding" in tags:
+        candidates.append("zip_non_utf8_filename_directory_rebuild")
+    if variant in {"mixed_store_deflate"} or "mixed_methods" in tags:
+        candidates.append("zip_mixed_method_one_entry_bad")
+    if "extra_field" in tags and "zip64" not in tags:
+        candidates.append("zip_extra_field_length_bad")
+    layer_candidates = [
+        item
+        for item in candidates
+        if _profile_layer_name(item) in {layer, "structural_directory", "partial_recoverable", "deceptive_hard_negative"}
+    ]
+    choices = layer_candidates or candidates
+    if not choices:
+        return fallback_profile, False
+    return str(rng.choice(choices)), True
+
+
+def _profile_layer_name(profile: str) -> str:
+    text = str(profile or "").lower()
+    if "payload_bad" in text or "sfx_payload_damage" in text:
+        return "deceptive_hard_negative"
+    if "missing" in text or "truncated" in text:
+        return "partial_recoverable"
+    return "structural_directory"
+
+
+def _copy_zip_derivation_fields(record: dict[str, Any], source_derivation: dict[str, Any]) -> None:
+    for key in ("zip_variant", "zip_container_tags", "zip_structure_features"):
+        if key in source_derivation:
+            record[key] = source_derivation.get(key)
 
 
 def _organize_root_sources(format_dir: Path, fmt: str, sample_filter: set[str]) -> int:
@@ -486,6 +567,13 @@ def _load_source_derivation(path: Path) -> dict[str, Any]:
             "sha256",
             "size",
             "command",
+            "zip_variant",
+            "zip_container_tags",
+            "zip_tool",
+            "zip_method",
+            "zip_level",
+            "zip_structure_features",
+            "zip_split",
         )
         if key in loaded
     }
@@ -528,6 +616,7 @@ def _skipped_record(
     source_derivation = _load_source_derivation(source)
     if source_derivation:
         record["source_derivation"] = source_derivation
+        _copy_zip_derivation_fields(record, source_derivation)
     return record
 
 
