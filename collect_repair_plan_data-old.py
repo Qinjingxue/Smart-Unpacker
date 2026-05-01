@@ -2520,49 +2520,22 @@ def _verify_output_against_oracle(path: Path, fmt: str, oracle: dict[str, Any]) 
             return _label_status(3 if complete else (1 if 0.0 < completeness < 1.0 else -1), "complete" if complete else ("partial" if completeness > 0 else "hard_negative"), completeness)
         expected_files = oracle.get("expected_files") if isinstance(oracle.get("expected_files"), dict) else {}
         if expected_files:
-            info = _read_archive_entry_infos(path, fmt)
-            recovered_sizes = info.get("sizes", {})
-            recovered_crcs = info.get("crcs", {})
-            entry_count = len(info.get("entries", []))
-            matched_files = 0
-            matched_bytes = 0
-            expected_bytes = 0
-            wrong_files = 0
-            unreadable_files = 0
-            for name, meta in expected_files.items():
-                if not isinstance(meta, dict):
-                    continue
-                expected_size = int(meta.get("size", 0) or 0)
-                expected_bytes += max(0, expected_size)
-                if name not in recovered_sizes:
-                    unreadable_files += 1
-                    continue
-                actual_size = int(recovered_sizes.get(name, 0) or 0)
-                actual_crc = int(recovered_crcs.get(name, 0) or 0)
-                expected_crc = int(meta.get("crc32", 0) or 0)
-                size_ok = (expected_size > 0 and actual_size >= expected_size) or (expected_size == 0 and actual_size > 0)
-                crc_ok = (expected_crc != 0 and actual_crc != 0 and expected_crc == actual_crc) or (expected_crc == 0)
-                if size_ok:
-                    matched_files += 1
-                    matched_bytes += min(actual_size, max(1, expected_size))
-                else:
-                    if crc_ok:
-                        matched_files += 1
-                        matched_bytes += min(actual_size, max(1, expected_size))
-                    else:
-                        wrong_files += 1
-            max_expected = max(1, len(expected_files))
-            file_coverage = matched_files / max_expected
-            byte_coverage = matched_bytes / max(1, expected_bytes) if expected_bytes > 0 else file_coverage
-            completeness = min(1.0, max(0.0, (file_coverage + byte_coverage) / 2.0))
+            recovered_info = _read_archive_hash_info(path, fmt)
+            recovered = recovered_info.get("hashes", {})
+            matched = sum(1 for name, meta in expected_files.items() if recovered.get(name) == meta.get("sha256"))
+            wrong_overlap = any(name in expected_files and recovered[name] != expected_files[name].get("sha256") for name in recovered)
+            wrong_files = sum(1 for name in recovered if name in expected_files and recovered[name] != expected_files[name].get("sha256"))
+            unreadable_files = len([name for name in recovered_info.get("entries", []) if name in expected_files and name not in recovered])
+            entry_count = len(recovered_info.get("entries", []))
+            completeness = matched / max(1, len(expected_files))
             if completeness >= 0.999:
-                return {**_label_status(3, "complete", completeness), "matched_files": matched_files, "wrong_files": wrong_files, "unreadable_files": unreadable_files, "entry_count": entry_count, "expected_files": len(expected_files)}
-            if wrong_files > 0 and matched_files == 0:
-                return {**_label_status(-1, "hard_negative", 0.0), "matched_files": matched_files, "wrong_files": wrong_files, "unreadable_files": unreadable_files, "entry_count": entry_count, "expected_files": len(expected_files)}
+                return {**_label_status(3, "complete", completeness), "matched_files": matched, "wrong_files": wrong_files, "unreadable_files": unreadable_files, "entry_count": entry_count, "expected_files": len(expected_files)}
+            if wrong_overlap:
+                return {**_label_status(-1, "hard_negative", 0.0), "matched_files": matched, "wrong_files": wrong_files, "unreadable_files": unreadable_files, "entry_count": entry_count, "expected_files": len(expected_files)}
             if completeness > 0:
-                return {**_label_status(1, "partial", completeness), "matched_files": matched_files, "wrong_files": wrong_files, "unreadable_files": unreadable_files, "entry_count": entry_count, "expected_files": len(expected_files)}
+                return {**_label_status(1, "partial", completeness), "matched_files": matched, "wrong_files": wrong_files, "unreadable_files": unreadable_files, "entry_count": entry_count, "expected_files": len(expected_files)}
             status = "directory_only" if entry_count else "no_progress"
-            return {**_label_status(0, status, 0.0), "matched_files": matched_files, "wrong_files": wrong_files, "unreadable_files": unreadable_files, "entry_count": entry_count, "expected_files": len(expected_files)}
+            return {**_label_status(0, status, 0.0), "matched_files": matched, "wrong_files": wrong_files, "unreadable_files": unreadable_files, "entry_count": entry_count, "expected_files": len(expected_files)}
     except Exception as exc:
         return {"status": "hard_negative", "label": -1, "completeness": 0.0, "error": str(exc)}
     return _label_status(0, "no_oracle", 0.0)
@@ -2570,34 +2543,6 @@ def _verify_output_against_oracle(path: Path, fmt: str, oracle: dict[str, Any]) 
 
 def _read_archive_hashes(path: Path, fmt: str) -> dict[str, str]:
     return _read_archive_hash_info(path, fmt)["hashes"]
-
-
-def _read_archive_entry_infos(path: Path, fmt: str) -> dict[str, Any]:
-    """Extract per-entry size+crc32 from repaired output, matching production verification."""
-    normalized = _normalize_format(fmt)
-    if normalized == "zip":
-        try:
-            with zipfile.ZipFile(path) as archive:
-                entries = [name for name in archive.namelist() if not name.endswith("/")]
-                sizes = {}
-                crcs = {}
-                for info in archive.infolist():
-                    if info.is_dir():
-                        continue
-                    sizes[info.filename] = int(info.file_size)
-                    crcs[info.filename] = int(info.CRC) & 0xFFFFFFFF
-            return {"entries": entries, "sizes": sizes, "crcs": crcs}
-        except Exception:
-            return {"entries": [], "sizes": {}, "crcs": {}}
-    if normalized == "tar":
-        try:
-            with tarfile.open(path) as archive:
-                entries = [m.name for m in archive.getmembers() if m.isfile()]
-                sizes = {m.name: int(m.size) for m in archive.getmembers() if m.isfile()}
-            return {"entries": entries, "sizes": sizes, "crcs": {}}
-        except Exception:
-            return {"entries": [], "sizes": {}, "crcs": {}}
-    return {"entries": [], "sizes": {}, "crcs": {}}
 
 
 def _read_archive_hash_info(path: Path, fmt: str) -> dict[str, Any]:

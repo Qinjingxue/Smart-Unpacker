@@ -219,15 +219,7 @@ class CorruptionCase:
             "expected_statuses": list(self.expected_statuses),
             "expected_module": self.expected_module,
             "output_required": self.output_required,
-            "expected_files": {
-                name: {
-                    "name": name,
-                    "size": len(payload),
-                    "sha256": hashlib.sha256(payload).hexdigest(),
-                    **dict(self.expected_file_metadata.get(name) or {}),
-                }
-                for name, payload in sorted(self.expected_files.items())
-            },
+            "expected_files": _oracle_expected_files_dict(self.expected_files, self.expected_file_metadata),
             "expected_payload": {
                 "size": len(self.expected_payload),
                 "sha256": hashlib.sha256(self.expected_payload).hexdigest(),
@@ -999,7 +991,7 @@ def build_corpus_corruption_case(
         seed=seed,
         damage_flags=damage_flags,
         expected_statuses=("repaired", "partial", "unrepairable", "unsupported"),
-        expected_files=oracle.get("files", {}),
+        expected_files=oracle.get("expected_files", oracle.get("files", {})),
         expected_payload=oracle.get("payload", b""),
         expected_bytes=clean if oracle.get("bytes_exact") else b"",
         oracle_strength=str(oracle.get("oracle_strength") or "bytes_exact"),
@@ -1836,10 +1828,14 @@ def _oracle_from_clean_bytes(data: bytes, fmt: ArchiveFormat) -> dict[str, Any]:
     base_fmt = _base_archive_format(fmt)
     if base_fmt == "zip":
         try:
-            with zipfile.ZipFile(io.BytesIO(data)) as archive:
-                files = {name: archive.read(name) for name in archive.namelist() if not name.endswith("/")}
-                infos = {item["name"]: item for item in _zip_entry_infos(data)}
-                return {"files": files, "files_meta": infos, "oracle_strength": "entry_hash"}
+            infos = _zip_entry_infos(data)
+            if infos:
+                expected_files = {
+                    item["name"]: {"size": int(item["size"]), "crc32": int(item["crc"]) & 0xFFFFFFFF, "has_crc": True}
+                    for item in infos
+                }
+                return {"expected_files": expected_files, "files_meta": {item["name"]: item for item in infos}, "oracle_strength": "entry_match"}
+            return {"bytes_exact": True, "oracle_strength": "bytes_exact"}
         except Exception:
             return {"bytes_exact": True, "oracle_strength": "bytes_exact"}
     if base_fmt == "tar":
@@ -1872,6 +1868,19 @@ def _oracle_from_clean_bytes(data: bytes, fmt: ArchiveFormat) -> dict[str, Any]:
         except Exception:
             return {"bytes_exact": True, "oracle_strength": "bytes_exact"}
     return {"bytes_exact": True, "oracle_strength": "structural"}
+
+
+def _oracle_expected_files_dict(expected_files: dict, file_metadata: dict | None) -> dict[str, Any]:
+    result = {}
+    for name, value in sorted(expected_files.items()):
+        if isinstance(value, dict):
+            result[name] = {"name": name, "size": int(value.get("size", 0) or 0), "crc32": int(value.get("crc32", 0) or 0) & 0xFFFFFFFF}
+        else:
+            result[name] = {"name": name, "size": len(value), "sha256": hashlib.sha256(value).hexdigest()}
+        extra = (file_metadata or {}).get(name)
+        if isinstance(extra, dict):
+            result[name].update(extra)
+    return result
 
 
 def _write_corpus_case(
