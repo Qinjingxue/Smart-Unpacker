@@ -42,6 +42,8 @@ class ZipEntryQuarantineRebuild:
             return 0.78
         coverage = coverage_view_from_job(job)
         if coverage.mixed_damage_suspected or coverage.payload_only_suspected:
+            if flags & {"trailing_junk", "boundary_unreliable"}:
+                return 0.55
             return 0.99
         if flags & {"crc_error", "checksum_error", "payload_damaged", "entry_payload_bad"}:
             return 0.98

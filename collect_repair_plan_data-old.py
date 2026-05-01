@@ -401,36 +401,6 @@ def _record_size_mb(record: dict[str, Any]) -> float:
     return 0.0
 
 
-def _attach_split_volumes(source_input: dict[str, Any], record: dict[str, Any]) -> None:
-    tags = record.get("zip_container_tags") or []
-    if isinstance(tags, list) and "split" not in tags and "multi_volume" not in tags:
-        return
-    damaged_path = source_input.get("path") or record.get("damaged_path") or ""
-    if not damaged_path:
-        return
-    damaged = Path(damaged_path)
-    volumes_dir = damaged.parent / (damaged.name + ".volumes")
-    if not volumes_dir.is_dir():
-        volumes = [p for p in damaged.parent.iterdir() if p.is_file() and p.name.startswith(damaged.name + ".") and p.suffix.lower() in {".z01", ".z02", ".zip"} and p != damaged]
-        if not volumes:
-            return
-        source_input["parts"] = source_input.get("parts") or []
-        existing = {str(p.get("path", "")) for p in source_input.get("parts", []) if isinstance(p, dict)}
-        for vol in sorted(volumes):
-            vol_path = str(vol)
-            if vol_path not in existing:
-                source_input["parts"].append({"path": vol_path, "role": "volume"})
-        return
-    source_input["parts"] = source_input.get("parts") or []
-    existing = {str(p.get("path", "")) for p in source_input.get("parts", []) if isinstance(p, dict)}
-    for vol in sorted(volumes_dir.iterdir()):
-        if not vol.is_file():
-            continue
-        vol_path = str(vol)
-        if vol_path not in existing:
-            source_input["parts"].append({"path": vol_path, "role": "volume"})
-
-
 def _collect_sample_with_timeout(record: dict[str, Any], args: argparse.Namespace, debug_events: "_DebugEvents", record_index: int, total_records: int) -> tuple[str, list[dict[str, Any]]]:
     timeout = _effective_case_timeout(record, args)
     if timeout <= 0:
@@ -486,7 +456,6 @@ def _collect_sample_rows(record: dict[str, Any], args: argparse.Namespace, debug
     scheduler = _scheduler(args)
     selector = CandidateSelector(scheduler.config)
     source_input = dict(record.get("damaged_input") or {})
-    _attach_split_volumes(source_input, record)
     fmt = str(record.get("format") or source_input.get("format_hint") or "")
     rows: list[dict[str, Any]] = []
     max_candidates_per_round = _effective_max_candidates(record, args)
@@ -534,7 +503,6 @@ def _collect_sample_rows(record: dict[str, Any], args: argparse.Namespace, debug
                 damage_flags=damage_flags,
                 archive_key=f"{record.get('sample_id')}:round:{state_round}:beam:{state.get('beam_id', 0)}",
                 attempts=state_round,
-                password=record.get("password"),
             )
             phase_started = time.perf_counter()
             lazy_mode = str(args.proposal_mode or "lazy") == "lazy"
@@ -566,7 +534,6 @@ def _collect_sample_rows(record: dict[str, Any], args: argparse.Namespace, debug
                 damage_flags=damage_flags,
                 archive_key=f"{record.get('sample_id')}:round:{state_round}:beam:{state.get('beam_id', 0)}",
                 attempts=state_round,
-                password=record.get("password"),
             )
             debug_events.write("phase", record, round=state_round, query_id=query_id, phase="before_state", elapsed_seconds=round(time.perf_counter() - phase_started, 3))
             state_features = _state_features(record, job, batch, state_round, previous_actions, previous_modules, best_completeness, before_state)

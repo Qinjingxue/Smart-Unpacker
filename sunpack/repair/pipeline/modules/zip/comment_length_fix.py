@@ -35,6 +35,8 @@ class ZipCommentLengthFix:
         if flags & {"carrier_archive", "sfx", "embedded_archive", "carrier_prefix"}:
             return 0.0
         if flags & {"zip_comment_length_bad", "comment_length_bad", "eocd_bad"}:
+            if flags & {"trailing_junk"}:
+                return 0.30
             return 0.9
         if "directory_rebuild" in diagnosis.categories:
             return 0.55
