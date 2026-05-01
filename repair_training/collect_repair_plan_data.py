@@ -421,6 +421,7 @@ def _attach_split_volumes(source_input: dict[str, Any], record: dict[str, Any]) 
     if not volumes_dir.is_dir():
         return
     source_input["parts"] = source_input.get("parts") or []
+    source_input["ranges"] = source_input.get("ranges") or []
     existing = {str(p.get("path", "")) for p in source_input.get("parts", []) if isinstance(p, dict)}
     for vol in sorted(volumes_dir.iterdir()):
         if not vol.is_file():
@@ -428,6 +429,7 @@ def _attach_split_volumes(source_input: dict[str, Any], record: dict[str, Any]) 
         vol_path = str(vol.resolve())
         if vol_path not in existing:
             source_input["parts"].append({"path": vol_path, "role": "volume"})
+            source_input["ranges"].append({"path": vol_path})
 
 
 def _collect_sample_with_timeout(record: dict[str, Any], args: argparse.Namespace, debug_events: "_DebugEvents", record_index: int, total_records: int) -> tuple[str, list[dict[str, Any]]]:
@@ -486,6 +488,10 @@ def _collect_sample_rows(record: dict[str, Any], args: argparse.Namespace, debug
     selector = CandidateSelector(scheduler.config)
     source_input = dict(record.get("damaged_input") or {})
     _attach_split_volumes(source_input, record)
+    if source_input.get("parts"):
+        damaged = record.get("damaged_input")
+        if isinstance(damaged, dict):
+            damaged["parts"] = source_input["parts"]
     fmt = str(record.get("format") or source_input.get("format_hint") or "")
     rows: list[dict[str, Any]] = []
     max_candidates_per_round = _effective_max_candidates(record, args)
@@ -1724,9 +1730,9 @@ def _scheduler(args: argparse.Namespace) -> RepairScheduler:
             "max_attempts_per_task": 8,
             "stages": {"deep": True},
             "deep": {
-                "max_candidates_per_module": 4,
+                "max_candidates_per_module": 6,
                 "verify_candidates": False,
-                "max_seconds_per_module": 3.0,
+                "max_seconds_per_module": 8.0,
                 "max_stream_trim_probe_attempts": 8,
                 "max_stream_trim_decode_mb": 32,
             },

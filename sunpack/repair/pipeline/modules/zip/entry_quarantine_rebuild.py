@@ -68,7 +68,7 @@ class ZipEntryQuarantineRebuild:
         result = dict(_native_zip_deep_partial_recovery(
             source_input_for_job(job),
             workspace,
-            1,
+            3,
             int(deep.get("max_entries", 20000) or 20000),
             float(deep.get("max_input_size_mb", 512) or 0),
             float(deep.get("max_output_size_mb", 2048) or 0),
@@ -79,14 +79,24 @@ class ZipEntryQuarantineRebuild:
         selected_path = str(result.get("selected_path") or "")
         recovered = int(result.get("verified_entries") or result.get("recovered_entries") or 0)
         skipped = int(result.get("skipped_entries") or 0)
-        if str(result.get("status") or "") not in {"repaired", "partial"} or not selected_path or not recovered or not skipped:
+        total_found = int(result.get("total_entries") or result.get("candidate_count") or 0)
+        if str(result.get("status") or "") not in {"repaired", "partial"} or not selected_path:
             return RepairResult(
                 status="unrepairable",
                 confidence=0.0,
                 format="zip",
                 module_name=self.spec.name,
                 diagnosis={**diagnosis.as_dict(), "native_zip_entry_quarantine": result},
-                message="ZIP quarantine rebuild requires at least one good entry and one skipped damaged entry",
+                message="ZIP deep recovery could not produce a valid output",
+            )
+        if not recovered and not skipped and not total_found:
+            return RepairResult(
+                status="unrepairable",
+                confidence=0.0,
+                format="zip",
+                module_name=self.spec.name,
+                diagnosis={**diagnosis.as_dict(), "native_zip_entry_quarantine": result},
+                message="ZIP quarantine rebuild requires at least one recoverable entry",
             )
         coverage = coverage_view_from_job(job)
         structural_flags = {
