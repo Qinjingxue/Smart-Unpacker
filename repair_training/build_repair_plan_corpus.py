@@ -100,8 +100,9 @@ ZIP_LAYER_BUDGET = (
     ("structural", 1),
     ("structural_directory", 3),
     ("partial_recoverable", 1),
-    ("two_step_repair", 1),
-    ("deceptive_hard_negative", 4),
+    ("hard_negative", 2),
+    ("two_step_repair", 5),
+    ("deceptive_hard_negative", 3),
 )
 
 
@@ -165,6 +166,7 @@ def _material_build(args: argparse.Namespace, material_root: Path) -> int:
             for source_index, source in enumerate(sample_sources):
                 source_archive_id = _source_archive_id(source)
                 source_derivation = _load_source_derivation(source)
+                zip_password = str(source_derivation.get("zip_password") or "") if source_derivation else ""
                 layer_plan = _damage_layer_plan(rng, fmt, max(0, int(args.per_sample)))
                 for variant_index, (requested_layer, layer, layer_weight, profile, skip_reason) in enumerate(layer_plan):
                     profile, structure_targeted_profile = _zip_structure_target_profile(
@@ -186,6 +188,7 @@ def _material_build(args: argparse.Namespace, material_root: Path) -> int:
                             variant_index=variant_index,
                             damage_profile=profile,
                             source_derivation=source_derivation,
+                            password=zip_password or None,
                         )
                         record = case.corpus_manifest_record(
                             source_archive_id=source_archive_id,
@@ -476,10 +479,9 @@ def _damage_layer_plan(rng: random.Random, fmt: str, per_sample: int) -> list[tu
         requested_layers.extend([layer] * int(count))
     while len(requested_layers) < per_sample:
         requested_layers.append(_choose_damage_profile(rng, fmt)[0])
-    requested_layers = requested_layers[:per_sample]
     rng.shuffle(requested_layers)
+    requested_layers = requested_layers[:per_sample]
     output: list[tuple[str, str, float, str, str]] = []
-    layer_seen: dict[str, int] = {}
     for requested_layer in requested_layers:
         layer_item = next((item for item in PROFILE_LAYERS if item[0] == requested_layer), PROFILE_LAYERS[0])
         layer, weight, profiles = layer_item
@@ -497,9 +499,7 @@ def _damage_layer_plan(rng: random.Random, fmt: str, per_sample: int) -> list[tu
             _, weight, profiles = layer_item
         compatible = _profiles_for_format(actual_layer, profiles, fmt)
         choices = compatible or profiles
-        seen = int(layer_seen.get(actual_layer, 0) or 0)
-        layer_seen[actual_layer] = seen + 1
-        profile = str(choices[seen % len(choices)])
+        profile = str(rng.choice(choices))
         output.append((requested_layer, actual_layer, float(weight), profile, skip_reason))
     return output
 
@@ -574,6 +574,7 @@ def _load_source_derivation(path: Path) -> dict[str, Any]:
             "zip_level",
             "zip_structure_features",
             "zip_split",
+            "zip_password",
         )
         if key in loaded
     }

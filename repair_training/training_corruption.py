@@ -210,6 +210,7 @@ class CorruptionCase:
             "damaged_input": dict(self.source_input),
             "corruption_plan": self.mutation_summary(),
             "damage_flags": list(self.damage_flags),
+            "password": self.password,
             "oracle": self.oracle_manifest(),
         }
 
@@ -978,6 +979,7 @@ def build_corpus_corruption_case(
     variant_index: int,
     damage_profile: str,
     source_derivation: dict[str, Any] | None = None,
+    password: str | None = None,
 ) -> CorruptionCase:
     clean = source_path.read_bytes()
     randomizer = random.Random(int(seed) + int(variant_index) * 1009)
@@ -1009,6 +1011,7 @@ def build_corpus_corruption_case(
         expected_file_metadata=dict(oracle.get("files_meta") or {}),
         output_required=False,
         builder_call="build_corpus_corruption_case(...)",
+        password=password,
     )
 
 
@@ -1872,6 +1875,7 @@ def _write_corpus_case(
     partial_expected_recoverable_entries: list[str] | None = None,
     partial_expected_damaged_entries: list[str] | None = None,
     expected_file_metadata: dict[str, dict[str, Any]] | None = None,
+    password: str | None = None,
 ) -> CorruptionCase:
     root.mkdir(parents=True, exist_ok=True)
     ext = _extension_for_format(fmt)
@@ -1902,6 +1906,7 @@ def _write_corpus_case(
         partial_expected_recoverable_entries=list(partial_expected_recoverable_entries or []),
         partial_expected_damaged_entries=list(partial_expected_damaged_entries or []),
         expected_file_metadata=dict(expected_file_metadata or {}),
+        password=password,
     )
 
 

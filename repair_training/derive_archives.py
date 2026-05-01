@@ -132,6 +132,7 @@ class DeriveTask:
     zip_variant: str = ""
     zip_container_tags: tuple[str, ...] = ()
     zip_structure_features: dict[str, Any] | None = None
+    zip_password: str = ""
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -511,6 +512,14 @@ def _zip_tasks(sample: Path, material_root: Path, cfg: dict[str, Any], tools: di
                 runner = _run_external
                 tool = "7z"
                 tool_path = str(seven_zip)
+            zip_password = ""
+            if variant == "encrypted_zipcrypto":
+                zip_password = "sunpack"
+                command_list = [str(seven_zip), "a", "-tzip", f"-mx={level}", f"-p{zip_password}", "-mem=ZipCrypto", "-y", str(output.resolve()), "."]
+                command = tuple(command_list)
+                runner = _run_external
+                tool = "7z"
+                tool_path = str(seven_zip)
             tasks.append(DeriveTask(
                 sample.name,
                 sample,
@@ -527,6 +536,7 @@ def _zip_tasks(sample: Path, material_root: Path, cfg: dict[str, Any], tools: di
                 zip_variant=variant,
                 zip_container_tags=tags,
                 zip_structure_features=features,
+                zip_password=zip_password,
             ))
     return tasks, []
 
@@ -538,7 +548,7 @@ def _zip_variant_method_levels(variant: str, cfg: dict[str, Any], levels: list[i
         return [("deflate", level) for level in levels]
     if variant == "mixed_store_deflate":
         return [("mixed", level) for level in levels]
-    if variant in {"data_descriptor_bit3", "long_comment", "sfx_stub", "duplicate_entries", "zip64_forced", "non_utf8_names", "split_zip", "sfx_split_zip"}:
+    if variant in {"data_descriptor_bit3", "long_comment", "sfx_stub", "duplicate_entries", "zip64_forced", "non_utf8_names", "split_zip", "sfx_split_zip", "encrypted_zipcrypto"}:
         return [("deflate", level) for level in levels]
     methods = [str(item) for item in _as_list(cfg.get("methods") or ["deflate"])]
     return [(method, level) for method in methods for level in levels]
@@ -884,6 +894,8 @@ def _base_record(task: DeriveTask, status: str) -> dict[str, Any]:
             "zip_level": task.level,
             "zip_structure_features": dict(task.zip_structure_features or {}),
         })
+        if task.zip_password:
+            record["zip_password"] = task.zip_password
         split_sidecar = task.output_path.with_name(task.output_path.name + ".split.json")
         if split_sidecar.is_file():
             try:
@@ -997,6 +1009,7 @@ def _zip_variant_tags(variant: str) -> tuple[str, ...]:
         "non_utf8_names": ("filename_encoding", "non_utf8_names"),
         "split_zip": ("split", "multi_volume"),
         "sfx_split_zip": ("sfx", "split", "multi_volume"),
+        "encrypted_zipcrypto": ("encrypted", "password_protected", "zipcrypto"),
     }
     return tuple(mapping.get(variant, ("zip",)))
 
@@ -1015,6 +1028,8 @@ def _zip_variant_features(variant: str, method: str, level: int) -> dict[str, An
         "has_long_comment": "long_comment" in tags,
         "has_filename_encoding_risk": "filename_encoding" in tags,
         "has_mixed_methods": "mixed_methods" in tags,
+        "has_encryption": "encrypted" in tags,
+        "encryption_method": "ZipCrypto" if "zipcrypto" in tags else "",
     }
 
 

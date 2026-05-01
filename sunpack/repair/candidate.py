@@ -474,11 +474,12 @@ def candidate_ranking_breakdown(candidate: RepairCandidate) -> dict[str, Any]:
     cost = _weighted_component_sum(cost_breakdown)
     risk = _weighted_component_sum(risk_breakdown)
     module_bias = _module_generation_bias(candidate)
-    raw_score = benefit * 0.55 + evidence * 0.25 + module_bias - cost * 0.18 - risk * 0.15
+    complexity_boost = _module_complexity_boost(candidate)
+    raw_score = benefit * 0.55 + evidence * 0.25 + module_bias - cost * 0.18 - risk * 0.15 + complexity_boost
     priority = _clamp01(raw_score)
     return {
         "version": 1,
-        "formula": "benefit*0.55 + evidence*0.25 + module_bias - cost*0.18 - risk*0.15",
+        "formula": "benefit*0.55 + evidence*0.25 + module_bias - cost*0.18 - risk*0.15 + complexity_boost",
         "generation_priority": priority,
         "raw_score": raw_score,
         "benefit_score": benefit,
@@ -492,6 +493,7 @@ def candidate_ranking_breakdown(candidate: RepairCandidate) -> dict[str, Any]:
             "cost": -0.18,
             "risk": -0.15,
             "module_bias": 1.0,
+            "complexity_boost": 1.0,
             "history": 0.0,
         },
         "contributions": {
@@ -500,6 +502,7 @@ def candidate_ranking_breakdown(candidate: RepairCandidate) -> dict[str, Any]:
             "cost": cost * -0.18,
             "risk": risk * -0.15,
             "module_bias": module_bias,
+            "complexity_boost": complexity_boost,
             "history": 0.0,
         },
         "benefit_breakdown": benefit_breakdown,
@@ -1019,6 +1022,22 @@ def _module_generation_bias(candidate: RepairCandidate) -> float:
         if "eocd_bad" in flags and not (flags & {"central_directory_bad", "directory_integrity_bad_or_unknown", "local_header_recovery"}):
             return 0.0
         return 0.11
+    return 0.0
+
+
+def _module_complexity_boost(candidate: RepairCandidate) -> float:
+    """Boost modules that handle multi-faceted damage (two-step, boundary+CD, etc.)."""
+    flags = {str(flag) for flag in candidate.damage_flags}
+    module = str(candidate.module_name or "")
+    complex_flags = flags & {"trailing_junk", "boundary_unreliable", "central_directory_bad",
+                              "directory_integrity_bad_or_unknown", "two_step_repair",
+                              "multi_round_repair_expected"}
+    if len(complex_flags) < 2:
+        return 0.0
+    if module in {"zip_central_directory_rebuild", "zip_cd_local_header_reconcile_rebuild"}:
+        return 0.06
+    if module == "zip_deep_partial_recovery":
+        return 0.08
     return 0.0
 
 

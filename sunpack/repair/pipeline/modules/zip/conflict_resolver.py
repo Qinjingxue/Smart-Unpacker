@@ -24,6 +24,7 @@ class ZipConflictResolverRebuild:
                 require_any_categories=("directory_rebuild", "content_recovery"),
                 require_any_flags=("duplicate_entries", "overlapping_entries", "local_header_conflict"),
                 require_any_failure_kinds=("structure_recognition", "corrupted_data", "checksum_error"),
+                reject_any_flags=("trailing_junk", "boundary_unreliable", "missing_volume"),
                 base_score=0.9,
             ),
         ),

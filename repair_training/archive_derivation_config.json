@@ -56,7 +56,8 @@
         "zip64_forced",
         "non_utf8_names",
         "split_zip",
-        "sfx_split_zip"
+        "sfx_split_zip",
+        "encrypted_zipcrypto"
       ],
       "variant_weights": {
         "normal_deflate": 0.8,
@@ -69,7 +70,8 @@
         "zip64_forced": 0.8,
         "non_utf8_names": 0.8,
         "split_zip": 1.0,
-        "sfx_split_zip": 0.7
+        "sfx_split_zip": 0.7,
+        "encrypted_zipcrypto": 1.0
       }
     },
     "7z": {
