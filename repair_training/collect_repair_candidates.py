@@ -274,20 +274,12 @@ def _dynamic_stream_modules(case) -> tuple[str, ...] | None:
 
 _FORMAT_MODULES: dict[str, tuple[str, ...]] = {
     "zip": (
-        "zip_eocd_repair",
-        "zip_comment_length_fix",
-        "zip_central_directory_count_fix",
-        "zip_central_directory_offset_fix",
-        "zip64_field_repair",
-        "zip_local_header_field_repair",
-        "zip_trailing_junk_trim",
-        "zip_central_directory_rebuild",
-        "zip_data_descriptor_recovery",
-        "zip_entry_quarantine_rebuild",
-        "zip_partial_recovery",
-        "zip_deep_partial_recovery",
-        "zip_missing_volume_partial_salvage",
-        "zip_conflict_resolver_rebuild",
+        "zip_fix_boundary",
+        "zip_fix_pointers",
+        "zip_fix_zip64",
+        "zip_rebuild",
+        "zip_salvage",
+        "zip_resolve_conflicts",
         "archive_nested_payload_salvage",
     ),
     "7z": (

@@ -515,67 +515,27 @@
     },
     "modules": [
       {
-        "name": "zip_eocd_repair",
+        "name": "zip_fix_boundary",
         "enabled": true
       },
       {
-        "name": "zip_comment_length_fix",
+        "name": "zip_fix_pointers",
         "enabled": true
       },
       {
-        "name": "zip_central_directory_count_fix",
+        "name": "zip_fix_zip64",
         "enabled": true
       },
       {
-        "name": "zip_central_directory_offset_fix",
+        "name": "zip_rebuild",
         "enabled": true
       },
       {
-        "name": "zip64_field_repair",
+        "name": "zip_salvage",
         "enabled": true
       },
       {
-        "name": "zip_local_header_field_repair",
-        "enabled": true
-      },
-      {
-        "name": "zip_trailing_junk_trim",
-        "enabled": true
-      },
-      {
-        "name": "zip_central_directory_rebuild",
-        "enabled": true
-      },
-      {
-        "name": "zip_data_descriptor_recovery",
-        "enabled": true
-      },
-      {
-        "name": "zip_local_header_verified_salvage",
-        "enabled": true
-      },
-      {
-        "name": "zip_cd_local_header_reconcile_rebuild",
-        "enabled": true
-      },
-      {
-        "name": "zip_entry_quarantine_rebuild",
-        "enabled": true
-      },
-      {
-        "name": "zip_partial_recovery",
-        "enabled": true
-      },
-      {
-        "name": "zip_deep_partial_recovery",
-        "enabled": true
-      },
-      {
-        "name": "zip_missing_volume_partial_salvage",
-        "enabled": true
-      },
-      {
-        "name": "zip_conflict_resolver_rebuild",
+        "name": "zip_resolve_conflicts",
         "enabled": true
       },
       {
