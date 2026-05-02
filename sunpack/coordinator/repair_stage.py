@@ -117,6 +117,8 @@ class ArchiveRepairStage:
                     "bytes_written": item.bytes_written,
                     "expected_size": item.expected_size,
                     "progress": item.progress,
+                    "crc_expected": item.crc_expected,
+                    "crc_actual": item.crc_actual,
                 }
                 for item in verification.file_observations
             ],

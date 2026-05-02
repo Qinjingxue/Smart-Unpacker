@@ -21,8 +21,12 @@ from repair_training.train_offline_rl import _feature_dict, _flatten, _excluded_
 
 KEEP_PREFIXES = (
     "state.verification_summary.",
+    "state.verification_per_file.",
     "state.extraction_summary.",
     "state.job_summary.",
+    "state.repair_hints.",
+    "state.fuzzy_profile.",
+    "state.analysis_native_probe.",
     "state.native_feedback.",
     "top.",
     "candidate.module",
@@ -161,7 +165,7 @@ def main(argv=None):
     # Print
     print()
     print("=" * 60)
-    print("SLIM MODEL RESULTS (5 state groups, no candidate features)")
+    print("SLIM MODEL RESULTS (state groups + candidate.module)")
     print("=" * 60)
     print(f"Features:  {len(feat_names)}")
     print(f"Rows:      {len(rows)} (train: {len(train_idx)}, eval: {len(eval_idx)})")
@@ -178,7 +182,7 @@ def main(argv=None):
     print("COMPARISON vs FULL MODEL:")
     print(f"  Full (219 feat): R2=0.9814  MAE=0.0203  Regret=0.00072")
     print(f"  Slim ({len(feat_names):3d} feat):  R2={metrics['r2']:.4f}  MAE={metrics['mae']:.4f}  Regret={metrics['future_return_regret_mean']:.6f}")
-    print(f"      (groups: state + native_feedback + candidate.module)")
+    print(f"      (state + fuzzy + extraction + verification + native probe + candidate.module)")
 
     return 0
 
