@@ -67,3 +67,5 @@ tests/cases/archive_scan/r3961_jpg_carrier_encrypted_rar
 .sunpack/
 models/
 datasets/
+bug.txt
+.deepseek/
