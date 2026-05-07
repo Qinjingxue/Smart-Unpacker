@@ -7,7 +7,7 @@ from sunpack.app.cli_constants import EXIT_OK, EXIT_RUNTIME, EXIT_USAGE
 from sunpack.app.cli_context import (
     CliContext,
 )
-from sunpack.config.cli_settings import DEFAULT_CLI_LANG, load_cli_language_from_config, normalize_cli_language
+from sunpack.config.cli_settings import DEFAULT_CLI_LANG, load_cli_language_from_config
 from sunpack.app.cli_parsers import (
     CliHelpFormatter,
     localize_help_action,
