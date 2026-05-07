@@ -33,21 +33,19 @@ class ZipFixPointers:
 
     def can_handle(self, job: RepairJob, diagnosis: RepairDiagnosis, config: dict) -> float:
         flags = set(job.damage_flags)
-        content_damage = {
-            "checksum_error", "crc_error", "entry_payload_bad", "damaged",
-            "content_integrity_bad_or_unknown", "data_error",
-        }
         if flags & {"carrier_archive", "sfx", "embedded_archive", "carrier_prefix"}:
             return 0.0
-        if flags & content_damage:
-            return 0.0
+        score = 0.0
+        content_damage = flags & {"checksum_error", "crc_error", "entry_payload_bad", "damaged", "content_integrity_bad_or_unknown", "data_error"}
         if "eocd_bad" in flags:
-            return 0.97
-        if flags & {"central_directory_offset_bad", "central_directory_count_bad", "central_directory_bad"}:
-            return 0.90
-        if flags & {"directory_integrity_bad_or_unknown"}:
-            return 0.85
-        return 0.0
+            score = 0.97
+        elif flags & {"central_directory_offset_bad", "central_directory_count_bad", "central_directory_bad"}:
+            score = 0.90
+        elif flags & {"directory_integrity_bad_or_unknown"}:
+            score = 0.85
+        if content_damage and score > 0:
+            score = max(0.30, score - 0.40)
+        return score
 
     def repair(self, job: RepairJob, diagnosis: RepairDiagnosis, workspace: str, config: dict) -> RepairResult:
         flags = set(job.damage_flags)

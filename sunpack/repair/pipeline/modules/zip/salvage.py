@@ -57,6 +57,9 @@ class ZipSalvage:
             return 0.97
         if coverage.payload_only_suspected:
             return 0.94
+        # store method: no compression to validate against, lower confidence but still try
+        if not flags & {"data_descriptor", "compressed_size_bad", "bit3_data_descriptor"} and flags & {"crc_error", "checksum_error", "entry_payload_bad", "corrupted_data"}:
+            return 0.78
         if flags & {"crc_error", "checksum_error", "payload_damaged", "entry_payload_bad", "corrupted_data"}:
             return 0.92
         if flags & {"central_directory_bad", "directory_integrity_bad_or_unknown", "local_header_recovery"}:
@@ -92,7 +95,11 @@ class ZipSalvage:
             return self._missing_volume_salvage(job, diagnosis, workspace, config)
 
         # Mode 4: Deep partial recovery
-        return self._deep_salvage(job, diagnosis, workspace, config)
+        result = self._deep_salvage(job, diagnosis, workspace, config)
+        if result.ok or result.status != "unrepairable":
+            return result
+        # Fallback: try lightweight salvage even when deep recovery fails
+        return self._lightweight_salvage(job, diagnosis, workspace, config)
 
     def generate_candidates(self, job: RepairJob, diagnosis: RepairDiagnosis, workspace: str, config: dict):
         flags = set(job.damage_flags)
@@ -265,5 +272,37 @@ class ZipSalvage:
             message="deep partial recovery produced a candidate",
         )
 
+
+    def _lightweight_salvage(self, job, diagnosis, workspace, config):
+        """Fallback: try verified entry salvage with empty quarantine list when deep recovery fails."""
+        deep = config.get("deep") if isinstance(config.get("deep"), dict) else {}
+        result = dict(_native_zip_verified_entry_salvage(
+            source_input_for_job(job), workspace, self.spec.name,
+            [],
+            int(deep.get("max_entries", 20000) or 20000),
+            float(deep.get("max_input_size_mb", 512) or 0),
+            float(deep.get("max_output_size_mb", 2048) or 0),
+            float(deep.get("max_entry_uncompressed_mb", 512) or 0),
+            float(deep.get("max_seconds_per_module", 30.0) or 0),
+        ))
+        status = str(result.get("status") or "unrepairable")
+        selected_path = str(result.get("selected_path") or "")
+        if status in {"repaired", "partial"} and selected_path:
+            return RepairResult(
+                status="partial", confidence=0.65, format="zip",
+                repaired_input={"kind": "file", "path": selected_path, "format_hint": "zip"},
+                actions=list(result.get("actions") or []),
+                damage_flags=list(job.damage_flags),
+                warnings=list(result.get("warnings") or []),
+                workspace_paths=list(result.get("workspace_paths") or []),
+                partial=True, module_name=self.spec.name,
+                diagnosis={**diagnosis.as_dict(), "native_zip_salvage_lightweight": result},
+                message="lightweight salvage produced a candidate",
+            )
+        return RepairResult(
+            status="unrepairable", confidence=0.0, format="zip",
+            module_name=self.spec.name, diagnosis=diagnosis.as_dict(),
+            message="lightweight salvage did not produce a candidate",
+        )
 
 register_repair_module(ZipSalvage())

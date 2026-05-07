@@ -27,6 +27,8 @@ TERMINAL_FAILURE_FLAGS = {
     "output_filesystem",
     "process_failure",
 }
+MAX_STAGNATION_ROUNDS = 2
+COMPLETENESS_REGRESSION_THRESHOLD = 0.3
 
 
 @dataclass(frozen=True)
@@ -130,6 +132,15 @@ class RepairLoopState:
             self.stop("repeated_repair_input", trigger=trigger, result=result)
             return False
         self._add_seen_input_digest(next_digest)
+
+        if self._detect_stagnation(round_payload):
+            self.stop("completeness_stagnation", trigger=trigger, result=result)
+            return False
+        if self._detect_regression(round_payload):
+            self._restore_previous_state()
+            self.stop("completeness_regression", trigger=trigger, result=result)
+            return False
+
         self.task.fact_bag.set("repair.loop.current_digest", next_digest)
         self._append_round(round_payload)
         LOGGER.info("archive repair round completed: %s", round_payload)
@@ -276,6 +287,35 @@ class RepairLoopState:
     def _elapsed_seconds(self) -> float:
         return time.monotonic() - self.started_at
 
+    def _detect_stagnation(self, round_payload: dict[str, Any]) -> bool:
+        rounds = self.task.fact_bag.get("repair.loop.rounds")
+        items = list(rounds) if isinstance(rounds, list) else []
+        if len(items) < MAX_STAGNATION_ROUNDS:
+            return False
+        recent = items[-MAX_STAGNATION_ROUNDS:]
+        values = [r.get("completeness", -1.0) for r in recent if isinstance(r, dict)]
+        if len(values) < MAX_STAGNATION_ROUNDS:
+            return False
+        if all(v == values[0] for v in values) and values[0] < 1.0:
+            return True
+        return False
+
+    def _detect_regression(self, round_payload: dict[str, Any]) -> bool:
+        rounds = self.task.fact_bag.get("repair.loop.rounds")
+        items = list(rounds) if isinstance(rounds, list) else []
+        if len(items) < 2:
+            return False
+        prev = float(items[-2].get("completeness", -1.0)) if isinstance(items[-2], dict) else -1.0
+        curr = float(round_payload.get("completeness", -1.0))
+        return prev > 0 and curr >= 0 and prev - curr > COMPLETENESS_REGRESSION_THRESHOLD
+
+    def _restore_previous_state(self) -> None:
+        rounds = self.task.fact_bag.get("repair.loop.rounds")
+        items = list(rounds) if isinstance(rounds, list) else []
+        if len(items) >= 2 and isinstance(items[-2], dict):
+            prev_digest = str(items[-2].get("input_digest", ""))
+            if prev_digest:
+                self.task.fact_bag.set("repair.loop.current_digest", prev_digest)
 
 def terminal_failure_reason(result: ExtractionResult) -> str:
     diagnostics = result.diagnostics if isinstance(result.diagnostics, dict) else {}

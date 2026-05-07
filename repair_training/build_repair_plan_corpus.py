@@ -199,6 +199,8 @@ def _material_build(args: argparse.Namespace, material_root: Path) -> int:
                             material_sample_id=sample_dir.name,
                             damage_json_path=str(damage_json_path),
                         )
+                        if zip_password and not record.get("password"):
+                            record["password"] = zip_password
                         record["damage_layer"] = layer
                         record["requested_damage_layer"] = requested_layer
                         record["actual_damage_layer"] = layer
@@ -334,6 +336,8 @@ def _zip_structure_target_profile(
     variant = str(source_derivation.get("zip_variant") or "").lower()
     tags = {str(item).lower() for item in source_derivation.get("zip_container_tags") or []}
     candidates: list[str] = []
+    if variant == "encrypted_zipcrypto" or "encrypted" in tags:
+        candidates.extend(["zip_encrypted_trailing_junk", "zip_encrypted_payload_bad"])
     if variant in {"sfx_stub", "sfx_split_zip"} or "sfx" in tags:
         candidates.extend(["zip_sfx_cd_damage", "zip_sfx_payload_damage"])
     if variant == "sfx_split_zip":

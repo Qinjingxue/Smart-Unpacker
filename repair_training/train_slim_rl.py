@@ -53,7 +53,7 @@ def main(argv=None):
 
     dataset_dir = Path(args.dataset_dir)
     rows = []
-    for path in sorted(dataset_dir.glob("repair_plan_ltr_*_zip_terminal_recovery.jsonl")):
+    for path in sorted(dataset_dir.glob("repair_plan_ltr_*_zip_v4*_terminal_recovery.jsonl")):
         with path.open("r", encoding="utf-8") as h:
             for line in h:
                 line = line.strip()

@@ -36,6 +36,10 @@ class ZipFix64:
             return 0.99
         if "zip64" in flags and flags & {"central_directory_bad", "compressed_size_bad", "local_header_bad"}:
             return 0.88
+        if "zip64" in flags:
+            return 0.70
+        if flags & {"compressed_size_bad", "local_header_bad"}:
+            return 0.35
         return 0.0
 
     def repair(self, job: RepairJob, diagnosis: RepairDiagnosis, workspace: str, config: dict) -> RepairResult:

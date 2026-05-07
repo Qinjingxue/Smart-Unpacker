@@ -421,6 +421,16 @@ class RepairScheduler:
         candidates.sort(key=lambda item: self._module_sort_key(item[0], item[1], item[2], item[3], diagnosis.format))
         limit = self._module_limit(auto_deep=auto_deep)
         selected_names = {module.spec.name for _, module, _, _ in candidates[:limit]}
+        selected = list(candidates[:limit])
+        if len(selected_names) < 3 and len(candidates) > len(selected):
+            for score, module, route_score, fine_score in candidates[limit:]:
+                if module.spec.name in selected_names:
+                    continue
+                selected.append((score, module, route_score, fine_score))
+                selected_names.add(module.spec.name)
+                if len(selected_names) >= 3:
+                    break
+            selected.sort(key=lambda item: self._module_sort_key(item[0], item[1], item[2], item[3], diagnosis.format))
         if selected_names:
             decisions = [
                 replace(
@@ -441,9 +451,11 @@ class RepairScheduler:
             failure_kind=context.failure_kind,
             modules=decisions,
         )
-        return candidates[:limit], decision
+        return selected, decision
 
     def _module_sort_key(self, score: float, module, route_score: float, fine_score: float, diagnosis_format: str = "") -> tuple:
+        boundary_first = -10 if module.spec.name == "zip_fix_boundary" else 0
+        pointers_first = -5 if module.spec.name == "zip_fix_pointers" else 0
         return (
             -float(score or 0.0),
             -float(fine_score or 0.0),
@@ -451,6 +463,8 @@ class RepairScheduler:
             _format_specificity_penalty(diagnosis_format, module.spec.formats),
             -_route_specificity(module.spec.routes),
             -_stage_rank(module.spec.stage),
+            boundary_first,
+            pointers_first,
             0 if module.spec.safe else 1,
             1 if module.spec.lossy else 0,
             1 if module.spec.partial else 0,

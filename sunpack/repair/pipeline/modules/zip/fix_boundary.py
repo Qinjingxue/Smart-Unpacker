@@ -30,7 +30,7 @@ class ZipFixBoundary:
                     "trailing_junk", "boundary_unreliable", "trailing_padding",
                 ),
                 require_any_fuzzy_hints=("trailing_text_junk_likely", "tail_printable_region", "trailing_padding_likely"),
-                reject_any_flags=("wrong_password", "carrier_archive", "sfx", "embedded_archive", "carrier_prefix"),
+                reject_any_flags=("wrong_password", "carrier_archive", "embedded_archive", "carrier_prefix"),
                 base_score=0.80,
             ),
         ),
@@ -38,10 +38,12 @@ class ZipFixBoundary:
 
     def can_handle(self, job: RepairJob, diagnosis: RepairDiagnosis, config: dict) -> float:
         flags = set(job.damage_flags)
-        if flags & {"carrier_archive", "sfx", "embedded_archive", "carrier_prefix"}:
+        if flags & {"carrier_archive", "embedded_archive", "carrier_prefix"}:
             return 0.0
         if flags & {"trailing_junk", "boundary_unreliable"}:
             return 0.88
+        if "sfx" in flags and flags & {"trailing_junk", "boundary_unreliable"}:
+            return 0.70
         if flags & {"zip_comment_length_bad", "comment_length_bad", "eocd_bad"}:
             if flags & {"trailing_junk"}:
                 return 0.50

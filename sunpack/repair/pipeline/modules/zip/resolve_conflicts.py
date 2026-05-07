@@ -24,7 +24,7 @@ class ZipResolveConflicts:
                 require_any_categories=("directory_rebuild", "content_recovery"),
                 require_any_flags=("duplicate_entries", "overlapping_entries", "local_header_conflict"),
                 require_any_failure_kinds=("structure_recognition", "corrupted_data", "checksum_error"),
-                reject_any_flags=("trailing_junk", "boundary_unreliable", "missing_volume"),
+                reject_any_flags=("missing_volume",),
                 base_score=0.90,
             ),
         ),
@@ -34,6 +34,10 @@ class ZipResolveConflicts:
         flags = set(job.damage_flags)
         if flags & {"duplicate_entries", "overlapping_entries", "local_header_conflict"}:
             return 0.96
+        if flags & {"central_directory_offset_bad", "local_header_recovery"} and flags & {"central_directory_bad"}:
+            return 0.50
+        if "directory_rebuild" in diagnosis.categories and flags & {"central_directory_offset_bad", "central_directory_bad", "local_header_recovery"}:
+            return 0.55
         return 0.0
 
     def repair(self, job: RepairJob, diagnosis: RepairDiagnosis, workspace: str, config: dict) -> RepairResult:
