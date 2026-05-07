@@ -1,7 +1,7 @@
 import json
-path = 'repair_training/datasets/repair_plan_ltr_failure.jsonl'
-f = open(path, 'r', encoding='utf-8')
+f = open('repair_training/datasets/.collect_shards/task_failure_00000.jsonl', 'r', encoding='utf-8')
 d = json.loads(f.readline())
-for k, v in sorted(d.items()):
-    print(k, '=', str(v)[:120])
+print('message:', d.get('message','')[:500])
+print('error:', d.get('error','')[:500])
+print('all keys:', list(d.keys()))
 f.close()
