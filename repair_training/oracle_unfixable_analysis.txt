@@ -1,0 +1,927 @@
+=== ORACLE-UNFIXABLE SAMPLE ANALYSIS ===
+Total records: 2225, all are Oracle-unfixable
+Sampled: 30 via random.seed(42)
+
+──────────────────────────────────────────────────────────────────────
+CASE 1: 22__zip__sfx_split_zip__deflate__l5_zip_split_missing_middle_volume_2
+  Variant: sfx_split_zip | Module: zip_fix_boundary | Cand: zip_fix_boundary
+  Terminal: no_output | Completeness: 0.0 | TRR: 0.0
+  Rollout: branch=1, states=2, terminals={'max_rounds': 1}
+  Path modules: ['zip_fix_boundary'] | Path actions: ['trim_after_eocd']
+  Cand status: repaired | Cand actions: ['plan_repair', 'zip_fix_boundary']
+  Cand damage_flags: ['central_directory_bad', 'central_directory_offset_bad', 'central_directory_count_bad', 'checksum_error', 'crc_error', 'damaged', 'trailing_junk', 'boundary_unreliable', 'input_truncated']
+  Damage JSON keys:
+    layer: deceptive_hard_negative | profile: zip_sfx_split_missing_volume | oracle_strength: entry_match
+    difficulty_tags: ['near_valid_directory', 'sfx_carrier_prefix', 'split_or_missing_volume']
+    oracle.expected_statuses: ['repaired', 'partial', 'unrepairable', 'unsupported'] | oracle.expected_module: 
+    json_damage_flags: ['central_directory_bad', 'central_directory_offset_bad', 'central_directory_count_bad', 'checksum_error', 'crc_error', 'damaged', 'trailing_junk', 'boundary_unreliable', 'missing_volume', 'input_truncated']
+  Damage operations:
+    [0] corpus_zip_sfx_prefix_refresh (kind=sfx, zone=zip.sfx.prefix, op=insert)
+        effect: archive is embedded behind a carrier prefix
+    [1] corpus_zip_bad_eocd_counts (kind=eocd, zone=zip.eocd.entry_counts, op=replace_range)
+        effect: directory entry counts conflict
+    [2] corpus_zip_bad_eocd_cd_offset (kind=eocd, zone=zip.eocd.cd_offset, op=replace_range)
+        effect: central directory offset points at start
+    [3] corpus_zip_bad_eocd_comment_length (kind=eocd, zone=zip.eocd.comment_length, op=replace_range)
+        effect: comment boundary is untrusted
+    [4] corpus_zip_sfx_split_missing_volume (kind=sfx, zone=zip.missing_volume, op=delete)
+        effect: SFX split archive is missing a volume range
+    [5] corpus_zip_flip_payload_byte (kind=payload, zone=zip.local_payload, op=replace_range)
+        effect: payload checksum may fail
+    [6] corpus_zip_delete_middle_volume_bytes (kind=volume, zone=zip.missing_volume, op=delete)
+        effect: middle archive bytes are missing
+    [7] corpus_zip_append_tail_junk (kind=tail, zone=archive.tail, op=append)
+        effect: extra bytes after archive
+  Runtime context:
+    native_status: crc_error
+    verification: completeness=0.0, integrity=damaged, assessment=unusable
+    repair_hints: damage_flags=[], likely_truncated=False
+  >>> DIAGNOSIS [multi_volume_missing]: Split/multi-volume with missing data. Profile=zip_sfx_split_missing_volume, layer=deceptive_hard_negative. Missing volume segments are physically unrecoverable.
+──────────────────────────────────────────────────────────────────────
+CASE 2: 122__zip__split_zip__deflate__l5_zip_split_missing_middle_volume_9
+  Variant: split_zip | Module: zip_fix_boundary | Cand: zip_fix_boundary
+  Terminal: no_output | Completeness: 0.0 | TRR: 0.0
+  Rollout: branch=0, states=1, terminals={'dead_end': 1}
+  Path modules: [] | Path actions: []
+  Cand status: repaired | Cand actions: ['plan_repair', 'zip_fix_boundary']
+  Cand damage_flags: ['central_directory_bad', 'central_directory_offset_bad', 'central_directory_count_bad', 'checksum_error', 'crc_error', 'damaged', 'trailing_junk', 'boundary_unreliable', 'input_truncated']
+  Damage JSON keys:
+    layer: two_step_repair | profile: zip_split_missing_middle_volume | oracle_strength: entry_match
+    difficulty_tags: ['near_valid_directory', 'split_or_missing_volume']
+    oracle.expected_statuses: ['repaired', 'partial', 'unrepairable', 'unsupported'] | oracle.expected_module: 
+    json_damage_flags: ['central_directory_bad', 'central_directory_offset_bad', 'central_directory_count_bad', 'checksum_error', 'crc_error', 'damaged', 'trailing_junk', 'boundary_unreliable', 'missing_volume', 'input_truncated']
+  Damage operations:
+    [0] corpus_zip_split_missing_middle_volume (kind=volume, zone=zip.missing_volume, op=delete)
+        effect: middle split volume bytes are missing
+    [1] corpus_zip_bad_eocd_counts (kind=eocd, zone=zip.eocd.entry_counts, op=replace_range)
+        effect: directory entry counts conflict
+    [2] corpus_zip_bad_eocd_cd_offset (kind=eocd, zone=zip.eocd.cd_offset, op=replace_range)
+        effect: central directory offset points at start
+    [3] corpus_zip_bad_eocd_comment_length (kind=eocd, zone=zip.eocd.comment_length, op=replace_range)
+        effect: comment boundary is untrusted
+    [4] corpus_zip_flip_payload_byte (kind=payload, zone=zip.local_payload, op=replace_range)
+        effect: payload checksum may fail
+    [5] corpus_zip_append_tail_junk (kind=tail, zone=archive.tail, op=append)
+        effect: extra bytes after archive
+  Runtime context:
+    native_status: crc_error
+    verification: completeness=0.0, integrity=damaged, assessment=unusable
+    repair_hints: damage_flags=[], likely_truncated=False
+  >>> DIAGNOSIS [multi_volume_missing]: Split/multi-volume with missing data. Profile=zip_split_missing_middle_volume, layer=two_step_repair. Missing volume segments are physically unrecoverable.
+──────────────────────────────────────────────────────────────────────
+CASE 3: ghostcp__zip__encrypted_zipcrypto__deflate__l0_zip_cd_crc_wrong_local_payload_correct_10
+  Variant: encrypted_zipcrypto | Module: zip_salvage | Cand: zip_salvage
+  Terminal: no_progress | Completeness: 0.0 | TRR: 0.0
+  Rollout: branch=1, states=2, terminals={'max_rounds': 1}
+  Path modules: [] | Path actions: []
+  Cand status: partial | Cand actions: ['deep_scan_local_headers', 'verify_entry_payloads', 'write_strict_verified_zip']
+  Cand damage_flags: ['damaged']
+  Damage JSON keys:
+    layer:  | profile:  | oracle_strength: 
+    difficulty_tags: []
+    oracle.expected_statuses: [] | oracle.expected_module: 
+    json_damage_flags: []
+  Damage operations:
+  Runtime context:
+    native_status: crc_error
+    verification: completeness=0.0, integrity=complete, assessment=inconsistent
+    repair_hints: damage_flags=[], likely_truncated=False
+  >>> DIAGNOSIS [encrypted_limitation]: Encrypted archive (encrypted_zipcrypto); module=zip_salvage. Encryption blocks deep inspection & payload verification.
+──────────────────────────────────────────────────────────────────────
+CASE 4: DCservice__zip__sfx_stub__deflate__l5_zip_sfx_payload_damage_6
+  Variant: sfx_stub | Module: zip_fix_boundary | Cand: zip_fix_boundary
+  Terminal: max_rounds | Completeness: 0.0 | TRR: 1.0
+  Rollout: branch=1, states=2, terminals={'max_rounds': 1}
+  Path modules: ['zip_fix_pointers'] | Path actions: ['scan_central_directory', 'rebuild_eocd']
+  Cand status: repaired | Cand actions: ['plan_repair', 'zip_fix_boundary']
+  Cand damage_flags: ['trailing_junk', 'boundary_unreliable', 'checksum_error', 'crc_error', 'damaged']
+  Damage JSON keys:
+    layer: hard_negative | profile: zip_sfx_cd_damage | oracle_strength: entry_match
+    difficulty_tags: ['near_valid_directory', 'sfx_carrier_prefix']
+    oracle.expected_statuses: ['repaired', 'partial', 'unrepairable', 'unsupported'] | oracle.expected_module: 
+    json_damage_flags: ['central_directory_bad', 'central_directory_offset_bad', 'central_directory_count_bad', 'trailing_junk', 'boundary_unreliable']
+  Damage operations:
+    [0] corpus_zip_sfx_prefix_refresh (kind=sfx, zone=zip.sfx.prefix, op=insert)
+        effect: archive is embedded behind a carrier prefix
+    [1] corpus_zip_bad_eocd_counts (kind=eocd, zone=zip.eocd.entry_counts, op=replace_range)
+        effect: directory entry counts conflict
+    [2] corpus_zip_bad_eocd_cd_offset (kind=eocd, zone=zip.eocd.cd_offset, op=replace_range)
+        effect: central directory offset points at start
+    [3] corpus_zip_bad_eocd_comment_length (kind=eocd, zone=zip.eocd.comment_length, op=replace_range)
+        effect: comment boundary is untrusted
+  Runtime context:
+    native_status: crc_error
+    verification: completeness=0.0, integrity=damaged, assessment=unusable
+    repair_hints: damage_flags=[], likely_truncated=False
+  >>> DIAGNOSIS [sfx_payload_damage]: SFX variant (sfx_stub), payload damage under SFX prefix. Module=zip_fix_boundary, dmg_profile=zip_sfx_cd_damage.
+──────────────────────────────────────────────────────────────────────
+CASE 5: aaaaa__zip__sfx_stub__deflate__l5_zip_sfx_payload_damage_11
+  Variant: sfx_stub | Module: zip_rebuild | Cand: zip_rebuild
+  Terminal: no_output | Completeness: 0.0 | TRR: 0.0
+  Rollout: branch=1, states=2, terminals={'max_rounds': 1}
+  Path modules: ['zip_fix_pointers'] | Path actions: ['scan_central_directory', 'rebuild_eocd']
+  Cand status: repaired | Cand actions: ['plan_repair', 'zip_rebuild']
+  Cand damage_flags: ['trailing_junk', 'boundary_unreliable', 'checksum_error', 'crc_error', 'damaged']
+  Damage JSON keys:
+    layer:  | profile:  | oracle_strength: 
+    difficulty_tags: []
+    oracle.expected_statuses: [] | oracle.expected_module: 
+    json_damage_flags: []
+  Damage operations:
+  Runtime context:
+    native_status: crc_error
+    verification: completeness=0.0, integrity=damaged, assessment=unusable
+    repair_hints: damage_flags=[], likely_truncated=False
+  >>> DIAGNOSIS [sfx_payload_damage]: SFX variant (sfx_stub), payload damage under SFX prefix. Module=zip_rebuild, dmg_profile=.
+──────────────────────────────────────────────────────────────────────
+CASE 6: 22__zip__split_zip__deflate__l9_zip_split_missing_middle_volume_7
+  Variant: split_zip | Module: zip_fix_zip64 | Cand: zip_fix_zip64
+  Terminal: no_output | Completeness: 0.0 | TRR: 0.0
+  Rollout: branch=1, states=2, terminals={'max_rounds': 1}
+  Path modules: [] | Path actions: []
+  Cand status: repaired | Cand actions: ['plan_repair', 'zip_fix_zip64']
+  Cand damage_flags: ['central_directory_bad', 'central_directory_offset_bad', 'central_directory_count_bad', 'checksum_error', 'crc_error', 'damaged', 'trailing_junk', 'boundary_unreliable', 'input_truncated']
+  Damage JSON keys:
+    layer: structural_directory | profile: zip_split_tail_volume_truncated | oracle_strength: entry_match
+    difficulty_tags: ['split_or_missing_volume']
+    oracle.expected_statuses: ['repaired', 'partial', 'unrepairable', 'unsupported'] | oracle.expected_module: 
+    json_damage_flags: ['central_directory_bad', 'central_directory_offset_bad', 'central_directory_count_bad', 'checksum_error', 'crc_error', 'damaged', 'trailing_junk', 'boundary_unreliable', 'missing_volume', 'input_truncated']
+  Damage operations:
+    [0] corpus_zip_split_tail_volume_truncated (kind=tail, zone=zip.missing_volume, op=truncate)
+        effect: tail split volume is truncated
+    [1] corpus_zip_split_tail_marker (kind=tail, zone=archive.tail, op=append)
+        effect: split tail has extra boundary noise
+    [2] corpus_zip_flip_payload_byte (kind=payload, zone=zip.local_payload, op=replace_range)
+        effect: payload checksum may fail
+    [3] corpus_zip_append_tail_junk (kind=tail, zone=archive.tail, op=append)
+        effect: extra bytes after archive
+  Runtime context:
+    native_status: crc_error
+    verification: completeness=0.0, integrity=damaged, assessment=unusable
+    repair_hints: damage_flags=[], likely_truncated=False
+  >>> DIAGNOSIS [multi_volume_missing]: Split/multi-volume with missing data. Profile=zip_split_tail_volume_truncated, layer=structural_directory. Missing volume segments are physically unrecoverable.
+──────────────────────────────────────────────────────────────────────
+CASE 7: 22__zip__normal_store__store__l0_zip_all_entry_payload_damage_with_directory_9
+  Variant: normal_store | Module: zip_fix_pointers | Cand: zip_fix_pointers
+  Terminal: no_output | Completeness: 0.0 | TRR: 0.0
+  Rollout: branch=1, states=2, terminals={'max_rounds': 1}
+  Path modules: [] | Path actions: []
+  Cand status: partial | Cand actions: ['scan_central_directory', 'rebuild_eocd']
+  Cand damage_flags: ['trailing_junk', 'boundary_unreliable', 'checksum_error', 'crc_error', 'damaged']
+  Damage JSON keys:
+    layer: structural_directory | profile: zip_drop_central_directory_keep_local_headers | oracle_strength: entry_match
+    difficulty_tags: ['near_valid_directory']
+    oracle.expected_statuses: ['repaired', 'partial', 'unrepairable', 'unsupported'] | oracle.expected_module: 
+    json_damage_flags: ['central_directory_bad', 'central_directory_offset_bad', 'central_directory_count_bad', 'input_truncated']
+  Damage operations:
+    [0] corpus_zip_drop_central_directory_keep_local_headers (kind=central_directory, zone=zip.central_directory, op=truncate)
+        effect: central directory is missing but local headers remain
+    [1] corpus_zip_eocd_disk_entry_count_near_wrong (kind=eocd, zone=zip.eocd.entry_count_disk, op=replace_range)
+        effect: EOCD disk entry count is plausible but wrong
+    [2] corpus_zip_eocd_total_entry_count_near_wrong (kind=eocd, zone=zip.eocd.entry_count_total, op=replace_range)
+        effect: EOCD total entry count is plausible but wrong
+  Runtime context:
+    native_status: crc_error
+    verification: completeness=0.0, integrity=damaged, assessment=unusable
+    repair_hints: damage_flags=[], likely_truncated=False
+  >>> DIAGNOSIS [partial_insufficient]: Partial repair insufficient. Module=zip_fix_pointers, actions=['scan_central_directory', 'rebuild_eocd'], completeness=0.0.
+──────────────────────────────────────────────────────────────────────
+CASE 8: 22__zip__encrypted_zipcrypto__deflate__l5_zip_two_step_comment_fix_then_eocd_repair_3
+  Variant: encrypted_zipcrypto | Module: zip_fix_boundary | Cand: zip_fix_boundary
+  Terminal: no_output | Completeness: 0.0 | TRR: 0.0
+  Rollout: branch=1, states=2, terminals={'max_rounds': 1}
+  Path modules: [] | Path actions: []
+  Cand status: repaired | Cand actions: ['plan_repair', 'zip_fix_boundary']
+  Cand damage_flags: ['damaged']
+  Damage JSON keys:
+    layer: two_step_repair | profile: zip_two_step_boundary_then_cd_rebuild | oracle_strength: entry_match
+    difficulty_tags: ['near_valid_directory', 'two_step_repair']
+    oracle.expected_statuses: ['repaired', 'partial', 'unrepairable', 'unsupported'] | oracle.expected_module: 
+    json_damage_flags: ['central_directory_bad', 'central_directory_offset_bad', 'central_directory_count_bad', 'two_step_repair', 'multi_round_repair_expected', 'trailing_junk', 'boundary_unreliable']
+  Damage operations:
+    [0] corpus_zip_two_step_boundary_junk (kind=append, zone=archive.tail, op=append)
+        effect: boundary must be trusted before rebuilding the central directory
+    [1] corpus_zip_two_step_drop_cd (kind=truncate, zone=zip.central_directory, op=truncate)
+        effect: central directory rebuild is needed after boundary trim
+    [2] corpus_zip_insert_sfx_prefix (kind=sfx, zone=zip.sfx.prefix, op=insert)
+        effect: archive is embedded behind a carrier prefix
+  Runtime context:
+    native_status: crc_error
+    verification: completeness=0.0, integrity=damaged, assessment=unusable
+    repair_hints: damage_flags=[], likely_truncated=False
+  >>> DIAGNOSIS [encrypted_limitation]: Encrypted archive (encrypted_zipcrypto); module=zip_fix_boundary. Encryption blocks deep inspection & payload verification.
+──────────────────────────────────────────────────────────────────────
+CASE 9: List__zip__encrypted_zipcrypto__deflate__l5_zip_two_step_drop_cd_with_eocd_noise_8
+  Variant: encrypted_zipcrypto | Module: zip_salvage | Cand: zip_salvage
+  Terminal: no_output | Completeness: 0.0 | TRR: 0.0
+  Rollout: branch=1, states=2, terminals={'max_rounds': 1}
+  Path modules: ['zip_fix_pointers'] | Path actions: ['scan_central_directory', 'rebuild_eocd']
+  Cand status: partial | Cand actions: ['plan_repair', 'zip_salvage']
+  Cand damage_flags: []
+  Damage JSON keys:
+    layer: two_step_repair | profile: zip_two_step_comment_fix_then_eocd_repair | oracle_strength: entry_match
+    difficulty_tags: ['near_valid_directory', 'two_step_repair', 'boundary_comment_ambiguity']
+    oracle.expected_statuses: ['repaired', 'partial', 'unrepairable', 'unsupported'] | oracle.expected_module: 
+    json_damage_flags: ['central_directory_bad', 'central_directory_offset_bad', 'central_directory_count_bad', 'two_step_repair', 'multi_round_repair_expected']
+  Damage operations:
+    [0] corpus_zip_two_step_bad_comment_len (kind=replace_range, zone=zip.eocd.comment_length, op=replace_range)
+        effect: comment length must be normalized first
+    [1] corpus_zip_two_step_comment_noise (kind=append, zone=zip.eocd.comment, op=append)
+        effect: comment noise hides the real EOCD boundary
+    [2] corpus_zip_two_step_bad_counts (kind=replace_range, zone=zip.eocd.entry_counts, op=replace_range)
+        effect: EOCD counts need a second repair
+  Runtime context:
+    native_status: crc_error
+    verification: completeness=0.0, integrity=complete, assessment=inconsistent
+    repair_hints: damage_flags=[], likely_truncated=False
+  >>> DIAGNOSIS [encrypted_limitation]: Encrypted archive (encrypted_zipcrypto); module=zip_salvage. Encryption blocks deep inspection & payload verification.
+──────────────────────────────────────────────────────────────────────
+CASE 10: 22__zip__data_descriptor_bit3__deflate__l5_zip_data_descriptor_payload_bad_2
+  Variant: data_descriptor_bit3 | Module: zip_fix_boundary | Cand: zip_fix_boundary
+  Terminal: no_output | Completeness: 0.0 | TRR: 0.0
+  Rollout: branch=1, states=2, terminals={'max_rounds': 1}
+  Path modules: [] | Path actions: []
+  Cand status: partial | Cand actions: ['trim_after_eocd']
+  Cand damage_flags: ['trailing_junk', 'boundary_unreliable', 'checksum_error', 'crc_error', 'damaged']
+  Damage JSON keys:
+    layer: deceptive_hard_negative | profile: zip_data_descriptor_payload_bad | oracle_strength: entry_match
+    difficulty_tags: ['near_valid_directory', 'deceptive_structural_success', 'hash_mismatch_risk', 'metadata_semantics_conflict']
+    oracle.expected_statuses: ['repaired', 'partial', 'unrepairable', 'unsupported'] | oracle.expected_module: 
+    json_damage_flags: ['central_directory_bad', 'central_directory_offset_bad', 'central_directory_count_bad', 'checksum_error', 'crc_error', 'damaged', 'hard_negative_target', 'payload_hash_mismatch', 'deceptive_structural_success', 'trailing_junk', 'boundary_unreliable']
+  Damage operations:
+    [0] corpus_zip_local_data_descriptor_flag_set (kind=replace_range, zone=zip.local_header.flags, op=replace_range)
+        effect: local header claims a data descriptor is present
+    [1] corpus_zip_cd_data_descriptor_flag_conflict (kind=replace_range, zone=zip.central_directory.flags, op=replace_range)
+        effect: central directory disagrees about data descriptor usage
+    [2] corpus_zip_fake_data_descriptor (kind=insert, zone=zip.data_descriptor, op=insert)
+        effect: fake data descriptor conflicts with metadata
+    [3] corpus_zip_eocd_disk_entry_count_near_wrong (kind=eocd, zone=zip.eocd.entry_count_disk, op=replace_range)
+        effect: EOCD disk entry count is plausible but wrong
+    [4] corpus_zip_eocd_total_entry_count_near_wrong (kind=eocd, zone=zip.eocd.entry_count_total, op=replace_range)
+        effect: EOCD total entry count is plausible but wrong
+    [5] corpus_zip_data_descriptor_payload_bad_0 (kind=payload, zone=zip.local_payload, op=replace_range)
+        effect: descriptor entry payload is damaged: ar.pak
+    [6] corpus_zip_flip_payload_byte (kind=payload, zone=zip.local_payload, op=replace_range)
+        effect: payload checksum may fail
+    [7] corpus_zip_append_tail_junk (kind=tail, zone=archive.tail, op=append)
+        effect: extra bytes after archive
+  Runtime context:
+    native_status: crc_error
+    verification: completeness=0.0, integrity=damaged, assessment=unusable
+    repair_hints: damage_flags=[], likely_truncated=False
+  >>> DIAGNOSIS [partial_insufficient]: Partial repair insufficient. Module=zip_fix_boundary, actions=['trim_after_eocd'], completeness=0.0.
+──────────────────────────────────────────────────────────────────────
+CASE 11: 22__zip__data_descriptor_bit3__deflate__l5_zip_data_descriptor_cd_conflict_1
+  Variant: data_descriptor_bit3 | Module: zip_rebuild | Cand: zip_rebuild
+  Terminal: directory_only | Completeness: 0.0 | TRR: 0.0
+  Rollout: branch=1, states=2, terminals={'max_rounds': 1}
+  Path modules: [] | Path actions: []
+  Cand status: partial | Cand actions: ['scan_local_file_headers', 'rebuild_zip_central_directory', 'write_repaired_zip']
+  Cand damage_flags: ['damaged']
+  Damage JSON keys:
+    layer: structural_directory | profile: zip_data_descriptor_cd_conflict | oracle_strength: entry_match
+    difficulty_tags: ['near_valid_directory', 'metadata_semantics_conflict']
+    oracle.expected_statuses: ['repaired', 'partial', 'unrepairable', 'unsupported'] | oracle.expected_module: 
+    json_damage_flags: ['central_directory_bad', 'central_directory_offset_bad', 'central_directory_count_bad']
+  Damage operations:
+    [0] corpus_zip_local_data_descriptor_flag_set (kind=replace_range, zone=zip.local_header.flags, op=replace_range)
+        effect: local header claims a data descriptor is present
+    [1] corpus_zip_cd_data_descriptor_flag_conflict (kind=replace_range, zone=zip.central_directory.flags, op=replace_range)
+        effect: central directory disagrees about data descriptor usage
+    [2] corpus_zip_fake_data_descriptor (kind=insert, zone=zip.data_descriptor, op=insert)
+        effect: fake data descriptor conflicts with metadata
+    [3] corpus_zip_eocd_disk_entry_count_near_wrong (kind=eocd, zone=zip.eocd.entry_count_disk, op=replace_range)
+        effect: EOCD disk entry count is plausible but wrong
+    [4] corpus_zip_eocd_total_entry_count_near_wrong (kind=eocd, zone=zip.eocd.entry_count_total, op=replace_range)
+        effect: EOCD total entry count is plausible but wrong
+  Runtime context:
+    native_status: crc_error
+    verification: completeness=0.0, integrity=damaged, assessment=unusable
+    repair_hints: damage_flags=[], likely_truncated=False
+  >>> DIAGNOSIS [partial_insufficient]: Partial repair insufficient. Module=zip_rebuild, actions=['scan_local_file_headers', 'rebuild_zip_central_directory', 'write_repaired_zip'], completeness=0.0.
+──────────────────────────────────────────────────────────────────────
+CASE 12: 22__zip__encrypted_zipcrypto__deflate__l5_zip_zip64_extra_size_mismatch_6
+  Variant: encrypted_zipcrypto | Module: zip_fix_boundary | Cand: zip_fix_boundary
+  Terminal: no_output | Completeness: 0.0 | TRR: 0.0
+  Rollout: branch=1, states=2, terminals={'max_rounds': 1}
+  Path modules: [] | Path actions: []
+  Cand status: repaired | Cand actions: ['plan_repair', 'zip_fix_boundary']
+  Cand damage_flags: ['damaged']
+  Damage JSON keys:
+    layer: structural_directory | profile: zip_zip64_extra_size_mismatch | oracle_strength: entry_match
+    difficulty_tags: ['near_valid_directory', 'zip64_metadata']
+    oracle.expected_statuses: ['repaired', 'partial', 'unrepairable', 'unsupported'] | oracle.expected_module: 
+    json_damage_flags: ['central_directory_bad', 'central_directory_offset_bad', 'central_directory_count_bad']
+  Damage operations:
+    [0] corpus_zip64_extra_uncompressed_size_bad (kind=replace_range, zone=zip.extra.zip64.uncompressed_size, op=replace_range)
+        effect: ZIP64 extra size conflicts with actual payload
+    [1] corpus_zip64_extra_length_bad (kind=replace_range, zone=zip.extra.zip64.length, op=replace_range)
+        effect: ZIP64 extra field length is off by one
+    [2] corpus_zip_cd_crc_wrong_local_payload_correct (kind=payload, zone=zip.central_directory.crc, op=replace_range)
+        effect: central directory CRC conflicts with local payload
+    [3] corpus_zip_cd_external_attr_noise (kind=replace_range, zone=zip.central_directory.external_attributes, op=replace_range)
+        effect: directory metadata remains structurally readable
+  Runtime context:
+    native_status: crc_error
+    verification: completeness=0.0, integrity=complete, assessment=inconsistent
+    repair_hints: damage_flags=[], likely_truncated=False
+  >>> DIAGNOSIS [encrypted_limitation]: Encrypted archive (encrypted_zipcrypto); module=zip_fix_boundary. Encryption blocks deep inspection & payload verification.
+──────────────────────────────────────────────────────────────────────
+CASE 13: aaaaa__zip__sfx_stub__deflate__l5_zip_sfx_payload_damage_9
+  Variant: sfx_stub | Module: zip_fix_boundary | Cand: zip_fix_boundary
+  Terminal: max_rounds | Completeness: 0.0 | TRR: 1.0
+  Rollout: branch=1, states=2, terminals={'max_rounds': 1}
+  Path modules: ['zip_fix_pointers'] | Path actions: ['scan_central_directory', 'rebuild_eocd']
+  Cand status: repaired | Cand actions: ['plan_repair', 'zip_fix_boundary']
+  Cand damage_flags: ['trailing_junk', 'boundary_unreliable', 'checksum_error', 'crc_error', 'damaged']
+  Damage JSON keys:
+    layer: two_step_repair | profile: zip_sfx_payload_damage | oracle_strength: entry_match
+    difficulty_tags: ['near_valid_directory', 'deceptive_structural_success', 'hash_mismatch_risk', 'sfx_carrier_prefix']
+    oracle.expected_statuses: ['repaired', 'partial', 'unrepairable', 'unsupported'] | oracle.expected_module: 
+    json_damage_flags: ['central_directory_bad', 'central_directory_offset_bad', 'central_directory_count_bad', 'checksum_error', 'crc_error', 'damaged', 'hard_negative_target', 'payload_hash_mismatch', 'deceptive_structural_success', 'trailing_junk', 'boundary_unreliable']
+  Damage operations:
+    [0] corpus_zip_sfx_prefix_refresh (kind=sfx, zone=zip.sfx.prefix, op=insert)
+        effect: archive is embedded behind a carrier prefix
+    [1] corpus_zip_bad_eocd_counts (kind=eocd, zone=zip.eocd.entry_counts, op=replace_range)
+        effect: directory entry counts conflict
+    [2] corpus_zip_bad_eocd_cd_offset (kind=eocd, zone=zip.eocd.cd_offset, op=replace_range)
+        effect: central directory offset points at start
+    [3] corpus_zip_bad_eocd_comment_length (kind=eocd, zone=zip.eocd.comment_length, op=replace_range)
+        effect: comment boundary is untrusted
+    [4] corpus_zip_sfx_payload_damage_0 (kind=payload, zone=zip.local_payload, op=replace_range)
+        effect: SFX archive payload is damaged after structure repair: package.json
+    [5] corpus_zip_flip_payload_byte (kind=payload, zone=zip.local_payload, op=replace_range)
+        effect: payload checksum may fail
+    [6] corpus_zip_append_tail_junk (kind=tail, zone=archive.tail, op=append)
+        effect: extra bytes after archive
+  Runtime context:
+    native_status: crc_error
+    verification: completeness=0.0, integrity=damaged, assessment=unusable
+    repair_hints: damage_flags=[], likely_truncated=False
+  >>> DIAGNOSIS [sfx_payload_damage]: SFX variant (sfx_stub), payload damage under SFX prefix. Module=zip_fix_boundary, dmg_profile=zip_sfx_payload_damage.
+──────────────────────────────────────────────────────────────────────
+CASE 14: aaaaa__zip__split_zip__deflate__l0_zip_split_tail_volume_truncated_8
+  Variant: split_zip | Module:  | Cand: (none)
+  Terminal:  | Completeness: 0 | TRR: 1.0
+  Rollout: branch=0, states=1, terminals={'dead_end': 1}
+  Path modules: [] | Path actions: []
+  Cand status:  | Cand actions: []
+  Cand damage_flags: []
+  Damage JSON keys:
+    layer: partial_recoverable | profile: zip_split_missing_middle_volume | oracle_strength: entry_match
+    difficulty_tags: ['near_valid_directory', 'split_or_missing_volume']
+    oracle.expected_statuses: ['repaired', 'partial', 'unrepairable', 'unsupported'] | oracle.expected_module: 
+    json_damage_flags: ['central_directory_bad', 'central_directory_offset_bad', 'central_directory_count_bad', 'checksum_error', 'crc_error', 'damaged', 'trailing_junk', 'boundary_unreliable', 'missing_volume', 'input_truncated']
+  Damage operations:
+    [0] corpus_zip_split_missing_middle_volume (kind=volume, zone=zip.missing_volume, op=delete)
+        effect: middle split volume bytes are missing
+    [1] corpus_zip_bad_eocd_counts (kind=eocd, zone=zip.eocd.entry_counts, op=replace_range)
+        effect: directory entry counts conflict
+    [2] corpus_zip_bad_eocd_cd_offset (kind=eocd, zone=zip.eocd.cd_offset, op=replace_range)
+        effect: central directory offset points at start
+    [3] corpus_zip_bad_eocd_comment_length (kind=eocd, zone=zip.eocd.comment_length, op=replace_range)
+        effect: comment boundary is untrusted
+    [4] corpus_zip_flip_payload_byte (kind=payload, zone=zip.local_payload, op=replace_range)
+        effect: payload checksum may fail
+    [5] corpus_zip_append_tail_junk (kind=tail, zone=archive.tail, op=append)
+        effect: extra bytes after archive
+  Runtime context:
+    native_status: None
+    verification: completeness=None, integrity=None, assessment=None
+    repair_hints: damage_flags=None, likely_truncated=None
+  >>> DIAGNOSIS [multi_volume_missing]: Split/multi-volume with missing data. Profile=zip_split_missing_middle_volume, layer=partial_recoverable. Missing volume segments are physically unrecoverable.
+──────────────────────────────────────────────────────────────────────
+CASE 15: MonoBleedingEdge__zip__encrypted_zipcrypto__deflate__l9_zip_two_step_boundary_then_cd_rebuild_0
+  Variant: encrypted_zipcrypto | Module:  | Cand: (none)
+  Terminal:  | Completeness: 0 | TRR: 0.0
+  Rollout: branch=1, states=2, terminals={'max_rounds': 1}
+  Path modules: ['zip_fix_pointers'] | Path actions: ['scan_central_directory', 'rebuild_eocd']
+  Cand status:  | Cand actions: []
+  Cand damage_flags: []
+  Damage JSON keys:
+    layer: partial_recoverable | profile: zip_single_entry_payload_damage | oracle_strength: entry_match
+    difficulty_tags: ['near_valid_directory']
+    oracle.expected_statuses: ['repaired', 'partial', 'unrepairable', 'unsupported'] | oracle.expected_module: 
+    json_damage_flags: ['central_directory_bad', 'central_directory_offset_bad', 'central_directory_count_bad', 'input_truncated']
+  Damage operations:
+    [0] corpus_zip_drop_central_directory (kind=central_directory, zone=zip.central_directory, op=truncate)
+        effect: central directory is missing but local headers remain
+    [1] corpus_zip_single_entry_payload_damage (kind=payload, zone=zip.local_payload, op=replace_range)
+        effect: entry payload damaged: etc/mono/browscap.ini
+  Runtime context:
+    native_status: None
+    verification: completeness=None, integrity=None, assessment=None
+    repair_hints: damage_flags=None, likely_truncated=None
+  >>> DIAGNOSIS [encrypted_limitation]: Encrypted archive (encrypted_zipcrypto); module=(none). Encryption blocks deep inspection & payload verification.
+──────────────────────────────────────────────────────────────────────
+CASE 16: 122__zip__split_zip__deflate__l5_zip_split_missing_middle_volume_11
+  Variant: split_zip | Module: zip_fix_pointers | Cand: zip_fix_pointers
+  Terminal: no_output | Completeness: 0.0 | TRR: 0.0
+  Rollout: branch=0, states=1, terminals={'dead_end': 1}
+  Path modules: [] | Path actions: []
+  Cand status: repaired | Cand actions: ['plan_repair', 'zip_fix_pointers']
+  Cand damage_flags: ['central_directory_bad', 'central_directory_offset_bad', 'central_directory_count_bad', 'checksum_error', 'crc_error', 'damaged', 'trailing_junk', 'boundary_unreliable', 'input_truncated']
+  Damage JSON keys:
+    layer:  | profile:  | oracle_strength: 
+    difficulty_tags: []
+    oracle.expected_statuses: [] | oracle.expected_module: 
+    json_damage_flags: []
+  Damage operations:
+  Runtime context:
+    native_status: crc_error
+    verification: completeness=0.0, integrity=damaged, assessment=unusable
+    repair_hints: damage_flags=[], likely_truncated=False
+  >>> DIAGNOSIS [multi_volume_missing]: Split/multi-volume with missing data. Profile=, layer=. Missing volume segments are physically unrecoverable.
+──────────────────────────────────────────────────────────────────────
+CASE 17: 333__zip__sfx_stub__deflate__l0_zip_sfx_payload_damage_2
+  Variant: sfx_stub | Module: zip_rebuild | Cand: zip_rebuild
+  Terminal: hard_negative | Completeness: 0.0 | TRR: 0.0
+  Rollout: branch=1, states=2, terminals={'max_rounds': 1}
+  Path modules: [] | Path actions: []
+  Cand status: partial | Cand actions: ['scan_local_file_headers', 'rebuild_zip_central_directory', 'write_repaired_zip']
+  Cand damage_flags: ['trailing_junk', 'boundary_unreliable', 'checksum_error', 'crc_error', 'damaged']
+  Damage JSON keys:
+    layer: two_step_repair | profile: zip_sfx_payload_damage | oracle_strength: entry_match
+    difficulty_tags: ['near_valid_directory', 'deceptive_structural_success', 'hash_mismatch_risk', 'sfx_carrier_prefix']
+    oracle.expected_statuses: ['repaired', 'partial', 'unrepairable', 'unsupported'] | oracle.expected_module: 
+    json_damage_flags: ['central_directory_bad', 'central_directory_offset_bad', 'central_directory_count_bad', 'checksum_error', 'crc_error', 'damaged', 'hard_negative_target', 'payload_hash_mismatch', 'deceptive_structural_success', 'trailing_junk', 'boundary_unreliable']
+  Damage operations:
+    [0] corpus_zip_sfx_prefix_refresh (kind=sfx, zone=zip.sfx.prefix, op=insert)
+        effect: archive is embedded behind a carrier prefix
+    [1] corpus_zip_bad_eocd_counts (kind=eocd, zone=zip.eocd.entry_counts, op=replace_range)
+        effect: directory entry counts conflict
+    [2] corpus_zip_bad_eocd_cd_offset (kind=eocd, zone=zip.eocd.cd_offset, op=replace_range)
+        effect: central directory offset points at start
+    [3] corpus_zip_bad_eocd_comment_length (kind=eocd, zone=zip.eocd.comment_length, op=replace_range)
+        effect: comment boundary is untrusted
+    [4] corpus_zip_sfx_payload_damage_0 (kind=payload, zone=zip.local_payload, op=replace_range)
+        effect: SFX archive payload is damaged after structure repair: HYOGEN/DATA/Honmon
+    [5] corpus_zip_flip_payload_byte (kind=payload, zone=zip.local_payload, op=replace_range)
+        effect: payload checksum may fail
+    [6] corpus_zip_append_tail_junk (kind=tail, zone=archive.tail, op=append)
+        effect: extra bytes after archive
+  Runtime context:
+    native_status: crc_error
+    verification: completeness=1.0, integrity=damaged, assessment=complete
+    repair_hints: damage_flags=[], likely_truncated=False
+  >>> DIAGNOSIS [sfx_payload_damage]: SFX variant (sfx_stub), payload damage under SFX prefix. Module=zip_rebuild, dmg_profile=zip_sfx_payload_damage.
+──────────────────────────────────────────────────────────────────────
+CASE 18: List__zip__encrypted_zipcrypto__deflate__l5_zip_duplicate_entry_crc_conflict_7
+  Variant: encrypted_zipcrypto | Module: zip_fix_pointers | Cand: zip_fix_pointers
+  Terminal: no_output | Completeness: 0.0 | TRR: 0.0
+  Rollout: branch=1, states=2, terminals={'max_rounds': 1}
+  Path modules: ['zip_fix_pointers'] | Path actions: ['scan_central_directory', 'rebuild_eocd']
+  Cand status: repaired | Cand actions: ['plan_repair', 'zip_fix_pointers']
+  Cand damage_flags: []
+  Damage JSON keys:
+    layer: two_step_repair | profile: zip_two_step_drop_cd_with_eocd_noise | oracle_strength: entry_match
+    difficulty_tags: ['near_valid_directory', 'two_step_repair']
+    oracle.expected_statuses: ['repaired', 'partial', 'unrepairable', 'unsupported'] | oracle.expected_module: 
+    json_damage_flags: ['central_directory_bad', 'central_directory_offset_bad', 'central_directory_count_bad', 'two_step_repair', 'multi_round_repair_expected', 'trailing_junk', 'boundary_unreliable']
+  Damage operations:
+    [0] corpus_zip_two_step_eocd_noise (kind=eocd, zone=archive.tail, op=append)
+        effect: false EOCD marker should be ignored
+    [1] corpus_zip_two_step_drop_directory_with_noise (kind=truncate, zone=zip.central_directory, op=truncate)
+        effect: local headers remain but directory and noisy boundary both need repair
+  Runtime context:
+    native_status: crc_error
+    verification: completeness=0.0, integrity=complete, assessment=inconsistent
+    repair_hints: damage_flags=[], likely_truncated=False
+  >>> DIAGNOSIS [encrypted_limitation]: Encrypted archive (encrypted_zipcrypto); module=zip_fix_pointers. Encryption blocks deep inspection & payload verification.
+──────────────────────────────────────────────────────────────────────
+CASE 19: aaaaa__zip__sfx_stub__deflate__l5_zip_sfx_payload_damage_10
+  Variant: sfx_stub | Module: zip_rebuild | Cand: zip_rebuild
+  Terminal: hard_negative | Completeness: 0.0 | TRR: 0.0
+  Rollout: branch=1, states=2, terminals={'max_rounds': 1}
+  Path modules: [] | Path actions: []
+  Cand status: partial | Cand actions: ['scan_local_file_headers', 'rebuild_zip_central_directory', 'write_repaired_zip']
+  Cand damage_flags: ['trailing_junk', 'boundary_unreliable', 'checksum_error', 'crc_error', 'damaged']
+  Damage JSON keys:
+    layer:  | profile:  | oracle_strength: 
+    difficulty_tags: []
+    oracle.expected_statuses: [] | oracle.expected_module: 
+    json_damage_flags: []
+  Damage operations:
+  Runtime context:
+    native_status: crc_error
+    verification: completeness=0.0, integrity=damaged, assessment=unusable
+    repair_hints: damage_flags=[], likely_truncated=False
+  >>> DIAGNOSIS [sfx_payload_damage]: SFX variant (sfx_stub), payload damage under SFX prefix. Module=zip_rebuild, dmg_profile=.
+──────────────────────────────────────────────────────────────────────
+CASE 20: List__zip__sfx_stub__deflate__l0_zip_sfx_cd_damage_6
+  Variant: sfx_stub | Module: zip_fix_pointers | Cand: zip_fix_pointers
+  Terminal: max_rounds | Completeness: 0.0 | TRR: 1.0
+  Rollout: branch=1, states=2, terminals={'max_rounds': 1}
+  Path modules: [] | Path actions: []
+  Cand status: partial | Cand actions: ['scan_central_directory', 'rebuild_eocd']
+  Cand damage_flags: ['trailing_junk', 'boundary_unreliable', 'damaged']
+  Damage JSON keys:
+    layer: partial_recoverable | profile: zip_sfx_cd_damage | oracle_strength: entry_match
+    difficulty_tags: ['near_valid_directory', 'sfx_carrier_prefix']
+    oracle.expected_statuses: ['repaired', 'partial', 'unrepairable', 'unsupported'] | oracle.expected_module: 
+    json_damage_flags: ['central_directory_bad', 'central_directory_offset_bad', 'central_directory_count_bad', 'trailing_junk', 'boundary_unreliable']
+  Damage operations:
+    [0] corpus_zip_sfx_prefix_refresh (kind=sfx, zone=zip.sfx.prefix, op=insert)
+        effect: archive is embedded behind a carrier prefix
+    [1] corpus_zip_bad_eocd_counts (kind=eocd, zone=zip.eocd.entry_counts, op=replace_range)
+        effect: directory entry counts conflict
+    [2] corpus_zip_bad_eocd_cd_offset (kind=eocd, zone=zip.eocd.cd_offset, op=replace_range)
+        effect: central directory offset points at start
+    [3] corpus_zip_bad_eocd_comment_length (kind=eocd, zone=zip.eocd.comment_length, op=replace_range)
+        effect: comment boundary is untrusted
+  Runtime context:
+    native_status: crc_error
+    verification: completeness=0.0, integrity=damaged, assessment=unusable
+    repair_hints: damage_flags=[], likely_truncated=False
+  >>> DIAGNOSIS [sfx_payload_damage]: SFX variant (sfx_stub), payload damage under SFX prefix. Module=zip_fix_pointers, dmg_profile=zip_sfx_cd_damage.
+──────────────────────────────────────────────────────────────────────
+CASE 21: ghostcp__zip__encrypted_zipcrypto__deflate__l0_structural_boundary_11
+  Variant: encrypted_zipcrypto | Module: zip_fix_boundary | Cand: zip_fix_boundary
+  Terminal: no_output | Completeness: 0.0 | TRR: 0.0
+  Rollout: branch=1, states=2, terminals={'max_rounds': 1}
+  Path modules: ['zip_fix_pointers'] | Path actions: ['scan_central_directory', 'rebuild_eocd']
+  Cand status: repaired | Cand actions: ['plan_repair', 'zip_fix_boundary']
+  Cand damage_flags: []
+  Damage JSON keys:
+    layer:  | profile:  | oracle_strength: 
+    difficulty_tags: []
+    oracle.expected_statuses: [] | oracle.expected_module: 
+    json_damage_flags: []
+  Damage operations:
+  Runtime context:
+    native_status: crc_error
+    verification: completeness=0.0, integrity=complete, assessment=inconsistent
+    repair_hints: damage_flags=[], likely_truncated=False
+  >>> DIAGNOSIS [encrypted_limitation]: Encrypted archive (encrypted_zipcrypto); module=zip_fix_boundary. Encryption blocks deep inspection & payload verification.
+──────────────────────────────────────────────────────────────────────
+CASE 22: 122__zip__data_descriptor_bit3__deflate__l5_zip_data_descriptor_payload_bad_5
+  Variant: data_descriptor_bit3 | Module:  | Cand: (none)
+  Terminal:  | Completeness: 0 | TRR: 0.0
+  Rollout: branch=1, states=2, terminals={'max_rounds': 1}
+  Path modules: ['zip_fix_pointers'] | Path actions: ['scan_central_directory', 'rebuild_eocd']
+  Cand status:  | Cand actions: []
+  Cand damage_flags: []
+  Damage JSON keys:
+    layer: partial_recoverable | profile: zip_data_descriptor_cd_conflict | oracle_strength: entry_match
+    difficulty_tags: ['near_valid_directory', 'metadata_semantics_conflict']
+    oracle.expected_statuses: ['repaired', 'partial', 'unrepairable', 'unsupported'] | oracle.expected_module: 
+    json_damage_flags: ['central_directory_bad', 'central_directory_offset_bad', 'central_directory_count_bad']
+  Damage operations:
+    [0] corpus_zip_cd_data_descriptor_flag_conflict (kind=replace_range, zone=zip.central_directory.flags, op=replace_range)
+        effect: central directory disagrees about data descriptor usage
+    [1] corpus_zip_fake_data_descriptor (kind=insert, zone=zip.data_descriptor, op=insert)
+        effect: fake data descriptor conflicts with metadata
+    [2] corpus_zip_eocd_disk_entry_count_near_wrong (kind=eocd, zone=zip.eocd.entry_count_disk, op=replace_range)
+        effect: EOCD disk entry count is plausible but wrong
+    [3] corpus_zip_eocd_total_entry_count_near_wrong (kind=eocd, zone=zip.eocd.entry_count_total, op=replace_range)
+        effect: EOCD total entry count is plausible but wrong
+  Runtime context:
+    native_status: None
+    verification: completeness=None, integrity=None, assessment=None
+    repair_hints: damage_flags=None, likely_truncated=None
+  >>> DIAGNOSIS [data_descriptor_unrecoverable]: Data descriptor variant (data_descriptor_bit3). Module=(none), dmg_ops_ops=['corpus_zip_cd_data_descriptor_flag_conflict', 'corpus_zip_fake_data_descriptor', 'corpus_zip_eocd_disk_entry_count_near_wrong', 'corpus_zip_eocd_total_entry_count_near_wrong']
+──────────────────────────────────────────────────────────────────────
+CASE 23: 222__zip__encrypted_zipcrypto__deflate__l0_zip_two_step_comment_fix_then_eocd_repair_7
+  Variant: encrypted_zipcrypto | Module: zip_fix_boundary | Cand: zip_fix_boundary
+  Terminal: no_output | Completeness: 0.0 | TRR: 0.0
+  Rollout: branch=1, states=2, terminals={'max_rounds': 1}
+  Path modules: ['zip_fix_pointers'] | Path actions: ['scan_central_directory', 'rebuild_eocd']
+  Cand status: repaired | Cand actions: ['plan_repair', 'zip_fix_boundary']
+  Cand damage_flags: []
+  Damage JSON keys:
+    layer: deceptive_hard_negative | profile: zip_wrong_local_offset_extracts_valid_other_entry | oracle_strength: entry_match
+    difficulty_tags: ['near_valid_directory', 'deceptive_structural_success', 'hash_mismatch_risk', 'ambiguous_entry_mapping']
+    oracle.expected_statuses: ['repaired', 'partial', 'unrepairable', 'unsupported'] | oracle.expected_module: 
+    json_damage_flags: ['central_directory_bad', 'central_directory_offset_bad', 'central_directory_count_bad', 'checksum_error', 'crc_error', 'damaged', 'hard_negative_target', 'payload_hash_mismatch', 'deceptive_structural_success', 'trailing_junk', 'boundary_unreliable']
+  Damage operations:
+    [0] corpus_zip_cd_offset_near_valid_wrong_entry (kind=replace_range, zone=zip.central_directory.local_header_offset, op=replace_range)
+        effect: central directory points near a valid local header but not the intended entry
+    [1] corpus_zip_cd_compressed_size_near_valid (kind=replace_range, zone=zip.central_directory.compressed_size, op=replace_range)
+        effect: directory size fields remain plausible
+    [2] corpus_zip_cd_crc_wrong_local_payload_correct (kind=payload, zone=zip.central_directory.crc, op=replace_range)
+        effect: central directory CRC conflicts with local payload
+    [3] corpus_zip_cd_external_attr_noise (kind=replace_range, zone=zip.central_directory.external_attributes, op=replace_range)
+        effect: directory metadata remains structurally readable
+    [4] corpus_zip_eocd_disk_entry_count_near_wrong (kind=eocd, zone=zip.eocd.entry_count_disk, op=replace_range)
+        effect: EOCD disk entry count is plausible but wrong
+    [5] corpus_zip_eocd_total_entry_count_near_wrong (kind=eocd, zone=zip.eocd.entry_count_total, op=replace_range)
+        effect: EOCD total entry count is plausible but wrong
+    [6] corpus_zip_wrong_local_offset_tail_probe_noise (kind=tail, zone=archive.tail, op=append)
+        effect: boundary probe can distract offset repair
+    [7] corpus_zip_flip_payload_byte (kind=payload, zone=zip.local_payload, op=replace_range)
+        effect: payload checksum may fail
+    [8] corpus_zip_append_tail_junk (kind=tail, zone=archive.tail, op=append)
+        effect: extra bytes after archive
+  Runtime context:
+    native_status: crc_error
+    verification: completeness=0.0, integrity=complete, assessment=inconsistent
+    repair_hints: damage_flags=[], likely_truncated=False
+  >>> DIAGNOSIS [encrypted_limitation]: Encrypted archive (encrypted_zipcrypto); module=zip_fix_boundary. Encryption blocks deep inspection & payload verification.
+──────────────────────────────────────────────────────────────────────
+CASE 24: List__zip__encrypted_zipcrypto__deflate__l5_zip_wrong_local_offset_extracts_valid_other_entry_9
+  Variant: encrypted_zipcrypto | Module: zip_fix_boundary | Cand: zip_fix_boundary
+  Terminal: no_output | Completeness: 0.0 | TRR: 0.0
+  Rollout: branch=1, states=2, terminals={'max_rounds': 1}
+  Path modules: [] | Path actions: []
+  Cand status: partial | Cand actions: ['trim_after_eocd']
+  Cand damage_flags: ['trailing_junk', 'boundary_unreliable', 'checksum_error', 'crc_error', 'damaged']
+  Damage JSON keys:
+    layer: hard_negative | profile: zip_all_entry_payload_damage_with_directory | oracle_strength: entry_match
+    difficulty_tags: ['near_valid_directory']
+    oracle.expected_statuses: ['repaired', 'partial', 'unrepairable', 'unsupported'] | oracle.expected_module: 
+    json_damage_flags: ['central_directory_bad', 'central_directory_offset_bad', 'central_directory_count_bad', 'checksum_error', 'crc_error', 'damaged', 'hard_negative_target', 'payload_hash_mismatch', 'trailing_junk', 'boundary_unreliable']
+  Damage operations:
+    [0] corpus_zip_bad_eocd_counts (kind=eocd, zone=zip.eocd.entry_counts, op=replace_range)
+        effect: directory entry counts conflict
+    [1] corpus_zip_bad_eocd_cd_offset (kind=eocd, zone=zip.eocd.cd_offset, op=replace_range)
+        effect: central directory offset points at start
+    [2] corpus_zip_bad_eocd_counts (kind=eocd, zone=zip.eocd.entry_counts, op=replace_range)
+        effect: directory entry counts conflict
+    [3] corpus_zip_bad_eocd_cd_offset (kind=eocd, zone=zip.eocd.cd_offset, op=replace_range)
+        effect: central directory offset points at start
+    [4] corpus_zip_bad_eocd_comment_length (kind=eocd, zone=zip.eocd.comment_length, op=replace_range)
+        effect: comment boundary is untrusted
+    [5] corpus_zip_all_entry_payload_damage_0 (kind=payload, zone=zip.local_payload, op=replace_range)
+        effect: all entry payloads are damaged but names may remain recoverable: 01_Ñ╕ÑπÑ▒Ñ├Ñ╚.jpg
+    [6] corpus_zip_all_entry_payload_damage_1 (kind=payload, zone=zip.local_payload, op=replace_range)
+        effect: all entry payloads are damaged but names may remain recoverable: 02_╫≈╞╖╜B╜Θ.jpg
+    [7] corpus_zip_all_entry_payload_damage_2 (kind=payload, zone=zip.local_payload, op=replace_range)
+        effect: all entry payloads are damaged but names may remain recoverable: 03_Ñ╫Ñ∞Ññ╥╗╙E.jpg
+    [8] corpus_zip_all_entry_payload_damage_3 (kind=payload, zone=zip.local_payload, op=replace_range)
+        effect: all entry payloads are damaged but names may remain recoverable: 04_Ñ¡ÑπÑΘ╜B╜Θ.jpg
+    [9] corpus_zip_all_entry_payload_damage_4 (kind=payload, zone=zip.local_payload, op=replace_range)
+        effect: all entry payloads are damaged but names may remain recoverable: 05_ÑñÑß⌐`Ñ╕ÑñÑΘÑ╣Ñ╚.jpg
+    [10] corpus_zip_all_entry_payload_damage_5 (kind=payload, zone=zip.local_payload, op=replace_range)
+        effect: all entry payloads are damaged but names may remain recoverable: 06_Ñ╣Ñ┌Ñ╖ÑπÑδÑñÑΘÑ╣Ñ╚.jpg
+    [11] corpus_zip_flip_payload_byte (kind=payload, zone=zip.local_payload, op=replace_range)
+        effect: payload checksum may fail
+    [12] corpus_zip_append_tail_junk (kind=tail, zone=archive.tail, op=append)
+        effect: extra bytes after archive
+  Runtime context:
+    native_status: crc_error
+    verification: completeness=0.0, integrity=complete, assessment=inconsistent
+    repair_hints: damage_flags=[], likely_truncated=False
+  >>> DIAGNOSIS [encrypted_limitation]: Encrypted archive (encrypted_zipcrypto); module=zip_fix_boundary. Encryption blocks deep inspection & payload verification.
+──────────────────────────────────────────────────────────────────────
+CASE 25: LIb__zip__encrypted_zipcrypto__deflate__l0_zip_local_header_crc_wrong_cd_correct_0
+  Variant: encrypted_zipcrypto | Module: zip_fix_pointers | Cand: zip_fix_pointers
+  Terminal: no_output | Completeness: 0.0 | TRR: 0.0
+  Rollout: branch=1, states=2, terminals={'max_rounds': 1}
+  Path modules: ['zip_fix_pointers'] | Path actions: ['scan_central_directory', 'rebuild_eocd']
+  Cand status: repaired | Cand actions: ['plan_repair', 'zip_fix_pointers']
+  Cand damage_flags: []
+  Damage JSON keys:
+    layer: structural_directory | profile: zip_extra_field_length_bad | oracle_strength: entry_match
+    difficulty_tags: ['near_valid_directory', 'extra_field_semantics']
+    oracle.expected_statuses: ['repaired', 'partial', 'unrepairable', 'unsupported'] | oracle.expected_module: 
+    json_damage_flags: ['central_directory_bad', 'central_directory_offset_bad', 'central_directory_count_bad']
+  Damage operations:
+    [0] corpus_zip_local_extra_length_bad (kind=replace_range, zone=zip.local_header.extra_length, op=replace_range)
+        effect: local header extra field length is inconsistent
+    [1] corpus_zip_cd_extra_length_bad (kind=replace_range, zone=zip.central_directory.extra_length, op=replace_range)
+        effect: central directory extra length is inconsistent
+    [2] corpus_zip_eocd_disk_entry_count_near_wrong (kind=eocd, zone=zip.eocd.entry_count_disk, op=replace_range)
+        effect: EOCD disk entry count is plausible but wrong
+    [3] corpus_zip_eocd_total_entry_count_near_wrong (kind=eocd, zone=zip.eocd.entry_count_total, op=replace_range)
+        effect: EOCD total entry count is plausible but wrong
+  Runtime context:
+    native_status: crc_error
+    verification: completeness=0.0, integrity=complete, assessment=inconsistent
+    repair_hints: damage_flags=[], likely_truncated=False
+  >>> DIAGNOSIS [encrypted_limitation]: Encrypted archive (encrypted_zipcrypto); module=zip_fix_pointers. Encryption blocks deep inspection & payload verification.
+──────────────────────────────────────────────────────────────────────
+CASE 26: ghostcp__zip__encrypted_zipcrypto__deflate__l0_structural_boundary_11
+  Variant: encrypted_zipcrypto | Module: zip_rebuild | Cand: zip_rebuild
+  Terminal: no_output | Completeness: 0.0 | TRR: 0.0
+  Rollout: branch=1, states=2, terminals={'max_rounds': 1}
+  Path modules: ['zip_fix_pointers'] | Path actions: ['scan_central_directory', 'rebuild_eocd']
+  Cand status: repaired | Cand actions: ['plan_repair', 'zip_rebuild']
+  Cand damage_flags: []
+  Damage JSON keys:
+    layer:  | profile:  | oracle_strength: 
+    difficulty_tags: []
+    oracle.expected_statuses: [] | oracle.expected_module: 
+    json_damage_flags: []
+  Damage operations:
+  Runtime context:
+    native_status: crc_error
+    verification: completeness=0.0, integrity=complete, assessment=inconsistent
+    repair_hints: damage_flags=[], likely_truncated=False
+  >>> DIAGNOSIS [encrypted_limitation]: Encrypted archive (encrypted_zipcrypto); module=zip_rebuild. Encryption blocks deep inspection & payload verification.
+──────────────────────────────────────────────────────────────────────
+CASE 27: 222__zip__encrypted_zipcrypto__deflate__l0_zip_cd_offset_near_valid_wrong_entry_4
+  Variant: encrypted_zipcrypto | Module: zip_fix_pointers | Cand: zip_fix_pointers
+  Terminal: no_output | Completeness: 0.0 | TRR: 0.0
+  Rollout: branch=1, states=2, terminals={'max_rounds': 1}
+  Path modules: ['zip_fix_pointers'] | Path actions: ['scan_central_directory', 'rebuild_eocd']
+  Cand status: repaired | Cand actions: ['plan_repair', 'zip_fix_pointers']
+  Cand damage_flags: []
+  Damage JSON keys:
+    layer: structural_directory | profile: zip_zip64_eocd_locator_bad | oracle_strength: entry_match
+    difficulty_tags: ['near_valid_directory', 'zip64_metadata']
+    oracle.expected_statuses: ['repaired', 'partial', 'unrepairable', 'unsupported'] | oracle.expected_module: 
+    json_damage_flags: ['central_directory_bad', 'central_directory_offset_bad', 'central_directory_count_bad']
+  Damage operations:
+    [0] corpus_zip_eocd_disk_entry_count_near_wrong (kind=eocd, zone=zip.eocd.entry_count_disk, op=replace_range)
+        effect: EOCD disk entry count is plausible but wrong
+    [1] corpus_zip_eocd_total_entry_count_near_wrong (kind=eocd, zone=zip.eocd.entry_count_total, op=replace_range)
+        effect: EOCD total entry count is plausible but wrong
+    [2] corpus_zip_eocd_disk_entry_count_near_wrong (kind=eocd, zone=zip.eocd.entry_count_disk, op=replace_range)
+        effect: EOCD disk entry count is plausible but wrong
+    [3] corpus_zip_eocd_total_entry_count_near_wrong (kind=eocd, zone=zip.eocd.entry_count_total, op=replace_range)
+        effect: EOCD total entry count is plausible but wrong
+  Runtime context:
+    native_status: crc_error
+    verification: completeness=0.0, integrity=complete, assessment=inconsistent
+    repair_hints: damage_flags=[], likely_truncated=False
+  >>> DIAGNOSIS [encrypted_limitation]: Encrypted archive (encrypted_zipcrypto); module=zip_fix_pointers. Encryption blocks deep inspection & payload verification.
+──────────────────────────────────────────────────────────────────────
+CASE 28: aaaaa__zip__sfx_stub__deflate__l5_zip_sfx_payload_damage_3
+  Variant: sfx_stub | Module:  | Cand: (none)
+  Terminal:  | Completeness: 0 | TRR: 1.0
+  Rollout: branch=1, states=2, terminals={'max_rounds': 1}
+  Path modules: ['zip_fix_pointers'] | Path actions: ['scan_central_directory', 'rebuild_eocd']
+  Cand status:  | Cand actions: []
+  Cand damage_flags: []
+  Damage JSON keys:
+    layer: two_step_repair | profile: zip_sfx_payload_damage | oracle_strength: entry_match
+    difficulty_tags: ['near_valid_directory', 'deceptive_structural_success', 'hash_mismatch_risk', 'sfx_carrier_prefix']
+    oracle.expected_statuses: ['repaired', 'partial', 'unrepairable', 'unsupported'] | oracle.expected_module: 
+    json_damage_flags: ['central_directory_bad', 'central_directory_offset_bad', 'central_directory_count_bad', 'checksum_error', 'crc_error', 'damaged', 'hard_negative_target', 'payload_hash_mismatch', 'deceptive_structural_success', 'trailing_junk', 'boundary_unreliable']
+  Damage operations:
+    [0] corpus_zip_sfx_prefix_refresh (kind=sfx, zone=zip.sfx.prefix, op=insert)
+        effect: archive is embedded behind a carrier prefix
+    [1] corpus_zip_bad_eocd_counts (kind=eocd, zone=zip.eocd.entry_counts, op=replace_range)
+        effect: directory entry counts conflict
+    [2] corpus_zip_bad_eocd_cd_offset (kind=eocd, zone=zip.eocd.cd_offset, op=replace_range)
+        effect: central directory offset points at start
+    [3] corpus_zip_bad_eocd_comment_length (kind=eocd, zone=zip.eocd.comment_length, op=replace_range)
+        effect: comment boundary is untrusted
+    [4] corpus_zip_sfx_payload_damage_0 (kind=payload, zone=zip.local_payload, op=replace_range)
+        effect: SFX archive payload is damaged after structure repair: package.json
+    [5] corpus_zip_flip_payload_byte (kind=payload, zone=zip.local_payload, op=replace_range)
+        effect: payload checksum may fail
+    [6] corpus_zip_append_tail_junk (kind=tail, zone=archive.tail, op=append)
+        effect: extra bytes after archive
+  Runtime context:
+    native_status: None
+    verification: completeness=None, integrity=None, assessment=None
+    repair_hints: damage_flags=None, likely_truncated=None
+  >>> DIAGNOSIS [sfx_payload_damage]: SFX variant (sfx_stub), payload damage under SFX prefix. Module=(none), dmg_profile=zip_sfx_payload_damage.
+──────────────────────────────────────────────────────────────────────
+CASE 29: koe__zip__normal_deflate__deflate__l9_zip_all_entry_payload_damage_with_directory_2
+  Variant: normal_deflate | Module: zip_fix_pointers | Cand: zip_fix_pointers
+  Terminal: no_output | Completeness: 0.0 | TRR: 0.0
+  Rollout: branch=1, states=2, terminals={'max_rounds': 1}
+  Path modules: [] | Path actions: []
+  Cand status: partial | Cand actions: ['scan_central_directory', 'rebuild_eocd']
+  Cand damage_flags: ['trailing_junk', 'boundary_unreliable', 'checksum_error', 'crc_error', 'damaged']
+  Damage JSON keys:
+    layer: two_step_repair | profile: zip_two_step_drop_cd_with_eocd_noise | oracle_strength: entry_match
+    difficulty_tags: ['near_valid_directory', 'two_step_repair']
+    oracle.expected_statuses: ['repaired', 'partial', 'unrepairable', 'unsupported'] | oracle.expected_module: 
+    json_damage_flags: ['central_directory_bad', 'central_directory_offset_bad', 'central_directory_count_bad', 'two_step_repair', 'multi_round_repair_expected', 'trailing_junk', 'boundary_unreliable']
+  Damage operations:
+    [0] corpus_zip_two_step_eocd_noise (kind=eocd, zone=archive.tail, op=append)
+        effect: false EOCD marker should be ignored
+    [1] corpus_zip_two_step_drop_directory_with_noise (kind=truncate, zone=zip.central_directory, op=truncate)
+        effect: local headers remain but directory and noisy boundary both need repair
+  Runtime context:
+    native_status: crc_error
+    verification: completeness=0.0, integrity=damaged, assessment=unusable
+    repair_hints: damage_flags=[], likely_truncated=False
+  >>> DIAGNOSIS [partial_insufficient]: Partial repair insufficient. Module=zip_fix_pointers, actions=['scan_central_directory', 'rebuild_eocd'], completeness=0.0.
+──────────────────────────────────────────────────────────────────────
+CASE 30: 22__zip__encrypted_zipcrypto__deflate__l5_zip_crc_repair_masks_payload_mismatch_11
+  Variant: encrypted_zipcrypto | Module:  | Cand: (none)
+  Terminal:  | Completeness: 0 | TRR: 0.0
+  Rollout: branch=1, states=2, terminals={'max_rounds': 1}
+  Path modules: ['zip_fix_pointers'] | Path actions: ['trim_after_eocd']
+  Cand status:  | Cand actions: []
+  Cand damage_flags: []
+  Damage JSON keys:
+    layer:  | profile:  | oracle_strength: 
+    difficulty_tags: []
+    oracle.expected_statuses: [] | oracle.expected_module: 
+    json_damage_flags: []
+  Damage operations:
+  Runtime context:
+    native_status: None
+    verification: completeness=None, integrity=None, assessment=None
+    repair_hints: damage_flags=None, likely_truncated=None
+  >>> DIAGNOSIS [encrypted_limitation]: Encrypted archive (encrypted_zipcrypto); module=(none). Encryption blocks deep inspection & payload verification.
+
+======================================================================
+=== SUMMARY STATISTICS ===
+
+--- Module (candidate) ---
+  zip_fix_boundary: 10
+  zip_fix_pointers: 7
+  zip_rebuild: 5
+  (none): 5
+  zip_salvage: 2
+  zip_fix_zip64: 1
+
+--- Zip Variant ---
+  encrypted_zipcrypto: 13
+  sfx_stub: 7
+  split_zip: 4
+  data_descriptor_bit3: 3
+  sfx_split_zip: 1
+  normal_store: 1
+  normal_deflate: 1
+
+--- Terminal Status ---
+  no_output: 18
+  : 5
+  max_rounds: 3
+  hard_negative: 2
+  no_progress: 1
+  directory_only: 1
+
+--- Failure Category ---
+  encrypted_limitation: 13
+  sfx_payload_damage: 7
+  multi_volume_missing: 5
+  partial_insufficient: 4
+  data_descriptor_unrecoverable: 1
+
+--- Oracle Strength ---
+  entry_match: 23
+
+--- Damage Layer ---
+  two_step_repair: 8
+  structural_directory: 6
+  partial_recoverable: 4
+  deceptive_hard_negative: 3
+  hard_negative: 2
+
+--- Damage Profile ---
+  zip_sfx_payload_damage: 3
+  zip_split_missing_middle_volume: 2
+  zip_sfx_cd_damage: 2
+  zip_data_descriptor_cd_conflict: 2
+  zip_two_step_drop_cd_with_eocd_noise: 2
+  zip_sfx_split_missing_volume: 1
+  zip_split_tail_volume_truncated: 1
+  zip_drop_central_directory_keep_local_headers: 1
+  zip_two_step_boundary_then_cd_rebuild: 1
+  zip_two_step_comment_fix_then_eocd_repair: 1
+  zip_data_descriptor_payload_bad: 1
+  zip_zip64_extra_size_mismatch: 1
+  zip_single_entry_payload_damage: 1
+  zip_wrong_local_offset_extracts_valid_other_entry: 1
+  zip_all_entry_payload_damage_with_directory: 1
+  zip_extra_field_length_bad: 1
+  zip_zip64_eocd_locator_bad: 1
+
+--- Difficulty Tags (top 15) ---
+  near_valid_directory: 22
+  sfx_carrier_prefix: 6
+  deceptive_structural_success: 5
+  hash_mismatch_risk: 5
+  split_or_missing_volume: 4
+  two_step_repair: 4
+  metadata_semantics_conflict: 3
+  zip64_metadata: 2
+  boundary_comment_ambiguity: 1
+  ambiguous_entry_mapping: 1
+  extra_field_semantics: 1
+
+--- Oracle Expected Statuses ---
+  repaired: 23
+  partial: 23
+  unrepairable: 23
+  unsupported: 23
+
+--- Candidate Damage Flags (top 15) ---
+  damaged: 18
+  trailing_junk: 14
+  boundary_unreliable: 14
+  checksum_error: 13
+  crc_error: 13
+  central_directory_bad: 4
+  central_directory_offset_bad: 4
+  central_directory_count_bad: 4
+  input_truncated: 4
+
+--- Candidate Actions (top 15) ---
+  plan_repair: 16
+  zip_fix_boundary: 8
+  zip_fix_pointers: 4
+  scan_central_directory: 3
+  rebuild_eocd: 3
+  scan_local_file_headers: 3
+  rebuild_zip_central_directory: 3
+  write_repaired_zip: 3
+  zip_rebuild: 2
+  trim_after_eocd: 2
+  deep_scan_local_headers: 1
+  verify_entry_payloads: 1
+  write_strict_verified_zip: 1
+  zip_fix_zip64: 1
+  zip_salvage: 1
+
+--- Native Status ---
+  crc_error: 25
+  : 5
