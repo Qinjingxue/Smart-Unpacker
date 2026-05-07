@@ -44,13 +44,17 @@ def load_source_bytes(source_input: dict[str, Any]) -> bytes:
 
 def source_input_for_job(job: RepairJob) -> dict[str, Any]:
     if job.archive_state is None or not job.archive_state.patches:
-        return dict(job.source_input)
-    return {
-        "kind": "bytes",
-        "data": archive_state_to_bytes(job.archive_state),
-        "format_hint": job.archive_state.format_hint or job.archive_state.source.format_hint or job.format,
-        "patch_digest": job.archive_state.effective_patch_digest(),
-    }
+        base = dict(job.source_input)
+    else:
+        base = {
+            "kind": "bytes",
+            "data": archive_state_to_bytes(job.archive_state),
+            "format_hint": job.archive_state.format_hint or job.archive_state.source.format_hint or job.format,
+            "patch_digest": job.archive_state.effective_patch_digest(),
+        }
+    if job.password:
+        base["password"] = job.password
+    return base
 
 
 def job_source_size(job: RepairJob) -> int | None:

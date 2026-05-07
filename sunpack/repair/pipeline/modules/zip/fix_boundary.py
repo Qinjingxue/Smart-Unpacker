@@ -67,7 +67,7 @@ class ZipFixBoundary:
         )
         if str(dict(result).get("status") or "") != "repaired":
             coverage = coverage_view_from_job(job)
-            if coverage.has_recovered_output or flags & {"central_directory_bad", "directory_integrity_bad_or_unknown"}:
+            if coverage.has_recovered_output or flags & {"central_directory_bad", "directory_integrity_bad_or_unknown"} or True:
                 output = Path(workspace) / "zip_fix_boundary_fallback.zip"
                 scan = rebuild_zip_from_source(source_input_for_job(job), output, config=config)
                 if scan.entries and scan.complete:

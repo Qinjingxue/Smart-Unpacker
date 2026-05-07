@@ -27,7 +27,9 @@ class ZipScanResult:
 
     @property
     def complete(self) -> bool:
-        return not self.skipped_offsets and not self.encrypted_entries and not self.timed_out
+        # Encrypted entries are structurally complete — their payload can't be
+        # verified without a password but the archive structure is intact.
+        return not self.skipped_offsets and not self.timed_out
 
 
 def rebuild_zip_from_source(

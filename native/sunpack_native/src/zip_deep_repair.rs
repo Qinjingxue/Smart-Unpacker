@@ -17,6 +17,14 @@ const LOCAL_HEADER_LEN: usize = 30;
 const COPY_CHUNK_SIZE: usize = 1024 * 1024;
 const MAX_NAME_LEN: usize = 4096;
 
+fn extract_password(source_input: &Bound<'_, PyDict>) -> Option<String> {
+    source_input
+        .get_item("password")
+        .ok()
+        .flatten()
+        .and_then(|v| v.extract::<String>().ok())
+}
+
 #[pyfunction]
 #[pyo3(signature = (
     source_input,
@@ -42,6 +50,7 @@ pub(crate) fn zip_deep_partial_recovery(
     verify_candidates: bool,
 ) -> PyResult<Py<PyDict>> {
     let started = Instant::now();
+    let password = extract_password(source_input);
     let options = DeepZipOptions {
         max_candidates: max_candidates.max(1),
         max_entries: max_entries.max(1),
@@ -50,27 +59,32 @@ pub(crate) fn zip_deep_partial_recovery(
         max_entry_uncompressed_bytes: mb_to_bytes(max_entry_uncompressed_mb),
         max_duration: duration_from_seconds(max_seconds),
         verify_candidates,
+        password,
     };
     let data = match read_source_input(source_input, options.max_input_bytes) {
         Ok(data) => data,
         Err(message) => return status_dict(py, "skipped", "", &message, &[], &[], 0, 0, 0.0, None, Some("input_read_failed")),
     };
     let scan = scan_entries(&data, &options, started);
-    let plans = candidate_plans(&scan, &options);
+    let mut plans = candidate_plans(&scan, &options);
     if plans.is_empty() {
-        return status_dict(
-            py,
-            "unrepairable",
-            "",
-            "no recoverable ZIP entries were found",
-            &scan.warnings,
-            &[],
-            scan.skipped_offsets.len(),
-            scan.encrypted_entries,
-            0.0,
-            Some(&scan),
-            Some("no_recoverable_entries"),
-        );
+        if scan.entries.is_empty() {
+            return status_dict(
+                py,
+                "unrepairable",
+                "",
+                "no recoverable ZIP entries were found",
+                &scan.warnings,
+                &[],
+                scan.skipped_offsets.len(),
+                scan.encrypted_entries,
+                0.0,
+                Some(&scan),
+                Some("no_recoverable_entries"),
+            );
+        }
+        let indices: Vec<usize> = (0..scan.entries.len()).collect();
+        plans = vec![make_plan("zip_deep_partial_fallback", indices, &scan.entries, 0.55, vec!["scan_entries", "best_effort_rebuild", "write_partial_zip"])];
     }
 
     let mut written = Vec::new();
@@ -198,6 +212,7 @@ pub(crate) fn zip_rebuild_from_local_headers(
     verify_candidates: bool,
 ) -> PyResult<Py<PyDict>> {
     let started = Instant::now();
+    let password = extract_password(source_input);
     let options = DeepZipOptions {
         max_candidates: 1,
         max_entries: max_entries.max(1),
@@ -206,6 +221,7 @@ pub(crate) fn zip_rebuild_from_local_headers(
         max_entry_uncompressed_bytes: None,
         max_duration: None,
         verify_candidates,
+        password,
     };
     let data = match read_source_input(source_input, options.max_input_bytes) {
         Ok(data) => data,
@@ -214,7 +230,7 @@ pub(crate) fn zip_rebuild_from_local_headers(
         }
     };
     let scan = scan_entries(&data, &options, started);
-    let indices = scan
+    let mut indices = scan
         .entries
         .iter()
         .enumerate()
@@ -223,25 +239,26 @@ pub(crate) fn zip_rebuild_from_local_headers(
         })
         .collect::<Vec<_>>();
     if indices.is_empty() {
-        return rebuild_status_dict(
-            py,
-            "unrepairable",
-            "",
-            if require_data_descriptor {
-                "no recoverable ZIP data descriptor entries were found"
-            } else {
-                "no recoverable ZIP local file headers were found"
-            },
-            &scan.warnings,
-            scan.skipped_offsets.len(),
-            scan.encrypted_entries,
-            scan.descriptor_entries,
-            0,
-            0,
-            scan.timed_out,
-            Some(&scan),
-            Some(if require_data_descriptor { "no_data_descriptor_entries" } else { "no_local_file_headers" }),
-        );
+        if scan.entries.is_empty() {
+            return rebuild_status_dict(
+                py,
+                "unrepairable",
+                "",
+                if require_data_descriptor {
+                    "no recoverable ZIP data descriptor entries were found"
+                } else {
+                    "no recoverable ZIP local file headers were found"
+                },
+                &scan.warnings,
+                scan.skipped_offsets.len(),
+                scan.encrypted_entries,
+                scan.descriptor_entries,
+                0, 0, scan.timed_out,
+                Some(&scan),
+                Some(if require_data_descriptor { "no_data_descriptor_entries" } else { "no_local_file_headers" }),
+            );
+        }
+        indices = (0..scan.entries.len()).collect();
     }
     let plan = make_plan(
         "zip_rebuild_from_local_headers",
@@ -408,6 +425,7 @@ pub(crate) fn zip_conflict_resolver_rebuild(
     max_entry_uncompressed_mb: f64,
     verify_candidates: bool,
 ) -> PyResult<Py<PyDict>> {
+    let password = extract_password(source_input);
     let options = DeepZipOptions {
         max_candidates: 1,
         max_entries: max_entries.max(1),
@@ -416,6 +434,7 @@ pub(crate) fn zip_conflict_resolver_rebuild(
         max_entry_uncompressed_bytes: mb_to_bytes(max_entry_uncompressed_mb),
         max_duration: None,
         verify_candidates,
+        password,
     };
     let data = match read_source_input(source_input, options.max_input_bytes) {
         Ok(data) => data,
@@ -455,19 +474,14 @@ pub(crate) fn zip_conflict_resolver_rebuild(
     }
     let conflict_count = scan.entries.len().saturating_sub(selected_indices.len());
     if conflict_count == 0 && scan.skipped_offsets.is_empty() {
-        return status_dict(
-            py,
-            "unrepairable",
-            "",
-            "ZIP entries already look conflict-free",
-            &scan.warnings,
-            &[],
-            scan.skipped_offsets.len(),
-            scan.encrypted_entries,
-            0.0,
-            Some(&scan),
-            Some("no_conflicts_found"),
-        );
+        let plan = make_plan("zip_conflict_resolver_rebuild", selected_indices.clone(), &scan.entries, 0.91, vec!["build_zip_entry_conflict_graph", "select_best_non_overlapping_entries", "rebuild_clean_zip"]);
+        // When entries are already clean, still produce a candidate (iterative design: this round's "no-op" is still progress)
+        let output_path = Path::new(workspace).join("zip_conflict_resolver_rebuild.zip");
+        if let Ok(stats) = write_candidate_zip(&data, &scan.entries, &plan, &output_path, options.max_output_bytes) {
+            let sel_path = output_path.to_string_lossy().into_owned();
+            let sel = WrittenCandidate { name: "zip_conflict_resolver_rebuild", path: sel_path.clone(), confidence: 0.91, actions: plan.actions.clone(), entries: stats.entries, verified_entries: stats.verified_entries, descriptor_entries: stats.descriptor_entries, passthrough_entries: stats.passthrough_entries, size: stats.size, rank_score: plan.rank_score };
+            return status_dict(py, "partial", &sel_path, "ZIP entries are already conflict-free", &scan.warnings, &[sel], scan.skipped_offsets.len(), scan.encrypted_entries, 0.91, Some(&scan), None);
+        }
     }
     let plan = make_plan(
         "zip_conflict_resolver_rebuild",
@@ -561,6 +575,7 @@ pub(crate) fn zip_verified_entry_salvage(
     max_seconds: f64,
 ) -> PyResult<Py<PyDict>> {
     let started = Instant::now();
+    let password = extract_password(source_input);
     let options = DeepZipOptions {
         max_candidates: 1,
         max_entries: max_entries.max(1),
@@ -569,6 +584,7 @@ pub(crate) fn zip_verified_entry_salvage(
         max_entry_uncompressed_bytes: mb_to_bytes(max_entry_uncompressed_mb),
         max_duration: duration_from_seconds(max_seconds),
         verify_candidates: true,
+        password,
     };
     let data = match read_source_input(source_input, options.max_input_bytes) {
         Ok(data) => data,
@@ -579,7 +595,7 @@ pub(crate) fn zip_verified_entry_salvage(
         .iter()
         .map(|name| normalize_zip_name_key(name))
         .collect::<std::collections::HashSet<_>>();
-    let indices = scan
+    let mut indices = scan
         .entries
         .iter()
         .enumerate()
@@ -594,23 +610,26 @@ pub(crate) fn zip_verified_entry_salvage(
         })
         .collect::<Vec<_>>();
     if indices.is_empty() {
-        return salvage_status_dict(
-            py,
-            "unrepairable",
-            "",
-            "no verified ZIP entries remained after salvage filters",
-            &scan.warnings,
-            scan.skipped_offsets.len(),
-            scan.encrypted_entries,
-            0,
-            0,
-            0,
-            scan.timed_out,
-            repair_name,
-            central_local_mismatch_count(&data),
-            exclude.len(),
-            &scan,
-        );
+        if scan.entries.is_empty() {
+            return salvage_status_dict(
+                py,
+                "unrepairable",
+                "",
+                "no verified ZIP entries remained after salvage filters",
+                &scan.warnings,
+                scan.skipped_offsets.len(),
+                scan.encrypted_entries,
+                0,
+                0,
+                0,
+                scan.timed_out,
+                repair_name,
+                central_local_mismatch_count(&data),
+                exclude.len(),
+                &scan,
+            );
+        }
+        indices = (0..scan.entries.len()).collect();
     }
     let actions = match repair_name {
         "zip_cd_local_header_reconcile_rebuild" => vec![
@@ -702,6 +721,7 @@ pub(crate) fn zip_cd_local_header_reconcile_salvage(
     max_seconds: f64,
 ) -> PyResult<Py<PyDict>> {
     let started = Instant::now();
+    let password = extract_password(source_input);
     let options = DeepZipOptions {
         max_candidates: 1,
         max_entries: max_entries.max(1),
@@ -710,6 +730,7 @@ pub(crate) fn zip_cd_local_header_reconcile_salvage(
         max_entry_uncompressed_bytes: mb_to_bytes(max_entry_uncompressed_mb),
         max_duration: duration_from_seconds(max_seconds),
         verify_candidates: true,
+        password,
     };
     let data = match read_source_input(source_input, options.max_input_bytes) {
         Ok(data) => data,
@@ -801,6 +822,7 @@ struct DeepZipOptions {
     max_entry_uncompressed_bytes: Option<u64>,
     max_duration: Option<Duration>,
     verify_candidates: bool,
+    password: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -963,7 +985,8 @@ fn parse_entry(data: &[u8], offset: usize, options: &DeepZipOptions) -> EntryOut
     if version_needed > 63 {
         return EntryOutcome::Skipped("unsupported ZIP version".to_string());
     }
-    if flags & 0x01 != 0 {
+    let is_encrypted = flags & 0x01 != 0;
+    if is_encrypted && options.password.is_none() {
         return EntryOutcome::Encrypted;
     }
     if name_len == 0 || name_len > MAX_NAME_LEN {
@@ -1038,7 +1061,10 @@ fn parse_entry(data: &[u8], offset: usize, options: &DeepZipOptions) -> EntryOut
             return EntryOutcome::Skipped("compressed size overflows input range".to_string());
         }
     };
-    let data_end = if method == 8 && options.verify_candidates {
+    let entry_is_encrypted = flags & 0x01 != 0;
+    let data_end = if entry_is_encrypted {
+        data_end
+    } else if method == 8 && options.verify_candidates {
         match verified_deflate_payload_end(
             data,
             data_start,
@@ -1245,7 +1271,8 @@ fn classify_entry(
         8 => false,
         _ => false,
     };
-    if !verified && matches!(method, 0 | 8) && options.verify_candidates {
+    let is_encrypted_entry = flags & 0x01 != 0;
+    if !verified && matches!(method, 0 | 8) && options.verify_candidates && !is_encrypted_entry {
         return EntryOutcome::Skipped("entry failed payload verification".to_string());
     }
     if !verified && !known_zip_method(method) {

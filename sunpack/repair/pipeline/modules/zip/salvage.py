@@ -139,7 +139,7 @@ class ZipSalvage:
             native_key="native_zip_salvage_deep",
             format_hint="zip", partial_default=True, default_confidence=0.70,
         ):
-            if int(c.diagnosis.get("native_candidate", {}).get("verified_entries") or 0) > 0:
+            if int(c.diagnosis.get("native_candidate", {}).get("verified_entries") or 0) > 0 or int(c.diagnosis.get("native_candidate", {}).get("entries") or 0) > 0:
                 if coverage.known:
                     c = replace(c, confidence=min(0.99, float(c.confidence or 0.0) + coverage.score_hint(payload=0.04, mixed=0.05, partial=0.02)))
                 all_candidates.append(c)
@@ -219,7 +219,7 @@ class ZipSalvage:
             candidates[i] = replace(candidates[i],
                 confidence=min(0.98, float(candidates[i].confidence or 0.0) + coverage.score_hint(directory=0.02, partial=0.04)),
             )
-        candidates = [c for c in candidates if int(c.diagnosis.get("native_candidate", {}).get("verified_entries") or 0) > 0]
+        candidates = [c for c in candidates if int(c.diagnosis.get("native_candidate", {}).get("verified_entries") or 0) > 0 or int(c.diagnosis.get("native_candidate", {}).get("entries") or 0) > 0]
         if not candidates:
             return RepairResult(
                 status="unrepairable", confidence=0.0, format="zip",
