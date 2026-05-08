@@ -591,14 +591,16 @@ def _native_feedback(candidate: Any) -> dict[str, Any]:
         "native_zip_deep_recovery",
         "native_zip_directory_field_repair",
         "native_zip_rebuild",
+        "native_zip_cd_local_header_reconcile",
+        "native_zip_quarantine_failed_entries",
+        "native_zip_salvage_verified_entries",
+        "native_zip_partial_salvage_missing_volume",
+        "native_zip_local_header_partial_scan",
+        "native_zip_resolve_duplicate_entries",
+        "native_zip_resolve_overlapping_entries",
+        "native_zip_reconcile_cd_data_descriptor_conflict",
         "native_zip_conflict_resolver",
         "native_zip_verified_entry_salvage",
-        "native_zip_cd_local_header_reconcile",
-        "native_zip_salvage_deep",
-        "native_zip_salvage_reconcile",
-        "native_zip_salvage_quarantine",
-        "native_zip_entry_quarantine",
-        "native_zip_resolve_conflicts",
     )
     for key in _NATIVE_KEYS:
         native = diagnosis.get(key)

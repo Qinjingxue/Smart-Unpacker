@@ -297,7 +297,7 @@ class BinaryCorruptor:
                 "trailing_junk",
             ],
             expected_statuses=("partial",),
-            expected_module="zip_central_directory_rebuild",
+            expected_module="zip_rebuild_cd_from_local_headers",
             expected_files={
                 "good.txt": entries["good.txt"],
                 "keep.bin": entries["keep.bin"],
@@ -335,7 +335,7 @@ class BinaryCorruptor:
                 "central_directory_bad",
             ],
             expected_statuses=("repaired",),
-            expected_module="zip_eocd_repair",
+            expected_module="zip_fix_eocd_record",
             expected_files=entries,
         )
 
@@ -384,7 +384,7 @@ class BinaryCorruptor:
                 "boundary_unreliable",
             ],
             expected_statuses=("partial", "repaired"),
-            expected_module="zip_central_directory_rebuild",
+            expected_module="zip_rebuild_cd_from_local_headers",
             expected_files={
                 "good.txt": entries["good.txt"],
                 "keep.bin": entries["keep.bin"],
@@ -703,7 +703,7 @@ class BinaryCorruptor:
             mutations,
             damage_flags=["trailing_junk"],
             expected_statuses=("repaired",),
-            expected_module="zip_trailing_junk_trim",
+            expected_module="zip_trim_trailing_junk",
             output_required=False,
             password=password,
             builder_call=f'encrypted_zip_trailing_junk(root, password="{password}")',
@@ -753,7 +753,7 @@ class BinaryCorruptor:
             mutations=mutations,
             damage_flags=["trailing_junk", "boundary_unreliable"],
             expected_statuses=("repaired",),
-            expected_module="zip_trailing_junk_trim",
+            expected_module="zip_trim_trailing_junk",
             expected_files=entries,
             builder_call="zip_multipart_tail_noise(root)",
         )
@@ -1213,9 +1213,9 @@ def _zip_corpus_mutations(data: bytes, randomizer: random.Random, profile: str, 
         elif profile == "zip_crc_repair_masks_payload_mismatch":
             mutations.extend(_zip_damage_payloads(data, entry_infos, randomizer, all_entries=False, name="corpus_zip_crc_repair_masks_payload_mismatch", expected_effect="CRC repair may hide a payload mismatch"))
             mutations.extend(_zip_cd_crc_mutations(cd_headers, randomizer, value=b"\xff\xff\xff\xff"))
-        elif profile == "zip_partial_recovery_wrong_hash_same_name":
-            mutations.append(_truncate("corpus_zip_partial_recovery_wrong_hash_drop_tail", max(1, eocd), "zip.central_directory", "partial recovery uses local names"))
-            mutations.extend(_zip_damage_payloads(data, entry_infos, randomizer, all_entries=False, name="corpus_zip_partial_recovery_wrong_hash_same_name", expected_effect="partial output has the expected name but wrong hash"))
+        elif profile == "zip_local_header_partial_scan_wrong_hash_same_name":
+            mutations.append(_truncate("corpus_zip_local_header_partial_scan_wrong_hash_drop_tail", max(1, eocd), "zip.central_directory", "partial recovery uses local names"))
+            mutations.extend(_zip_damage_payloads(data, entry_infos, randomizer, all_entries=False, name="corpus_zip_local_header_partial_scan_wrong_hash_same_name", expected_effect="partial output has the expected name but wrong hash"))
         elif layer in {"structural", "structural_directory", "hard_negative", "two_step_repair", "deceptive_hard_negative"}:
             mutations.extend([
                 _replace_bytes("corpus_zip_bad_eocd_counts", eocd + 8, struct.pack("<HH", 1, 99), "zip.eocd.entry_counts", "directory entry counts conflict"),
@@ -1670,7 +1670,7 @@ def _damage_layer(profile: str) -> str:
         "zip_quarantine_keeps_corrupted_entry",
         "zip_wrong_local_offset_extracts_valid_other_entry",
         "zip_crc_repair_masks_payload_mismatch",
-        "zip_partial_recovery_wrong_hash_same_name",
+        "zip_local_header_partial_scan_wrong_hash_same_name",
         "zip_sfx_payload_damage",
         "zip_data_descriptor_payload_bad",
     }:
@@ -2472,3 +2472,4 @@ def _build_encrypted_zip(root: Path, *, password: str) -> bytes:
     if completed.returncode != 0 or not archive.is_file():
         raise RuntimeError(f"7z encrypted ZIP fixture failed: {completed.stderr or completed.stdout}")
     return archive.read_bytes()
+

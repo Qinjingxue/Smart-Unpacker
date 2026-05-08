@@ -30,7 +30,7 @@ DEFAULT_SALVAGE_MODULES = {
     "rar_file_quarantine_rebuild",
     "seven_zip_solid_block_partial_salvage",
     "tar_sparse_pax_longname_repair",
-    "zip_resolve_conflicts",
+    "zip_resolve_duplicate_entries",
 }
 
 
@@ -86,7 +86,7 @@ def test_default_repair_config_enables_deep_salvage_modules(tmp_path):
             "structure_recognition",
         ),
             (
-                "zip_resolve_conflicts",
+                "zip_resolve_duplicate_entries",
                 "zip",
                 ["duplicate_entries", "overlapping_entries", "local_header_conflict"],
                 "checksum_error",
@@ -958,7 +958,7 @@ def test_repair_config_rejects_removed_analysis_repair_settings():
         normalize_config({"repair": {"max_modules_per_job": 1}})
 
 
-def test_zip_central_directory_rebuild_repairs_missing_eocd(tmp_path):
+def test_zip_rebuild_cd_from_local_headers_repairs_missing_eocd(tmp_path):
     source = tmp_path / "missing_cd.zip"
     _write_zip(source, {"a.txt": b"alpha", "b.txt": b"bravo"})
     data = source.read_bytes()
@@ -968,7 +968,7 @@ def test_zip_central_directory_rebuild_repairs_missing_eocd(tmp_path):
 
     result = _run_zip_repair(
         tmp_path,
-        "zip_central_directory_rebuild",
+        "zip_rebuild_cd_from_local_headers",
         source,
         ["central_directory_bad"],
     )
@@ -980,7 +980,7 @@ def test_zip_central_directory_rebuild_repairs_missing_eocd(tmp_path):
         assert archive.read("b.txt") == b"bravo"
 
 
-def test_zip_partial_recovery_skips_damaged_entry(tmp_path):
+def test_zip_local_header_partial_scan_skips_damaged_entry(tmp_path):
     source = tmp_path / "partial.zip"
     _write_zip(source, {"bad.txt": b"broken", "good.txt": b"still here"})
     data = bytearray(source.read_bytes())
@@ -990,7 +990,7 @@ def test_zip_partial_recovery_skips_damaged_entry(tmp_path):
 
     result = _run_zip_repair(
         tmp_path,
-        "zip_partial_recovery",
+        "zip_local_header_partial_scan",
         source,
         ["damaged", "checksum_error"],
     )
@@ -1002,13 +1002,13 @@ def test_zip_partial_recovery_skips_damaged_entry(tmp_path):
         assert archive.read("good.txt") == b"still here"
 
 
-def test_zip_data_descriptor_recovery_materializes_sizes(tmp_path):
+def test_zip_rebuild_cd_from_data_descriptors_materializes_sizes(tmp_path):
     source = tmp_path / "descriptor.zip"
     source.write_bytes(_descriptor_zip_fragment("dd.txt", b"descriptor payload"))
 
     result = _run_zip_repair(
         tmp_path,
-        "zip_data_descriptor_recovery",
+        "zip_rebuild_cd_from_data_descriptors",
         source,
         ["data_descriptor", "compressed_size_bad"],
     )
@@ -1019,7 +1019,7 @@ def test_zip_data_descriptor_recovery_materializes_sizes(tmp_path):
         assert archive.read("dd.txt") == b"descriptor payload"
 
 
-def test_zip_data_descriptor_recovery_supports_zip64_descriptor(tmp_path):
+def test_zip_rebuild_cd_from_data_descriptors_supports_zip64_descriptor(tmp_path):
     source = tmp_path / "zip64_descriptor.zip"
     source.write_bytes(_descriptor_zip_fragment(
         "zip64-dd.txt",
@@ -1029,7 +1029,7 @@ def test_zip_data_descriptor_recovery_supports_zip64_descriptor(tmp_path):
 
     result = _run_zip_repair(
         tmp_path,
-        "zip_data_descriptor_recovery",
+        "zip_rebuild_cd_from_data_descriptors",
         source,
         ["data_descriptor", "compressed_size_bad"],
     )
@@ -1040,7 +1040,7 @@ def test_zip_data_descriptor_recovery_supports_zip64_descriptor(tmp_path):
         assert archive.read("zip64-dd.txt") == b"zip64 descriptor payload"
 
 
-def test_zip_deep_partial_recovery_builds_best_verified_candidate(tmp_path):
+def test_zip_local_header_partial_scan_builds_best_verified_candidate(tmp_path):
     source = tmp_path / "deep_partial.zip"
     source.write_bytes(b"".join([
         _raw_stored_local_entry("good.txt", b"good payload"),
@@ -1052,7 +1052,7 @@ def test_zip_deep_partial_recovery_builds_best_verified_candidate(tmp_path):
     scheduler = RepairScheduler({
         "repair": {
             "workspace": str(tmp_path / "repair"),
-            "modules": [{"name": "zip_deep_partial_recovery", "enabled": True}],
+            "modules": [{"name": "zip_local_header_partial_scan", "enabled": True}],
         }
     })
     result = scheduler.repair(RepairJob(
@@ -1065,8 +1065,8 @@ def test_zip_deep_partial_recovery_builds_best_verified_candidate(tmp_path):
 
     assert result.ok is True
     assert result.status == "partial"
-    assert result.module_name == "zip_salvage"
-    native = result.diagnosis["native_zip_salvage_deep"]
+    assert result.module_name == "zip_local_header_partial_scan"
+    native = result.diagnosis["native_zip_local_header_partial_scan_deep"]
     assert native["selected_candidate"] == "zip_deep_descriptor_recovered"
     assert native["verified_entries"] == 2
     with zipfile.ZipFile(result.repaired_input["path"]) as archive:
@@ -1075,20 +1075,20 @@ def test_zip_deep_partial_recovery_builds_best_verified_candidate(tmp_path):
         assert archive.read("dd.txt") == b"descriptor payload"
 
 
-def test_zip_eocd_repair_rebuilds_missing_eocd_from_central_directory(tmp_path):
+def test_zip_fix_eocd_record_rebuilds_missing_eocd_from_central_directory(tmp_path):
     source = tmp_path / "missing_eocd.zip"
     _write_zip(source, {"payload.txt": b"zip payload"})
     data = source.read_bytes()
     source.write_bytes(data[:data.rfind(b"PK\x05\x06")])
 
-    result = _run_repair(tmp_path, "zip_eocd_repair", "zip", source, ["eocd_bad", "central_directory_bad"])
+    result = _run_repair(tmp_path, "zip_fix_eocd_record", "zip", source, ["eocd_bad", "central_directory_bad"])
 
     assert result.ok is True
     with zipfile.ZipFile(result.repaired_input["path"]) as archive:
         assert archive.read("payload.txt") == b"zip payload"
 
 
-def test_zip_central_directory_offset_fix_rewrites_bad_eocd_offset(tmp_path):
+def test_zip_fix_cd_offset_rewrites_bad_eocd_offset(tmp_path):
     source = tmp_path / "bad_cd_offset.zip"
     _write_zip(source, {"payload.txt": b"zip payload"})
     data = bytearray(source.read_bytes())
@@ -1096,27 +1096,27 @@ def test_zip_central_directory_offset_fix_rewrites_bad_eocd_offset(tmp_path):
     struct.pack_into("<I", data, eocd_offset + 16, 0)
     source.write_bytes(bytes(data))
 
-    result = _run_repair(tmp_path, "zip_central_directory_offset_fix", "zip", source, ["central_directory_offset_bad"])
+    result = _run_repair(tmp_path, "zip_fix_cd_offset", "zip", source, ["central_directory_offset_bad"])
 
     assert result.ok is True
     with zipfile.ZipFile(result.repaired_input["path"]) as archive:
         assert archive.read("payload.txt") == b"zip payload"
 
 
-def test_zip_trailing_junk_trim_removes_bytes_after_eocd(tmp_path):
+def test_zip_trim_trailing_junk_removes_bytes_after_eocd(tmp_path):
     source = tmp_path / "zip_tail.zip"
     _write_zip(source, {"payload.txt": b"zip payload"})
     original = source.read_bytes()
     source.write_bytes(original + b"JUNK")
 
-    result = _run_repair(tmp_path, "zip_trailing_junk_trim", "zip", source, ["trailing_junk"])
+    result = _run_repair(tmp_path, "zip_trim_trailing_junk", "zip", source, ["trailing_junk"])
 
     assert result.ok is True
     assert result.repaired_input["path"]
     assert len(open(result.repaired_input["path"], "rb").read()) == len(original)
 
 
-def test_zip_comment_length_fix_patches_oversized_comment_length(tmp_path):
+def test_zip_fix_eocd_comment_length_patches_oversized_comment_length(tmp_path):
     source = tmp_path / "bad_comment_len.zip"
     _write_zip(source, {"payload.txt": b"zip payload"})
     data = bytearray(source.read_bytes())
@@ -1124,14 +1124,14 @@ def test_zip_comment_length_fix_patches_oversized_comment_length(tmp_path):
     struct.pack_into("<H", data, eocd_offset + 20, 12)
     source.write_bytes(bytes(data))
 
-    result = _run_repair(tmp_path, "zip_comment_length_fix", "zip", source, ["comment_length_bad"])
+    result = _run_repair(tmp_path, "zip_fix_eocd_comment_length", "zip", source, ["comment_length_bad"])
 
     assert result.ok is True
     with zipfile.ZipFile(result.repaired_input["path"]) as archive:
         assert archive.read("payload.txt") == b"zip payload"
 
 
-def test_zip_central_directory_count_fix_patches_bad_counts(tmp_path):
+def test_zip_fix_cd_entry_count_patches_bad_counts(tmp_path):
     source = tmp_path / "bad_count.zip"
     _write_zip(source, {"a.txt": b"a", "b.txt": b"b"})
     data = bytearray(source.read_bytes())
@@ -1139,7 +1139,7 @@ def test_zip_central_directory_count_fix_patches_bad_counts(tmp_path):
     struct.pack_into("<HH", data, eocd_offset + 8, 1, 1)
     source.write_bytes(bytes(data))
 
-    result = _run_repair(tmp_path, "zip_central_directory_count_fix", "zip", source, ["central_directory_count_bad"])
+    result = _run_repair(tmp_path, "zip_fix_cd_entry_count", "zip", source, ["central_directory_count_bad"])
 
     assert result.ok is True
     repaired = open(result.repaired_input["path"], "rb").read()
@@ -1203,12 +1203,12 @@ def test_gzip_footer_fix_rewrites_crc_and_isize(tmp_path):
     assert gzip.decompress(open(result.repaired_input["path"], "rb").read()) == b"gzip payload"
 
 
-def test_gzip_trailing_junk_trim_removes_bytes_after_stream(tmp_path):
+def test_gzip_trim_trailing_junk_removes_bytes_after_stream(tmp_path):
     source = tmp_path / "gzip_tail.gz"
     original = gzip.compress(b"gzip payload")
     source.write_bytes(original + b"JUNK")
 
-    result = _run_repair(tmp_path, "gzip_trailing_junk_trim", "gzip", source, ["trailing_junk"])
+    result = _run_repair(tmp_path, "gzip_trim_trailing_junk", "gzip", source, ["trailing_junk"])
 
     assert result.ok is True
     assert open(result.repaired_input["path"], "rb").read() == original
@@ -2183,3 +2183,4 @@ def _rar5_block(header_type: int, flags: int = 0, data: bytes = b"") -> bytes:
 
 def _rar5_bytes() -> bytes:
     return b"Rar!\x1a\x07\x01\x00" + _rar5_block(1) + _rar5_block(5)
+

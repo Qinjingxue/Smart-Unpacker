@@ -345,16 +345,12 @@ class RepairScheduler:
         return selected, decision
 
     def _module_sort_key(self, score: float, module, route_score: float, fine_score: float, diagnosis_format: str = "") -> tuple:
-        boundary_first = -10 if module.spec.name == "zip_fix_boundary" else 0
-        pointers_first = -5 if module.spec.name == "zip_fix_pointers" else 0
         return (
             -float(score or 0.0),
             -float(fine_score or 0.0),
             -float(route_score or 0.0),
             _format_specificity_penalty(diagnosis_format, module.spec.formats),
             -_route_specificity(module.spec.routes),
-            boundary_first,
-            pointers_first,
             0 if module.spec.safe else 1,
             1 if module.spec.lossy else 0,
             1 if module.spec.partial else 0,

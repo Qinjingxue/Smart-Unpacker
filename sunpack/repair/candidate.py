@@ -393,9 +393,13 @@ def candidate_feature_payload(candidate: RepairCandidate) -> dict[str, Any]:
     ranking = candidate_ranking_breakdown(candidate)
     history = candidate_history_features(candidate)
     plan_metrics = _candidate_plan_metrics(candidate)
+    diagnosis = candidate.diagnosis if isinstance(candidate.diagnosis, dict) else {}
     return {
         "candidate_id": candidate_digest(candidate),
         "module": candidate.module_name,
+        "repair_name": str(diagnosis.get("repair_name") or candidate.module_name),
+        "native_key": str(diagnosis.get("native_key") or ""),
+        "atomic_action_group": str(diagnosis.get("atomic_action_group") or diagnosis.get("repair_name") or candidate.module_name),
         "format": candidate.format,
         "status": candidate.status,
         "stage": candidate.stage,
@@ -1011,27 +1015,27 @@ def _patch_plan_priority(candidate: RepairCandidate) -> float:
 def _module_generation_bias(candidate: RepairCandidate) -> float:
     module_name = str(candidate.module_name or "")
     flags = {str(flag) for flag in candidate.damage_flags}
-    if module_name == "zip_rebuild" and flags & {"data_descriptor", "bit3_data_descriptor", "compressed_size_bad"}:
-        return 0.08
-    if module_name == "zip_salvage" and flags & {"missing_volume", "input_truncated", "unexpected_end", "stream_truncated"}:
-        return 0.08
-    if module_name == "zip_fix_zip64" and flags & {"zip64", "zip64_eocd_bad", "zip64_locator_bad", "zip64_extra_bad"}:
-        return 0.1
-    if module_name == "zip_trailing_junk_trim" and "trailing_junk" in flags:
+    if module_name == "zip_rebuild_cd_from_data_descriptors" and flags & {"data_descriptor", "bit3_data_descriptor", "compressed_size_bad"}:
+        return 0.10
+    if module_name == "zip_reconcile_cd_data_descriptor_conflict" and flags & {"data_descriptor", "bit3_data_descriptor", "compressed_size_bad"}:
+        return 0.12
+    if module_name == "zip_partial_salvage_missing_volume" and flags & {"missing_volume", "input_truncated", "unexpected_end", "stream_truncated"}:
+        return 0.12
+    if module_name in {"zip_fix_zip64_locator", "zip_fix_zip64_eocd", "zip_fix_zip64_extra_size"} and flags & {"zip64", "zip64_eocd_bad", "zip64_locator_bad", "zip64_extra_bad"}:
+        return 0.12
+    if module_name == "zip_trim_trailing_junk" and "trailing_junk" in flags:
         if flags & {"checksum_error", "crc_error", "entry_payload_bad", "damaged", "content_integrity_bad_or_unknown"}:
             return -0.02
         return 0.03
-    if module_name == "zip_entry_quarantine_rebuild" and flags & {"checksum_error", "crc_error", "entry_payload_bad", "damaged"}:
+    if module_name == "zip_quarantine_failed_entries" and flags & {"checksum_error", "crc_error", "entry_payload_bad", "damaged"}:
         return 0.05
-    if module_name == "zip_deep_partial_recovery" and flags & {"checksum_error", "crc_error", "entry_payload_bad", "damaged"}:
+    if module_name == "zip_local_header_partial_scan" and flags & {"checksum_error", "crc_error", "entry_payload_bad", "damaged"}:
         return 0.05
-    if module_name == "zip64_field_repair":
-        return 0.16
-    if module_name == "zip_eocd_repair":
+    if module_name == "zip_fix_eocd_record":
         return 0.12
     if module_name == "seven_zip_crc_field_repair":
         return 0.1
-    if module_name == "zip_central_directory_rebuild":
+    if module_name == "zip_rebuild_cd_from_local_headers":
         if "eocd_bad" in flags and not (flags & {"central_directory_bad", "directory_integrity_bad_or_unknown", "local_header_recovery"}):
             return 0.0
         return 0.11
@@ -1047,9 +1051,9 @@ def _module_complexity_boost(candidate: RepairCandidate) -> float:
                               "multi_round_repair_expected"}
     if len(complex_flags) < 2:
         return 0.0
-    if module in {"zip_central_directory_rebuild", "zip_cd_local_header_reconcile_rebuild"}:
+    if module in {"zip_rebuild_cd_from_local_headers", "zip_reconcile_cd_local_headers", "zip_reconcile_cd_data_descriptor_conflict"}:
         return 0.06
-    if module == "zip_deep_partial_recovery":
+    if module == "zip_local_header_partial_scan":
         return 0.08
     return 0.0
 
@@ -1065,13 +1069,17 @@ def _candidate_context_mismatch_breakdown(candidate: RepairCandidate) -> dict[st
     content_damage = bool(flags & {"checksum_error", "crc_error", "entry_payload_bad", "payload_damaged", "damaged", "data_error"})
     central_directory_only = bool(flags & {"central_directory_bad", "central_directory_offset_bad", "central_directory_count_bad"}) and not content_damage
 
+    conflict_modules = {"zip_resolve_duplicate_entries", "zip_resolve_overlapping_entries"}
+    pointer_modules = {"zip_fix_eocd_record", "zip_fix_cd_offset", "zip_fix_cd_entry_count", "zip_fix_local_header_fields"}
+    zip64_modules = {"zip_fix_zip64_locator", "zip_fix_zip64_eocd", "zip_fix_zip64_extra_size"}
     return _component_breakdown({
-        "resolve_conflicts_without_conflict": {"value": 1.0 if module == "zip_resolve_conflicts" and not explicit_conflict else 0.0, "weight": 0.75},
-        "resolve_conflicts_data_descriptor": {"value": 1.0 if module == "zip_resolve_conflicts" and data_descriptor and not explicit_conflict else 0.0, "weight": 0.2},
-        "resolve_conflicts_simple_directory": {"value": 1.0 if module == "zip_resolve_conflicts" and central_directory_only and not explicit_conflict else 0.0, "weight": 0.25},
-        "zip64_without_zip64": {"value": 1.0 if module == "zip_fix_zip64" and not zip64_specific else 0.0, "weight": 0.85},
-        "pointers_on_sfx_or_split": {"value": 1.0 if module == "zip_fix_pointers" and (sfx_or_carrier or split_or_truncated) else 0.0, "weight": 0.45},
-        "boundary_on_payload_descriptor": {"value": 1.0 if module == "zip_fix_boundary" and data_descriptor and content_damage else 0.0, "weight": 0.18},
+        "conflict_without_conflict": {"value": 1.0 if module in conflict_modules and not explicit_conflict else 0.0, "weight": 0.75},
+        "conflict_on_descriptor_without_cd_conflict": {"value": 1.0 if module in conflict_modules and data_descriptor and not explicit_conflict else 0.0, "weight": 0.25},
+        "zip64_without_zip64": {"value": 1.0 if module in zip64_modules and not zip64_specific else 0.0, "weight": 0.85},
+        "pointer_on_sfx_or_split": {"value": 1.0 if module in pointer_modules and (sfx_or_carrier or split_or_truncated) else 0.0, "weight": 0.45},
+        "boundary_on_payload_descriptor": {"value": 1.0 if module in {"zip_trim_trailing_junk", "zip_fix_eocd_comment_length"} and data_descriptor and content_damage else 0.0, "weight": 0.18},
+        "descriptor_rebuild_without_descriptor": {"value": 1.0 if module == "zip_rebuild_cd_from_data_descriptors" and not data_descriptor else 0.0, "weight": 0.55},
+        "descriptor_reconcile_without_descriptor": {"value": 1.0 if module == "zip_reconcile_cd_data_descriptor_conflict" and not data_descriptor else 0.0, "weight": 0.65},
     })
 
 
@@ -1085,12 +1093,15 @@ def _candidate_lazy_no_output_breakdown(candidate: RepairCandidate) -> dict[str,
         validation.name == "repair_plan_materialization" and not validation.accepted
         for validation in candidate.validations
     )
+    conflict_modules = {"zip_resolve_duplicate_entries", "zip_resolve_overlapping_entries"}
+    pointer_modules = {"zip_fix_eocd_record", "zip_fix_cd_offset", "zip_fix_cd_entry_count", "zip_fix_local_header_fields"}
+    zip64_modules = {"zip_fix_zip64_locator", "zip_fix_zip64_eocd", "zip_fix_zip64_extra_size"}
     return _component_breakdown({
         "lazy_candidate": {"value": 1.0 if candidate.is_lazy else 0.0, "weight": 0.08},
         "materialization_failed": {"value": 1.0 if materialization_failed else 0.0, "weight": 1.0},
-        "resolve_conflicts_without_conflict": {"value": 1.0 if module == "zip_resolve_conflicts" and not explicit_conflict else 0.0, "weight": 0.65},
-        "zip64_without_zip64": {"value": 1.0 if module == "zip_fix_zip64" and not zip64_specific else 0.0, "weight": 0.75},
-        "split_tail_non_salvage": {"value": 1.0 if split_or_truncated and module in {"zip_resolve_conflicts", "zip_fix_pointers", "zip_fix_zip64"} else 0.0, "weight": 0.35},
+        "conflict_without_conflict": {"value": 1.0 if module in conflict_modules and not explicit_conflict else 0.0, "weight": 0.65},
+        "zip64_without_zip64": {"value": 1.0 if module in zip64_modules and not zip64_specific else 0.0, "weight": 0.75},
+        "split_tail_non_salvage": {"value": 1.0 if split_or_truncated and module in (conflict_modules | pointer_modules | zip64_modules) else 0.0, "weight": 0.35},
     })
 
 

@@ -275,9 +275,9 @@ _MODULE_EQUIVALENTS = {
     # These fuzz cases predate the looped repair scheduler.  The current
     # pipeline may legitimately recover the same ZIP directory/payload damage
     # with a more selective quarantine/deep-local-header module.
-    "zip_central_directory_rebuild": (
-        "zip_entry_quarantine_rebuild",
-        "zip_deep_partial_recovery",
+    "zip_rebuild_cd_from_local_headers": (
+        "zip_quarantine_failed_entries",
+        "zip_local_header_partial_scan",
     ),
 }
 
@@ -288,3 +288,4 @@ def _encrypted_case_or_skip(tmp_path: Path, builder_name: str) -> CorruptionCase
         return builder(tmp_path / builder_name)
     except FileNotFoundError as exc:
         pytest.skip(f"7z.exe is required for encrypted ZIP corruption fixtures: {exc}")
+

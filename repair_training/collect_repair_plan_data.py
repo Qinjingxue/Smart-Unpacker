@@ -71,6 +71,7 @@ def main(argv: list[str] | None = None) -> int:
         "terminal_status_counts": {},
         "terminal_success_count": 0,
         "no_output_reason_counts": {},
+        "legacy_module_seen_count": 0,
         "rollout_budget_exhausted": 0,
         "best_recovery_bucket_counts": {},
         "stop_reason_counts": {},
@@ -205,6 +206,9 @@ def _update_summary_counts(summary: dict[str, Any], record: dict[str, Any], rows
     terminal_success = False
     budget_exhausted = False
     for row in rows:
+        module_name = str(row.get("module") or row.get("module_name") or "")
+        if module_name in _LEGACY_ZIP_MODULE_NAMES:
+            summary["legacy_module_seen_count"] = int(summary.get("legacy_module_seen_count", 0) or 0) + 1
         if row.get("row_type") == "terminal":
             terminal_counts = summary.setdefault("terminal_status_counts", {})
             terminal_status = str(row.get("terminal_status") or row.get("label_status") or "unknown")
@@ -239,7 +243,7 @@ def _update_summary_counts(summary: dict[str, Any], record: dict[str, Any], rows
             reason = str(row.get("no_output_reason") or details.get("no_output_reason") or "unknown")
             reason_counts = summary.setdefault("no_output_reason_counts", {})
             reason_counts[reason] = int(reason_counts.get(reason, 0) or 0) + 1
-            module = str(row.get("module") or "unknown")
+            module = str(row.get("module") or row.get("module_name") or "unknown")
             module_counts = summary.setdefault("no_output_by_module", {})
             module_counts[module] = int(module_counts.get(module, 0) or 0) + 1
             profile = _record_damage_profile(record)
@@ -273,6 +277,16 @@ def _update_summary_counts(summary: dict[str, Any], record: dict[str, Any], rows
     layer = str(record.get("actual_damage_layer") or record.get("damage_layer") or "unknown")
     layer_counts = summary.setdefault("damage_layer_counts", {})
     layer_counts[layer] = int(layer_counts.get(layer, 0) or 0) + 1
+
+
+_LEGACY_ZIP_MODULE_NAMES = {
+    "zip_fix_boundary",
+    "zip_fix_pointers",
+    "zip_fix_zip64",
+    "zip_rebuild",
+    "zip_salvage",
+    "zip_resolve_conflicts",
+}
 
 
 def _recovery_bucket(value: float) -> str:
@@ -2212,12 +2226,25 @@ def _scheduler(args: argparse.Namespace) -> RepairScheduler:
                 "max_stream_trim_decode_mb": 32,
             },
             "modules": [
-                {"name": "zip_fix_boundary", "enabled": True},
-                {"name": "zip_fix_pointers", "enabled": True},
-                {"name": "zip_fix_zip64", "enabled": True},
-                {"name": "zip_rebuild", "enabled": True},
-                {"name": "zip_salvage", "enabled": True},
-                {"name": "zip_resolve_conflicts", "enabled": True},
+                {"name": "zip_trim_trailing_junk", "enabled": True},
+                {"name": "zip_fix_eocd_comment_length", "enabled": True},
+                {"name": "zip_fix_eocd_record", "enabled": True},
+                {"name": "zip_fix_cd_offset", "enabled": True},
+                {"name": "zip_fix_cd_entry_count", "enabled": True},
+                {"name": "zip_fix_local_header_fields", "enabled": True},
+                {"name": "zip_fix_zip64_locator", "enabled": True},
+                {"name": "zip_fix_zip64_eocd", "enabled": True},
+                {"name": "zip_fix_zip64_extra_size", "enabled": True},
+                {"name": "zip_rebuild_cd_from_local_headers", "enabled": True},
+                {"name": "zip_rebuild_cd_from_data_descriptors", "enabled": True},
+                {"name": "zip_reconcile_cd_local_headers", "enabled": True},
+                {"name": "zip_quarantine_failed_entries", "enabled": True},
+                {"name": "zip_salvage_verified_entries", "enabled": True},
+                {"name": "zip_partial_salvage_missing_volume", "enabled": True},
+                {"name": "zip_local_header_partial_scan", "enabled": True},
+                {"name": "zip_resolve_duplicate_entries", "enabled": True},
+                {"name": "zip_resolve_overlapping_entries", "enabled": True},
+                {"name": "zip_reconcile_cd_data_descriptor_conflict", "enabled": True},
             ],
         }
     })
@@ -2315,6 +2342,10 @@ def _action_row(
         "current_rank": rank,
         "candidate_id": payload.get("candidate_id"),
         "module": candidate.module_name,
+        "module_name": candidate.module_name,
+        "repair_name": payload.get("repair_name") or candidate.module_name,
+        "atomic_action_group": payload.get("atomic_action_group") or payload.get("repair_name") or candidate.module_name,
+        "native_key": payload.get("native_key") or "",
         "selected_by_current_system": bool(selected),
         "proposal_only": bool(proposal_only),
         "materialized_for_label": bool(materialized_for_label),
@@ -2504,6 +2535,9 @@ def _runtime_candidate_features(payload: dict[str, Any]) -> dict[str, Any]:
         key: payload.get(key)
         for key in (
             "module",
+            "repair_name",
+            "atomic_action_group",
+            "native_key",
             "format",
             "confidence",
             "score_hint",
@@ -2535,17 +2569,18 @@ def _runtime_candidate_features(payload: dict[str, Any]) -> dict[str, Any]:
             "content_damage_without_native_validation",
         },
         "context_mismatch_breakdown": {
-            "resolve_conflicts_without_conflict",
-            "resolve_conflicts_data_descriptor",
-            "resolve_conflicts_simple_directory",
+            "conflict_without_conflict",
+            "conflict_on_descriptor_without_cd_conflict",
             "zip64_without_zip64",
-            "pointers_on_sfx_or_split",
+            "pointer_on_sfx_or_split",
             "boundary_on_payload_descriptor",
+            "descriptor_rebuild_without_descriptor",
+            "descriptor_reconcile_without_descriptor",
         },
         "lazy_no_output_breakdown": {
             "lazy_candidate",
             "materialization_failed",
-            "resolve_conflicts_without_conflict",
+            "conflict_without_conflict",
             "zip64_without_zip64",
             "split_tail_non_salvage",
         },

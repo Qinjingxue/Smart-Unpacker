@@ -48,4 +48,5 @@ class ZipFix64:
         return repair_result_from_native_zip_field(self.spec.name, dict(result), job, diagnosis, config)
 
 
-register_repair_module(ZipFix64())
+# Legacy coarse module kept for historical imports only. ZIP repair registration
+# now happens through atomic.py.

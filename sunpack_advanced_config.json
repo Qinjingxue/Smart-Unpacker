@@ -505,30 +505,25 @@
       "enabled": false
     },
     "modules": [
-      {
-        "name": "zip_fix_boundary",
-        "enabled": true
-      },
-      {
-        "name": "zip_fix_pointers",
-        "enabled": true
-      },
-      {
-        "name": "zip_fix_zip64",
-        "enabled": true
-      },
-      {
-        "name": "zip_rebuild",
-        "enabled": true
-      },
-      {
-        "name": "zip_salvage",
-        "enabled": true
-      },
-      {
-        "name": "zip_resolve_conflicts",
-        "enabled": true
-      },
+      { "name": "zip_trim_trailing_junk", "enabled": true },
+      { "name": "zip_fix_eocd_comment_length", "enabled": true },
+      { "name": "zip_fix_eocd_record", "enabled": true },
+      { "name": "zip_fix_cd_offset", "enabled": true },
+      { "name": "zip_fix_cd_entry_count", "enabled": true },
+      { "name": "zip_fix_local_header_fields", "enabled": true },
+      { "name": "zip_fix_zip64_locator", "enabled": true },
+      { "name": "zip_fix_zip64_eocd", "enabled": true },
+      { "name": "zip_fix_zip64_extra_size", "enabled": true },
+      { "name": "zip_rebuild_cd_from_local_headers", "enabled": true },
+      { "name": "zip_rebuild_cd_from_data_descriptors", "enabled": true },
+      { "name": "zip_reconcile_cd_local_headers", "enabled": true },
+      { "name": "zip_quarantine_failed_entries", "enabled": true },
+      { "name": "zip_salvage_verified_entries", "enabled": true },
+      { "name": "zip_partial_salvage_missing_volume", "enabled": true },
+      { "name": "zip_local_header_partial_scan", "enabled": true },
+      { "name": "zip_resolve_duplicate_entries", "enabled": true },
+      { "name": "zip_resolve_overlapping_entries", "enabled": true },
+      { "name": "zip_reconcile_cd_data_descriptor_conflict", "enabled": true },
       {
         "name": "tar_header_checksum_fix",
         "enabled": true

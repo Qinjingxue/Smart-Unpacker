@@ -103,7 +103,7 @@ def test_coordinator_real_zip_repair_then_worker_extraction(tmp_path):
             "workspace": str(tmp_path / "repair"),
             "max_repair_rounds_per_task": 1,
             "module_limits": {"verify_candidates": False, "max_candidates_per_module": 4},
-            "modules": [{"name": "zip_deep_partial_recovery", "enabled": True}],
+            "modules": [{"name": "zip_local_header_partial_scan", "enabled": True}],
             "beam": {"enabled": True, "max_rounds": 1},
         },
         "verification": {
@@ -124,7 +124,7 @@ def test_coordinator_real_zip_repair_then_worker_extraction(tmp_path):
 
     assert outcome.success is True
     assert extractor.calls == 2
-    assert outcome.repair_module == "zip_salvage"
+    assert outcome.repair_module == "zip_local_header_partial_scan"
     assert (tmp_path / "out" / "ok.txt").read_bytes() == b"ok"
 
 
@@ -363,7 +363,7 @@ def test_nested_salvage_output_recurses_into_inner_archive_repair_pipeline(tmp_p
     assert runner.context.success_count == 2
     assert not runner.context.failed_tasks
     assert outer_task.fact_bag.get("repair.module") == "archive_nested_payload_salvage"
-    assert second_tasks[0].fact_bag.get("repair.module") == "zip_salvage"
+    assert second_tasks[0].fact_bag.get("repair.module") == "zip_local_header_partial_scan"
     assert inner_archive.is_file()
     assert (inner_archive.with_suffix("") / "final.txt").read_bytes() == b"done"
 
@@ -472,7 +472,7 @@ def test_zip_conflict_resolver_rejects_traversal_and_keeps_safe_duplicate(tmp_pa
     ]))
     result = _run_single_module_repair(
         tmp_path,
-        "zip_conflict_resolver_rebuild",
+        "zip_resolve_duplicate_entries",
         "zip",
         source,
         ["duplicate_entries", "overlapping_entries", "local_header_conflict", "damaged"],
@@ -502,7 +502,7 @@ def test_zip_conflict_resolver_rejects_windows_unicode_and_reserved_conflicts(tm
     ]))
     result = _run_single_module_repair(
         tmp_path,
-        "zip_conflict_resolver_rebuild",
+        "zip_resolve_duplicate_entries",
         "zip",
         source,
         ["duplicate_entries", "overlapping_entries", "local_header_conflict", "damaged"],
@@ -532,7 +532,7 @@ def test_zip_conflict_resolver_ignores_malicious_central_directory_metadata(tmp_
     source.write_bytes(_zip_with_cd_local_metadata_conflicts())
     result = _run_single_module_repair(
         tmp_path,
-        "zip_conflict_resolver_rebuild",
+        "zip_resolve_duplicate_entries",
         "zip",
         source,
         ["duplicate_entries", "overlapping_entries", "local_header_conflict", "damaged"],
@@ -660,7 +660,7 @@ def test_coordinator_zero_max_repair_rounds_skips_repair_loop(tmp_path):
             "workspace": str(tmp_path / "repair"),
             "max_repair_rounds_per_task": 0,
             "module_limits": {"verify_candidates": False, "max_candidates_per_module": 4},
-            "modules": [{"name": "zip_deep_partial_recovery", "enabled": True}],
+            "modules": [{"name": "zip_local_header_partial_scan", "enabled": True}],
             "beam": {"enabled": True, "max_rounds": 2},
         },
         "verification": {
@@ -1178,7 +1178,7 @@ def _nested_salvage_pipeline_config(tmp_path: Path) -> dict:
             "module_limits": {"verify_candidates": False, "max_candidates_per_module": 4},
             "modules": [
                 {"name": "archive_nested_payload_salvage", "enabled": True},
-                {"name": "zip_deep_partial_recovery", "enabled": True},
+                {"name": "zip_local_header_partial_scan", "enabled": True},
             ],
             "beam": {"enabled": True, "max_rounds": 2},
         },
@@ -1389,3 +1389,4 @@ def _require_worker_or_skip() -> None:
     ]
     if missing:
         pytest.skip(f"{', '.join(missing)} is required for coordinator real worker coverage")
+

@@ -20,7 +20,7 @@ detection -> analysis -> extraction -> verification -> repair -> extraction -> v
 - **真实 worker 解压**：最终解压由 `sevenzip_worker.exe` 调用 `7z.dll` 完成，不走 `7z.exe x` 文本封装。
 - **verification 驱动结果判断**：不只看 worker 成功/失败，而是检查输出目录、manifest、归档条目、CRC、样本可读性、文件完整度和部分恢复进度。
 - **repair beam 循环**：修复模块生成 patch plan，候选会重新解压并进入 verification；比较算法按完整度、失败数、patch 成本、来源完整性等选择更优结果，没有提升时主动停止。
-- **损坏包尽力恢复**：支持 ZIP central directory/local header 修复、entry quarantine、deep partial recovery、conflict resolver；TAR checksum/trailing/PAX/GNU longname/sparse 修复；gzip/bzip2/xz/zstd 截断和尾部垃圾处理；7z start/next header/边界/CRC/solid block salvage；RAR block/end/carrier/file quarantine 修复。
+- **损坏包尽力恢复**：ZIP repair 使用原子化模块（boundary/pointer/ZIP64/rebuild/descriptor/quarantine/partial/conflict 分别暴露为独立 action）；TAR checksum/trailing/PAX/GNU longname/sparse 修复；gzip/bzip2/xz/zstd 截断和尾部垃圾处理；7z start/next header/边界/CRC/solid block salvage；RAR block/end/carrier/file quarantine 修复。
 - **嵌套与载体恢复**：可从损坏外壳或 carrier 中扫描内层 ZIP/7z/RAR/TAR/gzip 等载荷，并把内层包送回 pipeline。
 - **Native-first 热路径**：Rust 承接目录扫描、二进制视图、signature prepass、结构 probe、carrier scan、repair I/O、CRC/readability、候选匹配索引和密码 fast verifier；C++ 承接 7z.dll ABI 与 worker。
 - **适合右键菜单和 watch**：提供 Windows 右键菜单脚本，也支持 `watch` 目录监控，文件稳定后自动处理。

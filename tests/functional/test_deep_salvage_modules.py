@@ -29,14 +29,14 @@ def test_zip_conflict_resolver_keeps_best_duplicate_entry(tmp_path):
 
     result = _run_deep_module(
         tmp_path,
-        "zip_conflict_resolver_rebuild",
+        "zip_resolve_duplicate_entries",
         "zip",
         source,
         ["duplicate_entries", "overlapping_entries", "damaged"],
     )
 
     assert result.status == "partial"
-    assert result.module_name == "zip_conflict_resolver_rebuild"
+    assert result.module_name == "zip_resolve_duplicate_entries"
     with zipfile.ZipFile(result.repaired_input["path"]) as archive:
         assert archive.namelist() == ["dup.txt"]
         assert archive.read("dup.txt") == good_payload
@@ -298,3 +298,4 @@ def _require_7z_tool() -> Path:
     if found:
         return Path(found)
     pytest.skip("7z executable is required for 7z salvage fixture")
+

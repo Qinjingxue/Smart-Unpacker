@@ -305,4 +305,5 @@ class ZipSalvage:
             message="lightweight salvage did not produce a candidate",
         )
 
-register_repair_module(ZipSalvage())
+# Legacy coarse module kept for historical imports only. ZIP repair registration
+# now happens through atomic.py.

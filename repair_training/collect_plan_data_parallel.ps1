@@ -316,6 +316,7 @@ if ($Scheduling -eq "pool") {
         expanded_state_count = 0
         branch_count = 0
         terminal_success_count = 0
+        legacy_module_seen_count = 0
         rollout_budget_exhausted = 0
         best_partial_returned_count = 0
         label_counts = @{}
@@ -331,7 +332,7 @@ if ($Scheduling -eq "pool") {
         shards = $summaries
     }
     foreach ($summary in $summaries) {
-        foreach ($name in @("samples", "success_rows", "failure_rows", "timeouts", "failed", "skipped", "state_count", "expanded_state_count", "branch_count", "terminal_success_count", "rollout_budget_exhausted", "best_partial_returned_count")) {
+        foreach ($name in @("samples", "success_rows", "failure_rows", "timeouts", "failed", "skipped", "state_count", "expanded_state_count", "branch_count", "terminal_success_count", "legacy_module_seen_count", "rollout_budget_exhausted", "best_partial_returned_count")) {
             $aggregate[$name] = [int]$aggregate[$name] + [int]($summary.$name)
         }
         Add-TrainingCountMap $aggregate["label_counts"] $summary.label_counts
@@ -492,6 +493,7 @@ $aggregate = [ordered]@{
     expanded_state_count = 0
     branch_count = 0
     terminal_success_count = 0
+    legacy_module_seen_count = 0
     rollout_budget_exhausted = 0
     best_partial_returned_count = 0
     label_counts = @{}
@@ -507,7 +509,7 @@ $aggregate = [ordered]@{
     shards = $summaries
 }
 foreach ($summary in $summaries) {
-    foreach ($name in @("samples", "success_rows", "failure_rows", "timeouts", "failed", "skipped", "state_count", "expanded_state_count", "branch_count", "terminal_success_count", "rollout_budget_exhausted", "best_partial_returned_count")) {
+    foreach ($name in @("samples", "success_rows", "failure_rows", "timeouts", "failed", "skipped", "state_count", "expanded_state_count", "branch_count", "terminal_success_count", "legacy_module_seen_count", "rollout_budget_exhausted", "best_partial_returned_count")) {
         $aggregate[$name] = [int]$aggregate[$name] + [int]($summary.$name)
     }
     Add-TrainingCountMap $aggregate["label_counts"] $summary.label_counts

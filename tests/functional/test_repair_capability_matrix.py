@@ -560,7 +560,7 @@ def _build_zip_one_bad_payload_one_good(root: Path) -> MatrixFixture:
     return _fixture_from_bytes(root, "zip-one-bad-payload.zip", bytes(data), zip_entries={"good.txt": b"good payload"})
 
 
-def _build_zip_partial_recovery_damaged_local_header(root: Path) -> MatrixFixture:
+def _build_zip_local_header_partial_scan_damaged_local_header(root: Path) -> MatrixFixture:
     entries = {"bad.txt": b"broken", "good.txt": b"still here"}
     data = bytearray(_zip_bytes(entries))
     first_lfh = data.find(b"PK\x03\x04")
@@ -1724,10 +1724,10 @@ def _build_zstd_truncated_partial(root: Path) -> MatrixFixture:
 UNREPAIRABLE = ("unrepairable", "unsupported")
 
 ZIP_COMPETITION_MODULES = (
-    "zip_central_directory_rebuild",
-    "zip_deep_partial_recovery",
-    "zip_entry_quarantine_rebuild",
-    "zip_partial_recovery",
+    "zip_rebuild_cd_from_local_headers",
+    "zip_local_header_partial_scan",
+    "zip_quarantine_failed_entries",
+    "zip_local_header_partial_scan",
 )
 
 SEVEN_ZIP_COMPETITION_MODULES = (
@@ -1766,49 +1766,49 @@ TAR_XZ_COMPETITION_MODULES = (
 
 
 MATRIX = [
-    MatrixCase("zip_trailing_junk", "zip", ("trailing_junk",), _build_zip_trailing_junk, ("repaired",), "zip_trailing_junk_trim", _verify_zip),
-    MatrixCase("zip_bad_comment_length", "zip", ("comment_length_bad",), _build_zip_bad_comment_length, ("repaired",), "zip_comment_length_fix", _verify_zip),
-    MatrixCase("zip_comment_length_overreported_with_tail", "zip", ("comment_length_bad", "trailing_junk"), _build_zip_comment_length_overreported_with_tail, ("repaired",), "zip_comment_length_fix", _verify_zip),
-    MatrixCase("zip_bad_cd_offset", "zip", ("central_directory_offset_bad",), _build_zip_bad_cd_offset, ("repaired",), "zip_central_directory_offset_fix", _verify_zip),
-    MatrixCase("zip_cd_offset_shifted_back", "zip", ("central_directory_offset_bad",), _build_zip_cd_offset_shifted_back, ("repaired",), "zip_central_directory_offset_fix", _verify_zip),
-    MatrixCase("zip_cd_offset_past_end", "zip", ("central_directory_offset_bad",), _build_zip_cd_offset_past_end, ("repaired",), "zip_central_directory_offset_fix", _verify_zip),
-    MatrixCase("zip_bad_cd_count", "zip", ("central_directory_count_bad",), _build_zip_bad_cd_count, ("repaired",), "zip_central_directory_count_fix", _verify_zip),
-    MatrixCase("zip_cd_count_overreported", "zip", ("central_directory_count_bad",), _build_zip_cd_count_overreported, ("repaired",), "zip_central_directory_count_fix", _verify_zip),
-    MatrixCase("zip_missing_eocd", "zip", ("eocd_bad", "central_directory_bad"), _build_zip_missing_eocd, ("repaired",), "zip_eocd_repair", _verify_zip),
-    MatrixCase("zip_missing_central_directory", "zip", ("central_directory_bad", "local_header_recovery"), _build_zip_missing_cd, ("repaired", "partial"), "zip_central_directory_rebuild", _verify_zip),
-    MatrixCase("zip_local_name_len_bad", "zip", ("local_header_bad", "local_header_length_bad"), _build_zip_local_name_len_bad, ("repaired",), "zip_local_header_field_repair", _verify_zip),
-    MatrixCase("zip_local_name_len_too_large", "zip", ("local_header_bad", "local_header_length_bad"), _build_zip_local_name_len_too_large, ("repaired",), "zip_local_header_field_repair", _verify_zip),
-    MatrixCase("zip_local_size_crc_bad", "zip", ("local_header_bad", "local_header_size_bad"), _build_zip_local_size_crc_bad, ("repaired",), "zip_local_header_field_repair", _verify_zip),
-    MatrixCase("zip_local_size_too_large", "zip", ("local_header_bad", "local_header_size_bad", "compressed_size_bad"), _build_zip_local_size_too_large, ("repaired",), "zip_local_header_field_repair", _verify_zip),
-    MatrixCase("zip_local_bit3_flag_bad", "zip", ("local_header_bad", "bit3_data_descriptor", "data_descriptor"), _build_zip_local_bit3_flag_bad, ("repaired",), "zip_local_header_field_repair", _verify_zip),
-    MatrixCase("zip_data_descriptor", "zip", ("data_descriptor", "compressed_size_bad"), _build_zip_descriptor, ("repaired",), "zip_data_descriptor_recovery", _verify_zip),
-    MatrixCase("zip64_data_descriptor", "zip", ("data_descriptor", "compressed_size_bad"), _build_zip64_descriptor, ("repaired",), "zip_data_descriptor_recovery", _verify_zip),
-    MatrixCase("zip64_missing_locator", "zip", ("zip64", "zip64_locator_bad", "central_directory_bad"), _build_zip64_missing_locator, ("repaired",), "zip64_field_repair", _verify_zip),
-    MatrixCase("zip64_bad_record_fields", "zip", ("zip64", "zip64_eocd_bad", "central_directory_bad"), _build_zip64_bad_record_fields, ("repaired",), "zip64_field_repair", _verify_zip),
-    MatrixCase("zip64_bad_central_extra", "zip", ("zip64", "zip64_extra_bad", "central_directory_bad"), _build_zip64_bad_central_extra, ("repaired",), "zip64_field_repair", _verify_zip),
-    MatrixCase("zip_multiple_directory_fields", "zip", ("central_directory_offset_bad", "central_directory_count_bad", "central_directory_bad"), _build_zip_multiple_directory_fields, ("repaired",), "zip_eocd_repair", _verify_zip),
-    MatrixCase("zip_eocd_four_field_combo", "zip", ("central_directory_offset_bad", "central_directory_count_bad", "comment_length_bad", "trailing_junk", "central_directory_bad"), _build_zip_eocd_four_field_combo, ("repaired",), "zip_eocd_repair", _verify_zip),
-    MatrixCase("zip_split_trailing_junk", "zip", ("trailing_junk", "boundary_unreliable"), _build_zip_split_trailing_junk, ("repaired",), "zip_trailing_junk_trim", _verify_zip),
+    MatrixCase("zip_trailing_junk", "zip", ("trailing_junk",), _build_zip_trailing_junk, ("repaired",), "zip_trim_trailing_junk", _verify_zip),
+    MatrixCase("zip_bad_comment_length", "zip", ("comment_length_bad",), _build_zip_bad_comment_length, ("repaired",), "zip_fix_eocd_comment_length", _verify_zip),
+    MatrixCase("zip_comment_length_overreported_with_tail", "zip", ("comment_length_bad", "trailing_junk"), _build_zip_comment_length_overreported_with_tail, ("repaired",), "zip_fix_eocd_comment_length", _verify_zip),
+    MatrixCase("zip_bad_cd_offset", "zip", ("central_directory_offset_bad",), _build_zip_bad_cd_offset, ("repaired",), "zip_fix_cd_offset", _verify_zip),
+    MatrixCase("zip_cd_offset_shifted_back", "zip", ("central_directory_offset_bad",), _build_zip_cd_offset_shifted_back, ("repaired",), "zip_fix_cd_offset", _verify_zip),
+    MatrixCase("zip_cd_offset_past_end", "zip", ("central_directory_offset_bad",), _build_zip_cd_offset_past_end, ("repaired",), "zip_fix_cd_offset", _verify_zip),
+    MatrixCase("zip_bad_cd_count", "zip", ("central_directory_count_bad",), _build_zip_bad_cd_count, ("repaired",), "zip_fix_cd_entry_count", _verify_zip),
+    MatrixCase("zip_cd_count_overreported", "zip", ("central_directory_count_bad",), _build_zip_cd_count_overreported, ("repaired",), "zip_fix_cd_entry_count", _verify_zip),
+    MatrixCase("zip_missing_eocd", "zip", ("eocd_bad", "central_directory_bad"), _build_zip_missing_eocd, ("repaired",), "zip_fix_eocd_record", _verify_zip),
+    MatrixCase("zip_missing_central_directory", "zip", ("central_directory_bad", "local_header_recovery"), _build_zip_missing_cd, ("repaired", "partial"), "zip_rebuild_cd_from_local_headers", _verify_zip),
+    MatrixCase("zip_local_name_len_bad", "zip", ("local_header_bad", "local_header_length_bad"), _build_zip_local_name_len_bad, ("repaired",), "zip_fix_local_header_fields", _verify_zip),
+    MatrixCase("zip_local_name_len_too_large", "zip", ("local_header_bad", "local_header_length_bad"), _build_zip_local_name_len_too_large, ("repaired",), "zip_fix_local_header_fields", _verify_zip),
+    MatrixCase("zip_local_size_crc_bad", "zip", ("local_header_bad", "local_header_size_bad"), _build_zip_local_size_crc_bad, ("repaired",), "zip_fix_local_header_fields", _verify_zip),
+    MatrixCase("zip_local_size_too_large", "zip", ("local_header_bad", "local_header_size_bad", "compressed_size_bad"), _build_zip_local_size_too_large, ("repaired",), "zip_fix_local_header_fields", _verify_zip),
+    MatrixCase("zip_local_bit3_flag_bad", "zip", ("local_header_bad", "bit3_data_descriptor", "data_descriptor"), _build_zip_local_bit3_flag_bad, ("repaired",), "zip_fix_local_header_fields", _verify_zip),
+    MatrixCase("zip_data_descriptor", "zip", ("data_descriptor", "compressed_size_bad"), _build_zip_descriptor, ("repaired",), "zip_rebuild_cd_from_data_descriptors", _verify_zip),
+    MatrixCase("zip64_data_descriptor", "zip", ("data_descriptor", "compressed_size_bad"), _build_zip64_descriptor, ("repaired",), "zip_rebuild_cd_from_data_descriptors", _verify_zip),
+    MatrixCase("zip64_missing_locator", "zip", ("zip64", "zip64_locator_bad", "central_directory_bad"), _build_zip64_missing_locator, ("repaired",), "zip_fix_zip64_locator", _verify_zip),
+    MatrixCase("zip64_bad_record_fields", "zip", ("zip64", "zip64_eocd_bad", "central_directory_bad"), _build_zip64_bad_record_fields, ("repaired",), "zip_fix_zip64_eocd", _verify_zip),
+    MatrixCase("zip64_bad_central_extra", "zip", ("zip64", "zip64_extra_bad", "central_directory_bad"), _build_zip64_bad_central_extra, ("repaired",), "zip_fix_zip64_extra_size", _verify_zip),
+    MatrixCase("zip_multiple_directory_fields", "zip", ("central_directory_offset_bad", "central_directory_count_bad", "central_directory_bad"), _build_zip_multiple_directory_fields, ("repaired",), "zip_fix_eocd_record", _verify_zip),
+    MatrixCase("zip_eocd_four_field_combo", "zip", ("central_directory_offset_bad", "central_directory_count_bad", "comment_length_bad", "trailing_junk", "central_directory_bad"), _build_zip_eocd_four_field_combo, ("repaired",), "zip_fix_eocd_record", _verify_zip),
+    MatrixCase("zip_split_trailing_junk", "zip", ("trailing_junk", "boundary_unreliable"), _build_zip_split_trailing_junk, ("repaired",), "zip_trim_trailing_junk", _verify_zip),
     MatrixCase("zip_missing_split_volume_with_extra_damage", "zip", ("missing_volume", "input_truncated", "trailing_junk", "central_directory_bad", "checksum_error"), _build_zip_missing_split_volume_with_extra_damage, UNREPAIRABLE, None),
-    MatrixCase("zip_missing_volume_keeps_complete_entry", "zip", ("missing_volume", "input_truncated", "central_directory_bad", "local_header_recovery"), _build_zip_missing_volume_keeps_complete_entry, ("partial",), "zip_missing_volume_partial_salvage", _verify_zip, modules=("zip_missing_volume_partial_salvage",)),
-    MatrixCase("zip_missing_volume_keeps_two_complete_entries", "zip", ("missing_volume", "input_truncated", "central_directory_bad", "local_header_recovery", "damaged"), _build_zip_missing_volume_keeps_two_complete_entries, ("partial",), "zip_missing_volume_partial_salvage", _verify_zip, modules=("zip_missing_volume_partial_salvage",)),
-    MatrixCase("zip_sfx_prefix_tail", "zip", ("carrier_archive", "sfx", "boundary_unreliable", "trailing_junk"), _build_zip_sfx_prefix_tail, ("repaired", "partial"), "zip_deep_partial_recovery", _verify_zip),
-    MatrixCase("zip_sfx_split_prefix_tail", "zip", ("carrier_archive", "sfx", "boundary_unreliable", "trailing_junk"), _build_zip_sfx_split_prefix_tail, ("repaired", "partial"), "zip_deep_partial_recovery", _verify_zip),
-    MatrixCase("zip_sfx_split_prefix_tail_bad_cd", "zip", ("carrier_archive", "sfx", "boundary_unreliable", "trailing_junk", "central_directory_offset_bad", "central_directory_count_bad", "central_directory_bad"), _build_zip_sfx_split_prefix_tail_bad_cd, ("repaired",), "zip_central_directory_rebuild", _verify_zip),
-    MatrixCase("zip_sfx_bad_cd_and_payload_bad", "zip", ("carrier_archive", "sfx", "boundary_unreliable", "trailing_junk", "central_directory_offset_bad", "central_directory_count_bad", "central_directory_bad", "checksum_error", "crc_error", "damaged"), _build_zip_sfx_bad_cd_and_payload_bad, ("partial",), "zip_central_directory_rebuild", _verify_zip),
-    MatrixCase("zip_competition_cd_deep_quarantine", "zip", ("carrier_archive", "sfx", "boundary_unreliable", "trailing_junk", "central_directory_offset_bad", "central_directory_count_bad", "central_directory_bad", "checksum_error", "crc_error", "damaged"), _build_zip_sfx_bad_cd_and_payload_bad, ("partial",), "zip_central_directory_rebuild", _verify_zip, modules=("zip_central_directory_rebuild",), competition_modules=ZIP_COMPETITION_MODULES),
-    MatrixCase("zip_fake_local_header_before_real_sfx", "zip", ("carrier_archive", "sfx", "boundary_unreliable", "trailing_junk", "local_header_recovery"), _build_zip_fake_local_header_before_real_sfx, ("repaired", "partial"), "zip_central_directory_rebuild", _verify_zip),
+    MatrixCase("zip_missing_volume_keeps_complete_entry", "zip", ("missing_volume", "input_truncated", "central_directory_bad", "local_header_recovery"), _build_zip_missing_volume_keeps_complete_entry, ("partial",), "zip_partial_salvage_missing_volume", _verify_zip, modules=("zip_partial_salvage_missing_volume",)),
+    MatrixCase("zip_missing_volume_keeps_two_complete_entries", "zip", ("missing_volume", "input_truncated", "central_directory_bad", "local_header_recovery", "damaged"), _build_zip_missing_volume_keeps_two_complete_entries, ("partial",), "zip_partial_salvage_missing_volume", _verify_zip, modules=("zip_partial_salvage_missing_volume",)),
+    MatrixCase("zip_sfx_prefix_tail", "zip", ("carrier_archive", "sfx", "boundary_unreliable", "trailing_junk"), _build_zip_sfx_prefix_tail, ("repaired", "partial"), "zip_local_header_partial_scan", _verify_zip),
+    MatrixCase("zip_sfx_split_prefix_tail", "zip", ("carrier_archive", "sfx", "boundary_unreliable", "trailing_junk"), _build_zip_sfx_split_prefix_tail, ("repaired", "partial"), "zip_local_header_partial_scan", _verify_zip),
+    MatrixCase("zip_sfx_split_prefix_tail_bad_cd", "zip", ("carrier_archive", "sfx", "boundary_unreliable", "trailing_junk", "central_directory_offset_bad", "central_directory_count_bad", "central_directory_bad"), _build_zip_sfx_split_prefix_tail_bad_cd, ("repaired",), "zip_rebuild_cd_from_local_headers", _verify_zip),
+    MatrixCase("zip_sfx_bad_cd_and_payload_bad", "zip", ("carrier_archive", "sfx", "boundary_unreliable", "trailing_junk", "central_directory_offset_bad", "central_directory_count_bad", "central_directory_bad", "checksum_error", "crc_error", "damaged"), _build_zip_sfx_bad_cd_and_payload_bad, ("partial",), "zip_rebuild_cd_from_local_headers", _verify_zip),
+    MatrixCase("zip_competition_cd_deep_quarantine", "zip", ("carrier_archive", "sfx", "boundary_unreliable", "trailing_junk", "central_directory_offset_bad", "central_directory_count_bad", "central_directory_bad", "checksum_error", "crc_error", "damaged"), _build_zip_sfx_bad_cd_and_payload_bad, ("partial",), "zip_rebuild_cd_from_local_headers", _verify_zip, modules=("zip_rebuild_cd_from_local_headers",), competition_modules=ZIP_COMPETITION_MODULES),
+    MatrixCase("zip_fake_local_header_before_real_sfx", "zip", ("carrier_archive", "sfx", "boundary_unreliable", "trailing_junk", "local_header_recovery"), _build_zip_fake_local_header_before_real_sfx, ("repaired", "partial"), "zip_rebuild_cd_from_local_headers", _verify_zip),
     MatrixCase("zip_single_payload_crc_bad", "zip", ("checksum_error", "crc_error", "damaged"), _build_zip_single_payload_crc_bad, UNREPAIRABLE, None),
-    MatrixCase("zip_one_bad_payload_one_good", "zip", ("checksum_error", "crc_error", "damaged"), _build_zip_one_bad_payload_one_good, ("partial",), "zip_entry_quarantine_rebuild", _verify_zip),
-    MatrixCase("zip_partial_recovery_damaged_local_header", "zip", ("damaged", "checksum_error"), _build_zip_partial_recovery_damaged_local_header, ("partial",), "zip_partial_recovery", _verify_zip, modules=("zip_partial_recovery",)),
-    MatrixCase("zip_entry_quarantine_two_bad_two_good", "zip", ("entry_payload_bad", "checksum_error", "crc_error", "damaged"), _build_zip_entry_quarantine_two_bad_two_good, ("partial",), "zip_entry_quarantine_rebuild", _verify_zip),
-    MatrixCase("zip_missing_cd_multiple_local_headers_one_bad_payload", "zip", ("central_directory_bad", "local_header_recovery", "checksum_error", "crc_error", "damaged"), _build_zip_missing_cd_multiple_local_headers_one_bad_payload, ("partial",), "zip_central_directory_rebuild", _verify_zip),
-    MatrixCase("zip_descriptor_payload_bad_keeps_other_descriptor_entry", "zip", ("data_descriptor", "compressed_size_bad", "checksum_error", "crc_error", "damaged"), _build_zip_descriptor_payload_bad_keeps_other_descriptor_entry, ("partial",), "zip_deep_partial_recovery", _verify_zip),
-    MatrixCase("zip64_descriptor_payload_bad_keeps_other_descriptor_entry", "zip", ("data_descriptor", "compressed_size_bad", "checksum_error", "crc_error", "damaged"), _build_zip64_descriptor_payload_bad_keeps_other_descriptor_entry, ("partial",), "zip_deep_partial_recovery", _verify_zip),
-    MatrixCase("zip_multi_structure_and_payload_bad", "zip", ("checksum_error", "crc_error", "damaged", "central_directory_offset_bad", "central_directory_count_bad", "comment_length_bad", "trailing_junk", "central_directory_bad"), _build_zip_multi_structure_and_payload_bad, ("partial",), "zip_central_directory_rebuild", _verify_zip),
-    MatrixCase("zip_cd_offset_and_payload_bad", "zip", ("central_directory_offset_bad", "central_directory_bad", "checksum_error", "crc_error", "damaged"), _build_zip_cd_offset_and_payload_bad, ("partial",), "zip_central_directory_rebuild", _verify_zip),
-    MatrixCase("zip_cd_count_and_payload_bad", "zip", ("central_directory_count_bad", "central_directory_bad", "checksum_error", "crc_error", "damaged"), _build_zip_cd_count_and_payload_bad, ("partial",), "zip_central_directory_rebuild", _verify_zip),
-    MatrixCase("zip_duplicate_conflict_resolver", "zip", ("duplicate_entries", "overlapping_entries", "damaged"), _build_zip_duplicate_conflict, ("partial",), "zip_conflict_resolver_rebuild", _verify_zip, modules=("zip_conflict_resolver_rebuild",)),
+    MatrixCase("zip_one_bad_payload_one_good", "zip", ("checksum_error", "crc_error", "damaged"), _build_zip_one_bad_payload_one_good, ("partial",), "zip_quarantine_failed_entries", _verify_zip),
+    MatrixCase("zip_local_header_partial_scan_damaged_local_header", "zip", ("damaged", "checksum_error"), _build_zip_local_header_partial_scan_damaged_local_header, ("partial",), "zip_local_header_partial_scan", _verify_zip, modules=("zip_local_header_partial_scan",)),
+    MatrixCase("zip_entry_quarantine_two_bad_two_good", "zip", ("entry_payload_bad", "checksum_error", "crc_error", "damaged"), _build_zip_entry_quarantine_two_bad_two_good, ("partial",), "zip_quarantine_failed_entries", _verify_zip),
+    MatrixCase("zip_missing_cd_multiple_local_headers_one_bad_payload", "zip", ("central_directory_bad", "local_header_recovery", "checksum_error", "crc_error", "damaged"), _build_zip_missing_cd_multiple_local_headers_one_bad_payload, ("partial",), "zip_rebuild_cd_from_local_headers", _verify_zip),
+    MatrixCase("zip_descriptor_payload_bad_keeps_other_descriptor_entry", "zip", ("data_descriptor", "compressed_size_bad", "checksum_error", "crc_error", "damaged"), _build_zip_descriptor_payload_bad_keeps_other_descriptor_entry, ("partial",), "zip_local_header_partial_scan", _verify_zip),
+    MatrixCase("zip64_descriptor_payload_bad_keeps_other_descriptor_entry", "zip", ("data_descriptor", "compressed_size_bad", "checksum_error", "crc_error", "damaged"), _build_zip64_descriptor_payload_bad_keeps_other_descriptor_entry, ("partial",), "zip_local_header_partial_scan", _verify_zip),
+    MatrixCase("zip_multi_structure_and_payload_bad", "zip", ("checksum_error", "crc_error", "damaged", "central_directory_offset_bad", "central_directory_count_bad", "comment_length_bad", "trailing_junk", "central_directory_bad"), _build_zip_multi_structure_and_payload_bad, ("partial",), "zip_rebuild_cd_from_local_headers", _verify_zip),
+    MatrixCase("zip_cd_offset_and_payload_bad", "zip", ("central_directory_offset_bad", "central_directory_bad", "checksum_error", "crc_error", "damaged"), _build_zip_cd_offset_and_payload_bad, ("partial",), "zip_rebuild_cd_from_local_headers", _verify_zip),
+    MatrixCase("zip_cd_count_and_payload_bad", "zip", ("central_directory_count_bad", "central_directory_bad", "checksum_error", "crc_error", "damaged"), _build_zip_cd_count_and_payload_bad, ("partial",), "zip_rebuild_cd_from_local_headers", _verify_zip),
+    MatrixCase("zip_duplicate_conflict_resolver", "zip", ("duplicate_entries", "overlapping_entries", "damaged"), _build_zip_duplicate_conflict, ("partial",), "zip_resolve_duplicate_entries", _verify_zip, modules=("zip_resolve_duplicate_entries",)),
     MatrixCase("archive_nested_zip_payload_salvage", "zip", ("outer_container_bad", "nested_archive", "damaged"), _build_nested_zip_payload, ("partial",), "archive_nested_payload_salvage", _verify_zip, modules=("archive_nested_payload_salvage",)),
     MatrixCase("7z_trailing_junk_v04", "7z", ("trailing_junk",), _build_7z_trailing_junk_v04, ("repaired",), "seven_zip_boundary_trim", _verify_bytes),
     MatrixCase("7z_start_crc_bad_v03", "7z", ("start_header_crc_bad",), _build_7z_start_crc_bad_v03, ("repaired",), "seven_zip_start_header_crc_fix", _verify_bytes),
@@ -1871,8 +1871,8 @@ MATRIX = [
     MatrixCase("gzip_footer_crc_bad", "gzip", ("gzip_footer_bad", "crc_error", "checksum_error"), _build_gzip_footer_crc_bad, ("repaired",), "gzip_footer_fix", _verify_gzip),
     MatrixCase("gzip_footer_isize_bad", "gzip", ("gzip_footer_bad", "checksum_error"), _build_gzip_footer_isize_bad, ("repaired",), "gzip_footer_fix", _verify_gzip),
     MatrixCase("gzip_footer_bad_with_trailing_junk", "gzip", ("gzip_footer_bad", "trailing_junk", "checksum_error"), _build_gzip_footer_bad_with_trailing_junk, ("repaired",), "gzip_footer_fix", _verify_gzip),
-    MatrixCase("gzip_trailing_junk", "gzip", ("trailing_junk",), _build_gzip_trailing_junk, ("repaired",), "gzip_trailing_junk_trim", _verify_gzip),
-    MatrixCase("gzip_trailing_padding", "gzip", ("trailing_padding", "boundary_unreliable"), _build_gzip_trailing_padding, ("repaired",), "gzip_trailing_junk_trim", _verify_gzip),
+    MatrixCase("gzip_trailing_junk", "gzip", ("trailing_junk",), _build_gzip_trailing_junk, ("repaired",), "gzip_trim_trailing_junk", _verify_gzip),
+    MatrixCase("gzip_trailing_padding", "gzip", ("trailing_padding", "boundary_unreliable"), _build_gzip_trailing_padding, ("repaired",), "gzip_trim_trailing_junk", _verify_gzip),
     MatrixCase("gzip_truncated_partial_recovery", "gzip", ("input_truncated", "probably_truncated", "unexpected_end"), _build_gzip_truncated_partial, ("partial",), "gzip_truncated_partial_recovery", _verify_gzip_prefix, modules=("gzip_truncated_partial_recovery",)),
     MatrixCase("gzip_deflate_prefix_salvage_truncated", "gzip", ("input_truncated", "damaged", "data_error"), _build_gzip_truncated_partial, ("partial",), "gzip_deflate_prefix_salvage", _verify_gzip_prefix, modules=("gzip_deflate_prefix_salvage",)),
     MatrixCase("gzip_deflate_prefix_salvage_rejects_truncated_tail", "gzip", ("input_truncated", "damaged", "data_error", "trailing_junk"), _build_gzip_truncated_partial_with_trailing_junk, UNREPAIRABLE, None, modules=("gzip_deflate_prefix_salvage",)),
@@ -1907,8 +1907,8 @@ MULTI_ROUND_MATRIX = [
         "zip",
         _build_zip_eocd_then_entry_quarantine,
         (
-            RepairRound(("central_directory_offset_bad", "central_directory_count_bad", "comment_length_bad", "trailing_junk", "central_directory_bad"), ("repaired",), "zip_eocd_repair", modules=("zip_eocd_repair",)),
-            RepairRound(("entry_payload_bad", "checksum_error", "crc_error", "damaged"), ("partial",), "zip_entry_quarantine_rebuild", modules=("zip_entry_quarantine_rebuild",)),
+            RepairRound(("central_directory_offset_bad", "central_directory_count_bad", "comment_length_bad", "trailing_junk", "central_directory_bad"), ("repaired",), "zip_fix_eocd_record", modules=("zip_fix_eocd_record",)),
+            RepairRound(("entry_payload_bad", "checksum_error", "crc_error", "damaged"), ("partial",), "zip_quarantine_failed_entries", modules=("zip_quarantine_failed_entries",)),
         ),
         _verify_zip,
     ),
@@ -1917,8 +1917,8 @@ MULTI_ROUND_MATRIX = [
         "zip",
         _build_zip_carrier_then_eocd_then_entry_quarantine,
         (
-            RepairRound(("carrier_archive", "sfx", "boundary_unreliable", "trailing_junk"), ("repaired", "partial"), "zip_deep_partial_recovery", modules=("zip_deep_partial_recovery",)),
-            RepairRound(("central_directory_offset_bad", "central_directory_count_bad", "comment_length_bad", "central_directory_bad", "entry_payload_bad", "checksum_error", "crc_error", "damaged"), ("repaired", "partial"), "zip_central_directory_rebuild", modules=("zip_central_directory_rebuild",)),
+            RepairRound(("carrier_archive", "sfx", "boundary_unreliable", "trailing_junk"), ("repaired", "partial"), "zip_local_header_partial_scan", modules=("zip_local_header_partial_scan",)),
+            RepairRound(("central_directory_offset_bad", "central_directory_count_bad", "comment_length_bad", "central_directory_bad", "entry_payload_bad", "checksum_error", "crc_error", "damaged"), ("repaired", "partial"), "zip_rebuild_cd_from_local_headers", modules=("zip_rebuild_cd_from_local_headers",)),
         ),
         _verify_zip,
     ),
@@ -1963,12 +1963,12 @@ MULTI_ROUND_MATRIX = [
         _verify_bytes,
     ),
     MultiRoundCase(
-        "nested_zip_salvage_then_entry_quarantine",
+        "nested_zip_local_header_partial_scan_then_entry_quarantine",
         "zip",
         _build_nested_zip_then_entry_quarantine,
         (
             RepairRound(("outer_container_bad", "nested_archive", "damaged"), ("partial",), "archive_nested_payload_salvage", modules=("archive_nested_payload_salvage",)),
-            RepairRound(("entry_payload_bad", "checksum_error", "crc_error", "damaged"), ("partial",), "zip_entry_quarantine_rebuild", modules=("zip_entry_quarantine_rebuild",)),
+            RepairRound(("entry_payload_bad", "checksum_error", "crc_error", "damaged"), ("partial",), "zip_quarantine_failed_entries", modules=("zip_quarantine_failed_entries",)),
         ),
         _verify_zip,
     ),
@@ -2035,8 +2035,8 @@ def test_repair_matrix_is_large_enough_to_cover_format_and_damage_axes():
         "tar_sparse_pax_longname_repair",
         "tar_xz_truncated_partial_recovery",
         "tar_zstd_truncated_partial_recovery",
-        "zip_conflict_resolver_rebuild",
-        "zip_partial_recovery",
+        "zip_resolve_duplicate_entries",
+        "zip_local_header_partial_scan",
         "xz_truncated_partial_recovery",
         "xz_block_salvage",
         "zstd_trailing_junk_trim",
@@ -2077,7 +2077,7 @@ def test_zip_deep_partial_skips_fake_local_header_before_real_sfx(tmp_path):
     scheduler = RepairScheduler({
         "repair": {
             "workspace": str(tmp_path / "repair-workspace"),
-            "modules": [{"name": "zip_deep_partial_recovery", "enabled": True}],
+            "modules": [{"name": "zip_local_header_partial_scan", "enabled": True}],
             "module_limits": {
                 "max_candidates_per_module": 4,
                 "verify_candidates": False,
@@ -2093,7 +2093,7 @@ def test_zip_deep_partial_skips_fake_local_header_before_real_sfx(tmp_path):
     ))
 
     assert result.status in {"repaired", "partial"}
-    assert result.module_name == "zip_salvage"
+    assert result.module_name == "zip_local_header_partial_scan"
     _verify_zip(result, fixture)
 
 
@@ -2158,3 +2158,4 @@ def test_repair_layer_composes_multi_error_repairs_across_rounds(tmp_path, case:
 
     assert result is not None
     case.verify(result, fixture)
+

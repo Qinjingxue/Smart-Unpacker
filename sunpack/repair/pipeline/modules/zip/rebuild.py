@@ -120,4 +120,5 @@ class ZipRebuild:
         )
 
 
-register_repair_module(ZipRebuild())
+# Legacy coarse module kept for historical imports only. ZIP repair registration
+# now happens through atomic.py.

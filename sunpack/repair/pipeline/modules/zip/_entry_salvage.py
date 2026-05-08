@@ -40,12 +40,15 @@ def run_verified_entry_salvage(
     exclude_names: list[str] | None = None,
     confidence: float = 0.86,
     message: str = "ZIP verified entry salvage produced a candidate",
+    repair_name: str | None = None,
+    native_key: str = "native_zip_verified_entry_salvage",
+    atomic_action_group: str | None = None,
 ) -> RepairResult:
     limits = module_limits(config)
     result = dict(_native_zip_verified_entry_salvage(
         source_input_for_job(job),
         workspace,
-        module_name,
+        repair_name or module_name,
         list(exclude_names or []),
         int(limits.get("max_entries", 20000) or 20000),
         float(limits.get("max_input_size_mb", 512) or 0),
@@ -66,7 +69,7 @@ def run_verified_entry_salvage(
             warnings=list(result.get("warnings") or []),
             workspace_paths=list(result.get("workspace_paths") or []),
             module_name=module_name,
-            diagnosis={**diagnosis.as_dict(), "native_zip_verified_entry_salvage": result},
+            diagnosis={**diagnosis.as_dict(), "repair_name": repair_name or module_name, "native_key": native_key, "atomic_action_group": atomic_action_group or repair_name or module_name, native_key: result},
             message=str(result.get("message") or "ZIP verified entry salvage did not produce a candidate"),
         )
     coverage = coverage_view_from_job(job)
@@ -83,9 +86,12 @@ def run_verified_entry_salvage(
         module_name=module_name,
         diagnosis={
             **diagnosis.as_dict(),
+            "repair_name": repair_name or module_name,
+            "native_key": native_key,
+            "atomic_action_group": atomic_action_group or repair_name or module_name,
             "archive_coverage": coverage.as_dict(),
             "excluded_names": list(exclude_names or []),
-            "native_zip_verified_entry_salvage": result,
+            native_key: result,
         },
         message=message,
     )

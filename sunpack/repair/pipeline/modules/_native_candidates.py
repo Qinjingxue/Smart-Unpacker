@@ -22,6 +22,8 @@ def candidates_from_native_result(
     default_confidence: float = 0.7,
     default_message: str = "native repair produced a candidate",
     prefer_patch_plan: bool = False,
+    repair_name: str | None = None,
+    atomic_action_group: str | None = None,
 ) -> list[RepairCandidate]:
     status = str(result.get("status") or "unrepairable")
     if status not in allowed_statuses:
@@ -61,6 +63,9 @@ def candidates_from_native_result(
         plan: dict[str, Any] = {}
         diagnosis_payload: dict[str, Any] = {
             **diagnosis.as_dict(),
+            "repair_name": str(repair_name or item.get("name") or module_name),
+            "native_key": native_key,
+            "atomic_action_group": str(atomic_action_group or repair_name or module_name),
             native_key: dict(result),
             "native_candidate": {"index": index, **details},
         }

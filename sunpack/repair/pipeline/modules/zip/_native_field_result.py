@@ -22,7 +22,11 @@ def repair_result_from_native_zip_field(
     job: RepairJob,
     diagnosis: RepairDiagnosis,
     config: dict,
+    *,
+    repair_name: str | None = None,
+    atomic_action_group: str | None = None,
 ) -> RepairResult:
+    repair_meta = _repair_meta(module_name, repair_name, atomic_action_group, "native_zip_directory_field_repair")
     status = str(result.get("status") or "unrepairable")
     if status != "repaired":
         return RepairResult(
@@ -34,7 +38,7 @@ def repair_result_from_native_zip_field(
             warnings=list(result.get("warnings") or []),
             workspace_paths=list(result.get("workspace_paths") or []),
             module_name=module_name,
-            diagnosis={**diagnosis.as_dict(), "native_zip_directory_field_repair": dict(result)},
+            diagnosis={**diagnosis.as_dict(), **repair_meta, "native_zip_directory_field_repair": dict(result)},
             message=str(result.get("message") or "native ZIP field repair did not produce a candidate"),
         )
 
@@ -95,10 +99,19 @@ def repair_result_from_native_zip_field(
         partial=partial,
         module_name=module_name,
         diagnosis=patch_diagnosis(
-            {**diagnosis.as_dict(), "native_zip_directory_field_repair": dict(result)},
+            {**diagnosis.as_dict(), **repair_meta, "native_zip_directory_field_repair": dict(result)},
             patch_plan,
             repaired_state,
         ),
         repaired_state=repaired_state,
         message=str(result.get("message") or "native ZIP field repair produced a candidate"),
     )
+
+
+def _repair_meta(module_name: str, repair_name: str | None, atomic_action_group: str | None, native_key: str) -> dict[str, Any]:
+    action = str(repair_name or module_name)
+    return {
+        "repair_name": action,
+        "native_key": native_key,
+        "atomic_action_group": str(atomic_action_group or action),
+    }
