@@ -497,6 +497,14 @@ def _collect_sample_rows(record: dict[str, Any], args: argparse.Namespace, debug
         if isinstance(flags, list) and "missing_volume" in flags:
             record["damage_flags"] = [f for f in flags if f != "missing_volume"]
             record["runtime_damage_flags"] = record["damage_flags"]
+    # Merge zip_container_tags into damage_flags for SFX/carrier detection
+    container_tags = record.get("zip_container_tags") or []
+    if isinstance(container_tags, list):
+        tag_flags = {t for t in container_tags if t in {"sfx", "carrier_prefix", "carrier_archive", "embedded_archive"}}
+        if tag_flags:
+            existing = set(record.get("damage_flags") or [])
+            record["damage_flags"] = list(existing | tag_flags)
+            record["runtime_damage_flags"] = record["damage_flags"]
     fmt = str(record.get("format") or source_input.get("format_hint") or "")
     rows: list[dict[str, Any]] = []
     max_candidates_per_round = _effective_max_candidates(record, args)

@@ -55,7 +55,7 @@ pub(crate) fn archive_carrier_crop_recovery(
             "unrepairable",
             "",
             target.name(),
-            "no embedded 7z/RAR archive signature passed structural checks",
+            "no embedded archive signature passed structural checks",
             &[],
             0,
             data.len() as u64,
@@ -1032,6 +1032,7 @@ pub(crate) fn archive_nested_payload_salvage(
 enum TargetFormat {
     SevenZip,
     Rar,
+    Zip,
     Any,
 }
 
@@ -1045,6 +1046,7 @@ impl TargetFormat {
         {
             "7z" | "seven_zip" | "sevenzip" => Self::SevenZip,
             "rar" => Self::Rar,
+            "zip" => Self::Zip,
             _ => Self::Any,
         }
     }
@@ -1053,6 +1055,7 @@ impl TargetFormat {
         match self {
             Self::SevenZip => "7z",
             Self::Rar => "rar",
+            Self::Zip => "zip",
             Self::Any => "archive",
         }
     }
@@ -1061,6 +1064,7 @@ impl TargetFormat {
         match self {
             Self::SevenZip => ".7z",
             Self::Rar => ".rar",
+            Self::Zip => ".zip",
             Self::Any => ".bin",
         }
     }
@@ -1135,6 +1139,19 @@ fn scan_archive_signatures(
                 continue;
             }
             if let Some(candidate) = seven_zip_candidate(data, offset) {
+                output.push(candidate);
+                if output.len() >= max_candidates {
+                    return output;
+                }
+            }
+        }
+    }
+    if matches!(target, TargetFormat::Zip | TargetFormat::Any) {
+        for offset in find_all(data, b"PK\x03\x04") {
+            if require_carrier_offset && offset == 0 {
+                continue;
+            }
+            if let Some(candidate) = zip_carrier_candidate(data, offset) {
                 output.push(candidate);
                 if output.len() >= max_candidates {
                     return output;
@@ -1229,6 +1246,49 @@ fn rar4_candidate(data: &[u8], offset: usize) -> Option<ArchiveCandidate> {
         next_header_crc_ok: true,
         warnings: Vec::new(),
     })
+}
+
+fn zip_carrier_candidate(data: &[u8], offset: usize) -> Option<ArchiveCandidate> {
+    // Verify a valid ZIP exists after the carrier prefix
+    // by searching for the EOCD record to confirm archive bounds
+    let eocd_pos = find_eocd_from(&data[offset..])?;
+    let absolute_eocd = offset + eocd_pos;
+    if absolute_eocd + 22 > data.len() {
+        return None;
+    }
+    let cd_size = u32_le(data, absolute_eocd + 12) as usize;
+    let cd_offset = u32_le(data, absolute_eocd + 16) as usize;
+    let comment_len = u16_le(data, absolute_eocd + 20) as usize;
+    let archive_end = absolute_eocd + 22 + comment_len;
+    if archive_end > data.len() {
+        return None;
+    }
+    // CD should be between the first LFH and the EOCD
+    if cd_offset < offset || cd_offset.checked_add(cd_size)? > absolute_eocd {
+        return None;
+    }
+    Some(ArchiveCandidate {
+        format: TargetFormat::Zip,
+        offset,
+        archive_end,
+        start_crc_ok: true,
+        next_header_crc_ok: true,
+        warnings: Vec::new(),
+    })
+}
+
+fn find_eocd_from(data: &[u8]) -> Option<usize> {
+    let needle = b"PK\x05\x06";
+    let mut pos = data.len().checked_sub(needle.len())?;
+    loop {
+        if &data[pos..pos + needle.len()] == needle {
+            return Some(pos);
+        }
+        if pos == 0 {
+            return None;
+        }
+        pos -= 1;
+    }
 }
 
 fn rar5_candidate(data: &[u8], offset: usize) -> Option<ArchiveCandidate> {
@@ -2494,6 +2554,7 @@ fn confidence_for_candidate(candidate: &ArchiveCandidate) -> f64 {
         TargetFormat::SevenZip if candidate.start_crc_ok && candidate.next_header_crc_ok => 0.92,
         TargetFormat::SevenZip if candidate.start_crc_ok => 0.82,
         TargetFormat::Rar => 0.86,
+        TargetFormat::Zip => 0.88,
         _ => 0.7,
     }
 }

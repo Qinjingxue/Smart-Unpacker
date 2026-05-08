@@ -17,13 +17,13 @@ from sunpack_native import archive_carrier_crop_recovery as _native_archive_carr
 class ArchiveCarrierCropDeepRecovery:
     spec = RepairModuleSpec(
         name="archive_carrier_crop_deep_recovery",
-        formats=("7z", "seven_zip", "rar", "archive"),
+        formats=("7z", "seven_zip", "rar", "zip", "archive"),
         categories=("boundary_repair", "content_recovery", "directory_rebuild"),
         stage="deep",
         safe=True,
         routes=(
             RepairRoute(
-                formats=("7z", "seven_zip", "rar", "archive"),
+                formats=("7z", "seven_zip", "rar", "zip", "archive"),
                 require_any_categories=(),
                 require_any_flags=("carrier_archive", "sfx", "embedded_archive", "carrier_prefix", "boundary_unreliable", "start_trusted_only"),
                 require_any_fuzzy_hints=("carrier_prefix_likely", "entropy_boundary_shift"),
@@ -36,13 +36,15 @@ class ArchiveCarrierCropDeepRecovery:
     def can_handle(self, job: RepairJob, diagnosis: RepairDiagnosis, config: dict) -> float:
         flags = set(job.damage_flags)
         fmt = str(diagnosis.format or job.format or "").lower()
-        if fmt not in {"7z", "seven_zip", "rar", "archive"}:
+        if fmt not in {"7z", "seven_zip", "rar", "zip", "archive"}:
             return 0.0
         if fmt == "rar" and flags & {"carrier_archive", "sfx", "embedded_archive", "carrier_prefix"}:
             return 0.65
+        if fmt == "zip" and flags & {"carrier_archive", "sfx", "embedded_archive", "carrier_prefix"}:
+            return 0.70
         if flags & {"carrier_archive", "sfx", "embedded_archive", "boundary_unreliable", "start_trusted_only"}:
             return 0.9
-        if "boundary_repair" in diagnosis.categories and fmt in {"7z", "seven_zip", "rar"}:
+        if "boundary_repair" in diagnosis.categories and fmt in {"7z", "seven_zip", "rar", "zip"}:
             return 0.74
         return 0.0
 

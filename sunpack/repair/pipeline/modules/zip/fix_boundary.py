@@ -55,6 +55,7 @@ class ZipFixBoundary:
     def repair(self, job: RepairJob, diagnosis: RepairDiagnosis, workspace: str, config: dict) -> RepairResult:
         flags = set(job.damage_flags)
         deep = config.get("deep") if isinstance(config.get("deep"), dict) else {}
+        source_input = source_input_for_job(job)
 
         if flags & {"trailing_junk", "boundary_unreliable"}:
             repair_name = "zip_trailing_junk_trim"
@@ -62,14 +63,14 @@ class ZipFixBoundary:
             repair_name = "zip_comment_length_fix"
 
         result = _native_zip_directory_field_repair(
-            source_input_for_job(job), workspace, repair_name,
+            source_input, workspace, repair_name,
             float(deep.get("max_input_size_mb", 512) or 0),
         )
         if str(dict(result).get("status") or "") != "repaired":
             coverage = coverage_view_from_job(job)
             if coverage.has_recovered_output or flags & {"central_directory_bad", "directory_integrity_bad_or_unknown"} or True:
                 output = Path(workspace) / "zip_fix_boundary_fallback.zip"
-                scan = rebuild_zip_from_source(source_input_for_job(job), output, config=config)
+                scan = rebuild_zip_from_source(source_input, output, config=config)
                 if scan.entries and scan.complete:
                     return RepairResult(
                         status="repaired", confidence=0.82, format="zip",
