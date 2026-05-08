@@ -356,6 +356,8 @@ pub(crate) fn zip_directory_field_repair(
         "zip_trailing_junk_trim" => repair_zip_trailing_junk(&data),
         "zip_eocd_repair" => repair_zip_eocd(&data),
         "zip_local_header_field_repair" => repair_zip_local_header_fields(&data),
+        "zip_data_descriptor_flag_normalize" => repair_zip_data_descriptor_flags(&data),
+        "zip_cd_entry_name_reconcile" => repair_zip_cd_entry_names_from_local_headers(&data),
         "zip64_extra_size" => repair_zip64_central_extra(&data),
         "zip64_locator" => repair_zip64_tail_target(&data, Zip64TailTarget::Locator),
         "zip64_eocd" => repair_zip64_tail_target(&data, Zip64TailTarget::Eocd),
@@ -852,6 +854,99 @@ pub(crate) fn zip_cd_local_header_reconcile_salvage(
     }
 }
 
+#[pyfunction]
+#[pyo3(signature = (
+    source_input,
+    workspace,
+    max_candidates=3,
+    max_entries=20000,
+    max_input_size_mb=512.0,
+    max_seconds=30.0
+))]
+pub(crate) fn zip_remove_spurious_data_descriptor(
+    py: Python<'_>,
+    source_input: &Bound<'_, PyDict>,
+    workspace: &str,
+    max_candidates: usize,
+    max_entries: usize,
+    max_input_size_mb: f64,
+    max_seconds: f64,
+) -> PyResult<Py<PyDict>> {
+    let started = Instant::now();
+    let max_input_bytes = mb_to_bytes(max_input_size_mb);
+    let data = match read_source_input(source_input, max_input_bytes) {
+        Ok(data) => data,
+        Err(message) => return descriptor_delete_status_dict(py, "skipped", &message, &[], Some("input_read_failed")),
+    };
+    let candidates = spurious_descriptor_delete_candidates(
+        &data,
+        max_candidates.max(1),
+        max_entries.max(1),
+        duration_from_seconds(max_seconds),
+        started,
+    );
+    if candidates.is_empty() {
+        return descriptor_delete_status_dict(
+            py,
+            "unrepairable",
+            "no safely removable spurious ZIP data descriptor was found",
+            &[],
+            Some("no_spurious_data_descriptor"),
+        );
+    }
+
+    fs::create_dir_all(workspace).ok();
+    let result = PyDict::new(py);
+    result.set_item("status", "partial")?;
+    result.set_item("selected_path", "")?;
+    result.set_item("selected_candidate", "spurious_data_descriptor_delete")?;
+    result.set_item("confidence", candidates[0].confidence)?;
+    result.set_item("format", "zip")?;
+    result.set_item("message", "spurious ZIP data descriptor delete patch was produced")?;
+    result.set_item(
+        "actions",
+        PyList::new(py, ["detect_spurious_data_descriptor", "delete_descriptor_span"])?,
+    )?;
+    result.set_item("candidate_status", "partial")?;
+    result.set_item("native_target", "spurious_data_descriptor_delete")?;
+    result.set_item(
+        "patch_facts",
+        PyList::new(py, descriptor_delete_patch_facts(&candidates[0]))?,
+    )?;
+    result.set_item("residual_facts", PyList::empty(py))?;
+    result.set_item(
+        "validation_details",
+        descriptor_delete_validation_details(py, &candidates[0])?,
+    )?;
+    result.set_item("warnings", PyList::empty(py))?;
+    result.set_item("skipped_entries", 0)?;
+    result.set_item("encrypted_entries", 0)?;
+    result.set_item("unsupported_entries", 0)?;
+    result.set_item("recovered_entries", 0)?;
+    result.set_item("verified_entries", 0)?;
+    result.set_item("descriptor_entries", candidates.len())?;
+    result.set_item("passthrough_entries", 0)?;
+
+    let candidate_list = PyList::empty(py);
+    for (index, candidate) in candidates.iter().enumerate() {
+        let item = PyDict::new(py);
+        item.set_item("name", format!("spurious_data_descriptor_delete_{index}"))?;
+        item.set_item("status", "partial")?;
+        item.set_item("confidence", candidate.confidence)?;
+        item.set_item("actions", PyList::new(py, ["detect_spurious_data_descriptor", "delete_descriptor_span"])?)?;
+        item.set_item("native_target", "spurious_data_descriptor_delete")?;
+        item.set_item("candidate_status", "partial")?;
+        item.set_item("patch_facts", PyList::new(py, descriptor_delete_patch_facts(candidate))?)?;
+        item.set_item("residual_facts", PyList::empty(py))?;
+        item.set_item("validation_details", descriptor_delete_validation_details(py, candidate)?)?;
+        item.set_item("patch_plan", descriptor_delete_patch_plan(py, candidate)?)?;
+        candidate_list.append(item)?;
+    }
+    result.set_item("candidates", candidate_list)?;
+    result.set_item("workspace_paths", PyList::empty(py))?;
+    Ok(result.unbind())
+}
+
 #[derive(Debug, Clone)]
 struct DeepZipOptions {
     max_candidates: usize,
@@ -863,6 +958,17 @@ struct DeepZipOptions {
     verify_candidates: bool,
     allow_unverified_entries: bool,
     password: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct DescriptorDeleteCandidate {
+    delete_offset: usize,
+    delete_size: usize,
+    descriptor_size: usize,
+    expected_next_offset: usize,
+    actual_next_offset: usize,
+    entry_name: Vec<u8>,
+    confidence: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -2359,6 +2465,8 @@ fn repair_name_to_target(name: &str) -> &str {
         "zip_trailing_junk_trim" => "trailing_junk",
         "zip_eocd_repair" => "eocd",
         "zip_local_header_field_repair" => "local_header",
+        "zip_data_descriptor_flag_normalize" => "data_descriptor_flags",
+        "zip_cd_entry_name_reconcile" => "cd_entry_names",
         "zip64_extra_size" => "zip64_extra_size",
         "zip64_locator" => "zip64_locator",
         "zip64_eocd" => "zip64_eocd",
@@ -2374,6 +2482,8 @@ fn field_patch_facts(target: &str) -> Vec<&'static str> {
         "trailing_junk" => vec!["fixed_field=trailing_junk"],
         "eocd" => vec!["fixed_field=eocd_record", "after_eocd_repair"],
         "local_header" => vec!["fixed_field=local_header_fields", "after_local_header_repair"],
+        "data_descriptor_flags" => vec!["fixed_field=data_descriptor_bit3_flags", "after_descriptor_flag_normalize"],
+        "cd_entry_names" => vec!["fixed_field=central_directory_entry_names", "after_cd_entry_name_reconcile"],
         "zip64_extra_size" => vec!["fixed_field=zip64_extra_size", "zip64_extra_reconciled"],
         "zip64_locator" => vec!["fixed_field=zip64_locator"],
         "zip64_eocd" => vec!["fixed_field=zip64_eocd"],
@@ -3141,6 +3251,155 @@ fn repair_zip_local_header_fields(data: &[u8]) -> Result<DirectoryFieldRepair, S
     })
 }
 
+fn repair_zip_data_descriptor_flags(data: &[u8]) -> Result<DirectoryFieldRepair, String> {
+    let cd = find_valid_central_directory(data)
+        .ok_or_else(|| "central directory was not parseable".to_string())?;
+    let entries = parse_central_directory_entries(data, cd.offset, cd.end);
+    if entries.is_empty() {
+        return Err("no central directory entries were parseable".to_string());
+    }
+    let mut bytes = data.to_vec();
+    let mut patches = Vec::new();
+    for entry in entries {
+        let Some(local) = find_local_for_central_offset_only(data, &entry) else {
+            continue;
+        };
+        let local_bit = local.flags & 0x08;
+        let central_bit = entry.flags & 0x08;
+        if local_bit == central_bit {
+            continue;
+        }
+        let data_start = local
+            .offset
+            .checked_add(LOCAL_HEADER_LEN)
+            .and_then(|value| value.checked_add(local.name_len as usize))
+            .and_then(|value| value.checked_add(local.extra_len as usize));
+        let Some(data_start) = data_start else {
+            continue;
+        };
+        let Some(payload_end) = data_start.checked_add(entry.compressed_size as usize) else {
+            continue;
+        };
+        let descriptor_present = descriptor_at(
+            data,
+            payload_end,
+            entry.crc32,
+            entry.compressed_size as u64,
+            entry.uncompressed_size as u64,
+        );
+        let bit = if descriptor_present { 0x08 } else { 0x00 };
+        let local_target = (local.flags & !0x08) | bit;
+        let central_target = (entry.flags & !0x08) | bit;
+        if local_target != local.flags {
+            add_zip_patch(
+                &mut bytes,
+                &mut patches,
+                local.offset + 6,
+                &local_target.to_le_bytes(),
+            );
+        }
+        if central_target != entry.flags {
+            let Some(central_offset) = find_central_entry_offset(data, cd.offset, cd.end, &entry) else {
+                continue;
+            };
+            add_zip_patch(
+                &mut bytes,
+                &mut patches,
+                central_offset + 8,
+                &central_target.to_le_bytes(),
+            );
+        }
+    }
+    if patches.is_empty() {
+        return Err("ZIP data descriptor bit flags already match or are not safely repairable".to_string());
+    }
+    Ok(DirectoryFieldRepair {
+        bytes,
+        patches,
+        truncate_at: None,
+        confidence: 0.93,
+        actions: vec!["normalize_zip_data_descriptor_bit_flags".to_string()],
+        message: "ZIP data descriptor bit flags were normalized by native repair".to_string(),
+    })
+}
+
+fn repair_zip_cd_entry_names_from_local_headers(data: &[u8]) -> Result<DirectoryFieldRepair, String> {
+    let cd = find_valid_central_directory(data)
+        .ok_or_else(|| "central directory was not parseable".to_string())?;
+    let entries = parse_central_directory_entries(data, cd.offset, cd.end);
+    if entries.is_empty() {
+        return Err("no central directory entries were parseable".to_string());
+    }
+    let mut bytes = data.to_vec();
+    let mut patches = Vec::new();
+    for entry in entries {
+        let Some(local) = find_local_for_central_offset_only(data, &entry) else {
+            continue;
+        };
+        if local.name == entry.name {
+            continue;
+        }
+        if local.name_len != entry.name_len {
+            continue;
+        }
+        if local.name.iter().any(|byte| *byte == 0) {
+            continue;
+        }
+        let Some(central_offset) = find_central_entry_offset(data, cd.offset, cd.end, &entry) else {
+            continue;
+        };
+        let name_offset = central_offset + 46;
+        if name_offset + local.name.len() > data.len() {
+            continue;
+        }
+        add_zip_patch(
+            &mut bytes,
+            &mut patches,
+            name_offset,
+            &local.name,
+        );
+    }
+    if patches.is_empty() {
+        return Err("no central directory entry name mismatch was safely repairable".to_string());
+    }
+    Ok(DirectoryFieldRepair {
+        bytes,
+        patches,
+        truncate_at: None,
+        confidence: 0.94,
+        actions: vec!["reconcile_central_directory_names_from_local_headers".to_string()],
+        message: "ZIP central directory entry names were reconciled from local headers".to_string(),
+    })
+}
+
+fn find_central_entry_offset(
+    data: &[u8],
+    cd_offset: usize,
+    cd_end: usize,
+    target: &CentralEntry,
+) -> Option<usize> {
+    let mut pos = cd_offset;
+    while pos + 46 <= data.len() && pos < cd_end && &data[pos..pos + 4] == CD_SIG {
+        let name_len = u16_le(data, pos + 28);
+        let extra_len = u16_le(data, pos + 30);
+        let comment_len = u16_le(data, pos + 32) as usize;
+        let name_start = pos + 46;
+        let extra_start = name_start + name_len as usize;
+        let comment_start = extra_start + extra_len as usize;
+        let record_end = comment_start + comment_len;
+        if record_end > data.len() || record_end > cd_end {
+            return None;
+        }
+        if u32_le(data, pos + 42) == target.local_header_offset
+            && data[name_start..extra_start] == target.name
+        {
+            return Some(pos);
+        }
+        pos = record_end;
+    }
+    None
+}
+
 #[derive(Clone, Copy)]
 enum Zip64TailTarget {
     Locator,
@@ -3422,6 +3681,201 @@ fn parse_central_directory_entries(
     entries
 }
 
+fn spurious_descriptor_delete_candidates(
+    data: &[u8],
+    max_candidates: usize,
+    max_entries: usize,
+    max_duration: Option<Duration>,
+    started: Instant,
+) -> Vec<DescriptorDeleteCandidate> {
+    let Some(cd) = find_valid_central_directory(data) else {
+        return Vec::new();
+    };
+    let mut entries = parse_central_directory_entries(data, cd.offset, cd.end);
+    if entries.len() > max_entries {
+        entries.truncate(max_entries);
+    }
+    entries.sort_by_key(|entry| entry.local_header_offset);
+    let mut output = Vec::new();
+    for (index, entry) in entries.iter().enumerate() {
+        if timed_out(started, max_duration) || output.len() >= max_candidates {
+            break;
+        }
+        let Some(local) = parse_local_header(data, entry.local_header_offset as usize) else {
+            continue;
+        };
+        let Some(delete_candidate) =
+            spurious_descriptor_delete_for_entry(data, &entries, index, entry, &local, cd.offset)
+        else {
+            continue;
+        };
+        output.push(delete_candidate);
+    }
+    output
+}
+
+fn spurious_descriptor_delete_for_entry(
+    data: &[u8],
+    entries: &[CentralEntry],
+    index: usize,
+    entry: &CentralEntry,
+    local: &LocalHeader,
+    cd_offset: usize,
+) -> Option<DescriptorDeleteCandidate> {
+    if entry.method != 0 && entry.method != 8 {
+        return None;
+    }
+    let data_start = local
+        .offset
+        .checked_add(LOCAL_HEADER_LEN)?
+        .checked_add(local.name_len as usize)?
+        .checked_add(local.extra_len as usize)?;
+    let compressed_size = entry.compressed_size as usize;
+    if compressed_size == 0 || compressed_size == u32::MAX as usize {
+        return None;
+    }
+    let descriptor_start = data_start.checked_add(compressed_size)?;
+    if descriptor_start >= data.len() {
+        return None;
+    }
+    let expected_next_offset = entries
+        .get(index + 1)
+        .map(|next| next.local_header_offset as usize)
+        .unwrap_or(cd_offset);
+    if expected_next_offset <= descriptor_start || expected_next_offset > data.len() {
+        return None;
+    }
+    let actual_next_offset = if entries.get(index + 1).is_some() {
+        find_signature_at_or_after(data, descriptor_start, LFH_SIG)?
+    } else {
+        find_signature_at_or_after(data, descriptor_start, CD_SIG)?
+    };
+    if actual_next_offset <= expected_next_offset || actual_next_offset > data.len() {
+        return None;
+    }
+    let delete_size = actual_next_offset.checked_sub(expected_next_offset)?;
+    if !(4..=64).contains(&delete_size) {
+        return None;
+    }
+    if descriptor_start.checked_add(delete_size)? > data.len() {
+        return None;
+    }
+    let descriptor_after_delete = descriptor_start.checked_add(delete_size)?;
+    let descriptor_end = descriptor_at_impl(
+        data,
+        descriptor_after_delete,
+        entry.crc32,
+        entry.compressed_size as u64,
+        entry.uncompressed_size as u64,
+    )?;
+    if descriptor_end != actual_next_offset {
+        return None;
+    }
+    if descriptor_start + 4 <= data.len() && &data[descriptor_start..descriptor_start + 4] != DD_SIG {
+        return None;
+    }
+    Some(DescriptorDeleteCandidate {
+        delete_offset: descriptor_start,
+        delete_size,
+        descriptor_size: expected_next_offset - descriptor_start,
+        expected_next_offset,
+        actual_next_offset,
+        entry_name: entry.name.clone(),
+        confidence: 0.94,
+    })
+}
+
+fn find_signature_at_or_after(data: &[u8], start: usize, signature: &[u8]) -> Option<usize> {
+    memmem::find(&data[start..], signature).map(|offset| start + offset)
+}
+
+fn descriptor_delete_patch_facts(candidate: &DescriptorDeleteCandidate) -> Vec<String> {
+    vec![
+        "removed_spurious_data_descriptor".to_string(),
+        format!("descriptor_delete_span={}:{}", candidate.delete_offset, candidate.delete_size),
+        format!("stream_offset_delta=-{}", candidate.delete_size),
+        "after_descriptor_stream_reconcile".to_string(),
+    ]
+}
+
+fn descriptor_delete_patch_plan(
+    py: Python<'_>,
+    candidate: &DescriptorDeleteCandidate,
+) -> PyResult<Py<PyDict>> {
+    let operation = PyDict::new(py);
+    operation.set_item("op", "delete")?;
+    operation.set_item("target", "logical")?;
+    operation.set_item("offset", candidate.delete_offset)?;
+    operation.set_item("size", candidate.delete_size)?;
+    let details = PyDict::new(py);
+    details.set_item("module", "zip_remove_spurious_data_descriptor")?;
+    details.set_item("native_target", "spurious_data_descriptor_delete")?;
+    details.set_item("descriptor_size_after_delete", candidate.descriptor_size)?;
+    operation.set_item("details", details)?;
+
+    let provenance = PyDict::new(py);
+    provenance.set_item("module", "zip_remove_spurious_data_descriptor")?;
+    provenance.set_item(
+        "actions",
+        PyList::new(py, ["detect_spurious_data_descriptor", "delete_descriptor_span"])?,
+    )?;
+    provenance.set_item("native_target", "spurious_data_descriptor_delete")?;
+
+    let plan = PyDict::new(py);
+    plan.set_item("kind", "patch_plan")?;
+    plan.set_item("operations", PyList::new(py, [operation])?)?;
+    plan.set_item("confidence", candidate.confidence)?;
+    plan.set_item("provenance", provenance)?;
+    Ok(plan.unbind())
+}
+
+fn descriptor_delete_validation_details(
+    py: Python<'_>,
+    candidate: &DescriptorDeleteCandidate,
+) -> PyResult<Py<PyDict>> {
+    let details = PyDict::new(py);
+    details.set_item("native_target", "spurious_data_descriptor_delete")?;
+    details.set_item("accepted", true)?;
+    details.set_item("delete_offset", candidate.delete_offset)?;
+    details.set_item("delete_size", candidate.delete_size)?;
+    details.set_item("descriptor_size_after_delete", candidate.descriptor_size)?;
+    details.set_item("expected_next_offset", candidate.expected_next_offset)?;
+    details.set_item("actual_next_offset", candidate.actual_next_offset)?;
+    details.set_item("entry_name", String::from_utf8_lossy(&candidate.entry_name).to_string())?;
+    Ok(details.unbind())
+}
+
+fn descriptor_delete_status_dict(
+    py: Python<'_>,
+    status: &str,
+    message: &str,
+    warnings: &[String],
+    fail_reason: Option<&str>,
+) -> PyResult<Py<PyDict>> {
+    let result = PyDict::new(py);
+    result.set_item("status", status)?;
+    result.set_item("selected_path", "")?;
+    result.set_item("selected_candidate", "")?;
+    result.set_item("confidence", 0.0)?;
+    result.set_item("format", "zip")?;
+    result.set_item("message", message)?;
+    result.set_item("actions", PyList::empty(py))?;
+    result.set_item("candidate_status", status)?;
+    result.set_item("native_target", "spurious_data_descriptor_delete")?;
+    result.set_item("patch_facts", PyList::empty(py))?;
+    result.set_item("residual_facts", PyList::empty(py))?;
+    result.set_item("validation_details", build_validation_details(py, "spurious_data_descriptor_delete", false, &[])?)?;
+    result.set_item("warnings", PyList::new(py, warnings)?)?;
+    result.set_item("candidates", PyList::empty(py))?;
+    result.set_item("workspace_paths", PyList::empty(py))?;
+    if let Some(reason) = fail_reason {
+        let diagnostics = PyDict::new(py);
+        diagnostics.set_item("fail_reason", reason)?;
+        result.set_item("diagnostics", diagnostics)?;
+    }
+    Ok(result.unbind())
+}
+
 fn parse_local_header(data: &[u8], offset: usize) -> Option<LocalHeader> {
     if offset + LOCAL_HEADER_LEN > data.len() || &data[offset..offset + 4] != LFH_SIG {
         return None;
@@ -3554,6 +4008,20 @@ fn find_local_for_central(data: &[u8], entry: &CentralEntry) -> Option<LocalHead
         };
         pos = next_start + next;
     }
+}
+
+fn find_local_for_central_offset_only(data: &[u8], entry: &CentralEntry) -> Option<LocalHeader> {
+    if entry.local_header_offset != 0xFFFF_FFFF {
+        if let Some(local) = parse_local_header(data, entry.local_header_offset as usize) {
+            return Some(local);
+        }
+    }
+    if let Some(zip64) = parse_zip64_extra_tolerant(&entry.extra, entry.extra_offset) {
+        if zip64.values.len() >= 3 {
+            return parse_local_header(data, zip64.values[2] as usize);
+        }
+    }
+    None
 }
 
 fn cd_local_reconcile_indices(data: &[u8], entries: &[RecoveredEntry]) -> (Vec<usize>, usize) {

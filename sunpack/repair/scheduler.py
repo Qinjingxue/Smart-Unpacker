@@ -10,15 +10,21 @@ from sunpack.repair.context import RepairContext, build_repair_context
 from sunpack.repair.diagnosis import RepairDiagnosis, diagnose_repair_job
 from sunpack.repair.job import RepairJob
 from sunpack.repair.pipeline.module import RepairRoute
-from sunpack.repair.pipeline.modules._common import job_source_size
+from sunpack.repair.pipeline.modules._common import job_source_size, repair_operation_cache_key
 from sunpack.repair.pipeline.registry import discover_repair_modules, get_repair_module_registry
 from sunpack.repair.result import RepairResult
+from sunpack.repair.runtime_cache import RepairRuntimeCache
 from sunpack.support import repair_trace
 
 
 class RepairScheduler:
     def __init__(self, config: dict[str, Any] | None = None):
         self.config = repair_config(config or {})
+        cache_config = self.config.get("runtime_cache") if isinstance(self.config.get("runtime_cache"), dict) else {}
+        self.repair_cache = RepairRuntimeCache(
+            enabled=bool(cache_config.get("enabled", True)),
+            max_entries=int(cache_config.get("max_entries", 512) or 512),
+        )
         discover_repair_modules()
 
     def diagnose(self, job: RepairJob) -> RepairDiagnosis:
@@ -76,7 +82,7 @@ class RepairScheduler:
     def generate_repair_candidates(self, job: RepairJob, *, lazy: bool = False) -> RepairCandidateBatch:
         diagnosis = self.diagnose(job)
         context = build_repair_context(job, diagnosis)
-        effective_job = replace(job, damage_flags=list(context.damage_flags))
+        effective_job = replace(job, damage_flags=list(context.damage_flags), repair_cache=job.repair_cache or self.repair_cache)
         if not self.config.get("enabled", True):
             result = self._result("skipped", job, diagnosis, "repair layer is disabled")
             repair_trace.write_event("repair_candidates_terminal", {
@@ -128,8 +134,9 @@ class RepairScheduler:
         workspace = self._workspace_for(job)
         workspace.mkdir(parents=True, exist_ok=True)
         module_configs = enabled_module_configs(self.config)
+        runtime_job = replace(effective_job, workspace=str(workspace))
         repair_candidates, warnings, capability = self._run_modules(
-            effective_job,
+            runtime_job,
             diagnosis,
             modules,
             capability,
@@ -840,21 +847,39 @@ def _lazy_module_candidate(
     })
 
     def materialize():
-        if hasattr(module, "generate_candidates"):
-            return _with_job_password_candidates(list(module.generate_candidates(  # type: ignore[attr-defined]
+        def compute():
+            if hasattr(module, "generate_candidates"):
+                return _with_job_password_candidates(list(module.generate_candidates(  # type: ignore[attr-defined]
+                    job,
+                    diagnosis,
+                    workspace,
+                    {**module_config, "virtual_patch_candidate": True},
+                ) or []), job)
+            result = module.repair(job, diagnosis, workspace, {**module_config, "virtual_patch_candidate": True})
+            if result.ok:
+                return RepairCandidate.from_result(
+                    _with_job_password_result(result, job),
+                    score_hint=score_hint,
+                    stage=module.spec.stage,
+                )
+            return None
+
+        cache = getattr(job, "repair_cache", None)
+        if cache is None:
+            return compute()
+        return cache.get_or_compute(
+            "materialize_candidate",
+            repair_operation_cache_key(
                 job,
-                diagnosis,
-                workspace,
-                {**module_config, "virtual_patch_candidate": True},
-            ) or []), job)
-        result = module.repair(job, diagnosis, workspace, {**module_config, "virtual_patch_candidate": True})
-        if result.ok:
-            return RepairCandidate.from_result(
-                _with_job_password_result(result, job),
-                score_hint=score_hint,
-                stage=module.spec.stage,
-            )
-        return None
+                module_name,
+                {
+                    "module_config": module_config,
+                    "virtual_patch_candidate": True,
+                    "score_hint": round(float(score_hint or 0.0), 8),
+                },
+            ),
+            compute,
+        )
 
     enriched = dict(diagnosis.as_dict())
     enriched.update({

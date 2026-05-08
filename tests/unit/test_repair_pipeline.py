@@ -16,12 +16,13 @@ import pytest
 from sunpack.analysis.result import ArchiveFormatEvidence, ArchiveSegment
 from sunpack.config.schema import normalize_config
 from sunpack.repair.config import enabled_module_configs
-from sunpack.repair.candidate import CandidateSelector, CandidateValidation, RepairCandidate
+from sunpack.repair.candidate import CandidateSelector, CandidateValidation, RepairCandidate, materialize_candidate
 from sunpack.repair import RepairJob, RepairScheduler
 from sunpack.repair.pipeline.module import RepairModuleSpec, RepairRoute
-from sunpack.repair.pipeline.modules._common import source_input_for_job
-from sunpack.repair.pipeline.registry import get_repair_module_registry
+from sunpack.repair.pipeline.modules._common import repair_operation_cache_key, source_input_for_job
+from sunpack.repair.pipeline.registry import get_repair_module_registry, register_repair_module
 from sunpack.repair.result import RepairResult
+from sunpack.repair.runtime_cache import RepairRuntimeCache
 
 
 RAR4_MAGIC = b"Rar!\x1a\x07\x00"
@@ -33,6 +34,34 @@ DEFAULT_SALVAGE_MODULES = {
     "tar_sparse_pax_longname_repair",
     "zip_resolve_duplicate_entries",
 }
+
+
+class _CountingLazyRepairModule:
+    def __init__(self) -> None:
+        self.calls = 0
+        self.spec = RepairModuleSpec(
+            name="test_counting_lazy_cache_module",
+            formats=("zip",),
+            categories=("directory_rebuild",),
+            routes=(RepairRoute(formats=("zip",), require_any_flags=("test_cache_damage",), base_score=0.95),),
+        )
+
+    def can_handle(self, job, diagnosis, config):
+        return 0.95 if "test_cache_damage" in set(job.damage_flags) else 0.0
+
+    def generate_candidates(self, job, diagnosis, workspace, config):
+        self.calls += 1
+        return [RepairCandidate(
+            module_name=self.spec.name,
+            format="zip",
+            repaired_input={"kind": "bytes", "data": b"cached", "format_hint": "zip"},
+            status="repaired",
+            confidence=0.9,
+            actions=["test_cached_materialize"],
+            damage_flags=list(job.damage_flags),
+            diagnosis={"repair_name": self.spec.name},
+            message="cached test candidate",
+        )]
 
 
 def test_repair_scheduler_without_modules_returns_unsupported(tmp_path):
@@ -57,6 +86,68 @@ def test_default_repair_config_enables_deep_salvage_modules(tmp_path):
     enabled = set(enabled_module_configs(scheduler.config))
 
     assert DEFAULT_SALVAGE_MODULES <= enabled
+
+
+def test_repair_runtime_cache_reuses_same_lazy_materialization(tmp_path):
+    module = _CountingLazyRepairModule()
+    register_repair_module(module)
+    source = tmp_path / "damaged.zip"
+    source.write_bytes(b"PK\x05\x06" + b"\x00" * 18)
+    scheduler = RepairScheduler({
+        "repair": {
+            "workspace": str(tmp_path / "repair"),
+            "modules": [{"name": module.spec.name, "enabled": True}],
+        }
+    })
+    job = RepairJob(
+        source_input={"kind": "file", "path": str(source), "format_hint": "zip"},
+        format="zip",
+        confidence=0.8,
+        damage_flags=["test_cache_damage"],
+        archive_key="cache-test.zip",
+    )
+
+    batch = scheduler.generate_repair_candidates(job, lazy=True)
+    assert len(batch.candidates) == 1
+    first = materialize_candidate(batch.candidates[0])
+    second = materialize_candidate(batch.candidates[0])
+
+    assert module.calls == 1
+    assert first[0].module_name == module.spec.name
+    assert second[0].module_name == module.spec.name
+    assert scheduler.repair_cache.stats()["by_namespace"]["materialize_candidate"]["hits"] == 1
+
+
+def test_repair_operation_cache_key_changes_when_file_changes(tmp_path):
+    source = tmp_path / "damaged.zip"
+    source.write_bytes(b"one")
+    job = RepairJob(source_input={"kind": "file", "path": str(source), "format_hint": "zip"}, format="zip")
+    first = repair_operation_cache_key(job, "op", {"param": True})
+
+    source.write_bytes(b"two-two")
+    second = repair_operation_cache_key(job, "op", {"param": True})
+
+    assert first != second
+
+
+def test_repair_runtime_cache_invalidates_missing_materialized_path(tmp_path):
+    cache = RepairRuntimeCache()
+    produced = tmp_path / "candidate.zip"
+    calls = {"count": 0}
+
+    def compute():
+        calls["count"] += 1
+        produced.write_bytes(f"run-{calls['count']}".encode("ascii"))
+        return {"selected_path": str(produced), "workspace_paths": [str(produced)]}
+
+    first = cache.get_or_compute("native_test", {"source": "same"}, compute)
+    second = cache.get_or_compute("native_test", {"source": "same"}, compute)
+    produced.unlink()
+    third = cache.get_or_compute("native_test", {"source": "same"}, compute)
+
+    assert calls["count"] == 2
+    assert first == second
+    assert third["selected_path"] == str(produced)
 
 
 @pytest.mark.parametrize(
@@ -1234,6 +1325,160 @@ def test_zip_v25_source_input_parts_become_concat_ranges(tmp_path):
     assert [item["path"] for item in source["ranges"]] == [str(part), str(main)]
 
 
+def test_zip_remove_spurious_data_descriptor_returns_single_delete_patch(tmp_path):
+    import sunpack_native
+
+    source = tmp_path / "descriptor_conflict.zip"
+    fake_offset = _write_descriptor_conflict_zip(source)
+
+    result = sunpack_native.zip_remove_spurious_data_descriptor(
+        {"kind": "file", "path": str(source), "format_hint": "zip"},
+        str(tmp_path / "native"),
+        3,
+        20000,
+        512.0,
+        30.0,
+    )
+
+    assert result["native_target"] == "spurious_data_descriptor_delete"
+    candidate = result["candidates"][0]
+    assert "removed_spurious_data_descriptor" in candidate["patch_facts"]
+    operations = candidate["patch_plan"]["operations"]
+    assert operations == [{
+        "op": "delete",
+        "target": "logical",
+        "offset": fake_offset,
+        "size": 18,
+        "details": {
+            "module": "zip_remove_spurious_data_descriptor",
+            "native_target": "spurious_data_descriptor_delete",
+            "descriptor_size_after_delete": 16,
+        },
+    }]
+
+
+def test_zip_remove_spurious_data_descriptor_candidate_is_virtual_patch(tmp_path):
+    source = tmp_path / "descriptor_conflict.zip"
+    fake_offset = _write_descriptor_conflict_zip(source)
+    scheduler = RepairScheduler({
+        "repair": {
+            "workspace": str(tmp_path / "repair"),
+            "modules": [{"name": "zip_remove_spurious_data_descriptor", "enabled": True}],
+            "virtual_patch_candidate": True,
+        }
+    })
+
+    batch = scheduler.generate_repair_candidates(RepairJob(
+        source_input={"kind": "file", "path": str(source), "format_hint": "zip"},
+        format="zip",
+        confidence=0.7,
+        damage_flags=[
+            "data_descriptor",
+            "compressed_size_bad",
+            "local_header_conflict",
+            "central_directory_offset_bad",
+            "spurious_data_descriptor_candidate",
+        ],
+        archive_key="descriptor_conflict.zip",
+    ), lazy=False)
+
+    assert len(batch.candidates) == 1
+    candidate = batch.candidates[0]
+    assert candidate.module_name == "zip_remove_spurious_data_descriptor"
+    assert candidate.repaired_input["kind"] in {"archive_state", "file"}
+    operation = candidate.plan["patch_plan"]["operations"][0]
+    assert operation["op"] == "delete"
+    assert operation["offset"] == fake_offset
+    assert operation["size"] == 18
+    assert "removed_spurious_data_descriptor" in candidate.diagnosis["patch_facts"]
+
+
+def test_zip_normalize_data_descriptor_flags_patches_only_bit3(tmp_path):
+    source = tmp_path / "descriptor_conflict.zip"
+    fake_offset = _write_descriptor_conflict_zip(source)
+    data = source.read_bytes()
+    patched = data[:fake_offset] + data[fake_offset + 18:]
+    cd_offset = patched.find(b"PK\x01\x02")
+    second_cd_offset = patched.find(b"PK\x01\x02", cd_offset + 4)
+    patched = bytearray(patched)
+    patched[second_cd_offset + 8:second_cd_offset + 10] = (0).to_bytes(2, "little")
+    source.write_bytes(patched)
+    scheduler = RepairScheduler({
+        "repair": {
+            "workspace": str(tmp_path / "repair"),
+            "modules": [{"name": "zip_normalize_data_descriptor_flags", "enabled": True}],
+            "virtual_patch_candidate": True,
+        }
+    })
+
+    batch = scheduler.generate_repair_candidates(RepairJob(
+        source_input={"kind": "file", "path": str(source), "format_hint": "zip"},
+        format="zip",
+        confidence=0.7,
+        damage_flags=[
+            "data_descriptor",
+            "compressed_size_bad",
+            "local_header_conflict",
+            "central_directory_bad",
+            "after_descriptor_stream_reconcile",
+        ],
+        archive_key="descriptor_conflict.zip",
+    ), lazy=False)
+
+    assert len(batch.candidates) == 1
+    candidate = batch.candidates[0]
+    assert candidate.repaired_input["kind"] in {"archive_state", "file"}
+    assert candidate.diagnosis["native_target"] == "data_descriptor_flags"
+    assert "fixed_field=data_descriptor_bit3_flags" in candidate.diagnosis["patch_facts"]
+    operations = candidate.diagnosis["patch_plan"]["operations"]
+    assert len(operations) == 1
+    assert operations[0]["op"] == "replace_range"
+    assert operations[0]["size"] == 2
+
+
+def test_zip_reconcile_cd_entry_names_from_local_headers_patches_only_name_bytes(tmp_path):
+    source = tmp_path / "descriptor_conflict.zip"
+    fake_offset = _write_descriptor_conflict_zip(source)
+    data = source.read_bytes()
+    patched = data[:fake_offset] + data[fake_offset + 18:]
+    cd_offset = patched.find(b"PK\x01\x02")
+    second_cd_offset = patched.find(b"PK\x01\x02", cd_offset + 4)
+    patched = bytearray(patched)
+    patched[second_cd_offset + 46:second_cd_offset + 56] = b"corrupt.tx"
+    source.write_bytes(patched)
+    scheduler = RepairScheduler({
+        "repair": {
+            "workspace": str(tmp_path / "repair"),
+            "modules": [{"name": "zip_reconcile_cd_entry_names_from_local_headers", "enabled": True}],
+            "virtual_patch_candidate": True,
+        }
+    })
+
+    batch = scheduler.generate_repair_candidates(RepairJob(
+        source_input={"kind": "file", "path": str(source), "format_hint": "zip"},
+        format="zip",
+        confidence=0.7,
+        damage_flags=[
+            "central_directory_bad",
+            "local_header_conflict",
+            "exact_match_failed",
+            "after_descriptor_stream_reconcile",
+            "after_descriptor_flag_normalize",
+        ],
+        archive_key="descriptor_conflict.zip",
+    ), lazy=False)
+
+    assert len(batch.candidates) == 1
+    candidate = batch.candidates[0]
+    assert candidate.diagnosis["native_target"] == "cd_entry_names"
+    assert "fixed_field=central_directory_entry_names" in candidate.diagnosis["patch_facts"]
+    operations = candidate.diagnosis["patch_plan"]["operations"]
+    assert len(operations) == 1
+    assert operations[0]["op"] == "replace_range"
+    assert operations[0]["offset"] == second_cd_offset + 46
+    assert operations[0]["size"] == len(b"second.txt")
+
+
 def test_zip_v23_duplicate_resolver_ranks_before_generic_rebuild(tmp_path):
     scheduler = RepairScheduler({
         "repair": {
@@ -2404,6 +2649,81 @@ def _descriptor_zip_fragment(name: str, payload: bytes, *, zip64: bool = False) 
         descriptor,
         b"PK\x01\x02BROKEN-CENTRAL-DIR",
     ])
+
+
+def _write_descriptor_conflict_zip(path: Path) -> int:
+    entries = [
+        ("first.txt", b"first payload"),
+        ("second.txt", b"second payload"),
+        ("third.txt", b"third payload"),
+    ]
+    locals_out = bytearray()
+    central: list[tuple[str, bytes, bytes, int, int, int]] = []
+    fake_offset = -1
+    for index, (name, payload) in enumerate(entries):
+        encoded_name = name.encode("utf-8")
+        offset = len(locals_out)
+        crc = zlib.crc32(payload) & 0xFFFFFFFF
+        locals_out.extend(struct.pack(
+            "<IHHHHHIIIHH",
+            0x04034B50,
+            20,
+            0x08,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            len(encoded_name),
+            0,
+        ))
+        locals_out.extend(encoded_name)
+        locals_out.extend(payload)
+        if index == 1:
+            fake_offset = len(locals_out)
+            locals_out.extend(b"PK\x07\x08" + b"F" * 14)
+        locals_out.extend(struct.pack("<IIII", 0x08074B50, crc, len(payload), len(payload)))
+        central_offset = offset - 18 if index > 1 else offset
+        central.append((name, encoded_name, payload, central_offset, crc, len(payload)))
+
+    cd_offset = sum(30 + len(name.encode("utf-8")) + len(payload) + 16 for name, payload in entries)
+    central_out = bytearray()
+    for _name, encoded_name, _payload, offset, crc, size in central:
+        central_out.extend(struct.pack(
+            "<IHHHHHHIIIHHHHHII",
+            0x02014B50,
+            20,
+            20,
+            0x08,
+            0,
+            0,
+            0,
+            crc,
+            size,
+            size,
+            len(encoded_name),
+            0,
+            0,
+            0,
+            0,
+            0,
+            offset,
+        ))
+        central_out.extend(encoded_name)
+    eocd = struct.pack(
+        "<IHHHHIIH",
+        0x06054B50,
+        0,
+        0,
+        len(entries),
+        len(entries),
+        len(central_out),
+        cd_offset,
+        0,
+    )
+    path.write_bytes(bytes(locals_out) + bytes(central_out) + eocd)
+    return fake_offset
 
 
 def _raw_stored_local_entry(name: str, payload: bytes, *, crc32: int | None = None) -> bytes:

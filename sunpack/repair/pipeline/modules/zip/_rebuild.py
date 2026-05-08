@@ -4,7 +4,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from sunpack.repair.pipeline.modules._common import module_limits
+from sunpack.repair.job import RepairJob
+from sunpack.repair.pipeline.modules._common import cached_repair_operation, cache_relevant_module_limits, module_limits
 from sunpack_native import zip_rebuild_from_local_headers as _native_zip_rebuild_from_local_headers
 
 
@@ -47,18 +48,30 @@ def rebuild_zip_from_source(
     require_data_descriptor: bool = False,
     preserve_raw_names: bool = False,
     config: dict[str, Any] | None = None,
+    cache_job: RepairJob | None = None,
 ) -> ZipScanResult:
     limits = module_limits(config)
-    result = dict(_native_zip_rebuild_from_local_headers(
-        source_input,
-        str(output_path),
-        bool(require_data_descriptor),
-        bool(preserve_raw_names),
-        int(limits.get("max_entries", 20000) or 20000),
-        float(limits.get("max_input_size_mb", 512) or 0),
-        float(limits.get("max_output_size_mb", 2048) or 0),
-        True,
-    ))
+    params = {
+        "source_input": source_input,
+        "output_path": str(output_path),
+        "require_data_descriptor": bool(require_data_descriptor),
+        "preserve_raw_names": bool(preserve_raw_names),
+        "limits": cache_relevant_module_limits(config),
+    }
+
+    def compute() -> dict[str, Any]:
+        return dict(_native_zip_rebuild_from_local_headers(
+            source_input,
+            str(output_path),
+            bool(require_data_descriptor),
+            bool(preserve_raw_names),
+            int(limits.get("max_entries", 20000) or 20000),
+            float(limits.get("max_input_size_mb", 512) or 0),
+            float(limits.get("max_output_size_mb", 2048) or 0),
+            True,
+        ))
+
+    result = dict(cached_repair_operation(cache_job, "native_zip_rebuild_from_local_headers", "zip_rebuild_from_local_headers", params, compute) if cache_job is not None else compute())
     skipped = int(result.get("skipped_entries", 0) or 0)
     return ZipScanResult(
         entries=int(result.get("recovered_entries", 0) or 0),

@@ -225,7 +225,12 @@ def _zip_profile_flags(profile: str) -> list[str]:
     if "zip64_eocd" in text:
         flags.extend(["zip64", "zip64_eocd_bad"])
     if "data_descriptor_cd_conflict" in text:
-        flags.extend(["data_descriptor", "compressed_size_bad", "local_header_conflict", "central_directory_bad", "central_directory_offset_bad"])
+        flags.extend([
+            "data_descriptor", "compressed_size_bad", "local_header_conflict",
+            "central_directory_bad", "central_directory_offset_bad", "central_directory_count_bad",
+            "spurious_data_descriptor_candidate", "descriptor_record_in_payload_gap",
+            "descriptor_delete_would_align_next_header",
+        ])
     elif "data_descriptor" in text:
         flags.extend(["data_descriptor", "compressed_size_bad"])
     if "two_step_local_header" in text:

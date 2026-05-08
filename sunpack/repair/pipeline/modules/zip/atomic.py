@@ -8,7 +8,7 @@ from sunpack.repair.coverage import coverage_view_from_job
 from sunpack.repair.diagnosis import RepairDiagnosis
 from sunpack.repair.job import RepairJob
 from sunpack.repair.pipeline.module import RepairModuleSpec, RepairRoute
-from sunpack.repair.pipeline.modules._common import source_input_for_job, module_limits
+from sunpack.repair.pipeline.modules._common import cached_repair_operation, cache_relevant_module_limits, source_input_for_job, module_limits
 from sunpack.repair.pipeline.modules._native_candidates import candidates_from_native_result
 from sunpack.repair.pipeline.registry import register_repair_module
 from sunpack.repair.result import RepairResult
@@ -17,6 +17,7 @@ from sunpack_native import (
     zip_conflict_resolver_rebuild as _native_zip_conflict_resolver,
     zip_deep_partial_recovery as _native_zip_deep_partial_recovery,
     zip_directory_field_repair as _native_zip_directory_field_repair,
+    zip_remove_spurious_data_descriptor as _native_zip_remove_spurious_data_descriptor,
 )
 
 from ._entry_salvage import run_verified_entry_salvage, verification_problem_names
@@ -304,6 +305,7 @@ class _ZipRebuildFromLocalHeaders:
             require_data_descriptor=self.require_data_descriptor,
             preserve_raw_names=self.preserve_raw_names,
             config=config,
+            cache_job=job,
         )
         if not scan.entries:
             return _unrepairable(self.module_name, diagnosis, "no recoverable ZIP entries were found", warnings=scan.warnings)
@@ -348,7 +350,7 @@ class _ZipRebuildFromLocalHeaders:
                 "patch_facts": patch_facts,
                 "residual_facts": residual_facts,
                 "validation_details": scan.validation_details or {},
-                "logical_stream_built": bool(scan.logical_stream_built) or str(source_input.get("kind") or "") == "concat_ranges",
+                "logical_stream_built": bool(scan.logical_stream_built) or bool(source_input.get("logical_stream_built")) or str(source_input.get("kind") or "") == "concat_ranges",
                 "split_sidecars_available": bool(scan.split_sidecars_available) or "split_sidecars_available" in set(job.damage_flags),
                 "raw_name_bytes_preserved": bool((scan.validation_details or {}).get("raw_filename_bytes_preserved")),
                 "raw_name_source": "local_header" if "raw_name_source=local_header" in set(patch_facts) else "",
@@ -401,6 +403,118 @@ class ZipRebuildCdFromDataDescriptors(_ZipRebuildFromLocalHeaders):
     route_family = "descriptor_rebuild"
 
 
+class ZipRemoveSpuriousDataDescriptor:
+    spec = RepairModuleSpec(
+        name="zip_remove_spurious_data_descriptor",
+        formats=("zip",),
+        categories=("directory_rebuild", "content_recovery"),
+        partial=True,
+        atomic=True,
+        route_family="descriptor_stream_surgery",
+        routes=(RepairRoute(
+            formats=("zip",),
+            require_any_flags=(
+                "spurious_data_descriptor_candidate",
+                "descriptor_record_in_payload_gap",
+                "descriptor_delete_would_align_next_header",
+                *DESCRIPTOR_FLAGS,
+            ),
+            reject_any_flags=(*MISSING_VOLUME_FLAGS, *CARRIER_FLAGS),
+            base_score=0.96,
+        ),),
+    )
+
+    def can_handle(self, job: RepairJob, diagnosis: RepairDiagnosis, config: dict) -> float:
+        flags = set(job.damage_flags)
+        if flags & set(MISSING_VOLUME_FLAGS) or flags & set(CARRIER_FLAGS):
+            return 0.0
+        descriptor = bool(flags & {"data_descriptor", "bit3_data_descriptor", "compressed_size_bad"})
+        structural_shift = bool(flags & {
+            "spurious_data_descriptor_candidate",
+            "descriptor_record_in_payload_gap",
+            "descriptor_delete_would_align_next_header",
+            "local_header_conflict",
+            "central_directory_offset_bad",
+            "central_directory_bad",
+        })
+        return 0.97 if descriptor and structural_shift else 0.0
+
+    def repair(self, job: RepairJob, diagnosis: RepairDiagnosis, workspace: str, config: dict) -> RepairResult:
+        candidates = self.generate_candidates(job, diagnosis, workspace, config)
+        if candidates:
+            return candidates[0].to_result(selection={"selected_module": self.spec.name})
+        return _unrepairable(self.spec.name, diagnosis, "no spurious ZIP data descriptor could be deleted")
+
+    def generate_candidates(self, job: RepairJob, diagnosis: RepairDiagnosis, workspace: str, config: dict):
+        limits = module_limits(config)
+        result = dict(_native_zip_remove_spurious_data_descriptor(
+            source_input_for_job(job),
+            workspace,
+            int(limits.get("max_candidates_per_module", 3) or 3),
+            int(limits.get("max_entries", 20000) or 20000),
+            float(limits.get("max_input_size_mb", 512) or 0),
+            float(limits.get("max_seconds_per_module", 30.0) or 0),
+        ))
+        return candidates_from_native_result(
+            self.spec.name, result, job, diagnosis,
+            native_key="native_zip_remove_spurious_data_descriptor",
+            repair_name=self.spec.name,
+            atomic_action_group=self.spec.name,
+            format_hint="zip",
+            partial_default=True,
+            default_confidence=0.94,
+            prefer_patch_plan=bool(config.get("virtual_patch_candidate", True)),
+        )
+
+
+class ZipNormalizeDataDescriptorFlags(_ZipDirectoryFieldRepair):
+    module_name = "zip_normalize_data_descriptor_flags"
+    repair_name = "zip_data_descriptor_flag_normalize"
+    categories = ("directory_rebuild", "content_recovery")
+    require_flags = ("data_descriptor", "bit3_data_descriptor", "compressed_size_bad", "after_descriptor_stream_reconcile")
+    reject_flags = (*MISSING_VOLUME_FLAGS, *CARRIER_FLAGS)
+    base_score = 0.94
+    confidence = 0.93
+    route_family = "descriptor_flag_normalize"
+    expected_native_actions = ("normalize_zip_data_descriptor_bit_flags",)
+    expected_native_target = "data_descriptor_flags"
+
+    def can_handle(self, job: RepairJob, diagnosis: RepairDiagnosis, config: dict) -> float:
+        flags = set(job.damage_flags)
+        if flags & set(self.reject_flags):
+            return 0.0
+        descriptor = bool(flags & {"data_descriptor", "bit3_data_descriptor", "compressed_size_bad"})
+        if descriptor and flags & {"after_descriptor_stream_reconcile", "local_header_conflict", "central_directory_bad", "central_directory_offset_bad"}:
+            return 0.95
+        return 0.0
+
+
+class ZipReconcileCdEntryNamesFromLocalHeaders(_ZipDirectoryFieldRepair):
+    module_name = "zip_reconcile_cd_entry_names_from_local_headers"
+    repair_name = "zip_cd_entry_name_reconcile"
+    categories = ("directory_rebuild",)
+    require_flags = (
+        "central_directory_bad",
+        "local_header_conflict",
+        "after_descriptor_stream_reconcile",
+        "after_descriptor_flag_normalize",
+    )
+    reject_flags = (*MISSING_VOLUME_FLAGS, *CARRIER_FLAGS)
+    base_score = 0.93
+    confidence = 0.94
+    route_family = "cd_entry_name_reconcile"
+    expected_native_actions = ("reconcile_central_directory_names_from_local_headers",)
+    expected_native_target = "cd_entry_names"
+
+    def can_handle(self, job: RepairJob, diagnosis: RepairDiagnosis, config: dict) -> float:
+        flags = set(job.damage_flags)
+        if flags & set(self.reject_flags):
+            return 0.0
+        if flags & {"central_directory_bad", "local_header_conflict"} and flags & {"after_descriptor_stream_reconcile", "after_descriptor_flag_normalize", "exact_match_failed"}:
+            return 0.94
+        return 0.0
+
+
 class ZipReconcileCdLocalHeaders:
     spec = RepairModuleSpec(
         name="zip_reconcile_cd_local_headers",
@@ -431,13 +545,26 @@ class ZipReconcileCdLocalHeaders:
 
     def generate_candidates(self, job: RepairJob, diagnosis: RepairDiagnosis, workspace: str, config: dict):
         limits = module_limits(config)
-        result = dict(_native_zip_cd_local_header_reconcile(
-            source_input_for_job(job), workspace,
-            int(limits.get("max_entries", 20000) or 20000),
-            float(limits.get("max_input_size_mb", 512) or 0),
-            float(limits.get("max_output_size_mb", 2048) or 0),
-            float(limits.get("max_entry_uncompressed_mb", 512) or 0),
-            float(limits.get("max_seconds_per_module", 30.0) or 0),
+        source_input = source_input_for_job(job)
+        params = {
+            "source_input": source_input,
+            "workspace": workspace,
+            "module": self.spec.name,
+            "limits": cache_relevant_module_limits(config),
+        }
+        result = dict(cached_repair_operation(
+            job,
+            "native_zip_cd_local_header_reconcile",
+            self.spec.name,
+            params,
+            lambda: dict(_native_zip_cd_local_header_reconcile(
+                source_input, workspace,
+                int(limits.get("max_entries", 20000) or 20000),
+                float(limits.get("max_input_size_mb", 512) or 0),
+                float(limits.get("max_output_size_mb", 2048) or 0),
+                float(limits.get("max_entry_uncompressed_mb", 512) or 0),
+                float(limits.get("max_seconds_per_module", 30.0) or 0),
+            )),
         ))
         return candidates_from_native_result(
             self.spec.name, result, job, diagnosis,
@@ -571,15 +698,29 @@ class _ZipLocalHeaderPartialScan:
 
     def generate_candidates(self, job: RepairJob, diagnosis: RepairDiagnosis, workspace: str, config: dict):
         limits = module_limits(config)
-        result = dict(_native_zip_deep_partial_recovery(
-            source_input_for_job(job), workspace,
-            int(limits.get("max_candidates_per_module", 3) or 3),
-            int(limits.get("max_entries", 20000) or 20000),
-            float(limits.get("max_input_size_mb", 512) or 0),
-            float(limits.get("max_output_size_mb", 2048) or 0),
-            float(limits.get("max_entry_uncompressed_mb", 512) or 0),
-            float(limits.get("max_seconds_per_module", 30.0) or 0),
-            bool(limits.get("verify_candidates", True)),
+        source_input = source_input_for_job(job)
+        params = {
+            "source_input": source_input,
+            "workspace": workspace,
+            "module": self.module_name,
+            "native_key": self.native_key,
+            "limits": cache_relevant_module_limits(config),
+        }
+        result = dict(cached_repair_operation(
+            job,
+            "native_zip_deep_partial_recovery",
+            self.module_name,
+            params,
+            lambda: dict(_native_zip_deep_partial_recovery(
+                source_input, workspace,
+                int(limits.get("max_candidates_per_module", 3) or 3),
+                int(limits.get("max_entries", 20000) or 20000),
+                float(limits.get("max_input_size_mb", 512) or 0),
+                float(limits.get("max_output_size_mb", 2048) or 0),
+                float(limits.get("max_entry_uncompressed_mb", 512) or 0),
+                float(limits.get("max_seconds_per_module", 30.0) or 0),
+                bool(limits.get("verify_candidates", True)),
+            )),
         ))
         coverage = coverage_view_from_job(job)
         candidates = candidates_from_native_result(
@@ -643,14 +784,29 @@ class _ZipConflictResolver:
 
     def generate_candidates(self, job: RepairJob, diagnosis: RepairDiagnosis, workspace: str, config: dict):
         limits = module_limits(config)
-        result = dict(_native_zip_conflict_resolver(
-            source_input_for_job(job), workspace,
-            int(limits.get("max_entries", 20000) or 20000),
-            float(limits.get("max_input_size_mb", 512) or 0),
-            float(limits.get("max_output_size_mb", 2048) or 0),
-            float(limits.get("max_entry_uncompressed_mb", 512) or 0),
-            bool(limits.get("verify_candidates", True)),
-            "crc_match" if self.module_name == "zip_resolve_duplicate_entries" else "first",
+        source_input = source_input_for_job(job)
+        policy = "crc_match" if self.module_name == "zip_resolve_duplicate_entries" else "first"
+        params = {
+            "source_input": source_input,
+            "workspace": workspace,
+            "module": self.module_name,
+            "policy": policy,
+            "limits": cache_relevant_module_limits(config),
+        }
+        result = dict(cached_repair_operation(
+            job,
+            "native_zip_conflict_resolver_rebuild",
+            self.module_name,
+            params,
+            lambda: dict(_native_zip_conflict_resolver(
+                source_input, workspace,
+                int(limits.get("max_entries", 20000) or 20000),
+                float(limits.get("max_input_size_mb", 512) or 0),
+                float(limits.get("max_output_size_mb", 2048) or 0),
+                float(limits.get("max_entry_uncompressed_mb", 512) or 0),
+                bool(limits.get("verify_candidates", True)),
+                policy,
+            )),
         ))
         return candidates_from_native_result(
             self.module_name, result, job, diagnosis,
@@ -699,6 +855,9 @@ for _module in (
     ZipRebuildCdFromLocalHeaders(),
     ZipRebuildCdPreserveRawNames(),
     ZipRebuildCdFromDataDescriptors(),
+    ZipRemoveSpuriousDataDescriptor(),
+    ZipNormalizeDataDescriptorFlags(),
+    ZipReconcileCdEntryNamesFromLocalHeaders(),
     ZipReconcileCdLocalHeaders(),
     ZipReconcileCdDataDescriptorConflict(),
     ZipQuarantineFailedEntries(),

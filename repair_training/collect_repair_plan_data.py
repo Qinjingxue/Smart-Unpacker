@@ -94,6 +94,11 @@ def main(argv: list[str] | None = None) -> int:
         "stop_reason_counts": {},
         "global_stagnation_counts": {},
         "best_partial_returned_count": 0,
+        "repair_cache_hits": 0,
+        "repair_cache_misses": 0,
+        "repair_cache_by_namespace": {},
+        "materialize_cache_hits": 0,
+        "native_operation_cache_hits": 0,
         "success_output": str(success_output),
         "failure_output": str(failure_output),
         "collector_shard": args.collector_shard,
@@ -194,6 +199,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--idle-timeout-seconds", type=float, default=0.0, help="Stop if no sample completes for this many seconds. Use 0 to disable.")
     parser.add_argument("--heartbeat-seconds", type=float, default=5.0, help="While waiting for a sample worker, emit heartbeat progress every N seconds.")
     parser.add_argument("--debug-events", default="", help="Optional JSONL path for collector START/END/TIMEOUT heartbeat events.")
+    parser.add_argument("--disable-repair-cache", action="store_true", help="Disable per-worker repair materialization/native operation cache.")
     parser.add_argument("--progress", action="store_true", help="Print sample START/END progress.")
     return parser
 
@@ -351,6 +357,8 @@ def _update_summary_counts(summary: dict[str, Any], record: dict[str, Any], rows
         summary["terminal_success_count"] = int(summary.get("terminal_success_count", 0) or 0) + 1
     if budget_exhausted:
         summary["rollout_budget_exhausted"] = int(summary.get("rollout_budget_exhausted", 0) or 0) + 1
+    rollout_summary = next((row.get("rollout_summary") for row in rows if isinstance(row.get("rollout_summary"), dict)), {})
+    _merge_repair_cache_summary(summary, rollout_summary.get("repair_cache") if isinstance(rollout_summary, dict) else {})
     oracle = record.get("oracle") if isinstance(record.get("oracle"), dict) else {}
     oracle_strength = str(record.get("oracle_strength") or oracle.get("oracle_strength") or "unknown")
     oracle_counts = summary.setdefault("oracle_strength_counts", {})
@@ -358,6 +366,26 @@ def _update_summary_counts(summary: dict[str, Any], record: dict[str, Any], rows
     layer = str(record.get("actual_damage_layer") or record.get("damage_layer") or "unknown")
     layer_counts = summary.setdefault("damage_layer_counts", {})
     layer_counts[layer] = int(layer_counts.get(layer, 0) or 0) + 1
+
+
+def _merge_repair_cache_summary(summary: dict[str, Any], cache_stats: Any) -> None:
+    if not isinstance(cache_stats, dict):
+        return
+    hits = int(cache_stats.get("hits", 0) or 0)
+    misses = int(cache_stats.get("misses", 0) or 0)
+    summary["repair_cache_hits"] = int(summary.get("repair_cache_hits", 0) or 0) + hits
+    summary["repair_cache_misses"] = int(summary.get("repair_cache_misses", 0) or 0) + misses
+    by_namespace = summary.setdefault("repair_cache_by_namespace", {})
+    for namespace, counts in (cache_stats.get("by_namespace") or {}).items():
+        if not isinstance(counts, dict):
+            continue
+        target = by_namespace.setdefault(str(namespace), {"hits": 0, "misses": 0})
+        target["hits"] = int(target.get("hits", 0) or 0) + int(counts.get("hits", 0) or 0)
+        target["misses"] = int(target.get("misses", 0) or 0) + int(counts.get("misses", 0) or 0)
+        if str(namespace) == "materialize_candidate":
+            summary["materialize_cache_hits"] = int(summary.get("materialize_cache_hits", 0) or 0) + int(counts.get("hits", 0) or 0)
+        elif str(namespace).startswith("native_"):
+            summary["native_operation_cache_hits"] = int(summary.get("native_operation_cache_hits", 0) or 0) + int(counts.get("hits", 0) or 0)
 
 
 _LEGACY_ZIP_MODULE_NAMES = {
@@ -1203,6 +1231,8 @@ def _collect_sample_rows(record: dict[str, Any], args: argparse.Namespace, debug
     _backfill_rl_transitions(rows, args)
     terminal_rows = [row for row in rows if row.get("row_type") == "terminal"]
     terminal_status_counts = Counter(str(item.get("terminal_status") or item.get("label_status") or "unknown") for item in terminal_rows)
+    repair_cache_stats = scheduler.repair_cache.stats() if hasattr(scheduler, "repair_cache") else {}
+    debug_events.write("repair_cache_stats", record, stats=repair_cache_stats)
     for row in rows:
         row["rollout_summary"] = {
             "state_count": created_state_count,
@@ -1211,6 +1241,7 @@ def _collect_sample_rows(record: dict[str, Any], args: argparse.Namespace, debug
             "rollout_budget_exhausted": bool(budget_exhausted),
             "terminal_count": len(terminal_rows),
             "terminal_status_counts": dict(sorted(terminal_status_counts.items())),
+            "repair_cache": repair_cache_stats,
         }
     return rows
 
@@ -1260,6 +1291,7 @@ def _runtime_initial_damage_flags(record: dict[str, Any]) -> list[str]:
         "carrier_archive", "embedded_archive", "data_descriptor", "compressed_size_bad", "bit3_data_descriptor", "local_header_conflict",
         "central_directory_bad", "central_directory_offset_bad", "central_directory_count_bad", "local_header_bad", "local_header_recovery",
         "split_archive", "split_sidecars_available", "tail_volume_truncated", "middle_volume_missing", "missing_volume_unavailable",
+        "spurious_data_descriptor_candidate", "descriptor_record_in_payload_gap", "descriptor_delete_would_align_next_header",
     ):
         if flag in raw:
             visible.append(flag)
@@ -2438,6 +2470,10 @@ def _scheduler(args: argparse.Namespace) -> RepairScheduler:
         "repair": {
             "workspace": str(Path(args.workspace)),
             "max_attempts_per_task": 8,
+            "runtime_cache": {
+                "enabled": not bool(getattr(args, "disable_repair_cache", False)),
+                "max_entries": 512,
+            },
             "module_limits": {
                 "max_candidates_per_module": 6,
                 "verify_candidates": False,
@@ -2459,6 +2495,9 @@ def _scheduler(args: argparse.Namespace) -> RepairScheduler:
                 {"name": "zip_rebuild_cd_from_local_headers", "enabled": True},
                 {"name": "zip_rebuild_cd_preserve_raw_names", "enabled": True},
                 {"name": "zip_rebuild_cd_from_data_descriptors", "enabled": True},
+                {"name": "zip_remove_spurious_data_descriptor", "enabled": True},
+                {"name": "zip_normalize_data_descriptor_flags", "enabled": True},
+                {"name": "zip_reconcile_cd_entry_names_from_local_headers", "enabled": True},
                 {"name": "zip_reconcile_cd_local_headers", "enabled": True},
                 {"name": "zip_quarantine_failed_entries", "enabled": True},
                 {"name": "zip_salvage_verified_entries", "enabled": True},

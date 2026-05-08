@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import base64
+import hashlib
+import json
 from pathlib import Path
 from typing import Any
 
 from sunpack.contracts.archive_state import ArchiveState, PatchOperation, PatchPlan
 from sunpack.repair.job import RepairJob
 from sunpack.repair.result import RepairResult
+from sunpack.repair.runtime_cache import stable_cache_key
 from sunpack.support.archive_state_view import archive_state_from_source_input, archive_state_to_bytes
 
 from sunpack_native import (
@@ -69,11 +72,24 @@ def source_input_for_job(job: RepairJob) -> dict[str, Any]:
     if job.archive_state is None or not job.archive_state.patches:
         base = dict(job.source_input)
     else:
+        digest = job.archive_state.effective_patch_digest()
+        cache = getattr(job, "repair_cache", None)
+        if cache is not None:
+            data = cache.get_or_compute(
+                "archive_state_to_bytes",
+                {
+                    "patch_digest": digest,
+                    "format_hint": job.archive_state.format_hint or job.archive_state.source.format_hint or job.format,
+                },
+                lambda: archive_state_to_bytes(job.archive_state),
+            )
+        else:
+            data = archive_state_to_bytes(job.archive_state)
         base = {
             "kind": "bytes",
-            "data": archive_state_to_bytes(job.archive_state),
+            "data": data,
             "format_hint": job.archive_state.format_hint or job.archive_state.source.format_hint or job.format,
-            "patch_digest": job.archive_state.effective_patch_digest(),
+            "patch_digest": digest,
         }
     if str(base.get("kind") or "") != "concat_ranges" and isinstance(base.get("parts"), list) and base.get("parts"):
         ranges: list[dict[str, Any]] = []
@@ -91,9 +107,127 @@ def source_input_for_job(job: RepairJob) -> dict[str, Any]:
             ranges.append({"path": main_path, "start": 0, "end": None})
         if ranges:
             base = {"kind": "concat_ranges", "ranges": ranges, "format_hint": base.get("format_hint") or job.format, "parts": base.get("parts")}
+    if str(base.get("kind") or "") == "concat_ranges" and getattr(job, "repair_cache", None) is not None and str(job.workspace or ""):
+        fingerprint = source_fingerprint(base)
+        workspace = Path(str(job.workspace)) / ".repair_cache"
+        output_path = workspace / f"logical_{stable_cache_key(fingerprint)[:24]}.bin"
+        def compute_concat_file() -> dict[str, str]:
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            return {"path": concat_ranges_to_file(list(base.get("ranges") or []), str(output_path))}
+        payload = job.repair_cache.get_or_compute(
+            "concat_ranges_to_file",
+            {"source": fingerprint, "output_path": str(output_path)},
+            compute_concat_file,
+        )
+        path = str(payload.get("path") or output_path)
+        if Path(path).is_file():
+            base = {"kind": "file", "path": path, "format_hint": base.get("format_hint") or job.format, "parts": base.get("parts"), "logical_stream_built": True}
     if job.password:
         base["password"] = job.password
     return base
+
+
+def repair_operation_cache_key(job: RepairJob, operation: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+    return {
+        "source": source_fingerprint_for_job(job),
+        "operation": str(operation),
+        "params": _cache_jsonable(params or {}),
+    }
+
+
+def cached_repair_operation(job: RepairJob, namespace: str, operation: str, params: dict[str, Any], compute):
+    cache = getattr(job, "repair_cache", None)
+    if cache is None:
+        return compute()
+    return cache.get_or_compute(namespace, repair_operation_cache_key(job, operation, params), compute)
+
+
+def source_fingerprint_for_job(job: RepairJob) -> dict[str, Any]:
+    if job.archive_state is not None and job.archive_state.patches:
+        return {
+            "kind": "archive_state",
+            "patch_digest": job.archive_state.effective_patch_digest(),
+            "format_hint": job.archive_state.format_hint or job.archive_state.source.format_hint or job.format,
+        }
+    return source_fingerprint(source_input_for_job(job))
+
+
+def source_fingerprint(source_input: dict[str, Any]) -> dict[str, Any]:
+    kind = str(source_input.get("kind") or "file")
+    if kind in {"bytes", "memory"}:
+        data = source_input.get("data", b"")
+        if isinstance(data, bytearray):
+            data = bytes(data)
+        if isinstance(data, bytes):
+            return {"kind": kind, "sha256": hashlib.sha256(data).hexdigest(), "size": len(data), "format_hint": source_input.get("format_hint")}
+        return {"kind": kind, "data": str(data), "format_hint": source_input.get("format_hint")}
+    if kind == "file":
+        return {"kind": "file", **_path_fingerprint(str(source_input.get("path") or "")), "format_hint": source_input.get("format_hint")}
+    if kind == "file_range":
+        return {
+            "kind": "file_range",
+            **_path_fingerprint(str(source_input.get("path") or "")),
+            "start": int(source_input.get("start") or 0),
+            "end": source_input.get("end"),
+            "format_hint": source_input.get("format_hint"),
+        }
+    if kind == "concat_ranges":
+        ranges = []
+        for item in source_input.get("ranges") or []:
+            if not isinstance(item, dict):
+                continue
+            ranges.append({
+                **_path_fingerprint(str(item.get("path") or "")),
+                "start": int(item.get("start") or 0),
+                "end": item.get("end"),
+            })
+        return {"kind": "concat_ranges", "ranges": ranges, "format_hint": source_input.get("format_hint")}
+    return {"kind": kind, "payload": _cache_jsonable(source_input)}
+
+
+def cache_relevant_module_limits(config: dict[str, Any] | None, keys: tuple[str, ...] = ()) -> dict[str, Any]:
+    limits = module_limits(config)
+    selected = keys or (
+        "max_candidates_per_module",
+        "max_entries",
+        "max_seconds_per_module",
+        "max_input_size_mb",
+        "max_output_size_mb",
+        "max_entry_uncompressed_mb",
+        "verify_candidates",
+    )
+    return {key: limits.get(key) for key in selected}
+
+
+def _path_fingerprint(path: str) -> dict[str, Any]:
+    if not path:
+        return {"path": ""}
+    candidate = Path(path)
+    try:
+        stat = candidate.stat()
+        return {
+            "path": str(candidate),
+            "size": int(stat.st_size),
+            "mtime_ns": int(stat.st_mtime_ns),
+        }
+    except OSError:
+        return {"path": str(candidate), "missing": True}
+
+
+def _cache_jsonable(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): _cache_jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_cache_jsonable(item) for item in value]
+    if isinstance(value, set):
+        return sorted(_cache_jsonable(item) for item in value)
+    if isinstance(value, bytes):
+        return {"bytes_sha256": hashlib.sha256(value).hexdigest(), "size": len(value)}
+    try:
+        json.dumps(value)
+        return value
+    except TypeError:
+        return str(value)
 
 
 def job_source_size(job: RepairJob) -> int | None:

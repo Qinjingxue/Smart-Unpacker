@@ -23,6 +23,7 @@ class RepairJob:
     source_descriptor: ArchiveInputDescriptor | None = None
     archive_state: ArchiveState | None = None
     repair_history: dict[str, Any] = field(default_factory=dict)
+    repair_cache: Any | None = field(default=None, compare=False, repr=False)
 
     @property
     def has_extraction_failure(self) -> bool:

@@ -34,6 +34,7 @@ param(
     [double]$IdleTimeoutSeconds = 0,
     [double]$HeartbeatSeconds = 5.0,
     [string]$DebugEvents = "",
+    [switch]$DisableRepairCache,
     [string]$Formats = "",
     [string]$Sample = "",
     [int]$Limit = 0,
@@ -103,6 +104,9 @@ if ($IdleTimeoutSeconds -gt 0) {
 }
 if ($DebugEvents) {
     $argsList += @("--debug-events", $DebugEvents)
+}
+if ($DisableRepairCache) {
+    $argsList += "--disable-repair-cache"
 }
 if ($SkipLargeStreamSamples) {
     $argsList += "--skip-large-stream-samples"

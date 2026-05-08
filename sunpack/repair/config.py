@@ -14,6 +14,10 @@ DEFAULT_REPAIR_CONFIG = {
     "stagnation_patience_rounds": 3,
     "min_recovery_improvement": 0.01,
     "continue_after_partial": True,
+    "runtime_cache": {
+        "enabled": True,
+        "max_entries": 512,
+    },
     "safety": {
         "allow_unsafe": False,
         "allow_partial": True,
@@ -59,6 +63,9 @@ DEFAULT_REPAIR_CONFIG = {
         {"name": "zip_rebuild_cd_from_local_headers", "enabled": True},
         {"name": "zip_rebuild_cd_preserve_raw_names", "enabled": True},
         {"name": "zip_rebuild_cd_from_data_descriptors", "enabled": True},
+        {"name": "zip_remove_spurious_data_descriptor", "enabled": True},
+        {"name": "zip_normalize_data_descriptor_flags", "enabled": True},
+        {"name": "zip_reconcile_cd_entry_names_from_local_headers", "enabled": True},
         {"name": "zip_reconcile_cd_local_headers", "enabled": True},
         {"name": "zip_quarantine_failed_entries", "enabled": True},
         {"name": "zip_salvage_verified_entries", "enabled": True},

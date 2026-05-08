@@ -5,7 +5,7 @@ from pathlib import Path
 from sunpack.repair.diagnosis import RepairDiagnosis
 from sunpack.repair.job import RepairJob
 from sunpack.repair.pipeline.module import RepairModuleSpec, RepairRoute
-from sunpack.repair.pipeline.modules._common import patch_plan_for_crop, source_input_for_job, module_limits
+from sunpack.repair.pipeline.modules._common import cached_repair_operation, cache_relevant_module_limits, patch_plan_for_crop, source_input_for_job, module_limits
 from sunpack.repair.pipeline.modules._native_candidates import candidates_from_native_result
 from sunpack.repair.pipeline.modules._native_validation import validate_with_native_probe
 from sunpack.repair.pipeline.registry import register_repair_module
@@ -76,12 +76,26 @@ class ArchiveCarrierCropDeepRecovery:
 
     def _run_native(self, job: RepairJob, diagnosis: RepairDiagnosis, workspace: str, config: dict) -> dict:
         limits = module_limits(config)
-        return _native_archive_carrier_crop_recovery(
-            source_input_for_job(job),
-            diagnosis.format or job.format or "archive",
-            workspace,
-            float(limits.get("max_input_size_mb", 512) or 0),
-            int(limits.get("max_candidates_per_module", 8) or 1),
+        source_input = source_input_for_job(job)
+        fmt = diagnosis.format or job.format or "archive"
+        params = {
+            "source_input": source_input,
+            "format": fmt,
+            "workspace": workspace,
+            "limits": cache_relevant_module_limits(config, ("max_input_size_mb", "max_candidates_per_module")),
+        }
+        return cached_repair_operation(
+            job,
+            "native_archive_carrier_crop_recovery",
+            self.spec.name,
+            params,
+            lambda: dict(_native_archive_carrier_crop_recovery(
+                source_input,
+                fmt,
+                workspace,
+                float(limits.get("max_input_size_mb", 512) or 0),
+                int(limits.get("max_candidates_per_module", 8) or 1),
+            )),
         )
 
 

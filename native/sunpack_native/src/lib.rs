@@ -217,6 +217,10 @@ fn sunpack_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(
+        zip_deep_repair::zip_remove_spurious_data_descriptor,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
         compression_stream_repair::gzip_footer_fix_repair,
         m
     )?)?;

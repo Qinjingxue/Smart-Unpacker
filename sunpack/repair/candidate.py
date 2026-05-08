@@ -1033,6 +1033,12 @@ def _module_generation_bias(candidate: RepairCandidate) -> float:
         return 0.10
     if module_name == "zip_reconcile_cd_data_descriptor_conflict" and flags & {"data_descriptor", "bit3_data_descriptor", "compressed_size_bad"}:
         return 0.12
+    if module_name == "zip_remove_spurious_data_descriptor" and flags & {"spurious_data_descriptor_candidate", "descriptor_record_in_payload_gap", "descriptor_delete_would_align_next_header"}:
+        return 0.24
+    if module_name == "zip_normalize_data_descriptor_flags" and flags & {"after_descriptor_stream_reconcile", "data_descriptor", "bit3_data_descriptor", "compressed_size_bad"}:
+        return 0.18
+    if module_name == "zip_reconcile_cd_entry_names_from_local_headers" and flags & {"after_descriptor_flag_normalize", "after_descriptor_stream_reconcile", "exact_match_failed"}:
+        return 0.16
     if module_name == "zip_partial_salvage_missing_volume" and flags & {"missing_volume", "input_truncated", "unexpected_end", "stream_truncated"}:
         if "split_sidecars_available" in flags and not (flags & {"tail_volume_truncated", "missing_volume_unavailable"}):
             return -0.08
@@ -1108,6 +1114,9 @@ def _candidate_context_mismatch_breakdown(candidate: RepairCandidate) -> dict[st
         "boundary_on_payload_descriptor": {"value": 1.0 if module in {"zip_trim_trailing_junk", "zip_fix_eocd_comment_length"} and data_descriptor and content_damage else 0.0, "weight": 0.18},
         "descriptor_rebuild_without_descriptor": {"value": 1.0 if module == "zip_rebuild_cd_from_data_descriptors" and not data_descriptor else 0.0, "weight": 0.55},
         "descriptor_reconcile_without_descriptor": {"value": 1.0 if module == "zip_reconcile_cd_data_descriptor_conflict" and not data_descriptor else 0.0, "weight": 0.65},
+        "descriptor_stream_delete_without_spurious_evidence": {"value": 1.0 if module == "zip_remove_spurious_data_descriptor" and not (flags & {"spurious_data_descriptor_candidate", "descriptor_record_in_payload_gap", "descriptor_delete_would_align_next_header"}) else 0.0, "weight": 0.75},
+        "descriptor_flag_normalize_without_descriptor": {"value": 1.0 if module == "zip_normalize_data_descriptor_flags" and not data_descriptor else 0.0, "weight": 0.70},
+        "cd_name_reconcile_without_cd_context": {"value": 1.0 if module == "zip_reconcile_cd_entry_names_from_local_headers" and not (flags & {"central_directory_bad", "local_header_conflict", "exact_match_failed"}) else 0.0, "weight": 0.65},
     })
 
 

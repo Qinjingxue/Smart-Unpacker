@@ -37,6 +37,7 @@ param(
     [double]$TotalTimeoutSeconds = 0,
     [double]$IdleTimeoutSeconds = 0,
     [double]$HeartbeatSeconds = 5.0,
+    [switch]$DisableRepairCache,
     [string]$Formats = "",
     [string]$Sample = "",
     [int]$Limit = 0,
@@ -192,6 +193,7 @@ function New-CollectorArgs {
     if ($MaterializeSelectedOnly) { $argsList.Add("-MaterializeSelectedOnly") }
     if ($IncludeUnmaterializedLabels) { $argsList.Add("-IncludeUnmaterializedLabels") }
     if ($SkipLargeStreamSamples) { $argsList.Add("-SkipLargeStreamSamples") }
+    if ($DisableRepairCache) { $argsList.Add("-DisableRepairCache") }
     if ($NoPretty) { $argsList.Add("-NoPretty") }
     if ($Progress) { $argsList.Add("-Progress") }
     return $argsList
@@ -319,6 +321,11 @@ if ($Scheduling -eq "pool") {
         legacy_module_seen_count = 0
         rollout_budget_exhausted = 0
         best_partial_returned_count = 0
+        repair_cache_hits = 0
+        repair_cache_misses = 0
+        materialize_cache_hits = 0
+        native_operation_cache_hits = 0
+        repair_cache_by_namespace = @{}
         label_counts = @{}
         future_label_counts = @{}
         rollout_mode_counts = @{}
@@ -342,8 +349,16 @@ if ($Scheduling -eq "pool") {
         shards = $summaries
     }
     foreach ($summary in $summaries) {
-        foreach ($name in @("samples", "success_rows", "failure_rows", "timeouts", "failed", "skipped", "state_count", "expanded_state_count", "branch_count", "terminal_success_count", "legacy_module_seen_count", "rollout_budget_exhausted", "best_partial_returned_count", "route_rejected_by_required_flags", "route_rejected_by_can_handle")) {
+        foreach ($name in @("samples", "success_rows", "failure_rows", "timeouts", "failed", "skipped", "state_count", "expanded_state_count", "branch_count", "terminal_success_count", "legacy_module_seen_count", "rollout_budget_exhausted", "best_partial_returned_count", "repair_cache_hits", "repair_cache_misses", "materialize_cache_hits", "native_operation_cache_hits", "route_rejected_by_required_flags", "route_rejected_by_can_handle")) {
             $aggregate[$name] = [int]$aggregate[$name] + [int]($summary.$name)
+        }
+        foreach ($prop in $summary.repair_cache_by_namespace.PSObject.Properties) {
+            $key = [string]$prop.Name
+            if (-not $aggregate["repair_cache_by_namespace"].ContainsKey($key)) {
+                $aggregate["repair_cache_by_namespace"][$key] = @{ hits = 0; misses = 0 }
+            }
+            $aggregate["repair_cache_by_namespace"][$key]["hits"] = [int]$aggregate["repair_cache_by_namespace"][$key]["hits"] + [int]($prop.Value.hits)
+            $aggregate["repair_cache_by_namespace"][$key]["misses"] = [int]$aggregate["repair_cache_by_namespace"][$key]["misses"] + [int]($prop.Value.misses)
         }
         Add-TrainingCountMap $aggregate["label_counts"] $summary.label_counts
         Add-TrainingCountMap $aggregate["future_label_counts"] $summary.future_label_counts
@@ -442,6 +457,7 @@ foreach ($shard in $shards) {
     if ($MaterializeSelectedOnly) { $argsList.Add("-MaterializeSelectedOnly") }
     if ($IncludeUnmaterializedLabels) { $argsList.Add("-IncludeUnmaterializedLabels") }
     if ($SkipLargeStreamSamples) { $argsList.Add("-SkipLargeStreamSamples") }
+    if ($DisableRepairCache) { $argsList.Add("-DisableRepairCache") }
     if ($NoPretty) { $argsList.Add("-NoPretty") }
     if ($Progress) { $argsList.Add("-Progress") }
 
@@ -514,6 +530,11 @@ $aggregate = [ordered]@{
     legacy_module_seen_count = 0
     rollout_budget_exhausted = 0
     best_partial_returned_count = 0
+    repair_cache_hits = 0
+    repair_cache_misses = 0
+    materialize_cache_hits = 0
+    native_operation_cache_hits = 0
+    repair_cache_by_namespace = @{}
     label_counts = @{}
     future_label_counts = @{}
     rollout_mode_counts = @{}
@@ -537,8 +558,16 @@ $aggregate = [ordered]@{
     shards = $summaries
 }
 foreach ($summary in $summaries) {
-    foreach ($name in @("samples", "success_rows", "failure_rows", "timeouts", "failed", "skipped", "state_count", "expanded_state_count", "branch_count", "terminal_success_count", "legacy_module_seen_count", "rollout_budget_exhausted", "best_partial_returned_count", "route_rejected_by_required_flags", "route_rejected_by_can_handle")) {
+    foreach ($name in @("samples", "success_rows", "failure_rows", "timeouts", "failed", "skipped", "state_count", "expanded_state_count", "branch_count", "terminal_success_count", "legacy_module_seen_count", "rollout_budget_exhausted", "best_partial_returned_count", "repair_cache_hits", "repair_cache_misses", "materialize_cache_hits", "native_operation_cache_hits", "route_rejected_by_required_flags", "route_rejected_by_can_handle")) {
         $aggregate[$name] = [int]$aggregate[$name] + [int]($summary.$name)
+    }
+    foreach ($prop in $summary.repair_cache_by_namespace.PSObject.Properties) {
+        $key = [string]$prop.Name
+        if (-not $aggregate["repair_cache_by_namespace"].ContainsKey($key)) {
+            $aggregate["repair_cache_by_namespace"][$key] = @{ hits = 0; misses = 0 }
+        }
+        $aggregate["repair_cache_by_namespace"][$key]["hits"] = [int]$aggregate["repair_cache_by_namespace"][$key]["hits"] + [int]($prop.Value.hits)
+        $aggregate["repair_cache_by_namespace"][$key]["misses"] = [int]$aggregate["repair_cache_by_namespace"][$key]["misses"] + [int]($prop.Value.misses)
     }
     Add-TrainingCountMap $aggregate["label_counts"] $summary.label_counts
     Add-TrainingCountMap $aggregate["future_label_counts"] $summary.future_label_counts

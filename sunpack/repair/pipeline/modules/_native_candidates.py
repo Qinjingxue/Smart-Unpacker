@@ -6,7 +6,7 @@ from sunpack.contracts.archive_state import PatchPlan
 from sunpack.repair.candidate import CandidateValidation, RepairCandidate
 from sunpack.repair.diagnosis import RepairDiagnosis
 from sunpack.repair.job import RepairJob
-from sunpack.repair.pipeline.modules._common import patched_state_for_job, patch_diagnosis, virtual_patch_repaired_input
+from sunpack.repair.pipeline.modules._common import patched_state_for_job, patch_diagnosis, source_input_for_job, virtual_patch_repaired_input
 
 
 def candidates_from_native_result(
@@ -43,6 +43,7 @@ def candidates_from_native_result(
         }]
 
     candidates: list[RepairCandidate] = []
+    runtime_source_input = source_input_for_job(job)
     for index, raw in enumerate(raw_candidates):
         item = _candidate_mapping(raw, index)
         path = str(item.get("path") or "")
@@ -73,7 +74,7 @@ def candidates_from_native_result(
             "patch_facts": _dedupe([str(value) for value in item.get("patch_facts") or result.get("patch_facts") or []]),
             "residual_facts": _dedupe([str(value) for value in item.get("residual_facts") or result.get("residual_facts") or []]),
             "validation_details": dict(item.get("validation_details") or result.get("validation_details") or {}),
-            "logical_stream_built": str(job.source_input.get("kind") or "") == "concat_ranges",
+            "logical_stream_built": bool(runtime_source_input.get("logical_stream_built")) or str(runtime_source_input.get("kind") or "") == "concat_ranges",
             "native_target_mismatch": bool(item.get("native_target_mismatch") or result.get("native_target_mismatch")),
             native_key: dict(result),
             "native_candidate": {"index": index, **details},
