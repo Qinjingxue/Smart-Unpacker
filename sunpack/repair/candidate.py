@@ -1039,6 +1039,8 @@ def _module_generation_bias(candidate: RepairCandidate) -> float:
         return 0.18
     if module_name == "zip_reconcile_cd_entry_names_from_local_headers" and flags & {"after_descriptor_flag_normalize", "after_descriptor_stream_reconcile", "exact_match_failed"}:
         return 0.16
+    if module_name == "zip_fix_extra_field_length" and flags & {"extra_field_length_bad", "extra_length_bad", "extra_field_bad"}:
+        return 0.24
     if module_name == "zip_partial_salvage_missing_volume" and flags & {"missing_volume", "input_truncated", "unexpected_end", "stream_truncated"}:
         if "split_sidecars_available" in flags and not (flags & {"tail_volume_truncated", "missing_volume_unavailable"}):
             return -0.08

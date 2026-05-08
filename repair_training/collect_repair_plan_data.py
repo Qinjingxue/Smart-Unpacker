@@ -87,7 +87,11 @@ def main(argv: list[str] | None = None) -> int:
         "post_crop_no_candidates_by_profile": {},
         "post_crop_residual_fact_counts": {},
         "split_logical_stream_counts": {},
+        "split_sidecar_route_counts": {},
         "split_sidecar_complete_candidate_counts": {},
+        "extra_field_length_candidate_counts": {},
+        "zip64_extra_no_candidate_by_profile": {},
+        "descriptor_cd_conflict_diff_buckets": {},
         "legacy_module_seen_count": 0,
         "rollout_budget_exhausted": 0,
         "best_recovery_bucket_counts": {},
@@ -188,6 +192,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-candidates-per-round", type=int, default=10, help="Maximum candidates logged per round.")
     parser.add_argument("--proposal-mode", choices=("lazy", "eager"), default="lazy", help="Use lazy repair plans or eager repair execution while collecting candidates.")
     parser.add_argument("--materialize-top-k-per-round", type=int, default=10, help="Materialize at most K pre-ranked candidates per round in lazy proposal mode.")
+    parser.add_argument("--max-expensive-materializations-per-round", type=int, default=3, help="For ZIP lazy collection, materialize at most this many high-cost full-rewrite candidates per round. Use 0 to disable the cap.")
     parser.add_argument("--materialize-selected-only", action="store_true", help="In lazy proposal mode, materialize only the pre-ranked top candidate.")
     parser.add_argument("--skip-unmaterialized-labels", action=argparse.BooleanOptionalAction, default=True, help="Do not write proposal-only rows without oracle labels.")
     parser.add_argument("--case-timeout-seconds", type=float, default=45.0, help="Terminate one sample after this timeout. Use 0 to disable.")
@@ -200,6 +205,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--heartbeat-seconds", type=float, default=5.0, help="While waiting for a sample worker, emit heartbeat progress every N seconds.")
     parser.add_argument("--debug-events", default="", help="Optional JSONL path for collector START/END/TIMEOUT heartbeat events.")
     parser.add_argument("--disable-repair-cache", action="store_true", help="Disable per-worker repair materialization/native operation cache.")
+    parser.add_argument("--profile-materialization-candidates", action="store_true", help="Emit one debug event per materialized candidate for hotspot profiling.")
     parser.add_argument("--progress", action="store_true", help="Print sample START/END progress.")
     return parser
 
@@ -316,6 +322,17 @@ def _update_summary_counts(summary: dict[str, Any], record: dict[str, Any], rows
             key = "logical_stream_built" if bool(row.get("logical_stream_built") or candidate_payload.get("logical_stream_built")) else "logical_stream_missing"
             counts = summary.setdefault("split_logical_stream_counts", {})
             counts[key] = int(counts.get(key, 0) or 0) + 1
+            module_key = str(row.get("module") or row.get("module_name") or "unknown")
+            route_counts = summary.setdefault("split_sidecar_route_counts", {})
+            route_counts[module_key] = int(route_counts.get(module_key, 0) or 0) + 1
+        if str(row.get("module") or row.get("module_name") or "") == "zip_fix_extra_field_length":
+            key = str(row.get("label_status") or row.get("terminal_status") or status or "unknown")
+            counts = summary.setdefault("extra_field_length_candidate_counts", {})
+            counts[key] = int(counts.get(key, 0) or 0) + 1
+        if str(row.get("module") or row.get("module_name") or "") == "zip_fix_zip64_extra_size" and status == "no_output":
+            profile = _record_damage_profile(record)
+            counts = summary.setdefault("zip64_extra_no_candidate_by_profile", {})
+            counts[profile] = int(counts.get(profile, 0) or 0) + 1
         route_evidence = [str(item) for item in row.get("route_evidence_flags") or []]
         route_evidence_lower = {item.lower() for item in route_evidence}
         for flag in route_evidence:
@@ -359,6 +376,7 @@ def _update_summary_counts(summary: dict[str, Any], record: dict[str, Any], rows
         summary["rollout_budget_exhausted"] = int(summary.get("rollout_budget_exhausted", 0) or 0) + 1
     rollout_summary = next((row.get("rollout_summary") for row in rows if isinstance(row.get("rollout_summary"), dict)), {})
     _merge_repair_cache_summary(summary, rollout_summary.get("repair_cache") if isinstance(rollout_summary, dict) else {})
+    _merge_materialization_summary(summary, rollout_summary.get("materialization") if isinstance(rollout_summary, dict) else {})
     oracle = record.get("oracle") if isinstance(record.get("oracle"), dict) else {}
     oracle_strength = str(record.get("oracle_strength") or oracle.get("oracle_strength") or "unknown")
     oracle_counts = summary.setdefault("oracle_strength_counts", {})
@@ -384,8 +402,25 @@ def _merge_repair_cache_summary(summary: dict[str, Any], cache_stats: Any) -> No
         target["misses"] = int(target.get("misses", 0) or 0) + int(counts.get("misses", 0) or 0)
         if str(namespace) == "materialize_candidate":
             summary["materialize_cache_hits"] = int(summary.get("materialize_cache_hits", 0) or 0) + int(counts.get("hits", 0) or 0)
+        elif str(namespace) == "zip_scan_artifact":
+            summary["zip_scan_artifact_hits"] = int(summary.get("zip_scan_artifact_hits", 0) or 0) + int(counts.get("hits", 0) or 0)
+            summary["zip_scan_artifact_misses"] = int(summary.get("zip_scan_artifact_misses", 0) or 0) + int(counts.get("misses", 0) or 0)
         elif str(namespace).startswith("native_"):
             summary["native_operation_cache_hits"] = int(summary.get("native_operation_cache_hits", 0) or 0) + int(counts.get("hits", 0) or 0)
+
+
+def _merge_materialization_summary(summary: dict[str, Any], materialization: Any) -> None:
+    if not isinstance(materialization, dict):
+        return
+    summary["expensive_materialization_skipped_count"] = int(summary.get("expensive_materialization_skipped_count", 0) or 0) + int(materialization.get("expensive_materialization_skipped_count", 0) or 0)
+    summary["materialize_worker_seconds_saved_estimate"] = round(
+        float(summary.get("materialize_worker_seconds_saved_estimate", 0.0) or 0.0)
+        + float(materialization.get("materialize_worker_seconds_saved_estimate", 0.0) or 0.0),
+        3,
+    )
+    target = summary.setdefault("materialize_cost_bucket_counts", {})
+    for bucket, count in (materialization.get("materialize_cost_bucket_counts") or {}).items():
+        target[str(bucket)] = int(target.get(str(bucket), 0) or 0) + int(count or 0)
 
 
 _LEGACY_ZIP_MODULE_NAMES = {
@@ -548,6 +583,16 @@ def _is_zip_high_recovery_competition_record(record: dict[str, Any]) -> bool:
         "zip_quarantine_keeps_corrupted_entry",
         "zip_drop_central_directory_keep_local_headers",
         "zip_rebuild_directory_keeps_bad_payload",
+        "zip_partial_recovery_wrong_hash_same_name",
+        "zip_single_entry_payload_damage",
+        "zip_local_header_crc_wrong_cd_correct",
+        "zip_partial_cd_rebuild_then_payload_mismatch",
+        "zip_drop_central_directory_keep_local_headers",
+        "zip_sfx_cd_damage",
+        "zip_sfx_payload_damage",
+        "zip_sfx_split_missing_volume",
+        "zip_split_missing_middle_volume",
+        "zip_zip64_extra_size_mismatch",
     }
 
 
@@ -585,8 +630,20 @@ def _record_size_mb(record: dict[str, Any]) -> float:
 
 def _attach_split_volumes(source_input: dict[str, Any], record: dict[str, Any]) -> None:
     tags = record.get("zip_container_tags") or []
-    if isinstance(tags, list) and "split" not in tags and "multi_volume" not in tags:
+    profile_text = " ".join(str(record.get(key) or "") for key in ("damage_profile", "sample_id", "source_archive_id", "zip_variant")).lower()
+    split_hint = bool(
+        (isinstance(tags, list) and ("split" in tags or "multi_volume" in tags or "split_archive" in tags))
+        or "split" in profile_text
+        or isinstance(record.get("zip_split"), dict)
+    )
+    if not split_hint:
         return
+    volumes: list[dict[str, Any]] = []
+    split_payload = record.get("zip_split")
+    if isinstance(split_payload, dict):
+        for item in split_payload.get("volumes") or []:
+            if isinstance(item, dict) and item.get("path"):
+                volumes.append(dict(item))
     # .volumes/ dir is next to the SOURCE archive, not the damaged file copy
     source_path = record.get("source_path") or ""
     source_name = record.get("source_archive_name") or ""
@@ -598,20 +655,29 @@ def _attach_split_volumes(source_input: dict[str, Any], record: dict[str, Any]) 
         material_format = record.get("material_format") or "zip"
         source_archive = Path("repair_training") / "material" / material_format / material_sample / source_name
     else:
-        return
-    volumes_dir = source_archive.parent / (source_archive.name + ".volumes")
-    if not volumes_dir.is_dir():
+        source_archive = None
+    volumes_dir = source_archive.parent / (source_archive.name + ".volumes") if source_archive is not None else None
+    if volumes_dir is not None and volumes_dir.is_dir():
+        for vol in sorted(volumes_dir.iterdir()):
+            if not vol.is_file():
+                continue
+            volumes.append({"path": str(vol.resolve()), "role": "volume"})
+    if not volumes:
         return
     source_input["parts"] = source_input.get("parts") or []
     source_input["ranges"] = source_input.get("ranges") or []
+    source_input["use_parts_only"] = True
     existing = {str(p.get("path", "")) for p in source_input.get("parts", []) if isinstance(p, dict)}
-    for vol in sorted(volumes_dir.iterdir()):
-        if not vol.is_file():
-            continue
-        vol_path = str(vol.resolve())
+    def volume_sort_key(item: dict[str, Any]) -> tuple[int, str]:
+        try:
+            return (int(item.get("index") or item.get("volume_number") or 0), str(item.get("path") or ""))
+        except Exception:
+            return (0, str(item.get("path") or ""))
+    for vol in sorted(volumes, key=volume_sort_key):
+        vol_path = str(Path(str(vol.get("path") or "")).resolve())
         if vol_path not in existing:
             source_input["parts"].append({"path": vol_path, "role": "volume"})
-            source_input["ranges"].append({"path": vol_path})
+            source_input["ranges"].append({"path": vol_path, "start": 0, "end": None})
 
 
 def _collect_records_serial(records: list[dict[str, Any]], args: argparse.Namespace, debug_events: "_DebugEvents", started_all: float) -> list[dict[str, Any]]:
@@ -890,6 +956,7 @@ def _collect_sample_rows(record: dict[str, Any], args: argparse.Namespace, debug
         damaged = record.get("damaged_input")
         if isinstance(damaged, dict):
             damaged["parts"] = source_input["parts"]
+            damaged["use_parts_only"] = bool(source_input.get("use_parts_only"))
         record["split_sidecars_available"] = True
         # Remove missing_volume flag since volumes are now available
         flags = record.get("damage_flags")
@@ -909,6 +976,10 @@ def _collect_sample_rows(record: dict[str, Any], args: argparse.Namespace, debug
         record["route_evidence_flags"] = _dedupe_str([*list(record.get("route_evidence_flags") or []), *route_evidence])
         record["damage_flags"] = _dedupe_str([*list(record.get("damage_flags") or []), *route_evidence])
         record["runtime_damage_flags"] = _dedupe_str([*list(record.get("runtime_damage_flags") or record.get("damage_flags") or []), *route_evidence])
+    if record.get("split_sidecars_available") and "missing_volume_unavailable" not in set(record.get("damage_flags") or []) and "tail_volume_truncated" not in set(record.get("damage_flags") or []):
+        for key in ("damage_flags", "runtime_damage_flags", "route_evidence_flags"):
+            if isinstance(record.get(key), list):
+                record[key] = [flag for flag in record[key] if flag not in {"missing_volume", "input_truncated", "unexpected_end", "stream_truncated"}]
     fmt = str(record.get("format") or source_input.get("format_hint") or "")
     rows: list[dict[str, Any]] = []
     max_candidates_per_round = _effective_max_candidates(record, args)
@@ -930,6 +1001,11 @@ def _collect_sample_rows(record: dict[str, Any], args: argparse.Namespace, debug
     best_state_id = str(root_state.get("state_id") or "")
     rounds_without_improvement = 0
     complete_found = False
+    materialization_summary: dict[str, Any] = {
+        "materialize_cost_bucket_counts": {},
+        "expensive_materialization_skipped_count": 0,
+        "materialize_worker_seconds_saved_estimate": 0.0,
+    }
 
     for round_index in range(max_rounds):
         if complete_found:
@@ -1014,7 +1090,8 @@ def _collect_sample_rows(record: dict[str, Any], args: argparse.Namespace, debug
             state_features["previous_modules"] = previous_modules
             state_features["previous_module_count"] = len(previous_modules)
             phase_started = time.perf_counter()
-            candidates, materialization_meta = _materialize_for_collection(list(batch.candidates), selector, args, record)
+            candidates, materialization_meta = _materialize_for_collection(list(batch.candidates), selector, args, record, debug_events, state_round, query_id)
+            _merge_materialization_round_summary(materialization_summary, materialization_meta)
             debug_events.write(
                 "phase",
                 record,
@@ -1025,6 +1102,8 @@ def _collect_sample_rows(record: dict[str, Any], args: argparse.Namespace, debug
                 candidate_count=len(candidates),
                 proposal_count=len(batch.candidates),
                 materialization_budget=materialization_meta["budget"],
+                expensive_materialization_skipped_count=materialization_meta.get("expensive_materialization_skipped_count", 0),
+                materialize_worker_seconds_saved_estimate=round(float(materialization_meta.get("materialize_worker_seconds_saved_estimate", 0.0) or 0.0), 3),
             )
             phase_started = time.perf_counter()
             validated = [selector._with_native_validation(candidate) for candidate in candidates]  # noqa: SLF001
@@ -1242,6 +1321,7 @@ def _collect_sample_rows(record: dict[str, Any], args: argparse.Namespace, debug
             "terminal_count": len(terminal_rows),
             "terminal_status_counts": dict(sorted(terminal_status_counts.items())),
             "repair_cache": repair_cache_stats,
+            "materialization": materialization_summary,
         }
     return rows
 
@@ -1290,6 +1370,7 @@ def _runtime_initial_damage_flags(record: dict[str, Any]) -> list[str]:
         "zip64_extra_present", "zip64_extra_bad", "zip64_extra_size_bad", "zip64_locator_bad", "zip64_eocd_bad", "sfx", "carrier_prefix",
         "carrier_archive", "embedded_archive", "data_descriptor", "compressed_size_bad", "bit3_data_descriptor", "local_header_conflict",
         "central_directory_bad", "central_directory_offset_bad", "central_directory_count_bad", "local_header_bad", "local_header_recovery",
+        "extra_field_bad", "extra_field_length_bad", "extra_length_bad",
         "split_archive", "split_sidecars_available", "tail_volume_truncated", "middle_volume_missing", "missing_volume_unavailable",
         "spurious_data_descriptor_candidate", "descriptor_record_in_payload_gap", "descriptor_delete_would_align_next_header",
     ):
@@ -2362,11 +2443,19 @@ def _hard_negative_weight(immediate_label: int, terminal_label: int, terminal_st
     return 0.0
 
 
-def _materialize_for_collection(candidates: list[Any], selector: CandidateSelector, args: argparse.Namespace, record: dict[str, Any]) -> tuple[list[Any], dict[str, Any]]:
+def _materialize_for_collection(
+    candidates: list[Any],
+    selector: CandidateSelector,
+    args: argparse.Namespace,
+    record: dict[str, Any],
+    debug_events: "_DebugEvents | None" = None,
+    state_round: int | None = None,
+    query_id: str = "",
+) -> tuple[list[Any], dict[str, Any]]:
     if str(args.proposal_mode or "lazy") != "lazy":
         materialized: list[Any] = []
         for candidate in candidates:
-            materialized.extend(materialize_candidate(candidate))
+            materialized.extend(_profiled_materialize_candidate(candidate, args, record, debug_events, state_round, query_id, None))
         ids = {_candidate_id(candidate): True for candidate in materialized}
         return materialized, {
             "budget": len(candidates),
@@ -2382,13 +2471,14 @@ def _materialize_for_collection(candidates: list[Any], selector: CandidateSelect
     budget = 1 if bool(args.materialize_selected_only) else max(1, int(args.materialize_top_k_per_round or 1))
     budget = min(budget, max(1, _effective_max_candidates(record, args)))
     if _normalize_format(str(record.get("material_format") or record.get("format") or "")) == "zip":
-        selected = _balanced_zip_materialization_selection(ranked, budget, record)
+        selected, selection_stats = _balanced_zip_materialization_selection(ranked, budget, record, args, debug_events, state_round, query_id)
     else:
         selected = ranked[:budget]
+        selection_stats = _materialization_selection_stats(ranked, selected, [], record)
     materialized = []
     ranks: dict[str, int] = {}
     for materialization_rank, (_, _, candidate) in enumerate(selected):
-        produced = materialize_candidate(candidate)
+        produced = _profiled_materialize_candidate(candidate, args, record, debug_events, state_round, query_id, materialization_rank)
         for item in produced:
             materialized.append(item)
             ranks[_candidate_id(item)] = materialization_rank
@@ -2397,7 +2487,50 @@ def _materialize_for_collection(candidates: list[Any], selector: CandidateSelect
         "materialized_ids": {_candidate_id(candidate): True for candidate in materialized},
         "ranks": ranks,
         "proposal_count": len(candidates),
+        **selection_stats,
     }
+
+
+def _merge_materialization_round_summary(summary: dict[str, Any], meta: dict[str, Any]) -> None:
+    summary["expensive_materialization_skipped_count"] = int(summary.get("expensive_materialization_skipped_count", 0) or 0) + int(meta.get("expensive_materialization_skipped_count", 0) or 0)
+    summary["materialize_worker_seconds_saved_estimate"] = float(summary.get("materialize_worker_seconds_saved_estimate", 0.0) or 0.0) + float(meta.get("materialize_worker_seconds_saved_estimate", 0.0) or 0.0)
+    buckets = summary.setdefault("materialize_cost_bucket_counts", {})
+    for key, value in (meta.get("materialize_cost_bucket_counts") or {}).items():
+        buckets[str(key)] = int(buckets.get(str(key), 0) or 0) + int(value or 0)
+
+
+def _profiled_materialize_candidate(
+    candidate: Any,
+    args: argparse.Namespace,
+    record: dict[str, Any],
+    debug_events: "_DebugEvents | None",
+    state_round: int | None,
+    query_id: str,
+    materialization_rank: int | None,
+) -> list[Any]:
+    if not bool(getattr(args, "profile_materialization_candidates", False)):
+        return materialize_candidate(candidate)
+    started = time.perf_counter()
+    produced = materialize_candidate(candidate)
+    elapsed = time.perf_counter() - started
+    if debug_events is not None:
+        debug_events.write(
+            "materialize_candidate",
+            record,
+            round=state_round,
+            query_id=query_id,
+            elapsed_seconds=round(elapsed, 3),
+            materialization_rank=materialization_rank,
+            module_name=str(getattr(candidate, "module_name", "") or ""),
+            candidate_id=_candidate_id(candidate),
+            produced_count=len(produced),
+            produced_modules=[str(getattr(item, "module_name", "") or "") for item in produced],
+            produced_label_statuses=[
+                str((getattr(item, "diagnosis", {}) or {}).get("candidate_status") or (getattr(item, "diagnosis", {}) or {}).get("label_status") or "")
+                for item in produced
+            ],
+        )
+    return produced
 
 
 def _is_zip_deceptive_record(record: dict[str, Any]) -> bool:
@@ -2414,16 +2547,104 @@ def _is_zip_deceptive_record(record: dict[str, Any]) -> bool:
     )
 
 
-def _balanced_zip_materialization_selection(ranked: list[tuple[float, int, Any]], budget: int, record: dict[str, Any]) -> list[tuple[float, int, Any]]:
+_ZIP_FULL_REWRITE_MODULES = {
+    "zip_rebuild_cd_from_local_headers",
+    "zip_rebuild_cd_preserve_raw_names",
+    "zip_rebuild_cd_from_data_descriptors",
+    "zip_reconcile_cd_local_headers",
+    "zip_reconcile_cd_data_descriptor_conflict",
+    "zip_quarantine_failed_entries",
+    "zip_salvage_verified_entries",
+    "zip_partial_salvage_missing_volume",
+    "zip_local_header_partial_scan",
+    "zip_resolve_duplicate_entries",
+    "zip_resolve_overlapping_entries",
+    "archive_carrier_crop_deep_recovery",
+}
+
+
+_ZIP_LOW_COST_PATCH_MODULES = {
+    "zip_remove_spurious_data_descriptor",
+    "zip_normalize_data_descriptor_flags",
+    "zip_reconcile_cd_entry_names_from_local_headers",
+    "zip_fix_cd_offset",
+    "zip_fix_cd_entry_count",
+    "zip_fix_eocd_comment_length",
+    "zip_fix_eocd_record",
+    "zip_fix_local_header_fields",
+    "zip_fix_extra_field_length",
+    "zip_fix_zip64_locator",
+    "zip_fix_zip64_eocd",
+    "zip_fix_zip64_extra_size",
+    "zip_trim_trailing_junk",
+}
+
+
+def _balanced_zip_materialization_selection(
+    ranked: list[tuple[float, int, Any]],
+    budget: int,
+    record: dict[str, Any],
+    args: argparse.Namespace,
+    debug_events: "_DebugEvents | None" = None,
+    state_round: int | None = None,
+    query_id: str = "",
+) -> tuple[list[tuple[float, int, Any]], dict[str, Any]]:
     selected: list[tuple[float, int, Any]] = []
     seen: set[str] = set()
+    skipped: list[tuple[tuple[float, int, Any], str]] = []
+    expensive_selected = 0
+    max_expensive = int(getattr(args, "max_expensive_materializations_per_round", 2) or 0)
+    high_recovery = _is_zip_high_recovery_competition_record(record)
+    if high_recovery and max_expensive > 0:
+        max_expensive = max(max_expensive, 4)
+    if _zip_materialization_cost_cap_exempt(record):
+        max_expensive = 0
+    flags = {str(item) for item in record.get("damage_flags") or []}
+    route_flags = {str(item) for item in record.get("route_evidence_flags") or []}
+    evidence = flags | route_flags
+
+    def module(entry: tuple[float, int, Any]) -> str:
+        return str(getattr(entry[2], "module_name", "") or "")
+
+    def expensive(entry: tuple[float, int, Any]) -> bool:
+        name = module(entry)
+        if name in _ZIP_LOW_COST_PATCH_MODULES:
+            return False
+        return name in _ZIP_FULL_REWRITE_MODULES or _estimated_materialize_cost_ms(entry[2], record) >= 450.0
+
+    def family(entry: tuple[float, int, Any]) -> str:
+        name = module(entry)
+        if name in {"zip_rebuild_cd_from_local_headers", "zip_rebuild_cd_preserve_raw_names", "zip_rebuild_cd_from_data_descriptors", "zip_reconcile_cd_local_headers", "zip_reconcile_cd_data_descriptor_conflict"}:
+            return "directory_rewrite"
+        if name in {"zip_quarantine_failed_entries", "zip_salvage_verified_entries", "zip_local_header_partial_scan", "zip_partial_salvage_missing_volume"}:
+            return "salvage_rewrite"
+        if name in {"zip_resolve_duplicate_entries", "zip_resolve_overlapping_entries"}:
+            return "conflict_rewrite"
+        return name
+
+    selected_expensive_families: set[str] = set()
 
     def add(entry: tuple[float, int, Any]) -> None:
+        nonlocal expensive_selected
         if len(selected) >= budget:
             return
         candidate_id = _candidate_id(entry[2])
         if candidate_id in seen:
             return
+        if expensive(entry) and max_expensive > 0:
+            name = module(entry)
+            if name == "zip_rebuild_cd_preserve_raw_names" and not (evidence & {"raw_filename_bytes", "filename_encoding_bad", "non_utf8_filename", "after_descriptor_flag_normalize", "exact_match_failed"}):
+                skipped.append((entry, "raw_name_without_name_evidence"))
+                return
+            fam = family(entry)
+            if not high_recovery and fam == "directory_rewrite" and fam in selected_expensive_families:
+                skipped.append((entry, "expensive_duplicate_family"))
+                return
+            if expensive_selected >= max_expensive:
+                skipped.append((entry, "expensive_round_cap"))
+                return
+            expensive_selected += 1
+            selected_expensive_families.add(fam)
         seen.add(candidate_id)
         selected.append(entry)
 
@@ -2443,7 +2664,7 @@ def _balanced_zip_materialization_selection(ranked: list[tuple[float, int, Any]]
 
     for entry in ranked[:1]:
         add(entry)
-    if _is_zip_high_recovery_competition_record(record):
+    if high_recovery:
         quotas = (("directory", 2), ("deep_partial", 2), ("boundary", 1), ("risk", 2))
     else:
         quotas = (("directory", 2), ("deep_partial", 2), ("risk", 2), ("boundary", 1))
@@ -2462,7 +2683,107 @@ def _balanced_zip_materialization_selection(ranked: list[tuple[float, int, Any]]
         add(entry)
         if len(selected) >= budget:
             break
-    return selected[:budget]
+    selected = selected[:budget]
+    if debug_events is not None:
+        for entry, reason in skipped:
+            candidate = entry[2]
+            debug_events.write(
+                "materialization_skip",
+                record,
+                round=state_round,
+                query_id=query_id,
+                module_name=module(entry),
+                candidate_id=_candidate_id(candidate),
+                estimated_materialize_cost_ms=round(_estimated_materialize_cost_ms(candidate, record), 1),
+                skip_reason=reason,
+            )
+    return selected, _materialization_selection_stats(ranked, selected, skipped, record)
+
+
+def _materialization_selection_stats(
+    ranked: list[tuple[float, int, Any]],
+    selected: list[tuple[float, int, Any]],
+    skipped: list[tuple[tuple[float, int, Any], str]],
+    record: dict[str, Any],
+) -> dict[str, Any]:
+    selected_ids = {_candidate_id(entry[2]) for entry in selected}
+    buckets: dict[str, int] = {}
+    for _, _, candidate in selected:
+        bucket = _materialize_cost_bucket(_estimated_materialize_cost_ms(candidate, record))
+        buckets[bucket] = int(buckets.get(bucket, 0) or 0) + 1
+    skipped_cost = sum(_estimated_materialize_cost_ms(entry[2], record) for entry, _ in skipped if _candidate_id(entry[2]) not in selected_ids)
+    return {
+        "materialize_cost_bucket_counts": buckets,
+        "expensive_materialization_skipped_count": len(skipped),
+        "materialize_worker_seconds_saved_estimate": round(skipped_cost / 1000.0, 3),
+    }
+
+
+def _materialize_cost_bucket(cost_ms: float) -> str:
+    if cost_ms < 100:
+        return "<100ms"
+    if cost_ms < 400:
+        return "100-400ms"
+    if cost_ms < 1000:
+        return "400ms-1s"
+    if cost_ms < 3000:
+        return "1-3s"
+    return ">=3s"
+
+
+def _estimated_materialize_cost_ms(candidate: Any, record: dict[str, Any]) -> float:
+    module = str(getattr(candidate, "module_name", "") or "")
+    size_mb = _record_size_mb(record) if record else 0.0
+    base = {
+        "zip_rebuild_cd_preserve_raw_names": 850.0,
+        "zip_rebuild_cd_from_local_headers": 800.0,
+        "zip_reconcile_cd_local_headers": 950.0,
+        "zip_rebuild_cd_from_data_descriptors": 450.0,
+        "zip_reconcile_cd_data_descriptor_conflict": 500.0,
+        "zip_resolve_duplicate_entries": 650.0,
+        "zip_quarantine_failed_entries": 450.0,
+        "zip_salvage_verified_entries": 450.0,
+        "zip_local_header_partial_scan": 450.0,
+        "zip_partial_salvage_missing_volume": 550.0,
+        "archive_carrier_crop_deep_recovery": 650.0,
+        "zip_remove_spurious_data_descriptor": 90.0,
+        "zip_normalize_data_descriptor_flags": 90.0,
+        "zip_reconcile_cd_entry_names_from_local_headers": 120.0,
+        "zip_fix_cd_offset": 120.0,
+        "zip_fix_cd_entry_count": 80.0,
+        "zip_fix_extra_field_length": 90.0,
+        "zip_trim_trailing_junk": 80.0,
+    }.get(module, 180.0)
+    size_factor = min(5.0, max(0.0, size_mb) / 24.0)
+    if module in _ZIP_FULL_REWRITE_MODULES:
+        base += size_factor * 550.0
+    elif module in _ZIP_LOW_COST_PATCH_MODULES:
+        base += size_factor * 40.0
+    if "sfx_split" in str(record.get("zip_variant") or "") or "split_zip" in str(record.get("zip_variant") or ""):
+        base *= 1.25
+    return float(base)
+
+
+def _zip_materialization_cost_cap_exempt(record: dict[str, Any]) -> bool:
+    profile = str(record.get("damage_profile") or "")
+    if profile.startswith("zip_two_step_"):
+        return True
+    if profile in {
+        "zip_sfx_cd_damage",
+        "zip_sfx_payload_damage",
+        "zip_sfx_split_missing_volume",
+        "zip_zip64_extra_size_mismatch",
+        "zip_single_entry_payload_damage",
+        "zip_local_header_crc_wrong_cd_correct",
+        "zip_partial_cd_rebuild_then_payload_mismatch",
+        "zip_drop_central_directory_keep_local_headers",
+        "zip_rebuild_directory_keeps_bad_payload",
+        "zip_partial_recovery_wrong_hash_same_name",
+    }:
+        return True
+    tags = {str(item) for item in record.get("zip_container_tags") or []}
+    flags = {str(item) for item in record.get("damage_flags") or []}
+    return bool(tags & {"sfx", "carrier_archive", "carrier_prefix"} or flags & {"sfx", "carrier_archive", "carrier_prefix", "zip64_extra_bad", "zip64_extra_size_bad"})
 
 
 def _scheduler(args: argparse.Namespace) -> RepairScheduler:
@@ -2489,6 +2810,7 @@ def _scheduler(args: argparse.Namespace) -> RepairScheduler:
                 {"name": "zip_fix_cd_offset", "enabled": True},
                 {"name": "zip_fix_cd_entry_count", "enabled": True},
                 {"name": "zip_fix_local_header_fields", "enabled": True},
+                {"name": "zip_fix_extra_field_length", "enabled": True},
                 {"name": "zip_fix_zip64_locator", "enabled": True},
                 {"name": "zip_fix_zip64_eocd", "enabled": True},
                 {"name": "zip_fix_zip64_extra_size", "enabled": True},

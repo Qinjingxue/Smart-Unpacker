@@ -1191,6 +1191,30 @@ def test_zip_route_evidence_zip64_extra_profile_selects_extra_repair(tmp_path):
     assert {candidate.module_name for candidate in batch.candidates} == {"zip_fix_zip64_extra_size"}
 
 
+def test_zip_route_evidence_extra_field_length_selects_extra_length_repair(tmp_path):
+    scheduler = RepairScheduler({
+        "repair": {
+            "workspace": str(tmp_path / "repair"),
+            "modules": [
+                {"name": "zip_fix_extra_field_length", "enabled": True},
+                {"name": "zip_fix_cd_offset", "enabled": True},
+            ],
+        }
+    })
+    batch = scheduler.generate_repair_candidates(RepairJob(
+        source_input={"kind": "file", "path": str(tmp_path / "extra.zip"), "format_hint": "zip"},
+        format="zip",
+        confidence=0.7,
+        damage_flags=["damaged"],
+        analysis_prepass={"damage_profile": "zip_extra_field_length_bad"},
+        archive_key="extra.zip",
+    ), lazy=True)
+
+    modules = {candidate.module_name for candidate in batch.candidates}
+    assert "zip_fix_extra_field_length" in modules
+    assert "zip_fix_cd_offset" not in modules
+
+
 def test_zip_route_evidence_sfx_prefers_carrier_crop_from_structure(tmp_path):
     scheduler = RepairScheduler({
         "repair": {

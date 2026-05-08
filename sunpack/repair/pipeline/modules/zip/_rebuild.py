@@ -8,6 +8,11 @@ from sunpack.repair.job import RepairJob
 from sunpack.repair.pipeline.modules._common import cached_repair_operation, cache_relevant_module_limits, module_limits
 from sunpack_native import zip_rebuild_from_local_headers as _native_zip_rebuild_from_local_headers
 
+try:  # Optional while older editable native builds are still in use.
+    from sunpack_native import zip_scan_source as _native_zip_scan_source
+except ImportError:  # pragma: no cover - depends on installed native extension version.
+    _native_zip_scan_source = None
+
 
 CD_SIG = b"PK\x01\x02"
 EOCD_SIG = b"PK\x05\x06"
@@ -91,3 +96,27 @@ def rebuild_zip_from_source(
         logical_stream_built=bool(result.get("logical_stream_built")),
         split_sidecars_available=bool(result.get("split_sidecars_available")),
     )
+
+
+def cached_zip_scan_artifact(source_input: dict[str, Any], *, config: dict[str, Any] | None = None, cache_job: RepairJob | None = None) -> dict[str, Any]:
+    if _native_zip_scan_source is None:
+        return {"status": "unavailable", "native_target": "zip_scan_source", "zip_scan_artifact_miss_reason": "native_api_unavailable"}
+    limits = module_limits(config)
+    params = {
+        "source_input": source_input,
+        "limits": cache_relevant_module_limits(config, ("max_seconds_per_module",)),
+    }
+
+    def compute() -> dict[str, Any]:
+        return dict(_native_zip_scan_source(
+            source_input,
+            int(limits.get("max_entries", 20000) or 20000),
+            float(limits.get("max_input_size_mb", 512) or 0),
+            float(limits.get("max_entry_uncompressed_mb", 512) or 0),
+            float(limits.get("max_seconds_per_module", 30.0) or 0),
+            bool(limits.get("verify_candidates", True)),
+        ))
+
+    if cache_job is None:
+        return compute()
+    return dict(cached_repair_operation(cache_job, "zip_scan_artifact", "zip_scan_source", params, compute))

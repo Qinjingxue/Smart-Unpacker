@@ -28,6 +28,68 @@ fn extract_password(source_input: &Bound<'_, PyDict>) -> Option<String> {
 #[pyfunction]
 #[pyo3(signature = (
     source_input,
+    max_entries=20000,
+    max_input_size_mb=512.0,
+    max_entry_uncompressed_mb=512.0,
+    max_seconds=30.0,
+    verify_candidates=true
+))]
+pub(crate) fn zip_scan_source(
+    py: Python<'_>,
+    source_input: &Bound<'_, PyDict>,
+    max_entries: usize,
+    max_input_size_mb: f64,
+    max_entry_uncompressed_mb: f64,
+    max_seconds: f64,
+    verify_candidates: bool,
+) -> PyResult<Py<PyDict>> {
+    let started = Instant::now();
+    let password = extract_password(source_input);
+    let options = DeepZipOptions {
+        max_candidates: 1,
+        max_entries: max_entries.max(1),
+        max_input_bytes: mb_to_bytes(max_input_size_mb),
+        max_output_bytes: Some(u64::MAX),
+        max_entry_uncompressed_bytes: mb_to_bytes(max_entry_uncompressed_mb),
+        max_duration: duration_from_seconds(max_seconds),
+        verify_candidates,
+        allow_unverified_entries: true,
+        password,
+    };
+    let data = match read_source_input(source_input, options.max_input_bytes) {
+        Ok(data) => data,
+        Err(message) => {
+            let result = PyDict::new(py);
+            result.set_item("status", "skipped")?;
+            result.set_item("native_target", "zip_scan_source")?;
+            result.set_item("candidate_status", "no_candidate")?;
+            result.set_item("message", message)?;
+            result.set_item("zip_scan_artifact", true)?;
+            result.set_item("zip_scan_artifact_miss_reason", "input_read_failed")?;
+            return Ok(result.into());
+        }
+    };
+    let scan = scan_entries(&data, &options, started);
+    let result = PyDict::new(py);
+    result.set_item("status", if scan.entries.is_empty() { "unrepairable" } else { "scanned" })?;
+    result.set_item("native_target", "zip_scan_source")?;
+    result.set_item("candidate_status", if scan.entries.is_empty() { "no_candidate" } else { "scan_artifact" })?;
+    result.set_item("message", "ZIP source scan artifact was produced")?;
+    result.set_item("zip_scan_artifact", true)?;
+    result.set_item("entries", scan.entries.len())?;
+    result.set_item("verified_entries", scan.entries.iter().filter(|entry| entry.verified).count())?;
+    result.set_item("descriptor_entries", scan.descriptor_entries)?;
+    result.set_item("encrypted_entries", scan.encrypted_entries)?;
+    result.set_item("timed_out", scan.timed_out)?;
+    result.set_item("diagnostics", build_scan_diagnostics(py, &scan, if scan.entries.is_empty() { Some("no_recoverable_entries") } else { None })?)?;
+    result.set_item("patch_facts", PyList::new(py, ["zip_scan_artifact_available"])?)?;
+    result.set_item("residual_facts", PyList::empty(py))?;
+    Ok(result.into())
+}
+
+#[pyfunction]
+#[pyo3(signature = (
+    source_input,
     workspace,
     max_candidates=3,
     max_entries=20000,
@@ -356,6 +418,7 @@ pub(crate) fn zip_directory_field_repair(
         "zip_trailing_junk_trim" => repair_zip_trailing_junk(&data),
         "zip_eocd_repair" => repair_zip_eocd(&data),
         "zip_local_header_field_repair" => repair_zip_local_header_fields(&data),
+        "zip_extra_field_length_fix" => repair_zip_extra_field_length(&data),
         "zip_data_descriptor_flag_normalize" => repair_zip_data_descriptor_flags(&data),
         "zip_cd_entry_name_reconcile" => repair_zip_cd_entry_names_from_local_headers(&data),
         "zip64_extra_size" => repair_zip64_central_extra(&data),
@@ -2465,6 +2528,7 @@ fn repair_name_to_target(name: &str) -> &str {
         "zip_trailing_junk_trim" => "trailing_junk",
         "zip_eocd_repair" => "eocd",
         "zip_local_header_field_repair" => "local_header",
+        "zip_extra_field_length_fix" => "extra_field_length",
         "zip_data_descriptor_flag_normalize" => "data_descriptor_flags",
         "zip_cd_entry_name_reconcile" => "cd_entry_names",
         "zip64_extra_size" => "zip64_extra_size",
@@ -2482,6 +2546,7 @@ fn field_patch_facts(target: &str) -> Vec<&'static str> {
         "trailing_junk" => vec!["fixed_field=trailing_junk"],
         "eocd" => vec!["fixed_field=eocd_record", "after_eocd_repair"],
         "local_header" => vec!["fixed_field=local_header_fields", "after_local_header_repair"],
+        "extra_field_length" => vec!["fixed_field=extra_field_length", "extra_field_length_reconciled"],
         "data_descriptor_flags" => vec!["fixed_field=data_descriptor_bit3_flags", "after_descriptor_flag_normalize"],
         "cd_entry_names" => vec!["fixed_field=central_directory_entry_names", "after_cd_entry_name_reconcile"],
         "zip64_extra_size" => vec!["fixed_field=zip64_extra_size", "zip64_extra_reconciled"],
@@ -2903,6 +2968,7 @@ struct CdWalk {
 }
 
 struct CentralEntry {
+    offset: usize,
     flags: u16,
     method: u16,
     crc32: u32,
@@ -3251,6 +3317,130 @@ fn repair_zip_local_header_fields(data: &[u8]) -> Result<DirectoryFieldRepair, S
     })
 }
 
+fn repair_zip_extra_field_length(data: &[u8]) -> Result<DirectoryFieldRepair, String> {
+    let eocd =
+        find_eocd_record(data, true).ok_or_else(|| "trusted EOCD was not found".to_string())?;
+    let cd_offset = eocd.cd_offset as usize;
+    let cd_end = cd_offset.saturating_add(eocd.cd_size as usize).min(data.len());
+    let mut entries = parse_central_directory_entries(data, cd_offset, cd_end);
+    let tolerant_entries = parse_tolerant_central_directory_entries(data, cd_offset, cd_end);
+    for entry in tolerant_entries {
+        if !entries.iter().any(|existing| existing.offset == entry.offset) {
+            entries.push(entry);
+        }
+    }
+    entries.sort_by_key(|entry| entry.offset);
+    if entries.is_empty() {
+        return Err("no central directory entries were parseable for extra field length repair".to_string());
+    }
+
+    let mut bytes = data.to_vec();
+    let mut patches = Vec::new();
+    let central_entries = entries;
+    for (index, entry) in central_entries.iter().enumerate() {
+        let Some(local) = find_local_for_central_offset_only(data, &entry)
+            .or_else(|| find_local_for_central(data, &entry))
+        else {
+            continue;
+        };
+        if let Some(target_extra_len) = infer_central_extra_length_from_next_header(data, entry, cd_end) {
+            if entry.extra_len != target_extra_len {
+                add_zip_patch(
+                    &mut bytes,
+                    &mut patches,
+                    entry.offset + 30,
+                    &target_extra_len.to_le_bytes(),
+                );
+            }
+        }
+        if let Some(target_extra_len) = infer_local_extra_length_from_layout(
+            &local,
+            entry,
+            central_entries.get(index + 1),
+            cd_offset,
+        ) {
+            if local.extra_len != target_extra_len {
+                add_zip_patch(
+                    &mut bytes,
+                    &mut patches,
+                    local.offset + 28,
+                    &target_extra_len.to_le_bytes(),
+                );
+            }
+        }
+    }
+    if patches.is_empty() {
+        return Err("no ZIP extra field length mismatch was safely repairable".to_string());
+    }
+    Ok(DirectoryFieldRepair {
+        bytes,
+        patches,
+        truncate_at: None,
+        confidence: 0.91,
+        actions: vec!["reconcile_zip_extra_field_lengths".to_string()],
+        message: "ZIP extra field length fields were reconciled by native repair".to_string(),
+    })
+}
+
+fn infer_central_extra_length_from_next_header(
+    data: &[u8],
+    entry: &CentralEntry,
+    cd_end: usize,
+) -> Option<u16> {
+    let name_start = entry.offset.checked_add(46)?;
+    let extra_start = name_start.checked_add(entry.name_len as usize)?;
+    let comment_len = find_next_central_offset(data, entry.offset, cd_end)?
+        .checked_sub(extra_start)?
+        .checked_sub(u16_le(data, entry.offset + 32) as usize)?;
+    if comment_len > u16::MAX as usize {
+        return None;
+    }
+    let target = comment_len as u16;
+    if target == entry.extra_len {
+        None
+    } else {
+        Some(target)
+    }
+}
+
+fn find_next_central_offset(data: &[u8], current_offset: usize, cd_end: usize) -> Option<usize> {
+    let start = current_offset.checked_add(46)?;
+    if start >= cd_end.min(data.len()) {
+        return Some(cd_end.min(data.len()));
+    }
+    memmem::find(&data[start..cd_end.min(data.len())], CD_SIG).map(|delta| start + delta).or(Some(cd_end.min(data.len())))
+}
+
+fn infer_local_extra_length_from_layout(
+    local: &LocalHeader,
+    entry: &CentralEntry,
+    next_entry: Option<&CentralEntry>,
+    cd_offset: usize,
+) -> Option<u16> {
+    if entry.compressed_size == 0xFFFF_FFFF || entry.flags & 0x08 != 0 {
+        return None;
+    }
+    let next_offset = next_entry
+        .map(|item| item.local_header_offset as usize)
+        .filter(|offset| *offset > local.offset)
+        .unwrap_or(cd_offset);
+    let fixed = local
+        .offset
+        .checked_add(LOCAL_HEADER_LEN)?
+        .checked_add(local.name_len as usize)?
+        .checked_add(entry.compressed_size as usize)?;
+    let target = next_offset.checked_sub(fixed)?;
+    if target > u16::MAX as usize {
+        return None;
+    }
+    let target = target as u16;
+    if target == local.extra_len {
+        None
+    } else {
+        Some(target)
+    }
+}
+
 fn repair_zip_data_descriptor_flags(data: &[u8]) -> Result<DirectoryFieldRepair, String> {
     let cd = find_valid_central_directory(data)
         .ok_or_else(|| "central directory was not parseable".to_string())?;
@@ -3530,10 +3720,14 @@ fn repair_zip64_central_extra(data: &[u8]) -> Result<DirectoryFieldRepair, Strin
         let Some(central_zip64) = parse_zip64_extra_tolerant(&entry.extra, entry.extra_offset) else {
             continue;
         };
-        let Some(local_zip64) = parse_zip64_extra_tolerant(&local.extra, local.extra_offset) else {
-            continue;
+        let expected = if let Some(local_zip64) = parse_zip64_extra_tolerant(&local.extra, local.extra_offset) {
+            expected_zip64_values(&entry, &local, &local_zip64)
+        } else if !central_zip64.values.is_empty() {
+            Some(central_zip64.values.clone())
+        } else {
+            None
         };
-        let Some(expected) = expected_zip64_values(&entry, &local, &local_zip64) else {
+        let Some(expected) = expected else {
             continue;
         };
         let expected_size = expected.len() * 8;
@@ -3664,6 +3858,7 @@ fn parse_central_directory_entries(
             break;
         }
         entries.push(CentralEntry {
+            offset: pos,
             flags: u16_le(data, pos + 8),
             method: u16_le(data, pos + 10),
             crc32: u32_le(data, pos + 16),
@@ -3677,6 +3872,60 @@ fn parse_central_directory_entries(
             local_header_offset: u32_le(data, pos + 42),
         });
         pos = record_end;
+    }
+    entries
+}
+
+fn parse_tolerant_central_directory_entries(
+    data: &[u8],
+    offset: usize,
+    expected_end: usize,
+) -> Vec<CentralEntry> {
+    let mut entries = Vec::new();
+    let mut pos = offset;
+    let end = expected_end.min(data.len());
+    while pos + 46 <= data.len() && pos < end {
+        if &data[pos..pos + 4] != CD_SIG {
+            let Some(next) = memmem::find(&data[pos.saturating_add(1)..end], CD_SIG) else {
+                break;
+            };
+            pos = pos + 1 + next;
+            continue;
+        }
+        let name_len = u16_le(data, pos + 28);
+        let extra_len = u16_le(data, pos + 30);
+        let comment_len = u16_le(data, pos + 32) as usize;
+        let name_start = pos + 46;
+        let extra_start = name_start + name_len as usize;
+        let comment_start = extra_start.saturating_add(extra_len as usize);
+        let record_end = comment_start.saturating_add(comment_len);
+        if extra_start > data.len() {
+            break;
+        }
+        let extra_end = comment_start.min(data.len());
+        entries.push(CentralEntry {
+            offset: pos,
+            flags: u16_le(data, pos + 8),
+            method: u16_le(data, pos + 10),
+            crc32: u32_le(data, pos + 16),
+            compressed_size: u32_le(data, pos + 20),
+            uncompressed_size: u32_le(data, pos + 24),
+            name_len,
+            extra_len,
+            name: data[name_start..extra_start].to_vec(),
+            extra: data[extra_start..extra_end].to_vec(),
+            extra_offset: extra_start,
+            local_header_offset: u32_le(data, pos + 42),
+        });
+        if record_end + 46 <= data.len() && record_end <= end && &data[record_end..record_end + 4] == CD_SIG {
+            pos = record_end;
+            continue;
+        }
+        let next_start = pos + 46;
+        let Some(next) = memmem::find(&data[next_start..end], CD_SIG) else {
+            break;
+        };
+        pos = next_start + next;
     }
     entries
 }

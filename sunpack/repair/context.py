@@ -220,6 +220,8 @@ def _zip_profile_flags(profile: str) -> list[str]:
         flags.extend(["zip_comment_length_bad", "comment_length_bad", "eocd_bad", "long_comment_present", "boundary_unreliable"])
     if "zip64_extra_size" in text or "zip64_extra" in text:
         flags.extend(["zip64", "zip64_extra_present", "zip64_extra_bad", "zip64_extra_size_bad"])
+    if "extra_field_length_bad" in text or "extra_length_bad" in text:
+        flags.extend(["extra_field_bad", "extra_field_length_bad"])
     if "zip64_eocd_locator" in text or "zip64_locator" in text:
         flags.extend(["zip64", "zip64_locator_bad"])
     if "zip64_eocd" in text:
@@ -318,6 +320,8 @@ def _normalize_zip_generic_damage(flags: list[str]) -> list[str]:
         "central_directory_count_bad",
         "local_header_bad",
         "local_header_recovery",
+        "extra_field_bad",
+        "extra_field_length_bad",
         "filename_encoding_bad",
         "raw_filename_bytes",
         "zip64_locator_bad",

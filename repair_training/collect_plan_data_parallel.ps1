@@ -27,6 +27,7 @@ param(
     [ValidateSet("lazy", "eager")]
     [string]$ProposalMode = "lazy",
     [int]$MaterializeTopKPerRound = 10,
+    [int]$MaxExpensiveMaterializationsPerRound = 3,
     [switch]$MaterializeSelectedOnly,
     [switch]$IncludeUnmaterializedLabels,
     [double]$CaseTimeoutSeconds = 45.0,
@@ -38,6 +39,7 @@ param(
     [double]$IdleTimeoutSeconds = 0,
     [double]$HeartbeatSeconds = 5.0,
     [switch]$DisableRepairCache,
+    [switch]$ProfileMaterializationCandidates,
     [string]$Formats = "",
     [string]$Sample = "",
     [int]$Limit = 0,
@@ -179,6 +181,7 @@ function New-CollectorArgs {
         "-FutureLabelDiscount", "$FutureLabelDiscount",
         "-ProposalMode", $ProposalMode,
         "-MaterializeTopKPerRound", "$MaterializeTopKPerRound",
+        "-MaxExpensiveMaterializationsPerRound", "$MaxExpensiveMaterializationsPerRound",
         "-CaseTimeoutSeconds", "$CaseTimeoutSeconds",
         "-StreamLargeSizeMb", "$StreamLargeSizeMb",
         "-StreamLargeCaseTimeoutSeconds", "$StreamLargeCaseTimeoutSeconds",
@@ -194,6 +197,7 @@ function New-CollectorArgs {
     if ($IncludeUnmaterializedLabels) { $argsList.Add("-IncludeUnmaterializedLabels") }
     if ($SkipLargeStreamSamples) { $argsList.Add("-SkipLargeStreamSamples") }
     if ($DisableRepairCache) { $argsList.Add("-DisableRepairCache") }
+    if ($ProfileMaterializationCandidates) { $argsList.Add("-ProfileMaterializationCandidates") }
     if ($NoPretty) { $argsList.Add("-NoPretty") }
     if ($Progress) { $argsList.Add("-Progress") }
     return $argsList
@@ -325,7 +329,12 @@ if ($Scheduling -eq "pool") {
         repair_cache_misses = 0
         materialize_cache_hits = 0
         native_operation_cache_hits = 0
+        zip_scan_artifact_hits = 0
+        zip_scan_artifact_misses = 0
+        expensive_materialization_skipped_count = 0
+        materialize_worker_seconds_saved_estimate = 0.0
         repair_cache_by_namespace = @{}
+        materialize_cost_bucket_counts = @{}
         label_counts = @{}
         future_label_counts = @{}
         rollout_mode_counts = @{}
@@ -343,15 +352,20 @@ if ($Scheduling -eq "pool") {
         validation_failed_by_profile = @{}
         post_crop_residual_fact_counts = @{}
         split_logical_stream_counts = @{}
+        split_sidecar_route_counts = @{}
         split_sidecar_complete_candidate_counts = @{}
+        extra_field_length_candidate_counts = @{}
+        zip64_extra_no_candidate_by_profile = @{}
+        descriptor_cd_conflict_diff_buckets = @{}
         route_rejected_by_required_flags = 0
         route_rejected_by_can_handle = 0
         shards = $summaries
     }
     foreach ($summary in $summaries) {
-        foreach ($name in @("samples", "success_rows", "failure_rows", "timeouts", "failed", "skipped", "state_count", "expanded_state_count", "branch_count", "terminal_success_count", "legacy_module_seen_count", "rollout_budget_exhausted", "best_partial_returned_count", "repair_cache_hits", "repair_cache_misses", "materialize_cache_hits", "native_operation_cache_hits", "route_rejected_by_required_flags", "route_rejected_by_can_handle")) {
+        foreach ($name in @("samples", "success_rows", "failure_rows", "timeouts", "failed", "skipped", "state_count", "expanded_state_count", "branch_count", "terminal_success_count", "legacy_module_seen_count", "rollout_budget_exhausted", "best_partial_returned_count", "repair_cache_hits", "repair_cache_misses", "materialize_cache_hits", "native_operation_cache_hits", "zip_scan_artifact_hits", "zip_scan_artifact_misses", "expensive_materialization_skipped_count", "route_rejected_by_required_flags", "route_rejected_by_can_handle")) {
             $aggregate[$name] = [int]$aggregate[$name] + [int]($summary.$name)
         }
+        $aggregate["materialize_worker_seconds_saved_estimate"] = [double]$aggregate["materialize_worker_seconds_saved_estimate"] + [double]($summary.materialize_worker_seconds_saved_estimate)
         foreach ($prop in $summary.repair_cache_by_namespace.PSObject.Properties) {
             $key = [string]$prop.Name
             if (-not $aggregate["repair_cache_by_namespace"].ContainsKey($key)) {
@@ -366,6 +380,7 @@ if ($Scheduling -eq "pool") {
         Add-TrainingCountMap $aggregate["terminal_status_counts"] $summary.terminal_status_counts
         Add-TrainingCountMap $aggregate["stop_reason_counts"] $summary.stop_reason_counts
         Add-TrainingCountMap $aggregate["best_recovery_bucket_counts"] $summary.best_recovery_bucket_counts
+        Add-TrainingCountMap $aggregate["materialize_cost_bucket_counts"] $summary.materialize_cost_bucket_counts
         Add-TrainingCountMap $aggregate["global_stagnation_counts"] $summary.global_stagnation_counts
         Add-TrainingCountMap $aggregate["no_output_reason_counts"] $summary.no_output_reason_counts
         Add-TrainingCountMap $aggregate["no_output_by_module"] $summary.no_output_by_module
@@ -377,7 +392,11 @@ if ($Scheduling -eq "pool") {
         Add-TrainingCountMap $aggregate["validation_failed_by_profile"] $summary.validation_failed_by_profile
         Add-TrainingCountMap $aggregate["post_crop_residual_fact_counts"] $summary.post_crop_residual_fact_counts
         Add-TrainingCountMap $aggregate["split_logical_stream_counts"] $summary.split_logical_stream_counts
+        Add-TrainingCountMap $aggregate["split_sidecar_route_counts"] $summary.split_sidecar_route_counts
         Add-TrainingCountMap $aggregate["split_sidecar_complete_candidate_counts"] $summary.split_sidecar_complete_candidate_counts
+        Add-TrainingCountMap $aggregate["extra_field_length_candidate_counts"] $summary.extra_field_length_candidate_counts
+        Add-TrainingCountMap $aggregate["zip64_extra_no_candidate_by_profile"] $summary.zip64_extra_no_candidate_by_profile
+        Add-TrainingCountMap $aggregate["descriptor_cd_conflict_diff_buckets"] $summary.descriptor_cd_conflict_diff_buckets
     }
 
     New-Item -ItemType Directory -Path (Split-Path -Parent $ParallelSummaryOutput) -Force | Out-Null
@@ -458,6 +477,7 @@ foreach ($shard in $shards) {
     if ($IncludeUnmaterializedLabels) { $argsList.Add("-IncludeUnmaterializedLabels") }
     if ($SkipLargeStreamSamples) { $argsList.Add("-SkipLargeStreamSamples") }
     if ($DisableRepairCache) { $argsList.Add("-DisableRepairCache") }
+    if ($ProfileMaterializationCandidates) { $argsList.Add("-ProfileMaterializationCandidates") }
     if ($NoPretty) { $argsList.Add("-NoPretty") }
     if ($Progress) { $argsList.Add("-Progress") }
 
@@ -534,7 +554,12 @@ $aggregate = [ordered]@{
     repair_cache_misses = 0
     materialize_cache_hits = 0
     native_operation_cache_hits = 0
+    zip_scan_artifact_hits = 0
+    zip_scan_artifact_misses = 0
+    expensive_materialization_skipped_count = 0
+    materialize_worker_seconds_saved_estimate = 0.0
     repair_cache_by_namespace = @{}
+    materialize_cost_bucket_counts = @{}
     label_counts = @{}
     future_label_counts = @{}
     rollout_mode_counts = @{}
@@ -552,15 +577,20 @@ $aggregate = [ordered]@{
     validation_failed_by_profile = @{}
     post_crop_residual_fact_counts = @{}
     split_logical_stream_counts = @{}
+    split_sidecar_route_counts = @{}
     split_sidecar_complete_candidate_counts = @{}
+    extra_field_length_candidate_counts = @{}
+    zip64_extra_no_candidate_by_profile = @{}
+    descriptor_cd_conflict_diff_buckets = @{}
     route_rejected_by_required_flags = 0
     route_rejected_by_can_handle = 0
     shards = $summaries
 }
 foreach ($summary in $summaries) {
-    foreach ($name in @("samples", "success_rows", "failure_rows", "timeouts", "failed", "skipped", "state_count", "expanded_state_count", "branch_count", "terminal_success_count", "legacy_module_seen_count", "rollout_budget_exhausted", "best_partial_returned_count", "repair_cache_hits", "repair_cache_misses", "materialize_cache_hits", "native_operation_cache_hits", "route_rejected_by_required_flags", "route_rejected_by_can_handle")) {
+    foreach ($name in @("samples", "success_rows", "failure_rows", "timeouts", "failed", "skipped", "state_count", "expanded_state_count", "branch_count", "terminal_success_count", "legacy_module_seen_count", "rollout_budget_exhausted", "best_partial_returned_count", "repair_cache_hits", "repair_cache_misses", "materialize_cache_hits", "native_operation_cache_hits", "zip_scan_artifact_hits", "zip_scan_artifact_misses", "expensive_materialization_skipped_count", "route_rejected_by_required_flags", "route_rejected_by_can_handle")) {
         $aggregate[$name] = [int]$aggregate[$name] + [int]($summary.$name)
     }
+    $aggregate["materialize_worker_seconds_saved_estimate"] = [double]$aggregate["materialize_worker_seconds_saved_estimate"] + [double]($summary.materialize_worker_seconds_saved_estimate)
     foreach ($prop in $summary.repair_cache_by_namespace.PSObject.Properties) {
         $key = [string]$prop.Name
         if (-not $aggregate["repair_cache_by_namespace"].ContainsKey($key)) {
@@ -575,6 +605,7 @@ foreach ($summary in $summaries) {
     Add-TrainingCountMap $aggregate["terminal_status_counts"] $summary.terminal_status_counts
     Add-TrainingCountMap $aggregate["stop_reason_counts"] $summary.stop_reason_counts
     Add-TrainingCountMap $aggregate["best_recovery_bucket_counts"] $summary.best_recovery_bucket_counts
+    Add-TrainingCountMap $aggregate["materialize_cost_bucket_counts"] $summary.materialize_cost_bucket_counts
     Add-TrainingCountMap $aggregate["global_stagnation_counts"] $summary.global_stagnation_counts
     Add-TrainingCountMap $aggregate["no_output_reason_counts"] $summary.no_output_reason_counts
     Add-TrainingCountMap $aggregate["no_output_by_module"] $summary.no_output_by_module
@@ -586,7 +617,11 @@ foreach ($summary in $summaries) {
     Add-TrainingCountMap $aggregate["validation_failed_by_profile"] $summary.validation_failed_by_profile
     Add-TrainingCountMap $aggregate["post_crop_residual_fact_counts"] $summary.post_crop_residual_fact_counts
     Add-TrainingCountMap $aggregate["split_logical_stream_counts"] $summary.split_logical_stream_counts
+    Add-TrainingCountMap $aggregate["split_sidecar_route_counts"] $summary.split_sidecar_route_counts
     Add-TrainingCountMap $aggregate["split_sidecar_complete_candidate_counts"] $summary.split_sidecar_complete_candidate_counts
+    Add-TrainingCountMap $aggregate["extra_field_length_candidate_counts"] $summary.extra_field_length_candidate_counts
+    Add-TrainingCountMap $aggregate["zip64_extra_no_candidate_by_profile"] $summary.zip64_extra_no_candidate_by_profile
+    Add-TrainingCountMap $aggregate["descriptor_cd_conflict_diff_buckets"] $summary.descriptor_cd_conflict_diff_buckets
 }
 
 New-Item -ItemType Directory -Path (Split-Path -Parent $ParallelSummaryOutput) -Force | Out-Null

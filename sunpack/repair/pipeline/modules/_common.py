@@ -103,10 +103,16 @@ def source_input_for_job(job: RepairJob) -> dict[str, Any]:
             seen.add(path)
             ranges.append({"path": path, "start": int(item.get("start") or 0), "end": item.get("end")})
         main_path = str(base.get("path") or "")
-        if main_path and main_path not in seen:
+        if main_path and main_path not in seen and not bool(base.get("use_parts_only")):
             ranges.append({"path": main_path, "start": 0, "end": None})
         if ranges:
-            base = {"kind": "concat_ranges", "ranges": ranges, "format_hint": base.get("format_hint") or job.format, "parts": base.get("parts")}
+            base = {
+                "kind": "concat_ranges",
+                "ranges": ranges,
+                "format_hint": base.get("format_hint") or job.format,
+                "parts": base.get("parts"),
+                "use_parts_only": bool(base.get("use_parts_only")),
+            }
     if str(base.get("kind") or "") == "concat_ranges" and getattr(job, "repair_cache", None) is not None and str(job.workspace or ""):
         fingerprint = source_fingerprint(base)
         workspace = Path(str(job.workspace)) / ".repair_cache"
@@ -121,7 +127,14 @@ def source_input_for_job(job: RepairJob) -> dict[str, Any]:
         )
         path = str(payload.get("path") or output_path)
         if Path(path).is_file():
-            base = {"kind": "file", "path": path, "format_hint": base.get("format_hint") or job.format, "parts": base.get("parts"), "logical_stream_built": True}
+            base = {
+                "kind": "file",
+                "path": path,
+                "format_hint": base.get("format_hint") or job.format,
+                "parts": base.get("parts"),
+                "use_parts_only": bool(base.get("use_parts_only")),
+                "logical_stream_built": True,
+            }
     if job.password:
         base["password"] = job.password
     return base

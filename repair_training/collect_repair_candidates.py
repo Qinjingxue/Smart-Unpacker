@@ -281,6 +281,7 @@ _FORMAT_MODULES: dict[str, tuple[str, ...]] = {
         "zip_fix_cd_offset",
         "zip_fix_cd_entry_count",
         "zip_fix_local_header_fields",
+        "zip_fix_extra_field_length",
         "zip_fix_zip64_locator",
         "zip_fix_zip64_eocd",
         "zip_fix_zip64_extra_size",

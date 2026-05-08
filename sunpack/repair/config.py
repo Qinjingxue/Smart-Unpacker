@@ -57,6 +57,7 @@ DEFAULT_REPAIR_CONFIG = {
         {"name": "zip_fix_cd_offset", "enabled": True},
         {"name": "zip_fix_cd_entry_count", "enabled": True},
         {"name": "zip_fix_local_header_fields", "enabled": True},
+        {"name": "zip_fix_extra_field_length", "enabled": True},
         {"name": "zip_fix_zip64_locator", "enabled": True},
         {"name": "zip_fix_zip64_eocd", "enabled": True},
         {"name": "zip_fix_zip64_extra_size", "enabled": True},

@@ -196,6 +196,7 @@ fn sunpack_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
         zip_deep_repair::zip_deep_partial_recovery,
         m
     )?)?;
+    m.add_function(wrap_pyfunction!(zip_deep_repair::zip_scan_source, m)?)?;
     m.add_function(wrap_pyfunction!(
         zip_deep_repair::zip_rebuild_from_local_headers,
         m

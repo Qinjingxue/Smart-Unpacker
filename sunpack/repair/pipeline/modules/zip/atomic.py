@@ -220,6 +220,19 @@ class ZipFixLocalHeaderFields(_ZipDirectoryFieldRepair):
     confidence = 0.88
 
 
+class ZipFixExtraFieldLength(_ZipDirectoryFieldRepair):
+    module_name = "zip_fix_extra_field_length"
+    repair_name = "zip_extra_field_length_fix"
+    expected_native_target = "extra_field_length"
+    categories = ("directory_rebuild",)
+    require_flags = ("extra_field_length_bad", "extra_length_bad", "extra_field_bad")
+    reject_flags = ("wrong_password", *CARRIER_FLAGS, *MISSING_VOLUME_FLAGS, *CONTENT_DAMAGE_FLAGS, "zip64", "zip64_extra_bad", "zip64_extra_size_bad")
+    base_score = 0.92
+    confidence = 0.93
+    route_family = "extra_field_length"
+    expected_native_actions = ("reconcile_zip_extra_field_lengths",)
+
+
 class _Zip64FieldRepair(_ZipDirectoryFieldRepair):
     categories = ("directory_rebuild",)
     base_score = 0.90
@@ -849,6 +862,7 @@ for _module in (
     ZipFixCdOffset(),
     ZipFixCdEntryCount(),
     ZipFixLocalHeaderFields(),
+    ZipFixExtraFieldLength(),
     ZipFixZip64Locator(),
     ZipFixZip64Eocd(),
     ZipFixZip64ExtraSize(),
@@ -877,6 +891,7 @@ def _patch_facts_for_directory_field(module_name: str, diagnosis: dict[str, Any]
         "zip_fix_cd_offset": ["fixed_field=central_directory_offset"],
         "zip_fix_cd_entry_count": ["fixed_field=central_directory_entry_count"],
         "zip_fix_local_header_fields": ["fixed_field=local_header_fields", "after_local_header_repair"],
+        "zip_fix_extra_field_length": ["fixed_field=extra_field_length", "extra_field_length_reconciled"],
         "zip_fix_zip64_locator": ["fixed_field=zip64_locator"],
         "zip_fix_zip64_eocd": ["fixed_field=zip64_eocd"],
         "zip_fix_zip64_extra_size": ["fixed_field=zip64_extra_size"],

@@ -23,6 +23,7 @@ param(
     [ValidateSet("lazy", "eager")]
     [string]$ProposalMode = "lazy",
     [int]$MaterializeTopKPerRound = 10,
+    [int]$MaxExpensiveMaterializationsPerRound = 3,
     [switch]$MaterializeSelectedOnly,
     [switch]$IncludeUnmaterializedLabels,
     [double]$CaseTimeoutSeconds = 45.0,
@@ -35,6 +36,7 @@ param(
     [double]$HeartbeatSeconds = 5.0,
     [string]$DebugEvents = "",
     [switch]$DisableRepairCache,
+    [switch]$ProfileMaterializationCandidates,
     [string]$Formats = "",
     [string]$Sample = "",
     [int]$Limit = 0,
@@ -87,6 +89,7 @@ $argsList = @(
     "--future-label-discount", "$FutureLabelDiscount",
     "--proposal-mode", $ProposalMode,
     "--materialize-top-k-per-round", "$MaterializeTopKPerRound",
+    "--max-expensive-materializations-per-round", "$MaxExpensiveMaterializationsPerRound",
     "--case-timeout-seconds", "$CaseTimeoutSeconds",
     "--stream-large-size-mb", "$StreamLargeSizeMb",
     "--stream-large-case-timeout-seconds", "$StreamLargeCaseTimeoutSeconds",
@@ -107,6 +110,9 @@ if ($DebugEvents) {
 }
 if ($DisableRepairCache) {
     $argsList += "--disable-repair-cache"
+}
+if ($ProfileMaterializationCandidates) {
+    $argsList += "--profile-materialization-candidates"
 }
 if ($SkipLargeStreamSamples) {
     $argsList += "--skip-large-stream-samples"
