@@ -173,6 +173,66 @@ def test_repair_beam_does_not_stop_on_accept_partial_before_next_round_improves(
     assert result.best_state.history[-1]["module"] == "complete_round_2"
 
 
+def test_repair_beam_stops_after_global_recovery_stagnation_patience():
+    scheduler = _SequencedCandidateScheduler([
+        [_candidate("partial_round_1", confidence=0.9, path="partial-1.zip")],
+        [_candidate("partial_round_2", confidence=0.9, path="partial-2.zip")],
+        [_candidate("partial_round_3", confidence=0.9, path="partial-3.zip")],
+        [_candidate("partial_round_4", confidence=0.9, path="partial-4.zip")],
+    ])
+
+    result = RepairBeamLoop(
+        scheduler,
+        beam_width=1,
+        max_analyze_candidates=1,
+        max_assess_candidates=1,
+        assess=lambda _item: {
+            "assessment_status": "partial",
+            "decision_hint": "repair",
+            "completeness": 0.5,
+            "recoverable_upper_bound": 1.0,
+        },
+        min_improvement=0.01,
+        patience_rounds=2,
+    ).run([
+        RepairBeamState(source_input={"kind": "file", "path": "broken.zip"}, format="zip", archive_key="broken")
+    ], max_rounds=5)
+
+    assert len(result.rounds) == 3
+    assert result.stop_reason == "global_recovery_stagnation"
+    assert result.rounds_without_global_improvement == 2
+    assert result.best_state is not None
+    assert result.best_state.completeness == 0.5
+
+
+def test_repair_beam_complete_is_success_hard_stop():
+    scheduler = _SequencedCandidateScheduler([
+        [_candidate("complete_round_1", confidence=0.9)],
+        [_candidate("should_not_run", confidence=0.9)],
+    ])
+
+    result = RepairBeamLoop(
+        scheduler,
+        beam_width=1,
+        max_analyze_candidates=1,
+        max_assess_candidates=1,
+        assess=lambda _item: {
+            "assessment_status": "complete",
+            "decision_hint": "accept",
+            "completeness": 1.0,
+            "recoverable_upper_bound": 1.0,
+        },
+        patience_rounds=3,
+    ).run([
+        RepairBeamState(source_input={"kind": "file", "path": "broken.zip"}, format="zip", archive_key="broken")
+    ], max_rounds=5)
+
+    assert len(result.rounds) == 1
+    assert result.stop_reason == "complete_repair"
+    assert result.best_complete_state is not None
+    assert len(scheduler.jobs) == 1
+
+
 def test_repair_beam_builds_from_repair_config():
     scheduler = _FakeCandidateScheduler([_candidate("one", confidence=0.5)])
 

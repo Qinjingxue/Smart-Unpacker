@@ -102,7 +102,7 @@ python sunpack.py config validate
 - `extract --direct-file <file>`：明确指定文件，跳过初始扫描和 detection，直接进入 analysis 及后续解压/校验/修复/后处理。
 - `analysis`：结构分析、signature prepass、fuzzy binary profile、批量 analysis cache。
 - `verification`：输出存在性、manifest、归档 CRC、可读性抽样、部分恢复阈值。
-- `repair`：repair stages、安全策略、deep 限制、auto deep、beam、模块开关和资源上限。
+- `repair`：统一最大修复模式、安全策略、module limits、beam、模块开关和资源上限。
 - `performance`：scheduler profile、worker 超时、profile calibration、resource guard。
 - `recursive_extract`：递归解压策略，`*` 无限递归，正整数为轮数，`?` 每轮询问。
 - `post_extract.archive_cleanup_mode`：成功后 `d` 删除、`r` 回收站、`k` 保留。

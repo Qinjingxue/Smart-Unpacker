@@ -18,6 +18,29 @@ from sunpack_native import (
     repair_write_candidate as _native_write_candidate,
 )
 
+DEFAULT_MODULE_LIMITS = {
+    "max_candidates_per_module": 3,
+    "max_entries": 20000,
+    "max_seconds_per_module": 30.0,
+    "max_input_size_mb": 512,
+    "max_output_size_mb": 2048,
+    "max_entry_uncompressed_mb": 512,
+    "verify_candidates": True,
+    "max_stream_trim_probe_attempts": 32,
+    "max_stream_trim_decode_mb": 64,
+    "max_gzip_footer_fix_decode_mb": 32,
+    "max_next_header_scan_bytes": 1024 * 1024,
+}
+
+
+def module_limits(config: dict[str, Any] | None) -> dict[str, Any]:
+    payload = dict(DEFAULT_MODULE_LIMITS)
+    if isinstance(config, dict):
+        raw = config.get("module_limits")
+        if isinstance(raw, dict):
+            payload.update(raw)
+    return payload
+
 
 def load_source_bytes(source_input: dict[str, Any]) -> bytes:
     kind = str(source_input.get("kind") or "file")

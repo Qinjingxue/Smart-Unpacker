@@ -440,7 +440,6 @@ def _candidate_proposal(payload: dict[str, Any], *, job: RepairJob | None = None
         for key in (
             "module",
             "format",
-            "stage",
             "confidence",
             "score_hint",
             "actions",
@@ -458,7 +457,7 @@ def _candidate_proposal(payload: dict[str, Any], *, job: RepairJob | None = None
             "patch_operation_count",
             "affected_entry_count",
         )
-        if key in payload
+            if key in payload
     }
     if str(output.get("plan_kind") or "") == "materialized":
         output.pop("plan_kind", None)
@@ -481,7 +480,6 @@ def _candidate_proposal(payload: dict[str, Any], *, job: RepairJob | None = None
                 "lazy",
                 "requires_native_validation",
                 "requires_materialization",
-                "plan_kind",
                 "estimated_cost",
                 "has_archive_state_plan",
                 "damage_flag_count",
@@ -524,8 +522,8 @@ def _zip_plan_risk_features(payload: dict[str, Any], *, job: RepairJob | None, r
         expected_output_kind = "boundary_trim"
     elif "quarantine" in text:
         expected_output_kind = "partial_quarantine"
-    elif "partial" in text or "deep" in text:
-        expected_output_kind = "partial_deep"
+    elif "partial" in text:
+        expected_output_kind = "partial_recovery"
     elif directory_rewrite:
         expected_output_kind = "directory_repair"
     elif uses_data_descriptor:
@@ -643,12 +641,11 @@ def _repair_prior_payload(repair_prior: RepairPrior | dict[str, Any] | None, pay
 _SAFE_BREAKDOWNS = {
     "benefit_breakdown": {"confidence", "score_hint"},
     "evidence_breakdown": {"patch_quality"},
-    "cost_breakdown": {"stage", "lazy_materialization", "native_validation", "patch_complexity"},
+    "cost_breakdown": {"lazy_materialization", "native_validation", "patch_complexity"},
     "risk_breakdown": {
         "partial_candidate",
         "content_damage",
         "content_damage_without_native_validation",
-        "deep_without_native_validation",
     },
 }
 

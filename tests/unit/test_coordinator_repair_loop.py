@@ -40,7 +40,7 @@ def test_extraction_failure_repair_reanalysis_loop_skips_reanalysis_after_accept
     assert not task.fact_bag.get("repair.loop.terminal_reason")
 
 
-def test_repair_loop_stops_when_patch_plan_does_not_improve(tmp_path):
+def test_repair_loop_keeps_incumbent_when_patch_plan_does_not_improve(tmp_path):
     source = tmp_path / "broken.zip"
     source.write_bytes(b"broken")
     worse = tmp_path / "worse.zip"
@@ -55,7 +55,7 @@ def test_repair_loop_stops_when_patch_plan_does_not_improve(tmp_path):
     outcome = runner._extract_verify_with_retries(task, str(out_dir), runtime_scheduler=None)
 
     assert outcome.success is False
-    assert task.fact_bag.get("repair.loop.terminal_reason") == "no_repair_improvement"
+    assert not task.fact_bag.get("repair.loop.terminal_reason")
     assert task.fact_bag.get("repair.loop.rounds") in (None, [])
 
 

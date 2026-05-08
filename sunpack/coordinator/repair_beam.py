@@ -130,13 +130,22 @@ class RepairBeamRunResult:
     states: list[RepairBeamState]
     accepted_states: list[RepairBeamState]
     terminal_results: list[Any] = field(default_factory=list)
+    best_complete_state: RepairBeamState | None = None
+    best_partial_state: RepairBeamState | None = None
+    stop_reason: str = ""
+    rounds_without_global_improvement: int = 0
+    frontier_exhausted: bool = False
 
     @property
     def best_state(self) -> RepairBeamState | None:
+        if self.best_complete_state is not None:
+            return self.best_complete_state
+        if self.best_partial_state is not None:
+            return self.best_partial_state
         candidates = self.accepted_states or self.states
         if not candidates:
             return None
-        return max(candidates, key=lambda item: item.score)
+        return max(candidates, key=_state_selection_key)
 
 
 class RepairBeamLoop:
@@ -152,6 +161,8 @@ class RepairBeamLoop:
         assess: AssessFn | None = None,
         should_assess: ShouldAssessFn | None = None,
         min_improvement: float = 0.0,
+        patience_rounds: int = 3,
+        return_best_partial: bool = True,
     ):
         self.scheduler = scheduler
         self.beam_width = max(1, int(beam_width or 1))
@@ -162,6 +173,8 @@ class RepairBeamLoop:
         self.assess = assess or (lambda _candidate: None)
         self.should_assess = should_assess or (lambda _item: True)
         self.min_improvement = max(0.0, float(min_improvement or 0.0))
+        self.patience_rounds = max(0, int(patience_rounds or 0))
+        self.return_best_partial = bool(return_best_partial)
 
     @classmethod
     def from_config(
@@ -176,14 +189,16 @@ class RepairBeamLoop:
         beam = config.get("beam") if isinstance(config.get("beam"), dict) else {}
         return cls(
             scheduler,
-            beam_width=int(beam.get("beam_width", 4) or 4),
-            max_candidates_per_state=int(beam.get("max_candidates_per_state", 4) or 4),
-            max_analyze_candidates=int(beam.get("max_analyze_candidates", 8) or 8),
-            max_assess_candidates=int(beam.get("max_assess_candidates", 4) or 4),
+            beam_width=int(beam.get("beam_width", 6) or 6),
+            max_candidates_per_state=int(beam.get("max_candidates_per_state", 8) or 8),
+            max_analyze_candidates=int(beam.get("max_analyze_candidates", 24) or 24),
+            max_assess_candidates=int(beam.get("max_assess_candidates", 12) or 12),
             analyze=analyze,
             assess=assess,
             should_assess=should_assess,
             min_improvement=float(beam.get("min_improvement", 0.0) or 0.0),
+            patience_rounds=int(beam.get("patience_rounds", 3) or 0),
+            return_best_partial=bool(beam.get("return_best_partial", True)),
         )
 
     def run(self, states: list[RepairBeamState], *, max_rounds: int = 3) -> RepairBeamRunResult:
@@ -191,31 +206,76 @@ class RepairBeamLoop:
         rounds: list[RepairBeamRound] = []
         accepted: list[RepairBeamState] = []
         terminal_results: list[Any] = []
-        best_completeness = max([float(state.completeness or 0.0) for state in frontier] or [0.0])
+        seen_state_digests = {state.digest for state in frontier}
+        seen_patch_digests = {_state_patch_digest(state) for state in frontier if _state_patch_digest(state)}
+        best_state = max(frontier, key=_state_selection_key, default=None)
+        best_complete_state = _best_complete_state(frontier)
+        best_partial_state = _best_partial_state(frontier)
+        best_recovery = _state_recovery_score(best_state) if best_state is not None else 0.0
+        rounds_without_global_improvement = 0
+        stop_reason = "max_repair_rounds_reached"
+        frontier_exhausted = False
         for round_index in range(1, max(0, int(max_rounds or 0)) + 1):
             if not frontier:
+                frontier_exhausted = True
+                stop_reason = "frontier_exhausted"
                 break
             round_result = self.expand_round(frontier, round_index=round_index)
             rounds.append(round_result)
             terminal_results.extend(round_result.terminal_results)
             accepted.extend(round_result.accepted_states)
-            if round_result.accepted_states:
+            best_complete_state = _better_state(best_complete_state, _best_complete_state(round_result.states_out))
+            best_partial_state = _better_state(best_partial_state, _best_partial_state(round_result.states_out))
+            round_best_state = max(round_result.states_out, key=_state_selection_key, default=None)
+            best_state = _better_state(best_state, round_best_state)
+            if best_complete_state is not None:
+                stop_reason = "complete_repair"
                 return RepairBeamRunResult(
                     rounds=rounds,
                     states=round_result.states_out,
                     accepted_states=_top_states(accepted, self.beam_width),
                     terminal_results=terminal_results,
+                    best_complete_state=best_complete_state,
+                    best_partial_state=best_partial_state,
+                    stop_reason=stop_reason,
+                    rounds_without_global_improvement=rounds_without_global_improvement,
+                    frontier_exhausted=False,
                 )
-            next_best = max([float(state.completeness or 0.0) for state in round_result.states_out] or [0.0])
-            if round_index > 1 and next_best <= best_completeness + self.min_improvement:
+            next_best = _state_recovery_score(round_best_state) if round_best_state is not None else 0.0
+            if next_best >= best_recovery + self.min_improvement:
+                best_recovery = next_best
+                rounds_without_global_improvement = 0
+            else:
+                rounds_without_global_improvement += 1
+            if self.patience_rounds > 0 and rounds_without_global_improvement >= self.patience_rounds:
+                stop_reason = "global_recovery_stagnation"
                 break
-            best_completeness = max(best_completeness, next_best)
-            frontier = round_result.states_out
+            frontier = []
+            for state in round_result.states_out:
+                patch_digest = _state_patch_digest(state)
+                if state.digest in seen_state_digests:
+                    continue
+                if patch_digest and patch_digest in seen_patch_digests:
+                    continue
+                seen_state_digests.add(state.digest)
+                if patch_digest:
+                    seen_patch_digests.add(patch_digest)
+                frontier.append(state)
+            if not frontier:
+                frontier_exhausted = True
+                stop_reason = "all_paths_repeated" if round_result.states_out else "frontier_exhausted"
+                break
+        result_states = frontier or ([best_state] if best_state is not None and self.return_best_partial else [])
         return RepairBeamRunResult(
             rounds=rounds,
-            states=frontier,
+            states=result_states,
             accepted_states=_top_states(accepted, self.beam_width),
             terminal_results=terminal_results,
+            best_complete_state=best_complete_state,
+            best_partial_state=best_partial_state if self.return_best_partial else None,
+            stop_reason=stop_reason,
+            rounds_without_global_improvement=rounds_without_global_improvement,
+            frontier_exhausted=frontier_exhausted,
         )
 
     def expand_round(self, states: list[RepairBeamState], *, round_index: int) -> RepairBeamRound:
@@ -614,6 +674,59 @@ def _candidate_progress_score(candidate: RepairCandidate) -> float:
     return best
 
 
+def _state_recovery_score(state: RepairBeamState | None) -> float:
+    if state is None:
+        return 0.0
+    coverage = state.verification.get("archive_coverage") if isinstance(state.verification.get("archive_coverage"), dict) else {}
+    if coverage.get("completeness") is not None:
+        return _clamp01(coverage.get("completeness"))
+    return _clamp01(state.completeness)
+
+
+def _state_selection_key(state: RepairBeamState) -> tuple[float, float, float]:
+    complete_bonus = 1.0 if _state_accepted(state) else 0.0
+    return (complete_bonus, _state_recovery_score(state), float(state.score or 0.0))
+
+
+def _better_state(current: RepairBeamState | None, challenger: RepairBeamState | None) -> RepairBeamState | None:
+    if challenger is None:
+        return current
+    if current is None:
+        return challenger
+    return challenger if _state_selection_key(challenger) > _state_selection_key(current) else current
+
+
+def _best_complete_state(states: list[RepairBeamState]) -> RepairBeamState | None:
+    complete = [state for state in states if _state_accepted(state)]
+    if not complete:
+        return None
+    return max(complete, key=_state_selection_key)
+
+
+def _best_partial_state(states: list[RepairBeamState]) -> RepairBeamState | None:
+    partial = [state for state in states if not _state_accepted(state) and _state_recovery_score(state) > 0.0]
+    if not partial:
+        return None
+    return max(partial, key=_state_selection_key)
+
+
+def _state_patch_digest(state: RepairBeamState) -> str:
+    if state.archive_state:
+        value = state.archive_state.get("patch_digest") or state.archive_state.get("effective_patch_digest")
+        if value:
+            return str(value)
+        return _stable_digest(_archive_state_equivalence_payload(state.archive_state))
+    return str(state.source_input.get("patch_digest") or "")
+
+
+def _clamp01(value: Any) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return min(1.0, max(0.0, number))
+
+
 def _state_accepted(state: RepairBeamState) -> bool:
     if state.decision_hint == DECISION_ACCEPT:
         return True
@@ -623,7 +736,7 @@ def _state_accepted(state: RepairBeamState) -> bool:
 def _top_states(states: list[RepairBeamState], limit: int) -> list[RepairBeamState]:
     seen: set[str] = set()
     output = []
-    for state in sorted(states, key=lambda item: item.score, reverse=True):
+    for state in sorted(states, key=_state_selection_key, reverse=True):
         if state.digest in seen:
             continue
         seen.add(state.digest)

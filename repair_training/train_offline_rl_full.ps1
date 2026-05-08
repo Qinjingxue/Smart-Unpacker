@@ -232,7 +232,6 @@ if (-not $SkipCollect) {
         ProposalMode = "lazy"
         MaterializeTopKPerRound = 4
         MaxTotalStatesPerSample = 6
-        RepairMaxModulesPerJob = 64
     }
 
     Push-Location $RepoRoot

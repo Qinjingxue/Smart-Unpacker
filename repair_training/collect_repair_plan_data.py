@@ -72,6 +72,10 @@ def main(argv: list[str] | None = None) -> int:
         "terminal_success_count": 0,
         "no_output_reason_counts": {},
         "rollout_budget_exhausted": 0,
+        "best_recovery_bucket_counts": {},
+        "stop_reason_counts": {},
+        "global_stagnation_counts": {},
+        "best_partial_returned_count": 0,
         "success_output": str(success_output),
         "failure_output": str(failure_output),
         "collector_shard": args.collector_shard,
@@ -145,12 +149,14 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--pretty", action="store_true", help="Also write formatted .pretty.json files. Enabled by default.")
     parser.add_argument("--no-pretty", action="store_false", dest="pretty", help="Only write compact JSONL.")
     parser.add_argument("--limit", type=int, default=0, help="Collect at most N manifest records.")
-    parser.add_argument("--max-rounds", type=int, default=5, help="Maximum repair rounds per damaged sample.")
+    parser.add_argument("--max-rounds", type=int, default=8, help="Maximum repair rounds per damaged sample.")
     parser.add_argument("--rollout-mode", choices=("greedy", "greedy_current_selector", "beam", "counterfactual"), default="beam", help="Repair-state rollout strategy for multi-step training collection.")
-    parser.add_argument("--beam-size", type=int, default=4, help="Maximum active next states retained per rollout depth.")
-    parser.add_argument("--branch-top-k", type=int, default=3, help="Maximum branch candidates advanced from one state in beam/counterfactual mode.")
+    parser.add_argument("--beam-size", type=int, default=8, help="Maximum active next states retained per rollout depth.")
+    parser.add_argument("--branch-top-k", type=int, default=5, help="Maximum branch candidates advanced from one state in beam/counterfactual mode.")
     parser.add_argument("--counterfactual-extra", type=int, default=2, help="Additional risky/high-value branches considered in counterfactual mode.")
-    parser.add_argument("--max-total-states-per-sample", type=int, default=6, help="Hard cap on states created for one damaged sample, including the root state.")
+    parser.add_argument("--max-total-states-per-sample", type=int, default=80, help="Hard cap on states created for one damaged sample, including the root state.")
+    parser.add_argument("--rollout-min-improvement", type=float, default=0.01, help="Minimum global recovery improvement needed to reset rollout stagnation patience.")
+    parser.add_argument("--rollout-stagnation-patience", type=int, default=3, help="Stop a sample after this many rollout rounds without global best recovery improvement. Use 0 to disable.")
     parser.add_argument("--future-label-discount", type=float, default=0.8, help="Discount used when backfilling future labels from descendant states.")
     parser.add_argument("--rl-discount", type=float, default=0.95, help="Discount used for offline RL future_return backfill.")
     parser.add_argument("--rl-step-cost", type=float, default=0.01, help="Per-action cost subtracted from offline RL rewards.")
@@ -158,10 +164,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--rl-hard-negative-penalty", type=float, default=0.10, help="Penalty applied to hard-negative actions for offline RL evaluation.")
     parser.add_argument("--max-candidates-per-round", type=int, default=10, help="Maximum candidates logged per round.")
     parser.add_argument("--proposal-mode", choices=("lazy", "eager"), default="lazy", help="Use lazy repair plans or eager repair execution while collecting candidates.")
-    parser.add_argument("--materialize-top-k-per-round", type=int, default=2, help="Materialize at most K pre-ranked candidates per round in lazy proposal mode.")
+    parser.add_argument("--materialize-top-k-per-round", type=int, default=10, help="Materialize at most K pre-ranked candidates per round in lazy proposal mode.")
     parser.add_argument("--materialize-selected-only", action="store_true", help="In lazy proposal mode, materialize only the pre-ranked top candidate.")
     parser.add_argument("--skip-unmaterialized-labels", action=argparse.BooleanOptionalAction, default=True, help="Do not write proposal-only rows without oracle labels.")
-    parser.add_argument("--repair-max-modules-per-job", type=int, default=64, help="Repair scheduler module routing cap used during collection.")
     parser.add_argument("--case-timeout-seconds", type=float, default=45.0, help="Terminate one sample after this timeout. Use 0 to disable.")
     parser.add_argument("--stream-large-size-mb", type=float, default=0.0, help="If >0, apply large-stream budgets to gzip/bzip2/xz/zstd samples at or above this source size.")
     parser.add_argument("--stream-large-case-timeout-seconds", type=float, default=0.0, help="Per-sample timeout for large stream samples. Use 0 to keep --case-timeout-seconds.")
@@ -204,6 +209,17 @@ def _update_summary_counts(summary: dict[str, Any], record: dict[str, Any], rows
             terminal_counts = summary.setdefault("terminal_status_counts", {})
             terminal_status = str(row.get("terminal_status") or row.get("label_status") or "unknown")
             terminal_counts[terminal_status] = int(terminal_counts.get(terminal_status, 0) or 0) + 1
+            stop_counts = summary.setdefault("stop_reason_counts", {})
+            stop_counts[terminal_status] = int(stop_counts.get(terminal_status, 0) or 0) + 1
+            bucket = _recovery_bucket(float(row.get("best_recovery_ratio", row.get("terminal_recovery_ratio", 0.0)) or 0.0))
+            bucket_counts = summary.setdefault("best_recovery_bucket_counts", {})
+            bucket_counts[bucket] = int(bucket_counts.get(bucket, 0) or 0) + 1
+            if terminal_status == "global_recovery_stagnation":
+                key = str(row.get("rounds_without_improvement") or 0)
+                stagnation_counts = summary.setdefault("global_stagnation_counts", {})
+                stagnation_counts[key] = int(stagnation_counts.get(key, 0) or 0) + 1
+            if terminal_status != "complete" and float(row.get("best_recovery_ratio", 0.0) or 0.0) > 0.0:
+                summary["best_partial_returned_count"] = int(summary.get("best_partial_returned_count", 0) or 0) + 1
             continue
         label = str(int(row.get("label", 0) or 0))
         label_counts[label] = int(label_counts.get(label, 0) or 0) + 1
@@ -220,9 +236,15 @@ def _update_summary_counts(summary: dict[str, Any], record: dict[str, Any], rows
         status = str(row.get("label_status") or "")
         if status == "no_output":
             details = row.get("label_details") if isinstance(row.get("label_details"), dict) else {}
-            reason = str(details.get("no_output_reason") or "unknown")
+            reason = str(row.get("no_output_reason") or details.get("no_output_reason") or "unknown")
             reason_counts = summary.setdefault("no_output_reason_counts", {})
             reason_counts[reason] = int(reason_counts.get(reason, 0) or 0) + 1
+            module = str(row.get("module") or "unknown")
+            module_counts = summary.setdefault("no_output_by_module", {})
+            module_counts[module] = int(module_counts.get(module, 0) or 0) + 1
+            profile = _record_damage_profile(record)
+            profile_counts = summary.setdefault("no_output_by_damage_profile", {})
+            profile_counts[profile] = int(profile_counts.get(profile, 0) or 0) + 1
         if status == "state_progress":
             summary["state_progress_count"] = int(summary.get("state_progress_count", 0) or 0) + 1
         if status == "partial" or int(row.get("label", 0) or 0) == 1:
@@ -251,6 +273,45 @@ def _update_summary_counts(summary: dict[str, Any], record: dict[str, Any], rows
     layer = str(record.get("actual_damage_layer") or record.get("damage_layer") or "unknown")
     layer_counts = summary.setdefault("damage_layer_counts", {})
     layer_counts[layer] = int(layer_counts.get(layer, 0) or 0) + 1
+
+
+def _recovery_bucket(value: float) -> str:
+    ratio = max(0.0, min(1.0, float(value or 0.0)))
+    if ratio >= 0.999:
+        return "1.00"
+    if ratio <= 0.0:
+        return "0.00"
+    if ratio < 0.25:
+        return "0.00-0.25"
+    if ratio < 0.50:
+        return "0.25-0.50"
+    if ratio < 0.75:
+        return "0.50-0.75"
+    return "0.75-1.00"
+
+
+def _record_damage_profile(record: dict[str, Any]) -> str:
+    profile = str(record.get("damage_profile") or "").strip()
+    if profile:
+        return profile
+    sample_id = str(record.get("sample_id") or "")
+    tail = sample_id.rsplit("__", 1)[-1] if "__" in sample_id else sample_id
+    if tail:
+        parts = tail.rsplit("_", 1)
+        if len(parts) == 2 and parts[1].isdigit():
+            return parts[0]
+        return tail
+    return "unknown"
+
+
+def _is_zip_partial_first_record(record: dict[str, Any]) -> bool:
+    profile = _record_damage_profile(record)
+    flags = {str(item) for item in record.get("damage_flags") or []}
+    if profile.endswith("zip_split_tail_volume_truncated") or profile == "zip_split_tail_volume_truncated":
+        return True
+    if _normalize_format(str(record.get("material_format") or record.get("format") or "")) != "zip":
+        return False
+    return bool(flags & {"missing_volume", "input_truncated", "unexpected_end", "stream_truncated"})
 
 
 def _attach_collector_context(row: dict[str, Any], args: argparse.Namespace) -> None:
@@ -734,12 +795,23 @@ def _collect_sample_rows(record: dict[str, Any], args: argparse.Namespace, debug
     budget_exhausted = False
     max_rounds = max(1, int(args.max_rounds or 1))
     max_total_states = max(1, int(getattr(args, "max_total_states_per_sample", 6) or 6))
+    rollout_min_improvement = max(0.0, float(getattr(args, "rollout_min_improvement", 0.01) or 0.0))
+    rollout_patience = max(0, int(getattr(args, "rollout_stagnation_patience", 3) or 0))
+    global_best_recovery = 0.0
+    best_state_id = str(root_state.get("state_id") or "")
+    rounds_without_improvement = 0
+    complete_found = False
 
     for round_index in range(max_rounds):
+        if complete_found:
+            break
         if not frontier:
             break
         next_frontier: list[dict[str, Any]] = []
+        round_best_recovery = global_best_recovery
         for state in frontier:
+            if complete_found:
+                break
             if expanded_state_count >= max_total_states:
                 budget_exhausted = True
                 rows.append(_rollout_terminal_row(record, state, "budget_exhausted", "rollout state budget exhausted", None))
@@ -869,6 +941,7 @@ def _collect_sample_rows(record: dict[str, Any], args: argparse.Namespace, debug
                 after_state = _state_summary(record, candidate_view.get("source_input") or {}, fmt, list(candidate.damage_flags or damage_flags), payload)
                 delta_features = _state_delta(before_state, after_state)
                 label_info = _label_candidate(record, candidate, best_completeness, before_state, after_state, delta_features, candidate_view=candidate_view)
+                round_best_recovery = max(round_best_recovery, float(label_info.get("completeness", 0.0) or 0.0))
                 row = _action_row(
                     record,
                     state_round,
@@ -943,6 +1016,8 @@ def _collect_sample_rows(record: dict[str, Any], args: argparse.Namespace, debug
                 label_info = label_by_id.get(candidate_id, {})
                 if int(label_info.get("label", 0) or 0) == 3 and rollout_mode != "greedy_current_selector":
                     rows.append(_rollout_terminal_row(record, state, "complete", "branch reached complete repair", after_by_id.get(candidate_id), parent_action_row_id=entry["action_row_id"], parent_candidate_id=candidate_id, terminal_label=3))
+                    complete_found = True
+                    best_state_id = str(state.get("state_id") or best_state_id)
                     continue
                 child_runtime_verification = _terminal_verification_summary_from_state(record, after_by_id.get(candidate_id, {}))
                 child_state = {
@@ -959,6 +1034,9 @@ def _collect_sample_rows(record: dict[str, Any], args: argparse.Namespace, debug
                     "previous_actions": [*previous_actions, *[str(action) for action in candidate.actions]],
                     "previous_modules": [*previous_modules, str(candidate.module_name)],
                     "best_completeness": max(best_completeness, float(label_info.get("completeness", 0.0) or 0.0)),
+                    "global_best_recovery_ratio": max(global_best_recovery, float(label_info.get("completeness", 0.0) or 0.0)),
+                    "rounds_without_improvement": rounds_without_improvement,
+                    "best_state_id": best_state_id,
                     "path_score": float(state.get("path_score", 0.0) or 0.0) + float(int(label_info.get("label", 0) or 0)),
                     "path_actions": [*list(state.get("path_actions") or []), *[str(action) for action in candidate.actions]],
                     "path_modules": [*list(state.get("path_modules") or []), str(candidate.module_name)],
@@ -972,7 +1050,25 @@ def _collect_sample_rows(record: dict[str, Any], args: argparse.Namespace, debug
                 next_frontier.append(child_state)
             if budget_exhausted:
                 break
+            if complete_found:
+                break
         frontier = _trim_frontier(next_frontier, args)
+        if round_best_recovery >= global_best_recovery + rollout_min_improvement:
+            global_best_recovery = round_best_recovery
+            rounds_without_improvement = 0
+            if frontier:
+                best_state_id = str(frontier[0].get("state_id") or best_state_id)
+        elif frontier:
+            rounds_without_improvement += 1
+        for item in frontier:
+            item["global_best_recovery_ratio"] = global_best_recovery
+            item["rounds_without_improvement"] = rounds_without_improvement
+            item["best_state_id"] = best_state_id
+        if rollout_patience > 0 and frontier and rounds_without_improvement >= rollout_patience:
+            for state in frontier:
+                rows.append(_rollout_terminal_row(record, state, "global_recovery_stagnation", "global best recovery did not improve within rollout patience", _state_summary(record, dict(state.get("source_input") or {}), fmt, list(state.get("damage_flags") or []))))
+            frontier = []
+            break
         if budget_exhausted:
             break
 
@@ -1007,6 +1103,9 @@ def _root_rollout_state(record: dict[str, Any], fmt: str, rollout_mode: str) -> 
         "previous_actions": [],
         "previous_modules": [],
         "best_completeness": 0.0,
+        "global_best_recovery_ratio": 0.0,
+        "rounds_without_improvement": 0,
+        "best_state_id": f"{sample_id}:r0:b0",
         "path_score": 0.0,
         "path_actions": [],
         "path_modules": [],
@@ -1284,6 +1383,9 @@ def _rollout_terminal_row(
     terminal_coverage = terminal_verification.get("archive_coverage") if isinstance(terminal_verification.get("archive_coverage"), dict) else {}
     terminal_recovery_ratio = _terminal_recovery_ratio(terminal_verification)
     terminal_ratio_source = _terminal_recovery_ratio_source(terminal_verification)
+    best_recovery_ratio = max(terminal_recovery_ratio, float(state.get("global_best_recovery_ratio", state.get("best_completeness", 0.0)) or 0.0))
+    best_state_id = str(state.get("best_state_id") or state.get("state_id") or "")
+    rounds_without_improvement = int(state.get("rounds_without_improvement", 0) or 0)
     row = {
         "schema_version": 1,
         "source": "repair_plan_corpus",
@@ -1295,6 +1397,8 @@ def _rollout_terminal_row(
         "material_sample_id": record.get("material_sample_id"),
         "source_archive_name": record.get("source_archive_name"),
         "source_derivation": _compact_source_derivation(source_derivation),
+        "damage_profile": _record_damage_profile(record),
+        "partial_first_target": _is_zip_partial_first_record(record),
         "zip_variant": record.get("zip_variant") or source_derivation.get("zip_variant"),
         "zip_container_tags": record.get("zip_container_tags") or source_derivation.get("zip_container_tags"),
         "zip_structure_features": record.get("zip_structure_features") or source_derivation.get("zip_structure_features"),
@@ -1326,6 +1430,10 @@ def _rollout_terminal_row(
         "terminal_archive_coverage": terminal_coverage,
         "terminal_recovery_ratio": terminal_recovery_ratio,
         "terminal_recovery_ratio_source": terminal_ratio_source,
+        "best_recovery_ratio": best_recovery_ratio,
+        "best_state_id": best_state_id,
+        "rounds_without_improvement": rounds_without_improvement,
+        "frontier_exhausted": status in {"frontier_exhausted", "dead_end", "no_candidates"},
         "stable_features": {
             "state": {
                 "format": record.get("format"),
@@ -1350,6 +1458,9 @@ def _rollout_terminal_row(
             "selected_path_terminal_label": label,
             "selected_path_terminal_status": status,
             "steps_to_terminal": 0,
+            "best_recovery_ratio": best_recovery_ratio,
+            "best_state_id": best_state_id,
+            "rounds_without_improvement": rounds_without_improvement,
         },
         "training_targets": {
             "immediate_gain": label,
@@ -1357,6 +1468,7 @@ def _rollout_terminal_row(
             "discounted_gain": float(label),
             "blended_gain": float(label),
             "terminal_recovery_ratio": terminal_recovery_ratio,
+            "best_recovery_ratio": best_recovery_ratio,
             "discounted_terminal_recovery_ratio": terminal_recovery_ratio,
             "risk_class": _risk_class(label, label, status),
             "hard_negative_weight": _hard_negative_weight(label, label, status),
@@ -1954,6 +2066,8 @@ def _rl_action_penalty(row: dict[str, Any], terminal_status: str, no_output_pena
     penalty = 0.0
     if status in {"no_output", "dead_end", "no_candidates"}:
         penalty += no_output_penalty
+    if status == "no_output" and str(row.get("no_output_reason") or _nested(row, "label_details", "no_output_reason") or "") == "lazy_plan_produced_no_candidate":
+        penalty += no_output_penalty
     if status == "hard_negative" or int(row.get("label", 0) or 0) < 0:
         penalty += hard_negative_penalty
     return penalty
@@ -2089,10 +2203,8 @@ def _scheduler(args: argparse.Namespace) -> RepairScheduler:
     return RepairScheduler({
         "repair": {
             "workspace": str(Path(args.workspace)),
-            "max_modules_per_job": max(1, int(getattr(args, "repair_max_modules_per_job", 64) or 64)),
             "max_attempts_per_task": 8,
-            "stages": {"deep": True},
-            "deep": {
+            "module_limits": {
                 "max_candidates_per_module": 6,
                 "verify_candidates": False,
                 "max_seconds_per_module": 8.0,
@@ -2211,6 +2323,9 @@ def _action_row(
         "label": int(label_info.get("label", 0) or 0),
         "label_status": label_info.get("status"),
         "no_output_reason": label_info.get("no_output_reason") if str(label_info.get("status") or "") == "no_output" else "",
+        "source_kind": label_info.get("source_kind") or "",
+        "context_mismatch_penalty": float(payload.get("context_mismatch_penalty", 0.0) or 0.0),
+        "lazy_no_output_risk": float(payload.get("lazy_no_output_risk", 0.0) or 0.0),
         "label_details": label_info,
         "stable_features": {
             "state": state_features,
@@ -2231,6 +2346,8 @@ def _action_row(
             "module_selected_by_router": module_decision.get("selected"),
             "generation_priority": payload.get("generation_priority"),
             "ranking_raw_score": (payload.get("ltr_features") or {}).get("ranking_raw_score") if isinstance(payload.get("ltr_features"), dict) else None,
+            "context_mismatch_penalty": payload.get("context_mismatch_penalty"),
+            "lazy_no_output_risk": payload.get("lazy_no_output_risk"),
             "current_rank": rank,
             "selected_by_current_system": bool(selected),
         },
@@ -2388,13 +2505,14 @@ def _runtime_candidate_features(payload: dict[str, Any]) -> dict[str, Any]:
         for key in (
             "module",
             "format",
-            "stage",
             "confidence",
             "score_hint",
             "actions",
             "damage_flags",
             "patch_cost",
             "risk_penalty",
+            "context_mismatch_penalty",
+            "lazy_no_output_risk",
             "cost_penalty",
             "evidence_score",
             "benefit_score",
@@ -2410,12 +2528,26 @@ def _runtime_candidate_features(payload: dict[str, Any]) -> dict[str, Any]:
     safe_breakdowns = {
         "benefit_breakdown": {"confidence", "score_hint"},
         "evidence_breakdown": {"patch_quality"},
-        "cost_breakdown": {"stage", "lazy_materialization", "native_validation", "patch_complexity"},
+        "cost_breakdown": {"lazy_materialization", "native_validation", "patch_complexity"},
         "risk_breakdown": {
             "partial_candidate",
             "content_damage",
             "content_damage_without_native_validation",
-            "deep_without_native_validation",
+        },
+        "context_mismatch_breakdown": {
+            "resolve_conflicts_without_conflict",
+            "resolve_conflicts_data_descriptor",
+            "resolve_conflicts_simple_directory",
+            "zip64_without_zip64",
+            "pointers_on_sfx_or_split",
+            "boundary_on_payload_descriptor",
+        },
+        "lazy_no_output_breakdown": {
+            "lazy_candidate",
+            "materialization_failed",
+            "resolve_conflicts_without_conflict",
+            "zip64_without_zip64",
+            "split_tail_non_salvage",
         },
     }
     for group, safe_names in safe_breakdowns.items():
@@ -2431,13 +2563,14 @@ def _runtime_candidate_features(payload: dict[str, Any]) -> dict[str, Any]:
             for key in (
                 "module",
                 "format",
-                "stage",
                 "confidence",
                 "score_hint",
                 "benefit_score",
                 "evidence_score",
                 "cost_penalty",
                 "risk_penalty",
+                "context_mismatch_penalty",
+                "lazy_no_output_risk",
                 "module_bias",
                 "generation_priority",
                 "ranking_raw_score",
@@ -2462,7 +2595,7 @@ def _runtime_candidate_features(payload: dict[str, Any]) -> dict[str, Any]:
     if isinstance(history, dict):
         output["history_features"] = {
             key: history.get(key)
-            for key in ("available", "sample_count", "attempts", "accepted", "score", "stage", "format", "module")
+            for key in ("available", "sample_count", "attempts", "accepted", "score", "format", "module")
             if key in history
         }
     return output
@@ -2493,12 +2626,11 @@ def _repair_prior_from_candidate(payload: dict[str, Any], module_decision: dict[
             for group, names in {
                 "benefit_breakdown": {"confidence", "score_hint"},
                 "evidence_breakdown": {"patch_quality"},
-                "cost_breakdown": {"stage", "lazy_materialization", "native_validation", "patch_complexity"},
+                "cost_breakdown": {"lazy_materialization", "native_validation", "patch_complexity"},
                 "risk_breakdown": {
                     "partial_candidate",
                     "content_damage",
                     "content_damage_without_native_validation",
-                    "deep_without_native_validation",
                 },
             }.items()
         },

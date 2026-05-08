@@ -867,7 +867,6 @@ def _generation_summary(generated_batch) -> dict[str, Any]:
         "message": str(getattr(generated_batch, "message", "") or ""),
         "candidate_generation": {
             "candidate_count": generation.get("candidate_count", len(generated_batch.candidates)),
-            "auto_deep_attempted": bool(generation.get("auto_deep_attempted", False)),
             "warnings": list(generation.get("warnings") or []),
         },
         "capability_decision": {

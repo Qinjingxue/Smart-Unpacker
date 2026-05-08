@@ -137,7 +137,6 @@ def _run_training_collector(root: Path, manifest: Path, args: argparse.Namespace
         "--max-total-states-per-sample", "5",
         "--max-candidates-per-round", "6",
         "--materialize-top-k-per-round", "6",
-        "--repair-max-modules-per-job", "4" if args.mode == "greedy_current_selector" else "64",
         "--proposal-mode", "eager" if args.mode == "greedy_current_selector" else "lazy",
         "--case-timeout-seconds", "30",
         "--no-pretty",
@@ -165,8 +164,7 @@ def _run_real_project_rounds(root: Path, case, args: argparse.Namespace) -> dict
                 "workspace": str(root / "real_workspace"),
                 "max_repair_rounds_per_task": max(1, int(args.max_rounds)),
                 "max_attempts_per_task": max(1, int(args.max_rounds)),
-                "stages": {"deep": True},
-                "deep": {"max_candidates_per_module": 4, "verify_candidates": False, "max_seconds_per_module": 3.0},
+                "module_limits": {"max_candidates_per_module": 4, "verify_candidates": False, "max_seconds_per_module": 3.0},
             },
             "verification": {
                 "enabled": True,

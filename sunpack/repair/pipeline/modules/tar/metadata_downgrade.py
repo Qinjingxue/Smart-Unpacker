@@ -3,7 +3,7 @@ from __future__ import annotations
 from sunpack.repair.diagnosis import RepairDiagnosis
 from sunpack.repair.job import RepairJob
 from sunpack.repair.pipeline.module import RepairModuleSpec, RepairRoute
-from sunpack.repair.pipeline.modules._common import source_input_for_job
+from sunpack.repair.pipeline.modules._common import source_input_for_job, module_limits
 from sunpack.repair.pipeline.registry import register_repair_module
 from sunpack.repair.result import RepairResult
 from sunpack_native import tar_metadata_downgrade_recovery as _native_tar_metadata_downgrade_recovery
@@ -37,13 +37,13 @@ class TarMetadataDowngradeRecovery:
         return 0.0
 
     def repair(self, job: RepairJob, diagnosis: RepairDiagnosis, workspace: str, config: dict) -> RepairResult:
-        deep = config.get("deep") if isinstance(config.get("deep"), dict) else {}
+        limits = module_limits(config)
         result = dict(_native_tar_metadata_downgrade_recovery(
             source_input_for_job(job),
             workspace,
-            float(deep.get("max_input_size_mb", 512) or 0),
-            float(deep.get("max_output_size_mb", 2048) or 0),
-            int(deep.get("max_entries", 20000) or 20000),
+            float(limits.get("max_input_size_mb", 512) or 0),
+            float(limits.get("max_output_size_mb", 2048) or 0),
+            int(limits.get("max_entries", 20000) or 20000),
         ))
         selected_path = str(result.get("selected_path") or "")
         status = str(result.get("status") or "unrepairable")

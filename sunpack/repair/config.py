@@ -6,23 +6,20 @@ DEFAULT_REPAIR_CONFIG = {
     "enabled": True,
     "workspace": ".sunpack_repair",
     "keep_candidates": False,
-    "max_modules_per_job": 6,
     "max_attempts_per_task": 3,
     "max_repair_rounds_per_task": 5,
     "max_repair_seconds_per_task": 120.0,
     "max_repair_generated_files_per_task": 16,
     "max_repair_generated_mb_per_task": 2048.0,
-    "stages": {
-        "targeted": True,
-        "safe_repair": True,
-        "deep": True,
-    },
+    "stagnation_patience_rounds": 3,
+    "min_recovery_improvement": 0.01,
+    "continue_after_partial": True,
     "safety": {
         "allow_unsafe": False,
         "allow_partial": True,
         "allow_lossy": False,
     },
-    "deep": {
+    "module_limits": {
         "max_candidates_per_module": 3,
         "max_entries": 20000,
         "max_seconds_per_module": 30.0,
@@ -30,22 +27,21 @@ DEFAULT_REPAIR_CONFIG = {
         "max_output_size_mb": 2048,
         "max_entry_uncompressed_mb": 512,
         "verify_candidates": True,
-    },
-    "auto_deep": {
-        "enabled": True,
-        "require_verification_repair": True,
-        "max_modules": 2,
-        "max_candidates_per_module": 1,
-        "max_input_size_mb": 128,
+        "max_stream_trim_probe_attempts": 32,
+        "max_stream_trim_decode_mb": 64,
+        "max_gzip_footer_fix_decode_mb": 32,
+        "max_next_header_scan_bytes": 1024 * 1024,
     },
     "beam": {
         "enabled": True,
-        "beam_width": 4,
-        "max_candidates_per_state": 4,
-        "max_analyze_candidates": 8,
-        "max_assess_candidates": 4,
-        "max_rounds": 3,
+        "beam_width": 6,
+        "max_candidates_per_state": 8,
+        "max_analyze_candidates": 24,
+        "max_assess_candidates": 12,
+        "max_rounds": 6,
         "min_improvement": 0.01,
+        "patience_rounds": 3,
+        "return_best_partial": True,
     },
     "telemetry": {
         "enabled": False,
@@ -108,6 +104,23 @@ DEFAULT_REPAIR_CONFIG = {
     ],
 }
 
+MODULE_NAME_ALIASES = {
+    "zip_central_directory_rebuild": "zip_rebuild",
+    "zip_data_descriptor_recovery": "zip_rebuild",
+    "zip_partial_recovery": "zip_rebuild",
+    "zip_eocd_repair": "zip_fix_pointers",
+    "zip_central_directory_offset_fix": "zip_fix_pointers",
+    "zip_central_directory_count_fix": "zip_fix_pointers",
+    "zip_trailing_junk_trim": "zip_fix_boundary",
+    "zip_comment_length_fix": "zip_fix_boundary",
+    "zip_deep_partial_recovery": "zip_salvage",
+    "zip_conflict_resolver_rebuild": "zip_resolve_conflicts",
+    "zip_entry_quarantine_rebuild": "zip_salvage",
+    "zip_missing_volume_partial_salvage": "zip_salvage",
+    "zip64_field_repair": "zip_fix_zip64",
+    "zip_local_header_field_repair": "zip_fix_pointers",
+}
+
 
 def repair_config(config: dict[str, Any] | None) -> dict[str, Any]:
     payload = dict((config or {}).get("repair") or {})
@@ -125,20 +138,24 @@ def normalize_repair_config(value: Any) -> dict[str, Any]:
         raise ValueError("repair.thresholds was removed; analysis confidence no longer triggers repair directly")
     if "trigger_on_extraction_failure" in value:
         raise ValueError("repair.trigger_on_extraction_failure was removed; repair now runs from verification decisions")
+    removed = sorted({"stages", "deep", "auto_deep", "max_modules_per_job"} & set(value))
+    if removed:
+        joined = ", ".join(f"repair.{name}" for name in removed)
+        raise ValueError(f"{joined} was removed; repair now always uses maximum module exploration. Move resource budgets to repair.module_limits or per-module module_limits.")
     config = _merge(DEFAULT_REPAIR_CONFIG, value)
     config["enabled"] = _bool_value(config.get("enabled", True), "repair.enabled")
     config["workspace"] = str(config.get("workspace") or ".sunpack_repair")
     config["keep_candidates"] = _bool_value(config.get("keep_candidates", False), "repair.keep_candidates")
-    config["max_modules_per_job"] = _int_at_least(config, "max_modules_per_job", 1)
     config["max_attempts_per_task"] = _int_at_least(config, "max_attempts_per_task", 0)
     config["max_repair_rounds_per_task"] = _int_at_least(config, "max_repair_rounds_per_task", 0)
     config["max_repair_seconds_per_task"] = _float_at_least(config, "max_repair_seconds_per_task", 0.0)
     config["max_repair_generated_files_per_task"] = _int_at_least(config, "max_repair_generated_files_per_task", 0)
     config["max_repair_generated_mb_per_task"] = _float_at_least(config, "max_repair_generated_mb_per_task", 0.0)
-    config["stages"] = _normalize_bool_map(config.get("stages"), "repair.stages")
+    config["stagnation_patience_rounds"] = _int_at_least(config, "stagnation_patience_rounds", 0)
+    config["min_recovery_improvement"] = _float_at_least(config, "min_recovery_improvement", 0.0)
+    config["continue_after_partial"] = _bool_value(config.get("continue_after_partial", True), "repair.continue_after_partial")
     config["safety"] = _normalize_safety(config.get("safety"))
-    config["deep"] = _normalize_deep(config.get("deep"))
-    config["auto_deep"] = _normalize_auto_deep(config.get("auto_deep"))
+    config["module_limits"] = _normalize_module_limits(config.get("module_limits"))
     config["beam"] = _normalize_beam(config.get("beam"))
     config["telemetry"] = _normalize_telemetry(config.get("telemetry"))
     config["modules"] = _normalize_modules(config.get("modules"))
@@ -173,12 +190,6 @@ def _merge(base: dict, override: dict) -> dict:
     return result
 
 
-def _normalize_bool_map(value: Any, path: str) -> dict[str, bool]:
-    if not isinstance(value, dict):
-        raise ValueError(f"{path} must be an object")
-    return {str(key): _bool_value(item, f"{path}.{key}") for key, item in value.items()}
-
-
 def _normalize_safety(value: Any) -> dict[str, bool]:
     if not isinstance(value, dict):
         raise ValueError("repair.safety must be an object")
@@ -193,9 +204,9 @@ def _normalize_safety(value: Any) -> dict[str, bool]:
     }
 
 
-def _normalize_deep(value: Any) -> dict[str, Any]:
+def _normalize_module_limits(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
-        raise ValueError("repair.deep must be an object")
+        raise ValueError("repair.module_limits must be an object")
     return {
         **value,
         "max_candidates_per_module": _int_at_least(value, "max_candidates_per_module", 1),
@@ -204,23 +215,11 @@ def _normalize_deep(value: Any) -> dict[str, Any]:
         "max_input_size_mb": _float_at_least(value, "max_input_size_mb", 0.0),
         "max_output_size_mb": _float_at_least(value, "max_output_size_mb", 0.0),
         "max_entry_uncompressed_mb": _float_at_least(value, "max_entry_uncompressed_mb", 0.0),
-        "verify_candidates": _bool_value(value.get("verify_candidates", True), "repair.deep.verify_candidates"),
-    }
-
-
-def _normalize_auto_deep(value: Any) -> dict[str, Any]:
-    if not isinstance(value, dict):
-        raise ValueError("repair.auto_deep must be an object")
-    return {
-        **value,
-        "enabled": _bool_value(value.get("enabled", True), "repair.auto_deep.enabled"),
-        "require_verification_repair": _bool_value(
-            value.get("require_verification_repair", True),
-            "repair.auto_deep.require_verification_repair",
-        ),
-        "max_modules": _int_at_least(value, "max_modules", 1),
-        "max_candidates_per_module": _int_at_least(value, "max_candidates_per_module", 1),
-        "max_input_size_mb": _float_at_least(value, "max_input_size_mb", 0.0),
+        "max_stream_trim_probe_attempts": _int_at_least(value, "max_stream_trim_probe_attempts", 1),
+        "max_stream_trim_decode_mb": _float_at_least(value, "max_stream_trim_decode_mb", 0.0),
+        "max_gzip_footer_fix_decode_mb": _float_at_least(value, "max_gzip_footer_fix_decode_mb", 0.0),
+        "max_next_header_scan_bytes": _int_at_least(value, "max_next_header_scan_bytes", 1),
+        "verify_candidates": _bool_value(value.get("verify_candidates", True), "repair.module_limits.verify_candidates"),
     }
 
 
@@ -236,6 +235,8 @@ def _normalize_beam(value: Any) -> dict[str, Any]:
         "max_assess_candidates": _int_at_least(value, "max_assess_candidates", 1),
         "max_rounds": _int_at_least(value, "max_rounds", 0),
         "min_improvement": _float_at_least(value, "min_improvement", 0.0),
+        "patience_rounds": _int_at_least(value, "patience_rounds", 0),
+        "return_best_partial": _bool_value(value.get("return_best_partial", True), "repair.beam.return_best_partial"),
     }
 
 
@@ -260,7 +261,7 @@ def _normalize_modules(value: Any) -> list[dict[str, Any]]:
         if not name:
             raise ValueError(f"repair.modules[{index}].name must not be empty")
         normalized = dict(item)
-        normalized["name"] = name
+        normalized["name"] = MODULE_NAME_ALIASES.get(name, name)
         normalized["enabled"] = _bool_value(item.get("enabled", False), f"repair.modules[{index}].enabled")
         result.append(normalized)
     return result

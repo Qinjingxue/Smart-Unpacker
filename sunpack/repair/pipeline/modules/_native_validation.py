@@ -2,13 +2,14 @@ from __future__ import annotations
 
 from typing import Any
 
+from sunpack.repair.pipeline.modules._common import module_limits
 from sunpack.support.sevenzip_native import get_native_password_tester
 
 
 def validate_with_native_probe(path: str, expected_format: str, config: dict[str, Any]) -> tuple[bool, list[str], dict[str, Any]]:
-    deep = config.get("deep") if isinstance(config.get("deep"), dict) else {}
-    if not bool(deep.get("verify_candidates", True)):
-        return True, [], {"skipped": True, "reason": "repair.deep.verify_candidates is false"}
+    limits = module_limits(config)
+    if not bool(limits.get("verify_candidates", True)):
+        return True, [], {"skipped": True, "reason": "repair.module_limits.verify_candidates is false"}
 
     try:
         tester = get_native_password_tester()

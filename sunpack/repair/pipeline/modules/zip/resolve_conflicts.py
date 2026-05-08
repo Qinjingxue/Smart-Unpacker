@@ -3,7 +3,7 @@ from __future__ import annotations
 from sunpack.repair.diagnosis import RepairDiagnosis
 from sunpack.repair.job import RepairJob
 from sunpack.repair.pipeline.module import RepairModuleSpec, RepairRoute
-from sunpack.repair.pipeline.modules._common import source_input_for_job
+from sunpack.repair.pipeline.modules._common import source_input_for_job, module_limits
 from sunpack.repair.pipeline.modules._native_candidates import candidates_from_native_result
 from sunpack.repair.pipeline.registry import register_repair_module
 from sunpack.repair.result import RepairResult
@@ -21,9 +21,7 @@ class ZipResolveConflicts:
         routes=(
             RepairRoute(
                 formats=("zip",),
-                require_any_categories=("directory_rebuild", "content_recovery"),
                 require_any_flags=("duplicate_entries", "overlapping_entries", "local_header_conflict"),
-                require_any_failure_kinds=("structure_recognition", "corrupted_data", "checksum_error"),
                 reject_any_flags=("missing_volume",),
                 base_score=0.90,
             ),
@@ -34,21 +32,17 @@ class ZipResolveConflicts:
         flags = set(job.damage_flags)
         if flags & {"duplicate_entries", "overlapping_entries", "local_header_conflict"}:
             return 0.96
-        if flags & {"central_directory_offset_bad", "local_header_recovery"} and flags & {"central_directory_bad"}:
-            return 0.50
-        if "directory_rebuild" in diagnosis.categories and flags & {"central_directory_offset_bad", "central_directory_bad", "local_header_recovery"}:
-            return 0.55
         return 0.0
 
     def repair(self, job: RepairJob, diagnosis: RepairDiagnosis, workspace: str, config: dict) -> RepairResult:
-        deep = config.get("deep") if isinstance(config.get("deep"), dict) else {}
+        limits = module_limits(config)
         result = dict(_native_zip_conflict_resolver(
             source_input_for_job(job), workspace,
-            int(deep.get("max_entries", 20000) or 20000),
-            float(deep.get("max_input_size_mb", 512) or 0),
-            float(deep.get("max_output_size_mb", 2048) or 0),
-            float(deep.get("max_entry_uncompressed_mb", 512) or 0),
-            bool(deep.get("verify_candidates", True)),
+            int(limits.get("max_entries", 20000) or 20000),
+            float(limits.get("max_input_size_mb", 512) or 0),
+            float(limits.get("max_output_size_mb", 2048) or 0),
+            float(limits.get("max_entry_uncompressed_mb", 512) or 0),
+            bool(limits.get("verify_candidates", True)),
         ))
         status = str(result.get("status") or "unrepairable")
         selected_path = str(result.get("selected_path") or "")
@@ -73,14 +67,14 @@ class ZipResolveConflicts:
         )
 
     def generate_candidates(self, job: RepairJob, diagnosis: RepairDiagnosis, workspace: str, config: dict):
-        deep = config.get("deep") if isinstance(config.get("deep"), dict) else {}
+        limits = module_limits(config)
         result = dict(_native_zip_conflict_resolver(
             source_input_for_job(job), workspace,
-            int(deep.get("max_entries", 20000) or 20000),
-            float(deep.get("max_input_size_mb", 512) or 0),
-            float(deep.get("max_output_size_mb", 2048) or 0),
-            float(deep.get("max_entry_uncompressed_mb", 512) or 0),
-            bool(deep.get("verify_candidates", True)),
+            int(limits.get("max_entries", 20000) or 20000),
+            float(limits.get("max_input_size_mb", 512) or 0),
+            float(limits.get("max_output_size_mb", 2048) or 0),
+            float(limits.get("max_entry_uncompressed_mb", 512) or 0),
+            bool(limits.get("verify_candidates", True)),
         ))
         return candidates_from_native_result(
             self.spec.name, result, job, diagnosis,

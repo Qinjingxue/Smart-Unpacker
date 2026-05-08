@@ -94,7 +94,7 @@ def _run_profile(args: argparse.Namespace, workers: int, run_dir: Path) -> dict[
     stdout_path = run_dir / "stdout.log"
     stderr_path = run_dir / "stderr.log"
     if args.no_run:
-        return _summarize_run(workers, run_dir, events, summary, stdout_path, stderr_path, 0.0, None)
+        return _summarize_run(workers, run_dir, events, summary, success, failure, stdout_path, stderr_path, 0.0, None)
 
     for path in (events, summary, success, failure, stdout_path, stderr_path):
         try:
@@ -122,7 +122,7 @@ def _run_profile(args: argparse.Namespace, workers: int, run_dir: Path) -> dict[
         stdout_path.write_text(exc.stdout or "", encoding="utf-8")
         stderr_path.write_text(exc.stderr or f"profile runner timeout after {args.timeout_seconds}s", encoding="utf-8")
     elapsed = time.perf_counter() - started
-    return _summarize_run(workers, run_dir, events, summary, stdout_path, stderr_path, elapsed, returncode, timed_out=timed_out, command=command)
+    return _summarize_run(workers, run_dir, events, summary, success, failure, stdout_path, stderr_path, elapsed, returncode, timed_out=timed_out, command=command)
 
 
 def _command(args: argparse.Namespace, workers: int, events: Path, summary: Path, success: Path, failure: Path, run_dir: Path) -> list[str]:
@@ -189,6 +189,8 @@ def _summarize_run(
     run_dir: Path,
     events_path: Path,
     summary_path: Path,
+    success_path: Path,
+    failure_path: Path,
     stdout_path: Path,
     stderr_path: Path,
     elapsed_seconds: float,
@@ -202,6 +204,7 @@ def _summarize_run(
     phase_stats, slow_phases = _phase_report(events, slow_threshold=_current_slow_threshold())
     sample_stats = _sample_report(events)
     lifecycle_stats, lifecycle_breakpoints = _lifecycle_report(events, slow_threshold=_current_slow_threshold())
+    no_output_profile = _no_output_profile_report(success_path, failure_path)
     return {
         "workers": workers,
         "returncode": returncode,
@@ -209,6 +212,8 @@ def _summarize_run(
         "elapsed_seconds": round(elapsed_seconds, 3),
         "events_path": str(events_path),
         "summary_path": str(summary_path),
+        "success_path": str(success_path),
+        "failure_path": str(failure_path),
         "stdout_path": str(stdout_path),
         "stderr_path": str(stderr_path),
         "command": command or [],
@@ -222,6 +227,7 @@ def _summarize_run(
         "lifecycle_breakpoints": lifecycle_breakpoints[:30],
         "slow_samples": sample_stats["slow_samples"][:20],
         "sample_status_counts": sample_stats["status_counts"],
+        "no_output_profile": no_output_profile,
     }
 
 
@@ -393,6 +399,115 @@ def _compact_collector_summary(summary: dict[str, Any]) -> dict[str, Any]:
         return {}
     omitted = {"shards"}
     return {key: value for key, value in summary.items() if key not in omitted}
+
+
+def _no_output_profile_report(success_path: Path, failure_path: Path) -> dict[str, Any]:
+    rows = _load_jsonl(success_path) + _load_jsonl(failure_path)
+    no_output_rows = [row for row in rows if row.get("row_type") != "terminal" and str(row.get("label_status") or "") == "no_output"]
+    reason_counts: Counter[str] = Counter()
+    module_counts: Counter[str] = Counter()
+    damage_counts: Counter[str] = Counter()
+    round_counts: Counter[str] = Counter()
+    by_sample: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        if row.get("row_type") == "terminal":
+            continue
+        by_sample[str(row.get("sample_id") or "")].append(row)
+    for row in no_output_rows:
+        details = row.get("label_details") if isinstance(row.get("label_details"), dict) else {}
+        reason_counts[str(row.get("no_output_reason") or details.get("no_output_reason") or "unknown")] += 1
+        module_counts[str(row.get("module") or "unknown")] += 1
+        damage_counts[_row_damage_profile(row)] += 1
+        round_counts[str(int(row.get("round") or 0))] += 1
+
+    profile_samples: dict[str, dict[str, Any]] = {}
+    for sample_id, sample_rows in by_sample.items():
+        profile = _combined_damage_profile(_row_damage_profile(sample_rows[0]))
+        stats = profile_samples.setdefault(
+            profile,
+            {
+                "profile": profile,
+                "samples": 0,
+                "complete": 0,
+                "partial": 0,
+                "progress": 0,
+                "unfixed": 0,
+                "no_output_samples": 0,
+                "no_output_rows": 0,
+                "no_output_modules": Counter(),
+                "round_counts": Counter(),
+            },
+        )
+        stats["samples"] += 1
+        best_label = max((int(row.get("label") or 0) for row in sample_rows), default=0)
+        statuses = {str(row.get("label_status") or "") for row in sample_rows}
+        if best_label >= 3 or "complete" in statuses:
+            stats["complete"] += 1
+        elif "partial" in statuses or best_label == 1:
+            stats["partial"] += 1
+        elif "state_progress" in statuses:
+            stats["progress"] += 1
+        else:
+            stats["unfixed"] += 1
+        sample_no_output = [row for row in sample_rows if str(row.get("label_status") or "") == "no_output"]
+        if sample_no_output:
+            stats["no_output_samples"] += 1
+            stats["no_output_rows"] += len(sample_no_output)
+            for row in sample_no_output:
+                stats["no_output_modules"][str(row.get("module") or "unknown")] += 1
+                stats["round_counts"][str(int(row.get("round") or 0))] += 1
+
+    combined_profiles: list[dict[str, Any]] = []
+    for stats in profile_samples.values():
+        samples = max(1, int(stats["samples"]))
+        combined_profiles.append({
+            "profile": stats["profile"],
+            "samples": stats["samples"],
+            "complete": stats["complete"],
+            "partial": stats["partial"],
+            "progress": stats["progress"],
+            "unfixed": stats["unfixed"],
+            "complete_rate": round(float(stats["complete"]) / samples, 4),
+            "partial_or_progress_rate": round(float(stats["partial"] + stats["progress"]) / samples, 4),
+            "no_output_samples": stats["no_output_samples"],
+            "no_output_rows": stats["no_output_rows"],
+            "no_output_rows_per_sample": round(float(stats["no_output_rows"]) / samples, 3),
+            "top_no_output_modules": dict(stats["no_output_modules"].most_common(8)),
+            "round_counts": dict(stats["round_counts"].most_common()),
+        })
+    combined_profiles.sort(key=lambda item: (int(item["no_output_rows"]), int(item["samples"])), reverse=True)
+    return {
+        "row_count": len(rows),
+        "sample_count": len(by_sample),
+        "no_output_rows": len(no_output_rows),
+        "reason_counts": dict(reason_counts.most_common()),
+        "module_counts": dict(module_counts.most_common(20)),
+        "damage_profile_counts": dict(damage_counts.most_common(30)),
+        "round_counts": dict(round_counts.most_common()),
+        "combined_profiles": combined_profiles[:30],
+    }
+
+
+def _row_damage_profile(row: dict[str, Any]) -> str:
+    profile = str(row.get("damage_profile") or "").strip()
+    if profile:
+        return profile
+    sample_id = str(row.get("sample_id") or "")
+    tail = sample_id.rsplit("__", 1)[-1] if "__" in sample_id else sample_id
+    if tail:
+        parts = tail.rsplit("_", 1)
+        if len(parts) == 2 and parts[1].isdigit():
+            return parts[0]
+        return tail
+    return "unknown"
+
+
+def _combined_damage_profile(profile: str) -> str:
+    text = str(profile or "unknown")
+    parts = text.split("_", 1)
+    if len(parts) == 2 and len(parts[0]) == 2 and parts[0][0].lower() == "l" and parts[0][1].isdigit():
+        return parts[1]
+    return text
 
 
 def _last_phase(events: list[dict[str, Any]]) -> dict[str, Any] | None:

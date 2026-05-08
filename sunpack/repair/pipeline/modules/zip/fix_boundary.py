@@ -6,7 +6,7 @@ from sunpack.repair.coverage import coverage_view_from_job
 from sunpack.repair.diagnosis import RepairDiagnosis
 from sunpack.repair.job import RepairJob
 from sunpack.repair.pipeline.module import RepairModuleSpec, RepairRoute
-from sunpack.repair.pipeline.modules._common import source_input_for_job
+from sunpack.repair.pipeline.modules._common import source_input_for_job, module_limits
 from sunpack.repair.pipeline.registry import register_repair_module
 from sunpack.repair.result import RepairResult
 from sunpack_native import zip_directory_field_repair as _native_zip_directory_field_repair
@@ -54,7 +54,7 @@ class ZipFixBoundary:
 
     def repair(self, job: RepairJob, diagnosis: RepairDiagnosis, workspace: str, config: dict) -> RepairResult:
         flags = set(job.damage_flags)
-        deep = config.get("deep") if isinstance(config.get("deep"), dict) else {}
+        limits = module_limits(config)
         source_input = source_input_for_job(job)
 
         if flags & {"trailing_junk", "boundary_unreliable"}:
@@ -64,7 +64,7 @@ class ZipFixBoundary:
 
         result = _native_zip_directory_field_repair(
             source_input, workspace, repair_name,
-            float(deep.get("max_input_size_mb", 512) or 0),
+            float(limits.get("max_input_size_mb", 512) or 0),
         )
         if str(dict(result).get("status") or "") != "repaired":
             coverage = coverage_view_from_job(job)

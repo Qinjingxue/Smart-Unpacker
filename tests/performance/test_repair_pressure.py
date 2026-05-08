@@ -112,11 +112,7 @@ def repair_pressure_config(tmp_path: Path, *, scheduler_profile: str = "single")
             "workspace": str(tmp_path / "repair-workspace"),
             "max_attempts_per_task": 3,
             "max_repair_rounds_per_task": 3,
-            "stages": {"targeted": True, "safe_repair": True, "deep": False},
-            "auto_deep": {
-                "enabled": True,
-                "require_verification_repair": True,
-                "max_modules": 2,
+            "module_limits": {
                 "max_candidates_per_module": 1,
                 "max_input_size_mb": 64,
             },

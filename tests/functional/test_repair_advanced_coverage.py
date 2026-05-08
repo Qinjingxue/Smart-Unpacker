@@ -68,8 +68,7 @@ def test_coordinator_real_repair_then_worker_extraction_for_prefixed_7z(tmp_path
             "enabled": True,
             "workspace": str(tmp_path / "repair"),
             "max_repair_rounds_per_task": 1,
-            "stages": {"deep": True},
-            "deep": {"verify_candidates": False, "max_candidates_per_module": 4},
+            "module_limits": {"verify_candidates": False, "max_candidates_per_module": 4},
             "modules": [{"name": "archive_carrier_crop_deep_recovery", "enabled": True}],
             "beam": {"enabled": True, "max_rounds": 1},
         },
@@ -103,8 +102,7 @@ def test_coordinator_real_zip_repair_then_worker_extraction(tmp_path):
             "enabled": True,
             "workspace": str(tmp_path / "repair"),
             "max_repair_rounds_per_task": 1,
-            "stages": {"deep": True},
-            "deep": {"verify_candidates": False, "max_candidates_per_module": 4},
+            "module_limits": {"verify_candidates": False, "max_candidates_per_module": 4},
             "modules": [{"name": "zip_deep_partial_recovery", "enabled": True}],
             "beam": {"enabled": True, "max_rounds": 1},
         },
@@ -126,7 +124,7 @@ def test_coordinator_real_zip_repair_then_worker_extraction(tmp_path):
 
     assert outcome.success is True
     assert extractor.calls == 2
-    assert outcome.repair_module == "zip_deep_partial_recovery"
+    assert outcome.repair_module == "zip_salvage"
     assert (tmp_path / "out" / "ok.txt").read_bytes() == b"ok"
 
 
@@ -365,7 +363,7 @@ def test_nested_salvage_output_recurses_into_inner_archive_repair_pipeline(tmp_p
     assert runner.context.success_count == 2
     assert not runner.context.failed_tasks
     assert outer_task.fact_bag.get("repair.module") == "archive_nested_payload_salvage"
-    assert second_tasks[0].fact_bag.get("repair.module") == "zip_deep_partial_recovery"
+    assert second_tasks[0].fact_bag.get("repair.module") == "zip_salvage"
     assert inner_archive.is_file()
     assert (inner_archive.with_suffix("") / "final.txt").read_bytes() == b"done"
 
@@ -553,8 +551,7 @@ def test_deep_module_input_size_limit_blocks_large_nested_salvage(tmp_path):
     scheduler = RepairScheduler({
         "repair": {
             "workspace": str(tmp_path / "repair"),
-            "stages": {"deep": True},
-            "deep": {"max_input_size_mb": 0.001},
+            "module_limits": {"max_input_size_mb": 0.001},
             "modules": [{"name": "archive_nested_payload_salvage", "enabled": True}],
         }
     })
@@ -570,7 +567,7 @@ def test_deep_module_input_size_limit_blocks_large_nested_salvage(tmp_path):
     assert result.ok is False
     modules = result.diagnosis["capability_decision"]["modules"]
     nested = next(item for item in modules if item["name"] == "archive_nested_payload_salvage")
-    assert "deep_input_size_blocked" in nested["reasons"]
+    assert "module_input_size_blocked" in nested["reasons"]
 
 
 def test_deep_candidate_cap_limits_nested_payload_salvage_outputs(tmp_path):
@@ -581,8 +578,7 @@ def test_deep_candidate_cap_limits_nested_payload_salvage_outputs(tmp_path):
     scheduler = RepairScheduler({
         "repair": {
             "workspace": str(tmp_path / "repair"),
-            "stages": {"deep": True},
-            "deep": {"max_candidates_per_module": 1, "verify_candidates": False},
+            "module_limits": {"max_candidates_per_module": 1, "verify_candidates": False},
             "modules": [{"name": "archive_nested_payload_salvage", "enabled": True}],
         }
     })
@@ -663,8 +659,7 @@ def test_coordinator_zero_max_repair_rounds_skips_repair_loop(tmp_path):
             "enabled": True,
             "workspace": str(tmp_path / "repair"),
             "max_repair_rounds_per_task": 0,
-            "stages": {"deep": True},
-            "deep": {"verify_candidates": False, "max_candidates_per_module": 4},
+            "module_limits": {"verify_candidates": False, "max_candidates_per_module": 4},
             "modules": [{"name": "zip_deep_partial_recovery", "enabled": True}],
             "beam": {"enabled": True, "max_rounds": 2},
         },
@@ -1033,8 +1028,7 @@ def _run_single_module_repair(tmp_path: Path, module_name: str, fmt: str, source
     scheduler = RepairScheduler({
         "repair": {
             "workspace": str(tmp_path / "repair"),
-            "stages": {"deep": True},
-            "deep": {"verify_candidates": False, "max_candidates_per_module": 4},
+            "module_limits": {"verify_candidates": False, "max_candidates_per_module": 4},
             "modules": [{"name": module_name, "enabled": True}],
         }
     })
@@ -1124,8 +1118,7 @@ def _coordinator_repair_attempt_config(tmp_path: Path, *, modules: list[dict]) -
             "enabled": True,
             "workspace": str(tmp_path / "repair-inner"),
             "max_repair_rounds_per_task": 1,
-            "stages": {"deep": True},
-            "deep": {"verify_candidates": False, "max_candidates_per_module": 4},
+            "module_limits": {"verify_candidates": False, "max_candidates_per_module": 4},
             "modules": modules,
             "beam": {"enabled": True, "max_rounds": 1},
         },
@@ -1153,8 +1146,7 @@ def _pipeline_runner_repair_config(tmp_path: Path, *, modules: list[dict], exten
             "workspace": str(tmp_path / "repair"),
             "max_attempts_per_task": 2,
             "max_repair_rounds_per_task": 2,
-            "stages": {"deep": True},
-            "deep": {"verify_candidates": False, "max_candidates_per_module": 4},
+            "module_limits": {"verify_candidates": False, "max_candidates_per_module": 4},
             "modules": modules,
             "beam": {"enabled": True, "max_rounds": 2},
         },
@@ -1183,8 +1175,7 @@ def _nested_salvage_pipeline_config(tmp_path: Path) -> dict:
             "workspace": str(tmp_path / "repair"),
             "max_attempts_per_task": 2,
             "max_repair_rounds_per_task": 2,
-            "stages": {"deep": True},
-            "deep": {"verify_candidates": False, "max_candidates_per_module": 4},
+            "module_limits": {"verify_candidates": False, "max_candidates_per_module": 4},
             "modules": [
                 {"name": "archive_nested_payload_salvage", "enabled": True},
                 {"name": "zip_deep_partial_recovery", "enabled": True},

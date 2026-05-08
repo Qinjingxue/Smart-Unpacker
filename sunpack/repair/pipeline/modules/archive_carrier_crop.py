@@ -5,7 +5,7 @@ from pathlib import Path
 from sunpack.repair.diagnosis import RepairDiagnosis
 from sunpack.repair.job import RepairJob
 from sunpack.repair.pipeline.module import RepairModuleSpec, RepairRoute
-from sunpack.repair.pipeline.modules._common import patch_plan_for_crop, source_input_for_job
+from sunpack.repair.pipeline.modules._common import patch_plan_for_crop, source_input_for_job, module_limits
 from sunpack.repair.pipeline.modules._native_candidates import candidates_from_native_result
 from sunpack.repair.pipeline.modules._native_validation import validate_with_native_probe
 from sunpack.repair.pipeline.registry import register_repair_module
@@ -69,13 +69,13 @@ class ArchiveCarrierCropDeepRecovery:
         )
 
     def _run_native(self, job: RepairJob, diagnosis: RepairDiagnosis, workspace: str, config: dict) -> dict:
-        deep = config.get("deep") if isinstance(config.get("deep"), dict) else {}
+        limits = module_limits(config)
         return _native_archive_carrier_crop_recovery(
             source_input_for_job(job),
             diagnosis.format or job.format or "archive",
             workspace,
-            float(deep.get("max_input_size_mb", 512) or 0),
-            int(deep.get("max_candidates_per_module", 8) or 1),
+            float(limits.get("max_input_size_mb", 512) or 0),
+            int(limits.get("max_candidates_per_module", 8) or 1),
         )
 
 

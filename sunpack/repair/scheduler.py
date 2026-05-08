@@ -38,7 +38,6 @@ class RepairScheduler:
         selector = CandidateSelector(self.config)
         warnings = list(batch.warnings)
         selection: dict[str, Any] = {}
-        primary_selection: dict[str, Any] = {}
         if batch.candidates:
             selected, selection = selector.select(_with_job_password_candidates(batch.candidates, job))
             if selected is not None:
@@ -56,27 +55,6 @@ class RepairScheduler:
                 return result
             warnings.extend(selection.get("warnings") or [])
             warnings.append("repair candidates were produced but none passed selection")
-            primary_selection = dict(selection)
-            if self._auto_deep_should_escalate(job) and not _batch_used_auto_deep(batch):
-                auto_batch = self._generate_auto_deep_candidates(job)
-                warnings.extend(auto_batch.warnings)
-                batch = _merge_candidate_batches(batch, auto_batch)
-                if auto_batch.candidates:
-                    selected, selection = selector.select(_with_job_password_candidates(auto_batch.candidates, job))
-                    if selected is not None:
-                        result = selected.to_result(selection=_merge_candidate_selections(primary_selection, selection))
-                        self._write_telemetry(job, batch, result, result.diagnosis.get("candidate_selection", {}))
-                        repair_trace.write_event("repair_selected_result", {
-                            "job": repair_trace.job_payload(job),
-                            "result": repair_trace.result_payload(result),
-                            "selection": result.diagnosis.get("candidate_selection", {}),
-                            "candidate": candidate_feature_payload(selected),
-                            "candidate_count": len(batch.candidates),
-                            "auto_deep": True,
-                        })
-                        return replace(result, warnings=_dedupe([*result.warnings, *warnings]))
-                    warnings.extend(selection.get("warnings") or [])
-                    warnings.append("auto_deep candidates were produced but none passed selection")
         diagnosis = _diagnosis_with_candidate_selection(batch.diagnosis, selection)
         result = RepairResult(
             status="unrepairable",
@@ -129,27 +107,22 @@ class RepairScheduler:
             )
 
         modules, capability = self._select_modules(job, diagnosis, context)
-        auto_deep_attempted = False
         if not modules:
-            if self._auto_deep_should_escalate(job):
-                auto_deep_attempted = True
-                modules, capability = self._select_modules(job, diagnosis, context, auto_deep=True)
-            if not modules:
-                status = "unrepairable" if capability.automatic_unrepairable else "unsupported"
-                result = self._result(status, job, diagnosis, capability.message(), capability)
-                repair_trace.write_event("repair_candidates_terminal", {
-                    "job": repair_trace.job_payload(job),
-                    "lazy": bool(lazy),
-                    "diagnosis": diagnosis.as_dict(),
-                    "capability_decision": capability.as_dict() if hasattr(capability, "as_dict") else {},
-                    "result": repair_trace.result_payload(result),
-                    "message": result.message,
-                })
-                return RepairCandidateBatch(
-                    terminal_result=result,
-                    diagnosis=result.diagnosis,
-                    message=result.message,
-                )
+            status = "unrepairable" if capability.automatic_unrepairable else "unsupported"
+            result = self._result(status, job, diagnosis, capability.message(), capability)
+            repair_trace.write_event("repair_candidates_terminal", {
+                "job": repair_trace.job_payload(job),
+                "lazy": bool(lazy),
+                "diagnosis": diagnosis.as_dict(),
+                "capability_decision": capability.as_dict() if hasattr(capability, "as_dict") else {},
+                "result": repair_trace.result_payload(result),
+                "message": result.message,
+            })
+            return RepairCandidateBatch(
+                terminal_result=result,
+                diagnosis=result.diagnosis,
+                message=result.message,
+            )
 
         workspace = self._workspace_for(job)
         workspace.mkdir(parents=True, exist_ok=True)
@@ -162,31 +135,11 @@ class RepairScheduler:
             workspace,
             module_configs,
             lazy=lazy,
-            auto_deep=auto_deep_attempted,
         )
-        if not repair_candidates and not auto_deep_attempted and self._auto_deep_should_escalate(job):
-            auto_modules, auto_capability = self._select_modules(job, diagnosis, context, auto_deep=True)
-            if auto_modules:
-                auto_candidates, auto_warnings, auto_capability = self._run_modules(
-                    job,
-                    diagnosis,
-                    auto_modules,
-                    auto_capability,
-                    workspace,
-                    module_configs,
-                    lazy=lazy,
-                    auto_deep=True,
-                )
-                repair_candidates.extend(auto_candidates)
-                warnings.extend(auto_warnings)
-                capability = auto_capability
-                auto_deep_attempted = True
         repair_candidates = [
             _with_candidate_features(replace(candidate, diagnosis=_with_capability_diagnosis(candidate.diagnosis, capability)))
             for candidate in repair_candidates
         ]
-        if auto_deep_attempted:
-            warnings.append("auto_deep: escalated to limited deep repair after primary stages produced no candidates")
         repair_trace.write_event("repair_candidates_generated", {
             "job": repair_trace.job_payload(job),
             "lazy": bool(lazy),
@@ -195,7 +148,6 @@ class RepairScheduler:
             "candidate_count": len(repair_candidates),
             "candidates": [candidate_feature_payload(candidate) for candidate in repair_candidates],
             "warnings": _dedupe(warnings),
-            "auto_deep_attempted": bool(auto_deep_attempted),
         })
         return RepairCandidateBatch(
             candidates=repair_candidates,
@@ -204,46 +156,6 @@ class RepairScheduler:
                 _with_capability_diagnosis(diagnosis.as_dict(), capability),
                 repair_candidates,
                 warnings,
-                auto_deep_attempted=auto_deep_attempted,
-            ),
-            message="registered repair modules did not produce a candidate",
-        )
-
-    def _generate_auto_deep_candidates(self, job: RepairJob, *, lazy: bool = False) -> RepairCandidateBatch:
-        diagnosis = self.diagnose(job)
-        context = build_repair_context(job, diagnosis)
-        modules, capability = self._select_modules(job, diagnosis, context, auto_deep=True)
-        if not modules:
-            return RepairCandidateBatch(
-                diagnosis=_with_capability_diagnosis(diagnosis.as_dict(), capability),
-                message=capability.message(),
-                warnings=[],
-            )
-        workspace = self._workspace_for(job)
-        workspace.mkdir(parents=True, exist_ok=True)
-        module_configs = enabled_module_configs(self.config)
-        repair_candidates, warnings, capability = self._run_modules(
-            job,
-            diagnosis,
-            modules,
-            capability,
-            workspace,
-            module_configs,
-            lazy=lazy,
-            auto_deep=True,
-        )
-        warnings.append("auto_deep: escalated to limited deep repair after primary stages produced no accepted candidates")
-        return RepairCandidateBatch(
-            candidates=[
-                _with_candidate_features(replace(candidate, diagnosis=_with_capability_diagnosis(candidate.diagnosis, capability)))
-                for candidate in repair_candidates
-            ],
-            warnings=_dedupe(warnings),
-            diagnosis=_with_generation_diagnosis(
-                _with_capability_diagnosis(diagnosis.as_dict(), capability),
-                repair_candidates,
-                warnings,
-                auto_deep_attempted=True,
             ),
             message="registered repair modules did not produce a candidate",
         )
@@ -258,12 +170,11 @@ class RepairScheduler:
         module_configs: dict[str, dict[str, Any]],
         *,
         lazy: bool,
-        auto_deep: bool = False,
     ) -> tuple[list[RepairCandidate], list[str], RepairCapabilityDecision]:
         warnings: list[str] = []
         repair_candidates: list[RepairCandidate] = []
         for score, module, route_score, fine_score in modules:
-            module_config = self._module_runtime_config(module.spec.name, module_configs, auto_deep=auto_deep)
+            module_config = self._module_runtime_config(module.spec.name, module_configs)
             score_hint = max(score, route_score, fine_score)
             if lazy:
                 repair_candidates.append(_lazy_module_candidate(
@@ -338,8 +249,6 @@ class RepairScheduler:
         job: RepairJob,
         diagnosis: RepairDiagnosis,
         context: RepairContext,
-        *,
-        auto_deep: bool = False,
     ):
         enabled = enabled_module_configs(self.config)
         registry = get_repair_module_registry()
@@ -347,8 +256,6 @@ class RepairScheduler:
         decisions: list[ModuleCapabilityDecision] = []
         for name, module in registry.all().items():
             if name not in enabled:
-                continue
-            if auto_deep and module.spec.stage != "deep":
                 continue
             reasons: list[str] = []
             declarative_reasons: list[str] = []
@@ -368,22 +275,16 @@ class RepairScheduler:
                 declarative_reasons.append("category_mismatch")
                 decisions.append(_module_decision(module, format_supported, reasons, declarative_reasons, policy_reasons, dynamic_reasons, route_score=route_score))
                 continue
-            stages = self.config.get("stages", {}) if isinstance(self.config.get("stages"), dict) else {}
-            if not auto_deep and not stages.get(module.spec.stage, True):
-                reasons.append("stage_disabled")
-                policy_reasons.append("stage_disabled")
-                decisions.append(_module_decision(module, format_supported, reasons, declarative_reasons, policy_reasons, dynamic_reasons, route_score=route_score))
-                continue
-            module_config = self._module_runtime_config(name, enabled, auto_deep=auto_deep)
+            module_config = self._module_runtime_config(name, enabled)
             safety_reasons = self._safety_reasons(module, module_config)
             if safety_reasons:
                 reasons.extend(safety_reasons)
                 policy_reasons.extend(safety_reasons)
                 decisions.append(_module_decision(module, format_supported, reasons, declarative_reasons, policy_reasons, dynamic_reasons, route_score=route_score))
                 continue
-            if module.spec.stage == "deep" and not self._deep_input_allowed(job, module_config):
-                reasons.append("deep_input_size_blocked")
-                policy_reasons.append("deep_input_size_blocked")
+            if not self._module_input_allowed(job, module_config):
+                reasons.append("module_input_size_blocked")
+                policy_reasons.append("module_input_size_blocked")
                 decisions.append(_module_decision(module, format_supported, reasons, declarative_reasons, policy_reasons, dynamic_reasons, route_score=route_score))
                 continue
             fine_score = float(module.can_handle(job, diagnosis, module_config) or 0.0)
@@ -419,25 +320,15 @@ class RepairScheduler:
             ))
             candidates.append((score, module, route_score, fine_score))
         candidates.sort(key=lambda item: self._module_sort_key(item[0], item[1], item[2], item[3], diagnosis.format))
-        limit = self._module_limit(auto_deep=auto_deep)
-        selected_names = {module.spec.name for _, module, _, _ in candidates[:limit]}
-        selected = list(candidates[:limit])
-        if len(selected_names) < 3 and len(candidates) > len(selected):
-            for score, module, route_score, fine_score in candidates[limit:]:
-                if module.spec.name in selected_names:
-                    continue
-                selected.append((score, module, route_score, fine_score))
-                selected_names.add(module.spec.name)
-                if len(selected_names) >= 3:
-                    break
-            selected.sort(key=lambda item: self._module_sort_key(item[0], item[1], item[2], item[3], diagnosis.format))
+        selected = list(candidates)
+        selected_names = {module.spec.name for _, module, _, _ in selected}
         if selected_names:
             decisions = [
                 replace(
                     item,
                     selected=item.name in selected_names,
-                    reasons=["selected"] if item.name in selected_names else ["module_limit"],
-                    policy_reasons=[] if item.name in selected_names else ["module_limit"],
+                    reasons=["selected"] if item.name in selected_names else item.reasons,
+                    policy_reasons=[] if item.name in selected_names else item.policy_reasons,
                 )
                 if item.selected
                 else item
@@ -462,7 +353,6 @@ class RepairScheduler:
             -float(route_score or 0.0),
             _format_specificity_penalty(diagnosis_format, module.spec.formats),
             -_route_specificity(module.spec.routes),
-            -_stage_rank(module.spec.stage),
             boundary_first,
             pointers_first,
             0 if module.spec.safe else 1,
@@ -551,9 +441,9 @@ class RepairScheduler:
             reasons.append("lossy_module_blocked")
         return reasons
 
-    def _deep_input_allowed(self, job: RepairJob, module_config: dict[str, Any]) -> bool:
-        deep = module_config.get("deep") if isinstance(module_config.get("deep"), dict) else {}
-        max_mb = float(deep.get("max_input_size_mb", 0) or 0)
+    def _module_input_allowed(self, job: RepairJob, module_config: dict[str, Any]) -> bool:
+        limits = module_config.get("module_limits") if isinstance(module_config.get("module_limits"), dict) else {}
+        max_mb = float(limits.get("max_input_size_mb", 0) or 0)
         if max_mb <= 0:
             return True
         size = job_source_size(job)
@@ -561,51 +451,20 @@ class RepairScheduler:
             return True
         return size <= int(max_mb * 1024 * 1024)
 
-    def _auto_deep_should_escalate(self, job: RepairJob) -> bool:
-        auto_deep = self.config.get("auto_deep") if isinstance(self.config.get("auto_deep"), dict) else {}
-        if not bool(auto_deep.get("enabled", True)):
-            return False
-        stages = self.config.get("stages") if isinstance(self.config.get("stages"), dict) else {}
-        if bool(stages.get("deep", True)):
-            return False
-        if bool(auto_deep.get("require_verification_repair", True)) and not _verification_requests_repair(job):
-            return False
-        return True
-
-    def _module_limit(self, *, auto_deep: bool = False) -> int:
-        if auto_deep:
-            auto_config = self.config.get("auto_deep") if isinstance(self.config.get("auto_deep"), dict) else {}
-            return max(1, int(auto_config.get("max_modules", 2) or 2))
-        return max(1, int(self.config.get("max_modules_per_job", 4) or 4))
-
     def _module_runtime_config(
         self,
         name: str,
         module_configs: dict[str, dict[str, Any]],
-        *,
-        auto_deep: bool = False,
     ) -> dict[str, Any]:
         config = dict(module_configs.get(name, {}))
         safety = dict(self.config.get("safety") or {})
         if isinstance(config.get("safety"), dict):
             safety.update(config["safety"])
-        deep = dict(self.config.get("deep") or {})
-        if isinstance(config.get("deep"), dict):
-            deep.update(config["deep"])
-        if auto_deep:
-            auto_config = self.config.get("auto_deep") if isinstance(self.config.get("auto_deep"), dict) else {}
-            deep["auto_deep"] = True
-            deep["max_candidates_per_module"] = _min_positive_int(
-                deep.get("max_candidates_per_module"),
-                auto_config.get("max_candidates_per_module"),
-                default=1,
-            )
-            deep["max_input_size_mb"] = _min_positive_float(
-                deep.get("max_input_size_mb"),
-                auto_config.get("max_input_size_mb"),
-            )
+        limits = dict(self.config.get("module_limits") or {})
+        if isinstance(config.get("module_limits"), dict):
+            limits.update(config["module_limits"])
         config["safety"] = safety
-        config["deep"] = deep
+        config["module_limits"] = limits
         return config
 
     def _workspace_for(self, job: RepairJob) -> Path:
@@ -817,13 +676,10 @@ def _with_generation_diagnosis(
     diagnosis: dict[str, Any],
     candidates: list[RepairCandidate],
     warnings: list[str],
-    *,
-    auto_deep_attempted: bool,
 ) -> dict[str, Any]:
     payload = dict(diagnosis or {})
     payload["candidate_generation"] = {
         "candidate_count": len(candidates),
-        "auto_deep_attempted": bool(auto_deep_attempted),
         "warnings": list(warnings),
         "candidates": [candidate_feature_payload(candidate) for candidate in candidates],
     }
@@ -835,49 +691,6 @@ def _diagnosis_with_candidate_selection(diagnosis: dict[str, Any], selection: di
     if selection:
         payload["candidate_selection"] = dict(selection)
     return payload
-
-
-def _merge_candidate_batches(left: RepairCandidateBatch, right: RepairCandidateBatch) -> RepairCandidateBatch:
-    warnings = _dedupe([*left.warnings, *right.warnings])
-    diagnosis = dict(left.diagnosis or {})
-    right_diagnosis = right.diagnosis if isinstance(right.diagnosis, dict) else {}
-    if right_diagnosis:
-        diagnosis["auto_deep_diagnosis"] = dict(right_diagnosis)
-    return RepairCandidateBatch(
-        candidates=[*left.candidates, *right.candidates],
-        warnings=warnings,
-        diagnosis=diagnosis,
-        message=right.message or left.message,
-        terminal_result=left.terminal_result or right.terminal_result,
-    )
-
-
-def _merge_candidate_selections(primary: dict[str, Any], secondary: dict[str, Any]) -> dict[str, Any]:
-    if not primary:
-        return dict(secondary or {})
-    if not secondary:
-        return dict(primary or {})
-    merged = dict(secondary)
-    primary_candidates = primary.get("candidates") if isinstance(primary.get("candidates"), list) else []
-    secondary_candidates = secondary.get("candidates") if isinstance(secondary.get("candidates"), list) else []
-    merged["candidates"] = [*primary_candidates, *secondary_candidates]
-    merged["candidate_count"] = int(primary.get("candidate_count", 0) or 0) + int(secondary.get("candidate_count", 0) or 0)
-    merged["accepted_count"] = int(primary.get("accepted_count", 0) or 0) + int(secondary.get("accepted_count", 0) or 0)
-    merged["warnings"] = _dedupe([*(primary.get("warnings") or []), *(secondary.get("warnings") or [])])
-    merged["auto_deep_selection"] = dict(secondary)
-    return merged
-
-
-def _batch_used_auto_deep(batch: RepairCandidateBatch) -> bool:
-    if any("auto_deep" in str(warning) for warning in batch.warnings):
-        return True
-    for candidate in batch.candidates:
-        deep = candidate.diagnosis.get("deep") if isinstance(candidate.diagnosis, dict) else {}
-        if isinstance(deep, dict) and deep.get("auto_deep"):
-            return True
-        if candidate.stage == "deep" and any("auto_deep" in str(action) for action in candidate.actions):
-            return True
-    return False
 
 
 def _record_module_feedback(
@@ -932,15 +745,6 @@ def _format_specificity_penalty(fmt: str, expected) -> int:
     return 2
 
 
-def _stage_rank(stage: str) -> int:
-    ranks = {
-        "targeted": 40,
-        "safe_repair": 30,
-        "deep": 20,
-    }
-    return ranks.get(str(stage or ""), 10)
-
-
 def _dedupe(values: list[str]) -> list[str]:
     result = []
     seen = set()
@@ -950,52 +754,6 @@ def _dedupe(values: list[str]) -> list[str]:
         seen.add(value)
         result.append(value)
     return result
-
-
-def _verification_requests_repair(job: RepairJob) -> bool:
-    payloads = []
-    if isinstance(job.extraction_failure, dict):
-        payloads.append(job.extraction_failure)
-        nested = job.extraction_failure.get("verification")
-        if isinstance(nested, dict):
-            payloads.append(nested)
-    if isinstance(job.extraction_diagnostics, dict):
-        payloads.append(job.extraction_diagnostics)
-        nested = job.extraction_diagnostics.get("verification")
-        if isinstance(nested, dict):
-            payloads.append(nested)
-    for payload in payloads:
-        if str(payload.get("decision_hint") or "").lower() == "repair":
-            return True
-    return False
-
-
-def _min_positive_int(left: Any, right: Any, *, default: int) -> int:
-    values = []
-    for value in (left, right):
-        try:
-            number = int(value)
-        except (TypeError, ValueError):
-            continue
-        if number > 0:
-            values.append(number)
-    if not values:
-        return default
-    return min(values)
-
-
-def _min_positive_float(left: Any, right: Any) -> float:
-    values = []
-    for value in (left, right):
-        try:
-            number = float(value)
-        except (TypeError, ValueError):
-            continue
-        if number > 0:
-            values.append(number)
-    if not values:
-        return 0.0
-    return min(values)
 
 
 def _intersects(left, right) -> bool:
@@ -1083,13 +841,9 @@ def _lazy_module_candidate(
             "stage": module.spec.stage,
             "workspace": workspace,
             "lazy": True,
-            "plan_kind": "probe_then_run" if module.spec.stage == "deep" else "lazy_repair",
+            "plan_kind": "lazy_repair",
             "requires_materialization": True,
-            "estimated_cost": {
-                "targeted": 0.25,
-                "safe_repair": 0.35,
-                "deep": 0.75,
-            }.get(str(module.spec.stage or ""), 0.5),
+            "estimated_cost": 0.5,
         },
     )
 

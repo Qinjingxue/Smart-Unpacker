@@ -365,7 +365,7 @@ class ExtractionBatchRunner:
                     incumbent_outcome,
                     current_outcome,
                 )
-                if _verification_accepts(verification):
+                if _verification_accepts_complete(verification):
                     selected = self._selected_acceptable_outcome(incumbent_outcome, current_outcome, out_dir)
                     if selected is not None:
                         return selected
@@ -387,7 +387,7 @@ class ExtractionBatchRunner:
                             return handled
                         if handled:
                             continue
-                selected = self._selected_acceptable_outcome(incumbent_outcome, current_outcome, out_dir)
+                selected = self._selected_acceptable_outcome(incumbent_outcome, current_outcome, out_dir, final=True)
                 if selected is not None:
                     return selected
                 return current_outcome
@@ -395,7 +395,7 @@ class ExtractionBatchRunner:
             verification = self.verifier.verify(task, result)
             outcome = BatchExtractionOutcome(result=result, verification=verification, attempts=attempt_index + 1)
             self._annotate_recovery_outcome(task, outcome, source="original", round_index=current_sequence)
-            if _verification_accepts(verification):
+            if _verification_accepts_complete(verification):
                 selected = self._selected_acceptable_outcome(incumbent_outcome, outcome, out_dir) or outcome
                 self._cleanup_shelved_outcome(incumbent_outcome, keep=selected)
                 return selected
@@ -428,7 +428,7 @@ class ExtractionBatchRunner:
                                 return handled
                             if handled:
                                 continue
-            selected = self._selected_acceptable_outcome(incumbent_outcome, outcome, out_dir)
+            selected = self._selected_acceptable_outcome(incumbent_outcome, outcome, out_dir, final=verification.decision_hint != DECISION_REPAIR)
             if selected is not None:
                 return selected
 
@@ -441,7 +441,7 @@ class ExtractionBatchRunner:
                 shutil.rmtree(result.out_dir, ignore_errors=True)
             attempt_index += 1
 
-        selected = self._selected_acceptable_outcome(incumbent_outcome, last_outcome, out_dir)
+        selected = self._selected_acceptable_outcome(incumbent_outcome, last_outcome, out_dir, final=True)
         if selected is not None:
             return selected
         return last_outcome or BatchExtractionOutcome(
@@ -532,11 +532,13 @@ class ExtractionBatchRunner:
         incumbent: BatchExtractionOutcome | None,
         challenger: BatchExtractionOutcome | None,
         out_dir: str,
+        *,
+        final: bool = False,
     ) -> BatchExtractionOutcome | None:
         selected = self._select_better_recovery_outcome(incumbent, challenger)
         if selected is None or selected.verification is None:
             return None
-        if not self._outcome_accepts(selected):
+        if not self._outcome_accepts(selected, final=final):
             return None
         _ensure_recovery_rank(selected)
         self._promote_recovery_outcome(selected, out_dir)
@@ -544,13 +546,19 @@ class ExtractionBatchRunner:
             self._filter_partial_outputs(selected.result)
         return selected
 
-    def _outcome_accepts(self, outcome: BatchExtractionOutcome) -> bool:
+    def _outcome_accepts(self, outcome: BatchExtractionOutcome, *, final: bool = False) -> bool:
         verification = outcome.verification
         if verification is None:
             return False
-        if outcome.result.success and _verification_accepts(verification):
+        if outcome.result.success and _verification_accepts_complete(verification):
             return True
+        if self._repair_continue_after_partial() and not final:
+            return False
         return self._accept_partial_output(outcome.result, verification)
+
+    def _repair_continue_after_partial(self) -> bool:
+        repair_config = self.repair_stage.config if isinstance(getattr(self.repair_stage, "config", None), dict) else {}
+        return bool(repair_config.get("continue_after_partial", True))
 
     def _recovery_min_improvement(self) -> float:
         verification_config = self.verifier.config
@@ -682,6 +690,14 @@ class ExtractionBatchRunner:
         max_rounds = int((self.repair_stage.config.get("beam") or {}).get("max_rounds", 1) or 1)
         run = beam.run([initial], max_rounds=max_rounds)
         _append_beam_run_candidate_log(task, run, phase="beam_run")
+        _append_repair_candidate_log(task, {
+            "phase": "beam_stop_reason",
+            "reason": str(getattr(run, "stop_reason", "") or ""),
+            "rounds": len(getattr(run, "rounds", []) or []),
+            "rounds_without_global_improvement": int(getattr(run, "rounds_without_global_improvement", 0) or 0),
+            "frontier_exhausted": bool(getattr(run, "frontier_exhausted", False)),
+            "best_state": _beam_state_summary(run.best_state),
+        })
         best = run.best_state
         if best is None:
             terminal_result = _first_terminal_repair_result(run.terminal_results)
@@ -768,7 +784,6 @@ class ExtractionBatchRunner:
                 "candidate": candidate_feature_payload(evaluation.candidate),
                 "comparison": dict(beam_outcome.comparison),
             })
-            loop_state.stop("no_repair_improvement", trigger="verification_beam", result=evaluation.repair_result)
             self._cleanup_beam_evaluations({evaluation.outcome.attempt_id: (
                 evaluation.candidate,
                 evaluation.result,
@@ -786,10 +801,10 @@ class ExtractionBatchRunner:
             )})
             return False
 
-        if _verification_accepts(evaluation.verification):
+        if _verification_accepts_complete(evaluation.verification):
             _append_repair_candidate_log(task, {
                 "phase": "beam_selected",
-                "reason": "verification_accepts",
+                "reason": "complete_repair",
                 "candidate": candidate_feature_payload(evaluation.candidate),
                 "verification": _verification_summary(evaluation.verification),
             })
@@ -809,7 +824,6 @@ class ExtractionBatchRunner:
                 "candidate": candidate_feature_payload(evaluation.candidate),
                 "comparison": dict(beam_outcome.comparison),
             })
-            loop_state.stop("no_repair_improvement", trigger="verification_beam", result=evaluation.repair_result)
             self._cleanup_beam_evaluations({evaluation.outcome.attempt_id: (
                 evaluation.candidate,
                 evaluation.result,
@@ -1100,6 +1114,12 @@ class ExtractionBatchRunner:
 def _verification_accepts(verification: VerificationResult | Any) -> bool:
     decision = getattr(verification, "decision_hint", "")
     return decision in {DECISION_ACCEPT, DECISION_ACCEPT_PARTIAL}
+
+
+def _verification_accepts_complete(verification: VerificationResult | Any) -> bool:
+    decision = getattr(verification, "decision_hint", "")
+    status = getattr(verification, "assessment_status", "")
+    return decision == DECISION_ACCEPT or status == "complete"
 
 
 def _verification_accepts_partial(verification: VerificationResult | Any) -> bool:

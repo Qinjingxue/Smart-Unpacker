@@ -3,7 +3,7 @@ from __future__ import annotations
 from sunpack.repair.diagnosis import RepairDiagnosis
 from sunpack.repair.job import RepairJob
 from sunpack.repair.pipeline.module import RepairModuleSpec, RepairRoute
-from sunpack.repair.pipeline.modules._common import source_input_for_job
+from sunpack.repair.pipeline.modules._common import source_input_for_job, module_limits
 from sunpack.repair.pipeline.modules._native_patch_result import native_patch_repair_result
 from sunpack.repair.pipeline.registry import register_repair_module
 from sunpack.repair.result import RepairResult
@@ -44,15 +44,15 @@ class GzipFooterFix:
         return 0.0
 
     def repair(self, job: RepairJob, diagnosis: RepairDiagnosis, workspace: str, config: dict) -> RepairResult:
-        deep = config.get("deep") if isinstance(config.get("deep"), dict) else {}
+        limits = module_limits(config)
         try:
             result = dict(
                 _native_gzip_footer_fix_repair(
                     source_input_for_job(job),
                     workspace,
-                    float(deep.get("max_input_size_mb", 512) or 0),
-                    float(deep.get("max_seconds_per_module", 30.0) or 0),
-                    float(deep.get("max_gzip_footer_fix_decode_mb", 32) or 0),
+                    float(limits.get("max_input_size_mb", 512) or 0),
+                    float(limits.get("max_seconds_per_module", 30.0) or 0),
+                    float(limits.get("max_gzip_footer_fix_decode_mb", 32) or 0),
                 )
             )
         except TypeError:
@@ -60,7 +60,7 @@ class GzipFooterFix:
                 _native_gzip_footer_fix_repair(
                     source_input_for_job(job),
                     workspace,
-                    float(deep.get("max_input_size_mb", 512) or 0),
+                    float(limits.get("max_input_size_mb", 512) or 0),
                 )
             )
         return native_patch_repair_result(

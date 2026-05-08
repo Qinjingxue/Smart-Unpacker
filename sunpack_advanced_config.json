@@ -469,37 +469,28 @@
     "enabled": true,
     "workspace": ".sunpack_repair",
     "keep_candidates": false,
-    "max_modules_per_job": 4,
     "max_attempts_per_task": 1,
     "max_repair_rounds_per_task": 3,
     "max_repair_seconds_per_task": 120,
     "max_repair_generated_files_per_task": 16,
     "max_repair_generated_mb_per_task": 2048,
-    "stages": {
-      "targeted": true,
-      "safe_repair": true,
-      "deep": false
-    },
     "safety": {
       "allow_unsafe": false,
       "allow_partial": true,
       "allow_lossy": false
     },
-    "deep": {
+    "module_limits": {
       "max_candidates_per_module": 3,
       "max_entries": 20000,
       "max_seconds_per_module": 30,
       "max_input_size_mb": 512,
       "max_output_size_mb": 2048,
       "max_entry_uncompressed_mb": 512,
-      "verify_candidates": true
-    },
-    "auto_deep": {
-      "enabled": true,
-      "require_verification_repair": true,
-      "max_modules": 2,
-      "max_candidates_per_module": 1,
-      "max_input_size_mb": 128
+      "verify_candidates": true,
+      "max_stream_trim_probe_attempts": 32,
+      "max_stream_trim_decode_mb": 64,
+      "max_gzip_footer_fix_decode_mb": 32,
+      "max_next_header_scan_bytes": 1048576
     },
     "beam": {
       "enabled": true,

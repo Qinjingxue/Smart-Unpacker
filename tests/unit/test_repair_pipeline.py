@@ -30,7 +30,7 @@ DEFAULT_SALVAGE_MODULES = {
     "rar_file_quarantine_rebuild",
     "seven_zip_solid_block_partial_salvage",
     "tar_sparse_pax_longname_repair",
-    "zip_conflict_resolver_rebuild",
+    "zip_resolve_conflicts",
 }
 
 
@@ -85,11 +85,11 @@ def test_default_repair_config_enables_deep_salvage_modules(tmp_path):
             ["pax_header_bad", "gnu_longname_bad", "damaged"],
             "structure_recognition",
         ),
-        (
-            "zip_conflict_resolver_rebuild",
-            "zip",
-            ["duplicate_entries", "overlapping_entries", "local_header_conflict"],
-            "checksum_error",
+            (
+                "zip_resolve_conflicts",
+                "zip",
+                ["duplicate_entries", "overlapping_entries", "local_header_conflict"],
+                "checksum_error",
         ),
     ],
 )
@@ -134,7 +134,7 @@ def test_default_repair_config_routes_salvage_modules_without_module_override(
     assert module_name in selected_after_primary
 
 
-def test_auto_deep_prefers_rar_file_quarantine_over_generic_carrier_crop_for_split_damage(tmp_path):
+def test_maximum_repair_prefers_rar_file_quarantine_over_generic_carrier_crop_for_split_damage(tmp_path):
     source = tmp_path / "damaged.part1.rar"
     source.write_bytes(b"Rar!\x1a\x07\x01\x00" + b"x" * 128)
     scheduler = RepairScheduler({"repair": {"workspace": str(tmp_path / "repair")}})
@@ -241,35 +241,33 @@ def test_repair_scheduler_can_disable_partial_modules(tmp_path):
     assert result.status == "unsupported"
 
 
-def test_repair_scheduler_gates_deep_modules_and_passes_budget_config(tmp_path):
+def test_repair_scheduler_uses_unified_module_limits_for_all_modules(tmp_path):
     source = tmp_path / "deep.zip"
     source.write_bytes(b"x" * 4096)
     module = _DummyDeepModule()
 
-    disabled = _run_dummy_repair(tmp_path, module, source=source)
     size_blocked = _run_dummy_repair(tmp_path, module, {
-        "stages": {"deep": True},
-        "deep": {"max_input_size_mb": 0.001},
+        "module_limits": {"max_input_size_mb": 0.001},
     }, source=source)
     allowed = _run_dummy_repair(tmp_path, module, {
-        "stages": {"deep": True},
-        "deep": {"max_input_size_mb": 1},
+        "module_limits": {"max_input_size_mb": 1},
         "modules": [
             {
                 "name": module.spec.name,
                 "enabled": True,
-                "deep": {"max_candidates_per_module": 2},
+                "module_limits": {"max_candidates_per_module": 2},
             }
         ],
     }, source=source)
 
-    assert disabled.status == "unsupported"
     assert size_blocked.status == "unsupported"
+    decision = size_blocked.diagnosis["capability_decision"]
+    assert decision["modules"][0]["policy_reasons"] == ["module_input_size_blocked"]
     assert allowed.ok is True
-    assert allowed.actions == ["deep_candidates=2"]
+    assert allowed.actions == ["module_limit_candidates=2"]
 
 
-def test_repair_scheduler_auto_deep_escalates_after_verification_repair(tmp_path):
+def test_repair_scheduler_runs_all_matching_modules_without_auto_escalation(tmp_path):
     source = tmp_path / "auto-deep.zip"
     source.write_bytes(b"x" * 4096)
     module = _DummyDeepModule()
@@ -283,11 +281,11 @@ def test_repair_scheduler_auto_deep_escalates_after_verification_repair(tmp_path
 
     assert result.ok is True
     assert result.module_name == module.spec.name
-    assert result.actions == ["deep_candidates=1"]
-    assert any("auto_deep" in warning for warning in result.warnings)
+    assert result.actions == ["module_limit_candidates=3"]
+    assert not any("auto_deep" in warning for warning in result.warnings)
 
 
-def test_repair_scheduler_auto_deep_requires_verification_repair(tmp_path):
+def test_repair_scheduler_does_not_require_verification_repair_for_payload_modules(tmp_path):
     source = tmp_path / "auto-deep-fail.zip"
     source.write_bytes(b"x" * 4096)
     module = _DummyDeepModule()
@@ -299,12 +297,11 @@ def test_repair_scheduler_auto_deep_requires_verification_repair(tmp_path):
         extraction_failure={"failure_stage": "verification", "decision_hint": "fail"},
     )
 
-    assert result.status == "unsupported"
-    decision = result.diagnosis["capability_decision"]
-    assert decision["modules"][0]["policy_reasons"] == ["stage_disabled"]
+    assert result.ok is True
+    assert result.module_name == module.spec.name
 
 
-def test_repair_scheduler_auto_deep_respects_limited_input_size(tmp_path):
+def test_repair_scheduler_module_limits_respect_limited_input_size(tmp_path):
     source = tmp_path / "auto-deep-large.zip"
     source.write_bytes(b"x" * 4096)
     module = _DummyDeepModule()
@@ -312,17 +309,17 @@ def test_repair_scheduler_auto_deep_respects_limited_input_size(tmp_path):
     result = _run_dummy_repair(
         tmp_path,
         module,
-        {"auto_deep": {"max_input_size_mb": 0.001}},
+        {"module_limits": {"max_input_size_mb": 0.001}},
         source=source,
         extraction_failure={"failure_stage": "verification", "decision_hint": "repair"},
     )
 
     assert result.status == "unsupported"
     decision = result.diagnosis["capability_decision"]
-    assert decision["modules"][0]["policy_reasons"] == ["deep_input_size_blocked"]
+    assert decision["modules"][0]["policy_reasons"] == ["module_input_size_blocked"]
 
 
-def test_repair_scheduler_auto_deep_escalates_after_candidate_rejection(tmp_path):
+def test_repair_scheduler_considers_all_matching_modules_after_candidate_rejection(tmp_path):
     source = tmp_path / "auto-deep-rejected.zip"
     source.write_bytes(b"x" * 4096)
     rejected = _DummyRejectedBoundaryModule()
@@ -358,8 +355,10 @@ def test_repair_scheduler_auto_deep_escalates_after_candidate_rejection(tmp_path
 
     assert result.ok is True
     assert result.module_name == deep.spec.name
-    assert result.actions == ["deep_candidates=1"]
-    assert "candidate rejected" in result.warnings
+    assert result.actions == ["module_limit_candidates=3"]
+    selected = result.diagnosis["capability_decision"]["selected_modules"]
+    assert rejected.spec.name in selected
+    assert deep.spec.name in selected
 
 
 def test_repair_scheduler_selects_best_generated_candidate(tmp_path):
@@ -371,8 +370,7 @@ def test_repair_scheduler_selects_best_generated_candidate(tmp_path):
         scheduler = RepairScheduler({
             "repair": {
                 "workspace": str(tmp_path / "repair"),
-                "stages": {"deep": True},
-                "deep": {"verify_candidates": False},
+                    "module_limits": {"verify_candidates": False},
                 "modules": [{"name": module.spec.name, "enabled": True}],
             }
         })
@@ -404,8 +402,7 @@ def test_repair_scheduler_telemetry_writes_compact_ltr_records(tmp_path, monkeyp
             "repair": {
                 "workspace": str(tmp_path / "repair"),
                 "telemetry": {"enabled": True},
-                "stages": {"deep": True},
-                "deep": {"verify_candidates": False},
+                    "module_limits": {"verify_candidates": False},
                 "modules": [{"name": module.spec.name, "enabled": True}],
             }
         })
@@ -491,8 +488,7 @@ def test_repair_scheduler_exposes_generated_candidate_batch(tmp_path):
         scheduler = RepairScheduler({
             "repair": {
                 "workspace": str(tmp_path / "repair"),
-                "stages": {"deep": True},
-                "deep": {"verify_candidates": False},
+                    "module_limits": {"verify_candidates": False},
                 "modules": [{"name": module.spec.name, "enabled": True}],
             }
         })
@@ -522,8 +518,7 @@ def test_repair_scheduler_propagates_password_to_results_and_candidates(tmp_path
         scheduler = RepairScheduler({
             "repair": {
                 "workspace": str(tmp_path / "repair"),
-                "stages": {"deep": True},
-                "deep": {"verify_candidates": False},
+                    "module_limits": {"verify_candidates": False},
                 "modules": [{"name": module.spec.name, "enabled": True}],
             }
         })
@@ -625,7 +620,6 @@ def test_repair_scheduler_uses_explicit_tie_breaker_for_equal_module_scores(tmp_
         scheduler = RepairScheduler({
             "repair": {
                 "workspace": str(tmp_path),
-                "max_modules_per_job": 1,
                 "modules": [
                     {"name": later.spec.name, "enabled": True},
                     {"name": earlier.spec.name, "enabled": True},
@@ -918,9 +912,9 @@ def test_repair_config_is_normalized_by_config_schema():
             "retry_on_verification_failure": True,
             "methods": [],
         },
-        "repair": {
-            "safety": {"allow_unsafe": True, "allow_partial": "false"},
-            "deep": {
+            "repair": {
+                "safety": {"allow_unsafe": True, "allow_partial": "false"},
+            "module_limits": {
                 "max_candidates_per_module": "2",
                 "max_entries": "12",
                 "max_seconds_per_module": "1.5",
@@ -928,28 +922,18 @@ def test_repair_config_is_normalized_by_config_schema():
                 "max_entry_uncompressed_mb": "8",
                 "verify_candidates": "false",
             },
-            "auto_deep": {
-                "enabled": "true",
-                "require_verification_repair": "true",
-                "max_modules": "1",
-                "max_candidates_per_module": "1",
-                "max_input_size_mb": "32",
-            },
             "telemetry": {"enabled": "true"},
         },
     })
 
     assert config["repair"]["safety"]["allow_unsafe"] is True
     assert config["repair"]["safety"]["allow_partial"] is False
-    assert config["repair"]["deep"]["max_candidates_per_module"] == 2
-    assert config["repair"]["deep"]["max_entries"] == 12
-    assert config["repair"]["deep"]["max_seconds_per_module"] == 1.5
-    assert config["repair"]["deep"]["max_output_size_mb"] == 64.0
-    assert config["repair"]["deep"]["max_entry_uncompressed_mb"] == 8.0
-    assert config["repair"]["deep"]["verify_candidates"] is False
-    assert config["repair"]["auto_deep"]["enabled"] is True
-    assert config["repair"]["auto_deep"]["max_modules"] == 1
-    assert config["repair"]["auto_deep"]["max_input_size_mb"] == 32.0
+    assert config["repair"]["module_limits"]["max_candidates_per_module"] == 2
+    assert config["repair"]["module_limits"]["max_entries"] == 12
+    assert config["repair"]["module_limits"]["max_seconds_per_module"] == 1.5
+    assert config["repair"]["module_limits"]["max_output_size_mb"] == 64.0
+    assert config["repair"]["module_limits"]["max_entry_uncompressed_mb"] == 8.0
+    assert config["repair"]["module_limits"]["verify_candidates"] is False
     assert config["repair"]["beam"]["enabled"] is True
     assert config["repair"]["telemetry"]["enabled"] is True
     assert config["verification"]["max_retries"] == 2
@@ -964,6 +948,14 @@ def test_repair_config_rejects_removed_analysis_repair_settings():
         normalize_config({"repair": {"thresholds": {"medium_confidence_min": 0.1}}})
     with pytest.raises(ValueError, match="trigger_on_extraction_failure"):
         normalize_config({"repair": {"trigger_on_extraction_failure": True}})
+    with pytest.raises(ValueError, match="repair.deep"):
+        normalize_config({"repair": {"deep": {"max_candidates_per_module": 1}}})
+    with pytest.raises(ValueError, match="repair.auto_deep"):
+        normalize_config({"repair": {"auto_deep": {"enabled": True}}})
+    with pytest.raises(ValueError, match="repair.stages"):
+        normalize_config({"repair": {"stages": {"deep": True}}})
+    with pytest.raises(ValueError, match="repair.max_modules_per_job"):
+        normalize_config({"repair": {"max_modules_per_job": 1}})
 
 
 def test_zip_central_directory_rebuild_repairs_missing_eocd(tmp_path):
@@ -1060,7 +1052,6 @@ def test_zip_deep_partial_recovery_builds_best_verified_candidate(tmp_path):
     scheduler = RepairScheduler({
         "repair": {
             "workspace": str(tmp_path / "repair"),
-            "stages": {"deep": True},
             "modules": [{"name": "zip_deep_partial_recovery", "enabled": True}],
         }
     })
@@ -1074,8 +1065,8 @@ def test_zip_deep_partial_recovery_builds_best_verified_candidate(tmp_path):
 
     assert result.ok is True
     assert result.status == "partial"
-    assert result.module_name == "zip_deep_partial_recovery"
-    native = result.diagnosis["native_zip_deep_recovery"]
+    assert result.module_name == "zip_salvage"
+    native = result.diagnosis["native_zip_salvage_deep"]
     assert native["selected_candidate"] == "zip_deep_descriptor_recovered"
     assert native["verified_entries"] == 2
     with zipfile.ZipFile(result.repaired_input["path"]) as archive:
@@ -1732,7 +1723,7 @@ class _DummyDeepModule:
             job,
             diagnosis,
             workspace,
-            actions=[f"deep_candidates={config['deep']['max_candidates_per_module']}"],
+            actions=[f"module_limit_candidates={config['module_limits']['max_candidates_per_module']}"],
         )
 
 
@@ -1970,7 +1961,6 @@ def _run_stream_partial_repair(tmp_path, module_name, fmt, source):
     scheduler = RepairScheduler({
         "repair": {
             "workspace": str(tmp_path / "repair"),
-            "stages": {"deep": True},
             "modules": [{"name": module_name, "enabled": True}],
         }
     })
@@ -1987,8 +1977,7 @@ def _run_deep_repair(tmp_path, module_name, fmt, source, flags):
     scheduler = RepairScheduler({
         "repair": {
             "workspace": str(tmp_path / "repair"),
-            "stages": {"deep": True},
-            "deep": {"verify_candidates": False},
+            "module_limits": {"verify_candidates": False},
             "modules": [{"name": module_name, "enabled": True}],
         }
     })

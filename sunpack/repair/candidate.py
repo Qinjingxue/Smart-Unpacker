@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from sunpack.contracts.archive_state import ArchiveState
+from sunpack.repair.pipeline.modules._common import module_limits
 from sunpack.repair.result import RepairResult, RepairStatus
 from sunpack.support.sevenzip_native import get_native_password_tester
 from sunpack.support.sevenzip_worker import dry_run_archive
@@ -225,13 +226,13 @@ class CandidateSelector:
     def _with_native_validation(self, candidate: RepairCandidate) -> RepairCandidate:
         if not candidate.requires_native_validation:
             return candidate
-        deep = self.config.get("deep") if isinstance(self.config.get("deep"), dict) else {}
-        if not bool(deep.get("verify_candidates", True)):
+        limits = module_limits(self.config)
+        if not bool(limits.get("verify_candidates", True)):
             validation = CandidateValidation(
                 name="native_candidate_validation",
                 accepted=True,
                 score=0.0,
-                details={"skipped": True, "reason": "repair.deep.verify_candidates is false"},
+                details={"skipped": True, "reason": "repair.module_limits.verify_candidates is false"},
             )
             return replace(candidate, validations=[*candidate.validations, validation])
 
@@ -257,7 +258,7 @@ class CandidateSelector:
 
         password = str(repaired_input.get("password") or "")
         format_hint = str(repaired_input.get("format_hint") or candidate.format or "")
-        timeout = float(deep.get("max_seconds_per_module", 30.0) or 30.0)
+        timeout = float(limits.get("max_seconds_per_module", 30.0) or 30.0)
         try:
             tester = get_native_password_tester()
             probe = tester.probe_archive(path)
@@ -438,7 +439,6 @@ def candidate_digest(candidate: RepairCandidate) -> str:
         "module": candidate.module_name,
         "format": candidate.format,
         "status": candidate.status,
-        "stage": candidate.stage,
         "actions": candidate.actions,
         "damage_flags": candidate.damage_flags,
         "repaired_input": _source_input_shape(candidate.repaired_input),
@@ -475,17 +475,21 @@ def candidate_ranking_breakdown(candidate: RepairCandidate) -> dict[str, Any]:
     risk = _weighted_component_sum(risk_breakdown)
     module_bias = _module_generation_bias(candidate)
     complexity_boost = _module_complexity_boost(candidate)
-    raw_score = benefit * 0.55 + evidence * 0.25 + module_bias - cost * 0.18 - risk * 0.15 + complexity_boost
+    context_mismatch = candidate_context_mismatch_penalty(candidate)
+    lazy_no_output_risk = candidate_lazy_no_output_risk(candidate)
+    raw_score = benefit * 0.55 + evidence * 0.25 + module_bias - cost * 0.18 - risk * 0.15 + complexity_boost - context_mismatch * 0.35 - lazy_no_output_risk * 0.25
     priority = _clamp01(raw_score)
     return {
-        "version": 1,
-        "formula": "benefit*0.55 + evidence*0.25 + module_bias - cost*0.18 - risk*0.15 + complexity_boost",
+        "version": 2,
+        "formula": "benefit*0.55 + evidence*0.25 + module_bias - cost*0.18 - risk*0.15 + complexity_boost - context_mismatch*0.35 - lazy_no_output_risk*0.25",
         "generation_priority": priority,
         "raw_score": raw_score,
         "benefit_score": benefit,
         "evidence_score": evidence,
         "cost_penalty": cost,
         "risk_penalty": risk,
+        "context_mismatch_penalty": context_mismatch,
+        "lazy_no_output_risk": lazy_no_output_risk,
         "module_bias": module_bias,
         "weights": {
             "benefit": 0.55,
@@ -494,6 +498,8 @@ def candidate_ranking_breakdown(candidate: RepairCandidate) -> dict[str, Any]:
             "risk": -0.15,
             "module_bias": 1.0,
             "complexity_boost": 1.0,
+            "context_mismatch": -0.35,
+            "lazy_no_output_risk": -0.25,
             "history": 0.0,
         },
         "contributions": {
@@ -503,12 +509,16 @@ def candidate_ranking_breakdown(candidate: RepairCandidate) -> dict[str, Any]:
             "risk": risk * -0.15,
             "module_bias": module_bias,
             "complexity_boost": complexity_boost,
+            "context_mismatch": context_mismatch * -0.35,
+            "lazy_no_output_risk": lazy_no_output_risk * -0.25,
             "history": 0.0,
         },
         "benefit_breakdown": benefit_breakdown,
         "evidence_breakdown": evidence_breakdown,
         "cost_breakdown": cost_breakdown,
         "risk_breakdown": risk_breakdown,
+        "context_mismatch_breakdown": _candidate_context_mismatch_breakdown(candidate),
+        "lazy_no_output_breakdown": _candidate_lazy_no_output_breakdown(candidate),
         "history_features": history,
     }
 
@@ -547,13 +557,7 @@ def candidate_evidence_breakdown(candidate: RepairCandidate) -> dict[str, dict[s
 
 
 def candidate_cost_breakdown(candidate: RepairCandidate) -> dict[str, dict[str, float]]:
-    stage_cost = {
-        "targeted": 0.05,
-        "safe_repair": 0.15,
-        "deep": 0.35,
-    }.get(str(candidate.stage or ""), 0.18)
     return _component_breakdown({
-        "stage": {"value": 1.0, "weight": stage_cost},
         "lazy_materialization": {"value": 1.0 if candidate.is_lazy else 0.0, "weight": 0.08},
         "not_materialized": {"value": 1.0 if not candidate.materialized else 0.0, "weight": 0.05},
         "native_validation": {"value": 1.0 if candidate.requires_native_validation else 0.0, "weight": 0.12},
@@ -569,7 +573,6 @@ def candidate_risk_breakdown(candidate: RepairCandidate) -> dict[str, dict[str, 
         "partial_status": {"value": 1.0 if candidate.status == "partial" else 0.0, "weight": 0.04},
         "content_damage": {"value": 1.0 if content_damage else 0.0, "weight": 0.08},
         "content_damage_without_native_validation": {"value": 1.0 if native_validation_missing else 0.0, "weight": 0.16},
-        "deep_without_native_validation": {"value": 1.0 if candidate.stage == "deep" and not candidate.requires_native_validation else 0.0, "weight": 0.08},
         "rejected_validation": {"value": 1.0 if any(not validation.accepted for validation in candidate.validations) else 0.0, "weight": 0.12},
         "missing_repaired_input": {"value": 1.0 if not candidate.repaired_input and not candidate.is_lazy else 0.0, "weight": 0.2},
     })
@@ -581,7 +584,6 @@ def candidate_history_features(candidate: RepairCandidate) -> dict[str, Any]:
         "available": False,
         "key": _history_key(candidate),
         "module": candidate.module_name,
-        "stage": candidate.stage,
         "format": candidate.format,
         "sample_count": 0,
         "attempts": 0,
@@ -607,7 +609,6 @@ def candidate_ltr_features(
     return {
         "module": candidate.module_name,
         "format": candidate.format,
-        "stage": candidate.stage,
         "status": candidate.status,
         "confidence": _clamp01(float(candidate.confidence or 0.0)),
         "score_hint": _clamp01(float(candidate.score_hint or 0.0)),
@@ -615,6 +616,8 @@ def candidate_ltr_features(
         "evidence_score": float(ranking["evidence_score"]),
         "cost_penalty": float(ranking["cost_penalty"]),
         "risk_penalty": float(ranking["risk_penalty"]),
+        "context_mismatch_penalty": float(ranking.get("context_mismatch_penalty", 0.0) or 0.0),
+        "lazy_no_output_risk": float(ranking.get("lazy_no_output_risk", 0.0) or 0.0),
         "module_bias": float(ranking["module_bias"]),
         "generation_priority": float(ranking["generation_priority"]),
         "ranking_raw_score": float(ranking["raw_score"]),
@@ -647,6 +650,14 @@ def candidate_ltr_features(
 
 def candidate_progress_score(candidate: RepairCandidate) -> float:
     return _candidate_progress_score(candidate)
+
+
+def candidate_context_mismatch_penalty(candidate: RepairCandidate) -> float:
+    return _clamp01(_weighted_component_sum(_candidate_context_mismatch_breakdown(candidate)))
+
+
+def candidate_lazy_no_output_risk(candidate: RepairCandidate) -> float:
+    return _clamp01(_weighted_component_sum(_candidate_lazy_no_output_breakdown(candidate)))
 
 
 def candidate_predicted_completeness(candidate: RepairCandidate) -> float | None:
@@ -779,7 +790,7 @@ def _candidate_plan_kind(candidate: RepairCandidate) -> str:
     if str(plan.get("plan_kind") or ""):
         return str(plan.get("plan_kind"))
     if candidate.is_lazy:
-        return "probe_then_run" if candidate.stage == "deep" else "lazy_repair"
+        return "lazy_repair"
     if _has_archive_state_plan(candidate):
         return "byte_patch"
     if candidate.repaired_input:
@@ -795,11 +806,7 @@ def _candidate_estimated_cost(candidate: RepairCandidate) -> float:
     except (TypeError, ValueError):
         pass
     if candidate.is_lazy:
-        return {
-            "targeted": 0.25,
-            "safe_repair": 0.35,
-            "deep": 0.75,
-        }.get(str(candidate.stage or ""), 0.5)
+        return 0.5
     return candidate_cost_penalty(candidate)
 
 
@@ -1004,6 +1011,12 @@ def _patch_plan_priority(candidate: RepairCandidate) -> float:
 def _module_generation_bias(candidate: RepairCandidate) -> float:
     module_name = str(candidate.module_name or "")
     flags = {str(flag) for flag in candidate.damage_flags}
+    if module_name == "zip_rebuild" and flags & {"data_descriptor", "bit3_data_descriptor", "compressed_size_bad"}:
+        return 0.08
+    if module_name == "zip_salvage" and flags & {"missing_volume", "input_truncated", "unexpected_end", "stream_truncated"}:
+        return 0.08
+    if module_name == "zip_fix_zip64" and flags & {"zip64", "zip64_eocd_bad", "zip64_locator_bad", "zip64_extra_bad"}:
+        return 0.1
     if module_name == "zip_trailing_junk_trim" and "trailing_junk" in flags:
         if flags & {"checksum_error", "crc_error", "entry_payload_bad", "damaged", "content_integrity_bad_or_unknown"}:
             return -0.02
@@ -1039,6 +1052,46 @@ def _module_complexity_boost(candidate: RepairCandidate) -> float:
     if module == "zip_deep_partial_recovery":
         return 0.08
     return 0.0
+
+
+def _candidate_context_mismatch_breakdown(candidate: RepairCandidate) -> dict[str, dict[str, float]]:
+    module = str(candidate.module_name or "")
+    flags = {str(flag) for flag in candidate.damage_flags}
+    explicit_conflict = bool(flags & {"duplicate_entries", "overlapping_entries", "local_header_conflict"})
+    zip64_specific = bool(flags & {"zip64", "zip64_eocd_bad", "zip64_locator_bad", "zip64_extra_bad"})
+    data_descriptor = bool(flags & {"data_descriptor", "bit3_data_descriptor", "compressed_size_bad"})
+    split_or_truncated = bool(flags & {"missing_volume", "input_truncated", "unexpected_end", "stream_truncated"})
+    sfx_or_carrier = bool(flags & {"sfx", "carrier_archive", "embedded_archive", "carrier_prefix"})
+    content_damage = bool(flags & {"checksum_error", "crc_error", "entry_payload_bad", "payload_damaged", "damaged", "data_error"})
+    central_directory_only = bool(flags & {"central_directory_bad", "central_directory_offset_bad", "central_directory_count_bad"}) and not content_damage
+
+    return _component_breakdown({
+        "resolve_conflicts_without_conflict": {"value": 1.0 if module == "zip_resolve_conflicts" and not explicit_conflict else 0.0, "weight": 0.75},
+        "resolve_conflicts_data_descriptor": {"value": 1.0 if module == "zip_resolve_conflicts" and data_descriptor and not explicit_conflict else 0.0, "weight": 0.2},
+        "resolve_conflicts_simple_directory": {"value": 1.0 if module == "zip_resolve_conflicts" and central_directory_only and not explicit_conflict else 0.0, "weight": 0.25},
+        "zip64_without_zip64": {"value": 1.0 if module == "zip_fix_zip64" and not zip64_specific else 0.0, "weight": 0.85},
+        "pointers_on_sfx_or_split": {"value": 1.0 if module == "zip_fix_pointers" and (sfx_or_carrier or split_or_truncated) else 0.0, "weight": 0.45},
+        "boundary_on_payload_descriptor": {"value": 1.0 if module == "zip_fix_boundary" and data_descriptor and content_damage else 0.0, "weight": 0.18},
+    })
+
+
+def _candidate_lazy_no_output_breakdown(candidate: RepairCandidate) -> dict[str, dict[str, float]]:
+    module = str(candidate.module_name or "")
+    flags = {str(flag) for flag in candidate.damage_flags}
+    explicit_conflict = bool(flags & {"duplicate_entries", "overlapping_entries", "local_header_conflict"})
+    zip64_specific = bool(flags & {"zip64", "zip64_eocd_bad", "zip64_locator_bad", "zip64_extra_bad"})
+    split_or_truncated = bool(flags & {"missing_volume", "input_truncated", "unexpected_end", "stream_truncated"})
+    materialization_failed = any(
+        validation.name == "repair_plan_materialization" and not validation.accepted
+        for validation in candidate.validations
+    )
+    return _component_breakdown({
+        "lazy_candidate": {"value": 1.0 if candidate.is_lazy else 0.0, "weight": 0.08},
+        "materialization_failed": {"value": 1.0 if materialization_failed else 0.0, "weight": 1.0},
+        "resolve_conflicts_without_conflict": {"value": 1.0 if module == "zip_resolve_conflicts" and not explicit_conflict else 0.0, "weight": 0.65},
+        "zip64_without_zip64": {"value": 1.0 if module == "zip_fix_zip64" and not zip64_specific else 0.0, "weight": 0.75},
+        "split_tail_non_salvage": {"value": 1.0 if split_or_truncated and module in {"zip_resolve_conflicts", "zip_fix_pointers", "zip_fix_zip64"} else 0.0, "weight": 0.35},
+    })
 
 
 def _native_validation_skipped(validation: CandidateValidation) -> bool:

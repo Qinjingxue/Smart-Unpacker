@@ -245,9 +245,7 @@ def _run_repair(tmp_path: Path, case: CorruptionCase, *, use_archive_state: bool
     scheduler = RepairScheduler({
         "repair": {
             "workspace": str(tmp_path / "repair-workspace"),
-            "max_modules_per_job": 8,
-            "stages": {"deep": True},
-            "deep": {
+            "module_limits": {
                 "max_candidates_per_module": 4,
                 "verify_candidates": False,
             },

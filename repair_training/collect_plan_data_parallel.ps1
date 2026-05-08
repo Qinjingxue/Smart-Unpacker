@@ -15,19 +15,18 @@ param(
     [ValidateSet("process_per_sample", "worker_pool", "inprocess")]
     [string]$SampleExecutionMode = "worker_pool",
     [int]$SampleWorkerCount = 0,
-    [int]$MaxRounds = 5,
+    [int]$MaxRounds = 8,
     [int]$MaxCandidatesPerRound = 10,
     [ValidateSet("greedy", "greedy_current_selector", "beam", "counterfactual")]
     [string]$RolloutMode = "beam",
-    [int]$BeamSize = 4,
-    [int]$BranchTopK = 3,
+    [int]$BeamSize = 8,
+    [int]$BranchTopK = 5,
     [int]$CounterfactualExtra = 2,
-    [int]$MaxTotalStatesPerSample = 20,
+    [int]$MaxTotalStatesPerSample = 80,
     [double]$FutureLabelDiscount = 0.8,
     [ValidateSet("lazy", "eager")]
     [string]$ProposalMode = "lazy",
-    [int]$MaterializeTopKPerRound = 2,
-    [int]$RepairMaxModulesPerJob = 64,
+    [int]$MaterializeTopKPerRound = 10,
     [switch]$MaterializeSelectedOnly,
     [switch]$IncludeUnmaterializedLabels,
     [double]$CaseTimeoutSeconds = 45.0,
@@ -179,7 +178,6 @@ function New-CollectorArgs {
         "-FutureLabelDiscount", "$FutureLabelDiscount",
         "-ProposalMode", $ProposalMode,
         "-MaterializeTopKPerRound", "$MaterializeTopKPerRound",
-        "-RepairMaxModulesPerJob", "$RepairMaxModulesPerJob",
         "-CaseTimeoutSeconds", "$CaseTimeoutSeconds",
         "-StreamLargeSizeMb", "$StreamLargeSizeMb",
         "-StreamLargeCaseTimeoutSeconds", "$StreamLargeCaseTimeoutSeconds",
@@ -319,22 +317,33 @@ if ($Scheduling -eq "pool") {
         branch_count = 0
         terminal_success_count = 0
         rollout_budget_exhausted = 0
+        best_partial_returned_count = 0
         label_counts = @{}
         future_label_counts = @{}
         rollout_mode_counts = @{}
         terminal_status_counts = @{}
+        stop_reason_counts = @{}
+        best_recovery_bucket_counts = @{}
+        global_stagnation_counts = @{}
         no_output_reason_counts = @{}
+        no_output_by_module = @{}
+        no_output_by_damage_profile = @{}
         shards = $summaries
     }
     foreach ($summary in $summaries) {
-        foreach ($name in @("samples", "success_rows", "failure_rows", "timeouts", "failed", "skipped", "state_count", "expanded_state_count", "branch_count", "terminal_success_count", "rollout_budget_exhausted")) {
+        foreach ($name in @("samples", "success_rows", "failure_rows", "timeouts", "failed", "skipped", "state_count", "expanded_state_count", "branch_count", "terminal_success_count", "rollout_budget_exhausted", "best_partial_returned_count")) {
             $aggregate[$name] = [int]$aggregate[$name] + [int]($summary.$name)
         }
         Add-TrainingCountMap $aggregate["label_counts"] $summary.label_counts
         Add-TrainingCountMap $aggregate["future_label_counts"] $summary.future_label_counts
         Add-TrainingCountMap $aggregate["rollout_mode_counts"] $summary.rollout_mode_counts
         Add-TrainingCountMap $aggregate["terminal_status_counts"] $summary.terminal_status_counts
+        Add-TrainingCountMap $aggregate["stop_reason_counts"] $summary.stop_reason_counts
+        Add-TrainingCountMap $aggregate["best_recovery_bucket_counts"] $summary.best_recovery_bucket_counts
+        Add-TrainingCountMap $aggregate["global_stagnation_counts"] $summary.global_stagnation_counts
         Add-TrainingCountMap $aggregate["no_output_reason_counts"] $summary.no_output_reason_counts
+        Add-TrainingCountMap $aggregate["no_output_by_module"] $summary.no_output_by_module
+        Add-TrainingCountMap $aggregate["no_output_by_damage_profile"] $summary.no_output_by_damage_profile
     }
 
     New-Item -ItemType Directory -Path (Split-Path -Parent $ParallelSummaryOutput) -Force | Out-Null
@@ -400,7 +409,6 @@ foreach ($shard in $shards) {
         "-FutureLabelDiscount", "$FutureLabelDiscount",
         "-ProposalMode", $ProposalMode,
         "-MaterializeTopKPerRound", "$MaterializeTopKPerRound",
-        "-RepairMaxModulesPerJob", "$RepairMaxModulesPerJob",
         "-CaseTimeoutSeconds", "$CaseTimeoutSeconds",
         "-StreamLargeSizeMb", "$StreamLargeSizeMb",
         "-StreamLargeCaseTimeoutSeconds", "$StreamLargeCaseTimeoutSeconds",
@@ -485,22 +493,33 @@ $aggregate = [ordered]@{
     branch_count = 0
     terminal_success_count = 0
     rollout_budget_exhausted = 0
+    best_partial_returned_count = 0
     label_counts = @{}
     future_label_counts = @{}
     rollout_mode_counts = @{}
     terminal_status_counts = @{}
+    stop_reason_counts = @{}
+    best_recovery_bucket_counts = @{}
+    global_stagnation_counts = @{}
     no_output_reason_counts = @{}
+    no_output_by_module = @{}
+    no_output_by_damage_profile = @{}
     shards = $summaries
 }
 foreach ($summary in $summaries) {
-    foreach ($name in @("samples", "success_rows", "failure_rows", "timeouts", "failed", "skipped", "state_count", "expanded_state_count", "branch_count", "terminal_success_count", "rollout_budget_exhausted")) {
+    foreach ($name in @("samples", "success_rows", "failure_rows", "timeouts", "failed", "skipped", "state_count", "expanded_state_count", "branch_count", "terminal_success_count", "rollout_budget_exhausted", "best_partial_returned_count")) {
         $aggregate[$name] = [int]$aggregate[$name] + [int]($summary.$name)
     }
     Add-TrainingCountMap $aggregate["label_counts"] $summary.label_counts
     Add-TrainingCountMap $aggregate["future_label_counts"] $summary.future_label_counts
     Add-TrainingCountMap $aggregate["rollout_mode_counts"] $summary.rollout_mode_counts
     Add-TrainingCountMap $aggregate["terminal_status_counts"] $summary.terminal_status_counts
+    Add-TrainingCountMap $aggregate["stop_reason_counts"] $summary.stop_reason_counts
+    Add-TrainingCountMap $aggregate["best_recovery_bucket_counts"] $summary.best_recovery_bucket_counts
+    Add-TrainingCountMap $aggregate["global_stagnation_counts"] $summary.global_stagnation_counts
     Add-TrainingCountMap $aggregate["no_output_reason_counts"] $summary.no_output_reason_counts
+    Add-TrainingCountMap $aggregate["no_output_by_module"] $summary.no_output_by_module
+    Add-TrainingCountMap $aggregate["no_output_by_damage_profile"] $summary.no_output_by_damage_profile
 }
 
 New-Item -ItemType Directory -Path (Split-Path -Parent $ParallelSummaryOutput) -Force | Out-Null

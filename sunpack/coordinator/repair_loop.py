@@ -27,7 +27,8 @@ TERMINAL_FAILURE_FLAGS = {
     "output_filesystem",
     "process_failure",
 }
-MAX_STAGNATION_ROUNDS = 2
+DEFAULT_STAGNATION_PATIENCE_ROUNDS = 3
+DEFAULT_MIN_RECOVERY_IMPROVEMENT = 0.01
 COMPLETENESS_REGRESSION_THRESHOLD = 0.3
 
 
@@ -37,6 +38,9 @@ class RepairLoopLimits:
     max_seconds: float = 120.0
     max_generated_files: int = 16
     max_generated_bytes: int = 2048 * 1024 * 1024
+    stagnation_patience_rounds: int = DEFAULT_STAGNATION_PATIENCE_ROUNDS
+    min_recovery_improvement: float = DEFAULT_MIN_RECOVERY_IMPROVEMENT
+    continue_after_partial: bool = True
 
     @classmethod
     def from_config(cls, config: dict[str, Any]) -> "RepairLoopLimits":
@@ -45,6 +49,9 @@ class RepairLoopLimits:
             max_seconds=max(0.0, float(config.get("max_repair_seconds_per_task", 120.0) or 0.0)),
             max_generated_files=max(0, int(config.get("max_repair_generated_files_per_task", 16) or 0)),
             max_generated_bytes=int(max(0.0, float(config.get("max_repair_generated_mb_per_task", 2048.0) or 0.0)) * 1024 * 1024),
+            stagnation_patience_rounds=max(0, int(config.get("stagnation_patience_rounds", DEFAULT_STAGNATION_PATIENCE_ROUNDS) or 0)),
+            min_recovery_improvement=max(0.0, float(config.get("min_recovery_improvement", DEFAULT_MIN_RECOVERY_IMPROVEMENT) or 0.0)),
+            continue_after_partial=bool(config.get("continue_after_partial", True)),
         )
 
 
@@ -118,6 +125,7 @@ class RepairLoopState:
 
         next_digest = input_digest(self.task)
         round_payload["output_digest"] = next_digest
+        round_payload["completeness"] = _result_recovery_score(result)
         signature = _action_signature(result, previous_digest)
         if signature in self.seen_action_signatures:
             round_payload["exit_reason"] = "repeated_repair_action"
@@ -134,7 +142,7 @@ class RepairLoopState:
         self._add_seen_input_digest(next_digest)
 
         if self._detect_stagnation(round_payload):
-            self.stop("completeness_stagnation", trigger=trigger, result=result)
+            self.stop("global_recovery_stagnation", trigger=trigger, result=result)
             return False
         if self._detect_regression(round_payload):
             self._restore_previous_state()
@@ -288,17 +296,25 @@ class RepairLoopState:
         return time.monotonic() - self.started_at
 
     def _detect_stagnation(self, round_payload: dict[str, Any]) -> bool:
-        rounds = self.task.fact_bag.get("repair.loop.rounds")
-        items = list(rounds) if isinstance(rounds, list) else []
-        if len(items) < MAX_STAGNATION_ROUNDS:
+        patience = int(self.limits.stagnation_patience_rounds or 0)
+        if patience <= 0:
             return False
-        recent = items[-MAX_STAGNATION_ROUNDS:]
-        values = [r.get("completeness", -1.0) for r in recent if isinstance(r, dict)]
-        if len(values) < MAX_STAGNATION_ROUNDS:
+        current = _as_float(round_payload.get("completeness"), default=-1.0)
+        if current < 0.0:
             return False
-        if all(v == values[0] for v in values) and values[0] < 1.0:
-            return True
-        return False
+        best = _as_float(self.task.fact_bag.get("repair.loop.best_recovery_score"), default=-1.0)
+        min_improvement = max(0.0, float(self.limits.min_recovery_improvement or 0.0))
+        if best < 0.0 or current >= best + min_improvement:
+            self.task.fact_bag.set("repair.loop.best_recovery_score", max(best, current))
+            self.task.fact_bag.set("repair.loop.rounds_without_global_improvement", 0)
+            round_payload["global_best_recovery_score"] = max(best, current)
+            round_payload["rounds_without_global_improvement"] = 0
+            return False
+        rounds_without = int(self.task.fact_bag.get("repair.loop.rounds_without_global_improvement", 0) or 0) + 1
+        self.task.fact_bag.set("repair.loop.rounds_without_global_improvement", rounds_without)
+        round_payload["global_best_recovery_score"] = best
+        round_payload["rounds_without_global_improvement"] = rounds_without
+        return current < 0.999 and rounds_without >= patience
 
     def _detect_regression(self, round_payload: dict[str, Any]) -> bool:
         rounds = self.task.fact_bag.get("repair.loop.rounds")
@@ -365,6 +381,24 @@ def terminal_failure_reason(result: ExtractionResult) -> str:
 def _looks_like_split_name(path: str) -> bool:
     name = Path(str(path or "")).name.lower()
     return name.endswith(".001") or ".part1." in name or ".part01." in name
+
+
+def _result_recovery_score(result: RepairResult) -> float:
+    diagnosis = result.diagnosis if isinstance(result.diagnosis, dict) else {}
+    selection = diagnosis.get("candidate_selection") if isinstance(diagnosis.get("candidate_selection"), dict) else {}
+    for key in ("completeness", "recovery_ratio"):
+        value = selection.get(key, diagnosis.get(key))
+        score = _as_float(value, default=-1.0)
+        if score >= 0.0:
+            return max(0.0, min(1.0, score))
+    return -1.0
+
+
+def _as_float(value: Any, *, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def input_digest(task: ArchiveTask) -> str:

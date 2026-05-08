@@ -128,7 +128,6 @@ def test_rar_file_quarantine_rebuild_resyncs_damaged_split_volume(tmp_path):
     scheduler = RepairScheduler({
         "repair": {
             "workspace": str(tmp_path / "repair"),
-            "stages": {"deep": True},
             "modules": [{"name": "rar_file_quarantine_rebuild", "enabled": True}],
         }
     })
@@ -203,8 +202,7 @@ def _run_deep_module(tmp_path: Path, module_name: str, fmt: str, source: Path, f
     scheduler = RepairScheduler({
         "repair": {
             "workspace": str(tmp_path / "repair"),
-            "stages": {"deep": True},
-            "deep": {"verify_candidates": False, "max_candidates_per_module": 4},
+            "module_limits": {"verify_candidates": False, "max_candidates_per_module": 4},
             "modules": [{"name": module_name, "enabled": True}],
         }
     })
