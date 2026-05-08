@@ -26,9 +26,11 @@ if str(REPO_ROOT) not in sys.path:
 
 from sunpack.repair import RepairJob, RepairResult, RepairScheduler
 from sunpack.repair.candidate import CandidateSelector, candidate_feature_payload, materialize_candidate
+from sunpack.contracts.archive_state import ArchiveState
 from sunpack.contracts.detection import FactBag
 from sunpack.contracts.tasks import ArchiveTask
 from sunpack.extraction.result import ExtractionResult
+from sunpack.support.archive_state_view import archive_state_to_bytes
 from sunpack.verification import VerificationScheduler
 from repair_training.runtime_features import FEATURE_CONTRACT_VERSION, RepairPrior, build_runtime_feature_record
 
@@ -68,6 +70,7 @@ def main(argv: list[str] | None = None) -> int:
         "future_label_counts": {},
         "terminal_status_counts": {},
         "terminal_success_count": 0,
+        "no_output_reason_counts": {},
         "rollout_budget_exhausted": 0,
         "success_output": str(success_output),
         "failure_output": str(failure_output),
@@ -234,6 +237,11 @@ def _update_summary_counts(summary: dict[str, Any], record: dict[str, Any], rows
         if parent_action:
             seen_branches.add(parent_action)
         status = str(row.get("label_status") or "")
+        if status == "no_output":
+            details = row.get("label_details") if isinstance(row.get("label_details"), dict) else {}
+            reason = str(details.get("no_output_reason") or "unknown")
+            reason_counts = summary.setdefault("no_output_reason_counts", {})
+            reason_counts[reason] = int(reason_counts.get(reason, 0) or 0) + 1
         if status == "state_progress":
             summary["state_progress_count"] = int(summary.get("state_progress_count", 0) or 0) + 1
         if status == "partial" or int(row.get("label", 0) or 0) == 1:
@@ -531,6 +539,7 @@ def _collect_sample_rows(record: dict[str, Any], args: argparse.Namespace, debug
                 rows.append(_rollout_terminal_row(record, state, "budget_exhausted", "rollout state budget exhausted", None))
                 break
             source_input = dict(state.get("source_input") or {})
+            archive_state = _archive_state_from_rollout_state(record, state, fmt)
             damage_flags = list(state.get("damage_flags") or [])
             previous_actions = list(state.get("previous_actions") or [])
             previous_modules = list(state.get("previous_modules") or [])
@@ -553,6 +562,7 @@ def _collect_sample_rows(record: dict[str, Any], args: argparse.Namespace, debug
                 archive_key=f"{record.get('sample_id')}:round:{state_round}:beam:{state.get('beam_id', 0)}",
                 attempts=state_round,
                 password=record.get("password"),
+                archive_state=archive_state,
             )
             phase_started = time.perf_counter()
             lazy_mode = str(args.proposal_mode or "lazy") == "lazy"
@@ -585,6 +595,7 @@ def _collect_sample_rows(record: dict[str, Any], args: argparse.Namespace, debug
                 archive_key=f"{record.get('sample_id')}:round:{state_round}:beam:{state.get('beam_id', 0)}",
                 attempts=state_round,
                 password=record.get("password"),
+                archive_state=archive_state,
             )
             debug_events.write("phase", record, round=state_round, query_id=query_id, phase="before_state", elapsed_seconds=round(time.perf_counter() - phase_started, 3))
             state_features = _state_features(record, job, batch, state_round, previous_actions, previous_modules, best_completeness, before_state)
@@ -648,9 +659,10 @@ def _collect_sample_rows(record: dict[str, Any], args: argparse.Namespace, debug
                 if args.skip_unmaterialized_labels and not materialized_for_label:
                     continue
                 payload = candidate_feature_payload(candidate)
-                after_state = _state_summary(record, candidate.repaired_input if isinstance(candidate.repaired_input, dict) else {}, fmt, list(candidate.damage_flags or damage_flags), payload)
+                candidate_view = _training_candidate_view(record, candidate, fmt)
+                after_state = _state_summary(record, candidate_view.get("source_input") or {}, fmt, list(candidate.damage_flags or damage_flags), payload)
                 delta_features = _state_delta(before_state, after_state)
-                label_info = _label_candidate(record, candidate, best_completeness, before_state, after_state, delta_features)
+                label_info = _label_candidate(record, candidate, best_completeness, before_state, after_state, delta_features, candidate_view=candidate_view)
                 row = _action_row(
                     record,
                     state_round,
@@ -717,7 +729,9 @@ def _collect_sample_rows(record: dict[str, Any], args: argparse.Namespace, debug
                 candidate = entry["candidate"]
                 candidate_id = _candidate_id(candidate)
                 selected_result = candidate.to_result(selection={"selected_module": candidate.module_name})
-                if not selected_result.ok or not selected_result.repaired_input:
+                candidate_view = _training_candidate_view(record, candidate, fmt)
+                next_source_input = candidate_view.get("source_input_for_next_round") if isinstance(candidate_view.get("source_input_for_next_round"), dict) else dict(selected_result.repaired_input or {})
+                if not selected_result.ok or not next_source_input:
                     rows.append(_rollout_terminal_row(record, state, "dead_end", "selected branch produced no repaired input", after_by_id.get(candidate_id), parent_action_row_id=entry["action_row_id"], parent_candidate_id=candidate_id))
                     continue
                 label_info = label_by_id.get(candidate_id, {})
@@ -733,7 +747,8 @@ def _collect_sample_rows(record: dict[str, Any], args: argparse.Namespace, debug
                     "parent_query_id": query_id,
                     "parent_candidate_id": candidate_id,
                     "parent_action_row_id": entry["action_row_id"],
-                    "source_input": dict(selected_result.repaired_input),
+                    "source_input": dict(next_source_input),
+                    "archive_state": candidate_view.get("archive_state"),
                     "damage_flags": _next_state_damage_flags(selected_result, damage_flags, child_runtime_verification),
                     "previous_actions": [*previous_actions, *[str(action) for action in candidate.actions]],
                     "previous_modules": [*previous_modules, str(candidate.module_name)],
@@ -863,7 +878,136 @@ def _attach_rollout_context(row: dict[str, Any], state: dict[str, Any], candidat
 def _candidate_has_output(candidate: Any) -> bool:
     repaired_input = candidate.repaired_input if isinstance(getattr(candidate, "repaired_input", None), dict) else {}
     path = str(repaired_input.get("path") or "")
-    return bool(path and Path(path).is_file())
+    if path and Path(path).is_file():
+        return True
+    return _candidate_archive_state_payload(candidate) is not None
+
+
+def _archive_state_from_rollout_state(record: dict[str, Any], state: dict[str, Any], fmt: str) -> ArchiveState | None:
+    raw = state.get("archive_state")
+    source_input = state.get("source_input") if isinstance(state.get("source_input"), dict) else {}
+    if not isinstance(raw, dict):
+        raw = source_input.get("archive_state") if isinstance(source_input.get("archive_state"), dict) else None
+    if not isinstance(raw, dict):
+        return None
+    return _archive_state_from_payload(record, raw, fmt)
+
+
+def _candidate_archive_state_payload(candidate: Any) -> dict[str, Any] | None:
+    plan = getattr(candidate, "plan", None)
+    if isinstance(plan, dict) and isinstance(plan.get("archive_state"), dict):
+        return dict(plan["archive_state"])
+    try:
+        result = candidate.to_result()
+    except Exception:
+        return None
+    repaired_state = getattr(result, "repaired_state", None)
+    if repaired_state is not None:
+        try:
+            return repaired_state.to_dict()
+        except Exception:
+            return None
+    return None
+
+
+def _archive_state_from_payload(record: dict[str, Any], raw: dict[str, Any], fmt: str) -> ArchiveState | None:
+    try:
+        fallback = str((record.get("damaged_input") or {}).get("path") or record.get("damaged_path") or record.get("source_path") or "")
+        parts = [
+            str(item.get("path") or "")
+            for item in ((record.get("damaged_input") or {}).get("parts") or [])
+            if isinstance(item, dict) and item.get("path")
+        ]
+        return ArchiveState.from_any(
+            raw,
+            archive_path=fallback,
+            part_paths=parts or None,
+            format_hint=str(record.get("format") or record.get("material_format") or fmt or ""),
+            logical_name=str(record.get("source_archive_name") or record.get("sample_id") or ""),
+        )
+    except Exception:
+        return None
+
+
+def _training_candidate_view(record: dict[str, Any], candidate: Any, fmt: str) -> dict[str, Any]:
+    repaired_input = candidate.repaired_input if isinstance(getattr(candidate, "repaired_input", None), dict) else {}
+    path = Path(str(repaired_input.get("path") or ""))
+    if path.is_file():
+        return {
+            "source_kind": str(repaired_input.get("kind") or "file"),
+            "source_input": dict(repaired_input),
+            "source_input_for_next_round": dict(repaired_input),
+            "materialized_path": str(path),
+        }
+    raw_state = _candidate_archive_state_payload(candidate)
+    if not isinstance(raw_state, dict):
+        return {
+            "source_kind": str(repaired_input.get("kind") or "missing"),
+            "source_input": dict(repaired_input),
+            "source_input_for_next_round": dict(repaired_input),
+            "no_output_reason": _candidate_no_output_reason(candidate, archive_state_present=False),
+        }
+    state = _archive_state_from_payload(record, raw_state, fmt)
+    if state is None:
+        return {
+            "source_kind": "archive_state",
+            "archive_state": raw_state,
+            "source_input": {},
+            "source_input_for_next_round": {},
+            "no_output_reason": "patch_materialization_failed",
+            "materialization_error": "archive_state payload could not be parsed",
+        }
+    try:
+        materialized_path = _materialize_training_archive_state(state, fmt)
+    except Exception as exc:
+        return {
+            "source_kind": "archive_state",
+            "archive_state": raw_state,
+            "patch_digest": state.effective_patch_digest(),
+            "source_input": {},
+            "source_input_for_next_round": {},
+            "no_output_reason": "patch_materialization_failed",
+            "materialization_error": str(exc),
+        }
+    summary_input = {"kind": "file", "source_kind": "archive_state", "path": materialized_path, "format_hint": state.format_hint or state.source.format_hint or fmt, "patch_digest": state.effective_patch_digest()}
+    return {
+        "source_kind": "archive_state",
+        "archive_state": state.to_dict(),
+        "patch_digest": state.effective_patch_digest(),
+        "materialized_path": materialized_path,
+        "source_input": summary_input,
+        "source_input_for_next_round": _archive_state_source_input(state.to_dict(), state.format_hint or state.source.format_hint or fmt),
+    }
+
+
+def _materialize_training_archive_state(state: ArchiveState, fmt: str) -> str:
+    digest = _sha256(json.dumps(state.to_dict(), sort_keys=True).encode("utf-8"))
+    suffix = "." + (_normalize_format(fmt or state.format_hint or state.source.format_hint or "zip").split(".")[-1] or "zip")
+    root = Path(".sunpack") / "repair-plan-workspace" / "training_archive_state"
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / f"state_{digest[:24]}{suffix}"
+    if not path.is_file():
+        path.write_bytes(archive_state_to_bytes(state))
+    return str(path)
+
+
+def _archive_state_source_input(raw_state: dict[str, Any], fmt: str) -> dict[str, Any]:
+    return {
+        "kind": "archive_state",
+        "format_hint": str(raw_state.get("format_hint") or fmt or ""),
+        "patch_digest": str(raw_state.get("patch_digest") or ""),
+        "archive_state": dict(raw_state),
+    }
+
+
+def _candidate_no_output_reason(candidate: Any, *, archive_state_present: bool) -> str:
+    if archive_state_present:
+        return "patch_materialization_failed"
+    for validation in list(getattr(candidate, "validations", []) or []):
+        warnings = [str(item) for item in getattr(validation, "warnings", []) or []]
+        if any("repair plan produced no candidate" in warning for warning in warnings):
+            return "lazy_plan_produced_no_candidate"
+    return "missing_repaired_input"
 
 
 def _branch_entries(entries: list[dict[str, Any]], selected_id: str, rollout_mode: str, args: argparse.Namespace) -> list[dict[str, Any]]:
@@ -1897,14 +2041,31 @@ def _label_candidate(
     before_state: dict[str, Any] | None = None,
     after_state: dict[str, Any] | None = None,
     delta_features: dict[str, Any] | None = None,
+    candidate_view: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    repaired_input = candidate.repaired_input if isinstance(candidate.repaired_input, dict) else {}
+    view = candidate_view if isinstance(candidate_view, dict) else _training_candidate_view(record, candidate, str(record.get("format") or record.get("material_format") or ""))
+    repaired_input = view.get("source_input") if isinstance(view.get("source_input"), dict) else (candidate.repaired_input if isinstance(candidate.repaired_input, dict) else {})
     path = Path(str(repaired_input.get("path") or ""))
     if not path.is_file():
-        return {"status": "no_output", "label": 0, "completeness": previous_completeness}
+        reason = str(view.get("no_output_reason") or _candidate_no_output_reason(candidate, archive_state_present=bool(view.get("archive_state"))))
+        return {
+            "status": "no_output",
+            "label": 0,
+            "completeness": previous_completeness,
+            "no_output_reason": reason,
+            "materialization_error": str(view.get("materialization_error") or ""),
+            "source_kind": str(view.get("source_kind") or repaired_input.get("kind") or "missing"),
+            "patch_digest": str(view.get("patch_digest") or ""),
+        }
     oracle = record.get("oracle") if isinstance(record.get("oracle"), dict) else {}
     fmt = str(record.get("format") or repaired_input.get("format_hint") or "")
     verified = _verify_output_against_oracle(path, fmt, oracle)
+    if view.get("source_kind"):
+        verified["source_kind"] = view.get("source_kind")
+    if view.get("patch_digest"):
+        verified["patch_digest"] = view.get("patch_digest")
+    if view.get("materialized_path"):
+        verified["training_materialized_path"] = view.get("materialized_path")
     completeness = float(verified.get("completeness", 0.0) or 0.0)
     verified["before_state"] = before_state or {}
     verified["after_state"] = after_state or {}
@@ -2428,6 +2589,19 @@ def _state_summary(
     damage_flags: list[str],
     candidate_payload: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    source_kind = str(source_input.get("source_kind") or source_input.get("kind") or "file")
+    patch_digest = str(source_input.get("patch_digest") or "")
+    materialization_error = ""
+    if source_kind == "archive_state" and isinstance(source_input.get("archive_state"), dict):
+        raw_state = dict(source_input["archive_state"])
+        patch_digest = str(raw_state.get("patch_digest") or "")
+        state = _archive_state_from_payload(record, raw_state, fmt)
+        if state is not None:
+            patch_digest = state.effective_patch_digest()
+            try:
+                source_input = {"kind": "file", "path": _materialize_training_archive_state(state, fmt), "format_hint": state.format_hint or state.source.format_hint or fmt}
+            except Exception as exc:
+                materialization_error = str(exc)
     path = Path(str(source_input.get("path") or ""))
     oracle = record.get("oracle") if isinstance(record.get("oracle"), dict) else {}
     payload = candidate_payload if isinstance(candidate_payload, dict) else {}
@@ -2444,6 +2618,9 @@ def _state_summary(
         "verification_status": "missing_output" if not path.is_file() else "unverified",
         "native_validation_score": payload.get("native_validation_score"),
         "source_path": str(path) if path else "",
+        "source_kind": source_kind,
+        "patch_digest": patch_digest,
+        "materialization_error": materialization_error,
     }
     if not path.is_file():
         return summary

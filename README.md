@@ -114,10 +114,10 @@ python sunpack.py config validate
 ```text
 app/config
   -> coordinator
-     -> detection -> analysis -> extraction -> verification
-                                      ^              |
-                                      |              v
-                                      +---- repair <-+
+     filesystem->relations-> detection -> analysis -> extraction -> verification
+                        ^                            |
+                        |                            v
+                        +------------------ repair <-+
      -> postprocess
 ```
 
