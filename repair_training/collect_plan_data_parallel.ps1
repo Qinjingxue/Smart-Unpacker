@@ -329,10 +329,14 @@ if ($Scheduling -eq "pool") {
         no_output_reason_counts = @{}
         no_output_by_module = @{}
         no_output_by_damage_profile = @{}
+        no_output_by_atomic_family = @{}
+        native_target_mismatch_counts = @{}
+        route_rejected_by_required_flags = 0
+        route_rejected_by_can_handle = 0
         shards = $summaries
     }
     foreach ($summary in $summaries) {
-        foreach ($name in @("samples", "success_rows", "failure_rows", "timeouts", "failed", "skipped", "state_count", "expanded_state_count", "branch_count", "terminal_success_count", "legacy_module_seen_count", "rollout_budget_exhausted", "best_partial_returned_count")) {
+        foreach ($name in @("samples", "success_rows", "failure_rows", "timeouts", "failed", "skipped", "state_count", "expanded_state_count", "branch_count", "terminal_success_count", "legacy_module_seen_count", "rollout_budget_exhausted", "best_partial_returned_count", "route_rejected_by_required_flags", "route_rejected_by_can_handle")) {
             $aggregate[$name] = [int]$aggregate[$name] + [int]($summary.$name)
         }
         Add-TrainingCountMap $aggregate["label_counts"] $summary.label_counts
@@ -345,6 +349,8 @@ if ($Scheduling -eq "pool") {
         Add-TrainingCountMap $aggregate["no_output_reason_counts"] $summary.no_output_reason_counts
         Add-TrainingCountMap $aggregate["no_output_by_module"] $summary.no_output_by_module
         Add-TrainingCountMap $aggregate["no_output_by_damage_profile"] $summary.no_output_by_damage_profile
+        Add-TrainingCountMap $aggregate["no_output_by_atomic_family"] $summary.no_output_by_atomic_family
+        Add-TrainingCountMap $aggregate["native_target_mismatch_counts"] $summary.native_target_mismatch_counts
     }
 
     New-Item -ItemType Directory -Path (Split-Path -Parent $ParallelSummaryOutput) -Force | Out-Null
@@ -506,10 +512,14 @@ $aggregate = [ordered]@{
     no_output_reason_counts = @{}
     no_output_by_module = @{}
     no_output_by_damage_profile = @{}
+    no_output_by_atomic_family = @{}
+    native_target_mismatch_counts = @{}
+    route_rejected_by_required_flags = 0
+    route_rejected_by_can_handle = 0
     shards = $summaries
 }
 foreach ($summary in $summaries) {
-    foreach ($name in @("samples", "success_rows", "failure_rows", "timeouts", "failed", "skipped", "state_count", "expanded_state_count", "branch_count", "terminal_success_count", "legacy_module_seen_count", "rollout_budget_exhausted", "best_partial_returned_count")) {
+    foreach ($name in @("samples", "success_rows", "failure_rows", "timeouts", "failed", "skipped", "state_count", "expanded_state_count", "branch_count", "terminal_success_count", "legacy_module_seen_count", "rollout_budget_exhausted", "best_partial_returned_count", "route_rejected_by_required_flags", "route_rejected_by_can_handle")) {
         $aggregate[$name] = [int]$aggregate[$name] + [int]($summary.$name)
     }
     Add-TrainingCountMap $aggregate["label_counts"] $summary.label_counts
@@ -522,6 +532,8 @@ foreach ($summary in $summaries) {
     Add-TrainingCountMap $aggregate["no_output_reason_counts"] $summary.no_output_reason_counts
     Add-TrainingCountMap $aggregate["no_output_by_module"] $summary.no_output_by_module
     Add-TrainingCountMap $aggregate["no_output_by_damage_profile"] $summary.no_output_by_damage_profile
+    Add-TrainingCountMap $aggregate["no_output_by_atomic_family"] $summary.no_output_by_atomic_family
+    Add-TrainingCountMap $aggregate["native_target_mismatch_counts"] $summary.native_target_mismatch_counts
 }
 
 New-Item -ItemType Directory -Path (Split-Path -Parent $ParallelSummaryOutput) -Force | Out-Null

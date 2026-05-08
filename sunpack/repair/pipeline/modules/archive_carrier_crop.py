@@ -21,6 +21,8 @@ class ArchiveCarrierCropDeepRecovery:
         categories=("boundary_repair", "content_recovery", "directory_rebuild"),
         stage="deep",
         safe=True,
+        atomic=True,
+        route_family="carrier_crop",
         routes=(
             RepairRoute(
                 formats=("7z", "seven_zip", "rar", "zip", "archive"),
@@ -41,10 +43,12 @@ class ArchiveCarrierCropDeepRecovery:
         if fmt == "rar" and flags & {"carrier_archive", "sfx", "embedded_archive", "carrier_prefix"}:
             return 0.65
         if fmt == "zip" and flags & {"carrier_archive", "sfx", "embedded_archive", "carrier_prefix"}:
-            return 0.70
+            return 0.98
+        if fmt == "zip":
+            return 0.0
         if flags & {"carrier_archive", "sfx", "embedded_archive", "boundary_unreliable", "start_trusted_only"}:
             return 0.9
-        if "boundary_repair" in diagnosis.categories and fmt in {"7z", "seven_zip", "rar", "zip"}:
+        if "boundary_repair" in diagnosis.categories and fmt in {"7z", "seven_zip", "rar"}:
             return 0.74
         return 0.0
 

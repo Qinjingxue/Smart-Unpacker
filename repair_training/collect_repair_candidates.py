@@ -274,6 +274,7 @@ def _dynamic_stream_modules(case) -> tuple[str, ...] | None:
 
 _FORMAT_MODULES: dict[str, tuple[str, ...]] = {
     "zip": (
+        "archive_carrier_crop_deep_recovery",
         "zip_trim_trailing_junk",
         "zip_fix_eocd_comment_length",
         "zip_fix_eocd_record",
@@ -284,6 +285,7 @@ _FORMAT_MODULES: dict[str, tuple[str, ...]] = {
         "zip_fix_zip64_eocd",
         "zip_fix_zip64_extra_size",
         "zip_rebuild_cd_from_local_headers",
+        "zip_rebuild_cd_preserve_raw_names",
         "zip_rebuild_cd_from_data_descriptors",
         "zip_reconcile_cd_local_headers",
         "zip_quarantine_failed_entries",

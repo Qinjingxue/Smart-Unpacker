@@ -13,6 +13,8 @@ class RepairRoute:
     require_any_fuzzy_hints: tuple[str, ...] = ()
     require_any_failure_stages: tuple[str, ...] = ()
     require_any_failure_kinds: tuple[str, ...] = ()
+    require_all_categories: tuple[str, ...] = ()
+    require_all_flags: tuple[str, ...] = ()
     formats: tuple[str, ...] = ()
     reject_any_flags: tuple[str, ...] = ("wrong_password",)
     reject_any_failure_stages: tuple[str, ...] = ()
@@ -39,6 +41,8 @@ class RepairModuleSpec:
     partial: bool = False
     lossy: bool = False
     routes: tuple[RepairRoute, ...] = ()
+    atomic: bool = False
+    route_family: str = ""
 
 
 class RepairModule(Protocol):

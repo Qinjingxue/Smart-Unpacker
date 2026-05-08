@@ -21,6 +21,8 @@ class ModuleCapabilityDecision:
     execution_status: str = ""
     execution_message: str = ""
     execution_warnings: list[str] = field(default_factory=list)
+    atomic: bool = False
+    route_family: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -39,6 +41,8 @@ class ModuleCapabilityDecision:
             "execution_status": self.execution_status,
             "execution_message": self.execution_message,
             "execution_warnings": list(self.execution_warnings),
+            "atomic": bool(self.atomic),
+            "route_family": self.route_family,
         }
 
 

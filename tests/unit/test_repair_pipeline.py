@@ -958,6 +958,191 @@ def test_repair_config_rejects_removed_analysis_repair_settings():
         normalize_config({"repair": {"max_modules_per_job": 1}})
 
 
+def test_zip_atomic_zip64_route_requires_specific_zip64_flag(tmp_path):
+    scheduler = RepairScheduler({
+        "repair": {
+            "workspace": str(tmp_path / "repair"),
+            "modules": [{"name": "zip_fix_zip64_locator", "enabled": True}],
+        }
+    })
+    batch = scheduler.generate_repair_candidates(RepairJob(
+        source_input={"kind": "file", "path": str(tmp_path / "generic.zip")},
+        format="zip",
+        confidence=0.7,
+        damage_flags=["central_directory_bad"],
+        archive_key="generic.zip",
+    ), lazy=True)
+
+    assert batch.terminal_result is not None
+    decision = batch.terminal_result.diagnosis["capability_decision"]
+    module = next(item for item in decision["modules"] if item["name"] == "zip_fix_zip64_locator")
+    assert module["selected"] is False
+    assert "route_required_flags_unmet" in module["reasons"]
+
+
+def test_zip_atomic_can_handle_zero_vetoes_route_score(tmp_path):
+    scheduler = RepairScheduler({
+        "repair": {
+            "workspace": str(tmp_path / "repair"),
+            "modules": [{"name": "zip_reconcile_cd_data_descriptor_conflict", "enabled": True}],
+        }
+    })
+    batch = scheduler.generate_repair_candidates(RepairJob(
+        source_input={"kind": "file", "path": str(tmp_path / "descriptor.zip")},
+        format="zip",
+        confidence=0.7,
+        damage_flags=["data_descriptor"],
+        archive_key="descriptor.zip",
+    ), lazy=True)
+
+    assert batch.terminal_result is not None
+    decision = batch.terminal_result.diagnosis["capability_decision"]
+    module = next(item for item in decision["modules"] if item["name"] == "zip_reconcile_cd_data_descriptor_conflict")
+    assert module["route_score"] > 0.0
+    assert module["fine_score"] == 0.0
+    assert "can_handle_rejected" in module["reasons"]
+
+
+def test_zip_sfx_route_prefers_carrier_crop_not_zip_atomic_fields(tmp_path):
+    scheduler = RepairScheduler({"repair": {"workspace": str(tmp_path / "repair")}})
+    batch = scheduler.generate_repair_candidates(RepairJob(
+        source_input={"kind": "file", "path": str(tmp_path / "sfx.zip")},
+        format="zip",
+        confidence=0.7,
+        damage_flags=["carrier_archive", "sfx", "boundary_unreliable", "trailing_junk"],
+        archive_key="sfx.zip",
+    ), lazy=True)
+
+    modules = {candidate.module_name for candidate in batch.candidates}
+    assert "archive_carrier_crop_deep_recovery" in modules
+    assert "zip_fix_zip64_locator" not in modules
+    assert "zip_fix_cd_offset" not in modules
+    assert "zip_rebuild_cd_from_data_descriptors" not in modules
+
+
+def test_zip_missing_volume_route_prefers_partial_salvage(tmp_path):
+    scheduler = RepairScheduler({"repair": {"workspace": str(tmp_path / "repair")}})
+    batch = scheduler.generate_repair_candidates(RepairJob(
+        source_input={"kind": "file", "path": str(tmp_path / "split.zip")},
+        format="zip",
+        confidence=0.7,
+        damage_flags=["missing_volume", "input_truncated", "local_header_recovery"],
+        archive_key="split.zip",
+    ), lazy=True)
+
+    modules = {candidate.module_name for candidate in batch.candidates}
+    assert "zip_partial_salvage_missing_volume" in modules
+    assert "zip_fix_cd_offset" not in modules
+    assert "zip_fix_zip64_eocd" not in modules
+    assert "zip_reconcile_cd_local_headers" not in modules
+
+
+def test_zip_route_evidence_duplicate_entries_selects_atomic_module(tmp_path):
+    scheduler = RepairScheduler({
+        "repair": {
+            "workspace": str(tmp_path / "repair"),
+            "modules": [{"name": "zip_resolve_duplicate_entries", "enabled": True}],
+        }
+    })
+    batch = scheduler.generate_repair_candidates(RepairJob(
+        source_input={"kind": "file", "path": str(tmp_path / "dup.zip"), "format_hint": "zip"},
+        format="zip",
+        confidence=0.7,
+        damage_flags=["damaged"],
+        analysis_prepass={"zip_structure_features": {"has_duplicate_entries": True}},
+        archive_key="dup.zip",
+    ), lazy=True)
+
+    modules = {candidate.module_name for candidate in batch.candidates}
+    assert "zip_resolve_duplicate_entries" in modules
+    assert "duplicate_entries" in batch.diagnosis["capability_decision"]["damage_flags"]
+
+
+def test_zip_route_evidence_raw_filename_selects_preserve_names(tmp_path):
+    scheduler = RepairScheduler({
+        "repair": {
+            "workspace": str(tmp_path / "repair"),
+            "modules": [{"name": "zip_rebuild_cd_preserve_raw_names", "enabled": True}],
+        }
+    })
+    batch = scheduler.generate_repair_candidates(RepairJob(
+        source_input={"kind": "file", "path": str(tmp_path / "raw.zip"), "format_hint": "zip"},
+        format="zip",
+        confidence=0.7,
+        damage_flags=["damaged"],
+        analysis_prepass={"zip_structure_features": {"has_filename_encoding_risk": True}},
+        archive_key="raw.zip",
+    ), lazy=True)
+
+    assert {candidate.module_name for candidate in batch.candidates} == {"zip_rebuild_cd_preserve_raw_names"}
+
+
+def test_zip_route_evidence_zip64_extra_profile_selects_extra_repair(tmp_path):
+    scheduler = RepairScheduler({
+        "repair": {
+            "workspace": str(tmp_path / "repair"),
+            "modules": [{"name": "zip_fix_zip64_extra_size", "enabled": True}],
+        }
+    })
+    batch = scheduler.generate_repair_candidates(RepairJob(
+        source_input={"kind": "file", "path": str(tmp_path / "zip64.zip"), "format_hint": "zip"},
+        format="zip",
+        confidence=0.7,
+        damage_flags=["damaged"],
+        analysis_prepass={
+            "damage_profile": "zip_zip64_extra_size_mismatch",
+            "zip_structure_features": {"has_zip64_extra": True},
+        },
+        archive_key="zip64.zip",
+    ), lazy=True)
+
+    assert {candidate.module_name for candidate in batch.candidates} == {"zip_fix_zip64_extra_size"}
+
+
+def test_zip_route_evidence_sfx_prefers_carrier_crop_from_structure(tmp_path):
+    scheduler = RepairScheduler({
+        "repair": {
+            "workspace": str(tmp_path / "repair"),
+            "modules": [
+                {"name": "archive_carrier_crop_deep_recovery", "enabled": True},
+                {"name": "zip_fix_cd_offset", "enabled": True},
+            ],
+        }
+    })
+    batch = scheduler.generate_repair_candidates(RepairJob(
+        source_input={"kind": "file", "path": str(tmp_path / "sfx.zip"), "format_hint": "zip"},
+        format="zip",
+        confidence=0.7,
+        damage_flags=["damaged"],
+        analysis_prepass={"zip_structure_features": {"has_sfx_prefix": True}},
+        archive_key="sfx.zip",
+    ), lazy=True)
+
+    modules = {candidate.module_name for candidate in batch.candidates}
+    assert "archive_carrier_crop_deep_recovery" in modules
+    assert "zip_fix_cd_offset" not in modules
+
+
+def test_zip_route_history_allows_rebuild_after_carrier_crop(tmp_path):
+    scheduler = RepairScheduler({
+        "repair": {
+            "workspace": str(tmp_path / "repair"),
+            "modules": [{"name": "zip_rebuild_cd_from_local_headers", "enabled": True}],
+        }
+    })
+    batch = scheduler.generate_repair_candidates(RepairJob(
+        source_input={"kind": "file", "path": str(tmp_path / "cropped.zip"), "format_hint": "zip"},
+        format="zip",
+        confidence=0.7,
+        damage_flags=["damaged", "central_directory_bad"],
+        repair_history={"previous_modules": ["archive_carrier_crop_deep_recovery"]},
+        archive_key="cropped.zip",
+    ), lazy=True)
+
+    assert {candidate.module_name for candidate in batch.candidates} == {"zip_rebuild_cd_from_local_headers"}
+    assert "after_archive_carrier_crop" in batch.diagnosis["capability_decision"]["damage_flags"]
+
+
 def test_zip_rebuild_cd_from_local_headers_repairs_missing_eocd(tmp_path):
     source = tmp_path / "missing_cd.zip"
     _write_zip(source, {"a.txt": b"alpha", "b.txt": b"bravo"})

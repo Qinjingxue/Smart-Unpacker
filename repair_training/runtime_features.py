@@ -439,6 +439,13 @@ def _candidate_proposal(payload: dict[str, Any], *, job: RepairJob | None = None
         key: payload.get(key)
         for key in (
             "module",
+            "repair_name",
+            "atomic_action_group",
+            "native_key",
+            "route_family",
+            "route_required_flags_matched",
+            "route_reject_reason",
+            "native_target_mismatch",
             "format",
             "confidence",
             "score_hint",

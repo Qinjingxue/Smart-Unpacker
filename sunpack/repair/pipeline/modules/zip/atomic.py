@@ -24,6 +24,22 @@ from ._native_field_result import repair_result_from_native_zip_field
 from ._rebuild import rebuild_zip_from_source
 
 
+CONTENT_DAMAGE_FLAGS = (
+    "checksum_error",
+    "crc_error",
+    "entry_payload_bad",
+    "payload_bad",
+    "payload_damaged",
+    "damaged",
+    "content_integrity_bad_or_unknown",
+    "data_error",
+    "corrupted_data",
+)
+CARRIER_FLAGS = ("carrier_archive", "embedded_archive", "carrier_prefix", "sfx")
+MISSING_VOLUME_FLAGS = ("missing_volume", "input_truncated", "unexpected_end", "stream_truncated")
+DESCRIPTOR_FLAGS = ("data_descriptor", "bit3_data_descriptor", "compressed_size_bad")
+
+
 def _unrepairable(module_name: str, diagnosis: RepairDiagnosis, message: str, *, warnings: list[str] | None = None, native_key: str = "", native_result: dict[str, Any] | None = None) -> RepairResult:
     payload = diagnosis.as_dict()
     payload.update({"repair_name": module_name, "atomic_action_group": module_name})
@@ -31,6 +47,8 @@ def _unrepairable(module_name: str, diagnosis: RepairDiagnosis, message: str, *,
         payload["native_key"] = native_key
     if native_key and native_result is not None:
         payload[native_key] = native_result
+        if bool(native_result.get("native_target_mismatch")):
+            payload["native_target_mismatch"] = True
     return RepairResult(
         status="unrepairable",
         confidence=0.0,
@@ -51,6 +69,8 @@ class _ZipDirectoryFieldRepair:
     base_score = 0.82
     confidence = 0.88
     content_damage_penalty = 0.35
+    route_family = ""
+    expected_native_actions: tuple[str, ...] = ()
 
     @property
     def spec(self) -> RepairModuleSpec:
@@ -58,10 +78,11 @@ class _ZipDirectoryFieldRepair:
             name=self.module_name,
             formats=("zip",),
             categories=self.categories,
+            atomic=True,
+            route_family=self.route_family or self.module_name,
             routes=(
                 RepairRoute(
                     formats=("zip",),
-                    require_any_categories=self.categories,
                     require_any_flags=self.require_flags,
                     reject_any_flags=self.reject_flags,
                     require_any_failure_kinds=("structure_recognition", "corrupted_data"),
@@ -76,12 +97,10 @@ class _ZipDirectoryFieldRepair:
             return 0.0
         if not flags & set(self.require_flags):
             return 0.0
-        if self.module_name in {"zip_fix_eocd_record", "zip_fix_cd_offset", "zip_fix_cd_entry_count"} and flags & {
-            "checksum_error", "crc_error", "entry_payload_bad", "damaged", "content_integrity_bad_or_unknown", "data_error"
-        }:
+        if self.module_name in {"zip_fix_eocd_record", "zip_fix_cd_offset", "zip_fix_cd_entry_count"} and flags & set(CONTENT_DAMAGE_FLAGS):
             return 0.0
         score = self.confidence
-        if flags & {"checksum_error", "crc_error", "entry_payload_bad", "damaged", "content_integrity_bad_or_unknown", "data_error"}:
+        if flags & set(CONTENT_DAMAGE_FLAGS):
             score = max(0.15, score - self.content_damage_penalty)
         return score
 
@@ -93,6 +112,18 @@ class _ZipDirectoryFieldRepair:
             self.repair_name,
             float(limits.get("max_input_size_mb", 512) or 0),
         ))
+        if self.expected_native_actions and str(result.get("status") or "") == "repaired":
+            actions = {str(action) for action in result.get("actions") or []}
+            if not actions & set(self.expected_native_actions):
+                result["native_target_mismatch"] = True
+                result["expected_native_actions"] = list(self.expected_native_actions)
+                return _unrepairable(
+                    self.module_name,
+                    diagnosis,
+                    "native ZIP field repair produced a different atomic target",
+                    native_key="native_zip_directory_field_repair",
+                    native_result=result,
+                )
         return repair_result_from_native_zip_field(
             self.module_name,
             result,
@@ -109,7 +140,7 @@ class ZipTrimTrailingJunk(_ZipDirectoryFieldRepair):
     repair_name = "zip_trailing_junk_trim"
     categories = ("boundary_repair",)
     require_flags = ("trailing_junk", "boundary_unreliable", "trailing_padding")
-    reject_flags = ("wrong_password", "carrier_archive", "embedded_archive", "carrier_prefix")
+    reject_flags = ("wrong_password", *CARRIER_FLAGS, *MISSING_VOLUME_FLAGS)
     base_score = 0.83
     confidence = 0.88
     content_damage_penalty = 0.22
@@ -120,6 +151,7 @@ class ZipFixEocdCommentLength(_ZipDirectoryFieldRepair):
     repair_name = "zip_comment_length_fix"
     categories = ("boundary_repair", "directory_rebuild")
     require_flags = ("zip_comment_length_bad", "comment_length_bad")
+    reject_flags = ("wrong_password", *CARRIER_FLAGS, *MISSING_VOLUME_FLAGS, *CONTENT_DAMAGE_FLAGS, *DESCRIPTOR_FLAGS)
     base_score = 0.84
     confidence = 0.91
 
@@ -129,7 +161,7 @@ class ZipFixEocdRecord(_ZipDirectoryFieldRepair):
     repair_name = "zip_eocd_repair"
     categories = ("directory_rebuild", "boundary_repair")
     require_flags = ("eocd_bad",)
-    reject_flags = ("wrong_password", "carrier_archive", "embedded_archive", "carrier_prefix", "sfx", "checksum_error", "crc_error", "entry_payload_bad", "damaged", "content_integrity_bad_or_unknown", "data_error")
+    reject_flags = ("wrong_password", *CARRIER_FLAGS, *MISSING_VOLUME_FLAGS, *CONTENT_DAMAGE_FLAGS)
     base_score = 0.86
     confidence = 0.97
 
@@ -139,7 +171,7 @@ class ZipFixCdOffset(_ZipDirectoryFieldRepair):
     repair_name = "zip_central_directory_offset_fix"
     categories = ("directory_rebuild",)
     require_flags = ("central_directory_offset_bad",)
-    reject_flags = ("wrong_password", "carrier_archive", "embedded_archive", "carrier_prefix", "sfx", "checksum_error", "crc_error", "entry_payload_bad", "damaged", "content_integrity_bad_or_unknown", "data_error")
+    reject_flags = ("wrong_password", *CARRIER_FLAGS, *MISSING_VOLUME_FLAGS, *CONTENT_DAMAGE_FLAGS)
     base_score = 0.86
     confidence = 0.92
 
@@ -149,7 +181,7 @@ class ZipFixCdEntryCount(_ZipDirectoryFieldRepair):
     repair_name = "zip_central_directory_count_fix"
     categories = ("directory_rebuild",)
     require_flags = ("central_directory_count_bad",)
-    reject_flags = ("wrong_password", "carrier_archive", "embedded_archive", "carrier_prefix", "sfx", "checksum_error", "crc_error", "entry_payload_bad", "damaged", "content_integrity_bad_or_unknown", "data_error")
+    reject_flags = ("wrong_password", *CARRIER_FLAGS, *MISSING_VOLUME_FLAGS, *CONTENT_DAMAGE_FLAGS)
     base_score = 0.85
     confidence = 0.90
 
@@ -159,7 +191,7 @@ class ZipFixLocalHeaderFields(_ZipDirectoryFieldRepair):
     repair_name = "zip_local_header_field_repair"
     categories = ("directory_rebuild",)
     require_flags = ("local_header_bad", "local_header_length_bad", "local_header_size_bad")
-    reject_flags = ("wrong_password", "carrier_archive", "embedded_archive", "carrier_prefix", "sfx")
+    reject_flags = ("wrong_password", *CARRIER_FLAGS, *MISSING_VOLUME_FLAGS, *CONTENT_DAMAGE_FLAGS)
     base_score = 0.84
     confidence = 0.88
 
@@ -170,21 +202,28 @@ class _Zip64FieldRepair(_ZipDirectoryFieldRepair):
     base_score = 0.90
     confidence = 0.96
     content_damage_penalty = 0.15
+    reject_flags = ("wrong_password", *CARRIER_FLAGS, *MISSING_VOLUME_FLAGS, *CONTENT_DAMAGE_FLAGS)
 
 
 class ZipFixZip64Locator(_Zip64FieldRepair):
     module_name = "zip_fix_zip64_locator"
     require_flags = ("zip64_locator_bad",)
+    route_family = "zip64_locator"
+    expected_native_actions = ("normalize_zip64_eocd_locator", "rewrite_zip64_eocd_locator")
 
 
 class ZipFixZip64Eocd(_Zip64FieldRepair):
     module_name = "zip_fix_zip64_eocd"
     require_flags = ("zip64_eocd_bad",)
+    route_family = "zip64_eocd"
+    expected_native_actions = ("rewrite_zip64_eocd_fields",)
 
 
 class ZipFixZip64ExtraSize(_Zip64FieldRepair):
     module_name = "zip_fix_zip64_extra_size"
     require_flags = ("zip64_extra_bad", "zip64_extra_size_bad")
+    route_family = "zip64_extra"
+    expected_native_actions = ("reconcile_zip64_central_extra_fields",)
 
 
 class _ZipRebuildFromLocalHeaders:
@@ -193,6 +232,7 @@ class _ZipRebuildFromLocalHeaders:
     require_flags: tuple[str, ...] = ()
     reject_flags: tuple[str, ...] = ("missing_volume",)
     base_score = 0.84
+    route_family = ""
 
     @property
     def spec(self) -> RepairModuleSpec:
@@ -201,10 +241,11 @@ class _ZipRebuildFromLocalHeaders:
             formats=("zip",),
             categories=("directory_rebuild", "content_recovery"),
             partial=True,
+            atomic=True,
+            route_family=self.route_family or self.module_name,
             routes=(
                 RepairRoute(
                     formats=("zip",),
-                    require_any_categories=("directory_rebuild", "content_recovery"),
                     require_any_flags=self.require_flags,
                     reject_any_flags=self.reject_flags,
                     require_any_failure_kinds=("structure_recognition", "corrupted_data"),
@@ -270,11 +311,40 @@ class ZipRebuildCdFromLocalHeaders(_ZipRebuildFromLocalHeaders):
     base_score = 0.85
 
 
+class ZipRebuildCdPreserveRawNames(_ZipRebuildFromLocalHeaders):
+    module_name = "zip_rebuild_cd_preserve_raw_names"
+    require_data_descriptor = False
+    require_flags = (
+        "non_utf8_filename",
+        "filename_encoding_bad",
+        "raw_filename_bytes",
+        "central_directory_bad",
+        "directory_integrity_bad_or_unknown",
+        "local_header_recovery",
+    )
+    base_score = 0.91
+    route_family = "raw_name_directory_rebuild"
+
+    def can_handle(self, job: RepairJob, diagnosis: RepairDiagnosis, config: dict) -> float:
+        flags = set(job.damage_flags)
+        if flags & set(self.reject_flags):
+            return 0.0
+        if flags & {"non_utf8_filename", "filename_encoding_bad", "raw_filename_bytes"}:
+            return 0.97
+        if flags & {"central_directory_bad", "directory_integrity_bad_or_unknown", "local_header_recovery"} and (
+            "directory_rebuild" in diagnosis.categories or "content_recovery" in diagnosis.categories
+        ):
+            return 0.88
+        return 0.0
+
+
 class ZipRebuildCdFromDataDescriptors(_ZipRebuildFromLocalHeaders):
     module_name = "zip_rebuild_cd_from_data_descriptors"
     require_data_descriptor = True
     require_flags = ("data_descriptor", "compressed_size_bad", "bit3_data_descriptor")
+    reject_flags = ("missing_volume", *CARRIER_FLAGS)
     base_score = 0.90
+    route_family = "descriptor_rebuild"
 
 
 class ZipReconcileCdLocalHeaders:
@@ -283,11 +353,20 @@ class ZipReconcileCdLocalHeaders:
         formats=("zip",),
         categories=("directory_rebuild", "content_recovery"),
         partial=True,
-        routes=(RepairRoute(formats=("zip",), require_any_flags=("central_directory_offset_bad", "local_header_conflict"), base_score=0.91),),
+        atomic=True,
+        route_family="cd_local_reconcile",
+        routes=(RepairRoute(
+            formats=("zip",),
+            require_any_flags=("central_directory_offset_bad", "local_header_conflict"),
+            reject_any_flags=(*MISSING_VOLUME_FLAGS, *DESCRIPTOR_FLAGS),
+            base_score=0.91,
+        ),),
     )
 
     def can_handle(self, job: RepairJob, diagnosis: RepairDiagnosis, config: dict) -> float:
         flags = set(job.damage_flags)
+        if flags & set(MISSING_VOLUME_FLAGS) or flags & set(DESCRIPTOR_FLAGS):
+            return 0.0
         return 0.94 if flags & {"central_directory_offset_bad", "local_header_conflict"} else 0.0
 
     def repair(self, job: RepairJob, diagnosis: RepairDiagnosis, workspace: str, config: dict) -> RepairResult:
@@ -321,7 +400,14 @@ class ZipReconcileCdDataDescriptorConflict(ZipReconcileCdLocalHeaders):
         formats=("zip",),
         categories=("directory_rebuild", "content_recovery"),
         partial=True,
-        routes=(RepairRoute(formats=("zip",), require_any_flags=("data_descriptor", "bit3_data_descriptor", "compressed_size_bad", "local_header_conflict"), base_score=0.93),),
+        atomic=True,
+        route_family="descriptor_conflict_reconcile",
+        routes=(RepairRoute(
+            formats=("zip",),
+            require_any_flags=DESCRIPTOR_FLAGS,
+            reject_any_flags=(*MISSING_VOLUME_FLAGS, *CARRIER_FLAGS),
+            base_score=0.93,
+        ),),
     )
 
     def can_handle(self, job: RepairJob, diagnosis: RepairDiagnosis, config: dict) -> float:
@@ -335,7 +421,9 @@ class ZipQuarantineFailedEntries:
         formats=("zip",),
         categories=("content_recovery",),
         partial=True,
-        routes=(RepairRoute(formats=("zip",), require_any_flags=("checksum_error", "crc_error", "entry_payload_bad", "damaged"), base_score=0.88),),
+        atomic=True,
+        route_family="payload_quarantine",
+        routes=(RepairRoute(formats=("zip",), require_any_flags=("checksum_error", "crc_error", "entry_payload_bad", "damaged"), reject_any_flags=MISSING_VOLUME_FLAGS, base_score=0.88),),
     )
 
     def can_handle(self, job: RepairJob, diagnosis: RepairDiagnosis, config: dict) -> float:
@@ -367,7 +455,9 @@ class ZipSalvageVerifiedEntries:
         formats=("zip",),
         categories=("content_recovery",),
         partial=True,
-        routes=(RepairRoute(formats=("zip",), require_any_flags=("checksum_error", "crc_error", "entry_payload_bad", "damaged", "payload_damaged", "corrupted_data"), base_score=0.82),),
+        atomic=True,
+        route_family="verified_entry_salvage",
+        routes=(RepairRoute(formats=("zip",), require_any_flags=("checksum_error", "crc_error", "entry_payload_bad", "damaged", "payload_damaged", "corrupted_data"), reject_any_flags=MISSING_VOLUME_FLAGS, base_score=0.82),),
     )
 
     def can_handle(self, job: RepairJob, diagnosis: RepairDiagnosis, config: dict) -> float:
@@ -393,9 +483,11 @@ class ZipSalvageVerifiedEntries:
 class _ZipLocalHeaderPartialScan:
     module_name = "zip_local_header_partial_scan"
     native_key = "native_zip_local_header_partial_scan"
-    require_flags: tuple[str, ...] = ("checksum_error", "crc_error", "entry_payload_bad", "damaged", "payload_damaged", "corrupted_data", "local_header_recovery", "carrier_archive", "sfx", "boundary_unreliable", "trailing_junk")
+    require_flags: tuple[str, ...] = ("checksum_error", "crc_error", "entry_payload_bad", "damaged", "payload_damaged", "corrupted_data", "local_header_recovery")
+    reject_flags: tuple[str, ...] = (*MISSING_VOLUME_FLAGS, *CARRIER_FLAGS)
     base_score = 0.84
     default_confidence = 0.70
+    route_family = "local_header_partial_scan"
 
     @property
     def spec(self) -> RepairModuleSpec:
@@ -404,15 +496,17 @@ class _ZipLocalHeaderPartialScan:
             formats=("zip",),
             categories=("content_recovery", "directory_rebuild"),
             partial=True,
-            routes=(RepairRoute(formats=("zip",), require_any_flags=self.require_flags, base_score=self.base_score),),
+            atomic=True,
+            route_family=self.route_family,
+            routes=(RepairRoute(formats=("zip",), require_any_flags=self.require_flags, reject_any_flags=self.reject_flags, base_score=self.base_score),),
         )
 
     def can_handle(self, job: RepairJob, diagnosis: RepairDiagnosis, config: dict) -> float:
         flags = set(job.damage_flags)
+        if flags & set(self.reject_flags):
+            return 0.0
         if not flags & set(self.require_flags):
             return 0.0
-        if flags & {"carrier_archive", "sfx"}:
-            return 0.78
         return 0.90 if flags & {"local_header_recovery", "entry_payload_bad", "crc_error", "checksum_error"} else 0.74
 
     def repair(self, job: RepairJob, diagnosis: RepairDiagnosis, workspace: str, config: dict) -> RepairResult:
@@ -455,8 +549,10 @@ class ZipPartialSalvageMissingVolume(_ZipLocalHeaderPartialScan):
     module_name = "zip_partial_salvage_missing_volume"
     native_key = "native_zip_partial_salvage_missing_volume"
     require_flags = ("missing_volume", "input_truncated", "unexpected_end", "stream_truncated")
+    reject_flags = ("wrong_password",)
     base_score = 0.94
     default_confidence = 0.68
+    route_family = "missing_volume_partial_salvage"
 
     def can_handle(self, job: RepairJob, diagnosis: RepairDiagnosis, config: dict) -> float:
         flags = set(job.damage_flags)
@@ -467,6 +563,7 @@ class _ZipConflictResolver:
     module_name = ""
     require_flags: tuple[str, ...] = ()
     base_score = 0.88
+    route_family = ""
 
     @property
     def spec(self) -> RepairModuleSpec:
@@ -475,12 +572,14 @@ class _ZipConflictResolver:
             formats=("zip",),
             categories=("directory_rebuild", "content_recovery"),
             partial=True,
-            routes=(RepairRoute(formats=("zip",), require_any_flags=self.require_flags, reject_any_flags=("missing_volume",), base_score=self.base_score),),
+            atomic=True,
+            route_family=self.route_family or self.module_name,
+            routes=(RepairRoute(formats=("zip",), require_any_flags=self.require_flags, reject_any_flags=(*MISSING_VOLUME_FLAGS, *DESCRIPTOR_FLAGS), base_score=self.base_score),),
         )
 
     def can_handle(self, job: RepairJob, diagnosis: RepairDiagnosis, config: dict) -> float:
         flags = set(job.damage_flags)
-        return 0.94 if flags & set(self.require_flags) and "missing_volume" not in flags else 0.0
+        return 0.94 if flags & set(self.require_flags) and not (flags & set(MISSING_VOLUME_FLAGS) or flags & set(DESCRIPTOR_FLAGS)) else 0.0
 
     def repair(self, job: RepairJob, diagnosis: RepairDiagnosis, workspace: str, config: dict) -> RepairResult:
         candidates = self.generate_candidates(job, diagnosis, workspace, config)
@@ -530,6 +629,7 @@ for _module in (
     ZipFixZip64Eocd(),
     ZipFixZip64ExtraSize(),
     ZipRebuildCdFromLocalHeaders(),
+    ZipRebuildCdPreserveRawNames(),
     ZipRebuildCdFromDataDescriptors(),
     ZipReconcileCdLocalHeaders(),
     ZipReconcileCdDataDescriptorConflict(),

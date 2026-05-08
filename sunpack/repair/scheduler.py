@@ -76,6 +76,7 @@ class RepairScheduler:
     def generate_repair_candidates(self, job: RepairJob, *, lazy: bool = False) -> RepairCandidateBatch:
         diagnosis = self.diagnose(job)
         context = build_repair_context(job, diagnosis)
+        effective_job = replace(job, damage_flags=list(context.damage_flags))
         if not self.config.get("enabled", True):
             result = self._result("skipped", job, diagnosis, "repair layer is disabled")
             repair_trace.write_event("repair_candidates_terminal", {
@@ -106,7 +107,7 @@ class RepairScheduler:
                 message=message,
             )
 
-        modules, capability = self._select_modules(job, diagnosis, context)
+        modules, capability = self._select_modules(effective_job, diagnosis, context)
         if not modules:
             status = "unrepairable" if capability.automatic_unrepairable else "unsupported"
             result = self._result(status, job, diagnosis, capability.message(), capability)
@@ -128,7 +129,7 @@ class RepairScheduler:
         workspace.mkdir(parents=True, exist_ok=True)
         module_configs = enabled_module_configs(self.config)
         repair_candidates, warnings, capability = self._run_modules(
-            job,
+            effective_job,
             diagnosis,
             modules,
             capability,
@@ -153,7 +154,7 @@ class RepairScheduler:
             candidates=repair_candidates,
             warnings=_dedupe(warnings),
             diagnosis=_with_generation_diagnosis(
-                _with_capability_diagnosis(diagnosis.as_dict(), capability),
+            _with_capability_diagnosis(diagnosis.as_dict(), capability),
                 repair_candidates,
                 warnings,
             ),
@@ -262,10 +263,19 @@ class RepairScheduler:
             policy_reasons: list[str] = []
             dynamic_reasons: list[str] = []
             format_supported = _format_matches(diagnosis.format, module.spec.formats)
-            route_score = self._route_score(module.spec.routes, context)
-            route_reasons = self._route_reasons(module.spec.routes, context) if route_score <= 0 else []
+            atomic = bool(getattr(module.spec, "atomic", False))
+            route_score = self._route_score(module.spec.routes, context, atomic=atomic)
+            route_reasons = self._route_reasons(module.spec.routes, context, atomic=atomic) if route_score <= 0 else []
             if route_score <= 0 and route_reasons:
                 declarative_reasons.extend(route_reasons)
+            if atomic and not format_supported:
+                reasons.append("format_not_supported")
+                decisions.append(_module_decision(module, format_supported, reasons, declarative_reasons, policy_reasons, dynamic_reasons, route_score=route_score))
+                continue
+            if atomic and route_score <= 0:
+                reasons.extend(declarative_reasons or ["atomic_route_rejected"])
+                decisions.append(_module_decision(module, format_supported, reasons, declarative_reasons, policy_reasons, dynamic_reasons, route_score=route_score))
+                continue
             if route_score <= 0 and not format_supported:
                 reasons.append("format_not_supported")
                 decisions.append(_module_decision(module, format_supported, reasons, declarative_reasons, policy_reasons, dynamic_reasons, route_score=route_score))
@@ -288,9 +298,12 @@ class RepairScheduler:
                 decisions.append(_module_decision(module, format_supported, reasons, declarative_reasons, policy_reasons, dynamic_reasons, route_score=route_score))
                 continue
             fine_score = float(module.can_handle(job, diagnosis, module_config) or 0.0)
-            score = max(fine_score, route_score)
+            score = min(fine_score, route_score) if atomic else max(fine_score, route_score)
             if score <= 0:
-                if declarative_reasons:
+                if atomic and fine_score <= 0:
+                    reasons.append("can_handle_rejected")
+                    dynamic_reasons.append("can_handle_rejected")
+                elif declarative_reasons:
                     reasons.extend(declarative_reasons)
                 else:
                     reasons.append("can_handle_rejected")
@@ -357,15 +370,15 @@ class RepairScheduler:
             module.spec.name,
         )
 
-    def _route_score(self, routes: tuple[RepairRoute, ...], context: RepairContext) -> float:
+    def _route_score(self, routes: tuple[RepairRoute, ...], context: RepairContext, *, atomic: bool = False) -> float:
         best = 0.0
         for route in routes:
-            score = self._single_route_score(route, context)
+            score = self._single_route_score(route, context, atomic=atomic)
             if score > best:
                 best = score
         return best
 
-    def _single_route_score(self, route: RepairRoute, context: RepairContext) -> float:
+    def _single_route_score(self, route: RepairRoute, context: RepairContext, *, atomic: bool = False) -> float:
         if route.formats and not _format_matches(context.format, route.formats):
             return 0.0
         if _intersects(route.reject_any_flags, context.damage_flags):
@@ -376,6 +389,14 @@ class RepairScheduler:
             return 0.0
 
         score = float(route.base_score or 0.0)
+        if not _contains_all(route.require_all_categories, context.categories):
+            return 0.0
+        if not _contains_all(route.require_all_flags, context.damage_flags):
+            return 0.0
+        if route.require_all_categories:
+            score += 0.1
+        if route.require_all_flags:
+            score += 0.14
         requirements = [
             (route.require_any_categories, context.categories, 0.08),
             (route.require_any_flags, context.damage_flags, 0.12),
@@ -395,7 +416,7 @@ class RepairScheduler:
             return 0.0
         return max(0.0, min(score, 1.0))
 
-    def _route_reasons(self, routes: tuple[RepairRoute, ...], context: RepairContext) -> list[str]:
+    def _route_reasons(self, routes: tuple[RepairRoute, ...], context: RepairContext, *, atomic: bool = False) -> list[str]:
         if not routes:
             return []
         reasons: list[str] = []
@@ -411,6 +432,12 @@ class RepairScheduler:
             if context.failure_kind and _intersects(route.reject_any_failure_kinds, (context.failure_kind,)):
                 reasons.append("route_rejected_failure_kind")
                 continue
+            if not _contains_all(route.require_all_categories, context.categories):
+                reasons.append("route_required_categories_unmet")
+                continue
+            if not _contains_all(route.require_all_flags, context.damage_flags):
+                reasons.append("route_required_flags_unmet")
+                continue
             requirements = [
                 (route.require_any_categories, context.categories),
                 (route.require_any_flags, context.damage_flags),
@@ -420,7 +447,7 @@ class RepairScheduler:
             ]
             active_requirements = [item for item in requirements if item[0]]
             if active_requirements and not any(_intersects(expected, actual) for expected, actual in active_requirements):
-                reasons.append("route_requirements_unmet")
+                reasons.append("route_required_flags_unmet" if atomic else "route_requirements_unmet")
         return _dedupe(reasons)
 
     def _safety_allows(self, module, module_config: dict[str, Any]) -> bool:
@@ -649,6 +676,8 @@ def _module_decision(
         declarative_reasons=_dedupe(declarative_reasons),
         policy_reasons=_dedupe(policy_reasons),
         dynamic_reasons=_dedupe(dynamic_reasons),
+        atomic=bool(getattr(module.spec, "atomic", False)),
+        route_family=str(getattr(module.spec, "route_family", "") or ""),
     )
 
 
@@ -724,6 +753,8 @@ def _route_specificity(routes: tuple[RepairRoute, ...]) -> int:
         + len(route.require_any_fuzzy_hints)
         + len(route.require_any_failure_stages)
         + len(route.require_any_failure_kinds)
+        + len(route.require_all_categories)
+        + len(route.require_all_flags)
         + len(route.reject_any_flags)
         + len(route.reject_any_failure_stages)
         + len(route.reject_any_failure_kinds)
@@ -754,6 +785,14 @@ def _dedupe(values: list[str]) -> list[str]:
 
 def _intersects(left, right) -> bool:
     return bool({str(item).lower() for item in left} & {str(item).lower() for item in right if str(item or "")})
+
+
+def _contains_all(expected, actual) -> bool:
+    required = {str(item).lower() for item in expected if str(item or "")}
+    if not required:
+        return True
+    present = {str(item).lower() for item in actual if str(item or "")}
+    return required <= present
 
 
 def _format_matches(fmt: str, expected) -> bool:
@@ -787,6 +826,18 @@ def _lazy_module_candidate(
     score_hint: float,
 ) -> RepairCandidate:
     module_name = module.spec.name
+    route_family = str(getattr(module.spec, "route_family", "") or "")
+    atomic_action_group = route_family or module_name
+    route_required_flags = tuple(
+        flag
+        for route in getattr(module.spec, "routes", ()) or ()
+        for flag in (*getattr(route, "require_all_flags", ()), *getattr(route, "require_any_flags", ()))
+    )
+    route_required_flags_matched = sorted({
+        str(flag)
+        for flag in route_required_flags
+        if str(flag).lower() in {str(item).lower() for item in job.damage_flags}
+    })
 
     def materialize():
         if hasattr(module, "generate_candidates"):
@@ -805,6 +856,15 @@ def _lazy_module_candidate(
             )
         return None
 
+    enriched = dict(diagnosis.as_dict())
+    enriched.update({
+        "repair_name": module_name,
+        "native_key": "",
+        "atomic_action_group": atomic_action_group,
+        "route_family": route_family,
+        "route_required_flags_matched": route_required_flags_matched,
+        "route_reject_reason": "",
+    })
     return RepairCandidate(
         module_name=module_name,
         format=diagnosis.format or job.format,
@@ -815,7 +875,7 @@ def _lazy_module_candidate(
         partial=bool(module.spec.partial),
         actions=["plan_repair", module_name],
         damage_flags=list(job.damage_flags),
-        diagnosis=diagnosis.as_dict(),
+        diagnosis=enriched,
         message="repair plan pending materialization",
         validations=[
             CandidateValidation(
@@ -826,6 +886,8 @@ def _lazy_module_candidate(
                     "module": module_name,
                     "stage": module.spec.stage,
                     "lazy": True,
+                    "atomic": bool(getattr(module.spec, "atomic", False)),
+                    "route_family": route_family,
                 },
             )
         ],

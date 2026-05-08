@@ -22,6 +22,7 @@ class RepairJob:
     attempts: int = 0
     source_descriptor: ArchiveInputDescriptor | None = None
     archive_state: ArchiveState | None = None
+    repair_history: dict[str, Any] = field(default_factory=dict)
 
     @property
     def has_extraction_failure(self) -> bool:

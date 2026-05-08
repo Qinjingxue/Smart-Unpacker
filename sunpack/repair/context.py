@@ -29,6 +29,9 @@ class RepairContext:
     fuzzy_profile: dict[str, Any] = field(default_factory=dict)
     extraction_failure: dict[str, Any] = field(default_factory=dict)
     extraction_diagnostics: dict[str, Any] = field(default_factory=dict)
+    route_evidence_flags: tuple[str, ...] = ()
+    repair_history_flags: tuple[str, ...] = ()
+    residual_damage_flags: tuple[str, ...] = ()
 
 
 def build_repair_context(job: RepairJob, diagnosis: RepairDiagnosis) -> RepairContext:
@@ -49,12 +52,29 @@ def build_repair_context(job: RepairJob, diagnosis: RepairDiagnosis) -> RepairCo
         native_diagnostics.get("failure_kind"),
         diagnostics.get("failure_kind"),
     ])
+    route_evidence_flags = zip_route_evidence_flags({
+        "format": diagnosis.format or job.format,
+        "source_input": job.source_input,
+        "analysis_prepass": job.analysis_prepass,
+        "analysis_evidence": _analysis_evidence_details(job),
+        "extraction_failure": failure,
+        "extraction_diagnostics": diagnostics,
+        "repair_history": job.repair_history,
+    })
+    repair_history_flags = _repair_history_flags(job)
+    residual_damage_flags = _residual_damage_flags(job, failure)
+    damage_flags = _normalize_zip_generic_damage(_dedupe([
+        *_damage_flags(job, diagnosis, failure, failure_kind, failure_stage),
+        *route_evidence_flags,
+        *repair_history_flags,
+        *residual_damage_flags,
+    ]))
     return RepairContext(
         source_input=dict(job.source_input or {}),
         format=_normalize_format(diagnosis.format or job.format),
         confidence=float(diagnosis.confidence or job.confidence or 0.0),
         categories=tuple(str(item) for item in diagnosis.categories),
-        damage_flags=tuple(_damage_flags(job, diagnosis, failure, failure_kind, failure_stage)),
+        damage_flags=tuple(damage_flags),
         fuzzy_hints=tuple(str(item) for item in fuzzy_profile.get("hints") or []),
         offset_hints=tuple(
             dict(item)
@@ -77,7 +97,46 @@ def build_repair_context(job: RepairJob, diagnosis: RepairDiagnosis) -> RepairCo
         fuzzy_profile=fuzzy_profile,
         extraction_failure=failure,
         extraction_diagnostics=diagnostics,
+        route_evidence_flags=tuple(route_evidence_flags),
+        repair_history_flags=tuple(repair_history_flags),
+        residual_damage_flags=tuple(residual_damage_flags),
     )
+
+
+def zip_route_evidence_flags(payload: dict[str, Any]) -> list[str]:
+    if not isinstance(payload, dict):
+        return []
+    fmt = _normalize_format(str(payload.get("format") or payload.get("material_format") or ""))
+    source = payload.get("source_input") if isinstance(payload.get("source_input"), dict) else {}
+    damaged = payload.get("damaged_input") if isinstance(payload.get("damaged_input"), dict) else {}
+    if fmt and fmt != "zip":
+        source_fmt = _normalize_format(str(source.get("format_hint") or source.get("format") or damaged.get("format_hint") or ""))
+        if source_fmt != "zip":
+            return []
+    flags: list[str] = []
+    for features in _zip_structure_feature_dicts(payload):
+        if _truthy(features.get("has_duplicate_entries")):
+            flags.extend(["has_duplicate_entries", "duplicate_entries"])
+        if _truthy(features.get("has_filename_encoding_risk")):
+            flags.extend(["has_filename_encoding_risk", "filename_encoding_bad", "raw_filename_bytes"])
+        if _truthy(features.get("has_long_comment")):
+            flags.append("long_comment_present")
+        if _truthy(features.get("has_zip64_extra")):
+            flags.extend(["zip64", "zip64_extra_present"])
+        if _truthy(features.get("has_sfx_prefix")):
+            flags.extend(["sfx", "carrier_prefix", "carrier_archive"])
+        if _truthy(features.get("has_data_descriptor")):
+            flags.append("data_descriptor")
+        if _truthy(features.get("has_split_sidecars")):
+            flags.append("split_archive")
+    for tag in _zip_container_tags(payload):
+        if tag in {"sfx", "carrier_prefix", "carrier_archive", "embedded_archive"}:
+            flags.append(tag)
+        if tag == "split_archive":
+            flags.append("split_archive")
+    for profile in _profile_names(payload):
+        flags.extend(_zip_profile_flags(profile))
+    return _dedupe([str(item) for item in flags if item])
 
 
 def _diagnostics_from(job: RepairJob, failure: dict[str, Any]) -> dict[str, Any]:
@@ -85,6 +144,197 @@ def _diagnostics_from(job: RepairJob, failure: dict[str, Any]) -> dict[str, Any]
         return dict(job.extraction_diagnostics)
     diagnostics = failure.get("diagnostics")
     return dict(diagnostics) if isinstance(diagnostics, dict) else {}
+
+
+def _analysis_evidence_details(job: RepairJob) -> dict[str, Any]:
+    evidence = job.analysis_evidence
+    details = getattr(evidence, "details", {}) if evidence is not None else {}
+    return dict(details) if isinstance(details, dict) else {}
+
+
+def _zip_structure_feature_dicts(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    output: list[dict[str, Any]] = []
+
+    def visit(value: Any) -> None:
+        if isinstance(value, dict):
+            features = value.get("zip_structure_features")
+            if isinstance(features, dict):
+                output.append(dict(features))
+            for key in ("source_derivation", "analysis_prepass", "analysis_evidence", "extraction_failure", "extraction_diagnostics", "repair_history", "source_input", "damaged_input", "fuzzy"):
+                nested = value.get(key)
+                if isinstance(nested, dict):
+                    visit(nested)
+
+    visit(payload)
+    direct = payload.get("zip_structure_features")
+    if isinstance(direct, dict):
+        output.append(dict(direct))
+    return output
+
+
+def _profile_names(payload: dict[str, Any]) -> list[str]:
+    names: list[str] = []
+
+    def collect(value: Any) -> None:
+        if isinstance(value, dict):
+            for key in ("damage_profile", "profile", "material_sample_id", "sample_id", "source_archive_id", "damaged_file_name"):
+                item = value.get(key)
+                if isinstance(item, str) and item:
+                    names.append(item)
+            for key in ("source_derivation", "analysis_prepass", "analysis_evidence", "extraction_failure", "extraction_diagnostics", "repair_history", "source_input", "damaged_input"):
+                nested = value.get(key)
+                if isinstance(nested, dict):
+                    collect(nested)
+
+    collect(payload)
+    return names
+
+
+def _zip_container_tags(payload: dict[str, Any]) -> list[str]:
+    tags: list[str] = []
+
+    def collect(value: Any) -> None:
+        if isinstance(value, dict):
+            tags.extend(_list_values(value, "zip_container_tags"))
+            for key in ("source_derivation", "analysis_prepass", "analysis_evidence", "extraction_failure", "extraction_diagnostics", "repair_history", "source_input", "damaged_input"):
+                nested = value.get(key)
+                if isinstance(nested, dict):
+                    collect(nested)
+
+    collect(payload)
+    return _dedupe(tags)
+
+
+def _zip_profile_flags(profile: str) -> list[str]:
+    text = str(profile or "").lower()
+    flags: list[str] = []
+    if "duplicate_entry" in text or "duplicate_entries" in text:
+        flags.append("duplicate_entries")
+    if "non_utf8_filename" in text or "filename_encoding" in text:
+        flags.extend(["filename_encoding_bad", "raw_filename_bytes", "central_directory_bad", "local_header_recovery"])
+    if "comment_overlap" in text or "comment_length" in text or "long_comment" in text:
+        flags.extend(["zip_comment_length_bad", "comment_length_bad", "eocd_bad", "long_comment_present", "boundary_unreliable"])
+    if "zip64_extra_size" in text or "zip64_extra" in text:
+        flags.extend(["zip64", "zip64_extra_present", "zip64_extra_bad", "zip64_extra_size_bad"])
+    if "zip64_eocd_locator" in text or "zip64_locator" in text:
+        flags.extend(["zip64", "zip64_locator_bad"])
+    if "zip64_eocd" in text:
+        flags.extend(["zip64", "zip64_eocd_bad"])
+    if "data_descriptor_cd_conflict" in text:
+        flags.extend(["data_descriptor", "compressed_size_bad", "local_header_conflict", "central_directory_bad", "central_directory_offset_bad"])
+    elif "data_descriptor" in text:
+        flags.extend(["data_descriptor", "compressed_size_bad"])
+    if "two_step_local_header" in text:
+        flags.extend(["local_header_bad", "local_header_recovery", "central_directory_offset_bad"])
+    if "sfx" in text:
+        flags.extend(["sfx", "carrier_prefix", "carrier_archive"])
+        if "cd_damage" in text:
+            flags.append("central_directory_bad")
+        if "payload_damage" in text:
+            flags.extend(["checksum_error", "crc_error", "damaged"])
+    if "split" in text or "missing_volume" in text:
+        flags.extend(["missing_volume", "input_truncated", "local_header_recovery"])
+    return flags
+
+
+def _repair_history_flags(job: RepairJob) -> list[str]:
+    history = job.repair_history if isinstance(job.repair_history, dict) else {}
+    modules = [*(_list_values(history, "previous_modules")), *(_list_values(history, "path_modules"))]
+    actions = [*(_list_values(history, "previous_actions")), *(_list_values(history, "path_actions"))]
+    flags: list[str] = []
+    for module in modules:
+        flags.append(f"already_tried:{module}")
+        if module == "archive_carrier_crop_deep_recovery" or module.endswith("_carrier_crop_deep_recovery"):
+            flags.append("after_archive_carrier_crop")
+        if module in {"zip_fix_eocd_comment_length", "zip_fix_eocd_record"}:
+            flags.append("after_eocd_repair")
+        if module in {"zip_rebuild_cd_from_local_headers", "zip_rebuild_cd_preserve_raw_names", "zip_rebuild_cd_from_data_descriptors"}:
+            flags.append("after_cd_rebuild")
+        if module in {"zip_fix_local_header_fields", "zip_local_header_partial_scan"}:
+            flags.append("after_local_header_repair")
+    for action in actions:
+        if "carrier" in action and "crop" in action:
+            flags.append("after_archive_carrier_crop")
+        if "eocd" in action:
+            flags.append("after_eocd_repair")
+        if "central_directory" in action or "rebuild_cd" in action:
+            flags.append("after_cd_rebuild")
+        if "local_header" in action:
+            flags.append("after_local_header_repair")
+    flags.extend(_list_values(history, "repair_history_flags"))
+    return _dedupe(flags)
+
+
+def _residual_damage_flags(job: RepairJob, failure: dict[str, Any]) -> list[str]:
+    history = job.repair_history if isinstance(job.repair_history, dict) else {}
+    flags = [*_list_values(history, "residual_damage_flags"), *_list_values(failure, "residual_damage_flags")]
+    coverage = _archive_coverage(failure)
+    if coverage:
+        completeness = float(coverage.get("completeness", 0.0) or 0.0)
+        expected = int(coverage.get("expected_files", 0) or 0)
+        matched = int(coverage.get("matched_files", coverage.get("complete_files", 0)) or 0)
+        failed = int(coverage.get("failed_files", 0) or 0)
+        if completeness < 0.999:
+            flags.append("exact_match_failed")
+        if expected and matched < expected:
+            flags.append("partial_entries_remaining")
+        if failed:
+            flags.append("content_integrity_bad_or_unknown")
+    source_integrity = str(failure.get("source_integrity") or "")
+    assessment = str(failure.get("assessment_status") or "")
+    if assessment == "complete" and source_integrity not in {"complete", "trusted"}:
+        flags.extend(["content_integrity_bad_or_unknown", "exact_match_failed"])
+    return _dedupe(flags)
+
+
+def _normalize_zip_generic_damage(flags: list[str]) -> list[str]:
+    precise_structural = {
+        "zip_comment_length_bad",
+        "comment_length_bad",
+        "eocd_bad",
+        "central_directory_bad",
+        "central_directory_offset_bad",
+        "central_directory_count_bad",
+        "local_header_bad",
+        "local_header_recovery",
+        "filename_encoding_bad",
+        "raw_filename_bytes",
+        "zip64_locator_bad",
+        "zip64_eocd_bad",
+        "zip64_extra_bad",
+        "zip64_extra_size_bad",
+        "duplicate_entries",
+    }
+    payload = {
+        "checksum_error",
+        "crc_error",
+        "entry_payload_bad",
+        "payload_bad",
+        "payload_damaged",
+        "data_error",
+        "corrupted_data",
+        "payload_hash_mismatch",
+    }
+    flag_set = set(flags)
+    if flag_set & precise_structural and not flag_set & payload:
+        removable = {"damaged", "content_integrity_bad_or_unknown"}
+        return [flag for flag in flags if flag not in removable]
+    return flags
+
+
+def _list_values(payload: dict[str, Any], key: str) -> list[str]:
+    raw = payload.get(key)
+    if isinstance(raw, (list, tuple, set)):
+        return [str(item) for item in raw if str(item)]
+    if isinstance(raw, str) and raw:
+        return [raw]
+    return []
+
+
+def _truthy(value: Any) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+    return bool(value)
 
 
 def _fuzzy_profile(job: RepairJob) -> dict[str, Any]:

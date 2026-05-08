@@ -57,6 +57,7 @@ DEFAULT_REPAIR_CONFIG = {
         {"name": "zip_fix_zip64_eocd", "enabled": True},
         {"name": "zip_fix_zip64_extra_size", "enabled": True},
         {"name": "zip_rebuild_cd_from_local_headers", "enabled": True},
+        {"name": "zip_rebuild_cd_preserve_raw_names", "enabled": True},
         {"name": "zip_rebuild_cd_from_data_descriptors", "enabled": True},
         {"name": "zip_reconcile_cd_local_headers", "enabled": True},
         {"name": "zip_quarantine_failed_entries", "enabled": True},

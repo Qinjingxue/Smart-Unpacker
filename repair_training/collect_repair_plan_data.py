@@ -26,6 +26,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from sunpack.repair import RepairJob, RepairResult, RepairScheduler
 from sunpack.repair.candidate import CandidateSelector, candidate_feature_payload, materialize_candidate
+from sunpack.repair.context import zip_route_evidence_flags
 from sunpack.contracts.archive_state import ArchiveState
 from sunpack.contracts.detection import FactBag
 from sunpack.contracts.tasks import ArchiveTask
@@ -71,6 +72,14 @@ def main(argv: list[str] | None = None) -> int:
         "terminal_status_counts": {},
         "terminal_success_count": 0,
         "no_output_reason_counts": {},
+        "route_rejected_by_required_flags": 0,
+        "route_rejected_by_can_handle": 0,
+        "native_target_mismatch_counts": {},
+        "no_output_by_atomic_family": {},
+        "route_evidence_flag_counts": {},
+        "selected_by_route_evidence": {},
+        "residual_flag_counts": {},
+        "no_candidates_by_missing_evidence_profile": {},
         "legacy_module_seen_count": 0,
         "rollout_budget_exhausted": 0,
         "best_recovery_bucket_counts": {},
@@ -224,6 +233,10 @@ def _update_summary_counts(summary: dict[str, Any], record: dict[str, Any], rows
                 stagnation_counts[key] = int(stagnation_counts.get(key, 0) or 0) + 1
             if terminal_status != "complete" and float(row.get("best_recovery_ratio", 0.0) or 0.0) > 0.0:
                 summary["best_partial_returned_count"] = int(summary.get("best_partial_returned_count", 0) or 0) + 1
+            if terminal_status == "no_candidates":
+                profile = _record_damage_profile(record)
+                counts = summary.setdefault("no_candidates_by_missing_evidence_profile", {})
+                counts[profile] = int(counts.get(profile, 0) or 0) + 1
             continue
         label = str(int(row.get("label", 0) or 0))
         label_counts[label] = int(label_counts.get(label, 0) or 0) + 1
@@ -246,9 +259,37 @@ def _update_summary_counts(summary: dict[str, Any], record: dict[str, Any], rows
             module = str(row.get("module") or row.get("module_name") or "unknown")
             module_counts = summary.setdefault("no_output_by_module", {})
             module_counts[module] = int(module_counts.get(module, 0) or 0) + 1
+            family = str(row.get("route_family") or (row.get("stable_features", {}).get("candidate", {}) if isinstance(row.get("stable_features"), dict) else {}).get("route_family") or module or "unknown")
+            family_counts = summary.setdefault("no_output_by_atomic_family", {})
+            family_counts[family] = int(family_counts.get(family, 0) or 0) + 1
             profile = _record_damage_profile(record)
             profile_counts = summary.setdefault("no_output_by_damage_profile", {})
             profile_counts[profile] = int(profile_counts.get(profile, 0) or 0) + 1
+        candidate_payload = row.get("debug_features", {}).get("candidate_features", {}) if isinstance(row.get("debug_features"), dict) else {}
+        if bool(row.get("native_target_mismatch") or candidate_payload.get("native_target_mismatch")):
+            key = str(row.get("module") or row.get("module_name") or "unknown")
+            mismatch_counts = summary.setdefault("native_target_mismatch_counts", {})
+            mismatch_counts[key] = int(mismatch_counts.get(key, 0) or 0) + 1
+        route_evidence = [str(item) for item in row.get("route_evidence_flags") or []]
+        route_evidence_lower = {item.lower() for item in route_evidence}
+        for flag in route_evidence:
+            counts = summary.setdefault("route_evidence_flag_counts", {})
+            counts[flag] = int(counts.get(flag, 0) or 0) + 1
+        residual_flags = [str(item) for item in row.get("residual_damage_flags") or []]
+        for flag in residual_flags:
+            counts = summary.setdefault("residual_flag_counts", {})
+            counts[flag] = int(counts.get(flag, 0) or 0) + 1
+        matched_route_flags = {str(item).lower() for item in row.get("route_required_flags_matched") or []}
+        if route_evidence_lower & matched_route_flags:
+            key = str(row.get("module") or row.get("module_name") or "unknown")
+            counts = summary.setdefault("selected_by_route_evidence", {})
+            counts[key] = int(counts.get(key, 0) or 0) + 1
+        decision = row.get("debug_features", {}).get("module_decision", {}) if isinstance(row.get("debug_features"), dict) else {}
+        decision_reasons = set(decision.get("reasons") or []) if isinstance(decision, dict) else set()
+        if "route_required_flags_unmet" in decision_reasons:
+            summary["route_rejected_by_required_flags"] = int(summary.get("route_rejected_by_required_flags", 0) or 0) + 1
+        if "can_handle_rejected" in decision_reasons:
+            summary["route_rejected_by_can_handle"] = int(summary.get("route_rejected_by_can_handle", 0) or 0) + 1
         if status == "state_progress":
             summary["state_progress_count"] = int(summary.get("state_progress_count", 0) or 0) + 1
         if status == "partial" or int(row.get("label", 0) or 0) == 1:
@@ -794,6 +835,11 @@ def _collect_sample_rows(record: dict[str, Any], args: argparse.Namespace, debug
             existing = set(record.get("damage_flags") or [])
             record["damage_flags"] = list(existing | tag_flags)
             record["runtime_damage_flags"] = record["damage_flags"]
+    route_evidence = zip_route_evidence_flags(record)
+    if route_evidence:
+        record["route_evidence_flags"] = _dedupe_str([*list(record.get("route_evidence_flags") or []), *route_evidence])
+        record["damage_flags"] = _dedupe_str([*list(record.get("damage_flags") or []), *route_evidence])
+        record["runtime_damage_flags"] = _dedupe_str([*list(record.get("runtime_damage_flags") or record.get("damage_flags") or []), *route_evidence])
     fmt = str(record.get("format") or source_input.get("format_hint") or "")
     rows: list[dict[str, Any]] = []
     max_candidates_per_round = _effective_max_candidates(record, args)
@@ -833,6 +879,9 @@ def _collect_sample_rows(record: dict[str, Any], args: argparse.Namespace, debug
             source_input = dict(state.get("source_input") or {})
             archive_state = _archive_state_from_rollout_state(record, state, fmt)
             damage_flags = list(state.get("damage_flags") or [])
+            route_evidence_flags = list(state.get("route_evidence_flags") or [])
+            repair_history_flags = list(state.get("repair_history_flags") or [])
+            residual_damage_flags = list(state.get("residual_damage_flags") or [])
             previous_actions = list(state.get("previous_actions") or [])
             previous_modules = list(state.get("previous_modules") or [])
             best_completeness = float(state.get("best_completeness", 0.0) or 0.0)
@@ -855,6 +904,7 @@ def _collect_sample_rows(record: dict[str, Any], args: argparse.Namespace, debug
                 attempts=state_round,
                 password=record.get("password"),
                 archive_state=archive_state,
+                repair_history=_repair_history_payload(record, state, route_evidence_flags, repair_history_flags, residual_damage_flags),
             )
             phase_started = time.perf_counter()
             lazy_mode = str(args.proposal_mode or "lazy") == "lazy"
@@ -888,6 +938,7 @@ def _collect_sample_rows(record: dict[str, Any], args: argparse.Namespace, debug
                 attempts=state_round,
                 password=record.get("password"),
                 archive_state=archive_state,
+                repair_history=_repair_history_payload(record, state, route_evidence_flags, repair_history_flags, residual_damage_flags),
             )
             debug_events.write("phase", record, round=state_round, query_id=query_id, phase="before_state", elapsed_seconds=round(time.perf_counter() - phase_started, 3))
             state_features = _state_features(record, job, batch, state_round, previous_actions, previous_modules, best_completeness, before_state)
@@ -1034,6 +1085,11 @@ def _collect_sample_rows(record: dict[str, Any], args: argparse.Namespace, debug
                     best_state_id = str(state.get("state_id") or best_state_id)
                     continue
                 child_runtime_verification = _terminal_verification_summary_from_state(record, after_by_id.get(candidate_id, {}))
+                child_repair_history_flags = _child_repair_history_flags(
+                    [*previous_modules, str(candidate.module_name)],
+                    [*previous_actions, *[str(action) for action in candidate.actions]],
+                )
+                child_residual_flags = _residual_damage_flags_from_label(label_info, after_by_id.get(candidate_id, {}), child_runtime_verification)
                 child_state = {
                     "episode_id": state["episode_id"],
                     "state_id": f"{record.get('sample_id')}:r{state_round + 1}:b{next_beam_id}",
@@ -1044,7 +1100,18 @@ def _collect_sample_rows(record: dict[str, Any], args: argparse.Namespace, debug
                     "parent_action_row_id": entry["action_row_id"],
                     "source_input": dict(next_source_input),
                     "archive_state": candidate_view.get("archive_state"),
-                    "damage_flags": _next_state_damage_flags(selected_result, damage_flags, child_runtime_verification),
+                    "damage_flags": _next_state_damage_flags(
+                        selected_result,
+                        damage_flags,
+                        child_runtime_verification,
+                        label_info,
+                        route_evidence_flags=route_evidence_flags,
+                        repair_history_flags=child_repair_history_flags,
+                        residual_damage_flags=child_residual_flags,
+                    ),
+                    "route_evidence_flags": list(route_evidence_flags),
+                    "repair_history_flags": child_repair_history_flags,
+                    "residual_damage_flags": child_residual_flags,
                     "previous_actions": [*previous_actions, *[str(action) for action in candidate.actions]],
                     "previous_modules": [*previous_modules, str(candidate.module_name)],
                     "best_completeness": max(best_completeness, float(label_info.get("completeness", 0.0) or 0.0)),
@@ -1114,6 +1181,9 @@ def _root_rollout_state(record: dict[str, Any], fmt: str, rollout_mode: str) -> 
         "parent_action_row_id": None,
         "source_input": dict(record.get("damaged_input") or {"path": record.get("damaged_path"), "format_hint": fmt}),
         "damage_flags": _runtime_initial_damage_flags(record),
+        "route_evidence_flags": _dedupe_str(list(record.get("route_evidence_flags") or zip_route_evidence_flags(record))),
+        "repair_history_flags": [],
+        "residual_damage_flags": [],
         "previous_actions": [],
         "previous_modules": [],
         "best_completeness": 0.0,
@@ -1131,23 +1201,122 @@ def _root_rollout_state(record: dict[str, Any], fmt: str, rollout_mode: str) -> 
 def _runtime_initial_damage_flags(record: dict[str, Any]) -> list[str]:
     explicit = record.get("runtime_damage_flags")
     if isinstance(explicit, list):
-        return [str(item) for item in explicit if str(item)]
+        return _dedupe_str([str(item) for item in explicit if str(item)])
     raw = {str(item) for item in (record.get("damage_flags") or [])}
     visible: list[str] = []
-    for flag in ("missing_volume", "wrong_password", "truncated", "input_truncated", "probably_truncated", "trailing_junk", "boundary_unreliable", "checksum_error", "crc_error", "damaged"):
+    evidence = set(zip_route_evidence_flags(record))
+    raw.update(evidence)
+    for flag in (
+        "missing_volume", "wrong_password", "truncated", "input_truncated", "probably_truncated", "trailing_junk", "boundary_unreliable",
+        "checksum_error", "crc_error", "damaged", "duplicate_entries", "has_duplicate_entries", "filename_encoding_bad", "raw_filename_bytes",
+        "has_filename_encoding_risk", "long_comment_present", "zip_comment_length_bad", "comment_length_bad", "eocd_bad", "zip64",
+        "zip64_extra_present", "zip64_extra_bad", "zip64_extra_size_bad", "zip64_locator_bad", "zip64_eocd_bad", "sfx", "carrier_prefix",
+        "carrier_archive", "embedded_archive", "data_descriptor", "compressed_size_bad", "bit3_data_descriptor", "local_header_conflict",
+        "central_directory_bad", "central_directory_offset_bad", "central_directory_count_bad", "local_header_bad", "local_header_recovery",
+        "split_archive",
+    ):
         if flag in raw:
             visible.append(flag)
     if raw and "damaged" not in visible:
         visible.append("damaged")
-    return visible
+    return _dedupe_str(visible)
 
 
-def _next_state_damage_flags(result: RepairResult, current_flags: list[str], runtime_verification: dict[str, Any]) -> list[str]:
-    if str(runtime_verification.get("assessment_status") or "") == "complete":
+def _next_state_damage_flags(
+    result: RepairResult,
+    current_flags: list[str],
+    runtime_verification: dict[str, Any],
+    label_info: dict[str, Any] | None = None,
+    *,
+    route_evidence_flags: list[str] | None = None,
+    repair_history_flags: list[str] | None = None,
+    residual_damage_flags: list[str] | None = None,
+) -> list[str]:
+    label_info = label_info if isinstance(label_info, dict) else {}
+    complete_by_oracle = int(label_info.get("label", 0) or 0) == 3 or (
+        str(label_info.get("status") or "") == "complete" and float(label_info.get("completeness", 0.0) or 0.0) >= 0.999
+    )
+    if complete_by_oracle:
         return []
-    if str(runtime_verification.get("source_integrity") or "") == "complete":
+    flags = _dedupe_str([
+        *list(result.damage_flags or current_flags),
+        *list(route_evidence_flags or []),
+        *list(repair_history_flags or []),
+        *list(residual_damage_flags or []),
+    ])
+    if flags:
+        return flags
+    if str(runtime_verification.get("assessment_status") or "") == "complete" or str(runtime_verification.get("source_integrity") or "") == "complete":
+        return ["exact_match_failed", "content_integrity_bad_or_unknown"]
+    return list(current_flags)
+
+
+def _dedupe_str(values: list[Any]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        text = str(value or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        result.append(text)
+    return result
+
+
+def _child_repair_history_flags(modules: list[str], actions: list[str]) -> list[str]:
+    flags: list[str] = []
+    for module in modules:
+        module = str(module or "")
+        if not module:
+            continue
+        flags.append(f"already_tried:{module}")
+        if module == "archive_carrier_crop_deep_recovery" or module.endswith("_carrier_crop_deep_recovery"):
+            flags.append("after_archive_carrier_crop")
+        if module in {"zip_fix_eocd_comment_length", "zip_fix_eocd_record"}:
+            flags.append("after_eocd_repair")
+        if module in {"zip_rebuild_cd_from_local_headers", "zip_rebuild_cd_preserve_raw_names", "zip_rebuild_cd_from_data_descriptors"}:
+            flags.append("after_cd_rebuild")
+        if module in {"zip_fix_local_header_fields", "zip_local_header_partial_scan"}:
+            flags.append("after_local_header_repair")
+    for action in actions:
+        action = str(action or "")
+        if "carrier" in action and "crop" in action:
+            flags.append("after_archive_carrier_crop")
+        if "eocd" in action:
+            flags.append("after_eocd_repair")
+        if "central_directory" in action or "rebuild_cd" in action:
+            flags.append("after_cd_rebuild")
+        if "local_header" in action:
+            flags.append("after_local_header_repair")
+    return _dedupe_str(flags)
+
+
+def _residual_damage_flags_from_label(label_info: dict[str, Any], after_state: dict[str, Any] | None, runtime_verification: dict[str, Any]) -> list[str]:
+    label_info = label_info if isinstance(label_info, dict) else {}
+    after_state = after_state if isinstance(after_state, dict) else {}
+    if int(label_info.get("label", 0) or 0) == 3 or (
+        str(label_info.get("status") or "") == "complete" and float(label_info.get("completeness", 0.0) or 0.0) >= 0.999
+    ):
         return []
-    return list(result.damage_flags or current_flags)
+    flags = ["exact_match_failed"]
+    reasons = {str(item) for item in label_info.get("hard_negative_reasons") or []}
+    if reasons & {"payload_hash_mismatch", "wrong_payload_for_expected_name", "wrong_entries_without_oracle_match"}:
+        flags.extend(["payload_hash_mismatch", "content_integrity_bad_or_unknown"])
+    expected = int(label_info.get("expected_files", 0) or 0)
+    matched = int(label_info.get("matched_files", 0) or 0)
+    unreadable = int(label_info.get("unreadable_files", 0) or 0)
+    entry_count = int(label_info.get("entry_count", after_state.get("entry_count", 0)) or 0)
+    readable = int(after_state.get("readable_entry_count", runtime_verification.get("complete_files", 0)) or 0)
+    if expected and matched < expected:
+        flags.append("partial_entries_remaining")
+    if unreadable > 0 or (entry_count and readable < entry_count):
+        flags.extend(["directory_visible_payload_unreadable", "content_integrity_bad_or_unknown"])
+    if str(runtime_verification.get("assessment_status") or "") == "complete" and float(label_info.get("completeness", 0.0) or 0.0) < 0.999:
+        flags.extend(["payload_hash_mismatch", "content_integrity_bad_or_unknown"])
+    status = str(label_info.get("status") or "")
+    if status in {"partial", "directory_only", "state_progress"}:
+        flags.append("partial_entries_remaining")
+    return _dedupe_str(flags)
 
 
 def _diagnostics_from_runtime_verification(runtime_verification: dict[str, Any]) -> dict[str, Any]:
@@ -2226,6 +2395,7 @@ def _scheduler(args: argparse.Namespace) -> RepairScheduler:
                 "max_stream_trim_decode_mb": 32,
             },
             "modules": [
+                {"name": "archive_carrier_crop_deep_recovery", "enabled": True},
                 {"name": "zip_trim_trailing_junk", "enabled": True},
                 {"name": "zip_fix_eocd_comment_length", "enabled": True},
                 {"name": "zip_fix_eocd_record", "enabled": True},
@@ -2236,6 +2406,7 @@ def _scheduler(args: argparse.Namespace) -> RepairScheduler:
                 {"name": "zip_fix_zip64_eocd", "enabled": True},
                 {"name": "zip_fix_zip64_extra_size", "enabled": True},
                 {"name": "zip_rebuild_cd_from_local_headers", "enabled": True},
+                {"name": "zip_rebuild_cd_preserve_raw_names", "enabled": True},
                 {"name": "zip_rebuild_cd_from_data_descriptors", "enabled": True},
                 {"name": "zip_reconcile_cd_local_headers", "enabled": True},
                 {"name": "zip_quarantine_failed_entries", "enabled": True},
@@ -2272,6 +2443,10 @@ def _state_features(record: dict[str, Any], job: RepairJob, batch, round_index: 
         "previous_action_count": len(previous_actions),
         "previous_modules": list(previous_modules),
         "previous_module_count": len(previous_modules),
+        "route_evidence_flags": list(getattr(job, "repair_history", {}).get("route_evidence_flags") or []),
+        "repair_history_flags": list(getattr(job, "repair_history", {}).get("repair_history_flags") or []),
+        "residual_damage_flags": list(getattr(job, "repair_history", {}).get("residual_damage_flags") or []),
+        "damage_flags": list(job.damage_flags or []),
         "best_runtime_score": float(runtime_state.get("runtime_score", 0.0) or 0.0),
         "state_summary": runtime_state,
         "runtime_state_summary": runtime_state,
@@ -2346,6 +2521,13 @@ def _action_row(
         "repair_name": payload.get("repair_name") or candidate.module_name,
         "atomic_action_group": payload.get("atomic_action_group") or payload.get("repair_name") or candidate.module_name,
         "native_key": payload.get("native_key") or "",
+        "route_family": payload.get("route_family") or payload.get("atomic_action_group") or payload.get("repair_name") or candidate.module_name,
+        "route_required_flags_matched": list(payload.get("route_required_flags_matched") or []),
+        "route_reject_reason": payload.get("route_reject_reason") or "",
+        "route_evidence_flags": list(state_features.get("route_evidence_flags") or []),
+        "repair_history_flags": list(state_features.get("repair_history_flags") or []),
+        "residual_damage_flags": list(state_features.get("residual_damage_flags") or []),
+        "native_target_mismatch": bool(payload.get("native_target_mismatch")),
         "selected_by_current_system": bool(selected),
         "proposal_only": bool(proposal_only),
         "materialized_for_label": bool(materialized_for_label),
@@ -2538,6 +2720,10 @@ def _runtime_candidate_features(payload: dict[str, Any]) -> dict[str, Any]:
             "repair_name",
             "atomic_action_group",
             "native_key",
+            "route_family",
+            "route_required_flags_matched",
+            "route_reject_reason",
+            "native_target_mismatch",
             "format",
             "confidence",
             "score_hint",
@@ -2812,11 +2998,17 @@ def _record_has_hard_negative_oracle(record: dict[str, Any]) -> bool:
 def _record_analysis_evidence(record: dict[str, Any], fmt: str):
     try:
         from types import SimpleNamespace
+        source_derivation = record.get("source_derivation") if isinstance(record.get("source_derivation"), dict) else {}
 
         return SimpleNamespace(
             format=fmt or record.get("format") or record.get("material_format") or "",
             confidence=0.82,
             status="selected",
+            details={
+                "zip_structure_features": record.get("zip_structure_features") or source_derivation.get("zip_structure_features") or {},
+                "zip_container_tags": record.get("zip_container_tags") or source_derivation.get("zip_container_tags") or [],
+                "damage_profile": _record_damage_profile(record),
+            },
         )
     except Exception:
         return None
@@ -2830,6 +3022,32 @@ def _record_analysis_prepass(record: dict[str, Any], fmt: str) -> dict[str, Any]
         "selected_format": fmt or record.get("format") or record.get("material_format") or "",
         "confidence": 0.82,
         "source_size": int(record.get("source_size") or source_derivation.get("size") or 0),
+        "zip_structure_features": record.get("zip_structure_features") or source_derivation.get("zip_structure_features") or {},
+        "zip_container_tags": record.get("zip_container_tags") or source_derivation.get("zip_container_tags") or [],
+        "damage_profile": _record_damage_profile(record),
+    }
+
+
+def _repair_history_payload(
+    record: dict[str, Any],
+    state: dict[str, Any],
+    route_evidence_flags: list[str],
+    repair_history_flags: list[str],
+    residual_damage_flags: list[str],
+) -> dict[str, Any]:
+    source_derivation = record.get("source_derivation") if isinstance(record.get("source_derivation"), dict) else {}
+    return {
+        "previous_modules": list(state.get("previous_modules") or []),
+        "previous_actions": list(state.get("previous_actions") or []),
+        "path_modules": list(state.get("path_modules") or []),
+        "path_actions": list(state.get("path_actions") or []),
+        "applied_patch_facts": list(state.get("applied_patch_facts") or []),
+        "route_evidence_flags": list(route_evidence_flags or []),
+        "repair_history_flags": list(repair_history_flags or []),
+        "residual_damage_flags": list(residual_damage_flags or []),
+        "damage_profile": _record_damage_profile(record),
+        "zip_structure_features": record.get("zip_structure_features") or source_derivation.get("zip_structure_features") or {},
+        "zip_container_tags": record.get("zip_container_tags") or source_derivation.get("zip_container_tags") or [],
     }
 
 
@@ -2861,6 +3079,9 @@ def _runtime_extraction_failure(record: dict[str, Any], state: dict[str, Any], b
         "unverified_files": oracle.get("unverified_files"),
         "archive_coverage": dict(oracle.get("archive_coverage") or {}),
         "repair_hints": hints,
+        "residual_damage_flags": list(state.get("residual_damage_flags") or []),
+        "route_evidence_flags": list(state.get("route_evidence_flags") or []),
+        "repair_history_flags": list(state.get("repair_history_flags") or []),
         "error": str(oracle.get("error") or "repair required") if str(oracle.get("assessment_status") or "") not in {"complete", "accepted"} else "",
     }
 
