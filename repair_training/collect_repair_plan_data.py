@@ -2210,6 +2210,7 @@ def _action_row(
         "materialization_budget": materialization_budget,
         "label": int(label_info.get("label", 0) or 0),
         "label_status": label_info.get("status"),
+        "no_output_reason": label_info.get("no_output_reason") if str(label_info.get("status") or "") == "no_output" else "",
         "label_details": label_info,
         "stable_features": {
             "state": state_features,

@@ -323,6 +323,7 @@ if ($Scheduling -eq "pool") {
         future_label_counts = @{}
         rollout_mode_counts = @{}
         terminal_status_counts = @{}
+        no_output_reason_counts = @{}
         shards = $summaries
     }
     foreach ($summary in $summaries) {
@@ -333,6 +334,7 @@ if ($Scheduling -eq "pool") {
         Add-TrainingCountMap $aggregate["future_label_counts"] $summary.future_label_counts
         Add-TrainingCountMap $aggregate["rollout_mode_counts"] $summary.rollout_mode_counts
         Add-TrainingCountMap $aggregate["terminal_status_counts"] $summary.terminal_status_counts
+        Add-TrainingCountMap $aggregate["no_output_reason_counts"] $summary.no_output_reason_counts
     }
 
     New-Item -ItemType Directory -Path (Split-Path -Parent $ParallelSummaryOutput) -Force | Out-Null
@@ -487,6 +489,7 @@ $aggregate = [ordered]@{
     future_label_counts = @{}
     rollout_mode_counts = @{}
     terminal_status_counts = @{}
+    no_output_reason_counts = @{}
     shards = $summaries
 }
 foreach ($summary in $summaries) {
@@ -497,6 +500,7 @@ foreach ($summary in $summaries) {
     Add-TrainingCountMap $aggregate["future_label_counts"] $summary.future_label_counts
     Add-TrainingCountMap $aggregate["rollout_mode_counts"] $summary.rollout_mode_counts
     Add-TrainingCountMap $aggregate["terminal_status_counts"] $summary.terminal_status_counts
+    Add-TrainingCountMap $aggregate["no_output_reason_counts"] $summary.no_output_reason_counts
 }
 
 New-Item -ItemType Directory -Path (Split-Path -Parent $ParallelSummaryOutput) -Force | Out-Null
