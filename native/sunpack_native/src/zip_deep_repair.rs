@@ -59,6 +59,7 @@ pub(crate) fn zip_deep_partial_recovery(
         max_entry_uncompressed_bytes: mb_to_bytes(max_entry_uncompressed_mb),
         max_duration: duration_from_seconds(max_seconds),
         verify_candidates,
+        allow_unverified_entries: false,
         password,
     };
     let data = match read_source_input(source_input, options.max_input_bytes) {
@@ -100,6 +101,7 @@ pub(crate) fn zip_deep_partial_recovery(
         ) {
             Ok(stats) => written.push(WrittenCandidate {
                 name: plan.name,
+                policy: "",
                 path: output_path.to_string_lossy().to_string(),
                 confidence: plan.confidence,
                 actions: plan.actions,
@@ -196,6 +198,7 @@ pub(crate) fn zip_deep_partial_recovery(
     source_input,
     output_path,
     require_data_descriptor=false,
+    preserve_raw_names=false,
     max_entries=20000,
     max_input_size_mb=512.0,
     max_output_size_mb=2048.0,
@@ -206,6 +209,7 @@ pub(crate) fn zip_rebuild_from_local_headers(
     source_input: &Bound<'_, PyDict>,
     output_path: &str,
     require_data_descriptor: bool,
+    preserve_raw_names: bool,
     max_entries: usize,
     max_input_size_mb: f64,
     max_output_size_mb: f64,
@@ -213,6 +217,10 @@ pub(crate) fn zip_rebuild_from_local_headers(
 ) -> PyResult<Py<PyDict>> {
     let started = Instant::now();
     let password = extract_password(source_input);
+    let logical_stream_built = get_optional_string(source_input, "kind")
+        .ok()
+        .flatten()
+        .is_some_and(|kind| kind == "concat_ranges");
     let options = DeepZipOptions {
         max_candidates: 1,
         max_entries: max_entries.max(1),
@@ -221,6 +229,7 @@ pub(crate) fn zip_rebuild_from_local_headers(
         max_entry_uncompressed_bytes: None,
         max_duration: None,
         verify_candidates,
+        allow_unverified_entries: preserve_raw_names,
         password,
     };
     let data = match read_source_input(source_input, options.max_input_bytes) {
@@ -274,7 +283,11 @@ pub(crate) fn zip_rebuild_from_local_headers(
         } else {
             vec![
                 "scan_local_file_headers",
-                "rebuild_zip_central_directory",
+                if preserve_raw_names {
+                    "preserve_raw_filename_bytes"
+                } else {
+                    "rebuild_zip_central_directory"
+                },
                 "write_repaired_zip",
             ]
         },
@@ -286,7 +299,7 @@ pub(crate) fn zip_rebuild_from_local_headers(
         Path::new(output_path),
         options.max_output_bytes,
     ) {
-        Ok(stats) => rebuild_status_dict(
+        Ok(stats) => add_rebuild_target_metadata(py, rebuild_status_dict(
             py,
             if scan.skipped_offsets.is_empty() && scan.encrypted_entries == 0 && !scan.timed_out {
                 "repaired"
@@ -304,7 +317,7 @@ pub(crate) fn zip_rebuild_from_local_headers(
             scan.timed_out,
             Some(&scan),
             None,
-        ),
+        )?, preserve_raw_names, logical_stream_built),
         Err(message) => rebuild_status_dict(
             py,
             "unrepairable",
@@ -343,7 +356,9 @@ pub(crate) fn zip_directory_field_repair(
         "zip_trailing_junk_trim" => repair_zip_trailing_junk(&data),
         "zip_eocd_repair" => repair_zip_eocd(&data),
         "zip_local_header_field_repair" => repair_zip_local_header_fields(&data),
-        "zip64_field_repair" => repair_zip64_fields(&data),
+        "zip64_extra_size" => repair_zip64_central_extra(&data),
+        "zip64_locator" => repair_zip64_tail_target(&data, Zip64TailTarget::Locator),
+        "zip64_eocd" => repair_zip64_tail_target(&data, Zip64TailTarget::Eocd),
         _ => Err(format!(
             "unsupported ZIP directory field repair: {repair_name}"
         )),
@@ -392,6 +407,13 @@ pub(crate) fn zip_directory_field_repair(
     }
     result.set_item("patches", patches)?;
     let target = repair_name_to_target(repair_name);
+    result.set_item("native_key", "native_zip_directory_field_repair")?;
+    result.set_item("native_target", target)?;
+    result.set_item("materialized_path", output_path.to_string_lossy().to_string())?;
+    result.set_item("candidate_status", "complete")?;
+    result.set_item("patch_facts", PyList::new(py, field_patch_facts(target))?)?;
+    result.set_item("residual_facts", PyList::empty(py))?;
+    result.set_item("validation_details", build_validation_details(py, target, true, &[])?)?;
     result.set_item(
         "diagnostics",
         build_field_repair_diagnostics(
@@ -413,7 +435,8 @@ pub(crate) fn zip_directory_field_repair(
     max_input_size_mb=512.0,
     max_output_size_mb=2048.0,
     max_entry_uncompressed_mb=512.0,
-    verify_candidates=true
+    verify_candidates=true,
+    policy="crc_match"
 ))]
 pub(crate) fn zip_conflict_resolver_rebuild(
     py: Python<'_>,
@@ -424,6 +447,7 @@ pub(crate) fn zip_conflict_resolver_rebuild(
     max_output_size_mb: f64,
     max_entry_uncompressed_mb: f64,
     verify_candidates: bool,
+    policy: &str,
 ) -> PyResult<Py<PyDict>> {
     let password = extract_password(source_input);
     let options = DeepZipOptions {
@@ -434,6 +458,7 @@ pub(crate) fn zip_conflict_resolver_rebuild(
         max_entry_uncompressed_bytes: mb_to_bytes(max_entry_uncompressed_mb),
         max_duration: None,
         verify_candidates,
+        allow_unverified_entries: false,
         password,
     };
     let data = match read_source_input(source_input, options.max_input_bytes) {
@@ -456,7 +481,7 @@ pub(crate) fn zip_conflict_resolver_rebuild(
             Some("no_recoverable_entries"),
         );
     }
-    let selected_indices = select_conflict_free_zip_entries(&scan.entries);
+    let selected_indices = select_conflict_free_zip_entries_by_policy(&scan.entries, policy);
     if selected_indices.is_empty() {
         return status_dict(
             py,
@@ -479,75 +504,87 @@ pub(crate) fn zip_conflict_resolver_rebuild(
         let output_path = Path::new(workspace).join("zip_conflict_resolver_rebuild.zip");
         if let Ok(stats) = write_candidate_zip(&data, &scan.entries, &plan, &output_path, options.max_output_bytes) {
             let sel_path = output_path.to_string_lossy().into_owned();
-            let sel = WrittenCandidate { name: "zip_conflict_resolver_rebuild", path: sel_path.clone(), confidence: 0.91, actions: plan.actions.clone(), entries: stats.entries, verified_entries: stats.verified_entries, descriptor_entries: stats.descriptor_entries, passthrough_entries: stats.passthrough_entries, size: stats.size, rank_score: plan.rank_score };
-            return status_dict(py, "partial", &sel_path, "ZIP entries are already conflict-free", &scan.warnings, &[sel], scan.skipped_offsets.len(), scan.encrypted_entries, 0.91, Some(&scan), None);
+            let sel = WrittenCandidate { name: "zip_conflict_resolver_rebuild", policy: "crc_match", path: sel_path.clone(), confidence: 0.91, actions: plan.actions.clone(), entries: stats.entries, verified_entries: stats.verified_entries, descriptor_entries: stats.descriptor_entries, passthrough_entries: stats.passthrough_entries, size: stats.size, rank_score: plan.rank_score };
+            return add_conflict_target_metadata(py, status_dict(py, "partial", &sel_path, "ZIP entries are already conflict-free", &scan.warnings, &[sel], scan.skipped_offsets.len(), scan.encrypted_entries, 0.91, Some(&scan), None)?, policy, conflict_count, selected_indices.len());
         }
     }
-    let plan = make_plan(
-        "zip_conflict_resolver_rebuild",
-        selected_indices,
-        &scan.entries,
-        0.91,
-        vec![
-            "build_zip_entry_conflict_graph",
-            "select_best_non_overlapping_entries",
-            "rebuild_clean_zip",
-        ],
-    );
-    let output_path = Path::new(workspace).join("zip_conflict_resolver_rebuild.zip");
-    let stats = match write_candidate_zip(
-        &data,
-        &scan.entries,
-        &plan,
-        &output_path,
-        options.max_output_bytes,
-    ) {
-        Ok(stats) => stats,
-        Err(message) => {
-            return status_dict(
-                    py,
-                    "unrepairable",
-                    "",
-                    &message,
-                    &scan.warnings,
-                    &[],
-                    scan.skipped_offsets.len(),
-                    scan.encrypted_entries,
-                    0.0,
-                    Some(&scan),
-                    Some("candidate_write_failed"),
-                )
+    let policy_names: Vec<&'static str> = if policy == "crc_match" || policy == "all_candidates" {
+        vec!["crc_match", "latest", "first", "largest_verified"]
+    } else {
+        vec![policy_name(policy)]
+    };
+    let mut written = Vec::new();
+    for policy_name in policy_names {
+        let indices = select_conflict_free_zip_entries_by_policy(&scan.entries, policy_name);
+        if indices.is_empty() {
+            continue;
         }
+        let plan = make_plan(
+            "zip_conflict_resolver_rebuild",
+            indices,
+            &scan.entries,
+            if policy_name == "crc_match" { 0.91 } else { 0.86 },
+            vec![
+                "build_zip_entry_conflict_graph",
+                "select_best_non_overlapping_entries",
+                "rebuild_clean_zip",
+            ],
+        );
+        let output_path = Path::new(workspace).join(format!("zip_conflict_resolver_rebuild_{policy_name}.zip"));
+        if let Ok(stats) = write_candidate_zip(
+            &data,
+            &scan.entries,
+            &plan,
+            &output_path,
+            options.max_output_bytes,
+        ) {
+            written.push(WrittenCandidate {
+                name: "zip_conflict_resolver_rebuild",
+                policy: policy_name,
+                path: output_path.to_string_lossy().to_string(),
+                confidence: plan.confidence,
+                actions: plan.actions.clone(),
+                entries: stats.entries,
+                verified_entries: stats.verified_entries,
+                descriptor_entries: stats.descriptor_entries,
+                passthrough_entries: stats.passthrough_entries,
+                size: stats.size,
+                rank_score: plan.rank_score,
+            });
+        }
+    }
+    let Some(selected) = written.iter().max_by_key(|item| item.rank_score) else {
+        return status_dict(
+            py,
+            "unrepairable",
+            "",
+            "ZIP conflict resolver could not write any policy candidate",
+            &scan.warnings,
+            &[],
+            scan.skipped_offsets.len(),
+            scan.encrypted_entries,
+            0.0,
+            Some(&scan),
+            Some("candidate_write_failed"),
+        );
     };
     let mut warnings = scan.warnings.clone();
     warnings.push(format!(
         "ZIP conflict resolver dropped {conflict_count} duplicate or overlapping entries"
     ));
-    let selected = WrittenCandidate {
-        name: "zip_conflict_resolver_rebuild",
-        path: output_path.to_string_lossy().to_string(),
-        confidence: 0.91,
-        actions: plan.actions.clone(),
-        entries: stats.entries,
-        verified_entries: stats.verified_entries,
-        descriptor_entries: stats.descriptor_entries,
-        passthrough_entries: stats.passthrough_entries,
-        size: stats.size,
-        rank_score: plan.rank_score,
-    };
-    status_dict(
+    add_conflict_target_metadata(py, status_dict(
         py,
         "partial",
         &selected.path,
         "ZIP duplicate/overlapping entry conflicts were resolved into a clean candidate",
         &warnings,
-        &[selected.clone()],
+        &written,
         scan.skipped_offsets.len(),
         scan.encrypted_entries,
         0.91,
         Some(&scan),
         None,
-    )
+    )?, policy, conflict_count, selected.entries)
 }
 
 #[pyfunction]
@@ -584,6 +621,7 @@ pub(crate) fn zip_verified_entry_salvage(
         max_entry_uncompressed_bytes: mb_to_bytes(max_entry_uncompressed_mb),
         max_duration: duration_from_seconds(max_seconds),
         verify_candidates: true,
+        allow_unverified_entries: false,
         password,
     };
     let data = match read_source_input(source_input, options.max_input_bytes) {
@@ -730,6 +768,7 @@ pub(crate) fn zip_cd_local_header_reconcile_salvage(
         max_entry_uncompressed_bytes: mb_to_bytes(max_entry_uncompressed_mb),
         max_duration: duration_from_seconds(max_seconds),
         verify_candidates: true,
+        allow_unverified_entries: false,
         password,
     };
     let data = match read_source_input(source_input, options.max_input_bytes) {
@@ -822,12 +861,14 @@ struct DeepZipOptions {
     max_entry_uncompressed_bytes: Option<u64>,
     max_duration: Option<Duration>,
     verify_candidates: bool,
+    allow_unverified_entries: bool,
     password: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 struct RecoveredEntry {
     name: Vec<u8>,
+    extra: Vec<u8>,
     local_header_offset: usize,
     version_needed: u16,
     flags: u16,
@@ -894,6 +935,7 @@ struct WriteStats {
 #[derive(Debug, Clone)]
 struct WrittenCandidate {
     name: &'static str,
+    policy: &'static str,
     path: String,
     confidence: f64,
     actions: Vec<&'static str>,
@@ -1009,6 +1051,7 @@ fn parse_entry(data: &[u8], offset: usize, options: &DeepZipOptions) -> EntryOut
             offset,
             data_start,
             name,
+            extra.to_vec(),
             version_needed,
             flags,
             method,
@@ -1096,6 +1139,7 @@ fn parse_entry(data: &[u8], offset: usize, options: &DeepZipOptions) -> EntryOut
         data_start,
         data_end,
         name,
+        extra.to_vec(),
         version_needed,
         flags,
         method,
@@ -1116,6 +1160,7 @@ fn parse_descriptor_entry(
     local_header_offset: usize,
     data_start: usize,
     name: Vec<u8>,
+    extra: Vec<u8>,
     version_needed: u16,
     flags: u16,
     method: u16,
@@ -1142,6 +1187,7 @@ fn parse_descriptor_entry(
                 );
                 return EntryOutcome::Recovered(RecoveredEntry {
                     name,
+                    extra: extra.clone(),
                     local_header_offset,
                     version_needed,
                     flags,
@@ -1167,6 +1213,7 @@ fn parse_descriptor_entry(
                     local_header_offset,
                     data_start,
                     name.clone(),
+                    extra.clone(),
                     version_needed,
                     flags,
                     mod_time,
@@ -1192,6 +1239,7 @@ fn parse_descriptor_entry(
             data_start,
             data_end,
             name,
+            extra,
             version_needed,
             flags,
             method,
@@ -1210,6 +1258,7 @@ fn parse_descriptor_entry(
     }
     EntryOutcome::Recovered(RecoveredEntry {
         name,
+        extra,
         local_header_offset,
         version_needed,
         flags,
@@ -1237,6 +1286,7 @@ fn classify_entry(
     data_start: usize,
     data_end: usize,
     name: Vec<u8>,
+    extra: Vec<u8>,
     version_needed: u16,
     flags: u16,
     method: u16,
@@ -1272,12 +1322,18 @@ fn classify_entry(
         _ => false,
     };
     let is_encrypted_entry = flags & 0x01 != 0;
-    if !verified && matches!(method, 0 | 8) && options.verify_candidates && !is_encrypted_entry {
+    if !verified
+        && matches!(method, 0 | 8)
+        && options.verify_candidates
+        && !is_encrypted_entry
+        && !options.allow_unverified_entries
+    {
         return EntryOutcome::Skipped("entry failed payload verification".to_string());
     }
     if !verified && !known_zip_method(method) {
         return EntryOutcome::Recovered(RecoveredEntry {
-            name,
+            name: name.clone(),
+            extra: extra.clone(),
             local_header_offset,
             version_needed,
             flags,
@@ -1299,7 +1355,8 @@ fn classify_entry(
     }
     if !verified && !options.verify_candidates {
         return EntryOutcome::Recovered(RecoveredEntry {
-            name,
+            name: name.clone(),
+            extra: extra.clone(),
             local_header_offset,
             version_needed,
             flags,
@@ -1321,6 +1378,7 @@ fn classify_entry(
     }
     EntryOutcome::Recovered(RecoveredEntry {
         name,
+        extra,
         local_header_offset,
         version_needed,
         flags,
@@ -1448,13 +1506,32 @@ fn make_plan(
     }
 }
 
-fn select_conflict_free_zip_entries(entries: &[RecoveredEntry]) -> Vec<usize> {
+fn policy_name(policy: &str) -> &'static str {
+    match policy {
+        "latest" => "latest",
+        "first" => "first",
+        "largest_verified" => "largest_verified",
+        _ => "crc_match",
+    }
+}
+
+fn select_conflict_free_zip_entries_by_policy(entries: &[RecoveredEntry], policy: &str) -> Vec<usize> {
     let mut order = (0..entries.len()).collect::<Vec<_>>();
-    order.sort_by(|left, right| {
-        zip_entry_score(&entries[*right])
-            .cmp(&zip_entry_score(&entries[*left]))
-            .then_with(|| entries[*left].data_start.cmp(&entries[*right].data_start))
-    });
+    match policy {
+        "latest" => order.sort_by_key(|index| std::cmp::Reverse(entries[*index].data_start)),
+        "first" => order.sort_by_key(|index| entries[*index].data_start),
+        "largest_verified" => order.sort_by(|left, right| {
+            let l = &entries[*left];
+            let r = &entries[*right];
+            (r.verified, r.uncompressed_size, std::cmp::Reverse(r.data_start))
+                .cmp(&(l.verified, l.uncompressed_size, std::cmp::Reverse(l.data_start)))
+        }),
+        _ => order.sort_by(|left, right| {
+            zip_entry_score(&entries[*right])
+                .cmp(&zip_entry_score(&entries[*left]))
+                .then_with(|| entries[*left].data_start.cmp(&entries[*right].data_start))
+        }),
+    }
     let mut selected = Vec::new();
     let mut used_names = std::collections::HashSet::new();
     let mut ranges: Vec<(usize, usize)> = Vec::new();
@@ -1669,8 +1746,9 @@ fn write_local_header(file: &mut File, entry: &RecoveredEntry) -> std::io::Resul
     file.write_all(&(entry.compressed_size as u32).to_le_bytes())?;
     file.write_all(&(entry.uncompressed_size as u32).to_le_bytes())?;
     file.write_all(&(entry.name.len() as u16).to_le_bytes())?;
-    file.write_all(&0u16.to_le_bytes())?;
+    file.write_all(&(entry.extra.len() as u16).to_le_bytes())?;
     file.write_all(&entry.name)?;
+    file.write_all(&entry.extra)?;
     Ok(())
 }
 
@@ -1687,13 +1765,14 @@ fn append_central_directory(output: &mut Vec<u8>, entry: &RecoveredEntry, local_
     output.extend_from_slice(&(entry.compressed_size as u32).to_le_bytes());
     output.extend_from_slice(&(entry.uncompressed_size as u32).to_le_bytes());
     output.extend_from_slice(&(entry.name.len() as u16).to_le_bytes());
-    output.extend_from_slice(&0u16.to_le_bytes());
+    output.extend_from_slice(&(entry.extra.len() as u16).to_le_bytes());
     output.extend_from_slice(&0u16.to_le_bytes());
     output.extend_from_slice(&0u16.to_le_bytes());
     output.extend_from_slice(&0u16.to_le_bytes());
     output.extend_from_slice(&0u32.to_le_bytes());
     output.extend_from_slice(&local_offset.to_le_bytes());
     output.extend_from_slice(&entry.name);
+    output.extend_from_slice(&entry.extra);
 }
 
 fn write_eocd(
@@ -1778,6 +1857,7 @@ fn deflate_resync_partial_entry(
     local_header_offset: usize,
     data_start: usize,
     name: Vec<u8>,
+    _extra: Vec<u8>,
     version_needed: u16,
     flags: u16,
     mod_time: u16,
@@ -1801,6 +1881,7 @@ fn deflate_resync_partial_entry(
     let crc32 = crc32_bytes(&decoded);
     Some(RecoveredEntry {
         name: output_name,
+        extra: Vec::new(),
         local_header_offset,
         version_needed: version_needed.max(20),
         flags: flags & !0x08,
@@ -2278,9 +2359,42 @@ fn repair_name_to_target(name: &str) -> &str {
         "zip_trailing_junk_trim" => "trailing_junk",
         "zip_eocd_repair" => "eocd",
         "zip_local_header_field_repair" => "local_header",
-        "zip64_field_repair" => "zip64",
+        "zip64_extra_size" => "zip64_extra_size",
+        "zip64_locator" => "zip64_locator",
+        "zip64_eocd" => "zip64_eocd",
         _ => "",
     }
+}
+
+fn field_patch_facts(target: &str) -> Vec<&'static str> {
+    match target {
+        "comment_length" => vec!["fixed_field=eocd_comment_length", "after_eocd_repair"],
+        "cd_count" => vec!["fixed_field=central_directory_entry_count"],
+        "cd_offset" => vec!["fixed_field=central_directory_offset"],
+        "trailing_junk" => vec!["fixed_field=trailing_junk"],
+        "eocd" => vec!["fixed_field=eocd_record", "after_eocd_repair"],
+        "local_header" => vec!["fixed_field=local_header_fields", "after_local_header_repair"],
+        "zip64_extra_size" => vec!["fixed_field=zip64_extra_size", "zip64_extra_reconciled"],
+        "zip64_locator" => vec!["fixed_field=zip64_locator"],
+        "zip64_eocd" => vec!["fixed_field=zip64_eocd"],
+        _ => Vec::new(),
+    }
+}
+
+fn build_validation_details(
+    py: Python<'_>,
+    target: &str,
+    accepted: bool,
+    mismatches: &[String],
+) -> PyResult<Py<PyDict>> {
+    let details = PyDict::new(py);
+    details.set_item("native_target", target)?;
+    details.set_item("accepted", accepted)?;
+    details.set_item("entry_name_byte_mismatches", PyList::new(py, mismatches)?)?;
+    if target == "rebuild_cd_preserve_raw_names" {
+        details.set_item("raw_filename_bytes_preserved", accepted && mismatches.is_empty())?;
+    }
+    Ok(details.unbind())
 }
 
 fn status_dict(
@@ -2304,6 +2418,11 @@ fn status_dict(
     result.set_item("format", "zip")?;
     result.set_item("message", message)?;
     result.set_item("actions", PyList::empty(py))?;
+    result.set_item("candidate_status", status)?;
+    result.set_item("native_target", "")?;
+    result.set_item("patch_facts", PyList::empty(py))?;
+    result.set_item("residual_facts", PyList::empty(py))?;
+    result.set_item("validation_details", build_validation_details(py, "", status != "unrepairable", &[])?)?;
     result.set_item("warnings", PyList::new(py, warnings)?)?;
     result.set_item("skipped_entries", skipped_entries)?;
     result.set_item("encrypted_entries", encrypted_entries)?;
@@ -2312,7 +2431,41 @@ fn status_dict(
     result.set_item("verified_entries", 0)?;
     result.set_item("descriptor_entries", 0)?;
     result.set_item("passthrough_entries", 0)?;
-    result.set_item("candidates", PyList::empty(py))?;
+    let candidate_list = PyList::empty(py);
+    for candidate in candidates {
+        let item = PyDict::new(py);
+        item.set_item("name", candidate.name)?;
+        item.set_item("path", &candidate.path)?;
+        item.set_item("status", status)?;
+        item.set_item("confidence", candidate.confidence)?;
+        item.set_item("entries", candidate.entries)?;
+        item.set_item("verified_entries", candidate.verified_entries)?;
+        item.set_item("descriptor_entries", candidate.descriptor_entries)?;
+        item.set_item("passthrough_entries", candidate.passthrough_entries)?;
+        item.set_item("size", candidate.size)?;
+        item.set_item("rank_score", candidate.rank_score)?;
+        item.set_item("policy", candidate.policy)?;
+        item.set_item("actions", PyList::new(py, &candidate.actions)?)?;
+        if !candidate.policy.is_empty() {
+            let patch_facts = vec![
+                "resolved_duplicate_entries".to_string(),
+                format!("kept_entry_policy={}", candidate.policy),
+            ];
+            item.set_item(
+                "patch_facts",
+                PyList::new(py, &patch_facts)?,
+            )?;
+            item.set_item("native_target", "zip_conflict_resolver_rebuild")?;
+            item.set_item("candidate_status", status)?;
+            let details = PyDict::new(py);
+            details.set_item("policy", candidate.policy)?;
+            details.set_item("kept_entries", candidate.entries)?;
+            details.set_item("crc_match_count", if candidate.policy == "crc_match" { candidate.verified_entries } else { 0 })?;
+            item.set_item("validation_details", details)?;
+        }
+        candidate_list.append(item)?;
+    }
+    result.set_item("candidates", candidate_list)?;
     result.set_item(
         "workspace_paths",
         PyList::new(
@@ -2360,6 +2513,83 @@ fn rebuild_status_dict(
         result.set_item("diagnostics", build_scan_diagnostics(py, s, fail_reason)?)?;
     }
     Ok(result.unbind())
+}
+
+fn add_rebuild_target_metadata(
+    py: Python<'_>,
+    result: Py<PyDict>,
+    preserve_raw_names: bool,
+    logical_stream_built: bool,
+) -> PyResult<Py<PyDict>> {
+    let bound = result.bind(py);
+    let target = if preserve_raw_names {
+        "rebuild_cd_preserve_raw_names"
+    } else {
+        "rebuild_cd_from_local_headers"
+    };
+    let path = get_optional_string(bound, "path")?.unwrap_or_default();
+    let status = get_optional_string(bound, "status")?.unwrap_or_else(|| "partial".to_string());
+    bound.set_item("native_key", "native_zip_rebuild")?;
+    bound.set_item("native_target", target)?;
+    bound.set_item("materialized_path", path)?;
+    bound.set_item("candidate_status", if status == "repaired" { "complete" } else { status.as_str() })?;
+    bound.set_item(
+        "patch_facts",
+        PyList::new(py, rebuild_patch_facts(preserve_raw_names))?,
+    )?;
+    bound.set_item("residual_facts", PyList::empty(py))?;
+    bound.set_item("logical_stream_built", logical_stream_built)?;
+    bound.set_item("split_sidecars_available", logical_stream_built)?;
+    bound.set_item(
+        "validation_details",
+        build_validation_details(py, target, true, &[])?,
+    )?;
+    Ok(result)
+}
+
+fn add_conflict_target_metadata(
+    py: Python<'_>,
+    result: Py<PyDict>,
+    policy: &str,
+    conflict_count: usize,
+    kept_entries: usize,
+) -> PyResult<Py<PyDict>> {
+    let bound = result.bind(py);
+    bound.set_item("native_target", "zip_conflict_resolver_rebuild")?;
+    bound.set_item("candidate_status", "partial")?;
+    bound.set_item(
+        "patch_facts",
+        PyList::new(py, &[
+            "resolved_duplicate_entries",
+            if policy == "crc_match" { "kept_entry_policy=crc_match" } else { "kept_entry_policy=deterministic" },
+        ])?,
+    )?;
+    bound.set_item(
+        "residual_facts",
+        if conflict_count > 0 { PyList::empty(py) } else { PyList::new(py, &["duplicate_entries_remaining_unknown"])? },
+    )?;
+    let details = PyDict::new(py);
+    details.set_item("policy", policy)?;
+    details.set_item("duplicate_groups", conflict_count)?;
+    details.set_item("kept_entries", kept_entries)?;
+    details.set_item("dropped_entries", conflict_count)?;
+    details.set_item("crc_match_count", if policy == "crc_match" { kept_entries } else { 0 })?;
+    bound.set_item("validation_details", details)?;
+    Ok(result)
+}
+
+fn rebuild_patch_facts(preserve_raw_names: bool) -> Vec<&'static str> {
+    if preserve_raw_names {
+        vec![
+            "raw_name_bytes_preserved",
+            "raw_name_source=local_header",
+            "after_cd_rebuild",
+            "entry_payload_unverified",
+            "raw_name_entry_passthrough",
+        ]
+    } else {
+        vec!["after_cd_rebuild"]
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2593,6 +2823,8 @@ struct LocalHeader {
 struct Zip64Extra {
     values: Vec<u64>,
     values_offset: usize,
+    size_offset: usize,
+    stored_size: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -2909,11 +3141,32 @@ fn repair_zip_local_header_fields(data: &[u8]) -> Result<DirectoryFieldRepair, S
     })
 }
 
-fn repair_zip64_fields(data: &[u8]) -> Result<DirectoryFieldRepair, String> {
-    if let Some(repair) = repair_zip64_tail(data)? {
-        return Ok(repair);
+#[derive(Clone, Copy)]
+enum Zip64TailTarget {
+    Locator,
+    Eocd,
+}
+
+fn repair_zip64_tail_target(
+    data: &[u8],
+    target: Zip64TailTarget,
+) -> Result<DirectoryFieldRepair, String> {
+    let Some(repair) = repair_zip64_tail(data)? else {
+        return Err("no ZIP64 tail mismatch was safely repairable".to_string());
+    };
+    let allowed = match target {
+        Zip64TailTarget::Locator => ["normalize_zip64_eocd_locator", "rewrite_zip64_eocd_locator"],
+        Zip64TailTarget::Eocd => ["rewrite_zip64_eocd_fields", ""],
+    };
+    let matched = repair.actions.iter().any(|action| allowed.contains(&action.as_str()));
+    let only_allowed = repair
+        .actions
+        .iter()
+        .all(|action| allowed.contains(&action.as_str()));
+    if !matched || !only_allowed {
+        return Err("ZIP64 native target did not match requested atomic repair".to_string());
     }
-    repair_zip64_central_extra(data)
+    Ok(repair)
 }
 
 fn repair_zip64_tail(data: &[u8]) -> Result<Option<DirectoryFieldRepair>, String> {
@@ -3015,15 +3268,24 @@ fn repair_zip64_central_extra(data: &[u8]) -> Result<DirectoryFieldRepair, Strin
         let Some(local) = find_local_for_central(data, &entry) else {
             continue;
         };
-        let Some(central_zip64) = parse_zip64_extra(&entry.extra, entry.extra_offset) else {
+        let Some(central_zip64) = parse_zip64_extra_tolerant(&entry.extra, entry.extra_offset) else {
             continue;
         };
-        let Some(local_zip64) = parse_zip64_extra(&local.extra, local.extra_offset) else {
+        let Some(local_zip64) = parse_zip64_extra_tolerant(&local.extra, local.extra_offset) else {
             continue;
         };
         let Some(expected) = expected_zip64_values(&entry, &local, &local_zip64) else {
             continue;
         };
+        let expected_size = expected.len() * 8;
+        if central_zip64.stored_size != expected_size {
+            add_zip_patch(
+                &mut bytes,
+                &mut patches,
+                central_zip64.size_offset,
+                &(expected_size as u16).to_le_bytes(),
+            );
+        }
         if central_zip64.values.len() < expected.len() {
             continue;
         }
@@ -3187,16 +3449,13 @@ fn parse_local_header(data: &[u8], offset: usize) -> Option<LocalHeader> {
     })
 }
 
-fn parse_zip64_extra(extra: &[u8], absolute_extra_offset: usize) -> Option<Zip64Extra> {
+fn parse_zip64_extra_tolerant(extra: &[u8], absolute_extra_offset: usize) -> Option<Zip64Extra> {
     let mut pos = 0usize;
     while pos + 4 <= extra.len() {
         let header_id = u16_le(extra, pos);
         let size = u16_le(extra, pos + 2) as usize;
         let value_start = pos + 4;
-        let value_end = value_start.checked_add(size)?;
-        if value_end > extra.len() {
-            return None;
-        }
+        let value_end = value_start.saturating_add(size).min(extra.len());
         if header_id == 0x0001 {
             let mut values = Vec::new();
             let mut cursor = value_start;
@@ -3207,9 +3466,15 @@ fn parse_zip64_extra(extra: &[u8], absolute_extra_offset: usize) -> Option<Zip64
             return Some(Zip64Extra {
                 values,
                 values_offset: absolute_extra_offset + value_start,
+                size_offset: absolute_extra_offset + pos + 2,
+                stored_size: size,
             });
         }
-        pos = value_end;
+        let next = value_start.saturating_add(size);
+        if next <= pos || next > extra.len() {
+            break;
+        }
+        pos = next;
     }
     None
 }
@@ -3261,7 +3526,7 @@ fn find_local_for_central(data: &[u8], entry: &CentralEntry) -> Option<LocalHead
     if entry.local_header_offset != 0xFFFF_FFFF {
         candidates.push(entry.local_header_offset as usize);
     }
-    if let Some(zip64) = parse_zip64_extra(&entry.extra, entry.extra_offset) {
+    if let Some(zip64) = parse_zip64_extra_tolerant(&entry.extra, entry.extra_offset) {
         if zip64.values.len() >= 3 {
             candidates.push(zip64.values[2] as usize);
         }
@@ -3624,6 +3889,7 @@ mod tests {
             max_entry_uncompressed_bytes: Some(1024 * 1024),
             max_duration: None,
             verify_candidates: true,
+            allow_unverified_entries: false,
         }
     }
 

@@ -80,6 +80,14 @@ def main(argv: list[str] | None = None) -> int:
         "selected_by_route_evidence": {},
         "residual_flag_counts": {},
         "no_candidates_by_missing_evidence_profile": {},
+        "no_output_by_patch_fact": {},
+        "native_target_mismatch_by_profile": {},
+        "no_candidate_by_native_target": {},
+        "validation_failed_by_profile": {},
+        "post_crop_no_candidates_by_profile": {},
+        "post_crop_residual_fact_counts": {},
+        "split_logical_stream_counts": {},
+        "split_sidecar_complete_candidate_counts": {},
         "legacy_module_seen_count": 0,
         "rollout_budget_exhausted": 0,
         "best_recovery_bucket_counts": {},
@@ -237,6 +245,9 @@ def _update_summary_counts(summary: dict[str, Any], record: dict[str, Any], rows
                 profile = _record_damage_profile(record)
                 counts = summary.setdefault("no_candidates_by_missing_evidence_profile", {})
                 counts[profile] = int(counts.get(profile, 0) or 0) + 1
+                if "after_archive_carrier_crop" in set(row.get("repair_history_flags") or row.get("path_actions") or []):
+                    counts = summary.setdefault("post_crop_no_candidates_by_profile", {})
+                    counts[profile] = int(counts.get(profile, 0) or 0) + 1
             continue
         label = str(int(row.get("label", 0) or 0))
         label_counts[label] = int(label_counts.get(label, 0) or 0) + 1
@@ -265,11 +276,40 @@ def _update_summary_counts(summary: dict[str, Any], record: dict[str, Any], rows
             profile = _record_damage_profile(record)
             profile_counts = summary.setdefault("no_output_by_damage_profile", {})
             profile_counts[profile] = int(profile_counts.get(profile, 0) or 0) + 1
+            native_target = str(row.get("native_target") or "unknown")
+            target_counts = summary.setdefault("no_candidate_by_native_target", {})
+            target_counts[native_target] = int(target_counts.get(native_target, 0) or 0) + 1
         candidate_payload = row.get("debug_features", {}).get("candidate_features", {}) if isinstance(row.get("debug_features"), dict) else {}
         if bool(row.get("native_target_mismatch") or candidate_payload.get("native_target_mismatch")):
             key = str(row.get("module") or row.get("module_name") or "unknown")
             mismatch_counts = summary.setdefault("native_target_mismatch_counts", {})
             mismatch_counts[key] = int(mismatch_counts.get(key, 0) or 0) + 1
+            profile = _record_damage_profile(record)
+            profile_counts = summary.setdefault("native_target_mismatch_by_profile", {})
+            profile_counts[profile] = int(profile_counts.get(profile, 0) or 0) + 1
+        patch_facts = [str(item) for item in row.get("patch_facts") or candidate_payload.get("patch_facts") or []]
+        if status == "no_output":
+            for fact in patch_facts or ["none"]:
+                counts = summary.setdefault("no_output_by_patch_fact", {})
+                counts[fact] = int(counts.get(fact, 0) or 0) + 1
+        candidate_status = str(row.get("candidate_status") or candidate_payload.get("candidate_status") or "")
+        if candidate_status == "validation_failed":
+            profile = _record_damage_profile(record)
+            counts = summary.setdefault("validation_failed_by_profile", {})
+            counts[profile] = int(counts.get(profile, 0) or 0) + 1
+        residual_facts = [str(item) for item in row.get("residual_facts") or candidate_payload.get("residual_facts") or []]
+        if "after_archive_carrier_crop" in set(patch_facts):
+            for fact in residual_facts or ["none"]:
+                counts = summary.setdefault("post_crop_residual_fact_counts", {})
+                counts[fact] = int(counts.get(fact, 0) or 0) + 1
+        if bool(row.get("split_sidecars_available") or candidate_payload.get("split_sidecars_available")) and int(row.get("label", 0) or 0) == 3:
+            key = str(row.get("module") or row.get("module_name") or "unknown")
+            counts = summary.setdefault("split_sidecar_complete_candidate_counts", {})
+            counts[key] = int(counts.get(key, 0) or 0) + 1
+        if bool(row.get("split_sidecars_available") or candidate_payload.get("split_sidecars_available")):
+            key = "logical_stream_built" if bool(row.get("logical_stream_built") or candidate_payload.get("logical_stream_built")) else "logical_stream_missing"
+            counts = summary.setdefault("split_logical_stream_counts", {})
+            counts[key] = int(counts.get(key, 0) or 0) + 1
         route_evidence = [str(item) for item in row.get("route_evidence_flags") or []]
         route_evidence_lower = {item.lower() for item in route_evidence}
         for flag in route_evidence:
@@ -822,6 +862,7 @@ def _collect_sample_rows(record: dict[str, Any], args: argparse.Namespace, debug
         damaged = record.get("damaged_input")
         if isinstance(damaged, dict):
             damaged["parts"] = source_input["parts"]
+        record["split_sidecars_available"] = True
         # Remove missing_volume flag since volumes are now available
         flags = record.get("damage_flags")
         if isinstance(flags, list) and "missing_volume" in flags:
@@ -1089,6 +1130,10 @@ def _collect_sample_rows(record: dict[str, Any], args: argparse.Namespace, debug
                     [*previous_modules, str(candidate.module_name)],
                     [*previous_actions, *[str(action) for action in candidate.actions]],
                 )
+                payload = candidate_feature_payload(candidate)
+                patch_facts = [str(item) for item in payload.get("patch_facts") or []]
+                if "after_archive_carrier_crop" in patch_facts and "after_archive_carrier_crop" not in child_repair_history_flags:
+                    child_repair_history_flags.append("after_archive_carrier_crop")
                 child_residual_flags = _residual_damage_flags_from_label(label_info, after_by_id.get(candidate_id, {}), child_runtime_verification)
                 child_state = {
                     "episode_id": state["episode_id"],
@@ -1112,6 +1157,7 @@ def _collect_sample_rows(record: dict[str, Any], args: argparse.Namespace, debug
                     "route_evidence_flags": list(route_evidence_flags),
                     "repair_history_flags": child_repair_history_flags,
                     "residual_damage_flags": child_residual_flags,
+                    "applied_patch_facts": _dedupe_str([*list(state.get("applied_patch_facts") or []), *patch_facts]),
                     "previous_actions": [*previous_actions, *[str(action) for action in candidate.actions]],
                     "previous_modules": [*previous_modules, str(candidate.module_name)],
                     "best_completeness": max(best_completeness, float(label_info.get("completeness", 0.0) or 0.0)),
@@ -1213,7 +1259,7 @@ def _runtime_initial_damage_flags(record: dict[str, Any]) -> list[str]:
         "zip64_extra_present", "zip64_extra_bad", "zip64_extra_size_bad", "zip64_locator_bad", "zip64_eocd_bad", "sfx", "carrier_prefix",
         "carrier_archive", "embedded_archive", "data_descriptor", "compressed_size_bad", "bit3_data_descriptor", "local_header_conflict",
         "central_directory_bad", "central_directory_offset_bad", "central_directory_count_bad", "local_header_bad", "local_header_recovery",
-        "split_archive",
+        "split_archive", "split_sidecars_available", "tail_volume_truncated", "middle_volume_missing", "missing_volume_unavailable",
     ):
         if flag in raw:
             visible.append(flag)
@@ -1244,6 +1290,8 @@ def _next_state_damage_flags(
         *list(repair_history_flags or []),
         *list(residual_damage_flags or []),
     ])
+    if "after_archive_carrier_crop" in set(flags):
+        flags = [flag for flag in flags if flag not in {"sfx", "carrier_archive", "carrier_prefix", "embedded_archive"}]
     if flags:
         return flags
     if str(runtime_verification.get("assessment_status") or "") == "complete" or str(runtime_verification.get("source_integrity") or "") == "complete":
@@ -1604,6 +1652,9 @@ def _rollout_terminal_row(
         "beam_id": int(state.get("beam_id", 0) or 0),
         "path_actions": list(state.get("path_actions") or []),
         "path_modules": list(state.get("path_modules") or []),
+        "route_evidence_flags": list(state.get("route_evidence_flags") or []),
+        "repair_history_flags": list(state.get("repair_history_flags") or []),
+        "residual_damage_flags": list(state.get("residual_damage_flags") or []),
         "path_score": float(state.get("path_score", 0.0) or 0.0),
         "rollout_mode": state.get("rollout_mode") or "greedy",
         "terminal_status": status,
@@ -2521,9 +2572,19 @@ def _action_row(
         "repair_name": payload.get("repair_name") or candidate.module_name,
         "atomic_action_group": payload.get("atomic_action_group") or payload.get("repair_name") or candidate.module_name,
         "native_key": payload.get("native_key") or "",
+        "native_target": payload.get("native_target") or "",
+        "candidate_status": payload.get("candidate_status") or "",
         "route_family": payload.get("route_family") or payload.get("atomic_action_group") or payload.get("repair_name") or candidate.module_name,
         "route_required_flags_matched": list(payload.get("route_required_flags_matched") or []),
         "route_reject_reason": payload.get("route_reject_reason") or "",
+        "patch_facts": list(payload.get("patch_facts") or []),
+        "residual_facts": list(payload.get("residual_facts") or []),
+        "validation_details": dict(payload.get("validation_details") or {}),
+        "raw_name_bytes_preserved": bool(payload.get("raw_name_bytes_preserved")),
+        "raw_name_source": payload.get("raw_name_source") or "",
+        "split_sidecars_available": bool(payload.get("split_sidecars_available")),
+        "logical_stream_built": bool(payload.get("logical_stream_built")),
+        "after_archive_carrier_crop": bool(payload.get("after_archive_carrier_crop")),
         "route_evidence_flags": list(state_features.get("route_evidence_flags") or []),
         "repair_history_flags": list(state_features.get("repair_history_flags") or []),
         "residual_damage_flags": list(state_features.get("residual_damage_flags") or []),

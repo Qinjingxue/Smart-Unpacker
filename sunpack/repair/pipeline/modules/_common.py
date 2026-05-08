@@ -75,6 +75,22 @@ def source_input_for_job(job: RepairJob) -> dict[str, Any]:
             "format_hint": job.archive_state.format_hint or job.archive_state.source.format_hint or job.format,
             "patch_digest": job.archive_state.effective_patch_digest(),
         }
+    if str(base.get("kind") or "") != "concat_ranges" and isinstance(base.get("parts"), list) and base.get("parts"):
+        ranges: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for item in base.get("parts") or []:
+            if not isinstance(item, dict):
+                continue
+            path = str(item.get("path") or "")
+            if not path or path in seen:
+                continue
+            seen.add(path)
+            ranges.append({"path": path, "start": int(item.get("start") or 0), "end": item.get("end")})
+        main_path = str(base.get("path") or "")
+        if main_path and main_path not in seen:
+            ranges.append({"path": main_path, "start": 0, "end": None})
+        if ranges:
+            base = {"kind": "concat_ranges", "ranges": ranges, "format_hint": base.get("format_hint") or job.format, "parts": base.get("parts")}
     if job.password:
         base["password"] = job.password
     return base

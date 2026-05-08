@@ -25,6 +25,13 @@ class ZipScanResult:
     timed_out: bool = False
     status: str = ""
     message: str = ""
+    native_target: str = ""
+    candidate_status: str = ""
+    patch_facts: list[str] | None = None
+    residual_facts: list[str] | None = None
+    validation_details: dict[str, Any] | None = None
+    logical_stream_built: bool = False
+    split_sidecars_available: bool = False
 
     @property
     def complete(self) -> bool:
@@ -38,6 +45,7 @@ def rebuild_zip_from_source(
     output_path: Path,
     *,
     require_data_descriptor: bool = False,
+    preserve_raw_names: bool = False,
     config: dict[str, Any] | None = None,
 ) -> ZipScanResult:
     limits = module_limits(config)
@@ -45,6 +53,7 @@ def rebuild_zip_from_source(
         source_input,
         str(output_path),
         bool(require_data_descriptor),
+        bool(preserve_raw_names),
         int(limits.get("max_entries", 20000) or 20000),
         float(limits.get("max_input_size_mb", 512) or 0),
         float(limits.get("max_output_size_mb", 2048) or 0),
@@ -61,4 +70,11 @@ def rebuild_zip_from_source(
         timed_out=bool(result.get("timed_out", False)),
         status=str(result.get("status") or ""),
         message=str(result.get("message") or ""),
+        native_target=str(result.get("native_target") or ""),
+        candidate_status=str(result.get("candidate_status") or ""),
+        patch_facts=[str(item) for item in result.get("patch_facts") or []],
+        residual_facts=[str(item) for item in result.get("residual_facts") or []],
+        validation_details=dict(result.get("validation_details") or {}),
+        logical_stream_built=bool(result.get("logical_stream_built")),
+        split_sidecars_available=bool(result.get("split_sidecars_available")),
     )

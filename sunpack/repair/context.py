@@ -128,7 +128,11 @@ def zip_route_evidence_flags(payload: dict[str, Any]) -> list[str]:
         if _truthy(features.get("has_data_descriptor")):
             flags.append("data_descriptor")
         if _truthy(features.get("has_split_sidecars")):
-            flags.append("split_archive")
+            flags.extend(["split_archive", "split_sidecars_available"])
+    if _source_has_parts(payload):
+        flags.append("split_sidecars_available")
+    if _truthy(payload.get("split_sidecars_available")):
+        flags.append("split_sidecars_available")
     for tag in _zip_container_tags(payload):
         if tag in {"sfx", "carrier_prefix", "carrier_archive", "embedded_archive"}:
             flags.append(tag)
@@ -232,7 +236,11 @@ def _zip_profile_flags(profile: str) -> list[str]:
             flags.append("central_directory_bad")
         if "payload_damage" in text:
             flags.extend(["checksum_error", "crc_error", "damaged"])
-    if "split" in text or "missing_volume" in text:
+    if "split_tail_volume_truncated" in text:
+        flags.extend(["missing_volume", "input_truncated", "local_header_recovery", "tail_volume_truncated", "missing_volume_unavailable"])
+    elif "split_missing_middle_volume" in text or "sfx_split_missing_volume" in text:
+        flags.extend(["missing_volume", "input_truncated", "local_header_recovery", "middle_volume_missing"])
+    elif "split" in text or "missing_volume" in text:
         flags.extend(["missing_volume", "input_truncated", "local_header_recovery"])
     return flags
 
@@ -241,6 +249,7 @@ def _repair_history_flags(job: RepairJob) -> list[str]:
     history = job.repair_history if isinstance(job.repair_history, dict) else {}
     modules = [*(_list_values(history, "previous_modules")), *(_list_values(history, "path_modules"))]
     actions = [*(_list_values(history, "previous_actions")), *(_list_values(history, "path_actions"))]
+    patch_facts = _list_values(history, "applied_patch_facts")
     flags: list[str] = []
     for module in modules:
         flags.append(f"already_tried:{module}")
@@ -261,6 +270,13 @@ def _repair_history_flags(job: RepairJob) -> list[str]:
             flags.append("after_cd_rebuild")
         if "local_header" in action:
             flags.append("after_local_header_repair")
+    for fact in patch_facts:
+        if fact == "after_archive_carrier_crop" or fact == "fixed_field=carrier_prefix_crop":
+            flags.append("after_archive_carrier_crop")
+        if fact.startswith("fixed_field=eocd"):
+            flags.append("after_eocd_repair")
+        if fact in {"after_cd_rebuild", "raw_name_bytes_preserved"}:
+            flags.append("after_cd_rebuild")
     flags.extend(_list_values(history, "repair_history_flags"))
     return _dedupe(flags)
 
@@ -316,10 +332,29 @@ def _normalize_zip_generic_damage(flags: list[str]) -> list[str]:
         "payload_hash_mismatch",
     }
     flag_set = set(flags)
+    if "after_archive_carrier_crop" in flag_set:
+        flags = [flag for flag in flags if flag not in {"sfx", "carrier_archive", "carrier_prefix", "embedded_archive"}]
+        flag_set = set(flags)
+    if "split_sidecars_available" in flag_set and "tail_volume_truncated" not in flag_set and "missing_volume_unavailable" not in flag_set:
+        flags = [flag for flag in flags if flag not in {"missing_volume", "input_truncated", "unexpected_end", "stream_truncated"}]
+        flag_set = set(flags)
     if flag_set & precise_structural and not flag_set & payload:
         removable = {"damaged", "content_integrity_bad_or_unknown"}
         return [flag for flag in flags if flag not in removable]
     return flags
+
+
+def _source_has_parts(payload: dict[str, Any]) -> bool:
+    for key in ("source_input", "damaged_input"):
+        source = payload.get(key)
+        if isinstance(source, dict) and source.get("parts"):
+            return True
+    history = payload.get("repair_history")
+    if isinstance(history, dict):
+        source = history.get("source_input")
+        if isinstance(source, dict) and source.get("parts"):
+            return True
+    return False
 
 
 def _list_values(payload: dict[str, Any], key: str) -> list[str]:

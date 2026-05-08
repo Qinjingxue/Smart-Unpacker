@@ -19,6 +19,7 @@ from sunpack.repair.config import enabled_module_configs
 from sunpack.repair.candidate import CandidateSelector, CandidateValidation, RepairCandidate
 from sunpack.repair import RepairJob, RepairScheduler
 from sunpack.repair.pipeline.module import RepairModuleSpec, RepairRoute
+from sunpack.repair.pipeline.modules._common import source_input_for_job
 from sunpack.repair.pipeline.registry import get_repair_module_registry
 from sunpack.repair.result import RepairResult
 
@@ -1143,6 +1144,119 @@ def test_zip_route_history_allows_rebuild_after_carrier_crop(tmp_path):
     assert "after_archive_carrier_crop" in batch.diagnosis["capability_decision"]["damage_flags"]
 
 
+def test_zip_v23_raw_name_candidate_ranks_before_generic_rebuild(tmp_path):
+    scheduler = RepairScheduler({
+        "repair": {
+            "workspace": str(tmp_path / "repair"),
+            "modules": [
+                {"name": "zip_rebuild_cd_preserve_raw_names", "enabled": True},
+                {"name": "zip_rebuild_cd_from_local_headers", "enabled": True},
+                {"name": "zip_fix_cd_offset", "enabled": True},
+            ],
+        }
+    })
+    batch = scheduler.generate_repair_candidates(RepairJob(
+        source_input={"kind": "file", "path": str(tmp_path / "raw.zip"), "format_hint": "zip"},
+        format="zip",
+        confidence=0.7,
+        damage_flags=["damaged", "filename_encoding_bad", "raw_filename_bytes", "central_directory_bad", "central_directory_offset_bad", "local_header_recovery"],
+        archive_key="raw.zip",
+    ), lazy=True)
+
+    selector = CandidateSelector(scheduler.config)
+    ranked = sorted(((selector.generation_priority(candidate), candidate.module_name) for candidate in batch.candidates), reverse=True)
+    assert ranked[0][1] == "zip_rebuild_cd_preserve_raw_names"
+
+
+def test_zip_v23_zip64_extra_candidate_ranks_before_generic_rebuild(tmp_path):
+    scheduler = RepairScheduler({
+        "repair": {
+            "workspace": str(tmp_path / "repair"),
+            "modules": [
+                {"name": "zip_fix_zip64_extra_size", "enabled": True},
+                {"name": "zip_rebuild_cd_from_local_headers", "enabled": True},
+            ],
+        }
+    })
+    batch = scheduler.generate_repair_candidates(RepairJob(
+        source_input={"kind": "file", "path": str(tmp_path / "zip64.zip"), "format_hint": "zip"},
+        format="zip",
+        confidence=0.7,
+        damage_flags=["damaged", "zip64", "zip64_extra_bad", "zip64_extra_size_bad", "central_directory_bad", "local_header_recovery"],
+        archive_key="zip64.zip",
+    ), lazy=True)
+
+    selector = CandidateSelector(scheduler.config)
+    ranked = sorted(((selector.generation_priority(candidate), candidate.module_name) for candidate in batch.candidates), reverse=True)
+    assert ranked[0][1] == "zip_fix_zip64_extra_size"
+
+
+def test_zip_v23_split_sidecars_do_not_force_partial_salvage(tmp_path):
+    scheduler = RepairScheduler({
+        "repair": {
+            "workspace": str(tmp_path / "repair"),
+            "modules": [
+                {"name": "zip_partial_salvage_missing_volume", "enabled": True},
+                {"name": "zip_rebuild_cd_from_local_headers", "enabled": True},
+                {"name": "zip_local_header_partial_scan", "enabled": True},
+            ],
+        }
+    })
+    batch = scheduler.generate_repair_candidates(RepairJob(
+        source_input={"kind": "file", "path": str(tmp_path / "split.zip"), "format_hint": "zip", "parts": [{"path": str(tmp_path / "split.z01")}]},
+        format="zip",
+        confidence=0.7,
+        damage_flags=["missing_volume", "input_truncated", "local_header_recovery"],
+        analysis_prepass={"zip_structure_features": {"has_split_sidecars": True}},
+        archive_key="split.zip",
+    ), lazy=True)
+
+    modules = {candidate.module_name for candidate in batch.candidates}
+    assert "zip_partial_salvage_missing_volume" not in modules
+    assert "zip_rebuild_cd_from_local_headers" in modules
+
+
+def test_zip_v25_source_input_parts_become_concat_ranges(tmp_path):
+    main = tmp_path / "split.zip"
+    part = tmp_path / "split.z01"
+    main.write_bytes(b"tail")
+    part.write_bytes(b"head")
+
+    source = source_input_for_job(RepairJob(
+        source_input={"kind": "file", "path": str(main), "format_hint": "zip", "parts": [{"path": str(part)}]},
+        format="zip",
+        confidence=0.7,
+        damage_flags=["split_sidecars_available", "local_header_recovery"],
+        archive_key="split.zip",
+    ))
+
+    assert source["kind"] == "concat_ranges"
+    assert [item["path"] for item in source["ranges"]] == [str(part), str(main)]
+
+
+def test_zip_v23_duplicate_resolver_ranks_before_generic_rebuild(tmp_path):
+    scheduler = RepairScheduler({
+        "repair": {
+            "workspace": str(tmp_path / "repair"),
+            "modules": [
+                {"name": "zip_resolve_duplicate_entries", "enabled": True},
+                {"name": "zip_rebuild_cd_from_local_headers", "enabled": True},
+            ],
+        }
+    })
+    batch = scheduler.generate_repair_candidates(RepairJob(
+        source_input={"kind": "file", "path": str(tmp_path / "dup.zip"), "format_hint": "zip"},
+        format="zip",
+        confidence=0.7,
+        damage_flags=["damaged", "duplicate_entries", "central_directory_bad", "local_header_recovery"],
+        archive_key="dup.zip",
+    ), lazy=True)
+
+    selector = CandidateSelector(scheduler.config)
+    ranked = sorted(((selector.generation_priority(candidate), candidate.module_name) for candidate in batch.candidates), reverse=True)
+    assert ranked[0][1] == "zip_resolve_duplicate_entries"
+
+
 def test_zip_rebuild_cd_from_local_headers_repairs_missing_eocd(tmp_path):
     source = tmp_path / "missing_cd.zip"
     _write_zip(source, {"a.txt": b"alpha", "b.txt": b"bravo"})
@@ -1163,6 +1277,28 @@ def test_zip_rebuild_cd_from_local_headers_repairs_missing_eocd(tmp_path):
     with zipfile.ZipFile(result.repaired_input["path"]) as archive:
         assert archive.read("a.txt") == b"alpha"
         assert archive.read("b.txt") == b"bravo"
+
+
+def test_zip_v24_raw_name_rebuild_uses_native_target_and_preserves_name_bytes(tmp_path):
+    source = tmp_path / "raw_name_missing_cd.zip"
+    raw_name = b"\xff-name.bin"
+    _write_raw_name_zip_prefix(source, raw_name, b"payload")
+
+    result = _run_zip_repair(
+        tmp_path,
+        "zip_rebuild_cd_preserve_raw_names",
+        source,
+        ["filename_encoding_bad", "raw_filename_bytes", "central_directory_bad", "local_header_recovery"],
+    )
+
+    assert result.ok is True
+    assert result.diagnosis["native_target"] == "rebuild_cd_preserve_raw_names"
+    assert result.diagnosis["raw_name_bytes_preserved"] is True
+    repaired = Path(result.repaired_input["path"]).read_bytes()
+    cd_offset = repaired.index(b"PK\x01\x02")
+    name_len = struct.unpack_from("<H", repaired, cd_offset + 28)[0]
+    name_start = cd_offset + 46
+    assert repaired[name_start:name_start + name_len] == raw_name
 
 
 def test_zip_local_header_partial_scan_skips_damaged_entry(tmp_path):
@@ -2187,6 +2323,16 @@ def _write_zip(path, files):
     with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_STORED) as archive:
         for name, payload in files.items():
             archive.writestr(name, payload)
+
+
+def _write_raw_name_zip_prefix(path, raw_name: bytes, payload: bytes):
+    crc = zlib.crc32(payload) & 0xFFFF_FFFF
+    local = bytearray()
+    local.extend(b"PK\x03\x04")
+    local.extend(struct.pack("<HHHHHIIIHH", 20, 0, 0, 0, 0, crc, len(payload), len(payload), len(raw_name), 0))
+    local.extend(raw_name)
+    local.extend(payload)
+    path.write_bytes(bytes(local))
 
 
 def _tar_bytes(files):

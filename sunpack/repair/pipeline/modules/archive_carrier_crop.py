@@ -40,6 +40,8 @@ class ArchiveCarrierCropDeepRecovery:
         fmt = str(diagnosis.format or job.format or "").lower()
         if fmt not in {"7z", "seven_zip", "rar", "zip", "archive"}:
             return 0.0
+        if "after_archive_carrier_crop" in flags or "already_tried:archive_carrier_crop_deep_recovery" in flags:
+            return 0.0
         if fmt == "rar" and flags & {"carrier_archive", "sfx", "embedded_archive", "carrier_prefix"}:
             return 0.65
         if fmt == "zip" and flags & {"carrier_archive", "sfx", "embedded_archive", "carrier_prefix"}:
@@ -181,7 +183,16 @@ def attach_native_crop_patch_plans(result: dict, job: RepairJob, module_name: st
         if end <= start:
             continue
         actions = list(item.get("actions") or result.get("actions") or [])
+        actions = _dedupe([*actions, "crop_archive_carrier_prefix"])
         confidence = float(item.get("confidence", result.get("confidence", 0.0)) or 0.0)
+        item["patch_facts"] = _dedupe([
+            *[str(value) for value in item.get("patch_facts") or []],
+            "fixed_field=carrier_prefix_crop",
+            "after_archive_carrier_crop",
+            "cropped_format=zip" if str(job.format or "").lower() == "zip" else f"cropped_format={job.format or 'archive'}",
+            f"cropped_start={start}",
+            f"cropped_end={end}",
+        ])
         item["patch_plan"] = patch_plan_for_crop(
             job,
             module_name,
@@ -190,3 +201,15 @@ def attach_native_crop_patch_plans(result: dict, job: RepairJob, module_name: st
             confidence=confidence,
             actions=actions,
         ).to_dict()
+
+
+def _dedupe(values: list[str]) -> list[str]:
+    output: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        text = str(value or "")
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        output.append(text)
+    return output

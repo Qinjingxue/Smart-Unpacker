@@ -399,11 +399,21 @@ def candidate_feature_payload(candidate: RepairCandidate) -> dict[str, Any]:
         "module": candidate.module_name,
         "repair_name": str(diagnosis.get("repair_name") or candidate.module_name),
         "native_key": str(diagnosis.get("native_key") or ""),
+        "native_target": str(diagnosis.get("native_target") or ""),
+        "candidate_status": str(diagnosis.get("candidate_status") or ""),
         "atomic_action_group": str(diagnosis.get("atomic_action_group") or diagnosis.get("repair_name") or candidate.module_name),
         "route_family": str(diagnosis.get("route_family") or diagnosis.get("atomic_action_group") or diagnosis.get("repair_name") or candidate.module_name),
         "route_required_flags_matched": list(diagnosis.get("route_required_flags_matched") or []),
         "route_reject_reason": str(diagnosis.get("route_reject_reason") or ""),
         "native_target_mismatch": bool(diagnosis.get("native_target_mismatch")),
+        "patch_facts": list(diagnosis.get("patch_facts") or []),
+        "residual_facts": list(diagnosis.get("residual_facts") or []),
+        "validation_details": dict(diagnosis.get("validation_details") or {}),
+        "raw_name_bytes_preserved": bool(diagnosis.get("raw_name_bytes_preserved")),
+        "raw_name_source": str(diagnosis.get("raw_name_source") or ""),
+        "split_sidecars_available": "split_sidecars_available" in {str(flag) for flag in candidate.damage_flags},
+        "logical_stream_built": bool(diagnosis.get("logical_stream_built")),
+        "after_archive_carrier_crop": "after_archive_carrier_crop" in {str(flag) for flag in candidate.damage_flags} or "after_archive_carrier_crop" in {str(fact) for fact in diagnosis.get("patch_facts") or []},
         "format": candidate.format,
         "status": candidate.status,
         "stage": candidate.stage,
@@ -1024,8 +1034,16 @@ def _module_generation_bias(candidate: RepairCandidate) -> float:
     if module_name == "zip_reconcile_cd_data_descriptor_conflict" and flags & {"data_descriptor", "bit3_data_descriptor", "compressed_size_bad"}:
         return 0.12
     if module_name == "zip_partial_salvage_missing_volume" and flags & {"missing_volume", "input_truncated", "unexpected_end", "stream_truncated"}:
+        if "split_sidecars_available" in flags and not (flags & {"tail_volume_truncated", "missing_volume_unavailable"}):
+            return -0.08
         return 0.12
+    if module_name == "zip_rebuild_cd_preserve_raw_names" and flags & {"filename_encoding_bad", "raw_filename_bytes", "non_utf8_filename"}:
+        return 0.22
+    if module_name == "zip_resolve_duplicate_entries" and "duplicate_entries" in flags:
+        return 0.22
     if module_name in {"zip_fix_zip64_locator", "zip_fix_zip64_eocd", "zip_fix_zip64_extra_size"} and flags & {"zip64", "zip64_eocd_bad", "zip64_locator_bad", "zip64_extra_bad"}:
+        if module_name == "zip_fix_zip64_extra_size" and flags & {"zip64_extra_bad", "zip64_extra_size_bad"}:
+            return 0.24
         return 0.12
     if module_name == "zip_trim_trailing_junk" and "trailing_junk" in flags:
         if flags & {"checksum_error", "crc_error", "entry_payload_bad", "damaged", "content_integrity_bad_or_unknown"}:
@@ -1040,6 +1058,12 @@ def _module_generation_bias(candidate: RepairCandidate) -> float:
     if module_name == "seven_zip_crc_field_repair":
         return 0.1
     if module_name == "zip_rebuild_cd_from_local_headers":
+        if flags & {"filename_encoding_bad", "raw_filename_bytes", "non_utf8_filename"}:
+            return 0.02
+        if "duplicate_entries" in flags:
+            return 0.02
+        if flags & {"zip64_extra_bad", "zip64_extra_size_bad"}:
+            return 0.01
         if "eocd_bad" in flags and not (flags & {"central_directory_bad", "directory_integrity_bad_or_unknown", "local_header_recovery"}):
             return 0.0
         return 0.11

@@ -331,6 +331,12 @@ if ($Scheduling -eq "pool") {
         no_output_by_damage_profile = @{}
         no_output_by_atomic_family = @{}
         native_target_mismatch_counts = @{}
+        native_target_mismatch_by_profile = @{}
+        no_candidate_by_native_target = @{}
+        validation_failed_by_profile = @{}
+        post_crop_residual_fact_counts = @{}
+        split_logical_stream_counts = @{}
+        split_sidecar_complete_candidate_counts = @{}
         route_rejected_by_required_flags = 0
         route_rejected_by_can_handle = 0
         shards = $summaries
@@ -351,6 +357,12 @@ if ($Scheduling -eq "pool") {
         Add-TrainingCountMap $aggregate["no_output_by_damage_profile"] $summary.no_output_by_damage_profile
         Add-TrainingCountMap $aggregate["no_output_by_atomic_family"] $summary.no_output_by_atomic_family
         Add-TrainingCountMap $aggregate["native_target_mismatch_counts"] $summary.native_target_mismatch_counts
+        Add-TrainingCountMap $aggregate["native_target_mismatch_by_profile"] $summary.native_target_mismatch_by_profile
+        Add-TrainingCountMap $aggregate["no_candidate_by_native_target"] $summary.no_candidate_by_native_target
+        Add-TrainingCountMap $aggregate["validation_failed_by_profile"] $summary.validation_failed_by_profile
+        Add-TrainingCountMap $aggregate["post_crop_residual_fact_counts"] $summary.post_crop_residual_fact_counts
+        Add-TrainingCountMap $aggregate["split_logical_stream_counts"] $summary.split_logical_stream_counts
+        Add-TrainingCountMap $aggregate["split_sidecar_complete_candidate_counts"] $summary.split_sidecar_complete_candidate_counts
     }
 
     New-Item -ItemType Directory -Path (Split-Path -Parent $ParallelSummaryOutput) -Force | Out-Null
@@ -514,6 +526,12 @@ $aggregate = [ordered]@{
     no_output_by_damage_profile = @{}
     no_output_by_atomic_family = @{}
     native_target_mismatch_counts = @{}
+    native_target_mismatch_by_profile = @{}
+    no_candidate_by_native_target = @{}
+    validation_failed_by_profile = @{}
+    post_crop_residual_fact_counts = @{}
+    split_logical_stream_counts = @{}
+    split_sidecar_complete_candidate_counts = @{}
     route_rejected_by_required_flags = 0
     route_rejected_by_can_handle = 0
     shards = $summaries
@@ -534,6 +552,12 @@ foreach ($summary in $summaries) {
     Add-TrainingCountMap $aggregate["no_output_by_damage_profile"] $summary.no_output_by_damage_profile
     Add-TrainingCountMap $aggregate["no_output_by_atomic_family"] $summary.no_output_by_atomic_family
     Add-TrainingCountMap $aggregate["native_target_mismatch_counts"] $summary.native_target_mismatch_counts
+    Add-TrainingCountMap $aggregate["native_target_mismatch_by_profile"] $summary.native_target_mismatch_by_profile
+    Add-TrainingCountMap $aggregate["no_candidate_by_native_target"] $summary.no_candidate_by_native_target
+    Add-TrainingCountMap $aggregate["validation_failed_by_profile"] $summary.validation_failed_by_profile
+    Add-TrainingCountMap $aggregate["post_crop_residual_fact_counts"] $summary.post_crop_residual_fact_counts
+    Add-TrainingCountMap $aggregate["split_logical_stream_counts"] $summary.split_logical_stream_counts
+    Add-TrainingCountMap $aggregate["split_sidecar_complete_candidate_counts"] $summary.split_sidecar_complete_candidate_counts
 }
 
 New-Item -ItemType Directory -Path (Split-Path -Parent $ParallelSummaryOutput) -Force | Out-Null

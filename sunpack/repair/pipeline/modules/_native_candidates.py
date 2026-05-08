@@ -28,6 +28,8 @@ def candidates_from_native_result(
     status = str(result.get("status") or "unrepairable")
     if status not in allowed_statuses:
         return []
+    if bool(result.get("native_target_mismatch")):
+        return []
     fmt = str(result.get("format") or format_hint or diagnosis.format or job.format or "archive")
     raw_candidates = result.get("candidates") if isinstance(result.get("candidates"), list) else []
     selected_path = str(result.get("selected_path") or "")
@@ -65,7 +67,14 @@ def candidates_from_native_result(
             **diagnosis.as_dict(),
             "repair_name": str(repair_name or item.get("name") or module_name),
             "native_key": native_key,
+            "native_target": str(item.get("native_target") or result.get("native_target") or ""),
+            "candidate_status": str(item.get("candidate_status") or result.get("candidate_status") or ""),
             "atomic_action_group": str(atomic_action_group or repair_name or module_name),
+            "patch_facts": _dedupe([str(value) for value in item.get("patch_facts") or result.get("patch_facts") or []]),
+            "residual_facts": _dedupe([str(value) for value in item.get("residual_facts") or result.get("residual_facts") or []]),
+            "validation_details": dict(item.get("validation_details") or result.get("validation_details") or {}),
+            "logical_stream_built": str(job.source_input.get("kind") or "") == "concat_ranges",
+            "native_target_mismatch": bool(item.get("native_target_mismatch") or result.get("native_target_mismatch")),
             native_key: dict(result),
             "native_candidate": {"index": index, **details},
         }

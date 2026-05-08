@@ -71,6 +71,7 @@ class _ZipDirectoryFieldRepair:
     content_damage_penalty = 0.35
     route_family = ""
     expected_native_actions: tuple[str, ...] = ()
+    expected_native_target = ""
 
     @property
     def spec(self) -> RepairModuleSpec:
@@ -112,6 +113,18 @@ class _ZipDirectoryFieldRepair:
             self.repair_name,
             float(limits.get("max_input_size_mb", 512) or 0),
         ))
+        expected_target = self.expected_native_target or self.repair_name
+        native_target = str(result.get("native_target") or "")
+        if str(result.get("status") or "") == "repaired" and expected_target and native_target and native_target != expected_target:
+            result["native_target_mismatch"] = True
+            result["expected_native_target"] = expected_target
+            return _unrepairable(
+                self.module_name,
+                diagnosis,
+                "native ZIP field repair produced a different atomic target",
+                native_key="native_zip_directory_field_repair",
+                native_result=result,
+            )
         if self.expected_native_actions and str(result.get("status") or "") == "repaired":
             actions = {str(action) for action in result.get("actions") or []}
             if not actions & set(self.expected_native_actions):
@@ -124,7 +137,7 @@ class _ZipDirectoryFieldRepair:
                     native_key="native_zip_directory_field_repair",
                     native_result=result,
                 )
-        return repair_result_from_native_zip_field(
+        result_payload = repair_result_from_native_zip_field(
             self.module_name,
             result,
             job,
@@ -133,11 +146,16 @@ class _ZipDirectoryFieldRepair:
             repair_name=self.module_name,
             atomic_action_group=self.module_name,
         )
+        if result_payload.ok:
+            patch_facts = _patch_facts_for_directory_field(self.module_name, result_payload.diagnosis)
+            result_payload.diagnosis["patch_facts"] = patch_facts
+        return result_payload
 
 
 class ZipTrimTrailingJunk(_ZipDirectoryFieldRepair):
     module_name = "zip_trim_trailing_junk"
     repair_name = "zip_trailing_junk_trim"
+    expected_native_target = "trailing_junk"
     categories = ("boundary_repair",)
     require_flags = ("trailing_junk", "boundary_unreliable", "trailing_padding")
     reject_flags = ("wrong_password", *CARRIER_FLAGS, *MISSING_VOLUME_FLAGS)
@@ -149,6 +167,7 @@ class ZipTrimTrailingJunk(_ZipDirectoryFieldRepair):
 class ZipFixEocdCommentLength(_ZipDirectoryFieldRepair):
     module_name = "zip_fix_eocd_comment_length"
     repair_name = "zip_comment_length_fix"
+    expected_native_target = "comment_length"
     categories = ("boundary_repair", "directory_rebuild")
     require_flags = ("zip_comment_length_bad", "comment_length_bad")
     reject_flags = ("wrong_password", *CARRIER_FLAGS, *MISSING_VOLUME_FLAGS, *CONTENT_DAMAGE_FLAGS, *DESCRIPTOR_FLAGS)
@@ -159,6 +178,7 @@ class ZipFixEocdCommentLength(_ZipDirectoryFieldRepair):
 class ZipFixEocdRecord(_ZipDirectoryFieldRepair):
     module_name = "zip_fix_eocd_record"
     repair_name = "zip_eocd_repair"
+    expected_native_target = "eocd"
     categories = ("directory_rebuild", "boundary_repair")
     require_flags = ("eocd_bad",)
     reject_flags = ("wrong_password", *CARRIER_FLAGS, *MISSING_VOLUME_FLAGS, *CONTENT_DAMAGE_FLAGS)
@@ -169,6 +189,7 @@ class ZipFixEocdRecord(_ZipDirectoryFieldRepair):
 class ZipFixCdOffset(_ZipDirectoryFieldRepair):
     module_name = "zip_fix_cd_offset"
     repair_name = "zip_central_directory_offset_fix"
+    expected_native_target = "cd_offset"
     categories = ("directory_rebuild",)
     require_flags = ("central_directory_offset_bad",)
     reject_flags = ("wrong_password", *CARRIER_FLAGS, *MISSING_VOLUME_FLAGS, *CONTENT_DAMAGE_FLAGS)
@@ -179,6 +200,7 @@ class ZipFixCdOffset(_ZipDirectoryFieldRepair):
 class ZipFixCdEntryCount(_ZipDirectoryFieldRepair):
     module_name = "zip_fix_cd_entry_count"
     repair_name = "zip_central_directory_count_fix"
+    expected_native_target = "cd_count"
     categories = ("directory_rebuild",)
     require_flags = ("central_directory_count_bad",)
     reject_flags = ("wrong_password", *CARRIER_FLAGS, *MISSING_VOLUME_FLAGS, *CONTENT_DAMAGE_FLAGS)
@@ -189,6 +211,7 @@ class ZipFixCdEntryCount(_ZipDirectoryFieldRepair):
 class ZipFixLocalHeaderFields(_ZipDirectoryFieldRepair):
     module_name = "zip_fix_local_header_fields"
     repair_name = "zip_local_header_field_repair"
+    expected_native_target = "local_header"
     categories = ("directory_rebuild",)
     require_flags = ("local_header_bad", "local_header_length_bad", "local_header_size_bad")
     reject_flags = ("wrong_password", *CARRIER_FLAGS, *MISSING_VOLUME_FLAGS, *CONTENT_DAMAGE_FLAGS)
@@ -197,7 +220,6 @@ class ZipFixLocalHeaderFields(_ZipDirectoryFieldRepair):
 
 
 class _Zip64FieldRepair(_ZipDirectoryFieldRepair):
-    repair_name = "zip64_field_repair"
     categories = ("directory_rebuild",)
     base_score = 0.90
     confidence = 0.96
@@ -207,6 +229,8 @@ class _Zip64FieldRepair(_ZipDirectoryFieldRepair):
 
 class ZipFixZip64Locator(_Zip64FieldRepair):
     module_name = "zip_fix_zip64_locator"
+    repair_name = "zip64_locator"
+    expected_native_target = "zip64_locator"
     require_flags = ("zip64_locator_bad",)
     route_family = "zip64_locator"
     expected_native_actions = ("normalize_zip64_eocd_locator", "rewrite_zip64_eocd_locator")
@@ -214,6 +238,8 @@ class ZipFixZip64Locator(_Zip64FieldRepair):
 
 class ZipFixZip64Eocd(_Zip64FieldRepair):
     module_name = "zip_fix_zip64_eocd"
+    repair_name = "zip64_eocd"
+    expected_native_target = "zip64_eocd"
     require_flags = ("zip64_eocd_bad",)
     route_family = "zip64_eocd"
     expected_native_actions = ("rewrite_zip64_eocd_fields",)
@@ -221,6 +247,8 @@ class ZipFixZip64Eocd(_Zip64FieldRepair):
 
 class ZipFixZip64ExtraSize(_Zip64FieldRepair):
     module_name = "zip_fix_zip64_extra_size"
+    repair_name = "zip64_extra_size"
+    expected_native_target = "zip64_extra_size"
     require_flags = ("zip64_extra_bad", "zip64_extra_size_bad")
     route_family = "zip64_extra"
     expected_native_actions = ("reconcile_zip64_central_extra_fields",)
@@ -229,6 +257,7 @@ class ZipFixZip64ExtraSize(_Zip64FieldRepair):
 class _ZipRebuildFromLocalHeaders:
     module_name = ""
     require_data_descriptor = False
+    preserve_raw_names = False
     require_flags: tuple[str, ...] = ()
     reject_flags: tuple[str, ...] = ("missing_volume",)
     base_score = 0.84
@@ -273,21 +302,37 @@ class _ZipRebuildFromLocalHeaders:
             source_input_for_job(job),
             candidate,
             require_data_descriptor=self.require_data_descriptor,
+            preserve_raw_names=self.preserve_raw_names,
             config=config,
         )
         if not scan.entries:
             return _unrepairable(self.module_name, diagnosis, "no recoverable ZIP entries were found", warnings=scan.warnings)
+        if self.preserve_raw_names and scan.native_target != "rebuild_cd_preserve_raw_names":
+            return _unrepairable(
+                self.module_name,
+                diagnosis,
+                "native ZIP rebuild produced a different atomic target",
+                warnings=scan.warnings,
+                native_key="native_zip_rebuild",
+                native_result={"native_target": scan.native_target, "native_target_mismatch": True, "validation_details": scan.validation_details or {}},
+            )
         coverage = coverage_view_from_job(job)
         payload_damage = bool(set(job.damage_flags) & {"checksum_error", "crc_error", "damaged", "entry_payload_bad", "payload_bad", "data_error"})
         partial = not scan.complete or payload_damage or coverage.has_missing_entries or coverage.has_payload_damage
         confidence = 0.74 if partial else 0.92
         confidence += coverage.score_hint(directory=0.04, mixed=-0.04, payload=-0.12)
+        patch_facts = _dedupe([str(value) for value in scan.patch_facts or []])
+        residual_facts = _dedupe([str(value) for value in scan.residual_facts or []])
+        source_input = source_input_for_job(job)
+        actions = ["scan_local_file_headers"]
+        actions.append("preserve_raw_filename_bytes" if self.preserve_raw_names else "rebuild_zip_central_directory")
+        actions.append("write_repaired_zip")
         return RepairResult(
             status="partial" if partial else "repaired",
             confidence=max(0.1, min(0.98, confidence)),
             format="zip",
             repaired_input={"kind": "file", "path": str(candidate), "format_hint": "zip"},
-            actions=["scan_local_file_headers", "rebuild_zip_central_directory", "write_repaired_zip"],
+            actions=actions,
             damage_flags=list(job.damage_flags),
             warnings=scan.warnings,
             workspace_paths=[str(candidate)],
@@ -297,7 +342,16 @@ class _ZipRebuildFromLocalHeaders:
                 **diagnosis.as_dict(),
                 "repair_name": self.module_name,
                 "native_key": "native_zip_rebuild",
+                "native_target": scan.native_target,
+                "candidate_status": scan.candidate_status,
                 "atomic_action_group": self.module_name,
+                "patch_facts": patch_facts,
+                "residual_facts": residual_facts,
+                "validation_details": scan.validation_details or {},
+                "logical_stream_built": bool(scan.logical_stream_built) or str(source_input.get("kind") or "") == "concat_ranges",
+                "split_sidecars_available": bool(scan.split_sidecars_available) or "split_sidecars_available" in set(job.damage_flags),
+                "raw_name_bytes_preserved": bool((scan.validation_details or {}).get("raw_filename_bytes_preserved")),
+                "raw_name_source": "local_header" if "raw_name_source=local_header" in set(patch_facts) else "",
                 "archive_coverage": coverage.as_dict(),
                 "native_zip_rebuild": scan.__dict__,
             },
@@ -314,6 +368,7 @@ class ZipRebuildCdFromLocalHeaders(_ZipRebuildFromLocalHeaders):
 class ZipRebuildCdPreserveRawNames(_ZipRebuildFromLocalHeaders):
     module_name = "zip_rebuild_cd_preserve_raw_names"
     require_data_descriptor = False
+    preserve_raw_names = True
     require_flags = (
         "non_utf8_filename",
         "filename_encoding_bad",
@@ -336,7 +391,6 @@ class ZipRebuildCdPreserveRawNames(_ZipRebuildFromLocalHeaders):
         ):
             return 0.88
         return 0.0
-
 
 class ZipRebuildCdFromDataDescriptors(_ZipRebuildFromLocalHeaders):
     module_name = "zip_rebuild_cd_from_data_descriptors"
@@ -596,6 +650,7 @@ class _ZipConflictResolver:
             float(limits.get("max_output_size_mb", 2048) or 0),
             float(limits.get("max_entry_uncompressed_mb", 512) or 0),
             bool(limits.get("verify_candidates", True)),
+            "crc_match" if self.module_name == "zip_resolve_duplicate_entries" else "first",
         ))
         return candidates_from_native_result(
             self.module_name, result, job, diagnosis,
@@ -610,6 +665,19 @@ class ZipResolveDuplicateEntries(_ZipConflictResolver):
     module_name = "zip_resolve_duplicate_entries"
     require_flags = ("duplicate_entries",)
     base_score = 0.91
+
+    def generate_candidates(self, job: RepairJob, diagnosis: RepairDiagnosis, workspace: str, config: dict):
+        candidates = super().generate_candidates(job, diagnosis, workspace, config)
+        output = []
+        for candidate in candidates:
+            diagnosis_payload = dict(candidate.diagnosis)
+            diagnosis_payload["patch_facts"] = _dedupe([
+                *[str(value) for value in diagnosis_payload.get("patch_facts") or []],
+                "resolved_duplicate_entries",
+                "kept_entry_policy=crc_match",
+            ])
+            output.append(replace(candidate, diagnosis=diagnosis_payload, actions=_dedupe([*candidate.actions, "resolve_duplicate_entries"])))
+        return output
 
 
 class ZipResolveOverlappingEntries(_ZipConflictResolver):
@@ -641,3 +709,30 @@ for _module in (
     ZipResolveOverlappingEntries(),
 ):
     register_repair_module(_module)
+
+
+def _patch_facts_for_directory_field(module_name: str, diagnosis: dict[str, Any]) -> list[str]:
+    mapping = {
+        "zip_fix_eocd_comment_length": ["fixed_field=eocd_comment_length", "after_eocd_repair"],
+        "zip_fix_eocd_record": ["fixed_field=eocd_record", "after_eocd_repair"],
+        "zip_fix_cd_offset": ["fixed_field=central_directory_offset"],
+        "zip_fix_cd_entry_count": ["fixed_field=central_directory_entry_count"],
+        "zip_fix_local_header_fields": ["fixed_field=local_header_fields", "after_local_header_repair"],
+        "zip_fix_zip64_locator": ["fixed_field=zip64_locator"],
+        "zip_fix_zip64_eocd": ["fixed_field=zip64_eocd"],
+        "zip_fix_zip64_extra_size": ["fixed_field=zip64_extra_size"],
+        "zip_trim_trailing_junk": ["fixed_field=trailing_junk"],
+    }
+    return _dedupe([*[str(value) for value in diagnosis.get("patch_facts") or []], *mapping.get(module_name, [])])
+
+
+def _dedupe(values: list[str]) -> list[str]:
+    output: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        text = str(value or "")
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        output.append(text)
+    return output
