@@ -8,6 +8,9 @@ param(
     [string]$Workspace = ".sunpack\repair-plan-workspace",
     [int]$CollectorShard = -1,
     [int]$CollectorWorkers = 1,
+    [ValidateSet("process_per_sample", "worker_pool", "inprocess")]
+    [string]$SampleExecutionMode = "worker_pool",
+    [int]$SampleWorkerCount = 0,
     [int]$MaxRounds = 5,
     [int]$MaxCandidatesPerRound = 10,
     [ValidateSet("greedy", "greedy_current_selector", "beam", "counterfactual")]
@@ -72,6 +75,8 @@ $argsList = @(
     "--workspace", $Workspace,
     "--collector-shard", "$CollectorShard",
     "--collector-workers", "$CollectorWorkers",
+    "--sample-execution-mode", $SampleExecutionMode,
+    "--sample-worker-count", "$SampleWorkerCount",
     "--max-rounds", "$MaxRounds",
     "--max-candidates-per-round", "$MaxCandidatesPerRound",
     "--rollout-mode", $RolloutMode,

@@ -9,9 +9,12 @@ param(
     [int]$CollectWorkers = 16,
     [ValidateSet("pool", "static")]
     [string]$Scheduling = "pool",
-    [int]$QueueBatchSize = 1,
+    [int]$QueueBatchSize = 10,
     [int]$MaxActiveCollectors = 6,
-    [int]$LaunchDelayMilliseconds = 150,
+    [int]$LaunchDelayMilliseconds = 25,
+    [ValidateSet("process_per_sample", "worker_pool", "inprocess")]
+    [string]$SampleExecutionMode = "worker_pool",
+    [int]$SampleWorkerCount = 0,
     [int]$MaxRounds = 5,
     [int]$MaxCandidatesPerRound = 10,
     [ValidateSet("greedy", "greedy_current_selector", "beam", "counterfactual")]
@@ -164,6 +167,8 @@ function New-CollectorArgs {
         "-Workspace", $Unit.Workspace,
         "-CollectorShard", "$Slot",
         "-CollectorWorkers", "$workerCount",
+        "-SampleExecutionMode", $SampleExecutionMode,
+        "-SampleWorkerCount", "$SampleWorkerCount",
         "-MaxRounds", "$MaxRounds",
         "-MaxCandidatesPerRound", "$MaxCandidatesPerRound",
         "-RolloutMode", $RolloutMode,
@@ -292,6 +297,8 @@ if ($Scheduling -eq "pool") {
         max_active_collectors = $activeLimit
         launch_delay_milliseconds = $launchDelayMs
         queue_batch_size = $batchSize
+        sample_execution_mode = $SampleExecutionMode
+        sample_worker_count = $SampleWorkerCount
         task_count = $tasks.Count
         records = $records.Count
         failed_tasks = $failed
@@ -379,6 +386,8 @@ foreach ($shard in $shards) {
         "-Workspace", $shard.Workspace,
         "-CollectorShard", "$($shard.Id)",
         "-CollectorWorkers", "$workerCount",
+        "-SampleExecutionMode", $SampleExecutionMode,
+        "-SampleWorkerCount", "$SampleWorkerCount",
         "-MaxRounds", "$MaxRounds",
         "-MaxCandidatesPerRound", "$MaxCandidatesPerRound",
         "-RolloutMode", $RolloutMode,
@@ -452,6 +461,10 @@ $aggregate = [ordered]@{
     requested_collect_workers = $CollectWorkers
     max_active_collectors = $workerCount
     launch_delay_milliseconds = 0
+    queue_batch_size = 0
+    sample_execution_mode = $SampleExecutionMode
+    sample_worker_count = $SampleWorkerCount
+    task_count = $shards.Count
     records = $records.Count
     failed_shards = $failed
     shard_count = $shards.Count

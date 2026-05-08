@@ -76,6 +76,8 @@ def main(argv: list[str] | None = None) -> int:
         "failure_output": str(failure_output),
         "collector_shard": args.collector_shard,
         "collector_workers": args.collector_workers,
+        "sample_execution_mode": args.sample_execution_mode,
+        "sample_worker_count": _sample_worker_count(args),
         "workspace": args.workspace,
     }
     started_all = time.perf_counter()
@@ -83,40 +85,19 @@ def main(argv: list[str] | None = None) -> int:
     debug_events = _DebugEvents(Path(args.debug_events) if args.debug_events else None)
     mode = "a" if args.append else "w"
     with success_output.open(mode, encoding="utf-8") as success_handle, failure_output.open(mode, encoding="utf-8") as failure_handle:
-        for record_index, record in enumerate(records, start=1):
-            total_timeout = float(args.total_timeout_seconds or 0)
-            if total_timeout > 0 and time.perf_counter() - started_all > total_timeout:
-                debug_events.write("total_timeout", record, record_index=record_index, total_records=len(records), elapsed_seconds=round(time.perf_counter() - started_all, 3))
-                summary["failed"] += 1
-                break
-            idle_timeout = float(args.idle_timeout_seconds or 0)
-            if idle_timeout > 0 and time.perf_counter() - last_progress > idle_timeout:
-                debug_events.write("idle_timeout", record, record_index=record_index, total_records=len(records), idle_seconds=round(time.perf_counter() - last_progress, 3))
-                summary["failed"] += 1
-                break
-            if record.get("status") == "skipped":
+        results = (
+            _collect_records_worker_pool(records, args, debug_events, started_all)
+            if str(args.sample_execution_mode or "") == "worker_pool"
+            else _collect_records_serial(records, args, debug_events, started_all)
+        )
+        for result in sorted(results, key=lambda item: int(item.get("record_index", 0) or 0)):
+            record = result["record"]
+            rows = list(result.get("rows") or [])
+            status = str(result.get("status") or "")
+            if status == "skipped" and not rows:
                 summary["skipped"] += 1
                 continue
-            if args.skip_large_stream_samples and _is_large_stream_sample(record, args):
-                row = _terminal_row(record, "skipped_budget", "large stream sample skipped by collect budget")
-                row["elapsed_sample_seconds"] = 0.0
-                _attach_collector_context(row, args)
-                _update_summary_counts(summary, record, [row])
-                failure_handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True, default=str) + "\n")
-                if args.pretty:
-                    failure_pretty_records.append(row)
-                summary["samples"] += 1
-                summary["failure_rows"] += 1
-                summary["skipped"] += 1
-                debug_events.write("sample_skipped_budget", record, record_index=record_index, total_records=len(records), budget=_sample_budget(record, args))
-                continue
-            if args.progress:
-                print(f"START {record_index}/{len(records)} {record.get('sample_id')} fmt={record.get('material_format') or record.get('format')} source={record.get('source_archive_name')}", flush=True)
-            debug_events.write("sample_start", record, record_index=record_index, total_records=len(records))
-            started = time.perf_counter()
-            status, rows = _collect_sample_with_timeout(record, args, debug_events, record_index, len(records))
-            elapsed = round(time.perf_counter() - started, 3)
-            last_progress = time.perf_counter()
+            elapsed = float(result.get("elapsed_seconds", 0.0) or 0.0)
             for row in rows:
                 row["elapsed_sample_seconds"] = elapsed
                 _attach_collector_context(row, args)
@@ -131,9 +112,7 @@ def main(argv: list[str] | None = None) -> int:
             summary["success_rows" if is_success else "failure_rows"] += len(rows)
             summary["timeouts"] += 1 if status == "timeout" else 0
             summary["failed"] += 1 if status == "failed" else 0
-            if args.progress:
-                print(f"END {record.get('sample_id')} status={status} rows={len(rows)} elapsed={elapsed}s", flush=True)
-            debug_events.write("sample_end", record, record_index=record_index, total_records=len(records), status=status, rows=len(rows), elapsed_seconds=elapsed)
+            summary["skipped"] += 1 if status.startswith("skipped") else 0
     if args.pretty:
         _pretty_path(success_output).write_text(json.dumps(success_pretty_records, ensure_ascii=False, indent=2, sort_keys=True, default=str), encoding="utf-8")
         _pretty_path(failure_output).write_text(json.dumps(failure_pretty_records, ensure_ascii=False, indent=2, sort_keys=True, default=str), encoding="utf-8")
@@ -159,6 +138,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--workspace", default=str(Path(".sunpack") / "repair-plan-workspace"), help="Repair workspace used by this collector.")
     parser.add_argument("--collector-shard", type=int, default=-1, help="Collector shard id written into emitted rows.")
     parser.add_argument("--collector-workers", type=int, default=1, help="Total collector worker count written into emitted rows.")
+    parser.add_argument("--sample-execution-mode", choices=("process_per_sample", "worker_pool", "inprocess"), default="worker_pool", help="How samples are executed. worker_pool reuses long-lived worker processes; process_per_sample preserves the old isolated timeout model.")
+    parser.add_argument("--sample-worker-count", type=int, default=0, help="Worker processes used by --sample-execution-mode worker_pool. 0 chooses a conservative default from collector settings.")
     parser.add_argument("--append", action="store_true", help="Append instead of overwriting output files.")
     parser.set_defaults(pretty=True)
     parser.add_argument("--pretty", action="store_true", help="Also write formatted .pretty.json files. Enabled by default.")
@@ -334,6 +315,15 @@ def _sample_filter(raw_items: list[str]) -> set[str]:
     return output
 
 
+def _sample_worker_count(args: argparse.Namespace) -> int:
+    explicit = int(getattr(args, "sample_worker_count", 0) or 0)
+    if explicit > 0:
+        return explicit
+    if int(getattr(args, "collector_shard", -1) or -1) >= 0:
+        return 1
+    return max(1, int(getattr(args, "collector_workers", 1) or 1))
+
+
 def _sample_budget(record: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
     return {
         "base_case_timeout_seconds": float(args.case_timeout_seconds or 0),
@@ -440,6 +430,194 @@ def _attach_split_volumes(source_input: dict[str, Any], record: dict[str, Any]) 
             source_input["ranges"].append({"path": vol_path})
 
 
+def _collect_records_serial(records: list[dict[str, Any]], args: argparse.Namespace, debug_events: "_DebugEvents", started_all: float) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    last_progress = started_all
+    total_records = len(records)
+    for record_index, record in enumerate(records, start=1):
+        total_timeout = float(args.total_timeout_seconds or 0)
+        if total_timeout > 0 and time.perf_counter() - started_all > total_timeout:
+            debug_events.write("total_timeout", record, record_index=record_index, total_records=total_records, elapsed_seconds=round(time.perf_counter() - started_all, 3))
+            break
+        idle_timeout = float(args.idle_timeout_seconds or 0)
+        if idle_timeout > 0 and time.perf_counter() - last_progress > idle_timeout:
+            debug_events.write("idle_timeout", record, record_index=record_index, total_records=total_records, idle_seconds=round(time.perf_counter() - last_progress, 3))
+            break
+        skipped = _skipped_sample_result(record, args, debug_events, record_index, total_records)
+        if skipped is not None:
+            results.append(skipped)
+            last_progress = time.perf_counter()
+            continue
+        if args.progress:
+            print(f"START {record_index}/{total_records} {record.get('sample_id')} fmt={record.get('material_format') or record.get('format')} source={record.get('source_archive_name')}", flush=True)
+        debug_events.write("sample_start", record, record_index=record_index, total_records=total_records)
+        started = time.perf_counter()
+        status, rows = (
+            _collect_sample(record, args, debug_events)
+            if str(args.sample_execution_mode or "") == "inprocess"
+            else _collect_sample_with_timeout(record, args, debug_events, record_index, total_records)
+        )
+        elapsed = round(time.perf_counter() - started, 3)
+        last_progress = time.perf_counter()
+        if args.progress:
+            print(f"END {record.get('sample_id')} status={status} rows={len(rows)} elapsed={elapsed}s", flush=True)
+        debug_events.write("sample_end", record, record_index=record_index, total_records=total_records, status=status, rows=len(rows), elapsed_seconds=elapsed)
+        results.append({"record_index": record_index, "record": record, "status": status, "rows": rows, "elapsed_seconds": elapsed})
+    return results
+
+
+def _skipped_sample_result(record: dict[str, Any], args: argparse.Namespace, debug_events: "_DebugEvents", record_index: int, total_records: int) -> dict[str, Any] | None:
+    if record.get("status") == "skipped":
+        return {"record_index": record_index, "record": record, "status": "skipped", "rows": [], "elapsed_seconds": 0.0}
+    if args.skip_large_stream_samples and _is_large_stream_sample(record, args):
+        row = _terminal_row(record, "skipped_budget", "large stream sample skipped by collect budget")
+        debug_events.write("sample_skipped_budget", record, record_index=record_index, total_records=total_records, budget=_sample_budget(record, args))
+        return {"record_index": record_index, "record": record, "status": "skipped_budget", "rows": [row], "elapsed_seconds": 0.0}
+    return None
+
+
+def _collect_records_worker_pool(records: list[dict[str, Any]], args: argparse.Namespace, debug_events: "_DebugEvents", started_all: float) -> list[dict[str, Any]]:
+    total_records = len(records)
+    worker_count = min(max(1, _sample_worker_count(args)), max(1, total_records))
+    if worker_count <= 1 and float(args.case_timeout_seconds or 0) <= 0:
+        pool_args = argparse.Namespace(**vars(args))
+        pool_args.sample_execution_mode = "inprocess"
+        return _collect_records_serial(records, pool_args, debug_events, started_all)
+
+    results: list[dict[str, Any]] = []
+    pending: list[tuple[int, dict[str, Any]]] = []
+    for record_index, record in enumerate(records, start=1):
+        skipped = _skipped_sample_result(record, args, debug_events, record_index, total_records)
+        if skipped is not None:
+            results.append(skipped)
+        else:
+            pending.append((record_index, record))
+    if not pending:
+        return results
+
+    ctx = mp.get_context("spawn")
+    result_queue = ctx.Queue()
+    workers: dict[int, dict[str, Any]] = {}
+    free_workers: list[int] = []
+
+    def start_worker(worker_id: int) -> None:
+        task_queue = ctx.Queue(maxsize=1)
+        process = ctx.Process(target=_collect_pool_worker, args=(worker_id, args, task_queue, result_queue), daemon=True)
+        process.start()
+        workers[worker_id] = {"process": process, "queue": task_queue, "current": None}
+        free_workers.append(worker_id)
+
+    for worker_id in range(worker_count):
+        start_worker(worker_id)
+
+    next_task = 0
+    completed = 0
+    last_progress = started_all
+    heartbeat_last: dict[int, float] = {}
+    try:
+        while completed < len(pending):
+            now = time.perf_counter()
+            total_timeout = float(args.total_timeout_seconds or 0)
+            if total_timeout > 0 and now - started_all > total_timeout:
+                record = pending[next_task][1] if next_task < len(pending) else pending[-1][1]
+                debug_events.write("total_timeout", record, total_records=total_records, elapsed_seconds=round(now - started_all, 3))
+                break
+            idle_timeout = float(args.idle_timeout_seconds or 0)
+            if idle_timeout > 0 and now - last_progress > idle_timeout:
+                record = pending[next_task][1] if next_task < len(pending) else pending[-1][1]
+                debug_events.write("idle_timeout", record, total_records=total_records, idle_seconds=round(now - last_progress, 3))
+                break
+            while free_workers and next_task < len(pending):
+                worker_id = free_workers.pop(0)
+                entry = workers.get(worker_id)
+                if not entry or not entry["process"].is_alive():
+                    start_worker(worker_id)
+                    entry = workers[worker_id]
+                    free_workers.remove(worker_id)
+                record_index, record = pending[next_task]
+                next_task += 1
+                if args.progress:
+                    print(f"START {record_index}/{total_records} {record.get('sample_id')} worker={worker_id} fmt={record.get('material_format') or record.get('format')} source={record.get('source_archive_name')}", flush=True)
+                debug_events.write("sample_start", record, record_index=record_index, total_records=total_records, worker_id=worker_id)
+                entry["current"] = {"record_index": record_index, "record": record, "started": time.perf_counter()}
+                heartbeat_last[worker_id] = time.perf_counter()
+                entry["queue"].put({"record_index": record_index, "total_records": total_records, "record": record})
+
+            try:
+                message = result_queue.get(timeout=0.05)
+            except Exception:
+                message = None
+            if isinstance(message, dict):
+                if message.get("message_type") == "debug_event":
+                    payload = message.get("payload")
+                    if isinstance(payload, dict):
+                        debug_events.write_payload(payload)
+                    continue
+                worker_id = int(message.get("worker_id", -1))
+                entry = workers.get(worker_id)
+                current = entry.get("current") if entry else None
+                record = message.get("record") or (current or {}).get("record") or {}
+                record_index = int(message.get("record_index") or (current or {}).get("record_index") or 0)
+                rows = list(message.get("rows") or [])
+                status = str(message.get("status") or "failed")
+                elapsed = round(float(message.get("elapsed_seconds") or 0.0), 3)
+                results.append({"record_index": record_index, "record": record, "status": status, "rows": rows, "elapsed_seconds": elapsed})
+                debug_events.write("sample_end", record, record_index=record_index, total_records=total_records, worker_id=worker_id, status=status, rows=len(rows), elapsed_seconds=elapsed)
+                if args.progress:
+                    print(f"END {record.get('sample_id')} worker={worker_id} status={status} rows={len(rows)} elapsed={elapsed}s", flush=True)
+                if entry:
+                    entry["current"] = None
+                    free_workers.append(worker_id)
+                completed += 1
+                last_progress = time.perf_counter()
+
+            for worker_id, entry in list(workers.items()):
+                current = entry.get("current")
+                if not current:
+                    continue
+                record = current["record"]
+                timeout = _effective_case_timeout(record, args)
+                elapsed = time.perf_counter() - float(current["started"])
+                heartbeat = float(args.heartbeat_seconds or 0)
+                if heartbeat > 0 and time.perf_counter() - heartbeat_last.get(worker_id, current["started"]) >= heartbeat:
+                    debug_events.write("sample_heartbeat", record, record_index=current["record_index"], total_records=total_records, worker_id=worker_id, pid=entry["process"].pid, elapsed_seconds=round(elapsed, 3), timeout_seconds=timeout)
+                    heartbeat_last[worker_id] = time.perf_counter()
+                if timeout > 0 and elapsed >= timeout:
+                    debug_events.write("sample_timeout", record, record_index=current["record_index"], total_records=total_records, worker_id=worker_id, pid=entry["process"].pid, elapsed_seconds=round(elapsed, 3), timeout_seconds=timeout)
+                    _kill_process_tree(entry["process"].pid)
+                    entry["process"].join(5)
+                    if entry["process"].is_alive():
+                        entry["process"].kill()
+                        entry["process"].join(5)
+                    rows = [_terminal_row(record, "timeout", f"sample exceeded {timeout:.1f}s timeout")]
+                    results.append({"record_index": current["record_index"], "record": record, "status": "timeout", "rows": rows, "elapsed_seconds": round(elapsed, 3)})
+                    debug_events.write("sample_end", record, record_index=current["record_index"], total_records=total_records, worker_id=worker_id, status="timeout", rows=len(rows), elapsed_seconds=round(elapsed, 3))
+                    completed += 1
+                    last_progress = time.perf_counter()
+                    workers.pop(worker_id, None)
+                    try:
+                        free_workers.remove(worker_id)
+                    except ValueError:
+                        pass
+                    start_worker(worker_id)
+    finally:
+        for entry in workers.values():
+            queue = entry.get("queue")
+            process = entry.get("process")
+            try:
+                queue.put(None)
+            except Exception:
+                pass
+            if process is not None:
+                process.join(2)
+                if process.is_alive():
+                    _kill_process_tree(process.pid)
+                    process.join(2)
+                    if process.is_alive():
+                        process.kill()
+    return results
+
+
 def _collect_sample_with_timeout(record: dict[str, Any], args: argparse.Namespace, debug_events: "_DebugEvents", record_index: int, total_records: int) -> tuple[str, list[dict[str, Any]]]:
     timeout = _effective_case_timeout(record, args)
     if timeout <= 0:
@@ -480,6 +658,34 @@ def _collect_worker(record: dict[str, Any], args: argparse.Namespace, result_pat
     debug_events.write("worker_done", record, pid=os.getpid(), status=result[0], rows=len(result[1]))
     with Path(result_path).open("wb") as handle:
         pickle.dump(result, handle)
+
+
+def _collect_pool_worker(worker_id: int, args: argparse.Namespace, task_queue: Any, result_queue: Any) -> None:
+    debug_events = _QueueDebugEvents(result_queue) if getattr(args, "debug_events", None) else _DebugEvents(None, truncate=False)
+    while True:
+        task = task_queue.get()
+        if task is None:
+            return
+        record = dict(task.get("record") or {})
+        record_index = int(task.get("record_index", 0) or 0)
+        started = time.perf_counter()
+        debug_events.write("worker_start", record, worker_id=worker_id, pid=os.getpid(), record_index=record_index, total_records=task.get("total_records"), budget=_sample_budget(record, args))
+        try:
+            status, rows = _collect_sample(record, args, debug_events)
+        except Exception as exc:
+            status, rows = "failed", [_terminal_row(record, "failed", str(exc))]
+            debug_events.write("sample_exception", record, worker_id=worker_id, pid=os.getpid(), record_index=record_index, error=str(exc))
+        elapsed = round(time.perf_counter() - started, 3)
+        debug_events.write("worker_done", record, worker_id=worker_id, pid=os.getpid(), record_index=record_index, status=status, rows=len(rows), elapsed_seconds=elapsed)
+        result_queue.put({
+            "message_type": "result",
+            "worker_id": worker_id,
+            "record_index": record_index,
+            "record": record,
+            "status": status,
+            "rows": rows,
+            "elapsed_seconds": elapsed,
+        })
 
 
 def _collect_sample(record: dict[str, Any], args: argparse.Namespace, debug_events: "_DebugEvents | None" = None) -> tuple[str, list[dict[str, Any]]]:
@@ -3011,18 +3217,35 @@ class _DebugEvents:
     def write(self, event: str, record: dict[str, Any], **extra: Any) -> None:
         if self.path is None:
             return
-        payload = {
-            "event": event,
-            "time": time.time(),
-            "sample_id": record.get("sample_id"),
-            "material_format": record.get("material_format"),
-            "format": record.get("format"),
-            "source_archive_name": record.get("source_archive_name"),
-            "damaged_file_name": record.get("damaged_file_name"),
-            **extra,
-        }
+        self.write_payload(_debug_event_payload(event, record, extra))
+
+    def write_payload(self, payload: dict[str, Any]) -> None:
+        if self.path is None:
+            return
         with self.path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str) + "\n")
+
+
+class _QueueDebugEvents(_DebugEvents):
+    def __init__(self, queue: Any):
+        super().__init__(None, truncate=False)
+        self.queue = queue
+
+    def write(self, event: str, record: dict[str, Any], **extra: Any) -> None:
+        self.queue.put({"message_type": "debug_event", "payload": _debug_event_payload(event, record, extra)})
+
+
+def _debug_event_payload(event: str, record: dict[str, Any], extra: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "event": event,
+        "time": time.time(),
+        "sample_id": record.get("sample_id"),
+        "material_format": record.get("material_format"),
+        "format": record.get("format"),
+        "source_archive_name": record.get("source_archive_name"),
+        "damaged_file_name": record.get("damaged_file_name"),
+        **extra,
+    }
 
 
 def _kill_process_tree(pid: int | None) -> None:
