@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import hashlib
 import threading
 import time
 from dataclasses import asdict, is_dataclass
@@ -16,10 +17,37 @@ def enabled() -> bool:
     return bool(_trace_path())
 
 
+def probe_enabled() -> bool:
+    return bool(_probe_path())
+
+
 def write_event(event: str, payload: dict[str, Any] | None = None) -> None:
     path = _trace_path()
     if not path:
         return
+    _write_jsonl(path, event, payload)
+
+
+def write_probe_event(event: str, payload: dict[str, Any] | None = None) -> None:
+    path = _probe_path()
+    if not path:
+        return
+    _write_jsonl(path, event, payload)
+
+
+def canonical_hash(value: Any) -> str:
+    try:
+        encoded = json.dumps(_jsonable(value), ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    except Exception:
+        encoded = str(value).encode("utf-8", errors="replace")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def public_policy_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    return _strip_forbidden_policy_keys(_jsonable(payload))
+
+
+def _write_jsonl(path: str, event: str, payload: dict[str, Any] | None = None) -> None:
     record = {
         "schema_version": 1,
         "event": str(event or ""),
@@ -56,6 +84,7 @@ def job_payload(job: Any) -> dict[str, Any]:
         "attempts": getattr(job, "attempts", 0),
         "source_descriptor": _jsonable(getattr(job, "source_descriptor", None)),
         "archive_state": _jsonable(getattr(job, "archive_state", None)),
+        "archive_knowledge": _jsonable(getattr(job, "knowledge", {})),
     }
 
 
@@ -80,6 +109,10 @@ def _trace_path() -> str:
     return str(os.environ.get("SUNPACK_REPAIR_TRACE_JSONL") or "").strip()
 
 
+def _probe_path() -> str:
+    return str(os.environ.get("SUNPACK_REPAIR_POLICY_PROBE_JSONL") or "").strip()
+
+
 def _strict() -> bool:
     return str(os.environ.get("SUNPACK_REPAIR_TRACE_STRICT") or "").strip().lower() in {"1", "true", "yes", "on"}
 
@@ -101,3 +134,31 @@ def _jsonable(value: Any) -> Any:
         except Exception:
             pass
     return str(value)
+
+
+_FORBIDDEN_POLICY_KEYS = {
+    "label",
+    "future_return",
+    "terminal_reward",
+    "oracle_completeness",
+    "oracle_exact_match_count",
+    "exact_match_count",
+    "terminal_recovery_ratio",
+}
+
+
+def _strip_forbidden_policy_keys(value: Any) -> Any:
+    if isinstance(value, dict):
+        output = {}
+        for key, item in value.items():
+            key_text = str(key)
+            lowered = key_text.lower()
+            if lowered in _FORBIDDEN_POLICY_KEYS:
+                continue
+            if lowered.startswith("oracle_"):
+                continue
+            output[key_text] = _strip_forbidden_policy_keys(item)
+        return output
+    if isinstance(value, list):
+        return [_strip_forbidden_policy_keys(item) for item in value]
+    return value

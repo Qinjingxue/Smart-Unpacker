@@ -5,6 +5,8 @@ from sunpack.contracts.tasks import ArchiveTask
 from sunpack.coordinator.scheduling.resource_model import build_resource_profile_key, estimate_resource_demand
 from sunpack.passwords import PasswordSession
 from sunpack.rename.scheduler import RenameScheduler
+from sunpack.support.archive_knowledge_writer import commit_task_knowledge, ensure_knowledge, write_payload
+from sunpack.support import archive_knowledge_projection as knowledge_view
 from sunpack.support.sevenzip_native import cached_analyze_archive_resources, cached_check_archive_health
 
 
@@ -20,7 +22,9 @@ class ResourcePreflightInspector:
         self.precise_resource_min_size_bytes = max(0, int(precise_resource_min_size_mb or 0)) * 1024 * 1024
 
     def inspect(self, task: ArchiveTask) -> ArchiveTask:
-        existing_analysis = task.fact_bag.get("resource.analysis")
+        existing_analysis = knowledge_view.resource_analysis(task)
+        if not isinstance(existing_analysis, dict) or not existing_analysis:
+            existing_analysis = task.fact_bag.get("resource.analysis")
         if isinstance(existing_analysis, dict):
             analysis = SimpleNamespace(ok=not bool(existing_analysis.get("is_broken")), **existing_analysis)
             self.record_resource_demand(task, analysis)
@@ -29,6 +33,7 @@ class ResourcePreflightInspector:
         precise_analysis = self._precise_resource_analysis(task, archive_size)
         if precise_analysis is not None:
             task.fact_bag.set("resource.analysis", precise_analysis)
+            self._write_resource_payload(task, analysis=precise_analysis)
             analysis = SimpleNamespace(ok=not bool(precise_analysis.get("is_broken")), **precise_analysis)
             self.record_resource_demand(task, analysis)
             return task
@@ -41,9 +46,16 @@ class ResourcePreflightInspector:
 
     def record_resource_demand(self, task: ArchiveTask, analysis) -> None:
         demand = estimate_resource_demand(analysis)
+        profile_key = build_resource_profile_key(analysis)
         task.fact_bag.set("resource.tokens", demand.as_dict())
         task.fact_bag.set("resource.token_cost", demand.scalar_cost)
-        task.fact_bag.set("resource.profile_key", build_resource_profile_key(analysis))
+        task.fact_bag.set("resource.profile_key", profile_key)
+        self._write_resource_payload(
+            task,
+            tokens=demand.as_dict(),
+            token_cost=demand.scalar_cost,
+            profile_key=profile_key,
+        )
 
     def record_estimated_profile(
         self,
@@ -59,7 +71,7 @@ class ResourcePreflightInspector:
         analysis = {
             "status": 0,
             "is_archive": True,
-            "is_encrypted": bool((task.fact_bag.get("resource.health") or {}).get("is_encrypted")),
+            "is_encrypted": bool(knowledge_view.resource_health(task).get("is_encrypted")),
             "is_broken": False,
             "solid": False,
             "item_count": 0,
@@ -75,9 +87,14 @@ class ResourcePreflightInspector:
             "message": reason,
         }
         task.fact_bag.set("resource.analysis", analysis)
-        task.fact_bag.set("resource.tokens", self._estimated_tokens_for_size(archive_size))
-        task.fact_bag.set("resource.token_cost", max(task.fact_bag.get("resource.tokens").values()))
-        task.fact_bag.set("resource.profile_key", f"{archive_type or 'unknown'}|{profile_suffix}|size<{self.precise_resource_min_size_bytes // (1024 * 1024)}m")
+        self._write_resource_payload(task, analysis=analysis)
+        tokens = self._estimated_tokens_for_size(archive_size)
+        token_cost = max(tokens.values())
+        profile_key = f"{archive_type or 'unknown'}|{profile_suffix}|size<{self.precise_resource_min_size_bytes // (1024 * 1024)}m"
+        task.fact_bag.set("resource.tokens", tokens)
+        task.fact_bag.set("resource.token_cost", token_cost)
+        task.fact_bag.set("resource.profile_key", profile_key)
+        self._write_resource_payload(task, tokens=tokens, token_cost=token_cost, profile_key=profile_key)
         return task
 
     def record_estimated_single_task_profile(self, task: ArchiveTask) -> ArchiveTask:
@@ -88,7 +105,7 @@ class ResourcePreflightInspector:
         )
 
     def _ensure_resource_health(self, task: ArchiveTask) -> None:
-        if task.fact_bag.has("resource.health"):
+        if knowledge_view.resource_health(task) or task.fact_bag.has("resource.health"):
             return
         if self._needs_offset_detection(task):
             return
@@ -105,6 +122,7 @@ class ResourcePreflightInspector:
                 "archive_type": health.archive_type,
                 "checksum_error": False,
             })
+            self._write_resource_payload(task, health=dict(knowledge_view.resource_health(task) or task.fact_bag.get("resource.health") or {}))
         except Exception:
             pass
 
@@ -160,14 +178,15 @@ class ResourcePreflightInspector:
         task.fact_bag.set("resource.tokens", {"cpu": 1, "io": 1, "memory": 1})
         task.fact_bag.set("resource.token_cost", 1)
         task.fact_bag.set("resource.profile_key", "unknown")
+        self._write_resource_payload(task, tokens={"cpu": 1, "io": 1, "memory": 1}, token_cost=1, profile_key="unknown")
         return task
 
     def _archive_type_for(self, task: ArchiveTask) -> str:
-        health = task.fact_bag.get("resource.health") or {}
+        health = knowledge_view.resource_health(task)
         archive_type = str(health.get("archive_type") or "").strip().lower()
         if archive_type and archive_type != "pe":
             return archive_type
-        detected_ext = str(task.fact_bag.get("file.detected_ext") or os.path.splitext(task.main_path)[1]).lower()
+        detected_ext = str(knowledge_view.get(task, "filesystem.detected_ext", "") or task.fact_bag.get("file.detected_ext") or os.path.splitext(task.main_path)[1]).lower()
         return detected_ext.lstrip(".") or archive_type or "unknown"
 
     def _archive_size(self, task: ArchiveTask) -> int:
@@ -189,3 +208,26 @@ class ResourcePreflightInspector:
         elif archive_mb >= 256:
             io = 2
         return {"cpu": 1, "io": io, "memory": 1}
+
+    def _write_resource_payload(
+        self,
+        task: ArchiveTask,
+        *,
+        health: dict | None = None,
+        analysis: dict | None = None,
+        tokens: dict | None = None,
+        token_cost: int | None = None,
+        profile_key: str = "",
+    ) -> None:
+        knowledge = ensure_knowledge(task)
+        if health:
+            write_payload(knowledge, "resource.health", dict(health), source_layer="resource", source_module="preflight")
+        if analysis:
+            write_payload(knowledge, "resource.analysis", dict(analysis), source_layer="resource", source_module="preflight")
+        if tokens:
+            write_payload(knowledge, "resource.tokens", dict(tokens), source_layer="resource", source_module="preflight")
+        if token_cost is not None:
+            write_payload(knowledge, "resource", {"token_cost": int(token_cost or 0)}, source_layer="resource", source_module="preflight")
+        if profile_key:
+            write_payload(knowledge, "resource", {"profile_key": profile_key}, source_layer="resource", source_module="preflight")
+        commit_task_knowledge(task, knowledge)

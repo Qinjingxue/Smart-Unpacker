@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
 
@@ -14,9 +14,12 @@ from sunpack.contracts.archive_state import ArchiveState
 from sunpack.contracts.tasks import ArchiveTask
 from sunpack.extraction.result import ExtractionResult
 from sunpack.repair.config import repair_config
+from sunpack.repair.context import normalize_zip_runtime_route_evidence
 from sunpack.repair.job import RepairJob
+from sunpack.repair.knowledge import write_repair_attempt, write_repair_job_context, write_repair_result
 from sunpack.repair.result import RepairResult
 from sunpack.repair.scheduler import RepairScheduler
+from sunpack.support import archive_knowledge_projection as knowledge_view
 from sunpack.verification.result import VerificationResult
 
 
@@ -66,6 +69,7 @@ class ArchiveRepairStage:
         attempts = self._attempts(task) + 1
         task.fact_bag.set("repair.attempts", attempts)
         task.fact_bag.set("repair.last_trigger", trigger)
+        write_repair_attempt(task, attempts, trigger=trigger)
         result = self.scheduler.repair(job)
         task.fact_bag.set("repair.last_result", self._result_payload(result))
         self._append_repair_history(task, result)
@@ -145,30 +149,84 @@ class ArchiveRepairStage:
             failure["previous_actions"] = previous_actions
         if previous_modules:
             failure["previous_modules"] = previous_modules
+        analysis_prepass = self._analysis_prepass(task)
+        analysis_evidence = self._analysis_evidence_from_facts(task)
+        repair_history = self._repair_history_payload(task, previous_actions, previous_modules)
+        route_payload = self._zip_runtime_route_payload(
+            task,
+            source_input=source_input,
+            analysis_prepass=analysis_prepass,
+            analysis_evidence=analysis_evidence,
+            extraction_failure=failure,
+            extraction_diagnostics=dict(result.diagnostics or {}),
+            repair_history=repair_history,
+        )
+        route_flags = [str(item) for item in route_payload.get("route_evidence_flags") or [] if str(item)]
+        if route_flags:
+            repair_hints = dict(failure.get("repair_hints") or {})
+            repair_hints["damage_flags"] = _dedupe([*list(repair_hints.get("damage_flags") or []), *route_flags])
+            failure["repair_hints"] = repair_hints
+        source_input = dict(route_payload.get("source_input") or source_input)
+        analysis_prepass = self._analysis_prepass_with_zip_route(analysis_prepass, route_payload)
+        analysis_evidence = self._analysis_evidence_with_zip_route(analysis_evidence, route_payload)
+        repair_history = self._repair_history_with_zip_route(repair_history, route_payload)
+        damage_flags = _dedupe([
+            *self._flags_from_failure_text(result.error),
+            *self._flags_from_verification(verification),
+            *_flags_from_repair_hints(repair_hints),
+            *route_flags,
+            *list(route_payload.get("damage_flags") or []),
+        ])
+        route_payload = normalize_zip_runtime_route_evidence({
+            **route_payload,
+            "source_input": source_input,
+            "analysis_prepass": analysis_prepass,
+            "analysis_evidence": dict(getattr(analysis_evidence, "details", {}) or {}) if analysis_evidence is not None else {},
+            "extraction_failure": failure,
+            "extraction_diagnostics": dict(result.diagnostics or {}),
+            "repair_history": repair_history,
+            "damage_flags": damage_flags,
+        })
+        damage_flags = list(route_payload.get("damage_flags") or damage_flags)
+        route_flags = [str(item) for item in route_payload.get("route_evidence_flags") or [] if str(item)]
+        if route_flags:
+            repair_hints = dict(failure.get("repair_hints") or {})
+            repair_hints["damage_flags"] = _dedupe([*list(repair_hints.get("damage_flags") or []), *route_flags])
+            failure["repair_hints"] = repair_hints
+            repair_history = self._repair_history_with_zip_route(repair_history, route_payload)
+        knowledge = self._knowledge_payload(
+            task,
+            source_input=source_input,
+            analysis_prepass=analysis_prepass,
+            analysis_evidence=analysis_evidence,
+            extraction_failure=failure,
+            extraction_diagnostics=dict(result.diagnostics or {}),
+            repair_history=repair_history,
+            route_payload=route_payload,
+            verification=verification,
+        )
         return RepairJob(
             source_input=source_input,
             format=self._format_from_task(task),
             confidence=float(self._analysis_confidence(task) or 0.0),
-            analysis_evidence=self._analysis_evidence_from_facts(task),
-            analysis_prepass=self._analysis_prepass(task),
+            analysis_evidence=analysis_evidence,
+            analysis_prepass=analysis_prepass,
             fuzzy_profile=self._analysis_fuzzy_profile(task),
             extraction_failure=failure,
             extraction_diagnostics=dict(result.diagnostics or {}),
-            damage_flags=_dedupe([
-                *self._flags_from_failure_text(result.error),
-                *self._flags_from_verification(verification),
-                *_flags_from_repair_hints(repair_hints),
-            ]),
+            damage_flags=damage_flags,
             password=result.password_used if result.password_used is not None else self._password_from_task(task),
             archive_key=task.key,
             workspace=str(self._workspace_root()),
             attempts=self._attempts(task),
             source_descriptor=task.archive_input(),
             archive_state=task.archive_state(),
+            repair_history=repair_history,
+            knowledge=knowledge,
         )
 
     def _append_repair_history(self, task: ArchiveTask, result: RepairResult) -> None:
-        history = list(task.fact_bag.get("repair.history") or [])
+        history = knowledge_view.repair_history_items(task)
         item = self._result_payload(result)
         history.append(item)
         task.fact_bag.set("repair.history", history)
@@ -183,13 +241,15 @@ class ArchiveRepairStage:
                 modules.append(module)
         task.fact_bag.set("repair.previous_actions", actions)
         task.fact_bag.set("repair.previous_modules", modules)
+        write_repair_result(task, result, phase="history")
 
     def _previous_repair_path(self, task: ArchiveTask) -> tuple[list[str], list[str]]:
-        actions = [str(action) for action in task.fact_bag.get("repair.previous_actions") or []]
-        modules = [str(module) for module in task.fact_bag.get("repair.previous_modules") or []]
+        history_payload = knowledge_view.repair_history_payload(task)
+        actions = [str(action) for action in history_payload.get("previous_actions") or []]
+        modules = [str(module) for module in history_payload.get("previous_modules") or []]
         if actions or modules:
             return actions, modules
-        history = list(task.fact_bag.get("repair.history") or [])
+        history = knowledge_view.repair_history_items(task)
         for entry in history:
             if not isinstance(entry, dict) or not entry.get("ok"):
                 continue
@@ -198,6 +258,171 @@ class ArchiveRepairStage:
             if module:
                 modules.append(module)
         return actions, modules
+
+    def _repair_history_payload(self, task: ArchiveTask, previous_actions: list[str], previous_modules: list[str]) -> dict[str, Any]:
+        history = knowledge_view.repair_history_items(task)
+        patch_facts: list[str] = []
+        residual_flags: list[str] = []
+        for entry in history:
+            diagnosis = entry.get("diagnosis") if isinstance(entry.get("diagnosis"), dict) else {}
+            for key in ("patch_facts", "residual_facts"):
+                patch_facts.extend(str(item) for item in diagnosis.get(key) or [] if str(item))
+            selection = diagnosis.get("candidate_selection") if isinstance(diagnosis.get("candidate_selection"), dict) else {}
+            candidate = selection.get("candidate") if isinstance(selection.get("candidate"), dict) else {}
+            patch_facts.extend(str(item) for item in candidate.get("patch_facts") or [] if str(item))
+            residual_flags.extend(str(item) for item in candidate.get("residual_facts") or [] if str(item))
+        return {
+            "previous_actions": list(previous_actions),
+            "previous_modules": list(previous_modules),
+            "path_actions": list(previous_actions),
+            "path_modules": list(previous_modules),
+            "applied_patch_facts": _dedupe(patch_facts),
+            "residual_damage_flags": _dedupe(residual_flags),
+            "route_evidence_flags": [],
+            "source_derivation": self._source_derivation_from_task(task),
+            "zip_structure_features": self._zip_structure_features_from_task(task),
+            "zip_container_tags": self._zip_container_tags_from_task(task),
+        }
+
+    def _zip_runtime_route_payload(
+        self,
+        task: ArchiveTask,
+        *,
+        source_input: dict[str, Any],
+        analysis_prepass: dict[str, Any],
+        analysis_evidence: ArchiveFormatEvidence | None,
+        extraction_failure: dict[str, Any],
+        extraction_diagnostics: dict[str, Any],
+        repair_history: dict[str, Any],
+    ) -> dict[str, Any]:
+        details = dict(getattr(analysis_evidence, "details", {}) or {}) if analysis_evidence is not None else {}
+        payload = {
+            "format": self._format_from_task(task),
+            "source_input": self._source_input_with_split_parts(task, source_input),
+            "analysis_prepass": dict(analysis_prepass or {}),
+            "analysis_evidence": details,
+            "extraction_failure": dict(extraction_failure or {}),
+            "extraction_diagnostics": dict(extraction_diagnostics or {}),
+            "repair_history": dict(repair_history or {}),
+            "source_derivation": self._source_derivation_from_task(task),
+            "zip_structure_features": self._zip_structure_features_from_task(task),
+            "zip_container_tags": self._zip_container_tags_from_task(task),
+            "damage_profile": self._damage_profile_from_task(task),
+            "damage_flags": list(extraction_failure.get("damage_flags") or []),
+        }
+        if getattr(task, "all_parts", None) and len(task.all_parts or []) > 1:
+            payload["split_sidecars_available"] = True
+        return normalize_zip_runtime_route_evidence(payload)
+
+    def _source_input_with_split_parts(self, task: ArchiveTask, source_input: dict[str, Any]) -> dict[str, Any]:
+        output = dict(source_input or {})
+        parts = [str(path) for path in getattr(task, "all_parts", []) or [] if str(path)]
+        if len(parts) <= 1:
+            return output
+        if output.get("kind") == "concat_ranges" and output.get("ranges"):
+            return output
+        output["parts"] = [{"path": path, "role": "volume"} for path in parts]
+        output["split_sidecars_available"] = True
+        output.setdefault("format_hint", self._format_from_task(task))
+        return output
+
+    def _analysis_prepass_with_zip_route(self, prepass: dict[str, Any], route_payload: dict[str, Any]) -> dict[str, Any]:
+        output = dict(prepass or {})
+        for key in ("zip_structure_features", "zip_container_tags", "source_derivation", "damage_profile"):
+            value = route_payload.get(key)
+            if value and not output.get(key):
+                output[key] = value
+        if route_payload.get("route_evidence_flags"):
+            output["route_evidence_flags"] = _dedupe([*list(output.get("route_evidence_flags") or []), *list(route_payload.get("route_evidence_flags") or [])])
+        return output
+
+    def _analysis_evidence_with_zip_route(self, evidence: ArchiveFormatEvidence | None, route_payload: dict[str, Any]) -> ArchiveFormatEvidence | None:
+        if evidence is None:
+            return None
+        details = dict(evidence.details or {})
+        for key in ("zip_structure_features", "zip_container_tags", "source_derivation", "damage_profile", "route_evidence_flags"):
+            value = route_payload.get(key)
+            if value and not details.get(key):
+                details[key] = value
+        return replace(evidence, details=details)
+
+    def _repair_history_with_zip_route(self, history: dict[str, Any], route_payload: dict[str, Any]) -> dict[str, Any]:
+        output = dict(history or {})
+        output["route_evidence_flags"] = _dedupe([*list(output.get("route_evidence_flags") or []), *list(route_payload.get("route_evidence_flags") or [])])
+        for key in ("zip_structure_features", "zip_container_tags", "source_derivation"):
+            value = route_payload.get(key)
+            if value and not output.get(key):
+                output[key] = value
+        return output
+
+    def _knowledge_payload(
+        self,
+        task: ArchiveTask,
+        *,
+        source_input: dict[str, Any],
+        analysis_prepass: dict[str, Any],
+        analysis_evidence: ArchiveFormatEvidence | None,
+        extraction_failure: dict[str, Any],
+        extraction_diagnostics: dict[str, Any],
+        repair_history: dict[str, Any],
+        route_payload: dict[str, Any],
+        verification: VerificationResult,
+    ) -> dict[str, Any]:
+        return write_repair_job_context(
+            task,
+            source_input=source_input,
+            analysis_prepass=analysis_prepass,
+            analysis_evidence=analysis_evidence,
+            extraction_failure=extraction_failure,
+            extraction_diagnostics=extraction_diagnostics,
+            repair_history=repair_history,
+            route_payload=route_payload,
+            verification=verification,
+        )
+
+    def _source_derivation_from_task(self, task: ArchiveTask) -> dict[str, Any]:
+        return knowledge_view.source_derivation(task)
+
+    def _zip_structure_features_from_task(self, task: ArchiveTask) -> dict[str, Any]:
+        projected = knowledge_view.zip_structure_features(task)
+        if projected:
+            return projected
+        for key in ("zip_structure_features",):
+            value = task.fact_bag.get(key)
+            if isinstance(value, dict) and value:
+                return dict(value)
+        prepass = self._analysis_prepass(task)
+        if isinstance(prepass.get("zip_structure_features"), dict):
+            return dict(prepass["zip_structure_features"])
+        evidence = self._analysis_evidence_from_facts(task)
+        details = getattr(evidence, "details", {}) if evidence is not None else {}
+        return dict(details.get("zip_structure_features") or {}) if isinstance(details, dict) and isinstance(details.get("zip_structure_features"), dict) else {}
+
+    def _zip_container_tags_from_task(self, task: ArchiveTask) -> list[str]:
+        projected = knowledge_view.zip_container_tags(task)
+        if projected:
+            return projected
+        for key in ("zip_container_tags",):
+            value = task.fact_bag.get(key)
+            if isinstance(value, list) and value:
+                return [str(item) for item in value if str(item)]
+        prepass = self._analysis_prepass(task)
+        if isinstance(prepass.get("zip_container_tags"), list):
+            return [str(item) for item in prepass["zip_container_tags"] if str(item)]
+        evidence = self._analysis_evidence_from_facts(task)
+        details = getattr(evidence, "details", {}) if evidence is not None else {}
+        tags = details.get("zip_container_tags") if isinstance(details, dict) else None
+        return [str(item) for item in tags if str(item)] if isinstance(tags, list) else []
+
+    def _damage_profile_from_task(self, task: ArchiveTask) -> str:
+        projected = knowledge_view.damage_profile(task)
+        if projected:
+            return projected
+        for key in ("damage_profile",):
+            value = task.fact_bag.get(key)
+            if value:
+                return str(value)
+        return ""
 
     def _source_input_from_task(self, task: ArchiveTask, *, format_hint: str = "") -> dict[str, Any] | None:
         descriptor = task.archive_state().to_archive_input_descriptor()
@@ -232,12 +457,7 @@ class ArchiveRepairStage:
 
     @staticmethod
     def _password_from_task(task: ArchiveTask) -> str | None:
-        fact_bag = getattr(task, "fact_bag", None)
-        if fact_bag is not None and hasattr(fact_bag, "get"):
-            password = fact_bag.get("archive.password")
-            if password is not None:
-                return str(password)
-        return None
+        return knowledge_view.archive_password(task)
 
     def _descriptor_from_repaired_input(self, task: ArchiveTask, repaired_input: dict[str, Any]) -> ArchiveInputDescriptor | None:
         if not repaired_input:
@@ -256,7 +476,7 @@ class ArchiveRepairStage:
                 format_hint=format_hint,
                 logical_name=str(task.logical_name or ""),
                 parts=[ArchiveInputPart(path=path)],
-                analysis={"source": "repair", "module": task.fact_bag.get("repair.module", "")},
+                analysis={"source": "repair", "module": str(knowledge_view.get(task, "repair.last_result.module_name", ""))},
             )
         if kind in {"file_range", "concat_ranges"}:
             return ArchiveInputDescriptor.from_source_input(repaired_input, archive_path=task.main_path, part_paths=list(task.all_parts or []))
@@ -372,6 +592,20 @@ class ArchiveRepairStage:
         if verification.source_integrity == "payload_damaged":
             flags.append("checksum_error")
             flags.append("crc_error")
+        if verification.completeness < 0.999:
+            flags.append("exact_match_failed")
+        coverage = verification.archive_coverage
+        expected = int(getattr(coverage, "expected_files", 0) or 0) if coverage is not None else 0
+        matched = int(getattr(coverage, "matched_files", 0) or getattr(coverage, "complete_files", 0) or 0) if coverage is not None else 0
+        failed = int(getattr(coverage, "failed_files", 0) or 0) if coverage is not None else 0
+        missing = int(getattr(coverage, "missing_files", 0) or 0) if coverage is not None else 0
+        partial = int(getattr(coverage, "partial_files", 0) or 0) if coverage is not None else 0
+        if expected and matched < expected:
+            flags.append("partial_entries_remaining")
+        if failed or missing or partial:
+            flags.append("content_integrity_bad_or_unknown")
+        if verification.assessment_status == "complete" and verification.source_integrity not in {"complete", "trusted"}:
+            flags.extend(["content_integrity_bad_or_unknown", "exact_match_failed"])
         for issue in verification.issues:
             code = issue.code.lower()
             if "crc" in code or "checksum" in code:
@@ -384,7 +618,7 @@ class ArchiveRepairStage:
 
     def _analysis_evidences_from_facts(self, task: ArchiveTask) -> list[ArchiveFormatEvidence]:
         evidences = []
-        for item in task.fact_bag.get("analysis.evidences") or []:
+        for item in knowledge_view.analysis_evidences(task):
             if not isinstance(item, dict):
                 continue
             segments = [
@@ -413,7 +647,7 @@ class ArchiveRepairStage:
         evidences = self._analysis_evidences_from_facts(task)
         if not evidences:
             return None
-        selected_format = task.fact_bag.get("analysis.selected_format")
+        selected_format = knowledge_view.selected_format(task)
         if selected_format:
             for evidence in evidences:
                 if evidence.format == selected_format:
@@ -434,17 +668,13 @@ class ArchiveRepairStage:
         return float(evidence.confidence) if evidence is not None else 0.0
 
     def _analysis_prepass(self, task: ArchiveTask) -> dict[str, Any]:
-        prepass = task.fact_bag.get("analysis.prepass")
-        return dict(prepass) if isinstance(prepass, dict) else {}
+        return knowledge_view.analysis_prepass(task)
 
     def _analysis_fuzzy_profile(self, task: ArchiveTask) -> dict[str, Any]:
-        fuzzy = task.fact_bag.get("analysis.fuzzy")
-        if isinstance(fuzzy, dict) and isinstance(fuzzy.get("binary_profile"), dict):
-            return dict(fuzzy["binary_profile"])
-        return {}
+        return knowledge_view.analysis_fuzzy_profile(task)
 
     def _format_from_task(self, task: ArchiveTask) -> str:
-        selected = task.fact_bag.get("analysis.selected_format")
+        selected = knowledge_view.selected_format(task)
         if selected:
             return self._normalize_format(str(selected))
         state = task.archive_state()
@@ -467,7 +697,7 @@ class ArchiveRepairStage:
         return Path(str(self.config.get("workspace") or ".sunpack_repair"))
 
     def _attempts(self, task: ArchiveTask) -> int:
-        return int(task.fact_bag.get("repair.attempts", 0) or 0)
+        return int(knowledge_view.get(task, "repair.attempts", task.fact_bag.get("repair.attempts", 0)) or 0)
 
 
 def _dedupe(values: list[str]) -> list[str]:
@@ -546,3 +776,25 @@ def _flags_from_repair_hints(hints: dict[str, Any]) -> list[str]:
     if native_status == "damaged" or analysis_status in {"damaged", "weak"}:
         flags.append("damaged")
     return _dedupe(flags)
+
+
+def _verification_summary_payload(verification: VerificationResult) -> dict[str, Any]:
+    coverage = getattr(verification, "archive_coverage", None)
+    return {
+        "completeness": float(getattr(verification, "completeness", 0.0) or 0.0),
+        "recoverable_upper_bound": float(getattr(verification, "recoverable_upper_bound", 0.0) or 0.0),
+        "assessment_status": str(getattr(verification, "assessment_status", "") or ""),
+        "source_integrity": str(getattr(verification, "source_integrity", "") or ""),
+        "decision_hint": str(getattr(verification, "decision_hint", "") or ""),
+        "archive_coverage": {
+            "completeness": float(getattr(coverage, "completeness", 0.0) or 0.0) if coverage is not None else 0.0,
+            "file_coverage": float(getattr(coverage, "file_coverage", 0.0) or 0.0) if coverage is not None else 0.0,
+            "byte_coverage": float(getattr(coverage, "byte_coverage", 0.0) or 0.0) if coverage is not None else 0.0,
+            "expected_files": int(getattr(coverage, "expected_files", 0) or 0) if coverage is not None else 0,
+            "matched_files": int(getattr(coverage, "matched_files", 0) or 0) if coverage is not None else 0,
+            "complete_files": int(getattr(coverage, "complete_files", 0) or 0) if coverage is not None else 0,
+            "partial_files": int(getattr(coverage, "partial_files", 0) or 0) if coverage is not None else 0,
+            "failed_files": int(getattr(coverage, "failed_files", 0) or 0) if coverage is not None else 0,
+            "missing_files": int(getattr(coverage, "missing_files", 0) or 0) if coverage is not None else 0,
+        },
+    }

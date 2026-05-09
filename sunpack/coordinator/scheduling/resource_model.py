@@ -6,6 +6,8 @@ from typing import Any
 
 import psutil
 
+from sunpack.support import archive_knowledge_projection as knowledge_view
+
 
 @dataclass(frozen=True)
 class ResourceDemand:
@@ -185,6 +187,17 @@ def build_resource_profile_key(analysis: Any) -> str:
 
 
 def estimate_task_work_bytes(task: Any) -> int:
+    analysis = knowledge_view.resource_analysis(task)
+    if analysis:
+        try:
+            archive_size = int(analysis.get("archive_size", 0) or 0)
+            unpacked_size = int(analysis.get("total_unpacked_size", 0) or 0)
+            packed_size = int(analysis.get("total_packed_size", 0) or 0)
+            estimated = max(archive_size + unpacked_size, packed_size + unpacked_size)
+            if estimated > 0:
+                return estimated
+        except Exception:
+            pass
     fact_bag = getattr(task, "fact_bag", None)
     if fact_bag is not None:
         try:
@@ -208,6 +221,9 @@ def estimate_task_work_bytes(task: Any) -> int:
 
 
 def task_profile_key(task: Any) -> str:
+    projected = knowledge_view.resource_profile_key(task)
+    if projected:
+        return projected
     fact_bag = getattr(task, "fact_bag", None)
     if fact_bag is None:
         return ""

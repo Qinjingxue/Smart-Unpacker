@@ -8,6 +8,7 @@ from sunpack.contracts.archive_input import (
     ArchiveRelationState,
     ArchiveRepairState,
 )
+from sunpack.contracts.archive_knowledge import ArchiveKnowledge, merge_knowledge
 from sunpack.contracts.archive_state import ArchiveState
 from sunpack.contracts.detection import FactBag
 from sunpack.support.path_keys import normalized_path, path_key
@@ -141,6 +142,15 @@ class ArchiveTask:
                 format_hint=self._format_hint(),
                 logical_name=str(self.logical_name or ""),
             ).to_archive_input_descriptor()
+        knowledge_input = ArchiveKnowledge.from_any(self.fact_bag.get("archive.knowledge")).get("source.input")
+        if isinstance(knowledge_input, dict):
+            return ArchiveInputDescriptor.from_any(
+                knowledge_input,
+                archive_path=self.main_path,
+                part_paths=list(self.all_parts or [self.main_path]),
+                format_hint=self._format_hint(),
+                logical_name=str(self.logical_name or ""),
+            )
         return ArchiveInputDescriptor.from_any(
             self.fact_bag.get("archive.input"),
             archive_path=self.main_path,
@@ -150,18 +160,48 @@ class ArchiveTask:
         )
 
     def archive_state(self) -> ArchiveState:
+        archive_input = ArchiveKnowledge.from_any(self.fact_bag.get("archive.knowledge")).get("source.input")
+        if not isinstance(archive_input, dict):
+            archive_input = self.fact_bag.get("archive.input")
         return ArchiveState.from_any(
             self.fact_bag.get("archive.state"),
             archive_path=self.main_path,
             part_paths=list(self.all_parts or [self.main_path]),
             format_hint=self._format_hint(),
             logical_name=str(self.logical_name or ""),
-            archive_input=self.fact_bag.get("archive.input"),
+            archive_input=archive_input,
         )
+
+    def knowledge(self) -> ArchiveKnowledge:
+        knowledge = ArchiveKnowledge.from_any(self.fact_bag.get("archive.knowledge"))
+        knowledge.mirror_fact_bag(self.fact_bag.to_dict(), source_layer="fact_bag")
+        state = self.archive_state()
+        if state.knowledge:
+            knowledge.merge(state.knowledge)
+        return knowledge
+
+    def set_knowledge(self, knowledge: ArchiveKnowledge | dict) -> None:
+        payload = ArchiveKnowledge.from_any(knowledge).to_dict()
+        self.fact_bag.set("archive.knowledge", payload)
+        raw_state = self.fact_bag.get("archive.state")
+        if isinstance(raw_state, dict):
+            state = self.archive_state()
+            self._store_archive_state(ArchiveState(
+                source=state.source,
+                patches=list(state.patches),
+                patch_digest=state.effective_patch_digest(),
+                logical_name=state.logical_name,
+                format_hint=state.format_hint,
+                analysis=dict(state.analysis),
+                verification=dict(state.verification),
+                knowledge=payload,
+            ))
 
     def ensure_archive_state(self) -> "ArchiveTask":
         if not isinstance(self.fact_bag.get("archive.state"), dict):
             self.set_archive_state(self.archive_state())
+        elif not isinstance(self.fact_bag.get("archive.knowledge"), dict):
+            self.set_knowledge(self.knowledge())
         return self
 
     def set_archive_input(self, descriptor: ArchiveInputDescriptor | dict) -> None:
@@ -175,6 +215,9 @@ class ArchiveTask:
             )
         self.fact_bag.set("archive.input", descriptor.to_dict())
         self.fact_bag.set("archive.descriptor.source", descriptor.to_dict())
+        knowledge = ArchiveKnowledge.from_any(self.fact_bag.get("archive.knowledge"))
+        knowledge.set("source.input", descriptor.to_source_input() or descriptor.to_dict(), source_layer="contracts", source_module="archive_task")
+        self.fact_bag.set("archive.knowledge", knowledge.to_dict())
         self._store_archive_state(ArchiveState.from_archive_input(descriptor))
 
     def set_archive_state(self, state: ArchiveState | dict) -> None:
@@ -190,10 +233,24 @@ class ArchiveTask:
         self._store_archive_state(state)
 
     def _store_archive_state(self, state: ArchiveState) -> None:
+        source_input = state.to_archive_input_descriptor().to_source_input()
+        knowledge = merge_knowledge(self.fact_bag.get("archive.knowledge"), state.knowledge, {"source": {"input": source_input}})
+        if knowledge:
+            state = ArchiveState(
+                source=state.source,
+                patches=list(state.patches),
+                patch_digest=state.effective_patch_digest(),
+                logical_name=state.logical_name,
+                format_hint=state.format_hint,
+                analysis=dict(state.analysis),
+                verification=dict(state.verification),
+                knowledge=knowledge,
+            )
         self.fact_bag.set("archive.state", state.to_dict())
         self.fact_bag.set("archive.source", state.source.to_dict())
         self.fact_bag.set("archive.patch_stack", [patch.to_dict() for patch in state.patches])
         self.fact_bag.set("archive.patch_digest", state.effective_patch_digest())
+        self.fact_bag.set("archive.knowledge", dict(state.knowledge))
 
     def archive_descriptor(self) -> ArchiveDescriptor:
         source = self.archive_state().to_archive_input_descriptor()

@@ -64,6 +64,7 @@ class RepairRuntimeTransitionEvaluator:
         temp_dir: str | Path,
     ) -> RepairRuntimeTransition:
         original_state = task.archive_state()
+        original_knowledge = task.knowledge().to_dict()
         temp_dir = str(temp_dir)
         shutil.rmtree(temp_dir, ignore_errors=True)
         digest = self._candidate_source_digest(candidate)
@@ -91,6 +92,7 @@ class RepairRuntimeTransitionEvaluator:
             )
         finally:
             task.set_archive_state(original_state)
+            task.set_knowledge(original_knowledge)
 
     def apply_candidate_to_task(self, task: ArchiveTask, candidate: RepairCandidate) -> None:
         archive_state = candidate.plan.get("archive_state") if isinstance(candidate.plan, dict) else None

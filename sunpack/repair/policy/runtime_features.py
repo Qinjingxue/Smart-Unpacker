@@ -3,7 +3,8 @@ from __future__ import annotations
 from typing import Any
 
 from sunpack.repair.candidate import RepairCandidate, candidate_feature_payload
-from sunpack.repair.context import zip_route_evidence_flags
+from sunpack.contracts.archive_knowledge import ArchiveKnowledge, project_knowledge_sources
+from sunpack.repair.context import normalize_zip_runtime_route_evidence
 from sunpack.repair.job import RepairJob
 
 
@@ -53,7 +54,7 @@ def policy_candidate_payload(job: RepairJob, candidate: RepairCandidate, *, inde
         **_public_candidate_payload(payload),
         "feature_contract_version": FEATURE_CONTRACT_VERSION,
         "round": _int(getattr(job, "attempts", 0)),
-        "material_format": str(candidate.format or job.format or ""),
+        "material_format": str(candidate.format or (runtime_context.get("analysis_summary") or {}).get("format") or ""),
         "current_rank": int(index),
         "branchable": _candidate_branchable(payload),
         "runtime_context": runtime_context,
@@ -62,27 +63,35 @@ def policy_candidate_payload(job: RepairJob, candidate: RepairCandidate, *, inde
 
 
 def runtime_context_from_job(job: RepairJob, *, candidate: RepairCandidate | None = None) -> dict[str, Any]:
-    source = job.source_input if isinstance(job.source_input, dict) else {}
-    failure = job.extraction_failure if isinstance(job.extraction_failure, dict) else {}
-    diagnostics = job.extraction_diagnostics if isinstance(job.extraction_diagnostics, dict) else {}
-    history = job.repair_history if isinstance(job.repair_history, dict) else {}
+    knowledge = _effective_job_knowledge(job)
+    source = _dict_at(knowledge, "source.input")
+    failure = _dict_at(knowledge, "extraction.failure")
+    diagnostics = _dict_at(knowledge, "extraction.diagnostics")
+    history = _dict_at(knowledge, "repair.history")
     worker = diagnostics.get("result") if isinstance(diagnostics.get("result"), dict) else {}
-    coverage = failure.get("archive_coverage") if isinstance(failure.get("archive_coverage"), dict) else {}
+    verification_payload = _dict_at(knowledge, "verification.summary")
+    coverage = failure.get("archive_coverage") if isinstance(failure.get("archive_coverage"), dict) else _dict_at(knowledge, "verification.summary.archive_coverage")
     repair_hints = failure.get("repair_hints") if isinstance(failure.get("repair_hints"), dict) else {}
     previous_actions = _list_values(failure, "previous_actions") or _list_values(history, "previous_actions") or _list_values(history, "path_actions")
     previous_modules = _list_values(failure, "previous_modules") or _list_values(history, "previous_modules") or _list_values(history, "path_modules")
-    damage_flags = list(job.damage_flags or [])
-    archive_state = getattr(job, "archive_state", None)
-    prepass = job.analysis_prepass if isinstance(job.analysis_prepass, dict) else {}
-    fuzzy = job.fuzzy_profile if isinstance(job.fuzzy_profile, dict) else {}
-    evidence = getattr(job, "analysis_evidence", None)
+    damage_flags = _list_at(knowledge, "repair.damage.flags")
+    prepass = _dict_at(knowledge, "analysis.prepass")
+    fuzzy = _dict_at(knowledge, "analysis.fuzzy")
+    evidence_payload = _dict_at(knowledge, "analysis.evidence")
+    analysis_summary = _dict_at(knowledge, "analysis.summary")
     route_evidence_flags = _route_evidence_flags(job, source=source, prepass=prepass, history=history)
+    knowledge_sources = project_knowledge_sources(knowledge.to_dict())
     return {
+        "knowledge_projection": {
+            "version": FEATURE_CONTRACT_VERSION,
+            "source_count": len(knowledge_sources),
+            "has_archive_knowledge": bool(knowledge_sources),
+        },
         "analysis_summary": {
-            "format": str(job.format or ""),
-            "confidence": _float(job.confidence),
-            "evidence_format": str(getattr(evidence, "format", "") or getattr(evidence, "archive_type", "") or ""),
-            "evidence_confidence": _float(getattr(evidence, "confidence", None)),
+            "format": str(analysis_summary.get("format") or ""),
+            "confidence": _float(analysis_summary.get("confidence")),
+            "evidence_format": str(evidence_payload.get("format") or evidence_payload.get("archive_type") or ""),
+            "evidence_confidence": _float(evidence_payload.get("confidence")),
             "prepass_status": str(prepass.get("status") or ""),
             "prepass_format": str(prepass.get("format") or prepass.get("selected_format") or ""),
             "prepass_confidence": _float(prepass.get("confidence")),
@@ -104,16 +113,16 @@ def runtime_context_from_job(job: RepairJob, *, candidate: RepairCandidate | Non
             "worker_returncode": _optional_int(diagnostics.get("returncode")),
         },
         "verification_summary": {
-            "decision_hint": str(failure.get("decision_hint") or ""),
-            "assessment_status": str(failure.get("assessment_status") or ""),
-            "source_integrity": str(failure.get("source_integrity") or ""),
-            "completeness": _float(failure.get("completeness")),
-            "recoverable_upper_bound": _float(failure.get("recoverable_upper_bound"), default=1.0),
-            "complete_files": _int(failure.get("complete_files")),
-            "partial_files": _int(failure.get("partial_files")),
-            "failed_files": _int(failure.get("failed_files")),
-            "missing_files": _int(failure.get("missing_files")),
-            "unverified_files": _int(failure.get("unverified_files")),
+            "decision_hint": str(failure.get("decision_hint") or verification_payload.get("decision_hint") or ""),
+            "assessment_status": str(failure.get("assessment_status") or verification_payload.get("assessment_status") or ""),
+            "source_integrity": str(failure.get("source_integrity") or verification_payload.get("source_integrity") or ""),
+            "completeness": _float(failure.get("completeness", verification_payload.get("completeness"))),
+            "recoverable_upper_bound": _float(failure.get("recoverable_upper_bound", verification_payload.get("recoverable_upper_bound")), default=1.0),
+            "complete_files": _int(failure.get("complete_files", verification_payload.get("complete_files"))),
+            "partial_files": _int(failure.get("partial_files", verification_payload.get("partial_files"))),
+            "failed_files": _int(failure.get("failed_files", verification_payload.get("failed_files"))),
+            "missing_files": _int(failure.get("missing_files", verification_payload.get("missing_files"))),
+            "unverified_files": _int(failure.get("unverified_files", verification_payload.get("unverified_files"))),
             "archive_coverage": {
                 "completeness": _float(coverage.get("completeness")),
                 "file_coverage": _float(coverage.get("file_coverage")),
@@ -147,8 +156,8 @@ def runtime_context_from_job(job: RepairJob, *, candidate: RepairCandidate | Non
         "previous_module_count": len(previous_modules),
         "runtime_state_summary": _runtime_state_summary(history.get("runtime_state_summary") if isinstance(history.get("runtime_state_summary"), dict) else {}),
         "job_summary": {
-            "format": str(job.format or ""),
-            "confidence": _float(job.confidence),
+            "format": str(analysis_summary.get("format") or ""),
+            "confidence": _float(analysis_summary.get("confidence")),
             "damage_flags": damage_flags,
             "damage_flag_count": len(damage_flags),
             "route_evidence_flags": route_evidence_flags,
@@ -161,8 +170,8 @@ def runtime_context_from_job(job: RepairJob, *, candidate: RepairCandidate | Non
             "has_password": job.password is not None,
             "source_kind": str(source.get("kind") or source.get("open_mode") or ""),
             "source_format_hint": str(source.get("format_hint") or source.get("format") or ""),
-            "has_archive_state": archive_state is not None,
-            "archive_state_patch_count": len(getattr(archive_state, "patches", []) or []) if archive_state is not None else 0,
+            "has_archive_state": bool(knowledge.get("source.has_archive_state")),
+            "archive_state_patch_count": _int(knowledge.get("source.archive_state_patch_count")),
         },
         "native_feedback": _native_feedback(candidate),
     }
@@ -295,11 +304,14 @@ def _analysis_native_probe(
     history: dict[str, Any],
     route_evidence_flags: list[str],
 ) -> dict[str, Any]:
+    knowledge = _effective_job_knowledge(job)
+    damage_flags = _list_at(knowledge, "repair.damage.flags")
+    analysis_summary = _dict_at(knowledge, "analysis.summary")
     probe: dict[str, Any] = {
-        "format": str(job.format or ""),
-        "confidence": _float(job.confidence),
-        "damage_flags": list(job.damage_flags or []),
-        "damage_flag_count": len(job.damage_flags or []),
+        "format": str(analysis_summary.get("format") or ""),
+        "confidence": _float(analysis_summary.get("confidence")),
+        "damage_flags": list(damage_flags),
+        "damage_flag_count": len(damage_flags),
         "attempts": _int(job.attempts),
         "has_password": job.password is not None,
         "source_kind": str(source.get("kind") or source.get("open_mode") or ""),
@@ -357,27 +369,39 @@ def _route_evidence_flags(
     history: dict[str, Any],
 ) -> list[str]:
     analysis_payload = _analysis_evidence_payload(job)
+    knowledge = _effective_job_knowledge(job)
+    damage_flags = _list_at(knowledge, "repair.damage.flags")
     payload = {
-        "format": job.format,
+        "format": knowledge.get("analysis.summary.format") or "",
         "source_input": source,
         "analysis_prepass": prepass,
         "analysis_evidence": analysis_payload,
-        "extraction_failure": job.extraction_failure if isinstance(job.extraction_failure, dict) else {},
-        "extraction_diagnostics": job.extraction_diagnostics if isinstance(job.extraction_diagnostics, dict) else {},
+        "extraction_failure": _dict_at(knowledge, "extraction.failure"),
+        "extraction_diagnostics": _dict_at(knowledge, "extraction.diagnostics"),
         "repair_history": history,
-        "damage_flags": list(job.damage_flags or []),
+        "archive_knowledge": knowledge.to_dict(),
+        "damage_flags": list(damage_flags),
     }
+    normalized = normalize_zip_runtime_route_evidence(payload)
     flags = [
         *list(history.get("route_evidence_flags") or []),
         *[
             flag
-            for flag in list(job.damage_flags or [])
+            for flag in list(damage_flags)
             if str(flag) in _ROUTE_VISIBLE_DAMAGE_FLAGS
         ],
-        *zip_route_evidence_flags(payload),
+        *list(normalized.get("route_evidence_flags") or []),
         *_route_flags_from_analysis_details(analysis_payload.get("details") if isinstance(analysis_payload, dict) else {}),
     ]
-    return _dedupe([str(flag) for flag in flags if str(flag)])
+    filtered = normalize_zip_runtime_route_evidence({**payload, "damage_flags": flags, "route_evidence_flags": flags})
+    return _dedupe([
+        str(flag)
+        for flag in [
+            *list(filtered.get("damage_flags") or []),
+            *list(filtered.get("route_evidence_flags") or []),
+        ]
+        if str(flag) in _ROUTE_VISIBLE_DAMAGE_FLAGS or str(flag) in set(history.get("route_evidence_flags") or [])
+    ])
 
 
 def _route_flags_from_analysis_details(details: Any) -> list[str]:
@@ -397,9 +421,18 @@ def _route_flags_from_analysis_details(details: Any) -> list[str]:
         flags.extend(["sfx", "carrier_prefix", "carrier_archive"])
     content_reason = str(details.get("content_damage_reason") or details.get("content_integrity_warning") or "").lower()
     if "crc" in content_reason or "checksum" in content_reason:
-        flags.extend(["checksum_error", "crc_error"])
-    if details.get("central_directory_present") and not details.get("central_directory_walk_ok", True):
-        flags.append("central_directory_bad")
+        flags.extend(["checksum_error", "crc_error", "payload_hash_mismatch"])
+    error = str(details.get("error") or details.get("reason") or "").lower()
+    link_mismatch = "local_header_link_mismatch" in error or "local header link" in error
+    if (details.get("central_directory_present") and not details.get("central_directory_walk_ok", True)) or link_mismatch:
+        flags.extend(["central_directory_bad", "central_directory_offset_bad", "central_directory_count_bad"])
+    if link_mismatch and (
+        prefix_context == "carrier"
+        or "carrier_prefixed_archive" in routes
+        or "carrier_prefix_likely" in fuzzy_hints
+        or bool(fuzzy.get("carrier_prefix_likely"))
+    ):
+        flags.extend(["damaged", "payload_hash_mismatch"])
     return flags
 
 
@@ -417,9 +450,11 @@ def _analysis_evidence_payload(job: RepairJob) -> dict[str, Any]:
 
 
 def _fuzzy_profile(job: RepairJob) -> dict[str, Any]:
-    profile = job.fuzzy_profile if isinstance(job.fuzzy_profile, dict) else {}
+    knowledge = _effective_job_knowledge(job)
+    profile = _dict_at(knowledge, "analysis.fuzzy")
     if not profile:
-        fuzzy = job.analysis_prepass.get("fuzzy") if isinstance(job.analysis_prepass, dict) else {}
+        prepass = _dict_at(knowledge, "analysis.prepass")
+        fuzzy = prepass.get("fuzzy") if isinstance(prepass.get("fuzzy"), dict) else {}
         if isinstance(fuzzy, dict) and isinstance(fuzzy.get("binary_profile"), dict):
             profile = fuzzy["binary_profile"]
     if not profile:
@@ -509,6 +544,7 @@ def _feature_payload_sources(
     history: dict[str, Any],
 ) -> list[dict[str, Any]]:
     sources = [source, prepass, history]
+    sources.extend(project_knowledge_sources(_effective_job_knowledge(job).to_dict()))
     for payload in (source, prepass, history):
         for key in ("source_derivation", "analysis_prepass", "analysis_evidence", "extraction_failure", "extraction_diagnostics", "repair_history", "damaged_input"):
             nested = payload.get(key) if isinstance(payload, dict) else None
@@ -522,6 +558,77 @@ def _feature_payload_sources(
             else:
                 sources.append({"source_derivation": value})
     return sources
+
+
+def _effective_job_knowledge(job: RepairJob) -> ArchiveKnowledge:
+    knowledge = ArchiveKnowledge.from_any(getattr(job, "knowledge", {}))
+    if isinstance(getattr(job, "source_input", None), dict):
+        _set_if_missing(knowledge, "source.input", job.source_input)
+    if isinstance(getattr(job, "analysis_prepass", None), dict):
+        _set_if_missing(knowledge, "analysis.prepass", job.analysis_prepass)
+    if isinstance(getattr(job, "fuzzy_profile", None), dict):
+        _set_if_missing(knowledge, "analysis.fuzzy", job.fuzzy_profile)
+    evidence_payload = _analysis_evidence_payload(job)
+    if evidence_payload:
+        _set_if_missing(knowledge, "analysis.evidence", evidence_payload)
+    if isinstance(getattr(job, "extraction_failure", None), dict):
+        _set_if_missing(knowledge, "extraction.failure", job.extraction_failure)
+        summary = _verification_summary_from_failure(job.extraction_failure)
+        if summary:
+            _set_if_missing(knowledge, "verification.summary", summary)
+    if isinstance(getattr(job, "extraction_diagnostics", None), dict):
+        _set_if_missing(knowledge, "extraction.diagnostics", job.extraction_diagnostics)
+    if isinstance(getattr(job, "repair_history", None), dict):
+        _set_if_missing(knowledge, "repair.history", job.repair_history)
+    if getattr(job, "damage_flags", None):
+        knowledge.add_flags("repair.damage", [str(flag) for flag in job.damage_flags or []], source_layer="repair")
+    if getattr(job, "format", None):
+        _set_if_missing(knowledge, "analysis.summary.format", str(job.format or ""))
+    if getattr(job, "confidence", None) is not None:
+        _set_if_missing(knowledge, "analysis.summary.confidence", _float(job.confidence))
+    archive_state = getattr(job, "archive_state", None)
+    if archive_state is not None:
+        _set_if_missing(knowledge, "source.has_archive_state", True)
+        _set_if_missing(knowledge, "source.archive_state_patch_count", len(getattr(archive_state, "patches", []) or []))
+    return knowledge
+
+
+def _set_if_missing(knowledge: ArchiveKnowledge, path: str, value: Any) -> None:
+    if value in (None, "", [], {}):
+        return
+    existing = knowledge.get(path)
+    if existing in (None, "", [], {}):
+        knowledge.set(path, value)
+
+
+def _dict_at(knowledge: ArchiveKnowledge, path: str) -> dict[str, Any]:
+    value = knowledge.get(path)
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _list_at(knowledge: ArchiveKnowledge, path: str) -> list[Any]:
+    value = knowledge.get(path)
+    return list(value) if isinstance(value, list) else []
+
+
+def _verification_summary_from_failure(failure: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: failure.get(key)
+        for key in (
+            "decision_hint",
+            "assessment_status",
+            "source_integrity",
+            "completeness",
+            "recoverable_upper_bound",
+            "complete_files",
+            "partial_files",
+            "failed_files",
+            "missing_files",
+            "unverified_files",
+            "archive_coverage",
+        )
+        if key in failure
+    }
 
 
 def _native_feedback(candidate: RepairCandidate | None) -> dict[str, Any]:

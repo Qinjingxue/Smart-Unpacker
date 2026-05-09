@@ -4,6 +4,7 @@ from sunpack.contracts.tasks import ArchiveTask
 from sunpack.extraction.result import ExtractionResult
 from sunpack.passwords import PasswordSession
 from sunpack.verification.evidence import build_verification_evidence
+from sunpack.verification.knowledge import write_verification_result
 from sunpack.verification.pipeline import VerificationPipeline
 from sunpack.verification.result import (
     ASSESSMENT_DISABLED,
@@ -24,7 +25,7 @@ class VerificationScheduler:
         evidence = build_verification_evidence(task, extraction_result, self.password_session)
         if not self.config.get("enabled", False):
             if not extraction_result.success:
-                return VerificationResult(
+                result = VerificationResult(
                     completeness=0.0,
                     recoverable_upper_bound=1.0,
                     assessment_status=ASSESSMENT_DISABLED,
@@ -32,7 +33,9 @@ class VerificationScheduler:
                     decision_hint=DECISION_REPAIR,
                     repair_hints=dict(evidence.repair_hints),
                 )
-            return VerificationResult(
+                write_verification_result(task, result)
+                return result
+            result = VerificationResult(
                 completeness=1.0,
                 recoverable_upper_bound=1.0,
                 assessment_status=ASSESSMENT_DISABLED,
@@ -40,7 +43,11 @@ class VerificationScheduler:
                 decision_hint=DECISION_ACCEPT,
                 repair_hints=dict(evidence.repair_hints),
             )
-        return VerificationPipeline(self.config).run(evidence)
+            write_verification_result(task, result)
+            return result
+        result = VerificationPipeline(self.config).run(evidence)
+        write_verification_result(task, result)
+        return result
 
     def _verification_config(self, config: dict[str, Any]) -> dict:
         if "verification" in config and isinstance(config.get("verification"), dict):

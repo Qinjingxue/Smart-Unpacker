@@ -32,6 +32,7 @@ class RepairContext:
     route_evidence_flags: tuple[str, ...] = ()
     repair_history_flags: tuple[str, ...] = ()
     residual_damage_flags: tuple[str, ...] = ()
+    knowledge: dict[str, Any] = field(default_factory=dict)
 
 
 def build_repair_context(job: RepairJob, diagnosis: RepairDiagnosis) -> RepairContext:
@@ -52,7 +53,7 @@ def build_repair_context(job: RepairJob, diagnosis: RepairDiagnosis) -> RepairCo
         native_diagnostics.get("failure_kind"),
         diagnostics.get("failure_kind"),
     ])
-    route_evidence_flags = zip_route_evidence_flags({
+    route_payload = normalize_zip_runtime_route_evidence({
         "format": diagnosis.format or job.format,
         "source_input": job.source_input,
         "analysis_prepass": job.analysis_prepass,
@@ -60,7 +61,10 @@ def build_repair_context(job: RepairJob, diagnosis: RepairDiagnosis) -> RepairCo
         "extraction_failure": failure,
         "extraction_diagnostics": diagnostics,
         "repair_history": job.repair_history,
+        "archive_knowledge": job.knowledge,
+        "damage_flags": list(job.damage_flags or []),
     })
+    route_evidence_flags = list(route_payload.get("route_evidence_flags") or [])
     repair_history_flags = _repair_history_flags(job)
     residual_damage_flags = _residual_damage_flags(job, failure)
     damage_flags = _normalize_zip_generic_damage(_dedupe([
@@ -69,6 +73,16 @@ def build_repair_context(job: RepairJob, diagnosis: RepairDiagnosis) -> RepairCo
         *repair_history_flags,
         *residual_damage_flags,
     ]))
+    normalized_damage_payload = normalize_zip_runtime_route_evidence({
+        **route_payload,
+        "extraction_failure": failure,
+        "extraction_diagnostics": diagnostics,
+        "repair_history": job.repair_history,
+        "archive_knowledge": job.knowledge,
+        "damage_flags": damage_flags,
+    })
+    damage_flags = list(normalized_damage_payload.get("damage_flags") or damage_flags)
+    route_evidence_flags = list(normalized_damage_payload.get("route_evidence_flags") or route_evidence_flags)
     return RepairContext(
         source_input=dict(job.source_input or {}),
         format=_normalize_format(diagnosis.format or job.format),
@@ -100,13 +114,14 @@ def build_repair_context(job: RepairJob, diagnosis: RepairDiagnosis) -> RepairCo
         route_evidence_flags=tuple(route_evidence_flags),
         repair_history_flags=tuple(repair_history_flags),
         residual_damage_flags=tuple(residual_damage_flags),
+        knowledge=dict(job.knowledge or {}),
     )
 
 
 def zip_route_evidence_flags(payload: dict[str, Any]) -> list[str]:
     if not isinstance(payload, dict):
         return []
-    fmt = _normalize_format(str(payload.get("format") or payload.get("material_format") or ""))
+    fmt = _format_from_payload(payload)
     source = payload.get("source_input") if isinstance(payload.get("source_input"), dict) else {}
     damaged = payload.get("damaged_input") if isinstance(payload.get("damaged_input"), dict) else {}
     if fmt and fmt != "zip":
@@ -138,9 +153,111 @@ def zip_route_evidence_flags(payload: dict[str, Any]) -> list[str]:
             flags.append(tag)
         if tag == "split_archive":
             flags.append("split_archive")
+    for details in _zip_analysis_detail_dicts(payload):
+        flags.extend(_zip_analysis_detail_route_flags(details))
     for profile in _profile_names(payload):
         flags.extend(_zip_profile_flags(profile))
     return _dedupe([str(item) for item in flags if item])
+
+
+def _format_from_payload(payload: dict[str, Any]) -> str:
+    raw = payload.get("format")
+    if isinstance(raw, dict):
+        if isinstance(raw.get("zip"), dict):
+            return "zip"
+        raw = raw.get("format") or raw.get("name") or raw.get("material_format")
+    if raw or payload.get("material_format"):
+        return _normalize_format(str(raw or payload.get("material_format") or ""))
+    return ""
+
+
+def normalize_zip_runtime_route_evidence(payload: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {"route_evidence_flags": [], "damage_flags": []}
+    enriched = dict(payload)
+    source_derivation = _merged_source_derivation(enriched)
+    if source_derivation:
+        enriched["source_derivation"] = source_derivation
+    features = _merged_zip_structure_features(enriched)
+    if features:
+        enriched["zip_structure_features"] = features
+    tags = _zip_container_tags(enriched)
+    if tags:
+        enriched["zip_container_tags"] = tags
+    profile_names = _profile_names(enriched)
+    if profile_names and not enriched.get("damage_profile"):
+        enriched["damage_profile"] = profile_names[0]
+    route_flags = zip_route_evidence_flags(enriched)
+    damage_flags = _normalize_zip_generic_damage(_dedupe([
+        *[str(item) for item in enriched.get("damage_flags") or [] if str(item)],
+        *route_flags,
+    ]))
+    route_flags = _filter_zip_conflicting_runtime_flags(route_flags, enriched)
+    damage_flags = _filter_zip_conflicting_runtime_flags(damage_flags, enriched)
+    source = enriched.get("source_input") if isinstance(enriched.get("source_input"), dict) else {}
+    if route_flags:
+        source = {**source, "route_evidence_flags": _dedupe([*list(source.get("route_evidence_flags") or []), *route_flags])}
+    if features and "zip_structure_features" not in source:
+        source["zip_structure_features"] = dict(features)
+    if tags and "zip_container_tags" not in source:
+        source["zip_container_tags"] = list(tags)
+    if source_derivation and "source_derivation" not in source:
+        source["source_derivation"] = dict(source_derivation)
+    enriched["source_input"] = source
+    enriched["route_evidence_flags"] = route_flags
+    enriched["damage_flags"] = damage_flags
+    enriched["zip_structure_features"] = features
+    enriched["zip_container_tags"] = tags
+    enriched["source_derivation"] = source_derivation
+    return enriched
+
+
+def _filter_zip_conflicting_runtime_flags(flags: list[str], payload: dict[str, Any]) -> list[str]:
+    flag_set = set(flags)
+    profiles = {name.lower() for name in _profile_names(payload)}
+    features = _merged_zip_structure_features(payload)
+    tags = {tag.lower() for tag in _zip_container_tags(payload)}
+    has_carrier_evidence = (
+        bool(features.get("has_sfx_prefix"))
+        or bool(tags & {"sfx", "carrier_prefix", "carrier_archive", "embedded_archive"})
+        or any("sfx" in profile for profile in profiles)
+    )
+    if not has_carrier_evidence:
+        flags = [flag for flag in flags if flag not in {"sfx", "carrier_prefix", "carrier_archive", "embedded_archive"}]
+        flag_set = set(flags)
+    structural_without_payload = bool(flag_set & {
+        "central_directory_bad",
+        "central_directory_offset_bad",
+        "central_directory_count_bad",
+        "local_header_conflict",
+        "filename_encoding_bad",
+        "raw_filename_bytes",
+        "extra_field_length_bad",
+        "zip64_extra_size_bad",
+        "spurious_data_descriptor_candidate",
+        "descriptor_record_in_payload_gap",
+        "descriptor_delete_would_align_next_header",
+    })
+    payload_profile = any("payload_bad" in profile or "payload_damage" in profile for profile in profiles)
+    sfx_payload = any("sfx_payload_damage" in profile for profile in profiles)
+    if structural_without_payload and not payload_profile and not sfx_payload:
+        flags = [
+            flag
+            for flag in flags
+            if flag not in {
+                "checksum_error",
+                "crc_error",
+                "payload_hash_mismatch",
+                "content_integrity_bad_or_unknown",
+                "entry_payload_bad",
+                "payload_bad",
+                "payload_damaged",
+                "data_error",
+                "corrupted_data",
+                "damaged",
+            }
+        ]
+    return _dedupe(flags)
 
 
 def _diagnostics_from(job: RepairJob, failure: dict[str, Any]) -> dict[str, Any]:
@@ -164,7 +281,11 @@ def _zip_structure_feature_dicts(payload: dict[str, Any]) -> list[dict[str, Any]
             features = value.get("zip_structure_features")
             if isinstance(features, dict):
                 output.append(dict(features))
-            for key in ("source_derivation", "analysis_prepass", "analysis_evidence", "extraction_failure", "extraction_diagnostics", "repair_history", "source_input", "damaged_input", "fuzzy"):
+            format_payload = value.get("format")
+            zip_payload = format_payload.get("zip") if isinstance(format_payload, dict) else None
+            if isinstance(zip_payload, dict) and isinstance(zip_payload.get("structure"), dict):
+                output.append(dict(zip_payload["structure"]))
+            for key in ("archive_knowledge", "knowledge", "source_derivation", "analysis_prepass", "analysis_evidence", "extraction_failure", "extraction_diagnostics", "repair_history", "source_input", "damaged_input", "fuzzy"):
                 nested = value.get(key)
                 if isinstance(nested, dict):
                     visit(nested)
@@ -176,6 +297,50 @@ def _zip_structure_feature_dicts(payload: dict[str, Any]) -> list[dict[str, Any]
     return output
 
 
+def _merged_zip_structure_features(payload: dict[str, Any]) -> dict[str, Any]:
+    merged: dict[str, Any] = {}
+    for features in _zip_structure_feature_dicts(payload):
+        for key, value in features.items():
+            if key not in merged or merged.get(key) in (None, "", False, 0):
+                merged[key] = value
+    return merged
+
+
+def _merged_source_derivation(payload: dict[str, Any]) -> dict[str, Any]:
+    merged: dict[str, Any] = {}
+
+    def visit(value: Any) -> None:
+        if not isinstance(value, dict):
+            return
+        derivation = value.get("source_derivation")
+        if isinstance(derivation, dict):
+            for key, item in derivation.items():
+                if key not in merged or merged.get(key) in (None, "", False, 0, []):
+                    merged[key] = item
+        source_payload = value.get("source")
+        if isinstance(source_payload, dict) and isinstance(source_payload.get("derivation"), dict):
+            for key, item in source_payload["derivation"].items():
+                if key not in merged or merged.get(key) in (None, "", False, 0, []):
+                    merged[key] = item
+        for key in ("archive_knowledge", "knowledge", "analysis_prepass", "analysis_evidence", "extraction_failure", "extraction_diagnostics", "repair_history", "source_input", "damaged_input"):
+            nested = value.get(key)
+            if isinstance(nested, dict):
+                visit(nested)
+
+    visit(payload)
+    features = _merged_zip_structure_features(payload)
+    tags = _zip_container_tags(payload)
+    if features and "zip_structure_features" not in merged:
+        merged["zip_structure_features"] = features
+    if tags and "zip_container_tags" not in merged:
+        merged["zip_container_tags"] = tags
+    for name in _profile_names(payload):
+        if "damage_profile" not in merged:
+            merged["damage_profile"] = name
+            break
+    return merged
+
+
 def _profile_names(payload: dict[str, Any]) -> list[str]:
     names: list[str] = []
 
@@ -185,7 +350,7 @@ def _profile_names(payload: dict[str, Any]) -> list[str]:
                 item = value.get(key)
                 if isinstance(item, str) and item:
                     names.append(item)
-            for key in ("source_derivation", "analysis_prepass", "analysis_evidence", "extraction_failure", "extraction_diagnostics", "repair_history", "source_input", "damaged_input"):
+            for key in ("archive_knowledge", "knowledge", "source_derivation", "analysis_prepass", "analysis_evidence", "extraction_failure", "extraction_diagnostics", "repair_history", "source_input", "damaged_input"):
                 nested = value.get(key)
                 if isinstance(nested, dict):
                     collect(nested)
@@ -200,7 +365,11 @@ def _zip_container_tags(payload: dict[str, Any]) -> list[str]:
     def collect(value: Any) -> None:
         if isinstance(value, dict):
             tags.extend(_list_values(value, "zip_container_tags"))
-            for key in ("source_derivation", "analysis_prepass", "analysis_evidence", "extraction_failure", "extraction_diagnostics", "repair_history", "source_input", "damaged_input"):
+            format_payload = value.get("format")
+            zip_payload = format_payload.get("zip") if isinstance(format_payload, dict) else None
+            if isinstance(zip_payload, dict):
+                tags.extend(_list_values(zip_payload, "container_tags"))
+            for key in ("archive_knowledge", "knowledge", "source_derivation", "analysis_prepass", "analysis_evidence", "extraction_failure", "extraction_diagnostics", "repair_history", "source_input", "damaged_input"):
                 nested = value.get(key)
                 if isinstance(nested, dict):
                     collect(nested)
@@ -209,19 +378,78 @@ def _zip_container_tags(payload: dict[str, Any]) -> list[str]:
     return _dedupe(tags)
 
 
+def _zip_analysis_detail_dicts(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    output: list[dict[str, Any]] = []
+
+    def visit(value: Any) -> None:
+        if not isinstance(value, dict):
+            return
+        details = value.get("details")
+        if isinstance(details, dict):
+            output.append(dict(details))
+        analysis_evidence = value.get("analysis_evidence")
+        if isinstance(analysis_evidence, dict):
+            if any(key in analysis_evidence for key in ("central_directory_present", "central_directory_walk_ok", "error", "fuzzy", "routes")):
+                output.append(dict(analysis_evidence))
+            nested_details = analysis_evidence.get("details")
+            if isinstance(nested_details, dict):
+                output.append(dict(nested_details))
+        for key in ("archive_knowledge", "knowledge", "analysis_prepass", "extraction_failure", "extraction_diagnostics", "repair_history", "source_input", "damaged_input"):
+            nested = value.get(key)
+            if isinstance(nested, dict):
+                visit(nested)
+
+    visit(payload)
+    return output
+
+
+def _zip_analysis_detail_route_flags(details: dict[str, Any]) -> list[str]:
+    flags: list[str] = []
+    routes = {str(item).lower() for item in details.get("routes") or []}
+    fuzzy = details.get("fuzzy") if isinstance(details.get("fuzzy"), dict) else {}
+    fuzzy_hints = {str(item).lower() for item in fuzzy.get("hints") or []}
+    prefix_context = str(details.get("prefix_context") or "").lower()
+    carrier = (
+        prefix_context == "carrier"
+        or "carrier_prefixed_archive" in routes
+        or "carrier_prefix_likely" in fuzzy_hints
+        or bool(fuzzy.get("carrier_prefix_likely"))
+    )
+    if carrier:
+        flags.extend(["sfx", "carrier_prefix", "carrier_archive"])
+    content_reason = str(details.get("content_damage_reason") or details.get("content_integrity_warning") or "").lower()
+    if "crc" in content_reason or "checksum" in content_reason:
+        flags.extend(["checksum_error", "crc_error", "payload_hash_mismatch"])
+    error = str(details.get("error") or details.get("reason") or "").lower()
+    cd_untrusted = bool(details.get("central_directory_present")) and not bool(details.get("central_directory_walk_ok", True))
+    link_mismatch = "local_header_link_mismatch" in error or "local header link" in error
+    if cd_untrusted or link_mismatch:
+        flags.extend(["central_directory_bad", "central_directory_offset_bad", "central_directory_count_bad"])
+    if carrier and link_mismatch:
+        flags.extend(["damaged", "payload_hash_mismatch"])
+    return flags
+
+
 def _zip_profile_flags(profile: str) -> list[str]:
     text = str(profile or "").lower()
     flags: list[str] = []
     if "duplicate_entry" in text or "duplicate_entries" in text:
         flags.append("duplicate_entries")
     if "non_utf8_filename" in text or "filename_encoding" in text:
-        flags.extend(["filename_encoding_bad", "raw_filename_bytes", "central_directory_bad", "local_header_recovery"])
+        flags.extend([
+            "filename_encoding_bad",
+            "raw_filename_bytes",
+            "central_directory_bad",
+            "central_directory_offset_bad",
+            "central_directory_count_bad",
+            "local_header_recovery",
+        ])
     if "comment_overlap" in text or "comment_length" in text or "long_comment" in text:
         flags.extend(["zip_comment_length_bad", "comment_length_bad", "eocd_bad", "long_comment_present", "boundary_unreliable"])
     if "zip64_extra_size" in text or "zip64_extra" in text:
         flags.extend(["zip64", "zip64_extra_present", "zip64_extra_bad", "zip64_extra_size_bad"])
     if "extra_field_length_bad" in text or "extra_length_bad" in text:
-        flags.extend(["extra_field_bad", "extra_field_length_bad"])
+        flags.extend(["extra_field_bad", "extra_field_length_bad", "central_directory_bad", "central_directory_offset_bad", "central_directory_count_bad"])
     if "zip64_eocd_locator" in text or "zip64_locator" in text:
         flags.extend(["zip64", "zip64_locator_bad"])
     if "zip64_eocd" in text:
@@ -240,15 +468,15 @@ def _zip_profile_flags(profile: str) -> list[str]:
     if "sfx" in text:
         flags.extend(["sfx", "carrier_prefix", "carrier_archive"])
         if "cd_damage" in text:
-            flags.append("central_directory_bad")
+            flags.extend(["central_directory_bad", "central_directory_offset_bad", "central_directory_count_bad"])
         if "payload_damage" in text:
-            flags.extend(["checksum_error", "crc_error", "damaged"])
+            flags.extend(["checksum_error", "crc_error", "damaged", "central_directory_bad", "central_directory_offset_bad", "central_directory_count_bad", "payload_hash_mismatch"])
     if "split_tail_volume_truncated" in text:
-        flags.extend(["missing_volume", "input_truncated", "local_header_recovery", "tail_volume_truncated", "missing_volume_unavailable"])
+        flags.extend(["missing_volume", "input_truncated", "local_header_recovery", "tail_volume_truncated", "missing_volume_unavailable", "central_directory_bad", "central_directory_offset_bad", "central_directory_count_bad"])
     elif "split_missing_middle_volume" in text or "sfx_split_missing_volume" in text:
-        flags.extend(["missing_volume", "input_truncated", "local_header_recovery", "middle_volume_missing"])
+        flags.extend(["missing_volume", "input_truncated", "local_header_recovery", "middle_volume_missing", "central_directory_bad", "central_directory_offset_bad", "central_directory_count_bad"])
     elif "split" in text or "missing_volume" in text:
-        flags.extend(["missing_volume", "input_truncated", "local_header_recovery"])
+        flags.extend(["missing_volume", "input_truncated", "local_header_recovery", "central_directory_bad", "central_directory_offset_bad", "central_directory_count_bad"])
     return flags
 
 

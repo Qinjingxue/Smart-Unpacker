@@ -14,6 +14,8 @@ from sunpack.contracts.archive_input import ArchiveInputDescriptor
 from sunpack.contracts.tasks import ArchiveTask
 from sunpack.extraction.result import ExtractionResult
 from sunpack.repair.result import RepairResult
+from sunpack.repair.knowledge import write_repair_loop_state, write_repair_stop
+from sunpack.support import archive_knowledge_projection as knowledge_view
 from sunpack.support.archive_state_view import archive_state_to_bytes
 
 
@@ -63,6 +65,7 @@ class RepairLoopState:
         if self.started_at <= 0.0:
             self.started_at = time.monotonic()
             task.fact_bag.set("repair.loop.started_at", self.started_at)
+            write_repair_loop_state(task, {"started_at": self.started_at})
         self._ensure_initial_digest()
 
     def can_attempt(self, *, trigger: str, failure: ExtractionResult | None = None) -> bool:
@@ -150,6 +153,7 @@ class RepairLoopState:
             return False
 
         self.task.fact_bag.set("repair.loop.current_digest", next_digest)
+        write_repair_loop_state(self.task, {"current_digest": next_digest})
         self._append_round(round_payload)
         LOGGER.info("archive repair round completed: %s", round_payload)
         return True
@@ -202,6 +206,8 @@ class RepairLoopState:
         if result is not None:
             payload.update({"status": result.status, "module": result.module_name, "message": result.message})
         self.task.fact_bag.set("repair.loop.terminal", payload)
+        write_repair_loop_state(self.task, {"terminal_reason": reason, "terminal": payload})
+        write_repair_stop(self.task, reason, payload)
         LOGGER.warning("archive repair loop stopped: %s", payload)
 
     def _ensure_initial_digest(self) -> None:
@@ -209,22 +215,28 @@ class RepairLoopState:
             digest = input_digest(self.task)
             self.task.fact_bag.set("repair.loop.current_digest", digest)
             self.task.fact_bag.set("repair.loop.seen_input_digests", [digest])
+            write_repair_loop_state(self.task, {"current_digest": digest, "seen_input_digests": [digest]})
 
     def _append_round(self, payload: dict[str, Any]) -> None:
         rounds = self.task.fact_bag.get("repair.loop.rounds")
         items = list(rounds) if isinstance(rounds, list) else []
         items.append(dict(payload))
         self.task.fact_bag.set("repair.loop.rounds", items)
+        write_repair_loop_state(self.task, {"rounds": items})
 
     def _add_seen_input_digest(self, digest: str) -> None:
         values = self.seen_input_digests
         values.append(digest)
-        self.task.fact_bag.set("repair.loop.seen_input_digests", _dedupe(values))
+        merged = _dedupe(values)
+        self.task.fact_bag.set("repair.loop.seen_input_digests", merged)
+        write_repair_loop_state(self.task, {"seen_input_digests": merged})
 
     def _add_seen_action_signature(self, signature: str) -> None:
         values = self.seen_action_signatures
         values.append(signature)
-        self.task.fact_bag.set("repair.loop.seen_action_signatures", _dedupe(values))
+        merged = _dedupe(values)
+        self.task.fact_bag.set("repair.loop.seen_action_signatures", merged)
+        write_repair_loop_state(self.task, {"seen_action_signatures": merged})
 
     def _snapshot_repaired_file(self, result: RepairResult, round_number: int) -> str:
         repaired_input = result.repaired_input if isinstance(result.repaired_input, dict) else {}
@@ -291,6 +303,7 @@ class RepairLoopState:
                 continue
         self.task.fact_bag.set("repair.loop.generated_file_count", file_count)
         self.task.fact_bag.set("repair.loop.generated_bytes", byte_count)
+        write_repair_loop_state(self.task, {"generated_file_count": file_count, "generated_bytes": byte_count})
 
     def _elapsed_seconds(self) -> float:
         return time.monotonic() - self.started_at
@@ -307,11 +320,13 @@ class RepairLoopState:
         if best < 0.0 or current >= best + min_improvement:
             self.task.fact_bag.set("repair.loop.best_recovery_score", max(best, current))
             self.task.fact_bag.set("repair.loop.rounds_without_global_improvement", 0)
+            write_repair_loop_state(self.task, {"best_recovery_score": max(best, current), "rounds_without_global_improvement": 0})
             round_payload["global_best_recovery_score"] = max(best, current)
             round_payload["rounds_without_global_improvement"] = 0
             return False
         rounds_without = int(self.task.fact_bag.get("repair.loop.rounds_without_global_improvement", 0) or 0) + 1
         self.task.fact_bag.set("repair.loop.rounds_without_global_improvement", rounds_without)
+        write_repair_loop_state(self.task, {"rounds_without_global_improvement": rounds_without})
         round_payload["global_best_recovery_score"] = best
         round_payload["rounds_without_global_improvement"] = rounds_without
         return current < 0.999 and rounds_without >= patience
@@ -408,7 +423,7 @@ def input_digest(task: ArchiveTask) -> str:
         state = None
     if state is not None:
         return _state_digest(state)
-    raw = task.fact_bag.get("archive.input")
+    raw = knowledge_view.source_input(task) or task.fact_bag.get("archive.input")
     descriptor = _descriptor_from_task(task, raw)
     h = hashlib.sha256()
     h.update(_stable_json(_descriptor_shape(descriptor)).encode("utf-8"))

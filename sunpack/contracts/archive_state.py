@@ -251,6 +251,7 @@ class ArchiveState:
     format_hint: str = ""
     analysis: dict[str, Any] = field(default_factory=dict)
     verification: dict[str, Any] = field(default_factory=dict)
+    knowledge: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -267,6 +268,8 @@ class ArchiveState:
             payload["analysis"] = dict(self.analysis)
         if self.verification:
             payload["verification"] = dict(self.verification)
+        if self.knowledge:
+            payload["knowledge"] = dict(self.knowledge)
         return payload
 
     def effective_patch_digest(self) -> str:
@@ -296,6 +299,7 @@ class ArchiveState:
             format_hint=self.format_hint,
             analysis=dict(self.analysis),
             verification=dict(self.verification),
+            knowledge=dict(self.knowledge),
         )
 
     @classmethod
@@ -306,6 +310,7 @@ class ArchiveState:
         patches: list[PatchPlan] | None = None,
         analysis: dict[str, Any] | None = None,
         verification: dict[str, Any] | None = None,
+        knowledge: dict[str, Any] | None = None,
     ) -> "ArchiveState":
         patch_stack = list(patches or [])
         state = cls(
@@ -315,6 +320,7 @@ class ArchiveState:
             format_hint=descriptor.format_hint,
             analysis=dict(analysis or {}),
             verification=dict(verification or {}),
+            knowledge=dict(knowledge or {}),
         )
         return cls(
             source=state.source,
@@ -324,6 +330,7 @@ class ArchiveState:
             format_hint=state.format_hint,
             analysis=state.analysis,
             verification=state.verification,
+            knowledge=state.knowledge,
         )
 
     @classmethod
@@ -353,6 +360,7 @@ class ArchiveState:
             format_hint=str(raw.get("format_hint") or source.format_hint),
             analysis=dict(raw.get("analysis") or {}) if isinstance(raw.get("analysis"), dict) else {},
             verification=dict(raw.get("verification") or {}) if isinstance(raw.get("verification"), dict) else {},
+            knowledge=_knowledge_from_raw(raw),
         )
         if state.patch_digest:
             return state
@@ -364,6 +372,7 @@ class ArchiveState:
             format_hint=state.format_hint,
             analysis=state.analysis,
             verification=state.verification,
+            knowledge=state.knowledge,
         )
 
     @classmethod
@@ -410,7 +419,18 @@ def _with_state_defaults(state: ArchiveState, *, format_hint: str = "", logical_
         format_hint=state.format_hint or format_hint,
         analysis=dict(state.analysis),
         verification=dict(state.verification),
+        knowledge=dict(state.knowledge),
     )
+
+
+def _knowledge_from_raw(raw: dict[str, Any]) -> dict[str, Any]:
+    knowledge = raw.get("knowledge")
+    if isinstance(knowledge, dict):
+        return dict(knowledge)
+    analysis = raw.get("analysis")
+    if isinstance(analysis, dict) and isinstance(analysis.get("knowledge"), dict):
+        return dict(analysis["knowledge"])
+    return {}
 
 
 def _stable_digest(payload: Any) -> str:

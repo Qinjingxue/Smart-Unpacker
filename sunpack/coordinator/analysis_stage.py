@@ -5,6 +5,7 @@ from dataclasses import asdict, replace
 from typing import Any
 
 from sunpack.analysis import ArchiveAnalysisReport, ArchiveAnalysisScheduler
+from sunpack.analysis.knowledge import write_analysis_report, write_selected_segment
 from sunpack.analysis.result import ArchiveFormatEvidence, ArchiveSegment
 from sunpack.contracts.archive_input import (
     ArchiveInputDescriptor,
@@ -196,6 +197,7 @@ class ArchiveAnalysisStage:
         task.fact_bag.set("analysis.selected_format", evidence.format)
         task.fact_bag.set("analysis.segment_index", index)
         task.fact_bag.set("analysis.segment", segment_payload)
+        write_selected_segment(task, evidence, segment, index=index)
         if archive_input:
             task.set_archive_state(ArchiveState.from_archive_input(archive_input))
 
@@ -219,6 +221,7 @@ class ArchiveAnalysisStage:
                 for evidence in report.evidences
             ],
         )
+        write_analysis_report(task, report)
         self._record_state_analysis(task, report)
 
     def _record_state_analysis(self, task: ArchiveTask, report: ArchiveAnalysisReport) -> None:

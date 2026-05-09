@@ -9,6 +9,7 @@ from sunpack.analysis.result import ArchiveAnalysisReport, ArchiveFormatEvidence
 from sunpack.analysis.view import MultiVolumeBinaryView, PatchedBinaryView, SharedBinaryView
 from sunpack.contracts.archive_input import ArchiveInputDescriptor
 from sunpack.contracts.archive_state import ArchiveState
+from sunpack.support import archive_knowledge_projection as knowledge_view
 
 
 class ArchiveAnalysisScheduler:
@@ -71,7 +72,9 @@ class ArchiveAnalysisScheduler:
 
     def _analyze_archive_input(self, task) -> ArchiveAnalysisReport | None:
         fact_bag = getattr(task, "fact_bag", None)
-        raw = fact_bag.get("archive.input") if fact_bag is not None and hasattr(fact_bag, "get") else None
+        raw = knowledge_view.source_input(task)
+        if not raw and fact_bag is not None and hasattr(fact_bag, "get"):
+            raw = fact_bag.get("archive.input")
         if not isinstance(raw, dict):
             return None
         if hasattr(task, "archive_input"):

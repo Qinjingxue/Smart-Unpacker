@@ -1,5 +1,6 @@
 import sys
 import types
+import json
 from dataclasses import replace
 from pathlib import Path
 
@@ -74,6 +75,40 @@ def test_zip_policy_provider_selects_candidate_without_selector(tmp_path, monkey
     assert "ltr_features" not in selection["candidates"][0]
     assert "runtime_context" in selection["candidates"][0]
     assert "candidate_proposal" in selection["candidates"][0]
+
+
+def test_policy_probe_writes_public_request_and_decision(tmp_path, monkeypatch):
+    _install_policy_package(monkeypatch, "sunpack_policy_test_probe", _IndexProvider(selected_index=1))
+    probe_path = tmp_path / "policy_probe.jsonl"
+    monkeypatch.setenv("SUNPACK_REPAIR_POLICY_PROBE_JSONL", str(probe_path))
+    monkeypatch.setenv("SUNPACK_REPAIR_POLICY_PROBE_RUN_ID", "probe-run")
+    first = _candidate("selector_would_prefer", tmp_path / "first.zip", confidence=0.95)
+    second = _candidate("model_choice", tmp_path / "second.zip", confidence=0.1)
+    scheduler = RepairScheduler({
+        "repair": {
+            "workspace": str(tmp_path / "repair"),
+            "policy": {"provider_package": "sunpack_policy_test_probe"},
+        }
+    })
+    scheduler.generate_repair_candidates = lambda job: RepairCandidateBatch(candidates=[first, second])  # type: ignore[method-assign]
+
+    result = scheduler.repair(_job(tmp_path))
+
+    assert result.ok
+    events = [json.loads(line) for line in probe_path.read_text(encoding="utf-8").splitlines()]
+    assert [event["event"] for event in events] == [
+        "policy_probe_request",
+        "policy_probe_decision",
+        "policy_probe_selected_result",
+    ]
+    request = events[0]
+    decision = events[1]
+    assert request["run_id"] == "probe-run"
+    assert request["candidate_set_hash"]
+    assert request["candidate_payloads"][0]["runtime_context"]
+    assert "label" not in json.dumps(request, ensure_ascii=False)
+    assert decision["policy"]["decision_status"] == "selected"
+    assert decision["selected_candidate"]["module_name"] == "model_choice"
 
 
 def test_invalid_policy_decision_falls_back_to_selector(tmp_path, monkeypatch):
@@ -208,6 +243,7 @@ def test_policy_candidate_payload_matches_training_minimal_shape_without_oracle(
 
 def test_runtime_transition_evaluator_applies_candidate_and_restores_task(tmp_path):
     task = _task(tmp_path / "broken.zip", fmt="zip")
+    task.set_knowledge({"test": {"stable": True}})
     original_digest = task.archive_state().effective_patch_digest()
     candidate = _candidate("zip_fix_cd_offset", tmp_path / "fixed.zip", confidence=0.5)
     extracted = ExtractionResult(success=True, archive=task.main_path, out_dir=str(tmp_path / "out"), all_parts=[task.main_path])
@@ -227,7 +263,56 @@ def test_runtime_transition_evaluator_applies_candidate_and_restores_task(tmp_pa
     assert transition.verification.decision_hint == "repair"
     assert transition.source_digest == "digest"
     assert task.archive_state().effective_patch_digest() == original_digest
+    restored_knowledge = task.knowledge().to_dict()
+    assert restored_knowledge["test"]["stable"] is True
+    assert "verification" not in restored_knowledge
     assert extractor.seen_archive_states
+
+
+def test_runtime_repair_job_includes_descriptor_route_evidence(tmp_path):
+    task = _task(tmp_path / "descriptor.zip", fmt="zip")
+    task.fact_bag.set("repair_training.damage_profile", "zip_data_descriptor_cd_conflict")
+    task.fact_bag.set("repair_training.zip_structure_features", {"has_data_descriptor": True})
+    task.fact_bag.set("repair_training.zip_container_tags", ["data_descriptor", "bit3"])
+    stage = ArchiveRepairStage({"repair": {"workspace": str(tmp_path / "repair"), "policy": {"enabled": False}}})
+    job = stage._job_from_verification_assessment(task, _failed_extraction(task), _verification())  # noqa: SLF001
+
+    assert job is not None
+    assert "data_descriptor" in job.damage_flags
+    assert "central_directory_offset_bad" in job.damage_flags
+    assert "spurious_data_descriptor_candidate" in job.damage_flags
+    assert "data_descriptor" in job.repair_history["route_evidence_flags"]
+
+
+def test_runtime_repair_job_includes_non_utf8_route_evidence(tmp_path):
+    task = _task(tmp_path / "names.zip", fmt="zip")
+    task.fact_bag.set("repair_training.damage_profile", "zip_non_utf8_filename_directory_rebuild")
+    task.fact_bag.set("repair_training.zip_structure_features", {"has_filename_encoding_risk": True})
+    task.fact_bag.set("repair_training.zip_container_tags", ["filename_encoding", "non_utf8_names"])
+    stage = ArchiveRepairStage({"repair": {"workspace": str(tmp_path / "repair"), "policy": {"enabled": False}}})
+    job = stage._job_from_verification_assessment(task, _failed_extraction(task), _verification())  # noqa: SLF001
+
+    assert job is not None
+    assert "filename_encoding_bad" in job.damage_flags
+    assert "raw_filename_bytes" in job.damage_flags
+
+
+def test_runtime_repair_job_preserves_split_sidecars_without_unavailable_flag(tmp_path):
+    task = _task(tmp_path / "split.zip", fmt="zip")
+    part = tmp_path / "split.z01"
+    part.write_bytes(b"part")
+    task.all_parts = [task.main_path, str(part)]
+    task.split_info.parts = list(task.all_parts)
+    task.split_info.is_split = True
+    task.fact_bag.set("repair_training.damage_profile", "zip_split_missing_middle_volume")
+    task.fact_bag.set("repair_training.zip_structure_features", {"has_split_sidecars": True})
+    stage = ArchiveRepairStage({"repair": {"workspace": str(tmp_path / "repair"), "policy": {"enabled": False}}})
+    job = stage._job_from_verification_assessment(task, _failed_extraction(task), _verification())  # noqa: SLF001
+
+    assert job is not None
+    assert job.source_input.get("parts")
+    assert "split_sidecars_available" in job.damage_flags
+    assert "missing_volume_unavailable" not in job.damage_flags
 
 
 class _IndexProvider:
@@ -333,6 +418,17 @@ def _verification() -> VerificationResult:
             complete_files=0,
             confidence=0.5,
         ),
+    )
+
+
+def _failed_extraction(task: ArchiveTask) -> ExtractionResult:
+    return ExtractionResult(
+        success=False,
+        archive=task.main_path,
+        out_dir="",
+        all_parts=task.all_parts,
+        error="archive is damaged",
+        diagnostics={"result": {"status": "failed", "failure_stage": "extract", "failure_kind": "data_error"}},
     )
 
 

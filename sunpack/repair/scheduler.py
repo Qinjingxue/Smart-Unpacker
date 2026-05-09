@@ -1,5 +1,6 @@
 from dataclasses import replace
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -57,6 +58,23 @@ class RepairScheduler:
                     _policy_candidate_payload(job, candidate, index=index)
                     for index, candidate in enumerate(selectable)
                 ]
+                probe_query = _policy_probe_query(job)
+                probe_payloads = [repair_trace.public_policy_payload(payload) for payload in policy_payloads]
+                repair_trace.write_probe_event("policy_probe_request", {
+                    **probe_query,
+                    "job": repair_trace.job_payload(job),
+                    "diagnosis": batch.diagnosis,
+                    "route_evidence_flags": _probe_context_flags(probe_payloads, "route_evidence_flags"),
+                    "repair_history_flags": _probe_context_flags(probe_payloads, "repair_history_flags"),
+                    "residual_damage_flags": _probe_context_flags(probe_payloads, "residual_damage_flags"),
+                    "candidate_count": len(validated),
+                    "accepted_count": len(selectable),
+                    "candidate_payloads": probe_payloads,
+                    "runtime_context_hash": _runtime_context_hash(probe_payloads),
+                    "candidate_payload_hashes": [repair_trace.canonical_hash(payload) for payload in probe_payloads],
+                    "candidate_set_hash": repair_trace.canonical_hash(_candidate_set_hash_input(probe_payloads)),
+                    "beam_disabled_by_policy": _policy_disables_beam(self.config),
+                })
                 selected, policy_selection = self.policy_manager.choose(
                     job=job,
                     candidates=selectable,
@@ -64,6 +82,13 @@ class RepairScheduler:
                     diagnosis=batch.diagnosis,
                 )
                 selection = {"policy": _policy_selection_public(policy_selection)}
+                repair_trace.write_probe_event("policy_probe_decision", {
+                    **probe_query,
+                    "policy": _policy_selection_public(policy_selection),
+                    "selected_candidate": _selected_policy_payload(probe_payloads, policy_selection),
+                    "candidate_set_hash": repair_trace.canonical_hash(_candidate_set_hash_input(probe_payloads)),
+                    "beam_disabled_by_policy": _policy_disables_beam(self.config),
+                })
                 if selected is not None:
                     selection.update({
                         "candidate_count": len(validated),
@@ -103,6 +128,14 @@ class RepairScheduler:
                     "result": repair_trace.result_payload(result),
                     "selection": selection,
                     "candidate": trace_candidate,
+                    "candidate_count": len(batch.candidates),
+                })
+                repair_trace.write_probe_event("policy_probe_selected_result", {
+                    **_policy_probe_query(job),
+                    "job": repair_trace.job_payload(job),
+                    "result": repair_trace.result_payload(result),
+                    "selection": repair_trace.public_policy_payload(selection),
+                    "candidate": repair_trace.public_policy_payload(trace_candidate if isinstance(trace_candidate, dict) else {}),
                     "candidate_count": len(batch.candidates),
                 })
                 return result
@@ -744,6 +777,78 @@ def _policy_selection_public(selection: dict[str, Any]) -> dict[str, Any]:
         )
         if key in selection
     }
+
+
+def _policy_probe_query(job: RepairJob) -> dict[str, Any]:
+    run_id = str(os.environ.get("SUNPACK_REPAIR_POLICY_PROBE_RUN_ID") or "")
+    archive_key = str(getattr(job, "archive_key", "") or "")
+    round_index = int(getattr(job, "attempts", 0) or 0)
+    if not run_id:
+        run_id = archive_key or repair_trace.canonical_hash(repair_trace.job_payload(job))[:16]
+    return {
+        "run_id": run_id,
+        "query_id": f"{archive_key or run_id}:{round_index}",
+        "archive_key": archive_key,
+        "round": round_index,
+        "format": str(getattr(job, "format", "") or ""),
+    }
+
+
+def _policy_disables_beam(config: dict[str, Any]) -> bool:
+    policy = config.get("policy") if isinstance(config.get("policy"), dict) else {}
+    return bool(policy.get("enabled", True)) and bool(policy.get("disable_beam_when_model_active", True))
+
+
+def _runtime_context_hash(payloads: list[dict[str, Any]]) -> str:
+    for payload in payloads:
+        context = payload.get("runtime_context") if isinstance(payload, dict) else None
+        if isinstance(context, dict):
+            return repair_trace.canonical_hash(context)
+    return ""
+
+
+def _probe_context_flags(payloads: list[dict[str, Any]], key: str) -> list[str]:
+    for payload in payloads:
+        context = payload.get("runtime_context") if isinstance(payload, dict) else None
+        summary = context.get("job_summary") if isinstance(context, dict) and isinstance(context.get("job_summary"), dict) else {}
+        values = summary.get(key)
+        if isinstance(values, list):
+            return [str(item) for item in values if str(item)]
+    return []
+
+
+def _candidate_set_hash_input(payloads: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    output: list[dict[str, Any]] = []
+    for payload in payloads:
+        if not isinstance(payload, dict):
+            continue
+        proposal = payload.get("candidate_proposal") if isinstance(payload.get("candidate_proposal"), dict) else {}
+        output.append({
+            "candidate_id": payload.get("candidate_id"),
+            "module_name": payload.get("module_name") or payload.get("module"),
+            "repair_name": payload.get("repair_name"),
+            "native_key": payload.get("native_key"),
+            "native_target": payload.get("native_target"),
+            "candidate_status": payload.get("candidate_status"),
+            "patch_facts": proposal.get("patch_facts") or payload.get("patch_facts"),
+            "validation_details": proposal.get("validation_details") or payload.get("validation_details"),
+        })
+    return output
+
+
+def _selected_policy_payload(payloads: list[dict[str, Any]], selection: dict[str, Any]) -> dict[str, Any]:
+    selected_index = selection.get("selected_index")
+    try:
+        index = int(selected_index)
+    except (TypeError, ValueError):
+        index = -1
+    if 0 <= index < len(payloads):
+        return payloads[index]
+    selected_id = str(selection.get("selected_candidate_id") or "")
+    for payload in payloads:
+        if str(payload.get("candidate_id") or "") == selected_id:
+            return payload
+    return {}
 
 
 def _float_equal(left: Any, right: Any) -> bool:

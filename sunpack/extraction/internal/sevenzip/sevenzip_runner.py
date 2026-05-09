@@ -11,6 +11,7 @@ import psutil
 from sunpack.contracts.archive_input import ArchiveInputDescriptor
 from sunpack.contracts.tasks import ArchiveTask
 from sunpack.extraction.internal.sevenzip.worker_diagnostics import attach_worker_diagnostics
+from sunpack.support import archive_knowledge_projection as knowledge_view
 from sunpack.support.resources import get_7z_dll_path, get_sevenzip_worker_path
 
 
@@ -253,11 +254,15 @@ class SevenZipRunner:
 
     def _archive_input(self, task: ArchiveTask, archive_path: str, part_paths: list[str]) -> ArchiveInputDescriptor | None:
         if hasattr(task, "archive_input"):
-            raw = task.fact_bag.get("archive.input") if getattr(task, "fact_bag", None) is not None else None
+            raw = knowledge_view.source_input(task)
+            if not raw:
+                raw = task.fact_bag.get("archive.input") if getattr(task, "fact_bag", None) is not None else None
             if isinstance(raw, dict):
                 return task.archive_input()
         fact_bag = getattr(task, "fact_bag", None)
-        raw = fact_bag.get("archive.input") if fact_bag is not None and hasattr(fact_bag, "get") else None
+        raw = knowledge_view.source_input(task)
+        if not raw and fact_bag is not None and hasattr(fact_bag, "get"):
+            raw = fact_bag.get("archive.input")
         if isinstance(raw, dict):
             return self._normalize_archive_input(raw, archive_path, part_paths)
         return None
@@ -702,6 +707,9 @@ class SevenZipRunner:
         return stdout or "", f"{stderr or ''}\n{message}".strip()
 
     def _task_profile_key(self, task: ArchiveTask) -> str:
+        profile_key = knowledge_view.resource_profile_key(task)
+        if profile_key:
+            return profile_key
         fact_bag = getattr(task, "fact_bag", None)
         if fact_bag is not None and hasattr(fact_bag, "get"):
             profile_key = fact_bag.get("resource.profile_key")

@@ -23,6 +23,7 @@ from sunpack.coordinator.scheduling import (
 )
 from sunpack.detection import NestedOutputScanPolicy
 from sunpack.extraction.result import ExtractionResult
+from sunpack.extraction.knowledge import write_extraction_result
 from sunpack.extraction.scheduler import ExtractionScheduler
 from sunpack.extraction.progress import filter_extraction_manifest_payload, filter_extraction_outputs
 from sunpack.rename.scheduler import RenameScheduler
@@ -30,6 +31,8 @@ from sunpack.repair.candidate import RepairCandidate, candidate_feature_payload
 from sunpack.verification import RecoveryAttempt, VerificationResult, VerificationScheduler, compare_attempts, rank_attempt
 from sunpack.verification.result import DECISION_ACCEPT, DECISION_ACCEPT_PARTIAL, DECISION_REPAIR, DECISION_RETRY_EXTRACT
 from sunpack.support.path_keys import absolute_path_key
+from sunpack.support import repair_trace
+from sunpack.support import archive_knowledge_projection as knowledge_view
 
 
 @dataclass
@@ -158,7 +161,7 @@ class ExtractionBatchRunner:
             return skipped_results
         if len(ready_tasks) == 1:
             guard_enabled = bool(self._resource_guard_config().get("enabled", False))
-            if guard_enabled or isinstance(ready_tasks[0].fact_bag.get("resource.analysis"), dict):
+            if guard_enabled or knowledge_view.resource_analysis(ready_tasks[0]):
                 self.resource_inspector.inspect(ready_tasks[0])
             else:
                 self.resource_inspector.record_estimated_single_task_profile(ready_tasks[0])
@@ -205,7 +208,7 @@ class ExtractionBatchRunner:
             return []
         results: list[tuple[ArchiveTask, BatchExtractionOutcome]] = []
         for task in tasks:
-            analysis = task.fact_bag.get("resource.analysis")
+            analysis = knowledge_view.resource_analysis(task)
             if not isinstance(analysis, dict):
                 continue
             violations = _resource_guard_violations(analysis, guard)
@@ -352,6 +355,7 @@ class ExtractionBatchRunner:
         attempt_sequence = 0
         while attempt_index < attempts:
             result = self.extractor.extract(task, out_dir, runtime_scheduler=runtime_scheduler)
+            write_extraction_result(task, result)
             current_sequence = attempt_sequence
             attempt_sequence += 1
             if not result.success:
@@ -513,6 +517,26 @@ class ExtractionBatchRunner:
         outcome.round_index = int(round_index or outcome.round_index or 0)
         if not outcome.attempt_id:
             outcome.attempt_id = _recovery_attempt_id(outcome)
+        repair_trace.write_probe_event("policy_probe_transition", {
+            "run_id": _policy_probe_run_id(task),
+            "query_id": f"{task.key or task.main_path}:{outcome.round_index}",
+            "archive": task.main_path,
+            "archive_key": task.key,
+            "logical_name": str(task.logical_name or ""),
+            "round": int(outcome.round_index or 0),
+            "attempt_id": outcome.attempt_id,
+            "attempt_source": outcome.attempt_source,
+            "repair_module": outcome.repair_module,
+            "patch_digest": outcome.patch_digest,
+            "patch_lineage_count": len(outcome.patch_lineage or []),
+            "extraction": _extraction_summary(outcome.result),
+            "verification": _verification_summary(outcome.verification),
+            "comparison": dict(outcome.comparison or {}),
+            "continue_repair": bool(
+                outcome.verification is not None
+                and getattr(outcome.verification, "decision_hint", "") == DECISION_REPAIR
+            ),
+        })
 
     def _select_better_recovery_outcome(
         self,
@@ -910,7 +934,7 @@ class ExtractionBatchRunner:
                     part_paths=list(task.all_parts or [task.main_path]),
                     format_hint=str(candidate.format or task.detected_ext or ""),
                     logical_name=str(task.logical_name or ""),
-                    archive_input=task.fact_bag.get("archive.input"),
+                    archive_input=knowledge_view.source_input(task) or task.fact_bag.get("archive.input"),
                 )
             except (TypeError, ValueError):
                 return None
@@ -1097,6 +1121,23 @@ class ExtractionBatchRunner:
         res = outcome.result
         out_dir = res.out_dir
         _write_repair_candidate_jsonl(task, outcome, out_dir)
+        repair_trace.write_probe_event("policy_probe_terminal", {
+            "run_id": _policy_probe_run_id(task),
+            "archive": task.main_path,
+            "archive_key": task.key,
+            "logical_name": str(task.logical_name or ""),
+            "attempt_id": outcome.attempt_id,
+            "attempt_source": outcome.attempt_source,
+            "round": int(outcome.round_index or 0),
+            "repair_module": outcome.repair_module,
+            "patch_digest": outcome.patch_digest,
+            "success": bool(outcome.success),
+            "extraction": _extraction_summary(outcome.result),
+            "verification": _verification_summary(outcome.verification) if outcome.verification is not None else {},
+            "comparison": dict(outcome.comparison or {}),
+            "candidate_log_count": len(task.fact_bag.get("repair.candidate_log") or []),
+            "repair_candidate_log_path": str(task.fact_bag.get("repair.candidate_log_path") or ""),
+        })
 
         with self.context.lock:
             if outcome.success:
@@ -1263,6 +1304,15 @@ def _first_terminal_repair_result(results: list[Any]):
         if result is not None and not getattr(result, "ok", False):
             return result
     return None
+
+
+def _policy_probe_run_id(task: ArchiveTask) -> str:
+    return str(
+        os.environ.get("SUNPACK_REPAIR_POLICY_PROBE_RUN_ID")
+        or task.fact_bag.get("repair_training.sample_id")
+        or task.key
+        or task.main_path
+    )
 
 
 def _ensure_recovery_rank(outcome: BatchExtractionOutcome) -> None:

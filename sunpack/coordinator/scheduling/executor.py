@@ -10,6 +10,7 @@ from sunpack.coordinator.scheduling.resource_model import (
     estimate_task_work_bytes,
     task_profile_key,
 )
+from sunpack.support import archive_knowledge_projection as knowledge_view
 
 
 class TaskExecutor:
@@ -113,6 +114,12 @@ class TaskExecutor:
         return self._resource_demand(task).scalar_cost
 
     def _resource_demand(self, task: Any) -> ResourceDemand:
+        tokens = knowledge_view.resource_tokens(task)
+        if tokens:
+            return demand_from_value(tokens)
+        value = knowledge_view.resource_token_cost(task)
+        if value:
+            return demand_from_value(value)
         fact_bag = getattr(task, "fact_bag", None)
         if fact_bag is not None:
             try:

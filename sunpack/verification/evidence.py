@@ -7,6 +7,7 @@ from sunpack.contracts.archive_state import ArchiveState
 from sunpack.contracts.tasks import ArchiveTask
 from sunpack.extraction.result import ExtractionResult
 from sunpack.passwords import PasswordSession
+from sunpack.support import archive_knowledge_projection as knowledge_view
 
 
 @dataclass(frozen=True)
@@ -43,10 +44,10 @@ def build_verification_evidence(
     if password is None and password_session is not None:
         password = password_session.get_resolved(task.key)
     if password is None:
-        password = fact_bag.get("archive.password")
+        password = knowledge_view.archive_password(task)
     archive_state = task.archive_state()
     archive_input = archive_state.to_archive_input_descriptor()
-    analysis_facts = _analysis_facts(fact_bag)
+    analysis_facts = _analysis_facts_from_task(task)
     extraction_diagnostics = dict(extraction_result.diagnostics or {})
     worker_result = _worker_result(extraction_diagnostics)
     worker_native_diagnostics = _worker_native_diagnostics(worker_result)
@@ -61,8 +62,8 @@ def build_verification_evidence(
         output_dir=extraction_result.out_dir,
         password=password,
         fact_bag=fact_bag,
-        health=dict(fact_bag.get("resource.health") or {}),
-        analysis=dict(fact_bag.get("resource.analysis") or {}),
+        health=knowledge_view.resource_health(task),
+        analysis=knowledge_view.resource_analysis(task),
         analysis_facts=analysis_facts,
         archive_state_analysis=dict(archive_state.analysis or {}),
         extraction_diagnostics=extraction_diagnostics,
@@ -90,6 +91,18 @@ def _load_progress_manifest(extraction_result: ExtractionResult) -> dict[str, An
     except (OSError, json.JSONDecodeError, TypeError, ValueError):
         return None
     return payload if isinstance(payload, dict) else None
+
+
+def _analysis_facts_from_task(task: ArchiveTask) -> dict[str, Any]:
+    prepass = knowledge_view.analysis_prepass(task)
+    selected = knowledge_view.selected_format(task)
+    segment = knowledge_view.get(task, "analysis.selected_segment.segment", {})
+    output = dict(prepass)
+    if selected:
+        output.setdefault("selected_format", selected)
+    if isinstance(segment, dict):
+        output.setdefault("segment", dict(segment))
+    return output
 
 
 def _analysis_facts(fact_bag: Any) -> dict[str, Any]:

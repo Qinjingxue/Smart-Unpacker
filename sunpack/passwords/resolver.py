@@ -1,4 +1,5 @@
 from sunpack.contracts.detection import FactBag
+from sunpack.contracts.archive_knowledge import ArchiveKnowledge
 from sunpack.contracts.archive_state import ArchiveState
 from sunpack.passwords.candidates import PasswordCandidatePipeline
 from sunpack.passwords.job import PasswordJob
@@ -157,6 +158,9 @@ class PasswordResolver:
             if state.patches:
                 return None
             return state.to_archive_input_descriptor().to_dict()
+        knowledge_input = ArchiveKnowledge.from_any(fact_bag.get("archive.knowledge")).get("source.input")
+        if isinstance(knowledge_input, dict):
+            return knowledge_input
         archive_input = fact_bag.get("archive.input")
         return archive_input if isinstance(archive_input, dict) else None
 
@@ -183,7 +187,7 @@ class PasswordResolver:
     def _facts_confirm_unencrypted(fact_bag: FactBag | None) -> bool:
         if fact_bag is None:
             return False
-        health = fact_bag.get("resource.health") or {}
+        health = ArchiveKnowledge.from_any(fact_bag.get("archive.knowledge")).get("resource.health") or fact_bag.get("resource.health") or {}
         if isinstance(health, dict):
             if health.get("is_archive") and not health.get("is_encrypted") and not health.get("is_wrong_password"):
                 return True
@@ -193,7 +197,7 @@ class PasswordResolver:
     def _facts_require_password(fact_bag: FactBag | None) -> bool:
         if fact_bag is None:
             return False
-        health = fact_bag.get("resource.health") or {}
+        health = ArchiveKnowledge.from_any(fact_bag.get("archive.knowledge")).get("resource.health") or fact_bag.get("resource.health") or {}
         if isinstance(health, dict) and (health.get("is_encrypted") or health.get("is_wrong_password")):
             return True
         return bool(fact_bag.get("file.validation_encrypted"))

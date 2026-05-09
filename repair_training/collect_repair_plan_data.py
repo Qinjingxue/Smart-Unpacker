@@ -26,7 +26,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from sunpack.repair import RepairJob, RepairResult, RepairScheduler
 from sunpack.repair.candidate import CandidateSelector, candidate_feature_payload, materialize_candidate
-from sunpack.repair.context import zip_route_evidence_flags
+from sunpack.repair.context import normalize_zip_runtime_route_evidence, zip_route_evidence_flags
 from sunpack.contracts.archive_state import ArchiveState
 from sunpack.contracts.detection import FactBag
 from sunpack.contracts.tasks import ArchiveTask
@@ -965,18 +965,26 @@ def _collect_sample_rows(record: dict[str, Any], args: argparse.Namespace, debug
         if isinstance(flags, list) and "missing_volume" in flags:
             record["damage_flags"] = [f for f in flags if f != "missing_volume"]
             record["runtime_damage_flags"] = record["damage_flags"]
-    # Merge zip_container_tags into damage_flags for SFX/carrier detection
-    container_tags = record.get("zip_container_tags") or []
-    if isinstance(container_tags, list):
-        tag_flags = {t for t in container_tags if t in {"sfx", "carrier_prefix", "carrier_archive", "embedded_archive"}}
-        if tag_flags:
-            existing = set(record.get("damage_flags") or [])
-            record["damage_flags"] = list(existing | tag_flags)
-            record["runtime_damage_flags"] = record["damage_flags"]
-    route_evidence = zip_route_evidence_flags(record)
+    route_payload = normalize_zip_runtime_route_evidence({
+        **dict(record),
+        "source_input": source_input,
+        "damaged_input": dict(record.get("damaged_input") or {}),
+        "damage_flags": list(record.get("damage_flags") or []),
+    })
+    if route_payload.get("source_input"):
+        source_input = dict(route_payload.get("source_input") or source_input)
+        damaged = record.get("damaged_input")
+        if isinstance(damaged, dict):
+            for key in ("parts", "route_evidence_flags", "zip_structure_features", "zip_container_tags", "source_derivation"):
+                if key in source_input:
+                    damaged[key] = source_input[key]
+    for key in ("zip_structure_features", "zip_container_tags", "source_derivation"):
+        if route_payload.get(key) and not record.get(key):
+            record[key] = route_payload[key]
+    route_evidence = list(route_payload.get("route_evidence_flags") or [])
     if route_evidence:
         record["route_evidence_flags"] = _dedupe_str([*list(record.get("route_evidence_flags") or []), *route_evidence])
-        record["damage_flags"] = _dedupe_str([*list(record.get("damage_flags") or []), *route_evidence])
+        record["damage_flags"] = _dedupe_str([*list(route_payload.get("damage_flags") or []), *route_evidence])
         record["runtime_damage_flags"] = _dedupe_str([*list(record.get("runtime_damage_flags") or record.get("damage_flags") or []), *route_evidence])
     if record.get("split_sidecars_available") and "missing_volume_unavailable" not in set(record.get("damage_flags") or []) and "tail_volume_truncated" not in set(record.get("damage_flags") or []):
         for key in ("damage_flags", "runtime_damage_flags", "route_evidence_flags"):
@@ -1052,6 +1060,7 @@ def _collect_sample_rows(record: dict[str, Any], args: argparse.Namespace, debug
                 password=record.get("password"),
                 archive_state=archive_state,
                 repair_history=_repair_history_payload(record, state, route_evidence_flags, repair_history_flags, residual_damage_flags),
+                knowledge=dict(state.get("archive_knowledge") or _record_archive_knowledge(record)),
             )
             phase_started = time.perf_counter()
             lazy_mode = str(args.proposal_mode or "lazy") == "lazy"
@@ -1086,6 +1095,7 @@ def _collect_sample_rows(record: dict[str, Any], args: argparse.Namespace, debug
                 password=record.get("password"),
                 archive_state=archive_state,
                 repair_history=_repair_history_payload(record, state, route_evidence_flags, repair_history_flags, residual_damage_flags),
+                knowledge=dict(state.get("archive_knowledge") or _record_archive_knowledge(record)),
             )
             debug_events.write("phase", record, round=state_round, query_id=query_id, phase="before_state", elapsed_seconds=round(time.perf_counter() - phase_started, 3))
             state_features = _state_features(record, job, batch, state_round, previous_actions, previous_modules, best_completeness, before_state)
@@ -1266,6 +1276,14 @@ def _collect_sample_rows(record: dict[str, Any], args: argparse.Namespace, debug
                     "route_evidence_flags": list(route_evidence_flags),
                     "repair_history_flags": child_repair_history_flags,
                     "residual_damage_flags": child_residual_flags,
+                    "archive_knowledge": _child_archive_knowledge(
+                        getattr(job, "knowledge", {}) or state.get("archive_knowledge") or {},
+                        candidate.module_name,
+                        candidate.actions,
+                        patch_facts,
+                        child_residual_flags,
+                        child_runtime_verification,
+                    ),
                     "applied_patch_facts": _dedupe_str([*list(state.get("applied_patch_facts") or []), *patch_facts]),
                     "previous_actions": [*previous_actions, *[str(action) for action in candidate.actions]],
                     "previous_modules": [*previous_modules, str(candidate.module_name)],
@@ -1343,6 +1361,7 @@ def _root_rollout_state(record: dict[str, Any], fmt: str, rollout_mode: str) -> 
         "route_evidence_flags": _dedupe_str(list(record.get("route_evidence_flags") or zip_route_evidence_flags(record))),
         "repair_history_flags": [],
         "residual_damage_flags": [],
+        "archive_knowledge": _record_archive_knowledge(record),
         "previous_actions": [],
         "previous_modules": [],
         "best_completeness": 0.0,
@@ -1381,6 +1400,30 @@ def _runtime_initial_damage_flags(record: dict[str, Any]) -> list[str]:
     if raw and "damaged" not in visible:
         visible.append("damaged")
     return _dedupe_str(visible)
+
+
+def _record_archive_knowledge(record: dict[str, Any]) -> dict[str, Any]:
+    source_derivation = record.get("source_derivation") if isinstance(record.get("source_derivation"), dict) else {}
+    return {
+        "source": {
+            "input": dict(record.get("damaged_input") or {}),
+            "derivation": _compact_source_derivation(source_derivation),
+        },
+        "format": {
+            "zip": {
+                "structure": record.get("zip_structure_features") or source_derivation.get("zip_structure_features") or {},
+                "container_tags": record.get("zip_container_tags") or source_derivation.get("zip_container_tags") or [],
+                "route_evidence_flags": list(record.get("route_evidence_flags") or zip_route_evidence_flags(record)),
+            }
+        },
+        "repair": {
+            "route_evidence": {"flags": list(record.get("route_evidence_flags") or zip_route_evidence_flags(record))},
+            "damage": {"flags": _runtime_initial_damage_flags(record)},
+        },
+        "verification": {
+            "summary": dict(record.get("runtime_initial_verification") or {}),
+        },
+    }
 
 
 def _next_state_damage_flags(
@@ -1452,6 +1495,34 @@ def _child_repair_history_flags(modules: list[str], actions: list[str]) -> list[
         if "local_header" in action:
             flags.append("after_local_header_repair")
     return _dedupe_str(flags)
+
+
+def _child_archive_knowledge(
+    parent: dict[str, Any],
+    module_name: str,
+    actions: list[str],
+    patch_facts: list[str],
+    residual_flags: list[str],
+    runtime_verification: dict[str, Any],
+) -> dict[str, Any]:
+    knowledge = dict(parent or {})
+    repair = dict(knowledge.get("repair") or {})
+    history = list(repair.get("history") or [])
+    history.append({
+        "module": str(module_name or ""),
+        "actions": [str(action) for action in actions or []],
+        "patch_facts": [str(fact) for fact in patch_facts or []],
+        "residual_flags": [str(flag) for flag in residual_flags or []],
+    })
+    repair["history"] = history[-200:]
+    repair["patch_facts"] = {"flags": _dedupe_str([*list((repair.get("patch_facts") or {}).get("flags") or []), *[str(fact) for fact in patch_facts or []]])}
+    repair["residual"] = {"flags": _dedupe_str([*list((repair.get("residual") or {}).get("flags") or []), *[str(flag) for flag in residual_flags or []]])}
+    knowledge["repair"] = repair
+    verification = dict(knowledge.get("verification") or {})
+    if runtime_verification:
+        verification["summary"] = dict(runtime_verification)
+        knowledge["verification"] = verification
+    return knowledge
 
 
 def _residual_damage_flags_from_label(label_info: dict[str, Any], after_state: dict[str, Any] | None, runtime_verification: dict[str, Any]) -> list[str]:
@@ -1770,6 +1841,7 @@ def _rollout_terminal_row(
         "route_evidence_flags": list(state.get("route_evidence_flags") or []),
         "repair_history_flags": list(state.get("repair_history_flags") or []),
         "residual_damage_flags": list(state.get("residual_damage_flags") or []),
+        "archive_knowledge": dict(state.get("archive_knowledge") or {}),
         "path_score": float(state.get("path_score", 0.0) or 0.0),
         "rollout_mode": state.get("rollout_mode") or "greedy",
         "terminal_status": status,
@@ -2941,6 +3013,7 @@ def _state_features(record: dict[str, Any], job: RepairJob, batch, round_index: 
         "route_evidence_flags": list(getattr(job, "repair_history", {}).get("route_evidence_flags") or []),
         "repair_history_flags": list(getattr(job, "repair_history", {}).get("repair_history_flags") or []),
         "residual_damage_flags": list(getattr(job, "repair_history", {}).get("residual_damage_flags") or []),
+        "archive_knowledge": dict(getattr(job, "knowledge", {}) or {}),
         "damage_flags": list(job.damage_flags or []),
         "best_runtime_score": float(runtime_state.get("runtime_score", 0.0) or 0.0),
         "state_summary": runtime_state,
@@ -3032,6 +3105,7 @@ def _action_row(
         "route_evidence_flags": list(state_features.get("route_evidence_flags") or []),
         "repair_history_flags": list(state_features.get("repair_history_flags") or []),
         "residual_damage_flags": list(state_features.get("residual_damage_flags") or []),
+        "archive_knowledge": dict(state_features.get("archive_knowledge") or getattr(job, "knowledge", {}) or {}),
         "native_target_mismatch": bool(payload.get("native_target_mismatch")),
         "selected_by_current_system": bool(selected),
         "proposal_only": bool(proposal_only),

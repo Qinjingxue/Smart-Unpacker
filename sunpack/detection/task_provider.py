@@ -4,7 +4,10 @@ from typing import Any
 from sunpack.config.detection_view import detection_config, rule_pipeline_config
 from sunpack.contracts.detection import FactBag
 from sunpack.contracts.tasks import ArchiveTask
+from sunpack.detection.knowledge import write_detection_task
 from sunpack.detection.scheduler import DetectionScheduler
+from sunpack.filesystem.knowledge import write_filesystem_task
+from sunpack.relations.knowledge import write_relation_task
 from sunpack.relations.scheduler import RelationsScheduler
 
 
@@ -37,6 +40,7 @@ class ArchiveTaskProvider:
             decision = detection.decision
             if decision.should_extract:
                 task = ArchiveTask.from_fact_bag(bag, decision.total_score, decision=decision)
+                _write_initial_task_knowledge(task)
                 if task.key in processed_keys:
                     continue
                 tasks.append(task)
@@ -53,6 +57,7 @@ class ArchiveTaskProvider:
             if not main_path or not self._is_standard_archive_candidate(main_path, bag):
                 continue
             task = ArchiveTask.from_fact_bag(bag, score=0)
+            _write_initial_task_knowledge(task)
             if task.key in processed_keys:
                 continue
             tasks.append(task)
@@ -105,3 +110,9 @@ class ArchiveTaskProvider:
         path = bag.get("candidate.entry_path") or bag.get("file.path") or ""
         name = os.path.basename(path) or str(bag.get("candidate.logical_name") or "split archive")
         return f"{name} [分卷缺失或不完整]"
+
+
+def _write_initial_task_knowledge(task: ArchiveTask) -> None:
+    write_filesystem_task(task)
+    write_relation_task(task)
+    write_detection_task(task)
