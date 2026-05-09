@@ -13,6 +13,7 @@ from sunpack.support.archive_knowledge_writer import (
     ensure_knowledge,
     write_flags,
     write_payload,
+    write_value,
 )
 from sunpack.verification.result import VerificationResult
 
@@ -37,7 +38,7 @@ def write_repair_job_context(
         write_payload(knowledge, "analysis.evidence", evidence_payload, source_layer="repair", source_module="job_context")
     write_payload(knowledge, "extraction.failure", dict(extraction_failure or {}), source_layer="repair", source_module="job_context")
     write_payload(knowledge, "extraction.diagnostics", dict(extraction_diagnostics or {}), source_layer="repair", source_module="job_context")
-    write_payload(knowledge, "repair.history", dict(repair_history or {}), source_layer="repair", source_module="job_context")
+    write_value(knowledge, "repair.history", dict(repair_history or {}), source_layer="repair", source_module="job_context")
     write_payload(knowledge, "verification.summary", _verification_payload(verification), source_layer="repair", source_module="job_context")
     if route_payload.get("format"):
         write_payload(

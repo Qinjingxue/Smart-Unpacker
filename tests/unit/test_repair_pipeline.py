@@ -983,6 +983,22 @@ def test_repair_scheduler_blocks_process_level_failures(tmp_path):
         extraction_diagnostics={
             "process_failure": {"failure_stage": "worker_start", "failure_kind": "process_start"},
         },
+        knowledge={
+            "source": {"input": {"kind": "file", "path": str(tmp_path / "broken.zip"), "format_hint": "zip"}},
+            "analysis": {"summary": {"format": "zip"}},
+            "extraction": {
+                "failure": {
+                    "failure_stage": "worker_start",
+                    "failure_kind": "process_start",
+                    "error": "worker missing",
+                },
+                "diagnostics": {
+                    "failure_stage": "worker_start",
+                    "failure_kind": "process_start",
+                    "process_failure": {"failure_stage": "worker_start", "failure_kind": "process_start"},
+                },
+            },
+        },
         archive_key="broken",
     ))
 

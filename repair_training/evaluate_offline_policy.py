@@ -59,6 +59,12 @@ def _parser() -> argparse.ArgumentParser:
 def _input_paths(inputs: list[str], dataset_dir: Path) -> list[Path]:
     if inputs:
         return [Path(item) for item in inputs if Path(item).is_file()]
+    runtime_graph = [
+        dataset_dir / "runtime_repair_graph_success.jsonl",
+        dataset_dir / "runtime_repair_graph_failure.jsonl",
+    ]
+    if any(path.is_file() for path in runtime_graph):
+        return [path for path in runtime_graph if path.is_file()]
     preferred = [
         dataset_dir / "repair_plan_ltr_success_zip_terminal_recovery.jsonl",
         dataset_dir / "repair_plan_ltr_failure_zip_terminal_recovery.jsonl",

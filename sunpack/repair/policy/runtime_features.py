@@ -472,9 +472,12 @@ def _feature_contract_miss(knowledge: ArchiveKnowledge) -> list[str]:
         "analysis.summary",
         "extraction.failure",
         "verification.summary",
-        "repair.history",
     )
-    return [path for path in required if knowledge.get(path) in (None, "", [], {})]
+    missing = [path for path in required if knowledge.get(path) in (None, "", [], {})]
+    sentinel = object()
+    if knowledge.get("repair.history", sentinel) is sentinel:
+        missing.append("repair.history")
+    return missing
 
 
 def _dict_at(knowledge: ArchiveKnowledge, path: str) -> dict[str, Any]:

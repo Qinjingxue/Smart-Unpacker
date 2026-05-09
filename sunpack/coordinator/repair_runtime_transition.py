@@ -6,10 +6,14 @@ from pathlib import Path
 from typing import Any, Callable
 
 from sunpack.contracts.archive_state import ArchiveState
+from sunpack.contracts.detection import FactBag
 from sunpack.contracts.tasks import ArchiveTask
+from sunpack.coordinator.analysis_stage import ArchiveAnalysisStage
 from sunpack.extraction.result import ExtractionResult
+from sunpack.extraction.knowledge import write_extraction_result
 from sunpack.extraction.scheduler import ExtractionScheduler
 from sunpack.repair.candidate import RepairCandidate
+from sunpack.repair.knowledge import write_repair_archive_status, write_repair_result
 from sunpack.verification import VerificationResult, VerificationScheduler
 from sunpack.verification.result import DECISION_ACCEPT, DECISION_ACCEPT_PARTIAL
 
@@ -25,6 +29,7 @@ class RepairRuntimeTransition:
     can_continue_repair: bool = False
     accepted_complete: bool = False
     accepted_partial: bool = False
+    task_snapshot: dict[str, Any] | None = None
 
 
 class RepairRuntimeTransitionEvaluator:
@@ -43,6 +48,7 @@ class RepairRuntimeTransitionEvaluator:
         extractor: ExtractionScheduler,
         verifier: VerificationScheduler,
         repair_stage: Any,
+        analysis_stage: ArchiveAnalysisStage | None = None,
         runtime_scheduler: Any = None,
         light_verify: Callable[[ArchiveTask, ExtractionResult], VerificationResult] | None = None,
         needs_full_verification: Callable[[RepairCandidate, VerificationResult], bool] | None = None,
@@ -51,6 +57,7 @@ class RepairRuntimeTransitionEvaluator:
         self.extractor = extractor
         self.verifier = verifier
         self.repair_stage = repair_stage
+        self.analysis_stage = analysis_stage
         self.runtime_scheduler = runtime_scheduler
         self.light_verify = light_verify
         self.needs_full_verification = needs_full_verification
@@ -62,6 +69,9 @@ class RepairRuntimeTransitionEvaluator:
         candidate: RepairCandidate,
         *,
         temp_dir: str | Path,
+        restore: bool = True,
+        refresh_analysis: bool = False,
+        record_repair_history: bool = False,
     ) -> RepairRuntimeTransition:
         original_state = task.archive_state()
         original_knowledge = task.knowledge().to_dict()
@@ -69,8 +79,13 @@ class RepairRuntimeTransitionEvaluator:
         shutil.rmtree(temp_dir, ignore_errors=True)
         digest = self._candidate_source_digest(candidate)
         try:
+            if record_repair_history:
+                self.record_candidate_repair(task, candidate)
             self.apply_candidate_to_task(task, candidate)
+            if refresh_analysis and self.analysis_stage is not None:
+                self.analysis_stage.refresh_task_analysis(task)
             extracted = self.extractor.extract(task, temp_dir, runtime_scheduler=self.runtime_scheduler)
+            write_extraction_result(task, extracted)
             light = self.light_verify(task, extracted) if self.light_verify is not None else self.verifier.verify(task, extracted)
             if self.needs_full_verification is not None and not self.needs_full_verification(candidate, light):
                 assessed = light
@@ -89,10 +104,12 @@ class RepairRuntimeTransitionEvaluator:
                 can_continue_repair=assessed.decision_hint not in {DECISION_ACCEPT, DECISION_ACCEPT_PARTIAL},
                 accepted_complete=assessed.decision_hint == DECISION_ACCEPT,
                 accepted_partial=assessed.decision_hint == DECISION_ACCEPT_PARTIAL,
+                task_snapshot=task.knowledge().to_dict(),
             )
         finally:
-            task.set_archive_state(original_state)
-            task.set_knowledge(original_knowledge)
+            if restore:
+                task.set_archive_state(original_state)
+                task.set_knowledge(original_knowledge)
 
     def apply_candidate_to_task(self, task: ArchiveTask, candidate: RepairCandidate) -> None:
         archive_state = candidate.plan.get("archive_state") if isinstance(candidate.plan, dict) else None
@@ -105,10 +122,29 @@ class RepairRuntimeTransitionEvaluator:
             return
         task.set_archive_input(candidate.repaired_input)
 
+    def record_candidate_repair(self, task: ArchiveTask, candidate: RepairCandidate) -> None:
+        result = candidate.to_result(selection={"selected_candidate_id": self._candidate_id(candidate)})
+        append_history = getattr(self.repair_stage, "_append_repair_history", None)
+        if callable(append_history):
+            append_history(task, result)
+        else:
+            write_repair_result(task, result, phase="runtime_transition")
+        if result.ok:
+            write_repair_archive_status(task, repaired=True)
+
     def _candidate_source_digest(self, candidate: RepairCandidate) -> str:
         if isinstance(candidate.plan, dict) and candidate.plan.get("archive_state"):
             return self.source_digest({"archive_state": candidate.plan.get("archive_state")})
         return self.source_digest(candidate.repaired_input)
+
+    @staticmethod
+    def _candidate_id(candidate: RepairCandidate) -> str:
+        try:
+            from sunpack.repair.candidate import candidate_feature_payload
+
+            return str(candidate_feature_payload(candidate).get("candidate_id") or "")
+        except Exception:
+            return ""
 
     @staticmethod
     def terminal_reason(result: ExtractionResult, verification: VerificationResult) -> str:
@@ -130,3 +166,32 @@ def _default_source_digest(source: dict[str, Any]) -> str:
     except TypeError:
         payload = str(source)
     return hashlib.sha256(payload.encode("utf-8", errors="replace")).hexdigest()
+
+
+def clone_archive_task(task: ArchiveTask, *, key_suffix: str = "") -> ArchiveTask:
+    bag = FactBag()
+    for key, value in task.fact_bag.to_dict().items():
+        bag.set(key, value)
+    cloned = ArchiveTask(
+        fact_bag=bag,
+        score=task.score,
+        key=f"{task.key}{key_suffix}" if key_suffix else task.key,
+        main_path=task.main_path,
+        all_parts=list(task.all_parts or []),
+        logical_name=task.logical_name,
+        split_info=type(task.split_info)(
+            is_split=task.split_info.is_split,
+            is_sfx_stub=task.split_info.is_sfx_stub,
+            parts=list(task.split_info.parts or []),
+            preferred_entry=task.split_info.preferred_entry,
+            source=task.split_info.source,
+            volumes=list(task.split_info.volumes or []),
+        ),
+        decision=task.decision,
+        stop_reason=task.stop_reason,
+        matched_rules=list(task.matched_rules or []),
+        detected_ext=task.detected_ext,
+    )
+    cloned.set_knowledge(task.knowledge().to_dict())
+    cloned.set_archive_state(task.archive_state())
+    return cloned

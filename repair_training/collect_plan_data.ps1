@@ -70,58 +70,26 @@ function Get-TrainingPython {
 }
 
 $python = Get-TrainingPython
+$runtimeWorkers = $CollectorWorkers
+if ($SampleWorkerCount -gt 0) {
+    $runtimeWorkers = $SampleWorkerCount
+}
+$runtimeWorkers = [Math]::Max(1, [int]$runtimeWorkers)
 $argsList = @(
-    "repair_training\collect_repair_plan_data.py",
+    "repair_training\collect_runtime_repair_graph.py",
     "--success-output", $SuccessOutput,
     "--failure-output", $FailureOutput,
     "--workspace", $Workspace,
-    "--collector-shard", "$CollectorShard",
-    "--collector-workers", "$CollectorWorkers",
-    "--sample-execution-mode", $SampleExecutionMode,
-    "--sample-worker-count", "$SampleWorkerCount",
     "--max-rounds", "$MaxRounds",
-    "--max-candidates-per-round", "$MaxCandidatesPerRound",
-    "--rollout-mode", $RolloutMode,
-    "--beam-size", "$BeamSize",
+    "--max-states", "$MaxTotalStatesPerSample",
     "--branch-top-k", "$BranchTopK",
-    "--counterfactual-extra", "$CounterfactualExtra",
-    "--max-total-states-per-sample", "$MaxTotalStatesPerSample",
     "--future-label-discount", "$FutureLabelDiscount",
-    "--proposal-mode", $ProposalMode,
-    "--materialize-top-k-per-round", "$MaterializeTopKPerRound",
-    "--max-expensive-materializations-per-round", "$MaxExpensiveMaterializationsPerRound",
+    "--materialize-top-k", "$MaterializeTopKPerRound",
     "--case-timeout-seconds", "$CaseTimeoutSeconds",
-    "--stream-large-size-mb", "$StreamLargeSizeMb",
-    "--stream-large-case-timeout-seconds", "$StreamLargeCaseTimeoutSeconds",
-    "--stream-large-max-candidates-per-round", "$StreamLargeMaxCandidatesPerRound",
-    "--heartbeat-seconds", "$HeartbeatSeconds"
+    "--workers", "$runtimeWorkers"
 )
-if ($TotalTimeoutSeconds -gt 0) {
-    $argsList += @("--total-timeout-seconds", "$TotalTimeoutSeconds")
-}
 if ($SummaryOutput) {
     $argsList += @("--summary-output", $SummaryOutput)
-}
-if ($IdleTimeoutSeconds -gt 0) {
-    $argsList += @("--idle-timeout-seconds", "$IdleTimeoutSeconds")
-}
-if ($DebugEvents) {
-    $argsList += @("--debug-events", $DebugEvents)
-}
-if ($DisableRepairCache) {
-    $argsList += "--disable-repair-cache"
-}
-if ($ProfileMaterializationCandidates) {
-    $argsList += "--profile-materialization-candidates"
-}
-if ($SkipLargeStreamSamples) {
-    $argsList += "--skip-large-stream-samples"
-}
-if ($MaterializeSelectedOnly) {
-    $argsList += "--materialize-selected-only"
-}
-if ($IncludeUnmaterializedLabels) {
-    $argsList += "--no-skip-unmaterialized-labels"
 }
 
 if ($Manifest) {

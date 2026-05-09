@@ -247,7 +247,9 @@ def _severity(flags: set[str], failure: dict[str, Any], confidence: float, *, pa
 def _repairability(job: RepairJob, flags: set[str]) -> tuple[bool, list[str], list[str]]:
     if "wrong_password" in flags and not _has_resolved_password(job):
         return False, [], ["password must be resolved before structural repair"]
-    if flags & {"output_filesystem", "process_failure"}:
+    if "output_filesystem" in flags and not _has_archive_repair_evidence(flags):
+        return False, [], ["failure is outside archive repair scope"]
+    if "process_failure" in flags and not _has_archive_repair_evidence(flags):
         return False, [], ["failure is outside archive repair scope"]
     if "missing_volume" in flags and not _missing_volume_partial_salvage_allowed(job, flags):
         return False, ["volume_synthesis"], ["missing archive volume must be supplied before repair"]
@@ -255,6 +257,13 @@ def _repairability(job: RepairJob, flags: set[str]) -> tuple[bool, list[str], li
     if job.attempts >= 2:
         return False, unsafe, ["repair attempt limit reached"]
     return True, unsafe, []
+
+
+def _has_archive_repair_evidence(flags: set[str]) -> bool:
+    return bool(
+        (flags & (BOUNDARY_FLAGS | DIRECTORY_FLAGS | CONTENT_FLAGS))
+        - {"process_failure"}
+    )
 
 
 def _missing_volume_partial_salvage_allowed(job: RepairJob, flags: set[str]) -> bool:

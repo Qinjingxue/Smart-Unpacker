@@ -76,6 +76,7 @@ def build_repair_context(job: RepairJob, diagnosis: RepairDiagnosis) -> RepairCo
             "repair_history": history_summary,
             "damage_flags": damage_flags,
         })
+    failure_kind = _archive_scoped_failure_kind(failure_kind, damage_flags)
     source = knowledge_view.source_input(knowledge)
     analysis_summary = knowledge_view.analysis_summary(knowledge)
     prepass = knowledge_view.analysis_prepass(knowledge)
@@ -112,6 +113,26 @@ def build_repair_context(job: RepairJob, diagnosis: RepairDiagnosis) -> RepairCo
         residual_damage_flags=tuple(residual_damage_flags),
         knowledge=knowledge.to_dict(),
     )
+
+
+def _archive_scoped_failure_kind(failure_kind: str, damage_flags: list[str]) -> str:
+    if str(failure_kind or "") != "output_filesystem":
+        return str(failure_kind or "")
+    evidence_flags = set(damage_flags or []) & {
+        "data_descriptor",
+        "central_directory_bad",
+        "central_directory_offset_bad",
+        "central_directory_count_bad",
+        "compressed_size_bad",
+        "checksum_error",
+        "crc_error",
+        "damaged",
+        "content_integrity_bad_or_unknown",
+        "local_header_recovery",
+        "local_header_conflict",
+        "payload_hash_mismatch",
+    }
+    return "corrupted_data" if evidence_flags else "output_filesystem"
 
 
 def zip_route_evidence_flags(payload: dict[str, Any]) -> list[str]:
