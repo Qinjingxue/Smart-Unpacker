@@ -7,7 +7,7 @@ from sunpack.analysis import ArchiveAnalysisReport
 from sunpack.analysis.result import ArchiveFormatEvidence, ArchiveSegment
 from sunpack.contracts.tasks import ArchiveTask
 from sunpack.repair.context import normalize_zip_runtime_route_evidence
-from sunpack.support.archive_knowledge_writer import commit_task_knowledge, ensure_knowledge, write_flags, write_payload
+from sunpack.support.archive_knowledge_writer import commit_task_knowledge, ensure_knowledge, write_flags, write_payload, write_value
 
 
 def write_analysis_report(task: ArchiveTask, report: ArchiveAnalysisReport) -> None:
@@ -63,6 +63,25 @@ def write_selected_segment(task: ArchiveTask, evidence: ArchiveFormatEvidence, s
         confidence=float(evidence.confidence or 0.0),
     )
     _write_format_evidence(knowledge, evidence)
+    commit_task_knowledge(task, knowledge)
+
+
+def write_extractable_segments(task: ArchiveTask, segments: list[dict[str, Any]]) -> None:
+    knowledge = ensure_knowledge(task)
+    write_value(
+        knowledge,
+        "analysis.extractable_segments",
+        list(segments or []),
+        source_layer="analysis",
+        source_module="analysis_stage",
+    )
+    write_value(
+        knowledge,
+        "analysis.extractable_segment_count",
+        int(len(segments or [])),
+        source_layer="analysis",
+        source_module="analysis_stage",
+    )
     commit_task_knowledge(task, knowledge)
 
 

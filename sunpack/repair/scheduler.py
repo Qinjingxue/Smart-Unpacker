@@ -69,6 +69,7 @@ class RepairScheduler:
                     "residual_damage_flags": _probe_context_flags(probe_payloads, "residual_damage_flags"),
                     "candidate_count": len(validated),
                     "accepted_count": len(selectable),
+                    "candidate_id_collision_count": _candidate_id_collision_count(probe_payloads),
                     "candidate_payloads": probe_payloads,
                     "runtime_context_hash": _runtime_context_hash(probe_payloads),
                     "candidate_payload_hashes": [repair_trace.canonical_hash(payload) for payload in probe_payloads],
@@ -766,11 +767,14 @@ def _policy_selection_public(selection: dict[str, Any]) -> dict[str, Any]:
             "provider_id",
             "confidence",
             "reason",
-            "selected_index",
             "selected_candidate_id",
+            "selected_candidate_id_valid",
             "selected_module",
             "selected_format",
             "candidate_count",
+            "duplicate_candidate_id_count",
+            "duplicate_candidate_ids",
+            "invalid_candidate_id_reason",
             "load_error",
             "provider_errors",
             "metadata",
@@ -837,18 +841,24 @@ def _candidate_set_hash_input(payloads: list[dict[str, Any]]) -> list[dict[str, 
 
 
 def _selected_policy_payload(payloads: list[dict[str, Any]], selection: dict[str, Any]) -> dict[str, Any]:
-    selected_index = selection.get("selected_index")
-    try:
-        index = int(selected_index)
-    except (TypeError, ValueError):
-        index = -1
-    if 0 <= index < len(payloads):
-        return payloads[index]
     selected_id = str(selection.get("selected_candidate_id") or "")
     for payload in payloads:
         if str(payload.get("candidate_id") or "") == selected_id:
             return payload
     return {}
+
+
+def _candidate_id_collision_count(payloads: list[dict[str, Any]]) -> int:
+    seen: set[str] = set()
+    duplicates: set[str] = set()
+    for payload in payloads:
+        candidate_id = str(payload.get("candidate_id") or "") if isinstance(payload, dict) else ""
+        if not candidate_id:
+            continue
+        if candidate_id in seen:
+            duplicates.add(candidate_id)
+        seen.add(candidate_id)
+    return len(duplicates)
 
 
 def _float_equal(left: Any, right: Any) -> bool:

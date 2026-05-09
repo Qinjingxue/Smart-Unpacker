@@ -23,6 +23,7 @@ class RepairPolicyRequest:
 @dataclass(frozen=True)
 class RepairPolicyDecision:
     selected_candidate_id: str = ""
+    # Legacy diagnostic field only. Runtime policy selection must use selected_candidate_id.
     selected_index: int | None = None
     confidence: float | None = None
     provider_id: str = ""
@@ -41,5 +42,5 @@ class RepairPolicyProvider(Protocol):
     def can_handle(self, request: RepairPolicyRequest) -> bool:
         ...
 
-    def choose(self, request: RepairPolicyRequest) -> RepairPolicyDecision | dict[str, Any] | str | int | None:
+    def choose(self, request: RepairPolicyRequest) -> RepairPolicyDecision | dict[str, Any] | str | None:
         ...

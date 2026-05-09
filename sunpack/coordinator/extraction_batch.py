@@ -396,6 +396,7 @@ class ExtractionBatchRunner:
                             self._cleanup_shelved_outcome(incumbent_outcome, keep=handled)
                             return handled
                         if handled:
+                            self._refresh_analysis_after_repair(task)
                             continue
                 selected = self._selected_acceptable_outcome(incumbent_outcome, current_outcome, out_dir, final=True)
                 if selected is not None:
@@ -423,6 +424,7 @@ class ExtractionBatchRunner:
                             state,
                         )
                         if handled:
+                            self._refresh_analysis_after_repair(task)
                             continue
                     elif self._beam_enabled():
                         self._shelve_outcome_if_needed(incumbent_outcome, out_dir)
@@ -446,6 +448,7 @@ class ExtractionBatchRunner:
                                 self._cleanup_shelved_outcome(incumbent_outcome, keep=handled)
                                 return handled
                             if handled:
+                                self._refresh_analysis_after_repair(task)
                                 continue
             selected = self._selected_acceptable_outcome(incumbent_outcome, outcome, out_dir, final=verification.decision_hint != DECISION_REPAIR)
             if selected is not None:
@@ -486,6 +489,15 @@ class ExtractionBatchRunner:
         if float(verification.completeness or 0.0) < min_completeness:
             return False
         return bool(result.partial_outputs or verification.partial_files or verification.complete_files or verification.unverified_files)
+
+    def _refresh_analysis_after_repair(self, task: ArchiveTask) -> None:
+        try:
+            self.analysis_stage.refresh_task_analysis(task)
+        except Exception as exc:
+            _append_repair_candidate_log(task, {
+                "phase": "analysis_refresh_failed",
+                "error": str(exc),
+            })
 
     def _filter_partial_outputs(self, result: ExtractionResult) -> None:
         try:
@@ -936,7 +948,7 @@ class ExtractionBatchRunner:
             self._promote_recovery_outcome(beam_outcome, out_dir)
             return beam_outcome
 
-        self.analysis_stage.analyze_task(task)
+        self._refresh_analysis_after_repair(task)
 
         if not bool(beam_outcome.comparison.get("should_continue_repair", True)):
             _append_repair_candidate_log(task, {

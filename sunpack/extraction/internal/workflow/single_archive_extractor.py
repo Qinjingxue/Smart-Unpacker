@@ -3,6 +3,8 @@ import shutil
 import subprocess
 from typing import Any, Callable, Optional
 
+from sunpack.contracts.archive_input import ArchiveInputDescriptor
+from sunpack.contracts.archive_state import ArchiveState
 from sunpack.contracts.tasks import ArchiveTask, SplitArchiveInfo
 from sunpack.extraction.internal.workflow.errors import classify_extract_error
 from sunpack.extraction.internal.workflow.retry_policy import ExtractRetryPolicy
@@ -47,7 +49,24 @@ class SingleArchiveExtractor:
         out_dir: str,
         split_info: Optional[SplitArchiveInfo] = None,
         runtime_scheduler: Any = None,
+        *,
+        allow_embedded_segments: bool = True,
     ) -> ExtractionResult:
+        if allow_embedded_segments:
+            segments = [
+                dict(item)
+                for item in knowledge_view.analysis_extractable_segments(task)
+                if isinstance(item, dict) and isinstance(item.get("archive_input"), dict)
+            ]
+            if segments:
+                return self._extract_embedded_segments(
+                    task,
+                    out_dir,
+                    segments,
+                    split_info=split_info,
+                    runtime_scheduler=runtime_scheduler,
+                )
+
         archive = task.main_path
         split_info = split_info or task.split_info
         archive, all_parts, split_info = self.split_entry_resolver.resolve(
@@ -356,3 +375,180 @@ class SingleArchiveExtractor:
         except Exception:
             return False
         return bool(getattr(state, "patches", None))
+
+    def _extract_embedded_segments(
+        self,
+        task: ArchiveTask,
+        out_dir: str,
+        segments: list[dict[str, Any]],
+        *,
+        split_info: Optional[SplitArchiveInfo] = None,
+        runtime_scheduler: Any = None,
+    ) -> ExtractionResult:
+        archive = task.main_path
+        split_info = split_info or task.split_info
+        all_parts = list(task.all_parts or [archive])
+        print(f"\n[EXTRACT] 开始 embedded segments: {archive} ({len(segments)} segments)")
+        if not self.ensure_space(5):
+            return self._failed(
+                archive,
+                out_dir,
+                all_parts,
+                "磁盘空间不足",
+                diagnostics={"failure_stage": "preflight", "failure_kind": "disk_space"},
+            )
+        try:
+            os.makedirs(out_dir, exist_ok=True)
+        except Exception as exc:
+            return self._failed(
+                archive,
+                out_dir,
+                all_parts,
+                f"目录创建失败: {exc}",
+                diagnostics={"failure_stage": "preflight", "failure_kind": "output_filesystem", "message": str(exc)},
+            )
+
+        saved_archive_facts = {
+            key: value
+            for key, value in task.fact_bag.to_dict().items()
+            if key.startswith("archive.")
+        }
+        segment_results: list[dict[str, Any]] = []
+        password_used = None
+        selected_codepage = None
+        any_success = False
+        any_partial = False
+
+        for position, segment in enumerate(segments, start=1):
+            fmt = str(segment.get("format") or "archive").replace("/", "_") or "archive"
+            segment_id = str(segment.get("segment_id") or f"embedded_{position:02d}_{fmt}")
+            segment_dir = os.path.join(out_dir, self._safe_segment_dir_name(segment_id, position, fmt))
+            descriptor = ArchiveInputDescriptor.from_any(
+                segment.get("archive_input") if isinstance(segment.get("archive_input"), dict) else None,
+                archive_path=archive,
+                part_paths=all_parts,
+                format_hint=str(segment.get("format") or ""),
+                logical_name=str(segment.get("logical_name") or segment_id),
+            )
+            try:
+                task.set_archive_state(ArchiveState.from_archive_input(descriptor))
+                result = self.extract(
+                    task,
+                    segment_dir,
+                    split_info=split_info,
+                    runtime_scheduler=runtime_scheduler,
+                    allow_embedded_segments=False,
+                )
+            finally:
+                self._restore_archive_facts(task, saved_archive_facts)
+
+            if result.password_used is not None and password_used is None:
+                password_used = result.password_used
+            if result.selected_codepage is not None and selected_codepage is None:
+                selected_codepage = result.selected_codepage
+            stats = self._directory_stats(segment_dir)
+            segment_success = bool(result.success)
+            segment_partial = bool(result.partial_outputs or stats["file_count"] > 0)
+            any_success = any_success or segment_success
+            any_partial = any_partial or segment_partial
+            segment_results.append({
+                "segment_id": segment_id,
+                "index": int(segment.get("index") or position),
+                "format": segment.get("format") or "",
+                "logical_name": segment.get("logical_name") or "",
+                "start_offset": segment.get("start_offset"),
+                "end_offset": segment.get("end_offset"),
+                "confidence": segment.get("confidence"),
+                "archive_input": segment.get("archive_input"),
+                "out_dir": segment_dir,
+                "success": segment_success,
+                "partial_outputs": segment_partial,
+                "error": result.error,
+                "diagnostics": dict(result.diagnostics or {}),
+                "progress_manifest": result.progress_manifest,
+                "files_written": stats["file_count"],
+                "bytes_written": stats["total_bytes"],
+            })
+
+        totals = self._directory_stats(out_dir)
+        diagnostics = {
+            "result": {
+                "status": "ok" if any_success else ("partial" if any_partial else "failed"),
+                "embedded_segment_count": len(segment_results),
+                "embedded_success_count": sum(1 for item in segment_results if item.get("success")),
+                "files_written": totals["file_count"],
+                "bytes_written": totals["total_bytes"],
+                "item_count": totals["file_count"],
+            },
+            "embedded_segments": segment_results,
+        }
+        if any_success:
+            manifest_path = ""
+            manifest_payload = None
+            if self.write_progress_manifest:
+                manifest_path, manifest_payload = write_extraction_progress_manifest_payload(
+                    archive=archive,
+                    out_dir=out_dir,
+                    diagnostics=diagnostics,
+                    round_index=1,
+                    write_file=self.write_progress_manifest,
+                )
+                if manifest_path:
+                    diagnostics["progress_manifest"] = manifest_path
+            print(f"[EXTRACT] embedded segments 成功: {archive}")
+            return ExtractionResult(
+                success=True,
+                archive=archive,
+                out_dir=out_dir,
+                all_parts=all_parts,
+                password_used=password_used,
+                selected_codepage=selected_codepage,
+                diagnostics=diagnostics,
+                partial_outputs=any_partial and not all(item.get("success") for item in segment_results),
+                progress_manifest=manifest_path,
+                progress_manifest_payload=manifest_payload,
+            )
+        print(f"[EXTRACT] embedded segments 失败: {archive}")
+        return self._failed(
+            archive,
+            out_dir,
+            all_parts,
+            "embedded segment extraction failed",
+            password_used=password_used,
+            selected_codepage=selected_codepage,
+            diagnostics={
+                **diagnostics,
+                "failure_stage": "embedded_segments",
+                "failure_kind": "embedded_extraction_failed",
+            },
+            partial_outputs=any_partial,
+        )
+
+    @staticmethod
+    def _safe_segment_dir_name(segment_id: str, position: int, fmt: str) -> str:
+        raw = segment_id or f"embedded_{position:02d}_{fmt or 'archive'}"
+        safe = "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "_" for ch in raw)
+        return safe or f"embedded_{position:02d}_{fmt or 'archive'}"
+
+    @staticmethod
+    def _restore_archive_facts(task: ArchiveTask, saved: dict[str, Any]) -> None:
+        current_keys = [key for key in task.fact_bag.to_dict() if key.startswith("archive.")]
+        for key in current_keys:
+            task.fact_bag.unset(key)
+        for key, value in saved.items():
+            task.fact_bag.set(key, value)
+
+    @staticmethod
+    def _directory_stats(path: str) -> dict[str, int]:
+        file_count = 0
+        total_bytes = 0
+        if not os.path.isdir(path):
+            return {"file_count": 0, "total_bytes": 0}
+        for root, _dirs, files in os.walk(path):
+            for name in files:
+                file_count += 1
+                try:
+                    total_bytes += int(os.path.getsize(os.path.join(root, name)))
+                except OSError:
+                    pass
+        return {"file_count": file_count, "total_bytes": total_bytes}

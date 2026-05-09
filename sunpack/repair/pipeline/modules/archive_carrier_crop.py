@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 from sunpack.repair.diagnosis import RepairDiagnosis
 from sunpack.repair.job import RepairJob
@@ -76,7 +77,7 @@ class ArchiveCarrierCropDeepRecovery:
 
     def _run_native(self, job: RepairJob, diagnosis: RepairDiagnosis, workspace: str, config: dict) -> dict:
         limits = module_limits(config)
-        source_input = source_input_for_job(job)
+        source_input = _carrier_crop_source_input(job)
         fmt = diagnosis.format or job.format or "archive"
         params = {
             "source_input": source_input,
@@ -97,6 +98,37 @@ class ArchiveCarrierCropDeepRecovery:
                 int(limits.get("max_candidates_per_module", 8) or 1),
             )),
         )
+
+
+def _carrier_crop_source_input(job: RepairJob) -> dict[str, Any]:
+    source_input = source_input_for_job(job)
+    if str(source_input.get("kind") or "") != "concat_ranges":
+        return source_input
+    main_path = str(source_input.get("path") or job.source_input.get("path") or "")
+    for part in source_input.get("parts") or job.source_input.get("parts") or []:
+        if not isinstance(part, dict):
+            continue
+        role = str(part.get("role") or "").lower()
+        path = str(part.get("path") or "")
+        if path and role in {"main", "primary", "carrier"}:
+            main_path = path
+            break
+    if not main_path:
+        ranges = source_input.get("ranges") if isinstance(source_input.get("ranges"), list) else []
+        if ranges and isinstance(ranges[0], dict):
+            main_path = str(ranges[0].get("path") or "")
+    if not main_path:
+        return source_input
+    output = {
+        "kind": "file",
+        "path": main_path,
+        "format_hint": source_input.get("format_hint") or job.format,
+        "parts": source_input.get("parts") or job.source_input.get("parts"),
+        "split_sidecars_available": bool(source_input.get("parts") or job.source_input.get("parts")),
+    }
+    if source_input.get("password"):
+        output["password"] = source_input.get("password")
+    return output
 
 
 def _result_from_native(module_name: str, result: dict, job: RepairJob, diagnosis: RepairDiagnosis, config: dict) -> RepairResult:

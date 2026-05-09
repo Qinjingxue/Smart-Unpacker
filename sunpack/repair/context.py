@@ -69,6 +69,13 @@ def build_repair_context(job: RepairJob, diagnosis: RepairDiagnosis) -> RepairCo
         *repair_history_flags,
         *residual_damage_flags,
     ]))
+    if _normalize_format(diagnosis.format or knowledge_view.analysis_summary(knowledge).get("format") or "") == "zip":
+        damage_flags = _filter_zip_conflicting_runtime_flags(damage_flags, {
+            "archive_knowledge": knowledge.to_dict(),
+            "analysis_evidence": {"details": knowledge_view.zip_runtime_facts(knowledge)},
+            "repair_history": history_summary,
+            "damage_flags": damage_flags,
+        })
     source = knowledge_view.source_input(knowledge)
     analysis_summary = knowledge_view.analysis_summary(knowledge)
     prepass = knowledge_view.analysis_prepass(knowledge)

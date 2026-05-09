@@ -8,6 +8,7 @@ from sunpack.contracts.archive_state import ArchiveState, PatchOperation, PatchP
 from sunpack.contracts.detection import FactBag
 from sunpack.contracts.tasks import ArchiveTask, SplitArchiveInfo
 from sunpack.coordinator.analysis_stage import ArchiveAnalysisStage
+from sunpack.support import archive_knowledge_projection as knowledge_view
 
 
 class _FakeAnalysisScheduler:
@@ -62,7 +63,7 @@ def _multi_report(path, evidences):
     )
 
 
-def test_analysis_stage_writes_file_range_input(tmp_path):
+def test_analysis_stage_writes_extractable_segment_without_switching_task_source(tmp_path):
     archive = tmp_path / "carrier.bin"
     archive.write_bytes(b"junk" + b"PK\x03\x04" + b"x" * 32 + b"tail")
     evidence = ArchiveFormatEvidence(
@@ -80,23 +81,25 @@ def test_analysis_stage_writes_file_range_input(tmp_path):
 
     assert task.fact_bag.get("analysis.selected_format") == "zip"
     assert task.fact_bag.get("analysis.segment")["start_offset"] == 4
-    assert task.archive_input().to_dict() == {
+    segments = knowledge_view.analysis_extractable_segments(task)
+    assert len(segments) == 1
+    assert segments[0]["archive_input"] == {
         "kind": "archive_input",
         "entry_path": str(archive),
         "open_mode": "file_range",
         "format_hint": "zip",
-        "logical_name": "case",
+        "logical_name": "case_01_zip",
         "parts": [{"path": str(archive), "role": "main", "start": 4, "end": 40}],
         "segment": {"start": 4, "source": "analysis", "end": 40, "confidence": 0.99},
         "analysis": {"status": "extractable", "confidence": 0.99, "damage_flags": []},
     }
+    assert task.archive_input().open_mode == "file"
     state = task.fact_bag.get("archive.state")
-    assert state["source"]["open_mode"] == "file_range"
-    assert state["source"]["parts"][0]["start"] == 4
+    assert state["source"]["open_mode"] == "file"
     assert state["patches"] == []
 
 
-def test_analysis_stage_expands_carrier_into_logical_archive_tasks(tmp_path):
+def test_analysis_stage_records_multiple_segments_on_original_task(tmp_path):
     carrier = tmp_path / "carrier.bin"
     carrier.write_bytes(b"junk" + b"Rar!\x1a\x07\x01\x00" + b"x" * 20 + b"pad" + b"7z\xbc\xaf\x27\x1c" + b"y" * 20)
     rar = ArchiveFormatEvidence(
@@ -118,9 +121,11 @@ def test_analysis_stage_expands_carrier_into_logical_archive_tasks(tmp_path):
 
     tasks = stage.analyze_tasks([task])
 
-    assert [item.logical_name for item in tasks] == ["case_01_rar", "case_02_7z"]
-    assert [item.fact_bag.get("analysis.selected_format") for item in tasks] == ["rar", "7z"]
-    assert tasks[0].archive_input().to_dict() == {
+    assert tasks == [task]
+    assert task.fact_bag.get("analysis.selected_format") == "rar"
+    segments = knowledge_view.analysis_extractable_segments(task)
+    assert [item["logical_name"] for item in segments] == ["case_01_rar", "case_02_7z"]
+    assert segments[0]["archive_input"] == {
         "kind": "archive_input",
         "entry_path": str(carrier),
         "open_mode": "file_range",
@@ -130,9 +135,8 @@ def test_analysis_stage_expands_carrier_into_logical_archive_tasks(tmp_path):
         "segment": {"start": 4, "source": "analysis", "end": 32, "confidence": 0.97},
         "analysis": {"status": "extractable", "confidence": 0.97, "damage_flags": []},
     }
-    assert tasks[1].archive_input().format_hint == "7z"
-    assert tasks[1].archive_input().parts[0].range.start == 35
-    assert tasks[1].key.endswith("#segment2:7z")
+    assert segments[1]["archive_input"]["format_hint"] == "7z"
+    assert segments[1]["archive_input"]["parts"][0]["start"] == 35
 
 
 def test_analysis_stage_reuses_batch_report_for_equivalent_inputs(tmp_path):
@@ -211,7 +215,9 @@ def test_analysis_stage_uses_range_input_for_embedded_password_required_archive(
     stage.analyze_task(task)
 
     assert task.fact_bag.get("analysis.selected_format") == "rar"
-    assert task.archive_input().to_dict() == {
+    segments = knowledge_view.analysis_extractable_segments(task)
+    assert len(segments) == 1
+    assert segments[0]["archive_input"] == {
         "kind": "archive_input",
         "entry_path": str(carrier),
         "open_mode": "file_range",
@@ -276,12 +282,14 @@ def test_analysis_stage_maps_split_logical_segment_to_concat_ranges(tmp_path):
 
     stage.analyze_task(task)
 
-    assert task.archive_input().to_dict() == {
+    segments = knowledge_view.analysis_extractable_segments(task)
+    assert len(segments) == 1
+    assert segments[0]["archive_input"] == {
         "kind": "archive_input",
         "entry_path": str(part1),
         "open_mode": "concat_ranges",
         "format_hint": "7z",
-        "logical_name": "case",
+        "logical_name": "case_01_7z",
         "ranges": [
             {"path": str(part1), "start": 8, "end": 10},
             {"path": str(part2), "start": 0, "end": 10},
@@ -291,8 +299,7 @@ def test_analysis_stage_maps_split_logical_segment_to_concat_ranges(tmp_path):
         "analysis": {"status": "extractable", "confidence": 0.97, "damage_flags": []},
     }
     state = task.fact_bag.get("archive.state")
-    assert state["source"]["open_mode"] == "concat_ranges"
-    assert [item["path"] for item in state["source"]["ranges"]] == [str(part1), str(part2), str(part3)]
+    assert state["source"]["open_mode"] == "native_volumes"
 
 
 def _rar4_block(header_type: int, flags: int = 0, payload: bytes = b"") -> bytes:

@@ -71,6 +71,11 @@ def analysis_selected_segment(task: Any) -> dict[str, Any]:
     return _dict(get(task, "analysis.selected_segment", {}))
 
 
+def analysis_extractable_segments(task: Any) -> list[dict[str, Any]]:
+    value = get(task, "analysis.extractable_segments", [])
+    return [dict(item) for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+
+
 def analysis_status(task: Any) -> str:
     return str(get(task, "analysis.status", "") or get(task, "analysis.summary.status", "") or "")
 

@@ -90,11 +90,15 @@ class RepairPolicyManager:
                 "load_error": self.last_load_error,
             }
 
-        candidate_by_id = {
-            str(payload.get("candidate_id") or ""): index
-            for index, payload in enumerate(candidate_payloads)
-            if isinstance(payload, dict) and payload.get("candidate_id")
-        }
+        candidate_by_id, duplicate_candidate_ids = _candidate_id_index(candidate_payloads)
+        if duplicate_candidate_ids:
+            return None, {
+                **base,
+                "decision_status": "fallback",
+                "fallback_reason": "duplicate_candidate_id",
+                "duplicate_candidate_id_count": len(duplicate_candidate_ids),
+                "duplicate_candidate_ids": duplicate_candidate_ids,
+            }
         errors: list[str] = []
         for provider in providers:
             provider_id = self._provider_id(provider)
@@ -109,23 +113,25 @@ class RepairPolicyManager:
                     raise
                 errors.append(f"{provider_id}: {exc}")
                 continue
-            selected_index = self._selected_index(decision, candidate_by_id, len(candidates))
+            selected_index = self._selected_index(decision, candidate_by_id)
             if selected_index is None:
-                errors.append(f"{provider_id}: invalid policy decision")
+                errors.append(f"{provider_id}: {_invalid_decision_reason(decision, candidate_by_id)}")
                 continue
             selected = candidates[selected_index]
             selected_payload = candidate_payloads[selected_index] if selected_index < len(candidate_payloads) else {}
+            selected_candidate_id = str(selected_payload.get("candidate_id") or "")
             return selected, {
                 **base,
                 "decision_status": "selected",
                 "provider_id": provider_id,
                 "confidence": decision.confidence,
                 "reason": decision.reason,
-                "selected_index": selected_index,
-                "selected_candidate_id": str(selected_payload.get("candidate_id") or decision.selected_candidate_id or ""),
+                "selected_candidate_id": selected_candidate_id,
+                "selected_candidate_id_valid": bool(selected_candidate_id),
                 "selected_module": selected.module_name,
                 "selected_format": selected.format,
                 "candidate_count": len(candidates),
+                "duplicate_candidate_id_count": 0,
                 "candidates": list(candidate_payloads),
                 "metadata": _public_metadata(decision.metadata),
             }
@@ -134,6 +140,7 @@ class RepairPolicyManager:
             "decision_status": "fallback",
             "fallback_reason": "provider_error_or_invalid_decision",
             "provider_errors": errors,
+            "invalid_candidate_id_reason": _first_invalid_reason(errors),
         }
 
     def providers(self) -> list[Any]:
@@ -189,22 +196,10 @@ class RepairPolicyManager:
         return str(getattr(provider, "provider_id", "") or provider.__class__.__name__ or "repair_policy")
 
     @staticmethod
-    def _selected_index(
-        decision: RepairPolicyDecision,
-        candidate_by_id: dict[str, int],
-        candidate_count: int,
-    ) -> int | None:
-        if decision.selected_candidate_id:
-            index = candidate_by_id.get(str(decision.selected_candidate_id))
-            if index is not None:
-                return index
-        if decision.selected_index is None:
+    def _selected_index(decision: RepairPolicyDecision, candidate_by_id: dict[str, int]) -> int | None:
+        if not decision.selected_candidate_id:
             return None
-        try:
-            index = int(decision.selected_index)
-        except (TypeError, ValueError):
-            return None
-        return index if 0 <= index < candidate_count else None
+        return candidate_by_id.get(str(decision.selected_candidate_id))
 
 
 def _coerce_decision(value: RepairPolicyDecision | dict[str, Any] | str | int | None, *, provider_id: str) -> RepairPolicyDecision:
@@ -226,6 +221,40 @@ def _coerce_decision(value: RepairPolicyDecision | dict[str, Any] | str | int | 
             metadata=dict(value.get("metadata") or {}),
         )
     return RepairPolicyDecision(provider_id=provider_id)
+
+
+def _candidate_id_index(candidate_payloads: list[PolicyCandidatePayload]) -> tuple[dict[str, int], list[str]]:
+    candidate_by_id: dict[str, int] = {}
+    duplicate_ids: set[str] = set()
+    for index, payload in enumerate(candidate_payloads):
+        if not isinstance(payload, dict):
+            continue
+        candidate_id = str(payload.get("candidate_id") or "")
+        if not candidate_id:
+            continue
+        if candidate_id in candidate_by_id:
+            duplicate_ids.add(candidate_id)
+            continue
+        candidate_by_id[candidate_id] = index
+    return candidate_by_id, sorted(duplicate_ids)
+
+
+def _invalid_decision_reason(decision: RepairPolicyDecision, candidate_by_id: dict[str, int]) -> str:
+    if not decision.selected_candidate_id:
+        if decision.selected_index is not None:
+            return "invalid_policy_decision_legacy_selected_index"
+        return "invalid_policy_decision_missing_candidate_id"
+    return "invalid_candidate_id" if str(decision.selected_candidate_id) not in candidate_by_id else "invalid_policy_decision"
+
+
+def _first_invalid_reason(errors: list[str]) -> str:
+    for error in errors:
+        text = str(error)
+        if ": " in text:
+            return text.split(": ", 1)[1]
+        if text:
+            return text
+    return ""
 
 
 def _optional_float(value: Any) -> float | None:
