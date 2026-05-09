@@ -21,6 +21,34 @@ class ArchiveKnowledge:
     def to_dict(self) -> dict[str, Any]:
         return _jsonable(self.data)
 
+    def revision(self) -> int:
+        meta = self.data.get("_meta")
+        if not isinstance(meta, dict):
+            return 0
+        try:
+            return int(meta.get("revision", 0) or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    def source_identity(self) -> dict[str, Any]:
+        state = self.get("archive.state", {})
+        source = self.get("source.input", {})
+        if isinstance(state, dict):
+            patch_digest = state.get("patch_digest") or state.get("effective_patch_digest")
+            if patch_digest:
+                return {
+                    "kind": "archive_state",
+                    "patch_digest": str(patch_digest),
+                    "format_hint": state.get("format_hint") or (source or {}).get("format_hint") if isinstance(source, dict) else state.get("format_hint"),
+                }
+        if isinstance(source, dict):
+            return {
+                "kind": str(source.get("kind") or source.get("open_mode") or "file"),
+                "path": str(source.get("path") or source.get("entry_path") or ""),
+                "format_hint": source.get("format_hint") or source.get("format"),
+            }
+        return {}
+
     def get(self, path: str, default: Any = None) -> Any:
         current: Any = self.data
         for part in _parts(path):
@@ -92,7 +120,7 @@ class ArchiveKnowledge:
 
     def add_evidence(self, path: str, value: Any, *, provenance: dict[str, Any] | None = None) -> "ArchiveKnowledge":
         evidence = list(self.data.setdefault("_evidence", []))
-        item = {"path": str(path), "value": _jsonable(value)}
+        item = {"path": str(path), "value": _compact_evidence_value(value)}
         if provenance:
             item["provenance"] = _jsonable(provenance)
         evidence.append(item)
@@ -223,3 +251,49 @@ def _jsonable(value: Any) -> Any:
         except Exception:
             return str(value)
     return str(value)
+
+
+def _compact_evidence_value(value: Any) -> Any:
+    if isinstance(value, ArchiveKnowledge):
+        return {"kind": "archive_knowledge", "revision": value.revision(), "source_identity": value.source_identity()}
+    if isinstance(value, dict):
+        output: dict[str, Any] = {}
+        for key, item in value.items():
+            text_key = str(key)
+            if text_key in {"archive_state", "candidate_features", "candidate_log", "workspace_paths"}:
+                output[text_key] = _compact_large_value(text_key, item)
+            elif text_key in {"stdout", "stderr"} and isinstance(item, str):
+                output[text_key] = item[:4000]
+            else:
+                output[text_key] = _compact_evidence_value(item)
+        return output
+    if isinstance(value, (list, tuple, set)):
+        values = list(value)
+        compacted = [_compact_evidence_value(item) for item in values[:50]]
+        if len(values) > 50:
+            compacted.append({"truncated_count": len(values) - 50})
+        return compacted
+    return _jsonable(value)
+
+
+def _compact_large_value(key: str, value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            "kind": key,
+            "keys": sorted(str(item) for item in value.keys())[:50],
+            "sha256": _stable_repr_digest(value),
+        }
+    if isinstance(value, list):
+        return {"kind": key, "count": len(value), "sha256": _stable_repr_digest(value)}
+    return _jsonable(value)
+
+
+def _stable_repr_digest(value: Any) -> str:
+    import hashlib
+    import json
+
+    try:
+        payload = json.dumps(_jsonable(value), ensure_ascii=False, sort_keys=True, default=str)
+    except Exception:
+        payload = repr(value)
+    return hashlib.sha256(payload.encode("utf-8", errors="replace")).hexdigest()

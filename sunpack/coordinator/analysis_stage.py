@@ -1,9 +1,10 @@
 import json
 import os
 import threading
+from contextlib import nullcontext
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, replace
-from typing import Any
+from typing import Any, Callable
 
 from sunpack.analysis import ArchiveAnalysisReport, ArchiveAnalysisScheduler
 from sunpack.analysis.knowledge import (
@@ -137,18 +138,20 @@ class ArchiveAnalysisStage:
         _, tasks = self._analyze_task_to_tasks(task)
         return tasks
 
-    def refresh_task_analysis(self, task: ArchiveTask) -> ArchiveAnalysisReport | None:
+    def refresh_task_analysis(self, task: ArchiveTask, *, phase_timer: Callable[..., Any] | None = None, phase_prefix: str = "analysis_refresh") -> ArchiveAnalysisReport | None:
         if not self.enabled or self.scheduler is None:
             return None
-        task.ensure_archive_state()
+        with _phase(phase_timer, f"{phase_prefix}_ensure_archive_state"):
+            task.ensure_archive_state()
         try:
-            report = self._get_or_analyze_report(task)
+            report = self._get_or_analyze_report(task, phase_timer=phase_timer, phase_prefix=phase_prefix)
         except Exception as exc:
             task.fact_bag.set("analysis.status", "error")
             task.fact_bag.set("analysis.error", str(exc))
             write_analysis_error(task, str(exc))
             return None
-        self._tasks_from_report(task, report)
+        with _phase(phase_timer, f"{phase_prefix}_tasks_from_report"):
+            self._tasks_from_report(task, report, phase_timer=phase_timer, phase_prefix=phase_prefix)
         return report
 
     def _analyze_task_to_tasks(self, task: ArchiveTask) -> tuple[ArchiveAnalysisReport | None, list[ArchiveTask]]:
@@ -165,32 +168,42 @@ class ArchiveAnalysisStage:
 
         return report, self._tasks_from_report(task, report)
 
-    def _get_or_analyze_report(self, task: ArchiveTask) -> ArchiveAnalysisReport:
-        cache_key = self._analysis_cache_key(task)
-        with self._report_cache_lock:
-            report = self._report_cache.get(cache_key)
+    def _get_or_analyze_report(self, task: ArchiveTask, *, phase_timer: Callable[..., Any] | None = None, phase_prefix: str = "analysis") -> ArchiveAnalysisReport:
+        with _phase(phase_timer, f"{phase_prefix}_cache_key"):
+            cache_key = self._analysis_cache_key(task)
+        with _phase(phase_timer, f"{phase_prefix}_cache_lookup"):
+            with self._report_cache_lock:
+                report = self._report_cache.get(cache_key)
         if report is None:
-            report = self.scheduler.analyze_task(task)
-            self._remember_report(cache_key, report)
+            with _phase(phase_timer, f"{phase_prefix}_scheduler_analyze"):
+                report = self.scheduler.analyze_task(task)
+            with _phase(phase_timer, f"{phase_prefix}_remember_report"):
+                self._remember_report(cache_key, report)
             return report
         return replace(report, cache_hits=report.cache_hits + 1)
 
-    def _tasks_from_report(self, task: ArchiveTask, report: ArchiveAnalysisReport) -> list[ArchiveTask]:
-        self._record_report(task, report)
+    def _tasks_from_report(self, task: ArchiveTask, report: ArchiveAnalysisReport, *, phase_timer: Callable[..., Any] | None = None, phase_prefix: str = "analysis") -> list[ArchiveTask]:
+        with _phase(phase_timer, f"{phase_prefix}_record_report"):
+            self._record_report(task, report)
         task.fact_bag.set("analysis.report_path", report.path)
-        candidates = self._extractable_segments(report)
+        with _phase(phase_timer, f"{phase_prefix}_extractable_segments"):
+            candidates = self._extractable_segments(report)
         self._write_extractable_segments(task, candidates)
         if not candidates:
             password_candidate = self._password_required_embedded_segment(report)
             if password_candidate is not None:
                 evidence, segment, index = password_candidate
                 self._write_extractable_segments(task, [(evidence, segment, index)])
-                self._apply_selected_segment(task, evidence, segment, index=index)
-                self._record_state_analysis(task, report)
+                with _phase(phase_timer, f"{phase_prefix}_apply_selected_segment"):
+                    self._apply_selected_segment(task, evidence, segment, index=index)
+                with _phase(phase_timer, f"{phase_prefix}_record_state_analysis"):
+                    self._record_state_analysis(task, report)
             return [task]
         evidence, segment, index = candidates[0]
-        self._apply_selected_segment(task, evidence, segment, index=index)
-        self._record_state_analysis(task, report)
+        with _phase(phase_timer, f"{phase_prefix}_apply_selected_segment"):
+            self._apply_selected_segment(task, evidence, segment, index=index)
+        with _phase(phase_timer, f"{phase_prefix}_record_state_analysis"):
+            self._record_state_analysis(task, report)
         return [task]
 
     def _apply_selected_segment(
@@ -488,3 +501,9 @@ class ArchiveAnalysisStage:
             return base
         fmt = str(evidence.format or "archive").replace("/", "_")
         return f"{base}_{index:02d}_{fmt}"
+
+
+def _phase(timer: Callable[..., Any] | None, name: str):
+    if timer is None:
+        return nullcontext()
+    return timer(name)

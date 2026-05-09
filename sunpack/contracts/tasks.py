@@ -170,11 +170,6 @@ class ArchiveTask:
 
     def knowledge(self) -> ArchiveKnowledge:
         knowledge = ArchiveKnowledge.from_any(self.fact_bag.get("archive.knowledge"))
-        raw_state = self._raw_archive_state()
-        if isinstance(raw_state, dict):
-            state_knowledge = raw_state.get("knowledge")
-            if isinstance(state_knowledge, dict):
-                knowledge.merge(state_knowledge)
         return knowledge
 
     def set_knowledge(self, knowledge: ArchiveKnowledge | dict) -> None:

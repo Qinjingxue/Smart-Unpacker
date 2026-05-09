@@ -222,10 +222,12 @@ def _dict(value: Any) -> dict[str, Any]:
 
 
 def _cached_projection(knowledge: ArchiveKnowledge, name: str, compute) -> Any:
-    revision = str(knowledge.get("_meta.revision", 0) or 0)
+    revision_value = knowledge.revision() if hasattr(knowledge, "revision") else int(knowledge.get("_meta.revision", 0) or 0)
+    if revision_value <= 0:
+        return compute()
+    revision = str(revision_value)
     identity = _stable_digest(_source_fingerprint_uncached(knowledge))
-    knowledge_identity = _stable_digest(knowledge.to_dict())
-    cache_key = (revision, str(name), f"{identity}:{knowledge_identity}")
+    cache_key = (revision, str(name), identity)
     if cache_key in _PROJECTION_CACHE:
         value = _PROJECTION_CACHE.pop(cache_key)
         _PROJECTION_CACHE[cache_key] = value

@@ -1,29 +1,35 @@
 from __future__ import annotations
 
-from typing import Any
+from contextlib import nullcontext
+from typing import Any, Callable
 
 from sunpack.contracts.tasks import ArchiveTask
 from sunpack.extraction.result import ExtractionResult
 from sunpack.support.archive_knowledge_writer import commit_task_knowledge, ensure_knowledge, write_payload
 
 
-def write_extraction_result(task: ArchiveTask, result: ExtractionResult) -> None:
-    knowledge = ensure_knowledge(task)
-    diagnostics = dict(result.diagnostics or {})
-    worker = diagnostics.get("result") if isinstance(diagnostics.get("result"), dict) else {}
-    write_payload(
-        knowledge,
-        "extraction",
-        {
+def write_extraction_result(task: ArchiveTask, result: ExtractionResult, *, phase_timer: Callable[..., Any] | None = None, phase_prefix: str = "write_extraction") -> None:
+    with _phase(phase_timer, f"{phase_prefix}_ensure_knowledge"):
+        knowledge = ensure_knowledge(task)
+    with _phase(phase_timer, f"{phase_prefix}_build_payload"):
+        diagnostics = dict(result.diagnostics or {})
+        worker = diagnostics.get("result") if isinstance(diagnostics.get("result"), dict) else {}
+        payload = {
             "result": _result_payload(result),
             "diagnostics": diagnostics,
             "failure": _failure_payload(result, worker),
             "progress_manifest": result.progress_manifest_payload or {},
-        },
-        source_layer="extraction",
-        source_module="scheduler",
-    )
-    commit_task_knowledge(task, knowledge)
+        }
+    with _phase(phase_timer, f"{phase_prefix}_write_payload"):
+        write_payload(
+            knowledge,
+            "extraction",
+            payload,
+            source_layer="extraction",
+            source_module="scheduler",
+        )
+    with _phase(phase_timer, f"{phase_prefix}_commit"):
+        commit_task_knowledge(task, knowledge, phase_timer=phase_timer, phase_prefix=f"{phase_prefix}_commit")
 
 
 def _result_payload(result: ExtractionResult) -> dict[str, Any]:
@@ -52,3 +58,9 @@ def _failure_payload(result: ExtractionResult, worker: dict[str, Any]) -> dict[s
         "partial_outputs": bool(result.partial_outputs),
         "failed_item": worker.get("failed_item"),
     }
+
+
+def _phase(timer: Callable[..., Any] | None, name: str):
+    if timer is None:
+        return nullcontext()
+    return timer(name)

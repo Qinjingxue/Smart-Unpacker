@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import faulthandler
 import json
 import multiprocessing as mp
 import os
 import shutil
 import sys
 import time
+from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -74,6 +76,10 @@ def main(argv: list[str] | None = None) -> int:
         "candidate_id_collision_count": 0,
         "feature_contract_version": FEATURE_CONTRACT_VERSION,
         "collector": "runtime_repair_graph",
+        "phase_seconds": {},
+        "phase_counts": {},
+        "slowest_samples": [],
+        "slowest_states": [],
     }
     started = time.perf_counter()
     output_mode = "a" if args.append else "w"
@@ -98,6 +104,7 @@ def main(argv: list[str] | None = None) -> int:
     summary["success_rows"] = rows_ok
     summary["failure_rows"] = rows_failed
     summary["wall_seconds"] = round(time.perf_counter() - started, 3)
+    _merge_projection_cache_stats(summary, knowledge_view.projection_cache_stats())
     Path(args.summary_output).write_text(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
     print(json.dumps(summary, ensure_ascii=False, sort_keys=True))
     return 0
@@ -120,6 +127,10 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--branch-top-k", type=int, default=5)
     parser.add_argument("--materialize-top-k", type=int, default=16)
     parser.add_argument("--case-timeout-seconds", type=float, default=60.0)
+    parser.add_argument("--debug-events-output", default="")
+    parser.add_argument("--phase-slow-threshold-ms", type=float, default=500.0)
+    parser.add_argument("--dump-stack-after-seconds", type=float, default=0.0)
+    parser.add_argument("--disable-process-isolation", action="store_true")
     parser.add_argument("--future-label-discount", type=float, default=0.8)
     parser.add_argument("--append", action="store_true")
     parser.add_argument("--progress", action="store_true")
@@ -129,13 +140,14 @@ def _parser() -> argparse.ArgumentParser:
 
 def _iter_collected_samples(records: list[dict[str, Any]], args: argparse.Namespace):
     workers = max(1, int(args.workers or 1))
+    collector = _collect_one_sample if bool(getattr(args, "disable_process_isolation", False)) else _collect_one_sample_with_timeout
     if workers <= 1:
         for index, record in enumerate(records):
-            yield _collect_one_sample(index, record, vars(args))
+            yield collector(index, record, vars(args))
         return
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = [
-            executor.submit(_collect_one_sample, index, record, vars(args))
+            executor.submit(collector, index, record, vars(args))
             for index, record in enumerate(records)
         ]
         for future in as_completed(futures):
@@ -148,18 +160,32 @@ def _collect_one_sample_with_timeout(index: int, record: dict[str, Any], args_di
     result_dir = Path(str(args_dict.get("workspace") or ".sunpack/runtime-repair-graph")) / ".worker_results"
     result_dir.mkdir(parents=True, exist_ok=True)
     result_path = result_dir / f"sample_{index:06d}_{os.getpid()}_{time.time_ns()}.json"
-    proc = ctx.Process(target=_collect_one_child, args=(index, record, args_dict, str(result_path)))
+    sample_id = str(record.get("sample_id") or f"sample_{index}")
+    debug_dir = Path(str(args_dict.get("workspace") or ".sunpack/runtime-repair-graph")) / ".debug_events"
+    debug_dir.mkdir(parents=True, exist_ok=True)
+    debug_path = debug_dir / f"sample_{index:06d}_{_safe_name(sample_id)}.jsonl"
+    stack_path = debug_dir / f"sample_{index:06d}_{_safe_name(sample_id)}.stack.txt"
+    child_args = dict(args_dict)
+    child_args["_debug_events_path"] = str(debug_path)
+    child_args["_stack_dump_path"] = str(stack_path)
+    proc = ctx.Process(target=_collect_one_child, args=(index, record, child_args, str(result_path)))
     proc.start()
     proc.join(timeout=timeout)
     if proc.is_alive():
         proc.terminate()
         proc.join(timeout=3)
+        last_event = _last_jsonl_event(debug_path)
         return "failed", [{
             "row_type": "collector_timeout",
             "sample_id": record.get("sample_id"),
             "material_format": _record_format(record),
             "terminal_status": "timeout",
             "timeout_seconds": timeout,
+            "last_phase": last_event.get("phase", ""),
+            "last_state_id": last_event.get("state_id", ""),
+            "last_candidate_id": last_event.get("candidate_id", ""),
+            "debug_events_path": str(debug_path),
+            "stack_dump_path": str(stack_path) if stack_path.exists() else "",
         }]
     if result_path.is_file():
         try:
@@ -178,12 +204,30 @@ def _collect_one_sample_with_timeout(index: int, record: dict[str, Any], args_di
         "sample_id": record.get("sample_id"),
         "material_format": _record_format(record),
         "terminal_status": "worker_exited_without_result",
+        "debug_events_path": str(debug_path),
+        "stack_dump_path": str(stack_path) if stack_path.exists() else "",
     }]
 
 
 def _collect_one_child(index: int, record: dict[str, Any], args_dict: dict[str, Any], result_path: str) -> None:
-    status, rows = _collect_one_sample(index, record, args_dict)
-    Path(result_path).write_text(json.dumps({"status": status, "rows": rows}, ensure_ascii=False, default=str), encoding="utf-8")
+    dump_after = float(args_dict.get("dump_stack_after_seconds", 0.0) or 0.0)
+    stack_handle = None
+    try:
+        if dump_after > 0:
+            stack_path = str(args_dict.get("_stack_dump_path") or "")
+            stack_handle = open(stack_path, "w", encoding="utf-8") if stack_path else None
+            faulthandler.enable(file=stack_handle)
+            faulthandler.dump_traceback_later(dump_after, file=stack_handle, exit=True)
+        status, rows = _collect_one_sample(index, record, args_dict)
+        Path(result_path).write_text(json.dumps({"status": status, "rows": rows}, ensure_ascii=False, default=str), encoding="utf-8")
+    finally:
+        if dump_after > 0:
+            try:
+                faulthandler.cancel_dump_traceback_later()
+            except Exception:
+                pass
+        if stack_handle is not None:
+            stack_handle.close()
 
 
 def _collect_one_sample_star(payload):
@@ -202,6 +246,79 @@ def _collect_one_sample(index: int, record: dict[str, Any], args_dict: dict[str,
             "material_format": _record_format(record),
             "error": str(exc),
         }]
+
+
+class _CollectorProfiler:
+    def __init__(self, args: argparse.Namespace, sample_id: str):
+        self.sample_id = sample_id
+        self.slow_threshold = max(0.0, float(getattr(args, "phase_slow_threshold_ms", 500.0) or 0.0)) / 1000.0
+        self.events_path = Path(str(getattr(args, "_debug_events_path", "") or getattr(args, "debug_events_output", "") or "")) if (getattr(args, "_debug_events_path", "") or getattr(args, "debug_events_output", "")) else None
+        self.phase_seconds: Counter[str] = Counter()
+        self.phase_counts: Counter[str] = Counter()
+        self.slowest: list[dict[str, Any]] = []
+        self.last_event: dict[str, Any] = {}
+
+    @contextmanager
+    def phase(self, phase: str, *, state_id: str = "", candidate_id: str = ""):
+        started = time.perf_counter()
+        self._event("phase_start", phase=phase, state_id=state_id, candidate_id=candidate_id)
+        try:
+            yield
+        except Exception as exc:
+            elapsed = time.perf_counter() - started
+            self._record_phase(phase, elapsed, state_id, candidate_id, status="exception", error=str(exc))
+            raise
+        else:
+            elapsed = time.perf_counter() - started
+            self._record_phase(phase, elapsed, state_id, candidate_id, status="ok")
+
+    def summary(self) -> dict[str, Any]:
+        return {
+            "phase_seconds": {key: round(float(value), 6) for key, value in self.phase_seconds.items()},
+            "phase_counts": {key: int(value) for key, value in self.phase_counts.items()},
+            "slowest_phases": sorted(self.slowest, key=lambda item: float(item.get("elapsed_seconds", 0.0)), reverse=True)[:20],
+        }
+
+    def _record_phase(self, phase: str, elapsed: float, state_id: str, candidate_id: str, *, status: str, error: str = "") -> None:
+        self.phase_seconds[phase] += elapsed
+        self.phase_counts[phase] += 1
+        event = {
+            "event": "phase_done",
+            "sample_id": self.sample_id,
+            "phase": phase,
+            "state_id": state_id,
+            "candidate_id": candidate_id,
+            "elapsed_seconds": round(elapsed, 6),
+            "status": status,
+        }
+        if error:
+            event["error"] = error
+        if elapsed >= self.slow_threshold or status != "ok":
+            self.slowest.append(event)
+            self._write_event(event)
+        self.last_event = event
+
+    def _event(self, event_name: str, *, phase: str, state_id: str, candidate_id: str) -> None:
+        event = {
+            "event": event_name,
+            "sample_id": self.sample_id,
+            "phase": phase,
+            "state_id": state_id,
+            "candidate_id": candidate_id,
+            "time": round(time.time(), 3),
+        }
+        self.last_event = event
+        self._write_event(event)
+
+    def _write_event(self, event: dict[str, Any]) -> None:
+        if self.events_path is None:
+            return
+        try:
+            self.events_path.parent.mkdir(parents=True, exist_ok=True)
+            with self.events_path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(event, ensure_ascii=False, sort_keys=True, default=str) + "\n")
+        except OSError:
+            pass
 
 
 class RuntimeRepairGraphCollector:
@@ -239,13 +356,16 @@ class RuntimeRepairGraphCollector:
         self.strategy = TrainingExhaustiveStrategy(branch_top_k=max(1, int(args.branch_top_k or 1)))
         self.rows: list[dict[str, Any]] = []
         self.state_counter = 0
+        self.profiler = _CollectorProfiler(args, self.sample_id)
 
     def collect(self) -> list[dict[str, Any]]:
         shutil.rmtree(self.workspace, ignore_errors=True)
         self.workspace.mkdir(parents=True, exist_ok=True)
         self.output_root.mkdir(parents=True, exist_ok=True)
-        root_task = _task_from_record(self.record)
-        self.analysis_stage.refresh_task_analysis(root_task)
+        with self.profiler.phase("sample_init"):
+            root_task = _task_from_record(self.record)
+        with self.profiler.phase("analysis_refresh", state_id=f"{self.sample_id}:root"):
+            self.analysis_stage.refresh_task_analysis(root_task, phase_timer=self.profiler.phase, phase_prefix="analysis_refresh")
         frontier = [self._state(root_task, round_index=0, parent_action_row_id="", parent_candidate_id="")]
         expanded = 0
         for round_index in range(max(1, int(self.args.max_rounds or 1))):
@@ -258,7 +378,9 @@ class RuntimeRepairGraphCollector:
                 expanded += 1
                 next_frontier.extend(self._expand_state(state, round_index))
             frontier = next_frontier[: max(1, int(self.args.max_states or 80))]
-        _backfill_runtime_returns(self.rows, float(self.args.future_label_discount or 0.8))
+        with self.profiler.phase("backfill_returns"):
+            _backfill_runtime_returns(self.rows, float(self.args.future_label_discount or 0.8))
+        self._attach_profile_summary()
         return self.rows
 
     def _state(self, task: ArchiveTask, *, round_index: int, parent_action_row_id: str, parent_candidate_id: str) -> dict[str, Any]:
@@ -274,20 +396,25 @@ class RuntimeRepairGraphCollector:
     def _expand_state(self, state: dict[str, Any], round_index: int) -> list[dict[str, Any]]:
         task: ArchiveTask = state["task"]
         out_dir = self.output_root / _safe_name(str(state["state_id"]))
-        extraction = self.extractor.extract(task, str(out_dir))
-        write_extraction_result(task, extraction)
-        verification = self.verifier.verify(task, extraction)
+        with self.profiler.phase("extract_initial", state_id=str(state["state_id"])):
+            extraction = self.extractor.extract(task, str(out_dir))
+        with self.profiler.phase("write_extraction_knowledge", state_id=str(state["state_id"])):
+            write_extraction_result(task, extraction, phase_timer=self.profiler.phase, phase_prefix="write_extraction")
+        with self.profiler.phase("verify_initial", state_id=str(state["state_id"])):
+            verification = self.verifier.verify(task, extraction, phase_timer=self.profiler.phase, phase_prefix="verify_initial")
         if verification.decision_hint == DECISION_ACCEPT:
             self.rows.append(_terminal_row(self.record, state, "complete", verification))
             return []
         if verification.decision_hint != DECISION_REPAIR:
             self.rows.append(_terminal_row(self.record, state, str(verification.decision_hint or verification.assessment_status or "terminal"), verification))
             return []
-        job = self.repair_stage._job_from_verification_assessment(task, extraction, verification)  # noqa: SLF001
+        with self.profiler.phase("build_repair_job", state_id=str(state["state_id"])):
+            job = self.repair_stage._job_from_verification_assessment(task, extraction, verification, phase_timer=self.profiler.phase, phase_prefix="build_repair_job")  # noqa: SLF001
         if job is None or self.repair_stage.scheduler is None:
             self.rows.append(_terminal_row(self.record, state, "no_repair_job", verification))
             return []
-        batch = self.repair_stage.scheduler.generate_repair_candidates(job)
+        with self.profiler.phase("generate_candidates", state_id=str(state["state_id"])):
+            batch = self.repair_stage.scheduler.generate_repair_candidates(job)
         if batch.terminal_result is not None or not batch.candidates:
             terminal_status = "no_candidates"
             if batch.terminal_result is not None:
@@ -301,14 +428,16 @@ class RuntimeRepairGraphCollector:
                 row["debug_repair_terminal_diagnosis"] = dict(getattr(batch.terminal_result, "diagnosis", {}) or {})
             self.rows.append(row)
             return []
-        candidates = self._runtime_candidates(batch.candidates)
+        with self.profiler.phase("materialize_candidates", state_id=str(state["state_id"])):
+            candidates = self._runtime_candidates(batch.candidates)
         if not candidates:
             row = _terminal_row(self.record, state, "no_materialized_candidates", verification)
             row["debug_candidate_count"] = len(batch.candidates)
             row["debug_damage_flags"] = list(job.damage_flags or [])
             self.rows.append(row)
             return []
-        payloads = [policy_candidate_payload(job, candidate, index=index) for index, candidate in enumerate(candidates)]
+        with self.profiler.phase("policy_payload_build", state_id=str(state["state_id"])):
+            payloads = [policy_candidate_payload(job, candidate, index=index) for index, candidate in enumerate(candidates)]
         query_id = f"{state['state_id']}:q"
         collision_count = _candidate_id_collision_count(payloads)
         candidate_set_hash = repair_trace.canonical_hash(_candidate_set_hash_input(payloads))
@@ -332,16 +461,21 @@ class RuntimeRepairGraphCollector:
                 continue
             action_row_id = f"{query_id}|{rank}|{candidate_id}"
             branch_task = clone_archive_task(task, key_suffix=f":{rank}")
-            transition = self.evaluator.evaluate(
-                branch_task,
-                candidate,
-                temp_dir=self.output_root / f"{_safe_name(str(state['state_id']))}_cand_{rank:02d}",
-                restore=False,
-                refresh_analysis=True,
-                record_repair_history=True,
-            )
+            with self.profiler.phase("transition_evaluate", state_id=str(state["state_id"]), candidate_id=candidate_id):
+                transition = self.evaluator.evaluate(
+                    branch_task,
+                    candidate,
+                    temp_dir=self.output_root / f"{_safe_name(str(state['state_id']))}_cand_{rank:02d}",
+                    restore=False,
+                    refresh_analysis=True,
+                    record_repair_history=True,
+                    phase_timer=self.profiler.phase,
+                    state_id=str(state["state_id"]),
+                    candidate_id=candidate_id,
+                )
             archive_path = _archive_path_for_oracle(branch_task, self.fmt)
-            oracle = _verify_output_against_oracle(Path(archive_path), self.fmt, self.record.get("oracle") if isinstance(self.record.get("oracle"), dict) else {}) if archive_path else {"status": "missing_output", "label": 0, "completeness": 0.0}
+            with self.profiler.phase("oracle_verify", state_id=str(state["state_id"]), candidate_id=candidate_id):
+                oracle = _verify_output_against_oracle(Path(archive_path), self.fmt, self.record.get("oracle") if isinstance(self.record.get("oracle"), dict) else {}) if archive_path else {"status": "missing_output", "label": 0, "completeness": 0.0}
             terminal_status = _transition_terminal_status(transition, oracle)
             row = {
                 "row_type": "action",
@@ -411,6 +545,16 @@ class RuntimeRepairGraphCollector:
         accepted = [candidate for candidate in validated if self.selector._accepted(candidate)]  # noqa: SLF001
         accepted.sort(key=self.selector.generation_priority, reverse=True)
         return accepted[: max(1, int(self.args.materialize_top_k or 16))]
+
+    def _attach_profile_summary(self) -> None:
+        if not self.rows:
+            return
+        summary = self.profiler.summary()
+        if self.rows:
+            self.rows[0]["collector_phase_seconds"] = dict(summary.get("phase_seconds") or {})
+            self.rows[0]["collector_phase_counts"] = dict(summary.get("phase_counts") or {})
+            self.rows[0]["collector_slowest_phases"] = list(summary.get("slowest_phases") or [])
+            self.rows[0]["knowledge_projection_cache_stats"] = knowledge_view.projection_cache_stats()
 
 
 def _runtime_graph_config(args: argparse.Namespace, workspace: Path) -> dict[str, Any]:
@@ -766,6 +910,59 @@ def _accumulate_summary(summary: dict[str, Any], rows: list[dict[str, Any]], sam
             key = str(row.get("label"))
             summary["label_counts"][key] = int(summary["label_counts"].get(key, 0) or 0) + 1
         summary["candidate_id_collision_count"] = int(summary.get("candidate_id_collision_count", 0) or 0) + int(row.get("candidate_id_collision_count", 0) or 0)
+        phase_seconds = row.get("collector_phase_seconds") if isinstance(row.get("collector_phase_seconds"), dict) else {}
+        phase_counts = row.get("collector_phase_counts") if isinstance(row.get("collector_phase_counts"), dict) else {}
+        if phase_seconds:
+            summary.setdefault("phase_seconds", {})
+            for phase, seconds in phase_seconds.items():
+                summary["phase_seconds"][phase] = round(float(summary["phase_seconds"].get(phase, 0.0) or 0.0) + float(seconds or 0.0), 6)
+        if phase_counts:
+            summary.setdefault("phase_counts", {})
+            for phase, count in phase_counts.items():
+                summary["phase_counts"][phase] = int(summary["phase_counts"].get(phase, 0) or 0) + int(count or 0)
+        slowest = row.get("collector_slowest_phases") if isinstance(row.get("collector_slowest_phases"), list) else []
+        if slowest:
+            summary.setdefault("slowest_states", [])
+            summary["slowest_states"].extend(item for item in slowest if isinstance(item, dict))
+            summary["slowest_states"] = sorted(summary["slowest_states"], key=lambda item: float(item.get("elapsed_seconds", 0.0) or 0.0), reverse=True)[:50]
+        projection_stats = row.get("knowledge_projection_cache_stats") if isinstance(row.get("knowledge_projection_cache_stats"), dict) else {}
+        if projection_stats:
+            _merge_projection_cache_stats(summary, projection_stats)
+
+
+def _last_jsonl_event(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        return {}
+    last = ""
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                if line.strip():
+                    last = line
+    except OSError:
+        return {}
+    if not last:
+        return {}
+    try:
+        value = json.loads(last)
+    except json.JSONDecodeError:
+        return {}
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _merge_projection_cache_stats(summary: dict[str, Any], stats: dict[str, Any]) -> None:
+    target = summary.setdefault("knowledge_projection_cache_stats", {"entries": 0, "max_entries": 0, "hits": 0, "misses": 0, "by_projection": {}})
+    target["entries"] = max(int(target.get("entries", 0) or 0), int(stats.get("entries", 0) or 0))
+    target["max_entries"] = max(int(target.get("max_entries", 0) or 0), int(stats.get("max_entries", 0) or 0))
+    target["hits"] = int(target.get("hits", 0) or 0) + int(stats.get("hits", 0) or 0)
+    target["misses"] = int(target.get("misses", 0) or 0) + int(stats.get("misses", 0) or 0)
+    by_projection = target.setdefault("by_projection", {})
+    for name, payload in (stats.get("by_projection") or {}).items():
+        if not isinstance(payload, dict):
+            continue
+        current = by_projection.setdefault(str(name), {"hits": 0, "misses": 0})
+        current["hits"] = int(current.get("hits", 0) or 0) + int(payload.get("hits", 0) or 0)
+        current["misses"] = int(current.get("misses", 0) or 0) + int(payload.get("misses", 0) or 0)
 
 
 def _safe_name(value: str) -> str:

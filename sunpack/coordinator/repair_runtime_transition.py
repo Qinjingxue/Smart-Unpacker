@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import shutil
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -72,28 +73,40 @@ class RepairRuntimeTransitionEvaluator:
         restore: bool = True,
         refresh_analysis: bool = False,
         record_repair_history: bool = False,
+        phase_timer: Callable[..., Any] | None = None,
+        state_id: str = "",
+        candidate_id: str = "",
     ) -> RepairRuntimeTransition:
         original_state = task.archive_state()
         original_knowledge = task.knowledge().to_dict()
         temp_dir = str(temp_dir)
-        shutil.rmtree(temp_dir, ignore_errors=True)
-        digest = self._candidate_source_digest(candidate)
+        with _phase(phase_timer, "transition_cleanup", state_id=state_id, candidate_id=candidate_id):
+            shutil.rmtree(temp_dir, ignore_errors=True)
+        with _phase(phase_timer, "transition_source_digest", state_id=state_id, candidate_id=candidate_id):
+            digest = self._candidate_source_digest(candidate)
         try:
             if record_repair_history:
-                self.record_candidate_repair(task, candidate)
-            self.apply_candidate_to_task(task, candidate)
+                with _phase(phase_timer, "transition_record_history", state_id=state_id, candidate_id=candidate_id):
+                    self.record_candidate_repair(task, candidate, phase_timer=phase_timer)
+            with _phase(phase_timer, "transition_apply_candidate", state_id=state_id, candidate_id=candidate_id):
+                self.apply_candidate_to_task(task, candidate)
             if refresh_analysis and self.analysis_stage is not None:
-                self.analysis_stage.refresh_task_analysis(task)
-            extracted = self.extractor.extract(task, temp_dir, runtime_scheduler=self.runtime_scheduler)
-            write_extraction_result(task, extracted)
-            light = self.light_verify(task, extracted) if self.light_verify is not None else self.verifier.verify(task, extracted)
-            if self.needs_full_verification is not None and not self.needs_full_verification(candidate, light):
-                assessed = light
-            elif light is not None and self.light_verify is not None:
-                assessed = self.verifier.verify(task, extracted)
-            else:
-                assessed = light
-            terminal_reason = self.terminal_reason(extracted, assessed)
+                with _phase(phase_timer, "transition_analysis_refresh", state_id=state_id, candidate_id=candidate_id):
+                    self.analysis_stage.refresh_task_analysis(task, phase_timer=phase_timer, phase_prefix="transition_analysis_refresh")
+            with _phase(phase_timer, "transition_extract", state_id=state_id, candidate_id=candidate_id):
+                extracted = self.extractor.extract(task, temp_dir, runtime_scheduler=self.runtime_scheduler)
+            with _phase(phase_timer, "transition_write_extraction_knowledge", state_id=state_id, candidate_id=candidate_id):
+                write_extraction_result(task, extracted, phase_timer=phase_timer, phase_prefix="transition_write_extraction")
+            with _phase(phase_timer, "transition_verify", state_id=state_id, candidate_id=candidate_id):
+                light = self.light_verify(task, extracted) if self.light_verify is not None else _verify_with_optional_timer(self.verifier, task, extracted, phase_timer=phase_timer, phase_prefix="transition_verify")
+                if self.needs_full_verification is not None and not self.needs_full_verification(candidate, light):
+                    assessed = light
+                elif light is not None and self.light_verify is not None:
+                    assessed = _verify_with_optional_timer(self.verifier, task, extracted, phase_timer=phase_timer, phase_prefix="transition_full_verify")
+                else:
+                    assessed = light
+            with _phase(phase_timer, "transition_terminal_reason", state_id=state_id, candidate_id=candidate_id):
+                terminal_reason = self.terminal_reason(extracted, assessed)
             return RepairRuntimeTransition(
                 candidate=candidate,
                 result=extracted,
@@ -108,8 +121,9 @@ class RepairRuntimeTransitionEvaluator:
             )
         finally:
             if restore:
-                task.set_archive_state(original_state)
-                task.set_knowledge(original_knowledge)
+                with _phase(phase_timer, "transition_restore", state_id=state_id, candidate_id=candidate_id):
+                    task.set_archive_state(original_state)
+                    task.set_knowledge(original_knowledge)
 
     def apply_candidate_to_task(self, task: ArchiveTask, candidate: RepairCandidate) -> None:
         archive_state = candidate.plan.get("archive_state") if isinstance(candidate.plan, dict) else None
@@ -122,15 +136,16 @@ class RepairRuntimeTransitionEvaluator:
             return
         task.set_archive_input(candidate.repaired_input)
 
-    def record_candidate_repair(self, task: ArchiveTask, candidate: RepairCandidate) -> None:
+    def record_candidate_repair(self, task: ArchiveTask, candidate: RepairCandidate, *, phase_timer: Callable[..., Any] | None = None) -> None:
         result = candidate.to_result(selection={"selected_candidate_id": self._candidate_id(candidate)})
         append_history = getattr(self.repair_stage, "_append_repair_history", None)
         if callable(append_history):
-            append_history(task, result)
+            write_repair_result(task, result, phase="history", phase_timer=phase_timer, phase_prefix="transition_record_history_write_repair")
         else:
-            write_repair_result(task, result, phase="runtime_transition")
+            write_repair_result(task, result, phase="runtime_transition", phase_timer=phase_timer, phase_prefix="transition_record_history_write_repair")
         if result.ok:
-            write_repair_archive_status(task, repaired=True)
+            with _phase(phase_timer, "transition_record_history_archive_status"):
+                write_repair_archive_status(task, repaired=True)
 
     def _candidate_source_digest(self, candidate: RepairCandidate) -> str:
         if isinstance(candidate.plan, dict) and candidate.plan.get("archive_state"):
@@ -166,6 +181,21 @@ def _default_source_digest(source: dict[str, Any]) -> str:
     except TypeError:
         payload = str(source)
     return hashlib.sha256(payload.encode("utf-8", errors="replace")).hexdigest()
+
+
+def _phase(timer: Callable[..., Any] | None, name: str, *, state_id: str = "", candidate_id: str = ""):
+    if timer is None:
+        return nullcontext()
+    return timer(name, state_id=state_id, candidate_id=candidate_id)
+
+
+def _verify_with_optional_timer(verifier: Any, task: ArchiveTask, extracted: ExtractionResult, *, phase_timer: Callable[..., Any] | None, phase_prefix: str) -> VerificationResult:
+    try:
+        return verifier.verify(task, extracted, phase_timer=phase_timer, phase_prefix=phase_prefix)
+    except TypeError as exc:
+        if "phase_timer" not in str(exc) and "phase_prefix" not in str(exc):
+            raise
+        return verifier.verify(task, extracted)
 
 
 def clone_archive_task(task: ArchiveTask, *, key_suffix: str = "") -> ArchiveTask:

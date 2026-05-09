@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import os
+from contextlib import nullcontext
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from sunpack.analysis.result import ArchiveFormatEvidence, ArchiveSegment
 from sunpack.contracts.archive_input import (
@@ -118,6 +119,9 @@ class ArchiveRepairStage:
         task: ArchiveTask,
         result: ExtractionResult,
         verification: VerificationResult,
+        *,
+        phase_timer: Callable[..., Any] | None = None,
+        phase_prefix: str = "build_repair_job",
     ) -> RepairJob | None:
         probe_query_id = f"{task.key or task.main_path}:job_from_verification"
         repair_trace.write_probe_event("policy_probe_job_build_step", {
@@ -127,7 +131,8 @@ class ArchiveRepairStage:
             "archive": task.main_path,
             "archive_key": task.key,
         })
-        source_input = self._source_input_from_task(task)
+        with _phase(phase_timer, f"{phase_prefix}_source_input"):
+            source_input = self._source_input_from_task(task)
         repair_trace.write_probe_event("policy_probe_job_build_step", {
             "run_id": _policy_probe_run_id(task),
             "query_id": probe_query_id,
@@ -136,92 +141,102 @@ class ArchiveRepairStage:
         })
         if source_input is None:
             return None
-        failure = self._failure_payload(task, result)
+        with _phase(phase_timer, f"{phase_prefix}_selected_format"):
+            selected_format = self._format_from_source_or_task(source_input, task)
+        with _phase(phase_timer, f"{phase_prefix}_failure_payload"):
+            failure = self._failure_payload(task, result, format_hint=selected_format)
         repair_trace.write_probe_event("policy_probe_job_build_step", {
             "run_id": _policy_probe_run_id(task),
             "query_id": probe_query_id,
             "step": "failure_payload",
             "failure_kind": failure.get("failure_kind"),
         })
-        repair_hints = _verification_repair_hints(verification)
-        if repair_hints:
-            _merge_repair_hints_into_failure(failure, repair_hints)
-        failure.update({
-            "status": "verification_failed",
-            "failure_stage": "verification",
-            "assessment_status": verification.assessment_status,
-            "source_integrity": verification.source_integrity,
-            "decision_hint": verification.decision_hint,
-            "completeness": verification.completeness,
-            "recoverable_upper_bound": verification.recoverable_upper_bound,
-            "complete_files": verification.complete_files,
-            "partial_files": verification.partial_files,
-            "failed_files": verification.failed_files,
-            "missing_files": verification.missing_files,
-            "unverified_files": verification.unverified_files,
-            "archive_coverage": asdict(verification.archive_coverage),
-            "repair_hints": repair_hints,
-            "issues": [
-                {
-                    "method": item.method,
-                    "code": item.code,
-                    "message": item.message,
-                    "path": item.path,
-                    "expected": item.expected,
-                    "actual": item.actual,
-                }
-                for item in verification.issues
-            ],
-            "file_observations": [
-                {
-                    "path": item.path,
-                    "archive_path": item.archive_path,
-                    "state": item.state,
-                    "method": item.method,
-                    "bytes_written": item.bytes_written,
-                    "expected_size": item.expected_size,
-                    "progress": item.progress,
-                    "crc_expected": item.crc_expected,
-                    "crc_actual": item.crc_actual,
-                }
-                for item in verification.file_observations
-            ],
-        })
-        previous_actions, previous_modules = self._previous_repair_path(task)
+        with _phase(phase_timer, f"{phase_prefix}_verification_payload"):
+            repair_hints = _verification_repair_hints(verification)
+            if repair_hints:
+                _merge_repair_hints_into_failure(failure, repair_hints)
+            failure.update({
+                "status": "verification_failed",
+                "failure_stage": "verification",
+                "assessment_status": verification.assessment_status,
+                "source_integrity": verification.source_integrity,
+                "decision_hint": verification.decision_hint,
+                "completeness": verification.completeness,
+                "recoverable_upper_bound": verification.recoverable_upper_bound,
+                "complete_files": verification.complete_files,
+                "partial_files": verification.partial_files,
+                "failed_files": verification.failed_files,
+                "missing_files": verification.missing_files,
+                "unverified_files": verification.unverified_files,
+                "archive_coverage": asdict(verification.archive_coverage),
+                "repair_hints": repair_hints,
+                "issues": [
+                    {
+                        "method": item.method,
+                        "code": item.code,
+                        "message": item.message,
+                        "path": item.path,
+                        "expected": item.expected,
+                        "actual": item.actual,
+                    }
+                    for item in verification.issues
+                ],
+                "file_observations": [
+                    {
+                        "path": item.path,
+                        "archive_path": item.archive_path,
+                        "state": item.state,
+                        "method": item.method,
+                        "bytes_written": item.bytes_written,
+                        "expected_size": item.expected_size,
+                        "progress": item.progress,
+                        "crc_expected": item.crc_expected,
+                        "crc_actual": item.crc_actual,
+                    }
+                    for item in verification.file_observations
+                ],
+            })
+        with _phase(phase_timer, f"{phase_prefix}_previous_repair_path"):
+            previous_actions, previous_modules = self._previous_repair_path(task)
         if previous_actions:
             failure["previous_actions"] = previous_actions
         if previous_modules:
             failure["previous_modules"] = previous_modules
-        analysis_prepass = self._analysis_prepass(task)
+        with _phase(phase_timer, f"{phase_prefix}_analysis_prepass"):
+            analysis_prepass = self._analysis_prepass(task)
         repair_trace.write_probe_event("policy_probe_job_build_step", {
             "run_id": _policy_probe_run_id(task),
             "query_id": probe_query_id,
             "step": "analysis_prepass",
             "prepass_keys": sorted(str(key) for key in analysis_prepass.keys())[:40],
         })
-        analysis_evidence = self._analysis_evidence_from_facts(task)
+        with _phase(phase_timer, f"{phase_prefix}_analysis_evidence"):
+            analysis_evidence = self._analysis_evidence_from_facts(task)
         repair_trace.write_probe_event("policy_probe_job_build_step", {
             "run_id": _policy_probe_run_id(task),
             "query_id": probe_query_id,
             "step": "analysis_evidence",
             "has_evidence": analysis_evidence is not None,
         })
-        repair_history = self._repair_history_payload(task, previous_actions, previous_modules)
+        with _phase(phase_timer, f"{phase_prefix}_repair_history_payload"):
+            repair_history = self._repair_history_payload(task, previous_actions, previous_modules)
         repair_trace.write_probe_event("policy_probe_job_build_step", {
             "run_id": _policy_probe_run_id(task),
             "query_id": probe_query_id,
             "step": "repair_history",
             "previous_action_count": len(previous_actions),
         })
-        route_payload = self._zip_runtime_route_payload(
-            task,
-            source_input=source_input,
-            analysis_prepass=analysis_prepass,
-            analysis_evidence=analysis_evidence,
-            extraction_failure=failure,
-            extraction_diagnostics=dict(result.diagnostics or {}),
-            repair_history=repair_history,
-        )
+        with _phase(phase_timer, f"{phase_prefix}_route_payload"):
+            route_payload = self._zip_runtime_route_payload(
+                task,
+                source_input=source_input,
+                format_hint=selected_format,
+                analysis_prepass=analysis_prepass,
+                analysis_evidence=analysis_evidence,
+                extraction_failure=failure,
+                extraction_diagnostics=dict(result.diagnostics or {}),
+                repair_history=repair_history,
+            )
         repair_trace.write_probe_event("policy_probe_job_build_step", {
             "run_id": _policy_probe_run_id(task),
             "query_id": probe_query_id,
@@ -234,23 +249,25 @@ class ArchiveRepairStage:
             repair_hints["damage_flags"] = _dedupe([*list(repair_hints.get("damage_flags") or []), *route_flags])
             failure["repair_hints"] = repair_hints
         source_input = dict(route_payload.get("source_input") or source_input)
-        damage_flags = _dedupe([
-            *self._flags_from_failure_text(result.error),
-            *self._flags_from_verification(verification),
-            *_flags_from_repair_hints(repair_hints),
-            *route_flags,
-            *list(route_payload.get("damage_flags") or []),
-        ])
-        route_payload = normalize_zip_runtime_route_evidence({
-            **route_payload,
-            "source_input": source_input,
-            "analysis_prepass": analysis_prepass,
-            "analysis_evidence": dict(getattr(analysis_evidence, "details", {}) or {}) if analysis_evidence is not None else {},
-            "extraction_failure": failure,
-            "extraction_diagnostics": dict(result.diagnostics or {}),
-            "repair_history": repair_history,
-            "damage_flags": damage_flags,
-        })
+        with _phase(phase_timer, f"{phase_prefix}_damage_flags"):
+            damage_flags = _dedupe([
+                *self._flags_from_failure_text(result.error),
+                *self._flags_from_verification(verification),
+                *_flags_from_repair_hints(repair_hints),
+                *route_flags,
+                *list(route_payload.get("damage_flags") or []),
+            ])
+        with _phase(phase_timer, f"{phase_prefix}_normalize_route_evidence"):
+            route_payload = normalize_zip_runtime_route_evidence({
+                **route_payload,
+                "source_input": source_input,
+                "analysis_prepass": analysis_prepass,
+                "analysis_evidence": dict(getattr(analysis_evidence, "details", {}) or {}) if analysis_evidence is not None else {},
+                "extraction_failure": failure,
+                "extraction_diagnostics": dict(result.diagnostics or {}),
+                "repair_history": repair_history,
+                "damage_flags": damage_flags,
+            })
         repair_trace.write_probe_event("policy_probe_job_build_step", {
             "run_id": _policy_probe_run_id(task),
             "query_id": probe_query_id,
@@ -264,17 +281,20 @@ class ArchiveRepairStage:
             repair_hints = dict(failure.get("repair_hints") or {})
             repair_hints["damage_flags"] = _dedupe([*list(repair_hints.get("damage_flags") or []), *route_flags])
             failure["repair_hints"] = repair_hints
-        knowledge = self._knowledge_payload(
-            task,
-            source_input=source_input,
-            analysis_prepass=analysis_prepass,
-            analysis_evidence=analysis_evidence,
-            extraction_failure=failure,
-            extraction_diagnostics=dict(result.diagnostics or {}),
-            repair_history=repair_history,
-            route_payload=route_payload,
-            verification=verification,
-        )
+        with _phase(phase_timer, f"{phase_prefix}_knowledge_payload"):
+            knowledge = self._knowledge_payload(
+                task,
+                source_input=source_input,
+                analysis_prepass=analysis_prepass,
+                analysis_evidence=analysis_evidence,
+                extraction_failure=failure,
+                extraction_diagnostics=dict(result.diagnostics or {}),
+                repair_history=repair_history,
+                route_payload=route_payload,
+                verification=verification,
+                phase_timer=phase_timer,
+                phase_prefix=f"{phase_prefix}_knowledge_payload",
+            )
         repair_trace.write_probe_event("policy_probe_job_build_step", {
             "run_id": _policy_probe_run_id(task),
             "query_id": probe_query_id,
@@ -286,25 +306,52 @@ class ArchiveRepairStage:
             "query_id": probe_query_id,
             "step": "return",
         })
-        return RepairJob(
-            source_input=source_input,
-            format=self._format_from_task(task),
-            confidence=float(self._analysis_confidence(task) or 0.0),
-            analysis_evidence=analysis_evidence,
-            analysis_prepass=analysis_prepass,
-            fuzzy_profile=self._analysis_fuzzy_profile(task),
-            extraction_failure=failure,
-            extraction_diagnostics=dict(result.diagnostics or {}),
-            damage_flags=damage_flags,
-            password=result.password_used if result.password_used is not None else self._password_from_task(task),
-            archive_key=task.key,
-            workspace=str(self._workspace_root()),
-            attempts=self._attempts(task),
-            source_descriptor=task.archive_input(),
-            archive_state=task.archive_state(),
-            repair_history=repair_history,
-            knowledge=knowledge,
-        )
+        with _phase(phase_timer, f"{phase_prefix}_construct_job"):
+            with _phase(phase_timer, f"{phase_prefix}_construct_job_format"):
+                job_format = self._normalize_format(str(route_payload.get("format") or getattr(analysis_evidence, "format", "") or selected_format))
+            with _phase(phase_timer, f"{phase_prefix}_construct_job_confidence"):
+                confidence = float(getattr(analysis_evidence, "confidence", 0.0) or 0.0)
+            with _phase(phase_timer, f"{phase_prefix}_construct_job_fuzzy"):
+                fuzzy = analysis_prepass.get("fuzzy") if isinstance(analysis_prepass.get("fuzzy"), dict) else {}
+                fuzzy_profile = dict(fuzzy.get("binary_profile") or fuzzy) if isinstance(fuzzy, dict) else {}
+            with _phase(phase_timer, f"{phase_prefix}_construct_job_extraction_diagnostics"):
+                extraction_diagnostics = dict(result.diagnostics or {})
+            with _phase(phase_timer, f"{phase_prefix}_construct_job_password"):
+                password = result.password_used if result.password_used is not None else self._password_from_task(task)
+            with _phase(phase_timer, f"{phase_prefix}_construct_job_workspace"):
+                workspace = str(self._workspace_root())
+            with _phase(phase_timer, f"{phase_prefix}_construct_job_attempts"):
+                attempts = _nested_int(knowledge, ("repair", "attempts"), 0)
+            with _phase(phase_timer, f"{phase_prefix}_construct_job_source_descriptor"):
+                source_descriptor = ArchiveInputDescriptor.from_any(
+                    source_input,
+                    archive_path=task.main_path,
+                    part_paths=list(task.all_parts or [task.main_path]),
+                    format_hint=job_format,
+                    logical_name=str(task.logical_name or ""),
+                )
+            with _phase(phase_timer, f"{phase_prefix}_construct_job_archive_state"):
+                archive_state = task.archive_state()
+            with _phase(phase_timer, f"{phase_prefix}_construct_job_dataclass"):
+                return RepairJob(
+                    source_input=source_input,
+                    format=job_format,
+                    confidence=confidence,
+                    analysis_evidence=analysis_evidence,
+                    analysis_prepass=analysis_prepass,
+                    fuzzy_profile=fuzzy_profile,
+                    extraction_failure=failure,
+                    extraction_diagnostics=extraction_diagnostics,
+                    damage_flags=damage_flags,
+                    password=password,
+                    archive_key=task.key,
+                    workspace=workspace,
+                    attempts=attempts,
+                    source_descriptor=source_descriptor,
+                    archive_state=archive_state,
+                    repair_history=repair_history,
+                    knowledge=knowledge,
+                )
 
     def _append_repair_history(self, task: ArchiveTask, result: RepairResult) -> None:
         history = knowledge_view.repair_history_items(task)
@@ -355,6 +402,7 @@ class ArchiveRepairStage:
         task: ArchiveTask,
         *,
         source_input: dict[str, Any],
+        format_hint: str = "",
         analysis_prepass: dict[str, Any],
         analysis_evidence: ArchiveFormatEvidence | None,
         extraction_failure: dict[str, Any],
@@ -362,9 +410,12 @@ class ArchiveRepairStage:
         repair_history: dict[str, Any],
     ) -> dict[str, Any]:
         details = dict(getattr(analysis_evidence, "details", {}) or {}) if analysis_evidence is not None else {}
+        fmt = self._normalize_format(str(format_hint or getattr(analysis_evidence, "format", "") or ""))
+        if not fmt or fmt == "unknown":
+            fmt = self._format_from_task(task)
         payload = {
-            "format": self._format_from_task(task),
-            "source_input": self._source_input_with_split_parts(task, source_input),
+            "format": fmt,
+            "source_input": self._source_input_with_split_parts(task, source_input, format_hint=fmt),
             "analysis_prepass": dict(analysis_prepass or {}),
             "analysis_evidence": details,
             "extraction_failure": dict(extraction_failure or {}),
@@ -380,7 +431,7 @@ class ArchiveRepairStage:
             payload["split_sidecars_available"] = True
         return normalize_zip_runtime_route_evidence(payload)
 
-    def _source_input_with_split_parts(self, task: ArchiveTask, source_input: dict[str, Any]) -> dict[str, Any]:
+    def _source_input_with_split_parts(self, task: ArchiveTask, source_input: dict[str, Any], *, format_hint: str = "") -> dict[str, Any]:
         output = dict(source_input or {})
         parts = [str(path) for path in getattr(task, "all_parts", []) or [] if str(path)]
         if len(parts) <= 1:
@@ -389,8 +440,18 @@ class ArchiveRepairStage:
             return output
         output["parts"] = [{"path": path, "role": "volume"} for path in parts]
         output["split_sidecars_available"] = True
-        output.setdefault("format_hint", self._format_from_task(task))
+        output.setdefault("format_hint", format_hint or self._format_from_task(task))
         return output
+
+    def _format_from_source_or_task(self, source_input: dict[str, Any], task: ArchiveTask) -> str:
+        fmt = str(source_input.get("format_hint") or source_input.get("format") or "")
+        if fmt:
+            return self._normalize_format(fmt)
+        selected = knowledge_view.selected_format(task)
+        if selected:
+            return self._normalize_format(str(selected))
+        detected = task.detected_ext or Path(task.main_path).suffix
+        return self._normalize_format(str(detected).lstrip("."))
 
     def _knowledge_payload(
         self,
@@ -404,6 +465,8 @@ class ArchiveRepairStage:
         repair_history: dict[str, Any],
         route_payload: dict[str, Any],
         verification: VerificationResult,
+        phase_timer: Callable[..., Any] | None = None,
+        phase_prefix: str = "build_repair_job_knowledge_payload",
     ) -> dict[str, Any]:
         return write_repair_job_context(
             task,
@@ -415,6 +478,8 @@ class ArchiveRepairStage:
             repair_history=repair_history,
             route_payload=route_payload,
             verification=verification,
+            phase_timer=phase_timer,
+            phase_prefix=phase_prefix,
         )
 
     def _source_derivation_from_task(self, task: ArchiveTask) -> dict[str, Any]:
@@ -487,21 +552,22 @@ class ArchiveRepairStage:
             return ArchiveInputDescriptor.from_source_input(repaired_input, archive_path=task.main_path, part_paths=list(task.all_parts or []))
         return None
 
-    def _failure_payload(self, task: ArchiveTask, result: ExtractionResult) -> dict[str, Any]:
+    def _failure_payload(self, task: ArchiveTask, result: ExtractionResult, *, format_hint: str = "") -> dict[str, Any]:
         flags = self._flags_from_failure_text(result.error)
         diagnostics = dict(result.diagnostics or {})
         worker_result = diagnostics.get("result") if isinstance(diagnostics.get("result"), dict) else {}
         native_diagnostics = worker_result.get("diagnostics") if isinstance(worker_result.get("diagnostics"), dict) else {}
         split_payload_damage = self._split_payload_damage_signal(task, worker_result, native_diagnostics)
+        fmt = self._normalize_format(format_hint) if format_hint else self._format_from_task(task)
         payload = {
             "status": "failed",
-            "format": self._format_from_task(task),
+            "format": fmt,
             "error": result.error,
             "damaged": "damaged" in flags or split_payload_damage,
             "checksum_error": "checksum_error" in flags or "crc_error" in flags or split_payload_damage,
             "missing_volume": "missing_volume" in flags,
             "wrong_password": "wrong_password" in flags,
-            "archive_type": self._format_from_task(task),
+            "archive_type": fmt,
         }
         if worker_result:
             for key in (
@@ -716,6 +782,18 @@ def _dedupe(values: list[str]) -> list[str]:
     return result
 
 
+def _nested_int(payload: dict[str, Any], path: tuple[str, ...], default: int = 0) -> int:
+    current: Any = payload
+    for key in path:
+        if not isinstance(current, dict):
+            return default
+        current = current.get(key)
+    try:
+        return int(current or default)
+    except (TypeError, ValueError):
+        return default
+
+
 def _append_candidate_log_from_result(task: ArchiveTask, result: RepairResult, *, phase: str, trigger: str) -> None:
     diagnosis = result.diagnosis if isinstance(result.diagnosis, dict) else {}
     features = diagnosis.get("candidate_features") if isinstance(diagnosis.get("candidate_features"), dict) else {}
@@ -812,3 +890,9 @@ def _verification_summary_payload(verification: VerificationResult) -> dict[str,
             "missing_files": int(getattr(coverage, "missing_files", 0) or 0) if coverage is not None else 0,
         },
     }
+
+
+def _phase(timer: Callable[..., Any] | None, name: str):
+    if timer is None:
+        return nullcontext()
+    return timer(name)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from typing import Any
 
@@ -14,20 +15,31 @@ def ensure_knowledge(target: Any) -> ArchiveKnowledge:
     return ArchiveKnowledge.from_any(target)
 
 
-def commit_task_knowledge(task: Any, knowledge: ArchiveKnowledge | dict[str, Any]) -> ArchiveKnowledge:
-    payload = ensure_knowledge(knowledge)
+def commit_task_knowledge(
+    task: Any,
+    knowledge: ArchiveKnowledge | dict[str, Any],
+    *,
+    phase_timer: Any | None = None,
+    phase_prefix: str = "commit_task_knowledge",
+) -> ArchiveKnowledge:
+    with _phase(phase_timer, f"{phase_prefix}_ensure_payload"):
+        payload = ensure_knowledge(knowledge)
     existing = ArchiveKnowledge()
-    if hasattr(task, "knowledge") and callable(task.knowledge):
-        existing = task.knowledge()
-    current_meta = existing.get("_meta") if isinstance(existing.get("_meta"), dict) else {}
+    with _phase(phase_timer, f"{phase_prefix}_existing_knowledge"):
+        if hasattr(task, "knowledge") and callable(task.knowledge):
+            existing = task.knowledge()
+        current_meta = existing.get("_meta") if isinstance(existing.get("_meta"), dict) else {}
     try:
         revision = int(current_meta.get("revision", 0) or 0) + 1
     except (TypeError, ValueError):
         revision = 1
     meta = payload.get("_meta") if isinstance(payload.get("_meta"), dict) else {}
     payload.data["_meta"] = {**meta, "revision": revision}
-    if hasattr(task, "set_knowledge") and callable(task.set_knowledge):
-        task.set_knowledge(payload)
+    with _phase(phase_timer, f"{phase_prefix}_set_knowledge"):
+        if hasattr(task, "fact_bag") and hasattr(task.fact_bag, "set"):
+            task.fact_bag.set("archive.knowledge", payload.to_dict())
+        elif hasattr(task, "set_knowledge") and callable(task.set_knowledge):
+            task.set_knowledge(payload)
     return payload
 
 
@@ -160,7 +172,7 @@ def write_evidence(
         provenance["source_module"] = source_module
     if confidence is not None:
         provenance["confidence"] = float(confidence)
-    rows.append({"path": path, "value": _jsonable(value), "provenance": provenance})
+    rows.append({"path": path, "value": _compact_evidence_value(value), "provenance": provenance})
     knowledge.set("_evidence", rows[-500:])
     return knowledge
 
@@ -180,3 +192,40 @@ def _jsonable(value: Any) -> Any:
         except Exception:
             return str(value)
     return str(value)
+
+
+def _compact_evidence_value(value: Any) -> Any:
+    if isinstance(value, ArchiveKnowledge):
+        return {"kind": "archive_knowledge", "revision": value.revision(), "source_identity": value.source_identity()}
+    if isinstance(value, dict):
+        output: dict[str, Any] = {}
+        for key, item in value.items():
+            text_key = str(key)
+            if text_key in {"archive_state", "candidate_features", "candidate_log", "workspace_paths"}:
+                output[text_key] = _compact_large_value(text_key, item)
+            elif text_key in {"stdout", "stderr"} and isinstance(item, str):
+                output[text_key] = item[:4000]
+            else:
+                output[text_key] = _compact_evidence_value(item)
+        return output
+    if isinstance(value, (list, tuple, set)):
+        values = list(value)
+        output = [_compact_evidence_value(item) for item in values[:50]]
+        if len(values) > 50:
+            output.append({"truncated_count": len(values) - 50})
+        return output
+    return _jsonable(value)
+
+
+def _compact_large_value(key: str, value: Any) -> Any:
+    if isinstance(value, dict):
+        return {"kind": key, "keys": sorted(str(item) for item in value.keys())[:50]}
+    if isinstance(value, list):
+        return {"kind": key, "count": len(value)}
+    return _jsonable(value)
+
+
+def _phase(timer: Any | None, name: str):
+    if timer is None:
+        return nullcontext()
+    return timer(name)
