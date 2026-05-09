@@ -41,6 +41,7 @@ def _filter_features(row: dict, view: str) -> dict:
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Train slim RL model (4 state groups only)")
     parser.add_argument("--dataset-dir", default=str(Path("repair_training/datasets")))
+    parser.add_argument("--input", action="append", default=[], help="Input JSONL file. Repeatable; defaults to latest ZIP repair-plan data.")
     parser.add_argument("--output-dir", default=str(Path("repair_training/models/offline_rl/zip_q_value_slim")))
     parser.add_argument("--format-scope", default="zip")
     parser.add_argument("--target", default="future_return")
@@ -53,7 +54,8 @@ def main(argv=None):
 
     dataset_dir = Path(args.dataset_dir)
     rows = []
-    for path in sorted(dataset_dir.glob("repair_plan_ltr_*_zip_v14.jsonl")):
+    paths = _input_paths(args.input, dataset_dir)
+    for path in paths:
         with path.open("r", encoding="utf-8") as h:
             for line in h:
                 line = line.strip()
@@ -185,6 +187,30 @@ def main(argv=None):
     print(f"      (state + fuzzy + extraction + verification + native probe + candidate.module)")
 
     return 0
+
+
+def _input_paths(inputs: list[str], dataset_dir: Path) -> list[Path]:
+    if inputs:
+        return [Path(item) for item in inputs if Path(item).is_file()]
+    preferred = [
+        dataset_dir / "repair_plan_ltr_success_zip_terminal_recovery.jsonl",
+        dataset_dir / "repair_plan_ltr_failure_zip_terminal_recovery.jsonl",
+    ]
+    if all(path.is_file() for path in preferred):
+        return preferred
+    candidates = sorted(dataset_dir.glob("repair_plan_ltr_success_zip_v*.jsonl"))
+    if candidates:
+        latest = sorted(candidates, key=lambda path: _version_key(path.name))[-1]
+        failure = latest.with_name(latest.name.replace("success", "failure"))
+        return [path for path in (latest, failure) if path.is_file()]
+    return sorted(dataset_dir.glob("repair_plan_ltr_*terminal_recovery.jsonl"))
+
+
+def _version_key(name: str) -> tuple[int, str]:
+    import re
+
+    match = re.search(r"_v(\d+)\.jsonl$", name)
+    return (int(match.group(1)) if match else -1, name)
 
 
 if __name__ == "__main__":

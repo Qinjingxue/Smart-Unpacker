@@ -323,6 +323,7 @@ if ($Scheduling -eq "pool") {
         branch_count = 0
         terminal_success_count = 0
         legacy_module_seen_count = 0
+        duplicate_candidate_id_count = 0
         rollout_budget_exhausted = 0
         best_partial_returned_count = 0
         repair_cache_hits = 0
@@ -362,7 +363,7 @@ if ($Scheduling -eq "pool") {
         shards = $summaries
     }
     foreach ($summary in $summaries) {
-        foreach ($name in @("samples", "success_rows", "failure_rows", "timeouts", "failed", "skipped", "state_count", "expanded_state_count", "branch_count", "terminal_success_count", "legacy_module_seen_count", "rollout_budget_exhausted", "best_partial_returned_count", "repair_cache_hits", "repair_cache_misses", "materialize_cache_hits", "native_operation_cache_hits", "zip_scan_artifact_hits", "zip_scan_artifact_misses", "expensive_materialization_skipped_count", "route_rejected_by_required_flags", "route_rejected_by_can_handle")) {
+        foreach ($name in @("samples", "success_rows", "failure_rows", "timeouts", "failed", "skipped", "state_count", "expanded_state_count", "branch_count", "terminal_success_count", "legacy_module_seen_count", "duplicate_candidate_id_count", "rollout_budget_exhausted", "best_partial_returned_count", "repair_cache_hits", "repair_cache_misses", "materialize_cache_hits", "native_operation_cache_hits", "zip_scan_artifact_hits", "zip_scan_artifact_misses", "expensive_materialization_skipped_count", "route_rejected_by_required_flags", "route_rejected_by_can_handle")) {
             $aggregate[$name] = [int]$aggregate[$name] + [int]($summary.$name)
         }
         $aggregate["materialize_worker_seconds_saved_estimate"] = [double]$aggregate["materialize_worker_seconds_saved_estimate"] + [double]($summary.materialize_worker_seconds_saved_estimate)
@@ -548,6 +549,7 @@ $aggregate = [ordered]@{
     branch_count = 0
     terminal_success_count = 0
     legacy_module_seen_count = 0
+    duplicate_candidate_id_count = 0
     rollout_budget_exhausted = 0
     best_partial_returned_count = 0
     repair_cache_hits = 0
@@ -587,7 +589,7 @@ $aggregate = [ordered]@{
     shards = $summaries
 }
 foreach ($summary in $summaries) {
-    foreach ($name in @("samples", "success_rows", "failure_rows", "timeouts", "failed", "skipped", "state_count", "expanded_state_count", "branch_count", "terminal_success_count", "legacy_module_seen_count", "rollout_budget_exhausted", "best_partial_returned_count", "repair_cache_hits", "repair_cache_misses", "materialize_cache_hits", "native_operation_cache_hits", "zip_scan_artifact_hits", "zip_scan_artifact_misses", "expensive_materialization_skipped_count", "route_rejected_by_required_flags", "route_rejected_by_can_handle")) {
+    foreach ($name in @("samples", "success_rows", "failure_rows", "timeouts", "failed", "skipped", "state_count", "expanded_state_count", "branch_count", "terminal_success_count", "legacy_module_seen_count", "duplicate_candidate_id_count", "rollout_budget_exhausted", "best_partial_returned_count", "repair_cache_hits", "repair_cache_misses", "materialize_cache_hits", "native_operation_cache_hits", "zip_scan_artifact_hits", "zip_scan_artifact_misses", "expensive_materialization_skipped_count", "route_rejected_by_required_flags", "route_rejected_by_can_handle")) {
         $aggregate[$name] = [int]$aggregate[$name] + [int]($summary.$name)
     }
     $aggregate["materialize_worker_seconds_saved_estimate"] = [double]$aggregate["materialize_worker_seconds_saved_estimate"] + [double]($summary.materialize_worker_seconds_saved_estimate)

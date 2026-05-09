@@ -127,6 +127,9 @@ class CandidateSelector:
     def select(self, candidates: list[RepairCandidate]) -> tuple[RepairCandidate | None, dict[str, Any]]:
         materialized = materialize_candidates(candidates)
         validated = [self._with_native_validation(candidate) for candidate in materialized]
+        return self.select_validated(validated)
+
+    def select_validated(self, validated: list[RepairCandidate]) -> tuple[RepairCandidate | None, dict[str, Any]]:
         accepted = [candidate for candidate in validated if self._accepted(candidate)]
         if not accepted:
             return None, {
@@ -453,6 +456,27 @@ def candidate_feature_payload(candidate: RepairCandidate) -> dict[str, Any]:
 
 
 def candidate_digest(candidate: RepairCandidate) -> str:
+    diagnosis = candidate.diagnosis if isinstance(candidate.diagnosis, dict) else {}
+    validation_details = diagnosis.get("validation_details") if isinstance(diagnosis.get("validation_details"), dict) else {}
+    native_candidate = diagnosis.get("native_candidate") if isinstance(diagnosis.get("native_candidate"), dict) else {}
+    native_identity = {
+        "repair_name": diagnosis.get("repair_name") or "",
+        "native_key": diagnosis.get("native_key") or "",
+        "native_target": diagnosis.get("native_target") or "",
+        "candidate_status": diagnosis.get("candidate_status") or "",
+        "atomic_action_group": diagnosis.get("atomic_action_group") or "",
+        "route_family": diagnosis.get("route_family") or "",
+        "patch_facts": sorted(str(item) for item in diagnosis.get("patch_facts") or [] if str(item)),
+        "residual_facts": sorted(str(item) for item in diagnosis.get("residual_facts") or [] if str(item)),
+        "validation_policy": validation_details.get("policy") or "",
+        "validation_native_target": validation_details.get("native_target") or "",
+        "validation_kept_entries": validation_details.get("kept_entries"),
+        "validation_dropped_entries": validation_details.get("dropped_entries"),
+        "validation_crc_match_count": validation_details.get("crc_match_count"),
+        "native_candidate_index": native_candidate.get("index"),
+        "native_candidate_name": native_candidate.get("name") or "",
+        "raw_name_bytes_preserved": bool(diagnosis.get("raw_name_bytes_preserved")),
+    }
     payload = {
         "module": candidate.module_name,
         "format": candidate.format,
@@ -461,6 +485,7 @@ def candidate_digest(candidate: RepairCandidate) -> str:
         "damage_flags": candidate.damage_flags,
         "repaired_input": _source_input_shape(candidate.repaired_input),
         "plan": _plan_shape(candidate.plan),
+        "native_identity": native_identity,
     }
     return hashlib.sha256(json.dumps(payload, ensure_ascii=True, sort_keys=True, default=str).encode("utf-8")).hexdigest()
 

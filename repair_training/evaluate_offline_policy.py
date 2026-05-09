@@ -104,8 +104,8 @@ def _policy_specs(values: list[str]) -> list[str]:
     return output
 
 
-def _load_prediction_scores(values: list[str]) -> dict[str, dict[tuple[str, str], float]]:
-    output: dict[str, dict[tuple[str, str], float]] = {}
+def _load_prediction_scores(values: list[str]) -> dict[str, dict[str, dict[tuple[str, str], float]]]:
+    output: dict[str, dict[str, dict[tuple[str, str], float]]] = {}
     for value in values:
         value = str(value or "")
         if not value.startswith("ltr:"):
@@ -113,8 +113,9 @@ def _load_prediction_scores(values: list[str]) -> dict[str, dict[tuple[str, str]
         path = Path(value[4:])
         name = path.parent.name or path.stem
         scores: dict[tuple[str, str], float] = {}
+        action_scores: dict[tuple[str, str], float] = {}
         if not path.is_file():
-            output[name] = scores
+            output[name] = {"candidate": scores, "action": action_scores}
             continue
         with path.open("r", encoding="utf-8") as handle:
             for line in handle:
@@ -127,7 +128,10 @@ def _load_prediction_scores(values: list[str]) -> dict[str, dict[tuple[str, str]
                     continue
                 key = (str(row.get("query_id") or ""), str(row.get("candidate_id") or ""))
                 scores[key] = _as_float(row.get("score"))
-        output[name] = scores
+                action_row_id = str(row.get("action_row_id") or "")
+                if action_row_id:
+                    action_scores[(str(row.get("query_id") or ""), action_row_id)] = _as_float(row.get("score"))
+        output[name] = {"candidate": scores, "action": action_scores}
     return output
 
 
@@ -161,7 +165,7 @@ def _build_graph(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def _evaluate_policy(policy: str, graph: dict[str, Any], predictions: dict[str, dict[tuple[str, str], float]], args: argparse.Namespace, oracle_cache: dict[str, dict[str, Any]]) -> dict[str, Any]:
+def _evaluate_policy(policy: str, graph: dict[str, Any], predictions: dict[str, dict[str, dict[tuple[str, str], float]]], args: argparse.Namespace, oracle_cache: dict[str, dict[str, Any]]) -> dict[str, Any]:
     rng = random.Random(int(args.seed))
     episodes = []
     skipped = 0
@@ -206,7 +210,7 @@ def _evaluate_policy(policy: str, graph: dict[str, Any], predictions: dict[str, 
     }
 
 
-def _follow_policy(policy: str, state_id: str, graph: dict[str, Any], predictions: dict[str, dict[tuple[str, str], float]], rng: random.Random, max_steps: int) -> dict[str, Any]:
+def _follow_policy(policy: str, state_id: str, graph: dict[str, Any], predictions: dict[str, dict[str, dict[tuple[str, str], float]]], rng: random.Random, max_steps: int) -> dict[str, Any]:
     episode_return = 0.0
     terminal_recovery = 0.0
     steps = 0
@@ -264,7 +268,7 @@ def _follow_policy(policy: str, state_id: str, graph: dict[str, Any], prediction
     }
 
 
-def _choose_action(policy: str, actions: list[dict[str, Any]], predictions: dict[str, dict[tuple[str, str], float]], rng: random.Random) -> tuple[dict[str, Any] | None, bool]:
+def _choose_action(policy: str, actions: list[dict[str, Any]], predictions: dict[str, dict[str, dict[tuple[str, str], float]]], rng: random.Random) -> tuple[dict[str, Any] | None, bool]:
     if not actions:
         return None, False
     if policy == "current_selector":
@@ -278,11 +282,15 @@ def _choose_action(policy: str, actions: list[dict[str, Any]], predictions: dict
         return max(actions, key=lambda row: _as_float(_nested(row, "rl", "future_return"))), False
     if policy.startswith("ltr:"):
         name = policy.split(":", 1)[1]
-        scores = predictions.get(name, {})
+        score_tables = predictions.get(name, {})
+        scores = score_tables.get("candidate", {}) if isinstance(score_tables, dict) else {}
+        action_scores = score_tables.get("action", {}) if isinstance(score_tables, dict) else {}
         ranked = []
         for row in actions:
-            key = (str(row.get("query_id") or ""), str(row.get("candidate_id") or ""))
-            ranked.append((scores.get(key), row))
+            query_id = str(row.get("query_id") or "")
+            action_key = (query_id, str(row.get("action_row_id") or ""))
+            candidate_key = (query_id, str(row.get("candidate_id") or ""))
+            ranked.append((action_scores.get(action_key, scores.get(candidate_key)), row))
         known = [(score, row) for score, row in ranked if score is not None]
         if known:
             return max(known, key=lambda item: float(item[0]))[1], False

@@ -43,6 +43,22 @@ class ArchiveRepairStage:
             return None
         return self._run_and_apply(task, job, trigger="verification")
 
+    def policy_active_for_verification(
+        self,
+        task: ArchiveTask,
+        result: ExtractionResult,
+        verification: VerificationResult,
+    ) -> bool:
+        if not self.enabled or self.scheduler is None:
+            return False
+        policy = self.config.get("policy") if isinstance(self.config.get("policy"), dict) else {}
+        if not bool(policy.get("disable_beam_when_model_active", True)):
+            return False
+        job = self._job_from_verification_assessment(task, result, verification)
+        if job is None:
+            return False
+        return bool(self.scheduler.policy_active_for_job(job))
+
     def _run_and_apply(self, task: ArchiveTask, job: RepairJob, *, trigger: str) -> RepairResult | None:
         if self.scheduler is None or self._attempts(task) >= self.max_attempts_per_task:
             return None

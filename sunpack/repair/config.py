@@ -47,6 +47,13 @@ DEFAULT_REPAIR_CONFIG = {
         "patience_rounds": 3,
         "return_best_partial": True,
     },
+    "policy": {
+        "enabled": True,
+        "fallback_to_selector": True,
+        "disable_beam_when_model_active": True,
+        "strict_provider_errors": False,
+        "provider_package": "sunpack_repair_models",
+    },
     "telemetry": {
         "enabled": False,
     },
@@ -187,6 +194,7 @@ def normalize_repair_config(value: Any) -> dict[str, Any]:
     config["safety"] = _normalize_safety(config.get("safety"))
     config["module_limits"] = _normalize_module_limits(config.get("module_limits"))
     config["beam"] = _normalize_beam(config.get("beam"))
+    config["policy"] = _normalize_policy(config.get("policy"))
     config["telemetry"] = _normalize_telemetry(config.get("telemetry"))
     config["modules"] = _normalize_modules(config.get("modules"))
     return config
@@ -275,6 +283,22 @@ def _normalize_telemetry(value: Any) -> dict[str, bool]:
         raise ValueError("repair.telemetry must be an object")
     return {
         "enabled": _bool_value(value.get("enabled", False), "repair.telemetry.enabled"),
+    }
+
+
+def _normalize_policy(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError("repair.policy must be an object")
+    provider_package = str(value.get("provider_package") or "sunpack_repair_models").strip()
+    if not provider_package:
+        raise ValueError("repair.policy.provider_package must not be empty")
+    return {
+        **value,
+        "enabled": _bool_value(value.get("enabled", True), "repair.policy.enabled"),
+        "fallback_to_selector": _bool_value(value.get("fallback_to_selector", True), "repair.policy.fallback_to_selector"),
+        "disable_beam_when_model_active": _bool_value(value.get("disable_beam_when_model_active", True), "repair.policy.disable_beam_when_model_active"),
+        "strict_provider_errors": _bool_value(value.get("strict_provider_errors", False), "repair.policy.strict_provider_errors"),
+        "provider_package": provider_package,
     }
 
 

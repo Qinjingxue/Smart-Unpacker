@@ -840,10 +840,17 @@ class ZipResolveDuplicateEntries(_ZipConflictResolver):
         output = []
         for candidate in candidates:
             diagnosis_payload = dict(candidate.diagnosis)
+            validation_details = diagnosis_payload.get("validation_details") if isinstance(diagnosis_payload.get("validation_details"), dict) else {}
+            policy = str(validation_details.get("policy") or "")
+            if not policy:
+                policy = "crc_match"
+                validation_details = dict(validation_details)
+                validation_details["policy"] = policy
+                diagnosis_payload["validation_details"] = validation_details
             diagnosis_payload["patch_facts"] = _dedupe([
                 *[str(value) for value in diagnosis_payload.get("patch_facts") or []],
                 "resolved_duplicate_entries",
-                "kept_entry_policy=crc_match",
+                f"kept_entry_policy={policy}",
             ])
             output.append(replace(candidate, diagnosis=diagnosis_payload, actions=_dedupe([*candidate.actions, "resolve_duplicate_entries"])))
         return output

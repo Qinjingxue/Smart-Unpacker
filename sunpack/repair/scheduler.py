@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from sunpack.repair.candidate import CandidateSelector, CandidateValidation, RepairCandidate, RepairCandidateBatch, candidate_feature_payload
+from sunpack.repair.candidate import CandidateSelector, CandidateValidation, RepairCandidate, RepairCandidateBatch, candidate_feature_payload, materialize_candidates
 from sunpack.repair.capability import ModuleCapabilityDecision, RepairCapabilityDecision
 from sunpack.repair.config import enabled_module_configs, repair_config
 from sunpack.repair.context import RepairContext, build_repair_context
@@ -12,6 +12,7 @@ from sunpack.repair.job import RepairJob
 from sunpack.repair.pipeline.module import RepairRoute
 from sunpack.repair.pipeline.modules._common import job_source_size, repair_operation_cache_key
 from sunpack.repair.pipeline.registry import discover_repair_modules, get_repair_module_registry
+from sunpack.repair.policy import RepairPolicyManager
 from sunpack.repair.result import RepairResult
 from sunpack.repair.runtime_cache import RepairRuntimeCache
 from sunpack.support import repair_trace
@@ -25,6 +26,7 @@ class RepairScheduler:
             enabled=bool(cache_config.get("enabled", True)),
             max_entries=int(cache_config.get("max_entries", 512) or 512),
         )
+        self.policy_manager = RepairPolicyManager(self.config)
         discover_repair_modules()
 
     def diagnose(self, job: RepairJob) -> RepairDiagnosis:
@@ -45,17 +47,57 @@ class RepairScheduler:
         warnings = list(batch.warnings)
         selection: dict[str, Any] = {}
         if batch.candidates:
-            selected, selection = selector.select(_with_job_password_candidates(batch.candidates, job))
+            selected = None
+            if self.policy_manager.active_for_job(job):
+                policy_candidates = _with_job_password_candidates(batch.candidates, job)
+                validated = self._validated_policy_candidates(selector, policy_candidates)
+                selectable = [candidate for candidate in validated if selector._accepted(candidate)]
+                policy_payloads = [_policy_candidate_payload(candidate) for candidate in selectable]
+                selected, policy_selection = self.policy_manager.choose(
+                    job=job,
+                    candidates=selectable,
+                    candidate_payloads=policy_payloads,
+                    diagnosis=batch.diagnosis,
+                )
+                selection = {"policy": _policy_selection_public(policy_selection)}
+                if selected is not None:
+                    selection.update({
+                        "candidate_count": len(validated),
+                        "accepted_count": len(selectable),
+                        "selected_module": selected.module_name,
+                        "selected_format": selected.format,
+                        "candidates": policy_payloads,
+                    })
+                elif self.policy_manager.fallback_to_selector:
+                    fallback_selected, fallback_selection = selector.select_validated(validated)
+                    selected = fallback_selected
+                    selection = {
+                        **fallback_selection,
+                        "policy": _policy_selection_public(policy_selection),
+                        "policy_fallback": True,
+                    }
+                else:
+                    warnings.append("model repair policy did not select a candidate")
+            else:
+                selected, selection = selector.select(_with_job_password_candidates(batch.candidates, job))
+                policy_status = self.policy_manager.status_for_job(job)
+                if policy_status.get("decision_status") in {"unavailable", "disabled"}:
+                    selection = {**selection, "policy": _policy_selection_public(policy_status), "policy_fallback": True}
             if selected is not None:
                 result = selected.to_result(selection=selection)
                 if warnings:
                     result = replace(result, warnings=_dedupe([*result.warnings, *warnings]))
                 self._write_telemetry(job, batch, result, selection)
+                trace_candidate = (
+                    _policy_candidate_payload(selected)
+                    if isinstance(selection.get("policy"), dict)
+                    else candidate_feature_payload(selected)
+                )
                 repair_trace.write_event("repair_selected_result", {
                     "job": repair_trace.job_payload(job),
                     "result": repair_trace.result_payload(result),
                     "selection": selection,
-                    "candidate": candidate_feature_payload(selected),
+                    "candidate": trace_candidate,
                     "candidate_count": len(batch.candidates),
                 })
                 return result
@@ -78,6 +120,17 @@ class RepairScheduler:
             "candidate_count": len(batch.candidates),
         })
         return result
+
+    def policy_active_for_job(self, job: RepairJob) -> bool:
+        return self.policy_manager.active_for_job(job)
+
+    def _validated_policy_candidates(
+        self,
+        selector: CandidateSelector,
+        candidates: list[RepairCandidate],
+    ) -> list[RepairCandidate]:
+        materialized = materialize_candidates(candidates)
+        return [selector._with_native_validation(candidate) for candidate in materialized]
 
     def generate_repair_candidates(self, job: RepairJob, *, lazy: bool = False) -> RepairCandidateBatch:
         diagnosis = self.diagnose(job)
@@ -616,6 +669,8 @@ def _write_pretty_telemetry(path: Path, records: list[dict[str, Any]]) -> None:
 
 def _telemetry_candidate_features(batch: RepairCandidateBatch, selection: dict[str, Any]) -> list[dict[str, Any]]:
     selected_features = selection.get("candidates") if isinstance(selection.get("candidates"), list) else []
+    if isinstance(selection.get("policy"), dict) and selected_features:
+        return [dict(item) for item in selected_features if isinstance(item, dict)]
     output = [dict(item) for item in selected_features if isinstance(item, dict) and item.get("ltr_features")]
     if output:
         return output
@@ -647,6 +702,75 @@ def _telemetry_selected_ids(
         str(item.get("candidate_id") or "")
         for item in features
         if str(item.get("module") or "") == selected_module and item.get("candidate_id")
+    }
+
+
+def _policy_candidate_payload(candidate: RepairCandidate) -> dict[str, Any]:
+    payload = candidate_feature_payload(candidate)
+    validation_details = payload.get("validation_details") if isinstance(payload.get("validation_details"), dict) else {}
+    safe_validation = {
+        key: validation_details.get(key)
+        for key in (
+            "policy",
+            "crc_match_count",
+            "kept_entries",
+            "dropped_entries",
+            "duplicate_group_count",
+            "kept_payload_verified_count",
+            "ambiguous_duplicate_group_count",
+            "native_target",
+        )
+        if key in validation_details
+    }
+    return {
+        "candidate_id": payload.get("candidate_id"),
+        "module": payload.get("module"),
+        "repair_name": payload.get("repair_name"),
+        "native_key": payload.get("native_key"),
+        "native_target": payload.get("native_target"),
+        "candidate_status": payload.get("candidate_status"),
+        "atomic_action_group": payload.get("atomic_action_group"),
+        "route_family": payload.get("route_family"),
+        "native_target_mismatch": payload.get("native_target_mismatch"),
+        "format": payload.get("format"),
+        "status": payload.get("status"),
+        "partial": payload.get("partial"),
+        "lazy": payload.get("lazy"),
+        "materialized": payload.get("materialized"),
+        "requires_native_validation": payload.get("requires_native_validation"),
+        "plan_kind": payload.get("plan_kind"),
+        "patch_cost": payload.get("patch_cost"),
+        "patch_span_count": payload.get("patch_span_count"),
+        "patch_operation_count": payload.get("patch_operation_count"),
+        "affected_entry_count": payload.get("affected_entry_count"),
+        "validation_details": safe_validation,
+        "validation_count": payload.get("validation_count"),
+        "native_validation_score": payload.get("native_validation_score"),
+    }
+
+
+def _policy_selection_public(selection: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: selection.get(key)
+        for key in (
+            "enabled",
+            "provider_package",
+            "fallback_to_selector",
+            "decision_status",
+            "fallback_reason",
+            "provider_id",
+            "confidence",
+            "reason",
+            "selected_index",
+            "selected_candidate_id",
+            "selected_module",
+            "selected_format",
+            "candidate_count",
+            "load_error",
+            "provider_errors",
+            "metadata",
+        )
+        if key in selection
     }
 
 

@@ -17,7 +17,14 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
 DEFAULT_DATASET_DIR = Path("repair_training") / "datasets"
 DEFAULT_OUTPUT_DIR = Path("repair_training") / "models" / "offline_rl" / "zip_q_value"
-FEATURE_VIEWS = {"runtime_only", "runtime_plus_repair_prior"}
+FEATURE_CONTRACT_VERSION = 3
+FEATURE_VIEWS = {
+    "runtime_only",
+    "runtime_plus_repair_prior",
+    "runtime_plus_candidate_native_facts",
+    "runtime_minimal_policy",
+    "runtime_minimal_native_validation",
+}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -81,7 +88,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--dataset-dir", default=str(DEFAULT_DATASET_DIR))
     parser.add_argument("--input", action="append", default=[], help="Input JSONL file. Repeatable; defaults to ZIP terminal recovery datasets.")
     parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR))
-    parser.add_argument("--feature-view", choices=sorted(FEATURE_VIEWS), default="runtime_only")
+    parser.add_argument("--feature-view", choices=sorted(FEATURE_VIEWS), default="runtime_minimal_native_validation")
     parser.add_argument("--target", choices=("future_return", "reward", "terminal_reward"), default="future_return")
     parser.add_argument("--format-scope", default="zip")
     parser.add_argument("--split-by", choices=("episode", "source_sample", "query"), default="source_sample")
@@ -127,6 +134,7 @@ def _feature_dict(row: dict[str, Any], view: str) -> dict[str, Any]:
     state_features = rl.get("state_features") if isinstance(rl.get("state_features"), dict) else {}
     action_features = rl.get("action_features") if isinstance(rl.get("action_features"), dict) else {}
     output: dict[str, Any] = {
+        "feature_contract_version": FEATURE_CONTRACT_VERSION,
         "top.round": int(row.get("round", 0) or 0),
         "top.material_format": row.get("material_format"),
         "top.module": row.get("module"),
@@ -135,8 +143,36 @@ def _feature_dict(row: dict[str, Any], view: str) -> dict[str, Any]:
     }
     _flatten(output, "state", state_features.get("runtime_context") if isinstance(state_features.get("runtime_context"), dict) else {})
     _flatten(output, "candidate", action_features.get("candidate_proposal") if isinstance(action_features.get("candidate_proposal"), dict) else {})
-    if view == "runtime_plus_repair_prior":
+    if view == "runtime_plus_candidate_native_facts":
+        stable = row.get("stable_features") if isinstance(row.get("stable_features"), dict) else {}
+        _flatten(output, "candidate_native", stable.get("candidate") if isinstance(stable.get("candidate"), dict) else {})
+    if view in {"runtime_plus_repair_prior", "runtime_plus_candidate_native_facts"}:
         _flatten(output, "repair_prior", action_features.get("repair_prior_features") if isinstance(action_features.get("repair_prior_features"), dict) else {})
+    if view in {"runtime_minimal_policy", "runtime_minimal_native_validation"}:
+        output = {
+            key: value
+            for key, value in output.items()
+            if (
+                key == "feature_contract_version"
+                or key.startswith("top.")
+                or key.startswith("state.")
+                or key.startswith("candidate.module")
+                or key.startswith("candidate.repair_name")
+                or key.startswith("candidate.atomic_action_group")
+                or key.startswith("candidate.route_family")
+                or key.startswith("candidate.format")
+                or (
+                    view == "runtime_minimal_native_validation"
+                    and (
+                        key.startswith("candidate.native_key")
+                        or key.startswith("candidate.native_target")
+                        or key.startswith("candidate.candidate_status")
+                        or key.startswith("candidate.native_target_mismatch")
+                        or key.startswith("candidate.validation_details")
+                    )
+                )
+            )
+        }
     return output
 
 
@@ -167,6 +203,27 @@ def _flatten(output: dict[str, Any], prefix: str, value: Any) -> None:
 
 
 def _excluded_feature_key(key: str, path: str) -> bool:
+    normalized = f"{path}.{key}".lower()
+    safe_validation_prefixes = (
+        "candidate.validation_details",
+        "candidate_native.validation_details",
+    )
+    safe_validation_keys = (
+        "policy",
+        "crc_match_count",
+        "kept_entries",
+        "dropped_entries",
+        "duplicate_group_count",
+        "kept_entry_crc_match_count",
+        "kept_payload_verified_count",
+        "dropped_entry_count",
+        "ambiguous_duplicate_group_count",
+        "native_target",
+        "accepted",
+        "raw_filename_bytes_preserved",
+    )
+    if any(normalized.startswith(prefix) for prefix in safe_validation_prefixes):
+        return False
     forbidden = (
         "oracle",
         "after_state",
@@ -188,7 +245,6 @@ def _excluded_feature_key(key: str, path: str) -> bool:
         "corruption",
         "runtime_score",
     )
-    normalized = f"{path}.{key}".lower()
     return any(token in normalized for token in forbidden)
 
 
@@ -264,6 +320,10 @@ def _metrics(rows: list[dict[str, Any]], y: np.ndarray, scores: np.ndarray, eval
         "oracle_future_return_mean": _mean(oracle_returns),
         "future_return_regret_mean": _mean(regrets),
         "future_return_regret_p90": _percentile(sorted(regrets), 0.90),
+        "duplicate_conflict_regret_mean": _duplicate_conflict_regret_mean(by_query),
+        "duplicate_policy_top1_accuracy": _duplicate_policy_top1_accuracy(by_query),
+        "candidate_id_collision_count": _candidate_id_collision_count([rows[idx] for idx in eval_idx]),
+        "feature_contract_version": FEATURE_CONTRACT_VERSION,
         "target_mean": float(statistics.mean(y_eval)) if len(y_eval) else 0.0,
         "prediction_mean": float(statistics.mean(s_eval)) if len(s_eval) else 0.0,
     }
@@ -279,6 +339,7 @@ def _prediction_rows(rows: list[dict[str, Any]], scores: np.ndarray, eval_idx: l
             "state_id": row.get("state_id"),
             "action_row_id": row.get("action_row_id"),
             "candidate_id": row.get("candidate_id"),
+            "candidate_id_collision_key": f"{row.get('query_id') or ''}|{row.get('candidate_id') or ''}",
             "module": row.get("module"),
             "material_format": row.get("material_format"),
             "label": row.get("label"),
@@ -291,6 +352,49 @@ def _prediction_rows(rows: list[dict[str, Any]], scores: np.ndarray, eval_idx: l
             "eval_row": idx in eval_set,
         })
     return output
+
+
+def _candidate_id_collision_count(rows: list[dict[str, Any]]) -> int:
+    by_key: dict[tuple[str, str], set[str]] = defaultdict(set)
+    for row in rows:
+        key = (str(row.get("query_id") or ""), str(row.get("candidate_id") or ""))
+        if not key[0] or not key[1]:
+            continue
+        by_key[key].add(str(row.get("action_row_id") or ""))
+    return sum(max(0, len(actions) - 1) for actions in by_key.values())
+
+
+def _duplicate_conflict_regret_mean(by_query: dict[str, list[tuple[dict[str, Any], float]]]) -> float:
+    regrets = []
+    for items in by_query.values():
+        if not items or not any(_is_duplicate_conflict_row(row) for row, _ in items):
+            continue
+        chosen = max(items, key=lambda item: item[1])[0]
+        chosen_return = float(_nested(chosen, "rl", "future_return") or 0.0)
+        oracle_return = max(float(_nested(row, "rl", "future_return") or 0.0) for row, _ in items)
+        regrets.append(max(0.0, oracle_return - chosen_return))
+    return _mean(regrets)
+
+
+def _duplicate_policy_top1_accuracy(by_query: dict[str, list[tuple[dict[str, Any], float]]]) -> float:
+    hits = []
+    for items in by_query.values():
+        duplicate_items = [(row, score) for row, score in items if _is_duplicate_conflict_row(row)]
+        if not duplicate_items:
+            continue
+        chosen = max(items, key=lambda item: item[1])[0]
+        oracle_return = max(float(_nested(row, "rl", "future_return") or 0.0) for row, _ in items)
+        chosen_return = float(_nested(chosen, "rl", "future_return") or 0.0)
+        hits.append(1.0 if chosen_return >= oracle_return - 1e-9 else 0.0)
+    return _mean(hits)
+
+
+def _is_duplicate_conflict_row(row: dict[str, Any]) -> bool:
+    sample = " ".join(str(row.get(key) or "") for key in ("sample_id", "episode_id", "module", "module_name"))
+    if "zip_duplicate_entry_crc_conflict" in sample or "zip_resolve_duplicate_entries" in sample:
+        return True
+    facts = row.get("patch_facts") if isinstance(row.get("patch_facts"), list) else []
+    return any("duplicate" in str(item).lower() for item in facts)
 
 
 def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:

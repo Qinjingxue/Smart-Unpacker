@@ -405,7 +405,7 @@ class ExtractionBatchRunner:
             if verification.decision_hint == DECISION_REPAIR:
                 state = RepairLoopState(task, self.repair_loop_limits)
                 if state.can_attempt(trigger="verification"):
-                    if self._beam_enabled():
+                    if self._beam_enabled() and not self._repair_policy_disables_beam(task, result, verification):
                         self._shelve_outcome_if_needed(incumbent_outcome, out_dir)
                         beam_evaluation = self._repair_after_verification_with_beam(
                             task,
@@ -612,6 +612,17 @@ class ExtractionBatchRunner:
         beam = self.repair_stage.config.get("beam") if isinstance(self.repair_stage.config.get("beam"), dict) else {}
         return bool(beam.get("enabled", False)) and self.repair_stage.scheduler is not None
 
+    def _repair_policy_disables_beam(
+        self,
+        task: ArchiveTask,
+        result: ExtractionResult,
+        verification: VerificationResult,
+    ) -> bool:
+        checker = getattr(self.repair_stage, "policy_active_for_verification", None)
+        if not callable(checker):
+            return False
+        return bool(checker(task, result, verification))
+
     def _repair_after_verification_decision_with_beam(
         self,
         task: ArchiveTask,
@@ -623,7 +634,7 @@ class ExtractionBatchRunner:
         incumbent_outcome: BatchExtractionOutcome | None,
         round_index: int,
     ) -> BatchExtractionOutcome | bool:
-        if not self._beam_enabled():
+        if not self._beam_enabled() or self._repair_policy_disables_beam(task, result, verification):
             return False
         self._shelve_outcome_if_needed(incumbent_outcome, out_dir)
         beam_evaluation = self._repair_after_verification_with_beam(
@@ -661,6 +672,8 @@ class ExtractionBatchRunner:
             return None
         job = self.repair_stage._job_from_verification_assessment(task, result, verification)
         if job is None:
+            return None
+        if scheduler.policy_active_for_job(job):
             return None
 
         evaluated: dict[str, tuple[RepairCandidate, ExtractionResult, VerificationResult, str]] = {}

@@ -7,7 +7,7 @@ from sunpack.repair import RepairJob
 from sunpack.repair.candidate import candidate_feature_payload
 
 
-FEATURE_CONTRACT_VERSION = 2
+FEATURE_CONTRACT_VERSION = 3
 
 
 @dataclass(frozen=True)
@@ -442,6 +442,8 @@ def _candidate_proposal(payload: dict[str, Any], *, job: RepairJob | None = None
             "repair_name",
             "atomic_action_group",
             "native_key",
+            "native_target",
+            "candidate_status",
             "route_family",
             "route_required_flags_matched",
             "route_reject_reason",
@@ -463,9 +465,19 @@ def _candidate_proposal(payload: dict[str, Any], *, job: RepairJob | None = None
             "patch_span_count",
             "patch_operation_count",
             "affected_entry_count",
+            "patch_facts",
+            "residual_facts",
+            "raw_name_bytes_preserved",
+            "raw_name_source",
+            "split_sidecars_available",
+            "logical_stream_built",
+            "after_archive_carrier_crop",
         )
             if key in payload
     }
+    validation_details = payload.get("validation_details")
+    if isinstance(validation_details, dict):
+        output["validation_details"] = _safe_validation_details(validation_details)
     if str(output.get("plan_kind") or "") == "materialized":
         output.pop("plan_kind", None)
     for group, safe_names in _SAFE_BREAKDOWNS.items():
@@ -500,6 +512,27 @@ def _candidate_proposal(payload: dict[str, Any], *, job: RepairJob | None = None
         if str(output["proposal_ltr"].get("plan_kind") or "") == "materialized":
             output["proposal_ltr"].pop("plan_kind", None)
     output.update(_zip_plan_risk_features(payload, job=job, runtime_state_summary=runtime_state_summary or {}))
+    return output
+
+
+def _safe_validation_details(details: dict[str, Any]) -> dict[str, Any]:
+    output: dict[str, Any] = {}
+    for key in (
+        "policy",
+        "crc_match_count",
+        "kept_entries",
+        "dropped_entries",
+        "duplicate_group_count",
+        "kept_entry_crc_match_count",
+        "kept_payload_verified_count",
+        "dropped_entry_count",
+        "ambiguous_duplicate_group_count",
+        "native_target",
+        "accepted",
+        "raw_filename_bytes_preserved",
+    ):
+        if key in details:
+            output[key] = details.get(key)
     return output
 
 

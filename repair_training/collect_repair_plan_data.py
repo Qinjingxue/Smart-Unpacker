@@ -93,6 +93,7 @@ def main(argv: list[str] | None = None) -> int:
         "zip64_extra_no_candidate_by_profile": {},
         "descriptor_cd_conflict_diff_buckets": {},
         "legacy_module_seen_count": 0,
+        "duplicate_candidate_id_count": 0,
         "rollout_budget_exhausted": 0,
         "best_recovery_bucket_counts": {},
         "stop_reason_counts": {},
@@ -124,6 +125,7 @@ def main(argv: list[str] | None = None) -> int:
         for result in sorted(results, key=lambda item: int(item.get("record_index", 0) or 0)):
             record = result["record"]
             rows = list(result.get("rows") or [])
+            summary["duplicate_candidate_id_count"] = int(summary.get("duplicate_candidate_id_count", 0) or 0) + _duplicate_candidate_id_count(rows)
             status = str(result.get("status") or "")
             if status == "skipped" and not rows:
                 summary["skipped"] += 1
@@ -666,7 +668,6 @@ def _attach_split_volumes(source_input: dict[str, Any], record: dict[str, Any]) 
         return
     source_input["parts"] = source_input.get("parts") or []
     source_input["ranges"] = source_input.get("ranges") or []
-    source_input["use_parts_only"] = True
     existing = {str(p.get("path", "")) for p in source_input.get("parts", []) if isinstance(p, dict)}
     def volume_sort_key(item: dict[str, Any]) -> tuple[int, str]:
         try:
@@ -956,7 +957,6 @@ def _collect_sample_rows(record: dict[str, Any], args: argparse.Namespace, debug
         damaged = record.get("damaged_input")
         if isinstance(damaged, dict):
             damaged["parts"] = source_input["parts"]
-            damaged["use_parts_only"] = bool(source_input.get("use_parts_only"))
         record["split_sidecars_available"] = True
         # Remove missing_volume flag since volumes are now available
         flags = record.get("damage_flags")
@@ -1143,8 +1143,8 @@ def _collect_sample_rows(record: dict[str, Any], args: argparse.Namespace, debug
             delta_by_id: dict[str, dict[str, Any]] = {}
             rank_by_id: dict[str, int] = {}
             for rank, (_, original_index, candidate) in enumerate(ranked):
-                if logged >= max_candidates_per_round:
-                    break
+                if logged >= max_candidates_per_round and not _protect_candidate_logging_for_sfx_split(record, candidate):
+                    continue
                 candidate_id = _candidate_id(candidate)
                 materialized_for_label = bool(materialization_meta["materialized_ids"].get(candidate_id, True))
                 if args.skip_unmaterialized_labels and not materialized_for_label:
@@ -2341,6 +2341,20 @@ def _terminal_rl_payload(row: dict[str, Any], gamma: float, step_cost: float, no
     }
 
 
+def _duplicate_candidate_id_count(rows: list[dict[str, Any]]) -> int:
+    by_key: dict[tuple[str, str], set[str]] = {}
+    for row in rows:
+        if row.get("row_type") == "terminal":
+            continue
+        query_id = str(row.get("query_id") or "")
+        candidate_id = str(row.get("candidate_id") or "")
+        action_row_id = str(row.get("action_row_id") or "")
+        if not query_id or not candidate_id or not action_row_id:
+            continue
+        by_key.setdefault((query_id, candidate_id), set()).add(action_row_id)
+    return sum(max(0, len(values) - 1) for values in by_key.values())
+
+
 def _first_child_state_row(children: list[dict[str, Any]]) -> dict[str, Any] | None:
     if not children:
         return None
@@ -2624,14 +2638,18 @@ def _balanced_zip_materialization_selection(
 
     selected_expensive_families: set[str] = set()
 
-    def add(entry: tuple[float, int, Any]) -> None:
+    def protected(entry: tuple[float, int, Any]) -> bool:
+        return module(entry) == "zip_rebuild_cd_preserve_raw_names" and _protect_raw_name_rebuild_for_sfx_split(record, evidence)
+
+    def add(entry: tuple[float, int, Any], *, force: bool = False) -> None:
         nonlocal expensive_selected
-        if len(selected) >= budget:
+        is_protected = protected(entry)
+        if len(selected) >= budget and not (force or is_protected):
             return
         candidate_id = _candidate_id(entry[2])
         if candidate_id in seen:
             return
-        if expensive(entry) and max_expensive > 0:
+        if expensive(entry) and max_expensive > 0 and not is_protected:
             name = module(entry)
             if name == "zip_rebuild_cd_preserve_raw_names" and not (evidence & {"raw_filename_bytes", "filename_encoding_bad", "non_utf8_filename", "after_descriptor_flag_normalize", "exact_match_failed"}):
                 skipped.append((entry, "raw_name_without_name_evidence"))
@@ -2683,7 +2701,9 @@ def _balanced_zip_materialization_selection(
         add(entry)
         if len(selected) >= budget:
             break
-    selected = selected[:budget]
+    for entry in ranked:
+        if protected(entry):
+            add(entry, force=True)
     if debug_events is not None:
         for entry, reason in skipped:
             candidate = entry[2]
@@ -2698,6 +2718,35 @@ def _balanced_zip_materialization_selection(
                 skip_reason=reason,
             )
     return selected, _materialization_selection_stats(ranked, selected, skipped, record)
+
+
+def _protect_raw_name_rebuild_for_sfx_split(record: dict[str, Any], evidence: set[str]) -> bool:
+    tags = {str(item) for item in record.get("zip_container_tags") or []}
+    structure = record.get("zip_structure_features") if isinstance(record.get("zip_structure_features"), dict) else {}
+    variant = str(record.get("zip_variant") or structure.get("variant") or "")
+    has_sfx = bool(
+        evidence & {"sfx", "carrier_archive", "carrier_prefix"}
+        or tags & {"sfx", "carrier_archive", "carrier_prefix"}
+        or bool(structure.get("has_sfx_prefix"))
+        or "sfx" in variant
+    )
+    has_split = bool(
+        evidence & {"split_archive", "split_sidecars_available"}
+        or tags & {"split", "multi_volume"}
+        or bool(structure.get("has_split_sidecars"))
+        or "split" in variant
+    )
+    has_local_recovery = bool(evidence & {"local_header_recovery", "middle_volume_missing", "missing_volume", "input_truncated"})
+    return has_sfx and has_split and has_local_recovery
+
+
+def _protect_candidate_logging_for_sfx_split(record: dict[str, Any], candidate: Any) -> bool:
+    if str(getattr(candidate, "module_name", "") or "") != "zip_rebuild_cd_preserve_raw_names":
+        return False
+    candidate_flags = {str(item) for item in getattr(candidate, "damage_flags", []) or []}
+    record_flags = {str(item) for item in record.get("damage_flags") or []}
+    route_flags = {str(item) for item in record.get("route_evidence_flags") or []}
+    return _protect_raw_name_rebuild_for_sfx_split(record, candidate_flags | record_flags | route_flags)
 
 
 def _materialization_selection_stats(
@@ -3142,6 +3191,8 @@ def _runtime_candidate_features(payload: dict[str, Any]) -> dict[str, Any]:
             "repair_name",
             "atomic_action_group",
             "native_key",
+            "native_target",
+            "candidate_status",
             "route_family",
             "route_required_flags_matched",
             "route_reject_reason",
@@ -3164,9 +3215,36 @@ def _runtime_candidate_features(payload: dict[str, Any]) -> dict[str, Any]:
             "plan_kind",
             "estimated_cost",
             "input_kind",
+            "patch_facts",
+            "residual_facts",
+            "raw_name_bytes_preserved",
+            "raw_name_source",
+            "split_sidecars_available",
+            "logical_stream_built",
+            "after_archive_carrier_crop",
         )
         if key in payload
     }
+    validation_details = payload.get("validation_details")
+    if isinstance(validation_details, dict):
+        output["validation_details"] = {
+            key: validation_details.get(key)
+            for key in (
+                "policy",
+                "crc_match_count",
+                "kept_entries",
+                "dropped_entries",
+                "duplicate_group_count",
+                "kept_entry_crc_match_count",
+                "kept_payload_verified_count",
+                "dropped_entry_count",
+                "ambiguous_duplicate_group_count",
+                "native_target",
+                "accepted",
+                "raw_filename_bytes_preserved",
+            )
+            if key in validation_details
+        }
     safe_breakdowns = {
         "benefit_breakdown": {"confidence", "score_hint"},
         "evidence_breakdown": {"patch_quality"},

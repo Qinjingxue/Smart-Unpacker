@@ -79,6 +79,29 @@ def candidates_from_native_result(
             native_key: dict(result),
             "native_candidate": {"index": index, **details},
         }
+        validation_details = diagnosis_payload["validation_details"]
+        if isinstance(validation_details, dict):
+            policy = str(validation_details.get("policy") or item.get("policy") or "")
+            if policy:
+                facts = [str(value) for value in diagnosis_payload.get("patch_facts") or []]
+                facts.append(f"kept_entry_policy={policy}")
+                diagnosis_payload["patch_facts"] = _dedupe(facts)
+            for key in (
+                "duplicate_group_count",
+                "kept_entry_crc_match_count",
+                "kept_payload_verified_count",
+                "dropped_entry_count",
+                "ambiguous_duplicate_group_count",
+            ):
+                if key not in validation_details and key in item:
+                    validation_details[key] = item.get(key)
+            if policy:
+                validation_details.setdefault("duplicate_group_count", 0)
+                validation_details.setdefault("kept_entry_crc_match_count", validation_details.get("crc_match_count", 0) or 0)
+                validation_details.setdefault("kept_payload_verified_count", 0)
+                validation_details.setdefault("dropped_entry_count", validation_details.get("dropped_entries", 0) or 0)
+                validation_details.setdefault("ambiguous_duplicate_group_count", 0)
+            diagnosis_payload["validation_details"] = validation_details
         requires_native_validation = True
         if use_patch_plan and patch_plan is not None:
             repaired_state = patched_state_for_job(job, patch_plan)
