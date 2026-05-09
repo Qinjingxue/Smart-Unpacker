@@ -3,6 +3,7 @@ from __future__ import annotations
 import shutil
 from contextlib import nullcontext
 from dataclasses import dataclass
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable
 
@@ -16,7 +17,7 @@ from sunpack.extraction.scheduler import ExtractionScheduler
 from sunpack.repair.candidate import RepairCandidate
 from sunpack.repair.knowledge import write_repair_archive_status, write_repair_result
 from sunpack.verification import VerificationResult, VerificationScheduler
-from sunpack.verification.result import DECISION_ACCEPT, DECISION_ACCEPT_PARTIAL
+from sunpack.verification.result import DECISION_ACCEPT, DECISION_ACCEPT_PARTIAL, DECISION_REPAIR, SOURCE_INTEGRITY_DAMAGED
 
 
 @dataclass
@@ -105,6 +106,8 @@ class RepairRuntimeTransitionEvaluator:
                     assessed = _verify_with_optional_timer(self.verifier, task, extracted, phase_timer=phase_timer, phase_prefix="transition_full_verify")
                 else:
                     assessed = light
+            with _phase(phase_timer, "transition_normalize_verification", state_id=state_id, candidate_id=candidate_id):
+                assessed = self.normalize_transition_verification(extracted, assessed)
             with _phase(phase_timer, "transition_terminal_reason", state_id=state_id, candidate_id=candidate_id):
                 terminal_reason = self.terminal_reason(extracted, assessed)
             return RepairRuntimeTransition(
@@ -114,8 +117,8 @@ class RepairRuntimeTransitionEvaluator:
                 temp_dir=temp_dir,
                 source_digest=digest,
                 terminal_reason=terminal_reason,
-                can_continue_repair=assessed.decision_hint not in {DECISION_ACCEPT, DECISION_ACCEPT_PARTIAL},
-                accepted_complete=assessed.decision_hint == DECISION_ACCEPT,
+                can_continue_repair=self.can_continue_repair(extracted, assessed),
+                accepted_complete=self.accepts_complete(extracted, assessed),
                 accepted_partial=assessed.decision_hint == DECISION_ACCEPT_PARTIAL,
                 task_snapshot=task.knowledge().to_dict(),
             )
@@ -163,13 +166,43 @@ class RepairRuntimeTransitionEvaluator:
 
     @staticmethod
     def terminal_reason(result: ExtractionResult, verification: VerificationResult) -> str:
-        if verification.decision_hint == DECISION_ACCEPT:
+        if RepairRuntimeTransitionEvaluator.accepts_complete(result, verification):
             return "complete"
         if verification.decision_hint == DECISION_ACCEPT_PARTIAL:
             return "verification_accept_partial"
         if not result.success and result.error:
             return str(result.error)
         return str(verification.decision_hint or verification.assessment_status or "repair_required")
+
+    @staticmethod
+    def accepts_complete(result: ExtractionResult, verification: VerificationResult) -> bool:
+        return bool(result.success and verification.decision_hint == DECISION_ACCEPT)
+
+    @staticmethod
+    def can_continue_repair(result: ExtractionResult, verification: VerificationResult) -> bool:
+        return bool(verification.decision_hint == DECISION_REPAIR)
+
+    @staticmethod
+    def normalize_transition_verification(result: ExtractionResult, verification: VerificationResult) -> VerificationResult:
+        """Match the production loop's repair gate for failed extractions.
+
+        The main ExtractionBatchRunner only accepts a complete verification as
+        terminal when extraction itself succeeded. A damaged extraction can still
+        produce a superficially complete verification when the oracle/coverage is
+        empty, but production keeps repairing that state. Training transitions
+        must expose the same decision so candidate graph expansion matches the
+        real loop.
+        """
+        if result.success or verification.decision_hint != DECISION_ACCEPT:
+            return verification
+        if not (result.error or result.partial_outputs or result.files_written or result.bytes_written):
+            return verification
+        return replace(
+            verification,
+            decision_hint=DECISION_REPAIR,
+            source_integrity=SOURCE_INTEGRITY_DAMAGED,
+            recoverable_upper_bound=min(float(verification.recoverable_upper_bound or 1.0), 0.99),
+        )
 
 
 def _default_source_digest(source: dict[str, Any]) -> str:

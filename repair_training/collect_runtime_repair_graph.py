@@ -29,8 +29,9 @@ from sunpack.coordinator.repair_runtime_transition import (  # noqa: E402
     RepairRuntimeTransitionEvaluator,
     clone_archive_task,
 )
-from sunpack.coordinator.repair_runtime_strategy import TrainingExhaustiveStrategy  # noqa: E402
+from sunpack.coordinator.repair_runtime_strategy import RepairRuntimeStrategyDecision, TrainingExhaustiveStrategy  # noqa: E402
 from sunpack.coordinator.repair_stage import ArchiveRepairStage  # noqa: E402
+from sunpack.coordinator.repair_loop import RepairLoopLimits, RepairLoopState  # noqa: E402
 from sunpack.coordinator.task_scan import direct_file_task  # noqa: E402
 from sunpack.extraction.knowledge import write_extraction_result  # noqa: E402
 from sunpack.extraction.scheduler import ExtractionScheduler  # noqa: E402
@@ -126,6 +127,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-states", type=int, default=80)
     parser.add_argument("--branch-top-k", type=int, default=5)
     parser.add_argument("--materialize-top-k", type=int, default=16)
+    parser.add_argument("--path-filter-json", default="", help="Optional sample_id -> candidate signature path map; when set, collect only those runtime paths.")
     parser.add_argument("--case-timeout-seconds", type=float, default=60.0)
     parser.add_argument("--debug-events-output", default="")
     parser.add_argument("--phase-slow-threshold-ms", type=float, default=500.0)
@@ -354,6 +356,8 @@ class RuntimeRepairGraphCollector:
             analysis_stage=self.analysis_stage,
         )
         self.strategy = TrainingExhaustiveStrategy(branch_top_k=max(1, int(args.branch_top_k or 1)))
+        self.loop_limits = RepairLoopLimits.from_config(self.repair_stage.config)
+        self.path_filter = _load_path_filter(getattr(args, "path_filter_json", ""))
         self.rows: list[dict[str, Any]] = []
         self.state_counter = 0
         self.profiler = _CollectorProfiler(args, self.sample_id)
@@ -385,12 +389,14 @@ class RuntimeRepairGraphCollector:
 
     def _state(self, task: ArchiveTask, *, round_index: int, parent_action_row_id: str, parent_candidate_id: str) -> dict[str, Any]:
         self.state_counter += 1
+        parent_path = list(getattr(task, "_runtime_graph_path_signatures", []) or [])
         return {
             "state_id": f"{self.sample_id}:s{self.state_counter}",
             "task": task,
             "round": int(round_index),
             "parent_action_row_id": parent_action_row_id,
             "parent_candidate_id": parent_candidate_id,
+            "path_signatures": parent_path,
         }
 
     def _expand_state(self, state: dict[str, Any], round_index: int) -> list[dict[str, Any]]:
@@ -402,11 +408,16 @@ class RuntimeRepairGraphCollector:
             write_extraction_result(task, extraction, phase_timer=self.profiler.phase, phase_prefix="write_extraction")
         with self.profiler.phase("verify_initial", state_id=str(state["state_id"])):
             verification = self.verifier.verify(task, extraction, phase_timer=self.profiler.phase, phase_prefix="verify_initial")
+            verification = RepairRuntimeTransitionEvaluator.normalize_transition_verification(extraction, verification)
         if verification.decision_hint == DECISION_ACCEPT:
             self.rows.append(_terminal_row(self.record, state, "complete", verification))
             return []
         if verification.decision_hint != DECISION_REPAIR:
             self.rows.append(_terminal_row(self.record, state, str(verification.decision_hint or verification.assessment_status or "terminal"), verification))
+            return []
+        loop_state = RepairLoopState(task, self.loop_limits)
+        if not loop_state.can_attempt(trigger="verification"):
+            self.rows.append(_terminal_row(self.record, state, str(loop_state.terminal_reason or "repair_loop_stopped"), verification))
             return []
         with self.profiler.phase("build_repair_job", state_id=str(state["state_id"])):
             job = self.repair_stage._job_from_verification_assessment(task, extraction, verification, phase_timer=self.profiler.phase, phase_prefix="build_repair_job")  # noqa: SLF001
@@ -441,12 +452,13 @@ class RuntimeRepairGraphCollector:
         query_id = f"{state['state_id']}:q"
         collision_count = _candidate_id_collision_count(payloads)
         candidate_set_hash = repair_trace.canonical_hash(_candidate_set_hash_input(payloads))
-        strategy_decision = self.strategy.choose(state_id=str(state["state_id"]), candidate_payloads=payloads, context={"sample_id": self.sample_id})
+        strategy_decision = self._strategy_decision_for_state(state, payloads)
         selected_ids = set(strategy_decision.selected_candidate_ids)
+        path_filter_active = strategy_decision.mode == "runtime_path_filter"
         next_states: list[dict[str, Any]] = []
         for rank, (candidate, payload) in enumerate(zip(candidates, payloads)):
             candidate_id = str(payload.get("candidate_id") or "")
-            if selected_ids and candidate_id not in selected_ids:
+            if (path_filter_active and (not selected_ids or candidate_id not in selected_ids)) or (selected_ids and candidate_id not in selected_ids):
                 self.rows.append(_unexplored_action_row(
                     self.record,
                     state,
@@ -461,6 +473,7 @@ class RuntimeRepairGraphCollector:
                 continue
             action_row_id = f"{query_id}|{rank}|{candidate_id}"
             branch_task = clone_archive_task(task, key_suffix=f":{rank}")
+            branch_loop_state = RepairLoopState(branch_task, self.loop_limits)
             with self.profiler.phase("transition_evaluate", state_id=str(state["state_id"]), candidate_id=candidate_id):
                 transition = self.evaluator.evaluate(
                     branch_task,
@@ -473,10 +486,24 @@ class RuntimeRepairGraphCollector:
                     state_id=str(state["state_id"]),
                     candidate_id=candidate_id,
                 )
+            repair_result = candidate.to_result(selection={"selected_candidate_id": candidate_id, "strategy": "training_exhaustive"})
+            loop_allows_continue = branch_loop_state.record_result(repair_result, trigger="verification_training")
             archive_path = _archive_path_for_oracle(branch_task, self.fmt)
             with self.profiler.phase("oracle_verify", state_id=str(state["state_id"]), candidate_id=candidate_id):
                 oracle = _verify_output_against_oracle(Path(archive_path), self.fmt, self.record.get("oracle") if isinstance(self.record.get("oracle"), dict) else {}) if archive_path else {"status": "missing_output", "label": 0, "completeness": 0.0}
             terminal_status = _transition_terminal_status(transition, oracle)
+            if bool(transition.can_continue_repair) and not loop_allows_continue:
+                terminal_status = str(branch_loop_state.terminal_reason or "repair_loop_stopped")
+            child_state = None
+            if bool(transition.can_continue_repair) and loop_allows_continue and round_index + 1 < int(self.args.max_rounds or 1):
+                setattr(branch_task, "_runtime_graph_path_signatures", [*list(state.get("path_signatures") or []), _candidate_signature(payload)])
+                child_state = self._state(
+                    branch_task,
+                    round_index=round_index + 1,
+                    parent_action_row_id=action_row_id,
+                    parent_candidate_id=candidate_id,
+                )
+            next_state_id = str(child_state.get("state_id") or "") if child_state is not None else ""
             row = {
                 "row_type": "action",
                 "collector": "runtime_repair_graph",
@@ -505,7 +532,7 @@ class RuntimeRepairGraphCollector:
                 "label_status": str(oracle.get("status") or ""),
                 "recovery_ratio": float(oracle.get("completeness", 0.0) or 0.0),
                 "terminal_status": terminal_status,
-                "next_state_id": "" if terminal_status in {"complete", "verification_accept_partial"} else f"{self.sample_id}:s{self.state_counter + len(next_states) + 1}",
+                "next_state_id": next_state_id,
                 "parent_action_row_id": state.get("parent_action_row_id") or "",
                 "parent_candidate_id": state.get("parent_candidate_id") or "",
                 "runtime_verification": _verification_payload(transition.verification),
@@ -521,30 +548,58 @@ class RuntimeRepairGraphCollector:
                         "repair_prior_features": {},
                     },
                     "reward": float(oracle.get("completeness", 0.0) or 0.0),
-                    "done": terminal_status in {"complete", "verification_accept_partial"},
-                    "next_state_id": "" if terminal_status in {"complete", "verification_accept_partial"} else f"{self.sample_id}:s{self.state_counter + len(next_states) + 1}",
+                    "done": not bool(transition.can_continue_repair and loop_allows_continue),
+                    "next_state_id": next_state_id,
                     "terminal_reward": float(oracle.get("completeness", 0.0) or 0.0),
                     "future_return": float(oracle.get("completeness", 0.0) or 0.0),
                     "single_path_robust_return": float(oracle.get("completeness", 0.0) or 0.0),
                 },
             }
             self.rows.append(row)
-            if row["rl"]["done"] or round_index + 1 >= int(self.args.max_rounds or 1):
-                continue
-            next_states.append(self._state(
-                branch_task,
-                round_index=round_index + 1,
-                parent_action_row_id=action_row_id,
-                parent_candidate_id=candidate_id,
-            ))
+            if child_state is not None:
+                next_states.append(child_state)
         return next_states[: max(1, int(self.args.branch_top_k or 1))]
 
+    def _strategy_decision_for_state(self, state: dict[str, Any], payloads: list[dict[str, Any]]) -> RepairRuntimeStrategyDecision:
+        path = list(state.get("path_signatures") or [])
+        target_path = self.path_filter.get(self.sample_id) if isinstance(self.path_filter, dict) else None
+        if isinstance(target_path, list):
+            if path != target_path[: len(path)]:
+                return RepairRuntimeStrategyDecision(
+                    mode="runtime_path_filter",
+                    selected_candidate_ids=[],
+                    metadata={"state_id": state.get("state_id"), "reason": "path_prefix_mismatch", "path": path},
+                )
+            if len(path) >= len(target_path):
+                return RepairRuntimeStrategyDecision(
+                    mode="runtime_path_filter",
+                    selected_candidate_ids=[],
+                    metadata={"state_id": state.get("state_id"), "reason": "path_complete", "path": path},
+                )
+            target_signature = str(target_path[len(path)] or "")
+            selected = [
+                str(payload.get("candidate_id") or "")
+                for payload in payloads
+                if _candidate_signature(payload) == target_signature and str(payload.get("candidate_id") or "")
+            ]
+            return RepairRuntimeStrategyDecision(
+                mode="runtime_path_filter",
+                selected_candidate_ids=selected[:1],
+                metadata={
+                    "state_id": state.get("state_id"),
+                    "target_signature": target_signature,
+                    "matched": bool(selected),
+                    "path": path,
+                },
+            )
+        return self.strategy.choose(state_id=str(state["state_id"]), candidate_payloads=payloads, context={"sample_id": self.sample_id})
+
     def _runtime_candidates(self, candidates):
-        materialized = materialize_candidates(list(candidates)[: max(1, int(self.args.materialize_top_k or 16))])
+        materialized = materialize_candidates(list(candidates))
         validated = [self.selector._with_native_validation(candidate) for candidate in materialized]  # noqa: SLF001
         accepted = [candidate for candidate in validated if self.selector._accepted(candidate)]  # noqa: SLF001
         accepted.sort(key=self.selector.generation_priority, reverse=True)
-        return accepted[: max(1, int(self.args.materialize_top_k or 16))]
+        return accepted
 
     def _attach_profile_summary(self) -> None:
         if not self.rows:
@@ -659,7 +714,9 @@ def _archive_path_for_oracle(task: ArchiveTask, fmt: str) -> str:
 
 
 def _transition_terminal_status(transition, oracle: dict[str, Any]) -> str:
-    if int(oracle.get("label", 0) or 0) == 3:
+    # Terminal/continue status must match production runtime. Oracle is only a
+    # post-transition label/reward and must not decide whether a branch stops.
+    if transition.accepted_complete:
         return "complete"
     if transition.accepted_partial:
         return "verification_accept_partial"
@@ -758,6 +815,8 @@ def _unexplored_action_row(
         "native_target": payload.get("native_target"),
         "candidate_status": payload.get("candidate_status"),
         "terminal_status": "not_explored",
+        "parent_action_row_id": state.get("parent_action_row_id") or "",
+        "parent_candidate_id": state.get("parent_candidate_id") or "",
         "stable_features": {
             "runtime_context": payload.get("runtime_context") or {},
             "candidate_proposal": payload.get("candidate_proposal") or {},
@@ -794,6 +853,22 @@ def _candidate_set_hash_input(payloads: list[dict[str, Any]]) -> list[dict[str, 
     ]
 
 
+def _candidate_signature(candidate: dict[str, Any]) -> str:
+    if not isinstance(candidate, dict) or not candidate:
+        return ""
+    proposal = candidate.get("candidate_proposal") if isinstance(candidate.get("candidate_proposal"), dict) else {}
+    validation = proposal.get("validation_details") if isinstance(proposal.get("validation_details"), dict) else candidate.get("validation_details")
+    policy = validation.get("policy") if isinstance(validation, dict) else ""
+    facts = proposal.get("patch_facts") or candidate.get("patch_facts") or []
+    return "|".join([
+        str(candidate.get("module_name") or candidate.get("module") or ""),
+        str(candidate.get("repair_name") or ""),
+        str(candidate.get("native_target") or ""),
+        str(policy or ""),
+        ",".join(str(item) for item in facts or []),
+    ])
+
+
 def _candidate_id_collision_count(payloads: list[dict[str, Any]]) -> int:
     seen: set[str] = set()
     duplicates = 0
@@ -805,6 +880,25 @@ def _candidate_id_collision_count(payloads: list[dict[str, Any]]) -> int:
             duplicates += 1
         seen.add(candidate_id)
     return duplicates
+
+
+def _load_path_filter(path: str) -> dict[str, list[str]]:
+    if not path:
+        return {}
+    item = Path(str(path))
+    if not item.is_file():
+        return {}
+    try:
+        payload = json.loads(item.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    output: dict[str, list[str]] = {}
+    for sample_id, values in payload.items():
+        if isinstance(values, list):
+            output[str(sample_id)] = [str(value) for value in values if str(value)]
+    return output
 
 
 def _load_manifest(path: Path, args: argparse.Namespace) -> list[dict[str, Any]]:

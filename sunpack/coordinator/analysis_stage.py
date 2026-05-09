@@ -385,8 +385,6 @@ class ArchiveAnalysisStage:
         if len(parts) == 1:
             if int(segment.start_offset) <= 0:
                 return None
-            if self._is_standard_archive_path(parts[0]):
-                return None
             archive_range = ArchiveInputRange(
                 path=parts[0],
                 start=int(segment.start_offset),
@@ -449,21 +447,6 @@ class ArchiveAnalysisStage:
             if paths:
                 return paths
         return list(task.all_parts or [task.main_path])
-
-    def _is_standard_archive_path(self, path: str) -> bool:
-        name = os.path.basename(path).lower()
-        suffixes = []
-        root = name
-        while True:
-            root, ext = os.path.splitext(root)
-            if not ext:
-                break
-            suffixes.append(ext)
-        if not suffixes:
-            return False
-        archive_exts = {".zip", ".7z", ".rar", ".tar", ".gz", ".bz2", ".xz", ".zst"}
-        split_exts = {".001"}
-        return any(ext in archive_exts or ext in split_exts for ext in suffixes)
 
     def _logical_range_to_file_ranges(self, parts: list[str], start: int, end: int | None) -> list[dict]:
         ranges = []

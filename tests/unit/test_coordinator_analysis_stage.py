@@ -99,6 +99,38 @@ def test_analysis_stage_writes_extractable_segment_without_switching_task_source
     assert state["patches"] == []
 
 
+def test_analysis_stage_keeps_sfx_segment_for_standard_archive_extension(tmp_path):
+    archive = tmp_path / "carrier.zip"
+    archive.write_bytes(b"MZ-stub" + b"PK\x03\x04" + b"x" * 64)
+    evidence = ArchiveFormatEvidence(
+        format="zip",
+        confidence=0.99,
+        status="extractable",
+        segments=[
+            ArchiveSegment(
+                start_offset=7,
+                end_offset=75,
+                confidence=0.99,
+                damage_flags=["carrier_prefix"],
+                evidence=["zip:eocd", "fuzzy:carrier_prefix"],
+            )
+        ],
+    )
+    task = _task(archive)
+    stage = ArchiveAnalysisStage({"analysis": {"enabled": False}})
+    stage.enabled = True
+    stage.scheduler = _FakeAnalysisScheduler(_report(archive, evidence))
+
+    stage.analyze_task(task)
+
+    segments = knowledge_view.analysis_extractable_segments(task)
+    assert len(segments) == 1
+    assert segments[0]["archive_input"]["open_mode"] == "file_range"
+    assert segments[0]["archive_input"]["parts"][0]["path"] == str(archive)
+    assert segments[0]["archive_input"]["parts"][0]["start"] == 7
+    assert task.archive_input().open_mode == "file"
+
+
 def test_analysis_stage_records_multiple_segments_on_original_task(tmp_path):
     carrier = tmp_path / "carrier.bin"
     carrier.write_bytes(b"junk" + b"Rar!\x1a\x07\x01\x00" + b"x" * 20 + b"pad" + b"7z\xbc\xaf\x27\x1c" + b"y" * 20)

@@ -9,6 +9,7 @@ from sunpack.contracts.archive_input import ArchiveInputDescriptor, ArchiveInput
 from sunpack.contracts.archive_state import ArchiveState, PatchOperation, PatchPlan
 from sunpack.contracts.detection import FactBag
 from sunpack.contracts.tasks import ArchiveTask
+from sunpack.extraction.internal.sevenzip.sevenzip_runner import _PersistentWorker
 from sunpack.extraction.scheduler import ExtractionScheduler
 from sunpack.support.resources import get_7z_dll_path, get_sevenzip_worker_path
 from tests.helpers.tool_config import get_test_tools
@@ -113,6 +114,43 @@ def test_worker_failed_result_includes_diagnostics(tmp_path):
     assert worker_result["diagnostics"]["input_trace"]["last_win32_error"] != 0
     assert "handler_attempts" in worker_result["diagnostics"]
     assert "output_trace" in worker_result["diagnostics"]
+
+
+def test_persistent_worker_result_escapes_control_characters(tmp_path):
+    worker_path = _require_worker_or_skip()
+    seven_zip_dll = _require_7z_dll_or_skip()
+    archive = tmp_path / "control-name.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("control-\x01-name.txt", "unsafe filename payload")
+    payload = {
+        "job_id": "control-name",
+        "seven_zip_dll_path": seven_zip_dll,
+        "archive_path": str(archive),
+        "output_dir": str(tmp_path / "out"),
+    }
+    runner = ExtractionScheduler(
+        max_retries=1,
+        process_config={"max_extract_task_seconds": 2, "process_sample_interval_ms": 10},
+    ).sevenzip_runner
+    persistent = _PersistentWorker(worker_path, None)
+
+    try:
+        persistent.send(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+        stdout, stderr, returncode, reusable = runner._read_persistent_worker_result(  # noqa: SLF001
+            persistent,
+            runtime_scheduler=None,
+            task=_task(archive),
+        )
+    finally:
+        persistent.close()
+
+    worker_result = _worker_result(stdout)
+    assert returncode != 0
+    assert reusable is True
+    assert "timed out" not in stderr.lower()
+    assert worker_result["job_id"] == "control-name"
+    assert worker_result["failed_item"] == "control-\x01-name.txt"
+    assert worker_result["diagnostics"]["failed_item"]["path"] == "control-\x01-name.txt"
 
 
 def test_worker_dry_run_reads_archive_state_with_patch_stack(tmp_path):

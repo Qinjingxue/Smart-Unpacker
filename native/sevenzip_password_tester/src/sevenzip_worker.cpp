@@ -33,14 +33,24 @@ bool has_arg(int argc, char** argv, const std::string& expected) {
 std::string json_escape(const std::string& value) {
     std::string out;
     out.reserve(value.size() + 8);
-    for (const char ch : value) {
+    for (const unsigned char ch : value) {
         switch (ch) {
         case '\\': out += "\\\\"; break;
         case '"': out += "\\\""; break;
         case '\n': out += "\\n"; break;
         case '\r': out += "\\r"; break;
         case '\t': out += "\\t"; break;
-        default: out += ch; break;
+        default:
+            if (ch < 0x20) {
+                std::ostringstream escaped;
+                escaped << "\\u"
+                        << std::uppercase << std::hex << std::setw(4) << std::setfill('0')
+                        << static_cast<int>(ch);
+                out += escaped.str();
+            } else {
+                out += static_cast<char>(ch);
+            }
+            break;
         }
     }
     return out;
