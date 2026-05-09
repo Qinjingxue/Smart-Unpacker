@@ -36,7 +36,9 @@ def commit_task_knowledge(
     meta = payload.get("_meta") if isinstance(payload.get("_meta"), dict) else {}
     payload.data["_meta"] = {**meta, "revision": revision}
     with _phase(phase_timer, f"{phase_prefix}_set_knowledge"):
-        if hasattr(task, "fact_bag") and hasattr(task.fact_bag, "set"):
+        if hasattr(task, "_replace_knowledge_payload") and callable(task._replace_knowledge_payload):
+            task._replace_knowledge_payload(payload.to_dict())
+        elif hasattr(task, "fact_bag") and hasattr(task.fact_bag, "set"):
             task.fact_bag.set("archive.knowledge", payload.to_dict())
         elif hasattr(task, "set_knowledge") and callable(task.set_knowledge):
             task.set_knowledge(payload)

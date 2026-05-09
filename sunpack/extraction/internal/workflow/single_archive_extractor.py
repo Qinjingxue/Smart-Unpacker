@@ -1,6 +1,7 @@
 import os
 import shutil
 import subprocess
+from contextlib import nullcontext
 from typing import Any, Callable, Optional
 
 from sunpack.contracts.archive_input import ArchiveInputDescriptor
@@ -51,13 +52,16 @@ class SingleArchiveExtractor:
         runtime_scheduler: Any = None,
         *,
         allow_embedded_segments: bool = True,
+        phase_timer: Callable[..., Any] | None = None,
+        phase_prefix: str = "extract",
     ) -> ExtractionResult:
         if allow_embedded_segments:
-            segments = [
-                dict(item)
-                for item in knowledge_view.analysis_extractable_segments(task)
-                if isinstance(item, dict) and isinstance(item.get("archive_input"), dict)
-            ]
+            with _phase(phase_timer, f"{phase_prefix}_read_extractable_segments"):
+                segments = [
+                    dict(item)
+                    for item in knowledge_view.analysis_extractable_segments(task)
+                    if isinstance(item, dict) and isinstance(item.get("archive_input"), dict)
+                ]
             if segments:
                 return self._extract_embedded_segments(
                     task,
@@ -65,15 +69,18 @@ class SingleArchiveExtractor:
                     segments,
                     split_info=split_info,
                     runtime_scheduler=runtime_scheduler,
+                    phase_timer=phase_timer,
+                    phase_prefix=f"{phase_prefix}_embedded",
                 )
 
         archive = task.main_path
         split_info = split_info or task.split_info
-        archive, all_parts, split_info = self.split_entry_resolver.resolve(
-            archive,
-            list(task.all_parts or [archive]),
-            split_info,
-        )
+        with _phase(phase_timer, f"{phase_prefix}_resolve_split_entry"):
+            archive, all_parts, split_info = self.split_entry_resolver.resolve(
+                archive,
+                list(task.all_parts or [archive]),
+                split_info,
+            )
         is_split = split_info.is_split or len(all_parts) > 1
 
         print(f"\n[EXTRACT] 开始: {archive}")
@@ -98,10 +105,13 @@ class SingleArchiveExtractor:
                 diagnostics={"failure_stage": "preflight", "failure_kind": "output_filesystem", "message": str(exc)},
             )
 
-        startupinfo = self._startupinfo()
+        with _phase(phase_timer, f"{phase_prefix}_startupinfo"):
+            startupinfo = self._startupinfo()
         retry_count = 0
         while retry_count < self.retry_policy.max_retries:
-            if not self.ensure_space(5):
+            with _phase(phase_timer, f"{phase_prefix}_ensure_space_retry"):
+                has_space = self.ensure_space(5)
+            if not has_space:
                 shutil.rmtree(out_dir, ignore_errors=True)
                 return self._failed(
                     archive,
@@ -111,7 +121,8 @@ class SingleArchiveExtractor:
                     diagnostics={"failure_stage": "preflight", "failure_kind": "disk_space"},
                 )
             try:
-                os.makedirs(out_dir, exist_ok=True)
+                with _phase(phase_timer, f"{phase_prefix}_mkdir_retry"):
+                    os.makedirs(out_dir, exist_ok=True)
             except Exception as exc:
                 return self._failed(
                     archive,
@@ -121,12 +132,13 @@ class SingleArchiveExtractor:
                     diagnostics={"failure_stage": "preflight", "failure_kind": "output_filesystem", "message": str(exc)},
                 )
 
-            staged = self.rename_scheduler.normalize_archive_paths(
-                archive,
-                all_parts,
-                startupinfo=startupinfo,
-                volume_entries=list(split_info.volumes or []),
-            )
+            with _phase(phase_timer, f"{phase_prefix}_normalize_archive_paths"):
+                staged = self.rename_scheduler.normalize_archive_paths(
+                    archive,
+                    all_parts,
+                    startupinfo=startupinfo,
+                    volume_entries=list(split_info.volumes or []),
+                )
             run_archive = staged.archive
             run_parts = staged.run_parts
             cleanup_parts = staged.cleanup_parts
@@ -137,7 +149,8 @@ class SingleArchiveExtractor:
             selected_codepage = None
 
             try:
-                resolution = self._resolve_password(task, run_archive, run_parts)
+                with _phase(phase_timer, f"{phase_prefix}_resolve_password"):
+                    resolution = self._resolve_password(task, run_archive, run_parts)
                 correct_pwd = resolution.password
                 test_result = resolution.test_result
                 test_err = resolution.error_text
@@ -155,25 +168,30 @@ class SingleArchiveExtractor:
                                 diagnostics=self._diagnostics_from(test_result),
                             )
 
-                selected_codepage = self._codepage_from_facts(task)
+                with _phase(phase_timer, f"{phase_prefix}_codepage_from_facts"):
+                    selected_codepage = self._codepage_from_facts(task)
 
                 if correct_pwd is None:
                     err = test_err
                 else:
-                    run_result = self.sevenzip_runner.run_extract(
-                        archive_path=run_archive,
-                        part_paths=run_parts,
-                        out_dir=out_dir,
-                        password=correct_pwd,
-                        selected_codepage=selected_codepage,
-                        startupinfo=startupinfo,
-                        runtime_scheduler=runtime_scheduler,
-                        task=task,
-                    )
+                    with _phase(phase_timer, f"{phase_prefix}_sevenzip_run_extract"):
+                        run_result = self.sevenzip_runner.run_extract(
+                            archive_path=run_archive,
+                            part_paths=run_parts,
+                            out_dir=out_dir,
+                            password=correct_pwd,
+                            selected_codepage=selected_codepage,
+                            startupinfo=startupinfo,
+                            runtime_scheduler=runtime_scheduler,
+                            task=task,
+                        )
 
                     if run_result.returncode == 0:
-                        diagnostics = self._diagnostics_from(run_result)
-                        if self._empty_repaired_success(diagnostics, task):
+                        with _phase(phase_timer, f"{phase_prefix}_diagnostics_success"):
+                            diagnostics = self._diagnostics_from(run_result)
+                        with _phase(phase_timer, f"{phase_prefix}_empty_repaired_success_check"):
+                            empty_repaired_success = self._empty_repaired_success(diagnostics, task)
+                        if empty_repaired_success:
                             print(f"[EXTRACT] 失败: {archive} (错误: 修复结果没有可提取文件)")
                             shutil.rmtree(out_dir, ignore_errors=True)
                             diagnostics["failure_stage"] = "verification"
@@ -191,13 +209,14 @@ class SingleArchiveExtractor:
                         manifest_path = ""
                         manifest_payload = None
                         if diagnostics.get("result"):
-                            manifest_path, manifest_payload = write_extraction_progress_manifest_payload(
-                                archive=archive,
-                                out_dir=out_dir,
-                                diagnostics=diagnostics,
-                                round_index=retry_count + 1,
-                                write_file=self.write_progress_manifest,
-                            )
+                            with _phase(phase_timer, f"{phase_prefix}_write_success_manifest"):
+                                manifest_path, manifest_payload = write_extraction_progress_manifest_payload(
+                                    archive=archive,
+                                    out_dir=out_dir,
+                                    diagnostics=diagnostics,
+                                    round_index=retry_count + 1,
+                                    write_file=self.write_progress_manifest,
+                                )
                             if manifest_path:
                                 diagnostics["progress_manifest"] = manifest_path
                         return ExtractionResult(
@@ -214,7 +233,8 @@ class SingleArchiveExtractor:
 
                     err = f"{run_result.stdout}\n{run_result.stderr}".lower()
             finally:
-                self.rename_scheduler.cleanup_normalized_split_group(staged)
+                with _phase(phase_timer, f"{phase_prefix}_cleanup_normalized_paths"):
+                    self.rename_scheduler.cleanup_normalized_split_group(staged)
 
             if self.retry_policy.can_retry(run_result, err, retry_count, archive, is_split):
                 retry_count += 1
@@ -232,18 +252,23 @@ class SingleArchiveExtractor:
                 self.retry_policy.backoff(retry_count)
                 continue
 
-            error_msg = classify_extract_error(run_result or test_result, err, archive=archive, is_split_archive=is_split)
-            error_msg = self.retry_policy.append_retry_count(error_msg, retry_count)
+            with _phase(phase_timer, f"{phase_prefix}_classify_error"):
+                error_msg = classify_extract_error(run_result or test_result, err, archive=archive, is_split_archive=is_split)
+                error_msg = self.retry_policy.append_retry_count(error_msg, retry_count)
             print(f"[EXTRACT] 失败: {archive} (错误: {error_msg})")
-            diagnostics = self._diagnostics_from(run_result or test_result)
-            if self.best_effort and has_recoverable_partial_outputs(diagnostics, out_dir):
-                manifest_path, manifest_payload = write_extraction_progress_manifest_payload(
-                    archive=archive,
-                    out_dir=out_dir,
-                    diagnostics=diagnostics,
-                    round_index=retry_count + 1,
-                    write_file=self.write_progress_manifest,
-                )
+            with _phase(phase_timer, f"{phase_prefix}_diagnostics_failure"):
+                diagnostics = self._diagnostics_from(run_result or test_result)
+            with _phase(phase_timer, f"{phase_prefix}_recoverable_partial_check"):
+                recoverable_partial = self.best_effort and has_recoverable_partial_outputs(diagnostics, out_dir)
+            if recoverable_partial:
+                with _phase(phase_timer, f"{phase_prefix}_write_partial_manifest"):
+                    manifest_path, manifest_payload = write_extraction_progress_manifest_payload(
+                        archive=archive,
+                        out_dir=out_dir,
+                        diagnostics=diagnostics,
+                        round_index=retry_count + 1,
+                        write_file=self.write_progress_manifest,
+                    )
                 diagnostics["partial_outputs"] = True
                 if manifest_path:
                     diagnostics["progress_manifest"] = manifest_path
@@ -384,12 +409,16 @@ class SingleArchiveExtractor:
         *,
         split_info: Optional[SplitArchiveInfo] = None,
         runtime_scheduler: Any = None,
+        phase_timer: Callable[..., Any] | None = None,
+        phase_prefix: str = "extract_embedded",
     ) -> ExtractionResult:
         archive = task.main_path
         split_info = split_info or task.split_info
         all_parts = list(task.all_parts or [archive])
         print(f"\n[EXTRACT] 开始 embedded segments: {archive} ({len(segments)} segments)")
-        if not self.ensure_space(5):
+        with _phase(phase_timer, f"{phase_prefix}_ensure_space_initial"):
+            has_space = self.ensure_space(5)
+        if not has_space:
             return self._failed(
                 archive,
                 out_dir,
@@ -398,7 +427,8 @@ class SingleArchiveExtractor:
                 diagnostics={"failure_stage": "preflight", "failure_kind": "disk_space"},
             )
         try:
-            os.makedirs(out_dir, exist_ok=True)
+            with _phase(phase_timer, f"{phase_prefix}_mkdir_initial"):
+                os.makedirs(out_dir, exist_ok=True)
         except Exception as exc:
             return self._failed(
                 archive,
@@ -408,11 +438,12 @@ class SingleArchiveExtractor:
                 diagnostics={"failure_stage": "preflight", "failure_kind": "output_filesystem", "message": str(exc)},
             )
 
-        saved_archive_facts = {
-            key: value
-            for key, value in task.fact_bag.to_dict().items()
-            if key.startswith("archive.")
-        }
+        with _phase(phase_timer, f"{phase_prefix}_save_archive_facts"):
+            saved_archive_facts = {
+                key: value
+                for key, value in task.fact_bag.to_dict().items()
+                if key.startswith("archive.")
+            }
         segment_results: list[dict[str, Any]] = []
         password_used = None
         selected_codepage = None
@@ -423,30 +454,36 @@ class SingleArchiveExtractor:
             fmt = str(segment.get("format") or "archive").replace("/", "_") or "archive"
             segment_id = str(segment.get("segment_id") or f"embedded_{position:02d}_{fmt}")
             segment_dir = os.path.join(out_dir, self._safe_segment_dir_name(segment_id, position, fmt))
-            descriptor = ArchiveInputDescriptor.from_any(
-                segment.get("archive_input") if isinstance(segment.get("archive_input"), dict) else None,
-                archive_path=archive,
-                part_paths=all_parts,
-                format_hint=str(segment.get("format") or ""),
-                logical_name=str(segment.get("logical_name") or segment_id),
-            )
+            with _phase(phase_timer, f"{phase_prefix}_segment_descriptor"):
+                descriptor = ArchiveInputDescriptor.from_any(
+                    segment.get("archive_input") if isinstance(segment.get("archive_input"), dict) else None,
+                    archive_path=archive,
+                    part_paths=all_parts,
+                    format_hint=str(segment.get("format") or ""),
+                    logical_name=str(segment.get("logical_name") or segment_id),
+                )
             try:
-                task.set_archive_state(ArchiveState.from_archive_input(descriptor))
+                with _phase(phase_timer, f"{phase_prefix}_segment_set_archive_state"):
+                    task.set_archive_state(ArchiveState.from_archive_input(descriptor))
                 result = self.extract(
                     task,
                     segment_dir,
                     split_info=split_info,
                     runtime_scheduler=runtime_scheduler,
                     allow_embedded_segments=False,
+                    phase_timer=phase_timer,
+                    phase_prefix=f"{phase_prefix}_segment_extract",
                 )
             finally:
-                self._restore_archive_facts(task, saved_archive_facts)
+                with _phase(phase_timer, f"{phase_prefix}_segment_restore_archive_facts"):
+                    self._restore_archive_facts(task, saved_archive_facts)
 
             if result.password_used is not None and password_used is None:
                 password_used = result.password_used
             if result.selected_codepage is not None and selected_codepage is None:
                 selected_codepage = result.selected_codepage
-            stats = self._directory_stats(segment_dir)
+            with _phase(phase_timer, f"{phase_prefix}_segment_directory_stats"):
+                stats = self._directory_stats(segment_dir)
             segment_success = bool(result.success)
             segment_partial = bool(result.partial_outputs or stats["file_count"] > 0)
             any_success = any_success or segment_success
@@ -470,7 +507,8 @@ class SingleArchiveExtractor:
                 "bytes_written": stats["total_bytes"],
             })
 
-        totals = self._directory_stats(out_dir)
+        with _phase(phase_timer, f"{phase_prefix}_directory_stats_total"):
+            totals = self._directory_stats(out_dir)
         diagnostics = {
             "result": {
                 "status": "ok" if any_success else ("partial" if any_partial else "failed"),
@@ -486,13 +524,14 @@ class SingleArchiveExtractor:
             manifest_path = ""
             manifest_payload = None
             if self.write_progress_manifest:
-                manifest_path, manifest_payload = write_extraction_progress_manifest_payload(
-                    archive=archive,
-                    out_dir=out_dir,
-                    diagnostics=diagnostics,
-                    round_index=1,
-                    write_file=self.write_progress_manifest,
-                )
+                with _phase(phase_timer, f"{phase_prefix}_write_manifest"):
+                    manifest_path, manifest_payload = write_extraction_progress_manifest_payload(
+                        archive=archive,
+                        out_dir=out_dir,
+                        diagnostics=diagnostics,
+                        round_index=1,
+                        write_file=self.write_progress_manifest,
+                    )
                 if manifest_path:
                     diagnostics["progress_manifest"] = manifest_path
             print(f"[EXTRACT] embedded segments 成功: {archive}")
@@ -552,3 +591,9 @@ class SingleArchiveExtractor:
                 except OSError:
                     pass
         return {"file_count": file_count, "total_bytes": total_bytes}
+
+
+def _phase(timer: Callable[..., Any] | None, name: str):
+    if timer is None:
+        return nullcontext()
+    return timer(name)

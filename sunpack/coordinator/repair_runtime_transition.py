@@ -95,7 +95,13 @@ class RepairRuntimeTransitionEvaluator:
                 with _phase(phase_timer, "transition_analysis_refresh", state_id=state_id, candidate_id=candidate_id):
                     self.analysis_stage.refresh_task_analysis(task, phase_timer=phase_timer, phase_prefix="transition_analysis_refresh")
             with _phase(phase_timer, "transition_extract", state_id=state_id, candidate_id=candidate_id):
-                extracted = self.extractor.extract(task, temp_dir, runtime_scheduler=self.runtime_scheduler)
+                extracted = self.extractor.extract(
+                    task,
+                    temp_dir,
+                    runtime_scheduler=self.runtime_scheduler,
+                    phase_timer=phase_timer,
+                    phase_prefix="transition_extract",
+                )
             with _phase(phase_timer, "transition_write_extraction_knowledge", state_id=state_id, candidate_id=candidate_id):
                 write_extraction_result(task, extracted, phase_timer=phase_timer, phase_prefix="transition_write_extraction")
             with _phase(phase_timer, "transition_verify", state_id=state_id, candidate_id=candidate_id):

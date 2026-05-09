@@ -1,3 +1,6 @@
+from contextlib import nullcontext
+from typing import Any, Callable
+
 from sunpack.verification.evidence import VerificationEvidence
 from sunpack.verification.registry import get_verification_method
 from sunpack.verification.result import (
@@ -32,7 +35,13 @@ class VerificationPipeline:
         self.complete_accept_threshold = _clamp01(float(self.config.get("complete_accept_threshold", 0.999) or 0.999))
         self.partial_accept_threshold = _clamp01(float(self.config.get("partial_accept_threshold", 0.2) or 0.2))
 
-    def run(self, evidence: VerificationEvidence) -> VerificationResult:
+    def run(
+        self,
+        evidence: VerificationEvidence,
+        *,
+        phase_timer: Callable[..., Any] | None = None,
+        phase_prefix: str = "verify_pipeline",
+    ) -> VerificationResult:
         issues: list[VerificationIssue] = []
         methods_run: list[str] = []
         steps: list[VerificationStepRecord] = []
@@ -66,7 +75,8 @@ class VerificationPipeline:
                 ))
                 continue
 
-            step = method.verify(evidence, method_config)
+            with _phase(phase_timer, f"{phase_prefix}_method_{method_name}"):
+                step = method.verify(evidence, method_config)
             methods_run.append(step.method or method_name)
             issues.extend(step.issues)
             file_observations.extend(step.file_observations)
@@ -89,17 +99,18 @@ class VerificationPipeline:
                 file_observations=list(step.file_observations),
             ))
 
-        return self._build_result(
-            methods_run=methods_run,
-            issues=issues,
-            steps=steps,
-            file_observations=file_observations,
-            completeness_hints=completeness_hints,
-            upper_bound_hints=upper_bound_hints,
-            source_hints=source_hints,
-            decision_hints=decision_hints,
-            repair_hints=evidence.repair_hints,
-        )
+        with _phase(phase_timer, f"{phase_prefix}_build_result"):
+            return self._build_result(
+                methods_run=methods_run,
+                issues=issues,
+                steps=steps,
+                file_observations=file_observations,
+                completeness_hints=completeness_hints,
+                upper_bound_hints=upper_bound_hints,
+                source_hints=source_hints,
+                decision_hints=decision_hints,
+                repair_hints=evidence.repair_hints,
+            )
 
     def _build_result(
         self,
@@ -472,3 +483,9 @@ def _decision_hint(
 
 def _clamp01(value: float) -> float:
     return min(1.0, max(0.0, value))
+
+
+def _phase(timer: Callable[..., Any] | None, name: str):
+    if timer is None:
+        return nullcontext()
+    return timer(name)

@@ -65,12 +65,16 @@ class ExtractionScheduler:
         out_dir: str,
         split_info: Optional[SplitArchiveInfo] = None,
         runtime_scheduler: Any = None,
+        phase_timer: Any = None,
+        phase_prefix: str = "extract",
     ) -> ExtractionResult:
         return self._single_archive_extractor().extract(
             task,
             out_dir,
             split_info=split_info,
             runtime_scheduler=runtime_scheduler,
+            phase_timer=phase_timer,
+            phase_prefix=phase_prefix,
         )
 
     def close(self) -> None:

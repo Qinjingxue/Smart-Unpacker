@@ -24,7 +24,13 @@ class VerificationScheduler:
 
     def verify(self, task: ArchiveTask, extraction_result: ExtractionResult, *, phase_timer: Callable[..., Any] | None = None, phase_prefix: str = "verify") -> VerificationResult:
         with _phase(phase_timer, f"{phase_prefix}_build_evidence"):
-            evidence = build_verification_evidence(task, extraction_result, self.password_session)
+            evidence = build_verification_evidence(
+                task,
+                extraction_result,
+                self.password_session,
+                phase_timer=phase_timer,
+                phase_prefix=f"{phase_prefix}_build_evidence",
+            )
         if not self.config.get("enabled", False):
             if not extraction_result.success:
                 result = VerificationResult(
@@ -36,7 +42,7 @@ class VerificationScheduler:
                     repair_hints=dict(evidence.repair_hints),
                 )
                 with _phase(phase_timer, f"{phase_prefix}_write_knowledge"):
-                    write_verification_result(task, result)
+                    write_verification_result(task, result, phase_timer=phase_timer, phase_prefix=f"{phase_prefix}_write_knowledge")
                 return result
             result = VerificationResult(
                 completeness=1.0,
@@ -47,12 +53,16 @@ class VerificationScheduler:
                 repair_hints=dict(evidence.repair_hints),
             )
             with _phase(phase_timer, f"{phase_prefix}_write_knowledge"):
-                write_verification_result(task, result)
+                write_verification_result(task, result, phase_timer=phase_timer, phase_prefix=f"{phase_prefix}_write_knowledge")
             return result
         with _phase(phase_timer, f"{phase_prefix}_pipeline"):
-            result = VerificationPipeline(self.config).run(evidence)
+            result = VerificationPipeline(self.config).run(
+                evidence,
+                phase_timer=phase_timer,
+                phase_prefix=f"{phase_prefix}_pipeline",
+            )
         with _phase(phase_timer, f"{phase_prefix}_write_knowledge"):
-            write_verification_result(task, result)
+            write_verification_result(task, result, phase_timer=phase_timer, phase_prefix=f"{phase_prefix}_write_knowledge")
         return result
 
     def _verification_config(self, config: dict[str, Any]) -> dict:

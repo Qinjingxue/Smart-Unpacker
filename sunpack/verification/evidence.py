@@ -1,7 +1,8 @@
 from dataclasses import dataclass, field
 import json
+from contextlib import nullcontext
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from sunpack.contracts.archive_state import ArchiveState
 from sunpack.contracts.tasks import ArchiveTask
@@ -38,19 +39,31 @@ def build_verification_evidence(
     task: ArchiveTask,
     extraction_result: ExtractionResult,
     password_session: PasswordSession | None = None,
+    *,
+    phase_timer: Callable[..., Any] | None = None,
+    phase_prefix: str = "verify_build_evidence",
 ) -> VerificationEvidence:
-    fact_bag = task.fact_bag
-    password = extraction_result.password_used
-    if password is None and password_session is not None:
-        password = password_session.get_resolved(task.key)
-    if password is None:
-        password = knowledge_view.archive_password(task)
-    archive_state = task.archive_state()
-    archive_input = archive_state.to_archive_input_descriptor()
-    analysis_facts = _analysis_facts_from_task(task)
-    extraction_diagnostics = dict(extraction_result.diagnostics or {})
-    worker_result = _worker_result(extraction_diagnostics)
-    worker_native_diagnostics = _worker_native_diagnostics(worker_result)
+    with _phase(phase_timer, f"{phase_prefix}_fact_bag"):
+        fact_bag = task.fact_bag
+    with _phase(phase_timer, f"{phase_prefix}_password"):
+        password = extraction_result.password_used
+        if password is None and password_session is not None:
+            password = password_session.get_resolved(task.key)
+        if password is None:
+            password = knowledge_view.archive_password(task)
+    with _phase(phase_timer, f"{phase_prefix}_archive_state"):
+        archive_state = task.archive_state()
+        archive_input = archive_state.to_archive_input_descriptor()
+    with _phase(phase_timer, f"{phase_prefix}_analysis_facts"):
+        analysis_facts = _analysis_facts_from_task(task)
+    with _phase(phase_timer, f"{phase_prefix}_diagnostics"):
+        extraction_diagnostics = dict(extraction_result.diagnostics or {})
+        worker_result = _worker_result(extraction_diagnostics)
+        worker_native_diagnostics = _worker_native_diagnostics(worker_result)
+    with _phase(phase_timer, f"{phase_prefix}_repair_hints"):
+        repair_hints = _repair_hints(analysis_facts, archive_state, worker_result, worker_native_diagnostics)
+    with _phase(phase_timer, f"{phase_prefix}_progress_manifest"):
+        progress_manifest = _load_progress_manifest(extraction_result)
     return VerificationEvidence(
         task=task,
         extraction_result=extraction_result,
@@ -69,9 +82,9 @@ def build_verification_evidence(
         extraction_diagnostics=extraction_diagnostics,
         worker_result=worker_result,
         worker_native_diagnostics=worker_native_diagnostics,
-        repair_hints=_repair_hints(analysis_facts, archive_state, worker_result, worker_native_diagnostics),
+        repair_hints=repair_hints,
         selected_codepage=extraction_result.selected_codepage,
-        progress_manifest=_load_progress_manifest(extraction_result),
+        progress_manifest=progress_manifest,
     )
 
 
@@ -149,3 +162,9 @@ def _repair_hints(
         "native_status": worker_result.get("native_status") or worker_native_diagnostics.get("native_status"),
     }
     return {key: value for key, value in hints.items() if value not in (None, "", [])}
+
+
+def _phase(timer: Callable[..., Any] | None, name: str):
+    if timer is None:
+        return nullcontext()
+    return timer(name)

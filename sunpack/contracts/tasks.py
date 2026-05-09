@@ -50,6 +50,11 @@ class ArchiveTask:
     detected_ext: str = ""
 
     def __post_init__(self):
+        self._archive_knowledge_cache_raw = None
+        self._archive_knowledge_cache = None
+        self._archive_state_cache_raw = None
+        self._archive_state_cache_knowledge_raw = None
+        self._archive_state_cache = None
         self.all_parts = list(self.all_parts or [])
         if not self.main_path:
             raise ValueError("ArchiveTask.main_path is required")
@@ -139,14 +144,8 @@ class ArchiveTask:
     def archive_input(self) -> ArchiveInputDescriptor:
         raw_state = self._raw_archive_state()
         if isinstance(raw_state, dict):
-            return ArchiveState.from_any(
-                raw_state,
-                archive_path=self.main_path,
-                part_paths=list(self.all_parts or [self.main_path]),
-                format_hint=self._format_hint(),
-                logical_name=str(self.logical_name or ""),
-            ).to_archive_input_descriptor()
-        knowledge_input = ArchiveKnowledge.from_any(self.fact_bag.get("archive.knowledge")).get("source.input")
+            return self.archive_state().to_archive_input_descriptor()
+        knowledge_input = self.knowledge().get("source.input")
         if isinstance(knowledge_input, dict):
             return ArchiveInputDescriptor.from_any(
                 knowledge_input,
@@ -158,8 +157,16 @@ class ArchiveTask:
         raise ValueError("ArchiveTask is missing ArchiveKnowledge source.input")
 
     def archive_state(self) -> ArchiveState:
-        archive_input = ArchiveKnowledge.from_any(self.fact_bag.get("archive.knowledge")).get("source.input")
-        return ArchiveState.from_any(
+        raw_state = self._raw_archive_state()
+        knowledge_raw = self.fact_bag.get("archive.knowledge")
+        if (
+            raw_state is self._archive_state_cache_raw
+            and knowledge_raw is self._archive_state_cache_knowledge_raw
+            and isinstance(self._archive_state_cache, ArchiveState)
+        ):
+            return self._archive_state_cache
+        archive_input = self.knowledge().get("source.input")
+        state = ArchiveState.from_any(
             self._raw_archive_state(),
             archive_path=self.main_path,
             part_paths=list(self.all_parts or [self.main_path]),
@@ -167,14 +174,23 @@ class ArchiveTask:
             logical_name=str(self.logical_name or ""),
             archive_input=archive_input,
         )
+        self._archive_state_cache_raw = raw_state
+        self._archive_state_cache_knowledge_raw = knowledge_raw
+        self._archive_state_cache = state
+        return state
 
     def knowledge(self) -> ArchiveKnowledge:
-        knowledge = ArchiveKnowledge.from_any(self.fact_bag.get("archive.knowledge"))
+        raw = self.fact_bag.get("archive.knowledge")
+        if raw is self._archive_knowledge_cache_raw and isinstance(self._archive_knowledge_cache, ArchiveKnowledge):
+            return self._archive_knowledge_cache
+        knowledge = ArchiveKnowledge.from_any(raw)
+        self._archive_knowledge_cache_raw = raw
+        self._archive_knowledge_cache = knowledge
         return knowledge
 
     def set_knowledge(self, knowledge: ArchiveKnowledge | dict) -> None:
         payload = ArchiveKnowledge.from_any(knowledge).to_dict()
-        self.fact_bag.set("archive.knowledge", payload)
+        self._replace_knowledge_payload(payload)
         raw_state = self._raw_archive_state()
         if isinstance(raw_state, dict):
             state = self.archive_state()
@@ -207,9 +223,9 @@ class ArchiveTask:
             )
         self.fact_bag.set("archive.input", descriptor.to_dict())
         self.fact_bag.set("archive.descriptor.source", descriptor.to_dict())
-        knowledge = ArchiveKnowledge.from_any(self.fact_bag.get("archive.knowledge"))
+        knowledge = self.knowledge()
         knowledge.set("source.input", descriptor.to_dict(), source_layer="contracts", source_module="archive_task")
-        self.fact_bag.set("archive.knowledge", knowledge.to_dict())
+        self._replace_knowledge_payload(knowledge.to_dict())
         self._store_archive_state(ArchiveState.from_archive_input(descriptor))
 
     def set_archive_state(self, state: ArchiveState | dict) -> None:
@@ -247,11 +263,16 @@ class ArchiveTask:
                 verification=dict(state.verification),
                 knowledge=knowledge,
             )
-        self.fact_bag.set("archive.state", state.to_dict())
+        state_payload = _archive_state_snapshot(state)
+        self.fact_bag.set("archive.state", state_payload)
         self.fact_bag.set("archive.source", state.source.to_dict())
         self.fact_bag.set("archive.patch_stack", [patch.to_dict() for patch in state.patches])
         self.fact_bag.set("archive.patch_digest", state.effective_patch_digest())
-        self.fact_bag.set("archive.knowledge", dict(state.knowledge))
+        knowledge_payload = dict(state.knowledge)
+        self._replace_knowledge_payload(knowledge_payload)
+        self._archive_state_cache_raw = state_payload
+        self._archive_state_cache_knowledge_raw = knowledge_payload
+        self._archive_state_cache = state
 
     def archive_descriptor(self) -> ArchiveDescriptor:
         source = self.archive_state().to_archive_input_descriptor()
@@ -296,7 +317,7 @@ class ArchiveTask:
         )
 
     def _format_hint(self) -> str:
-        knowledge = ArchiveKnowledge.from_any(self.fact_bag.get("archive.knowledge"))
+        knowledge = self.knowledge()
         return str(
             knowledge.get("archive.format_hint", "")
             or knowledge.get("analysis.selected_format", "")
@@ -310,7 +331,7 @@ class ArchiveTask:
         return raw if isinstance(raw, dict) else None
 
     def _write_detection_boundary_knowledge(self) -> None:
-        knowledge = ArchiveKnowledge.from_any(self.fact_bag.get("archive.knowledge"))
+        knowledge = self.knowledge()
         raw_source = self.fact_bag.get("archive.input")
         source_descriptor = ArchiveInputDescriptor.from_any(
             raw_source if isinstance(raw_source, dict) else None,
@@ -344,7 +365,15 @@ class ArchiveTask:
                 "volumes": list(self.split_info.volumes or []),
             },
         }, source_layer="contracts", source_module="from_fact_bag")
-        self.fact_bag.set("archive.knowledge", knowledge.to_dict())
+        self._replace_knowledge_payload(knowledge.to_dict())
+
+    def _replace_knowledge_payload(self, payload: dict[str, Any]) -> None:
+        self.fact_bag.set("archive.knowledge", payload)
+        self._archive_knowledge_cache_raw = payload
+        self._archive_knowledge_cache = ArchiveKnowledge.from_any(payload)
+        self._archive_state_cache_raw = None
+        self._archive_state_cache_knowledge_raw = None
+        self._archive_state_cache = None
 
 
 def _archive_state_snapshot(state: ArchiveState) -> dict[str, Any]:
