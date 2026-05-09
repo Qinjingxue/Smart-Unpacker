@@ -120,17 +120,6 @@ class TaskExecutor:
         value = knowledge_view.resource_token_cost(task)
         if value:
             return demand_from_value(value)
-        fact_bag = getattr(task, "fact_bag", None)
-        if fact_bag is not None:
-            try:
-                tokens = fact_bag.get("resource.tokens")
-                if tokens:
-                    return demand_from_value(tokens)
-                value = fact_bag.get("resource.token_cost")
-                if value:
-                    return demand_from_value(value)
-            except Exception:
-                pass
         return demand_from_value(getattr(task, "resource_token_cost", 1) or 1)
 
     def _select_best_fit_task(self, pending: list[Any]) -> tuple[int, Any, ResourceDemand, str] | None:

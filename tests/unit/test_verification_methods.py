@@ -199,8 +199,15 @@ def _task(tmp_path, analysis=None):
     archive = tmp_path / "sample.zip"
     archive.write_bytes(b"zip")
     bag = FactBag()
-    bag.set("resource.analysis", analysis or {})
-    return ArchiveTask(fact_bag=bag, score=10, key="sample", main_path=str(archive), all_parts=[str(archive)])
+    task = ArchiveTask(fact_bag=bag, score=10, key="sample", main_path=str(archive), all_parts=[str(archive)])
+    knowledge = task.knowledge()
+    if analysis is not None:
+        knowledge.set("resource.analysis", analysis, source_layer="test", source_module="fixture")
+        knowledge.set("analysis.prepass", analysis, source_layer="test", source_module="fixture")
+        if analysis.get("expected_names"):
+            knowledge.set("verification.expected_names", analysis["expected_names"], source_layer="test", source_module="fixture")
+    task.set_knowledge(knowledge)
+    return task
 
 
 def _scheduler(methods):

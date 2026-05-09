@@ -20,6 +20,7 @@ from sunpack.verification.result import (
     VerificationIssue,
     VerificationStepResult,
 )
+from sunpack.support import archive_knowledge_projection as knowledge_view
 from sunpack.support.path_names import clean_relative_archive_path, normalize_match_name, normalize_match_path
 
 
@@ -138,7 +139,7 @@ class ExpectedNamePresenceMethod:
             for field in NAME_FIELDS:
                 candidates.extend(_iter_name_values(analysis.get(field)))
         if not candidates:
-            candidates.extend(_iter_name_values(_fact_value(evidence.fact_bag, "verification.expected_names")))
+            candidates.extend(_iter_name_values(knowledge_view.get(evidence.task, "verification.expected_names", [])))
 
         max_names = max(1, int(config.get("max_expected_names", 50) or 50))
         names = []
@@ -155,13 +156,6 @@ class ExpectedNamePresenceMethod:
             if len(names) >= max_names:
                 break
         return names
-
-
-def _fact_value(fact_bag: Any, key: str) -> Any:
-    if fact_bag is not None and hasattr(fact_bag, "get"):
-        return fact_bag.get(key)
-    return None
-
 
 def _output_files_for_coverage(evidence: VerificationEvidence) -> list[dict[str, Any]]:
     manifest = evidence.progress_manifest or {}

@@ -23,9 +23,7 @@ class ResourcePreflightInspector:
 
     def inspect(self, task: ArchiveTask) -> ArchiveTask:
         existing_analysis = knowledge_view.resource_analysis(task)
-        if not isinstance(existing_analysis, dict) or not existing_analysis:
-            existing_analysis = task.fact_bag.get("resource.analysis")
-        if isinstance(existing_analysis, dict):
+        if isinstance(existing_analysis, dict) and existing_analysis:
             analysis = SimpleNamespace(ok=not bool(existing_analysis.get("is_broken")), **existing_analysis)
             self.record_resource_demand(task, analysis)
             return task
@@ -105,7 +103,7 @@ class ResourcePreflightInspector:
         )
 
     def _ensure_resource_health(self, task: ArchiveTask) -> None:
-        if knowledge_view.resource_health(task) or task.fact_bag.has("resource.health"):
+        if knowledge_view.resource_health(task):
             return
         if self._needs_offset_detection(task):
             return
@@ -114,15 +112,16 @@ class ResourcePreflightInspector:
             health = cached_check_archive_health(task.main_path, part_paths=part_paths)
             if not health.is_archive:
                 return
-            task.fact_bag.set("resource.health", {
+            health_payload = {
                 "is_archive": health.is_archive,
                 "is_encrypted": health.is_encrypted,
                 "is_broken": health.is_broken,
                 "is_wrong_password": health.is_wrong_password,
                 "archive_type": health.archive_type,
                 "checksum_error": False,
-            })
-            self._write_resource_payload(task, health=dict(knowledge_view.resource_health(task) or task.fact_bag.get("resource.health") or {}))
+            }
+            task.fact_bag.set("resource.health", health_payload)
+            self._write_resource_payload(task, health=health_payload)
         except Exception:
             pass
 
@@ -186,7 +185,7 @@ class ResourcePreflightInspector:
         archive_type = str(health.get("archive_type") or "").strip().lower()
         if archive_type and archive_type != "pe":
             return archive_type
-        detected_ext = str(knowledge_view.get(task, "filesystem.detected_ext", "") or task.fact_bag.get("file.detected_ext") or os.path.splitext(task.main_path)[1]).lower()
+        detected_ext = str(knowledge_view.get(task, "filesystem.detected_ext", "") or os.path.splitext(task.main_path)[1]).lower()
         return detected_ext.lstrip(".") or archive_type or "unknown"
 
     def _archive_size(self, task: ArchiveTask) -> int:

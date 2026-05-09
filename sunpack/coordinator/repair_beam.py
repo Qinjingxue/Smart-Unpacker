@@ -337,7 +337,7 @@ class RepairBeamLoop:
             state = RepairBeamState(
                 source_input=dict(repaired_input),
                 format=item.candidate.format or item.state.format,
-                archive_state=candidate_state or dict(item.state.archive_state),
+                archive_state=candidate_state,
                 confidence=max(
                     float(item.candidate.confidence or 0.0),
                     float(item.analyze.get("confidence", 0.0) or 0.0),
@@ -678,7 +678,19 @@ def _state_recovery_score(state: RepairBeamState | None) -> float:
     if state is None:
         return 0.0
     coverage = state.verification.get("archive_coverage") if isinstance(state.verification.get("archive_coverage"), dict) else {}
-    if coverage.get("completeness") is not None:
+    coverage_has_observations = any(
+        int(coverage.get(key, 0) or 0) > 0
+        for key in (
+            "expected_files",
+            "matched_files",
+            "complete_files",
+            "partial_files",
+            "failed_files",
+            "missing_files",
+            "unverified_files",
+        )
+    )
+    if coverage.get("completeness") is not None and coverage_has_observations:
         return _clamp01(coverage.get("completeness"))
     return _clamp01(state.completeness)
 

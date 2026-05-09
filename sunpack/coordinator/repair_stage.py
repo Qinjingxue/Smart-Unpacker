@@ -16,7 +16,13 @@ from sunpack.extraction.result import ExtractionResult
 from sunpack.repair.config import repair_config
 from sunpack.repair.context import normalize_zip_runtime_route_evidence
 from sunpack.repair.job import RepairJob
-from sunpack.repair.knowledge import write_repair_attempt, write_repair_job_context, write_repair_result
+from sunpack.repair.knowledge import (
+    write_repair_archive_status,
+    write_repair_attempt,
+    write_repair_candidate_log,
+    write_repair_job_context,
+    write_repair_result,
+)
 from sunpack.repair.result import RepairResult
 from sunpack.repair.scheduler import RepairScheduler
 from sunpack.support import archive_knowledge_projection as knowledge_view
@@ -67,17 +73,12 @@ class ArchiveRepairStage:
         if self.scheduler is None or self._attempts(task) >= self.max_attempts_per_task:
             return None
         attempts = self._attempts(task) + 1
-        task.fact_bag.set("repair.attempts", attempts)
-        task.fact_bag.set("repair.last_trigger", trigger)
         write_repair_attempt(task, attempts, trigger=trigger)
         result = self.scheduler.repair(job)
-        task.fact_bag.set("repair.last_result", self._result_payload(result))
         self._append_repair_history(task, result)
         _append_candidate_log_from_result(task, result, phase="scheduler_repair", trigger=trigger)
         if not result.ok:
             return result
-        task.fact_bag.set("repair.status", result.status)
-        task.fact_bag.set("repair.module", result.module_name)
         descriptor = self._descriptor_from_repaired_input(task, result.repaired_input or {})
         if result.repaired_state is not None:
             task.set_archive_state(result.repaired_state)
@@ -86,8 +87,8 @@ class ArchiveRepairStage:
         else:
             task.set_archive_state(ArchiveState.from_archive_input(descriptor))
         if job.password is not None:
-            task.fact_bag.set("archive.password", job.password)
-        task.fact_bag.set("archive.repaired", True)
+            write_repair_archive_status(task, password=job.password)
+        write_repair_archive_status(task, repaired=True)
         return result
 
     def _job_from_verification_assessment(
@@ -229,18 +230,6 @@ class ArchiveRepairStage:
         history = knowledge_view.repair_history_items(task)
         item = self._result_payload(result)
         history.append(item)
-        task.fact_bag.set("repair.history", history)
-        actions: list[str] = []
-        modules: list[str] = []
-        for entry in history:
-            if not isinstance(entry, dict) or not entry.get("ok"):
-                continue
-            actions.extend(str(action) for action in entry.get("actions") or [])
-            module = str(entry.get("module_name") or "")
-            if module:
-                modules.append(module)
-        task.fact_bag.set("repair.previous_actions", actions)
-        task.fact_bag.set("repair.previous_modules", modules)
         write_repair_result(task, result, phase="history")
 
     def _previous_repair_path(self, task: ArchiveTask) -> tuple[list[str], list[str]]:
@@ -387,10 +376,6 @@ class ArchiveRepairStage:
         projected = knowledge_view.zip_structure_features(task)
         if projected:
             return projected
-        for key in ("zip_structure_features",):
-            value = task.fact_bag.get(key)
-            if isinstance(value, dict) and value:
-                return dict(value)
         prepass = self._analysis_prepass(task)
         if isinstance(prepass.get("zip_structure_features"), dict):
             return dict(prepass["zip_structure_features"])
@@ -402,10 +387,6 @@ class ArchiveRepairStage:
         projected = knowledge_view.zip_container_tags(task)
         if projected:
             return projected
-        for key in ("zip_container_tags",):
-            value = task.fact_bag.get(key)
-            if isinstance(value, list) and value:
-                return [str(item) for item in value if str(item)]
         prepass = self._analysis_prepass(task)
         if isinstance(prepass.get("zip_container_tags"), list):
             return [str(item) for item in prepass["zip_container_tags"] if str(item)]
@@ -415,14 +396,7 @@ class ArchiveRepairStage:
         return [str(item) for item in tags if str(item)] if isinstance(tags, list) else []
 
     def _damage_profile_from_task(self, task: ArchiveTask) -> str:
-        projected = knowledge_view.damage_profile(task)
-        if projected:
-            return projected
-        for key in ("damage_profile",):
-            value = task.fact_bag.get(key)
-            if value:
-                return str(value)
-        return ""
+        return knowledge_view.damage_profile(task)
 
     def _source_input_from_task(self, task: ArchiveTask, *, format_hint: str = "") -> dict[str, Any] | None:
         descriptor = task.archive_state().to_archive_input_descriptor()
@@ -697,7 +671,7 @@ class ArchiveRepairStage:
         return Path(str(self.config.get("workspace") or ".sunpack_repair"))
 
     def _attempts(self, task: ArchiveTask) -> int:
-        return int(knowledge_view.get(task, "repair.attempts", task.fact_bag.get("repair.attempts", 0)) or 0)
+        return knowledge_view.repair_attempts(task)
 
 
 def _dedupe(values: list[str]) -> list[str]:
@@ -719,8 +693,7 @@ def _append_candidate_log_from_result(task: ArchiveTask, result: RepairResult, *
     capability = diagnosis.get("capability_decision") if isinstance(diagnosis.get("capability_decision"), dict) else {}
     if not features and not selection and not generation and not capability:
         return
-    entries = task.fact_bag.get("repair.candidate_log")
-    log = list(entries) if isinstance(entries, list) else []
+    log = knowledge_view.repair_candidate_log(task)
     log.append({
         "phase": phase,
         "trigger": trigger,
@@ -738,6 +711,7 @@ def _append_candidate_log_from_result(task: ArchiveTask, result: RepairResult, *
         },
     })
     task.fact_bag.set("repair.candidate_log", log[-200:])
+    write_repair_candidate_log(task, log[-200:])
 
 
 def _verification_repair_hints(verification: VerificationResult) -> dict[str, Any]:

@@ -15,16 +15,25 @@ REQUIRED_VERIFICATION_KEYS = (
     "methods",
 )
 
+VERIFICATION_DEFAULTS = {
+    "enabled": True,
+    "max_retries": 2,
+    "cleanup_failed_output": True,
+    "accept_partial_when_source_damaged": True,
+    "partial_min_completeness": 0.2,
+    "complete_accept_threshold": 0.999,
+    "partial_accept_threshold": 0.2,
+    "retry_on_verification_failure": True,
+    "methods": [],
+}
+
 
 def normalize_verification_config(value: Any) -> dict[str, Any]:
     if value is None:
         raise ValueError("Missing required config object: verification")
     if not isinstance(value, dict):
         raise ValueError("verification must be an object")
-    missing = [key for key in REQUIRED_VERIFICATION_KEYS if key not in value]
-    if missing:
-        raise ValueError(f"Missing required verification config field(s): {', '.join(missing)}")
-    config = dict(value)
+    config = {**VERIFICATION_DEFAULTS, **dict(value)}
     config["enabled"] = bool(config["enabled"])
     config["max_retries"] = max(0, _int_field(config, "max_retries"))
     config["cleanup_failed_output"] = bool(config["cleanup_failed_output"])
@@ -63,11 +72,9 @@ def _normalize_methods(value: Any) -> list[dict[str, Any]]:
         name = str(item.get("name") or "").strip()
         if not name:
             raise ValueError(f"verification.methods[{index}].name must not be empty")
-        if "enabled" not in item:
-            raise ValueError(f"verification.methods[{index}].enabled must be set")
         normalized = dict(item)
         normalized["name"] = name
-        normalized["enabled"] = bool(item["enabled"])
+        normalized["enabled"] = bool(item.get("enabled", True))
         methods.append(normalized)
     return methods
 

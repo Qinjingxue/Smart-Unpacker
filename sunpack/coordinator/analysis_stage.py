@@ -5,7 +5,7 @@ from dataclasses import asdict, replace
 from typing import Any
 
 from sunpack.analysis import ArchiveAnalysisReport, ArchiveAnalysisScheduler
-from sunpack.analysis.knowledge import write_analysis_report, write_selected_segment
+from sunpack.analysis.knowledge import write_analysis_error, write_analysis_report, write_selected_segment
 from sunpack.analysis.result import ArchiveFormatEvidence, ArchiveSegment
 from sunpack.contracts.archive_input import (
     ArchiveInputDescriptor,
@@ -16,6 +16,7 @@ from sunpack.contracts.archive_input import (
 from sunpack.contracts.archive_state import ArchiveState
 from sunpack.contracts.detection import FactBag
 from sunpack.contracts.tasks import ArchiveTask, SplitArchiveInfo
+from sunpack.support import archive_knowledge_projection as knowledge_view
 
 
 class ArchiveAnalysisStage:
@@ -78,7 +79,7 @@ class ArchiveAnalysisStage:
         try:
             patch_digest = task.archive_state().effective_patch_digest()
         except (TypeError, ValueError, AttributeError):
-            patch_digest = str(task.fact_bag.get("archive.patch_digest") or "")
+            patch_digest = str(knowledge_view.get(task, "archive.patch_digest", "") or "")
         parts = self._ordered_parts(task) or list(task.all_parts or [task.main_path])
         return (
             patch_digest,
@@ -121,9 +122,9 @@ class ArchiveAnalysisStage:
         results = [(first_index, first_results)]
         if report is None:
             for index, task in group[1:]:
-                task.fact_bag.set("analysis.status", first_task.fact_bag.get("analysis.status") or "error")
-                if first_task.fact_bag.get("analysis.error"):
-                    task.fact_bag.set("analysis.error", first_task.fact_bag.get("analysis.error"))
+                task.fact_bag.set("analysis.status", knowledge_view.analysis_status(first_task) or "error")
+                if knowledge_view.analysis_error(first_task):
+                    task.fact_bag.set("analysis.error", knowledge_view.analysis_error(first_task))
                 results.append((index, [task]))
             return results
         for index, task in group[1:]:
@@ -148,6 +149,7 @@ class ArchiveAnalysisStage:
         except Exception as exc:
             task.fact_bag.set("analysis.status", "error")
             task.fact_bag.set("analysis.error", str(exc))
+            write_analysis_error(task, str(exc))
             return None, [task]
 
         return report, self._tasks_from_report(task, report)
@@ -482,7 +484,7 @@ class ArchiveAnalysisStage:
 
     def _segment_logical_name(self, task: ArchiveTask, evidence: ArchiveFormatEvidence, index: int) -> str:
         base = str(task.logical_name or os.path.splitext(os.path.basename(task.main_path))[0] or "archive")
-        if task.fact_bag.get("analysis.logical_archive_index"):
+        if knowledge_view.get(task, "analysis.selected_segment.index", 0):
             return base
         if index <= 0:
             return base

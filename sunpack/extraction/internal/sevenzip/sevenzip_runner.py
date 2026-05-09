@@ -241,10 +241,6 @@ class SevenZipRunner:
         return job
 
     def _archive_state(self, task: ArchiveTask) -> dict | None:
-        fact_bag = getattr(task, "fact_bag", None)
-        raw = fact_bag.get("archive.state") if fact_bag is not None and hasattr(fact_bag, "get") else None
-        if isinstance(raw, dict):
-            return dict(raw)
         if hasattr(task, "archive_state"):
             try:
                 return task.archive_state().to_dict()
@@ -255,14 +251,9 @@ class SevenZipRunner:
     def _archive_input(self, task: ArchiveTask, archive_path: str, part_paths: list[str]) -> ArchiveInputDescriptor | None:
         if hasattr(task, "archive_input"):
             raw = knowledge_view.source_input(task)
-            if not raw:
-                raw = task.fact_bag.get("archive.input") if getattr(task, "fact_bag", None) is not None else None
             if isinstance(raw, dict):
                 return task.archive_input()
-        fact_bag = getattr(task, "fact_bag", None)
         raw = knowledge_view.source_input(task)
-        if not raw and fact_bag is not None and hasattr(fact_bag, "get"):
-            raw = fact_bag.get("archive.input")
         if isinstance(raw, dict):
             return self._normalize_archive_input(raw, archive_path, part_paths)
         return None
@@ -710,9 +701,4 @@ class SevenZipRunner:
         profile_key = knowledge_view.resource_profile_key(task)
         if profile_key:
             return profile_key
-        fact_bag = getattr(task, "fact_bag", None)
-        if fact_bag is not None and hasattr(fact_bag, "get"):
-            profile_key = fact_bag.get("resource.profile_key")
-            if profile_key:
-                return str(profile_key)
         return "unknown"

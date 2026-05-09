@@ -271,9 +271,12 @@ def test_runtime_transition_evaluator_applies_candidate_and_restores_task(tmp_pa
 
 def test_runtime_repair_job_includes_descriptor_route_evidence(tmp_path):
     task = _task(tmp_path / "descriptor.zip", fmt="zip")
-    task.fact_bag.set("repair_training.damage_profile", "zip_data_descriptor_cd_conflict")
-    task.fact_bag.set("repair_training.zip_structure_features", {"has_data_descriptor": True})
-    task.fact_bag.set("repair_training.zip_container_tags", ["data_descriptor", "bit3"])
+    _write_source_derivation(
+        task,
+        damage_profile="zip_data_descriptor_cd_conflict",
+        zip_structure_features={"has_data_descriptor": True},
+        zip_container_tags=["data_descriptor", "bit3"],
+    )
     stage = ArchiveRepairStage({"repair": {"workspace": str(tmp_path / "repair"), "policy": {"enabled": False}}})
     job = stage._job_from_verification_assessment(task, _failed_extraction(task), _verification())  # noqa: SLF001
 
@@ -286,9 +289,12 @@ def test_runtime_repair_job_includes_descriptor_route_evidence(tmp_path):
 
 def test_runtime_repair_job_includes_non_utf8_route_evidence(tmp_path):
     task = _task(tmp_path / "names.zip", fmt="zip")
-    task.fact_bag.set("repair_training.damage_profile", "zip_non_utf8_filename_directory_rebuild")
-    task.fact_bag.set("repair_training.zip_structure_features", {"has_filename_encoding_risk": True})
-    task.fact_bag.set("repair_training.zip_container_tags", ["filename_encoding", "non_utf8_names"])
+    _write_source_derivation(
+        task,
+        damage_profile="zip_non_utf8_filename_directory_rebuild",
+        zip_structure_features={"has_filename_encoding_risk": True},
+        zip_container_tags=["filename_encoding", "non_utf8_names"],
+    )
     stage = ArchiveRepairStage({"repair": {"workspace": str(tmp_path / "repair"), "policy": {"enabled": False}}})
     job = stage._job_from_verification_assessment(task, _failed_extraction(task), _verification())  # noqa: SLF001
 
@@ -304,8 +310,12 @@ def test_runtime_repair_job_preserves_split_sidecars_without_unavailable_flag(tm
     task.all_parts = [task.main_path, str(part)]
     task.split_info.parts = list(task.all_parts)
     task.split_info.is_split = True
-    task.fact_bag.set("repair_training.damage_profile", "zip_split_missing_middle_volume")
-    task.fact_bag.set("repair_training.zip_structure_features", {"has_split_sidecars": True})
+    task.set_archive_state(task.archive_state())
+    _write_source_derivation(
+        task,
+        damage_profile="zip_split_missing_middle_volume",
+        zip_structure_features={"has_split_sidecars": True},
+    )
     stage = ArchiveRepairStage({"repair": {"workspace": str(tmp_path / "repair"), "policy": {"enabled": False}}})
     job = stage._job_from_verification_assessment(task, _failed_extraction(task), _verification())  # noqa: SLF001
 
@@ -400,6 +410,18 @@ def _task(path: Path, *, fmt: str) -> ArchiveTask:
         logical_name=path.stem,
         detected_ext=fmt,
     ).ensure_archive_state()
+
+
+def _write_source_derivation(task: ArchiveTask, **payload) -> None:
+    knowledge = task.knowledge()
+    knowledge.set("source.derivation", payload, source_layer="test", source_module="fixture")
+    structure = payload.get("zip_structure_features")
+    if isinstance(structure, dict):
+        knowledge.set("format.zip.structure", structure, source_layer="test", source_module="fixture")
+    tags = payload.get("zip_container_tags")
+    if isinstance(tags, list):
+        knowledge.set("format.zip.container_tags", tags, source_layer="test", source_module="fixture")
+    task.set_knowledge(knowledge)
 
 
 def _verification() -> VerificationResult:

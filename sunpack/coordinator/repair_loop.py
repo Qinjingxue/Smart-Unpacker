@@ -61,10 +61,9 @@ class RepairLoopState:
     def __init__(self, task: ArchiveTask, limits: RepairLoopLimits):
         self.task = task
         self.limits = limits
-        self.started_at = float(task.fact_bag.get("repair.loop.started_at", 0.0) or 0.0)
+        self.started_at = float(_loop_value(task, "started_at", 0.0) or 0.0)
         if self.started_at <= 0.0:
             self.started_at = time.monotonic()
-            task.fact_bag.set("repair.loop.started_at", self.started_at)
             write_repair_loop_state(task, {"started_at": self.started_at})
         self._ensure_initial_digest()
 
@@ -152,7 +151,6 @@ class RepairLoopState:
             self.stop("completeness_regression", trigger=trigger, result=result)
             return False
 
-        self.task.fact_bag.set("repair.loop.current_digest", next_digest)
         write_repair_loop_state(self.task, {"current_digest": next_digest})
         self._append_round(round_payload)
         LOGGER.info("archive repair round completed: %s", round_payload)
@@ -160,44 +158,43 @@ class RepairLoopState:
 
     @property
     def terminal_reason(self) -> str:
-        return str(self.task.fact_bag.get("repair.loop.terminal_reason") or "")
+        return str(_loop_value(self.task, "terminal_reason", "") or "")
 
     @property
     def round_count(self) -> int:
-        rounds = self.task.fact_bag.get("repair.loop.rounds")
+        rounds = _loop_value(self.task, "rounds", [])
         return len(rounds) if isinstance(rounds, list) else 0
 
     @property
     def current_digest(self) -> str:
-        digest = str(self.task.fact_bag.get("repair.loop.current_digest") or "")
+        digest = str(_loop_value(self.task, "current_digest", "") or "")
         if digest:
             return digest
         digest = input_digest(self.task)
-        self.task.fact_bag.set("repair.loop.current_digest", digest)
+        write_repair_loop_state(self.task, {"current_digest": digest})
         return digest
 
     @property
     def seen_input_digests(self) -> list[str]:
-        values = self.task.fact_bag.get("repair.loop.seen_input_digests")
+        values = _loop_value(self.task, "seen_input_digests", [])
         return [str(item) for item in values] if isinstance(values, list) else []
 
     @property
     def seen_action_signatures(self) -> list[str]:
-        values = self.task.fact_bag.get("repair.loop.seen_action_signatures")
+        values = _loop_value(self.task, "seen_action_signatures", [])
         return [str(item) for item in values] if isinstance(values, list) else []
 
     @property
     def generated_file_count(self) -> int:
-        return int(self.task.fact_bag.get("repair.loop.generated_file_count", 0) or 0)
+        return int(_loop_value(self.task, "generated_file_count", 0) or 0)
 
     @property
     def generated_bytes(self) -> int:
-        return int(self.task.fact_bag.get("repair.loop.generated_bytes", 0) or 0)
+        return int(_loop_value(self.task, "generated_bytes", 0) or 0)
 
     def stop(self, reason: str, *, trigger: str = "", result: RepairResult | None = None) -> None:
         if self.terminal_reason:
             return
-        self.task.fact_bag.set("repair.loop.terminal_reason", reason)
         payload = {
             "reason": reason,
             "trigger": trigger,
@@ -205,7 +202,6 @@ class RepairLoopState:
         }
         if result is not None:
             payload.update({"status": result.status, "module": result.module_name, "message": result.message})
-        self.task.fact_bag.set("repair.loop.terminal", payload)
         write_repair_loop_state(self.task, {"terminal_reason": reason, "terminal": payload})
         write_repair_stop(self.task, reason, payload)
         LOGGER.warning("archive repair loop stopped: %s", payload)
@@ -213,29 +209,24 @@ class RepairLoopState:
     def _ensure_initial_digest(self) -> None:
         if not self.seen_input_digests:
             digest = input_digest(self.task)
-            self.task.fact_bag.set("repair.loop.current_digest", digest)
-            self.task.fact_bag.set("repair.loop.seen_input_digests", [digest])
             write_repair_loop_state(self.task, {"current_digest": digest, "seen_input_digests": [digest]})
 
     def _append_round(self, payload: dict[str, Any]) -> None:
-        rounds = self.task.fact_bag.get("repair.loop.rounds")
+        rounds = _loop_value(self.task, "rounds", [])
         items = list(rounds) if isinstance(rounds, list) else []
         items.append(dict(payload))
-        self.task.fact_bag.set("repair.loop.rounds", items)
         write_repair_loop_state(self.task, {"rounds": items})
 
     def _add_seen_input_digest(self, digest: str) -> None:
         values = self.seen_input_digests
         values.append(digest)
         merged = _dedupe(values)
-        self.task.fact_bag.set("repair.loop.seen_input_digests", merged)
         write_repair_loop_state(self.task, {"seen_input_digests": merged})
 
     def _add_seen_action_signature(self, signature: str) -> None:
         values = self.seen_action_signatures
         values.append(signature)
         merged = _dedupe(values)
-        self.task.fact_bag.set("repair.loop.seen_action_signatures", merged)
         write_repair_loop_state(self.task, {"seen_action_signatures": merged})
 
     def _snapshot_repaired_file(self, result: RepairResult, round_number: int) -> str:
@@ -301,8 +292,6 @@ class RepairLoopState:
                     byte_count += item.stat().st_size
             except OSError:
                 continue
-        self.task.fact_bag.set("repair.loop.generated_file_count", file_count)
-        self.task.fact_bag.set("repair.loop.generated_bytes", byte_count)
         write_repair_loop_state(self.task, {"generated_file_count": file_count, "generated_bytes": byte_count})
 
     def _elapsed_seconds(self) -> float:
@@ -315,24 +304,21 @@ class RepairLoopState:
         current = _as_float(round_payload.get("completeness"), default=-1.0)
         if current < 0.0:
             return False
-        best = _as_float(self.task.fact_bag.get("repair.loop.best_recovery_score"), default=-1.0)
+        best = _as_float(_loop_value(self.task, "best_recovery_score", -1.0), default=-1.0)
         min_improvement = max(0.0, float(self.limits.min_recovery_improvement or 0.0))
         if best < 0.0 or current >= best + min_improvement:
-            self.task.fact_bag.set("repair.loop.best_recovery_score", max(best, current))
-            self.task.fact_bag.set("repair.loop.rounds_without_global_improvement", 0)
             write_repair_loop_state(self.task, {"best_recovery_score": max(best, current), "rounds_without_global_improvement": 0})
             round_payload["global_best_recovery_score"] = max(best, current)
             round_payload["rounds_without_global_improvement"] = 0
             return False
-        rounds_without = int(self.task.fact_bag.get("repair.loop.rounds_without_global_improvement", 0) or 0) + 1
-        self.task.fact_bag.set("repair.loop.rounds_without_global_improvement", rounds_without)
+        rounds_without = int(_loop_value(self.task, "rounds_without_global_improvement", 0) or 0) + 1
         write_repair_loop_state(self.task, {"rounds_without_global_improvement": rounds_without})
         round_payload["global_best_recovery_score"] = best
         round_payload["rounds_without_global_improvement"] = rounds_without
         return current < 0.999 and rounds_without >= patience
 
     def _detect_regression(self, round_payload: dict[str, Any]) -> bool:
-        rounds = self.task.fact_bag.get("repair.loop.rounds")
+        rounds = _loop_value(self.task, "rounds", [])
         items = list(rounds) if isinstance(rounds, list) else []
         if len(items) < 2:
             return False
@@ -341,12 +327,12 @@ class RepairLoopState:
         return prev > 0 and curr >= 0 and prev - curr > COMPLETENESS_REGRESSION_THRESHOLD
 
     def _restore_previous_state(self) -> None:
-        rounds = self.task.fact_bag.get("repair.loop.rounds")
+        rounds = _loop_value(self.task, "rounds", [])
         items = list(rounds) if isinstance(rounds, list) else []
         if len(items) >= 2 and isinstance(items[-2], dict):
             prev_digest = str(items[-2].get("input_digest", ""))
             if prev_digest:
-                self.task.fact_bag.set("repair.loop.current_digest", prev_digest)
+                write_repair_loop_state(self.task, {"current_digest": prev_digest})
 
 def terminal_failure_reason(result: ExtractionResult) -> str:
     diagnostics = result.diagnostics if isinstance(result.diagnostics, dict) else {}
@@ -423,7 +409,7 @@ def input_digest(task: ArchiveTask) -> str:
         state = None
     if state is not None:
         return _state_digest(state)
-    raw = knowledge_view.source_input(task) or task.fact_bag.get("archive.input")
+    raw = knowledge_view.source_input(task)
     descriptor = _descriptor_from_task(task, raw)
     h = hashlib.sha256()
     h.update(_stable_json(_descriptor_shape(descriptor)).encode("utf-8"))
@@ -445,6 +431,11 @@ def input_digest(task: ArchiveTask) -> str:
         for part in descriptor.parts:
             _hash_path(h, part.path)
     return h.hexdigest()
+
+
+def _loop_value(task: ArchiveTask, key: str, default: Any = None) -> Any:
+    loop = knowledge_view.repair_loop(task)
+    return loop.get(key, default) if isinstance(loop, dict) else default
 
 
 def _state_digest(state: ArchiveState) -> str:

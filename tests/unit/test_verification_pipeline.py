@@ -196,7 +196,9 @@ def test_verification_evidence_uses_password_session_when_result_has_no_password
 
 def test_verification_evidence_uses_archive_password_fact_when_session_has_none(tmp_path):
     task, result = _task_and_result(tmp_path)
-    task.fact_bag.set("archive.password", "secret")
+    knowledge = task.knowledge()
+    knowledge.set("archive.password", "secret", source_layer="test", source_module="fixture")
+    task.set_knowledge(knowledge)
     scheduler = VerificationScheduler({
         "verification": {
             "enabled": True,
@@ -234,8 +236,10 @@ def _task_and_result(tmp_path):
     out_dir.mkdir()
     (out_dir / "inside.txt").write_text("hello", encoding="utf-8")
     bag = FactBag()
-    bag.set("resource.health", {"is_archive": True})
-    bag.set("resource.analysis", {"file_count": 1, "total_unpacked_size": 5})
     task = ArchiveTask(fact_bag=bag, score=10, key="sample-key", main_path=str(archive), all_parts=[str(archive)])
+    knowledge = task.knowledge()
+    knowledge.set("resource.health", {"is_archive": True}, source_layer="test", source_module="fixture")
+    knowledge.set("resource.analysis", {"file_count": 1, "total_unpacked_size": 5}, source_layer="test", source_module="fixture")
+    task.set_knowledge(knowledge)
     result = ExtractionResult(success=True, archive=str(archive), out_dir=str(out_dir), all_parts=[str(archive)])
     return task, result

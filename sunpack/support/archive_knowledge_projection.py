@@ -22,16 +22,7 @@ def source_input(task: Any) -> dict[str, Any]:
 
 
 def source_derivation(task: Any) -> dict[str, Any]:
-    payload = _dict(get(task, "source.derivation", {}))
-    if payload:
-        return payload
-    training = {
-        "damage_profile": get(task, "repair_training.damage_profile"),
-        "sample_id": get(task, "repair_training.sample_id"),
-        "zip_structure_features": get(task, "repair_training.zip_structure_features"),
-        "zip_container_tags": get(task, "repair_training.zip_container_tags"),
-    }
-    return {key: value for key, value in training.items() if value not in (None, "", [], {})}
+    return _dict(get(task, "source.derivation", {}))
 
 
 def analysis_prepass(task: Any) -> dict[str, Any]:
@@ -53,25 +44,35 @@ def selected_format(task: Any) -> str:
     return str(get(task, "analysis.selected_format", "") or get(task, "analysis.summary.format", "") or "")
 
 
+def analysis_selected_segment(task: Any) -> dict[str, Any]:
+    return _dict(get(task, "analysis.selected_segment", {}))
+
+
+def analysis_status(task: Any) -> str:
+    return str(get(task, "analysis.status", "") or get(task, "analysis.summary.status", "") or "")
+
+
+def analysis_error(task: Any) -> str:
+    return str(get(task, "analysis.error", "") or get(task, "analysis.summary.error", "") or "")
+
+
 def zip_structure_features(task: Any) -> dict[str, Any]:
-    return (
-        _dict(get(task, "format.zip.structure", {}))
-        or _dict(source_derivation(task).get("zip_structure_features"))
-        or _dict(get(task, "repair_training.zip_structure_features", {}))
-    )
+    return _dict(get(task, "format.zip.structure", {})) or _dict(source_derivation(task).get("zip_structure_features"))
 
 
 def zip_container_tags(task: Any) -> list[str]:
     value = get(task, "format.zip.container_tags", [])
     if not value:
         value = source_derivation(task).get("zip_container_tags", [])
-    if not value:
-        value = get(task, "repair_training.zip_container_tags", [])
     return [str(item) for item in value if str(item)] if isinstance(value, list) else []
 
 
 def damage_profile(task: Any) -> str:
-    return str(source_derivation(task).get("damage_profile") or get(task, "repair_training.damage_profile", "") or "")
+    return str(source_derivation(task).get("damage_profile") or "")
+
+
+def sample_id(task: Any) -> str:
+    return str(source_derivation(task).get("sample_id") or get(task, "training.sample_id", "") or "")
 
 
 def extraction_failure(task: Any) -> dict[str, Any]:
@@ -102,6 +103,27 @@ def repair_attempts(task: Any) -> int:
         return int(get(task, "repair.attempts", 0) or 0)
     except (TypeError, ValueError):
         return 0
+
+
+def repair_loop(task: Any) -> dict[str, Any]:
+    return _dict(get(task, "repair.loop", {}))
+
+
+def repair_candidate_log(task: Any) -> list[dict[str, Any]]:
+    value = get(task, "repair.candidate_log", [])
+    return [dict(item) for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+
+
+def repair_candidate_log_path(task: Any) -> str:
+    return str(get(task, "repair.candidate_log_path", "") or "")
+
+
+def archive_metadata(task: Any) -> dict[str, Any]:
+    return _dict(get(task, "archive.metadata", {}))
+
+
+def archive_repaired(task: Any) -> bool:
+    return bool(get(task, "archive.repaired", False))
 
 
 def archive_password(task: Any) -> str | None:

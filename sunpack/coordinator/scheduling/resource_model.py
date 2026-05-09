@@ -198,19 +198,6 @@ def estimate_task_work_bytes(task: Any) -> int:
                 return estimated
         except Exception:
             pass
-    fact_bag = getattr(task, "fact_bag", None)
-    if fact_bag is not None:
-        try:
-            analysis = fact_bag.get("resource.analysis") or {}
-            archive_size = int(analysis.get("archive_size", 0) or 0)
-            unpacked_size = int(analysis.get("total_unpacked_size", 0) or 0)
-            packed_size = int(analysis.get("total_packed_size", 0) or 0)
-            estimated = max(archive_size + unpacked_size, packed_size + unpacked_size)
-            if estimated > 0:
-                return estimated
-        except Exception:
-            pass
-
     total = 0
     for path in list(getattr(task, "all_parts", None) or []) or [getattr(task, "main_path", "")]:
         try:
@@ -224,13 +211,7 @@ def task_profile_key(task: Any) -> str:
     projected = knowledge_view.resource_profile_key(task)
     if projected:
         return projected
-    fact_bag = getattr(task, "fact_bag", None)
-    if fact_bag is None:
-        return ""
-    try:
-        return str(fact_bag.get("resource.profile_key") or "")
-    except Exception:
-        return ""
+    return ""
 
 
 def _analysis_value(analysis: Any, key: str, default: Any = None) -> Any:

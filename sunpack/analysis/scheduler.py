@@ -56,12 +56,8 @@ class ArchiveAnalysisScheduler:
         return self.analyze_path(task.main_path)
 
     def _analyze_archive_state(self, task) -> ArchiveAnalysisReport | None:
-        fact_bag = getattr(task, "fact_bag", None)
-        raw = fact_bag.get("archive.state") if fact_bag is not None and hasattr(fact_bag, "get") else None
-        if not isinstance(raw, dict):
-            return None
         try:
-            state = task.archive_state() if hasattr(task, "archive_state") else self._normalize_archive_state(raw, task)
+            state = task.archive_state() if hasattr(task, "archive_state") else None
         except (TypeError, ValueError):
             return None
         if state is None:
@@ -71,10 +67,7 @@ class ArchiveAnalysisScheduler:
         return self._analyze_descriptor(state.to_archive_input_descriptor(), task)
 
     def _analyze_archive_input(self, task) -> ArchiveAnalysisReport | None:
-        fact_bag = getattr(task, "fact_bag", None)
         raw = knowledge_view.source_input(task)
-        if not raw and fact_bag is not None and hasattr(fact_bag, "get"):
-            raw = fact_bag.get("archive.input")
         if not isinstance(raw, dict):
             return None
         if hasattr(task, "archive_input"):

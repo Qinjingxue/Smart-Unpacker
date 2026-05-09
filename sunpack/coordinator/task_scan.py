@@ -1,4 +1,5 @@
 import os
+from types import SimpleNamespace
 from typing import Any
 
 from sunpack.contracts.detection import FactBag
@@ -54,15 +55,8 @@ def direct_file_task(path: str) -> ArchiveTask:
         bag.set("file.size", os.path.getsize(path))
     except OSError:
         pass
-    return ArchiveTask(
-        fact_bag=bag,
+    return ArchiveTask.from_fact_bag(
+        bag,
         score=0,
-        key=path,
-        main_path=path,
-        all_parts=[path],
-        logical_name=logical_name or name,
-        decision="direct_file",
-        stop_reason="cli_direct_file",
-        matched_rules=[],
-        detected_ext=ext.lower(),
-    ).ensure_archive_state()
+        decision=SimpleNamespace(decision="direct_file", stop_reason="cli_direct_file", matched_rules=[]),
+    )

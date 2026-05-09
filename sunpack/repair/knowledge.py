@@ -133,6 +133,33 @@ def write_repair_loop_state(task: ArchiveTask, payload: dict[str, Any]) -> None:
     commit_task_knowledge(task, knowledge)
 
 
+def write_repair_candidate_log(task: ArchiveTask, entries: list[dict[str, Any]], *, path: str = "") -> None:
+    knowledge = ensure_knowledge(task)
+    write_payload(
+        knowledge,
+        "repair",
+        {
+            "candidate_log": [dict(item) for item in entries[-200:] if isinstance(item, dict)],
+            **({"candidate_log_path": str(path)} if path else {}),
+        },
+        source_layer="repair",
+        source_module="candidate_log",
+    )
+    commit_task_knowledge(task, knowledge)
+
+
+def write_repair_archive_status(task: ArchiveTask, *, password: str | None = None, repaired: bool | None = None) -> None:
+    knowledge = ensure_knowledge(task)
+    payload: dict[str, Any] = {}
+    if password is not None:
+        payload["password"] = str(password)
+    if repaired is not None:
+        payload["repaired"] = bool(repaired)
+    if payload:
+        write_payload(knowledge, "archive", payload, source_layer="repair", source_module="stage")
+        commit_task_knowledge(task, knowledge)
+
+
 def _analysis_evidence_payload(evidence: Any) -> dict[str, Any]:
     if evidence is None:
         return {}

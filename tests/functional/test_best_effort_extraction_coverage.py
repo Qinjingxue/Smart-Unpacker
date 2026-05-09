@@ -25,6 +25,7 @@ from sunpack.extraction.progress import write_extraction_progress_manifest
 from sunpack.extraction.result import ExtractionResult
 from sunpack.repair.candidate import RepairCandidate, RepairCandidateBatch
 from sunpack.repair.result import RepairResult
+from sunpack.support import archive_knowledge_projection as knowledge_view
 from sunpack.support.resources import get_7z_dll_path, get_sevenzip_worker_path
 from sunpack.verification import VerificationResult, VerificationScheduler
 from sunpack.verification.evidence import VerificationEvidence
@@ -570,7 +571,7 @@ def test_resource_guard_blocks_many_entry_archive_as_guarded_not_generic_failure
     archive = _zip_with_many_entries(tmp_path, count=260)
     out_dir = tmp_path / "out"
     task = _task(archive)
-    task.fact_bag.set("resource.analysis", {
+    _write_task_knowledge(task, "resource.analysis", {
         "status": 0,
         "is_archive": True,
         "is_broken": False,
@@ -936,10 +937,12 @@ def test_repair_terminal_missing_volume_feedback_stops_later_repairs(tmp_path):
 
     assert outcome.success is False
     assert repair_scheduler.calls == 1
-    assert task.fact_bag.get("repair.loop.terminal_reason") == "repair_unrepairable"
-    terminal = task.fact_bag.get("repair.loop.terminal")
+    repair_loop = knowledge_view.repair_loop(task)
+    assert repair_loop.get("terminal_reason") == "repair_unrepairable"
+    terminal = repair_loop.get("terminal")
     assert terminal["module"] == "missing_volume_classifier"
-    assert task.fact_bag.get("repair.last_result")["diagnosis"]["failure_kind"] == "missing_volume"
+    last_result = knowledge_view.get(task, "repair.last_result")
+    assert last_result["diagnosis"]["failure_kind"] == "missing_volume"
 
 
 def test_split_concat_ranges_patch_state_reaches_worker_without_full_copy(tmp_path):
@@ -1399,7 +1402,7 @@ def _verify_worker_output(
 
 
 def _task(archive: Path, *, fact_bag: FactBag | None = None, detected_ext: str = "zip") -> ArchiveTask:
-    return ArchiveTask(
+    task = ArchiveTask(
         fact_bag=fact_bag or FactBag(),
         score=10,
         key=archive.name,
@@ -1408,6 +1411,21 @@ def _task(archive: Path, *, fact_bag: FactBag | None = None, detected_ext: str =
         logical_name=archive.stem,
         detected_ext=detected_ext,
     )
+    if fact_bag is not None:
+        resource_analysis = fact_bag.get("resource.analysis")
+        if isinstance(resource_analysis, dict):
+            _write_task_knowledge(task, "resource.analysis", resource_analysis)
+            _write_task_knowledge(task, "analysis.prepass", resource_analysis)
+        expected_names = fact_bag.get("verification.expected_names")
+        if expected_names:
+            _write_task_knowledge(task, "verification.expected_names", list(expected_names))
+    return task
+
+
+def _write_task_knowledge(task: ArchiveTask, path: str, value) -> None:
+    knowledge = task.knowledge()
+    knowledge.set(path, value, source_layer="test", source_module="fixture")
+    task.set_knowledge(knowledge)
 
 
 def _best_effort_pipeline_config(

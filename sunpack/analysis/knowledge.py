@@ -55,6 +55,18 @@ def write_selected_segment(task: ArchiveTask, evidence: ArchiveFormatEvidence, s
     commit_task_knowledge(task, knowledge)
 
 
+def write_analysis_error(task: ArchiveTask, error: str) -> None:
+    knowledge = ensure_knowledge(task)
+    write_payload(
+        knowledge,
+        "analysis",
+        {"status": "error", "error": str(error or "")},
+        source_layer="analysis",
+        source_module="analysis_stage",
+    )
+    commit_task_knowledge(task, knowledge)
+
+
 def _write_format_evidence(knowledge: Any, evidence: ArchiveFormatEvidence) -> None:
     details = dict(evidence.details or {})
     write_payload(

@@ -1,6 +1,5 @@
 from sunpack.contracts.detection import FactBag
 from sunpack.contracts.archive_knowledge import ArchiveKnowledge
-from sunpack.contracts.archive_state import ArchiveState
 from sunpack.passwords.candidates import PasswordCandidatePipeline
 from sunpack.passwords.job import PasswordJob
 from sunpack.passwords.result import PasswordResolution
@@ -149,20 +148,10 @@ class PasswordResolver:
     ) -> dict | None:
         if fact_bag is None:
             return None
-        raw_state = fact_bag.get("archive.state")
-        if isinstance(raw_state, dict):
-            try:
-                state = ArchiveState.from_any(raw_state, archive_path=archive_path, part_paths=part_paths)
-            except (TypeError, ValueError):
-                return None
-            if state.patches:
-                return None
-            return state.to_archive_input_descriptor().to_dict()
         knowledge_input = ArchiveKnowledge.from_any(fact_bag.get("archive.knowledge")).get("source.input")
         if isinstance(knowledge_input, dict):
             return knowledge_input
-        archive_input = fact_bag.get("archive.input")
-        return archive_input if isinstance(archive_input, dict) else None
+        return None
 
     def _remember(
         self,
@@ -187,20 +176,20 @@ class PasswordResolver:
     def _facts_confirm_unencrypted(fact_bag: FactBag | None) -> bool:
         if fact_bag is None:
             return False
-        health = ArchiveKnowledge.from_any(fact_bag.get("archive.knowledge")).get("resource.health") or fact_bag.get("resource.health") or {}
+        health = ArchiveKnowledge.from_any(fact_bag.get("archive.knowledge")).get("resource.health") or {}
         if isinstance(health, dict):
             if health.get("is_archive") and not health.get("is_encrypted") and not health.get("is_wrong_password"):
                 return True
-        return bool(fact_bag.get("file.validation_ok")) and not bool(fact_bag.get("file.validation_encrypted"))
+        return False
 
     @staticmethod
     def _facts_require_password(fact_bag: FactBag | None) -> bool:
         if fact_bag is None:
             return False
-        health = ArchiveKnowledge.from_any(fact_bag.get("archive.knowledge")).get("resource.health") or fact_bag.get("resource.health") or {}
+        health = ArchiveKnowledge.from_any(fact_bag.get("archive.knowledge")).get("resource.health") or {}
         if isinstance(health, dict) and (health.get("is_encrypted") or health.get("is_wrong_password")):
             return True
-        return bool(fact_bag.get("file.validation_encrypted"))
+        return False
 
     @staticmethod
     def _should_recheck_failed_encrypted_search(error_text: str) -> bool:
@@ -212,14 +201,19 @@ class PasswordResolver:
     def _archive_key_from_fact_bag(fact_bag: FactBag | None) -> str:
         if fact_bag is None:
             return ""
-        return str(fact_bag.get("candidate.logical_name") or fact_bag.get("candidate.entry_path") or "")
+        knowledge = ArchiveKnowledge.from_any(fact_bag.get("archive.knowledge"))
+        source_derivation = knowledge.get("source.derivation") or {}
+        if isinstance(source_derivation, dict):
+            return str(source_derivation.get("candidate_logical_name") or source_derivation.get("candidate_entry_path") or "")
+        source_input = knowledge.get("source.input") or {}
+        return str(source_input.get("logical_name") or source_input.get("entry_path") or "") if isinstance(source_input, dict) else ""
 
     @staticmethod
     def _facts_have_patches(fact_bag: FactBag | None) -> bool:
         if fact_bag is None:
             return False
-        raw_state = fact_bag.get("archive.state")
-        if isinstance(raw_state, dict):
-            patches = raw_state.get("patches") or raw_state.get("patch_stack") or []
+        state_payload = ArchiveKnowledge.from_any(fact_bag.get("archive.knowledge")).get("archive.state") or {}
+        if isinstance(state_payload, dict):
+            patches = state_payload.get("patches") or state_payload.get("patch_stack") or []
             return bool(patches)
         return False

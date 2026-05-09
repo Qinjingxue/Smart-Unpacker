@@ -28,6 +28,11 @@ from sunpack.extraction.scheduler import ExtractionScheduler
 from sunpack.extraction.progress import filter_extraction_manifest_payload, filter_extraction_outputs
 from sunpack.rename.scheduler import RenameScheduler
 from sunpack.repair.candidate import RepairCandidate, candidate_feature_payload
+from sunpack.repair.knowledge import (
+    write_repair_archive_status,
+    write_repair_candidate_log,
+    write_repair_result,
+)
 from sunpack.verification import RecoveryAttempt, VerificationResult, VerificationScheduler, compare_attempts, rank_attempt
 from sunpack.verification.result import DECISION_ACCEPT, DECISION_ACCEPT_PARTIAL, DECISION_REPAIR, DECISION_RETRY_EXTRACT
 from sunpack.support.path_keys import absolute_path_key
@@ -763,11 +768,14 @@ class ExtractionBatchRunner:
             "frontier_exhausted": bool(getattr(run, "frontier_exhausted", False)),
             "best_state": _beam_state_summary(run.best_state),
         })
+        terminal_result = _first_terminal_repair_result(run.terminal_results)
+        if terminal_result is not None and not evaluated:
+            write_repair_result(task, terminal_result, phase="beam_terminal")
+            return _BeamRepairTerminal(repair_result=terminal_result)
         best = run.best_state
         if best is None:
-            terminal_result = _first_terminal_repair_result(run.terminal_results)
             if terminal_result is not None:
-                task.fact_bag.set("repair.last_result", self.repair_stage._result_payload(terminal_result))
+                write_repair_result(task, terminal_result, phase="beam_terminal")
                 return _BeamRepairTerminal(repair_result=terminal_result)
             self._cleanup_beam_evaluations(evaluated)
             return None
@@ -880,6 +888,20 @@ class ExtractionBatchRunner:
             self._promote_recovery_outcome(beam_outcome, out_dir)
             return beam_outcome
 
+        if _verification_accepts_partial(evaluation.verification) and not loop_state.can_attempt(trigger="verification_beam_best_partial"):
+            _append_repair_candidate_log(task, {
+                "phase": "beam_selected",
+                "reason": "repair_budget_best_partial",
+                "candidate": candidate_feature_payload(evaluation.candidate),
+                "verification": _verification_summary(evaluation.verification),
+            })
+            if self._accept_partial_output(evaluation.result, evaluation.verification):
+                self._filter_partial_outputs(evaluation.result)
+            final_result = self._promote_beam_output(evaluation.result, evaluation.temp_dir, out_dir)
+            beam_outcome.result = final_result
+            self._promote_recovery_outcome(beam_outcome, out_dir)
+            return beam_outcome
+
         self.analysis_stage.analyze_task(task)
 
         if not bool(beam_outcome.comparison.get("should_continue_repair", True)):
@@ -917,8 +939,7 @@ class ExtractionBatchRunner:
             task.set_archive_state(state)
         else:
             task.set_archive_input(candidate.repaired_input)
-        task.fact_bag.set("archive.repaired", True)
-        task.fact_bag.set("repair.module", candidate.module_name)
+        write_repair_archive_status(task, repaired=True)
 
     def _archive_state_payload_for_candidate(self, task: ArchiveTask, candidate: RepairCandidate) -> dict[str, Any]:
         state = self._archive_state_for_candidate(task, candidate)
@@ -934,7 +955,7 @@ class ExtractionBatchRunner:
                     part_paths=list(task.all_parts or [task.main_path]),
                     format_hint=str(candidate.format or task.detected_ext or ""),
                     logical_name=str(task.logical_name or ""),
-                    archive_input=knowledge_view.source_input(task) or task.fact_bag.get("archive.input"),
+                    archive_input=knowledge_view.source_input(task),
                 )
             except (TypeError, ValueError):
                 return None
@@ -1135,8 +1156,8 @@ class ExtractionBatchRunner:
             "extraction": _extraction_summary(outcome.result),
             "verification": _verification_summary(outcome.verification) if outcome.verification is not None else {},
             "comparison": dict(outcome.comparison or {}),
-            "candidate_log_count": len(task.fact_bag.get("repair.candidate_log") or []),
-            "repair_candidate_log_path": str(task.fact_bag.get("repair.candidate_log_path") or ""),
+            "candidate_log_count": len(knowledge_view.repair_candidate_log(task)),
+            "repair_candidate_log_path": knowledge_view.repair_candidate_log_path(task),
         })
 
         with self.context.lock:
@@ -1309,7 +1330,7 @@ def _first_terminal_repair_result(results: list[Any]):
 def _policy_probe_run_id(task: ArchiveTask) -> str:
     return str(
         os.environ.get("SUNPACK_REPAIR_POLICY_PROBE_RUN_ID")
-        or task.fact_bag.get("repair_training.sample_id")
+        or knowledge_view.sample_id(task)
         or task.key
         or task.main_path
     )
@@ -1348,18 +1369,18 @@ def _append_beam_run_candidate_log(task: ArchiveTask, run: Any, *, phase: str) -
 
 def _append_repair_candidate_log(task: ArchiveTask, payload: dict[str, Any]) -> None:
     fact_bag = getattr(task, "fact_bag", None)
-    if fact_bag is None or not hasattr(fact_bag, "get") or not hasattr(fact_bag, "set"):
+    if fact_bag is None or not hasattr(fact_bag, "set"):
         return
-    entries = fact_bag.get("repair.candidate_log")
-    log = list(entries) if isinstance(entries, list) else []
+    log = knowledge_view.repair_candidate_log(task)
     log.append(_jsonable_candidate_log_payload(payload))
     limit = 200
     fact_bag.set("repair.candidate_log", log[-limit:])
+    write_repair_candidate_log(task, log[-limit:])
 
 
 def _write_repair_candidate_jsonl(task: ArchiveTask, outcome: BatchExtractionOutcome, out_dir: str) -> str:
-    entries = task.fact_bag.get("repair.candidate_log")
-    if not isinstance(entries, list) or not entries:
+    entries = knowledge_view.repair_candidate_log(task)
+    if not entries:
         return ""
     target_dir = Path(out_dir) / ".sunpack"
     target = target_dir / "repair_candidates.jsonl"
@@ -1370,6 +1391,7 @@ def _write_repair_candidate_jsonl(task: ArchiveTask, outcome: BatchExtractionOut
                 handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True, default=str))
                 handle.write("\n")
         task.fact_bag.set("repair.candidate_log_path", str(target))
+        write_repair_candidate_log(task, entries, path=str(target))
         return str(target)
     except OSError:
         return ""
@@ -1710,8 +1732,8 @@ def _write_recovery_report(
         "selected_attempt": dict(outcome.recovery_rank),
         "comparison": dict(outcome.comparison),
         "rejected_attempts": list(outcome.rejected_attempts),
-        "repair_candidate_log": list(task.fact_bag.get("repair.candidate_log") or []),
-        "repair_candidate_log_path": str(task.fact_bag.get("repair.candidate_log_path") or ""),
+        "repair_candidate_log": knowledge_view.repair_candidate_log(task),
+        "repair_candidate_log_path": knowledge_view.repair_candidate_log_path(task),
         "files": _file_recovery_items(verification, manifest=manifest),
     }
     target = Path(out_dir) / ".sunpack" / "recovery_report.json"

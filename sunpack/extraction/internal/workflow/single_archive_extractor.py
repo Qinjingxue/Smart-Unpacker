@@ -261,10 +261,7 @@ class SingleArchiveExtractor:
         )
 
     def _resolve_password(self, task: ArchiveTask, archive_path: str, part_paths: list[str]):
-        fact_bag = getattr(task, "fact_bag", None)
         known_password = knowledge_view.archive_password(task)
-        if known_password is None and fact_bag is not None and hasattr(fact_bag, "get"):
-            known_password = fact_bag.get("archive.password")
         if known_password is not None:
             return PasswordResolution(password=str(known_password), archive_key=task.key)
         archive_state = task.archive_state() if hasattr(task, "archive_state") else None
@@ -292,9 +289,6 @@ class SingleArchiveExtractor:
     @staticmethod
     def _codepage_from_facts(task: ArchiveTask) -> str | None:
         metadata = knowledge_view.get(task, "archive.metadata", {})
-        if not metadata:
-            fact_bag = getattr(task, "fact_bag", None)
-            metadata = fact_bag.get("archive.metadata") if fact_bag is not None and hasattr(fact_bag, "get") else {}
         if isinstance(metadata, dict) and metadata.get("selected_codepage"):
             return str(metadata.get("selected_codepage"))
         return None
@@ -302,15 +296,6 @@ class SingleArchiveExtractor:
     @staticmethod
     def _task_requires_password(task: ArchiveTask) -> bool:
         health = knowledge_view.resource_health(task)
-        if isinstance(health, dict) and (health.get("is_encrypted") or health.get("is_wrong_password")):
-            return True
-        return SingleArchiveExtractor._facts_require_password(getattr(task, "fact_bag", None))
-
-    @staticmethod
-    def _facts_require_password(fact_bag) -> bool:
-        if fact_bag is None or not hasattr(fact_bag, "get"):
-            return False
-        health = fact_bag.get("resource.health") or {}
         if isinstance(health, dict) and (health.get("is_encrypted") or health.get("is_wrong_password")):
             return True
         return False
