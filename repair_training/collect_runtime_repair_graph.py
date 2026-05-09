@@ -449,31 +449,38 @@ class RuntimeRepairGraphCollector:
             return []
         with self.profiler.phase("policy_payload_build", state_id=str(state["state_id"])):
             payloads = [policy_candidate_payload(job, candidate, index=index) for index, candidate in enumerate(candidates)]
-        query_id = f"{state['state_id']}:q"
-        collision_count = _candidate_id_collision_count(payloads)
-        candidate_set_hash = repair_trace.canonical_hash(_candidate_set_hash_input(payloads))
-        strategy_decision = self._strategy_decision_for_state(state, payloads)
-        selected_ids = set(strategy_decision.selected_candidate_ids)
-        path_filter_active = strategy_decision.mode == "runtime_path_filter"
+        with self.profiler.phase("collect_state_prepare_query", state_id=str(state["state_id"])):
+            query_id = f"{state['state_id']}:q"
+            collision_count = _candidate_id_collision_count(payloads)
+            candidate_set_hash = repair_trace.canonical_hash(_candidate_set_hash_input(payloads))
+        with self.profiler.phase("collect_state_strategy_decision", state_id=str(state["state_id"])):
+            strategy_decision = self._strategy_decision_for_state(state, payloads)
+            selected_ids = set(strategy_decision.selected_candidate_ids)
+            path_filter_active = strategy_decision.mode == "runtime_path_filter"
         next_states: list[dict[str, Any]] = []
         for rank, (candidate, payload) in enumerate(zip(candidates, payloads)):
-            candidate_id = str(payload.get("candidate_id") or "")
+            with self.profiler.phase("collect_state_candidate_id", state_id=str(state["state_id"])):
+                candidate_id = str(payload.get("candidate_id") or "")
             if (path_filter_active and (not selected_ids or candidate_id not in selected_ids)) or (selected_ids and candidate_id not in selected_ids):
-                self.rows.append(_unexplored_action_row(
-                    self.record,
-                    state,
-                    query_id=query_id,
-                    round_index=round_index,
-                    rank=rank,
-                    payload=payload,
-                    candidate_set_hash=candidate_set_hash,
-                    collision_count=collision_count,
-                    strategy_decision=strategy_decision,
-                ))
+                with self.profiler.phase("collect_state_unexplored_row", state_id=str(state["state_id"]), candidate_id=candidate_id):
+                    self.rows.append(_unexplored_action_row(
+                        self.record,
+                        state,
+                        query_id=query_id,
+                        round_index=round_index,
+                        rank=rank,
+                        payload=payload,
+                        candidate_set_hash=candidate_set_hash,
+                        collision_count=collision_count,
+                        strategy_decision=strategy_decision,
+                    ))
                 continue
-            action_row_id = f"{query_id}|{rank}|{candidate_id}"
-            branch_task = clone_archive_task(task, key_suffix=f":{rank}")
-            branch_loop_state = RepairLoopState(branch_task, self.loop_limits)
+            with self.profiler.phase("collect_state_branch_setup", state_id=str(state["state_id"]), candidate_id=candidate_id):
+                action_row_id = f"{query_id}|{rank}|{candidate_id}"
+            with self.profiler.phase("collect_state_clone_task", state_id=str(state["state_id"]), candidate_id=candidate_id):
+                branch_task = clone_archive_task(task, key_suffix=f":{rank}")
+            with self.profiler.phase("collect_state_loop_state_init", state_id=str(state["state_id"]), candidate_id=candidate_id):
+                branch_loop_state = RepairLoopState(branch_task, self.loop_limits)
             with self.profiler.phase("transition_evaluate", state_id=str(state["state_id"]), candidate_id=candidate_id):
                 transition = self.evaluator.evaluate(
                     branch_task,
@@ -486,78 +493,91 @@ class RuntimeRepairGraphCollector:
                     state_id=str(state["state_id"]),
                     candidate_id=candidate_id,
                 )
-            repair_result = candidate.to_result(selection={"selected_candidate_id": candidate_id, "strategy": "training_exhaustive"})
-            loop_allows_continue = branch_loop_state.record_result(repair_result, trigger="verification_training")
-            archive_path = _archive_path_for_oracle(branch_task, self.fmt)
+            with self.profiler.phase("collect_state_repair_result", state_id=str(state["state_id"]), candidate_id=candidate_id):
+                repair_result = candidate.to_result(selection={"selected_candidate_id": candidate_id, "strategy": "training_exhaustive"})
+            with self.profiler.phase("collect_state_loop_record_result", state_id=str(state["state_id"]), candidate_id=candidate_id):
+                loop_allows_continue = branch_loop_state.record_result(
+                    repair_result,
+                    trigger="verification_training",
+                    phase_timer=self.profiler.phase,
+                    phase_prefix="collect_state_loop_record_result",
+                )
+            with self.profiler.phase("collect_state_archive_path_for_oracle", state_id=str(state["state_id"]), candidate_id=candidate_id):
+                archive_path = _archive_path_for_oracle(branch_task, self.fmt)
             with self.profiler.phase("oracle_verify", state_id=str(state["state_id"]), candidate_id=candidate_id):
                 oracle = _verify_output_against_oracle(Path(archive_path), self.fmt, self.record.get("oracle") if isinstance(self.record.get("oracle"), dict) else {}) if archive_path else {"status": "missing_output", "label": 0, "completeness": 0.0}
-            terminal_status = _transition_terminal_status(transition, oracle)
-            if bool(transition.can_continue_repair) and not loop_allows_continue:
-                terminal_status = str(branch_loop_state.terminal_reason or "repair_loop_stopped")
+            with self.profiler.phase("collect_state_terminal_status", state_id=str(state["state_id"]), candidate_id=candidate_id):
+                terminal_status = _transition_terminal_status(transition, oracle)
+                if bool(transition.can_continue_repair) and not loop_allows_continue:
+                    terminal_status = str(branch_loop_state.terminal_reason or "repair_loop_stopped")
             child_state = None
-            if bool(transition.can_continue_repair) and loop_allows_continue and round_index + 1 < int(self.args.max_rounds or 1):
-                setattr(branch_task, "_runtime_graph_path_signatures", [*list(state.get("path_signatures") or []), _candidate_signature(payload)])
-                child_state = self._state(
-                    branch_task,
-                    round_index=round_index + 1,
-                    parent_action_row_id=action_row_id,
-                    parent_candidate_id=candidate_id,
-                )
-            next_state_id = str(child_state.get("state_id") or "") if child_state is not None else ""
-            row = {
-                "row_type": "action",
-                "collector": "runtime_repair_graph",
-                "sample_id": self.sample_id,
-                "episode_id": self.sample_id,
-                "state_id": state["state_id"],
-                "query_id": query_id,
-                "round": int(round_index),
-                "action_row_id": action_row_id,
-                "candidate_id": candidate_id,
-                "candidate_id_collision_count": collision_count,
-                "candidate_set_hash": candidate_set_hash,
-                "strategy": strategy_decision.mode,
-                "strategy_selected_candidate_ids": list(strategy_decision.selected_candidate_ids),
-                "current_rank": rank,
-                "branchable": True,
-                "explored": True,
-                "selected": rank == 0,
-                "material_format": self.fmt,
-                "module": payload.get("module_name") or payload.get("module"),
-                "module_name": payload.get("module_name") or payload.get("module"),
-                "repair_name": payload.get("repair_name"),
-                "native_target": payload.get("native_target"),
-                "candidate_status": payload.get("candidate_status"),
-                "label": int(oracle.get("label", 0) or 0),
-                "label_status": str(oracle.get("status") or ""),
-                "recovery_ratio": float(oracle.get("completeness", 0.0) or 0.0),
-                "terminal_status": terminal_status,
-                "next_state_id": next_state_id,
-                "parent_action_row_id": state.get("parent_action_row_id") or "",
-                "parent_candidate_id": state.get("parent_candidate_id") or "",
-                "runtime_verification": _verification_payload(transition.verification),
-                "stable_features": {
-                    "runtime_context": payload.get("runtime_context") or {},
-                    "candidate_proposal": payload.get("candidate_proposal") or {},
-                    "candidate": payload,
-                },
-                "rl": {
-                    "state_features": {"runtime_context": payload.get("runtime_context") or {}},
-                    "action_features": {
-                        "candidate_proposal": payload.get("candidate_proposal") or {},
-                        "repair_prior_features": {},
-                    },
-                    "reward": float(oracle.get("completeness", 0.0) or 0.0),
-                    "done": not bool(transition.can_continue_repair and loop_allows_continue),
+            with self.profiler.phase("collect_state_child_state", state_id=str(state["state_id"]), candidate_id=candidate_id):
+                if bool(transition.can_continue_repair) and loop_allows_continue and round_index + 1 < int(self.args.max_rounds or 1):
+                    setattr(branch_task, "_runtime_graph_path_signatures", [*list(state.get("path_signatures") or []), _candidate_signature(payload)])
+                    child_state = self._state(
+                        branch_task,
+                        round_index=round_index + 1,
+                        parent_action_row_id=action_row_id,
+                        parent_candidate_id=candidate_id,
+                    )
+                next_state_id = str(child_state.get("state_id") or "") if child_state is not None else ""
+            with self.profiler.phase("collect_state_build_action_row", state_id=str(state["state_id"]), candidate_id=candidate_id):
+                row = {
+                    "row_type": "action",
+                    "collector": "runtime_repair_graph",
+                    "sample_id": self.sample_id,
+                    "episode_id": self.sample_id,
+                    "state_id": state["state_id"],
+                    "query_id": query_id,
+                    "round": int(round_index),
+                    "action_row_id": action_row_id,
+                    "candidate_id": candidate_id,
+                    "candidate_id_collision_count": collision_count,
+                    "candidate_set_hash": candidate_set_hash,
+                    "strategy": strategy_decision.mode,
+                    "strategy_selected_candidate_ids": list(strategy_decision.selected_candidate_ids),
+                    "current_rank": rank,
+                    "branchable": True,
+                    "explored": True,
+                    "selected": rank == 0,
+                    "material_format": self.fmt,
+                    "module": payload.get("module_name") or payload.get("module"),
+                    "module_name": payload.get("module_name") or payload.get("module"),
+                    "repair_name": payload.get("repair_name"),
+                    "native_target": payload.get("native_target"),
+                    "candidate_status": payload.get("candidate_status"),
+                    "label": int(oracle.get("label", 0) or 0),
+                    "label_status": str(oracle.get("status") or ""),
+                    "recovery_ratio": float(oracle.get("completeness", 0.0) or 0.0),
+                    "terminal_status": terminal_status,
                     "next_state_id": next_state_id,
-                    "terminal_reward": float(oracle.get("completeness", 0.0) or 0.0),
-                    "future_return": float(oracle.get("completeness", 0.0) or 0.0),
-                    "single_path_robust_return": float(oracle.get("completeness", 0.0) or 0.0),
-                },
-            }
-            self.rows.append(row)
-            if child_state is not None:
-                next_states.append(child_state)
+                    "parent_action_row_id": state.get("parent_action_row_id") or "",
+                    "parent_candidate_id": state.get("parent_candidate_id") or "",
+                    "runtime_verification": _verification_payload(transition.verification),
+                    "stable_features": {
+                        "runtime_context": payload.get("runtime_context") or {},
+                        "candidate_proposal": payload.get("candidate_proposal") or {},
+                        "candidate": payload,
+                    },
+                    "rl": {
+                        "state_features": {"runtime_context": payload.get("runtime_context") or {}},
+                        "action_features": {
+                            "candidate_proposal": payload.get("candidate_proposal") or {},
+                            "repair_prior_features": {},
+                        },
+                        "reward": float(oracle.get("completeness", 0.0) or 0.0),
+                        "done": not bool(transition.can_continue_repair and loop_allows_continue),
+                        "next_state_id": next_state_id,
+                        "terminal_reward": float(oracle.get("completeness", 0.0) or 0.0),
+                        "future_return": float(oracle.get("completeness", 0.0) or 0.0),
+                        "single_path_robust_return": float(oracle.get("completeness", 0.0) or 0.0),
+                    },
+                }
+            with self.profiler.phase("collect_state_append_action_row", state_id=str(state["state_id"]), candidate_id=candidate_id):
+                self.rows.append(row)
+            with self.profiler.phase("collect_state_append_child_state", state_id=str(state["state_id"]), candidate_id=candidate_id):
+                if child_state is not None:
+                    next_states.append(child_state)
         return next_states[: max(1, int(self.args.branch_top_k or 1))]
 
     def _strategy_decision_for_state(self, state: dict[str, Any], payloads: list[dict[str, Any]]) -> RepairRuntimeStrategyDecision:

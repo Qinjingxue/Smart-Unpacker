@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import shutil
+from copy import deepcopy
 from contextlib import nullcontext
 from dataclasses import dataclass
 from dataclasses import replace
@@ -239,8 +240,29 @@ def _verify_with_optional_timer(verifier: Any, task: ArchiveTask, extracted: Ext
 
 def clone_archive_task(task: ArchiveTask, *, key_suffix: str = "") -> ArchiveTask:
     bag = FactBag()
-    for key, value in task.fact_bag.to_dict().items():
-        bag.set(key, value)
+    knowledge_payload = task.knowledge().to_dict()
+    state_payload = task.fact_bag.get("archive.state")
+    if not isinstance(state_payload, dict):
+        state_payload = task.archive_state().to_dict()
+        state_payload.pop("knowledge", None)
+    bag.set("archive.knowledge", deepcopy(knowledge_payload))
+    bag.set("archive.state", deepcopy(state_payload))
+    for key in (
+        "archive.input",
+        "archive.descriptor.source",
+        "archive.source",
+        "archive.patch_stack",
+        "archive.patch_digest",
+        "file.path",
+        "file.detected_ext",
+        "candidate.entry_path",
+        "candidate.member_paths",
+        "candidate.logical_name",
+        "relation.split_volumes",
+    ):
+        value = task.fact_bag.get(key)
+        if value is not None:
+            bag.set(key, deepcopy(value))
     cloned = ArchiveTask(
         fact_bag=bag,
         score=task.score,
@@ -261,6 +283,7 @@ def clone_archive_task(task: ArchiveTask, *, key_suffix: str = "") -> ArchiveTas
         matched_rules=list(task.matched_rules or []),
         detected_ext=task.detected_ext,
     )
-    cloned.set_knowledge(task.knowledge().to_dict())
-    cloned.set_archive_state(task.archive_state())
+    replace_knowledge = getattr(cloned, "_replace_knowledge_payload", None)
+    if callable(replace_knowledge):
+        replace_knowledge(bag.get("archive.knowledge"))
     return cloned

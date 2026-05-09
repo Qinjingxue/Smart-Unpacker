@@ -3,11 +3,13 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import shutil
 import time
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from sunpack.contracts.archive_state import ArchiveState
 from sunpack.contracts.archive_input import ArchiveInputDescriptor
@@ -89,70 +91,123 @@ class RepairLoopState:
             return False
         return True
 
-    def record_result(self, result: RepairResult | None, *, trigger: str) -> bool:
+    def record_result(
+        self,
+        result: RepairResult | None,
+        *,
+        trigger: str,
+        phase_timer: Callable[..., Any] | None = None,
+        phase_prefix: str = "repair_loop_record_result",
+    ) -> bool:
         if result is None:
             return False
 
-        previous_digest = self.current_digest
-        round_number = self.round_count + 1
-        round_payload = {
-            "round": round_number,
-            "trigger": trigger,
-            "input_digest": previous_digest,
-            "status": result.status,
-            "module": result.module_name,
-            "actions": list(result.actions),
-            "format": result.format,
-            "confidence": float(result.confidence or 0.0),
-            "partial": bool(result.partial),
-            "message": result.message,
-            "workspace_paths": list(result.workspace_paths),
-        }
+        with _phase(phase_timer, f"{phase_prefix}_prepare_payload"):
+            previous_digest = self.current_digest
+            round_number = self.round_count + 1
+            round_payload = {
+                "round": round_number,
+                "trigger": trigger,
+                "input_digest": previous_digest,
+                "status": result.status,
+                "module": result.module_name,
+                "actions": list(result.actions),
+                "format": result.format,
+                "confidence": float(result.confidence or 0.0),
+                "partial": bool(result.partial),
+                "message": result.message,
+                "workspace_paths": list(result.workspace_paths),
+            }
 
         if result.status in TERMINAL_REPAIR_STATUSES:
-            self._add_generated_paths(result)
-            self._append_round(round_payload)
-            self.stop(f"repair_{result.status}", trigger=trigger, result=result)
+            with _phase(phase_timer, f"{phase_prefix}_terminal_add_generated_paths"):
+                self._add_generated_paths(result)
+            with _phase(phase_timer, f"{phase_prefix}_terminal_append_round"):
+                self._append_round(round_payload)
+            with _phase(phase_timer, f"{phase_prefix}_terminal_stop"):
+                self.stop(f"repair_{result.status}", trigger=trigger, result=result)
             return False
         if not result.ok:
-            self._add_generated_paths(result)
-            self._append_round(round_payload)
+            with _phase(phase_timer, f"{phase_prefix}_failed_add_generated_paths"):
+                self._add_generated_paths(result)
+            with _phase(phase_timer, f"{phase_prefix}_failed_append_round"):
+                self._append_round(round_payload)
             return False
 
-        snapshot_path = self._snapshot_repaired_file(result, round_number)
+        with _phase(phase_timer, f"{phase_prefix}_snapshot_repaired_file"):
+            snapshot_path = self._snapshot_repaired_file(result, round_number)
         if snapshot_path:
             round_payload["output_path"] = snapshot_path
             round_payload["workspace_paths"] = _dedupe([*round_payload["workspace_paths"], snapshot_path])
-        self._add_generated_paths(result, extra_paths=[snapshot_path] if snapshot_path else [])
+        with _phase(phase_timer, f"{phase_prefix}_generated_path_totals"):
+            generated_file_count, generated_bytes = self._generated_path_totals(
+                result,
+                extra_paths=[snapshot_path] if snapshot_path else [],
+            )
 
-        next_digest = input_digest(self.task)
+        with _phase(phase_timer, f"{phase_prefix}_input_digest"):
+            next_digest = input_digest(self.task)
         round_payload["output_digest"] = next_digest
         round_payload["completeness"] = _result_recovery_score(result)
-        signature = _action_signature(result, previous_digest)
-        if signature in self.seen_action_signatures:
+        with _phase(phase_timer, f"{phase_prefix}_action_signature"):
+            signature = _action_signature(result, previous_digest)
+        with _phase(phase_timer, f"{phase_prefix}_seen_action_lookup"):
+            seen_action_signatures = self.seen_action_signatures
+            repeated_action = signature in seen_action_signatures
+        generated_update = {"generated_file_count": generated_file_count, "generated_bytes": generated_bytes}
+        if repeated_action:
             round_payload["exit_reason"] = "repeated_repair_action"
-            self._append_round(round_payload)
-            self.stop("repeated_repair_action", trigger=trigger, result=result)
+            with _phase(phase_timer, f"{phase_prefix}_repeated_action_write_generated"):
+                write_repair_loop_state(self.task, generated_update)
+            with _phase(phase_timer, f"{phase_prefix}_repeated_action_append_round"):
+                self._append_round(round_payload)
+            with _phase(phase_timer, f"{phase_prefix}_repeated_action_stop"):
+                self.stop("repeated_repair_action", trigger=trigger, result=result)
             return False
-        self._add_seen_action_signature(signature)
 
-        if next_digest in self.seen_input_digests:
+        with _phase(phase_timer, f"{phase_prefix}_seen_input_lookup"):
+            seen_input_digests = self.seen_input_digests
+            repeated_input = next_digest in seen_input_digests
+        if repeated_input:
             round_payload["exit_reason"] = "repeated_repair_input"
-            self._append_round(round_payload)
-            self.stop("repeated_repair_input", trigger=trigger, result=result)
-            return False
-        self._add_seen_input_digest(next_digest)
-
-        if self._detect_stagnation(round_payload):
-            self.stop("global_recovery_stagnation", trigger=trigger, result=result)
-            return False
-        if self._detect_regression(round_payload):
-            self._restore_previous_state()
-            self.stop("completeness_regression", trigger=trigger, result=result)
+            with _phase(phase_timer, f"{phase_prefix}_repeated_input_write_generated"):
+                write_repair_loop_state(self.task, generated_update)
+            with _phase(phase_timer, f"{phase_prefix}_repeated_input_append_round"):
+                self._append_round(round_payload)
+            with _phase(phase_timer, f"{phase_prefix}_repeated_input_stop"):
+                self.stop("repeated_repair_input", trigger=trigger, result=result)
             return False
 
-        write_repair_loop_state(self.task, {"current_digest": next_digest})
-        self._append_round(round_payload)
+        loop_update: dict[str, Any] = {
+            "generated_file_count": generated_file_count,
+            "generated_bytes": generated_bytes,
+            "seen_action_signatures": _dedupe([*seen_action_signatures, signature]),
+            "seen_input_digests": _dedupe([*seen_input_digests, next_digest]),
+            "current_digest": next_digest,
+        }
+        with _phase(phase_timer, f"{phase_prefix}_detect_stagnation"):
+            stagnant = self._detect_stagnation_update(round_payload, loop_update)
+        if stagnant:
+            with _phase(phase_timer, f"{phase_prefix}_stagnation_stop"):
+                write_repair_loop_state(self.task, loop_update)
+                self.stop("global_recovery_stagnation", trigger=trigger, result=result)
+            return False
+        with _phase(phase_timer, f"{phase_prefix}_detect_regression"):
+            regression = self._detect_regression(round_payload)
+        if regression:
+            with _phase(phase_timer, f"{phase_prefix}_restore_previous_state"):
+                self._restore_previous_state()
+            with _phase(phase_timer, f"{phase_prefix}_regression_stop"):
+                self.stop("completeness_regression", trigger=trigger, result=result)
+            return False
+
+        with _phase(phase_timer, f"{phase_prefix}_append_round_payload"):
+            rounds = _loop_value(self.task, "rounds", [])
+            items = list(rounds) if isinstance(rounds, list) else []
+            items.append(dict(round_payload))
+            loop_update["rounds"] = items
+        with _phase(phase_timer, f"{phase_prefix}_commit_loop_update"):
+            write_repair_loop_state(self.task, loop_update)
         LOGGER.info("archive repair round completed: %s", round_payload)
         return True
 
@@ -241,7 +296,10 @@ class RepairLoopState:
         target = self._round_snapshot_path(source, result, round_number)
         if source.resolve() != target.resolve():
             target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(source, target)
+            try:
+                os.link(source, target)
+            except OSError:
+                shutil.copyfile(source, target)
         format_hint = str(repaired_input.get("format_hint") or repaired_input.get("format") or result.format or "")
         self.task.set_archive_state(ArchiveState.from_archive_input(ArchiveInputDescriptor.from_dict({
             "kind": "archive_input",
@@ -276,6 +334,10 @@ class RepairLoopState:
             index += 1
 
     def _add_generated_paths(self, result: RepairResult, *, extra_paths: list[str] | None = None) -> None:
+        file_count, byte_count = self._generated_path_totals(result, extra_paths=extra_paths)
+        write_repair_loop_state(self.task, {"generated_file_count": file_count, "generated_bytes": byte_count})
+
+    def _generated_path_totals(self, result: RepairResult, *, extra_paths: list[str] | None = None) -> tuple[int, int]:
         paths = set(result.workspace_paths or [])
         paths.update(str(path) for path in (extra_paths or []) if path)
         repaired_input = result.repaired_input if isinstance(result.repaired_input, dict) else {}
@@ -292,12 +354,15 @@ class RepairLoopState:
                     byte_count += item.stat().st_size
             except OSError:
                 continue
-        write_repair_loop_state(self.task, {"generated_file_count": file_count, "generated_bytes": byte_count})
+        return file_count, byte_count
 
     def _elapsed_seconds(self) -> float:
         return time.monotonic() - self.started_at
 
     def _detect_stagnation(self, round_payload: dict[str, Any]) -> bool:
+        return self._detect_stagnation_update(round_payload, None)
+
+    def _detect_stagnation_update(self, round_payload: dict[str, Any], loop_update: dict[str, Any] | None) -> bool:
         patience = int(self.limits.stagnation_patience_rounds or 0)
         if patience <= 0:
             return False
@@ -307,12 +372,20 @@ class RepairLoopState:
         best = _as_float(_loop_value(self.task, "best_recovery_score", -1.0), default=-1.0)
         min_improvement = max(0.0, float(self.limits.min_recovery_improvement or 0.0))
         if best < 0.0 or current >= best + min_improvement:
-            write_repair_loop_state(self.task, {"best_recovery_score": max(best, current), "rounds_without_global_improvement": 0})
+            update = {"best_recovery_score": max(best, current), "rounds_without_global_improvement": 0}
+            if loop_update is not None:
+                loop_update.update(update)
+            else:
+                write_repair_loop_state(self.task, update)
             round_payload["global_best_recovery_score"] = max(best, current)
             round_payload["rounds_without_global_improvement"] = 0
             return False
         rounds_without = int(_loop_value(self.task, "rounds_without_global_improvement", 0) or 0) + 1
-        write_repair_loop_state(self.task, {"rounds_without_global_improvement": rounds_without})
+        update = {"rounds_without_global_improvement": rounds_without}
+        if loop_update is not None:
+            loop_update.update(update)
+        else:
+            write_repair_loop_state(self.task, update)
         round_payload["global_best_recovery_score"] = best
         round_payload["rounds_without_global_improvement"] = rounds_without
         return current < 0.999 and rounds_without >= patience
@@ -382,6 +455,12 @@ def terminal_failure_reason(result: ExtractionResult) -> str:
 def _looks_like_split_name(path: str) -> bool:
     name = Path(str(path or "")).name.lower()
     return name.endswith(".001") or ".part1." in name or ".part01." in name
+
+
+def _phase(timer: Callable[..., Any] | None, name: str):
+    if timer is None:
+        return nullcontext()
+    return timer(name)
 
 
 def _result_recovery_score(result: RepairResult) -> float:
