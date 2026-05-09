@@ -180,6 +180,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--limit", type=int, default=0, help="Collect at most N manifest records.")
     parser.add_argument("--max-rounds", type=int, default=8, help="Maximum repair rounds per damaged sample.")
     parser.add_argument("--rollout-mode", choices=("greedy", "greedy_current_selector", "beam", "counterfactual"), default="beam", help="Repair-state rollout strategy for multi-step training collection.")
+    parser.add_argument("--transition-environment", choices=("synthetic", "production_aligned"), default="production_aligned", help="Transition semantics recorded in emitted rows. production_aligned uses the public runtime policy payload contract and production stop/status names; synthetic is kept only for legacy diagnostics.")
     parser.add_argument("--beam-size", type=int, default=8, help="Maximum active next states retained per rollout depth.")
     parser.add_argument("--branch-top-k", type=int, default=5, help="Maximum branch candidates advanced from one state in beam/counterfactual mode.")
     parser.add_argument("--counterfactual-extra", type=int, default=2, help="Additional risky/high-value branches considered in counterfactual mode.")
@@ -482,6 +483,7 @@ def _attach_collector_context(row: dict[str, Any], args: argparse.Namespace) -> 
     if shard >= 0:
         row["collector_shard"] = shard
     row["collector_workers"] = max(1, workers)
+    row["transition_environment"] = str(getattr(args, "transition_environment", "production_aligned") or "production_aligned")
 
 
 def _material_manifests(material_root: Path, formats: set[str], samples: set[str]) -> list[Path]:
@@ -2309,12 +2311,42 @@ def _backfill_rl_transitions(rows: list[dict[str, Any]], args: argparse.Namespac
         future_return = future_return_for_action(row)
         rl["future_return"] = future_return
         rl["episode_return"] = future_return
+        rl["single_path_robust_return"] = _single_path_robust_return(row, future_return)
         row["rl"] = rl
+
+
+def _single_path_robust_return(row: dict[str, Any], future_return: float) -> float:
+    """Training target for model-controlled single-path repair.
+
+    Offline graph upper bound can be optimistic because beam keeps alternate
+    partial states alive. The runtime model has no beam, so penalize transitions
+    that are known to strand a single path or repeat non-progress actions.
+    """
+    rl = row.get("rl") if isinstance(row.get("rl"), dict) else {}
+    terminal_status = str(rl.get("terminal_status") or row.get("terminal_status") or row.get("label_status") or "")
+    module = str(row.get("module") or row.get("module_name") or "")
+    facts = {str(item) for item in row.get("patch_facts") or []}
+    history_flags = {str(item) for item in row.get("repair_history_flags") or []}
+    residual_flags = {str(item) for item in row.get("residual_damage_flags") or []}
+    penalty = 0.0
+    if terminal_status in {"no_output", "dead_end", "no_candidates", "frontier_exhausted"}:
+        penalty += 0.20
+    if terminal_status in {"budget_exhausted", "global_recovery_stagnation", "max_rounds"}:
+        penalty += 0.08
+    if module == "archive_carrier_crop_deep_recovery" and "after_archive_carrier_crop" in history_flags:
+        penalty += 0.25
+    if module in {"zip_salvage_verified_entries", "zip_quarantine_failed_entries"} and (
+        "payload_hash_mismatch" in residual_flags or "exact_match_failed" in residual_flags
+    ):
+        penalty += 0.05
+    if "after_archive_carrier_crop" in facts and terminal_status in {"dead_end", "no_candidates", "no_output"}:
+        penalty += 0.20
+    return max(-1.0, min(1.0, float(future_return) - penalty))
 
 
 def _terminal_rl_payload(row: dict[str, Any], gamma: float, step_cost: float, no_output_penalty: float, hard_negative_penalty: float) -> dict[str, Any]:
     terminal_ratio = _terminal_row_recovery_ratio(row)
-    return {
+    payload = {
         "schema_version": 1,
         "state_id": row.get("state_id"),
         "action_id": None,
@@ -2339,6 +2371,8 @@ def _terminal_rl_payload(row: dict[str, Any], gamma: float, step_cost: float, no
         "no_output_penalty": no_output_penalty,
         "hard_negative_penalty": hard_negative_penalty,
     }
+    payload["single_path_robust_return"] = terminal_ratio
+    return payload
 
 
 def _duplicate_candidate_id_count(rows: list[dict[str, Any]]) -> int:

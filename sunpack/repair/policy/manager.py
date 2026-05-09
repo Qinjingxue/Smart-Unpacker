@@ -98,6 +98,10 @@ class RepairPolicyManager:
         errors: list[str] = []
         for provider in providers:
             provider_id = self._provider_id(provider)
+            contract_miss = _provider_contract_miss(provider, candidate_payloads)
+            if contract_miss:
+                errors.append(f"{provider_id}: feature_contract_miss:{','.join(contract_miss)}")
+                continue
             try:
                 decision = _coerce_decision(provider.choose(request), provider_id=provider_id)
             except Exception as exc:
@@ -241,3 +245,31 @@ def _normalize_format(value: Any) -> str:
 def _public_metadata(value: dict[str, Any]) -> dict[str, Any]:
     allowed = {"model_id", "model_version", "feature_contract_version", "decision_reason"}
     return {key: value[key] for key in allowed if key in value}
+
+
+def _provider_contract_miss(provider: Any, candidate_payloads: list[PolicyCandidatePayload]) -> list[str]:
+    misses: list[str] = []
+    expected_version = getattr(provider, "supported_feature_contract_version", None)
+    if expected_version is not None:
+        for payload in candidate_payloads:
+            if isinstance(payload, dict) and payload.get("feature_contract_version") != expected_version:
+                misses.append("feature_contract_version")
+                break
+    required = getattr(provider, "required_payload_sections", None)
+    if required:
+        for section in required:
+            name = str(section)
+            if not name:
+                continue
+            if not all(isinstance(payload, dict) and _has_payload_path(payload, name) for payload in candidate_payloads):
+                misses.append(name)
+    return sorted(set(misses))
+
+
+def _has_payload_path(payload: dict[str, Any], path: str) -> bool:
+    current: Any = payload
+    for part in path.split("."):
+        if not isinstance(current, dict) or part not in current:
+            return False
+        current = current.get(part)
+    return True

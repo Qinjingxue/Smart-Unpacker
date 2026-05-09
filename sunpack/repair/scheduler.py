@@ -13,6 +13,7 @@ from sunpack.repair.pipeline.module import RepairRoute
 from sunpack.repair.pipeline.modules._common import job_source_size, repair_operation_cache_key
 from sunpack.repair.pipeline.registry import discover_repair_modules, get_repair_module_registry
 from sunpack.repair.policy import RepairPolicyManager
+from sunpack.repair.policy.runtime_features import policy_candidate_payload
 from sunpack.repair.result import RepairResult
 from sunpack.repair.runtime_cache import RepairRuntimeCache
 from sunpack.support import repair_trace
@@ -52,7 +53,10 @@ class RepairScheduler:
                 policy_candidates = _with_job_password_candidates(batch.candidates, job)
                 validated = self._validated_policy_candidates(selector, policy_candidates)
                 selectable = [candidate for candidate in validated if selector._accepted(candidate)]
-                policy_payloads = [_policy_candidate_payload(candidate) for candidate in selectable]
+                policy_payloads = [
+                    _policy_candidate_payload(job, candidate, index=index)
+                    for index, candidate in enumerate(selectable)
+                ]
                 selected, policy_selection = self.policy_manager.choose(
                     job=job,
                     candidates=selectable,
@@ -88,8 +92,9 @@ class RepairScheduler:
                 if warnings:
                     result = replace(result, warnings=_dedupe([*result.warnings, *warnings]))
                 self._write_telemetry(job, batch, result, selection)
+                selected_rank = _candidate_index(selectable if "selectable" in locals() else [], selected)
                 trace_candidate = (
-                    _policy_candidate_payload(selected)
+                    _policy_candidate_payload(job, selected, index=selected_rank)
                     if isinstance(selection.get("policy"), dict)
                     else candidate_feature_payload(selected)
                 )
@@ -705,48 +710,15 @@ def _telemetry_selected_ids(
     }
 
 
-def _policy_candidate_payload(candidate: RepairCandidate) -> dict[str, Any]:
-    payload = candidate_feature_payload(candidate)
-    validation_details = payload.get("validation_details") if isinstance(payload.get("validation_details"), dict) else {}
-    safe_validation = {
-        key: validation_details.get(key)
-        for key in (
-            "policy",
-            "crc_match_count",
-            "kept_entries",
-            "dropped_entries",
-            "duplicate_group_count",
-            "kept_payload_verified_count",
-            "ambiguous_duplicate_group_count",
-            "native_target",
-        )
-        if key in validation_details
-    }
-    return {
-        "candidate_id": payload.get("candidate_id"),
-        "module": payload.get("module"),
-        "repair_name": payload.get("repair_name"),
-        "native_key": payload.get("native_key"),
-        "native_target": payload.get("native_target"),
-        "candidate_status": payload.get("candidate_status"),
-        "atomic_action_group": payload.get("atomic_action_group"),
-        "route_family": payload.get("route_family"),
-        "native_target_mismatch": payload.get("native_target_mismatch"),
-        "format": payload.get("format"),
-        "status": payload.get("status"),
-        "partial": payload.get("partial"),
-        "lazy": payload.get("lazy"),
-        "materialized": payload.get("materialized"),
-        "requires_native_validation": payload.get("requires_native_validation"),
-        "plan_kind": payload.get("plan_kind"),
-        "patch_cost": payload.get("patch_cost"),
-        "patch_span_count": payload.get("patch_span_count"),
-        "patch_operation_count": payload.get("patch_operation_count"),
-        "affected_entry_count": payload.get("affected_entry_count"),
-        "validation_details": safe_validation,
-        "validation_count": payload.get("validation_count"),
-        "native_validation_score": payload.get("native_validation_score"),
-    }
+def _policy_candidate_payload(job: RepairJob, candidate: RepairCandidate, *, index: int = 0) -> dict[str, Any]:
+    return policy_candidate_payload(job, candidate, index=index)
+
+
+def _candidate_index(candidates: list[RepairCandidate], selected: RepairCandidate) -> int:
+    for index, candidate in enumerate(candidates):
+        if candidate is selected:
+            return index
+    return 0
 
 
 def _policy_selection_public(selection: dict[str, Any]) -> dict[str, Any]:

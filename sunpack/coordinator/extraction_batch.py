@@ -12,6 +12,7 @@ from sunpack.contracts.tasks import ArchiveTask
 from sunpack.coordinator.analysis_stage import ArchiveAnalysisStage
 from sunpack.coordinator.repair_beam import RepairBeamCandidate, RepairBeamLoop, RepairBeamState
 from sunpack.coordinator.repair_loop import RepairLoopLimits, RepairLoopState, terminal_failure_reason
+from sunpack.coordinator.repair_runtime_transition import RepairRuntimeTransitionEvaluator
 from sunpack.coordinator.repair_stage import ArchiveRepairStage
 from sunpack.coordinator.resource_preflight import ResourcePreflightInspector
 from sunpack.coordinator.scheduling import (
@@ -405,7 +406,16 @@ class ExtractionBatchRunner:
             if verification.decision_hint == DECISION_REPAIR:
                 state = RepairLoopState(task, self.repair_loop_limits)
                 if state.can_attempt(trigger="verification"):
-                    if self._beam_enabled() and not self._repair_policy_disables_beam(task, result, verification):
+                    if self._repair_policy_disables_beam(task, result, verification):
+                        handled = self._repair_after_verification_with_scheduler(
+                            task,
+                            result,
+                            verification,
+                            state,
+                        )
+                        if handled:
+                            continue
+                    elif self._beam_enabled():
                         self._shelve_outcome_if_needed(incumbent_outcome, out_dir)
                         beam_evaluation = self._repair_after_verification_with_beam(
                             task,
@@ -634,7 +644,14 @@ class ExtractionBatchRunner:
         incumbent_outcome: BatchExtractionOutcome | None,
         round_index: int,
     ) -> BatchExtractionOutcome | bool:
-        if not self._beam_enabled() or self._repair_policy_disables_beam(task, result, verification):
+        if self._repair_policy_disables_beam(task, result, verification):
+            return self._repair_after_verification_with_scheduler(
+                task,
+                result,
+                verification,
+                loop_state,
+            )
+        if not self._beam_enabled():
             return False
         self._shelve_outcome_if_needed(incumbent_outcome, out_dir)
         beam_evaluation = self._repair_after_verification_with_beam(
@@ -659,6 +676,16 @@ class ExtractionBatchRunner:
             round_index,
         )
 
+    def _repair_after_verification_with_scheduler(
+        self,
+        task: ArchiveTask,
+        result: ExtractionResult,
+        verification: VerificationResult,
+        loop_state: RepairLoopState,
+    ) -> bool:
+        repair_result = self.repair_stage.repair_after_verification_assessment_result(task, result, verification)
+        return bool(loop_state.record_result(repair_result, trigger="verification_policy"))
+
     def _repair_after_verification_with_beam(
         self,
         task: ArchiveTask,
@@ -673,7 +700,8 @@ class ExtractionBatchRunner:
         job = self.repair_stage._job_from_verification_assessment(task, result, verification)
         if job is None:
             return None
-        if scheduler.policy_active_for_job(job):
+        active = getattr(scheduler, "policy_active_for_job", None)
+        if callable(active) and active(job):
             return None
 
         evaluated: dict[str, tuple[RepairCandidate, ExtractionResult, VerificationResult, str]] = {}
@@ -993,33 +1021,27 @@ class ExtractionBatchRunner:
         runtime_scheduler: ConcurrencyScheduler,
         evaluated: dict[str, tuple[RepairCandidate, ExtractionResult, VerificationResult, str]],
     ) -> VerificationResult:
-        original_state = task.archive_state()
-        digest = _source_input_digest(item.candidate.repaired_input)
-        if isinstance(item.candidate.plan, dict) and item.candidate.plan.get("archive_state"):
-            digest = _source_input_digest({"archive_state": item.candidate.plan.get("archive_state")})
         temp_dir = f"{out_dir}.beam_{len(evaluated) + 1:02d}_{item.candidate.module_name}"
-        shutil.rmtree(temp_dir, ignore_errors=True)
-        try:
-            archive_state = item.candidate.plan.get("archive_state") if isinstance(item.candidate.plan, dict) else None
-            if isinstance(archive_state, dict):
-                task.set_archive_state(archive_state)
-            else:
-                descriptor = self.repair_stage._descriptor_from_repaired_input(task, item.candidate.repaired_input)
-                if descriptor is not None:
-                    task.set_archive_state(ArchiveState.from_archive_input(descriptor))
-                else:
-                    task.set_archive_input(item.candidate.repaired_input)
-            extracted = self.extractor.extract(task, temp_dir, runtime_scheduler=runtime_scheduler)
-            light_assessment = self._verify_beam_candidate_light(task, extracted)
-            assessed = (
-                self.verifier.verify(task, extracted)
-                if self._beam_candidate_needs_full_verification(item, light_assessment)
-                else light_assessment
-            )
-            evaluated[digest] = (item.candidate, extracted, assessed, temp_dir)
-            return assessed
-        finally:
-            task.set_archive_state(original_state)
+        evaluator = RepairRuntimeTransitionEvaluator(
+            extractor=self.extractor,
+            verifier=self.verifier,
+            repair_stage=self.repair_stage,
+            runtime_scheduler=runtime_scheduler,
+            light_verify=self._verify_beam_candidate_light,
+            needs_full_verification=lambda candidate, light: self._beam_candidate_needs_full_verification(
+                RepairBeamCandidate(candidate=candidate, state=item.state, score=item.score),
+                light,
+            ),
+            source_digest=_source_input_digest,
+        )
+        transition = evaluator.evaluate(task, item.candidate, temp_dir=temp_dir)
+        evaluated[transition.source_digest] = (
+            item.candidate,
+            transition.result,
+            transition.verification,
+            transition.temp_dir,
+        )
+        return transition.verification
 
     def _promote_beam_output(self, result: ExtractionResult, temp_dir: str, out_dir: str) -> ExtractionResult:
         if os.path.abspath(temp_dir) != os.path.abspath(out_dir):

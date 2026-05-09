@@ -69,3 +69,4 @@ models/
 datasets/
 bug.txt
 .deepseek/
+.private/

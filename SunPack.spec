@@ -2,7 +2,7 @@ import os
 from pathlib import Path
 
 from PyInstaller.building.build_main import Analysis, COLLECT, EXE, PYZ
-from PyInstaller.utils.hooks import collect_submodules
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 
 project_root = Path(SPECPATH)
@@ -11,6 +11,7 @@ dist_name = os.environ.get("SUNPACK_DIST_NAME", "sunpack")
 exe_name = os.environ.get("SUNPACK_EXE_NAME", "sunpack")
 
 hiddenimports = ["sunpack_native"]
+datas = []
 for package in (
     "watchdog",
     "zstandard",
@@ -39,11 +40,15 @@ for package in (
 ):
     hiddenimports.extend(collect_submodules(package))
 
+if os.environ.get("SUNPACK_INCLUDE_REPAIR_MODELS", "").strip().lower() in {"1", "true", "yes", "on"}:
+    hiddenimports.extend(collect_submodules("sunpack_repair_models"))
+    datas.extend(collect_data_files("sunpack_repair_models"))
+
 a = Analysis(
     ["sunpack.py"],
     pathex=[str(project_root)],
     binaries=[],
-    datas=[],
+    datas=datas,
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},

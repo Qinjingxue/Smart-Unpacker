@@ -57,7 +57,8 @@ class ArchiveRepairStage:
         job = self._job_from_verification_assessment(task, result, verification)
         if job is None:
             return False
-        return bool(self.scheduler.policy_active_for_job(job))
+        active = getattr(self.scheduler, "policy_active_for_job", None)
+        return bool(callable(active) and active(job))
 
     def _run_and_apply(self, task: ArchiveTask, job: RepairJob, *, trigger: str) -> RepairResult | None:
         if self.scheduler is None or self._attempts(task) >= self.max_attempts_per_task:

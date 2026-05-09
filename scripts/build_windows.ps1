@@ -568,8 +568,8 @@ $distRoot = Join-Path $repoRoot "dist"
 $buildRoot = Join-Path $repoRoot "build"
 $nativeWheelRoot = Join-Path $buildRoot ("native-wheels-" + $buildArch)
 $releaseRoot = Join-Path $repoRoot "release"
-$distFolderName = if ($buildArch -eq "x64") { "sunpack" } else { "sunpack-" + $buildArch }
-$appExeName = "sunpack.exe"
+$distFolderName = if ($env:SUNPACK_DIST_NAME) { $env:SUNPACK_DIST_NAME } elseif ($buildArch -eq "x64") { "sunpack" } else { "sunpack-" + $buildArch }
+$appExeName = if ($env:SUNPACK_EXE_NAME) { $env:SUNPACK_EXE_NAME + ".exe" } else { "sunpack.exe" }
 $distAppRoot = Join-Path $distRoot $distFolderName
 $distExePath = Join-Path $distAppRoot $appExeName
 $distInternalRoot = Join-Path $distAppRoot "_internal"
@@ -615,7 +615,7 @@ $cmakeCommand = Get-CMakeCommand -VenvScripts $venvScripts
 $ctestCommand = Get-CTestCommand -VenvScripts $venvScripts
 
 $env:Path = "$venvScripts;$env:Path"
-$env:PYTHONPATH = $repoRoot
+$env:PYTHONPATH = if ($env:PYTHONPATH) { "$repoRoot;$env:PYTHONPATH" } else { $repoRoot }
 
 Write-Step "Cleaning previous build outputs"
 Remove-IfExists -LiteralPath $buildRoot

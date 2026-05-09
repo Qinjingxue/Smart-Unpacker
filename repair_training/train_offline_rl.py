@@ -89,7 +89,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--input", action="append", default=[], help="Input JSONL file. Repeatable; defaults to ZIP terminal recovery datasets.")
     parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR))
     parser.add_argument("--feature-view", choices=sorted(FEATURE_VIEWS), default="runtime_minimal_native_validation")
-    parser.add_argument("--target", choices=("future_return", "reward", "terminal_reward"), default="future_return")
+    parser.add_argument("--target", choices=("future_return", "single_path_robust_return", "reward", "terminal_reward"), default="single_path_robust_return")
     parser.add_argument("--format-scope", default="zip")
     parser.add_argument("--split-by", choices=("episode", "source_sample", "query"), default="source_sample")
     parser.add_argument("--seed", type=int, default=2026)
@@ -251,6 +251,8 @@ def _excluded_feature_key(key: str, path: str) -> bool:
 def _target_value(row: dict[str, Any], target: str) -> float | None:
     rl = row.get("rl") if isinstance(row.get("rl"), dict) else {}
     value = rl.get(target)
+    if value is None and target == "single_path_robust_return":
+        value = rl.get("future_return")
     if value is None and target == "terminal_reward":
         value = rl.get("terminal_reward")
     if value is None:

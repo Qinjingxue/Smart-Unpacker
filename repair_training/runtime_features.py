@@ -5,9 +5,15 @@ from typing import Any
 
 from sunpack.repair import RepairJob
 from sunpack.repair.candidate import candidate_feature_payload
+from sunpack.repair.policy.runtime_features import (
+    FEATURE_CONTRACT_VERSION as PRODUCTION_FEATURE_CONTRACT_VERSION,
+    candidate_proposal_from_payload as production_candidate_proposal_from_payload,
+    policy_candidate_payload,
+    runtime_context_from_job,
+)
 
 
-FEATURE_CONTRACT_VERSION = 3
+FEATURE_CONTRACT_VERSION = PRODUCTION_FEATURE_CONTRACT_VERSION
 
 
 @dataclass(frozen=True)
@@ -31,33 +37,38 @@ def build_runtime_feature_record(
 ) -> dict[str, Any]:
     payload = candidate_feature_payload(candidate) if candidate is not None else {}
     prior_payload = _repair_prior_payload(repair_prior, payload)
-    failure = job.extraction_failure if isinstance(job.extraction_failure, dict) else {}
-    path_actions = previous_actions if previous_actions is not None else failure.get("previous_actions")
-    path_modules = previous_modules if previous_modules is not None else failure.get("previous_modules")
-    runtime_state = _runtime_state_summary(runtime_state_summary or {})
-    fuzzy = _fuzzy_profile(job)
-    native_probe = _analysis_native_probe(job)
+    runtime_payload = (
+        policy_candidate_payload(job, candidate, index=_current_rank_from_prior(repair_prior))
+        if candidate is not None
+        else {
+            "feature_contract_version": FEATURE_CONTRACT_VERSION,
+            "runtime_context": runtime_context_from_job(job),
+            "candidate_proposal": production_candidate_proposal_from_payload(payload, job=job),
+        }
+    )
+    runtime_context = dict(runtime_payload.get("runtime_context") or {})
+    if previous_actions is not None:
+        runtime_context["previous_actions"] = list(previous_actions)
+        runtime_context["previous_action_count"] = len(previous_actions)
+    if previous_modules is not None:
+        runtime_context["previous_modules"] = list(previous_modules)
+        runtime_context["previous_module_count"] = len(previous_modules)
+    if runtime_state_summary is not None:
+        runtime_context["runtime_state_summary"] = _runtime_state_summary(runtime_state_summary)
     return {
         "feature_contract_version": FEATURE_CONTRACT_VERSION,
-        "runtime_context": {
-            "analysis_summary": _analysis_summary(job),
-            "analysis_native_probe": native_probe,
-            "fuzzy_profile": fuzzy,
-            "extraction_summary": _extraction_summary(job),
-            "verification_summary": _verification_summary(job),
-            "verification_per_file": _verification_per_file(job),
-            "repair_hints": _repair_hints(job),
-            "previous_actions": list(path_actions or []),
-            "previous_action_count": len(path_actions or []),
-            "previous_modules": list(path_modules or []),
-            "previous_module_count": len(path_modules or []),
-            "runtime_state_summary": runtime_state,
-            "job_summary": _job_summary(job),
-            "native_feedback": _native_feedback(candidate),
-        },
-        "candidate_proposal": _candidate_proposal(payload, job=job, runtime_state_summary=runtime_state),
+        "runtime_context": runtime_context,
+        "candidate_proposal": dict(runtime_payload.get("candidate_proposal") or {}),
         "repair_prior_features": prior_payload,
     }
+
+
+def _current_rank_from_prior(repair_prior: RepairPrior | dict[str, Any] | None) -> int:
+    if isinstance(repair_prior, RepairPrior):
+        return _int(repair_prior.current_selector_rank)
+    if isinstance(repair_prior, dict):
+        return _int(repair_prior.get("current_selector_rank") or repair_prior.get("current_rank"))
+    return 0
 
 
 # ── Analysis layer ──────────────────────────────────────────────────
