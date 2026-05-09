@@ -16,6 +16,16 @@ def ensure_knowledge(target: Any) -> ArchiveKnowledge:
 
 def commit_task_knowledge(task: Any, knowledge: ArchiveKnowledge | dict[str, Any]) -> ArchiveKnowledge:
     payload = ensure_knowledge(knowledge)
+    existing = ArchiveKnowledge()
+    if hasattr(task, "knowledge") and callable(task.knowledge):
+        existing = task.knowledge()
+    current_meta = existing.get("_meta") if isinstance(existing.get("_meta"), dict) else {}
+    try:
+        revision = int(current_meta.get("revision", 0) or 0) + 1
+    except (TypeError, ValueError):
+        revision = 1
+    meta = payload.get("_meta") if isinstance(payload.get("_meta"), dict) else {}
+    payload.data["_meta"] = {**meta, "revision": revision}
     if hasattr(task, "set_knowledge") and callable(task.set_knowledge):
         task.set_knowledge(payload)
     return payload

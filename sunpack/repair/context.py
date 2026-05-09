@@ -6,6 +6,8 @@ from typing import Any
 from sunpack.repair.coverage import ArchiveCoverageView, coverage_view_from_payload
 from sunpack.repair.diagnosis import RepairDiagnosis
 from sunpack.repair.job import RepairJob
+from sunpack.contracts.archive_knowledge import ArchiveKnowledge
+from sunpack.support import archive_knowledge_projection as knowledge_view
 
 
 @dataclass(frozen=True)
@@ -36,11 +38,12 @@ class RepairContext:
 
 
 def build_repair_context(job: RepairJob, diagnosis: RepairDiagnosis) -> RepairContext:
-    failure = dict(job.extraction_failure or {})
-    diagnostics = _diagnostics_from(job, failure)
+    knowledge = ArchiveKnowledge.from_any(job.knowledge)
+    failure = knowledge_view.extraction_failure(knowledge)
+    diagnostics = knowledge_view.extraction_diagnostics(knowledge)
     result_payload = diagnostics.get("result") if isinstance(diagnostics.get("result"), dict) else {}
     native_diagnostics = result_payload.get("diagnostics") if isinstance(result_payload.get("diagnostics"), dict) else {}
-    fuzzy_profile = _fuzzy_profile(job)
+    fuzzy_profile = knowledge_view.analysis_fuzzy_profile(knowledge)
     failure_stage = _first_text([
         failure.get("failure_stage"),
         result_payload.get("failure_stage"),
@@ -53,40 +56,26 @@ def build_repair_context(job: RepairJob, diagnosis: RepairDiagnosis) -> RepairCo
         native_diagnostics.get("failure_kind"),
         diagnostics.get("failure_kind"),
     ])
-    route_payload = normalize_zip_runtime_route_evidence({
-        "format": diagnosis.format or job.format,
-        "source_input": job.source_input,
-        "analysis_prepass": job.analysis_prepass,
-        "analysis_evidence": _analysis_evidence_details(job),
-        "extraction_failure": failure,
-        "extraction_diagnostics": diagnostics,
-        "repair_history": job.repair_history,
-        "archive_knowledge": job.knowledge,
-        "damage_flags": list(job.damage_flags or []),
-    })
-    route_evidence_flags = list(route_payload.get("route_evidence_flags") or [])
-    repair_history_flags = _repair_history_flags(job)
-    residual_damage_flags = _residual_damage_flags(job, failure)
+    route_context = knowledge_view.repair_route_context(knowledge)
+    history_summary = knowledge_view.repair_history_summary(knowledge)
+    route_evidence_flags = list(route_context.get("route_evidence_flags") or [])
+    repair_history_flags = list(history_summary.get("repair_history_flags") or [])
+    residual_damage_flags = list(route_context.get("residual_damage_flags") or history_summary.get("residual_damage_flags") or [])
     damage_flags = _normalize_zip_generic_damage(_dedupe([
-        *_damage_flags(job, diagnosis, failure, failure_kind, failure_stage),
+        *list(route_context.get("damage_flags") or []),
+        *[flag for item in diagnosis.evidence for flag in item.damage_flags],
+        *_failure_damage_flags(job, failure, failure_kind, failure_stage),
         *route_evidence_flags,
         *repair_history_flags,
         *residual_damage_flags,
     ]))
-    normalized_damage_payload = normalize_zip_runtime_route_evidence({
-        **route_payload,
-        "extraction_failure": failure,
-        "extraction_diagnostics": diagnostics,
-        "repair_history": job.repair_history,
-        "archive_knowledge": job.knowledge,
-        "damage_flags": damage_flags,
-    })
-    damage_flags = list(normalized_damage_payload.get("damage_flags") or damage_flags)
-    route_evidence_flags = list(normalized_damage_payload.get("route_evidence_flags") or route_evidence_flags)
+    source = knowledge_view.source_input(knowledge)
+    analysis_summary = knowledge_view.analysis_summary(knowledge)
+    prepass = knowledge_view.analysis_prepass(knowledge)
     return RepairContext(
-        source_input=dict(job.source_input or {}),
-        format=_normalize_format(diagnosis.format or job.format),
-        confidence=float(diagnosis.confidence or job.confidence or 0.0),
+        source_input=dict(source),
+        format=_normalize_format(diagnosis.format or analysis_summary.get("format") or source.get("format_hint") or source.get("format") or ""),
+        confidence=float(diagnosis.confidence or analysis_summary.get("confidence") or 0.0),
         categories=tuple(str(item) for item in diagnosis.categories),
         damage_flags=tuple(damage_flags),
         fuzzy_hints=tuple(str(item) for item in fuzzy_profile.get("hints") or []),
@@ -105,16 +94,16 @@ def build_repair_context(job: RepairJob, diagnosis: RepairDiagnosis) -> RepairCo
             native_diagnostics.get("operation_result_name"),
         ]),
         failed_item=_first_text([failure.get("failed_item"), result_payload.get("failed_item")]),
-        structure_evidence=job.analysis_evidence,
+        structure_evidence=None,
         archive_coverage=coverage_view_from_payload(_archive_coverage(failure), _file_observations(failure)),
-        prepass=dict(job.analysis_prepass or {}),
+        prepass=dict(prepass),
         fuzzy_profile=fuzzy_profile,
         extraction_failure=failure,
         extraction_diagnostics=diagnostics,
         route_evidence_flags=tuple(route_evidence_flags),
         repair_history_flags=tuple(repair_history_flags),
         residual_damage_flags=tuple(residual_damage_flags),
-        knowledge=dict(job.knowledge or {}),
+        knowledge=knowledge.to_dict(),
     )
 
 
@@ -258,19 +247,6 @@ def _filter_zip_conflicting_runtime_flags(flags: list[str], payload: dict[str, A
             }
         ]
     return _dedupe(flags)
-
-
-def _diagnostics_from(job: RepairJob, failure: dict[str, Any]) -> dict[str, Any]:
-    if isinstance(job.extraction_diagnostics, dict) and job.extraction_diagnostics:
-        return dict(job.extraction_diagnostics)
-    diagnostics = failure.get("diagnostics")
-    return dict(diagnostics) if isinstance(diagnostics, dict) else {}
-
-
-def _analysis_evidence_details(job: RepairJob) -> dict[str, Any]:
-    evidence = job.analysis_evidence
-    details = getattr(evidence, "details", {}) if evidence is not None else {}
-    return dict(details) if isinstance(details, dict) else {}
 
 
 def _zip_structure_feature_dicts(payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -480,64 +456,6 @@ def _zip_profile_flags(profile: str) -> list[str]:
     return flags
 
 
-def _repair_history_flags(job: RepairJob) -> list[str]:
-    history = job.repair_history if isinstance(job.repair_history, dict) else {}
-    modules = [*(_list_values(history, "previous_modules")), *(_list_values(history, "path_modules"))]
-    actions = [*(_list_values(history, "previous_actions")), *(_list_values(history, "path_actions"))]
-    patch_facts = _list_values(history, "applied_patch_facts")
-    flags: list[str] = []
-    for module in modules:
-        flags.append(f"already_tried:{module}")
-        if module == "archive_carrier_crop_deep_recovery" or module.endswith("_carrier_crop_deep_recovery"):
-            flags.append("after_archive_carrier_crop")
-        if module in {"zip_fix_eocd_comment_length", "zip_fix_eocd_record"}:
-            flags.append("after_eocd_repair")
-        if module in {"zip_rebuild_cd_from_local_headers", "zip_rebuild_cd_preserve_raw_names", "zip_rebuild_cd_from_data_descriptors"}:
-            flags.append("after_cd_rebuild")
-        if module in {"zip_fix_local_header_fields", "zip_local_header_partial_scan"}:
-            flags.append("after_local_header_repair")
-    for action in actions:
-        if "carrier" in action and "crop" in action:
-            flags.append("after_archive_carrier_crop")
-        if "eocd" in action:
-            flags.append("after_eocd_repair")
-        if "central_directory" in action or "rebuild_cd" in action:
-            flags.append("after_cd_rebuild")
-        if "local_header" in action:
-            flags.append("after_local_header_repair")
-    for fact in patch_facts:
-        if fact == "after_archive_carrier_crop" or fact == "fixed_field=carrier_prefix_crop":
-            flags.append("after_archive_carrier_crop")
-        if fact.startswith("fixed_field=eocd"):
-            flags.append("after_eocd_repair")
-        if fact in {"after_cd_rebuild", "raw_name_bytes_preserved"}:
-            flags.append("after_cd_rebuild")
-    flags.extend(_list_values(history, "repair_history_flags"))
-    return _dedupe(flags)
-
-
-def _residual_damage_flags(job: RepairJob, failure: dict[str, Any]) -> list[str]:
-    history = job.repair_history if isinstance(job.repair_history, dict) else {}
-    flags = [*_list_values(history, "residual_damage_flags"), *_list_values(failure, "residual_damage_flags")]
-    coverage = _archive_coverage(failure)
-    if coverage:
-        completeness = float(coverage.get("completeness", 0.0) or 0.0)
-        expected = int(coverage.get("expected_files", 0) or 0)
-        matched = int(coverage.get("matched_files", coverage.get("complete_files", 0)) or 0)
-        failed = int(coverage.get("failed_files", 0) or 0)
-        if completeness < 0.999:
-            flags.append("exact_match_failed")
-        if expected and matched < expected:
-            flags.append("partial_entries_remaining")
-        if failed:
-            flags.append("content_integrity_bad_or_unknown")
-    source_integrity = str(failure.get("source_integrity") or "")
-    assessment = str(failure.get("assessment_status") or "")
-    if assessment == "complete" and source_integrity not in {"complete", "trusted"}:
-        flags.extend(["content_integrity_bad_or_unknown", "exact_match_failed"])
-    return _dedupe(flags)
-
-
 def _normalize_zip_generic_damage(flags: list[str]) -> list[str]:
     precise_structural = {
         "zip_comment_length_bad",
@@ -609,30 +527,13 @@ def _truthy(value: Any) -> bool:
     return bool(value)
 
 
-def _fuzzy_profile(job: RepairJob) -> dict[str, Any]:
-    if isinstance(job.fuzzy_profile, dict) and job.fuzzy_profile:
-        return dict(job.fuzzy_profile)
-    fuzzy = job.analysis_prepass.get("fuzzy") if isinstance(job.analysis_prepass, dict) else {}
-    if isinstance(fuzzy, dict) and isinstance(fuzzy.get("binary_profile"), dict):
-        return dict(fuzzy["binary_profile"])
-    evidence = job.analysis_evidence
-    details = getattr(evidence, "details", {}) if evidence is not None else {}
-    route = details.get("fuzzy") if isinstance(details, dict) else {}
-    profile = route.get("profile") if isinstance(route, dict) else {}
-    return dict(profile) if isinstance(profile, dict) else {}
-
-
-def _damage_flags(
+def _failure_damage_flags(
     job: RepairJob,
-    diagnosis: RepairDiagnosis,
     failure: dict[str, Any],
     failure_kind: str,
     failure_stage: str,
 ) -> list[str]:
     flags = []
-    flags.extend(job.damage_flags)
-    for evidence in diagnosis.evidence:
-        flags.extend(evidence.damage_flags)
     if failure.get("checksum_error"):
         flags.append("checksum_error")
     if failure.get("missing_volume"):

@@ -69,21 +69,12 @@ def _write_jsonl(path: str, event: str, payload: dict[str, Any] | None = None) -
 
 def job_payload(job: Any) -> dict[str, Any]:
     return {
-        "source_input": _jsonable(getattr(job, "source_input", {})),
         "format": getattr(job, "format", ""),
         "confidence": getattr(job, "confidence", 0.0),
-        "analysis_evidence": _jsonable(getattr(job, "analysis_evidence", None)),
-        "analysis_prepass": _jsonable(getattr(job, "analysis_prepass", {})),
-        "fuzzy_profile": _jsonable(getattr(job, "fuzzy_profile", {})),
-        "extraction_failure": _jsonable(getattr(job, "extraction_failure", None)),
-        "extraction_diagnostics": _jsonable(getattr(job, "extraction_diagnostics", {})),
-        "damage_flags": list(getattr(job, "damage_flags", []) or []),
         "password_present": getattr(job, "password", None) is not None,
         "archive_key": getattr(job, "archive_key", ""),
         "workspace": getattr(job, "workspace", ""),
         "attempts": getattr(job, "attempts", 0),
-        "source_descriptor": _jsonable(getattr(job, "source_descriptor", None)),
-        "archive_state": _jsonable(getattr(job, "archive_state", None)),
         "archive_knowledge": _jsonable(getattr(job, "knowledge", {})),
     }
 

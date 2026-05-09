@@ -31,6 +31,17 @@ def write_analysis_report(task: ArchiveTask, report: ArchiveAnalysisReport) -> N
         source_module="analysis_stage",
     )
     if selected is not None:
+        write_payload(
+            knowledge,
+            "analysis.summary",
+            {
+                "format": getattr(selected, "format", "") or "",
+                "confidence": float(getattr(selected, "confidence", 0.0) or 0.0),
+                "status": getattr(selected, "status", "") or "",
+            },
+            source_layer="analysis",
+            source_module="analysis_stage",
+        )
         _write_format_evidence(knowledge, selected)
     commit_task_knowledge(task, knowledge)
 

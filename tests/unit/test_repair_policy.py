@@ -16,6 +16,7 @@ from sunpack.repair.config import normalize_repair_config
 from sunpack.repair.job import RepairJob
 from sunpack.repair.policy.runtime_features import policy_candidate_payload
 from sunpack.repair.scheduler import RepairScheduler
+from sunpack.support import archive_knowledge_projection as knowledge_view
 from sunpack.verification.result import ArchiveCoverageSummary, VerificationResult
 
 
@@ -195,37 +196,48 @@ def test_policy_candidate_payload_matches_training_minimal_shape_without_oracle(
         },
     )
     job = _job(tmp_path)
+    knowledge = dict(job.knowledge)
+    knowledge.update({
+        "analysis": {
+            "summary": {"format": "zip", "confidence": 0.5},
+            "prepass": {
+                "status": "ok",
+                "selected_format": "zip",
+                "fuzzy": {
+                    "binary_profile": {
+                        "entropy_profile": {"head_entropy": 7.1, "overall_class": "binary"},
+                        "byte_class_profile": {"head": {"printable_ratio": 0.2}},
+                    }
+                },
+            },
+            "fuzzy": {
+                "entropy_profile": {"head_entropy": 7.1, "overall_class": "binary"},
+                "byte_class_profile": {"head": {"printable_ratio": 0.2}},
+            },
+        },
+        "format": {"zip": {"structure": {"has_duplicate_entries": True}, "container_tags": ["split_archive"], "route_evidence_flags": ["duplicate_entries"]}},
+        "extraction": {
+            "failure": {
+                "status": "failed",
+                "decision_hint": "repair",
+                "archive_coverage": {"completeness": 0.5, "expected_files": 2, "matched_files": 1},
+            }
+        },
+        "repair": {
+            "route_evidence": {"flags": ["duplicate_entries"]},
+            "history": {
+                "items": [],
+                "repair_history_flags": ["after_cd_rebuild"],
+                "residual_damage_flags": ["exact_match_failed"],
+                "runtime_state_summary": {"directory_detected": True, "entry_count": 2},
+            },
+            "residual": {"flags": ["exact_match_failed"]},
+        },
+    })
     job = replace(
         job,
         attempts=2,
-        analysis_prepass={
-            "status": "ok",
-            "selected_format": "zip",
-            "zip_structure_features": {"has_duplicate_entries": True},
-            "zip_container_tags": ["split_archive"],
-            "fuzzy": {
-                "binary_profile": {
-                    "entropy_profile": {"head_entropy": 7.1, "overall_class": "binary"},
-                    "byte_class_profile": {"head": {"printable_ratio": 0.2}},
-                }
-            },
-        },
-        extraction_failure={
-            "status": "failed",
-            "decision_hint": "repair",
-            "archive_coverage": {"completeness": 0.5, "expected_files": 2, "matched_files": 1},
-        },
-        repair_history={
-            "route_evidence_flags": ["duplicate_entries"],
-            "repair_history_flags": ["after_cd_rebuild"],
-            "residual_damage_flags": ["exact_match_failed"],
-            "runtime_state_summary": {"directory_detected": True, "entry_count": 2},
-            "source_derivation": {
-                "zip_structure_features": {"has_duplicate_entries": True},
-                "zip_container_tags": ["split_archive"],
-                "zip_variant": "data_descriptor",
-            },
-        },
+        knowledge=knowledge,
     )
 
     payload = policy_candidate_payload(job, candidate, index=3)
@@ -284,7 +296,44 @@ def test_runtime_repair_job_includes_descriptor_route_evidence(tmp_path):
     assert "data_descriptor" in job.damage_flags
     assert "central_directory_offset_bad" in job.damage_flags
     assert "spurious_data_descriptor_candidate" in job.damage_flags
-    assert "data_descriptor" in job.repair_history["route_evidence_flags"]
+    assert "data_descriptor" in knowledge_view.repair_route_context(job.knowledge)["route_evidence_flags"]
+
+
+def test_runtime_features_do_not_backfill_missing_archive_knowledge_from_job_fields(tmp_path):
+    source = tmp_path / "source.zip"
+    source.write_bytes(b"broken")
+    job = RepairJob(
+        source_input={"kind": "file", "path": str(source), "format_hint": "zip"},
+        format="zip",
+        analysis_prepass={"status": "ok", "selected_format": "zip"},
+        extraction_failure={"status": "failed", "decision_hint": "repair"},
+        damage_flags=["data_descriptor"],
+        repair_history={"route_evidence_flags": ["data_descriptor"]},
+        knowledge={},
+    )
+
+    payload = policy_candidate_payload(job, _candidate("zip_salvage_verified_entries", tmp_path / "fixed.zip", confidence=0.5), index=0)
+
+    assert "source.input" in payload["runtime_context"]["knowledge_projection"]["feature_contract_miss"]
+    assert payload["runtime_context"]["job_summary"]["route_evidence_flags"] == []
+
+
+def test_runtime_features_source_has_no_legacy_repair_job_fallbacks():
+    source = Path("sunpack/repair/policy/runtime_features.py").read_text(encoding="utf-8")
+    forbidden = [
+        "project_knowledge_sources",
+        "_set_if_missing",
+        "_feature_payload_sources",
+        "_verification_summary_from_failure",
+        'getattr(job, "source_input"',
+        'getattr(job, "analysis_prepass"',
+        'getattr(job, "extraction_failure"',
+        'getattr(job, "repair_history"',
+        'getattr(job, "damage_flags"',
+    ]
+
+    for token in forbidden:
+        assert token not in source
 
 
 def test_runtime_repair_job_includes_non_utf8_route_evidence(tmp_path):
@@ -388,12 +437,20 @@ def _candidate(module: str, path: Path, *, confidence: float) -> RepairCandidate
 def _job(tmp_path: Path) -> RepairJob:
     source = tmp_path / "source.zip"
     source.write_bytes(b"broken")
+    knowledge = {
+        "source": {"input": {"kind": "file", "path": str(source), "format_hint": "zip"}},
+        "analysis": {"summary": {"format": "zip", "confidence": 0.5}},
+        "extraction": {"failure": {"status": "failed"}},
+        "verification": {"summary": {"decision_hint": "repair", "completeness": 0.0}},
+        "repair": {"history": {"items": []}},
+    }
     return RepairJob(
         source_input={"kind": "file", "path": str(source), "format_hint": "zip"},
         format="zip",
         archive_key="source",
         workspace=str(tmp_path / "repair"),
         extraction_failure={"status": "failed"},
+        knowledge=knowledge,
     )
 
 
@@ -421,6 +478,8 @@ def _write_source_derivation(task: ArchiveTask, **payload) -> None:
     tags = payload.get("zip_container_tags")
     if isinstance(tags, list):
         knowledge.set("format.zip.container_tags", tags, source_layer="test", source_module="fixture")
+    if payload.get("damage_profile"):
+        knowledge.set("source.profile", payload.get("damage_profile"), source_layer="test", source_module="fixture")
     task.set_knowledge(knowledge)
 
 

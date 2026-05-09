@@ -32,6 +32,7 @@ from sunpack.contracts.detection import FactBag
 from sunpack.contracts.tasks import ArchiveTask
 from sunpack.extraction.result import ExtractionResult
 from sunpack.support.archive_state_view import archive_state_to_bytes
+from sunpack.support import archive_knowledge_projection as knowledge_view
 from sunpack.verification import VerificationScheduler
 from repair_training.runtime_features import FEATURE_CONTRACT_VERSION, RepairPrior, build_runtime_feature_record
 
@@ -102,6 +103,9 @@ def main(argv: list[str] | None = None) -> int:
         "repair_cache_hits": 0,
         "repair_cache_misses": 0,
         "repair_cache_by_namespace": {},
+        "knowledge_projection_cache_hits": 0,
+        "knowledge_projection_cache_misses": 0,
+        "knowledge_projection_cache_by_projection": {},
         "materialize_cache_hits": 0,
         "native_operation_cache_hits": 0,
         "success_output": str(success_output),
@@ -379,6 +383,7 @@ def _update_summary_counts(summary: dict[str, Any], record: dict[str, Any], rows
         summary["rollout_budget_exhausted"] = int(summary.get("rollout_budget_exhausted", 0) or 0) + 1
     rollout_summary = next((row.get("rollout_summary") for row in rows if isinstance(row.get("rollout_summary"), dict)), {})
     _merge_repair_cache_summary(summary, rollout_summary.get("repair_cache") if isinstance(rollout_summary, dict) else {})
+    _merge_projection_cache_summary(summary, rollout_summary.get("knowledge_projection_cache") if isinstance(rollout_summary, dict) else {})
     _merge_materialization_summary(summary, rollout_summary.get("materialization") if isinstance(rollout_summary, dict) else {})
     oracle = record.get("oracle") if isinstance(record.get("oracle"), dict) else {}
     oracle_strength = str(record.get("oracle_strength") or oracle.get("oracle_strength") or "unknown")
@@ -410,6 +415,20 @@ def _merge_repair_cache_summary(summary: dict[str, Any], cache_stats: Any) -> No
             summary["zip_scan_artifact_misses"] = int(summary.get("zip_scan_artifact_misses", 0) or 0) + int(counts.get("misses", 0) or 0)
         elif str(namespace).startswith("native_"):
             summary["native_operation_cache_hits"] = int(summary.get("native_operation_cache_hits", 0) or 0) + int(counts.get("hits", 0) or 0)
+
+
+def _merge_projection_cache_summary(summary: dict[str, Any], cache_stats: Any) -> None:
+    if not isinstance(cache_stats, dict):
+        return
+    summary["knowledge_projection_cache_hits"] = int(summary.get("knowledge_projection_cache_hits", 0) or 0) + int(cache_stats.get("hits", 0) or 0)
+    summary["knowledge_projection_cache_misses"] = int(summary.get("knowledge_projection_cache_misses", 0) or 0) + int(cache_stats.get("misses", 0) or 0)
+    by_projection = summary.setdefault("knowledge_projection_cache_by_projection", {})
+    for projection, counts in (cache_stats.get("by_projection") or {}).items():
+        if not isinstance(counts, dict):
+            continue
+        target = by_projection.setdefault(str(projection), {"hits": 0, "misses": 0})
+        target["hits"] = int(target.get("hits", 0) or 0) + int(counts.get("hits", 0) or 0)
+        target["misses"] = int(target.get("misses", 0) or 0) + int(counts.get("misses", 0) or 0)
 
 
 def _merge_materialization_summary(summary: dict[str, Any], materialization: Any) -> None:
@@ -1331,7 +1350,9 @@ def _collect_sample_rows(record: dict[str, Any], args: argparse.Namespace, debug
     terminal_rows = [row for row in rows if row.get("row_type") == "terminal"]
     terminal_status_counts = Counter(str(item.get("terminal_status") or item.get("label_status") or "unknown") for item in terminal_rows)
     repair_cache_stats = scheduler.repair_cache.stats() if hasattr(scheduler, "repair_cache") else {}
+    projection_cache_stats = knowledge_view.projection_cache_stats()
     debug_events.write("repair_cache_stats", record, stats=repair_cache_stats)
+    debug_events.write("knowledge_projection_cache_stats", record, stats=projection_cache_stats)
     for row in rows:
         row["rollout_summary"] = {
             "state_count": created_state_count,
@@ -1341,6 +1362,7 @@ def _collect_sample_rows(record: dict[str, Any], args: argparse.Namespace, debug
             "terminal_count": len(terminal_rows),
             "terminal_status_counts": dict(sorted(terminal_status_counts.items())),
             "repair_cache": repair_cache_stats,
+            "knowledge_projection_cache": projection_cache_stats,
             "materialization": materialization_summary,
         }
     return rows

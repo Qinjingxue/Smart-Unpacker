@@ -139,21 +139,6 @@ def project_knowledge_sources(knowledge: Any) -> list[dict[str, Any]]:
     zip_payload = raw.get("format", {}).get("zip") if isinstance(raw.get("format"), dict) else None
     if isinstance(zip_payload, dict):
         sources.append(zip_payload)
-        legacy_zip: dict[str, Any] = {}
-        structure = zip_payload.get("structure")
-        if isinstance(structure, dict):
-            legacy_zip["zip_structure_features"] = structure
-        tags = zip_payload.get("container_tags")
-        if isinstance(tags, list):
-            legacy_zip["zip_container_tags"] = tags
-        route_flags = zip_payload.get("route_evidence_flags")
-        if isinstance(route_flags, list):
-            legacy_zip["route_evidence_flags"] = route_flags
-        if legacy_zip:
-            sources.append(legacy_zip)
-    source_payload = raw.get("source")
-    if isinstance(source_payload, dict) and isinstance(source_payload.get("derivation"), dict):
-        sources.append({"source_derivation": source_payload["derivation"]})
     return sources
 
 

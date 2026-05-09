@@ -39,8 +39,17 @@ def write_repair_job_context(
     write_payload(knowledge, "extraction.diagnostics", dict(extraction_diagnostics or {}), source_layer="repair", source_module="job_context")
     write_payload(knowledge, "repair.history", dict(repair_history or {}), source_layer="repair", source_module="job_context")
     write_payload(knowledge, "verification.summary", _verification_payload(verification), source_layer="repair", source_module="job_context")
+    if route_payload.get("format"):
+        write_payload(
+            knowledge,
+            "analysis.summary",
+            {"format": str(route_payload.get("format") or ""), "confidence": getattr(verification, "confidence", None)},
+            source_layer="repair",
+            source_module="job_context",
+        )
 
     normalized = normalize_zip_runtime_route_evidence({
+        **dict(route_payload or {}),
         "source_input": source_input,
         "analysis_prepass": analysis_prepass,
         "analysis_evidence": evidence_payload,
@@ -57,9 +66,17 @@ def write_repair_job_context(
         write_payload(knowledge, "format.zip", {"route_evidence_flags": route_flags}, source_layer="repair", source_module="job_context")
     if damage_flags:
         write_flags(knowledge, "repair.damage", damage_flags, source_layer="repair", source_module="job_context")
-    source_derivation = normalized.get("source_derivation") if isinstance(normalized.get("source_derivation"), dict) else {}
+    source_derivation = route_payload.get("source_derivation") if isinstance(route_payload.get("source_derivation"), dict) else {}
     if source_derivation:
         write_payload(knowledge, "source.derivation", source_derivation, source_layer="repair", source_module="job_context")
+    structure = route_payload.get("zip_structure_features")
+    if isinstance(structure, dict):
+        write_payload(knowledge, "format.zip", {"structure": structure}, source_layer="repair", source_module="job_context")
+    tags = route_payload.get("zip_container_tags")
+    if isinstance(tags, list):
+        write_payload(knowledge, "format.zip", {"container_tags": tags}, source_layer="repair", source_module="job_context")
+    if route_payload.get("damage_profile"):
+        write_payload(knowledge, "source", {"profile": str(route_payload.get("damage_profile") or "")}, source_layer="repair", source_module="job_context")
     commit_task_knowledge(task, knowledge)
     return knowledge.to_dict()
 
@@ -69,24 +86,7 @@ def write_repair_result(task: ArchiveTask, result: RepairResult, *, phase: str =
     payload = _repair_result_payload(result)
     append_history(knowledge, "repair.history.items", payload, source_layer="repair", source_module=result.module_name)
     write_payload(knowledge, "repair.last_result", payload, source_layer="repair", source_module=result.module_name)
-    history_payload = knowledge.get("repair.history")
-    history_payload = dict(history_payload) if isinstance(history_payload, dict) else {}
-    if result.actions:
-        write_payload(
-            knowledge,
-            "repair.history",
-            {"previous_actions": _dedupe([*list(history_payload.get("previous_actions") or []), *list(result.actions)])},
-            source_layer="repair",
-            source_module=result.module_name,
-        )
     if result.module_name:
-        write_payload(
-            knowledge,
-            "repair.history",
-            {"previous_modules": _dedupe([*list(history_payload.get("previous_modules") or []), result.module_name])},
-            source_layer="repair",
-            source_module=result.module_name,
-        )
         write_flags(knowledge, "repair.history", [f"already_tried:{result.module_name}"], source_layer="repair", source_module=result.module_name)
     diagnosis = result.diagnosis if isinstance(result.diagnosis, dict) else {}
     for key, namespace in (("patch_facts", "repair.patch_facts"), ("residual_facts", "repair.residual")):

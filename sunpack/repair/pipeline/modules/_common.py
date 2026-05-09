@@ -6,10 +6,12 @@ import json
 from pathlib import Path
 from typing import Any
 
+from sunpack.contracts.archive_knowledge import ArchiveKnowledge
 from sunpack.contracts.archive_state import ArchiveState, PatchOperation, PatchPlan
 from sunpack.repair.job import RepairJob
 from sunpack.repair.result import RepairResult
 from sunpack.repair.runtime_cache import stable_cache_key
+from sunpack.support import archive_knowledge_projection as knowledge_view
 from sunpack.support.archive_state_view import archive_state_from_source_input, archive_state_to_bytes
 
 from sunpack_native import (
@@ -156,13 +158,8 @@ def cached_repair_operation(job: RepairJob, namespace: str, operation: str, para
 
 
 def source_fingerprint_for_job(job: RepairJob) -> dict[str, Any]:
-    if job.archive_state is not None and job.archive_state.patches:
-        return {
-            "kind": "archive_state",
-            "patch_digest": job.archive_state.effective_patch_digest(),
-            "format_hint": job.archive_state.format_hint or job.archive_state.source.format_hint or job.format,
-        }
-    return source_fingerprint(source_input_for_job(job))
+    knowledge = ArchiveKnowledge.from_any(getattr(job, "knowledge", {}))
+    return knowledge_view.source_fingerprint(knowledge)
 
 
 def source_fingerprint(source_input: dict[str, Any]) -> dict[str, Any]:

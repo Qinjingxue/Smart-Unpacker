@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Optional, List
+from typing import Any, Optional, List
 from sunpack.contracts.archive_input import (
     ArchiveDescriptor,
     ArchiveFormatState,
@@ -234,7 +234,12 @@ class ArchiveTask:
         knowledge = merge_knowledge(
             self.fact_bag.get("archive.knowledge"),
             state.knowledge,
-            {"source": {"input": source_input}, "archive": {"state": state.to_dict()}},
+            {
+                "source": {"input": source_input},
+                "archive": {
+                    "state": _archive_state_snapshot(state),
+                },
+            },
         )
         if knowledge:
             state = ArchiveState(
@@ -345,6 +350,13 @@ class ArchiveTask:
             },
         }, source_layer="contracts", source_module="from_fact_bag")
         self.fact_bag.set("archive.knowledge", knowledge.to_dict())
+
+
+def _archive_state_snapshot(state: ArchiveState) -> dict[str, Any]:
+    """Return a JSON-safe state snapshot that cannot recursively embed ArchiveKnowledge."""
+    payload = state.to_dict()
+    payload.pop("knowledge", None)
+    return payload
 
 
 def _dedupe(values: list[str]) -> list[str]:

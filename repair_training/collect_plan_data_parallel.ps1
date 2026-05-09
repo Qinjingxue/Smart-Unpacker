@@ -328,6 +328,8 @@ if ($Scheduling -eq "pool") {
         best_partial_returned_count = 0
         repair_cache_hits = 0
         repair_cache_misses = 0
+        knowledge_projection_cache_hits = 0
+        knowledge_projection_cache_misses = 0
         materialize_cache_hits = 0
         native_operation_cache_hits = 0
         zip_scan_artifact_hits = 0
@@ -335,6 +337,7 @@ if ($Scheduling -eq "pool") {
         expensive_materialization_skipped_count = 0
         materialize_worker_seconds_saved_estimate = 0.0
         repair_cache_by_namespace = @{}
+        knowledge_projection_cache_by_projection = @{}
         materialize_cost_bucket_counts = @{}
         label_counts = @{}
         future_label_counts = @{}
@@ -363,7 +366,7 @@ if ($Scheduling -eq "pool") {
         shards = $summaries
     }
     foreach ($summary in $summaries) {
-        foreach ($name in @("samples", "success_rows", "failure_rows", "timeouts", "failed", "skipped", "state_count", "expanded_state_count", "branch_count", "terminal_success_count", "legacy_module_seen_count", "duplicate_candidate_id_count", "rollout_budget_exhausted", "best_partial_returned_count", "repair_cache_hits", "repair_cache_misses", "materialize_cache_hits", "native_operation_cache_hits", "zip_scan_artifact_hits", "zip_scan_artifact_misses", "expensive_materialization_skipped_count", "route_rejected_by_required_flags", "route_rejected_by_can_handle")) {
+        foreach ($name in @("samples", "success_rows", "failure_rows", "timeouts", "failed", "skipped", "state_count", "expanded_state_count", "branch_count", "terminal_success_count", "legacy_module_seen_count", "duplicate_candidate_id_count", "rollout_budget_exhausted", "best_partial_returned_count", "repair_cache_hits", "repair_cache_misses", "knowledge_projection_cache_hits", "knowledge_projection_cache_misses", "materialize_cache_hits", "native_operation_cache_hits", "zip_scan_artifact_hits", "zip_scan_artifact_misses", "expensive_materialization_skipped_count", "route_rejected_by_required_flags", "route_rejected_by_can_handle")) {
             $aggregate[$name] = [int]$aggregate[$name] + [int]($summary.$name)
         }
         $aggregate["materialize_worker_seconds_saved_estimate"] = [double]$aggregate["materialize_worker_seconds_saved_estimate"] + [double]($summary.materialize_worker_seconds_saved_estimate)
@@ -374,6 +377,14 @@ if ($Scheduling -eq "pool") {
             }
             $aggregate["repair_cache_by_namespace"][$key]["hits"] = [int]$aggregate["repair_cache_by_namespace"][$key]["hits"] + [int]($prop.Value.hits)
             $aggregate["repair_cache_by_namespace"][$key]["misses"] = [int]$aggregate["repair_cache_by_namespace"][$key]["misses"] + [int]($prop.Value.misses)
+        }
+        foreach ($prop in $summary.knowledge_projection_cache_by_projection.PSObject.Properties) {
+            $key = [string]$prop.Name
+            if (-not $aggregate["knowledge_projection_cache_by_projection"].ContainsKey($key)) {
+                $aggregate["knowledge_projection_cache_by_projection"][$key] = @{ hits = 0; misses = 0 }
+            }
+            $aggregate["knowledge_projection_cache_by_projection"][$key]["hits"] = [int]$aggregate["knowledge_projection_cache_by_projection"][$key]["hits"] + [int]($prop.Value.hits)
+            $aggregate["knowledge_projection_cache_by_projection"][$key]["misses"] = [int]$aggregate["knowledge_projection_cache_by_projection"][$key]["misses"] + [int]($prop.Value.misses)
         }
         Add-TrainingCountMap $aggregate["label_counts"] $summary.label_counts
         Add-TrainingCountMap $aggregate["future_label_counts"] $summary.future_label_counts
@@ -554,6 +565,8 @@ $aggregate = [ordered]@{
     best_partial_returned_count = 0
     repair_cache_hits = 0
     repair_cache_misses = 0
+    knowledge_projection_cache_hits = 0
+    knowledge_projection_cache_misses = 0
     materialize_cache_hits = 0
     native_operation_cache_hits = 0
     zip_scan_artifact_hits = 0
@@ -561,6 +574,7 @@ $aggregate = [ordered]@{
     expensive_materialization_skipped_count = 0
     materialize_worker_seconds_saved_estimate = 0.0
     repair_cache_by_namespace = @{}
+    knowledge_projection_cache_by_projection = @{}
     materialize_cost_bucket_counts = @{}
     label_counts = @{}
     future_label_counts = @{}
@@ -589,7 +603,7 @@ $aggregate = [ordered]@{
     shards = $summaries
 }
 foreach ($summary in $summaries) {
-    foreach ($name in @("samples", "success_rows", "failure_rows", "timeouts", "failed", "skipped", "state_count", "expanded_state_count", "branch_count", "terminal_success_count", "legacy_module_seen_count", "duplicate_candidate_id_count", "rollout_budget_exhausted", "best_partial_returned_count", "repair_cache_hits", "repair_cache_misses", "materialize_cache_hits", "native_operation_cache_hits", "zip_scan_artifact_hits", "zip_scan_artifact_misses", "expensive_materialization_skipped_count", "route_rejected_by_required_flags", "route_rejected_by_can_handle")) {
+    foreach ($name in @("samples", "success_rows", "failure_rows", "timeouts", "failed", "skipped", "state_count", "expanded_state_count", "branch_count", "terminal_success_count", "legacy_module_seen_count", "duplicate_candidate_id_count", "rollout_budget_exhausted", "best_partial_returned_count", "repair_cache_hits", "repair_cache_misses", "knowledge_projection_cache_hits", "knowledge_projection_cache_misses", "materialize_cache_hits", "native_operation_cache_hits", "zip_scan_artifact_hits", "zip_scan_artifact_misses", "expensive_materialization_skipped_count", "route_rejected_by_required_flags", "route_rejected_by_can_handle")) {
         $aggregate[$name] = [int]$aggregate[$name] + [int]($summary.$name)
     }
     $aggregate["materialize_worker_seconds_saved_estimate"] = [double]$aggregate["materialize_worker_seconds_saved_estimate"] + [double]($summary.materialize_worker_seconds_saved_estimate)
@@ -600,6 +614,14 @@ foreach ($summary in $summaries) {
         }
         $aggregate["repair_cache_by_namespace"][$key]["hits"] = [int]$aggregate["repair_cache_by_namespace"][$key]["hits"] + [int]($prop.Value.hits)
         $aggregate["repair_cache_by_namespace"][$key]["misses"] = [int]$aggregate["repair_cache_by_namespace"][$key]["misses"] + [int]($prop.Value.misses)
+    }
+    foreach ($prop in $summary.knowledge_projection_cache_by_projection.PSObject.Properties) {
+        $key = [string]$prop.Name
+        if (-not $aggregate["knowledge_projection_cache_by_projection"].ContainsKey($key)) {
+            $aggregate["knowledge_projection_cache_by_projection"][$key] = @{ hits = 0; misses = 0 }
+        }
+        $aggregate["knowledge_projection_cache_by_projection"][$key]["hits"] = [int]$aggregate["knowledge_projection_cache_by_projection"][$key]["hits"] + [int]($prop.Value.hits)
+        $aggregate["knowledge_projection_cache_by_projection"][$key]["misses"] = [int]$aggregate["knowledge_projection_cache_by_projection"][$key]["misses"] + [int]($prop.Value.misses)
     }
     Add-TrainingCountMap $aggregate["label_counts"] $summary.label_counts
     Add-TrainingCountMap $aggregate["future_label_counts"] $summary.future_label_counts

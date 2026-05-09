@@ -22,13 +22,17 @@ def write_relation_task(task: ArchiveTask) -> None:
         "split_missing_reason": str(task.fact_bag.get("relation.split_missing_reason") or ""),
     }
     write_payload(knowledge, "relations", relation_payload, source_layer="relations", source_module="task")
+    source_derivation = _source_derivation_payload(task, relation_payload)
     write_payload(
         knowledge,
         "source.derivation",
-        _source_derivation_payload(task, relation_payload),
+        source_derivation,
         source_layer="relations",
         source_module="task",
     )
+    tags = source_derivation.get("zip_container_tags") if isinstance(source_derivation.get("zip_container_tags"), list) else []
+    if tags:
+        write_payload(knowledge, "format.zip", {"container_tags": tags}, source_layer="relations", source_module="task")
     commit_task_knowledge(task, knowledge)
 
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import asdict, replace
+import os
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +26,7 @@ from sunpack.repair.knowledge import (
 )
 from sunpack.repair.result import RepairResult
 from sunpack.repair.scheduler import RepairScheduler
+from sunpack.support import repair_trace
 from sunpack.support import archive_knowledge_projection as knowledge_view
 from sunpack.verification.result import VerificationResult
 
@@ -63,11 +65,31 @@ class ArchiveRepairStage:
         policy = self.config.get("policy") if isinstance(self.config.get("policy"), dict) else {}
         if not bool(policy.get("disable_beam_when_model_active", True)):
             return False
+        repair_trace.write_probe_event("policy_probe_active_check_start", {
+            "run_id": _policy_probe_run_id(task),
+            "query_id": f"{task.key or task.main_path}:policy_active",
+            "archive": task.main_path,
+            "archive_key": task.key,
+        })
         job = self._job_from_verification_assessment(task, result, verification)
         if job is None:
+            repair_trace.write_probe_event("policy_probe_active_check_done", {
+                "run_id": _policy_probe_run_id(task),
+                "query_id": f"{task.key or task.main_path}:policy_active",
+                "active": False,
+                "reason": "no_job",
+            })
             return False
         active = getattr(self.scheduler, "policy_active_for_job", None)
-        return bool(callable(active) and active(job))
+        result_active = bool(callable(active) and active(job))
+        repair_trace.write_probe_event("policy_probe_active_check_done", {
+            "run_id": _policy_probe_run_id(task),
+            "query_id": f"{task.key or task.main_path}:policy_active",
+            "active": result_active,
+            "format": job.format,
+            "damage_flag_count": len(job.damage_flags or []),
+        })
+        return result_active
 
     def _run_and_apply(self, task: ArchiveTask, job: RepairJob, *, trigger: str) -> RepairResult | None:
         if self.scheduler is None or self._attempts(task) >= self.max_attempts_per_task:
@@ -97,10 +119,30 @@ class ArchiveRepairStage:
         result: ExtractionResult,
         verification: VerificationResult,
     ) -> RepairJob | None:
+        probe_query_id = f"{task.key or task.main_path}:job_from_verification"
+        repair_trace.write_probe_event("policy_probe_job_build_step", {
+            "run_id": _policy_probe_run_id(task),
+            "query_id": probe_query_id,
+            "step": "start",
+            "archive": task.main_path,
+            "archive_key": task.key,
+        })
         source_input = self._source_input_from_task(task)
+        repair_trace.write_probe_event("policy_probe_job_build_step", {
+            "run_id": _policy_probe_run_id(task),
+            "query_id": probe_query_id,
+            "step": "source_input",
+            "source_kind": (source_input or {}).get("kind") if isinstance(source_input, dict) else "",
+        })
         if source_input is None:
             return None
         failure = self._failure_payload(task, result)
+        repair_trace.write_probe_event("policy_probe_job_build_step", {
+            "run_id": _policy_probe_run_id(task),
+            "query_id": probe_query_id,
+            "step": "failure_payload",
+            "failure_kind": failure.get("failure_kind"),
+        })
         repair_hints = _verification_repair_hints(verification)
         if repair_hints:
             _merge_repair_hints_into_failure(failure, repair_hints)
@@ -151,8 +193,26 @@ class ArchiveRepairStage:
         if previous_modules:
             failure["previous_modules"] = previous_modules
         analysis_prepass = self._analysis_prepass(task)
+        repair_trace.write_probe_event("policy_probe_job_build_step", {
+            "run_id": _policy_probe_run_id(task),
+            "query_id": probe_query_id,
+            "step": "analysis_prepass",
+            "prepass_keys": sorted(str(key) for key in analysis_prepass.keys())[:40],
+        })
         analysis_evidence = self._analysis_evidence_from_facts(task)
+        repair_trace.write_probe_event("policy_probe_job_build_step", {
+            "run_id": _policy_probe_run_id(task),
+            "query_id": probe_query_id,
+            "step": "analysis_evidence",
+            "has_evidence": analysis_evidence is not None,
+        })
         repair_history = self._repair_history_payload(task, previous_actions, previous_modules)
+        repair_trace.write_probe_event("policy_probe_job_build_step", {
+            "run_id": _policy_probe_run_id(task),
+            "query_id": probe_query_id,
+            "step": "repair_history",
+            "previous_action_count": len(previous_actions),
+        })
         route_payload = self._zip_runtime_route_payload(
             task,
             source_input=source_input,
@@ -162,15 +222,18 @@ class ArchiveRepairStage:
             extraction_diagnostics=dict(result.diagnostics or {}),
             repair_history=repair_history,
         )
+        repair_trace.write_probe_event("policy_probe_job_build_step", {
+            "run_id": _policy_probe_run_id(task),
+            "query_id": probe_query_id,
+            "step": "route_payload",
+            "route_flag_count": len(route_payload.get("route_evidence_flags") or []),
+        })
         route_flags = [str(item) for item in route_payload.get("route_evidence_flags") or [] if str(item)]
         if route_flags:
             repair_hints = dict(failure.get("repair_hints") or {})
             repair_hints["damage_flags"] = _dedupe([*list(repair_hints.get("damage_flags") or []), *route_flags])
             failure["repair_hints"] = repair_hints
         source_input = dict(route_payload.get("source_input") or source_input)
-        analysis_prepass = self._analysis_prepass_with_zip_route(analysis_prepass, route_payload)
-        analysis_evidence = self._analysis_evidence_with_zip_route(analysis_evidence, route_payload)
-        repair_history = self._repair_history_with_zip_route(repair_history, route_payload)
         damage_flags = _dedupe([
             *self._flags_from_failure_text(result.error),
             *self._flags_from_verification(verification),
@@ -188,13 +251,19 @@ class ArchiveRepairStage:
             "repair_history": repair_history,
             "damage_flags": damage_flags,
         })
+        repair_trace.write_probe_event("policy_probe_job_build_step", {
+            "run_id": _policy_probe_run_id(task),
+            "query_id": probe_query_id,
+            "step": "route_payload_normalized",
+            "damage_flag_count": len(route_payload.get("damage_flags") or []),
+            "route_flag_count": len(route_payload.get("route_evidence_flags") or []),
+        })
         damage_flags = list(route_payload.get("damage_flags") or damage_flags)
         route_flags = [str(item) for item in route_payload.get("route_evidence_flags") or [] if str(item)]
         if route_flags:
             repair_hints = dict(failure.get("repair_hints") or {})
             repair_hints["damage_flags"] = _dedupe([*list(repair_hints.get("damage_flags") or []), *route_flags])
             failure["repair_hints"] = repair_hints
-            repair_history = self._repair_history_with_zip_route(repair_history, route_payload)
         knowledge = self._knowledge_payload(
             task,
             source_input=source_input,
@@ -206,6 +275,17 @@ class ArchiveRepairStage:
             route_payload=route_payload,
             verification=verification,
         )
+        repair_trace.write_probe_event("policy_probe_job_build_step", {
+            "run_id": _policy_probe_run_id(task),
+            "query_id": probe_query_id,
+            "step": "knowledge_payload",
+            "knowledge_keys": sorted(str(key) for key in knowledge.keys())[:40] if isinstance(knowledge, dict) else [],
+        })
+        repair_trace.write_probe_event("policy_probe_job_build_step", {
+            "run_id": _policy_probe_run_id(task),
+            "query_id": probe_query_id,
+            "step": "return",
+        })
         return RepairJob(
             source_input=source_input,
             format=self._format_from_task(task),
@@ -268,9 +348,6 @@ class ArchiveRepairStage:
             "applied_patch_facts": _dedupe(patch_facts),
             "residual_damage_flags": _dedupe(residual_flags),
             "route_evidence_flags": [],
-            "source_derivation": self._source_derivation_from_task(task),
-            "zip_structure_features": self._zip_structure_features_from_task(task),
-            "zip_container_tags": self._zip_container_tags_from_task(task),
         }
 
     def _zip_runtime_route_payload(
@@ -315,35 +392,6 @@ class ArchiveRepairStage:
         output.setdefault("format_hint", self._format_from_task(task))
         return output
 
-    def _analysis_prepass_with_zip_route(self, prepass: dict[str, Any], route_payload: dict[str, Any]) -> dict[str, Any]:
-        output = dict(prepass or {})
-        for key in ("zip_structure_features", "zip_container_tags", "source_derivation", "damage_profile"):
-            value = route_payload.get(key)
-            if value and not output.get(key):
-                output[key] = value
-        if route_payload.get("route_evidence_flags"):
-            output["route_evidence_flags"] = _dedupe([*list(output.get("route_evidence_flags") or []), *list(route_payload.get("route_evidence_flags") or [])])
-        return output
-
-    def _analysis_evidence_with_zip_route(self, evidence: ArchiveFormatEvidence | None, route_payload: dict[str, Any]) -> ArchiveFormatEvidence | None:
-        if evidence is None:
-            return None
-        details = dict(evidence.details or {})
-        for key in ("zip_structure_features", "zip_container_tags", "source_derivation", "damage_profile", "route_evidence_flags"):
-            value = route_payload.get(key)
-            if value and not details.get(key):
-                details[key] = value
-        return replace(evidence, details=details)
-
-    def _repair_history_with_zip_route(self, history: dict[str, Any], route_payload: dict[str, Any]) -> dict[str, Any]:
-        output = dict(history or {})
-        output["route_evidence_flags"] = _dedupe([*list(output.get("route_evidence_flags") or []), *list(route_payload.get("route_evidence_flags") or [])])
-        for key in ("zip_structure_features", "zip_container_tags", "source_derivation"):
-            value = route_payload.get(key)
-            if value and not output.get(key):
-                output[key] = value
-        return output
-
     def _knowledge_payload(
         self,
         task: ArchiveTask,
@@ -373,27 +421,10 @@ class ArchiveRepairStage:
         return knowledge_view.source_derivation(task)
 
     def _zip_structure_features_from_task(self, task: ArchiveTask) -> dict[str, Any]:
-        projected = knowledge_view.zip_structure_features(task)
-        if projected:
-            return projected
-        prepass = self._analysis_prepass(task)
-        if isinstance(prepass.get("zip_structure_features"), dict):
-            return dict(prepass["zip_structure_features"])
-        evidence = self._analysis_evidence_from_facts(task)
-        details = getattr(evidence, "details", {}) if evidence is not None else {}
-        return dict(details.get("zip_structure_features") or {}) if isinstance(details, dict) and isinstance(details.get("zip_structure_features"), dict) else {}
+        return knowledge_view.zip_structure_features(task)
 
     def _zip_container_tags_from_task(self, task: ArchiveTask) -> list[str]:
-        projected = knowledge_view.zip_container_tags(task)
-        if projected:
-            return projected
-        prepass = self._analysis_prepass(task)
-        if isinstance(prepass.get("zip_container_tags"), list):
-            return [str(item) for item in prepass["zip_container_tags"] if str(item)]
-        evidence = self._analysis_evidence_from_facts(task)
-        details = getattr(evidence, "details", {}) if evidence is not None else {}
-        tags = details.get("zip_container_tags") if isinstance(details, dict) else None
-        return [str(item) for item in tags if str(item)] if isinstance(tags, list) else []
+        return knowledge_view.zip_container_tags(task)
 
     def _damage_profile_from_task(self, task: ArchiveTask) -> str:
         return knowledge_view.damage_profile(task)
@@ -717,6 +748,15 @@ def _append_candidate_log_from_result(task: ArchiveTask, result: RepairResult, *
 def _verification_repair_hints(verification: VerificationResult) -> dict[str, Any]:
     hints = getattr(verification, "repair_hints", None)
     return dict(hints) if isinstance(hints, dict) else {}
+
+
+def _policy_probe_run_id(task: ArchiveTask) -> str:
+    return str(
+        os.environ.get("SUNPACK_REPAIR_POLICY_PROBE_RUN_ID")
+        or knowledge_view.sample_id(task)
+        or task.key
+        or task.main_path
+    )
 
 
 def _merge_repair_hints_into_failure(failure: dict[str, Any], hints: dict[str, Any]) -> None:

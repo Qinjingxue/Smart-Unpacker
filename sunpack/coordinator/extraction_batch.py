@@ -657,10 +657,29 @@ class ExtractionBatchRunner:
         result: ExtractionResult,
         verification: VerificationResult,
     ) -> bool:
+        repair_trace.write_probe_event("policy_probe_beam_gate_start", {
+            "run_id": _policy_probe_run_id(task),
+            "query_id": f"{task.key or task.main_path}:beam_gate",
+            "archive": task.main_path,
+            "archive_key": task.key,
+            "decision_hint": getattr(verification, "decision_hint", ""),
+        })
         checker = getattr(self.repair_stage, "policy_active_for_verification", None)
         if not callable(checker):
+            repair_trace.write_probe_event("policy_probe_beam_gate_done", {
+                "run_id": _policy_probe_run_id(task),
+                "query_id": f"{task.key or task.main_path}:beam_gate",
+                "active": False,
+                "reason": "missing_checker",
+            })
             return False
-        return bool(checker(task, result, verification))
+        active = bool(checker(task, result, verification))
+        repair_trace.write_probe_event("policy_probe_beam_gate_done", {
+            "run_id": _policy_probe_run_id(task),
+            "query_id": f"{task.key or task.main_path}:beam_gate",
+            "active": active,
+        })
+        return active
 
     def _repair_after_verification_decision_with_beam(
         self,
@@ -712,8 +731,23 @@ class ExtractionBatchRunner:
         verification: VerificationResult,
         loop_state: RepairLoopState,
     ) -> bool:
+        repair_trace.write_probe_event("policy_probe_scheduler_repair_start", {
+            "run_id": _policy_probe_run_id(task),
+            "query_id": f"{task.key or task.main_path}:scheduler_repair",
+            "archive": task.main_path,
+            "archive_key": task.key,
+            "decision_hint": getattr(verification, "decision_hint", ""),
+        })
         repair_result = self.repair_stage.repair_after_verification_assessment_result(task, result, verification)
-        return bool(loop_state.record_result(repair_result, trigger="verification_policy"))
+        handled = bool(loop_state.record_result(repair_result, trigger="verification_policy"))
+        repair_trace.write_probe_event("policy_probe_scheduler_repair_done", {
+            "run_id": _policy_probe_run_id(task),
+            "query_id": f"{task.key or task.main_path}:scheduler_repair",
+            "handled": handled,
+            "result_status": getattr(repair_result, "status", "") if repair_result is not None else "",
+            "result_module": getattr(repair_result, "module_name", "") if repair_result is not None else "",
+        })
+        return handled
 
     def _repair_after_verification_with_beam(
         self,

@@ -1,7 +1,9 @@
 from dataclasses import dataclass, field
 from typing import Any
 
+from sunpack.contracts.archive_knowledge import ArchiveKnowledge
 from sunpack.repair.job import RepairJob
+from sunpack.support import archive_knowledge_projection as knowledge_view
 
 
 BOUNDARY_FLAGS = {
@@ -92,16 +94,25 @@ class RepairDiagnosis:
 
 def diagnose_repair_job(job: RepairJob) -> RepairDiagnosis:
     evidences = _collect_evidence(job)
-    fmt = _first_text([job.format, *(item.format for item in evidences)])
+    knowledge = ArchiveKnowledge.from_any(job.knowledge)
+    analysis_summary = knowledge_view.analysis_summary(knowledge)
+    source = knowledge_view.source_input(knowledge)
+    fmt = _first_text([
+        str(analysis_summary.get("format") or ""),
+        str(source.get("format_hint") or source.get("format") or ""),
+        *(item.format for item in evidences),
+    ])
     flags = {flag for item in evidences for flag in item.damage_flags}
-    categories = _categories_for(fmt, flags, job.extraction_failure or {})
-    severity = _severity(flags, job.extraction_failure or {}, job.confidence, password=job.password)
+    failure = knowledge_view.extraction_failure(knowledge)
+    categories = _categories_for(fmt, flags, failure)
+    confidence = float(analysis_summary.get("confidence", 0.0) or 0.0)
+    severity = _severity(flags, failure, confidence, password=job.password)
     repairable, unsafe_actions, notes = _repairability(job, flags)
     return RepairDiagnosis(
         format=fmt,
         categories=categories,
         severity=severity,
-        confidence=max([job.confidence, *(item.confidence for item in evidences)] or [0.0]),
+        confidence=max([confidence, *(item.confidence for item in evidences)] or [0.0]),
         start_trusted=any(item.start_trusted for item in evidences) or "start_trusted_only" in flags,
         end_trusted=any(item.end_trusted for item in evidences) and "boundary_unreliable" not in flags,
         repairable=repairable,
@@ -113,45 +124,54 @@ def diagnose_repair_job(job: RepairJob) -> RepairDiagnosis:
 
 def _collect_evidence(job: RepairJob) -> list[DamageEvidence]:
     evidences: list[DamageEvidence] = []
-    if job.analysis_evidence is not None:
-        evidences.append(_analysis_evidence(job))
-    if job.extraction_failure:
-        evidences.append(_extraction_evidence(job))
-    if job.damage_flags and not evidences:
+    knowledge = ArchiveKnowledge.from_any(job.knowledge)
+    analysis_evidences = knowledge_view.analysis_evidences(knowledge)
+    if analysis_evidences:
+        evidences.extend(_analysis_evidence(item, knowledge) for item in analysis_evidences)
+    if knowledge_view.extraction_failure(knowledge):
+        evidences.append(_extraction_evidence(job, knowledge))
+    route_context = knowledge_view.repair_route_context(knowledge)
+    route_flags = list(route_context.get("damage_flags") or route_context.get("route_evidence_flags") or [])
+    if route_flags and not evidences:
+        analysis_summary = knowledge_view.analysis_summary(knowledge)
         evidences.append(DamageEvidence(
-            source="job",
-            format=job.format,
-            confidence=job.confidence,
-            damage_flags=list(job.damage_flags),
+            source="knowledge",
+            format=str(analysis_summary.get("format") or ""),
+            confidence=float(analysis_summary.get("confidence", 0.0) or 0.0),
+            damage_flags=list(route_flags),
         ))
     return evidences
 
 
-def _analysis_evidence(job: RepairJob) -> DamageEvidence:
-    evidence = job.analysis_evidence
-    segments = list(getattr(evidence, "segments", None) or [])
-    flags = list(job.damage_flags)
+def _analysis_evidence(evidence: dict[str, Any], knowledge: ArchiveKnowledge) -> DamageEvidence:
+    segments = list(evidence.get("segments") or [])
+    route_context = knowledge_view.repair_route_context(knowledge)
+    flags = list(route_context.get("damage_flags") or [])
     start_trusted = False
     end_trusted = False
     if segments:
         primary = segments[0]
-        flags.extend(list(getattr(primary, "damage_flags", None) or []))
-        start_trusted = getattr(primary, "start_offset", None) is not None
-        end_trusted = getattr(primary, "end_offset", None) is not None and "boundary_unreliable" not in flags
+        if isinstance(primary, dict):
+            flags.extend(list(primary.get("damage_flags") or []))
+            start_trusted = primary.get("start_offset") is not None
+            end_trusted = primary.get("end_offset") is not None and "boundary_unreliable" not in flags
+    details = evidence.get("details") if isinstance(evidence.get("details"), dict) else {}
     return DamageEvidence(
         source="analysis",
-        format=str(getattr(evidence, "format", "") or job.format),
-        confidence=float(getattr(evidence, "confidence", job.confidence) or 0.0),
+        format=str(evidence.get("format") or knowledge_view.analysis_summary(knowledge).get("format") or ""),
+        confidence=float(evidence.get("confidence", knowledge_view.analysis_summary(knowledge).get("confidence", 0.0)) or 0.0),
         start_trusted=start_trusted,
         end_trusted=end_trusted,
         damage_flags=_dedupe(flags),
-        details={"status": getattr(evidence, "status", "")},
+        details={"status": str(evidence.get("status") or ""), **details},
     )
 
 
-def _extraction_evidence(job: RepairJob) -> DamageEvidence:
-    failure = dict(job.extraction_failure or {})
-    flags = list(job.damage_flags)
+def _extraction_evidence(job: RepairJob, knowledge: ArchiveKnowledge) -> DamageEvidence:
+    failure = knowledge_view.extraction_failure(knowledge)
+    route_context = knowledge_view.repair_route_context(knowledge)
+    analysis_summary = knowledge_view.analysis_summary(knowledge)
+    flags = list(route_context.get("damage_flags") or [])
     if failure.get("checksum_error"):
         flags.append("checksum_error")
     if failure.get("missing_volume"):
@@ -183,8 +203,8 @@ def _extraction_evidence(job: RepairJob) -> DamageEvidence:
         flags.append("process_failure")
     return DamageEvidence(
         source="extraction",
-        format=str(failure.get("archive_type") or failure.get("format") or job.format or ""),
-        confidence=job.confidence,
+        format=str(failure.get("archive_type") or failure.get("format") or analysis_summary.get("format") or ""),
+        confidence=float(analysis_summary.get("confidence", 0.0) or 0.0),
         damage_flags=_dedupe(flags),
         worker_status=str(failure.get("native_status") or failure.get("status") or ""),
         operation_result=failure.get("operation_result"),
