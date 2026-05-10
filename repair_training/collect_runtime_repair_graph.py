@@ -126,6 +126,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-rounds", type=int, default=6)
     parser.add_argument("--max-states", type=int, default=80)
     parser.add_argument("--branch-top-k", type=int, default=5)
+    parser.add_argument("--root-branch-top-k", type=int, default=5)
+    parser.add_argument("--root-complete-explore-all", action="store_true", default=True)
+    parser.add_argument("--no-root-complete-explore-all", dest="root_complete_explore_all", action="store_false")
     parser.add_argument("--materialize-top-k", type=int, default=16)
     parser.add_argument("--hard-negative-backfill-k", type=int, default=3)
     parser.add_argument("--stop-after-complete-with-negatives", action="store_true", default=True)
@@ -377,20 +380,20 @@ class RuntimeRepairGraphCollector:
             root_task = _task_from_record(self.record)
         with self.profiler.phase("analysis_refresh", state_id=f"{self.sample_id}:root"):
             self.analysis_stage.refresh_task_analysis(root_task, phase_timer=self.profiler.phase, phase_prefix="analysis_refresh")
-        frontier = [self._state(root_task, round_index=0, parent_action_row_id="", parent_candidate_id="")]
+        frontier = [self._state(root_task, round_index=0, parent_action_row_id="", parent_candidate_id="", parent_state_id="")]
         expanded = 0
         for round_index in range(max(1, int(self.args.max_rounds or 1))):
             if not frontier or expanded >= int(self.args.max_states or 80):
                 break
             next_frontier: list[dict[str, Any]] = []
             for state in frontier:
-                if self._training_budget_satisfied():
+                if round_index > 0 and self._training_budget_satisfied():
                     break
                 if expanded >= int(self.args.max_states or 80):
                     break
                 expanded += 1
                 next_frontier.extend(self._expand_state(state, round_index))
-                if self._training_budget_satisfied():
+                if round_index > 0 and self._training_budget_satisfied():
                     break
             frontier = next_frontier[: max(1, int(self.args.max_states or 80))]
         with self.profiler.phase("backfill_returns"):
@@ -398,16 +401,35 @@ class RuntimeRepairGraphCollector:
         self._attach_profile_summary()
         return self.rows
 
-    def _state(self, task: ArchiveTask, *, round_index: int, parent_action_row_id: str, parent_candidate_id: str) -> dict[str, Any]:
+    def _state(
+        self,
+        task: ArchiveTask,
+        *,
+        round_index: int,
+        parent_action_row_id: str,
+        parent_candidate_id: str,
+        parent_state_id: str,
+        root_state_id: str = "",
+        root_candidate_id: str = "",
+        root_candidate_rank: int | None = None,
+        path_candidate_ids: list[str] | None = None,
+    ) -> dict[str, Any]:
         self.state_counter += 1
+        state_id = f"{self.sample_id}:s{self.state_counter}"
         parent_path = list(getattr(task, "_runtime_graph_path_signatures", []) or [])
+        candidate_path = list(path_candidate_ids or [])
         return {
-            "state_id": f"{self.sample_id}:s{self.state_counter}",
+            "state_id": state_id,
             "task": task,
             "round": int(round_index),
             "parent_action_row_id": parent_action_row_id,
             "parent_candidate_id": parent_candidate_id,
+            "parent_state_id": parent_state_id,
+            "root_state_id": root_state_id or state_id,
+            "root_candidate_id": root_candidate_id,
+            "root_candidate_rank": root_candidate_rank,
             "path_signatures": parent_path,
+            "path_candidate_ids": candidate_path,
         }
 
     def _expand_state(self, state: dict[str, Any], round_index: int) -> list[dict[str, Any]]:
@@ -525,14 +547,31 @@ class RuntimeRepairGraphCollector:
             child_state = None
             with self.profiler.phase("collect_state_child_state", state_id=str(state["state_id"]), candidate_id=candidate_id):
                 if bool(transition.can_continue_repair) and loop_allows_continue and round_index + 1 < int(self.args.max_rounds or 1):
+                    path_candidate_ids = [*list(state.get("path_candidate_ids") or []), candidate_id]
+                    root_candidate_id = str(state.get("root_candidate_id") or "")
+                    root_candidate_rank = state.get("root_candidate_rank")
+                    if int(round_index) == 0:
+                        root_candidate_id = candidate_id
+                        root_candidate_rank = rank
                     setattr(branch_task, "_runtime_graph_path_signatures", [*list(state.get("path_signatures") or []), _candidate_signature(payload)])
                     child_state = self._state(
                         branch_task,
                         round_index=round_index + 1,
                         parent_action_row_id=action_row_id,
                         parent_candidate_id=candidate_id,
+                        parent_state_id=str(state["state_id"]),
+                        root_state_id=str(state.get("root_state_id") or state["state_id"]),
+                        root_candidate_id=root_candidate_id,
+                        root_candidate_rank=int(root_candidate_rank) if root_candidate_rank is not None else None,
+                        path_candidate_ids=path_candidate_ids,
                     )
                 next_state_id = str(child_state.get("state_id") or "") if child_state is not None else ""
+                path_candidate_ids_for_row = [*list(state.get("path_candidate_ids") or []), candidate_id]
+                root_candidate_id_for_row = str(state.get("root_candidate_id") or "")
+                root_candidate_rank_for_row = state.get("root_candidate_rank")
+                if int(round_index) == 0:
+                    root_candidate_id_for_row = candidate_id
+                    root_candidate_rank_for_row = rank
             with self.profiler.phase("collect_state_build_action_row", state_id=str(state["state_id"]), candidate_id=candidate_id):
                 row = {
                     "row_type": "action",
@@ -540,10 +579,17 @@ class RuntimeRepairGraphCollector:
                     "sample_id": self.sample_id,
                     "episode_id": self.sample_id,
                     "state_id": state["state_id"],
+                    "root_state_id": state.get("root_state_id") or state["state_id"],
+                    "parent_state_id": state.get("parent_state_id") or "",
                     "query_id": query_id,
                     "round": int(round_index),
+                    "path_depth": int(round_index),
                     "action_row_id": action_row_id,
                     "candidate_id": candidate_id,
+                    "path_candidate_ids": path_candidate_ids_for_row,
+                    "root_candidate_id": root_candidate_id_for_row,
+                    "root_candidate_rank": root_candidate_rank_for_row,
+                    "root_action": int(round_index) == 0,
                     "candidate_id_collision_count": collision_count,
                     "candidate_set_hash": candidate_set_hash,
                     "strategy": strategy_decision.mode,
@@ -551,7 +597,7 @@ class RuntimeRepairGraphCollector:
                     "current_rank": rank,
                     "branchable": True,
                     "explored": True,
-                    "selected": rank == 0,
+                    "selected": candidate_id in selected_ids,
                     "material_format": self.fmt,
                     "module": payload.get("module_name") or payload.get("module"),
                     "module_name": payload.get("module_name") or payload.get("module"),
@@ -563,6 +609,7 @@ class RuntimeRepairGraphCollector:
                     "recovery_ratio": float(oracle.get("completeness", 0.0) or 0.0),
                     "terminal_status": terminal_status,
                     "next_state_id": next_state_id,
+                    "child_state_id": next_state_id,
                     "parent_action_row_id": state.get("parent_action_row_id") or "",
                     "parent_candidate_id": state.get("parent_candidate_id") or "",
                     "runtime_verification": _verification_payload(transition.verification),
@@ -580,9 +627,16 @@ class RuntimeRepairGraphCollector:
                         "reward": float(oracle.get("completeness", 0.0) or 0.0),
                         "done": not bool(transition.can_continue_repair and loop_allows_continue),
                         "next_state_id": next_state_id,
+                        "child_state_id": next_state_id,
                         "terminal_reward": float(oracle.get("completeness", 0.0) or 0.0),
                         "future_return": float(oracle.get("completeness", 0.0) or 0.0),
                         "single_path_robust_return": float(oracle.get("completeness", 0.0) or 0.0),
+                        "sequence_terminal_status": terminal_status,
+                        "sequence_repeated_action": "repeated_repair_action" in str(terminal_status).lower(),
+                        "sequence_repeated_input": "repeated_repair_input" in str(terminal_status).lower(),
+                        "sequence_no_candidate": "no_candidates" in str(terminal_status).lower() or "unrepairable" in str(terminal_status).lower(),
+                        "sequence_zero_recovery": float(oracle.get("completeness", 0.0) or 0.0) <= 0.0,
+                        "sequence_partial_regression": False,
                     },
                 }
             with self.profiler.phase("collect_state_append_action_row", state_id=str(state["state_id"]), candidate_id=candidate_id):
@@ -590,7 +644,7 @@ class RuntimeRepairGraphCollector:
             with self.profiler.phase("collect_state_append_child_state", state_id=str(state["state_id"]), candidate_id=candidate_id):
                 if child_state is not None:
                     next_states.append(child_state)
-        return next_states[: max(1, int(self.args.branch_top_k or 1))]
+        return next_states[: self._state_frontier_limit(round_index)]
 
     def _strategy_decision_for_state(self, state: dict[str, Any], payloads: list[dict[str, Any]]) -> RepairRuntimeStrategyDecision:
         path = list(state.get("path_signatures") or [])
@@ -624,6 +678,24 @@ class RuntimeRepairGraphCollector:
                     "path": path,
                 },
             )
+        if int(state.get("round", 0) or 0) == 0:
+            limit = max(1, int(getattr(self.args, "root_branch_top_k", 5) or 5))
+            selected = [
+                str(item.get("candidate_id") or "")
+                for item in list(payloads or [])[:limit]
+                if str(item.get("candidate_id") or "")
+            ]
+            return RepairRuntimeStrategyDecision(
+                mode="training_root_exhaustive",
+                selected_candidate_ids=selected,
+                beam_enabled=False,
+                metadata={
+                    "state_id": state.get("state_id"),
+                    "candidate_count": len(payloads or []),
+                    "root_branch_top_k": limit,
+                    "root_complete_explore_all": bool(getattr(self.args, "root_complete_explore_all", True)),
+                },
+            )
         decision = self.strategy.choose(state_id=str(state["state_id"]), candidate_payloads=payloads, context={"sample_id": self.sample_id})
         target_negatives = max(0, int(getattr(self.args, "target_negative_per_positive", 3) or 0))
         extra = max(0, int(getattr(self.args, "hard_negative_backfill_k", 0) or 0))
@@ -653,6 +725,11 @@ class RuntimeRepairGraphCollector:
             beam_enabled=decision.beam_enabled,
             metadata=metadata,
         )
+
+    def _state_frontier_limit(self, round_index: int) -> int:
+        if int(round_index) == 0:
+            return max(1, int(getattr(self.args, "root_branch_top_k", 5) or 5))
+        return max(1, int(self.args.branch_top_k or 1))
 
     def _terminal_row_for_task(self, state: dict[str, Any], status: str, verification, task: ArchiveTask) -> dict[str, Any]:
         oracle = None
@@ -828,7 +905,16 @@ def _terminal_row(record: dict[str, Any], state: dict[str, Any], status: str, ve
         "sample_id": record.get("sample_id"),
         "episode_id": record.get("sample_id"),
         "state_id": state.get("state_id"),
+        "root_state_id": state.get("root_state_id") or state.get("state_id"),
+        "parent_state_id": state.get("parent_state_id") or "",
         "round": state.get("round"),
+        "path_depth": state.get("round"),
+        "path_candidate_ids": list(state.get("path_candidate_ids") or []),
+        "root_candidate_id": state.get("root_candidate_id") or "",
+        "root_candidate_rank": state.get("root_candidate_rank"),
+        "root_action": False,
+        "parent_action_row_id": state.get("parent_action_row_id") or "",
+        "parent_candidate_id": state.get("parent_candidate_id") or "",
         "terminal_status": status,
         "material_format": _record_format(record),
         "runtime_verification": _verification_payload(verification),
@@ -866,39 +952,102 @@ def _terminal_row(record: dict[str, Any], state: dict[str, Any], status: str, ve
 
 def _backfill_runtime_returns(rows: list[dict[str, Any]], discount: float) -> None:
     by_state: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    terminal_by_state: dict[str, tuple[float, str]] = {}
     for row in rows:
         if row.get("row_type") == "action":
             by_state[str(row.get("state_id") or "")].append(row)
+        elif row.get("row_type") == "terminal":
+            state_id = str(row.get("state_id") or "")
+            recovery = float(row.get("terminal_recovery_ratio", row.get("recovery_ratio", 0.0)) or 0.0)
+            status = str(row.get("terminal_status") or "")
+            current = terminal_by_state.get(state_id)
+            if current is None or recovery > current[0]:
+                terminal_by_state[state_id] = (recovery, status)
 
-    memo: dict[str, float] = {}
+    memo: dict[str, dict[str, Any]] = {}
 
-    def best_return(state_id: str) -> float:
+    def best_info(state_id: str) -> dict[str, Any]:
         if state_id in memo:
             return memo[state_id]
-        best = 0.0
+        terminal = terminal_by_state.get(state_id)
+        best: dict[str, Any] = {
+            "value": float(terminal[0]) if terminal else 0.0,
+            "terminal_status": str(terminal[1]) if terminal else "",
+            "best_path": [],
+        }
         for row in by_state.get(state_id, []):
+            if row.get("explored") is False:
+                continue
             immediate = float(row.get("recovery_ratio", 0.0) or 0.0)
             next_state = str(row.get("next_state_id") or "")
-            future = best_return(next_state) if next_state else 0.0
-            value = max(immediate, float(discount) * future)
-            best = max(best, value)
+            child = best_info(next_state) if next_state else {"value": 0.0, "terminal_status": "", "best_path": []}
+            discounted_future = float(discount) * float(child.get("value", 0.0) or 0.0)
+            if immediate > discounted_future or not child.get("best_path"):
+                value = immediate
+                terminal_status = str(row.get("terminal_status") or "")
+                best_path = [str(row.get("candidate_id") or "")]
+            else:
+                value = discounted_future
+                terminal_status = str(child.get("terminal_status") or row.get("terminal_status") or "")
+                best_path = [str(row.get("candidate_id") or ""), *list(child.get("best_path") or [])]
+            if value > float(best.get("value", 0.0) or 0.0):
+                best = {
+                    "value": value,
+                    "terminal_status": terminal_status,
+                    "best_path": [item for item in best_path if item],
+                }
         memo[state_id] = best
         return best
 
     for state_id in list(by_state):
-        best_return(state_id)
+        best_info(state_id)
+    root_return_by_candidate: dict[tuple[str, str], dict[str, Any]] = {}
     for row in rows:
         if row.get("row_type") != "action":
             continue
+        if row.get("explored") is False:
+            continue
         immediate = float(row.get("recovery_ratio", 0.0) or 0.0)
         next_state = str(row.get("next_state_id") or "")
-        future = best_return(next_state) if next_state else 0.0
+        child = best_info(next_state) if next_state else {"value": 0.0, "terminal_status": "", "best_path": []}
+        future = float(child.get("value", 0.0) or 0.0)
         value = max(immediate, float(discount) * future)
+        if immediate > float(discount) * future or not child.get("best_path"):
+            subtree_status = str(row.get("terminal_status") or "")
+            subtree_path = [str(row.get("candidate_id") or "")]
+        else:
+            subtree_status = str(child.get("terminal_status") or row.get("terminal_status") or "")
+            subtree_path = [str(row.get("candidate_id") or ""), *list(child.get("best_path") or [])]
+        root_state_id = str(row.get("root_state_id") or row.get("state_id") or "")
+        root_candidate_id = str(row.get("root_candidate_id") or row.get("candidate_id") or "")
+        if root_state_id and root_candidate_id and row.get("root_action"):
+            root_return_by_candidate[(root_state_id, root_candidate_id)] = {
+                "value": value,
+                "terminal_status": subtree_status,
+                "best_path": [item for item in subtree_path if item],
+            }
         row["terminal_recovery_ratio"] = immediate
         if isinstance(row.get("rl"), dict):
             row["rl"]["future_return"] = value
             row["rl"]["single_path_robust_return"] = value
             row["rl"]["terminal_reward"] = immediate
+            row["rl"]["subtree_oracle_return"] = value
+            row["rl"]["subtree_terminal_status"] = subtree_status
+            row["rl"]["subtree_best_path"] = [item for item in subtree_path if item]
+            state_terminal = terminal_by_state.get(str(row.get("state_id") or ""))
+            current_state_recovery = float(state_terminal[0]) if state_terminal else 0.0
+            row["rl"]["transition_value_delta"] = value - current_state_recovery
+    for row in rows:
+        if row.get("row_type") != "action" or row.get("explored") is False:
+            continue
+        root_state_id = str(row.get("root_state_id") or row.get("state_id") or "")
+        root_candidate_id = str(row.get("root_candidate_id") or row.get("candidate_id") or "")
+        root_info = root_return_by_candidate.get((root_state_id, root_candidate_id))
+        if not root_info or not isinstance(row.get("rl"), dict):
+            continue
+        row["rl"]["root_candidate_return"] = float(root_info.get("value", 0.0) or 0.0)
+        row["rl"]["root_candidate_terminal_status"] = str(root_info.get("terminal_status") or "")
+        row["rl"]["root_candidate_best_path"] = list(root_info.get("best_path") or [])
 
 
 def _unexplored_action_row(
@@ -920,10 +1069,17 @@ def _unexplored_action_row(
         "sample_id": record.get("sample_id"),
         "episode_id": record.get("sample_id"),
         "state_id": state.get("state_id"),
+        "root_state_id": state.get("root_state_id") or state.get("state_id"),
+        "parent_state_id": state.get("parent_state_id") or "",
         "query_id": query_id,
         "round": int(round_index),
+        "path_depth": int(round_index),
         "action_row_id": f"{query_id}|{rank}|{candidate_id}",
         "candidate_id": candidate_id,
+        "path_candidate_ids": [*list(state.get("path_candidate_ids") or []), candidate_id],
+        "root_candidate_id": candidate_id if int(round_index) == 0 else str(state.get("root_candidate_id") or ""),
+        "root_candidate_rank": rank if int(round_index) == 0 else state.get("root_candidate_rank"),
+        "root_action": int(round_index) == 0,
         "candidate_id_collision_count": collision_count,
         "candidate_set_hash": candidate_set_hash,
         "strategy": strategy_decision.mode,
@@ -940,6 +1096,8 @@ def _unexplored_action_row(
         "native_target": payload.get("native_target"),
         "candidate_status": payload.get("candidate_status"),
         "terminal_status": "not_explored",
+        "child_state_id": "",
+        "next_state_id": "",
         "parent_action_row_id": state.get("parent_action_row_id") or "",
         "parent_candidate_id": state.get("parent_candidate_id") or "",
         "stable_features": {
@@ -1128,6 +1286,17 @@ def _accumulate_summary(summary: dict[str, Any], rows: list[dict[str, Any]], sam
         if row.get("label") is not None:
             key = str(row.get("label"))
             summary["label_counts"][key] = int(summary["label_counts"].get(key, 0) or 0) + 1
+        if int(row.get("round", -1) or -1) == 0 and row.get("row_type") == "action":
+            if bool(row.get("root_action")):
+                summary["root_action_row_count"] = int(summary.get("root_action_row_count", 0) or 0) + 1
+            if row.get("explored") is True:
+                summary["root_explored_action_count"] = int(summary.get("root_explored_action_count", 0) or 0) + 1
+            elif row.get("explored") is False:
+                summary["root_unexplored_candidate_count"] = int(summary.get("root_unexplored_candidate_count", 0) or 0) + 1
+            if _safe_int(row.get("current_rank"), 999) < 5:
+                summary["root_top5_candidate_count"] = int(summary.get("root_top5_candidate_count", 0) or 0) + 1
+                if row.get("explored") is True:
+                    summary["root_top5_explored_count"] = int(summary.get("root_top5_explored_count", 0) or 0) + 1
         summary["candidate_id_collision_count"] = int(summary.get("candidate_id_collision_count", 0) or 0) + int(row.get("candidate_id_collision_count", 0) or 0)
         phase_seconds = row.get("collector_phase_seconds") if isinstance(row.get("collector_phase_seconds"), dict) else {}
         phase_counts = row.get("collector_phase_counts") if isinstance(row.get("collector_phase_counts"), dict) else {}
@@ -1187,6 +1356,15 @@ def _merge_projection_cache_stats(summary: dict[str, Any], stats: dict[str, Any]
 def _safe_name(value: str) -> str:
     text = "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "_" for ch in str(value or "sample"))
     return text[:120] or "sample"
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        if value is None or value == "":
+            return int(default)
+        return int(value)
+    except Exception:
+        return int(default)
 
 
 def _dedupe(values: list[str]) -> list[str]:
