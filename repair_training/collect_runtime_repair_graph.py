@@ -127,6 +127,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-states", type=int, default=80)
     parser.add_argument("--branch-top-k", type=int, default=5)
     parser.add_argument("--materialize-top-k", type=int, default=16)
+    parser.add_argument("--hard-negative-backfill-k", type=int, default=3)
+    parser.add_argument("--stop-after-complete-with-negatives", action="store_true", default=True)
+    parser.add_argument("--no-stop-after-complete-with-negatives", dest="stop_after_complete_with_negatives", action="store_false")
+    parser.add_argument("--target-negative-per-positive", type=int, default=3)
+    parser.add_argument("--max-positive-actions-per-sample", type=int, default=4)
     parser.add_argument("--path-filter-json", default="", help="Optional sample_id -> candidate signature path map; when set, collect only those runtime paths.")
     parser.add_argument("--case-timeout-seconds", type=float, default=60.0)
     parser.add_argument("--debug-events-output", default="")
@@ -361,6 +366,8 @@ class RuntimeRepairGraphCollector:
         self.rows: list[dict[str, Any]] = []
         self.state_counter = 0
         self.profiler = _CollectorProfiler(args, self.sample_id)
+        self.explored_positive_actions = 0
+        self.explored_negative_actions = 0
 
     def collect(self) -> list[dict[str, Any]]:
         shutil.rmtree(self.workspace, ignore_errors=True)
@@ -377,10 +384,14 @@ class RuntimeRepairGraphCollector:
                 break
             next_frontier: list[dict[str, Any]] = []
             for state in frontier:
+                if self._training_budget_satisfied():
+                    break
                 if expanded >= int(self.args.max_states or 80):
                     break
                 expanded += 1
                 next_frontier.extend(self._expand_state(state, round_index))
+                if self._training_budget_satisfied():
+                    break
             frontier = next_frontier[: max(1, int(self.args.max_states or 80))]
         with self.profiler.phase("backfill_returns"):
             _backfill_runtime_returns(self.rows, float(self.args.future_label_discount or 0.8))
@@ -410,19 +421,19 @@ class RuntimeRepairGraphCollector:
             verification = self.verifier.verify(task, extraction, phase_timer=self.profiler.phase, phase_prefix="verify_initial")
             verification = RepairRuntimeTransitionEvaluator.normalize_transition_verification(extraction, verification)
         if verification.decision_hint == DECISION_ACCEPT:
-            self.rows.append(_terminal_row(self.record, state, "complete", verification))
+            self._append_terminal_row(state, "complete", verification, task)
             return []
         if verification.decision_hint != DECISION_REPAIR:
-            self.rows.append(_terminal_row(self.record, state, str(verification.decision_hint or verification.assessment_status or "terminal"), verification))
+            self._append_terminal_row(state, str(verification.decision_hint or verification.assessment_status or "terminal"), verification, task)
             return []
         loop_state = RepairLoopState(task, self.loop_limits)
         if not loop_state.can_attempt(trigger="verification"):
-            self.rows.append(_terminal_row(self.record, state, str(loop_state.terminal_reason or "repair_loop_stopped"), verification))
+            self._append_terminal_row(state, str(loop_state.terminal_reason or "repair_loop_stopped"), verification, task)
             return []
         with self.profiler.phase("build_repair_job", state_id=str(state["state_id"])):
             job = self.repair_stage._job_from_verification_assessment(task, extraction, verification, phase_timer=self.profiler.phase, phase_prefix="build_repair_job")  # noqa: SLF001
         if job is None or self.repair_stage.scheduler is None:
-            self.rows.append(_terminal_row(self.record, state, "no_repair_job", verification))
+            self._append_terminal_row(state, "no_repair_job", verification, task)
             return []
         with self.profiler.phase("generate_candidates", state_id=str(state["state_id"])):
             batch = self.repair_stage.scheduler.generate_repair_candidates(job)
@@ -430,7 +441,7 @@ class RuntimeRepairGraphCollector:
             terminal_status = "no_candidates"
             if batch.terminal_result is not None:
                 terminal_status = str(getattr(batch.terminal_result, "status", "") or "repair_terminal")
-            row = _terminal_row(self.record, state, terminal_status, verification)
+            row = self._terminal_row_for_task(state, terminal_status, verification, task)
             row["debug_damage_flags"] = list(job.damage_flags or [])
             row["debug_job_format"] = job.format
             row["debug_route_evidence_flags"] = list((knowledge_view.repair_route_context(job.knowledge) or {}).get("route_evidence_flags") or [])
@@ -442,7 +453,7 @@ class RuntimeRepairGraphCollector:
         with self.profiler.phase("materialize_candidates", state_id=str(state["state_id"])):
             candidates = self._runtime_candidates(batch.candidates)
         if not candidates:
-            row = _terminal_row(self.record, state, "no_materialized_candidates", verification)
+            row = self._terminal_row_for_task(state, "no_materialized_candidates", verification, task)
             row["debug_candidate_count"] = len(batch.candidates)
             row["debug_damage_flags"] = list(job.damage_flags or [])
             self.rows.append(row)
@@ -510,6 +521,7 @@ class RuntimeRepairGraphCollector:
                 terminal_status = _transition_terminal_status(transition, oracle)
                 if bool(transition.can_continue_repair) and not loop_allows_continue:
                     terminal_status = str(branch_loop_state.terminal_reason or "repair_loop_stopped")
+                self._record_explored_label(oracle)
             child_state = None
             with self.profiler.phase("collect_state_child_state", state_id=str(state["state_id"]), candidate_id=candidate_id):
                 if bool(transition.can_continue_repair) and loop_allows_continue and round_index + 1 < int(self.args.max_rounds or 1):
@@ -612,7 +624,67 @@ class RuntimeRepairGraphCollector:
                     "path": path,
                 },
             )
-        return self.strategy.choose(state_id=str(state["state_id"]), candidate_payloads=payloads, context={"sample_id": self.sample_id})
+        decision = self.strategy.choose(state_id=str(state["state_id"]), candidate_payloads=payloads, context={"sample_id": self.sample_id})
+        target_negatives = max(0, int(getattr(self.args, "target_negative_per_positive", 3) or 0))
+        extra = max(0, int(getattr(self.args, "hard_negative_backfill_k", 0) or 0))
+        if self.explored_positive_actions >= 1 and self.explored_negative_actions < target_negatives:
+            extra = max(extra, len(payloads))
+        if extra <= 0 or not payloads:
+            return decision
+        selected = [str(item) for item in decision.selected_candidate_ids if str(item)]
+        selected_set = set(selected)
+        tail: list[str] = []
+        for payload in reversed(payloads):
+            candidate_id = str(payload.get("candidate_id") or "")
+            if not candidate_id or candidate_id in selected_set:
+                continue
+            tail.append(candidate_id)
+            selected_set.add(candidate_id)
+            if len(tail) >= extra:
+                break
+        if not tail:
+            return decision
+        metadata = dict(decision.metadata or {})
+        metadata["hard_negative_backfill_k"] = extra
+        metadata["hard_negative_backfill_selected"] = len(tail)
+        return RepairRuntimeStrategyDecision(
+            mode=f"{decision.mode}+hard_negative_backfill",
+            selected_candidate_ids=[*selected, *tail],
+            beam_enabled=decision.beam_enabled,
+            metadata=metadata,
+        )
+
+    def _terminal_row_for_task(self, state: dict[str, Any], status: str, verification, task: ArchiveTask) -> dict[str, Any]:
+        oracle = None
+        with self.profiler.phase("terminal_oracle_verify", state_id=str(state.get("state_id") or "")):
+            archive_path = _archive_path_for_oracle(task, self.fmt)
+            if archive_path:
+                oracle = _verify_output_against_oracle(
+                    Path(archive_path),
+                    self.fmt,
+                    self.record.get("oracle") if isinstance(self.record.get("oracle"), dict) else {},
+                )
+        return _terminal_row(self.record, state, status, verification, oracle=oracle)
+
+    def _append_terminal_row(self, state: dict[str, Any], status: str, verification, task: ArchiveTask) -> None:
+        self.rows.append(self._terminal_row_for_task(state, status, verification, task))
+
+    def _record_explored_label(self, oracle: dict[str, Any]) -> None:
+        recovery = float(oracle.get("completeness", 0.0) or 0.0)
+        label = int(oracle.get("label", 0) or 0)
+        if label >= 3 or recovery >= 0.999:
+            self.explored_positive_actions += 1
+        else:
+            self.explored_negative_actions += 1
+
+    def _training_budget_satisfied(self) -> bool:
+        if not bool(getattr(self.args, "stop_after_complete_with_negatives", True)):
+            return False
+        target = max(0, int(getattr(self.args, "target_negative_per_positive", 3) or 0))
+        if self.explored_positive_actions >= 1 and self.explored_negative_actions >= target:
+            return True
+        positive_cap = max(0, int(getattr(self.args, "max_positive_actions_per_sample", 4) or 0))
+        return bool(positive_cap > 0 and self.explored_positive_actions >= positive_cap)
 
     def _runtime_candidates(self, candidates):
         materialized = materialize_candidates(list(candidates))
@@ -745,8 +817,12 @@ def _transition_terminal_status(transition, oracle: dict[str, Any]) -> str:
     return str(transition.terminal_reason or "terminal")
 
 
-def _terminal_row(record: dict[str, Any], state: dict[str, Any], status: str, verification) -> dict[str, Any]:
-    return {
+def _terminal_row(record: dict[str, Any], state: dict[str, Any], status: str, verification, *, oracle: dict[str, Any] | None = None) -> dict[str, Any]:
+    oracle = oracle if isinstance(oracle, dict) else None
+    recovery = float((oracle or {}).get("completeness", getattr(verification, "completeness", 0.0)) or 0.0)
+    label = int((oracle or {}).get("label", 3 if recovery >= 0.999 else (1 if recovery > 0 else 0)) or 0)
+    label_status = str((oracle or {}).get("status") or status or "")
+    row = {
         "row_type": "terminal",
         "collector": "runtime_repair_graph",
         "sample_id": record.get("sample_id"),
@@ -756,7 +832,36 @@ def _terminal_row(record: dict[str, Any], state: dict[str, Any], status: str, ve
         "terminal_status": status,
         "material_format": _record_format(record),
         "runtime_verification": _verification_payload(verification),
+        "label": label,
+        "label_status": label_status,
+        "recovery_ratio": recovery,
+        "terminal_recovery_ratio": recovery,
+        "terminal_recovery_ratio_source": "oracle" if oracle is not None else "runtime_verification",
+        "rl": {
+            "reward": recovery,
+            "done": True,
+            "terminal_reward": recovery,
+            "future_return": recovery,
+            "single_path_robust_return": recovery,
+        },
     }
+    if oracle is not None:
+        row["terminal_oracle"] = {
+            key: value
+            for key, value in oracle.items()
+            if key
+            in {
+                "status",
+                "label",
+                "completeness",
+                "matched_files",
+                "wrong_files",
+                "unreadable_files",
+                "entry_count",
+                "expected_files",
+            }
+        }
+    return row
 
 
 def _backfill_runtime_returns(rows: list[dict[str, Any]], discount: float) -> None:

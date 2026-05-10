@@ -137,7 +137,9 @@ def _load_rows(paths: list[Path]) -> list[dict[str, Any]]:
 
 def _feature_dict(row: dict[str, Any], view: str) -> dict[str, Any]:
     rl = row.get("rl") if isinstance(row.get("rl"), dict) else {}
-    state_features = rl.get("state_features") if isinstance(rl.get("state_features"), dict) else {}
+    stable = row.get("stable_features") if isinstance(row.get("stable_features"), dict) else {}
+    runtime_context = stable.get("runtime_context") if isinstance(stable.get("runtime_context"), dict) else {}
+    candidate_proposal = stable.get("candidate_proposal") if isinstance(stable.get("candidate_proposal"), dict) else {}
     action_features = rl.get("action_features") if isinstance(rl.get("action_features"), dict) else {}
     output: dict[str, Any] = {
         "feature_contract_version": FEATURE_CONTRACT_VERSION,
@@ -147,10 +149,9 @@ def _feature_dict(row: dict[str, Any], view: str) -> dict[str, Any]:
         "top.current_rank": int(row.get("current_rank", 0) or 0),
         "top.branchable": bool(row.get("branchable")),
     }
-    _flatten(output, "state", state_features.get("runtime_context") if isinstance(state_features.get("runtime_context"), dict) else {})
-    _flatten(output, "candidate", action_features.get("candidate_proposal") if isinstance(action_features.get("candidate_proposal"), dict) else {})
+    _flatten(output, "state", runtime_context)
+    _flatten(output, "candidate", candidate_proposal)
     if view == "runtime_plus_candidate_native_facts":
-        stable = row.get("stable_features") if isinstance(row.get("stable_features"), dict) else {}
         _flatten(output, "candidate_native", stable.get("candidate") if isinstance(stable.get("candidate"), dict) else {})
     if view in {"runtime_plus_repair_prior", "runtime_plus_candidate_native_facts"}:
         _flatten(output, "repair_prior", action_features.get("repair_prior_features") if isinstance(action_features.get("repair_prior_features"), dict) else {})
