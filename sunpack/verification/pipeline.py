@@ -479,11 +479,15 @@ def _decision_hint(
         and output_confidence >= 0.5
         and completeness >= complete_accept_threshold
     )
+    output_partial_acceptable = output_quality_score >= partial_accept_threshold and output_confidence >= 0.35
     if DECISION_ACCEPT_PARTIAL in decision_hints and source_integrity in {
         SOURCE_INTEGRITY_TRUNCATED,
         SOURCE_INTEGRITY_PAYLOAD_DAMAGED,
         SOURCE_INTEGRITY_DAMAGED,
-    } and completeness >= partial_accept_threshold and completeness >= min(0.999, recoverable_upper_bound):
+    } and (
+        (completeness >= partial_accept_threshold and completeness >= min(0.999, recoverable_upper_bound))
+        or output_partial_acceptable
+    ):
         return DECISION_ACCEPT_PARTIAL
     if (
         assessment_status == ASSESSMENT_COMPLETE
@@ -496,7 +500,7 @@ def _decision_hint(
         SOURCE_INTEGRITY_PAYLOAD_DAMAGED,
         SOURCE_INTEGRITY_DAMAGED,
     }:
-        if high_output_quality:
+        if high_output_quality or output_partial_acceptable:
             return DECISION_ACCEPT_PARTIAL
         return DECISION_REPAIR
     for decision in (DECISION_REPAIR, DECISION_RETRY_EXTRACT, DECISION_ACCEPT_PARTIAL, DECISION_ACCEPT):
@@ -506,7 +510,10 @@ def _decision_hint(
         SOURCE_INTEGRITY_TRUNCATED,
         SOURCE_INTEGRITY_PAYLOAD_DAMAGED,
         SOURCE_INTEGRITY_DAMAGED,
-    } and completeness >= partial_accept_threshold and completeness >= min(0.999, recoverable_upper_bound):
+    } and (
+        (completeness >= partial_accept_threshold and completeness >= min(0.999, recoverable_upper_bound))
+        or output_partial_acceptable
+    ):
         return DECISION_ACCEPT_PARTIAL
     if assessment_status in {ASSESSMENT_PARTIAL, ASSESSMENT_INCONSISTENT}:
         return DECISION_REPAIR

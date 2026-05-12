@@ -52,8 +52,15 @@ def compute_output_quality(
             failed_ratio = max(failed_ratio, coverage_failed)
             confidence = max(confidence, coverage_confidence)
 
+    presence_score = 0.82 if total_bytes > 0 else 0.45
+    if file_count > 1:
+        presence_score = min(0.9, presence_score + 0.04)
+    presence_score *= 1.0 - min(0.3, failed_ratio * 0.15)
     byte_presence_bonus = 0.05 if total_bytes > 0 else 0.0
-    score = _clamp01(complete_ratio + byte_presence_bonus - failed_ratio * 0.25)
+    score = max(
+        presence_score,
+        _clamp01(complete_ratio + byte_presence_bonus - failed_ratio * 0.25),
+    )
     return OutputQuality(
         score=score,
         file_count=file_count,

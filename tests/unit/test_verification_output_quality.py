@@ -66,6 +66,19 @@ def test_output_quality_uses_archive_coverage_when_observations_missing(tmp_path
     assert quality.confidence == pytest.approx(0.95)
 
 
+def test_output_quality_keeps_value_for_large_failed_output(tmp_path):
+    (tmp_path / "song.mp3").write_bytes(b"x" * 4096)
+    observations = [
+        FileVerificationObservation(path="song.mp3", state="failed", bytes_written=4096, expected_size=4096)
+    ]
+
+    quality = compute_output_quality(SimpleNamespace(output_dir=str(tmp_path)), observations)
+
+    assert quality.score > 0.6
+    assert quality.failed_ratio == pytest.approx(1.0)
+    assert quality.file_count == 1
+
+
 def test_complete_but_damaged_source_with_high_output_quality_accepts_partial():
     decision = _decision_hint(
         assessment_status=ASSESSMENT_COMPLETE,
@@ -96,3 +109,35 @@ def test_complete_but_damaged_source_with_low_output_quality_still_repairs():
     )
 
     assert decision == DECISION_REPAIR
+
+
+def test_partial_damaged_source_with_output_quality_accepts_partial():
+    decision = _decision_hint(
+        assessment_status="partial",
+        source_integrity=SOURCE_INTEGRITY_DAMAGED,
+        completeness=0.0,
+        recoverable_upper_bound=1.0,
+        decision_hints=[],
+        complete_accept_threshold=0.999,
+        partial_accept_threshold=0.2,
+        output_quality_score=0.7,
+        output_confidence=0.8,
+    )
+
+    assert decision == DECISION_ACCEPT_PARTIAL
+
+
+def test_complete_damaged_source_with_partial_output_quality_accepts_partial():
+    decision = _decision_hint(
+        assessment_status=ASSESSMENT_COMPLETE,
+        source_integrity=SOURCE_INTEGRITY_DAMAGED,
+        completeness=1.0,
+        recoverable_upper_bound=0.99,
+        decision_hints=[],
+        complete_accept_threshold=0.999,
+        partial_accept_threshold=0.2,
+        output_quality_score=0.82,
+        output_confidence=0.35,
+    )
+
+    assert decision == DECISION_ACCEPT_PARTIAL
