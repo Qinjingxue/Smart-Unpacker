@@ -63,19 +63,21 @@ def write_repair_job_context(
             )
 
     with _phase(phase_timer, f"{phase_prefix}_normalize_route_evidence"):
-        normalized = normalize_zip_runtime_route_evidence({
-            **dict(route_payload or {}),
-            "source_input": source_input,
-            "analysis_prepass": analysis_prepass,
-            "analysis_evidence": evidence_payload,
-            "extraction_failure": extraction_failure,
-            "extraction_diagnostics": extraction_diagnostics,
-            "repair_history": repair_history,
-            "archive_knowledge": knowledge.to_dict(),
-            "damage_flags": list(route_payload.get("damage_flags") or []),
-        })
-    route_flags = [str(flag) for flag in normalized.get("route_evidence_flags") or route_payload.get("route_evidence_flags") or [] if str(flag)]
-    damage_flags = [str(flag) for flag in normalized.get("damage_flags") or route_payload.get("damage_flags") or [] if str(flag)]
+        route_flags = [str(flag) for flag in route_payload.get("route_evidence_flags") or [] if str(flag)]
+        damage_flags = [str(flag) for flag in route_payload.get("damage_flags") or [] if str(flag)]
+        if not route_flags and not damage_flags:
+            normalized = normalize_zip_runtime_route_evidence({
+                **dict(route_payload or {}),
+                "source_input": source_input,
+                "analysis_prepass": analysis_prepass,
+                "analysis_evidence": evidence_payload,
+                "extraction_failure": extraction_failure,
+                "extraction_diagnostics": extraction_diagnostics,
+                "repair_history": repair_history,
+                "damage_flags": [],
+            })
+            route_flags = [str(flag) for flag in normalized.get("route_evidence_flags") or [] if str(flag)]
+            damage_flags = [str(flag) for flag in normalized.get("damage_flags") or [] if str(flag)]
     with _phase(phase_timer, f"{phase_prefix}_write_route_flags"):
         if route_flags:
             write_flags(knowledge, "repair.route_evidence", route_flags, source_layer="repair", source_module="job_context")
