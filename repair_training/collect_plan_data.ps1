@@ -1,5 +1,6 @@
 [CmdletBinding()]
 param(
+    [string]$Format = "zip",
     [string]$MaterialRoot = "repair_training\material",
     [string]$Manifest = "",
     [string]$RunDir = "",
@@ -39,7 +40,7 @@ param(
     [string]$DebugEvents = "",
     [switch]$DisableRepairCache,
     [switch]$ProfileMaterializationCandidates,
-    [string]$Formats = "zip",
+    [string]$Formats = "",
     [string]$Sample = "",
     [int]$Limit = 0,
     [switch]$Append,
@@ -79,8 +80,10 @@ if ($SampleWorkerCount -gt 0) {
     $runtimeWorkers = $SampleWorkerCount
 }
 $runtimeWorkers = [Math]::Max(1, [int]$runtimeWorkers)
+if (-not $Formats) { $Formats = $Format }
 $argsList = @(
-    "repair_training\collect_runtime_repair_graph.py",
+    "-m", "repair_training.core.collect_runtime_graph",
+    "--format", $Format,
     "--run-name", $RunName,
     "--max-rounds", "$MaxRounds",
     "--max-states", "$MaxTotalStatesPerSample",

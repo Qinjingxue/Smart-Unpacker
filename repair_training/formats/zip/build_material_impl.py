@@ -13,11 +13,11 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from repair_training.training_corruption import (
+from repair_training.formats.zip.corruption_impl import (
     MATERIAL_FORMAT_DIRS,
     build_corpus_corruption_case,
     detect_archive_format,
@@ -26,9 +26,9 @@ from repair_training.training_corruption import (
 
 
 DEFAULT_MATERIAL_ROOT = Path("repair_training") / "material"
-DEFAULT_OUTPUT_DIR = Path(".sunpack") / "corpus"
+DEFAULT_OUTPUT_DIR = Path("repair_training") / "tmp" / "corpus"
 DEFAULT_MANIFEST = DEFAULT_OUTPUT_DIR / "repair_plan_manifest.jsonl"
-DEFAULT_ZIP_V3_DISTRIBUTION = Path("repair_training") / "damage_distribution_zip_root_transition_v3.json"
+DEFAULT_ZIP_V3_DISTRIBUTION = Path("repair_training") / "formats" / "zip" / "distributions" / "damage_distribution_zip_root_transition_v3.json"
 PROFILE_LAYERS = (
     ("structural", 0.30, ("structural_boundary", "structural_header_tail", "structural_footer_tail")),
     ("structural_directory", 0.30, (

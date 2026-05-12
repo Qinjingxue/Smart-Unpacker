@@ -53,7 +53,8 @@
 [CmdletBinding()]
 param(
     [string]$SourceRoot = "repair_training\source_material",
-    [string]$Formats = "zip",
+    [string]$Format = "zip",
+    [string]$Formats = "",
     [int]$ArchivesPerSample = 3,
     [int]$PerSample = 5,
     [int]$MaxRounds = 2,
@@ -82,20 +83,23 @@ if (-not (Test-Path $Python)) {
 }
 
 $MaterialRoot = Join-Path $RepoRoot "repair_training\material"
-$DatasetDir = Join-Path $RepoRoot "repair_training\datasets"
-$ModelDir = Join-Path $RepoRoot "repair_training\models\offline_rl\zip_q_value"
+$stamp = Get-Date -Format "yyyyMMdd_HHmmss"
+if (-not $Formats) { $Formats = $Format }
+$RunDir = Join-Path $RepoRoot ("repair_training\runs\{0}\{1}_full_pipeline" -f $Format, $stamp)
+$DatasetDir = Join-Path $RunDir "datasets"
+$ModelDir = Join-Path $RunDir ("models\{0}_runtime_policy" -f $Format)
 $ConfigPath = Join-Path $RepoRoot "repair_training\archive_derivation_config.json"
-$Workspace = Join-Path $RepoRoot ".sunpack\repair-plan-workspace"
-$CorpusDir = Join-Path $RepoRoot ".sunpack\corpus"
+$Workspace = Join-Path $RunDir "tmp\workspace"
+$CorpusDir = Join-Path $RepoRoot "repair_training\tmp\corpus"
 
-$SuccessData = Join-Path $DatasetDir "repair_plan_ltr_success_zip_terminal_recovery.jsonl"
-$FailureData = Join-Path $DatasetDir "repair_plan_ltr_failure_zip_terminal_recovery.jsonl"
-$ParallelSummary = Join-Path $DatasetDir "collect_parallel_summary_zip_terminal_recovery.json"
+$SuccessData = Join-Path $DatasetDir "runtime_graph_success.jsonl"
+$FailureData = Join-Path $DatasetDir "runtime_graph_failure.jsonl"
+$ParallelSummary = Join-Path $DatasetDir "runtime_graph_summary.json"
 
 $DeriveScript = Join-Path $RepoRoot "repair_training\derive_archives.py"
-$BuildScript = Join-Path $RepoRoot "repair_training\build_repair_plan_corpus.py"
+$BuildScript = "repair_training.formats.$Format.build_material"
 $CollectScript = Join-Path $RepoRoot "repair_training\collect_plan_data_parallel.ps1"
-$TrainScript = Join-Path $RepoRoot "repair_training\train_offline_rl.py"
+$TrainScript = "repair_training.core.train_policy"
 
 $env:PYTHONPATH = "$RepoRoot"
 
@@ -204,12 +208,11 @@ Write-OK "Archive derivation complete"
 # ── Step 2: Build Corruption Corpus ────────────────────────────────────────
 Write-Step "Step 2: Building corruption cases"
 
-Invoke-Python -Script $BuildScript -Arguments @(
-    "--material-root", $MaterialRoot,
-    "--per-sample", "$PerSample",
-    "--formats", $Formats,
-    "--seed", "$Seed"
-)
+    Write-Host "    python -m $BuildScript --material-root $MaterialRoot --per-sample $PerSample --formats $Formats --seed $Seed" -ForegroundColor DarkGray
+    & $Python -m $BuildScript "--material-root" $MaterialRoot "--per-sample" "$PerSample" "--formats" $Formats "--seed" "$Seed"
+    if ($LASTEXITCODE -ne 0) {
+        throw "Python module failed (exit code $LASTEXITCODE): $BuildScript"
+    }
 Write-OK "Corpus build complete"
 
 # ── Step 3: Collect Repair-Plan Rollout Data ───────────────────────────────
@@ -217,7 +220,9 @@ if (-not $SkipCollect) {
     Write-Step "Step 3: Collecting repair-plan rollout data (parallel sunpack)"
 
     $collectArgs = @{
+        Format = $Format
         MaterialRoot = "repair_training\material"
+        RunDir = $RunDir
         SuccessOutput = $SuccessData
         FailureOutput = $FailureData
         ParallelSummaryOutput = $ParallelSummary
@@ -291,18 +296,23 @@ if ($successRows -eq 0) {
 if (-not $SkipTrain) {
     Write-Step "Step 5: Training offline RL Q-value model"
 
-    Invoke-Python -Script $TrainScript -Arguments @(
+    Write-Host "    python -m $TrainScript --format $Format --dataset-dir $DatasetDir --output-dir $ModelDir ..." -ForegroundColor DarkGray
+    & $Python -m $TrainScript `
+        "--format", $Format,
         "--dataset-dir", $DatasetDir,
         "--output-dir", $ModelDir,
         "--format-scope", $Formats,
-        "--target", "future_return",
-        "--feature-view", "runtime_only",
+        "--target", "root_transition_return_v1",
+        "--feature-view", "runtime_minimal_native_validation",
+        "--sample-weight-mode", "root_transition_v1",
         "--seed", "$Seed",
         "--n-estimators", "$NEstimators",
         "--learning-rate", "$LearningRate",
         "--num-leaves", "$NumLeaves",
         "--min-child-samples", "20"
-    )
+    if ($LASTEXITCODE -ne 0) {
+        throw "Python module failed (exit code $LASTEXITCODE): $TrainScript"
+    }
     Write-OK "RL training complete"
 }
 else {

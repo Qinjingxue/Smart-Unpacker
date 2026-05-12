@@ -17,13 +17,19 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from repair_training.collect_repair_plan_data import (  # noqa: E402
-    _attach_split_volumes,
+from repair_training.core.plugin import load_training_format_plugin, normalize_format_name  # noqa: E402
+from repair_training.core.run_layout import (  # noqa: E402
+    create_or_resolve_run_dir,
+    ensure_run_layout,
+    safe_name,
+    update_run_manifest,
+    write_latest_run,
 )
+from repair_training.core.material_records import attach_split_volumes  # noqa: E402
 from sunpack.contracts.tasks import ArchiveTask  # noqa: E402
 from sunpack.coordinator.analysis_stage import ArchiveAnalysisStage  # noqa: E402
 from sunpack.coordinator.repair_runtime_transition import (  # noqa: E402
@@ -38,7 +44,6 @@ from sunpack.extraction.knowledge import write_extraction_result  # noqa: E402
 from sunpack.extraction.scheduler import ExtractionScheduler  # noqa: E402
 from sunpack.repair.candidate import CandidateSelector, candidate_feature_payload, materialize_candidates  # noqa: E402
 from sunpack.repair.control_candidates import with_accept_current_state_candidate  # noqa: E402
-from sunpack.repair.context import zip_route_evidence_flags  # noqa: E402
 from sunpack.repair.policy.runtime_features import FEATURE_CONTRACT_VERSION, policy_candidate_payload, policy_candidate_payloads  # noqa: E402
 from sunpack.support import archive_knowledge_projection as knowledge_view  # noqa: E402
 from sunpack.support import repair_trace  # noqa: E402
@@ -53,13 +58,15 @@ from sunpack.verification import VerificationScheduler  # noqa: E402
 from sunpack.verification.result import DECISION_ACCEPT, DECISION_REPAIR  # noqa: E402
 
 
-DEFAULT_MANIFEST = Path(".sunpack") / "corpus" / "repair_plan_manifest.jsonl"
-DEFAULT_RUN_NAME = "zip_runtime_graph"
-RUNS_ROOT = Path("repair_training") / "runs"
+DEFAULT_MANIFEST = Path("repair_training") / "tmp" / "corpus" / "repair_plan_manifest.jsonl"
+DEFAULT_RUN_NAME = "runtime_graph"
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    args.format = normalize_format_name(getattr(args, "format", "") or getattr(args, "formats", "") or "zip")
+    plugin = load_training_format_plugin(args.format)
+    _apply_plugin_defaults(args, plugin)
     run = _configure_run_paths(args)
     records = _load_manifest(Path(args.manifest), args)
     Path(args.success_output).parent.mkdir(parents=True, exist_ok=True)
@@ -111,7 +118,7 @@ def main(argv: list[str] | None = None) -> int:
         summary["wall_seconds"] = round(time.perf_counter() - started, 3)
         _merge_projection_cache_stats(summary, knowledge_view.projection_cache_stats())
         Path(args.summary_output).write_text(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
-        _write_latest_run(run["run_dir"])
+        write_latest_run(args.format, run["run_dir"])
         _write_run_manifest(
             run,
             args,
@@ -143,6 +150,7 @@ def main(argv: list[str] | None = None) -> int:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Collect runtime-aligned repair graph rows by executing the real repair loop in exploration mode.")
+    parser.add_argument("--format", default="zip", help="Training format plugin to use, e.g. zip.")
     parser.add_argument("--run-dir", default="", help="Training run directory. Defaults to repair_training/runs/<date>_<run-name>.")
     parser.add_argument("--run-name", default=DEFAULT_RUN_NAME, help="Suffix used when auto-creating --run-dir.")
     parser.add_argument("--keep-temp", action="store_true", help="Keep run tmp/workspace after collection for debugging.")
@@ -182,15 +190,32 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _apply_plugin_defaults(args: argparse.Namespace, plugin: Any) -> None:
+    args.formats = args.format
+    if not str(args.run_name or "").strip() or args.run_name == DEFAULT_RUN_NAME:
+        args.run_name = str(plugin.default_run_name or DEFAULT_RUN_NAME)
+    budget = getattr(plugin, "default_collection_budget", {}) or {}
+    if "workers" in budget and int(getattr(args, "workers", 0) or 0) == 6:
+        args.workers = int(budget["workers"])
+    if "max_rounds" in budget and int(getattr(args, "max_rounds", 0) or 0) == 6:
+        args.max_rounds = int(budget["max_rounds"])
+    if "max_states" in budget and int(getattr(args, "max_states", 0) or 0) == 20:
+        args.max_states = int(budget["max_states"])
+    if "branch_top_k" in budget and int(getattr(args, "branch_top_k", 0) or 0) == 5:
+        args.branch_top_k = int(budget["branch_top_k"])
+    if "root_branch_top_k" in budget and int(getattr(args, "root_branch_top_k", 0) or 0) == 5:
+        args.root_branch_top_k = int(budget["root_branch_top_k"])
+    if "materialize_top_k" in budget and int(getattr(args, "materialize_top_k", 0) or 0) == 8:
+        args.materialize_top_k = int(budget["materialize_top_k"])
+
+
 def _configure_run_paths(args: argparse.Namespace) -> dict[str, Any]:
     started_at = _now_iso()
-    run_dir = Path(args.run_dir) if str(args.run_dir or "").strip() else RUNS_ROOT / f"{_dt.datetime.now().strftime('%Y%m%d_%H%M%S')}_{_safe_name(str(args.run_name or DEFAULT_RUN_NAME))}"
-    run_dir = run_dir.resolve()
-    datasets_dir = run_dir / "datasets"
-    logs_dir = run_dir / "logs"
-    tmp_dir = run_dir / "tmp"
-    for path in (datasets_dir, run_dir / "models", run_dir / "reports", logs_dir, tmp_dir):
-        path.mkdir(parents=True, exist_ok=True)
+    run_dir = create_or_resolve_run_dir(format_name=args.format, run_name=str(args.run_name or DEFAULT_RUN_NAME), run_dir=args.run_dir)
+    layout = ensure_run_layout(run_dir)
+    datasets_dir = layout["datasets_dir"]
+    logs_dir = layout["logs_dir"]
+    tmp_dir = layout["tmp_dir"]
     managed_workspace = not bool(str(args.workspace or "").strip())
     if not args.success_output:
         args.success_output = str(datasets_dir / "runtime_graph_success.jsonl")
@@ -260,6 +285,7 @@ def _write_run_manifest(
         "inputs": {
             "manifest": str(args.manifest or ""),
             "material_root": str(args.material_root or ""),
+            "format": str(args.format or ""),
             "formats": str(args.formats or ""),
             "sample": str(args.sample or ""),
             "limit": int(args.limit or 0),
@@ -288,26 +314,30 @@ def _write_run_manifest(
     Path(run["run_dir"], "run_manifest.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
 
 
-def _write_latest_run(run_dir: Path) -> None:
-    latest = Path("repair_training") / "latest_run.txt"
-    latest.write_text(str(run_dir.resolve()) + "\n", encoding="utf-8")
-
-
 def _run_post_collection_analysis(run_dir: Path) -> None:
     try:
-        subprocess.check_call(
-            [
-                sys.executable,
-                str(ROOT / "repair_training" / "analyze_runtime_graph_run.py"),
-                "--run-dir",
-                str(run_dir),
-            ],
-            cwd=ROOT,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        format_name = _format_from_run_manifest(run_dir)
+        plugin = load_training_format_plugin(format_name)
+        if plugin.analyze_collection:
+            code = plugin.analyze_collection(Path(run_dir))
+            if code not in (None, 0):
+                raise RuntimeError(f"collection analysis failed with exit code {code}")
     except Exception as exc:
-        _merge_run_manifest(run_dir, {"collection_analysis": {"status": "failed", "error": str(exc)}})
+        update_run_manifest(Path(run_dir), collection_analysis={"status": "failed", "error": str(exc)})
+
+
+def _format_from_run_manifest(run_dir: Path) -> str:
+    path = Path(run_dir) / "run_manifest.json"
+    if path.is_file():
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            value = str(payload.get("inputs", {}).get("format") or payload.get("format") or "").strip()
+            if value:
+                return normalize_format_name(value)
+        except Exception:
+            pass
+    parent = Path(run_dir).parent.name
+    return normalize_format_name(parent or "zip")
 
 
 def _merge_run_manifest(run_dir: Path, update: dict[str, Any]) -> None:
@@ -353,11 +383,11 @@ def _iter_collected_samples(records: list[dict[str, Any]], args: argparse.Namesp
 def _collect_one_sample_with_timeout(index: int, record: dict[str, Any], args_dict: dict[str, Any]) -> tuple[str, list[dict[str, Any]]]:
     timeout = max(1.0, float(args_dict.get("case_timeout_seconds", 60.0) or 60.0))
     ctx = mp.get_context("spawn")
-    result_dir = Path(str(args_dict.get("workspace") or ".sunpack/runtime-repair-graph")) / ".worker_results"
+    result_dir = Path(str(args_dict.get("workspace") or "repair_training/tmp/runtime-repair-graph")) / ".worker_results"
     result_dir.mkdir(parents=True, exist_ok=True)
     result_path = result_dir / f"sample_{index:06d}_{os.getpid()}_{time.time_ns()}.json"
     sample_id = str(record.get("sample_id") or f"sample_{index}")
-    debug_dir = Path(str(args_dict.get("workspace") or ".sunpack/runtime-repair-graph")) / ".debug_events"
+    debug_dir = Path(str(args_dict.get("workspace") or "repair_training/tmp/runtime-repair-graph")) / ".debug_events"
     debug_dir.mkdir(parents=True, exist_ok=True)
     debug_path = debug_dir / f"sample_{index:06d}_{_safe_name(sample_id)}.jsonl"
     stack_path = debug_dir / f"sample_{index:06d}_{_safe_name(sample_id)}.stack.txt"
@@ -1130,31 +1160,23 @@ def _task_from_record(record: dict[str, Any]) -> ArchiveTask:
 
 
 def _write_record_knowledge(task: ArchiveTask, record: dict[str, Any]) -> None:
-    structure = dict(record.get("zip_structure_features") or {})
-    tags = [str(item) for item in record.get("zip_container_tags") or [] if str(item)]
-    profile = str(record.get("damage_profile") or record.get("profile") or "")
-    source_derivation = dict(record.get("source_derivation") or {})
-    route_flags = zip_route_evidence_flags({
-        "format": _record_format(record),
-        "source_input": record.get("damaged_input") or {},
-        "zip_structure_features": structure,
-        "zip_container_tags": tags,
-        "damage_profile": profile,
-        "source_derivation": source_derivation,
-        "damage_flags": list(record.get("runtime_damage_flags") or record.get("damage_flags") or []),
-    })
+    plugin = load_training_format_plugin(_record_format(record))
+    context = plugin.collection_record_context(record) if plugin.collection_record_context else {}
     knowledge = ensure_knowledge(task)
-    write_payload(knowledge, "format.zip", {"structure": structure, "container_tags": tags, "route_evidence_flags": route_flags}, source_layer="training", source_module="runtime_graph")
-    write_payload(knowledge, "source", {"profile": profile, "derivation": source_derivation}, source_layer="training", source_module="runtime_graph")
-    write_payload(knowledge, "training", {"sample_id": str(record.get("sample_id") or ""), "damage_profile": profile}, source_layer="training", source_module="runtime_graph")
-    if route_flags:
-        write_flags(knowledge, "format.zip.route_evidence", route_flags, source_layer="training", source_module="runtime_graph")
+    payloads = context.get("payloads") if isinstance(context.get("payloads"), dict) else {}
+    flags = context.get("flags") if isinstance(context.get("flags"), dict) else {}
+    for namespace, payload in payloads.items():
+        if isinstance(payload, dict):
+            write_payload(knowledge, str(namespace), payload, source_layer="training", source_module="runtime_graph")
+    for namespace, values in flags.items():
+        if values:
+            write_flags(knowledge, str(namespace), values, source_layer="training", source_module="runtime_graph")
     commit_task_knowledge(task, knowledge)
 
 
 def _attach_split_to_task(task: ArchiveTask, record: dict[str, Any]) -> None:
     source_input = dict(record.get("damaged_input") or {})
-    _attach_split_volumes(source_input, record)
+    attach_split_volumes(source_input, record)
     part_items = [dict(item) for item in source_input.get("parts") or [] if isinstance(item, dict) and item.get("path")]
     parts = _dedupe([str(item.get("path") or "") for item in part_items if item.get("path")])
     main_path = str(task.main_path)
@@ -1319,7 +1341,7 @@ def _oracle_output_items(extraction_result: Any) -> list[dict[str, Any]]:
                 items.append(_oracle_output_item(raw, output_dir))
     if not items and output_dir.is_dir():
         for path in output_dir.rglob("*"):
-            if path.is_file() and ".sunpack" not in path.parts:
+            if path.is_file():
                 rel = path.relative_to(output_dir).as_posix()
                 items.append(_oracle_output_item({"path": str(path), "archive_path": rel, "status": "complete"}, output_dir))
     return [item for item in items if item.get("archive_path") or item.get("path")]

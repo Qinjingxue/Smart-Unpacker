@@ -17,10 +17,12 @@ from lightgbm import LGBMRegressor
 from sklearn.feature_extraction import DictVectorizer
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
+from repair_training.core.plugin import load_training_format_plugin, normalize_format_name
+from repair_training.core.run_layout import latest_run_for_format, update_run_manifest
+
 
 DEFAULT_DATASET_DIR = Path("repair_training") / "datasets"
-DEFAULT_MODEL_SUBDIR = Path("models") / "zip_runtime_policy"
-LATEST_RUN = Path("repair_training") / "latest_run.txt"
+DEFAULT_MODEL_SUBDIR = Path("models") / "runtime_policy"
 FEATURE_CONTRACT_VERSION = 3
 FEATURE_VIEWS = {
     "runtime_only",
@@ -43,10 +45,14 @@ TARGETS = {
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    args.format = normalize_format_name(getattr(args, "format", "") or getattr(args, "format_scope", "") or "zip")
+    plugin = load_training_format_plugin(args.format)
+    _apply_plugin_defaults(args, plugin)
     run_dir = _resolve_run_dir(args)
     dataset_dir = _resolve_dataset_dir(args, run_dir)
     if not args.output_dir:
-        args.output_dir = str((run_dir / DEFAULT_MODEL_SUBDIR) if run_dir is not None else Path("repair_training") / "models" / "zip_runtime_policy")
+        output_subdir = Path(plugin.model_output_subdir or DEFAULT_MODEL_SUBDIR)
+        args.output_dir = str((run_dir / output_subdir) if run_dir is not None else Path("repair_training") / "models" / args.format / "runtime_policy")
     input_paths = _input_paths(args.input, dataset_dir)
     rows = _load_rows(input_paths)
     replay_rows = _load_rows([Path(item) for item in getattr(args, "extra_replay_input", []) if Path(item).is_file()])
@@ -123,6 +129,7 @@ def main(argv: list[str] | None = None) -> int:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Train a minimal offline RL Q-value model from repair-plan transitions.")
+    parser.add_argument("--format", default="zip", help="Training format plugin to use, e.g. zip.")
     parser.add_argument("--run-dir", default="", help="Training run directory. Defaults to repair_training/latest_run.txt when available.")
     parser.add_argument("--dataset-dir", default="")
     parser.add_argument("--input", action="append", default=[], help="Input JSONL file. Repeatable; defaults to ZIP terminal recovery datasets.")
@@ -143,6 +150,16 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _apply_plugin_defaults(args: argparse.Namespace, plugin: Any) -> None:
+    args.format_scope = args.format
+    if args.feature_view == "runtime_minimal_native_validation":
+        args.feature_view = str(plugin.default_feature_view or args.feature_view)
+    if args.target == "root_transition_return_v1":
+        args.target = str(plugin.default_target or args.target)
+    if args.sample_weight_mode == "root_transition_v1":
+        args.sample_weight_mode = str(plugin.default_sample_weight_mode or args.sample_weight_mode)
+
+
 def _input_paths(inputs: list[str], dataset_dir: Path) -> list[Path]:
     if inputs:
         return [Path(item) for item in inputs if Path(item).is_file()]
@@ -154,25 +171,17 @@ def _input_paths(inputs: list[str], dataset_dir: Path) -> list[Path]:
     ]
     if any(path.is_file() for path in runtime_graph):
         return [path for path in runtime_graph if path.is_file()]
-    preferred = [
-        dataset_dir / "repair_plan_ltr_success_zip_terminal_recovery.jsonl",
-        dataset_dir / "repair_plan_ltr_failure_zip_terminal_recovery.jsonl",
-    ]
-    if all(path.is_file() for path in preferred):
-        return preferred
-    return sorted(dataset_dir.glob("repair_plan_ltr_*terminal_recovery.jsonl"))
+    return []
 
 
 def _resolve_run_dir(args: argparse.Namespace) -> Path | None:
     if str(args.run_dir or "").strip():
         return Path(args.run_dir).resolve()
-    if not args.input and LATEST_RUN.is_file():
-        text = LATEST_RUN.read_text(encoding="utf-8").strip()
-        if text:
-            path = Path(text).resolve()
-            if path.is_dir():
-                args.run_dir = str(path)
-                return path
+    if not args.input:
+        path = latest_run_for_format(args.format)
+        if path is not None:
+            args.run_dir = str(path)
+            return path
     return None
 
 
@@ -194,7 +203,7 @@ def _sha256_file(path: Path) -> str:
 
 def _git_commit() -> str:
     try:
-        return subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=Path(__file__).resolve().parents[1], text=True, stderr=subprocess.DEVNULL).strip()
+        return subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=Path(__file__).resolve().parents[2], text=True, stderr=subprocess.DEVNULL).strip()
     except Exception:
         return ""
 
@@ -206,18 +215,10 @@ def _now_iso() -> str:
 def _update_run_manifest(run_dir: Path | None, args: argparse.Namespace, output_dir: Path, summary: dict[str, Any]) -> None:
     if run_dir is None:
         return
-    manifest_path = run_dir / "run_manifest.json"
-    payload: dict[str, Any] = {}
-    if manifest_path.is_file():
-        try:
-            raw = json.loads(manifest_path.read_text(encoding="utf-8"))
-            payload = raw if isinstance(raw, dict) else {}
-        except json.JSONDecodeError:
-            payload = {}
-    payload.setdefault("run_dir", str(run_dir))
-    payload["training"] = {
+    update_run_manifest(run_dir, training={
         "trained_at": summary.get("trained_at") or _now_iso(),
         "output_dir": str(output_dir),
+        "format": args.format,
         "feature_view": args.feature_view,
         "target": args.target,
         "sample_weight_mode": args.sample_weight_mode,
@@ -226,27 +227,18 @@ def _update_run_manifest(run_dir: Path | None, args: argparse.Namespace, output_
         "input_files": summary.get("input_files", []),
         "input_file_hashes": summary.get("input_file_hashes", {}),
         "metrics": summary.get("metrics", {}),
-    }
-    manifest_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    })
 
 
 def _run_post_training_analysis(run_dir: Path | None, output_dir: Path) -> None:
     if run_dir is None:
         return
     try:
-        subprocess.check_call(
-            [
-                sys.executable,
-                str(Path(__file__).resolve().parents[1] / "repair_training" / "analyze_training_run.py"),
-                "--run-dir",
-                str(run_dir),
-                "--model-dir",
-                str(output_dir),
-            ],
-            cwd=Path(__file__).resolve().parents[1],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        plugin = load_training_format_plugin(Path(run_dir).parent.name)
+        if plugin.analyze_training:
+            code = plugin.analyze_training(Path(run_dir), Path(output_dir))
+            if code not in (None, 0):
+                raise RuntimeError(f"training analysis failed with exit code {code}")
     except Exception as exc:
         _merge_run_manifest(run_dir, {"training_analysis": {"status": "failed", "error": str(exc), "model_dir": str(output_dir)}})
 
@@ -586,7 +578,7 @@ def _split_key(row: dict[str, Any], split_by: str) -> str:
     value = row.get("material_sample_id")
     if not value:
         episode = str(row.get("episode_id") or row.get("sample_id") or "")
-        value = episode.split(":")[0].split("_zip_")[0] if episode else ""
+        value = episode.split(":")[0] if episode else ""
     return str(value or "unknown")
 
 
@@ -812,7 +804,7 @@ def _root_transition_metrics(by_query: dict[str, list[tuple[int, dict[str, Any],
 
 def _is_duplicate_conflict_row(row: dict[str, Any]) -> bool:
     sample = " ".join(str(row.get(key) or "") for key in ("sample_id", "episode_id", "module", "module_name"))
-    if "zip_duplicate_entry_crc_conflict" in sample or "zip_resolve_duplicate_entries" in sample:
+    if "duplicate" in sample and ("conflict" in sample or "resolve" in sample):
         return True
     facts = row.get("patch_facts") if isinstance(row.get("patch_facts"), list) else []
     return any("duplicate" in str(item).lower() for item in facts)

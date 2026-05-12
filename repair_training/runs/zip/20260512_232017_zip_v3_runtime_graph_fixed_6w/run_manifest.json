@@ -6,6 +6,8 @@
   },
   "collector": "runtime_repair_graph",
   "ended_at": "2026-05-12T23:42:06+08:00",
+  "format": "zip",
+  "format_plugin": "repair_training.formats.zip.plugin",
   "git_commit": "787058e19aea6325fdca85ef792d9e48e6770981",
   "inputs": {
     "formats": "zip",
@@ -1159,45 +1161,6 @@
       "verification_accept_partial": 1119
     },
     "wall_seconds": 1308.307
-  },
-  "training": {
-    "feature_contract_version": 3,
-    "feature_view": "runtime_minimal_native_validation",
-    "input_file_hashes": {
-      "C:\\Users\\29402\\Desktop\\sunpack\\repair_training\\runs\\20260512_232017_zip_v3_runtime_graph_fixed_6w\\datasets\\runtime_graph_failure.jsonl": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-      "C:\\Users\\29402\\Desktop\\sunpack\\repair_training\\runs\\20260512_232017_zip_v3_runtime_graph_fixed_6w\\datasets\\runtime_graph_success.jsonl": "c0807fd673dcf7b40938c61af3c27fb8a5e1c8bf24e3108f130bb9920119a212"
-    },
-    "input_files": [
-      "C:\\Users\\29402\\Desktop\\sunpack\\repair_training\\runs\\20260512_232017_zip_v3_runtime_graph_fixed_6w\\datasets\\runtime_graph_success.jsonl",
-      "C:\\Users\\29402\\Desktop\\sunpack\\repair_training\\runs\\20260512_232017_zip_v3_runtime_graph_fixed_6w\\datasets\\runtime_graph_failure.jsonl"
-    ],
-    "metrics": {
-      "candidate_id_collision_count": 0,
-      "duplicate_conflict_regret_mean": 0.014884977009132732,
-      "duplicate_policy_top1_accuracy": 0.9655172413793104,
-      "eval_query_count": 1759,
-      "feature_contract_version": 3,
-      "future_return_regret_mean": 0.01784022462837421,
-      "future_return_regret_p90": 0.0,
-      "mae": 0.15178660674053265,
-      "oracle_future_return_mean": 0.426460107762516,
-      "prediction_mean": 0.25919115944292176,
-      "r2": 0.5525347355174817,
-      "rmse": 0.20010426015744662,
-      "root_best_return_mean": 0.6274823283549017,
-      "root_mean_regret": 0.029170490544387098,
-      "root_query_count": 527,
-      "root_selected_return_mean": 0.5983118378105147,
-      "root_top1_accuracy": 0.872865275142315,
-      "target_mean": 0.2183679042432834,
-      "top1_future_return_mean": 0.4086198831341418,
-      "weighted_future_return_regret_mean": 0.19684265266837073
-    },
-    "output_dir": "repair_training\\runs\\20260512_232017_zip_v3_runtime_graph_fixed_6w\\models\\zip_runtime_policy_replay_v7",
-    "row_count": 44620,
-    "sample_weight_mode": "root_transition_v1",
-    "target": "root_transition_return_v1",
-    "trained_at": "2026-05-13T01:49:53+08:00"
   },
   "training_analysis": {
     "json": "C:\\Users\\29402\\Desktop\\sunpack\\repair_training\\runs\\20260512_232017_zip_v3_runtime_graph_fixed_6w\\reports\\training_analysis.json",

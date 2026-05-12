@@ -1,5 +1,6 @@
 [CmdletBinding()]
 param(
+    [string]$Format = "zip",
     [string]$MaterialRoot = "repair_training\material",
     [string]$Manifest = "",
     [string]$RunDir = "",
@@ -42,7 +43,7 @@ param(
     [double]$HeartbeatSeconds = 5.0,
     [switch]$DisableRepairCache,
     [switch]$ProfileMaterializationCandidates,
-    [string]$Formats = "zip",
+    [string]$Formats = "",
     [string]$Sample = "",
     [int]$Limit = 0,
     [switch]$NoPretty,
@@ -62,7 +63,7 @@ if (-not $RunDir) {
     $stamp = Get-Date -Format "yyyyMMdd_HHmmss"
     $safeRunName = ($RunName -replace '[^A-Za-z0-9_.-]+', '_').Trim('_')
     if (-not $safeRunName) { $safeRunName = "zip_runtime_graph_parallel" }
-    $RunDir = Join-Path "repair_training\runs" ("{0}_{1}" -f $stamp, $safeRunName)
+    $RunDir = Join-Path (Join-Path "repair_training\runs" $Format) ("{0}_{1}" -f $stamp, $safeRunName)
 }
 $RunDir = [System.IO.Path]::GetFullPath((Join-Path $repoRoot $RunDir))
 $datasetDir = Join-Path $RunDir "datasets"
@@ -89,6 +90,8 @@ function Split-TrainingCsv {
     }
     return $output
 }
+
+if (-not $Formats) { $Formats = $Format }
 
 function Resolve-TrainingPath {
     param([string]$Path)
@@ -185,6 +188,7 @@ function New-CollectorArgs {
         "-NoProfile",
         "-ExecutionPolicy", "Bypass",
         "-File", $collectScript,
+        "-Format", $Format,
         "-Manifest", (Resolve-TrainingPath $Unit.Manifest),
         "-SuccessOutput", (Resolve-TrainingPath $Unit.Success),
         "-FailureOutput", (Resolve-TrainingPath $Unit.Failure),
@@ -233,7 +237,7 @@ function Invoke-CollectionAnalysis {
     if ($SkipAnalysisReport) { return }
     foreach ($candidate in @("python", "py")) {
         try {
-            & $candidate "repair_training\analyze_runtime_graph_run.py" "--run-dir" $RunDir *> $null
+            & $candidate "-m" "repair_training.core.analyze_collection" "--run-dir" $RunDir *> $null
             if ($LASTEXITCODE -eq 0) { return }
         } catch {
         }
@@ -246,7 +250,7 @@ function Invoke-CollectionAnalysis {
             foreach ($prop in $raw.PSObject.Properties) { $payload[$prop.Name] = $prop.Value }
         } catch { $payload = @{} }
     }
-    $payload["collection_analysis"] = @{ status = "failed"; error = "failed to run analyze_runtime_graph_run.py from parallel wrapper" }
+    $payload["collection_analysis"] = @{ status = "failed"; error = "failed to run repair_training.core.analyze_collection from parallel wrapper" }
     ($payload | ConvertTo-Json -Depth 20) | Set-Content -LiteralPath $manifestPath -Encoding UTF8
 }
 
@@ -483,7 +487,7 @@ for ($index = 0; $index -lt $workerCount; $index++) {
         Summary = Join-Path $shardRoot ("summary_{0:D3}.json" -f $index)
         Stdout = Join-Path $shardRoot ("stdout_{0:D3}.log" -f $index)
         Stderr = Join-Path $shardRoot ("stderr_{0:D3}.log" -f $index)
-        Workspace = Join-Path ".sunpack\repair-plan-workspace" ("shard_{0:D3}" -f $index)
+        Workspace = Join-Path (Join-Path $tmpDir "workspace") ("shard_{0:D3}" -f $index)
         Records = New-Object System.Collections.Generic.List[string]
     }
     $shards += $shard
@@ -504,6 +508,7 @@ foreach ($shard in $shards) {
         "-NoProfile",
         "-ExecutionPolicy", "Bypass",
         "-File", $collectScript,
+        "-Format", $Format,
         "-Manifest", (Join-Path $repoRoot $shard.Manifest),
         "-SuccessOutput", (Join-Path $repoRoot $shard.Success),
         "-FailureOutput", (Join-Path $repoRoot $shard.Failure),
@@ -700,6 +705,20 @@ foreach ($summary in $summaries) {
 New-Item -ItemType Directory -Path (Split-Path -Parent (Resolve-TrainingPath $ParallelSummaryOutput)) -Force | Out-Null
 ($aggregate | ConvertTo-Json -Depth 20) | Set-Content -LiteralPath (Resolve-TrainingPath $ParallelSummaryOutput) -Encoding UTF8
 Set-Content -LiteralPath (Join-Path $repoRoot "repair_training\latest_run.txt") -Value ($RunDir + "`n") -Encoding UTF8
+$latestRunsPath = Join-Path $repoRoot "repair_training\latest_runs.json"
+$latestRuns = @{}
+if (Test-Path -LiteralPath $latestRunsPath) {
+    try {
+        $rawLatestRuns = Get-Content -LiteralPath $latestRunsPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        foreach ($prop in $rawLatestRuns.PSObject.Properties) {
+            $latestRuns[$prop.Name] = [string]$prop.Value
+        }
+    } catch {
+        $latestRuns = @{}
+    }
+}
+$latestRuns[$Format] = $RunDir
+($latestRuns | ConvertTo-Json -Depth 4) | Set-Content -LiteralPath $latestRunsPath -Encoding UTF8
 Invoke-CollectionAnalysis
 Write-Host ($aggregate | ConvertTo-Json -Depth 8) -ForegroundColor Cyan
 

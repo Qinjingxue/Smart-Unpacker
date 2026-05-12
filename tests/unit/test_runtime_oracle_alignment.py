@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import zlib
 
-from repair_training.collect_runtime_repair_graph import (
+from repair_training.core.collect_runtime_graph import (
     _runtime_oracle_disagreement_reason,
     verify_extraction_output_against_oracle,
 )

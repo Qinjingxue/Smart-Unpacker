@@ -1,5 +1,6 @@
 [CmdletBinding()]
 param(
+    [string]$Format = "zip",
     [string]$MaterialRoot = "repair_training\material",
     [int]$PerSample = 10,
     [string]$Seed = "random",
@@ -35,8 +36,11 @@ function Get-TrainingPython {
 }
 
 $python = Get-TrainingPython
+if (-not $Formats) { $Formats = $Format }
+$ModuleFormat = $Format
+if ($ModuleFormat -eq "7z") { $ModuleFormat = "seven_zip" }
 $argsList = @(
-    "repair_training\build_repair_plan_corpus.py",
+    "-m", "repair_training.formats.$ModuleFormat.build_material",
     "--material-root", $MaterialRoot,
     "--per-sample", "$PerSample",
     "--seed", $Seed
