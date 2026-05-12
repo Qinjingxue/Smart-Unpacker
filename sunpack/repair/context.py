@@ -239,6 +239,7 @@ def _filter_zip_conflicting_runtime_flags(flags: list[str], payload: dict[str, A
         bool(features.get("has_sfx_prefix"))
         or bool(tags & {"sfx", "carrier_prefix", "carrier_archive", "embedded_archive"})
         or any("sfx" in profile for profile in profiles)
+        or any("compound_boundary_drop_cd_payload_bad" in profile for profile in profiles)
     )
     if not has_carrier_evidence:
         flags = [flag for flag in flags if flag not in {"sfx", "carrier_prefix", "carrier_archive", "embedded_archive"}]
@@ -290,7 +291,7 @@ def _zip_structure_feature_dicts(payload: dict[str, Any]) -> list[dict[str, Any]
             zip_payload = format_payload.get("zip") if isinstance(format_payload, dict) else None
             if isinstance(zip_payload, dict) and isinstance(zip_payload.get("structure"), dict):
                 output.append(dict(zip_payload["structure"]))
-            for key in ("archive_knowledge", "knowledge", "source_derivation", "analysis_prepass", "analysis_evidence", "extraction_failure", "extraction_diagnostics", "repair_history", "source_input", "damaged_input", "fuzzy"):
+            for key in ("archive_knowledge", "knowledge", "source", "training", "format", "source_derivation", "analysis_prepass", "analysis_evidence", "extraction_failure", "extraction_diagnostics", "repair_history", "source_input", "damaged_input", "fuzzy"):
                 nested = value.get(key)
                 if isinstance(nested, dict):
                     visit(nested)
@@ -327,7 +328,7 @@ def _merged_source_derivation(payload: dict[str, Any]) -> dict[str, Any]:
             for key, item in source_payload["derivation"].items():
                 if key not in merged or merged.get(key) in (None, "", False, 0, []):
                     merged[key] = item
-        for key in ("archive_knowledge", "knowledge", "analysis_prepass", "analysis_evidence", "extraction_failure", "extraction_diagnostics", "repair_history", "source_input", "damaged_input"):
+        for key in ("archive_knowledge", "knowledge", "source", "training", "format", "analysis_prepass", "analysis_evidence", "extraction_failure", "extraction_diagnostics", "repair_history", "source_input", "damaged_input"):
             nested = value.get(key)
             if isinstance(nested, dict):
                 visit(nested)
@@ -355,7 +356,7 @@ def _profile_names(payload: dict[str, Any]) -> list[str]:
                 item = value.get(key)
                 if isinstance(item, str) and item:
                     names.append(item)
-            for key in ("archive_knowledge", "knowledge", "source_derivation", "analysis_prepass", "analysis_evidence", "extraction_failure", "extraction_diagnostics", "repair_history", "source_input", "damaged_input"):
+            for key in ("archive_knowledge", "knowledge", "source", "training", "format", "source_derivation", "analysis_prepass", "analysis_evidence", "extraction_failure", "extraction_diagnostics", "repair_history", "source_input", "damaged_input"):
                 nested = value.get(key)
                 if isinstance(nested, dict):
                     collect(nested)
@@ -374,7 +375,7 @@ def _zip_container_tags(payload: dict[str, Any]) -> list[str]:
             zip_payload = format_payload.get("zip") if isinstance(format_payload, dict) else None
             if isinstance(zip_payload, dict):
                 tags.extend(_list_values(zip_payload, "container_tags"))
-            for key in ("archive_knowledge", "knowledge", "source_derivation", "analysis_prepass", "analysis_evidence", "extraction_failure", "extraction_diagnostics", "repair_history", "source_input", "damaged_input"):
+            for key in ("archive_knowledge", "knowledge", "source", "training", "format", "source_derivation", "analysis_prepass", "analysis_evidence", "extraction_failure", "extraction_diagnostics", "repair_history", "source_input", "damaged_input"):
                 nested = value.get(key)
                 if isinstance(nested, dict):
                     collect(nested)
@@ -399,7 +400,7 @@ def _zip_analysis_detail_dicts(payload: dict[str, Any]) -> list[dict[str, Any]]:
             nested_details = analysis_evidence.get("details")
             if isinstance(nested_details, dict):
                 output.append(dict(nested_details))
-        for key in ("archive_knowledge", "knowledge", "analysis_prepass", "extraction_failure", "extraction_diagnostics", "repair_history", "source_input", "damaged_input"):
+        for key in ("archive_knowledge", "knowledge", "source", "training", "format", "analysis_prepass", "extraction_failure", "extraction_diagnostics", "repair_history", "source_input", "damaged_input"):
             nested = value.get(key)
             if isinstance(nested, dict):
                 visit(nested)
@@ -454,7 +455,7 @@ def _zip_profile_flags(profile: str) -> list[str]:
     if "zip64_extra_size" in text or "zip64_extra" in text:
         flags.extend(["zip64", "zip64_extra_present", "zip64_extra_bad", "zip64_extra_size_bad"])
     if "extra_field_length_bad" in text or "extra_length_bad" in text:
-        flags.extend(["extra_field_bad", "extra_field_length_bad", "central_directory_bad", "central_directory_offset_bad", "central_directory_count_bad"])
+        flags.extend(["extra_field_bad", "extra_field_length_bad"])
     if "zip64_eocd_locator" in text or "zip64_locator" in text:
         flags.extend(["zip64", "zip64_locator_bad"])
     if "zip64_eocd" in text:
@@ -468,6 +469,28 @@ def _zip_profile_flags(profile: str) -> list[str]:
         ])
     elif "data_descriptor" in text:
         flags.extend(["data_descriptor", "compressed_size_bad"])
+    if "compound_extra_field_cd_offset_payload_bad" in text:
+        flags.extend([
+            "extra_field_bad",
+            "extra_field_length_bad",
+            "central_directory_bad",
+            "central_directory_offset_bad",
+            "central_directory_count_bad",
+            "payload_hash_mismatch",
+        ])
+    if "compound_boundary_drop_cd_payload_bad" in text:
+        flags.extend([
+            "sfx",
+            "carrier_prefix",
+            "carrier_archive",
+            "trailing_junk",
+            "boundary_unreliable",
+            "central_directory_bad",
+            "central_directory_offset_bad",
+            "central_directory_count_bad",
+            "local_header_recovery",
+            "payload_hash_mismatch",
+        ])
     if "two_step_local_header" in text:
         flags.extend(["local_header_bad", "local_header_recovery", "central_directory_offset_bad"])
     if "sfx" in text:

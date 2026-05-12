@@ -467,6 +467,12 @@ def _decision_hint(
         and source_integrity in {SOURCE_INTEGRITY_COMPLETE, SOURCE_INTEGRITY_UNKNOWN}
     ):
         return DECISION_ACCEPT
+    if assessment_status == ASSESSMENT_COMPLETE and source_integrity in {
+        SOURCE_INTEGRITY_TRUNCATED,
+        SOURCE_INTEGRITY_PAYLOAD_DAMAGED,
+        SOURCE_INTEGRITY_DAMAGED,
+    }:
+        return DECISION_REPAIR
     for decision in (DECISION_REPAIR, DECISION_RETRY_EXTRACT, DECISION_ACCEPT_PARTIAL, DECISION_ACCEPT):
         if decision in decision_hints:
             return decision

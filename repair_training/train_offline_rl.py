@@ -5,6 +5,7 @@ import hashlib
 import json
 import statistics
 import subprocess
+import sys
 import datetime as _dt
 from collections import defaultdict
 from pathlib import Path
@@ -114,6 +115,8 @@ def main(argv: list[str] | None = None) -> int:
     (output_dir / "metrics.json").write_text(json.dumps(metrics, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
     (output_dir / "training_summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
     _update_run_manifest(run_dir, args, output_dir, summary)
+    if not bool(getattr(args, "skip_analysis_report", False)):
+        _run_post_training_analysis(run_dir, output_dir)
     print(json.dumps(summary, ensure_ascii=False, sort_keys=True))
     return 0
 
@@ -125,8 +128,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--input", action="append", default=[], help="Input JSONL file. Repeatable; defaults to ZIP terminal recovery datasets.")
     parser.add_argument("--output-dir", default="")
     parser.add_argument("--feature-view", choices=sorted(FEATURE_VIEWS), default="runtime_minimal_native_validation")
-    parser.add_argument("--target", choices=sorted(TARGETS), default="single_path_robust_return")
-    parser.add_argument("--sample-weight-mode", choices=("none", "runtime_policy_v1", "root_transition_v1"), default="none")
+    parser.add_argument("--target", choices=sorted(TARGETS), default="root_transition_return_v1")
+    parser.add_argument("--sample-weight-mode", choices=("none", "runtime_policy_v1", "root_transition_v1"), default="root_transition_v1")
     parser.add_argument("--policy-rollout-input", action="append", default=[], help="JSONL rollout return rows to merge into graph rows.")
     parser.add_argument("--extra-replay-input", action="append", default=[], help="JSONL replay rows to append to training rows.")
     parser.add_argument("--format-scope", default="zip")
@@ -136,6 +139,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--learning-rate", type=float, default=0.04)
     parser.add_argument("--num-leaves", type=int, default=31)
     parser.add_argument("--min-child-samples", type=int, default=20)
+    parser.add_argument("--skip-analysis-report", action="store_true", help="Do not run training analysis after model artifacts are written.")
     return parser
 
 
@@ -223,6 +227,40 @@ def _update_run_manifest(run_dir: Path | None, args: argparse.Namespace, output_
         "input_file_hashes": summary.get("input_file_hashes", {}),
         "metrics": summary.get("metrics", {}),
     }
+    manifest_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _run_post_training_analysis(run_dir: Path | None, output_dir: Path) -> None:
+    if run_dir is None:
+        return
+    try:
+        subprocess.check_call(
+            [
+                sys.executable,
+                str(Path(__file__).resolve().parents[1] / "repair_training" / "analyze_training_run.py"),
+                "--run-dir",
+                str(run_dir),
+                "--model-dir",
+                str(output_dir),
+            ],
+            cwd=Path(__file__).resolve().parents[1],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception as exc:
+        _merge_run_manifest(run_dir, {"training_analysis": {"status": "failed", "error": str(exc), "model_dir": str(output_dir)}})
+
+
+def _merge_run_manifest(run_dir: Path, update: dict[str, Any]) -> None:
+    manifest_path = run_dir / "run_manifest.json"
+    payload: dict[str, Any] = {}
+    if manifest_path.is_file():
+        try:
+            loaded = json.loads(manifest_path.read_text(encoding="utf-8"))
+            payload = loaded if isinstance(loaded, dict) else {}
+        except Exception:
+            payload = {}
+    payload.update(update)
     manifest_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
 
 

@@ -313,7 +313,16 @@ def _canonical_zip_route_flags(knowledge: ArchiveKnowledge) -> list[str]:
     if "zip64_extra_size" in profile or "zip64_extra" in profile:
         flags.extend(["zip64", "zip64_extra_present", "zip64_extra_bad", "zip64_extra_size_bad"])
     if "extra_field_length_bad" in profile or "extra_length_bad" in profile:
-        flags.extend(["extra_field_bad", "extra_field_length_bad", "central_directory_bad", "central_directory_offset_bad", "central_directory_count_bad"])
+        flags.extend(["extra_field_bad", "extra_field_length_bad"])
+    if "compound_extra_field_cd_offset_payload_bad" in profile:
+        flags.extend([
+            "extra_field_bad",
+            "extra_field_length_bad",
+            "central_directory_bad",
+            "central_directory_offset_bad",
+            "central_directory_count_bad",
+            "payload_hash_mismatch",
+        ])
     if "zip64_eocd_locator" in profile or "zip64_locator" in profile:
         flags.extend(["zip64", "zip64_locator_bad"])
     if "zip64_eocd" in profile:
@@ -332,6 +341,19 @@ def _canonical_zip_route_flags(knowledge: ArchiveKnowledge) -> list[str]:
         ])
     elif "data_descriptor" in profile:
         flags.extend(["data_descriptor", "compressed_size_bad"])
+    if "compound_boundary_drop_cd_payload_bad" in profile:
+        flags.extend([
+            "sfx",
+            "carrier_prefix",
+            "carrier_archive",
+            "trailing_junk",
+            "boundary_unreliable",
+            "central_directory_bad",
+            "central_directory_offset_bad",
+            "central_directory_count_bad",
+            "local_header_recovery",
+            "payload_hash_mismatch",
+        ])
     if "sfx" in profile:
         flags.extend(["sfx", "carrier_prefix", "carrier_archive"])
         if "cd_damage" in profile:

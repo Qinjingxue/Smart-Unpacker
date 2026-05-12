@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import time
+import zlib
 from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import Counter, defaultdict
@@ -22,8 +23,6 @@ if str(ROOT) not in sys.path:
 
 from repair_training.collect_repair_plan_data import (  # noqa: E402
     _attach_split_volumes,
-    _materialize_training_archive_state,
-    _verify_output_against_oracle,
 )
 from sunpack.contracts.tasks import ArchiveTask  # noqa: E402
 from sunpack.coordinator.analysis_stage import ArchiveAnalysisStage  # noqa: E402
@@ -49,6 +48,7 @@ from sunpack.support.archive_knowledge_writer import (  # noqa: E402
     write_flags,
     write_payload,
 )
+from sunpack.support.path_names import clean_relative_archive_path, normalize_match_path  # noqa: E402
 from sunpack.verification import VerificationScheduler  # noqa: E402
 from sunpack.verification.result import DECISION_ACCEPT, DECISION_REPAIR  # noqa: E402
 
@@ -121,6 +121,8 @@ def main(argv: list[str] | None = None) -> int:
             ended_at=_now_iso(),
             summary=summary,
         )
+        if not bool(getattr(args, "skip_analysis_report", False)):
+            _run_post_collection_analysis(run["run_dir"])
         print(json.dumps(summary, ensure_ascii=False, sort_keys=True))
         return 0
     except Exception as exc:
@@ -136,7 +138,7 @@ def main(argv: list[str] | None = None) -> int:
         raise
     finally:
         if run.get("managed_workspace") and not bool(getattr(args, "keep_temp", False)):
-            shutil.rmtree(Path(args.workspace), ignore_errors=True)
+            _fast_rmtree(Path(args.workspace))
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -153,14 +155,14 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--failure-output", default="")
     parser.add_argument("--summary-output", default="")
     parser.add_argument("--workspace", default="")
-    parser.add_argument("--workers", type=int, default=1)
+    parser.add_argument("--workers", type=int, default=6)
     parser.add_argument("--max-rounds", type=int, default=6)
-    parser.add_argument("--max-states", type=int, default=80)
+    parser.add_argument("--max-states", type=int, default=20)
     parser.add_argument("--branch-top-k", type=int, default=5)
     parser.add_argument("--root-branch-top-k", type=int, default=5)
     parser.add_argument("--root-complete-explore-all", action="store_true", default=True)
     parser.add_argument("--no-root-complete-explore-all", dest="root_complete_explore_all", action="store_false")
-    parser.add_argument("--materialize-top-k", type=int, default=16)
+    parser.add_argument("--materialize-top-k", type=int, default=8)
     parser.add_argument("--hard-negative-backfill-k", type=int, default=3)
     parser.add_argument("--stop-after-complete-with-negatives", action="store_true", default=True)
     parser.add_argument("--no-stop-after-complete-with-negatives", dest="stop_after_complete_with_negatives", action="store_false")
@@ -176,6 +178,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--append", action="store_true")
     parser.add_argument("--progress", action="store_true")
     parser.add_argument("--no-pretty", action="store_true")
+    parser.add_argument("--skip-analysis-report", action="store_true", help="Do not run collection analysis after a successful collection.")
     return parser
 
 
@@ -208,6 +211,31 @@ def _configure_run_paths(args: argparse.Namespace) -> dict[str, Any]:
         "managed_workspace": managed_workspace,
         "started_at": started_at,
     }
+
+
+def _fast_rmtree(path: Path) -> None:
+    target = Path(path)
+    if not target.exists():
+        return
+    if os.name == "nt":
+        try:
+            subprocess.run(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    "Remove-Item -LiteralPath $args[0] -Recurse -Force -ErrorAction Stop",
+                    str(target),
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=True,
+            )
+            return
+        except Exception:
+            pass
+    shutil.rmtree(target, ignore_errors=True)
 
 
 def _write_run_manifest(
@@ -263,6 +291,36 @@ def _write_run_manifest(
 def _write_latest_run(run_dir: Path) -> None:
     latest = Path("repair_training") / "latest_run.txt"
     latest.write_text(str(run_dir.resolve()) + "\n", encoding="utf-8")
+
+
+def _run_post_collection_analysis(run_dir: Path) -> None:
+    try:
+        subprocess.check_call(
+            [
+                sys.executable,
+                str(ROOT / "repair_training" / "analyze_runtime_graph_run.py"),
+                "--run-dir",
+                str(run_dir),
+            ],
+            cwd=ROOT,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception as exc:
+        _merge_run_manifest(run_dir, {"collection_analysis": {"status": "failed", "error": str(exc)}})
+
+
+def _merge_run_manifest(run_dir: Path, update: dict[str, Any]) -> None:
+    path = Path(run_dir) / "run_manifest.json"
+    payload: dict[str, Any] = {}
+    if path.is_file():
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+            payload = loaded if isinstance(loaded, dict) else {}
+        except Exception:
+            payload = {}
+    payload.update(update)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
 
 
 def _git_commit() -> str:
@@ -501,7 +559,7 @@ class RuntimeRepairGraphCollector:
         self.explored_negative_actions = 0
 
     def collect(self) -> list[dict[str, Any]]:
-        shutil.rmtree(self.workspace, ignore_errors=True)
+        _fast_rmtree(self.workspace)
         self.workspace.mkdir(parents=True, exist_ok=True)
         self.output_root.mkdir(parents=True, exist_ok=True)
         with self.profiler.phase("sample_init"):
@@ -565,25 +623,26 @@ class RuntimeRepairGraphCollector:
         out_dir = self.output_root / _safe_name(str(state["state_id"]))
         with self.profiler.phase("extract_initial", state_id=str(state["state_id"])):
             extraction = self.extractor.extract(task, str(out_dir))
+            state["_extraction_result"] = extraction
         with self.profiler.phase("write_extraction_knowledge", state_id=str(state["state_id"])):
             write_extraction_result(task, extraction, phase_timer=self.profiler.phase, phase_prefix="write_extraction")
         with self.profiler.phase("verify_initial", state_id=str(state["state_id"])):
             verification = self.verifier.verify(task, extraction, phase_timer=self.profiler.phase, phase_prefix="verify_initial")
             verification = RepairRuntimeTransitionEvaluator.normalize_transition_verification(extraction, verification)
         if verification.decision_hint == DECISION_ACCEPT:
-            self._append_terminal_row(state, "complete", verification, task)
+            self._append_terminal_row(state, "complete", verification, task, extraction)
             return []
         if verification.decision_hint != DECISION_REPAIR:
-            self._append_terminal_row(state, str(verification.decision_hint or verification.assessment_status or "terminal"), verification, task)
+            self._append_terminal_row(state, str(verification.decision_hint or verification.assessment_status or "terminal"), verification, task, extraction)
             return []
         loop_state = RepairLoopState(task, self.loop_limits)
         if not loop_state.can_attempt(trigger="verification"):
-            self._append_terminal_row(state, str(loop_state.terminal_reason or "repair_loop_stopped"), verification, task)
+            self._append_terminal_row(state, str(loop_state.terminal_reason or "repair_loop_stopped"), verification, task, extraction)
             return []
         with self.profiler.phase("build_repair_job", state_id=str(state["state_id"])):
             job = self.repair_stage._job_from_verification_assessment(task, extraction, verification, phase_timer=self.profiler.phase, phase_prefix="build_repair_job")  # noqa: SLF001
         if job is None or self.repair_stage.scheduler is None:
-            self._append_terminal_row(state, "no_repair_job", verification, task)
+            self._append_terminal_row(state, "no_repair_job", verification, task, extraction)
             return []
         with self.profiler.phase("generate_candidates", state_id=str(state["state_id"])):
             batch = self.repair_stage.scheduler.generate_repair_candidates(
@@ -595,7 +654,7 @@ class RuntimeRepairGraphCollector:
         with self.profiler.phase("materialize_candidates", state_id=str(state["state_id"])):
             candidates = self._runtime_candidates(with_accept_current_state_candidate(candidate_source, job))
         if not candidates:
-            row = self._terminal_row_for_task(state, "no_materialized_candidates", verification, task)
+            row = self._terminal_row_for_task(state, "no_materialized_candidates", verification, task, extraction)
             row["debug_candidate_count"] = len(batch.candidates)
             row["debug_damage_flags"] = list(job.damage_flags or [])
             self.rows.append(row)
@@ -672,10 +731,12 @@ class RuntimeRepairGraphCollector:
                     phase_timer=self.profiler.phase,
                     phase_prefix="collect_state_loop_record_result",
                 )
-            with self.profiler.phase("collect_state_archive_path_for_oracle", state_id=str(state["state_id"]), candidate_id=candidate_id):
-                archive_path = _archive_path_for_oracle(branch_task, self.fmt)
             with self.profiler.phase("oracle_verify", state_id=str(state["state_id"]), candidate_id=candidate_id):
-                oracle = _verify_output_against_oracle(Path(archive_path), self.fmt, self.record.get("oracle") if isinstance(self.record.get("oracle"), dict) else {}) if archive_path else {"status": "missing_output", "label": 0, "completeness": 0.0}
+                oracle = verify_extraction_output_against_oracle(
+                    transition.result,
+                    self.record.get("oracle") if isinstance(self.record.get("oracle"), dict) else {},
+                    record=self.record,
+                )
             with self.profiler.phase("collect_state_terminal_status", state_id=str(state["state_id"]), candidate_id=candidate_id):
                 terminal_status = _transition_terminal_status(transition, oracle)
                 if bool(transition.can_continue_repair) and not loop_allows_continue:
@@ -750,6 +811,8 @@ class RuntimeRepairGraphCollector:
                     "parent_action_row_id": state.get("parent_action_row_id") or "",
                     "parent_candidate_id": state.get("parent_candidate_id") or "",
                     "runtime_verification": _verification_payload(transition.verification),
+                    "oracle_ground_truth": _oracle_ground_truth_payload(oracle),
+                    "runtime_oracle_disagreement_reason": _runtime_oracle_disagreement_reason(transition.verification, oracle),
                     "stable_features": {
                         "runtime_context": payload.get("runtime_context") or {},
                         "candidate_proposal": payload.get("candidate_proposal") or {},
@@ -870,20 +933,19 @@ class RuntimeRepairGraphCollector:
             return max(1, int(getattr(self.args, "root_branch_top_k", 5) or 5))
         return max(1, int(self.args.branch_top_k or 1))
 
-    def _terminal_row_for_task(self, state: dict[str, Any], status: str, verification, task: ArchiveTask) -> dict[str, Any]:
+    def _terminal_row_for_task(self, state: dict[str, Any], status: str, verification, task: ArchiveTask, extraction: Any | None = None) -> dict[str, Any]:
         oracle = None
         with self.profiler.phase("terminal_oracle_verify", state_id=str(state.get("state_id") or "")):
-            archive_path = _archive_path_for_oracle(task, self.fmt)
-            if archive_path:
-                oracle = _verify_output_against_oracle(
-                    Path(archive_path),
-                    self.fmt,
-                    self.record.get("oracle") if isinstance(self.record.get("oracle"), dict) else {},
-                )
+            extraction = extraction or state.get("_extraction_result")
+            oracle = verify_extraction_output_against_oracle(
+                extraction,
+                self.record.get("oracle") if isinstance(self.record.get("oracle"), dict) else {},
+                record=self.record,
+            )
         return _terminal_row(self.record, state, status, verification, oracle=oracle)
 
-    def _append_terminal_row(self, state: dict[str, Any], status: str, verification, task: ArchiveTask) -> None:
-        self.rows.append(self._terminal_row_for_task(state, status, verification, task))
+    def _append_terminal_row(self, state: dict[str, Any], status: str, verification, task: ArchiveTask, extraction: Any | None = None) -> None:
+        self.rows.append(self._terminal_row_for_task(state, status, verification, task, extraction))
 
     def _record_explored_label(self, oracle: dict[str, Any]) -> None:
         recovery = float(oracle.get("completeness", 0.0) or 0.0)
@@ -909,14 +971,12 @@ class RuntimeRepairGraphCollector:
         strategy_decision: RepairRuntimeStrategyDecision,
         selected_ids: set[str],
     ) -> None:
-        with self.profiler.phase("collect_state_noop_oracle_path", state_id=str(state["state_id"]), candidate_id=candidate_id):
-            archive_path = _archive_path_for_oracle(task, self.fmt)
         with self.profiler.phase("collect_state_noop_oracle_verify", state_id=str(state["state_id"]), candidate_id=candidate_id):
-            oracle = _verify_output_against_oracle(
-                Path(archive_path),
-                self.fmt,
+            oracle = verify_extraction_output_against_oracle(
+                state.get("_extraction_result"),
                 self.record.get("oracle") if isinstance(self.record.get("oracle"), dict) else {},
-            ) if archive_path else {"status": "missing_output", "label": 0, "completeness": 0.0}
+                record=self.record,
+            )
         with self.profiler.phase("collect_state_noop_build_row", state_id=str(state["state_id"]), candidate_id=candidate_id):
             self._record_explored_label(oracle)
             action_row_id = f"{query_id}|{rank}|{candidate_id}"
@@ -968,6 +1028,8 @@ class RuntimeRepairGraphCollector:
                 "parent_action_row_id": state.get("parent_action_row_id") or "",
                 "parent_candidate_id": state.get("parent_candidate_id") or "",
                 "runtime_verification": _verification_payload(verification),
+                "oracle_ground_truth": _oracle_ground_truth_payload(oracle),
+                "runtime_oracle_disagreement_reason": _runtime_oracle_disagreement_reason(verification, oracle),
                 "stable_features": {
                     "runtime_context": payload.get("runtime_context") or {},
                     "candidate_proposal": payload.get("candidate_proposal") or {},
@@ -1115,14 +1177,256 @@ def _attach_split_to_task(task: ArchiveTask, record: dict[str, Any]) -> None:
         task.set_archive_input({"kind": "concat_ranges", "ranges": ranges, "format_hint": _record_format(record), "path": main_path, "parts": part_items, "use_parts_only": bool(source_input.get("use_parts_only"))})
 
 
-def _archive_path_for_oracle(task: ArchiveTask, fmt: str) -> str:
-    state = task.archive_state()
-    if state.patches:
-        return _materialize_training_archive_state(state, fmt)
-    descriptor = state.to_archive_input_descriptor()
-    if descriptor.open_mode == "file" and descriptor.entry_path:
-        return descriptor.entry_path
-    return _materialize_training_archive_state(state, fmt)
+def verify_extraction_output_against_oracle(extraction_result: Any, oracle: dict[str, Any], *, record: dict[str, Any] | None = None) -> dict[str, Any]:
+    oracle = oracle if isinstance(oracle, dict) else {}
+    record = record if isinstance(record, dict) else {}
+    expected_files = oracle.get("expected_files") if isinstance(oracle.get("expected_files"), dict) else {}
+    if expected_files:
+        return _verify_expected_files_from_extraction(extraction_result, expected_files, record=record)
+    expected_payload = oracle.get("expected_payload") if isinstance(oracle.get("expected_payload"), dict) else {}
+    if expected_payload:
+        return _verify_expected_payload_from_extraction(extraction_result, expected_payload, record=record)
+    expected_bytes = oracle.get("expected_bytes") if isinstance(oracle.get("expected_bytes"), dict) else {}
+    if expected_bytes:
+        return _oracle_label_status(0, "missing_extraction_oracle_for_archive_bytes", 0.0, oracle_source="extraction_output")
+    return _oracle_label_status(0, "no_oracle", 0.0, oracle_source="extraction_output")
+
+
+def _verify_expected_files_from_extraction(extraction_result: Any, expected_files: dict[str, Any], *, record: dict[str, Any]) -> dict[str, Any]:
+    output_items = _oracle_output_items(extraction_result)
+    if not output_items:
+        return {
+            **_oracle_label_status(0, "missing_extraction_output", 0.0, oracle_source="extraction_output"),
+            "expected_files": len(expected_files),
+            "matched_files": 0,
+            "complete_files": 0,
+            "partial_files": 0,
+            "failed_files": 0,
+            "missing_files": len(expected_files),
+            "expected_bytes": _expected_file_bytes(expected_files),
+            "matched_bytes": 0,
+            "complete_bytes": 0,
+        }
+    output_by_path = {normalize_match_path(item.get("archive_path") or item.get("path")): item for item in output_items}
+    expected_count = 0
+    expected_bytes = 0
+    matched_files = 0
+    complete_files = 0
+    partial_files = 0
+    failed_files = 0
+    missing_files = 0
+    matched_bytes = 0
+    complete_bytes = 0
+    zero_byte_expected = 0
+    for raw_name, raw_meta in expected_files.items():
+        if not isinstance(raw_meta, dict):
+            continue
+        expected_count += 1
+        expected_name = clean_relative_archive_path(raw_meta.get("name") or raw_name)
+        expected_size = _safe_int(raw_meta.get("size"))
+        expected_crc = _optional_crc32(raw_meta.get("crc32", raw_meta.get("crc")))
+        has_crc = bool(raw_meta.get("has_crc", expected_crc is not None))
+        if expected_size is not None:
+            expected_bytes += max(0, expected_size)
+            if expected_size == 0:
+                zero_byte_expected += 1
+        item = output_by_path.get(normalize_match_path(expected_name))
+        if item is None:
+            missing_files += 1
+            continue
+        matched_files += 1
+        actual_size = _safe_int(item.get("size", item.get("bytes_written")))
+        actual_crc = _optional_crc32(item.get("crc32"))
+        output_status = str(item.get("status") or "")
+        size_ok = expected_size is None or actual_size == expected_size
+        crc_ok = (not has_crc) or expected_crc is None or (actual_crc is not None and actual_crc == expected_crc)
+        if expected_size is not None and actual_size is not None:
+            matched_bytes += min(max(0, actual_size), max(0, expected_size))
+        if output_status == "failed":
+            failed_files += 1
+        elif size_ok and crc_ok and actual_size is not None:
+            complete_files += 1
+            complete_bytes += max(0, actual_size if expected_size is None else expected_size)
+        elif actual_size is not None and actual_size > 0 and (expected_size is None or actual_size < expected_size):
+            partial_files += 1
+        else:
+            failed_files += 1
+    file_coverage = complete_files / max(1, expected_count)
+    byte_coverage = complete_bytes / max(1, expected_bytes) if expected_bytes > 0 else file_coverage
+    completeness = min(1.0, max(0.0, (file_coverage + byte_coverage) / 2.0))
+    status = "complete"
+    label = 3
+    if complete_files == expected_count and expected_count > 0 and completeness >= 0.999:
+        status = "complete"
+        label = 3
+    elif complete_files > 0 or partial_files > 0 or matched_files > 0:
+        status = "partial" if complete_files or partial_files else "hard_negative"
+        label = 1 if complete_files or partial_files else -1
+    else:
+        status = "no_progress" if output_items else "missing_extraction_output"
+        label = 0
+    cap_reason = _oracle_completion_cap_reason(record, expected_bytes=expected_bytes, zero_byte_expected=zero_byte_expected, expected_count=expected_count, expected_files=expected_files)
+    if cap_reason and label == 3:
+        label = 1 if complete_files > 0 or matched_files > 0 else 0
+        status = "partial" if label == 1 else "no_progress"
+        completeness = min(completeness, 0.999)
+    return {
+        **_oracle_label_status(label, status, completeness, oracle_source="extraction_output"),
+        "matched_files": matched_files,
+        "complete_files": complete_files,
+        "partial_files": partial_files,
+        "failed_files": failed_files,
+        "missing_files": missing_files,
+        "wrong_files": failed_files,
+        "unreadable_files": missing_files,
+        "entry_count": len(output_items),
+        "expected_files": expected_count,
+        "expected_bytes": expected_bytes,
+        "matched_bytes": matched_bytes,
+        "complete_bytes": complete_bytes,
+        **({"oracle_cap_reason": cap_reason} if cap_reason else {}),
+    }
+
+
+def _verify_expected_payload_from_extraction(extraction_result: Any, expected_payload: dict[str, Any], *, record: dict[str, Any]) -> dict[str, Any]:
+    output_items = [item for item in _oracle_output_items(extraction_result) if Path(str(item.get("path") or "")).is_file()]
+    if not output_items:
+        return _oracle_label_status(0, "missing_extraction_output", 0.0, oracle_source="extraction_output")
+    if len(output_items) != 1:
+        return {**_oracle_label_status(1, "partial", 0.5, oracle_source="extraction_output"), "oracle_cap_reason": "expected_payload_multiple_outputs"}
+    path = Path(str(output_items[0].get("path") or ""))
+    data = path.read_bytes()
+    expected_sha = str(expected_payload.get("sha256") or "")
+    digest = _sha256_bytes(data)
+    complete = bool(expected_sha and digest == expected_sha)
+    expected_size = _safe_int(expected_payload.get("size")) or len(data)
+    completeness = 1.0 if complete else min(1.0, len(data) / max(1, expected_size))
+    cap_reason = _oracle_completion_cap_reason(record, expected_bytes=expected_size, zero_byte_expected=1 if expected_size == 0 else 0, expected_count=1, expected_files={})
+    if complete and not cap_reason:
+        return _oracle_label_status(3, "complete", 1.0, oracle_source="extraction_output")
+    return {**_oracle_label_status(1 if completeness > 0 else -1, "partial" if completeness > 0 else "hard_negative", min(completeness, 0.999), oracle_source="extraction_output"), **({"oracle_cap_reason": cap_reason} if cap_reason else {})}
+
+
+def _oracle_output_items(extraction_result: Any) -> list[dict[str, Any]]:
+    if extraction_result is None:
+        return []
+    manifest = getattr(extraction_result, "progress_manifest_payload", None)
+    output_dir = Path(str(getattr(extraction_result, "out_dir", "") or ""))
+    items: list[dict[str, Any]] = []
+    if isinstance(manifest, dict):
+        for raw in manifest.get("files") or []:
+            if isinstance(raw, dict):
+                items.append(_oracle_output_item(raw, output_dir))
+    if not items and output_dir.is_dir():
+        for path in output_dir.rglob("*"):
+            if path.is_file() and ".sunpack" not in path.parts:
+                rel = path.relative_to(output_dir).as_posix()
+                items.append(_oracle_output_item({"path": str(path), "archive_path": rel, "status": "complete"}, output_dir))
+    return [item for item in items if item.get("archive_path") or item.get("path")]
+
+
+def _oracle_output_item(raw: dict[str, Any], output_dir: Path) -> dict[str, Any]:
+    path_text = str(raw.get("path") or "")
+    path = Path(path_text)
+    if path_text and not path.is_absolute() and output_dir:
+        path = output_dir / path
+    archive_path = clean_relative_archive_path(raw.get("archive_path") or raw.get("name") or (path.name if path_text else ""))
+    size = _safe_int(raw.get("bytes_written", raw.get("size")))
+    crc = _optional_crc32(raw.get("crc32"))
+    if path.is_file():
+        size = path.stat().st_size
+        crc = _crc32_file(path)
+    return {
+        "path": str(path) if path_text else "",
+        "archive_path": archive_path,
+        "status": str(raw.get("status") or "unverified"),
+        "size": size,
+        "bytes_written": size,
+        "crc32": crc,
+    }
+
+
+def _oracle_completion_cap_reason(record: dict[str, Any], *, expected_bytes: int, zero_byte_expected: int, expected_count: int, expected_files: dict[str, Any]) -> str:
+    physical_complete_expected = record.get("physical_complete_expected")
+    profile = str(record.get("profile") or record.get("damage_profile") or record.get("sample_id") or "").lower()
+    flags = {str(item).lower() for item in record.get("damage_flags") or []}
+    expected_has_payload_hash = any(isinstance(meta, dict) and (meta.get("sha256") or meta.get("crc32") is not None or meta.get("crc") is not None) for meta in expected_files.values())
+    if str(profile).startswith("partial_") and expected_count > 0 and zero_byte_expected == expected_count:
+        return "invalid_physical_partial_sample"
+    if physical_complete_expected is False and not expected_has_payload_hash:
+        return "physical_complete_not_expected_or_payload_oracle_missing"
+    if flags & {"payload_hash_mismatch", "payload_loss", "entry_payload_bad"} and not expected_has_payload_hash:
+        return "physical_complete_not_expected_or_payload_oracle_missing"
+    if physical_complete_expected is False and expected_bytes <= 0:
+        return "physical_complete_not_expected_or_payload_oracle_missing"
+    return ""
+
+
+def _oracle_label_status(label: int, status: str, completeness: float, **extra: Any) -> dict[str, Any]:
+    return {"status": status, "label": int(label), "completeness": max(0.0, min(1.0, float(completeness or 0.0))), **extra}
+
+
+def _oracle_ground_truth_payload(oracle: dict[str, Any]) -> dict[str, Any]:
+    keys = {
+        "status", "label", "completeness", "matched_files", "complete_files", "partial_files", "failed_files",
+        "missing_files", "wrong_files", "unreadable_files", "entry_count", "expected_files", "expected_bytes",
+        "matched_bytes", "complete_bytes", "oracle_source", "oracle_cap_reason", "error",
+    }
+    return {key: value for key, value in dict(oracle or {}).items() if key in keys}
+
+
+def _runtime_oracle_disagreement_reason(verification: Any, oracle: dict[str, Any]) -> str:
+    decision = str(getattr(verification, "decision_hint", "") or "")
+    recovery = float((oracle or {}).get("completeness", 0.0) or 0.0)
+    status = str((oracle or {}).get("status") or "")
+    if decision == DECISION_ACCEPT and recovery < 0.999:
+        if status == "missing_extraction_output":
+            return "expected_output_missing"
+        if (oracle or {}).get("oracle_cap_reason"):
+            return str((oracle or {}).get("oracle_cap_reason"))
+        if status in {"hard_negative", "partial"}:
+            return "payload_hash_mismatch"
+        return "metadata_only_match_rejected"
+    return ""
+
+
+def _expected_file_bytes(expected_files: dict[str, Any]) -> int:
+    total = 0
+    for meta in expected_files.values():
+        if isinstance(meta, dict):
+            total += max(0, _safe_int(meta.get("size")) or 0)
+    return total
+
+
+def _crc32_file(path: Path) -> int:
+    value = 0
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            value = zlib.crc32(chunk, value)
+    return value & 0xFFFFFFFF
+
+
+def _sha256_bytes(data: bytes) -> str:
+    import hashlib
+    return hashlib.sha256(data).hexdigest()
+
+
+def _safe_int(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _optional_crc32(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value) & 0xFFFFFFFF
+    except (TypeError, ValueError):
+        return None
 
 
 def _transition_terminal_status(transition, oracle: dict[str, Any]) -> str:
@@ -1190,6 +1494,8 @@ def _terminal_row(record: dict[str, Any], state: dict[str, Any], status: str, ve
                 "expected_files",
             }
         }
+        row["oracle_ground_truth"] = _oracle_ground_truth_payload(oracle)
+        row["runtime_oracle_disagreement_reason"] = _runtime_oracle_disagreement_reason(verification, oracle)
     return row
 
 

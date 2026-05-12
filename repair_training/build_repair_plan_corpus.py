@@ -3,10 +3,12 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import random
 import shutil
 import sys
 import time
+import zipfile
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
@@ -26,6 +28,7 @@ from repair_training.training_corruption import (
 DEFAULT_MATERIAL_ROOT = Path("repair_training") / "material"
 DEFAULT_OUTPUT_DIR = Path(".sunpack") / "corpus"
 DEFAULT_MANIFEST = DEFAULT_OUTPUT_DIR / "repair_plan_manifest.jsonl"
+DEFAULT_ZIP_V3_DISTRIBUTION = Path("repair_training") / "damage_distribution_zip_root_transition_v3.json"
 PROFILE_LAYERS = (
     ("structural", 0.30, ("structural_boundary", "structural_header_tail", "structural_footer_tail")),
     ("structural_directory", 0.30, (
@@ -125,11 +128,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--init-material", action="store_true", help="Create repair_training/material format directories and exit.")
     parser.add_argument("--material-root", default=str(DEFAULT_MATERIAL_ROOT), help="Root containing <format>/<sample_id> material folders.")
     parser.add_argument("--per-sample", type=int, default=10, help="Damaged variants per source archive inside each material sample folder.")
-    parser.add_argument("--seed", default="random", help="Random seed. Use 'random' for a fresh seed each run.")
-    parser.add_argument("--formats", default="", help="Optional comma-separated material format directory allowlist.")
+    parser.add_argument("--seed", default="20260512", help="Random seed. Use 'random' for a fresh seed each run.")
+    parser.add_argument("--formats", default="zip", help="Optional comma-separated material format directory allowlist.")
     parser.add_argument("--sample", action="append", default=[], help="Optional sample folder name filter. Repeatable.")
     parser.add_argument("--no-pretty", action="store_false", dest="pretty", help="Only write JSONL manifests.")
-    parser.add_argument("--profile-distribution", default="", help="JSON file with explicit per-profile counts for material generation.")
+    parser.add_argument("--profile-distribution", default=str(DEFAULT_ZIP_V3_DISTRIBUTION), help="JSON file with explicit per-profile counts for material generation.")
+    parser.add_argument("--distribution-jitter-pct", type=float, default=0.08, help="Randomly perturb explicit profile counts by this fraction while preserving total count. Use 0 for exact configured counts.")
     parser.add_argument("--distribution-report", default="", help="Write a material distribution report JSON after generation.")
     parser.set_defaults(pretty=True)
 
@@ -146,8 +150,14 @@ def _material_build(args: argparse.Namespace, material_root: Path) -> int:
     rng = random.Random(base_seed)
     formats = _format_filter(args.formats)
     distribution, profile_metadata = _load_profile_distribution(args.profile_distribution)
+    configured_distribution = dict(distribution)
+    jitter_pct = max(0.0, float(getattr(args, "distribution_jitter_pct", 0.0) or 0.0))
+    if distribution and jitter_pct > 0:
+        distribution = _jitter_profile_distribution(distribution, rng, jitter_pct)
+    if distribution and not str(args.distribution_report or "").strip():
+        args.distribution_report = str(material_root / "zip" / "material_distribution_report_v3.json")
     if distribution:
-        return _material_build_with_profile_distribution(args, material_root, distribution, profile_metadata, rng, base_seed, formats)
+        return _material_build_with_profile_distribution(args, material_root, distribution, profile_metadata, rng, base_seed, formats, configured_distribution=configured_distribution, distribution_jitter_pct=jitter_pct)
     sample_filter = set(args.sample or [])
     summary = {"material_root": str(material_root), "seed": base_seed, "organized": 0, "samples": 0, "sources": 0, "generated": 0, "skipped": 0}
     for format_dir in _format_dirs(material_root, formats):
@@ -237,6 +247,9 @@ def _material_build_with_profile_distribution(
     rng: random.Random,
     base_seed: int,
     formats: set[str],
+    *,
+    configured_distribution: dict[str, int] | None = None,
+    distribution_jitter_pct: float = 0.0,
 ) -> int:
     sample_filter = set(args.sample or [])
     if formats and "zip" not in formats:
@@ -248,6 +261,8 @@ def _material_build_with_profile_distribution(
         "material_root": str(material_root),
         "seed": base_seed,
         "profile_distribution": dict(distribution),
+        "configured_profile_distribution": dict(configured_distribution or distribution),
+        "distribution_jitter_pct": float(distribution_jitter_pct),
         "profile_metadata_counts": dict(Counter(str((profile_metadata.get(profile) or {}).get("profile_layer") or "basic") for profile in distribution)),
         "organized": _organize_root_sources(zip_dir, "zip", sample_filter),
         "samples": 0,
@@ -340,6 +355,9 @@ def _material_build_with_profile_distribution(
     report_path = Path(args.distribution_report) if str(args.distribution_report or "").strip() else material_root / "zip" / "material_distribution_report.json"
     report = _material_distribution_report(material_root / "zip", distribution, profile_metadata)
     report["summary"] = summary
+    report["configured_profile_distribution"] = dict(configured_distribution or distribution)
+    report["effective_profile_distribution"] = dict(distribution)
+    report["distribution_jitter_pct"] = float(distribution_jitter_pct)
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True, default=str), encoding="utf-8")
     summary["distribution_report"] = str(report_path)
@@ -468,6 +486,7 @@ def _distributed_zip_sources(zip_dir: Path, sample_filter: set[str]) -> list[dic
                 "source": source,
                 "source_derivation": source_derivation,
                 "source_archive_id": _source_archive_id(source),
+                "source_payload_bytes": _zip_source_payload_bytes(source),
             })
     return sources
 
@@ -480,6 +499,77 @@ def _expanded_profile_plan(distribution: dict[str, int], rng: random.Random) -> 
     return plan
 
 
+def _jitter_profile_distribution(distribution: dict[str, int], rng: random.Random, jitter_pct: float) -> dict[str, int]:
+    if not distribution:
+        return {}
+    total = int(sum(max(0, int(count)) for count in distribution.values()))
+    if total <= 0:
+        return dict(distribution)
+    jitter = max(0.0, float(jitter_pct))
+    if jitter <= 0:
+        return dict(distribution)
+    weighted: list[tuple[str, float]] = []
+    for profile, count_raw in sorted(distribution.items()):
+        count = max(0, int(count_raw))
+        if count <= 0:
+            weighted.append((profile, 0.0))
+            continue
+        multiplier = rng.uniform(max(0.05, 1.0 - jitter), 1.0 + jitter)
+        weighted.append((profile, max(0.01, float(count) * multiplier)))
+    weight_total = sum(weight for _, weight in weighted)
+    if weight_total <= 0:
+        return dict(distribution)
+    scaled: list[tuple[str, int, float]] = []
+    assigned = 0
+    for profile, weight in weighted:
+        if weight <= 0:
+            scaled.append((profile, 0, 0.0))
+            continue
+        raw = weight / weight_total * total
+        floor = max(1, int(math.floor(raw))) if int(distribution.get(profile, 0) or 0) > 0 else 0
+        scaled.append((profile, floor, raw - math.floor(raw)))
+        assigned += floor
+    if assigned > total:
+        # Rare when many tiny positive buckets are forced to one. Remove from the
+        # largest overrepresented buckets first while keeping positive buckets alive
+        # as long as possible.
+        overflow = assigned - total
+        scaled_mut = list(scaled)
+        for index in sorted(range(len(scaled_mut)), key=lambda i: scaled_mut[i][1], reverse=True):
+            if overflow <= 0:
+                break
+            profile, floor, frac = scaled_mut[index]
+            removable = max(0, floor - (1 if int(distribution.get(profile, 0) or 0) > 0 else 0))
+            take = min(removable, overflow)
+            if take:
+                scaled_mut[index] = (profile, floor - take, frac)
+                overflow -= take
+        scaled = scaled_mut
+        assigned = total - overflow
+    remaining = total - assigned
+    output = {profile: count for profile, count, _ in scaled}
+    if remaining > 0:
+        for profile, _, _ in sorted(scaled, key=lambda item: item[2], reverse=True):
+            if remaining <= 0:
+                break
+            output[profile] = int(output.get(profile, 0)) + 1
+            remaining -= 1
+    # Final guard for exact total after any rounding corner case.
+    delta = total - sum(output.values())
+    profiles = sorted(output, key=lambda key: output[key], reverse=(delta < 0))
+    while delta != 0 and profiles:
+        for profile in profiles:
+            if delta == 0:
+                break
+            if delta > 0:
+                output[profile] = int(output.get(profile, 0)) + 1
+                delta -= 1
+            elif output.get(profile, 0) > 1:
+                output[profile] = int(output.get(profile, 0)) - 1
+                delta += 1
+    return dict(sorted(output.items()))
+
+
 def _choose_source_for_profile(
     sources: list[dict[str, Any]],
     profile: str,
@@ -488,9 +578,32 @@ def _choose_source_for_profile(
 ) -> dict[str, Any]:
     compatible = [item for item in sources if _source_compatible_with_profile(dict(item.get("source_derivation") or {}), profile)]
     choices = compatible or sources
+    if _profile_requires_payload_source(profile):
+        payload_choices = [item for item in choices if int(item.get("source_payload_bytes") or 0) > 0]
+        if payload_choices:
+            choices = payload_choices
     min_count = min(source_counts[str(item["source"])] for item in choices)
     least_used = [item for item in choices if source_counts[str(item["source"])] == min_count]
     return dict(rng.choice(least_used))
+
+
+def _profile_requires_payload_source(profile: str) -> bool:
+    profile_l = str(profile or "").lower()
+    return (
+        profile_l.startswith("partial_")
+        or "payload" in profile_l
+        or "missing_middle" in profile_l
+        or "tail_volume" in profile_l
+        or "split_tail" in profile_l
+    )
+
+
+def _zip_source_payload_bytes(path: Path) -> int:
+    try:
+        with zipfile.ZipFile(path) as archive:
+            return int(sum(max(0, int(info.file_size or 0)) for info in archive.infolist() if not info.is_dir()))
+    except Exception:
+        return 0
 
 
 def _apply_profile_metadata(record: dict[str, Any], profile: str, metadata: dict[str, Any]) -> None:

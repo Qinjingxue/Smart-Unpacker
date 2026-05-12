@@ -9,26 +9,26 @@ param(
     [string]$SummaryOutput = "",
     [string]$Workspace = "",
     [int]$CollectorShard = -1,
-    [int]$CollectorWorkers = 1,
+    [int]$CollectorWorkers = 6,
     [ValidateSet("process_per_sample", "worker_pool", "inprocess")]
     [string]$SampleExecutionMode = "worker_pool",
     [int]$SampleWorkerCount = 0,
-    [int]$MaxRounds = 8,
+    [int]$MaxRounds = 6,
     [int]$MaxCandidatesPerRound = 10,
     [ValidateSet("greedy", "greedy_current_selector", "beam", "counterfactual")]
     [string]$RolloutMode = "beam",
     [int]$BeamSize = 8,
     [int]$BranchTopK = 5,
     [int]$CounterfactualExtra = 2,
-    [int]$MaxTotalStatesPerSample = 80,
+    [int]$MaxTotalStatesPerSample = 20,
     [double]$FutureLabelDiscount = 0.8,
     [ValidateSet("lazy", "eager")]
     [string]$ProposalMode = "lazy",
-    [int]$MaterializeTopKPerRound = 10,
+    [int]$MaterializeTopKPerRound = 8,
     [int]$MaxExpensiveMaterializationsPerRound = 3,
     [switch]$MaterializeSelectedOnly,
     [switch]$IncludeUnmaterializedLabels,
-    [double]$CaseTimeoutSeconds = 45.0,
+    [double]$CaseTimeoutSeconds = 180.0,
     [double]$StreamLargeSizeMb = 0,
     [double]$StreamLargeCaseTimeoutSeconds = 0,
     [int]$StreamLargeMaxCandidatesPerRound = 0,
@@ -39,11 +39,12 @@ param(
     [string]$DebugEvents = "",
     [switch]$DisableRepairCache,
     [switch]$ProfileMaterializationCandidates,
-    [string]$Formats = "",
+    [string]$Formats = "zip",
     [string]$Sample = "",
     [int]$Limit = 0,
     [switch]$Append,
     [switch]$KeepTemp,
+    [switch]$SkipAnalysisReport,
     [switch]$NoPretty,
     [switch]$Progress,
     [string[]]$ExtraArgs = @()
@@ -127,6 +128,9 @@ if ($Append) {
 }
 if ($KeepTemp) {
     $argsList += "--keep-temp"
+}
+if ($SkipAnalysisReport) {
+    $argsList += "--skip-analysis-report"
 }
 if ($NoPretty) {
     $argsList += "--no-pretty"

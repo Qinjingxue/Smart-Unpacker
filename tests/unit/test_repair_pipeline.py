@@ -15,6 +15,7 @@ import pytest
 
 from sunpack.analysis.result import ArchiveFormatEvidence, ArchiveSegment
 from sunpack.config.schema import normalize_config
+from sunpack.contracts.archive_knowledge import ArchiveKnowledge
 from sunpack.repair.config import enabled_module_configs
 from sunpack.repair.candidate import CandidateSelector, CandidateValidation, RepairCandidate, materialize_candidate
 from sunpack.repair import RepairJob, RepairScheduler
@@ -34,6 +35,13 @@ DEFAULT_SALVAGE_MODULES = {
     "tar_sparse_pax_longname_repair",
     "zip_resolve_duplicate_entries",
 }
+
+
+def _zip_profile_knowledge(profile: str) -> dict:
+    knowledge = ArchiveKnowledge()
+    knowledge.set("analysis.summary.format", "zip", source_layer="test", source_module="fixture")
+    knowledge.set("source.profile", profile, source_layer="test", source_module="fixture")
+    return knowledge.to_dict()
 
 
 class _CountingLazyRepairModule:
@@ -1223,12 +1231,39 @@ def test_zip_route_evidence_extra_field_length_selects_extra_length_repair(tmp_p
         confidence=0.7,
         damage_flags=["damaged"],
         analysis_prepass={"damage_profile": "zip_extra_field_length_bad"},
+        knowledge=_zip_profile_knowledge("zip_extra_field_length_bad"),
         archive_key="extra.zip",
     ), lazy=True)
 
     modules = {candidate.module_name for candidate in batch.candidates}
     assert "zip_fix_extra_field_length" in modules
     assert "zip_fix_cd_offset" not in modules
+
+
+def test_zip_compound_extra_payload_profile_keeps_extra_field_repair_route(tmp_path):
+    scheduler = RepairScheduler({
+        "repair": {
+            "workspace": str(tmp_path / "repair"),
+            "modules": [
+                {"name": "zip_fix_extra_field_length", "enabled": True},
+                {"name": "zip_fix_cd_offset", "enabled": True},
+                {"name": "zip_rebuild_cd_from_local_headers", "enabled": True},
+            ],
+        }
+    })
+    batch = scheduler.generate_repair_candidates(RepairJob(
+        source_input={"kind": "file", "path": str(tmp_path / "compound.zip"), "format_hint": "zip"},
+        format="zip",
+        confidence=0.7,
+        damage_flags=["central_directory_bad", "central_directory_offset_bad", "central_directory_count_bad", "checksum_error", "crc_error"],
+        analysis_prepass={"damage_profile": "compound_extra_field_cd_offset_payload_bad"},
+        knowledge=_zip_profile_knowledge("compound_extra_field_cd_offset_payload_bad"),
+        archive_key="compound.zip",
+    ), lazy=True)
+
+    modules = {candidate.module_name for candidate in batch.candidates}
+    assert "zip_fix_extra_field_length" in modules
+    assert "payload_hash_mismatch" in batch.diagnosis["capability_decision"]["damage_flags"]
 
 
 def test_zip_route_evidence_sfx_prefers_carrier_crop_from_structure(tmp_path):
@@ -1247,12 +1282,39 @@ def test_zip_route_evidence_sfx_prefers_carrier_crop_from_structure(tmp_path):
         confidence=0.7,
         damage_flags=["damaged"],
         analysis_prepass={"zip_structure_features": {"has_sfx_prefix": True}},
+        knowledge=_zip_profile_knowledge("zip_sfx_cd_damage"),
         archive_key="sfx.zip",
     ), lazy=True)
 
     modules = {candidate.module_name for candidate in batch.candidates}
     assert "archive_carrier_crop_deep_recovery" in modules
     assert "zip_fix_cd_offset" not in modules
+
+
+def test_zip_compound_boundary_payload_profile_routes_carrier_crop(tmp_path):
+    scheduler = RepairScheduler({
+        "repair": {
+            "workspace": str(tmp_path / "repair"),
+            "modules": [
+                {"name": "archive_carrier_crop_deep_recovery", "enabled": True},
+                {"name": "zip_rebuild_cd_from_local_headers", "enabled": True},
+                {"name": "zip_local_header_partial_scan", "enabled": True},
+            ],
+        }
+    })
+    batch = scheduler.generate_repair_candidates(RepairJob(
+        source_input={"kind": "file", "path": str(tmp_path / "compound_sfx.zip"), "format_hint": "zip"},
+        format="zip",
+        confidence=0.7,
+        damage_flags=["central_directory_bad", "central_directory_offset_bad", "trailing_junk"],
+        analysis_prepass={"damage_profile": "compound_boundary_drop_cd_payload_bad"},
+        knowledge=_zip_profile_knowledge("compound_boundary_drop_cd_payload_bad"),
+        archive_key="compound_sfx.zip",
+    ), lazy=True)
+
+    modules = {candidate.module_name for candidate in batch.candidates}
+    assert "archive_carrier_crop_deep_recovery" in modules
+    assert "carrier_archive" in batch.diagnosis["capability_decision"]["damage_flags"]
 
 
 def test_zip_route_history_allows_rebuild_after_carrier_crop(tmp_path):

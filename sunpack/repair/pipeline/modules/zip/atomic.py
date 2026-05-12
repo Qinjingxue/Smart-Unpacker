@@ -226,7 +226,7 @@ class ZipFixExtraFieldLength(_ZipDirectoryFieldRepair):
     expected_native_target = "extra_field_length"
     categories = ("directory_rebuild",)
     require_flags = ("extra_field_length_bad", "extra_length_bad", "extra_field_bad")
-    reject_flags = ("wrong_password", *CARRIER_FLAGS, *MISSING_VOLUME_FLAGS, *CONTENT_DAMAGE_FLAGS, "zip64", "zip64_extra_bad", "zip64_extra_size_bad")
+    reject_flags = ("wrong_password", *CARRIER_FLAGS, *MISSING_VOLUME_FLAGS, "zip64", "zip64_extra_bad", "zip64_extra_size_bad")
     base_score = 0.92
     confidence = 0.93
     route_family = "extra_field_length"

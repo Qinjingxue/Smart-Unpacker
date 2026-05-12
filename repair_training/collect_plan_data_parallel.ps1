@@ -17,22 +17,22 @@ param(
     [ValidateSet("process_per_sample", "worker_pool", "inprocess")]
     [string]$SampleExecutionMode = "worker_pool",
     [int]$SampleWorkerCount = 0,
-    [int]$MaxRounds = 8,
+    [int]$MaxRounds = 6,
     [int]$MaxCandidatesPerRound = 10,
     [ValidateSet("greedy", "greedy_current_selector", "beam", "counterfactual")]
     [string]$RolloutMode = "beam",
     [int]$BeamSize = 8,
     [int]$BranchTopK = 5,
     [int]$CounterfactualExtra = 2,
-    [int]$MaxTotalStatesPerSample = 80,
+    [int]$MaxTotalStatesPerSample = 20,
     [double]$FutureLabelDiscount = 0.8,
     [ValidateSet("lazy", "eager")]
     [string]$ProposalMode = "lazy",
-    [int]$MaterializeTopKPerRound = 10,
+    [int]$MaterializeTopKPerRound = 8,
     [int]$MaxExpensiveMaterializationsPerRound = 3,
     [switch]$MaterializeSelectedOnly,
     [switch]$IncludeUnmaterializedLabels,
-    [double]$CaseTimeoutSeconds = 45.0,
+    [double]$CaseTimeoutSeconds = 180.0,
     [double]$StreamLargeSizeMb = 0,
     [double]$StreamLargeCaseTimeoutSeconds = 0,
     [int]$StreamLargeMaxCandidatesPerRound = 0,
@@ -42,11 +42,12 @@ param(
     [double]$HeartbeatSeconds = 5.0,
     [switch]$DisableRepairCache,
     [switch]$ProfileMaterializationCandidates,
-    [string]$Formats = "",
+    [string]$Formats = "zip",
     [string]$Sample = "",
     [int]$Limit = 0,
     [switch]$NoPretty,
-    [switch]$Progress
+    [switch]$Progress,
+    [switch]$SkipAnalysisReport
 )
 
 $ErrorActionPreference = "Stop"
@@ -223,8 +224,30 @@ function New-CollectorArgs {
     if ($DisableRepairCache) { $argsList.Add("-DisableRepairCache") }
     if ($ProfileMaterializationCandidates) { $argsList.Add("-ProfileMaterializationCandidates") }
     if ($NoPretty) { $argsList.Add("-NoPretty") }
+    $argsList.Add("-SkipAnalysisReport")
     if ($Progress) { $argsList.Add("-Progress") }
     return $argsList
+}
+
+function Invoke-CollectionAnalysis {
+    if ($SkipAnalysisReport) { return }
+    foreach ($candidate in @("python", "py")) {
+        try {
+            & $candidate "repair_training\analyze_runtime_graph_run.py" "--run-dir" $RunDir *> $null
+            if ($LASTEXITCODE -eq 0) { return }
+        } catch {
+        }
+    }
+    $manifestPath = Join-Path $RunDir "run_manifest.json"
+    $payload = @{}
+    if (Test-Path -LiteralPath $manifestPath) {
+        try {
+            $raw = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+            foreach ($prop in $raw.PSObject.Properties) { $payload[$prop.Name] = $prop.Value }
+        } catch { $payload = @{} }
+    }
+    $payload["collection_analysis"] = @{ status = "failed"; error = "failed to run analyze_runtime_graph_run.py from parallel wrapper" }
+    ($payload | ConvertTo-Json -Depth 20) | Set-Content -LiteralPath $manifestPath -Encoding UTF8
 }
 
 $collectScript = Join-Path $repoRoot "repair_training\collect_plan_data.ps1"
@@ -438,6 +461,7 @@ if ($Scheduling -eq "pool") {
     New-Item -ItemType Directory -Path (Split-Path -Parent (Resolve-TrainingPath $ParallelSummaryOutput)) -Force | Out-Null
     ($aggregate | ConvertTo-Json -Depth 20) | Set-Content -LiteralPath (Resolve-TrainingPath $ParallelSummaryOutput) -Encoding UTF8
     Set-Content -LiteralPath (Join-Path $repoRoot "repair_training\latest_run.txt") -Value ($RunDir + "`n") -Encoding UTF8
+    Invoke-CollectionAnalysis
     Write-Host ($aggregate | ConvertTo-Json -Depth 8) -ForegroundColor Cyan
 
     if ($failed.Count -gt 0) {
@@ -676,6 +700,7 @@ foreach ($summary in $summaries) {
 New-Item -ItemType Directory -Path (Split-Path -Parent (Resolve-TrainingPath $ParallelSummaryOutput)) -Force | Out-Null
 ($aggregate | ConvertTo-Json -Depth 20) | Set-Content -LiteralPath (Resolve-TrainingPath $ParallelSummaryOutput) -Encoding UTF8
 Set-Content -LiteralPath (Join-Path $repoRoot "repair_training\latest_run.txt") -Value ($RunDir + "`n") -Encoding UTF8
+Invoke-CollectionAnalysis
 Write-Host ($aggregate | ConvertTo-Json -Depth 8) -ForegroundColor Cyan
 
 if ($failed.Count -gt 0) {
