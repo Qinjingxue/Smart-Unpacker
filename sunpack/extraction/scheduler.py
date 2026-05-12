@@ -102,4 +102,5 @@ class ExtractionScheduler:
             sevenzip_runner=self.sevenzip_runner,
             best_effort=True,
             write_progress_manifest=bool(self.extraction_config.get("write_progress_manifest", False)),
+            quiet=bool(self.extraction_config.get("quiet", False)),
         )

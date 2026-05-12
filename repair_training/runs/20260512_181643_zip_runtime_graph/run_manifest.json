@@ -2282,5 +2282,44 @@
       "压缩包损坏": 1
     },
     "wall_seconds": 1409.132
+  },
+  "training": {
+    "feature_contract_version": 3,
+    "feature_view": "runtime_minimal_native_validation",
+    "input_file_hashes": {
+      "C:\\Users\\29402\\Desktop\\sunpack\\repair_training\\runs\\20260512_181643_zip_runtime_graph\\datasets\\runtime_graph_failure.jsonl": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "C:\\Users\\29402\\Desktop\\sunpack\\repair_training\\runs\\20260512_181643_zip_runtime_graph\\datasets\\runtime_graph_success.jsonl": "73a046030b036870fb96b6d4e9f6d9aed5b715d5729e7a929db2278902c1b323"
+    },
+    "input_files": [
+      "C:\\Users\\29402\\Desktop\\sunpack\\repair_training\\runs\\20260512_181643_zip_runtime_graph\\datasets\\runtime_graph_success.jsonl",
+      "C:\\Users\\29402\\Desktop\\sunpack\\repair_training\\runs\\20260512_181643_zip_runtime_graph\\datasets\\runtime_graph_failure.jsonl"
+    ],
+    "metrics": {
+      "candidate_id_collision_count": 0,
+      "duplicate_conflict_regret_mean": 0.005588394656863161,
+      "duplicate_policy_top1_accuracy": 0.9545454545454546,
+      "eval_query_count": 1300,
+      "feature_contract_version": 3,
+      "future_return_regret_mean": 0.017838398195610165,
+      "future_return_regret_p90": 0.0,
+      "mae": 0.17465205555076924,
+      "oracle_future_return_mean": 0.6481351766651328,
+      "prediction_mean": 0.4374792581110663,
+      "r2": 0.6062790414720134,
+      "rmse": 0.25253466251044354,
+      "root_best_return_mean": 0.9626100939987726,
+      "root_mean_regret": 0.02741415764133511,
+      "root_query_count": 482,
+      "root_selected_return_mean": 0.9351959363574375,
+      "root_top1_accuracy": 0.9543568464730291,
+      "target_mean": 0.3802646357125967,
+      "top1_future_return_mean": 0.6302967784695226,
+      "weighted_future_return_regret_mean": 0.15658597124640863
+    },
+    "output_dir": "C:\\Users\\29402\\Desktop\\sunpack\\repair_training\\runs\\20260512_181643_zip_runtime_graph\\models\\zip_runtime_policy",
+    "row_count": 26975,
+    "sample_weight_mode": "root_transition_v1",
+    "target": "root_transition_return_v1",
+    "trained_at": "2026-05-12T19:23:49+08:00"
   }
 }

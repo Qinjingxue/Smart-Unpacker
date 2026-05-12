@@ -1,0 +1,27 @@
+{
+  "description": "ZIP root-transition training material distribution v2. Total count is 2800 and emphasizes first-step contrastive decisions for no-op, SFX, descriptor, split, ZIP64, raw-name, and partial-recovery profiles.",
+  "profiles": {
+    "zip_data_descriptor_payload_bad": 240,
+    "zip_data_descriptor_cd_conflict": 240,
+    "zip_sfx_payload_damage": 220,
+    "zip_sfx_cd_damage": 200,
+    "zip_duplicate_entry_crc_conflict": 200,
+    "zip_non_utf8_filename_directory_rebuild": 180,
+    "zip_zip64_extra_size_mismatch": 180,
+    "zip_split_missing_middle_volume": 160,
+    "zip_split_tail_volume_truncated": 150,
+    "zip_extra_field_length_bad": 120,
+    "zip_zip64_eocd_locator_bad": 100,
+    "zip_comment_overlap_eocd_shifted": 100,
+    "zip_mixed_method_one_entry_bad": 80,
+    "zip_wrong_offset_content_overlap": 80,
+    "zip_two_step_boundary_then_cd_rebuild": 80,
+    "zip_two_step_local_header_then_cd_offset": 80,
+    "zip_directory_only_bad_payload": 80,
+    "zip_encrypted_payload_bad": 80,
+    "zip_encrypted_trailing_junk": 60,
+    "zip_partial_recovery_wrong_hash_same_name": 60,
+    "zip_structural_boundary": 60,
+    "zip_rebuild_directory_keeps_bad_payload": 50
+  }
+}

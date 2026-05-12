@@ -31,6 +31,7 @@ class SingleArchiveExtractor:
         sevenzip_runner: SevenZipRunner,
         best_effort: bool = True,
         write_progress_manifest: bool = False,
+        quiet: bool = False,
     ):
         self.seven_z_path = seven_z_path
         self.password_store = password_store
@@ -43,6 +44,7 @@ class SingleArchiveExtractor:
         self.sevenzip_runner = sevenzip_runner
         self.best_effort = bool(best_effort)
         self.write_progress_manifest = bool(write_progress_manifest)
+        self.quiet = bool(quiet)
 
     def extract(
         self,
@@ -83,7 +85,7 @@ class SingleArchiveExtractor:
             )
         is_split = split_info.is_split or len(all_parts) > 1
 
-        print(f"\n[EXTRACT] 开始: {archive}")
+        self._log(f"\n[EXTRACT] 开始: {archive}")
 
         if not self.ensure_space(5):
             return self._failed(
@@ -194,7 +196,7 @@ class SingleArchiveExtractor:
                         with _phase(phase_timer, f"{phase_prefix}_empty_repaired_success_check"):
                             empty_repaired_success = self._empty_repaired_success(diagnostics, task)
                         if empty_repaired_success:
-                            print(f"[EXTRACT] 失败: {archive} (错误: 修复结果没有可提取文件)")
+                            self._log(f"[EXTRACT] 失败: {archive} (错误: 修复结果没有可提取文件)")
                             shutil.rmtree(out_dir, ignore_errors=True)
                             diagnostics["failure_stage"] = "verification"
                             diagnostics["failure_kind"] = "empty_repair_output"
@@ -207,7 +209,7 @@ class SingleArchiveExtractor:
                                 selected_codepage=selected_codepage,
                                 diagnostics=diagnostics,
                             )
-                        print(f"[EXTRACT] 成功: {archive}")
+                        self._log(f"[EXTRACT] 成功: {archive}")
                         manifest_path = ""
                         manifest_payload = None
                         if diagnostics.get("result"):
@@ -250,14 +252,14 @@ class SingleArchiveExtractor:
                         diagnostics={"failure_stage": "retry_preflight", "failure_kind": "disk_space"},
                     )
                 shutil.rmtree(out_dir, ignore_errors=True)
-                print(f"[EXTRACT] 临时失败，准备第 {retry_count + 1}/{self.retry_policy.max_retries} 次尝试: {archive}")
+                self._log(f"[EXTRACT] 临时失败，准备第 {retry_count + 1}/{self.retry_policy.max_retries} 次尝试: {archive}")
                 self.retry_policy.backoff(retry_count)
                 continue
 
             with _phase(phase_timer, f"{phase_prefix}_classify_error"):
                 error_msg = classify_extract_error(run_result or test_result, err, archive=archive, is_split_archive=is_split)
                 error_msg = self.retry_policy.append_retry_count(error_msg, retry_count)
-            print(f"[EXTRACT] 失败: {archive} (错误: {error_msg})")
+            self._log(f"[EXTRACT] 失败: {archive} (错误: {error_msg})")
             with _phase(phase_timer, f"{phase_prefix}_diagnostics_failure"):
                 diagnostics = self._diagnostics_from(run_result or test_result)
             with _phase(phase_timer, f"{phase_prefix}_recoverable_partial_check"):
@@ -417,7 +419,7 @@ class SingleArchiveExtractor:
         archive = task.main_path
         split_info = split_info or task.split_info
         all_parts = list(task.all_parts or [archive])
-        print(f"\n[EXTRACT] 开始 embedded segments: {archive} ({len(segments)} segments)")
+        self._log(f"\n[EXTRACT] 开始 embedded segments: {archive} ({len(segments)} segments)")
         with _phase(phase_timer, f"{phase_prefix}_ensure_space_initial"):
             has_space = self.ensure_space(5)
         if not has_space:
@@ -536,7 +538,7 @@ class SingleArchiveExtractor:
                     )
                 if manifest_path:
                     diagnostics["progress_manifest"] = manifest_path
-            print(f"[EXTRACT] embedded segments 成功: {archive}")
+            self._log(f"[EXTRACT] embedded segments 成功: {archive}")
             return ExtractionResult(
                 success=True,
                 archive=archive,
@@ -549,7 +551,7 @@ class SingleArchiveExtractor:
                 progress_manifest=manifest_path,
                 progress_manifest_payload=manifest_payload,
             )
-        print(f"[EXTRACT] embedded segments 失败: {archive}")
+        self._log(f"[EXTRACT] embedded segments 失败: {archive}")
         return self._failed(
             archive,
             out_dir,
@@ -593,6 +595,10 @@ class SingleArchiveExtractor:
                 except OSError:
                     pass
         return {"file_count": file_count, "total_bytes": total_bytes}
+
+    def _log(self, message: str) -> None:
+        if not self.quiet:
+            print(message)
 
 
 def _phase(timer: Callable[..., Any] | None, name: str):

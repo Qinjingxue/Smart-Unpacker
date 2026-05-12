@@ -240,6 +240,8 @@ def _candidate_id_index(candidate_payloads: list[PolicyCandidatePayload]) -> tup
 
 
 def _invalid_decision_reason(decision: RepairPolicyDecision, candidate_by_id: dict[str, int]) -> str:
+    if decision.reason.startswith("abstain:"):
+        return decision.reason
     if not decision.selected_candidate_id:
         if decision.selected_index is not None:
             return "invalid_policy_decision_legacy_selected_index"

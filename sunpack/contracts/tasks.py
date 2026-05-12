@@ -286,7 +286,7 @@ class ArchiveTask:
         with _phase(phase_timer, f"{phase_prefix}_knowledge_payload"):
             knowledge_payload = dict(state.knowledge)
         with _phase(phase_timer, f"{phase_prefix}_replace_knowledge"):
-            self._replace_knowledge_payload(knowledge_payload)
+            self._replace_knowledge_payload(knowledge_payload, knowledge_cache=ArchiveKnowledge(knowledge_payload))
         with _phase(phase_timer, f"{phase_prefix}_cache_update"):
             self._archive_state_cache_raw = state_payload
             self._archive_state_cache_knowledge_raw = knowledge_payload
@@ -392,6 +392,16 @@ class ArchiveTask:
         *,
         knowledge_cache: ArchiveKnowledge | None = None,
     ) -> None:
+        current = self.fact_bag.get("archive.knowledge")
+        if current is payload:
+            self._archive_knowledge_cache_raw = current if isinstance(current, dict) else payload
+            if knowledge_cache is not None:
+                self._archive_knowledge_cache = knowledge_cache
+            elif isinstance(self._archive_knowledge_cache, ArchiveKnowledge) and self._archive_knowledge_cache_raw is current:
+                pass
+            else:
+                self._archive_knowledge_cache = ArchiveKnowledge.from_any(current if isinstance(current, dict) else payload)
+            return
         self.fact_bag.set("archive.knowledge", payload)
         self._archive_knowledge_cache_raw = payload
         self._archive_knowledge_cache = knowledge_cache if knowledge_cache is not None else ArchiveKnowledge.from_any(payload)

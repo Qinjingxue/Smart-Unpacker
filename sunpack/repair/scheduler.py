@@ -113,10 +113,21 @@ class RepairScheduler:
                     ]
                     fallback_selected, fallback_selection = selector.select_validated(fallback_validated)
                     selected = fallback_selected
+                    fallback_candidate_payload = (
+                        candidate_feature_payload(fallback_selected)
+                        if fallback_selected is not None
+                        else {}
+                    )
                     selection = {
                         **fallback_selection,
                         "policy": _policy_selection_public(policy_selection),
                         "policy_fallback": True,
+                        "fallback_selected_candidate_id": str(fallback_candidate_payload.get("candidate_id") or ""),
+                        "fallback_selected_candidate": fallback_candidate_payload,
+                        "fallback_candidate_in_request": _candidate_id_in_payloads(
+                            str(fallback_candidate_payload.get("candidate_id") or ""),
+                            policy_payloads,
+                        ),
                     }
                 else:
                     warnings.append("model repair policy did not select a candidate")
@@ -807,6 +818,8 @@ def _policy_selection_public(selection: dict[str, Any]) -> dict[str, Any]:
             "invalid_candidate_id_reason",
             "load_error",
             "provider_errors",
+            "fallback_selected_candidate_id",
+            "fallback_candidate_in_request",
             "metadata",
         )
         if key in selection
@@ -876,6 +889,12 @@ def _selected_policy_payload(payloads: list[dict[str, Any]], selection: dict[str
         if str(payload.get("candidate_id") or "") == selected_id:
             return payload
     return {}
+
+
+def _candidate_id_in_payloads(candidate_id: str, payloads: list[dict[str, Any]]) -> bool:
+    if not candidate_id:
+        return False
+    return any(str(payload.get("candidate_id") or "") == candidate_id for payload in payloads if isinstance(payload, dict))
 
 
 def _candidate_id_collision_count(payloads: list[dict[str, Any]]) -> int:

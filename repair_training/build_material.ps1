@@ -5,6 +5,8 @@ param(
     [string]$Seed = "random",
     [string]$Formats = "",
     [string]$Sample = "",
+    [string]$ProfileDistribution = "",
+    [string]$DistributionReport = "",
     [switch]$NoPretty,
     [string[]]$ExtraArgs = @()
 )
@@ -45,6 +47,12 @@ if ($Formats) {
 }
 if ($Sample) {
     $argsList += @("--sample", $Sample)
+}
+if ($ProfileDistribution) {
+    $argsList += @("--profile-distribution", $ProfileDistribution)
+}
+if ($DistributionReport) {
+    $argsList += @("--distribution-report", $DistributionReport)
 }
 if ($NoPretty) {
     $argsList += "--no-pretty"

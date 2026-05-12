@@ -7,6 +7,7 @@ import random
 import shutil
 import sys
 import time
+from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
@@ -128,6 +129,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--formats", default="", help="Optional comma-separated material format directory allowlist.")
     parser.add_argument("--sample", action="append", default=[], help="Optional sample folder name filter. Repeatable.")
     parser.add_argument("--no-pretty", action="store_false", dest="pretty", help="Only write JSONL manifests.")
+    parser.add_argument("--profile-distribution", default="", help="JSON file with explicit per-profile counts for material generation.")
+    parser.add_argument("--distribution-report", default="", help="Write a material distribution report JSON after generation.")
     parser.set_defaults(pretty=True)
 
     parser.add_argument("--input-dir", default="", help="Legacy: directory of clean archives.")
@@ -142,6 +145,9 @@ def _material_build(args: argparse.Namespace, material_root: Path) -> int:
     base_seed = _resolve_seed(args.seed)
     rng = random.Random(base_seed)
     formats = _format_filter(args.formats)
+    distribution, profile_metadata = _load_profile_distribution(args.profile_distribution)
+    if distribution:
+        return _material_build_with_profile_distribution(args, material_root, distribution, profile_metadata, rng, base_seed, formats)
     sample_filter = set(args.sample or [])
     summary = {"material_root": str(material_root), "seed": base_seed, "organized": 0, "samples": 0, "sources": 0, "generated": 0, "skipped": 0}
     for format_dir in _format_dirs(material_root, formats):
@@ -223,6 +229,124 @@ def _material_build(args: argparse.Namespace, material_root: Path) -> int:
     return 0
 
 
+def _material_build_with_profile_distribution(
+    args: argparse.Namespace,
+    material_root: Path,
+    distribution: dict[str, int],
+    profile_metadata: dict[str, dict[str, Any]],
+    rng: random.Random,
+    base_seed: int,
+    formats: set[str],
+) -> int:
+    sample_filter = set(args.sample or [])
+    if formats and "zip" not in formats:
+        raise SystemExit("--profile-distribution currently supports ZIP material generation; include --formats zip or omit --formats")
+    zip_dir = material_root / "zip"
+    if not zip_dir.is_dir():
+        raise SystemExit(f"ZIP material directory does not exist: {zip_dir}")
+    summary = {
+        "material_root": str(material_root),
+        "seed": base_seed,
+        "profile_distribution": dict(distribution),
+        "profile_metadata_counts": dict(Counter(str((profile_metadata.get(profile) or {}).get("profile_layer") or "basic") for profile in distribution)),
+        "organized": _organize_root_sources(zip_dir, "zip", sample_filter),
+        "samples": 0,
+        "sources": 0,
+        "generated": 0,
+        "skipped": 0,
+    }
+    sources = _distributed_zip_sources(zip_dir, sample_filter)
+    if not sources:
+        raise SystemExit(f"No ZIP sources found under {zip_dir}")
+    sample_dirs = sorted({item["sample_dir"] for item in sources})
+    for sample_dir in sample_dirs:
+        _clear_generated_material(sample_dir)
+    records_by_sample: dict[Path, list[dict[str, Any]]] = defaultdict(list)
+    variant_counts: Counter[str] = Counter()
+    source_counts: Counter[str] = Counter()
+    profile_plan = _expanded_profile_plan(distribution, rng)
+    for global_index, profile in enumerate(profile_plan):
+        source_item = _choose_source_for_profile(sources, profile, source_counts, rng)
+        source = Path(source_item["source"])
+        sample_dir = Path(source_item["sample_dir"])
+        source_archive_id = str(source_item["source_archive_id"])
+        source_derivation = dict(source_item.get("source_derivation") or {})
+        zip_password = str(source_derivation.get("zip_password") or "")
+        source_key = str(source)
+        variant_index = int(variant_counts[source_key])
+        variant_counts[source_key] += 1
+        source_counts[source_key] += 1
+        case_root = sample_dir / "damaged" / source.stem / f"v{variant_index:03d}"
+        damage_json_path = case_root / f"{source.stem}_{variant_index:03d}.damage.json"
+        try:
+            case = build_corpus_corruption_case(
+                case_root,
+                source_path=source,
+                fmt="zip",
+                seed=rng.randrange(1, 2**31 - 1) + global_index,
+                variant_index=variant_index,
+                damage_profile=profile,
+                source_derivation=source_derivation,
+                password=zip_password or None,
+            )
+            record = case.corpus_manifest_record(
+                source_archive_id=source_archive_id,
+                source_path=str(source),
+                damage_profile=profile,
+                variant_index=variant_index,
+                material_format="zip",
+                material_sample_id=sample_dir.name,
+                damage_json_path=str(damage_json_path),
+            )
+            if zip_password and not record.get("password"):
+                record["password"] = zip_password
+            record["damage_layer"] = _profile_layer_name(profile)
+            record["requested_damage_layer"] = record["damage_layer"]
+            record["actual_damage_layer"] = record["damage_layer"]
+            record["damage_layer_weight"] = 1.0
+            record["profile_distribution_target"] = int(distribution.get(profile, 0))
+            _apply_profile_metadata(record, profile, profile_metadata.get(profile) or {})
+            if source_derivation:
+                record["source_derivation"] = source_derivation
+                _copy_zip_derivation_fields(record, source_derivation)
+            damage_json_path.parent.mkdir(parents=True, exist_ok=True)
+            damage_json_path.write_text(json.dumps(record, ensure_ascii=False, indent=2, sort_keys=True, default=str), encoding="utf-8")
+            records_by_sample[sample_dir].append(record)
+            summary["generated"] += 1
+        except Exception as exc:
+            record = _skipped_record(
+                source,
+                "zip",
+                source_archive_id,
+                variant_index,
+                profile,
+                exc,
+                "zip",
+                sample_dir.name,
+                damage_layer=_profile_layer_name(profile),
+                damage_layer_weight=1.0,
+                requested_damage_layer=_profile_layer_name(profile),
+                actual_damage_layer=_profile_layer_name(profile),
+            )
+            _apply_profile_metadata(record, profile, profile_metadata.get(profile) or {})
+            records_by_sample[sample_dir].append(record)
+            summary["skipped"] += 1
+    for sample_dir in sample_dirs:
+        records = records_by_sample.get(sample_dir, [])
+        if records:
+            summary["samples"] += 1
+        _write_sample_manifest(sample_dir, records, bool(args.pretty))
+    summary["sources"] = len(sources)
+    report_path = Path(args.distribution_report) if str(args.distribution_report or "").strip() else material_root / "zip" / "material_distribution_report.json"
+    report = _material_distribution_report(material_root / "zip", distribution, profile_metadata)
+    report["summary"] = summary
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True, default=str), encoding="utf-8")
+    summary["distribution_report"] = str(report_path)
+    print(json.dumps(summary, ensure_ascii=False, sort_keys=True))
+    return 0
+
+
 def _legacy_build(args: argparse.Namespace) -> int:
     input_dir = Path(args.input_dir)
     output_dir = Path(args.output_dir)
@@ -278,6 +402,221 @@ def _init_material(material_root: Path) -> None:
     material_root.mkdir(parents=True, exist_ok=True)
     for name in MATERIAL_FORMAT_DIRS:
         (material_root / name).mkdir(parents=True, exist_ok=True)
+
+
+def _load_profile_distribution(path_raw: str) -> tuple[dict[str, int], dict[str, dict[str, Any]]]:
+    if not str(path_raw or "").strip():
+        return {}, {}
+    path = Path(path_raw)
+    if not path.is_absolute():
+        path = REPO_ROOT / path
+    loaded = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(loaded, dict):
+        raise SystemExit(f"profile distribution must be a JSON object: {path}")
+    output: dict[str, int] = {}
+    metadata: dict[str, dict[str, Any]] = {}
+
+    def add_profile_items(items: dict[str, Any], *, default_layer: str) -> None:
+        for key, value in items.items():
+            if isinstance(value, dict):
+                count = int(value.get("count", 0))
+                meta = {str(meta_key): meta_value for meta_key, meta_value in value.items() if meta_key != "count"}
+            else:
+                count = int(value)
+                meta = {}
+            if count < 0:
+                raise SystemExit(f"profile count must be non-negative: {key}={count}")
+            if count:
+                profile = str(key)
+                output[profile] = output.get(profile, 0) + count
+                merged = dict(metadata.get(profile) or {})
+                merged.update(meta)
+                merged.setdefault("profile_layer", default_layer)
+                if default_layer == "compound":
+                    merged.setdefault("compound_profile", True)
+                if default_layer == "physical":
+                    merged.setdefault("physical_complete_expected", False)
+                metadata[profile] = merged
+
+    if isinstance(loaded.get("profiles"), dict):
+        add_profile_items(loaded["profiles"], default_layer="basic")
+        if isinstance(loaded.get("compound_profiles"), dict):
+            add_profile_items(loaded["compound_profiles"], default_layer="compound")
+        if isinstance(loaded.get("physical_profiles"), dict):
+            add_profile_items(loaded["physical_profiles"], default_layer="physical")
+    else:
+        add_profile_items(loaded, default_layer="basic")
+    if not output:
+        raise SystemExit(f"profile distribution has no positive counts: {path}")
+    expected_total = loaded.get("total") if isinstance(loaded, dict) else None
+    if expected_total is not None and int(expected_total) != sum(output.values()):
+        raise SystemExit(f"profile distribution total mismatch: expected {expected_total}, got {sum(output.values())}")
+    return output, metadata
+
+
+def _distributed_zip_sources(zip_dir: Path, sample_filter: set[str]) -> list[dict[str, Any]]:
+    sources: list[dict[str, Any]] = []
+    for sample_dir in sorted(item for item in zip_dir.iterdir() if item.is_dir()):
+        if sample_dir.name == "damaged":
+            continue
+        if sample_filter and sample_dir.name not in sample_filter:
+            continue
+        for source in _sample_sources(sample_dir, "zip"):
+            source_derivation = _load_source_derivation(source)
+            sources.append({
+                "sample_dir": sample_dir,
+                "source": source,
+                "source_derivation": source_derivation,
+                "source_archive_id": _source_archive_id(source),
+            })
+    return sources
+
+
+def _expanded_profile_plan(distribution: dict[str, int], rng: random.Random) -> list[str]:
+    plan: list[str] = []
+    for profile, count in sorted(distribution.items()):
+        plan.extend([profile] * int(count))
+    rng.shuffle(plan)
+    return plan
+
+
+def _choose_source_for_profile(
+    sources: list[dict[str, Any]],
+    profile: str,
+    source_counts: Counter[str],
+    rng: random.Random,
+) -> dict[str, Any]:
+    compatible = [item for item in sources if _source_compatible_with_profile(dict(item.get("source_derivation") or {}), profile)]
+    choices = compatible or sources
+    min_count = min(source_counts[str(item["source"])] for item in choices)
+    least_used = [item for item in choices if source_counts[str(item["source"])] == min_count]
+    return dict(rng.choice(least_used))
+
+
+def _apply_profile_metadata(record: dict[str, Any], profile: str, metadata: dict[str, Any]) -> None:
+    profile_l = str(profile or "").lower()
+    layer = str(metadata.get("profile_layer") or ("compound" if profile_l.startswith("compound_") else "physical" if profile_l.startswith("partial_") else "basic"))
+    record["profile_layer"] = layer
+    record["compound_profile"] = bool(metadata.get("compound_profile", profile_l.startswith("compound_")))
+    if "compound_components" in metadata:
+        record["compound_components"] = list(metadata.get("compound_components") or [])
+    if "base_source_requirements" in metadata:
+        record["base_source_requirements"] = list(metadata.get("base_source_requirements") or [])
+    if "expected_min_steps" in metadata:
+        record["expected_min_steps"] = int(metadata.get("expected_min_steps") or 0)
+    elif profile_l.startswith("compound_"):
+        record["expected_min_steps"] = 3
+    if "expected_route_facts" in metadata:
+        record["expected_route_facts"] = list(metadata.get("expected_route_facts") or [])
+    if "physical_complete_expected" in metadata:
+        record["physical_complete_expected"] = bool(metadata.get("physical_complete_expected"))
+    elif profile_l.startswith("partial_"):
+        record["physical_complete_expected"] = False
+
+
+def _source_compatible_with_profile(source_derivation: dict[str, Any], profile: str) -> bool:
+    profile_l = str(profile or "").lower()
+    variant = str(source_derivation.get("zip_variant") or "").lower()
+    tags = {str(item).lower() for item in source_derivation.get("zip_container_tags") or []}
+    features = source_derivation.get("zip_structure_features") if isinstance(source_derivation.get("zip_structure_features"), dict) else {}
+    if "no_sidecar" in profile_l:
+        return variant not in {"split_zip", "sfx_split_zip"} and "split" not in tags and not bool(features.get("has_split_sidecars"))
+    if "sfx" in profile_l:
+        return variant in {"sfx_stub", "sfx_split_zip"} or bool(tags & {"sfx", "carrier_prefix", "carrier_archive"})
+    if "split" in profile_l or "missing_middle" in profile_l:
+        return variant in {"split_zip", "sfx_split_zip"} or "split" in tags or bool(features.get("has_split_sidecars"))
+    if "data_descriptor" in profile_l or "descriptor" in profile_l:
+        return variant == "data_descriptor_bit3" or "data_descriptor" in tags or bool(features.get("has_data_descriptor"))
+    if "zip64" in profile_l:
+        return variant == "zip64_forced" or "zip64" in tags or bool(features.get("has_zip64_extra"))
+    if "non_utf8" in profile_l or "filename" in profile_l:
+        return variant == "non_utf8_names" or "filename_encoding" in tags or bool(features.get("has_filename_encoding_risk"))
+    if "duplicate" in profile_l:
+        return variant == "duplicate_entries" or "duplicate_entries" in tags or bool(features.get("has_duplicate_entries"))
+    if "mixed_method" in profile_l:
+        return variant == "mixed_store_deflate" or "mixed_methods" in tags
+    if "comment" in profile_l:
+        return variant == "long_comment" or bool(tags & {"long_comment", "eocd_comment"}) or bool(features.get("has_long_comment"))
+    if "encrypted" in profile_l:
+        return variant == "encrypted_zipcrypto" or "encrypted" in tags
+    if "extra_field" in profile_l:
+        return "extra_field" in tags or variant in {"normal_deflate", "normal_store"}
+    return True
+
+
+def _material_distribution_report(zip_dir: Path, targets: dict[str, int], profile_metadata: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
+    profile_counts: Counter[str] = Counter()
+    layer_counts: Counter[str] = Counter()
+    expected_min_steps_counts: Counter[str] = Counter()
+    physical_expected_counts: Counter[str] = Counter()
+    expected_route_fact_counts: Counter[str] = Counter()
+    sample_counts: Counter[str] = Counter()
+    source_counts: Counter[str] = Counter()
+    method_counts: Counter[str] = Counter()
+    tag_counts: Counter[str] = Counter()
+    route_fact_counts: Counter[str] = Counter()
+    skipped = 0
+    for path in sorted(zip_dir.rglob("*.damage.json")):
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            skipped += 1
+            continue
+        profile = str(record.get("damage_profile") or "")
+        if not profile:
+            skipped += 1
+            continue
+        profile_counts[profile] += 1
+        meta = dict((profile_metadata or {}).get(profile) or {})
+        layer = str(record.get("profile_layer") or meta.get("profile_layer") or ("compound" if profile.startswith("compound_") else "physical" if profile.startswith("partial_") else "basic"))
+        layer_counts[layer] += 1
+        if record.get("compound_profile") or meta.get("compound_profile"):
+            layer_counts["compound_profile_true"] += 1
+        if "expected_min_steps" in record or "expected_min_steps" in meta:
+            expected_min_steps_counts[str(int(record.get("expected_min_steps", meta.get("expected_min_steps", 0)) or 0))] += 1
+        if "physical_complete_expected" in record or "physical_complete_expected" in meta:
+            physical_expected_counts[str(bool(record.get("physical_complete_expected", meta.get("physical_complete_expected", True)))).lower()] += 1
+        for fact in record.get("expected_route_facts") or meta.get("expected_route_facts") or []:
+            if str(fact):
+                expected_route_fact_counts[str(fact)] += 1
+        fallback_sample = path.parts[-5] if len(path.parts) >= 5 else ""
+        sample_counts[str(record.get("material_sample_id") or fallback_sample)] += 1
+        source_counts[str(record.get("source_archive_id") or record.get("source_archive_name") or "")] += 1
+        derivation = record.get("source_derivation") if isinstance(record.get("source_derivation"), dict) else {}
+        method = str(record.get("zip_method") or derivation.get("zip_method") or derivation.get("method") or "")
+        if method:
+            method_counts[method] += 1
+        for tag in record.get("zip_container_tags") or derivation.get("zip_container_tags") or []:
+            if str(tag):
+                tag_counts[str(tag)] += 1
+        structure = record.get("zip_structure_features") if isinstance(record.get("zip_structure_features"), dict) else derivation.get("zip_structure_features")
+        if isinstance(structure, dict):
+            for key, value in structure.items():
+                if value:
+                    route_fact_counts[str(key)] += 1
+    target_errors = {
+        profile: {
+            "target": int(target),
+            "actual": int(profile_counts.get(profile, 0)),
+            "delta": int(profile_counts.get(profile, 0)) - int(target),
+        }
+        for profile, target in sorted(targets.items())
+    }
+    return {
+        "total": int(sum(profile_counts.values())),
+        "profile_counts": dict(sorted(profile_counts.items())),
+        "target_errors": target_errors,
+        "profile_layer_counts": dict(sorted(layer_counts.items())),
+        "expected_min_steps_counts": dict(sorted(expected_min_steps_counts.items(), key=lambda item: int(item[0]) if str(item[0]).isdigit() else 0)),
+        "physical_complete_expected_counts": dict(sorted(physical_expected_counts.items())),
+        "expected_route_fact_counts": dict(sorted(expected_route_fact_counts.items())),
+        "sample_counts": dict(sample_counts.most_common()),
+        "source_counts": dict(source_counts.most_common(50)),
+        "method_counts": dict(sorted(method_counts.items())),
+        "container_tag_counts": dict(sorted(tag_counts.items())),
+        "structure_fact_counts": dict(sorted(route_fact_counts.items())),
+        "skipped_damage_json": skipped,
+    }
 
 
 def _clear_generated_material(sample_dir: Path) -> None:
@@ -371,6 +710,10 @@ def _zip_structure_target_profile(
 
 def _profile_layer_name(profile: str) -> str:
     text = str(profile or "").lower()
+    if text.startswith("compound_"):
+        return "compound"
+    if text.startswith("partial_"):
+        return "physical_partial"
     if "payload_bad" in text or "sfx_payload_damage" in text:
         return "deceptive_hard_negative"
     if "missing" in text or "truncated" in text:

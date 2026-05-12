@@ -480,7 +480,7 @@ class RuntimeRepairGraphCollector:
                 "process_no_progress_timeout_seconds": max(1.0, float(args.case_timeout_seconds or 60.0)),
             },
             output_config={"root": str(self.output_root)},
-            extraction_config={"write_progress_manifest": True},
+            extraction_config={"write_progress_manifest": True, "quiet": True},
         )
         self.verifier = VerificationScheduler(self.config, password_session=self.extractor.password_session)
         self.repair_stage = ArchiveRepairStage(self.config)
@@ -1053,7 +1053,7 @@ def _runtime_graph_config(args: argparse.Namespace, workspace: Path) -> dict[str
             "recovery_min_improvement": 0.01,
         },
         "output": {"root": str(workspace / "outputs")},
-        "extraction": {"write_progress_manifest": True},
+        "extraction": {"write_progress_manifest": True, "quiet": True},
         "performance": {"scheduler_profile": "single"},
     }
 

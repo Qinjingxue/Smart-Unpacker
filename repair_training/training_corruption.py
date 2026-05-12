@@ -1103,7 +1103,9 @@ def _zip_corpus_mutations(data: bytes, randomizer: random.Random, profile: str, 
     cd_offset = _safe_zip_cd_offset(data)
     cd_headers = _zip_central_directory_header_offsets(data, cd_offset, eocd)
     if eocd >= 0 and eocd + 22 <= len(data):
-        if profile in {"zip_sfx_cd_damage", "zip_sfx_payload_damage", "zip_sfx_split_missing_volume"}:
+        if profile.startswith("compound_") or profile.startswith("partial_"):
+            mutations.extend(_zip_compound_profile_mutations(data, entry_infos, cd_headers, eocd, randomizer, profile))
+        elif profile in {"zip_sfx_cd_damage", "zip_sfx_payload_damage", "zip_sfx_split_missing_volume"}:
             mutations.append(_insert("corpus_zip_sfx_prefix_refresh", 0, b"MZ-SUNPACK-CORPUS" + _random_junk(randomizer, "SFX", 8, 24), "zip.sfx.prefix", "archive is embedded behind a carrier prefix"))
             mutations.extend(_zip_eocd_directory_conflict_mutations(eocd))
             if profile == "zip_sfx_payload_damage":
@@ -1271,6 +1273,64 @@ def _zip_corpus_mutations(data: bytes, randomizer: random.Random, profile: str, 
         flags.append("input_truncated")
     mutations = _ensure_minimum_zip_mutations(data, mutations, randomizer)
     return mutations, _dedupe_list(flags)
+
+
+def _zip_compound_profile_mutations(
+    data: bytes,
+    entry_infos: list[dict[str, Any]],
+    cd_headers: list[int],
+    eocd: int,
+    randomizer: random.Random,
+    profile: str,
+) -> list[BinaryMutation]:
+    profile = str(profile or "").lower()
+    mutations: list[BinaryMutation] = []
+    if "sfx" in profile:
+        mutations.append(_insert("corpus_compound_sfx_prefix", 0, b"MZ-SUNPACK-COMPOUND" + _random_junk(randomizer, "SFX", 12, 32), "zip.sfx.prefix", "compound archive is embedded behind a carrier prefix"))
+    if "trailing_junk" in profile or "boundary" in profile or "comment" in profile:
+        mutations.append(_append("corpus_compound_tail_junk", _random_junk(randomizer, "CMPBOUND", 16, 64), "archive.tail", "compound boundary has trailing junk"))
+    if "drop_cd" in profile or "cd_rebuild" in profile:
+        mutations.append(_truncate("corpus_compound_drop_cd", eocd, "zip.central_directory", "compound repair requires rebuilding the central directory"))
+    if "cd_offset" in profile or "local_header" in profile or "wrong_offset" in profile or "content_overlap" in profile:
+        mutations.extend(_zip_cd_offset_near_valid_mutations(data, cd_headers, entry_infos))
+    if "cd_count" in profile or "eocd_count" in profile or "comment_eocd" in profile:
+        mutations.extend(_zip_eocd_count_mutations(eocd, count_delta=3))
+    if "comment_eocd" in profile:
+        comment = _random_junk(randomizer, "CMPCOMMENT", 24, 72)
+        mutations.append(_replace_bytes("corpus_compound_bad_comment_len", eocd + 20, struct.pack("<H", min(65535, len(comment) + 24)), "zip.eocd.comment_length", "compound EOCD comment length hides the real boundary"))
+        mutations.append(_append("corpus_compound_comment_noise", comment, "zip.eocd.comment", "compound EOCD comment noise"))
+    if "directory" in profile:
+        mutations.extend(_zip_eocd_directory_conflict_mutations(eocd))
+    if "rebuild_directory" in profile and eocd > 0:
+        mutations.append(_truncate("corpus_compound_rebuild_directory_drop_cd", eocd, "zip.central_directory", "directory must be rebuilt while payload may remain bad"))
+    if "descriptor" in profile:
+        mutations.extend(_zip_data_descriptor_conflict_mutations(data, cd_headers, entry_infos, randomizer))
+    if "zip64" in profile:
+        mutations.extend(_zip64_locator_mutations(data, randomizer))
+        mutations.extend(_zip64_extra_mutations(data, randomizer))
+    if "extra_field" in profile:
+        mutations.extend(_zip_extra_field_length_mutations(data, entry_infos, randomizer))
+    if "duplicate" in profile:
+        mutations.extend(_zip_duplicate_entry_conflict_mutations(data, cd_headers, entry_infos, randomizer))
+    if "non_utf8" in profile and cd_headers:
+        mutations.append(_replace_byte("corpus_compound_non_utf8_filename_byte", cd_headers[0] + 46, data[cd_headers[0] + 46] ^ 0x80, "zip.central_directory.filename", "compound filename bytes require raw-name preserving repair"))
+    if "encrypted" in profile:
+        mutations.append(_append("corpus_compound_encrypted_tail_junk", _random_junk(randomizer, "CMPENC", 12, 48), "archive.tail", "encrypted compound sample has trailing junk"))
+    if "split" in profile or "missing_middle" in profile:
+        mutations.append(_delete("corpus_compound_missing_middle_bytes", max(1, len(data) // 3), max(8, len(data) // 14), "zip.missing_volume", "compound split archive is missing a middle byte range"))
+    if "split_tail" in profile or "tail_payload_loss" in profile:
+        mutations.append(_truncate("corpus_compound_tail_payload_loss", max(1, len(data) * 4 // 5), "zip.missing_volume", "compound split tail payload is physically truncated"))
+    if "payload" in profile:
+        all_entries = "all_entry" in profile or "many_entries" in profile or "all_bad" in profile
+        mutations.extend(_zip_damage_payloads(data, entry_infos, randomizer, all_entries=all_entries, name="corpus_compound_payload_damage", expected_effect="compound payload bytes are physically damaged"))
+    if "crc" in profile:
+        mutations.extend(_zip_cd_crc_mutations(cd_headers, randomizer))
+    if profile.startswith("compound_"):
+        if not any(mutation.zone.startswith("zip.local_header") for mutation in mutations):
+            mutations.extend(_zip_local_crc_mutations(entry_infos, randomizer))
+        if not any("eocd" in mutation.zone or "central_directory" in mutation.zone for mutation in mutations):
+            mutations.extend(_zip_eocd_directory_conflict_mutations(eocd))
+    return mutations
 
 
 def _zip_eocd_directory_conflict_mutations(eocd: int) -> list[BinaryMutation]:
@@ -1625,6 +1685,10 @@ def _raw_corpus_mutations(data: bytes, fmt: ArchiveFormat, randomizer: random.Ra
 
 def _damage_layer(profile: str) -> str:
     text = str(profile or "").lower()
+    if text.startswith("compound_"):
+        return "two_step_repair"
+    if text.startswith("partial_"):
+        return "deceptive_hard_negative"
     for layer in ("deceptive_hard_negative", "two_step_repair", "structural_directory", "partial_recoverable", "hard_negative", "structural"):
         if layer in text:
             return layer
@@ -1750,6 +1814,10 @@ def _difficulty_tags_for_profile(profile: str, layer: str, mutations: list[Binar
         tags.append("near_valid_directory")
     if layer == "two_step_repair" or text.startswith("zip_two_step_"):
         tags.append("two_step_repair")
+    if text.startswith("compound_"):
+        tags.extend(["compound_damage", "multi_round_repair_expected"])
+    if text.startswith("partial_"):
+        tags.extend(["physical_upper_bound", "best_partial_expected"])
     if layer == "deceptive_hard_negative" or "wrong_hash" in text or "bad_payload" in text or "payload_mismatch" in text:
         tags.extend(["deceptive_structural_success", "hash_mismatch_risk"])
     if "wrong_entry" in text or "wrong_local_offset" in text or "duplicate_entries" in text:
