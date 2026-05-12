@@ -36,8 +36,9 @@ from sunpack.coordinator.task_scan import direct_file_task  # noqa: E402
 from sunpack.extraction.knowledge import write_extraction_result  # noqa: E402
 from sunpack.extraction.scheduler import ExtractionScheduler  # noqa: E402
 from sunpack.repair.candidate import CandidateSelector, candidate_feature_payload, materialize_candidates  # noqa: E402
+from sunpack.repair.control_candidates import with_accept_current_state_candidate  # noqa: E402
 from sunpack.repair.context import zip_route_evidence_flags  # noqa: E402
-from sunpack.repair.policy.runtime_features import FEATURE_CONTRACT_VERSION, policy_candidate_payload  # noqa: E402
+from sunpack.repair.policy.runtime_features import FEATURE_CONTRACT_VERSION, policy_candidate_payload, policy_candidate_payloads  # noqa: E402
 from sunpack.support import archive_knowledge_projection as knowledge_view  # noqa: E402
 from sunpack.support import repair_trace  # noqa: E402
 from sunpack.support.archive_knowledge_writer import (  # noqa: E402
@@ -458,22 +459,14 @@ class RuntimeRepairGraphCollector:
             self._append_terminal_row(state, "no_repair_job", verification, task)
             return []
         with self.profiler.phase("generate_candidates", state_id=str(state["state_id"])):
-            batch = self.repair_stage.scheduler.generate_repair_candidates(job)
-        if batch.terminal_result is not None or not batch.candidates:
-            terminal_status = "no_candidates"
-            if batch.terminal_result is not None:
-                terminal_status = str(getattr(batch.terminal_result, "status", "") or "repair_terminal")
-            row = self._terminal_row_for_task(state, terminal_status, verification, task)
-            row["debug_damage_flags"] = list(job.damage_flags or [])
-            row["debug_job_format"] = job.format
-            row["debug_route_evidence_flags"] = list((knowledge_view.repair_route_context(job.knowledge) or {}).get("route_evidence_flags") or [])
-            if batch.terminal_result is not None:
-                row["debug_repair_terminal_message"] = str(getattr(batch.terminal_result, "message", "") or "")
-                row["debug_repair_terminal_diagnosis"] = dict(getattr(batch.terminal_result, "diagnosis", {}) or {})
-            self.rows.append(row)
-            return []
+            batch = self.repair_stage.scheduler.generate_repair_candidates(
+                job,
+                phase_timer=self.profiler.phase,
+                phase_prefix="generate_candidates",
+            )
+        candidate_source = list(batch.candidates or [])
         with self.profiler.phase("materialize_candidates", state_id=str(state["state_id"])):
-            candidates = self._runtime_candidates(batch.candidates)
+            candidates = self._runtime_candidates(with_accept_current_state_candidate(candidate_source, job))
         if not candidates:
             row = self._terminal_row_for_task(state, "no_materialized_candidates", verification, task)
             row["debug_candidate_count"] = len(batch.candidates)
@@ -481,7 +474,7 @@ class RuntimeRepairGraphCollector:
             self.rows.append(row)
             return []
         with self.profiler.phase("policy_payload_build", state_id=str(state["state_id"])):
-            payloads = [policy_candidate_payload(job, candidate, index=index) for index, candidate in enumerate(candidates)]
+            payloads = policy_candidate_payloads(job, candidates)
         with self.profiler.phase("collect_state_prepare_query", state_id=str(state["state_id"])):
             query_id = f"{state['state_id']}:q"
             collision_count = _candidate_id_collision_count(payloads)
@@ -507,6 +500,23 @@ class RuntimeRepairGraphCollector:
                         collision_count=collision_count,
                         strategy_decision=strategy_decision,
                     ))
+                continue
+            if _is_noop_payload(payload):
+                with self.profiler.phase("collect_state_noop_fast_path", state_id=str(state["state_id"]), candidate_id=candidate_id):
+                    self._append_noop_action_row(
+                        state,
+                        verification,
+                        task,
+                        query_id=query_id,
+                        round_index=round_index,
+                        rank=rank,
+                        payload=payload,
+                        candidate_id=candidate_id,
+                        candidate_set_hash=candidate_set_hash,
+                        collision_count=collision_count,
+                        strategy_decision=strategy_decision,
+                        selected_ids=selected_ids,
+                    )
                 continue
             with self.profiler.phase("collect_state_branch_setup", state_id=str(state["state_id"]), candidate_id=candidate_id):
                 action_row_id = f"{query_id}|{rank}|{candidate_id}"
@@ -595,7 +605,7 @@ class RuntimeRepairGraphCollector:
                     "strategy": strategy_decision.mode,
                     "strategy_selected_candidate_ids": list(strategy_decision.selected_candidate_ids),
                     "current_rank": rank,
-                    "branchable": True,
+                    "branchable": bool(payload.get("branchable", True)),
                     "explored": True,
                     "selected": candidate_id in selected_ids,
                     "material_format": self.fmt,
@@ -685,6 +695,7 @@ class RuntimeRepairGraphCollector:
                 for item in list(payloads or [])[:limit]
                 if str(item.get("candidate_id") or "")
             ]
+            selected = _with_protected_noop_selection(selected, payloads)
             return RepairRuntimeStrategyDecision(
                 mode="training_root_exhaustive",
                 selected_candidate_ids=selected,
@@ -697,6 +708,7 @@ class RuntimeRepairGraphCollector:
                 },
             )
         decision = self.strategy.choose(state_id=str(state["state_id"]), candidate_payloads=payloads, context={"sample_id": self.sample_id})
+        decision = _decision_with_protected_noop(decision, payloads)
         target_negatives = max(0, int(getattr(self.args, "target_negative_per_positive", 3) or 0))
         extra = max(0, int(getattr(self.args, "hard_negative_backfill_k", 0) or 0))
         if self.explored_positive_actions >= 1 and self.explored_negative_actions < target_negatives:
@@ -753,6 +765,110 @@ class RuntimeRepairGraphCollector:
             self.explored_positive_actions += 1
         else:
             self.explored_negative_actions += 1
+
+    def _append_noop_action_row(
+        self,
+        state: dict[str, Any],
+        verification,
+        task: ArchiveTask,
+        *,
+        query_id: str,
+        round_index: int,
+        rank: int,
+        payload: dict[str, Any],
+        candidate_id: str,
+        candidate_set_hash: str,
+        collision_count: int,
+        strategy_decision: RepairRuntimeStrategyDecision,
+        selected_ids: set[str],
+    ) -> None:
+        with self.profiler.phase("collect_state_noop_oracle_path", state_id=str(state["state_id"]), candidate_id=candidate_id):
+            archive_path = _archive_path_for_oracle(task, self.fmt)
+        with self.profiler.phase("collect_state_noop_oracle_verify", state_id=str(state["state_id"]), candidate_id=candidate_id):
+            oracle = _verify_output_against_oracle(
+                Path(archive_path),
+                self.fmt,
+                self.record.get("oracle") if isinstance(self.record.get("oracle"), dict) else {},
+            ) if archive_path else {"status": "missing_output", "label": 0, "completeness": 0.0}
+        with self.profiler.phase("collect_state_noop_build_row", state_id=str(state["state_id"]), candidate_id=candidate_id):
+            self._record_explored_label(oracle)
+            action_row_id = f"{query_id}|{rank}|{candidate_id}"
+            path_candidate_ids_for_row = [*list(state.get("path_candidate_ids") or []), candidate_id]
+            root_candidate_id_for_row = str(state.get("root_candidate_id") or "")
+            root_candidate_rank_for_row = state.get("root_candidate_rank")
+            if int(round_index) == 0:
+                root_candidate_id_for_row = candidate_id
+                root_candidate_rank_for_row = rank
+            terminal_status = "repair_skipped"
+            recovery = float(oracle.get("completeness", 0.0) or 0.0)
+            row = {
+                "row_type": "action",
+                "collector": "runtime_repair_graph",
+                "sample_id": self.sample_id,
+                "episode_id": self.sample_id,
+                "state_id": state["state_id"],
+                "root_state_id": state.get("root_state_id") or state["state_id"],
+                "parent_state_id": state.get("parent_state_id") or "",
+                "query_id": query_id,
+                "round": int(round_index),
+                "path_depth": int(round_index),
+                "action_row_id": action_row_id,
+                "candidate_id": candidate_id,
+                "path_candidate_ids": path_candidate_ids_for_row,
+                "root_candidate_id": root_candidate_id_for_row,
+                "root_candidate_rank": root_candidate_rank_for_row,
+                "root_action": int(round_index) == 0,
+                "candidate_id_collision_count": collision_count,
+                "candidate_set_hash": candidate_set_hash,
+                "strategy": strategy_decision.mode,
+                "strategy_selected_candidate_ids": list(strategy_decision.selected_candidate_ids),
+                "current_rank": rank,
+                "branchable": False,
+                "explored": True,
+                "selected": candidate_id in selected_ids,
+                "material_format": self.fmt,
+                "module": payload.get("module_name") or payload.get("module"),
+                "module_name": payload.get("module_name") or payload.get("module"),
+                "repair_name": payload.get("repair_name"),
+                "native_target": payload.get("native_target"),
+                "candidate_status": payload.get("candidate_status"),
+                "label": int(oracle.get("label", 0) or 0),
+                "label_status": str(oracle.get("status") or ""),
+                "recovery_ratio": recovery,
+                "terminal_status": terminal_status,
+                "next_state_id": "",
+                "child_state_id": "",
+                "parent_action_row_id": state.get("parent_action_row_id") or "",
+                "parent_candidate_id": state.get("parent_candidate_id") or "",
+                "runtime_verification": _verification_payload(verification),
+                "stable_features": {
+                    "runtime_context": payload.get("runtime_context") or {},
+                    "candidate_proposal": payload.get("candidate_proposal") or {},
+                    "candidate": payload,
+                },
+                "rl": {
+                    "state_features": {"runtime_context": payload.get("runtime_context") or {}},
+                    "action_features": {
+                        "candidate_proposal": payload.get("candidate_proposal") or {},
+                        "repair_prior_features": {},
+                    },
+                    "reward": recovery,
+                    "done": True,
+                    "next_state_id": "",
+                    "child_state_id": "",
+                    "terminal_reward": recovery,
+                    "future_return": recovery,
+                    "single_path_robust_return": recovery,
+                    "sequence_terminal_status": terminal_status,
+                    "sequence_repeated_action": False,
+                    "sequence_repeated_input": False,
+                    "sequence_no_candidate": False,
+                    "sequence_zero_recovery": recovery <= 0.0,
+                    "sequence_partial_regression": False,
+                },
+            }
+        with self.profiler.phase("collect_state_noop_append_row", state_id=str(state["state_id"]), candidate_id=candidate_id):
+            self.rows.append(row)
 
     def _training_budget_satisfied(self) -> bool:
         if not bool(getattr(self.args, "stop_after_complete_with_negatives", True)):
@@ -1165,6 +1281,48 @@ def _candidate_id_collision_count(payloads: list[dict[str, Any]]) -> int:
     return duplicates
 
 
+def _is_noop_payload(payload: dict[str, Any]) -> bool:
+    proposal = payload.get("candidate_proposal") if isinstance(payload.get("candidate_proposal"), dict) else {}
+    return bool(
+        payload.get("noop")
+        or payload.get("control_action")
+        or proposal.get("noop")
+        or proposal.get("control_action")
+        or str(payload.get("module_name") or payload.get("module") or "") == "repair_accept_current_state"
+    )
+
+
+def _decision_with_protected_noop(
+    decision: RepairRuntimeStrategyDecision,
+    payloads: list[dict[str, Any]],
+) -> RepairRuntimeStrategyDecision:
+    selected = _with_protected_noop_selection(list(decision.selected_candidate_ids or []), payloads)
+    if selected == list(decision.selected_candidate_ids or []):
+        return decision
+    metadata = dict(decision.metadata or {})
+    metadata["protected_noop_selected"] = True
+    return RepairRuntimeStrategyDecision(
+        mode=f"{decision.mode}+protected_noop",
+        selected_candidate_ids=selected,
+        beam_enabled=decision.beam_enabled,
+        metadata=metadata,
+    )
+
+
+def _with_protected_noop_selection(selected: list[str], payloads: list[dict[str, Any]]) -> list[str]:
+    output = [str(item) for item in selected if str(item)]
+    seen = set(output)
+    for payload in payloads or []:
+        proposal = payload.get("candidate_proposal") if isinstance(payload.get("candidate_proposal"), dict) else {}
+        if not bool(payload.get("noop") or proposal.get("noop")):
+            continue
+        candidate_id = str(payload.get("candidate_id") or "")
+        if candidate_id and candidate_id not in seen:
+            output.append(candidate_id)
+            seen.add(candidate_id)
+    return output
+
+
 def _load_path_filter(path: str) -> dict[str, list[str]]:
     if not path:
         return {}
@@ -1286,7 +1444,7 @@ def _accumulate_summary(summary: dict[str, Any], rows: list[dict[str, Any]], sam
         if row.get("label") is not None:
             key = str(row.get("label"))
             summary["label_counts"][key] = int(summary["label_counts"].get(key, 0) or 0) + 1
-        if int(row.get("round", -1) or -1) == 0 and row.get("row_type") == "action":
+        if _safe_int(row.get("round"), -1) == 0 and row.get("row_type") == "action":
             if bool(row.get("root_action")):
                 summary["root_action_row_count"] = int(summary.get("root_action_row_count", 0) or 0) + 1
             if row.get("explored") is True:

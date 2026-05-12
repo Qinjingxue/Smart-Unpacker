@@ -184,6 +184,8 @@ class SingleArchiveExtractor:
                             startupinfo=startupinfo,
                             runtime_scheduler=runtime_scheduler,
                             task=task,
+                            phase_timer=phase_timer,
+                            phase_prefix=f"{phase_prefix}_sevenzip",
                         )
 
                     if run_result.returncode == 0:

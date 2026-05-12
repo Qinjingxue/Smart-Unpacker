@@ -1,3 +1,4 @@
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from typing import Any, Optional, List
 from sunpack.contracts.archive_input import (
@@ -190,7 +191,7 @@ class ArchiveTask:
 
     def set_knowledge(self, knowledge: ArchiveKnowledge | dict) -> None:
         payload = ArchiveKnowledge.from_any(knowledge).to_dict()
-        self._replace_knowledge_payload(payload)
+        self._replace_knowledge_payload(payload, knowledge_cache=ArchiveKnowledge(payload))
         raw_state = self._raw_archive_state()
         if isinstance(raw_state, dict):
             state = self.archive_state()
@@ -225,54 +226,71 @@ class ArchiveTask:
         self.fact_bag.set("archive.descriptor.source", descriptor.to_dict())
         knowledge = self.knowledge()
         knowledge.set("source.input", descriptor.to_dict(), source_layer="contracts", source_module="archive_task")
-        self._replace_knowledge_payload(knowledge.to_dict())
+        payload = knowledge.to_dict()
+        self._replace_knowledge_payload(payload, knowledge_cache=ArchiveKnowledge(payload))
         self._store_archive_state(ArchiveState.from_archive_input(descriptor))
 
-    def set_archive_state(self, state: ArchiveState | dict) -> None:
+    def set_archive_state(
+        self,
+        state: ArchiveState | dict,
+        *,
+        phase_timer: Any | None = None,
+        phase_prefix: str = "set_archive_state",
+    ) -> None:
         if isinstance(state, dict):
-            state = ArchiveState.from_any(
-                state,
-                archive_path=self.main_path,
-                part_paths=list(self.all_parts or [self.main_path]),
-                format_hint=self._format_hint(),
-                logical_name=str(self.logical_name or ""),
-                archive_input=knowledge_view.source_input(self),
-            )
-        self._store_archive_state(state)
+            with _phase(phase_timer, f"{phase_prefix}_from_any"):
+                state = ArchiveState.from_any(
+                    state,
+                    archive_path=self.main_path,
+                    part_paths=list(self.all_parts or [self.main_path]),
+                    format_hint=self._format_hint(),
+                    logical_name=str(self.logical_name or ""),
+                    archive_input=knowledge_view.source_input(self),
+                )
+        self._store_archive_state(state, phase_timer=phase_timer, phase_prefix=phase_prefix)
 
-    def _store_archive_state(self, state: ArchiveState) -> None:
-        source_input = state.to_archive_input_descriptor().to_dict()
-        knowledge = merge_knowledge(
-            self.fact_bag.get("archive.knowledge"),
-            state.knowledge,
-            {
-                "source": {"input": source_input},
-                "archive": {
-                    "state": _archive_state_snapshot(state),
-                },
-            },
-        )
+    def _store_archive_state(
+        self,
+        state: ArchiveState,
+        *,
+        phase_timer: Any | None = None,
+        phase_prefix: str = "store_archive_state",
+    ) -> None:
+        with _phase(phase_timer, f"{phase_prefix}_source_input"):
+            source_input = state.to_archive_input_descriptor().to_dict()
+        with _phase(phase_timer, f"{phase_prefix}_merge_knowledge"):
+            state_snapshot_for_knowledge = _archive_state_snapshot(state)
+            knowledge = self._merged_state_knowledge(state, source_input, state_snapshot_for_knowledge)
         if knowledge:
-            state = ArchiveState(
-                source=state.source,
-                patches=list(state.patches),
-                patch_digest=state.effective_patch_digest(),
-                logical_name=state.logical_name,
-                format_hint=state.format_hint,
-                analysis=dict(state.analysis),
-                verification=dict(state.verification),
-                knowledge=knowledge,
-            )
-        state_payload = _archive_state_snapshot(state)
-        self.fact_bag.set("archive.state", state_payload)
-        self.fact_bag.set("archive.source", state.source.to_dict())
-        self.fact_bag.set("archive.patch_stack", [patch.to_dict() for patch in state.patches])
-        self.fact_bag.set("archive.patch_digest", state.effective_patch_digest())
-        knowledge_payload = dict(state.knowledge)
-        self._replace_knowledge_payload(knowledge_payload)
-        self._archive_state_cache_raw = state_payload
-        self._archive_state_cache_knowledge_raw = knowledge_payload
-        self._archive_state_cache = state
+            with _phase(phase_timer, f"{phase_prefix}_rebuild_state_with_knowledge"):
+                state = ArchiveState(
+                    source=state.source,
+                    patches=list(state.patches),
+                    patch_digest=state.effective_patch_digest(),
+                    logical_name=state.logical_name,
+                    format_hint=state.format_hint,
+                    analysis=dict(state.analysis),
+                    verification=dict(state.verification),
+                    knowledge=knowledge,
+                )
+        with _phase(phase_timer, f"{phase_prefix}_snapshot"):
+            state_payload = _archive_state_snapshot(state)
+            source_payload = state.source.to_dict()
+            patch_stack = [patch.to_dict() for patch in state.patches]
+            patch_digest = state.effective_patch_digest()
+        with _phase(phase_timer, f"{phase_prefix}_fact_bag_set"):
+            self.fact_bag.set("archive.state", state_payload)
+            self.fact_bag.set("archive.source", source_payload)
+            self.fact_bag.set("archive.patch_stack", patch_stack)
+            self.fact_bag.set("archive.patch_digest", patch_digest)
+        with _phase(phase_timer, f"{phase_prefix}_knowledge_payload"):
+            knowledge_payload = dict(state.knowledge)
+        with _phase(phase_timer, f"{phase_prefix}_replace_knowledge"):
+            self._replace_knowledge_payload(knowledge_payload)
+        with _phase(phase_timer, f"{phase_prefix}_cache_update"):
+            self._archive_state_cache_raw = state_payload
+            self._archive_state_cache_knowledge_raw = knowledge_payload
+            self._archive_state_cache = state
 
     def archive_descriptor(self) -> ArchiveDescriptor:
         source = self.archive_state().to_archive_input_descriptor()
@@ -365,15 +383,46 @@ class ArchiveTask:
                 "volumes": list(self.split_info.volumes or []),
             },
         }, source_layer="contracts", source_module="from_fact_bag")
-        self._replace_knowledge_payload(knowledge.to_dict())
+        payload = knowledge.to_dict()
+        self._replace_knowledge_payload(payload, knowledge_cache=ArchiveKnowledge(payload))
 
-    def _replace_knowledge_payload(self, payload: dict[str, Any]) -> None:
+    def _replace_knowledge_payload(
+        self,
+        payload: dict[str, Any],
+        *,
+        knowledge_cache: ArchiveKnowledge | None = None,
+    ) -> None:
         self.fact_bag.set("archive.knowledge", payload)
         self._archive_knowledge_cache_raw = payload
-        self._archive_knowledge_cache = ArchiveKnowledge.from_any(payload)
+        self._archive_knowledge_cache = knowledge_cache if knowledge_cache is not None else ArchiveKnowledge.from_any(payload)
         self._archive_state_cache_raw = None
         self._archive_state_cache_knowledge_raw = None
         self._archive_state_cache = None
+
+    def _merged_state_knowledge(
+        self,
+        state: ArchiveState,
+        source_input: dict[str, Any],
+        state_snapshot: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Merge state facts without deep-merging the whole knowledge tree when possible."""
+        existing = self.fact_bag.get("archive.knowledge")
+        additions = {
+            "source": {"input": source_input},
+            "archive": {"state": state_snapshot},
+        }
+        if state.knowledge:
+            return merge_knowledge(existing, state.knowledge, additions)
+        if not isinstance(existing, dict):
+            return merge_knowledge(existing, additions)
+        knowledge = dict(existing)
+        source = dict(knowledge.get("source") or {}) if isinstance(knowledge.get("source"), dict) else {}
+        source["input"] = source_input
+        archive = dict(knowledge.get("archive") or {}) if isinstance(knowledge.get("archive"), dict) else {}
+        archive["state"] = state_snapshot
+        knowledge["source"] = source
+        knowledge["archive"] = archive
+        return knowledge
 
 
 def _archive_state_snapshot(state: ArchiveState) -> dict[str, Any]:
@@ -381,6 +430,12 @@ def _archive_state_snapshot(state: ArchiveState) -> dict[str, Any]:
     payload = state.to_dict()
     payload.pop("knowledge", None)
     return payload
+
+
+def _phase(timer: Any | None, name: str):
+    if timer is None:
+        return nullcontext()
+    return timer(name)
 
 
 def _dedupe(values: list[str]) -> list[str]:

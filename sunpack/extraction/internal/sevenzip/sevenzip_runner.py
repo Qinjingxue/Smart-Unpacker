@@ -4,6 +4,7 @@ import queue
 import subprocess
 import threading
 import time
+from contextlib import nullcontext
 from typing import Any
 
 import psutil
@@ -155,16 +156,21 @@ class SevenZipRunner:
         startupinfo,
         runtime_scheduler: Any,
         task: ArchiveTask,
+        phase_timer: Any | None = None,
+        phase_prefix: str = "sevenzip",
     ) -> subprocess.CompletedProcess:
         try:
-            job = self._build_job(
-                archive_path=archive_path,
-                part_paths=part_paths,
-                out_dir=out_dir,
-                password=password,
-                selected_codepage=selected_codepage,
-                task=task,
-            )
+            with _phase(phase_timer, f"{phase_prefix}_build_job"):
+                job = self._build_job(
+                    archive_path=archive_path,
+                    part_paths=part_paths,
+                    out_dir=out_dir,
+                    password=password,
+                    selected_codepage=selected_codepage,
+                    task=task,
+                    phase_timer=phase_timer,
+                    phase_prefix=f"{phase_prefix}_build_job",
+                )
         except (OSError, FileNotFoundError) as exc:
             return self._completed_process(
                 ["sevenzip_worker.exe"],
@@ -177,7 +183,14 @@ class SevenZipRunner:
                     "message": str(exc),
                 },
             )
-        return self._run_worker(job, startupinfo=startupinfo, runtime_scheduler=runtime_scheduler, task=task)
+        return self._run_worker(
+            job,
+            startupinfo=startupinfo,
+            runtime_scheduler=runtime_scheduler,
+            task=task,
+            phase_timer=phase_timer,
+            phase_prefix=phase_prefix,
+        )
 
     def run_extract_command(
         self,
@@ -213,6 +226,8 @@ class SevenZipRunner:
         password: str | None,
         selected_codepage: str | None,
         task: ArchiveTask,
+        phase_timer: Any | None = None,
+        phase_prefix: str = "sevenzip_build_job",
     ) -> dict:
         job = {
             "job_id": str(getattr(task, "key", "") or archive_path),
@@ -225,14 +240,16 @@ class SevenZipRunner:
         if selected_codepage:
             job["codepage"] = selected_codepage
 
-        archive_state = self._archive_state(task)
+        with _phase(phase_timer, f"{phase_prefix}_archive_state"):
+            archive_state = self._archive_state(task)
         if archive_state:
             job["archive_state"] = archive_state
             source = archive_state.get("source") if isinstance(archive_state.get("source"), dict) else {}
             if archive_state.get("format_hint") or source.get("format_hint"):
                 job["format_hint"] = archive_state.get("format_hint") or source.get("format_hint")
         else:
-            archive_input = self._archive_input(task, archive_path, part_paths)
+            with _phase(phase_timer, f"{phase_prefix}_archive_input"):
+                archive_input = self._archive_input(task, archive_path, part_paths)
             if archive_input:
                 descriptor_payload = archive_input.to_dict()
                 job["archive_input"] = descriptor_payload
@@ -241,6 +258,9 @@ class SevenZipRunner:
         return job
 
     def _archive_state(self, task: ArchiveTask) -> dict | None:
+        raw = getattr(getattr(task, "fact_bag", None), "get", lambda *_: None)("archive.state")
+        if isinstance(raw, dict):
+            return dict(raw)
         if hasattr(task, "archive_state"):
             try:
                 return task.archive_state().to_dict()
@@ -288,10 +308,29 @@ class SevenZipRunner:
             process_failure=process_failure,
         )
 
-    def _run_worker(self, job: dict, startupinfo, runtime_scheduler: Any, task: ArchiveTask) -> subprocess.CompletedProcess:
-        payload = json.dumps(job, ensure_ascii=False, separators=(",", ":"))
+    def _run_worker(
+        self,
+        job: dict,
+        startupinfo,
+        runtime_scheduler: Any,
+        task: ArchiveTask,
+        *,
+        phase_timer: Any | None = None,
+        phase_prefix: str = "sevenzip",
+    ) -> subprocess.CompletedProcess:
+        with _phase(phase_timer, f"{phase_prefix}_json_payload"):
+            payload = json.dumps(job, ensure_ascii=False, separators=(",", ":"))
         if self._persistent_workers_enabled():
-            return self._run_persistent_worker(payload, startupinfo=startupinfo, runtime_scheduler=runtime_scheduler, task=task, job=job)
+            with _phase(phase_timer, f"{phase_prefix}_persistent_total"):
+                return self._run_persistent_worker(
+                    payload,
+                    startupinfo=startupinfo,
+                    runtime_scheduler=runtime_scheduler,
+                    task=task,
+                    job=job,
+                    phase_timer=phase_timer,
+                    phase_prefix=phase_prefix,
+                )
         if runtime_scheduler is None:
             try:
                 completed = subprocess.run(
@@ -368,9 +407,13 @@ class SevenZipRunner:
         runtime_scheduler: Any,
         task: ArchiveTask,
         job: dict,
+        *,
+        phase_timer: Any | None = None,
+        phase_prefix: str = "sevenzip",
     ) -> subprocess.CompletedProcess:
         try:
-            worker = self._pool().acquire(startupinfo)
+            with _phase(phase_timer, f"{phase_prefix}_persistent_acquire"):
+                worker = self._pool().acquire(startupinfo)
         except (OSError, FileNotFoundError, RuntimeError) as exc:
             return self._completed_process(
                 [self.worker_path or "sevenzip_worker.exe"],
@@ -387,8 +430,10 @@ class SevenZipRunner:
 
         reusable = False
         try:
-            worker.send(payload)
-            stdout, stderr, returncode, reusable = self._read_persistent_worker_result(worker, runtime_scheduler, task)
+            with _phase(phase_timer, f"{phase_prefix}_persistent_send"):
+                worker.send(payload)
+            with _phase(phase_timer, f"{phase_prefix}_persistent_read_result"):
+                stdout, stderr, returncode, reusable = self._read_persistent_worker_result(worker, runtime_scheduler, task)
             return self._completed_process(
                 [worker.worker_path, "--persistent"],
                 returncode,
@@ -411,7 +456,8 @@ class SevenZipRunner:
                 },
             )
         finally:
-            self._pool().release(worker, reusable=reusable)
+            with _phase(phase_timer, f"{phase_prefix}_persistent_release"):
+                self._pool().release(worker, reusable=reusable)
 
     def _read_persistent_worker_result(
         self,
@@ -702,3 +748,9 @@ class SevenZipRunner:
         if profile_key:
             return profile_key
         return "unknown"
+
+
+def _phase(timer: Any | None, name: str):
+    if timer is None:
+        return nullcontext()
+    return timer(name)

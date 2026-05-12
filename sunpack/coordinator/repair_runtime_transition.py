@@ -16,7 +16,7 @@ from sunpack.extraction.result import ExtractionResult
 from sunpack.extraction.knowledge import write_extraction_result
 from sunpack.extraction.scheduler import ExtractionScheduler
 from sunpack.repair.candidate import RepairCandidate
-from sunpack.repair.knowledge import write_repair_archive_status, write_repair_result
+from sunpack.repair.knowledge import write_repair_result
 from sunpack.verification import VerificationResult, VerificationScheduler
 from sunpack.verification.result import DECISION_ACCEPT, DECISION_ACCEPT_PARTIAL, DECISION_REPAIR, SOURCE_INTEGRITY_DAMAGED
 
@@ -91,7 +91,7 @@ class RepairRuntimeTransitionEvaluator:
                 with _phase(phase_timer, "transition_record_history", state_id=state_id, candidate_id=candidate_id):
                     self.record_candidate_repair(task, candidate, phase_timer=phase_timer)
             with _phase(phase_timer, "transition_apply_candidate", state_id=state_id, candidate_id=candidate_id):
-                self.apply_candidate_to_task(task, candidate)
+                self.apply_candidate_to_task(task, candidate, phase_timer=phase_timer)
             if refresh_analysis and self.analysis_stage is not None:
                 with _phase(phase_timer, "transition_analysis_refresh", state_id=state_id, candidate_id=candidate_id):
                     self.analysis_stage.refresh_task_analysis(task, phase_timer=phase_timer, phase_prefix="transition_analysis_refresh")
@@ -132,17 +132,21 @@ class RepairRuntimeTransitionEvaluator:
         finally:
             if restore:
                 with _phase(phase_timer, "transition_restore", state_id=state_id, candidate_id=candidate_id):
-                    task.set_archive_state(original_state)
+                    task.set_archive_state(original_state, phase_timer=phase_timer, phase_prefix="transition_restore_set_archive_state")
                     task.set_knowledge(original_knowledge)
 
-    def apply_candidate_to_task(self, task: ArchiveTask, candidate: RepairCandidate) -> None:
+    def apply_candidate_to_task(self, task: ArchiveTask, candidate: RepairCandidate, *, phase_timer: Callable[..., Any] | None = None) -> None:
         archive_state = candidate.plan.get("archive_state") if isinstance(candidate.plan, dict) else None
         if isinstance(archive_state, dict):
-            task.set_archive_state(archive_state)
+            task.set_archive_state(archive_state, phase_timer=phase_timer, phase_prefix="transition_apply_candidate_set_archive_state")
             return
         descriptor = self.repair_stage._descriptor_from_repaired_input(task, candidate.repaired_input)
         if descriptor is not None:
-            task.set_archive_state(ArchiveState.from_archive_input(descriptor))
+            task.set_archive_state(
+                ArchiveState.from_archive_input(descriptor),
+                phase_timer=phase_timer,
+                phase_prefix="transition_apply_candidate_set_archive_state",
+            )
             return
         task.set_archive_input(candidate.repaired_input)
 
@@ -150,12 +154,23 @@ class RepairRuntimeTransitionEvaluator:
         result = candidate.to_result(selection={"selected_candidate_id": self._candidate_id(candidate)})
         append_history = getattr(self.repair_stage, "_append_repair_history", None)
         if callable(append_history):
-            write_repair_result(task, result, phase="history", phase_timer=phase_timer, phase_prefix="transition_record_history_write_repair")
+            write_repair_result(
+                task,
+                result,
+                phase="history",
+                archive_repaired=True if result.ok else None,
+                phase_timer=phase_timer,
+                phase_prefix="transition_record_history_write_repair",
+            )
         else:
-            write_repair_result(task, result, phase="runtime_transition", phase_timer=phase_timer, phase_prefix="transition_record_history_write_repair")
-        if result.ok:
-            with _phase(phase_timer, "transition_record_history_archive_status"):
-                write_repair_archive_status(task, repaired=True)
+            write_repair_result(
+                task,
+                result,
+                phase="runtime_transition",
+                archive_repaired=True if result.ok else None,
+                phase_timer=phase_timer,
+                phase_prefix="transition_record_history_write_repair",
+            )
 
     def _candidate_source_digest(self, candidate: RepairCandidate) -> str:
         if isinstance(candidate.plan, dict) and candidate.plan.get("archive_state"):
@@ -240,7 +255,9 @@ def _verify_with_optional_timer(verifier: Any, task: ArchiveTask, extracted: Ext
 
 def clone_archive_task(task: ArchiveTask, *, key_suffix: str = "") -> ArchiveTask:
     bag = FactBag()
-    knowledge_payload = task.knowledge().to_dict()
+    knowledge_payload = task.fact_bag.get("archive.knowledge")
+    if not isinstance(knowledge_payload, dict):
+        knowledge_payload = task.knowledge().to_dict()
     state_payload = task.fact_bag.get("archive.state")
     if not isinstance(state_payload, dict):
         state_payload = task.archive_state().to_dict()
@@ -283,7 +300,4 @@ def clone_archive_task(task: ArchiveTask, *, key_suffix: str = "") -> ArchiveTas
         matched_rules=list(task.matched_rules or []),
         detected_ext=task.detected_ext,
     )
-    replace_knowledge = getattr(cloned, "_replace_knowledge_payload", None)
-    if callable(replace_knowledge):
-        replace_knowledge(bag.get("archive.knowledge"))
     return cloned

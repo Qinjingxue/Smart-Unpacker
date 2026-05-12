@@ -382,6 +382,10 @@ class CandidateSelector:
 
 
 def candidate_feature_payload(candidate: RepairCandidate) -> dict[str, Any]:
+    diagnosis = candidate.diagnosis if isinstance(candidate.diagnosis, dict) else {}
+    cached = diagnosis.get("candidate_features")
+    if isinstance(cached, dict) and cached.get("candidate_id"):
+        return dict(cached)
     validations = [
         {
             "name": validation.name,
@@ -396,7 +400,6 @@ def candidate_feature_payload(candidate: RepairCandidate) -> dict[str, Any]:
     ranking = candidate_ranking_breakdown(candidate)
     history = candidate_history_features(candidate)
     plan_metrics = _candidate_plan_metrics(candidate)
-    diagnosis = candidate.diagnosis if isinstance(candidate.diagnosis, dict) else {}
     return {
         "candidate_id": candidate_digest(candidate),
         "module": candidate.module_name,
@@ -409,6 +412,8 @@ def candidate_feature_payload(candidate: RepairCandidate) -> dict[str, Any]:
         "route_required_flags_matched": list(diagnosis.get("route_required_flags_matched") or []),
         "route_reject_reason": str(diagnosis.get("route_reject_reason") or ""),
         "native_target_mismatch": bool(diagnosis.get("native_target_mismatch")),
+        "control_action": bool(diagnosis.get("control_action")),
+        "noop": bool(diagnosis.get("noop")),
         "patch_facts": list(diagnosis.get("patch_facts") or []),
         "residual_facts": list(diagnosis.get("residual_facts") or []),
         "validation_details": dict(diagnosis.get("validation_details") or {}),

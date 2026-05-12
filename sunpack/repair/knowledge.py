@@ -102,7 +102,15 @@ def write_repair_job_context(
         return knowledge.to_dict()
 
 
-def write_repair_result(task: ArchiveTask, result: RepairResult, *, phase: str = "repair", phase_timer: Callable[..., Any] | None = None, phase_prefix: str = "write_repair_result") -> None:
+def write_repair_result(
+    task: ArchiveTask,
+    result: RepairResult,
+    *,
+    phase: str = "repair",
+    archive_repaired: bool | None = None,
+    phase_timer: Callable[..., Any] | None = None,
+    phase_prefix: str = "write_repair_result",
+) -> None:
     with _phase(phase_timer, f"{phase_prefix}_ensure_knowledge"):
         knowledge = ensure_knowledge(task)
     with _phase(phase_timer, f"{phase_prefix}_compact_payload"):
@@ -121,6 +129,9 @@ def write_repair_result(task: ArchiveTask, result: RepairResult, *, phase: str =
                 write_flags(knowledge, namespace, [str(item) for item in values], source_layer="repair", source_module=result.module_name)
     with _phase(phase_timer, f"{phase_prefix}_write_status"):
         write_payload(knowledge, "repair", {"status": result.status, "phase": phase}, source_layer="repair", source_module=result.module_name)
+    with _phase(phase_timer, f"{phase_prefix}_write_archive_status"):
+        if archive_repaired is not None:
+            write_payload(knowledge, "archive", {"repaired": bool(archive_repaired)}, source_layer="repair", source_module=result.module_name)
     with _phase(phase_timer, f"{phase_prefix}_commit"):
         commit_task_knowledge(task, knowledge, phase_timer=phase_timer, phase_prefix=f"{phase_prefix}_commit")
 
@@ -134,6 +145,33 @@ def write_repair_stop(task: ArchiveTask, reason: str, payload: dict[str, Any] | 
         source_layer="repair",
         source_module="loop",
     )
+    commit_task_knowledge(task, knowledge)
+
+
+def write_repair_loop_update(
+    task: ArchiveTask,
+    loop_payload: dict[str, Any],
+    *,
+    stop_reason: str = "",
+    stop_payload: dict[str, Any] | None = None,
+) -> None:
+    knowledge = ensure_knowledge(task)
+    write_payload(
+        knowledge,
+        "repair.loop",
+        dict(loop_payload or {}),
+        source_layer="repair",
+        source_module="loop",
+    )
+    if stop_reason:
+        details = dict(stop_payload or {})
+        write_payload(
+            knowledge,
+            "repair.stop",
+            {"reason": str(stop_reason or ""), "details": details},
+            source_layer="repair",
+            source_module="loop",
+        )
     commit_task_knowledge(task, knowledge)
 
 

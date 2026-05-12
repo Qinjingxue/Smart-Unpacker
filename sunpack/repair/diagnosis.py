@@ -92,9 +92,9 @@ class RepairDiagnosis:
         }
 
 
-def diagnose_repair_job(job: RepairJob) -> RepairDiagnosis:
-    evidences = _collect_evidence(job)
-    knowledge = ArchiveKnowledge.from_any(job.knowledge)
+def diagnose_repair_job(job: RepairJob, *, knowledge: ArchiveKnowledge | None = None) -> RepairDiagnosis:
+    knowledge = knowledge if isinstance(knowledge, ArchiveKnowledge) else ArchiveKnowledge.from_any(job.knowledge)
+    evidences = _collect_evidence(job, knowledge=knowledge)
     analysis_summary = knowledge_view.analysis_summary(knowledge)
     source = knowledge_view.source_input(knowledge)
     fmt = _first_text([
@@ -122,9 +122,9 @@ def diagnose_repair_job(job: RepairJob) -> RepairDiagnosis:
     )
 
 
-def _collect_evidence(job: RepairJob) -> list[DamageEvidence]:
+def _collect_evidence(job: RepairJob, *, knowledge: ArchiveKnowledge | None = None) -> list[DamageEvidence]:
     evidences: list[DamageEvidence] = []
-    knowledge = ArchiveKnowledge.from_any(job.knowledge)
+    knowledge = knowledge if isinstance(knowledge, ArchiveKnowledge) else ArchiveKnowledge.from_any(job.knowledge)
     analysis_evidences = knowledge_view.analysis_evidences(knowledge)
     if analysis_evidences:
         evidences.extend(_analysis_evidence(item, knowledge) for item in analysis_evidences)

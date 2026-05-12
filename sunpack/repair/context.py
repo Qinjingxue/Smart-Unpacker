@@ -37,8 +37,8 @@ class RepairContext:
     knowledge: dict[str, Any] = field(default_factory=dict)
 
 
-def build_repair_context(job: RepairJob, diagnosis: RepairDiagnosis) -> RepairContext:
-    knowledge = ArchiveKnowledge.from_any(job.knowledge)
+def build_repair_context(job: RepairJob, diagnosis: RepairDiagnosis, *, knowledge: ArchiveKnowledge | None = None) -> RepairContext:
+    knowledge = knowledge if isinstance(knowledge, ArchiveKnowledge) else ArchiveKnowledge.from_any(job.knowledge)
     failure = knowledge_view.extraction_failure(knowledge)
     diagnostics = knowledge_view.extraction_diagnostics(knowledge)
     result_payload = diagnostics.get("result") if isinstance(diagnostics.get("result"), dict) else {}
@@ -69,9 +69,10 @@ def build_repair_context(job: RepairJob, diagnosis: RepairDiagnosis) -> RepairCo
         *repair_history_flags,
         *residual_damage_flags,
     ]))
+    knowledge_payload = knowledge.to_dict()
     if _normalize_format(diagnosis.format or knowledge_view.analysis_summary(knowledge).get("format") or "") == "zip":
         damage_flags = _filter_zip_conflicting_runtime_flags(damage_flags, {
-            "archive_knowledge": knowledge.to_dict(),
+            "archive_knowledge": knowledge_payload,
             "analysis_evidence": {"details": knowledge_view.zip_runtime_facts(knowledge)},
             "repair_history": history_summary,
             "damage_flags": damage_flags,
@@ -111,7 +112,7 @@ def build_repair_context(job: RepairJob, diagnosis: RepairDiagnosis) -> RepairCo
         route_evidence_flags=tuple(route_evidence_flags),
         repair_history_flags=tuple(repair_history_flags),
         residual_damage_flags=tuple(residual_damage_flags),
-        knowledge=knowledge.to_dict(),
+        knowledge=knowledge_payload,
     )
 
 

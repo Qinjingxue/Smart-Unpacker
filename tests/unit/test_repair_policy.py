@@ -15,6 +15,7 @@ from sunpack.repair.candidate import RepairCandidate, RepairCandidateBatch
 from sunpack.repair.config import normalize_repair_config
 from sunpack.repair.job import RepairJob
 from sunpack.repair.policy.runtime_features import policy_candidate_payload
+from sunpack.repair.result import RepairResult
 from sunpack.repair.scheduler import RepairScheduler
 from sunpack.support import archive_knowledge_projection as knowledge_view
 from sunpack.verification.result import ArchiveCoverageSummary, VerificationResult
@@ -78,6 +79,52 @@ def test_zip_policy_provider_selects_candidate_without_selector(tmp_path, monkey
     assert "ltr_features" not in selection["candidates"][0]
     assert "runtime_context" in selection["candidates"][0]
     assert "candidate_proposal" in selection["candidates"][0]
+
+
+def test_zip_policy_request_includes_accept_current_state_candidate(tmp_path, monkeypatch):
+    _install_policy_package(monkeypatch, "sunpack_policy_test_noop", _CandidateIdProvider(selected_module="repair_accept_current_state"))
+    candidate = _candidate("ordinary_repair", tmp_path / "ordinary.zip", confidence=0.95)
+    scheduler = RepairScheduler({
+        "repair": {
+            "workspace": str(tmp_path / "repair"),
+            "policy": {"provider_package": "sunpack_policy_test_noop"},
+        }
+    })
+    scheduler.generate_repair_candidates = lambda job: RepairCandidateBatch(candidates=[candidate])  # type: ignore[method-assign]
+
+    result = scheduler.repair(_job(tmp_path))
+
+    assert result.status == "skipped"
+    assert result.module_name == "repair_accept_current_state"
+    selection = result.diagnosis["candidate_selection"]
+    noop_payloads = [
+        payload for payload in selection["candidates"]
+        if payload.get("noop") or (payload.get("candidate_proposal") or {}).get("noop")
+    ]
+    assert len(noop_payloads) == 1
+    assert noop_payloads[0]["branchable"] is False
+    assert noop_payloads[0]["candidate_proposal"]["control_action"] is True
+
+
+def test_zip_policy_can_select_accept_current_state_when_repair_generation_is_terminal(tmp_path, monkeypatch):
+    _install_policy_package(monkeypatch, "sunpack_policy_test_terminal_noop", _CandidateIdProvider(selected_module="repair_accept_current_state"))
+    scheduler = RepairScheduler({
+        "repair": {
+            "workspace": str(tmp_path / "repair"),
+            "policy": {"provider_package": "sunpack_policy_test_terminal_noop", "fallback_to_selector": False},
+        }
+    })
+    scheduler.generate_repair_candidates = lambda job: RepairCandidateBatch(  # type: ignore[method-assign]
+        terminal_result=RepairResult(status="unrepairable", format="zip", message="no repair modules")
+    )
+
+    result = scheduler.repair(_job(tmp_path))
+
+    assert result.status == "skipped"
+    assert result.module_name == "repair_accept_current_state"
+    policy = result.diagnosis["candidate_selection"]["policy"]
+    assert policy["decision_status"] == "selected"
+    assert policy["selected_candidate_id_valid"] is True
 
 
 def test_policy_probe_writes_public_request_and_decision(tmp_path, monkeypatch):
@@ -487,7 +534,7 @@ class _FakeExtractor:
         self.result = result
         self.seen_archive_states = []
 
-    def extract(self, task, out_dir, runtime_scheduler=None):
+    def extract(self, task, out_dir, runtime_scheduler=None, **kwargs):
         self.seen_archive_states.append(task.archive_state().effective_patch_digest())
         self.result.out_dir = str(out_dir)
         return self.result

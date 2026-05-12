@@ -1,4 +1,5 @@
 from dataclasses import replace
+from contextlib import nullcontext
 import json
 import os
 from pathlib import Path
@@ -8,6 +9,7 @@ from sunpack.repair.candidate import CandidateSelector, CandidateValidation, Rep
 from sunpack.repair.capability import ModuleCapabilityDecision, RepairCapabilityDecision
 from sunpack.repair.config import enabled_module_configs, repair_config
 from sunpack.repair.context import RepairContext, build_repair_context
+from sunpack.repair.control_candidates import is_accept_current_state_candidate, with_accept_current_state_candidate
 from sunpack.repair.diagnosis import RepairDiagnosis, diagnose_repair_job
 from sunpack.repair.job import RepairJob
 from sunpack.repair.pipeline.module import RepairRoute
@@ -17,6 +19,7 @@ from sunpack.repair.policy import RepairPolicyManager
 from sunpack.repair.policy.runtime_features import policy_candidate_payload
 from sunpack.repair.result import RepairResult
 from sunpack.repair.runtime_cache import RepairRuntimeCache
+from sunpack.contracts.archive_knowledge import ArchiveKnowledge
 from sunpack.support import repair_trace
 
 
@@ -31,12 +34,17 @@ class RepairScheduler:
         self.policy_manager = RepairPolicyManager(self.config)
         discover_repair_modules()
 
-    def diagnose(self, job: RepairJob) -> RepairDiagnosis:
-        return diagnose_repair_job(job)
+    def diagnose(self, job: RepairJob, *, knowledge: ArchiveKnowledge | None = None) -> RepairDiagnosis:
+        return diagnose_repair_job(job, knowledge=knowledge)
 
     def repair(self, job: RepairJob) -> RepairResult:
         batch = self.generate_repair_candidates(job)
-        if batch.terminal_result is not None:
+        terminal_policy_noop = (
+            batch.terminal_result is not None
+            and self.policy_manager.active_for_job(job)
+            and _terminal_result_allows_policy_noop(batch.terminal_result)
+        )
+        if batch.terminal_result is not None and not terminal_policy_noop:
             self._write_telemetry(job, batch, batch.terminal_result, {})
             repair_trace.write_event("repair_terminal_result", {
                 "job": repair_trace.job_payload(job),
@@ -48,10 +56,10 @@ class RepairScheduler:
         selector = CandidateSelector(self.config)
         warnings = list(batch.warnings)
         selection: dict[str, Any] = {}
-        if batch.candidates:
+        if batch.candidates or terminal_policy_noop:
             selected = None
             if self.policy_manager.active_for_job(job):
-                policy_candidates = _with_job_password_candidates(batch.candidates, job)
+                policy_candidates = _with_job_password_candidates(with_accept_current_state_candidate(batch.candidates, job), job)
                 validated = self._validated_policy_candidates(selector, policy_candidates)
                 selectable = [candidate for candidate in validated if selector._accepted(candidate)]
                 policy_payloads = [
@@ -99,7 +107,11 @@ class RepairScheduler:
                         "candidates": policy_payloads,
                     })
                 elif self.policy_manager.fallback_to_selector:
-                    fallback_selected, fallback_selection = selector.select_validated(validated)
+                    fallback_validated = [
+                        candidate for candidate in validated
+                        if not is_accept_current_state_candidate(candidate)
+                    ]
+                    fallback_selected, fallback_selection = selector.select_validated(fallback_validated)
                     selected = fallback_selected
                     selection = {
                         **fallback_selection,
@@ -171,10 +183,15 @@ class RepairScheduler:
         materialized = materialize_candidates(candidates)
         return [selector._with_native_validation(candidate) for candidate in materialized]
 
-    def generate_repair_candidates(self, job: RepairJob, *, lazy: bool = False) -> RepairCandidateBatch:
-        diagnosis = self.diagnose(job)
-        context = build_repair_context(job, diagnosis)
-        effective_job = replace(job, damage_flags=list(context.damage_flags), repair_cache=job.repair_cache or self.repair_cache)
+    def generate_repair_candidates(self, job: RepairJob, *, lazy: bool = False, phase_timer: Any | None = None, phase_prefix: str = "generate_candidates") -> RepairCandidateBatch:
+        with _phase(phase_timer, f"{phase_prefix}_knowledge"):
+            knowledge = ArchiveKnowledge.from_any(job.knowledge)
+        with _phase(phase_timer, f"{phase_prefix}_diagnose"):
+            diagnosis = self.diagnose(job, knowledge=knowledge)
+        with _phase(phase_timer, f"{phase_prefix}_build_context"):
+            context = build_repair_context(job, diagnosis, knowledge=knowledge)
+        with _phase(phase_timer, f"{phase_prefix}_effective_job"):
+            effective_job = replace(job, damage_flags=list(context.damage_flags), repair_cache=job.repair_cache or self.repair_cache)
         if not self.config.get("enabled", True):
             result = self._result("skipped", job, diagnosis, "repair layer is disabled")
             repair_trace.write_event("repair_candidates_terminal", {
@@ -205,7 +222,8 @@ class RepairScheduler:
                 message=message,
             )
 
-        modules, capability = self._select_modules(effective_job, diagnosis, context)
+        with _phase(phase_timer, f"{phase_prefix}_select_modules"):
+            modules, capability = self._select_modules(effective_job, diagnosis, context)
         if not modules:
             status = "unrepairable" if capability.automatic_unrepairable else "unsupported"
             result = self._result(status, job, diagnosis, capability.message(), capability)
@@ -223,30 +241,36 @@ class RepairScheduler:
                 message=result.message,
             )
 
-        workspace = self._workspace_for(job)
-        workspace.mkdir(parents=True, exist_ok=True)
-        module_configs = enabled_module_configs(self.config)
-        runtime_job = replace(effective_job, workspace=str(workspace))
-        repair_candidates, warnings, capability = self._run_modules(
-            runtime_job,
-            diagnosis,
-            modules,
-            capability,
-            workspace,
-            module_configs,
-            lazy=lazy,
-        )
-        repair_candidates = [
-            _with_candidate_features(replace(candidate, diagnosis=_with_capability_diagnosis(candidate.diagnosis, capability)))
-            for candidate in repair_candidates
-        ]
+        with _phase(phase_timer, f"{phase_prefix}_workspace"):
+            workspace = self._workspace_for(job)
+            workspace.mkdir(parents=True, exist_ok=True)
+        with _phase(phase_timer, f"{phase_prefix}_module_configs"):
+            module_configs = enabled_module_configs(self.config)
+            runtime_job = replace(effective_job, workspace=str(workspace))
+        with _phase(phase_timer, f"{phase_prefix}_run_modules"):
+            repair_candidates, warnings, capability = self._run_modules(
+                runtime_job,
+                diagnosis,
+                modules,
+                capability,
+                workspace,
+                module_configs,
+                lazy=lazy,
+            )
+        with _phase(phase_timer, f"{phase_prefix}_candidate_features"):
+            repair_candidates = [
+                _with_candidate_features(replace(candidate, diagnosis=_with_capability_diagnosis(candidate.diagnosis, capability)))
+                for candidate in repair_candidates
+            ]
+        with _phase(phase_timer, f"{phase_prefix}_trace_generated"):
+            trace_candidates = [candidate_feature_payload(candidate) for candidate in repair_candidates]
         repair_trace.write_event("repair_candidates_generated", {
             "job": repair_trace.job_payload(job),
             "lazy": bool(lazy),
             "diagnosis": diagnosis.as_dict(),
             "capability_decision": capability.as_dict() if hasattr(capability, "as_dict") else {},
             "candidate_count": len(repair_candidates),
-            "candidates": [candidate_feature_payload(candidate) for candidate in repair_candidates],
+            "candidates": trace_candidates,
             "warnings": _dedupe(warnings),
         })
         return RepairCandidateBatch(
@@ -748,6 +772,12 @@ def _policy_candidate_payload(job: RepairJob, candidate: RepairCandidate, *, ind
     return policy_candidate_payload(job, candidate, index=index)
 
 
+def _phase(timer: Any | None, name: str):
+    if timer is None:
+        return nullcontext()
+    return timer(name)
+
+
 def _candidate_index(candidates: list[RepairCandidate], selected: RepairCandidate) -> int:
     for index, candidate in enumerate(candidates):
         if candidate is selected:
@@ -1147,6 +1177,12 @@ def _with_job_password_result(result: RepairResult, job: RepairJob) -> RepairRes
         return result
     repaired_input = _with_password(result.repaired_input, job.password)
     return replace(result, repaired_input=repaired_input)
+
+
+def _terminal_result_allows_policy_noop(result: RepairResult | None) -> bool:
+    if result is None:
+        return False
+    return str(getattr(result, "status", "") or "") in {"unrepairable", "unsupported"}
 
 
 def _with_job_password_candidates(candidates: list[RepairCandidate], job: RepairJob) -> list[RepairCandidate]:

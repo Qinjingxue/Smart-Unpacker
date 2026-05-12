@@ -46,9 +46,19 @@ _ROUTE_VISIBLE_DAMAGE_FLAGS = {
 }
 
 
-def policy_candidate_payload(job: RepairJob, candidate: RepairCandidate, *, index: int = 0) -> dict[str, Any]:
-    payload = candidate_feature_payload(candidate)
-    runtime_context = runtime_context_from_job(job, candidate=candidate)
+def policy_candidate_payload(
+    job: RepairJob,
+    candidate: RepairCandidate,
+    *,
+    index: int = 0,
+    runtime_context: dict[str, Any] | None = None,
+    candidate_payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    payload = candidate_payload if isinstance(candidate_payload, dict) else candidate_feature_payload(candidate)
+    if runtime_context is None:
+        runtime_context = runtime_context_from_job(job, candidate=candidate, candidate_payload=payload)
+    else:
+        runtime_context = {**runtime_context, "native_feedback": _native_feedback_from_payload(payload)}
     candidate_proposal = candidate_proposal_from_payload(payload, job=job)
     return {
         **_public_candidate_payload(payload),
@@ -62,7 +72,20 @@ def policy_candidate_payload(job: RepairJob, candidate: RepairCandidate, *, inde
     }
 
 
-def runtime_context_from_job(job: RepairJob, *, candidate: RepairCandidate | None = None) -> dict[str, Any]:
+def policy_candidate_payloads(job: RepairJob, candidates: list[RepairCandidate]) -> list[dict[str, Any]]:
+    runtime_context = runtime_context_from_job(job)
+    return [
+        policy_candidate_payload(job, candidate, index=index, runtime_context=runtime_context)
+        for index, candidate in enumerate(candidates)
+    ]
+
+
+def runtime_context_from_job(
+    job: RepairJob,
+    *,
+    candidate: RepairCandidate | None = None,
+    candidate_payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     knowledge = _effective_job_knowledge(job)
     source = _dict_at(knowledge, "source.input")
     failure = _dict_at(knowledge, "extraction.failure")
@@ -177,7 +200,7 @@ def runtime_context_from_job(job: RepairJob, *, candidate: RepairCandidate | Non
             "has_archive_state": _dict_at(knowledge, "archive.state") != {},
             "archive_state_patch_count": len(_dict_at(knowledge, "archive.state").get("patches") or _dict_at(knowledge, "archive.state").get("patch_stack") or []),
         },
-        "native_feedback": _native_feedback(candidate),
+        "native_feedback": _native_feedback_from_payload(candidate_payload) if isinstance(candidate_payload, dict) else _native_feedback(candidate),
     }
 
 
@@ -195,6 +218,8 @@ def candidate_proposal_from_payload(payload: dict[str, Any], *, job: RepairJob |
             "route_required_flags_matched",
             "route_reject_reason",
             "native_target_mismatch",
+            "control_action",
+            "noop",
             "format",
             "confidence",
             "score_hint",
@@ -276,6 +301,8 @@ def _public_candidate_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "atomic_action_group": payload.get("atomic_action_group"),
         "route_family": payload.get("route_family"),
         "native_target_mismatch": payload.get("native_target_mismatch"),
+        "control_action": payload.get("control_action"),
+        "noop": payload.get("noop"),
         "format": payload.get("format"),
         "status": payload.get("status"),
         "partial": payload.get("partial"),
@@ -493,7 +520,12 @@ def _list_at(knowledge: ArchiveKnowledge, path: str) -> list[Any]:
 def _native_feedback(candidate: RepairCandidate | None) -> dict[str, Any]:
     if candidate is None:
         return {}
-    payload = candidate_feature_payload(candidate)
+    return _native_feedback_from_payload(candidate_feature_payload(candidate))
+
+
+def _native_feedback_from_payload(payload: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
     return {
         "native_target": payload.get("native_target"),
         "candidate_status": payload.get("candidate_status"),
@@ -533,6 +565,8 @@ def _safe_feature_value(value: Any) -> Any:
 
 
 def _candidate_branchable(payload: dict[str, Any]) -> bool:
+    if payload.get("noop") or payload.get("control_action"):
+        return False
     if payload.get("has_archive_state_plan"):
         return True
     if payload.get("materialized") is False and payload.get("lazy"):

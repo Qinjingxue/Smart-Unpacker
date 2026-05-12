@@ -9,6 +9,7 @@ from typing import Any, Callable
 from sunpack.analysis import ArchiveAnalysisReport, ArchiveAnalysisScheduler
 from sunpack.analysis.knowledge import (
     write_analysis_error,
+    write_analysis_refresh,
     write_analysis_report,
     write_extractable_segments,
     write_selected_segment,
@@ -184,30 +185,35 @@ class ArchiveAnalysisStage:
 
     def _tasks_from_report(self, task: ArchiveTask, report: ArchiveAnalysisReport, *, phase_timer: Callable[..., Any] | None = None, phase_prefix: str = "analysis") -> list[ArchiveTask]:
         with _phase(phase_timer, f"{phase_prefix}_record_report"):
-            self._record_report(task, report, phase_timer=phase_timer, phase_prefix=phase_prefix, record_state=False)
+            self._record_report(task, report, phase_timer=phase_timer, phase_prefix=phase_prefix, record_state=False, write_knowledge=False)
         with _phase(phase_timer, f"{phase_prefix}_set_report_path"):
             task.fact_bag.set("analysis.report_path", report.path)
         with _phase(phase_timer, f"{phase_prefix}_extractable_segments"):
             candidates = self._extractable_segments(report)
-        with _phase(phase_timer, f"{phase_prefix}_write_extractable_segments"):
-            self._write_extractable_segments(task, candidates, phase_timer=phase_timer, phase_prefix=phase_prefix)
+        with _phase(phase_timer, f"{phase_prefix}_write_segments_build_payload"):
+            segment_payloads = self._extractable_segment_payloads(task, candidates)
+        selected_segment = None
         if not candidates:
             password_candidate = self._password_required_embedded_segment(report)
             if password_candidate is not None:
                 evidence, segment, index = password_candidate
-                self._write_extractable_segments(task, [(evidence, segment, index)])
+                selected_segment = (evidence, segment, index)
+                with _phase(phase_timer, f"{phase_prefix}_write_segments_build_payload"):
+                    segment_payloads = self._extractable_segment_payloads(task, [(evidence, segment, index)])
                 with _phase(phase_timer, f"{phase_prefix}_apply_selected_segment"):
-                    self._apply_selected_segment(task, evidence, segment, index=index)
-                with _phase(phase_timer, f"{phase_prefix}_record_state_analysis"):
-                    self._record_state_analysis(task, report, phase_timer=phase_timer, phase_prefix=phase_prefix)
-            else:
-                with _phase(phase_timer, f"{phase_prefix}_record_state_analysis"):
-                    self._record_state_analysis(task, report, phase_timer=phase_timer, phase_prefix=phase_prefix)
+                    self._apply_selected_segment(task, evidence, segment, index=index, write_knowledge=False)
+            with _phase(phase_timer, f"{phase_prefix}_batched_write"):
+                write_analysis_refresh(task, report, extractable_segments=segment_payloads, selected_segment=selected_segment)
+            with _phase(phase_timer, f"{phase_prefix}_state_update"):
+                self._record_state_analysis(task, report, phase_timer=phase_timer, phase_prefix=phase_prefix)
             return [task]
         evidence, segment, index = candidates[0]
+        selected_segment = (evidence, segment, index)
         with _phase(phase_timer, f"{phase_prefix}_apply_selected_segment"):
-            self._apply_selected_segment(task, evidence, segment, index=index)
-        with _phase(phase_timer, f"{phase_prefix}_record_state_analysis"):
+            self._apply_selected_segment(task, evidence, segment, index=index, write_knowledge=False)
+        with _phase(phase_timer, f"{phase_prefix}_batched_write"):
+            write_analysis_refresh(task, report, extractable_segments=segment_payloads, selected_segment=selected_segment)
+        with _phase(phase_timer, f"{phase_prefix}_state_update"):
             self._record_state_analysis(task, report, phase_timer=phase_timer, phase_prefix=phase_prefix)
         return [task]
 
@@ -218,13 +224,15 @@ class ArchiveAnalysisStage:
         segment: ArchiveSegment,
         *,
         index: int,
+        write_knowledge: bool = True,
     ) -> None:
         segment_payload = self._segment_payload(task, evidence, segment)
         task.fact_bag.set("analysis.status", evidence.status)
         task.fact_bag.set("analysis.selected_format", evidence.format)
         task.fact_bag.set("analysis.segment_index", index)
         task.fact_bag.set("analysis.segment", segment_payload)
-        write_selected_segment(task, evidence, segment, index=index)
+        if write_knowledge:
+            write_selected_segment(task, evidence, segment, index=index)
 
     def _record_report(
         self,
@@ -234,6 +242,7 @@ class ArchiveAnalysisStage:
         phase_timer: Callable[..., Any] | None = None,
         phase_prefix: str = "analysis",
         record_state: bool = True,
+        write_knowledge: bool = True,
     ) -> None:
         with _phase(phase_timer, f"{phase_prefix}_record_report_fact_bag_basic"):
             task.fact_bag.set("analysis.status", "extractable" if report.has_extractable else "not_extractable")
@@ -255,8 +264,9 @@ class ArchiveAnalysisStage:
             ]
         with _phase(phase_timer, f"{phase_prefix}_record_report_fact_bag_evidences"):
             task.fact_bag.set("analysis.evidences", evidences)
-        with _phase(phase_timer, f"{phase_prefix}_record_report_write_knowledge"):
-            write_analysis_report(task, report)
+        if write_knowledge:
+            with _phase(phase_timer, f"{phase_prefix}_record_report_write_knowledge"):
+                write_analysis_report(task, report)
         if record_state:
             with _phase(phase_timer, f"{phase_prefix}_record_report_state_analysis"):
                 self._record_state_analysis(task, report, phase_timer=phase_timer, phase_prefix=phase_prefix)
@@ -287,7 +297,12 @@ class ArchiveAnalysisStage:
                 verification=dict(state.verification),
             )
         with _phase(phase_timer, f"{phase_prefix}_record_state_set_archive_state"):
-            task.set_archive_state(new_state)
+            if dict(state.analysis) != analysis:
+                task.set_archive_state(
+                    new_state,
+                    phase_timer=phase_timer,
+                    phase_prefix=f"{phase_prefix}_record_state_set_archive_state",
+                )
 
     def _extractable_segments(self, report: ArchiveAnalysisReport) -> list[tuple[ArchiveFormatEvidence, ArchiveSegment, int]]:
         candidates: list[tuple[ArchiveFormatEvidence, ArchiveSegment, int]] = []
@@ -313,34 +328,42 @@ class ArchiveAnalysisStage:
         phase_timer: Callable[..., Any] | None = None,
         phase_prefix: str = "analysis",
     ) -> None:
-        payloads: list[dict[str, Any]] = []
         with _phase(phase_timer, f"{phase_prefix}_write_segments_build_payload"):
-            for evidence, segment, index in candidates:
-                archive_input = self._archive_input_for_segment(task, evidence, segment, index=index)
-                if archive_input is None:
-                    continue
-                segment_payload = self._segment_payload(task, evidence, segment)
-                payloads.append({
-                    "segment_id": f"embedded_{index:02d}_{str(evidence.format or 'archive').replace('/', '_')}",
-                    "index": int(index),
-                    "format": str(evidence.format or ""),
-                    "start_offset": int(segment.start_offset),
-                    "end_offset": int(segment.end_offset) if segment.end_offset is not None else None,
-                    "confidence": float(segment.confidence or evidence.confidence or 0.0),
-                    "damage_flags": list(segment.damage_flags),
-                    "evidence": {
-                        "format": evidence.format,
-                        "confidence": float(evidence.confidence or 0.0),
-                        "status": evidence.status,
-                        "warnings": list(evidence.warnings),
-                        "details": dict(evidence.details or {}),
-                    },
-                    "logical_name": self._segment_logical_name(task, evidence, index),
-                    "segment": segment_payload,
-                    "archive_input": archive_input.to_dict(),
-                })
+            payloads = self._extractable_segment_payloads(task, candidates)
         with _phase(phase_timer, f"{phase_prefix}_write_segments_commit"):
             write_extractable_segments(task, payloads)
+
+    def _extractable_segment_payloads(
+        self,
+        task: ArchiveTask,
+        candidates: list[tuple[ArchiveFormatEvidence, ArchiveSegment, int]],
+    ) -> list[dict[str, Any]]:
+        payloads: list[dict[str, Any]] = []
+        for evidence, segment, index in candidates:
+            archive_input = self._archive_input_for_segment(task, evidence, segment, index=index)
+            if archive_input is None:
+                continue
+            segment_payload = self._segment_payload(task, evidence, segment)
+            payloads.append({
+                "segment_id": f"embedded_{index:02d}_{str(evidence.format or 'archive').replace('/', '_')}",
+                "index": int(index),
+                "format": str(evidence.format or ""),
+                "start_offset": int(segment.start_offset),
+                "end_offset": int(segment.end_offset) if segment.end_offset is not None else None,
+                "confidence": float(segment.confidence or evidence.confidence or 0.0),
+                "damage_flags": list(segment.damage_flags),
+                "evidence": {
+                    "format": evidence.format,
+                    "confidence": float(evidence.confidence or 0.0),
+                    "status": evidence.status,
+                    "warnings": list(evidence.warnings),
+                    "details": dict(evidence.details or {}),
+                },
+                "logical_name": self._segment_logical_name(task, evidence, index),
+                "segment": segment_payload,
+                "archive_input": archive_input.to_dict(),
+            })
+        return payloads
 
     def _prefer_specific_segments(
         self,

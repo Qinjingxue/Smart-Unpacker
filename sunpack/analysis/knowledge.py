@@ -46,6 +46,80 @@ def write_analysis_report(task: ArchiveTask, report: ArchiveAnalysisReport) -> N
     commit_task_knowledge(task, knowledge)
 
 
+def write_analysis_refresh(
+    task: ArchiveTask,
+    report: ArchiveAnalysisReport,
+    *,
+    extractable_segments: list[dict[str, Any]] | None = None,
+    selected_segment: tuple[ArchiveFormatEvidence, ArchiveSegment, int] | None = None,
+) -> None:
+    knowledge = ensure_knowledge(task)
+    selected = report.selected[0] if report.selected else None
+    write_payload(
+        knowledge,
+        "analysis",
+        {
+            "status": "extractable" if report.has_extractable else "not_extractable",
+            "report_path": report.path,
+            "read_bytes": report.read_bytes,
+            "cache_hits": report.cache_hits,
+            "prepass": dict(report.prepass or {}),
+            "fuzzy": dict(report.fuzzy or {}),
+            "selected_format": getattr(selected, "format", "") if selected is not None else "",
+            "confidence": float(getattr(selected, "confidence", 0.0) or 0.0) if selected is not None else 0.0,
+            "evidences": [_evidence_payload(item) for item in report.evidences],
+        },
+        source_layer="analysis",
+        source_module="analysis_stage",
+    )
+    if selected is not None:
+        write_payload(
+            knowledge,
+            "analysis.summary",
+            {
+                "format": getattr(selected, "format", "") or "",
+                "confidence": float(getattr(selected, "confidence", 0.0) or 0.0),
+                "status": getattr(selected, "status", "") or "",
+            },
+            source_layer="analysis",
+            source_module="analysis_stage",
+        )
+        _write_format_evidence(knowledge, selected)
+    segments = list(extractable_segments or [])
+    write_value(
+        knowledge,
+        "analysis.extractable_segments",
+        segments,
+        source_layer="analysis",
+        source_module="analysis_stage",
+    )
+    write_value(
+        knowledge,
+        "analysis.extractable_segment_count",
+        int(len(segments)),
+        source_layer="analysis",
+        source_module="analysis_stage",
+    )
+    if selected_segment is not None:
+        evidence, segment, index = selected_segment
+        write_payload(
+            knowledge,
+            "analysis.selected_segment",
+            {
+                "index": int(index),
+                "format": evidence.format,
+                "confidence": float(evidence.confidence or 0.0),
+                "status": evidence.status,
+                "segment": asdict(segment),
+            },
+            source_layer="analysis",
+            source_module="analysis_stage",
+            confidence=float(evidence.confidence or 0.0),
+        )
+        _write_format_evidence(knowledge, evidence)
+    commit_task_knowledge(task, knowledge)
+
+
 def write_selected_segment(task: ArchiveTask, evidence: ArchiveFormatEvidence, segment: ArchiveSegment, *, index: int) -> None:
     knowledge = ensure_knowledge(task)
     write_payload(

@@ -16,7 +16,7 @@ from sunpack.contracts.archive_input import ArchiveInputDescriptor
 from sunpack.contracts.tasks import ArchiveTask
 from sunpack.extraction.result import ExtractionResult
 from sunpack.repair.result import RepairResult
-from sunpack.repair.knowledge import write_repair_loop_state, write_repair_stop
+from sunpack.repair.knowledge import write_repair_loop_state, write_repair_loop_update, write_repair_stop
 from sunpack.support import archive_knowledge_projection as knowledge_view
 from sunpack.support.archive_state_view import archive_state_to_bytes
 
@@ -121,21 +121,30 @@ class RepairLoopState:
 
         if result.status in TERMINAL_REPAIR_STATUSES:
             with _phase(phase_timer, f"{phase_prefix}_terminal_add_generated_paths"):
-                self._add_generated_paths(result)
-            with _phase(phase_timer, f"{phase_prefix}_terminal_append_round"):
-                self._append_round(round_payload)
-            with _phase(phase_timer, f"{phase_prefix}_terminal_stop"):
-                self.stop(f"repair_{result.status}", trigger=trigger, result=result)
+                generated_file_count, generated_bytes = self._generated_path_totals(result)
+            reason = f"repair_{result.status}"
+            round_payload["exit_reason"] = reason
+            with _phase(phase_timer, f"{phase_prefix}_batched_terminal_commit"):
+                self._commit_terminal_update(
+                    reason,
+                    trigger=trigger,
+                    result=result,
+                    round_payload=round_payload,
+                    generated_update={"generated_file_count": generated_file_count, "generated_bytes": generated_bytes},
+                )
             return False
         if not result.ok:
             with _phase(phase_timer, f"{phase_prefix}_failed_add_generated_paths"):
-                self._add_generated_paths(result)
-            with _phase(phase_timer, f"{phase_prefix}_failed_append_round"):
-                self._append_round(round_payload)
+                generated_file_count, generated_bytes = self._generated_path_totals(result)
+            with _phase(phase_timer, f"{phase_prefix}_batched_failed_commit"):
+                self._append_round_with_update(
+                    round_payload,
+                    {"generated_file_count": generated_file_count, "generated_bytes": generated_bytes},
+                )
             return False
 
         with _phase(phase_timer, f"{phase_prefix}_snapshot_repaired_file"):
-            snapshot_path = self._snapshot_repaired_file(result, round_number)
+            snapshot_path = self._snapshot_repaired_file(result, round_number, phase_timer=phase_timer, phase_prefix=phase_prefix)
         if snapshot_path:
             round_payload["output_path"] = snapshot_path
             round_payload["workspace_paths"] = _dedupe([*round_payload["workspace_paths"], snapshot_path])
@@ -157,12 +166,14 @@ class RepairLoopState:
         generated_update = {"generated_file_count": generated_file_count, "generated_bytes": generated_bytes}
         if repeated_action:
             round_payload["exit_reason"] = "repeated_repair_action"
-            with _phase(phase_timer, f"{phase_prefix}_repeated_action_write_generated"):
-                write_repair_loop_state(self.task, generated_update)
-            with _phase(phase_timer, f"{phase_prefix}_repeated_action_append_round"):
-                self._append_round(round_payload)
-            with _phase(phase_timer, f"{phase_prefix}_repeated_action_stop"):
-                self.stop("repeated_repair_action", trigger=trigger, result=result)
+            with _phase(phase_timer, f"{phase_prefix}_batched_terminal_commit"):
+                self._commit_terminal_update(
+                    "repeated_repair_action",
+                    trigger=trigger,
+                    result=result,
+                    round_payload=round_payload,
+                    generated_update=generated_update,
+                )
             return False
 
         with _phase(phase_timer, f"{phase_prefix}_seen_input_lookup"):
@@ -170,12 +181,14 @@ class RepairLoopState:
             repeated_input = next_digest in seen_input_digests
         if repeated_input:
             round_payload["exit_reason"] = "repeated_repair_input"
-            with _phase(phase_timer, f"{phase_prefix}_repeated_input_write_generated"):
-                write_repair_loop_state(self.task, generated_update)
-            with _phase(phase_timer, f"{phase_prefix}_repeated_input_append_round"):
-                self._append_round(round_payload)
-            with _phase(phase_timer, f"{phase_prefix}_repeated_input_stop"):
-                self.stop("repeated_repair_input", trigger=trigger, result=result)
+            with _phase(phase_timer, f"{phase_prefix}_batched_terminal_commit"):
+                self._commit_terminal_update(
+                    "repeated_repair_input",
+                    trigger=trigger,
+                    result=result,
+                    round_payload=round_payload,
+                    generated_update=generated_update,
+                )
             return False
 
         loop_update: dict[str, Any] = {
@@ -272,6 +285,42 @@ class RepairLoopState:
         items.append(dict(payload))
         write_repair_loop_state(self.task, {"rounds": items})
 
+    def _append_round_with_update(self, payload: dict[str, Any], update: dict[str, Any]) -> None:
+        rounds = _loop_value(self.task, "rounds", [])
+        items = list(rounds) if isinstance(rounds, list) else []
+        items.append(dict(payload))
+        write_repair_loop_update(self.task, {**dict(update or {}), "rounds": items})
+
+    def _commit_terminal_update(
+        self,
+        reason: str,
+        *,
+        trigger: str,
+        result: RepairResult,
+        round_payload: dict[str, Any],
+        generated_update: dict[str, Any],
+    ) -> None:
+        if self.terminal_reason:
+            return
+        rounds = _loop_value(self.task, "rounds", [])
+        items = list(rounds) if isinstance(rounds, list) else []
+        items.append(dict(round_payload))
+        terminal_payload = {
+            "reason": reason,
+            "trigger": trigger,
+            "rounds": len(items),
+            "status": result.status,
+            "module": result.module_name,
+            "message": result.message,
+        }
+        write_repair_loop_update(
+            self.task,
+            {**dict(generated_update or {}), "rounds": items, "terminal_reason": reason, "terminal": terminal_payload},
+            stop_reason=reason,
+            stop_payload=terminal_payload,
+        )
+        LOGGER.warning("archive repair loop stopped: %s", terminal_payload)
+
     def _add_seen_input_digest(self, digest: str) -> None:
         values = self.seen_input_digests
         values.append(digest)
@@ -284,7 +333,14 @@ class RepairLoopState:
         merged = _dedupe(values)
         write_repair_loop_state(self.task, {"seen_action_signatures": merged})
 
-    def _snapshot_repaired_file(self, result: RepairResult, round_number: int) -> str:
+    def _snapshot_repaired_file(
+        self,
+        result: RepairResult,
+        round_number: int,
+        *,
+        phase_timer=None,
+        phase_prefix: str = "repair_loop",
+    ) -> str:
         repaired_input = result.repaired_input if isinstance(result.repaired_input, dict) else {}
         kind = str(repaired_input.get("kind") or "file").lower()
         source_path = str(repaired_input.get("path") or repaired_input.get("archive_path") or "")
@@ -301,20 +357,24 @@ class RepairLoopState:
             except OSError:
                 shutil.copyfile(source, target)
         format_hint = str(repaired_input.get("format_hint") or repaired_input.get("format") or result.format or "")
-        self.task.set_archive_state(ArchiveState.from_archive_input(ArchiveInputDescriptor.from_dict({
-            "kind": "archive_input",
-            "entry_path": str(target),
-            "open_mode": "file",
-            "format_hint": format_hint,
-            "logical_name": str(self.task.logical_name or ""),
-            "parts": [{"path": str(target), "role": "main"}],
-            "analysis": {
-                "source": "repair_loop",
-                "module": result.module_name,
-                "actions": list(result.actions),
-                "round": int(round_number),
-            },
-        })))
+        self.task.set_archive_state(
+            ArchiveState.from_archive_input(ArchiveInputDescriptor.from_dict({
+                "kind": "archive_input",
+                "entry_path": str(target),
+                "open_mode": "file",
+                "format_hint": format_hint,
+                "logical_name": str(self.task.logical_name or ""),
+                "parts": [{"path": str(target), "role": "main"}],
+                "analysis": {
+                    "source": "repair_loop",
+                    "module": result.module_name,
+                    "actions": list(result.actions),
+                    "round": int(round_number),
+                },
+            })),
+            phase_timer=phase_timer,
+            phase_prefix=f"{phase_prefix}_snapshot_set_archive_state",
+        )
         return str(target)
 
     def _round_snapshot_path(self, source: Path, result: RepairResult, round_number: int) -> Path:
