@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import shutil
+import inspect
 from copy import deepcopy
 from contextlib import nullcontext
 from dataclasses import dataclass
@@ -94,9 +95,15 @@ class RepairRuntimeTransitionEvaluator:
                 self.apply_candidate_to_task(task, candidate, phase_timer=phase_timer)
             if refresh_analysis and self.analysis_stage is not None:
                 with _phase(phase_timer, "transition_analysis_refresh", state_id=state_id, candidate_id=candidate_id):
-                    self.analysis_stage.refresh_task_analysis(task, phase_timer=phase_timer, phase_prefix="transition_analysis_refresh")
+                    _refresh_analysis_with_optional_timer(
+                        self.analysis_stage,
+                        task,
+                        phase_timer=phase_timer,
+                        phase_prefix="transition_analysis_refresh",
+                    )
             with _phase(phase_timer, "transition_extract", state_id=state_id, candidate_id=candidate_id):
-                extracted = self.extractor.extract(
+                extracted = _extract_with_optional_timer(
+                    self.extractor,
                     task,
                     temp_dir,
                     runtime_scheduler=self.runtime_scheduler,
@@ -242,6 +249,57 @@ def _phase(timer: Callable[..., Any] | None, name: str, *, state_id: str = "", c
     if timer is None:
         return nullcontext()
     return timer(name, state_id=state_id, candidate_id=candidate_id)
+
+
+def _extract_with_optional_timer(
+    extractor: Any,
+    task: ArchiveTask,
+    out_dir: str,
+    *,
+    runtime_scheduler: Any,
+    phase_timer: Callable[..., Any] | None,
+    phase_prefix: str,
+) -> ExtractionResult:
+    extract = extractor.extract
+    try:
+        parameters = inspect.signature(extract).parameters
+    except (TypeError, ValueError):
+        parameters = {}
+    kwargs: dict[str, Any] = {"runtime_scheduler": runtime_scheduler}
+    if "phase_timer" in parameters:
+        kwargs["phase_timer"] = phase_timer
+    if "phase_prefix" in parameters:
+        kwargs["phase_prefix"] = phase_prefix
+    return extract(task, out_dir, **kwargs)
+
+
+def _refresh_analysis_with_optional_timer(
+    analysis_stage: Any,
+    task: ArchiveTask,
+    *,
+    phase_timer: Callable[..., Any] | None,
+    phase_prefix: str,
+) -> None:
+    refresh = getattr(analysis_stage, "refresh_task_analysis", None)
+    if callable(refresh):
+        try:
+            parameters = inspect.signature(refresh).parameters
+        except (TypeError, ValueError):
+            parameters = {}
+        kwargs: dict[str, Any] = {}
+        if "phase_timer" in parameters:
+            kwargs["phase_timer"] = phase_timer
+        if "phase_prefix" in parameters:
+            kwargs["phase_prefix"] = phase_prefix
+        refresh(task, **kwargs)
+        return
+    analyze_to_tasks = getattr(analysis_stage, "analyze_task_to_tasks", None)
+    if callable(analyze_to_tasks):
+        analyze_to_tasks(task)
+        return
+    analyze_task = getattr(analysis_stage, "analyze_task", None)
+    if callable(analyze_task):
+        analyze_task(task)
 
 
 def _verify_with_optional_timer(verifier: Any, task: ArchiveTask, extracted: ExtractionResult, *, phase_timer: Callable[..., Any] | None, phase_prefix: str) -> VerificationResult:

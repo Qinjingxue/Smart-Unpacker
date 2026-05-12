@@ -71,6 +71,11 @@ def rank_attempt(attempt: RecoveryAttempt) -> RecoveryRank:
     completeness = _clamp01(float(coverage.completeness if coverage.confidence > 0 else verification.completeness))
     file_coverage = _clamp01(float(coverage.file_coverage or completeness))
     byte_coverage = _clamp01(float(coverage.byte_coverage or completeness))
+    output_quality_score = _clamp01(float(getattr(verification, "output_quality_score", 0.0) or 0.0))
+    output_confidence = _clamp01(float(getattr(verification, "output_confidence", 0.0) or 0.0))
+    output_complete_ratio = _clamp01(float(getattr(verification, "output_complete_ratio", 0.0) or 0.0))
+    output_file_count = int(getattr(verification, "output_file_count", 0) or 0)
+    output_total_bytes = int(getattr(verification, "output_total_bytes", 0) or 0)
     complete_bonus = 1.0 if verification.assessment_status == ASSESSMENT_COMPLETE else 0.0
     terminal_penalty = 1.0 if terminal else 0.0
     patch_cost = max(0.0, float(attempt.patch_cost or 0.0))
@@ -82,6 +87,8 @@ def rank_attempt(attempt: RecoveryAttempt) -> RecoveryRank:
         + completeness * 1.5
         + file_coverage * 0.55
         + byte_coverage * 0.35
+        + output_quality_score * 1.1
+        + output_confidence * 0.12
         + source_integrity_rank * 0.08
         + source_quality * 0.3
         + min(1.0, complete_files / max(1, int(coverage.expected_files or complete_files or 1))) * 0.25
@@ -100,6 +107,11 @@ def rank_attempt(attempt: RecoveryAttempt) -> RecoveryRank:
         "completeness": completeness,
         "file_coverage": file_coverage,
         "byte_coverage": byte_coverage,
+        "output_quality_score": output_quality_score,
+        "output_confidence": output_confidence,
+        "output_complete_ratio": output_complete_ratio,
+        "output_file_count": output_file_count,
+        "output_total_bytes": output_total_bytes,
         "source_integrity": verification.source_integrity,
         "source_integrity_rank": source_integrity_rank,
         "complete_files": complete_files,
@@ -191,6 +203,7 @@ def _verification_from_payload(payload: dict[str, Any]) -> VerificationResult:
     from sunpack.verification.result import ArchiveCoverageSummary
 
     coverage_payload = payload.get("archive_coverage") if isinstance(payload.get("archive_coverage"), dict) else {}
+    output_quality = payload.get("output_quality") if isinstance(payload.get("output_quality"), dict) else {}
     coverage = ArchiveCoverageSummary(
         completeness=_clamp01(float(coverage_payload.get("completeness", payload.get("completeness", 1.0)) or 0.0)),
         file_coverage=_clamp01(float(coverage_payload.get("file_coverage", payload.get("file_coverage", payload.get("completeness", 1.0))) or 0.0)),
@@ -219,6 +232,13 @@ def _verification_from_payload(payload: dict[str, Any]) -> VerificationResult:
         failed_files=_as_int(payload.get("failed_files", coverage.failed_files)),
         missing_files=_as_int(payload.get("missing_files", coverage.missing_files)),
         unverified_files=_as_int(payload.get("unverified_files", coverage.unverified_files)),
+        output_quality_score=_clamp01(float(payload.get("output_quality_score", output_quality.get("score", 0.0)) or 0.0)),
+        output_file_count=_as_int(payload.get("output_file_count", output_quality.get("file_count"))),
+        output_total_bytes=_as_int(payload.get("output_total_bytes", output_quality.get("total_bytes"))),
+        output_complete_ratio=_clamp01(float(payload.get("output_complete_ratio", output_quality.get("complete_ratio", 0.0)) or 0.0)),
+        output_failed_ratio=_clamp01(float(payload.get("output_failed_ratio", output_quality.get("failed_ratio", 0.0)) or 0.0)),
+        output_empty=bool(payload.get("output_empty", output_quality.get("empty", True))),
+        output_confidence=_clamp01(float(payload.get("output_confidence", output_quality.get("confidence", 0.0)) or 0.0)),
         archive_coverage=coverage,
         repair_hints=dict(payload.get("repair_hints") or {}) if isinstance(payload.get("repair_hints"), dict) else {},
     )
@@ -232,6 +252,10 @@ def _sort_key(attempt: RecoveryAttempt, rank: RecoveryRank) -> tuple:
         vector["status_rank"],
         vector["decision_rank"],
         round(vector["completeness"], 6),
+        round(vector["output_quality_score"], 6),
+        round(vector["output_complete_ratio"], 6),
+        int(vector["output_file_count"]),
+        int(vector["output_total_bytes"] > 0),
         int(vector["complete_files"]),
         -int(vector["failed_missing_files"]),
         round(vector["file_coverage"], 6),
@@ -274,6 +298,7 @@ def _rank_reasons(vector: dict[str, Any]) -> list[dict[str, Any]]:
         {"code": "coverage.completeness", "value": vector["completeness"]},
         {"code": "coverage.file_coverage", "value": vector["file_coverage"]},
         {"code": "coverage.byte_coverage", "value": vector["byte_coverage"]},
+        {"code": "output.quality", "value": vector["output_quality_score"]},
         {"code": "files.complete", "value": vector["complete_files"]},
     ]
     if vector["failed_missing_files"]:

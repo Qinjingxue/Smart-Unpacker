@@ -492,7 +492,17 @@ class ExtractionBatchRunner:
 
     def _refresh_analysis_after_repair(self, task: ArchiveTask) -> None:
         try:
-            self.analysis_stage.refresh_task_analysis(task)
+            refresh = getattr(self.analysis_stage, "refresh_task_analysis", None)
+            if callable(refresh):
+                refresh(task)
+                return
+            analyze_to_tasks = getattr(self.analysis_stage, "analyze_task_to_tasks", None)
+            if callable(analyze_to_tasks):
+                analyze_to_tasks(task)
+                return
+            analyze_task = getattr(self.analysis_stage, "analyze_task", None)
+            if callable(analyze_task):
+                analyze_task(task)
         except Exception as exc:
             _append_repair_candidate_log(task, {
                 "phase": "analysis_refresh_failed",
@@ -948,8 +958,6 @@ class ExtractionBatchRunner:
             self._promote_recovery_outcome(beam_outcome, out_dir)
             return beam_outcome
 
-        self._refresh_analysis_after_repair(task)
-
         if not bool(beam_outcome.comparison.get("should_continue_repair", True)):
             _append_repair_candidate_log(task, {
                 "phase": "beam_stop",
@@ -1117,6 +1125,7 @@ class ExtractionBatchRunner:
             extractor=self.extractor,
             verifier=self.verifier,
             repair_stage=self.repair_stage,
+            analysis_stage=self.analysis_stage,
             runtime_scheduler=runtime_scheduler,
             light_verify=self._verify_beam_candidate_light,
             needs_full_verification=lambda candidate, light: self._beam_candidate_needs_full_verification(
@@ -1582,12 +1591,21 @@ def _beam_state_summary(state: Any) -> dict[str, Any]:
 
 def _verification_summary(verification: VerificationResult | Any) -> dict[str, Any]:
     coverage = getattr(verification, "archive_coverage", None)
+    output_quality = _output_quality_payload(verification)
     return {
         "decision_hint": getattr(verification, "decision_hint", ""),
         "assessment_status": getattr(verification, "assessment_status", ""),
         "source_integrity": getattr(verification, "source_integrity", ""),
         "completeness": float(getattr(verification, "completeness", 0.0) or 0.0),
         "recoverable_upper_bound": float(getattr(verification, "recoverable_upper_bound", 1.0) or 1.0),
+        "output_quality_score": output_quality["score"],
+        "output_file_count": output_quality["file_count"],
+        "output_total_bytes": output_quality["total_bytes"],
+        "output_complete_ratio": output_quality["complete_ratio"],
+        "output_failed_ratio": output_quality["failed_ratio"],
+        "output_empty": output_quality["empty"],
+        "output_confidence": output_quality["confidence"],
+        "output_quality": output_quality,
         "complete_files": int(getattr(verification, "complete_files", 0) or 0),
         "partial_files": int(getattr(verification, "partial_files", 0) or 0),
         "failed_files": int(getattr(verification, "failed_files", 0) or 0),
@@ -1743,15 +1761,36 @@ def _coverage_complete_files(payload: dict[str, Any]) -> int:
 
 
 def _verification_payload(verification: VerificationResult) -> dict[str, Any]:
+    output_quality = _output_quality_payload(verification)
     return {
         "completeness": verification.completeness,
         "recoverable_upper_bound": verification.recoverable_upper_bound,
         "assessment_status": verification.assessment_status,
         "source_integrity": verification.source_integrity,
         "decision_hint": verification.decision_hint,
+        "output_quality_score": output_quality["score"],
+        "output_file_count": output_quality["file_count"],
+        "output_total_bytes": output_quality["total_bytes"],
+        "output_complete_ratio": output_quality["complete_ratio"],
+        "output_failed_ratio": output_quality["failed_ratio"],
+        "output_empty": output_quality["empty"],
+        "output_confidence": output_quality["confidence"],
+        "output_quality": output_quality,
         "repair_hints": dict(getattr(verification, "repair_hints", {}) or {}),
         "archive_coverage": _coverage_payload(verification),
         "files": _file_recovery_items(verification),
+    }
+
+
+def _output_quality_payload(verification: VerificationResult | Any) -> dict[str, Any]:
+    return {
+        "score": float(getattr(verification, "output_quality_score", 0.0) or 0.0),
+        "file_count": int(getattr(verification, "output_file_count", 0) or 0),
+        "total_bytes": int(getattr(verification, "output_total_bytes", 0) or 0),
+        "complete_ratio": float(getattr(verification, "output_complete_ratio", 0.0) or 0.0),
+        "failed_ratio": float(getattr(verification, "output_failed_ratio", 0.0) or 0.0),
+        "empty": bool(getattr(verification, "output_empty", True)),
+        "confidence": float(getattr(verification, "output_confidence", 0.0) or 0.0),
     }
 
 

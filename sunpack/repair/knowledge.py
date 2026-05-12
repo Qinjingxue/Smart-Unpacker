@@ -158,10 +158,11 @@ def write_repair_loop_update(
     stop_payload: dict[str, Any] | None = None,
 ) -> None:
     knowledge = ensure_knowledge(task)
+    legacy_payload = dict(loop_payload or {})
     write_payload(
         knowledge,
         "repair.loop",
-        dict(loop_payload or {}),
+        legacy_payload,
         source_layer="repair",
         source_module="loop",
     )
@@ -175,6 +176,11 @@ def write_repair_loop_update(
             source_module="loop",
         )
     commit_task_knowledge(task, knowledge)
+    for key, value in legacy_payload.items():
+        try:
+            task.fact_bag.set(f"repair.loop.{key}", value)
+        except Exception:
+            pass
 
 
 def write_repair_attempt(task: ArchiveTask, attempts: int, *, trigger: str = "") -> None:
@@ -191,14 +197,20 @@ def write_repair_attempt(task: ArchiveTask, attempts: int, *, trigger: str = "")
 
 def write_repair_loop_state(task: ArchiveTask, payload: dict[str, Any]) -> None:
     knowledge = ensure_knowledge(task)
+    legacy_payload = dict(payload or {})
     write_payload(
         knowledge,
         "repair.loop",
-        dict(payload or {}),
+        legacy_payload,
         source_layer="repair",
         source_module="loop",
     )
     commit_task_knowledge(task, knowledge)
+    for key, value in legacy_payload.items():
+        try:
+            task.fact_bag.set(f"repair.loop.{key}", value)
+        except Exception:
+            pass
 
 
 def write_repair_candidate_log(task: ArchiveTask, entries: list[dict[str, Any]], *, path: str = "") -> None:
@@ -241,6 +253,15 @@ def _analysis_evidence_payload(evidence: Any) -> dict[str, Any]:
 
 
 def _verification_payload(verification: VerificationResult) -> dict[str, Any]:
+    output_quality = {
+        "score": float(getattr(verification, "output_quality_score", 0.0) or 0.0),
+        "file_count": int(getattr(verification, "output_file_count", 0) or 0),
+        "total_bytes": int(getattr(verification, "output_total_bytes", 0) or 0),
+        "complete_ratio": float(getattr(verification, "output_complete_ratio", 0.0) or 0.0),
+        "failed_ratio": float(getattr(verification, "output_failed_ratio", 0.0) or 0.0),
+        "empty": bool(getattr(verification, "output_empty", True)),
+        "confidence": float(getattr(verification, "output_confidence", 0.0) or 0.0),
+    }
     return {
         "completeness": verification.completeness,
         "recoverable_upper_bound": verification.recoverable_upper_bound,
@@ -252,6 +273,14 @@ def _verification_payload(verification: VerificationResult) -> dict[str, Any]:
         "failed_files": verification.failed_files,
         "missing_files": verification.missing_files,
         "unverified_files": verification.unverified_files,
+        "output_quality_score": output_quality["score"],
+        "output_file_count": output_quality["file_count"],
+        "output_total_bytes": output_quality["total_bytes"],
+        "output_complete_ratio": output_quality["complete_ratio"],
+        "output_failed_ratio": output_quality["failed_ratio"],
+        "output_empty": output_quality["empty"],
+        "output_confidence": output_quality["confidence"],
+        "output_quality": output_quality,
         "archive_coverage": asdict(verification.archive_coverage),
         "repair_hints": dict(verification.repair_hints or {}),
     }
@@ -286,6 +315,11 @@ def _compact_repair_result_payload(result: RepairResult) -> dict[str, Any]:
             "patch_facts": [str(item) for item in diagnosis.get("patch_facts") or [] if str(item)],
             "residual_facts": [str(item) for item in diagnosis.get("residual_facts") or [] if str(item)],
             "candidate_selection": dict(candidate_selection),
+            **{
+                key: diagnosis.get(key)
+                for key in ("failure_kind", "failure_stage", "native_status", "message")
+                if diagnosis.get(key) not in (None, "", [], {})
+            },
         },
         "repaired_input": _compact_repaired_input(repaired_input),
     }

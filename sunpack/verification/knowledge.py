@@ -19,6 +19,15 @@ def write_verification_result(
     with _phase(phase_timer, f"{phase_prefix}_ensure_knowledge"):
         knowledge = ensure_knowledge(task)
     with _phase(phase_timer, f"{phase_prefix}_build_summary"):
+        output_quality = {
+            "score": float(result.output_quality_score),
+            "file_count": int(result.output_file_count),
+            "total_bytes": int(result.output_total_bytes),
+            "complete_ratio": float(result.output_complete_ratio),
+            "failed_ratio": float(result.output_failed_ratio),
+            "empty": bool(result.output_empty),
+            "confidence": float(result.output_confidence),
+        }
         summary = {
             "methods_run": list(result.methods_run),
             "completeness": float(result.completeness),
@@ -31,6 +40,14 @@ def write_verification_result(
             "failed_files": int(result.failed_files),
             "missing_files": int(result.missing_files),
             "unverified_files": int(result.unverified_files),
+            "output_quality_score": output_quality["score"],
+            "output_file_count": output_quality["file_count"],
+            "output_total_bytes": output_quality["total_bytes"],
+            "output_complete_ratio": output_quality["complete_ratio"],
+            "output_failed_ratio": output_quality["failed_ratio"],
+            "output_empty": output_quality["empty"],
+            "output_confidence": output_quality["confidence"],
+            "output_quality": output_quality,
             "archive_coverage": asdict(result.archive_coverage),
             "repair_hints": dict(result.repair_hints or {}),
         }

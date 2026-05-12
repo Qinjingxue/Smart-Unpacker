@@ -106,6 +106,13 @@ class VerificationResult:
     failed_files: int = 0
     missing_files: int = 0
     unverified_files: int = 0
+    output_quality_score: float = 0.0
+    output_file_count: int = 0
+    output_total_bytes: int = 0
+    output_complete_ratio: float = 0.0
+    output_failed_ratio: float = 0.0
+    output_empty: bool = True
+    output_confidence: float = 0.0
     archive_coverage: ArchiveCoverageSummary = field(default_factory=ArchiveCoverageSummary)
     file_observations: list[FileVerificationObservation] = field(default_factory=list)
     repair_hints: dict[str, Any] = field(default_factory=dict)

@@ -94,6 +94,7 @@ def runtime_context_from_job(
     route_context = knowledge_view.repair_route_context(knowledge)
     worker = diagnostics.get("result") if isinstance(diagnostics.get("result"), dict) else {}
     verification_payload = _dict_at(knowledge, "verification.summary")
+    output_quality = verification_payload.get("output_quality") if isinstance(verification_payload.get("output_quality"), dict) else {}
     coverage = failure.get("archive_coverage") if isinstance(failure.get("archive_coverage"), dict) else _dict_at(knowledge, "verification.summary.archive_coverage")
     repair_hints = failure.get("repair_hints") if isinstance(failure.get("repair_hints"), dict) else {}
     previous_actions = _list_values(history, "previous_actions") or _list_values(history, "path_actions")
@@ -106,6 +107,30 @@ def runtime_context_from_job(
     route_evidence_flags = list(route_context.get("route_evidence_flags") or [])
     knowledge_payload = knowledge.to_dict()
     feature_contract_miss = _feature_contract_miss(knowledge)
+    output_quality_score = _float(
+        failure.get("output_quality_score", verification_payload.get("output_quality_score", output_quality.get("score")))
+    )
+    output_file_count = _int(
+        failure.get("output_file_count", verification_payload.get("output_file_count", output_quality.get("file_count")))
+    )
+    output_total_bytes = _int(
+        failure.get("output_total_bytes", verification_payload.get("output_total_bytes", output_quality.get("total_bytes")))
+    )
+    output_complete_ratio = _float(
+        failure.get("output_complete_ratio", verification_payload.get("output_complete_ratio", output_quality.get("complete_ratio")))
+    )
+    output_failed_ratio = _float(
+        failure.get("output_failed_ratio", verification_payload.get("output_failed_ratio", output_quality.get("failed_ratio")))
+    )
+    output_confidence = _float(
+        failure.get("output_confidence", verification_payload.get("output_confidence", output_quality.get("confidence")))
+    )
+    has_incumbent_best_output = bool(
+        output_quality_score > 0.0
+        or output_file_count > 0
+        or _int(failure.get("complete_files", verification_payload.get("complete_files"))) > 0
+        or _int(failure.get("partial_files", verification_payload.get("partial_files"))) > 0
+    )
     return {
         "knowledge_projection": {
             "version": FEATURE_CONTRACT_VERSION,
@@ -145,6 +170,21 @@ def runtime_context_from_job(
             "source_integrity": str(failure.get("source_integrity") or verification_payload.get("source_integrity") or ""),
             "completeness": _float(failure.get("completeness", verification_payload.get("completeness"))),
             "recoverable_upper_bound": _float(failure.get("recoverable_upper_bound", verification_payload.get("recoverable_upper_bound")), default=1.0),
+            "output_quality_score": output_quality_score,
+            "output_complete_ratio": output_complete_ratio,
+            "output_failed_ratio": output_failed_ratio,
+            "output_file_count": output_file_count,
+            "output_total_bytes": output_total_bytes,
+            "output_confidence": output_confidence,
+            "has_incumbent_best_output": has_incumbent_best_output,
+            "output_quality": {
+                "score": output_quality_score,
+                "complete_ratio": output_complete_ratio,
+                "failed_ratio": output_failed_ratio,
+                "file_count": output_file_count,
+                "total_bytes": output_total_bytes,
+                "confidence": output_confidence,
+            },
             "complete_files": _int(failure.get("complete_files", verification_payload.get("complete_files"))),
             "partial_files": _int(failure.get("partial_files", verification_payload.get("partial_files"))),
             "failed_files": _int(failure.get("failed_files", verification_payload.get("failed_files"))),

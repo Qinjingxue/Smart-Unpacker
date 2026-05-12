@@ -872,12 +872,29 @@ def _flags_from_repair_hints(hints: dict[str, Any]) -> list[str]:
 
 def _verification_summary_payload(verification: VerificationResult) -> dict[str, Any]:
     coverage = getattr(verification, "archive_coverage", None)
+    output_quality = {
+        "score": float(getattr(verification, "output_quality_score", 0.0) or 0.0),
+        "file_count": int(getattr(verification, "output_file_count", 0) or 0),
+        "total_bytes": int(getattr(verification, "output_total_bytes", 0) or 0),
+        "complete_ratio": float(getattr(verification, "output_complete_ratio", 0.0) or 0.0),
+        "failed_ratio": float(getattr(verification, "output_failed_ratio", 0.0) or 0.0),
+        "empty": bool(getattr(verification, "output_empty", True)),
+        "confidence": float(getattr(verification, "output_confidence", 0.0) or 0.0),
+    }
     return {
         "completeness": float(getattr(verification, "completeness", 0.0) or 0.0),
         "recoverable_upper_bound": float(getattr(verification, "recoverable_upper_bound", 0.0) or 0.0),
         "assessment_status": str(getattr(verification, "assessment_status", "") or ""),
         "source_integrity": str(getattr(verification, "source_integrity", "") or ""),
         "decision_hint": str(getattr(verification, "decision_hint", "") or ""),
+        "output_quality_score": output_quality["score"],
+        "output_file_count": output_quality["file_count"],
+        "output_total_bytes": output_quality["total_bytes"],
+        "output_complete_ratio": output_quality["complete_ratio"],
+        "output_failed_ratio": output_quality["failed_ratio"],
+        "output_empty": output_quality["empty"],
+        "output_confidence": output_quality["confidence"],
+        "output_quality": output_quality,
         "archive_coverage": {
             "completeness": float(getattr(coverage, "completeness", 0.0) or 0.0) if coverage is not None else 0.0,
             "file_coverage": float(getattr(coverage, "file_coverage", 0.0) or 0.0) if coverage is not None else 0.0,

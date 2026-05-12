@@ -16,12 +16,24 @@ def main(argv: list[str] | None = None) -> int:
     graph_rows = _read_jsonl(Path(args.training_jsonl))
     ab_rows = _read_jsonl(Path(args.ab_jsonl))
     rows, summary = build_replay_rows(graph_rows, ab_rows)
+    rows = _amplify_rows(
+        rows,
+        selected_repeat=max(1, int(args.selected_repeat)),
+        positive_repeat=max(1, int(args.positive_repeat)),
+    )
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("w", encoding="utf-8") as handle:
         for row in rows:
             handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
-    summary.update({"output": str(output), "replay_row_count": len(rows)})
+    summary.update(
+        {
+            "output": str(output),
+            "replay_row_count": len(rows),
+            "selected_repeat": max(1, int(args.selected_repeat)),
+            "positive_repeat": max(1, int(args.positive_repeat)),
+        }
+    )
     print(json.dumps(summary, ensure_ascii=False, sort_keys=True))
     return 0
 
@@ -31,6 +43,18 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--training-jsonl", required=True)
     parser.add_argument("--ab-jsonl", required=True)
     parser.add_argument("--output", required=True)
+    parser.add_argument(
+        "--selected-repeat",
+        type=int,
+        default=1,
+        help="Repeat model-selected penalty rows this many times in the replay output.",
+    )
+    parser.add_argument(
+        "--positive-repeat",
+        type=int,
+        default=1,
+        help="Repeat positive-control/better-alternative rows this many times in the replay output.",
+    )
     return parser
 
 
@@ -47,6 +71,10 @@ def build_replay_rows(graph_rows: list[dict[str, Any]], ab_rows: list[dict[str, 
         "probe_replay_row_count": 0,
         "probe_replay_selected_count": 0,
         "probe_replay_better_alternative_count": 0,
+        "probe_replay_positive_control_count": 0,
+        "probe_replay_noop_positive_count": 0,
+        "probe_replay_selector_module_positive_count": 0,
+        "probe_replay_selector_path_module_positive_count": 0,
         "legacy_graph_replay_row_count": 0,
         "unmatched_selected_candidate_count": 0,
         "request_without_probe_count": 0,
@@ -69,6 +97,7 @@ def build_replay_rows(graph_rows: list[dict[str, Any]], ab_rows: list[dict[str, 
             continue
         summary["regression_sample_count"] += 1
         selector_ids = _selected_candidate_ids_from_trace(baseline)
+        selector_modules = _selector_modules(baseline)
         requests = _probe_requests(model)
         decisions = _probe_decisions(model)
         if requests:
@@ -89,6 +118,8 @@ def build_replay_rows(graph_rows: list[dict[str, Any]], ab_rows: list[dict[str, 
                     model_terminal=str(model.get("terminal_status") or ""),
                     selector_recovery=selector_recovery,
                     selector_candidate_id=selector_ids[round_index] if round_index < len(selector_ids) else "",
+                    selector_module=_selector_module_for_round(baseline, round_index),
+                    selector_modules=selector_modules,
                 )
                 if selected_id and not any(row.get("candidate_id") == selected_id for row in request_rows):
                     summary["unmatched_selected_candidate_count"] += 1
@@ -99,6 +130,14 @@ def build_replay_rows(graph_rows: list[dict[str, Any]], ab_rows: list[dict[str, 
                             summary["probe_replay_selected_count"] += 1
                         if _nested(row, "rl", "error_replay_better_alternative"):
                             summary["probe_replay_better_alternative_count"] += 1
+                        if _nested(row, "rl", "probe_replay_positive_control"):
+                            summary["probe_replay_positive_control_count"] += 1
+                        if _nested(row, "rl", "probe_replay_noop_positive"):
+                            summary["probe_replay_noop_positive_count"] += 1
+                        if _nested(row, "rl", "probe_replay_selector_module_positive"):
+                            summary["probe_replay_selector_module_positive_count"] += 1
+                        if _nested(row, "rl", "probe_replay_selector_path_module_positive"):
+                            summary["probe_replay_selector_path_module_positive_count"] += 1
             continue
 
         summary["request_without_probe_count"] += 1
@@ -158,6 +197,8 @@ def _rows_from_probe_request(
     model_terminal: str,
     selector_recovery: float,
     selector_candidate_id: str,
+    selector_module: str,
+    selector_modules: set[str],
 ) -> list[dict[str, Any]]:
     payloads = request.get("candidate_payloads") if isinstance(request.get("candidate_payloads"), list) else []
     candidate_set_hash = str(request.get("candidate_set_hash") or "")
@@ -179,6 +220,18 @@ def _rows_from_probe_request(
             best_graph_row = graph_match
         selected = candidate_id == selected_candidate_id
         selector_selected = bool(selector_candidate_id and candidate_id == selector_candidate_id)
+        positive_reason = ""
+        if not selector_selected and selector_recovery > model_recovery + 1e-9:
+            module_name = str(payload.get("module_name") or payload.get("module") or "")
+            if selector_module and module_name == selector_module:
+                selector_selected = True
+                positive_reason = "selector_module"
+            elif module_name and module_name in selector_modules:
+                selector_selected = True
+                positive_reason = "selector_path_module"
+            elif not selector_candidate_id and not selector_module and _is_noop_payload(payload):
+                selector_selected = True
+                positive_reason = "noop_accept_current_state"
         graph_value = _graph_return(graph_match) if graph_match else None
         if not selected and not selector_selected and graph_value is None:
             continue
@@ -190,6 +243,7 @@ def _rows_from_probe_request(
             rank=rank,
             selected=selected,
             selector_selected=selector_selected,
+            positive_reason=positive_reason,
             model_recovery=model_recovery,
             model_terminal=model_terminal,
             selector_recovery=selector_recovery,
@@ -220,6 +274,7 @@ def _probe_action_row(
     rank: int,
     selected: bool,
     selector_selected: bool,
+    positive_reason: str,
     model_recovery: float,
     model_terminal: str,
     selector_recovery: float,
@@ -246,6 +301,15 @@ def _probe_action_row(
         rl["policy_rollout_terminal_status"] = model_terminal
     if selector_selected:
         rl["error_replay_better_alternative"] = selector_recovery > model_recovery + 1e-9
+        rl["probe_replay_positive_control"] = selector_recovery > model_recovery + 1e-9
+        if positive_reason:
+            rl["probe_replay_positive_reason"] = positive_reason
+        if positive_reason == "noop_accept_current_state":
+            rl["probe_replay_noop_positive"] = True
+        if positive_reason == "selector_module":
+            rl["probe_replay_selector_module_positive"] = True
+        if positive_reason == "selector_path_module":
+            rl["probe_replay_selector_path_module_positive"] = True
         if round_index == 0 and selector_recovery > model_recovery + 1e-9:
             rl["error_replay_better_root_alternative"] = True
         rl["selector_recovery_return"] = selector_recovery
@@ -383,6 +447,47 @@ def _selected_candidate_ids_from_trace(row: dict[str, Any]) -> list[str]:
     return ids
 
 
+def _selector_module_for_round(row: dict[str, Any], round_index: int) -> str:
+    path = row.get("repair_module_path")
+    if isinstance(path, list) and round_index < len(path):
+        return str(path[round_index] or "")
+    actions = row.get("repair_action_path")
+    if isinstance(actions, list) and round_index < len(actions):
+        item = actions[round_index]
+        if isinstance(item, dict):
+            return str(item.get("module_name") or item.get("module") or "")
+        return str(item or "")
+    return ""
+
+
+def _selector_modules(row: dict[str, Any]) -> set[str]:
+    modules: set[str] = set()
+    path = row.get("repair_module_path")
+    if isinstance(path, list):
+        modules.update(str(item) for item in path if str(item or ""))
+    actions = row.get("repair_action_path")
+    if isinstance(actions, list):
+        for item in actions:
+            if isinstance(item, dict):
+                module = str(item.get("module_name") or item.get("module") or "")
+            else:
+                module = str(item or "")
+            if module:
+                modules.add(module)
+    return modules
+
+
+def _is_noop_payload(payload: dict[str, Any]) -> bool:
+    proposal = payload.get("candidate_proposal") if isinstance(payload.get("candidate_proposal"), dict) else {}
+    return bool(
+        payload.get("noop")
+        or payload.get("control_action")
+        or proposal.get("noop")
+        or proposal.get("control_action")
+        or str(payload.get("module_name") or payload.get("module") or "") == "repair_accept_current_state"
+    )
+
+
 def _clone_replay_row(row: dict[str, Any], *, suffix: str) -> dict[str, Any]:
     output = copy.deepcopy(row)
     output["row_type"] = "action"
@@ -391,6 +496,32 @@ def _clone_replay_row(row: dict[str, Any], *, suffix: str) -> dict[str, Any]:
     output["query_id"] = f"{row.get('query_id')}:replay:{suffix}"
     output["selected"] = False
     output["explored"] = True
+    return output
+
+
+def _amplify_rows(rows: list[dict[str, Any]], *, selected_repeat: int, positive_repeat: int) -> list[dict[str, Any]]:
+    if selected_repeat <= 1 and positive_repeat <= 1:
+        return rows
+    output: list[dict[str, Any]] = []
+    for row in rows:
+        output.append(row)
+        rl = row.get("rl") if isinstance(row.get("rl"), dict) else {}
+        repeat = 1
+        if bool(rl.get("probe_replay_selected")) or bool(rl.get("error_replay_penalty")):
+            repeat = max(repeat, selected_repeat)
+        if bool(rl.get("probe_replay_positive_control")) or bool(rl.get("error_replay_better_alternative")):
+            repeat = max(repeat, positive_repeat)
+        for index in range(1, repeat):
+            extra = copy.deepcopy(row)
+            suffix = f"amp{index}"
+            extra["action_row_id"] = f"{row.get('action_row_id')}:{suffix}"
+            extra["query_id"] = f"{row.get('query_id')}:{suffix}"
+            extra_rl = extra.setdefault("rl", {})
+            if isinstance(extra_rl, dict):
+                extra_rl["replay_amplified"] = True
+                extra_rl["replay_amplification_index"] = index
+                extra_rl["replay_amplification_repeat"] = repeat
+            output.append(extra)
     return output
 
 

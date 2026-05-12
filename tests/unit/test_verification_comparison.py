@@ -122,6 +122,38 @@ def test_verification_tiebreak_prefers_better_source_integrity_when_completeness
     assert ranked[0][1].rank_vector["source_integrity_rank"] > ranked[1][1].rank_vector["source_integrity_rank"]
 
 
+def test_verification_comparator_prefers_incumbent_output_quality_over_cleaner_archive_health():
+    incumbent = _attempt(
+        "incumbent-output",
+        status=ASSESSMENT_PARTIAL,
+        decision=DECISION_ACCEPT_PARTIAL,
+        completeness=0.7,
+        complete_files=3,
+        expected_files=4,
+        source_integrity=SOURCE_INTEGRITY_DAMAGED,
+        output_quality_score=0.95,
+        output_file_count=3,
+        output_total_bytes=1024,
+    )
+    cleaner_source_worse_output = _attempt(
+        "cleaner-source",
+        status=ASSESSMENT_PARTIAL,
+        decision=DECISION_REPAIR,
+        completeness=0.7,
+        complete_files=3,
+        expected_files=4,
+        source_integrity=SOURCE_INTEGRITY_COMPLETE,
+        output_quality_score=0.2,
+        output_file_count=1,
+        output_total_bytes=128,
+    )
+
+    result = compare_attempts([cleaner_source_worse_output], incumbent=incumbent)
+
+    assert result.best is incumbent
+    assert result.ranks["incumbent-output"].rank_vector["output_quality_score"] == 0.95
+
+
 def test_verification_tiebreak_prefers_fewer_failed_files_when_completeness_matches():
     fewer_failed = _attempt(
         "fewer-failed",
@@ -189,6 +221,9 @@ def _attempt(
     source_code: str = "info.archive_output_coverage",
     patch_cost: float = 0.0,
     source_integrity: str = SOURCE_INTEGRITY_DAMAGED,
+    output_quality_score: float = 0.0,
+    output_file_count: int = 0,
+    output_total_bytes: int = 0,
 ) -> RecoveryAttempt:
     coverage = ArchiveCoverageSummary(
         completeness=completeness,
@@ -211,6 +246,12 @@ def _attempt(
             archive_coverage=coverage,
             complete_files=complete_files,
             failed_files=failed_files,
+            output_quality_score=output_quality_score,
+            output_file_count=output_file_count,
+            output_total_bytes=output_total_bytes,
+            output_complete_ratio=output_quality_score,
+            output_confidence=0.8 if output_quality_score else 0.0,
+            output_empty=output_file_count <= 0,
         ),
         patch_cost=patch_cost,
     )

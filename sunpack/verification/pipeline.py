@@ -2,6 +2,7 @@ from contextlib import nullcontext
 from typing import Any, Callable
 
 from sunpack.verification.evidence import VerificationEvidence
+from sunpack.verification.output_quality import compute_output_quality
 from sunpack.verification.registry import get_verification_method
 from sunpack.verification.result import (
     ASSESSMENT_COMPLETE,
@@ -110,6 +111,7 @@ class VerificationPipeline:
                 source_hints=source_hints,
                 decision_hints=decision_hints,
                 repair_hints=evidence.repair_hints,
+                evidence=evidence,
             )
 
     def _build_result(
@@ -124,9 +126,15 @@ class VerificationPipeline:
         source_hints: list[str],
         decision_hints: list[str],
         repair_hints: dict | None = None,
+        evidence: VerificationEvidence,
     ) -> VerificationResult:
         file_observations = _dedupe_observations(file_observations)
         archive_coverage = _archive_coverage_summary(issues, file_observations)
+        output_quality = compute_output_quality(
+            evidence,
+            file_observations,
+            archive_coverage=archive_coverage,
+        )
         completeness = _aggregate_completeness(file_observations, completeness_hints)
         if archive_coverage.confidence > 0:
             completeness = archive_coverage.completeness
@@ -147,6 +155,8 @@ class VerificationPipeline:
             decision_hints=decision_hints,
             complete_accept_threshold=self.complete_accept_threshold,
             partial_accept_threshold=self.partial_accept_threshold,
+            output_quality_score=output_quality.score,
+            output_confidence=output_quality.confidence,
         )
         return VerificationResult(
             methods_run=methods_run,
@@ -162,6 +172,13 @@ class VerificationPipeline:
             failed_files=counts["failed"],
             missing_files=counts["missing"],
             unverified_files=counts["unverified"],
+            output_quality_score=output_quality.score,
+            output_file_count=output_quality.file_count,
+            output_total_bytes=output_quality.total_bytes,
+            output_complete_ratio=output_quality.complete_ratio,
+            output_failed_ratio=output_quality.failed_ratio,
+            output_empty=output_quality.empty,
+            output_confidence=output_quality.confidence,
             archive_coverage=archive_coverage,
             file_observations=file_observations,
             repair_hints=dict(repair_hints or {}),
@@ -452,9 +469,16 @@ def _decision_hint(
     decision_hints: list[str],
     complete_accept_threshold: float,
     partial_accept_threshold: float,
+    output_quality_score: float = 0.0,
+    output_confidence: float = 0.0,
 ) -> str:
     if DECISION_FAIL in decision_hints:
         return DECISION_FAIL
+    high_output_quality = (
+        output_quality_score >= complete_accept_threshold
+        and output_confidence >= 0.5
+        and completeness >= complete_accept_threshold
+    )
     if DECISION_ACCEPT_PARTIAL in decision_hints and source_integrity in {
         SOURCE_INTEGRITY_TRUNCATED,
         SOURCE_INTEGRITY_PAYLOAD_DAMAGED,
@@ -472,6 +496,8 @@ def _decision_hint(
         SOURCE_INTEGRITY_PAYLOAD_DAMAGED,
         SOURCE_INTEGRITY_DAMAGED,
     }:
+        if high_output_quality:
+            return DECISION_ACCEPT_PARTIAL
         return DECISION_REPAIR
     for decision in (DECISION_REPAIR, DECISION_RETRY_EXTRACT, DECISION_ACCEPT_PARTIAL, DECISION_ACCEPT):
         if decision in decision_hints:
