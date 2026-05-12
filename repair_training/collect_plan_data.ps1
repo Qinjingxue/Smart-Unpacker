@@ -2,10 +2,12 @@
 param(
     [string]$MaterialRoot = "repair_training\material",
     [string]$Manifest = "",
-    [string]$SuccessOutput = "repair_training\datasets\repair_plan_ltr_success.jsonl",
-    [string]$FailureOutput = "repair_training\datasets\repair_plan_ltr_failure.jsonl",
+    [string]$RunDir = "",
+    [string]$RunName = "zip_runtime_graph",
+    [string]$SuccessOutput = "",
+    [string]$FailureOutput = "",
     [string]$SummaryOutput = "",
-    [string]$Workspace = ".sunpack\repair-plan-workspace",
+    [string]$Workspace = "",
     [int]$CollectorShard = -1,
     [int]$CollectorWorkers = 1,
     [ValidateSet("process_per_sample", "worker_pool", "inprocess")]
@@ -41,6 +43,7 @@ param(
     [string]$Sample = "",
     [int]$Limit = 0,
     [switch]$Append,
+    [switch]$KeepTemp,
     [switch]$NoPretty,
     [switch]$Progress,
     [string[]]$ExtraArgs = @()
@@ -77,9 +80,7 @@ if ($SampleWorkerCount -gt 0) {
 $runtimeWorkers = [Math]::Max(1, [int]$runtimeWorkers)
 $argsList = @(
     "repair_training\collect_runtime_repair_graph.py",
-    "--success-output", $SuccessOutput,
-    "--failure-output", $FailureOutput,
-    "--workspace", $Workspace,
+    "--run-name", $RunName,
     "--max-rounds", "$MaxRounds",
     "--max-states", "$MaxTotalStatesPerSample",
     "--branch-top-k", "$BranchTopK",
@@ -88,8 +89,23 @@ $argsList = @(
     "--case-timeout-seconds", "$CaseTimeoutSeconds",
     "--workers", "$runtimeWorkers"
 )
+if ($RunDir) {
+    $argsList += @("--run-dir", $RunDir)
+}
+if ($SuccessOutput) {
+    $argsList += @("--success-output", $SuccessOutput)
+}
+if ($FailureOutput) {
+    $argsList += @("--failure-output", $FailureOutput)
+}
 if ($SummaryOutput) {
     $argsList += @("--summary-output", $SummaryOutput)
+}
+if ($Workspace) {
+    $argsList += @("--workspace", $Workspace)
+}
+if ($DebugEvents) {
+    $argsList += @("--debug-events-output", $DebugEvents)
 }
 
 if ($Manifest) {
@@ -108,6 +124,9 @@ if ($Limit -gt 0) {
 }
 if ($Append) {
     $argsList += "--append"
+}
+if ($KeepTemp) {
+    $argsList += "--keep-temp"
 }
 if ($NoPretty) {
     $argsList += "--no-pretty"

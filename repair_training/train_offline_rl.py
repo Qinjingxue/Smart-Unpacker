@@ -4,6 +4,8 @@ import argparse
 import hashlib
 import json
 import statistics
+import subprocess
+import datetime as _dt
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
@@ -16,7 +18,8 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
 
 DEFAULT_DATASET_DIR = Path("repair_training") / "datasets"
-DEFAULT_OUTPUT_DIR = Path("repair_training") / "models" / "offline_rl" / "zip_q_value"
+DEFAULT_MODEL_SUBDIR = Path("models") / "zip_runtime_policy"
+LATEST_RUN = Path("repair_training") / "latest_run.txt"
 FEATURE_CONTRACT_VERSION = 3
 FEATURE_VIEWS = {
     "runtime_only",
@@ -39,7 +42,12 @@ TARGETS = {
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    rows = _load_rows(_input_paths(args.input, Path(args.dataset_dir)))
+    run_dir = _resolve_run_dir(args)
+    dataset_dir = _resolve_dataset_dir(args, run_dir)
+    if not args.output_dir:
+        args.output_dir = str((run_dir / DEFAULT_MODEL_SUBDIR) if run_dir is not None else Path("repair_training") / "models" / "zip_runtime_policy")
+    input_paths = _input_paths(args.input, dataset_dir)
+    rows = _load_rows(input_paths)
     replay_rows = _load_rows([Path(item) for item in getattr(args, "extra_replay_input", []) if Path(item).is_file()])
     rollout_rows = _load_rows([Path(item) for item in getattr(args, "policy_rollout_input", []) if Path(item).is_file()])
     if rollout_rows:
@@ -92,7 +100,11 @@ def main(argv: list[str] | None = None) -> int:
         "row_count": len(rows),
         "train_row_count": len(train_idx),
         "eval_row_count": len(eval_idx),
-        "input_files": [str(path) for path in _input_paths(args.input, Path(args.dataset_dir))],
+        "run_dir": str(run_dir or ""),
+        "git_commit": _git_commit(),
+        "trained_at": _now_iso(),
+        "input_files": [str(path) for path in input_paths],
+        "input_file_hashes": {str(path): _sha256_file(path) for path in input_paths},
         "policy_rollout_input_files": [str(path) for path in getattr(args, "policy_rollout_input", [])],
         "extra_replay_input_files": [str(path) for path in getattr(args, "extra_replay_input", [])],
         **_training_row_summary(rows),
@@ -101,15 +113,17 @@ def main(argv: list[str] | None = None) -> int:
     }
     (output_dir / "metrics.json").write_text(json.dumps(metrics, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
     (output_dir / "training_summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    _update_run_manifest(run_dir, args, output_dir, summary)
     print(json.dumps(summary, ensure_ascii=False, sort_keys=True))
     return 0
 
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Train a minimal offline RL Q-value model from repair-plan transitions.")
-    parser.add_argument("--dataset-dir", default=str(DEFAULT_DATASET_DIR))
+    parser.add_argument("--run-dir", default="", help="Training run directory. Defaults to repair_training/latest_run.txt when available.")
+    parser.add_argument("--dataset-dir", default="")
     parser.add_argument("--input", action="append", default=[], help="Input JSONL file. Repeatable; defaults to ZIP terminal recovery datasets.")
-    parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR))
+    parser.add_argument("--output-dir", default="")
     parser.add_argument("--feature-view", choices=sorted(FEATURE_VIEWS), default="runtime_minimal_native_validation")
     parser.add_argument("--target", choices=sorted(TARGETS), default="single_path_robust_return")
     parser.add_argument("--sample-weight-mode", choices=("none", "runtime_policy_v1", "root_transition_v1"), default="none")
@@ -129,6 +143,8 @@ def _input_paths(inputs: list[str], dataset_dir: Path) -> list[Path]:
     if inputs:
         return [Path(item) for item in inputs if Path(item).is_file()]
     runtime_graph = [
+        dataset_dir / "runtime_graph_success.jsonl",
+        dataset_dir / "runtime_graph_failure.jsonl",
         dataset_dir / "runtime_repair_graph_success.jsonl",
         dataset_dir / "runtime_repair_graph_failure.jsonl",
     ]
@@ -141,6 +157,73 @@ def _input_paths(inputs: list[str], dataset_dir: Path) -> list[Path]:
     if all(path.is_file() for path in preferred):
         return preferred
     return sorted(dataset_dir.glob("repair_plan_ltr_*terminal_recovery.jsonl"))
+
+
+def _resolve_run_dir(args: argparse.Namespace) -> Path | None:
+    if str(args.run_dir or "").strip():
+        return Path(args.run_dir).resolve()
+    if not args.input and LATEST_RUN.is_file():
+        text = LATEST_RUN.read_text(encoding="utf-8").strip()
+        if text:
+            path = Path(text).resolve()
+            if path.is_dir():
+                args.run_dir = str(path)
+                return path
+    return None
+
+
+def _resolve_dataset_dir(args: argparse.Namespace, run_dir: Path | None) -> Path:
+    if str(args.dataset_dir or "").strip():
+        return Path(args.dataset_dir)
+    if run_dir is not None:
+        return run_dir / "datasets"
+    return DEFAULT_DATASET_DIR
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _git_commit() -> str:
+    try:
+        return subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=Path(__file__).resolve().parents[1], text=True, stderr=subprocess.DEVNULL).strip()
+    except Exception:
+        return ""
+
+
+def _now_iso() -> str:
+    return _dt.datetime.now(_dt.timezone.utc).astimezone().isoformat(timespec="seconds")
+
+
+def _update_run_manifest(run_dir: Path | None, args: argparse.Namespace, output_dir: Path, summary: dict[str, Any]) -> None:
+    if run_dir is None:
+        return
+    manifest_path = run_dir / "run_manifest.json"
+    payload: dict[str, Any] = {}
+    if manifest_path.is_file():
+        try:
+            raw = json.loads(manifest_path.read_text(encoding="utf-8"))
+            payload = raw if isinstance(raw, dict) else {}
+        except json.JSONDecodeError:
+            payload = {}
+    payload.setdefault("run_dir", str(run_dir))
+    payload["training"] = {
+        "trained_at": summary.get("trained_at") or _now_iso(),
+        "output_dir": str(output_dir),
+        "feature_view": args.feature_view,
+        "target": args.target,
+        "sample_weight_mode": args.sample_weight_mode,
+        "feature_contract_version": FEATURE_CONTRACT_VERSION,
+        "row_count": summary.get("row_count"),
+        "input_files": summary.get("input_files", []),
+        "input_file_hashes": summary.get("input_file_hashes", {}),
+        "metrics": summary.get("metrics", {}),
+    }
+    manifest_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
 
 
 def _load_rows(paths: list[Path]) -> list[dict[str, Any]]:

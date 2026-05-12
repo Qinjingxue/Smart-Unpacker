@@ -2,10 +2,12 @@
 param(
     [string]$MaterialRoot = "repair_training\material",
     [string]$Manifest = "",
-    [string]$SuccessOutput = "repair_training\datasets\repair_plan_ltr_success.jsonl",
-    [string]$FailureOutput = "repair_training\datasets\repair_plan_ltr_failure.jsonl",
+    [string]$RunDir = "",
+    [string]$RunName = "zip_runtime_graph_parallel",
+    [string]$SuccessOutput = "",
+    [string]$FailureOutput = "",
     [string]$DebugEvents = "",
-    [string]$ParallelSummaryOutput = "repair_training\datasets\collect_parallel_summary.json",
+    [string]$ParallelSummaryOutput = "",
     [int]$CollectWorkers = 16,
     [ValidateSet("pool", "static")]
     [string]$Scheduling = "pool",
@@ -55,6 +57,22 @@ if ($env:OS -ne "Windows_NT") {
 $repoRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 Set-Location $repoRoot
 
+if (-not $RunDir) {
+    $stamp = Get-Date -Format "yyyyMMdd_HHmmss"
+    $safeRunName = ($RunName -replace '[^A-Za-z0-9_.-]+', '_').Trim('_')
+    if (-not $safeRunName) { $safeRunName = "zip_runtime_graph_parallel" }
+    $RunDir = Join-Path "repair_training\runs" ("{0}_{1}" -f $stamp, $safeRunName)
+}
+$RunDir = [System.IO.Path]::GetFullPath((Join-Path $repoRoot $RunDir))
+$datasetDir = Join-Path $RunDir "datasets"
+$logsDir = Join-Path $RunDir "logs"
+$tmpDir = Join-Path $RunDir "tmp"
+New-Item -ItemType Directory -Path $datasetDir, (Join-Path $RunDir "models"), (Join-Path $RunDir "reports"), $logsDir, $tmpDir -Force | Out-Null
+if (-not $SuccessOutput) { $SuccessOutput = Join-Path $datasetDir "runtime_graph_success.jsonl" }
+if (-not $FailureOutput) { $FailureOutput = Join-Path $datasetDir "runtime_graph_failure.jsonl" }
+if (-not $ParallelSummaryOutput) { $ParallelSummaryOutput = Join-Path $datasetDir "runtime_graph_summary.json" }
+if (-not $DebugEvents) { $DebugEvents = Join-Path $logsDir "debug_events.jsonl" }
+
 function Split-TrainingCsv {
     param([string]$Raw, [switch]$Lower)
     $output = @()
@@ -69,6 +87,12 @@ function Split-TrainingCsv {
         }
     }
     return $output
+}
+
+function Resolve-TrainingPath {
+    param([string]$Path)
+    if ([System.IO.Path]::IsPathRooted($Path)) { return $Path }
+    return (Join-Path $repoRoot $Path)
 }
 
 function Add-TrainingCountMap {
@@ -128,8 +152,6 @@ $workerCount = [Math]::Max(1, [Math]::Min([int]$CollectWorkers, $records.Count))
 $batchSize = [Math]::Max(1, [int]$QueueBatchSize)
 $activeLimit = [Math]::Max(1, [Math]::Min([int]$MaxActiveCollectors, $workerCount))
 $launchDelayMs = [Math]::Max(0, [int]$LaunchDelayMilliseconds)
-$datasetDir = Split-Path -Parent $SuccessOutput
-if (-not $datasetDir) { $datasetDir = "repair_training\datasets" }
 $shardRoot = Join-Path $datasetDir ".collect_shards"
 if (Test-Path -LiteralPath $shardRoot) {
     Remove-Item -LiteralPath $shardRoot -Recurse -Force
@@ -162,11 +184,13 @@ function New-CollectorArgs {
         "-NoProfile",
         "-ExecutionPolicy", "Bypass",
         "-File", $collectScript,
-        "-Manifest", (Join-Path $repoRoot $Unit.Manifest),
-        "-SuccessOutput", (Join-Path $repoRoot $Unit.Success),
-        "-FailureOutput", (Join-Path $repoRoot $Unit.Failure),
-        "-SummaryOutput", (Join-Path $repoRoot $Unit.Summary),
+        "-Manifest", (Resolve-TrainingPath $Unit.Manifest),
+        "-SuccessOutput", (Resolve-TrainingPath $Unit.Success),
+        "-FailureOutput", (Resolve-TrainingPath $Unit.Failure),
+        "-SummaryOutput", (Resolve-TrainingPath $Unit.Summary),
         "-Workspace", $Unit.Workspace,
+        "-RunDir", $RunDir,
+        "-RunName", $RunName,
         "-CollectorShard", "$Slot",
         "-CollectorWorkers", "$workerCount",
         "-SampleExecutionMode", $SampleExecutionMode,
@@ -223,10 +247,10 @@ if ($Scheduling -eq "pool") {
             Summary = Join-Path $shardRoot ("task_summary_{0:D5}.json" -f $taskId)
             Stdout = Join-Path $shardRoot ("task_stdout_{0:D5}.log" -f $taskId)
             Stderr = Join-Path $shardRoot ("task_stderr_{0:D5}.log" -f $taskId)
-            Workspace = Join-Path ".sunpack\repair-plan-workspace" ("pool_task_{0:D5}" -f $taskId)
+            Workspace = Join-Path (Join-Path $tmpDir "workspace") ("pool_task_{0:D5}" -f $taskId)
             Records = $taskRecords
         }
-        [System.IO.File]::WriteAllLines((Join-Path $repoRoot $task.Manifest), [string[]]$task.Records, [System.Text.UTF8Encoding]::new($false))
+        [System.IO.File]::WriteAllLines((Resolve-TrainingPath $task.Manifest), [string[]]$task.Records, [System.Text.UTF8Encoding]::new($false))
         $tasks += $task
     }
 
@@ -241,9 +265,9 @@ if ($Scheduling -eq "pool") {
         while ($pending.Count -gt 0 -and $freeSlots.Count -gt 0) {
             $slot = $freeSlots.Dequeue()
             $task = $pending.Dequeue()
-            $eventsPath = Join-Path $repoRoot $task.Events
+            $eventsPath = Resolve-TrainingPath $task.Events
             $argsList = New-CollectorArgs -Unit $task -Slot $slot -EventsPath $eventsPath
-            $process = Start-Process -FilePath "powershell.exe" -ArgumentList ([string[]]$argsList) -PassThru -WindowStyle Hidden -RedirectStandardOutput (Join-Path $repoRoot $task.Stdout) -RedirectStandardError (Join-Path $repoRoot $task.Stderr)
+            $process = Start-Process -FilePath "powershell.exe" -ArgumentList ([string[]]$argsList) -PassThru -WindowStyle Hidden -RedirectStandardOutput (Resolve-TrainingPath $task.Stdout) -RedirectStandardError (Resolve-TrainingPath $task.Stderr)
             $running.Add([PSCustomObject]@{ Task = $task; Slot = $slot; Process = $process }) | Out-Null
             if ($launchDelayMs -gt 0) {
                 Start-Sleep -Milliseconds $launchDelayMs
@@ -264,11 +288,11 @@ if ($Scheduling -eq "pool") {
     }
 
     New-Item -ItemType Directory -Path (Split-Path -Parent $SuccessOutput) -Force | Out-Null
-    [System.IO.File]::WriteAllText((Join-Path $repoRoot $SuccessOutput), "", [System.Text.UTF8Encoding]::new($false))
-    [System.IO.File]::WriteAllText((Join-Path $repoRoot $FailureOutput), "", [System.Text.UTF8Encoding]::new($false))
+    [System.IO.File]::WriteAllText((Resolve-TrainingPath $SuccessOutput), "", [System.Text.UTF8Encoding]::new($false))
+    [System.IO.File]::WriteAllText((Resolve-TrainingPath $FailureOutput), "", [System.Text.UTF8Encoding]::new($false))
     if ($DebugEvents) {
         New-Item -ItemType Directory -Path (Split-Path -Parent $DebugEvents) -Force | Out-Null
-        [System.IO.File]::WriteAllText((Join-Path $repoRoot $DebugEvents), "", [System.Text.UTF8Encoding]::new($false))
+        [System.IO.File]::WriteAllText((Resolve-TrainingPath $DebugEvents), "", [System.Text.UTF8Encoding]::new($false))
     }
 
     $summaries = @()
@@ -276,13 +300,13 @@ if ($Scheduling -eq "pool") {
     foreach ($entry in $completed | Sort-Object { $_.Task.Id }) {
         $task = $entry.Task
         foreach ($pair in @(@($task.Success, $SuccessOutput), @($task.Failure, $FailureOutput))) {
-            Append-JsonlFileNoBom (Join-Path $repoRoot $pair[0]) (Join-Path $repoRoot $pair[1])
+            Append-JsonlFileNoBom (Resolve-TrainingPath $pair[0]) (Resolve-TrainingPath $pair[1])
         }
-        if ($DebugEvents -and (Test-Path -LiteralPath (Join-Path $repoRoot $task.Events))) {
-            Append-JsonlFileNoBom (Join-Path $repoRoot $task.Events) (Join-Path $repoRoot $DebugEvents)
+        if ($DebugEvents -and (Test-Path -LiteralPath (Resolve-TrainingPath $task.Events))) {
+            Append-JsonlFileNoBom (Resolve-TrainingPath $task.Events) (Resolve-TrainingPath $DebugEvents)
         }
-        if (Test-Path -LiteralPath (Join-Path $repoRoot $task.Summary)) {
-            $summary = Get-Content -LiteralPath (Join-Path $repoRoot $task.Summary) -Raw -Encoding UTF8 | ConvertFrom-Json
+        if (Test-Path -LiteralPath (Resolve-TrainingPath $task.Summary)) {
+            $summary = Get-Content -LiteralPath (Resolve-TrainingPath $task.Summary) -Raw -Encoding UTF8 | ConvertFrom-Json
             $summary | Add-Member -NotePropertyName collector_task -NotePropertyValue $task.Id -Force
             $summary | Add-Member -NotePropertyName collector_slot -NotePropertyValue $entry.Slot -Force
             $summaries += $summary
@@ -411,8 +435,9 @@ if ($Scheduling -eq "pool") {
         Add-TrainingCountMap $aggregate["descriptor_cd_conflict_diff_buckets"] $summary.descriptor_cd_conflict_diff_buckets
     }
 
-    New-Item -ItemType Directory -Path (Split-Path -Parent $ParallelSummaryOutput) -Force | Out-Null
-    ($aggregate | ConvertTo-Json -Depth 20) | Set-Content -LiteralPath $ParallelSummaryOutput -Encoding UTF8
+    New-Item -ItemType Directory -Path (Split-Path -Parent (Resolve-TrainingPath $ParallelSummaryOutput)) -Force | Out-Null
+    ($aggregate | ConvertTo-Json -Depth 20) | Set-Content -LiteralPath (Resolve-TrainingPath $ParallelSummaryOutput) -Encoding UTF8
+    Set-Content -LiteralPath (Join-Path $repoRoot "repair_training\latest_run.txt") -Value ($RunDir + "`n") -Encoding UTF8
     Write-Host ($aggregate | ConvertTo-Json -Depth 8) -ForegroundColor Cyan
 
     if ($failed.Count -gt 0) {
@@ -648,8 +673,9 @@ foreach ($summary in $summaries) {
     Add-TrainingCountMap $aggregate["descriptor_cd_conflict_diff_buckets"] $summary.descriptor_cd_conflict_diff_buckets
 }
 
-New-Item -ItemType Directory -Path (Split-Path -Parent $ParallelSummaryOutput) -Force | Out-Null
-($aggregate | ConvertTo-Json -Depth 20) | Set-Content -LiteralPath $ParallelSummaryOutput -Encoding UTF8
+New-Item -ItemType Directory -Path (Split-Path -Parent (Resolve-TrainingPath $ParallelSummaryOutput)) -Force | Out-Null
+($aggregate | ConvertTo-Json -Depth 20) | Set-Content -LiteralPath (Resolve-TrainingPath $ParallelSummaryOutput) -Encoding UTF8
+Set-Content -LiteralPath (Join-Path $repoRoot "repair_training\latest_run.txt") -Value ($RunDir + "`n") -Encoding UTF8
 Write-Host ($aggregate | ConvertTo-Json -Depth 8) -ForegroundColor Cyan
 
 if ($failed.Count -gt 0) {

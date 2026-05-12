@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import argparse
 import faulthandler
+import datetime as _dt
 import json
 import multiprocessing as mp
 import os
 import shutil
+import subprocess
 import sys
 import time
 from contextlib import contextmanager
@@ -52,20 +54,20 @@ from sunpack.verification.result import DECISION_ACCEPT, DECISION_REPAIR  # noqa
 
 
 DEFAULT_MANIFEST = Path(".sunpack") / "corpus" / "repair_plan_manifest.jsonl"
-DEFAULT_SUCCESS_OUTPUT = Path("repair_training") / "datasets" / "runtime_repair_graph_success.jsonl"
-DEFAULT_FAILURE_OUTPUT = Path("repair_training") / "datasets" / "runtime_repair_graph_failure.jsonl"
-DEFAULT_SUMMARY_OUTPUT = Path("repair_training") / "datasets" / "runtime_repair_graph_summary.json"
+DEFAULT_RUN_NAME = "zip_runtime_graph"
+RUNS_ROOT = Path("repair_training") / "runs"
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    run = _configure_run_paths(args)
     records = _load_manifest(Path(args.manifest), args)
-    args.success_output = str(Path(args.success_output))
-    args.failure_output = str(Path(args.failure_output))
-    args.summary_output = str(Path(args.summary_output))
     Path(args.success_output).parent.mkdir(parents=True, exist_ok=True)
     Path(args.failure_output).parent.mkdir(parents=True, exist_ok=True)
     Path(args.summary_output).parent.mkdir(parents=True, exist_ok=True)
+    if args.debug_events_output:
+        Path(args.debug_events_output).parent.mkdir(parents=True, exist_ok=True)
+    _write_run_manifest(run, args, status="running", records=len(records), started_at=_now_iso())
     rows_ok = 0
     rows_failed = 0
     summary: dict[str, Any] = {
@@ -84,45 +86,73 @@ def main(argv: list[str] | None = None) -> int:
         "slowest_states": [],
     }
     started = time.perf_counter()
-    output_mode = "a" if args.append else "w"
-    with Path(args.success_output).open(output_mode, encoding="utf-8") as success_handle, Path(args.failure_output).open(output_mode, encoding="utf-8") as failure_handle:
-        for sample_status, sample_rows in _iter_collected_samples(records, args):
-            handle = success_handle if sample_status == "ok" else failure_handle
-            for row in sample_rows:
-                handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True, default=str) + "\n")
-            handle.flush()
-            if sample_status == "ok":
-                rows_ok += len(sample_rows)
-            else:
-                rows_failed += len(sample_rows)
-            _accumulate_summary(summary, sample_rows, sample_status)
-            if args.progress:
-                print(json.dumps({
-                    "sample_status": sample_status,
-                    "rows": len(sample_rows),
-                    "success_rows": rows_ok,
-                    "failure_rows": rows_failed,
-                }, ensure_ascii=False, sort_keys=True), flush=True)
-    summary["success_rows"] = rows_ok
-    summary["failure_rows"] = rows_failed
-    summary["wall_seconds"] = round(time.perf_counter() - started, 3)
-    _merge_projection_cache_stats(summary, knowledge_view.projection_cache_stats())
-    Path(args.summary_output).write_text(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
-    print(json.dumps(summary, ensure_ascii=False, sort_keys=True))
-    return 0
+    try:
+        output_mode = "a" if args.append else "w"
+        with Path(args.success_output).open(output_mode, encoding="utf-8") as success_handle, Path(args.failure_output).open(output_mode, encoding="utf-8") as failure_handle:
+            for sample_status, sample_rows in _iter_collected_samples(records, args):
+                handle = success_handle if sample_status == "ok" else failure_handle
+                for row in sample_rows:
+                    handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True, default=str) + "\n")
+                handle.flush()
+                if sample_status == "ok":
+                    rows_ok += len(sample_rows)
+                else:
+                    rows_failed += len(sample_rows)
+                _accumulate_summary(summary, sample_rows, sample_status)
+                if args.progress:
+                    print(json.dumps({
+                        "sample_status": sample_status,
+                        "rows": len(sample_rows),
+                        "success_rows": rows_ok,
+                        "failure_rows": rows_failed,
+                    }, ensure_ascii=False, sort_keys=True), flush=True)
+        summary["success_rows"] = rows_ok
+        summary["failure_rows"] = rows_failed
+        summary["wall_seconds"] = round(time.perf_counter() - started, 3)
+        _merge_projection_cache_stats(summary, knowledge_view.projection_cache_stats())
+        Path(args.summary_output).write_text(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+        _write_latest_run(run["run_dir"])
+        _write_run_manifest(
+            run,
+            args,
+            status="ok",
+            records=len(records),
+            started_at=run["started_at"],
+            ended_at=_now_iso(),
+            summary=summary,
+        )
+        print(json.dumps(summary, ensure_ascii=False, sort_keys=True))
+        return 0
+    except Exception as exc:
+        _write_run_manifest(
+            run,
+            args,
+            status="failed",
+            records=len(records),
+            started_at=run["started_at"],
+            ended_at=_now_iso(),
+            error=str(exc),
+        )
+        raise
+    finally:
+        if run.get("managed_workspace") and not bool(getattr(args, "keep_temp", False)):
+            shutil.rmtree(Path(args.workspace), ignore_errors=True)
 
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Collect runtime-aligned repair graph rows by executing the real repair loop in exploration mode.")
+    parser.add_argument("--run-dir", default="", help="Training run directory. Defaults to repair_training/runs/<date>_<run-name>.")
+    parser.add_argument("--run-name", default=DEFAULT_RUN_NAME, help="Suffix used when auto-creating --run-dir.")
+    parser.add_argument("--keep-temp", action="store_true", help="Keep run tmp/workspace after collection for debugging.")
     parser.add_argument("--manifest", default="")
     parser.add_argument("--material-root", default=str(Path("repair_training") / "material"))
     parser.add_argument("--formats", default="zip")
     parser.add_argument("--sample", default="")
     parser.add_argument("--limit", type=int, default=0)
-    parser.add_argument("--success-output", default=str(DEFAULT_SUCCESS_OUTPUT))
-    parser.add_argument("--failure-output", default=str(DEFAULT_FAILURE_OUTPUT))
-    parser.add_argument("--summary-output", default=str(DEFAULT_SUMMARY_OUTPUT))
-    parser.add_argument("--workspace", default=str(Path(".sunpack") / "runtime-repair-graph"))
+    parser.add_argument("--success-output", default="")
+    parser.add_argument("--failure-output", default="")
+    parser.add_argument("--summary-output", default="")
+    parser.add_argument("--workspace", default="")
     parser.add_argument("--workers", type=int, default=1)
     parser.add_argument("--max-rounds", type=int, default=6)
     parser.add_argument("--max-states", type=int, default=80)
@@ -147,6 +177,103 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--progress", action="store_true")
     parser.add_argument("--no-pretty", action="store_true")
     return parser
+
+
+def _configure_run_paths(args: argparse.Namespace) -> dict[str, Any]:
+    started_at = _now_iso()
+    run_dir = Path(args.run_dir) if str(args.run_dir or "").strip() else RUNS_ROOT / f"{_dt.datetime.now().strftime('%Y%m%d_%H%M%S')}_{_safe_name(str(args.run_name or DEFAULT_RUN_NAME))}"
+    run_dir = run_dir.resolve()
+    datasets_dir = run_dir / "datasets"
+    logs_dir = run_dir / "logs"
+    tmp_dir = run_dir / "tmp"
+    for path in (datasets_dir, run_dir / "models", run_dir / "reports", logs_dir, tmp_dir):
+        path.mkdir(parents=True, exist_ok=True)
+    managed_workspace = not bool(str(args.workspace or "").strip())
+    if not args.success_output:
+        args.success_output = str(datasets_dir / "runtime_graph_success.jsonl")
+    if not args.failure_output:
+        args.failure_output = str(datasets_dir / "runtime_graph_failure.jsonl")
+    if not args.summary_output:
+        args.summary_output = str(datasets_dir / "runtime_graph_summary.json")
+    if not args.debug_events_output:
+        args.debug_events_output = str(logs_dir / "debug_events.jsonl")
+    if not args.workspace:
+        args.workspace = str(tmp_dir / "workspace")
+    args.run_dir = str(run_dir)
+    return {
+        "run_dir": run_dir,
+        "datasets_dir": datasets_dir,
+        "logs_dir": logs_dir,
+        "tmp_dir": tmp_dir,
+        "managed_workspace": managed_workspace,
+        "started_at": started_at,
+    }
+
+
+def _write_run_manifest(
+    run: dict[str, Any],
+    args: argparse.Namespace,
+    *,
+    status: str,
+    records: int,
+    started_at: str,
+    ended_at: str = "",
+    summary: dict[str, Any] | None = None,
+    error: str = "",
+) -> None:
+    payload = {
+        "status": status,
+        "collector": "runtime_repair_graph",
+        "started_at": started_at,
+        "ended_at": ended_at,
+        "record_count": records,
+        "run_dir": str(run["run_dir"]),
+        "git_commit": _git_commit(),
+        "inputs": {
+            "manifest": str(args.manifest or ""),
+            "material_root": str(args.material_root or ""),
+            "formats": str(args.formats or ""),
+            "sample": str(args.sample or ""),
+            "limit": int(args.limit or 0),
+        },
+        "outputs": {
+            "success_output": str(args.success_output),
+            "failure_output": str(args.failure_output),
+            "summary_output": str(args.summary_output),
+            "debug_events_output": str(args.debug_events_output),
+            "workspace": str(args.workspace),
+        },
+        "parameters": {
+            "workers": int(args.workers or 1),
+            "max_rounds": int(args.max_rounds or 0),
+            "max_states": int(args.max_states or 0),
+            "branch_top_k": int(args.branch_top_k or 0),
+            "root_branch_top_k": int(args.root_branch_top_k or 0),
+            "materialize_top_k": int(args.materialize_top_k or 0),
+            "case_timeout_seconds": float(args.case_timeout_seconds or 0.0),
+            "future_label_discount": float(args.future_label_discount or 0.0),
+        },
+        "summary": summary or {},
+    }
+    if error:
+        payload["error"] = error
+    Path(run["run_dir"], "run_manifest.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _write_latest_run(run_dir: Path) -> None:
+    latest = Path("repair_training") / "latest_run.txt"
+    latest.write_text(str(run_dir.resolve()) + "\n", encoding="utf-8")
+
+
+def _git_commit() -> str:
+    try:
+        return subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True, stderr=subprocess.DEVNULL).strip()
+    except Exception:
+        return ""
+
+
+def _now_iso() -> str:
+    return _dt.datetime.now(_dt.timezone.utc).astimezone().isoformat(timespec="seconds")
 
 
 def _iter_collected_samples(records: list[dict[str, Any]], args: argparse.Namespace):
