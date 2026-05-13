@@ -100,6 +100,7 @@ def diagnose_repair_job(job: RepairJob, *, knowledge: ArchiveKnowledge | None = 
     fmt = _first_text([
         str(analysis_summary.get("format") or ""),
         str(source.get("format_hint") or source.get("format") or ""),
+        str(job.format or ""),
         *(item.format for item in evidences),
     ])
     flags = {flag for item in evidences for flag in item.damage_flags}
@@ -131,7 +132,10 @@ def _collect_evidence(job: RepairJob, *, knowledge: ArchiveKnowledge | None = No
     if knowledge_view.extraction_failure(knowledge):
         evidences.append(_extraction_evidence(job, knowledge))
     route_context = knowledge_view.repair_route_context(knowledge)
-    route_flags = list(route_context.get("damage_flags") or route_context.get("route_evidence_flags") or [])
+    route_flags = _dedupe([
+        *list(route_context.get("damage_flags") or route_context.get("route_evidence_flags") or []),
+        *[str(flag) for flag in job.damage_flags if str(flag)],
+    ])
     if route_flags and not evidences:
         analysis_summary = knowledge_view.analysis_summary(knowledge)
         evidences.append(DamageEvidence(

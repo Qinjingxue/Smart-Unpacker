@@ -270,23 +270,11 @@ fn sunpack_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(
-        archive_deep_repair::seven_zip_precise_boundary_repair,
+        archive_deep_repair::seven_zip_scan_source,
         m
     )?)?;
     m.add_function(wrap_pyfunction!(
-        archive_deep_repair::seven_zip_crc_field_repair,
-        m
-    )?)?;
-    m.add_function(wrap_pyfunction!(
-        archive_deep_repair::seven_zip_next_header_field_repair,
-        m
-    )?)?;
-    m.add_function(wrap_pyfunction!(
-        archive_deep_repair::seven_zip_solid_block_partial_salvage,
-        m
-    )?)?;
-    m.add_function(wrap_pyfunction!(
-        archive_deep_repair::seven_zip_non_solid_partial_salvage,
+        archive_deep_repair::seven_zip_atomic_repair,
         m
     )?)?;
     m.add_function(wrap_pyfunction!(

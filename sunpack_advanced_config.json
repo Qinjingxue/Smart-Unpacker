@@ -630,31 +630,103 @@
         "enabled": true
       },
       {
-        "name": "seven_zip_start_header_crc_fix",
+        "name": "seven_zip_trim_trailing_junk",
         "enabled": true
       },
       {
-        "name": "seven_zip_next_header_field_repair",
+        "name": "seven_zip_crop_carrier_prefix",
         "enabled": true
       },
       {
-        "name": "seven_zip_boundary_trim",
+        "name": "seven_zip_fix_start_header_crc",
         "enabled": true
       },
       {
-        "name": "seven_zip_precise_boundary_repair",
+        "name": "seven_zip_fix_signature_header_version",
         "enabled": true
       },
       {
-        "name": "seven_zip_crc_field_repair",
+        "name": "seven_zip_fix_next_header_crc",
         "enabled": true
       },
       {
-        "name": "seven_zip_solid_block_partial_salvage",
+        "name": "seven_zip_fix_next_header_offset",
         "enabled": true
       },
       {
-        "name": "seven_zip_non_solid_partial_salvage",
+        "name": "seven_zip_fix_next_header_size",
+        "enabled": true
+      },
+      {
+        "name": "seven_zip_repoint_next_header",
+        "enabled": true
+      },
+      {
+        "name": "seven_zip_decode_encoded_header",
+        "enabled": true
+      },
+      {
+        "name": "seven_zip_fix_pack_stream_offset",
+        "enabled": true
+      },
+      {
+        "name": "seven_zip_fix_pack_stream_size",
+        "enabled": true
+      },
+      {
+        "name": "seven_zip_fix_stream_crc",
+        "enabled": true
+      },
+      {
+        "name": "seven_zip_quarantine_bad_folder",
+        "enabled": true
+      },
+      {
+        "name": "seven_zip_fix_empty_stream_flags",
+        "enabled": true
+      },
+      {
+        "name": "seven_zip_fix_encoded_header_stream_crc",
+        "enabled": true
+      },
+      {
+        "name": "seven_zip_fix_unpack_size",
+        "enabled": true
+      },
+      {
+        "name": "seven_zip_repair_folder_bind_pairs",
+        "enabled": true
+      },
+      {
+        "name": "seven_zip_repair_folder_stream_counts",
+        "enabled": true
+      },
+      {
+        "name": "seven_zip_fix_file_count_metadata",
+        "enabled": true
+      },
+      {
+        "name": "seven_zip_reconcile_file_names_utf16",
+        "enabled": true
+      },
+      {
+        "name": "seven_zip_drop_unreferenced_folder",
+        "enabled": true
+      },
+      {
+        "name": "seven_zip_drop_unreferenced_file_record",
+        "enabled": true
+      },
+      {
+        "name": "seven_zip_clear_invalid_stream_crc_defined_flag",
+        "enabled": true
+      },
+      {
+        "name": "seven_zip_salvage_solid_prefix",
+        "enabled": true
+      },
+      {
+        "name": "seven_zip_salvage_non_solid_entries",
         "enabled": true
       },
       {

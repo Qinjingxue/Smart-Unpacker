@@ -152,7 +152,7 @@ def test_rar_file_quarantine_rebuild_resyncs_damaged_split_volume(tmp_path):
     assert int(dry_run.result.get("files_written", 0) or 0) >= 1
 
 
-def test_seven_zip_solid_block_partial_salvage_repackages_decodable_entries_as_zip(tmp_path):
+def test_seven_zip_salvage_solid_prefix_repackages_decodable_entries_as_zip(tmp_path):
     seven_zip = _require_7z_tool()
     source_dir = tmp_path / "src"
     source_dir.mkdir()
@@ -169,14 +169,14 @@ def test_seven_zip_solid_block_partial_salvage_repackages_decodable_entries_as_z
 
     result = _run_deep_module(
         tmp_path,
-        "seven_zip_solid_block_partial_salvage",
+        "seven_zip_salvage_solid_prefix",
         "7z",
         source,
         ["solid_block_damaged", "packed_stream_bad", "damaged"],
     )
 
     assert result.status == "partial"
-    assert result.module_name == "seven_zip_solid_block_partial_salvage"
+    assert result.module_name == "seven_zip_salvage_solid_prefix"
     with zipfile.ZipFile(result.repaired_input["path"]) as archive:
         assert archive.read("alpha.txt") == b"alpha 7z payload"
         assert archive.read("bravo.txt") == b"bravo 7z payload"
@@ -298,4 +298,5 @@ def _require_7z_tool() -> Path:
     if found:
         return Path(found)
     pytest.skip("7z executable is required for 7z salvage fixture")
+
 

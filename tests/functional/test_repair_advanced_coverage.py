@@ -414,8 +414,8 @@ def test_pipeline_runner_run_entry_repairs_real_rar_carrier_crop_when_available(
             + b"TRAILING-JUNK",
             "7z",
             ["trailing_junk", "boundary_unreliable"],
-            [{"name": "seven_zip_boundary_trim", "enabled": True}],
-            "seven_zip_boundary_trim",
+            [{"name": "seven_zip_trim_trailing_junk", "enabled": True}],
+            "seven_zip_trim_trailing_junk",
         ),
     ],
 )
@@ -1389,4 +1389,5 @@ def _require_worker_or_skip() -> None:
     ]
     if missing:
         pytest.skip(f"{', '.join(missing)} is required for coordinator real worker coverage")
+
 

@@ -70,3 +70,4 @@ datasets/
 bug.txt
 .deepseek/
 .private/
+repair_training/tmp/

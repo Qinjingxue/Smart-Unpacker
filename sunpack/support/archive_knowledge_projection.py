@@ -136,11 +136,17 @@ def zip_runtime_facts(task: Any) -> dict[str, Any]:
     return _cached_projection(knowledge, "zip_runtime_facts", lambda: _zip_runtime_facts_uncached(knowledge))
 
 
+def seven_zip_runtime_facts(task: Any) -> dict[str, Any]:
+    knowledge = task_knowledge(task)
+    return _cached_projection(knowledge, "seven_zip_runtime_facts", lambda: _seven_zip_runtime_facts_uncached(knowledge))
+
+
 def policy_runtime_context(task: Any) -> dict[str, Any]:
     knowledge = task_knowledge(task)
     return _cached_projection(knowledge, "policy_runtime_context", lambda: {
         "source_fingerprint": source_fingerprint(knowledge),
         "zip_runtime_facts": zip_runtime_facts(knowledge),
+        "seven_zip_runtime_facts": seven_zip_runtime_facts(knowledge),
         "repair_route_context": repair_route_context(knowledge),
         "repair_history_summary": repair_history_summary(knowledge),
     })
@@ -253,11 +259,24 @@ def _zip_runtime_facts_uncached(knowledge: ArchiveKnowledge) -> dict[str, Any]:
     }
 
 
+def _seven_zip_runtime_facts_uncached(knowledge: ArchiveKnowledge) -> dict[str, Any]:
+    structure = _dict(knowledge.get("format.7z.structure", {}))
+    tags = knowledge.get("format.7z.container_tags", [])
+    route_flags = knowledge.get("format.7z.route_evidence_flags", [])
+    return {
+        "structure": structure,
+        "container_tags": [str(item) for item in tags if str(item)] if isinstance(tags, list) else [],
+        "route_evidence_flags": [str(item) for item in route_flags if str(item)] if isinstance(route_flags, list) else [],
+    }
+
+
 def _repair_route_context_uncached(knowledge: ArchiveKnowledge) -> dict[str, Any]:
     flags: list[str] = []
     for path in (
         "format.zip.route_evidence_flags",
         "format.zip.route_evidence.flags",
+        "format.7z.route_evidence_flags",
+        "format.7z.route_evidence.flags",
         "repair.route_evidence.flags",
         "repair.damage.flags",
         "verification.residual.flags",
@@ -267,6 +286,7 @@ def _repair_route_context_uncached(knowledge: ArchiveKnowledge) -> dict[str, Any
         if isinstance(value, list):
             flags.extend(str(item) for item in value if str(item))
     flags.extend(_canonical_zip_route_flags(knowledge))
+    flags.extend(_canonical_seven_zip_route_flags(knowledge))
     route_flags = _dedupe(flags)
     residual = _dedupe([
         str(item)
@@ -279,6 +299,129 @@ def _repair_route_context_uncached(knowledge: ArchiveKnowledge) -> dict[str, Any
         "damage_flags": route_flags,
         "residual_damage_flags": residual,
     }
+
+
+def _canonical_seven_zip_route_flags(knowledge: ArchiveKnowledge) -> list[str]:
+    structure = _dict(knowledge.get("format.7z.structure", {}))
+    tags = {str(item).lower() for item in (knowledge.get("format.7z.container_tags", []) or [])}
+    profile = str(knowledge.get("source.profile", "") or knowledge.get("training.damage_profile", "") or "").lower()
+    flags: list[str] = []
+    if structure:
+        flags.append("seven_zip_signature_found")
+    if structure.get("has_carrier_prefix") or structure.get("carrier_prefix_bytes"):
+        flags.extend(["carrier_prefix", "carrier_archive", "embedded_archive"])
+    if int(structure.get("trailing_bytes") or 0) > 0:
+        flags.append("trailing_junk")
+    if structure.get("start_crc_ok") is False:
+        flags.append("start_header_crc_bad")
+    if structure.get("next_header_crc_ok") is False:
+        flags.append("next_header_crc_bad")
+    if structure.get("next_header_out_of_range") or structure.get("next_header_range_valid") is False:
+        flags.append("next_header_out_of_range")
+    if structure.get("encoded_header_candidate_found"):
+        flags.append("encoded_header_candidate_found")
+    if structure.get("encoded_header_present"):
+        flags.append("encoded_header_present")
+    if structure.get("encoded_header_decodable"):
+        flags.append("encoded_header_decodable")
+    if structure.get("encoded_header_stream_crc_bad"):
+        flags.append("encoded_header_stream_crc_bad")
+    if structure.get("next_header_nid_valid") is False:
+        flags.append("encoded_header_unreadable")
+    for key, flag in (
+        ("pack_stream_offset_bad", "pack_stream_offset_bad"),
+        ("pack_stream_size_bad", "pack_stream_size_bad"),
+        ("unpack_size_bad", "unpack_size_bad"),
+        ("stream_crc_bad", "stream_crc_bad"),
+        ("substream_crc_bad", "substream_crc_bad"),
+        ("empty_stream_flags_bad", "empty_stream_flags_bad"),
+        ("empty_file_flags_bad", "empty_file_flags_bad"),
+        ("anti_item_flags_bad", "anti_item_flags_bad"),
+        ("folder_bind_pairs_bad", "folder_bind_pairs_bad"),
+        ("folder_stream_counts_bad", "folder_stream_counts_bad"),
+        ("file_count_metadata_bad", "file_count_metadata_bad"),
+        ("signature_header_version_bad", "signature_header_version_bad"),
+        ("file_names_utf16_bad", "file_names_utf16_bad"),
+        ("names_utf16_bad", "names_utf16_bad"),
+        ("file_name_metadata_bad", "file_name_metadata_bad"),
+        ("unreferenced_folder", "unreferenced_folder"),
+        ("unreferenced_folder_record", "unreferenced_folder_record"),
+        ("unreferenced_file_record", "unreferenced_file_record"),
+        ("file_record_unreferenced", "file_record_unreferenced"),
+        ("invalid_stream_crc_defined_flag", "invalid_stream_crc_defined_flag"),
+        ("stream_crc_defined_flag_bad", "stream_crc_defined_flag_bad"),
+        ("bad_folder_detected", "bad_folder_detected"),
+        ("verified_folder_available", "verified_folder_available"),
+    ):
+        if structure.get(key):
+            flags.append(flag)
+    if structure.get("solid_archive"):
+        flags.append("solid_archive")
+    if structure.get("non_solid_archive"):
+        flags.append("non_solid_archive")
+    if tags & {"carrier_prefix", "carrier_archive", "embedded_archive", "sfx"}:
+        flags.extend(sorted(tags & {"carrier_prefix", "carrier_archive", "embedded_archive", "sfx"}))
+    if "solid" in profile and "non_solid" not in profile:
+        flags.append("solid_archive")
+    if "non_solid" in profile:
+        flags.append("non_solid_archive")
+    if "trailing" in profile or "junk" in profile:
+        flags.append("trailing_junk")
+    if "carrier" in profile or "sfx" in profile or "embedded" in profile:
+        flags.extend(["carrier_prefix", "carrier_archive", "embedded_archive"])
+    if "start_header_crc" in profile:
+        flags.append("start_header_crc_bad")
+    if "next_header_crc" in profile:
+        flags.append("next_header_crc_bad")
+    if "next_header_offset" in profile:
+        flags.append("next_header_offset_bad")
+    if "next_header_size" in profile:
+        flags.append("next_header_size_bad")
+    if "out_of_range" in profile:
+        flags.append("next_header_out_of_range")
+    if "payload" in profile or "crc" in profile or "stream" in profile:
+        flags.extend(["payload_crc_bad", "packed_stream_bad", "partial_recovery_possible"])
+    if "encoded_header" in profile:
+        flags.append("encoded_header_present")
+    if "encoded_header_decodable" in profile:
+        flags.append("encoded_header_decodable")
+    if "encoded_header_stream_crc" in profile:
+        flags.extend(["encoded_header_present", "encoded_header_decodable", "encoded_header_stream_crc_bad"])
+    if "pack_stream_offset" in profile or "pack_pos" in profile:
+        flags.append("pack_stream_offset_bad")
+    if "pack_stream_size" in profile or "pack_size" in profile:
+        flags.append("pack_stream_size_bad")
+    if "unpack_size" in profile:
+        flags.append("unpack_size_bad")
+    if "stream_crc" in profile:
+        flags.append("stream_crc_bad")
+    if "substream_crc" in profile:
+        flags.append("substream_crc_bad")
+    if "empty_stream" in profile:
+        flags.append("empty_stream_flags_bad")
+    if "empty_file" in profile:
+        flags.append("empty_file_flags_bad")
+    if "anti_item" in profile:
+        flags.append("anti_item_flags_bad")
+    if "bind_pair" in profile:
+        flags.append("folder_bind_pairs_bad")
+    if "folder_stream_count" in profile:
+        flags.append("folder_stream_counts_bad")
+    if "file_count" in profile:
+        flags.append("file_count_metadata_bad")
+    if "signature_header_version" in profile:
+        flags.append("signature_header_version_bad")
+    if "utf16" in profile or "utf_16" in profile or "file_names" in profile:
+        flags.append("file_names_utf16_bad")
+    if "unreferenced_folder" in profile:
+        flags.append("unreferenced_folder")
+    if "unreferenced_file" in profile:
+        flags.append("unreferenced_file_record")
+    if "crc_defined_flag" in profile:
+        flags.append("invalid_stream_crc_defined_flag")
+    if "bad_folder" in profile or "folder_quarantine" in profile:
+        flags.extend(["bad_folder_detected", "verified_folder_available"])
+    return flags
 
 
 def _canonical_zip_route_flags(knowledge: ArchiveKnowledge) -> list[str]:

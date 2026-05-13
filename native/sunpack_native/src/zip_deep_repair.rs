@@ -4607,6 +4607,7 @@ mod tests {
             max_duration: None,
             verify_candidates: true,
             allow_unverified_entries: false,
+            password: None,
         }
     }
 

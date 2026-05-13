@@ -1,1 +1,1 @@
-"""7z repair modules will live here."""
+"""Atomic 7z repair modules."""

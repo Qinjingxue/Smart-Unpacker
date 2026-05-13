@@ -29,7 +29,7 @@ def test_layer_converters_write_archive_knowledge_namespaces(tmp_path):
     write_relation_task(task)
     write_detection_task(task)
     write_analysis_report(task, _analysis_report(str(archive)))
-    write_extraction_result(task, ExtractionResult(success=False, archive=str(archive), out_dir=str(tmp_path / "out"), all_parts=[str(archive)], error="bad", diagnostics={"result": {"status": "failed", "failure_stage": "extract", "failure_kind": "data_error"}}))
+    write_extraction_result(task, ExtractionResult(success=False, archive=str(archive), out_dir=str(tmp_path / "out"), all_parts=[str(archive)], error="bad", diagnostics={"result": {"status": "failed", "failure_stage": "extract", "failure_kind": "data_error"}}, password_used="secret"))
     write_verification_result(task, VerificationResult(completeness=0.5, assessment_status="partial", decision_hint="repair", failed_files=1, archive_coverage=ArchiveCoverageSummary(completeness=0.5, expected_files=2, matched_files=1)))
     write_repair_result(task, RepairResult(status="repaired", module_name="zip_fix_cd_offset", actions=["fix_cd_offset"], repaired_input={"kind": "file", "path": str(archive)}, diagnosis={"patch_facts": ["fixed_field=cd_offset"]}))
 
@@ -41,6 +41,8 @@ def test_layer_converters_write_archive_knowledge_namespaces(tmp_path):
     assert payload["analysis"]["selected_format"] == "zip"
     assert payload["format"]["zip"]["structure"]["has_data_descriptor"] is True
     assert payload["extraction"]["failure"]["failure_kind"] == "data_error"
+    assert payload["archive"]["password"] == "secret"
+    assert payload["archive"]["password_present"] is True
     assert payload["verification"]["summary"]["decision_hint"] == "repair"
     assert payload["repair"]["last_result"]["module_name"] == "zip_fix_cd_offset"
     assert "fixed_field=cd_offset" in payload["repair"]["patch_facts"]["flags"]

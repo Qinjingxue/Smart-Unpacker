@@ -137,8 +137,7 @@ required = [
     'tar_sparse_pax_longname_repair', 'compression_stream_partial_recovery',
     'compression_stream_trailing_junk_trim', 'tar_compressed_partial_recovery',
     'tar_metadata_downgrade_recovery', 'archive_carrier_crop_recovery',
-    'seven_zip_precise_boundary_repair', 'seven_zip_crc_field_repair',
-    'seven_zip_next_header_field_repair', 'seven_zip_solid_block_partial_salvage',
+    'seven_zip_scan_source', 'seven_zip_atomic_repair',
     'rar_file_quarantine_rebuild', 'archive_nested_payload_salvage',
     'rar_block_chain_trim_recovery', 'rar_end_block_repair',
 ]

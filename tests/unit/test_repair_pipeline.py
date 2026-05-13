@@ -16,11 +16,16 @@ import pytest
 from sunpack.analysis.result import ArchiveFormatEvidence, ArchiveSegment
 from sunpack.config.schema import normalize_config
 from sunpack.contracts.archive_knowledge import ArchiveKnowledge
+from sunpack.contracts.archive_input import ArchiveInputDescriptor
+from sunpack.contracts.archive_state import ArchiveState, PatchOperation, PatchPlan
 from sunpack.repair.config import enabled_module_configs
+from sunpack.repair.diagnosis import RepairDiagnosis
 from sunpack.repair.candidate import CandidateSelector, CandidateValidation, RepairCandidate, materialize_candidate
 from sunpack.repair import RepairJob, RepairScheduler
 from sunpack.repair.pipeline.module import RepairModuleSpec, RepairRoute
 from sunpack.repair.pipeline.modules._common import repair_operation_cache_key, source_input_for_job
+from sunpack.repair.pipeline.modules.seven_zip._scan import password_fingerprint
+from sunpack.repair.pipeline.modules.seven_zip.atomic import SevenZipFixStartHeaderCrc
 from sunpack.repair.pipeline.registry import get_repair_module_registry, register_repair_module
 from sunpack.repair.result import RepairResult
 from sunpack.repair.runtime_cache import RepairRuntimeCache
@@ -31,7 +36,7 @@ RAR5_MAGIC = b"Rar!\x1a\x07\x01\x00"
 DEFAULT_SALVAGE_MODULES = {
     "archive_nested_payload_salvage",
     "rar_file_quarantine_rebuild",
-    "seven_zip_solid_block_partial_salvage",
+    "seven_zip_salvage_solid_prefix",
     "tar_sparse_pax_longname_repair",
     "zip_resolve_duplicate_entries",
 }
@@ -138,6 +143,73 @@ def test_repair_operation_cache_key_changes_when_file_changes(tmp_path):
     assert first != second
 
 
+def test_repair_operation_cache_key_distinguishes_password_fingerprint(tmp_path):
+    source = tmp_path / "encrypted.7z"
+    source.write_bytes(b"7z\xbc\xaf\x27\x1c" + b"\0" * 32)
+    job = RepairJob(source_input={"kind": "file", "path": str(source), "format_hint": "7z"}, format="7z")
+
+    first = repair_operation_cache_key(job, "seven_zip_scan_source", {"password_fingerprint": password_fingerprint("alpha")})
+    second = repair_operation_cache_key(job, "seven_zip_scan_source", {"password_fingerprint": password_fingerprint("beta")})
+
+    assert first != second
+    assert "alpha" not in json.dumps(first)
+    assert "beta" not in json.dumps(second)
+
+
+def test_source_input_for_job_carries_password_for_file_concat_and_patched_state(tmp_path):
+    source = tmp_path / "encrypted.7z"
+    part = tmp_path / "encrypted.7z.001"
+    source.write_bytes(b"tailxxxx")
+    part.write_bytes(b"head")
+
+    file_input = source_input_for_job(RepairJob(
+        source_input={"kind": "file", "path": str(source), "format_hint": "7z"},
+        format="7z",
+        password="secret",
+    ))
+    assert file_input["password"] == "secret"
+
+    concat_input = source_input_for_job(RepairJob(
+        source_input={"kind": "file", "path": str(source), "format_hint": "7z", "parts": [{"path": str(part)}]},
+        format="7z",
+        password="secret",
+    ))
+    assert concat_input["kind"] == "concat_ranges"
+    assert concat_input["password"] == "secret"
+
+    descriptor = ArchiveInputDescriptor.from_parts(archive_path=str(source), format_hint="7z")
+    patched_state = ArchiveState.from_archive_input(
+        descriptor,
+        patches=[PatchPlan(operations=[PatchOperation.replace_bytes(offset=0, data=b"patched")])],
+    )
+    patched_input = source_input_for_job(RepairJob(
+        source_input={"kind": "file", "path": str(source), "format_hint": "7z"},
+        format="7z",
+        archive_state=patched_state,
+        password="secret",
+    ))
+    assert patched_input["kind"] == "bytes"
+    assert patched_input["password"] == "secret"
+
+
+def test_seven_zip_wrong_password_flags_are_vetoed_only_without_resolved_password():
+    module = SevenZipFixStartHeaderCrc()
+    job = RepairJob(
+        source_input={"kind": "bytes", "data": b"", "format_hint": "7z"},
+        format="7z",
+        damage_flags=["seven_zip_signature_found", "start_header_crc_bad", "wrong_password", "encrypted_header"],
+    )
+    assert module.can_handle(job, RepairDiagnosis(format="7z"), {}) == 0.0
+
+    unlocked = RepairJob(
+        source_input=job.source_input,
+        format="7z",
+        damage_flags=list(job.damage_flags),
+        password="secret",
+    )
+    assert module.can_handle(unlocked, RepairDiagnosis(format="7z"), {}) > 0.0
+
+
 def test_repair_runtime_cache_invalidates_missing_materialized_path(tmp_path):
     cache = RepairRuntimeCache()
     produced = tmp_path / "candidate.zip"
@@ -174,7 +246,7 @@ def test_repair_runtime_cache_invalidates_missing_materialized_path(tmp_path):
             "checksum_error",
         ),
         (
-            "seven_zip_solid_block_partial_salvage",
+            "seven_zip_salvage_solid_prefix",
             "7z",
             ["solid_block_damaged", "packed_stream_bad", "damaged"],
             "data_error",
@@ -2024,24 +2096,24 @@ def test_tar_zstd_partial_recovery_repairs_inner_tar_when_backend_available(tmp_
         assert archive.extractfile("first.bin").read() == b"first payload"
 
 
-def test_seven_zip_boundary_trim_removes_bytes_after_next_header(tmp_path):
+def test_seven_zip_trim_trailing_junk_removes_bytes_after_next_header(tmp_path):
     source = tmp_path / "tail.7z"
     original = _seven_zip_bytes()
     source.write_bytes(original + b"JUNK")
 
-    result = _run_repair(tmp_path, "seven_zip_boundary_trim", "7z", source, ["trailing_junk"])
+    result = _run_deep_repair(tmp_path, "seven_zip_trim_trailing_junk", "7z", source, ["trailing_junk"])
 
     assert result.ok is True
     assert open(result.repaired_input["path"], "rb").read() == original
 
 
-def test_seven_zip_start_header_crc_fix_rewrites_bad_crc(tmp_path):
+def test_seven_zip_fix_start_header_crc_rewrites_bad_crc(tmp_path):
     source = tmp_path / "bad_start_crc.7z"
     data = bytearray(_seven_zip_bytes())
     data[8:12] = b"\0\0\0\0"
     source.write_bytes(bytes(data))
 
-    result = _run_repair(tmp_path, "seven_zip_start_header_crc_fix", "7z", source, ["start_header_crc_bad"])
+    result = _run_deep_repair(tmp_path, "seven_zip_fix_start_header_crc", "7z", source, ["start_header_crc_bad"])
 
     assert result.ok is True
     assert open(result.repaired_input["path"], "rb").read() == _seven_zip_bytes()
@@ -2104,27 +2176,27 @@ def test_rar_carrier_crop_deep_recovery_crops_embedded_rar(tmp_path):
     assert open(result.repaired_input["path"], "rb").read() == original
 
 
-def test_seven_zip_precise_boundary_repair_trims_carrier_and_tail(tmp_path):
+def test_seven_zip_crop_carrier_prefix_trims_carrier_and_tail(tmp_path):
     source = tmp_path / "carrier-tail.7z"
     original = _seven_zip_bytes()
     source.write_bytes(b"SFX" + original + b"JUNK")
 
     result = _run_deep_repair(
         tmp_path,
-        "seven_zip_precise_boundary_repair",
+        "seven_zip_crop_carrier_prefix",
         "7z",
         source,
         ["carrier_archive", "trailing_junk", "boundary_unreliable"],
     )
 
     assert result.ok is True
-    assert result.module_name == "seven_zip_precise_boundary_repair"
+    assert result.module_name == "seven_zip_crop_carrier_prefix"
     assert open(result.repaired_input["path"], "rb").read() == original
-    assert result.diagnosis["native_archive_deep_repair"]["offset"] == 3
-    assert result.actions == ["crop_7z_to_precise_next_header_boundary"]
+    assert result.diagnosis["native_7z_atomic_repair"]["offset"] == 3
+    assert result.actions == ["crop_7z_carrier_prefix"]
 
 
-def test_seven_zip_crc_field_repair_rewrites_next_header_and_start_crc(tmp_path):
+def test_seven_zip_fix_next_header_crc_rewrites_next_header_and_start_crc(tmp_path):
     source = tmp_path / "bad-next-crc.7z"
     original = _seven_zip_bytes()
     data = bytearray(original)
@@ -2134,16 +2206,16 @@ def test_seven_zip_crc_field_repair_rewrites_next_header_and_start_crc(tmp_path)
 
     result = _run_deep_repair(
         tmp_path,
-        "seven_zip_crc_field_repair",
+        "seven_zip_fix_next_header_crc",
         "7z",
         source,
         ["next_header_crc_bad", "start_header_crc_bad"],
     )
 
     assert result.ok is True
-    assert result.module_name == "seven_zip_crc_field_repair"
+    assert result.module_name == "seven_zip_fix_next_header_crc"
     assert open(result.repaired_input["path"], "rb").read() == original
-    assert result.actions == ["recompute_7z_next_header_crc", "recompute_7z_start_header_crc"]
+    assert result.actions == ["recompute_7z_next_header_crc"]
 
 
 def test_rar_trailing_junk_trim_supports_rar4(tmp_path):
@@ -2936,4 +3008,5 @@ def _rar5_block(header_type: int, flags: int = 0, data: bytes = b"") -> bytes:
 
 def _rar5_bytes() -> bytes:
     return b"Rar!\x1a\x07\x01\x00" + _rar5_block(1) + _rar5_block(5)
+
 

@@ -39,6 +39,9 @@ $python = Get-TrainingPython
 if (-not $Formats) { $Formats = $Format }
 $ModuleFormat = $Format
 if ($ModuleFormat -eq "7z") { $ModuleFormat = "seven_zip" }
+if (($ModuleFormat -eq "seven_zip") -and ($MaterialRoot -eq "repair_training\material")) {
+    $MaterialRoot = "repair_training\material\seven_zip"
+}
 $argsList = @(
     "-m", "repair_training.formats.$ModuleFormat.build_material",
     "--material-root", $MaterialRoot,

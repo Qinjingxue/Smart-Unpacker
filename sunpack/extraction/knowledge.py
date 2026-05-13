@@ -28,6 +28,17 @@ def write_extraction_result(task: ArchiveTask, result: ExtractionResult, *, phas
             source_layer="extraction",
             source_module="scheduler",
         )
+        if result.password_used is not None:
+            write_payload(
+                knowledge,
+                "archive",
+                {
+                    "password": result.password_used,
+                    "password_present": bool(str(result.password_used)),
+                },
+                source_layer="extraction",
+                source_module="scheduler",
+            )
     with _phase(phase_timer, f"{phase_prefix}_commit"):
         commit_task_knowledge(task, knowledge, phase_timer=phase_timer, phase_prefix=f"{phase_prefix}_commit")
 

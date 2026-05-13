@@ -81,7 +81,9 @@ def write_repair_job_context(
     with _phase(phase_timer, f"{phase_prefix}_write_route_flags"):
         if route_flags:
             write_flags(knowledge, "repair.route_evidence", route_flags, source_layer="repair", source_module="job_context")
-            write_payload(knowledge, "format.zip", {"route_evidence_flags": route_flags}, source_layer="repair", source_module="job_context")
+            fmt = str(route_payload.get("format") or "").lower()
+            format_namespace = "format.7z" if fmt in {"7z", "seven_zip"} else "format.zip"
+            write_payload(knowledge, format_namespace, {"route_evidence_flags": route_flags}, source_layer="repair", source_module="job_context")
         if damage_flags:
             write_flags(knowledge, "repair.damage", damage_flags, source_layer="repair", source_module="job_context")
     with _phase(phase_timer, f"{phase_prefix}_write_source_derivation"):
@@ -95,6 +97,12 @@ def write_repair_job_context(
         tags = route_payload.get("zip_container_tags")
         if isinstance(tags, list):
             write_payload(knowledge, "format.zip", {"container_tags": tags}, source_layer="repair", source_module="job_context")
+        seven_structure = route_payload.get("seven_zip_structure") or route_payload.get("seven_zip_structure_features")
+        if isinstance(seven_structure, dict):
+            write_payload(knowledge, "format.7z", {"structure": seven_structure}, source_layer="repair", source_module="job_context")
+        seven_tags = route_payload.get("seven_zip_container_tags")
+        if isinstance(seven_tags, list):
+            write_payload(knowledge, "format.7z", {"container_tags": seven_tags}, source_layer="repair", source_module="job_context")
     with _phase(phase_timer, f"{phase_prefix}_write_damage_profile"):
         if route_payload.get("damage_profile"):
             write_payload(knowledge, "source", {"profile": str(route_payload.get("damage_profile") or "")}, source_layer="repair", source_module="job_context")

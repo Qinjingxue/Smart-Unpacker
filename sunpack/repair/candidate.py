@@ -1093,8 +1093,12 @@ def _module_generation_bias(candidate: RepairCandidate) -> float:
         return 0.05
     if module_name == "zip_fix_eocd_record":
         return 0.12
-    if module_name == "seven_zip_crc_field_repair":
+    if module_name in {"seven_zip_fix_start_header_crc", "seven_zip_fix_next_header_crc"}:
         return 0.1
+    if module_name in {"seven_zip_fix_next_header_offset", "seven_zip_fix_next_header_size", "seven_zip_repoint_next_header"}:
+        return 0.08
+    if module_name in {"seven_zip_trim_trailing_junk", "seven_zip_crop_carrier_prefix"}:
+        return 0.06
     if module_name == "zip_rebuild_cd_from_local_headers":
         if flags & {"filename_encoding_bad", "raw_filename_bytes", "non_utf8_filename"}:
             return 0.02

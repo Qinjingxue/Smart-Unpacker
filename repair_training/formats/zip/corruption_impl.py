@@ -599,7 +599,7 @@ class BinaryCorruptor:
             mutations,
             damage_flags=["start_header_crc_bad", "next_header_crc_bad", "trailing_junk"],
             expected_statuses=("repaired",),
-            expected_module="seven_zip_crc_field_repair",
+            expected_module="seven_zip_fix_next_header_crc",
             expected_bytes=clean,
         )
 
@@ -621,7 +621,7 @@ class BinaryCorruptor:
             mutations,
             damage_flags=["carrier_archive", "sfx", "boundary_unreliable", "trailing_junk"],
             expected_statuses=("repaired",),
-            expected_module="seven_zip_precise_boundary_repair",
+            expected_module="seven_zip_crop_carrier_prefix",
             expected_bytes=clean,
         )
 
@@ -2540,4 +2540,5 @@ def _build_encrypted_zip(root: Path, *, password: str) -> bytes:
     if completed.returncode != 0 or not archive.is_file():
         raise RuntimeError(f"7z encrypted ZIP fixture failed: {completed.stderr or completed.stdout}")
     return archive.read_bytes()
+
 

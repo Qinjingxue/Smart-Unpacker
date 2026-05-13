@@ -13,7 +13,15 @@ REMOVED_ZIP_COARSE_MODULES = {
     "zip_salvage",
     "zip_resolve_conflicts",
 }
-
+REMOVED_SEVEN_ZIP_COARSE_MODULES = {
+    "seven_zip_boundary_trim",
+    "seven_zip_precise_boundary_repair",
+    "seven_zip_crc_field_repair",
+    "seven_zip_start_header_crc_fix",
+    "seven_zip_next_header_field_repair",
+    "seven_zip_solid_block_partial_salvage",
+    "seven_zip_non_solid_partial_salvage",
+}
 
 class RepairModuleRegistry:
     def __init__(self):
@@ -25,6 +33,11 @@ class RepairModuleRegistry:
             raise ValueError(
                 f"ZIP repair module {name!r} has been removed. "
                 "Register one atomic ZIP module instead."
+            )
+        if name in REMOVED_SEVEN_ZIP_COARSE_MODULES:
+            raise ValueError(
+                f"7z repair module {name!r} has been removed. "
+                "Register one atomic 7z module instead."
             )
         self._modules[name] = module
 
