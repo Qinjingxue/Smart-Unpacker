@@ -65,6 +65,9 @@ class _SevenZipAtomicRepair:
         reject_flags = set(self.reject_flags)
         if _has_resolved_password(job):
             reject_flags.difference_update(WRONG_PASSWORD_FLAGS)
+        elif flags & set(WRONG_PASSWORD_FLAGS) and not _seven_zip_password_blocking(job, config):
+            reject_flags.difference_update(WRONG_PASSWORD_FLAGS)
+            flags.difference_update(WRONG_PASSWORD_FLAGS)
         if flags & reject_flags:
             return 0.0
         if (flags & set(WRONG_PASSWORD_FLAGS)) and not _has_resolved_password(job):
@@ -451,9 +454,8 @@ def _job_flags(job: RepairJob, config: dict[str, Any]) -> set[str]:
         values = _get_path(knowledge, path, [])
         if isinstance(values, list):
             flags.update(str(item) for item in values if str(item))
-    if not flags or "seven_zip_signature_found" not in flags:
-        scan = cached_seven_zip_scan_artifact(job, config)
-        flags.update(str(item) for item in scan.get("route_evidence_flags") or [] if str(item))
+    scan = cached_seven_zip_scan_artifact(job, config)
+    flags.update(str(item) for item in scan.get("route_evidence_flags") or [] if str(item))
     return flags
 
 
@@ -555,6 +557,20 @@ def _compact_scan(scan: dict[str, Any]) -> dict[str, Any]:
 
 def _has_resolved_password(job: RepairJob) -> bool:
     return bool(getattr(job, "password", None))
+
+
+def _seven_zip_password_blocking(job: RepairJob, config: dict[str, Any]) -> bool:
+    scan = cached_seven_zip_scan_artifact(job, config)
+    structure = scan.get("structure") if isinstance(scan.get("structure"), dict) else {}
+    if bool(scan.get("password_present")) or _has_resolved_password(job):
+        return False
+    return bool(
+        structure.get("password_required")
+        or structure.get("password_rejected")
+        or structure.get("encrypted_header")
+        or scan.get("password_required")
+        or scan.get("password_rejected")
+    )
 
 
 def _get_path(payload: dict[str, Any], path: str, default: Any = None) -> Any:

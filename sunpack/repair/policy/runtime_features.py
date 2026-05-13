@@ -287,6 +287,15 @@ def candidate_proposal_from_payload(payload: dict[str, Any], *, job: RepairJob |
         )
         if key in payload
     }
+    source_input = job.source_input if job is not None and isinstance(job.source_input, dict) else {}
+    if output.get("input_kind") == "concat_ranges" or str(source_input.get("kind") or "") == "concat_ranges":
+        output["logical_stream_built"] = True
+    if (
+        bool(source_input.get("split_sidecars_available"))
+        or bool(source_input.get("parts"))
+        or (str(source_input.get("kind") or "") == "concat_ranges" and len(list(source_input.get("ranges") or [])) > 1)
+    ):
+        output["split_sidecars_available"] = True
     validation = payload.get("validation_details")
     if isinstance(validation, dict):
         output["validation_details"] = {

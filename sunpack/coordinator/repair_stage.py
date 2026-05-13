@@ -16,7 +16,7 @@ from sunpack.contracts.archive_state import ArchiveState
 from sunpack.contracts.tasks import ArchiveTask
 from sunpack.extraction.result import ExtractionResult
 from sunpack.repair.config import repair_config
-from sunpack.repair.context import normalize_zip_runtime_route_evidence
+from sunpack.repair.context import normalize_runtime_route_evidence
 from sunpack.repair.job import RepairJob
 from sunpack.repair.knowledge import (
     write_repair_archive_status,
@@ -227,7 +227,7 @@ class ArchiveRepairStage:
             "previous_action_count": len(previous_actions),
         })
         with _phase(phase_timer, f"{phase_prefix}_route_payload"):
-            route_payload = self._zip_runtime_route_payload(
+            route_payload = self._runtime_route_payload(
                 task,
                 source_input=source_input,
                 format_hint=selected_format,
@@ -258,7 +258,7 @@ class ArchiveRepairStage:
                 *list(route_payload.get("damage_flags") or []),
             ])
         with _phase(phase_timer, f"{phase_prefix}_normalize_route_evidence"):
-            route_payload = normalize_zip_runtime_route_evidence({
+            route_payload = normalize_runtime_route_evidence({
                 **route_payload,
                 "source_input": source_input,
                 "analysis_prepass": analysis_prepass,
@@ -397,7 +397,7 @@ class ArchiveRepairStage:
             "route_evidence_flags": [],
         }
 
-    def _zip_runtime_route_payload(
+    def _runtime_route_payload(
         self,
         task: ArchiveTask,
         *,
@@ -424,12 +424,14 @@ class ArchiveRepairStage:
             "source_derivation": self._source_derivation_from_task(task),
             "zip_structure_features": self._zip_structure_features_from_task(task),
             "zip_container_tags": self._zip_container_tags_from_task(task),
+            "seven_zip_structure_features": self._seven_zip_structure_features_from_task(task),
+            "seven_zip_container_tags": self._seven_zip_container_tags_from_task(task),
             "damage_profile": self._damage_profile_from_task(task),
             "damage_flags": list(extraction_failure.get("damage_flags") or []),
         }
         if getattr(task, "all_parts", None) and len(task.all_parts or []) > 1:
             payload["split_sidecars_available"] = True
-        return normalize_zip_runtime_route_evidence(payload)
+        return normalize_runtime_route_evidence(payload)
 
     def _source_input_with_split_parts(self, task: ArchiveTask, source_input: dict[str, Any], *, format_hint: str = "") -> dict[str, Any]:
         output = dict(source_input or {})
@@ -437,9 +439,14 @@ class ArchiveRepairStage:
         if len(parts) <= 1:
             return output
         if output.get("kind") == "concat_ranges" and output.get("ranges"):
+            output.setdefault("parts", [{"path": path, "role": "volume"} for path in parts])
+            output["split_sidecars_available"] = True
+            output["logical_stream_built"] = True
+            output.setdefault("format_hint", format_hint or self._format_from_task(task))
             return output
         output["parts"] = [{"path": path, "role": "volume"} for path in parts]
         output["split_sidecars_available"] = True
+        output["logical_stream_built"] = True
         output.setdefault("format_hint", format_hint or self._format_from_task(task))
         return output
 
@@ -490,6 +497,12 @@ class ArchiveRepairStage:
 
     def _zip_container_tags_from_task(self, task: ArchiveTask) -> list[str]:
         return knowledge_view.zip_container_tags(task)
+
+    def _seven_zip_structure_features_from_task(self, task: ArchiveTask) -> dict[str, Any]:
+        return dict(knowledge_view.seven_zip_runtime_facts(task).get("structure") or {})
+
+    def _seven_zip_container_tags_from_task(self, task: ArchiveTask) -> list[str]:
+        return [str(item) for item in knowledge_view.seven_zip_runtime_facts(task).get("container_tags") or [] if str(item)]
 
     def _damage_profile_from_task(self, task: ArchiveTask) -> str:
         return knowledge_view.damage_profile(task)

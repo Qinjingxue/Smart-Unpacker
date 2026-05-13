@@ -6,7 +6,7 @@ from typing import Any, Callable
 
 from sunpack.contracts.tasks import ArchiveTask
 from sunpack.extraction.result import ExtractionResult
-from sunpack.repair.context import normalize_zip_runtime_route_evidence
+from sunpack.repair.context import normalize_runtime_route_evidence
 from sunpack.repair.result import RepairResult
 from sunpack.support.archive_knowledge_writer import (
     append_history,
@@ -66,7 +66,7 @@ def write_repair_job_context(
         route_flags = [str(flag) for flag in route_payload.get("route_evidence_flags") or [] if str(flag)]
         damage_flags = [str(flag) for flag in route_payload.get("damage_flags") or [] if str(flag)]
         if not route_flags and not damage_flags:
-            normalized = normalize_zip_runtime_route_evidence({
+            normalized = normalize_runtime_route_evidence({
                 **dict(route_payload or {}),
                 "source_input": source_input,
                 "analysis_prepass": analysis_prepass,

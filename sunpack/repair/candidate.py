@@ -420,7 +420,7 @@ def candidate_feature_payload(candidate: RepairCandidate) -> dict[str, Any]:
         "raw_name_bytes_preserved": bool(diagnosis.get("raw_name_bytes_preserved")),
         "raw_name_source": str(diagnosis.get("raw_name_source") or ""),
         "split_sidecars_available": "split_sidecars_available" in {str(flag) for flag in candidate.damage_flags},
-        "logical_stream_built": bool(diagnosis.get("logical_stream_built")),
+        "logical_stream_built": bool(diagnosis.get("logical_stream_built")) or _candidate_input_kind(candidate) == "concat_ranges",
         "after_archive_carrier_crop": "after_archive_carrier_crop" in {str(flag) for flag in candidate.damage_flags} or "after_archive_carrier_crop" in {str(fact) for fact in diagnosis.get("patch_facts") or []},
         "format": candidate.format,
         "status": candidate.status,

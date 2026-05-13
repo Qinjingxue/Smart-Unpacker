@@ -1176,7 +1176,7 @@ fn scan_archive_signatures(
 
 fn seven_zip_candidate(data: &[u8], offset: usize) -> Option<ArchiveCandidate> {
     let header = parse_seven_zip_header(data, offset)?;
-    if !header.start_crc_ok() || !header.next_header_nid_valid {
+    if !header.start_crc_ok() {
         return None;
     }
     let mut warnings = Vec::new();
@@ -3097,7 +3097,6 @@ fn seven_zip_repair_boundary_target(
     for candidate in candidates.into_iter().filter(|candidate| {
         candidate.format == TargetFormat::SevenZip
             && candidate.archive_end > candidate.offset
-            && candidate.next_header_crc_ok
             && if require_prefix { candidate.offset > 0 } else { candidate.offset == 0 && candidate.archive_end < data.len() }
     }) {
         let output_path = Path::new(workspace).join(format!("seven_zip_{target}_{:08x}.7z", candidate.offset));

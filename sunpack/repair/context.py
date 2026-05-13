@@ -61,14 +61,19 @@ def build_repair_context(job: RepairJob, diagnosis: RepairDiagnosis, *, knowledg
     route_evidence_flags = list(route_context.get("route_evidence_flags") or [])
     repair_history_flags = list(history_summary.get("repair_history_flags") or [])
     residual_damage_flags = list(route_context.get("residual_damage_flags") or history_summary.get("residual_damage_flags") or [])
-    damage_flags = _normalize_zip_generic_damage(_dedupe([
+    context_format = _normalize_format(diagnosis.format or knowledge_view.analysis_summary(knowledge).get("format") or "")
+    damage_flags = _dedupe([
         *list(route_context.get("damage_flags") or []),
         *[flag for item in diagnosis.evidence for flag in item.damage_flags],
         *_failure_damage_flags(job, failure, failure_kind, failure_stage),
         *route_evidence_flags,
         *repair_history_flags,
         *residual_damage_flags,
-    ]))
+    ])
+    if context_format == "zip":
+        damage_flags = _normalize_zip_generic_damage(damage_flags)
+    elif context_format in {"7z", "seven_zip"}:
+        damage_flags = _filter_seven_zip_conflicting_runtime_flags(damage_flags, {"archive_knowledge": knowledge.to_dict()})
     knowledge_payload = knowledge.to_dict()
     if _normalize_format(diagnosis.format or knowledge_view.analysis_summary(knowledge).get("format") or "") == "zip":
         damage_flags = _filter_zip_conflicting_runtime_flags(damage_flags, {
@@ -136,6 +141,15 @@ def _archive_scoped_failure_kind(failure_kind: str, damage_flags: list[str]) -> 
     return "corrupted_data" if evidence_flags else "output_filesystem"
 
 
+def runtime_route_evidence_flags(payload: dict[str, Any]) -> list[str]:
+    fmt = _format_from_payload(payload)
+    if fmt in {"7z", "seven_zip"}:
+        return seven_zip_route_evidence_flags(payload)
+    if fmt == "zip" or not fmt:
+        return zip_route_evidence_flags(payload)
+    return _dedupe([str(item) for item in payload.get("damage_flags") or [] if str(item)])
+
+
 def zip_route_evidence_flags(payload: dict[str, Any]) -> list[str]:
     if not isinstance(payload, dict):
         return []
@@ -178,11 +192,96 @@ def zip_route_evidence_flags(payload: dict[str, Any]) -> list[str]:
     return _dedupe([str(item) for item in flags if item])
 
 
+def seven_zip_route_evidence_flags(payload: dict[str, Any]) -> list[str]:
+    if not isinstance(payload, dict):
+        return []
+    flags: list[str] = []
+    for features in _seven_zip_structure_feature_dicts(payload):
+        if features:
+            flags.append("seven_zip_signature_found")
+        if _truthy(features.get("has_carrier_prefix")) or int(features.get("carrier_prefix_bytes") or 0) > 0:
+            flags.extend(["carrier_prefix", "carrier_archive", "embedded_archive"])
+        if int(features.get("trailing_bytes") or 0) > 0:
+            flags.append("trailing_junk")
+        if features.get("start_crc_ok") is False:
+            flags.append("start_header_crc_bad")
+        if features.get("next_header_crc_ok") is False:
+            flags.append("next_header_crc_bad")
+        if features.get("next_header_out_of_range") or features.get("next_header_range_valid") is False:
+            flags.extend(["next_header_out_of_range", "next_header_offset_bad"])
+        for key, flag in (
+            ("signature_header_version_bad", "signature_header_version_bad"),
+            ("next_header_offset_bad", "next_header_offset_bad"),
+            ("next_header_size_bad", "next_header_size_bad"),
+            ("encoded_header_candidate_found", "encoded_header_candidate_found"),
+            ("encoded_header_present", "encoded_header_present"),
+            ("encoded_header_decodable", "encoded_header_decodable"),
+            ("encoded_header_stream_crc_bad", "encoded_header_stream_crc_bad"),
+            ("pack_stream_offset_bad", "pack_stream_offset_bad"),
+            ("pack_stream_size_bad", "pack_stream_size_bad"),
+            ("unpack_size_bad", "unpack_size_bad"),
+            ("stream_crc_bad", "stream_crc_bad"),
+            ("substream_crc_bad", "substream_crc_bad"),
+            ("empty_stream_flags_bad", "empty_stream_flags_bad"),
+            ("empty_file_flags_bad", "empty_file_flags_bad"),
+            ("anti_item_flags_bad", "anti_item_flags_bad"),
+            ("folder_bind_pairs_bad", "folder_bind_pairs_bad"),
+            ("folder_stream_counts_bad", "folder_stream_counts_bad"),
+            ("file_count_metadata_bad", "file_count_metadata_bad"),
+            ("file_names_utf16_bad", "file_names_utf16_bad"),
+            ("names_utf16_bad", "names_utf16_bad"),
+            ("file_name_metadata_bad", "file_name_metadata_bad"),
+            ("unreferenced_folder", "unreferenced_folder"),
+            ("unreferenced_folder_record", "unreferenced_folder"),
+            ("unreferenced_file_record", "unreferenced_file_record"),
+            ("file_record_unreferenced", "unreferenced_file_record"),
+            ("invalid_stream_crc_defined_flag", "invalid_stream_crc_defined_flag"),
+            ("stream_crc_defined_flag_bad", "invalid_stream_crc_defined_flag"),
+            ("bad_folder_detected", "bad_folder_detected"),
+            ("verified_folder_available", "verified_folder_available"),
+            ("payload_crc_bad", "payload_crc_bad"),
+            ("packed_stream_bad", "packed_stream_bad"),
+            ("partial_recovery_possible", "partial_recovery_possible"),
+            ("password_present", "password_present"),
+            ("password_required", "password_required"),
+            ("password_rejected", "password_rejected"),
+            ("encrypted_header", "encrypted_header"),
+            ("solid_archive", "solid_archive"),
+            ("non_solid_archive", "non_solid_archive"),
+        ):
+            if _truthy(features.get(key)):
+                flags.append(flag)
+        if features.get("next_header_nid_valid") is False:
+            flags.append("encoded_header_unreadable")
+    tags = {str(tag).lower() for tag in _seven_zip_container_tags(payload)}
+    if tags & {"sfx", "carrier_prefix", "carrier_archive", "embedded_archive"}:
+        flags.extend(sorted(tags & {"sfx", "carrier_prefix", "carrier_archive", "embedded_archive"}))
+        flags.extend(["carrier_prefix", "carrier_archive", "embedded_archive"])
+    if tags & {"split", "split_archive", "multi_volume"} or _source_has_parts(payload):
+        flags.extend(["split_archive", "split_sidecars_available"])
+    if "solid_archive" in tags:
+        flags.append("solid_archive")
+    if "non_solid_archive" in tags:
+        flags.append("non_solid_archive")
+    if "encoded_header" in tags:
+        flags.append("encoded_header_present")
+    if "encrypted" in tags or "encrypted_header" in tags:
+        flags.append("encrypted_header")
+    for profile in _profile_names(payload):
+        flags.extend(_seven_zip_profile_flags(profile))
+    for item in payload.get("damage_flags") or []:
+        if str(item):
+            flags.append(str(item))
+    return _filter_seven_zip_conflicting_runtime_flags(_dedupe(flags), payload)
+
+
 def _format_from_payload(payload: dict[str, Any]) -> str:
     raw = payload.get("format")
     if isinstance(raw, dict):
         if isinstance(raw.get("zip"), dict):
             return "zip"
+        if isinstance(raw.get("7z"), dict) or isinstance(raw.get("seven_zip"), dict):
+            return "7z"
         raw = raw.get("format") or raw.get("name") or raw.get("material_format")
     if raw or payload.get("material_format"):
         return _normalize_format(str(raw or payload.get("material_format") or ""))
@@ -226,6 +325,65 @@ def normalize_zip_runtime_route_evidence(payload: dict[str, Any]) -> dict[str, A
     enriched["damage_flags"] = damage_flags
     enriched["zip_structure_features"] = features
     enriched["zip_container_tags"] = tags
+    enriched["source_derivation"] = source_derivation
+    return enriched
+
+
+def normalize_runtime_route_evidence(payload: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {"route_evidence_flags": [], "damage_flags": []}
+    fmt = _format_from_payload(payload)
+    if fmt in {"7z", "seven_zip"}:
+        return normalize_seven_zip_runtime_route_evidence(payload)
+    if fmt == "zip" or not fmt:
+        return normalize_zip_runtime_route_evidence(payload)
+    enriched = dict(payload)
+    route_flags = _dedupe([str(item) for item in enriched.get("route_evidence_flags") or [] if str(item)])
+    damage_flags = _dedupe([*[str(item) for item in enriched.get("damage_flags") or [] if str(item)], *route_flags])
+    enriched["route_evidence_flags"] = route_flags
+    enriched["damage_flags"] = damage_flags
+    return enriched
+
+
+def normalize_seven_zip_runtime_route_evidence(payload: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {"route_evidence_flags": [], "damage_flags": []}
+    enriched = dict(payload)
+    source_derivation = _merged_source_derivation(enriched)
+    if source_derivation:
+        enriched["source_derivation"] = source_derivation
+    structure = _merged_seven_zip_structure_features(enriched)
+    tags = _seven_zip_container_tags(enriched)
+    if structure:
+        enriched["seven_zip_structure_features"] = structure
+    if tags:
+        enriched["seven_zip_container_tags"] = tags
+    profile_names = _profile_names(enriched)
+    if profile_names and not enriched.get("damage_profile"):
+        enriched["damage_profile"] = profile_names[0]
+    route_flags = seven_zip_route_evidence_flags(enriched)
+    damage_flags = _filter_seven_zip_conflicting_runtime_flags(_dedupe([
+        *[str(item) for item in enriched.get("damage_flags") or [] if str(item)],
+        *route_flags,
+    ]), enriched)
+    source = enriched.get("source_input") if isinstance(enriched.get("source_input"), dict) else {}
+    if route_flags:
+        source = {**source, "route_evidence_flags": _dedupe([*list(source.get("route_evidence_flags") or []), *route_flags])}
+    if structure and "seven_zip_structure_features" not in source:
+        source["seven_zip_structure_features"] = dict(structure)
+    if tags and "seven_zip_container_tags" not in source:
+        source["seven_zip_container_tags"] = list(tags)
+    if source_derivation and "source_derivation" not in source:
+        source["source_derivation"] = dict(source_derivation)
+    if "split_sidecars_available" in route_flags:
+        source["split_sidecars_available"] = True
+    if source.get("kind") == "concat_ranges":
+        source["logical_stream_built"] = True
+    enriched["source_input"] = source
+    enriched["route_evidence_flags"] = route_flags
+    enriched["damage_flags"] = damage_flags
+    enriched["seven_zip_structure_features"] = structure
+    enriched["seven_zip_container_tags"] = tags
     enriched["source_derivation"] = source_derivation
     return enriched
 
@@ -312,6 +470,42 @@ def _merged_zip_structure_features(payload: dict[str, Any]) -> dict[str, Any]:
     return merged
 
 
+def _seven_zip_structure_feature_dicts(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    output: list[dict[str, Any]] = []
+
+    def visit(value: Any) -> None:
+        if isinstance(value, dict):
+            for key in ("seven_zip_structure_features", "seven_zip_structure", "7z_structure"):
+                features = value.get(key)
+                if isinstance(features, dict):
+                    output.append(dict(features))
+            format_payload = value.get("format")
+            seven_payload = None
+            if isinstance(format_payload, dict):
+                seven_payload = format_payload.get("7z") or format_payload.get("seven_zip")
+            if isinstance(seven_payload, dict) and isinstance(seven_payload.get("structure"), dict):
+                output.append(dict(seven_payload["structure"]))
+            for key in ("archive_knowledge", "knowledge", "source", "training", "format", "source_derivation", "analysis_prepass", "analysis_evidence", "extraction_failure", "extraction_diagnostics", "repair_history", "source_input", "damaged_input", "fuzzy"):
+                nested = value.get(key)
+                if isinstance(nested, dict):
+                    visit(nested)
+
+    visit(payload)
+    direct = payload.get("seven_zip_structure_features")
+    if isinstance(direct, dict):
+        output.append(dict(direct))
+    return output
+
+
+def _merged_seven_zip_structure_features(payload: dict[str, Any]) -> dict[str, Any]:
+    merged: dict[str, Any] = {}
+    for features in _seven_zip_structure_feature_dicts(payload):
+        for key, value in features.items():
+            if key not in merged or merged.get(key) in (None, "", False, 0, []):
+                merged[key] = value
+    return merged
+
+
 def _merged_source_derivation(payload: dict[str, Any]) -> dict[str, Any]:
     merged: dict[str, Any] = {}
 
@@ -334,12 +528,21 @@ def _merged_source_derivation(payload: dict[str, Any]) -> dict[str, Any]:
                 visit(nested)
 
     visit(payload)
-    features = _merged_zip_structure_features(payload)
-    tags = _zip_container_tags(payload)
-    if features and "zip_structure_features" not in merged:
-        merged["zip_structure_features"] = features
-    if tags and "zip_container_tags" not in merged:
-        merged["zip_container_tags"] = tags
+    fmt = _format_from_payload(payload)
+    if fmt == "zip":
+        features = _merged_zip_structure_features(payload)
+        tags = _zip_container_tags(payload)
+        if features and "zip_structure_features" not in merged:
+            merged["zip_structure_features"] = features
+        if tags and "zip_container_tags" not in merged:
+            merged["zip_container_tags"] = tags
+    elif fmt in {"7z", "seven_zip"}:
+        structure = _merged_seven_zip_structure_features(payload)
+        tags = _seven_zip_container_tags(payload)
+        if structure and "seven_zip_structure_features" not in merged:
+            merged["seven_zip_structure_features"] = structure
+        if tags and "seven_zip_container_tags" not in merged:
+            merged["seven_zip_container_tags"] = tags
     for name in _profile_names(payload):
         if "damage_profile" not in merged:
             merged["damage_profile"] = name
@@ -375,6 +578,28 @@ def _zip_container_tags(payload: dict[str, Any]) -> list[str]:
             zip_payload = format_payload.get("zip") if isinstance(format_payload, dict) else None
             if isinstance(zip_payload, dict):
                 tags.extend(_list_values(zip_payload, "container_tags"))
+            for key in ("archive_knowledge", "knowledge", "source", "training", "format", "source_derivation", "analysis_prepass", "analysis_evidence", "extraction_failure", "extraction_diagnostics", "repair_history", "source_input", "damaged_input"):
+                nested = value.get(key)
+                if isinstance(nested, dict):
+                    collect(nested)
+
+    collect(payload)
+    return _dedupe(tags)
+
+
+def _seven_zip_container_tags(payload: dict[str, Any]) -> list[str]:
+    tags: list[str] = []
+
+    def collect(value: Any) -> None:
+        if isinstance(value, dict):
+            tags.extend(_list_values(value, "seven_zip_container_tags"))
+            tags.extend(_list_values(value, "7z_container_tags"))
+            format_payload = value.get("format")
+            seven_payload = None
+            if isinstance(format_payload, dict):
+                seven_payload = format_payload.get("7z") or format_payload.get("seven_zip")
+            if isinstance(seven_payload, dict):
+                tags.extend(_list_values(seven_payload, "container_tags"))
             for key in ("archive_knowledge", "knowledge", "source", "training", "format", "source_derivation", "analysis_prepass", "analysis_evidence", "extraction_failure", "extraction_diagnostics", "repair_history", "source_input", "damaged_input"):
                 nested = value.get(key)
                 if isinstance(nested, dict):
@@ -508,6 +733,52 @@ def _zip_profile_flags(profile: str) -> list[str]:
     return flags
 
 
+def _seven_zip_profile_flags(profile: str) -> list[str]:
+    text = str(profile or "").lower()
+    flags: list[str] = []
+    if "split" in text:
+        flags.extend(["split_archive", "split_sidecars_available"])
+    if "sfx" in text or "carrier" in text:
+        flags.extend(["carrier_prefix", "carrier_archive", "embedded_archive"])
+    if "trailing" in text:
+        flags.append("trailing_junk")
+    if "start_header_crc" in text or "start_crc" in text:
+        flags.append("start_header_crc_bad")
+    if "next_header_crc" in text or "next_crc" in text:
+        flags.append("next_header_crc_bad")
+    if "next_header_offset" in text:
+        flags.append("next_header_offset_bad")
+    if "next_header_size" in text:
+        flags.append("next_header_size_bad")
+    if "pack_offset" in text or "pack_stream_offset" in text:
+        flags.append("pack_stream_offset_bad")
+    if "pack_size" in text or "pack_stream_size" in text:
+        flags.append("pack_stream_size_bad")
+    if "stream_crc" in text or "substream_crc" in text:
+        flags.extend(["stream_crc_bad", "payload_crc_bad"])
+    if "encoded_header" in text:
+        flags.append("encoded_header_present")
+    if "encoded_header_unreadable" in text:
+        flags.append("encoded_header_unreadable")
+    if "folder" in text:
+        flags.extend(["bad_folder_detected", "verified_folder_available"])
+    if "names" in text or "utf16" in text:
+        flags.append("file_names_utf16_bad")
+    if "file_count" in text:
+        flags.append("file_count_metadata_bad")
+    if "empty_stream" in text:
+        flags.append("empty_stream_flags_bad")
+    if "solid" in text:
+        flags.append("solid_archive")
+    if "non_solid" in text:
+        flags.append("non_solid_archive")
+    if "payload" in text or "partial" in text or "truncated" in text:
+        flags.extend(["packed_stream_bad", "payload_crc_bad", "partial_recovery_possible"])
+    if "encrypted" in text:
+        flags.append("encrypted_header")
+    return flags
+
+
 def _normalize_zip_generic_damage(flags: list[str]) -> list[str]:
     precise_structural = {
         "zip_comment_length_bad",
@@ -549,6 +820,19 @@ def _normalize_zip_generic_damage(flags: list[str]) -> list[str]:
         removable = {"damaged", "content_integrity_bad_or_unknown"}
         return [flag for flag in flags if flag not in removable]
     return flags
+
+
+def _filter_seven_zip_conflicting_runtime_flags(flags: list[str], payload: dict[str, Any]) -> list[str]:
+    flag_set = set(flags)
+    if "split_sidecars_available" in flag_set and "tail_volume_truncated" not in flag_set and "missing_volume_unavailable" not in flag_set:
+        flags = [flag for flag in flags if flag not in {"missing_volume", "input_truncated", "unexpected_end", "stream_truncated"}]
+        flag_set = set(flags)
+    structure = _merged_seven_zip_structure_features(payload)
+    password_required = _truthy(structure.get("password_required")) or _truthy(structure.get("password_rejected"))
+    encrypted_header = _truthy(structure.get("encrypted_header"))
+    if "wrong_password" in flag_set and not password_required and not encrypted_header:
+        flags = [flag for flag in flags if flag != "wrong_password"]
+    return _dedupe(flags)
 
 
 def _source_has_parts(payload: dict[str, Any]) -> bool:

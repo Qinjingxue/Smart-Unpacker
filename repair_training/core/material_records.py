@@ -5,21 +5,46 @@ from typing import Any
 
 
 def attach_split_volumes(source_input: dict[str, Any], record: dict[str, Any]) -> None:
-    tags = record.get("zip_container_tags") or []
-    profile_text = " ".join(str(record.get(key) or "") for key in ("damage_profile", "sample_id", "source_archive_id", "zip_variant")).lower()
+    if source_input.get("parts"):
+        _ensure_ranges_from_parts(source_input)
+        source_input["split_sidecars_available"] = True
+        return
+    tags = []
+    for key, value in record.items():
+        if str(key).endswith("container_tags") and isinstance(value, list):
+            tags.extend(str(item) for item in value if str(item))
+    value = record.get("container_tags")
+    if isinstance(value, list):
+        tags.extend(str(item) for item in value if str(item))
+    variant_values = [
+        str(value)
+        for key, value in record.items()
+        if str(key).endswith("_variant") and value is not None
+    ]
+    profile_text = " ".join([
+        str(record.get("damage_profile") or ""),
+        str(record.get("sample_id") or ""),
+        str(record.get("source_archive_id") or ""),
+        *variant_values,
+    ]).lower()
+    damaged = record.get("damaged_input") if isinstance(record.get("damaged_input"), dict) else {}
     split_hint = bool(
-        (isinstance(tags, list) and ("split" in tags or "multi_volume" in tags or "split_archive" in tags))
+        ("split" in tags or "multi_volume" in tags or "split_archive" in tags or "split_sidecars_available" in tags)
         or "split" in profile_text
-        or isinstance(record.get("zip_split"), dict)
+        or isinstance(record.get("split"), dict)
+        or isinstance(damaged.get("parts"), list)
     )
     if not split_hint:
         return
     volumes: list[dict[str, Any]] = []
-    split_payload = record.get("zip_split")
+    split_payload = record.get("split")
     if isinstance(split_payload, dict):
-        for item in split_payload.get("volumes") or []:
+        for item in split_payload.get("volumes") or split_payload.get("parts") or []:
             if isinstance(item, dict) and item.get("path"):
                 volumes.append(dict(item))
+    for item in damaged.get("parts") or []:
+        if isinstance(item, dict) and item.get("path"):
+            volumes.append(dict(item))
     source_path = record.get("source_path") or ""
     source_name = record.get("source_archive_name") or ""
     if source_path:
@@ -52,3 +77,16 @@ def attach_split_volumes(source_input: dict[str, Any], record: dict[str, Any]) -
         if vol_path not in existing:
             source_input["parts"].append({"path": vol_path, "role": "volume"})
             source_input["ranges"].append({"path": vol_path, "start": 0, "end": None})
+    if source_input.get("parts"):
+        source_input["split_sidecars_available"] = True
+
+
+def _ensure_ranges_from_parts(source_input: dict[str, Any]) -> None:
+    if source_input.get("ranges"):
+        return
+    ranges: list[dict[str, Any]] = []
+    for item in source_input.get("parts") or []:
+        if isinstance(item, dict) and item.get("path"):
+            ranges.append({"path": str(item.get("path")), "start": int(item.get("start") or 0), "end": item.get("end")})
+    if ranges:
+        source_input["ranges"] = ranges

@@ -6,7 +6,7 @@ from typing import Any
 from sunpack.analysis import ArchiveAnalysisReport
 from sunpack.analysis.result import ArchiveFormatEvidence, ArchiveSegment
 from sunpack.contracts.tasks import ArchiveTask
-from sunpack.repair.context import normalize_zip_runtime_route_evidence
+from sunpack.repair.context import normalize_runtime_route_evidence
 from sunpack.support.archive_knowledge_writer import commit_task_knowledge, ensure_knowledge, write_flags, write_payload, write_value
 
 
@@ -205,7 +205,9 @@ def _write_format_evidence(knowledge: Any, evidence: ArchiveFormatEvidence) -> N
                 source_module="analysis_stage",
             )
         return
-    route_payload = normalize_zip_runtime_route_evidence({
+    if evidence.format != "zip":
+        return
+    route_payload = normalize_runtime_route_evidence({
         "format": evidence.format,
         "analysis_evidence": {"details": details},
         "source_derivation": {

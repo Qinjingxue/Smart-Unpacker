@@ -114,7 +114,13 @@ def source_input_for_job(job: RepairJob) -> dict[str, Any]:
                 "format_hint": base.get("format_hint") or job.format,
                 "parts": base.get("parts"),
                 "use_parts_only": bool(base.get("use_parts_only")),
+                "split_sidecars_available": True,
+                "logical_stream_built": True,
             }
+    if str(base.get("kind") or "") == "concat_ranges":
+        base["logical_stream_built"] = True
+        if base.get("parts") or len(list(base.get("ranges") or [])) > 1:
+            base["split_sidecars_available"] = True
     if str(base.get("kind") or "") == "concat_ranges" and getattr(job, "repair_cache", None) is not None and str(job.workspace or ""):
         fingerprint = source_fingerprint(base)
         workspace = Path(str(job.workspace)) / ".repair_cache"
@@ -136,6 +142,7 @@ def source_input_for_job(job: RepairJob) -> dict[str, Any]:
                 "parts": base.get("parts"),
                 "use_parts_only": bool(base.get("use_parts_only")),
                 "logical_stream_built": True,
+                "split_sidecars_available": bool(base.get("split_sidecars_available")) or bool(base.get("parts")) or len(list(base.get("ranges") or [])) > 1,
             }
     if job.password:
         base["password"] = job.password

@@ -235,7 +235,7 @@ def _categories_for(fmt: str, flags: set[str], failure: dict[str, Any]) -> list[
 
 
 def _severity(flags: set[str], failure: dict[str, Any], confidence: float, *, password: str | None = None) -> str:
-    if ("wrong_password" in flags or failure.get("wrong_password")) and not _has_resolved_password_value(password):
+    if ("wrong_password" in flags or failure.get("wrong_password")) and not _has_resolved_password_value(password) and _wrong_password_requires_block(flags, failure):
         return "blocked"
     if "missing_volume" in flags or failure.get("missing_volume"):
         return "high"
@@ -249,7 +249,7 @@ def _severity(flags: set[str], failure: dict[str, Any], confidence: float, *, pa
 
 
 def _repairability(job: RepairJob, flags: set[str]) -> tuple[bool, list[str], list[str]]:
-    if "wrong_password" in flags and not _has_resolved_password(job):
+    if "wrong_password" in flags and not _has_resolved_password(job) and _wrong_password_requires_block(flags, knowledge_view.extraction_failure(job.knowledge)):
         return False, [], ["password must be resolved before structural repair"]
     if "output_filesystem" in flags and not _has_archive_repair_evidence(flags):
         return False, [], ["failure is outside archive repair scope"]
@@ -263,6 +263,34 @@ def _repairability(job: RepairJob, flags: set[str]) -> tuple[bool, list[str], li
     return True, unsafe, []
 
 
+def _wrong_password_requires_block(flags: set[str], failure: dict[str, Any]) -> bool:
+    fmt = str(failure.get("format") or failure.get("archive_type") or "").lower()
+    if fmt not in {"7z", "seven_zip"}:
+        return True
+    if flags & {"password_required", "password_rejected", "encrypted_header"}:
+        return True
+    structural = {
+        "seven_zip_signature_found",
+        "split_sidecars_available",
+        "split_archive",
+        "carrier_prefix",
+        "carrier_archive",
+        "embedded_archive",
+        "trailing_junk",
+        "next_header_out_of_range",
+        "next_header_offset_bad",
+        "next_header_size_bad",
+        "start_header_crc_bad",
+        "next_header_crc_bad",
+        "pack_stream_offset_bad",
+        "pack_stream_size_bad",
+        "packed_stream_bad",
+        "payload_crc_bad",
+        "partial_recovery_possible",
+    }
+    return not bool(flags & structural)
+
+
 def _has_archive_repair_evidence(flags: set[str]) -> bool:
     return bool(
         (flags & (BOUNDARY_FLAGS | DIRECTORY_FLAGS | CONTENT_FLAGS))
@@ -271,9 +299,14 @@ def _has_archive_repair_evidence(flags: set[str]) -> bool:
 
 
 def _missing_volume_partial_salvage_allowed(job: RepairJob, flags: set[str]) -> bool:
-    if str(job.format or "").lower().lstrip(".") not in {"zip"}:
-        return False
-    return "local_header_recovery" in flags
+    fmt = str(job.format or "").lower().lstrip(".")
+    if fmt == "zip":
+        return "local_header_recovery" in flags
+    if fmt in {"7z", "seven_zip"}:
+        if "missing_volume_unavailable" in flags:
+            return False
+        return bool(flags & {"split_sidecars_available", "partial_recovery_possible", "packed_stream_bad", "payload_crc_bad", "seven_zip_signature_found"})
+    return False
 
 
 def _coverage_flags(coverage: dict[str, Any]) -> list[str]:
