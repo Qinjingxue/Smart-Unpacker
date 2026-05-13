@@ -11,6 +11,8 @@ from sunpack.contracts.archive_state import ArchiveState, PatchOperation, PatchP
 from sunpack.repair.diagnosis import RepairDiagnosis
 from sunpack.repair.job import RepairJob
 from sunpack.repair.pipeline.modules._common import source_input_for_job
+from sunpack.repair.pipeline.modules._common import crop_source_input_ranges
+from sunpack.repair.pipeline.modules._native_candidates import candidates_from_native_result
 from sunpack.repair.pipeline.modules.seven_zip._scan import password_fingerprint
 from sunpack.repair.pipeline.modules.seven_zip.atomic import SevenZipFixStartHeaderCrc
 from sunpack.repair.runtime_cache import RepairRuntimeCache
@@ -77,15 +79,15 @@ def test_seven_zip_clean_only_writes_variant_coverage_report(tmp_path):
         "--clean",
         "--clean-only",
         "--clean-variant-limit",
-        "12",
+        "48",
     ])
 
     assert rc == 0
     assert (material_root / "sources" / "clean_archive_manifest.jsonl").is_file()
     assert not (material_root / "damage_manifest.jsonl").exists()
-    report = json.loads((material_root / "material_distribution_report_seven_zip_v1.json").read_text(encoding="utf-8"))
+    report = json.loads((material_root / "material_distribution_report_seven_zip_v2.json").read_text(encoding="utf-8"))
     coverage = report["clean_variant_coverage"]
-    assert coverage["variant_count"] == 12
+    assert coverage["variant_count"] == 48
     assert coverage["sfx_counts"].get("true")
     assert coverage["split_counts"].get("true")
     assert coverage["encrypted_counts"].get("true")
@@ -126,6 +128,114 @@ def test_seven_zip_split_profile_uses_split_parts(tmp_path):
     assert row["damaged_input"]["use_parts_only"] is True
     assert "split_archive" in row["seven_zip_container_tags"]
     assert row["source_derivation"]["split"] is True
+    assert row["source_derivation"]["split_entry_path"]
+    first_part = row["damaged_input"]["parts"][0]
+    if row["source_derivation"]["sfx"]:
+        assert first_part["role"] == "carrier"
+        assert row["damaged_path"].endswith(".exe")
+
+
+def test_seven_zip_split_trailing_junk_targets_logical_tail(tmp_path):
+    if not (Path("tools/7z.exe").is_file() or shutil.which("7z") or shutil.which("7z.exe")):
+        pytest.skip("7z executable is not available")
+    material_root = tmp_path / "seven_zip_split_tail"
+    distribution = tmp_path / "split_tail_distribution.json"
+    distribution.write_text(json.dumps({
+        "total": 1,
+        "profiles": {
+            "seven_zip_split_trailing_junk": {
+                "count": 1,
+                "compound_components": ["trailing_junk"],
+                "expected_route_facts": ["split_sidecars_available", "trailing_junk"],
+                "variant_requirements": ["split"],
+            }
+        },
+        "compound_profiles": {},
+        "physical_profiles": {},
+    }), encoding="utf-8")
+
+    rc = build_seven_zip_material([
+        "--limit",
+        "1",
+        "--material-root",
+        str(material_root),
+        "--profile-distribution",
+        str(distribution),
+        "--clean",
+    ])
+
+    assert rc == 0
+    row = json.loads((material_root / "damage_manifest.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    mutation = row["corruption_plan"][0]
+    assert mutation["operation"] == "append"
+    assert mutation["logical_offset"] == mutation["offset"]
+    assert mutation["part_path"] == row["damaged_input"]["parts"][-1]["path"]
+    assert mutation["part_offset"] >= 0
+
+
+def test_crop_source_input_ranges_preserves_split_metadata():
+    source = {
+        "kind": "concat_ranges",
+        "format_hint": "7z",
+        "password": "secret",
+        "parts": [{"path": "p1", "role": "carrier"}, {"path": "p2", "role": "volume"}],
+        "ranges": [{"path": "p1", "start": 0, "end": 100}, {"path": "p2", "start": 0, "end": 200}],
+        "split_sidecars_available": True,
+        "logical_stream_built": True,
+    }
+
+    cropped = crop_source_input_ranges(source, 20)
+
+    assert cropped is not None
+    assert cropped["kind"] == "concat_ranges"
+    assert cropped["ranges"] == [{"path": "p1", "start": 20, "end": 100}, {"path": "p2", "start": 0, "end": 200}]
+    assert cropped["split_sidecars_available"] is True
+    assert cropped["logical_stream_built"] is True
+    assert cropped["parts"] == source["parts"]
+    assert cropped["password"] == "secret"
+
+
+def test_split_aware_carrier_crop_candidate_uses_concat_ranges():
+    job = RepairJob(
+        source_input={
+            "kind": "concat_ranges",
+            "format_hint": "7z",
+            "parts": [{"path": "p1", "role": "carrier"}, {"path": "p2", "role": "volume"}],
+            "ranges": [{"path": "p1", "start": 0, "end": 100}, {"path": "p2", "start": 0, "end": 200}],
+            "split_sidecars_available": True,
+            "logical_stream_built": True,
+        },
+        format="seven_zip",
+        password="secret",
+    )
+    result = {
+        "status": "repaired",
+        "format": "7z",
+        "native_target": "carrier_prefix",
+        "candidates": [{
+            "path": "debug-crop.7z",
+            "offset": 20,
+            "actions": ["crop_archive_carrier_prefix"],
+            "patch_facts": ["after_archive_carrier_crop"],
+        }],
+    }
+
+    candidates = candidates_from_native_result(
+        "seven_zip_crop_carrier_prefix",
+        result,
+        job,
+        RepairDiagnosis(format="seven_zip"),
+        native_key="native_7z_atomic_repair",
+    )
+
+    assert candidates
+    repaired_input = candidates[0].repaired_input
+    assert repaired_input["kind"] == "concat_ranges"
+    assert repaired_input["split_sidecars_available"] is True
+    assert repaired_input["logical_stream_built"] is True
+    assert repaired_input["ranges"][0]["start"] == 20
+    assert repaired_input["password"] == "secret"
+    assert "split_logical_stream_preserved_after_crop" in candidates[0].diagnosis["patch_facts"]
 
 
 def test_seven_zip_source_input_carries_password_for_file_concat_and_patched_state(tmp_path):
@@ -182,19 +292,25 @@ def test_seven_zip_source_input_carries_password_for_file_concat_and_patched_sta
 def test_seven_zip_password_flags_veto_only_without_resolved_password():
     module = SevenZipFixStartHeaderCrc()
     diagnosis = RepairDiagnosis(format="seven_zip")
-    no_password_job = RepairJob(
+    encrypted_header_fact_job = RepairJob(
         source_input={"kind": "bytes", "data": b"", "format_hint": "7z"},
         format="seven_zip",
-        damage_flags=["start_header_crc_bad", "encrypted_header", "wrong_password"],
+        damage_flags=["start_header_crc_bad", "encrypted_header_present", "wrong_password"],
+    )
+    password_required_job = RepairJob(
+        source_input={"kind": "bytes", "data": b"", "format_hint": "7z"},
+        format="seven_zip",
+        damage_flags=["start_header_crc_bad", "password_required", "wrong_password"],
     )
     password_job = RepairJob(
         source_input={"kind": "bytes", "data": b"", "format_hint": "7z"},
         format="seven_zip",
-        damage_flags=["start_header_crc_bad", "encrypted_header", "wrong_password"],
+        damage_flags=["start_header_crc_bad", "password_required", "wrong_password"],
         password="secret",
     )
 
-    assert module.can_handle(no_password_job, diagnosis, {}) == 0.0
+    assert module.can_handle(encrypted_header_fact_job, diagnosis, {}) > 0.0
+    assert module.can_handle(password_required_job, diagnosis, {}) == 0.0
     assert module.can_handle(password_job, diagnosis, {}) > 0.0
 
 

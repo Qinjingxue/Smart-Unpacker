@@ -20,7 +20,7 @@ except Exception:  # pragma: no cover - native extension may be unavailable duri
     _native_seven_zip_atomic_repair = None
 
 
-WRONG_PASSWORD_FLAGS = ("wrong_password", "encrypted_header")
+WRONG_PASSWORD_FLAGS = ("wrong_password", "password_required", "password_rejected")
 CARRIER_FLAGS = ("carrier_archive", "carrier_prefix", "sfx", "embedded_archive")
 CONTENT_FLAGS = ("packed_stream_bad", "payload_crc_bad", "crc_error", "checksum_error", "data_error", "damaged")
 
@@ -65,9 +65,11 @@ class _SevenZipAtomicRepair:
         reject_flags = set(self.reject_flags)
         if _has_resolved_password(job):
             reject_flags.difference_update(WRONG_PASSWORD_FLAGS)
-        elif flags & set(WRONG_PASSWORD_FLAGS) and not _seven_zip_password_blocking(job, config):
+        elif flags & set(WRONG_PASSWORD_FLAGS) and not _seven_zip_authentication_blocking(job, config):
             reject_flags.difference_update(WRONG_PASSWORD_FLAGS)
-            flags.difference_update(WRONG_PASSWORD_FLAGS)
+            flags.discard("wrong_password")
+            flags.discard("password_required")
+            flags.discard("password_rejected")
         if flags & reject_flags:
             return 0.0
         if (flags & set(WRONG_PASSWORD_FLAGS)) and not _has_resolved_password(job):
@@ -260,7 +262,7 @@ class SevenZipDecodeEncodedHeader(_SevenZipAtomicRepair):
     repair_name = "seven_zip_decode_encoded_header"
     native_target = "encoded_header_decode"
     route_family = "seven_zip_encoded_header"
-    require_flags = ("encoded_header_present", "encoded_header_decodable")
+    require_flags = ("encoded_header_present",)
     reject_flags = WRONG_PASSWORD_FLAGS
     base_score = 0.84
     confidence = 0.88
@@ -271,7 +273,7 @@ class SevenZipFixPackStreamOffset(_SevenZipAtomicRepair):
     repair_name = "seven_zip_fix_pack_stream_offset"
     native_target = "pack_stream_offset"
     route_family = "seven_zip_pack_stream"
-    require_flags = ("pack_stream_offset_bad",)
+    require_flags = ("pack_stream_offset_bad", "encoded_header_present")
     base_score = 0.82
     confidence = 0.87
 
@@ -281,7 +283,7 @@ class SevenZipFixPackStreamSize(_SevenZipAtomicRepair):
     repair_name = "seven_zip_fix_pack_stream_size"
     native_target = "pack_stream_size"
     route_family = "seven_zip_pack_stream"
-    require_flags = ("pack_stream_size_bad",)
+    require_flags = ("pack_stream_size_bad", "encoded_header_present")
     base_score = 0.82
     confidence = 0.87
 
@@ -324,7 +326,7 @@ class SevenZipFixEncodedHeaderStreamCrc(_SevenZipAtomicRepair):
     repair_name = "seven_zip_fix_encoded_header_stream_crc"
     native_target = "encoded_header_stream_crc"
     route_family = "seven_zip_encoded_header"
-    require_flags = ("encoded_header_stream_crc_bad", "encoded_header_decodable")
+    require_flags = ("encoded_header_stream_crc_bad", "encoded_header_present")
     reject_flags = WRONG_PASSWORD_FLAGS
     base_score = 0.82
     confidence = 0.85
@@ -439,7 +441,7 @@ class SevenZipSalvageSolidPrefix(_SevenZipAtomicRepair):
 
 
 def _job_flags(job: RepairJob, config: dict[str, Any]) -> set[str]:
-    flags = {str(item) for item in job.damage_flags if str(item)}
+    flags = {_normalize_seven_zip_flag(str(item)) for item in job.damage_flags if str(item)}
     knowledge = getattr(job, "knowledge", {})
     if not isinstance(knowledge, dict):
         knowledge = {}
@@ -453,10 +455,14 @@ def _job_flags(job: RepairJob, config: dict[str, Any]) -> set[str]:
     ):
         values = _get_path(knowledge, path, [])
         if isinstance(values, list):
-            flags.update(str(item) for item in values if str(item))
+            flags.update(_normalize_seven_zip_flag(str(item)) for item in values if str(item))
     scan = cached_seven_zip_scan_artifact(job, config)
-    flags.update(str(item) for item in scan.get("route_evidence_flags") or [] if str(item))
+    flags.update(_normalize_seven_zip_flag(str(item)) for item in scan.get("route_evidence_flags") or [] if str(item))
     return flags
+
+
+def _normalize_seven_zip_flag(flag: str) -> str:
+    return "encrypted_header_present" if flag == "encrypted_header" else flag
 
 
 def _record_native_attempt(job: RepairJob, module_name: str, target: str, result: dict[str, Any], scan: dict[str, Any]) -> None:
@@ -559,7 +565,10 @@ def _has_resolved_password(job: RepairJob) -> bool:
     return bool(getattr(job, "password", None))
 
 
-def _seven_zip_password_blocking(job: RepairJob, config: dict[str, Any]) -> bool:
+def _seven_zip_authentication_blocking(job: RepairJob, config: dict[str, Any]) -> bool:
+    authentication = _archive_authentication(job)
+    if authentication:
+        return bool(authentication.get("authentication_blocking"))
     scan = cached_seven_zip_scan_artifact(job, config)
     structure = scan.get("structure") if isinstance(scan.get("structure"), dict) else {}
     if bool(scan.get("password_present")) or _has_resolved_password(job):
@@ -567,10 +576,32 @@ def _seven_zip_password_blocking(job: RepairJob, config: dict[str, Any]) -> bool
     return bool(
         structure.get("password_required")
         or structure.get("password_rejected")
-        or structure.get("encrypted_header")
         or scan.get("password_required")
         or scan.get("password_rejected")
     )
+
+
+def _archive_authentication(job: RepairJob) -> dict[str, Any]:
+    knowledge = getattr(job, "knowledge", {})
+    if not isinstance(knowledge, dict):
+        return {}
+    archive = knowledge.get("archive") if isinstance(knowledge.get("archive"), dict) else {}
+    authentication = archive.get("authentication") if isinstance(archive.get("authentication"), dict) else {}
+    if authentication:
+        return dict(authentication)
+    structure = _get_path(knowledge, "format.7z.structure", {}) or {}
+    if not isinstance(structure, dict):
+        structure = {}
+    flags = {str(item) for item in getattr(job, "damage_flags", []) if str(item)}
+    password_present = bool(getattr(job, "password", None)) or bool(_get_path(knowledge, "archive.password", None)) or bool(structure.get("password_present"))
+    password_required = bool(structure.get("password_required")) or "password_required" in flags
+    password_rejected = bool(structure.get("password_rejected")) or "password_rejected" in flags
+    return {
+        "password_present": password_present,
+        "password_required": password_required,
+        "password_rejected": password_rejected,
+        "authentication_blocking": bool((password_required and not password_present) or password_rejected),
+    }
 
 
 def _get_path(payload: dict[str, Any], path: str, default: Any = None) -> Any:

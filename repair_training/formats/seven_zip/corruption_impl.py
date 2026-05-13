@@ -31,9 +31,12 @@ class Mutation:
     size: int
     zone: str
     expected_effect: str
+    logical_offset: int | None = None
+    part_path: str | None = None
+    part_offset: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "name": self.name,
             "operation": self.op,
             "offset": self.offset,
@@ -41,6 +44,13 @@ class Mutation:
             "zone": self.zone,
             "expected_effect": self.expected_effect,
         }
+        if self.logical_offset is not None:
+            payload["logical_offset"] = self.logical_offset
+        if self.part_path:
+            payload["part_path"] = self.part_path
+        if self.part_offset is not None:
+            payload["part_offset"] = self.part_offset
+        return payload
 
 
 @dataclass(frozen=True)
@@ -495,12 +505,12 @@ def _create_source_variant(root: Path, tool: Path, spec: dict[str, Any], bundle:
 
 def _make_sfx_variant(tool: Path, base_archive: Path, output: Path, parts: list[Path]) -> tuple[Path, list[Path], str]:
     sfx_module = tool.with_name("7z.sfx")
-    if sfx_module.is_file() and base_archive.is_file():
-        output.write_bytes(sfx_module.read_bytes() + base_archive.read_bytes())
-        return output, [output], "real_sfx_module_concat"
     if sfx_module.is_file() and parts:
         output.write_bytes(sfx_module.read_bytes() + parts[0].read_bytes())
         return output, [output, *parts[1:]], "real_sfx_module_split_prefix"
+    if sfx_module.is_file() and base_archive.is_file():
+        output.write_bytes(sfx_module.read_bytes() + base_archive.read_bytes())
+        return output, [output], "real_sfx_module_concat"
     output.write_bytes(b"MZ-SUNPACK-TRAINING-SFX\r\n" + parts[0].read_bytes())
     return output, [output, *parts[1:]], "synthetic_prefix"
 
@@ -585,7 +595,7 @@ def _build_record(
     seed: int,
     rng: random.Random,
 ) -> dict[str, Any]:
-    clean = source.path.read_bytes()
+    clean = _source_logical_bytes(source)
     data = bytearray(clean)
     mutations: list[Mutation] = []
     route_flags = list(meta.get("expected_route_facts") or [])
@@ -608,8 +618,12 @@ def _build_record(
     profile_dir = damaged_root / profile
     profile_dir.mkdir(parents=True, exist_ok=True)
     case_id = f"seven_zip_{profile}_{index:04d}"
-    damaged_path = profile_dir / f"{case_id}.7z"
-    damaged_path.write_bytes(bytes(data))
+    damaged_path = profile_dir / (f"{case_id}.exe" if source.sfx else f"{case_id}.7z")
+    damaged_parts: list[dict[str, Any]] = []
+    if source.split:
+        damaged_parts = _write_split_parts_for_damage(source, damaged_path, bytes(data), mutations)
+    else:
+        damaged_path.write_bytes(bytes(data))
     expected_files = _expected_files_manifest(source.expected_files)
     physical_complete_expected = bool(meta.get("physical_complete_expected", not profile.startswith("partial_")))
     password = source.password
@@ -617,9 +631,8 @@ def _build_record(
         password = None
     damaged_input = {"kind": "file", "path": str(damaged_path.resolve()), "format_hint": "7z"}
     if source.split:
-        sidecar_parts = _copy_split_parts_for_damage(source, damaged_path)
         damaged_input.update({
-            "parts": sidecar_parts,
+            "parts": damaged_parts,
             "use_parts_only": True,
         })
     record = {
@@ -662,6 +675,8 @@ def _build_record(
             "sfx": source.sfx,
             "split": source.split,
             "sfx_generation_mode": source.sfx_generation_mode,
+            "split_entry_path": str(damaged_parts[0].get("path") if damaged_parts else damaged_path.resolve()),
+            "sfx_carrier_entry_path": str(damaged_path.resolve()) if source.sfx else "",
             "layer": str(meta.get("layer") or ("physical" if not physical_complete_expected else ("compound" if meta.get("compound_profile", profile.startswith("compound_")) else "basic"))),
             "variant_requirements": sorted(_variant_requirements(profile, meta)),
             "compound_profile": bool(meta.get("compound_profile", profile.startswith("compound_"))),
@@ -760,8 +775,9 @@ def _apply_component(data: bytearray, component: str, rng: random.Random, mutati
         route_flags.extend(["packed_stream_bad", "payload_crc_bad", "crc_error", "partial_recovery_possible"])
     elif component in {"tail_truncated", "pack_stream_truncated"}:
         cut = max(sig + 40, len(data) - max(16, len(data) // 8))
+        removed = max(0, len(data) - cut)
         del data[cut:]
-        mutations.append(Mutation("truncate_7z_stream_tail", "truncate", cut, len(data) - cut, "7z.stream_tail", "7z stream tail is physically truncated"))
+        mutations.append(Mutation("truncate_7z_stream_tail", "truncate", cut, removed, "7z.stream_tail", "7z stream tail is physically truncated"))
         route_flags.extend(["packed_stream_bad", "payload_crc_bad", "partial_recovery_possible"])
     elif component in {"encoded_header_unreadable", "next_header_damage", "payload_overlap"}:
         start, end = _next_header_range(data, sig)
@@ -886,16 +902,77 @@ def _container_tags(flags: list[str]) -> list[str]:
     return _dedupe(tags)
 
 
-def _copy_split_parts_for_damage(source: SourceVariant, damaged_path: Path) -> list[dict[str, Any]]:
+def _source_logical_bytes(source: SourceVariant) -> bytes:
+    parts = list(source.parts or [])
+    if source.split and parts:
+        return b"".join(part.read_bytes() for part in parts)
+    return source.path.read_bytes()
+
+
+def _write_split_parts_for_damage(
+    source: SourceVariant,
+    damaged_path: Path,
+    data: bytes,
+    mutations: list[Mutation],
+) -> list[dict[str, Any]]:
     parts = list(source.parts or [source.path])
-    output: list[dict[str, Any]] = [{"path": str(damaged_path.resolve()), "role": "main", "volume_number": 1}]
-    for index, part in enumerate(parts[1:], start=2):
-        suffix = "".join(part.suffixes[-2:]) or f".{index:03d}"
-        target = damaged_path.with_name(f"{damaged_path.stem}{suffix}")
-        if part.is_file():
-            shutil.copyfile(part, target)
-        output.append({"path": str(target.resolve()), "role": "volume", "volume_number": index})
+    lengths = [part.stat().st_size if part.is_file() else 0 for part in parts]
+    targets: list[Path] = []
+    offset = 0
+    for index, part in enumerate(parts):
+        if index == 0:
+            target = damaged_path
+        else:
+            suffix = "".join(part.suffixes[-2:]) or f".{index + 1:03d}"
+            target = damaged_path.with_name(f"{damaged_path.stem}{suffix}")
+        length = lengths[index] if index < len(lengths) else 0
+        if index == len(parts) - 1:
+            chunk = data[offset:]
+        else:
+            chunk = data[offset:offset + length]
+        target.write_bytes(chunk)
+        targets.append(target)
+        offset += length
+    _annotate_mutation_part_locations(mutations, targets, lengths)
+    output = []
+    for index, target in enumerate(targets):
+        output.append({
+            "path": str(target.resolve()),
+            "role": "carrier" if index == 0 and source.sfx else ("main" if index == 0 else "volume"),
+            "volume_number": index + 1,
+            "index": index,
+            "start": 0,
+            "end": None,
+        })
     return output
+
+
+def _annotate_mutation_part_locations(mutations: list[Mutation], parts: list[Path], lengths: list[int]) -> None:
+    annotated: list[Mutation] = []
+    for mutation in mutations:
+        part_path, part_offset = _logical_offset_to_part(mutation.offset, parts, lengths)
+        annotated.append(Mutation(
+            mutation.name,
+            mutation.op,
+            mutation.offset,
+            mutation.size,
+            mutation.zone,
+            mutation.expected_effect,
+            logical_offset=mutation.offset,
+            part_path=str(part_path.resolve()) if part_path is not None else None,
+            part_offset=part_offset,
+        ))
+    mutations[:] = annotated
+
+
+def _logical_offset_to_part(offset: int, parts: list[Path], lengths: list[int]) -> tuple[Path | None, int | None]:
+    cursor = 0
+    for index, part in enumerate(parts):
+        length = lengths[index] if index < len(lengths) else 0
+        if offset < cursor + length or index == len(parts) - 1:
+            return part, max(0, offset - cursor)
+        cursor += length
+    return None, None
 
 
 def _expected_files_manifest(files: dict[str, bytes]) -> dict[str, dict[str, Any]]:

@@ -83,6 +83,14 @@ def build_repair_context(job: RepairJob, diagnosis: RepairDiagnosis, *, knowledg
             "damage_flags": damage_flags,
         })
     failure_kind = _archive_scoped_failure_kind(failure_kind, damage_flags)
+    authentication = knowledge_view.archive_authentication(knowledge)
+    normalized_failure_classes = _normalized_failure_classes(
+        failure_kind,
+        damage_flags,
+        authentication=authentication,
+        fmt=context_format,
+    )
+    damage_flags = _dedupe([*damage_flags, *normalized_failure_classes])
     source = knowledge_view.source_input(knowledge)
     analysis_summary = knowledge_view.analysis_summary(knowledge)
     prepass = knowledge_view.analysis_prepass(knowledge)
@@ -139,6 +147,44 @@ def _archive_scoped_failure_kind(failure_kind: str, damage_flags: list[str]) -> 
         "payload_hash_mismatch",
     }
     return "corrupted_data" if evidence_flags else "output_filesystem"
+
+
+def _normalized_failure_classes(
+    failure_kind: str,
+    damage_flags: list[str],
+    *,
+    authentication: dict[str, Any],
+    fmt: str,
+) -> list[str]:
+    if _normalize_format(fmt) not in {"7z", "seven_zip"}:
+        return []
+    if str(failure_kind or "").lower() not in {"encrypted_or_wrong_password", "wrong_password"}:
+        return []
+    if bool(authentication.get("authentication_blocking")):
+        return []
+    flags = {str(flag) for flag in damage_flags if str(flag)}
+    structural = {
+        "seven_zip_signature_found",
+        "split_sidecars_available",
+        "split_archive",
+        "carrier_prefix",
+        "carrier_archive",
+        "embedded_archive",
+        "trailing_junk",
+        "next_header_out_of_range",
+        "next_header_offset_bad",
+        "next_header_size_bad",
+        "start_header_crc_bad",
+        "next_header_crc_bad",
+        "pack_stream_offset_bad",
+        "pack_stream_size_bad",
+        "stream_crc_bad",
+        "substream_crc_bad",
+        "packed_stream_bad",
+        "payload_crc_bad",
+        "partial_recovery_possible",
+    }
+    return ["structure_recognition", "corrupted_data"] if flags & structural else []
 
 
 def runtime_route_evidence_flags(payload: dict[str, Any]) -> list[str]:
@@ -245,7 +291,8 @@ def seven_zip_route_evidence_flags(payload: dict[str, Any]) -> list[str]:
             ("password_present", "password_present"),
             ("password_required", "password_required"),
             ("password_rejected", "password_rejected"),
-            ("encrypted_header", "encrypted_header"),
+            ("encrypted_header", "encrypted_header_present"),
+            ("encrypted_header_present", "encrypted_header_present"),
             ("solid_archive", "solid_archive"),
             ("non_solid_archive", "non_solid_archive"),
         ):
@@ -266,7 +313,7 @@ def seven_zip_route_evidence_flags(payload: dict[str, Any]) -> list[str]:
     if "encoded_header" in tags:
         flags.append("encoded_header_present")
     if "encrypted" in tags or "encrypted_header" in tags:
-        flags.append("encrypted_header")
+        flags.append("encrypted_header_present")
     for profile in _profile_names(payload):
         flags.extend(_seven_zip_profile_flags(profile))
     for item in payload.get("damage_flags") or []:
@@ -775,7 +822,7 @@ def _seven_zip_profile_flags(profile: str) -> list[str]:
     if "payload" in text or "partial" in text or "truncated" in text:
         flags.extend(["packed_stream_bad", "payload_crc_bad", "partial_recovery_possible"])
     if "encrypted" in text:
-        flags.append("encrypted_header")
+        flags.append("encrypted_header_present")
     return flags
 
 
@@ -823,14 +870,14 @@ def _normalize_zip_generic_damage(flags: list[str]) -> list[str]:
 
 
 def _filter_seven_zip_conflicting_runtime_flags(flags: list[str], payload: dict[str, Any]) -> list[str]:
+    flags = ["encrypted_header_present" if str(flag) == "encrypted_header" else str(flag) for flag in flags if str(flag)]
     flag_set = set(flags)
     if "split_sidecars_available" in flag_set and "tail_volume_truncated" not in flag_set and "missing_volume_unavailable" not in flag_set:
         flags = [flag for flag in flags if flag not in {"missing_volume", "input_truncated", "unexpected_end", "stream_truncated"}]
         flag_set = set(flags)
     structure = _merged_seven_zip_structure_features(payload)
     password_required = _truthy(structure.get("password_required")) or _truthy(structure.get("password_rejected"))
-    encrypted_header = _truthy(structure.get("encrypted_header"))
-    if "wrong_password" in flag_set and not password_required and not encrypted_header:
+    if "wrong_password" in flag_set and not password_required:
         flags = [flag for flag in flags if flag != "wrong_password"]
     return _dedupe(flags)
 

@@ -145,6 +145,7 @@ def policy_runtime_context(task: Any) -> dict[str, Any]:
     knowledge = task_knowledge(task)
     return _cached_projection(knowledge, "policy_runtime_context", lambda: {
         "source_fingerprint": source_fingerprint(knowledge),
+        "archive_authentication": archive_authentication(knowledge),
         "zip_runtime_facts": zip_runtime_facts(knowledge),
         "seven_zip_runtime_facts": seven_zip_runtime_facts(knowledge),
         "repair_route_context": repair_route_context(knowledge),
@@ -183,6 +184,11 @@ def archive_repaired(task: Any) -> bool:
 def archive_password(task: Any) -> str | None:
     value = get(task, "archive.password")
     return str(value) if value is not None else None
+
+
+def archive_authentication(task: Any) -> dict[str, Any]:
+    knowledge = task_knowledge(task)
+    return _cached_projection(knowledge, "archive_authentication", lambda: _archive_authentication_uncached(knowledge))
 
 
 def resource_health(task: Any) -> dict[str, Any]:
@@ -270,6 +276,27 @@ def _seven_zip_runtime_facts_uncached(knowledge: ArchiveKnowledge) -> dict[str, 
     }
 
 
+def _archive_authentication_uncached(knowledge: ArchiveKnowledge) -> dict[str, Any]:
+    structure = _dict(knowledge.get("format.7z.structure", {}))
+    extraction_failure = _dict(knowledge.get("extraction.failure", {}))
+    password_present = bool(knowledge.get("archive.password")) or _truthy(structure.get("password_present"))
+    password_required = _truthy(structure.get("password_required"))
+    password_rejected = _truthy(structure.get("password_rejected"))
+    encrypted_header_present = _truthy(structure.get("encrypted_header_present")) or _truthy(structure.get("encrypted_header"))
+    encrypted_payload_present = _truthy(structure.get("encrypted_payload_present")) or _truthy(structure.get("encrypted_payload"))
+    raw_wrong_password = _truthy(extraction_failure.get("wrong_password")) or str(extraction_failure.get("native_status") or "").lower() == "wrong_password"
+    authentication_blocking = bool((password_required and not password_present) or password_rejected)
+    return {
+        "password_present": password_present,
+        "password_required": password_required,
+        "password_rejected": password_rejected,
+        "encrypted_payload_present": encrypted_payload_present,
+        "encrypted_header_present": encrypted_header_present,
+        "raw_wrong_password": raw_wrong_password,
+        "authentication_blocking": authentication_blocking,
+    }
+
+
 def _repair_route_context_uncached(knowledge: ArchiveKnowledge) -> dict[str, Any]:
     flags: list[str] = []
     for path in (
@@ -287,6 +314,10 @@ def _repair_route_context_uncached(knowledge: ArchiveKnowledge) -> dict[str, Any
             flags.extend(str(item) for item in value if str(item))
     flags.extend(_canonical_zip_route_flags(knowledge))
     flags.extend(_canonical_seven_zip_route_flags(knowledge))
+    flags = ["encrypted_header_present" if str(flag) == "encrypted_header" else str(flag) for flag in flags if str(flag)]
+    authentication = _archive_authentication_uncached(knowledge)
+    if not authentication.get("authentication_blocking"):
+        flags = [flag for flag in flags if flag != "wrong_password"]
     route_flags = _dedupe(flags)
     residual = _dedupe([
         str(item)
@@ -645,3 +676,9 @@ def _dedupe(values: list[str]) -> list[str]:
         seen.add(value)
         output.append(value)
     return output
+
+
+def _truthy(value: Any) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+    return bool(value)

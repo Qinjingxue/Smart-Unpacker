@@ -6,7 +6,7 @@ from sunpack.contracts.archive_state import PatchPlan
 from sunpack.repair.candidate import CandidateValidation, RepairCandidate
 from sunpack.repair.diagnosis import RepairDiagnosis
 from sunpack.repair.job import RepairJob
-from sunpack.repair.pipeline.modules._common import patched_state_for_job, patch_diagnosis, source_input_for_job, virtual_patch_repaired_input
+from sunpack.repair.pipeline.modules._common import crop_source_input_ranges, patched_state_for_job, patch_diagnosis, source_input_for_job, virtual_patch_repaired_input
 
 
 def candidates_from_native_result(
@@ -79,6 +79,12 @@ def candidates_from_native_result(
             native_key: dict(result),
             "native_candidate": {"index": index, **details},
         }
+        split_crop_input = _split_aware_crop_repaired_input(item, result, job, runtime_source_input, candidate_format)
+        if split_crop_input is not None:
+            repaired_input = split_crop_input
+            facts = [str(value) for value in diagnosis_payload.get("patch_facts") or []]
+            facts.append("split_logical_stream_preserved_after_crop")
+            diagnosis_payload["patch_facts"] = _dedupe(facts)
         validation_details = diagnosis_payload["validation_details"]
         if isinstance(validation_details, dict):
             policy = str(validation_details.get("policy") or item.get("policy") or "")
@@ -140,6 +146,70 @@ def candidates_from_native_result(
             plan=plan,
         ))
     return candidates
+
+
+def _split_aware_crop_repaired_input(
+    item: dict[str, Any],
+    result: dict[str, Any],
+    job: RepairJob,
+    runtime_source_input: dict[str, Any],
+    candidate_format: str,
+) -> dict[str, Any] | None:
+    facts = {str(value) for value in item.get("patch_facts") or result.get("patch_facts") or []}
+    actions = {str(value) for value in item.get("actions") or result.get("actions") or []}
+    if "after_archive_carrier_crop" not in facts and "crop_archive_carrier_prefix" not in actions:
+        return None
+    source_input = dict(getattr(job, "source_input", None) or {})
+    if str(source_input.get("kind") or "") != "concat_ranges" and not source_input.get("parts"):
+        source_input = dict(runtime_source_input or {})
+    if str(source_input.get("kind") or "") != "concat_ranges" and not source_input.get("parts"):
+        return None
+    try:
+        start = int(item.get("offset") if item.get("offset") is not None else item.get("cropped_start") or 0)
+    except (TypeError, ValueError):
+        return None
+    end = _crop_end(item, result)
+    if _is_split_logical_source(source_input):
+        target = str(item.get("native_target") or result.get("native_target") or "")
+        is_prefix_crop = (
+            "crop_archive_carrier_prefix" in actions
+            or "crop_7z_carrier_prefix" in actions
+            or "after_archive_carrier_crop" in facts
+            or target in {"archive_carrier_crop", "carrier_prefix"}
+        )
+        if is_prefix_crop:
+            end = None
+    repaired = crop_source_input_ranges(source_input, start, end)
+    if repaired is None:
+        return None
+    repaired["format_hint"] = candidate_format
+    if job.password is not None:
+        repaired["password"] = job.password
+    return repaired
+
+
+def _is_split_logical_source(source_input: dict[str, Any]) -> bool:
+    if bool(source_input.get("split_sidecars_available")) or bool(source_input.get("logical_stream_built")):
+        return True
+    if isinstance(source_input.get("parts"), list) and len(source_input.get("parts") or []) > 1:
+        return True
+    if str(source_input.get("kind") or "") == "concat_ranges" and len(source_input.get("ranges") or []) > 1:
+        return True
+    return False
+
+
+def _crop_end(item: dict[str, Any], result: dict[str, Any]) -> int | None:
+    for key in ("end_offset", "cropped_end"):
+        value = item.get(key)
+        if value is None:
+            continue
+        try:
+            end = int(value)
+        except (TypeError, ValueError):
+            continue
+        if end > 0:
+            return end
+    return None
 
 
 def _candidate_mapping(raw: Any, index: int) -> dict[str, Any]:

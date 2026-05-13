@@ -17,6 +17,42 @@ except Exception:  # pragma: no cover - native extension may be unavailable duri
     _native_seven_zip_scan_source = None
 
 
+SEVEN_Z_SCAN_ROUTE_FLAGS = {
+    "seven_zip_signature_found",
+    "carrier_prefix",
+    "carrier_archive",
+    "embedded_archive",
+    "sfx",
+    "trailing_junk",
+    "start_header_crc_bad",
+    "next_header_crc_bad",
+    "next_header_offset_bad",
+    "next_header_size_bad",
+    "next_header_out_of_range",
+    "encoded_header_candidate_found",
+    "encoded_header_unreadable",
+    "encoded_header_present",
+    "encoded_header",
+    "solid_archive",
+    "non_solid_archive",
+    "encrypted_header_present",
+    "password_required",
+    "password_rejected",
+    "packed_stream_bad",
+    "pack_stream_offset_bad",
+    "pack_stream_size_bad",
+    "stream_crc_bad",
+    "substream_crc_bad",
+    "payload_crc_bad",
+    "partial_recovery_possible",
+    "split_archive",
+    "split_sidecars_available",
+    "logical_stream_built",
+    "missing_volume",
+    "input_truncated",
+}
+
+
 def cached_seven_zip_scan_artifact(job: RepairJob, config: dict[str, Any] | None = None) -> dict[str, Any]:
     if _native_seven_zip_scan_source is None:
         return {
@@ -77,12 +113,13 @@ def _write_scan_summary_to_job_knowledge(job: RepairJob, scan: dict[str, Any]) -
     if password_present:
         _set_path(job.knowledge, "archive.password_present", True)
     if route_flags:
-        _add_flags(job.knowledge, "format.7z.route_evidence", route_flags)
-        _add_flags(job.knowledge, "repair.route_evidence", route_flags)
-        _add_flags(job.knowledge, "repair.damage", route_flags)
+        _replace_scan_flags(job.knowledge, "format.7z.route_evidence", route_flags)
+        _replace_scan_flags(job.knowledge, "repair.route_evidence", route_flags)
+        _replace_scan_flags(job.knowledge, "repair.damage", route_flags)
         _set_path(job.knowledge, "format.7z.route_evidence_flags", route_flags)
     if tags:
         _set_path(job.knowledge, "format.7z.container_tags", tags)
+    _bump_revision(job.knowledge)
     markers["seven_zip_scan_summary_digest"] = digest
 
 
@@ -112,6 +149,17 @@ def _set_path(payload: dict[str, Any], path: str, value: Any) -> None:
         current[parts[-1]] = value
 
 
+def _bump_revision(payload: dict[str, Any]) -> None:
+    meta = payload.setdefault("_meta", {})
+    if not isinstance(meta, dict):
+        meta = {}
+        payload["_meta"] = meta
+    try:
+        meta["revision"] = int(meta.get("revision") or 0) + 1
+    except (TypeError, ValueError):
+        meta["revision"] = 1
+
+
 def _get_path(payload: dict[str, Any], path: str, default: Any = None) -> Any:
     current: Any = payload
     for part in [part for part in str(path or "").split(".") if part]:
@@ -128,6 +176,24 @@ def _add_flags(payload: dict[str, Any], namespace: str, flags: list[str]) -> Non
     seen: set[str] = set()
     for item in [*existing, *flags]:
         if item in seen:
+            continue
+        seen.add(item)
+        merged.append(item)
+    _set_path(payload, path, merged)
+
+
+def _replace_scan_flags(payload: dict[str, Any], namespace: str, flags: list[str]) -> None:
+    path = f"{namespace}.flags" if namespace else "flags"
+    existing = [str(item) for item in _get_path(payload, path, []) or [] if str(item)]
+    merged: list[str] = []
+    seen: set[str] = set()
+    for item in existing:
+        if item in SEVEN_Z_SCAN_ROUTE_FLAGS or item in seen:
+            continue
+        seen.add(item)
+        merged.append(item)
+    for item in flags:
+        if not item or item in seen:
             continue
         seen.add(item)
         merged.append(item)

@@ -92,6 +92,7 @@ def runtime_context_from_job(
     diagnostics = _dict_at(knowledge, "extraction.diagnostics")
     history = knowledge_view.repair_history_summary(knowledge)
     route_context = knowledge_view.repair_route_context(knowledge)
+    authentication = knowledge_view.archive_authentication(knowledge)
     worker = diagnostics.get("result") if isinstance(diagnostics.get("result"), dict) else {}
     verification_payload = _dict_at(knowledge, "verification.summary")
     output_quality = verification_payload.get("output_quality") if isinstance(verification_payload.get("output_quality"), dict) else {}
@@ -163,6 +164,15 @@ def runtime_context_from_job(
             "bytes_written": _int(worker.get("bytes_written") if worker else diagnostics.get("bytes_written")),
             "error_kind_present": bool(failure.get("error") or diagnostics.get("error") or worker.get("message")),
             "worker_returncode": _optional_int(diagnostics.get("returncode")),
+        },
+        "archive_authentication": {
+            "password_present": bool(authentication.get("password_present")),
+            "password_required": bool(authentication.get("password_required")),
+            "password_rejected": bool(authentication.get("password_rejected")),
+            "encrypted_payload_present": bool(authentication.get("encrypted_payload_present")),
+            "encrypted_header_present": bool(authentication.get("encrypted_header_present")),
+            "authentication_blocking": bool(authentication.get("authentication_blocking")),
+            "raw_wrong_password": bool(authentication.get("raw_wrong_password")),
         },
         "verification_summary": {
             "decision_hint": str(failure.get("decision_hint") or verification_payload.get("decision_hint") or ""),

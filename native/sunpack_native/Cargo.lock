@@ -410,6 +410,9 @@ name = "lzma-rust2"
 version = "0.16.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "47bb1e988e6fb779cf720ad431242d3f03167c1b3f2b1aae7f1a94b2495b36ae"
+dependencies = [
+ "sha2 0.10.9",
+]
 
 [[package]]
 name = "lzma-sys"
@@ -737,6 +740,7 @@ dependencies = [
  "crc32fast",
  "flate2",
  "hmac",
+ "lzma-rust2",
  "memchr",
  "pbkdf2",
  "pyo3",

@@ -1148,7 +1148,10 @@ def _runtime_graph_config(args: argparse.Namespace, workspace: Path) -> dict[str
         },
         "verification": {
             "enabled": True,
-            "methods": [{"name": "archive_test_crc"}],
+            "methods": [
+                {"name": "extraction_exit_signal"},
+                {"name": "archive_test_crc"},
+            ],
             "max_retries": 0,
             "retry_on_verification_failure": True,
             "cleanup_failed_output": False,
@@ -1242,7 +1245,22 @@ def _verify_expected_files_from_extraction(extraction_result: Any, expected_file
             "matched_bytes": 0,
             "complete_bytes": 0,
         }
-    output_by_path = {normalize_match_path(item.get("archive_path") or item.get("path")): item for item in output_items}
+    output_by_path: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {}
+    for item in output_items:
+        paths = [item.get("archive_path") or item.get("path")]
+        paths.extend(item.get("archive_path_aliases") or [])
+        for raw_path in paths:
+            key = normalize_match_path(raw_path)
+            if not key:
+                continue
+            alias_meta = {}
+            if key != normalize_match_path(item.get("archive_path") or item.get("path")):
+                alias_meta = {
+                    "oracle_path_alias_used": True,
+                    "oracle_segment_prefix": item.get("oracle_segment_prefix") or "",
+                    "oracle_output_manifest_source": item.get("oracle_output_manifest_source") or "top_manifest",
+                }
+            output_by_path.setdefault(key, (item, alias_meta))
     expected_count = 0
     expected_bytes = 0
     matched_files = 0
@@ -1253,6 +1271,9 @@ def _verify_expected_files_from_extraction(extraction_result: Any, expected_file
     matched_bytes = 0
     complete_bytes = 0
     zero_byte_expected = 0
+    alias_used = False
+    alias_prefixes: set[str] = set()
+    manifest_sources: set[str] = set()
     for raw_name, raw_meta in expected_files.items():
         if not isinstance(raw_meta, dict):
             continue
@@ -1265,10 +1286,17 @@ def _verify_expected_files_from_extraction(extraction_result: Any, expected_file
             expected_bytes += max(0, expected_size)
             if expected_size == 0:
                 zero_byte_expected += 1
-        item = output_by_path.get(normalize_match_path(expected_name))
-        if item is None:
+        match = output_by_path.get(normalize_match_path(expected_name))
+        if match is None:
             missing_files += 1
             continue
+        item, alias_meta = match
+        if alias_meta.get("oracle_path_alias_used"):
+            alias_used = True
+            if alias_meta.get("oracle_segment_prefix"):
+                alias_prefixes.add(str(alias_meta.get("oracle_segment_prefix")))
+            if alias_meta.get("oracle_output_manifest_source"):
+                manifest_sources.add(str(alias_meta.get("oracle_output_manifest_source")))
         matched_files += 1
         actual_size = _safe_int(item.get("size", item.get("bytes_written")))
         actual_crc = _optional_crc32(item.get("crc32"))
@@ -1319,6 +1347,9 @@ def _verify_expected_files_from_extraction(extraction_result: Any, expected_file
         "expected_bytes": expected_bytes,
         "matched_bytes": matched_bytes,
         "complete_bytes": complete_bytes,
+        **({"oracle_path_alias_used": True} if alias_used else {}),
+        **({"oracle_segment_prefix": ",".join(sorted(alias_prefixes))} if alias_prefixes else {}),
+        **({"oracle_output_manifest_source": ",".join(sorted(manifest_sources))} if manifest_sources else {}),
         **({"oracle_cap_reason": cap_reason} if cap_reason else {}),
     }
 
@@ -1352,12 +1383,56 @@ def _oracle_output_items(extraction_result: Any) -> list[dict[str, Any]]:
         for raw in manifest.get("files") or []:
             if isinstance(raw, dict):
                 items.append(_oracle_output_item(raw, output_dir))
+    items = _with_embedded_output_aliases(items, output_dir)
     if not items and output_dir.is_dir():
         for path in output_dir.rglob("*"):
             if path.is_file():
                 rel = path.relative_to(output_dir).as_posix()
                 items.append(_oracle_output_item({"path": str(path), "archive_path": rel, "status": "complete"}, output_dir))
+        items = _with_embedded_output_aliases(items, output_dir)
     return [item for item in items if item.get("archive_path") or item.get("path")]
+
+
+def _with_embedded_output_aliases(items: list[dict[str, Any]], output_dir: Path) -> list[dict[str, Any]]:
+    if not items:
+        return items
+    prefixes = sorted({prefix for item in items for prefix in [_embedded_segment_prefix(item.get("archive_path"))] if prefix})
+    if len(prefixes) != 1:
+        return items
+    prefix = prefixes[0]
+    source = "top_manifest"
+    segment_manifest = output_dir / prefix / ".sunpack" / "extraction_manifest.json"
+    if segment_manifest.is_file():
+        source = "segment_manifest"
+    normalized: list[dict[str, Any]] = []
+    marker = prefix + "/"
+    for item in items:
+        copied = dict(item)
+        archive_path = clean_relative_archive_path(copied.get("archive_path") or "")
+        if archive_path.startswith(marker):
+            alias = clean_relative_archive_path(archive_path[len(marker):])
+            if alias:
+                aliases = list(copied.get("archive_path_aliases") or [])
+                if alias not in aliases:
+                    aliases.append(alias)
+                copied["archive_path_aliases"] = aliases
+                copied["oracle_segment_prefix"] = prefix
+                copied["oracle_output_manifest_source"] = source
+        normalized.append(copied)
+    return normalized
+
+
+def _embedded_segment_prefix(path: Any) -> str:
+    text = clean_relative_archive_path(path or "")
+    if not text:
+        return ""
+    parts = text.split("/")
+    if len(parts) < 2:
+        return ""
+    prefix = parts[0]
+    if not prefix.startswith("embedded_"):
+        return ""
+    return prefix
 
 
 def _oracle_output_item(raw: dict[str, Any], output_dir: Path) -> dict[str, Any]:
@@ -1406,6 +1481,7 @@ def _oracle_ground_truth_payload(oracle: dict[str, Any]) -> dict[str, Any]:
         "status", "label", "completeness", "matched_files", "complete_files", "partial_files", "failed_files",
         "missing_files", "wrong_files", "unreadable_files", "entry_count", "expected_files", "expected_bytes",
         "matched_bytes", "complete_bytes", "oracle_source", "oracle_cap_reason", "error",
+        "oracle_path_alias_used", "oracle_segment_prefix", "oracle_output_manifest_source",
     }
     return {key: value for key, value in dict(oracle or {}).items() if key in keys}
 

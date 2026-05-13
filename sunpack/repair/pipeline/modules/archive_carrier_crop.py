@@ -6,7 +6,7 @@ from typing import Any
 from sunpack.repair.diagnosis import RepairDiagnosis
 from sunpack.repair.job import RepairJob
 from sunpack.repair.pipeline.module import RepairModuleSpec, RepairRoute
-from sunpack.repair.pipeline.modules._common import cached_repair_operation, cache_relevant_module_limits, patch_plan_for_crop, source_input_for_job, module_limits
+from sunpack.repair.pipeline.modules._common import cached_repair_operation, cache_relevant_module_limits, crop_source_input_ranges, patch_plan_for_crop, source_input_for_job, module_limits
 from sunpack.repair.pipeline.modules._native_candidates import candidates_from_native_result
 from sunpack.repair.pipeline.modules._native_validation import validate_with_native_probe
 from sunpack.repair.pipeline.registry import register_repair_module
@@ -154,18 +154,26 @@ def _result_from_native(module_name: str, result: dict, job: RepairJob, diagnosi
                 diagnosis={**diagnosis.as_dict(), "native_archive_deep_repair": dict(result), "native_probe": validation},
                 message="native probe rejected repaired candidate",
             )
+        repaired_input = _split_aware_repaired_input_from_native(result, job, fmt)
+        if repaired_input is None:
+            repaired_input = {"kind": "file", "path": selected_path, "format_hint": fmt}
+        diagnosis_payload = {**diagnosis.as_dict(), "native_archive_deep_repair": dict(result), "native_probe": validation}
+        if str(repaired_input.get("kind") or "") == "concat_ranges":
+            patch_facts = [str(value) for value in diagnosis_payload.get("patch_facts") or []]
+            patch_facts.append("split_logical_stream_preserved_after_crop")
+            diagnosis_payload["patch_facts"] = _dedupe(patch_facts)
         return RepairResult(
             status=status,
             confidence=float(result.get("confidence") or 0.78),
             format=fmt,
-            repaired_input={"kind": "file", "path": selected_path, "format_hint": fmt},
+            repaired_input=repaired_input,
             actions=list(result.get("actions") or []),
             damage_flags=list(job.damage_flags),
             warnings=warnings,
             workspace_paths=list(result.get("workspace_paths") or []),
             partial=status == "partial",
             module_name=module_name,
-            diagnosis={**diagnosis.as_dict(), "native_archive_deep_repair": dict(result), "native_probe": validation},
+            diagnosis=diagnosis_payload,
             message=str(result.get("message") or "archive carrier crop produced a candidate"),
         )
     return RepairResult(
@@ -183,6 +191,56 @@ def _result_from_native(module_name: str, result: dict, job: RepairJob, diagnosi
 
 
 register_repair_module(ArchiveCarrierCropDeepRecovery())
+
+
+def _split_aware_repaired_input_from_native(result: dict, job: RepairJob, fmt: str) -> dict[str, Any] | None:
+    source = dict(job.source_input or {})
+    if str(source.get("kind") or "") != "concat_ranges" and not source.get("parts"):
+        source = source_input_for_job(job)
+    if str(source.get("kind") or "") != "concat_ranges" and not source.get("parts"):
+        return None
+    try:
+        start = int(result.get("offset") or result.get("cropped_start") or 0)
+    except (TypeError, ValueError):
+        return None
+    end = None
+    for key in ("end_offset", "cropped_end"):
+        try:
+            value = result.get(key)
+            if value is not None and int(value) > 0:
+                end = int(value)
+                break
+        except (TypeError, ValueError):
+            continue
+    if _is_split_logical_source(source):
+        actions = {str(item) for item in result.get("actions") or []}
+        facts = {str(item) for item in result.get("patch_facts") or []}
+        target = str(result.get("native_target") or "")
+        is_prefix_crop = (
+            "crop_archive_carrier_prefix" in actions
+            or "crop_7z_carrier_prefix" in actions
+            or "after_archive_carrier_crop" in facts
+            or target in {"archive_carrier_crop", "carrier_prefix"}
+        )
+        if is_prefix_crop:
+            end = None
+    repaired = crop_source_input_ranges(source, start, end)
+    if repaired is None:
+        return None
+    repaired["format_hint"] = fmt
+    if job.password is not None:
+        repaired["password"] = job.password
+    return repaired
+
+
+def _is_split_logical_source(source: dict[str, Any]) -> bool:
+    if bool(source.get("split_sidecars_available")) or bool(source.get("logical_stream_built")):
+        return True
+    if isinstance(source.get("parts"), list) and len(source.get("parts") or []) > 1:
+        return True
+    if str(source.get("kind") or "") == "concat_ranges" and len(source.get("ranges") or []) > 1:
+        return True
+    return False
 
 
 def normalize_native_candidate_lengths(result: dict) -> None:

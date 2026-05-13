@@ -20,6 +20,7 @@ from sunpack.repair.policy.runtime_features import policy_candidate_payload
 from sunpack.repair.result import RepairResult
 from sunpack.repair.runtime_cache import RepairRuntimeCache
 from sunpack.contracts.archive_knowledge import ArchiveKnowledge
+from sunpack.support import archive_knowledge_projection as knowledge_view
 from sunpack.support import repair_trace
 
 
@@ -197,6 +198,8 @@ class RepairScheduler:
     def generate_repair_candidates(self, job: RepairJob, *, lazy: bool = False, phase_timer: Any | None = None, phase_prefix: str = "generate_candidates") -> RepairCandidateBatch:
         with _phase(phase_timer, f"{phase_prefix}_knowledge"):
             knowledge = ArchiveKnowledge.from_any(job.knowledge)
+        with _phase(phase_timer, f"{phase_prefix}_pre_route_scan"):
+            job, knowledge = self._apply_pre_route_scan(job, knowledge)
         with _phase(phase_timer, f"{phase_prefix}_diagnose"):
             diagnosis = self.diagnose(job, knowledge=knowledge)
         with _phase(phase_timer, f"{phase_prefix}_build_context"):
@@ -294,6 +297,36 @@ class RepairScheduler:
             ),
             message="registered repair modules did not produce a candidate",
         )
+
+    def _apply_pre_route_scan(self, job: RepairJob, knowledge: ArchiveKnowledge) -> tuple[RepairJob, ArchiveKnowledge]:
+        fmt = str(job.format or "").lower()
+        if fmt not in {"7z", "seven_zip", "sevenzip"}:
+            return job, knowledge
+        before_flags = _route_flags(knowledge)
+        try:
+            from sunpack.repair.pipeline.modules.seven_zip._scan import cached_seven_zip_scan_artifact
+            scan_job = replace(job, repair_cache=job.repair_cache or self.repair_cache)
+            artifact = cached_seven_zip_scan_artifact(scan_job, self.config)
+            refreshed = ArchiveKnowledge.from_any(scan_job.knowledge)
+            after_flags = _route_flags(refreshed)
+            added = sorted(after_flags - before_flags)
+            repair_trace.write_event("repair_pre_route_scan", {
+                "job": repair_trace.job_payload(scan_job),
+                "pre_route_scan_applied": True,
+                "pre_route_scan_digest": getattr(artifact, "digest", ""),
+                "pre_route_scan_flags_added": added,
+                "route_flags_before_scan": sorted(before_flags),
+                "route_flags_after_scan": sorted(after_flags),
+            })
+            return scan_job, refreshed
+        except Exception as exc:
+            repair_trace.write_event("repair_pre_route_scan", {
+                "job": repair_trace.job_payload(job),
+                "pre_route_scan_applied": False,
+                "pre_route_scan_error": str(exc),
+                "route_flags_before_scan": sorted(before_flags),
+            })
+            return job, knowledge
 
     def _run_modules(
         self,
@@ -787,6 +820,17 @@ def _phase(timer: Any | None, name: str):
     if timer is None:
         return nullcontext()
     return timer(name)
+
+
+def _route_flags(knowledge: ArchiveKnowledge) -> set[str]:
+    try:
+        context = knowledge_view.repair_route_context(knowledge)
+    except Exception:
+        return set()
+    flags = context.get("route_evidence_flags") or context.get("damage_flags") or []
+    if not isinstance(flags, list):
+        return set()
+    return {str(flag) for flag in flags if str(flag)}
 
 
 def _candidate_index(candidates: list[RepairCandidate], selected: RepairCandidate) -> int:

@@ -135,10 +135,23 @@ class VerificationPipeline:
             file_observations,
             archive_coverage=archive_coverage,
         )
+        direct_verification_signal = _has_direct_verification_signal(
+            file_observations=file_observations,
+            completeness_hints=completeness_hints,
+            source_hints=source_hints,
+            decision_hints=decision_hints,
+            archive_coverage=archive_coverage,
+        )
+        evidence_sufficient = direct_verification_signal or not output_quality.empty
         completeness = _aggregate_completeness(file_observations, completeness_hints)
         if archive_coverage.confidence > 0:
             completeness = archive_coverage.completeness
         source_integrity = _aggregate_source_integrity(source_hints)
+        extraction_failed = not bool(getattr(evidence.extraction_result, "success", False))
+        if not evidence_sufficient:
+            completeness = 0.0
+            if extraction_failed and source_integrity == SOURCE_INTEGRITY_UNKNOWN:
+                source_integrity = SOURCE_INTEGRITY_DAMAGED
         recoverable_upper_bound = _aggregate_upper_bound(source_integrity, upper_bound_hints)
         counts = _file_counts(file_observations)
         assessment_status = _assessment_status(
@@ -146,6 +159,7 @@ class VerificationPipeline:
             source_integrity=source_integrity,
             counts=counts,
             issues=issues,
+            evidence_sufficient=evidence_sufficient,
         )
         decision_hint = _decision_hint(
             assessment_status=assessment_status,
@@ -157,6 +171,7 @@ class VerificationPipeline:
             partial_accept_threshold=self.partial_accept_threshold,
             output_quality_score=output_quality.score,
             output_confidence=output_quality.confidence,
+            evidence_sufficient=evidence_sufficient,
         )
         return VerificationResult(
             methods_run=methods_run,
@@ -194,6 +209,19 @@ def _aggregate_completeness(file_observations: list[FileVerificationObservation]
     if file_completeness is not None:
         return _clamp01(file_completeness)
     return 1.0
+
+
+def _has_direct_verification_signal(
+    *,
+    file_observations: list[FileVerificationObservation],
+    completeness_hints: list[float],
+    source_hints: list[str],
+    decision_hints: list[str],
+    archive_coverage: ArchiveCoverageSummary,
+) -> bool:
+    if file_observations or completeness_hints or source_hints or decision_hints:
+        return True
+    return bool(archive_coverage.confidence > 0)
 
 
 def _file_completeness(file_observations: list[FileVerificationObservation]) -> float | None:
@@ -446,11 +474,16 @@ def _assessment_status(
     source_integrity: str,
     counts: dict[str, int],
     issues: list[VerificationIssue],
+    evidence_sufficient: bool = True,
 ) -> str:
     if counts["failed"] or counts["missing"]:
         return ASSESSMENT_INCONSISTENT if source_integrity == SOURCE_INTEGRITY_COMPLETE else ASSESSMENT_PARTIAL
     if counts["partial"]:
         return ASSESSMENT_PARTIAL
+    if not evidence_sufficient:
+        if any(issue.code.startswith("fail") for issue in issues):
+            return ASSESSMENT_UNUSABLE
+        return ASSESSMENT_UNKNOWN
     if completeness >= 0.999:
         return ASSESSMENT_COMPLETE
     if completeness > 0.0:
@@ -471,8 +504,17 @@ def _decision_hint(
     partial_accept_threshold: float,
     output_quality_score: float = 0.0,
     output_confidence: float = 0.0,
+    evidence_sufficient: bool = True,
 ) -> str:
     if DECISION_FAIL in decision_hints:
+        return DECISION_FAIL
+    if not evidence_sufficient:
+        if source_integrity in {
+            SOURCE_INTEGRITY_TRUNCATED,
+            SOURCE_INTEGRITY_PAYLOAD_DAMAGED,
+            SOURCE_INTEGRITY_DAMAGED,
+        }:
+            return DECISION_REPAIR
         return DECISION_FAIL
     high_output_quality = (
         output_quality_score >= complete_accept_threshold

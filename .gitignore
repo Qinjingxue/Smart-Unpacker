@@ -71,3 +71,4 @@ bug.txt
 .deepseek/
 .private/
 repair_training/tmp/
+repair_training/runs/

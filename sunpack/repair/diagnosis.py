@@ -249,7 +249,7 @@ def _severity(flags: set[str], failure: dict[str, Any], confidence: float, *, pa
 
 
 def _repairability(job: RepairJob, flags: set[str]) -> tuple[bool, list[str], list[str]]:
-    if "wrong_password" in flags and not _has_resolved_password(job) and _wrong_password_requires_block(flags, knowledge_view.extraction_failure(job.knowledge)):
+    if "wrong_password" in flags and not _has_resolved_password(job) and _wrong_password_requires_block(flags, knowledge_view.extraction_failure(job.knowledge), job=job):
         return False, [], ["password must be resolved before structural repair"]
     if "output_filesystem" in flags and not _has_archive_repair_evidence(flags):
         return False, [], ["failure is outside archive repair scope"]
@@ -263,11 +263,14 @@ def _repairability(job: RepairJob, flags: set[str]) -> tuple[bool, list[str], li
     return True, unsafe, []
 
 
-def _wrong_password_requires_block(flags: set[str], failure: dict[str, Any]) -> bool:
+def _wrong_password_requires_block(flags: set[str], failure: dict[str, Any], job: RepairJob | None = None) -> bool:
+    authentication = knowledge_view.archive_authentication(job.knowledge) if job is not None else {}
+    if authentication:
+        return bool(authentication.get("authentication_blocking"))
     fmt = str(failure.get("format") or failure.get("archive_type") or "").lower()
     if fmt not in {"7z", "seven_zip"}:
         return True
-    if flags & {"password_required", "password_rejected", "encrypted_header"}:
+    if flags & {"password_required", "password_rejected"}:
         return True
     structural = {
         "seven_zip_signature_found",

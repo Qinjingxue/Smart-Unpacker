@@ -154,6 +154,36 @@ def test_archive_test_crc_compares_archive_state_manifest_to_output_files(tmp_pa
     assert verification.archive_coverage.sources[0]["code"] == "info.archive_output_coverage"
 
 
+def test_archive_test_crc_unsupported_empty_failed_extraction_is_not_complete(tmp_path):
+    archive = tmp_path / "sample.7z"
+    archive.write_bytes(b"7z damaged")
+    out_dir = tmp_path / "missing-output"
+    task = ArchiveTask(
+        fact_bag=FactBag(),
+        score=10,
+        key="sample-7z",
+        main_path=str(archive),
+        all_parts=[str(archive)],
+        detected_ext="7z",
+    )
+    result = ExtractionResult(
+        success=False,
+        archive=str(archive),
+        out_dir=str(out_dir),
+        all_parts=[str(archive)],
+        error="extract failed",
+    )
+
+    verification = _scheduler([{"name": "archive_test_crc"}]).verify(task, result)
+
+    assert verification.steps[0].status == "skipped"
+    assert verification.issues[0].code == "warning.archive_crc_state_unsupported"
+    assert verification.completeness == 0.0
+    assert verification.assessment_status != "complete"
+    assert verification.decision_hint != "accept"
+    assert verification.output_empty is True
+
+
 def test_output_presence_uses_worker_manifest_progress_as_completeness(tmp_path):
     archive = tmp_path / "sample.zip"
     archive.write_bytes(b"zip")

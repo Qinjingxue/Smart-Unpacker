@@ -6,12 +6,10 @@ import json
 from pathlib import Path
 from typing import Any
 
-from sunpack.contracts.archive_knowledge import ArchiveKnowledge
 from sunpack.contracts.archive_state import ArchiveState, PatchOperation, PatchPlan
 from sunpack.repair.job import RepairJob
 from sunpack.repair.result import RepairResult
 from sunpack.repair.runtime_cache import stable_cache_key
-from sunpack.support import archive_knowledge_projection as knowledge_view
 from sunpack.support.archive_state_view import archive_state_from_source_input, archive_state_to_bytes
 
 from sunpack_native import (
@@ -165,13 +163,7 @@ def cached_repair_operation(job: RepairJob, namespace: str, operation: str, para
 
 
 def source_fingerprint_for_job(job: RepairJob) -> dict[str, Any]:
-    if isinstance(getattr(job, "knowledge", None), dict):
-        markers = _repair_cache_markers(job.knowledge)
-        cached = markers.get("source_fingerprint_for_job")
-        if isinstance(cached, dict):
-            return dict(cached)
-    knowledge = ArchiveKnowledge.from_any(getattr(job, "knowledge", {}))
-    fingerprint = knowledge_view.source_fingerprint(knowledge)
+    fingerprint = source_fingerprint(source_input_for_job(job))
     if isinstance(getattr(job, "knowledge", None), dict):
         _repair_cache_markers(job.knowledge)["source_fingerprint_for_job"] = _cache_jsonable(fingerprint)
     return fingerprint
@@ -548,6 +540,78 @@ def source_input_size(source_input: dict[str, Any]) -> int | None:
             total += size
         return total
     return None
+
+
+def crop_source_input_ranges(source_input: dict[str, Any], cropped_start: int, cropped_end: int | None = None) -> dict[str, Any] | None:
+    ranges = _logical_ranges_for_crop(source_input)
+    if not ranges:
+        return None
+    start = max(0, int(cropped_start or 0))
+    end = None if cropped_end is None or int(cropped_end) <= 0 else max(start, int(cropped_end))
+    output_ranges: list[dict[str, Any]] = []
+    cursor = 0
+    for item in ranges:
+        size = _range_size(item)
+        if size is None:
+            return None
+        next_cursor = cursor + size
+        if next_cursor <= start:
+            cursor = next_cursor
+            continue
+        if end is not None and cursor >= end:
+            break
+        item_start = int(item.get("start") or 0)
+        local_start = item_start + max(0, start - cursor)
+        if end is None:
+            local_end = item.get("end")
+        else:
+            take = max(0, min(next_cursor, end) - max(cursor, start))
+            local_end = local_start + take
+        if local_end is None or int(local_end) > local_start:
+            output_ranges.append({**item, "start": local_start, "end": local_end})
+        cursor = next_cursor
+    if not output_ranges:
+        return None
+    result = {
+        "kind": "concat_ranges",
+        "ranges": output_ranges,
+        "format_hint": source_input.get("format_hint") or source_input.get("format"),
+        "parts": source_input.get("parts"),
+        "use_parts_only": True,
+        "logical_stream_built": True,
+        "split_sidecars_available": bool(source_input.get("split_sidecars_available")) or bool(source_input.get("parts")) or len(output_ranges) > 1,
+    }
+    if source_input.get("password"):
+        result["password"] = source_input.get("password")
+    return {key: value for key, value in result.items() if value not in (None, "", [], {})}
+
+
+def _logical_ranges_for_crop(source_input: dict[str, Any]) -> list[dict[str, Any]]:
+    kind = str(source_input.get("kind") or "file")
+    if kind == "concat_ranges":
+        return [dict(item) for item in source_input.get("ranges") or [] if isinstance(item, dict) and item.get("path")]
+    if isinstance(source_input.get("parts"), list) and source_input.get("parts"):
+        ranges = []
+        seen: set[str] = set()
+        for part in source_input.get("parts") or []:
+            if not isinstance(part, dict):
+                continue
+            path = str(part.get("path") or "")
+            if not path or path in seen:
+                continue
+            seen.add(path)
+            ranges.append({"path": path, "start": int(part.get("start") or 0), "end": part.get("end")})
+        if ranges:
+            return ranges
+    if kind == "file_range":
+        return [{
+            "path": source_input.get("path"),
+            "start": int(source_input.get("start") or 0),
+            "end": source_input.get("end"),
+        }]
+    if kind == "file" and source_input.get("path"):
+        return [{"path": source_input.get("path"), "start": 0, "end": None}]
+    return []
 
 
 def _take_concat_prefix(ranges: list[dict[str, Any]], length: int) -> list[dict[str, Any]]:

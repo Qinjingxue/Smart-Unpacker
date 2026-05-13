@@ -197,9 +197,16 @@ def test_seven_zip_wrong_password_flags_are_vetoed_only_without_resolved_passwor
     job = RepairJob(
         source_input={"kind": "bytes", "data": b"", "format_hint": "7z"},
         format="7z",
-        damage_flags=["seven_zip_signature_found", "start_header_crc_bad", "wrong_password", "encrypted_header"],
+        damage_flags=["seven_zip_signature_found", "start_header_crc_bad", "wrong_password", "password_required"],
     )
     assert module.can_handle(job, RepairDiagnosis(format="7z"), {}) == 0.0
+
+    header_fact_only = RepairJob(
+        source_input=job.source_input,
+        format="7z",
+        damage_flags=["seven_zip_signature_found", "start_header_crc_bad", "wrong_password", "encrypted_header_present"],
+    )
+    assert module.can_handle(header_fact_only, RepairDiagnosis(format="7z"), {}) > 0.0
 
     unlocked = RepairJob(
         source_input=job.source_input,
