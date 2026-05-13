@@ -113,12 +113,16 @@ class RepairPolicyManager:
                     raise
                 errors.append(f"{provider_id}: {exc}")
                 continue
-            selected_index = self._selected_index(decision, candidate_by_id)
-            if selected_index is None:
+            selected_candidate_index = self._selected_candidate_index(decision, candidate_by_id)
+            if selected_candidate_index is None:
                 errors.append(f"{provider_id}: {_invalid_decision_reason(decision, candidate_by_id)}")
                 continue
-            selected = candidates[selected_index]
-            selected_payload = candidate_payloads[selected_index] if selected_index < len(candidate_payloads) else {}
+            selected = candidates[selected_candidate_index]
+            selected_payload = (
+                candidate_payloads[selected_candidate_index]
+                if selected_candidate_index < len(candidate_payloads)
+                else {}
+            )
             selected_candidate_id = str(selected_payload.get("candidate_id") or "")
             return selected, {
                 **base,
@@ -196,25 +200,22 @@ class RepairPolicyManager:
         return str(getattr(provider, "provider_id", "") or provider.__class__.__name__ or "repair_policy")
 
     @staticmethod
-    def _selected_index(decision: RepairPolicyDecision, candidate_by_id: dict[str, int]) -> int | None:
+    def _selected_candidate_index(decision: RepairPolicyDecision, candidate_by_id: dict[str, int]) -> int | None:
         if not decision.selected_candidate_id:
             return None
         return candidate_by_id.get(str(decision.selected_candidate_id))
 
 
-def _coerce_decision(value: RepairPolicyDecision | dict[str, Any] | str | int | None, *, provider_id: str) -> RepairPolicyDecision:
+def _coerce_decision(value: RepairPolicyDecision | dict[str, Any] | str | None, *, provider_id: str) -> RepairPolicyDecision:
     if isinstance(value, RepairPolicyDecision):
         if value.provider_id:
             return value
         return RepairPolicyDecision(**{**asdict(value), "provider_id": provider_id})
-    if isinstance(value, int):
-        return RepairPolicyDecision(selected_index=value, provider_id=provider_id)
     if isinstance(value, str):
         return RepairPolicyDecision(selected_candidate_id=value, provider_id=provider_id)
     if isinstance(value, dict):
         return RepairPolicyDecision(
             selected_candidate_id=str(value.get("selected_candidate_id") or value.get("candidate_id") or ""),
-            selected_index=value.get("selected_index"),
             confidence=_optional_float(value.get("confidence")),
             provider_id=str(value.get("provider_id") or provider_id),
             reason=str(value.get("reason") or ""),
@@ -243,8 +244,6 @@ def _invalid_decision_reason(decision: RepairPolicyDecision, candidate_by_id: di
     if decision.reason.startswith("abstain:"):
         return decision.reason
     if not decision.selected_candidate_id:
-        if decision.selected_index is not None:
-            return "invalid_policy_decision_legacy_selected_index"
         return "invalid_policy_decision_missing_candidate_id"
     return "invalid_candidate_id" if str(decision.selected_candidate_id) not in candidate_by_id else "invalid_policy_decision"
 
@@ -274,7 +273,7 @@ def _normalize_format(value: Any) -> str:
 
 
 def _public_metadata(value: dict[str, Any]) -> dict[str, Any]:
-    allowed = {"model_id", "model_version", "feature_contract_version", "decision_reason"}
+    allowed = {"model_id", "model_version", "feature_contract_version", "format", "decision_reason"}
     return {key: value[key] for key in allowed if key in value}
 
 

@@ -162,8 +162,8 @@ def test_policy_probe_writes_public_request_and_decision(tmp_path, monkeypatch):
     assert decision["selected_candidate"]["module_name"] == "model_choice"
 
 
-def test_legacy_selected_index_policy_decision_falls_back_to_selector(tmp_path, monkeypatch):
-    _install_policy_package(monkeypatch, "sunpack_policy_test_invalid", _IndexProvider(selected_index=99))
+def test_policy_decision_without_candidate_id_falls_back_to_selector(tmp_path, monkeypatch):
+    _install_policy_package(monkeypatch, "sunpack_policy_test_invalid", _MissingCandidateIdProvider())
     first = _candidate("selector_choice", tmp_path / "first.zip", confidence=0.95)
     second = _candidate("other", tmp_path / "second.zip", confidence=0.1)
     scheduler = RepairScheduler({
@@ -179,7 +179,7 @@ def test_legacy_selected_index_policy_decision_falls_back_to_selector(tmp_path, 
     assert result.ok
     assert result.module_name == "selector_choice"
     assert result.diagnosis["candidate_selection"]["policy"]["decision_status"] == "fallback"
-    assert result.diagnosis["candidate_selection"]["policy"]["invalid_candidate_id_reason"] == "invalid_policy_decision_legacy_selected_index"
+    assert result.diagnosis["candidate_selection"]["policy"]["invalid_candidate_id_reason"] == "invalid_policy_decision_missing_candidate_id"
     assert result.diagnosis["candidate_selection"]["policy_fallback"] is True
 
 
@@ -480,19 +480,15 @@ def test_runtime_repair_job_preserves_split_sidecars_without_unavailable_flag(tm
     assert "missing_volume_unavailable" not in job.damage_flags
 
 
-class _IndexProvider:
+class _MissingCandidateIdProvider:
     provider_id = "test_zip_policy"
     supported_formats = ("zip",)
-
-    def __init__(self, *, selected_index: int):
-        self.selected_index = selected_index
 
     def available(self):
         return True
 
     def choose(self, request):
         return {
-            "selected_index": self.selected_index,
             "confidence": 0.9,
             "metadata": {
                 "model_id": "test",

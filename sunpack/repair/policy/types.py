@@ -23,8 +23,6 @@ class RepairPolicyRequest:
 @dataclass(frozen=True)
 class RepairPolicyDecision:
     selected_candidate_id: str = ""
-    # Legacy diagnostic field only. Runtime policy selection must use selected_candidate_id.
-    selected_index: int | None = None
     confidence: float | None = None
     provider_id: str = ""
     reason: str = ""
