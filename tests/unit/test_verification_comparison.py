@@ -154,6 +154,42 @@ def test_verification_comparator_prefers_incumbent_output_quality_over_cleaner_a
     assert result.ranks["incumbent-output"].rank_vector["output_quality_score"] == 0.95
 
 
+def test_verification_comparator_does_not_treat_partial_salvage_container_as_full_complete():
+    incumbent = _attempt(
+        "incumbent-many-output",
+        status=ASSESSMENT_PARTIAL,
+        decision=DECISION_ACCEPT_PARTIAL,
+        completeness=0.85,
+        complete_files=17,
+        expected_files=20,
+        source_integrity=SOURCE_INTEGRITY_DAMAGED,
+        output_quality_score=0.95,
+        output_file_count=17,
+        output_total_bytes=200_000,
+    )
+    salvage_container = _attempt(
+        "salvage-one-file-container",
+        status=ASSESSMENT_COMPLETE,
+        decision=DECISION_ACCEPT,
+        completeness=1.0,
+        complete_files=1,
+        expected_files=1,
+        source_integrity=SOURCE_INTEGRITY_COMPLETE,
+        output_quality_score=0.82,
+        output_file_count=1,
+        output_total_bytes=1_000,
+        repair_module="seven_zip_salvage_non_solid_entries",
+    )
+
+    result = compare_attempts([salvage_container], incumbent=incumbent)
+
+    assert result.best is incumbent
+    salvage_rank = result.ranks["salvage-one-file-container"]
+    assert salvage_rank.rank_vector["partial_salvage_attempt"] is True
+    assert salvage_rank.rank_vector["assessment_status"] == ASSESSMENT_PARTIAL
+    assert salvage_rank.decision == "keep_partial"
+
+
 def test_verification_tiebreak_prefers_fewer_failed_files_when_completeness_matches():
     fewer_failed = _attempt(
         "fewer-failed",
@@ -224,6 +260,7 @@ def _attempt(
     output_quality_score: float = 0.0,
     output_file_count: int = 0,
     output_total_bytes: int = 0,
+    repair_module: str = "",
 ) -> RecoveryAttempt:
     coverage = ArchiveCoverageSummary(
         completeness=completeness,
@@ -254,4 +291,5 @@ def _attempt(
             output_empty=output_file_count <= 0,
         ),
         patch_cost=patch_cost,
+        repair_module=repair_module,
     )

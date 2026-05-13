@@ -1,7 +1,10 @@
 use flate2::read::GzDecoder;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList};
-use sevenz_rust2::{Archive, BlockDecoder, Password};
+use sevenz_rust2::{
+    Archive, ArchiveEntry, ArchiveWriter, BlockDecoder, EncoderConfiguration, EncoderMethod,
+    Password,
+};
 use std::fs::{self, File};
 use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -398,7 +401,7 @@ fn seven_zip_salvage_solid_prefix_native(
     let data = match read_source_input(source_input, mb_to_bytes(max_input_size_mb)) {
         Ok(data) => data,
         Err(message) => {
-            return status_dict(py, "skipped", "", "zip", &message, &[], 0, 0, 0, 0.0, &[])
+            return status_dict(py, "skipped", "", "7z", &message, &[], 0, 0, 0, 0.0, &[])
         }
     };
     let recovered = match recover_seven_zip_entries_by_block(&data, max_entries.max(1), password.as_deref()) {
@@ -406,7 +409,7 @@ fn seven_zip_salvage_solid_prefix_native(
         Err(message) => {
             let residual = password_residual_fact(&message, password.is_some());
             let residual_refs = residual.iter().map(String::as_str).collect::<Vec<_>>();
-            return seven_zip_atomic_status(py, "unrepairable", "solid_prefix", "zip", "", &message, &[], &[], &[], 0.0, &residual_refs, &[])
+            return seven_zip_atomic_status(py, "unrepairable", "solid_prefix", "7z", "", &message, &[], &[], &[], 0.0, &residual_refs, &[])
         }
     };
     if recovered.is_empty() {
@@ -414,7 +417,7 @@ fn seven_zip_salvage_solid_prefix_native(
             py,
             "unrepairable",
             "",
-            "zip",
+            "7z",
             "no decodable 7z block entries were recoverable",
             &[],
             0,
@@ -424,16 +427,16 @@ fn seven_zip_salvage_solid_prefix_native(
             &[],
         );
     }
-    let output_path = Path::new(workspace).join("seven_zip_salvage_solid_prefix.zip");
+    let output_path = Path::new(workspace).join("seven_zip_salvage_solid_prefix.7z");
     let output_bytes =
-        match write_stored_zip_entries(&recovered, &output_path, mb_to_bytes(max_output_size_mb)) {
+        match write_stored_7z_entries(&recovered, &output_path, mb_to_bytes(max_output_size_mb)) {
             Ok(bytes) => bytes,
             Err(message) => {
                 return status_dict(
                     py,
                     "unrepairable",
                     "",
-                    "zip",
+                    "7z",
                     &message,
                     &[],
                     0,
@@ -447,7 +450,7 @@ fn seven_zip_salvage_solid_prefix_native(
     let selected = WrittenArchiveCandidate {
         name: "seven_zip_salvage_solid_prefix".to_string(),
         path: output_path.to_string_lossy().to_string(),
-        format: "zip".to_string(),
+        format: "7z".to_string(),
         status: "partial".to_string(),
         offset: 0,
         end_offset: data.len() as u64,
@@ -456,16 +459,16 @@ fn seven_zip_salvage_solid_prefix_native(
         actions: vec![
             "parse_7z_next_header_blocks".to_string(),
             "decode_7z_blocks_independently".to_string(),
-            "repack_recoverable_entries_as_zip".to_string(),
+            "repack_recoverable_entries_as_7z".to_string(),
         ],
-        warnings: vec!["7z salvage output is a ZIP containing recovered files only".to_string()],
+        warnings: vec!["7z partial salvage container contains recovered files only".to_string()],
     };
-    status_dict_with_candidates(
+    let result = status_dict_with_candidates(
         py,
         "partial",
         &selected.path,
-        "zip",
-        "7z block-level salvage recovered decodable entries into a ZIP candidate",
+        "7z",
+        "7z block-level salvage recovered decodable entries into a 7z partial candidate",
         &selected.warnings,
         0,
         data.len() as u64,
@@ -474,10 +477,12 @@ fn seven_zip_salvage_solid_prefix_native(
         &[
             "parse_7z_next_header_blocks",
             "decode_7z_blocks_independently",
-            "repack_recoverable_entries_as_zip",
+            "repack_recoverable_entries_as_7z",
         ],
         &[selected.clone()],
-    )
+    )?;
+    result.bind(py).set_item("recovered_entry_count", recovered.len())?;
+    Ok(result)
 }
 
 fn seven_zip_salvage_non_solid_entries_native(
@@ -492,7 +497,7 @@ fn seven_zip_salvage_non_solid_entries_native(
     let data = match read_source_input(source_input, mb_to_bytes(max_input_size_mb)) {
         Ok(data) => data,
         Err(message) => {
-            return status_dict(py, "skipped", "", "zip", &message, &[], 0, 0, 0, 0.0, &[])
+            return status_dict(py, "skipped", "", "7z", &message, &[], 0, 0, 0, 0.0, &[])
         }
     };
     let recovered = match recover_seven_zip_entries_by_block(&data, max_entries.max(1), password.as_deref()) {
@@ -500,7 +505,7 @@ fn seven_zip_salvage_non_solid_entries_native(
         Err(message) => {
             let residual = password_residual_fact(&message, password.is_some());
             let residual_refs = residual.iter().map(String::as_str).collect::<Vec<_>>();
-            return seven_zip_atomic_status(py, "unrepairable", "non_solid_entries", "zip", "", &message, &[], &[], &[], 0.0, &residual_refs, &[])
+            return seven_zip_atomic_status(py, "unrepairable", "non_solid_entries", "7z", "", &message, &[], &[], &[], 0.0, &residual_refs, &[])
         }
     };
     if recovered.is_empty() {
@@ -508,7 +513,7 @@ fn seven_zip_salvage_non_solid_entries_native(
             py,
             "unrepairable",
             "",
-            "zip",
+            "7z",
             "no independently decodable non-solid 7z entries were recoverable",
             &[],
             0,
@@ -518,16 +523,16 @@ fn seven_zip_salvage_non_solid_entries_native(
             &[],
         );
     }
-    let output_path = Path::new(workspace).join("seven_zip_salvage_non_solid_entries.zip");
+    let output_path = Path::new(workspace).join("seven_zip_salvage_non_solid_entries.7z");
     let output_bytes =
-        match write_stored_zip_entries(&recovered, &output_path, mb_to_bytes(max_output_size_mb)) {
+        match write_stored_7z_entries(&recovered, &output_path, mb_to_bytes(max_output_size_mb)) {
             Ok(bytes) => bytes,
             Err(message) => {
                 return status_dict(
                     py,
                     "unrepairable",
                     "",
-                    "zip",
+                    "7z",
                     &message,
                     &[],
                     0,
@@ -541,7 +546,7 @@ fn seven_zip_salvage_non_solid_entries_native(
     let selected = WrittenArchiveCandidate {
         name: "seven_zip_salvage_non_solid_entries".to_string(),
         path: output_path.to_string_lossy().to_string(),
-        format: "zip".to_string(),
+        format: "7z".to_string(),
         status: "partial".to_string(),
         offset: 0,
         end_offset: data.len() as u64,
@@ -551,18 +556,18 @@ fn seven_zip_salvage_non_solid_entries_native(
             "parse_7z_folder_streams".to_string(),
             "decode_independent_7z_entries".to_string(),
             "quarantine_failed_7z_entries".to_string(),
-            "repack_recoverable_entries_as_zip".to_string(),
+            "repack_recoverable_entries_as_7z".to_string(),
         ],
         warnings: vec![
-            "7z non-solid salvage output is a ZIP containing recovered files only".to_string(),
+            "7z partial salvage container contains recovered files only".to_string(),
         ],
     };
-    status_dict_with_candidates(
+    let result = status_dict_with_candidates(
         py,
         "partial",
         &selected.path,
-        "zip",
-        "7z non-solid partial salvage recovered independently decodable entries into a ZIP candidate",
+        "7z",
+        "7z non-solid partial salvage recovered independently decodable entries into a 7z partial candidate",
         &selected.warnings,
         0,
         data.len() as u64,
@@ -572,10 +577,12 @@ fn seven_zip_salvage_non_solid_entries_native(
             "parse_7z_folder_streams",
             "decode_independent_7z_entries",
             "quarantine_failed_7z_entries",
-            "repack_recoverable_entries_as_zip",
+            "repack_recoverable_entries_as_7z",
         ],
         &[selected.clone()],
-    )
+    )?;
+    result.bind(py).set_item("recovered_entry_count", recovered.len())?;
+    Ok(result)
 }
 
 #[pyfunction]
@@ -796,6 +803,19 @@ pub(crate) fn seven_zip_atomic_repair(
     max_entries: usize,
     max_candidates: usize,
 ) -> PyResult<Py<PyDict>> {
+    match target {
+        "encoded_header_decode"
+        | "unpack_size"
+        | "bad_folder_quarantine"
+        | "file_names_utf16"
+        | "unreferenced_folder"
+        | "unreferenced_file_record"
+        | "stream_crc_defined_flag"
+        | "folder_bind_pairs"
+        | "folder_stream_counts"
+        | "file_count_metadata" => return seven_zip_metadata_target_not_materialized(py, target),
+        _ => {}
+    }
     let data = match read_source_input(source_input, mb_to_bytes(max_input_size_mb)) {
         Ok(data) => data,
         Err(message) => return seven_zip_atomic_status(py, "skipped", target, "7z", "", &message, &[], &[], &[], 0.0, &[], &[]),
@@ -814,24 +834,14 @@ pub(crate) fn seven_zip_atomic_repair(
         | "stream_crc"
         | "encoded_header_stream_crc"
         | "empty_stream_flags" => seven_zip_repair_metadata_target(py, &data, workspace, target),
-        "encoded_header_decode"
-        | "unpack_size"
-        | "bad_folder_quarantine"
-        | "file_names_utf16"
-        | "unreferenced_folder"
-        | "unreferenced_file_record"
-        | "stream_crc_defined_flag"
-        | "folder_bind_pairs"
-        | "folder_stream_counts"
-        | "file_count_metadata" => seven_zip_metadata_target_not_materialized(py, target),
         "non_solid_entries" => {
             let result = seven_zip_salvage_non_solid_entries_native(py, source_input, workspace, max_input_size_mb, max_output_size_mb, max_entries)?;
-            set_seven_zip_atomic_fields(py, &result, target, &["salvaged_non_solid_entries", "source_format=7z", "output_container=zip", "partial=true"], &["partial_recovery_remaining"])?;
+            set_seven_zip_atomic_fields(py, &result, target, &["salvaged_non_solid_entries", "source_format=7z", "output_container=7z", "partial=true", "repacked_recovered_entries_as_7z"], &["partial_recovery_remaining"])?;
             Ok(result)
         }
         "solid_prefix" => {
             let result = seven_zip_salvage_solid_prefix_native(py, source_input, workspace, max_input_size_mb, max_output_size_mb, max_entries)?;
-            set_seven_zip_atomic_fields(py, &result, target, &["salvaged_solid_prefix", "source_format=7z", "output_container=zip", "partial=true"], &["partial_recovery_remaining"])?;
+            set_seven_zip_atomic_fields(py, &result, target, &["salvaged_solid_prefix", "source_format=7z", "output_container=7z", "partial=true", "repacked_recovered_entries_as_7z"], &["partial_recovery_remaining"])?;
             Ok(result)
         }
         _ => seven_zip_atomic_status(py, "target_mismatch", target, "7z", "", "unsupported 7z atomic repair target", &[], &[], &[], 0.0, &[], &[]),
@@ -2200,7 +2210,6 @@ fn rar5_header_block(block_type: u64, flags: u64, tail_fields: &[u8], data: &[u8
 struct StoredZipEntry {
     name: Vec<u8>,
     data: Vec<u8>,
-    crc32: u32,
 }
 
 fn recover_seven_zip_entries_by_block(
@@ -2215,6 +2224,22 @@ fn recover_seven_zip_entries_by_block(
     let password = seven_zip_password(password);
     let archive = Archive::read(&mut cursor, &password).map_err(|err| err.to_string())?;
     let mut output = Vec::new();
+    for file in &archive.files {
+        if output.len() >= max_entries {
+            break;
+        }
+        if file.is_directory || file.is_anti_item || file.has_stream || file.size != 0 {
+            continue;
+        }
+        let name = sanitize_archive_name(file.name());
+        if name.is_empty() {
+            continue;
+        }
+        output.push(StoredZipEntry {
+            name: name.into_bytes(),
+            data: Vec::new(),
+        });
+    }
     for block_index in 0..archive.blocks.len() {
         if output.len() >= max_entries {
             break;
@@ -2239,7 +2264,6 @@ fn recover_seven_zip_entries_by_block(
             }
             output.push(StoredZipEntry {
                 name: name.into_bytes(),
-                crc32: crc32(&bytes),
                 data: bytes,
             });
             Ok(true)
@@ -2604,70 +2628,40 @@ fn nested_tar_end(data: &[u8], offset: usize) -> Option<usize> {
     None
 }
 
-fn write_stored_zip_entries(
+fn write_stored_7z_entries(
     entries: &[StoredZipEntry],
     output: &Path,
     max_output_bytes: Option<u64>,
 ) -> Result<u64, String> {
     ensure_parent(output).map_err(|err| err.to_string())?;
+    let recovered_payload_bytes = entries
+        .iter()
+        .try_fold(0u64, |total, entry| total.checked_add(entry.data.len() as u64))
+        .ok_or_else(|| "recovered entry payload size overflow".to_string())?;
+    if max_output_bytes.is_some_and(|limit| recovered_payload_bytes > limit) {
+        return Err("candidate output exceeds repair.deep.max_output_size_mb".to_string());
+    }
+
     let temp = temp_path(output);
     let result = (|| -> Result<u64, String> {
-        let mut file = File::create(&temp).map_err(|err| err.to_string())?;
-        let mut cd = Vec::new();
+        let file = File::create(&temp).map_err(|err| err.to_string())?;
+        let mut writer = ArchiveWriter::new(file).map_err(|err| err.to_string())?;
+        writer.set_content_methods(vec![EncoderConfiguration::new(EncoderMethod::COPY)]);
+        writer.set_encrypt_header(false);
         for entry in entries {
-            if entry.name.len() > u16::MAX as usize || entry.data.len() > u32::MAX as usize {
-                return Err("recovered entry exceeds ZIP32 limits".to_string());
-            }
-            let local_offset = file.stream_position().map_err(|err| err.to_string())?;
-            file.write_all(&0x0403_4B50u32.to_le_bytes())
-                .map_err(|err| err.to_string())?;
-            file.write_all(&20u16.to_le_bytes())
-                .map_err(|err| err.to_string())?;
-            file.write_all(&0u16.to_le_bytes())
-                .map_err(|err| err.to_string())?;
-            file.write_all(&0u16.to_le_bytes())
-                .map_err(|err| err.to_string())?;
-            file.write_all(&0u16.to_le_bytes())
-                .map_err(|err| err.to_string())?;
-            file.write_all(&0u16.to_le_bytes())
-                .map_err(|err| err.to_string())?;
-            file.write_all(&entry.crc32.to_le_bytes())
-                .map_err(|err| err.to_string())?;
-            file.write_all(&(entry.data.len() as u32).to_le_bytes())
-                .map_err(|err| err.to_string())?;
-            file.write_all(&(entry.data.len() as u32).to_le_bytes())
-                .map_err(|err| err.to_string())?;
-            file.write_all(&(entry.name.len() as u16).to_le_bytes())
-                .map_err(|err| err.to_string())?;
-            file.write_all(&0u16.to_le_bytes())
-                .map_err(|err| err.to_string())?;
-            file.write_all(&entry.name).map_err(|err| err.to_string())?;
-            file.write_all(&entry.data).map_err(|err| err.to_string())?;
-            append_stored_zip_cd(&mut cd, entry, local_offset as u32);
-            if max_output_bytes
-                .is_some_and(|limit| file.stream_position().unwrap_or(u64::MAX) > limit)
-            {
-                return Err("candidate output exceeds repair.deep.max_output_size_mb".to_string());
+            let name = stored_7z_entry_name(entry);
+            let archive_entry = ArchiveEntry::new_file(&name);
+            if entry.data.is_empty() {
+                writer
+                    .push_archive_entry::<&[u8]>(archive_entry, None)
+                    .map_err(|err| err.to_string())?;
+            } else {
+                writer
+                    .push_archive_entry(archive_entry, Some(entry.data.as_slice()))
+                    .map_err(|err| err.to_string())?;
             }
         }
-        let cd_offset = file.stream_position().map_err(|err| err.to_string())?;
-        file.write_all(&cd).map_err(|err| err.to_string())?;
-        file.write_all(&0x0605_4B50u32.to_le_bytes())
-            .map_err(|err| err.to_string())?;
-        file.write_all(&0u16.to_le_bytes())
-            .map_err(|err| err.to_string())?;
-        file.write_all(&0u16.to_le_bytes())
-            .map_err(|err| err.to_string())?;
-        file.write_all(&(entries.len() as u16).to_le_bytes())
-            .map_err(|err| err.to_string())?;
-        file.write_all(&(entries.len() as u16).to_le_bytes())
-            .map_err(|err| err.to_string())?;
-        file.write_all(&(cd.len() as u32).to_le_bytes())
-            .map_err(|err| err.to_string())?;
-        file.write_all(&(cd_offset as u32).to_le_bytes())
-            .map_err(|err| err.to_string())?;
-        file.write_all(&0u16.to_le_bytes())
-            .map_err(|err| err.to_string())?;
+        let mut file = writer.finish().map_err(|err| err.to_string())?;
         file.flush().map_err(|err| err.to_string())?;
         let size = file.stream_position().map_err(|err| err.to_string())?;
         if max_output_bytes.is_some_and(|limit| size > limit) {
@@ -2690,25 +2684,14 @@ fn write_stored_zip_entries(
     }
 }
 
-fn append_stored_zip_cd(output: &mut Vec<u8>, entry: &StoredZipEntry, local_offset: u32) {
-    output.extend_from_slice(&0x0201_4B50u32.to_le_bytes());
-    output.extend_from_slice(&20u16.to_le_bytes());
-    output.extend_from_slice(&20u16.to_le_bytes());
-    output.extend_from_slice(&0u16.to_le_bytes());
-    output.extend_from_slice(&0u16.to_le_bytes());
-    output.extend_from_slice(&0u16.to_le_bytes());
-    output.extend_from_slice(&0u16.to_le_bytes());
-    output.extend_from_slice(&entry.crc32.to_le_bytes());
-    output.extend_from_slice(&(entry.data.len() as u32).to_le_bytes());
-    output.extend_from_slice(&(entry.data.len() as u32).to_le_bytes());
-    output.extend_from_slice(&(entry.name.len() as u16).to_le_bytes());
-    output.extend_from_slice(&0u16.to_le_bytes());
-    output.extend_from_slice(&0u16.to_le_bytes());
-    output.extend_from_slice(&0u16.to_le_bytes());
-    output.extend_from_slice(&0u16.to_le_bytes());
-    output.extend_from_slice(&0u32.to_le_bytes());
-    output.extend_from_slice(&local_offset.to_le_bytes());
-    output.extend_from_slice(&entry.name);
+fn stored_7z_entry_name(entry: &StoredZipEntry) -> String {
+    let name = String::from_utf8_lossy(&entry.name).replace('\\', "/");
+    let name = name.trim_start_matches('/').trim_start_matches("./");
+    if name.is_empty() {
+        "recovered_entry".to_string()
+    } else {
+        name.to_string()
+    }
 }
 
 fn sanitize_archive_name(name: &str) -> String {
@@ -3164,7 +3147,11 @@ fn seven_zip_repair_crc_target(
     workspace: &str,
     target: &str,
 ) -> PyResult<Py<PyDict>> {
-    let offset = find_all(data, SEVEN_Z_MAGIC).into_iter().next().unwrap_or(0);
+    let offset = if data.starts_with(SEVEN_Z_MAGIC) {
+        0
+    } else {
+        find_all(data, SEVEN_Z_MAGIC).into_iter().next().unwrap_or(0)
+    };
     let Some(header) = parse_seven_zip_header(data, offset) else {
         return seven_zip_atomic_status(py, "unrepairable", target, "7z", "", "7z header is not readable for CRC repair", &[], &[], &[], 0.0, &["encoded_header_unreadable"], &[]);
     };
@@ -3358,7 +3345,11 @@ fn seven_zip_repair_metadata_target(
     workspace: &str,
     target: &str,
 ) -> PyResult<Py<PyDict>> {
-    let Some(offset) = find_all(data, SEVEN_Z_MAGIC).first().copied() else {
+    let offset = if data.starts_with(SEVEN_Z_MAGIC) {
+        0
+    } else if data.windows(SEVEN_Z_MAGIC.len()).any(|window| window == SEVEN_Z_MAGIC) {
+        1
+    } else {
         return seven_zip_atomic_status(py, "unrepairable", target, "7z", "", "7z signature was not found", &[], &[], &[], 0.0, &["seven_zip_signature_missing"], &[]);
     };
     if offset != 0 {

@@ -20,6 +20,11 @@ class TrainingFormatPlugin:
     build_material: Callable[[Any], int] | None = None
     collection_record_context: Callable[[dict[str, Any]], dict[str, Any]] | None = None
     oracle_label: Callable[[Any, dict[str, Any]], dict[str, Any]] | None = None
+    resolve_collection_material_report: Callable[[Path, dict[str, Any]], Path | None] | None = None
+    load_material_index: Callable[[Path, dict[str, Any]], dict[str, dict[str, Any]]] | None = None
+    compact_material_distribution: Callable[[dict[str, Any]], dict[str, Any]] | None = None
+    collection_report_sections: Callable[[dict[str, Any]], list[dict[str, Any]]] | None = None
+    training_report_sections: Callable[[dict[str, Any]], list[dict[str, Any]]] | None = None
     analyze_collection: Callable[[Path], int | None] | None = None
     analyze_training: Callable[[Path, Path], int | None] | None = None
 

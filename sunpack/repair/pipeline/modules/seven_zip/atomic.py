@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from typing import Any
 
-from sunpack.contracts.archive_knowledge import ArchiveKnowledge
 from sunpack.repair.diagnosis import RepairDiagnosis
 from sunpack.repair.job import RepairJob
 from sunpack.repair.pipeline.module import RepairModuleSpec, RepairRoute
@@ -302,7 +303,7 @@ class SevenZipQuarantineBadFolder(_SevenZipAtomicRepair):
     base_score = 0.86
     confidence = 0.74
     partial = True
-    format_hint = "zip"
+    format_hint = "7z"
 
 
 class SevenZipFixEmptyStreamFlags(_SevenZipAtomicRepair):
@@ -417,7 +418,7 @@ class SevenZipSalvageNonSolidEntries(_SevenZipAtomicRepair):
     base_score = 0.88
     confidence = 0.76
     partial = True
-    format_hint = "zip"
+    format_hint = "7z"
 
 
 class SevenZipSalvageSolidPrefix(_SevenZipAtomicRepair):
@@ -431,12 +432,14 @@ class SevenZipSalvageSolidPrefix(_SevenZipAtomicRepair):
     base_score = 0.86
     confidence = 0.72
     partial = True
-    format_hint = "zip"
+    format_hint = "7z"
 
 
 def _job_flags(job: RepairJob, config: dict[str, Any]) -> set[str]:
     flags = {str(item) for item in job.damage_flags if str(item)}
-    knowledge = ArchiveKnowledge.from_any(getattr(job, "knowledge", {}))
+    knowledge = getattr(job, "knowledge", {})
+    if not isinstance(knowledge, dict):
+        knowledge = {}
     for path in (
         "format.7z.route_evidence_flags",
         "format.7z.route_evidence.flags",
@@ -445,7 +448,7 @@ def _job_flags(job: RepairJob, config: dict[str, Any]) -> set[str]:
         "verification.residual.flags",
         "repair.residual.flags",
     ):
-        values = knowledge.get(path, [])
+        values = _get_path(knowledge, path, [])
         if isinstance(values, list):
             flags.update(str(item) for item in values if str(item))
     if not flags or "seven_zip_signature_found" not in flags:
@@ -457,7 +460,6 @@ def _job_flags(job: RepairJob, config: dict[str, Any]) -> set[str]:
 def _record_native_attempt(job: RepairJob, module_name: str, target: str, result: dict[str, Any], scan: dict[str, Any]) -> None:
     if not isinstance(getattr(job, "knowledge", None), dict):
         return
-    knowledge = ArchiveKnowledge.from_any(job.knowledge)
     payload = {
         "module_name": module_name,
         "native_target": str(result.get("native_target") or target),
@@ -472,17 +474,25 @@ def _record_native_attempt(job: RepairJob, module_name: str, target: str, result
         "expected_native_target": str(result.get("expected_native_target") or target),
         "password_present": bool(getattr(job, "password", None)),
     }
-    attempts = list(knowledge.get("repair.native_attempts", []) or [])
+    payload["_attempt_digest"] = _stable_digest(payload)
+    attempts = list(_get_path(job.knowledge, "repair.native_attempts", []) or [])
+    if any(isinstance(item, dict) and item.get("_attempt_digest") == payload["_attempt_digest"] for item in attempts):
+        return
     attempts.append(payload)
-    knowledge.set("repair.native_attempts", attempts[-100:], source_layer="repair", source_module=module_name)
+    _set_path(job.knowledge, "repair.native_attempts", attempts[-100:])
     facts = payload["patch_facts"]
     if facts:
-        knowledge.add_flags("repair.patch_facts", facts, source_layer="repair", source_module=module_name)
+        _add_flags(job.knowledge, "repair.patch_facts", facts)
+    if {"output_container=7z", "partial=true"}.issubset(set(facts)):
+        structure = dict(_get_path(job.knowledge, "format.7z.structure", {}) or {})
+        structure["partial_salvage_container"] = True
+        recovered_entry_count = result.get("recovered_entry_count")
+        if isinstance(recovered_entry_count, int):
+            structure["recovered_entry_count"] = recovered_entry_count
+        _set_path(job.knowledge, "format.7z.structure", structure)
     residual = payload["residual_facts"]
     if residual:
-        knowledge.add_flags("repair.residual", residual, source_layer="repair", source_module=module_name)
-    job.knowledge.clear()
-    job.knowledge.update(knowledge.to_dict())
+        _add_flags(job.knowledge, "repair.residual", residual)
 
 
 def _compact_scan(scan: dict[str, Any]) -> dict[str, Any]:
@@ -545,6 +555,61 @@ def _compact_scan(scan: dict[str, Any]) -> dict[str, Any]:
 
 def _has_resolved_password(job: RepairJob) -> bool:
     return bool(getattr(job, "password", None))
+
+
+def _get_path(payload: dict[str, Any], path: str, default: Any = None) -> Any:
+    current: Any = payload
+    for part in [part for part in str(path or "").split(".") if part]:
+        if not isinstance(current, dict) or part not in current:
+            return default
+        current = current[part]
+    return current
+
+
+def _set_path(payload: dict[str, Any], path: str, value: Any) -> None:
+    current = payload
+    parts = [part for part in str(path or "").split(".") if part]
+    for part in parts[:-1]:
+        item = current.setdefault(part, {})
+        if not isinstance(item, dict):
+            item = {}
+            current[part] = item
+        current = item
+    if parts:
+        current[parts[-1]] = _jsonable(value)
+
+
+def _add_flags(payload: dict[str, Any], namespace: str, flags: list[str]) -> None:
+    path = f"{namespace}.flags" if namespace else "flags"
+    existing = [str(item) for item in _get_path(payload, path, []) or [] if str(item)]
+    merged: list[str] = []
+    seen: set[str] = set()
+    for item in [*existing, *[str(flag) for flag in flags if str(flag)]]:
+        if item in seen:
+            continue
+        seen.add(item)
+        merged.append(item)
+    _set_path(payload, path, merged)
+
+
+def _stable_digest(payload: Any) -> str:
+    data = json.dumps(_jsonable(payload), ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(data.encode("utf-8", errors="replace")).hexdigest()
+
+
+def _jsonable(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): _jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_jsonable(item) for item in value]
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    if hasattr(value, "to_dict"):
+        try:
+            return _jsonable(value.to_dict())
+        except Exception:
+            return str(value)
+    return str(value)
 
 
 for _module in (

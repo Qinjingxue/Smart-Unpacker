@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import json
 from pathlib import Path
 from typing import Any
 
@@ -10,7 +11,7 @@ from repair_training.core.plugin import TrainingFormatPlugin
 
 FORMAT_NAME = "seven_zip"
 PACKAGE_ROOT = Path(__file__).resolve().parent
-DEFAULT_DISTRIBUTION = PACKAGE_ROOT / "distributions" / "damage_distribution_seven_zip_root_transition_v1.json"
+DEFAULT_DISTRIBUTION = PACKAGE_ROOT / "distributions" / "damage_distribution_seven_zip_root_transition_v2.json"
 
 
 def get_training_plugin() -> TrainingFormatPlugin:
@@ -31,6 +32,10 @@ def get_training_plugin() -> TrainingFormatPlugin:
         default_distribution=DEFAULT_DISTRIBUTION,
         model_output_subdir=Path("models") / "seven_zip_runtime_policy",
         collection_record_context=collection_record_context,
+        resolve_collection_material_report=resolve_collection_material_report,
+        load_material_index=load_material_index,
+        compact_material_distribution=compact_material_distribution,
+        collection_report_sections=collection_report_sections,
         analyze_collection=_analyze_collection,
         analyze_training=_analyze_training,
     )
@@ -87,6 +92,111 @@ def collection_record_context(record: dict[str, Any]) -> dict[str, Any]:
         },
         "flags": {"format.7z.route_evidence": route_flags, "repair.damage": route_flags},
     }
+
+
+def resolve_collection_material_report(run_dir: Path, run_manifest: dict[str, Any]) -> Path | None:
+    for candidate in _manifest_sibling_reports(run_manifest):
+        if candidate.is_file():
+            return candidate
+    default = Path("repair_training") / "material" / "seven_zip" / "material_distribution_report_seven_zip_v2.json"
+    return default.resolve() if default.is_file() else None
+
+
+def load_material_index(run_dir: Path, run_manifest: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    manifest = _manifest_path(run_manifest)
+    return _index_manifest(manifest) if manifest and manifest.is_file() else {}
+
+
+def compact_material_distribution(report: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "profile_counts": report.get("profile_counts", {}),
+        "layer_counts": report.get("compound_profile_counts") or report.get("layer_counts", {}),
+        "expected_min_steps_counts": report.get("expected_min_steps_counts", {}),
+        "physical_complete_expected_counts": report.get("physical_complete_expected_counts", {}),
+        "clean_variant_coverage": report.get("clean_variant_coverage", {}),
+        "damaged_container_presence_counts": report.get("damaged_container_presence_counts", {}),
+        "damaged_variant_coverage": {
+            "compression_methods": (report.get("damaged_variant_coverage") or {}).get("compression_methods", {}),
+            "compression_levels": (report.get("damaged_variant_coverage") or {}).get("compression_levels", {}),
+            "profile_variant_warnings": (report.get("damaged_variant_coverage") or {}).get("profile_variant_warnings", {}),
+        },
+    }
+
+
+def collection_report_sections(material_distribution: dict[str, Any]) -> list[dict[str, Any]]:
+    clean = material_distribution.get("clean_variant_coverage") if isinstance(material_distribution.get("clean_variant_coverage"), dict) else {}
+    damaged = material_distribution.get("damaged_container_presence_counts") if isinstance(material_distribution.get("damaged_container_presence_counts"), dict) else {}
+    steps = material_distribution.get("expected_min_steps_counts") if isinstance(material_distribution.get("expected_min_steps_counts"), dict) else {}
+    sections: list[dict[str, Any]] = []
+    if clean:
+        sections.append({
+            "title": "7z Clean Variant Coverage",
+            "headers": ["Metric", "Value"],
+            "rows": [
+                ["Variants", clean.get("variant_count", 0)],
+                ["Methods", json.dumps(clean.get("compression_methods", {}), ensure_ascii=False, sort_keys=True)],
+                ["Levels", json.dumps(clean.get("compression_levels", {}), ensure_ascii=False, sort_keys=True)],
+                ["Split", json.dumps(clean.get("split_counts", {}), ensure_ascii=False, sort_keys=True)],
+                ["Encrypted", json.dumps(clean.get("encrypted_counts", {}), ensure_ascii=False, sort_keys=True)],
+                ["SFX", json.dumps(clean.get("sfx_counts", {}), ensure_ascii=False, sort_keys=True)],
+                ["Encoded Header", json.dumps(clean.get("encoded_header_counts", {}), ensure_ascii=False, sort_keys=True)],
+                ["Warnings", json.dumps(clean.get("warnings", {}), ensure_ascii=False, sort_keys=True)],
+            ],
+        })
+    if damaged or steps:
+        sections.append({
+            "title": "7z Damaged Coverage",
+            "headers": ["Metric", "Value"],
+            "rows": [
+                ["Container presence", json.dumps(damaged, ensure_ascii=False, sort_keys=True)],
+                ["Expected min steps", json.dumps(steps, ensure_ascii=False, sort_keys=True)],
+                ["Profile variant warnings", json.dumps(((material_distribution.get("damaged_variant_coverage") or {}).get("profile_variant_warnings", {})), ensure_ascii=False, sort_keys=True)],
+            ],
+        })
+    return sections
+
+
+def _manifest_sibling_reports(run_manifest: dict[str, Any]) -> list[Path]:
+    manifest = _manifest_path(run_manifest)
+    if manifest and manifest.is_file():
+        return sorted(manifest.parent.glob("material_distribution_report*.json"))
+    return []
+
+
+def _manifest_path(run_manifest: dict[str, Any]) -> Path | None:
+    inputs = run_manifest.get("inputs") if isinstance(run_manifest.get("inputs"), dict) else {}
+    for key in ("manifest_abs", "manifest"):
+        raw = str(inputs.get(key) or "").strip()
+        if raw:
+            return Path(raw).resolve()
+    return None
+
+
+def _index_manifest(path: Path | None) -> dict[str, dict[str, Any]]:
+    output: dict[str, dict[str, Any]] = {}
+    if path is None or not path.is_file():
+        return output
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(row, dict):
+                continue
+            sample_id = str(row.get("sample_id") or "")
+            if not sample_id:
+                continue
+            derivation = row.get("source_derivation") if isinstance(row.get("source_derivation"), dict) else {}
+            output[sample_id] = {
+                "damage_profile": row.get("damage_profile") or row.get("profile"),
+                "profile_layer": row.get("profile_layer") or row.get("damage_layer") or derivation.get("layer"),
+                "damage_layer": row.get("damage_layer") or derivation.get("layer"),
+                "physical_complete_expected": row.get("physical_complete_expected"),
+            }
+    return output
 
 
 def _dedupe(values: list[str]) -> list[str]:

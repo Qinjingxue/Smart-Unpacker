@@ -284,6 +284,8 @@ def _write_run_manifest(
         "git_commit": _git_commit(),
         "inputs": {
             "manifest": str(args.manifest or ""),
+            "manifest_abs": str(Path(args.manifest).resolve()) if str(args.manifest or "").strip() else "",
+            "material_distribution_report": str(_find_sibling_material_report(Path(args.manifest)) or "") if str(args.manifest or "").strip() else "",
             "material_root": str(args.material_root or ""),
             "format": str(args.format or ""),
             "formats": str(args.formats or ""),
@@ -324,6 +326,17 @@ def _run_post_collection_analysis(run_dir: Path) -> None:
                 raise RuntimeError(f"collection analysis failed with exit code {code}")
     except Exception as exc:
         update_run_manifest(Path(run_dir), collection_analysis={"status": "failed", "error": str(exc)})
+
+
+def _find_sibling_material_report(manifest: Path) -> Path | None:
+    try:
+        manifest = manifest.resolve()
+    except Exception:
+        manifest = Path(manifest)
+    if not manifest.is_file():
+        return None
+    candidates = sorted(manifest.parent.glob("material_distribution_report*.json"))
+    return candidates[0].resolve() if candidates else None
 
 
 def _format_from_run_manifest(run_dir: Path) -> str:

@@ -59,8 +59,15 @@ def rank_attempt(attempt: RecoveryAttempt) -> RecoveryRank:
     verification = attempt.verification
     coverage = verification.archive_coverage
     terminal = _terminal_blocker(attempt)
-    status_rank = _status_rank(verification.assessment_status)
-    decision_rank = _decision_rank(verification.decision_hint)
+    partial_salvage = _partial_salvage_attempt(attempt)
+    effective_status = verification.assessment_status
+    effective_decision = verification.decision_hint
+    if partial_salvage and effective_status == ASSESSMENT_COMPLETE:
+        effective_status = ASSESSMENT_PARTIAL
+    if partial_salvage and effective_decision == DECISION_ACCEPT:
+        effective_decision = DECISION_ACCEPT_PARTIAL
+    status_rank = _status_rank(effective_status)
+    decision_rank = _decision_rank(effective_decision)
     source_quality = _coverage_source_quality(coverage.sources)
     source_integrity_rank = _source_integrity_rank(verification.source_integrity)
     complete_files = int(coverage.complete_files or verification.complete_files or 0)
@@ -68,15 +75,21 @@ def rank_attempt(attempt: RecoveryAttempt) -> RecoveryRank:
         coverage.missing_files or verification.missing_files or 0
     )
     partial_files = int(coverage.partial_files or verification.partial_files or 0)
-    completeness = _clamp01(float(coverage.completeness if coverage.confidence > 0 else verification.completeness))
-    file_coverage = _clamp01(float(coverage.file_coverage or completeness))
-    byte_coverage = _clamp01(float(coverage.byte_coverage or completeness))
     output_quality_score = _clamp01(float(getattr(verification, "output_quality_score", 0.0) or 0.0))
     output_confidence = _clamp01(float(getattr(verification, "output_confidence", 0.0) or 0.0))
     output_complete_ratio = _clamp01(float(getattr(verification, "output_complete_ratio", 0.0) or 0.0))
     output_file_count = int(getattr(verification, "output_file_count", 0) or 0)
     output_total_bytes = int(getattr(verification, "output_total_bytes", 0) or 0)
-    complete_bonus = 1.0 if verification.assessment_status == ASSESSMENT_COMPLETE else 0.0
+    completeness = _clamp01(float(coverage.completeness if coverage.confidence > 0 else verification.completeness))
+    file_coverage = _clamp01(float(coverage.file_coverage or completeness))
+    byte_coverage = _clamp01(float(coverage.byte_coverage or completeness))
+    if partial_salvage:
+        self_contained_output_bound = max(0.0, min(output_quality_score, output_complete_ratio or output_quality_score))
+        completeness = min(completeness, self_contained_output_bound)
+        file_coverage = min(file_coverage, self_contained_output_bound)
+        byte_coverage = min(byte_coverage, self_contained_output_bound)
+        source_integrity_rank = min(source_integrity_rank, 0.3)
+    complete_bonus = 1.0 if effective_status == ASSESSMENT_COMPLETE else 0.0
     terminal_penalty = 1.0 if terminal else 0.0
     patch_cost = max(0.0, float(attempt.patch_cost or 0.0))
     risk_penalty = min(0.25, len(attempt.risk_flags) * 0.03)
@@ -100,8 +113,11 @@ def rank_attempt(attempt: RecoveryAttempt) -> RecoveryRank:
     )
     vector = {
         "terminal_blocker": terminal,
-        "assessment_status": verification.assessment_status,
-        "decision_hint": verification.decision_hint,
+        "assessment_status": effective_status,
+        "decision_hint": effective_decision,
+        "raw_assessment_status": verification.assessment_status,
+        "raw_decision_hint": verification.decision_hint,
+        "partial_salvage_attempt": partial_salvage,
         "status_rank": status_rank,
         "decision_rank": decision_rank,
         "completeness": completeness,
@@ -274,6 +290,9 @@ def _rank_decision(attempt: RecoveryAttempt, *, terminal: bool) -> str:
         return "drop"
     decision = attempt.verification.decision_hint
     status = attempt.verification.assessment_status
+    if _partial_salvage_attempt(attempt):
+        if decision == DECISION_ACCEPT or status == ASSESSMENT_COMPLETE:
+            return "keep_partial"
     if decision == DECISION_ACCEPT or status == ASSESSMENT_COMPLETE:
         return "accept"
     if decision == DECISION_ACCEPT_PARTIAL:
@@ -281,6 +300,24 @@ def _rank_decision(attempt: RecoveryAttempt, *, terminal: bool) -> str:
     if decision in {DECISION_REPAIR, DECISION_RETRY_EXTRACT}:
         return "continue_repair"
     return "drop"
+
+
+def _partial_salvage_attempt(attempt: RecoveryAttempt) -> bool:
+    module = str(attempt.repair_module or "").lower()
+    if any(token in module for token in ("salvage", "quarantine")):
+        return True
+    for item in attempt.risk_flags:
+        text = str(item).lower()
+        if any(token in text for token in ("partial_salvage", "partial=true", "salvage", "quarantine")):
+            return True
+    for patch in attempt.patch_lineage:
+        if not isinstance(patch, dict):
+            continue
+        provenance = patch.get("provenance") if isinstance(patch.get("provenance"), dict) else {}
+        payload = json.dumps(provenance, sort_keys=True, default=str).lower()
+        if any(token in payload for token in ("partial_salvage", "partial=true", "salvage", "quarantine")):
+            return True
+    return False
 
 
 def _stop_reason_for_rank(rank: RecoveryRank) -> str:

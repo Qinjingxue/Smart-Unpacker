@@ -7,6 +7,8 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
+from repair_training.core.plugin import load_training_format_plugin, normalize_format_name
+
 
 LATEST_RUN = Path("repair_training") / "latest_run.txt"
 
@@ -14,7 +16,9 @@ LATEST_RUN = Path("repair_training") / "latest_run.txt"
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     run_dir = _resolve_run_dir(args.run_dir)
-    model_dir = Path(args.model_dir).resolve() if str(args.model_dir or "").strip() else (run_dir / "models" / "zip_runtime_policy")
+    run_manifest = _read_json(run_dir / "run_manifest.json", [])
+    plugin = load_training_format_plugin(_format_from_run_manifest(run_manifest))
+    model_dir = Path(args.model_dir).resolve() if str(args.model_dir or "").strip() else (run_dir / plugin.model_output_subdir)
     reports_dir = run_dir / "reports"
     reports_dir.mkdir(parents=True, exist_ok=True)
     analysis = analyze_training(run_dir, model_dir)
@@ -29,6 +33,8 @@ def main(argv: list[str] | None = None) -> int:
 
 def analyze_training(run_dir: Path, model_dir: Path) -> dict[str, Any]:
     warnings: list[str] = []
+    run_manifest = _read_json(run_dir / "run_manifest.json", warnings)
+    plugin = load_training_format_plugin(_format_from_run_manifest(run_manifest))
     summary = _read_json(model_dir / "training_summary.json", warnings)
     metrics = _read_json(model_dir / "metrics.json", warnings)
     collection = _read_json(run_dir / "reports" / "collection_analysis.json", warnings)
@@ -45,7 +51,7 @@ def analyze_training(run_dir: Path, model_dir: Path) -> dict[str, Any]:
             by_query[query].append(row)
     prediction_regret = _prediction_regret(by_query)
     findings = _training_findings(summary, metrics, predictions, collection, prediction_regret)
-    return {
+    analysis = {
         "run_dir": str(run_dir),
         "model_dir": str(model_dir),
         "warnings": warnings,
@@ -78,6 +84,8 @@ def analyze_training(run_dir: Path, model_dir: Path) -> dict[str, Any]:
         "collection_oracle_best": (collection.get("oracle_best") if isinstance(collection.get("oracle_best"), dict) else {}),
         "actionable_findings": findings,
     }
+    analysis["format_report_sections"] = plugin.training_report_sections(analysis) if plugin.training_report_sections else []
+    return analysis
 
 
 def _prediction_regret(by_query: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
@@ -217,6 +225,17 @@ def _markdown_report(analysis: dict[str, Any]) -> str:
         "",
         _table(["Module", "Prediction Rows"], pred.get("top_modules", [])[:20]),
     ]
+    for section in analysis.get("format_report_sections") or []:
+        if not isinstance(section, dict):
+            continue
+        title = str(section.get("title") or "Format Details")
+        rows = section.get("rows") if isinstance(section.get("rows"), list) else []
+        headers = section.get("headers") if isinstance(section.get("headers"), list) else []
+        lines.extend(["", f"## {title}", ""])
+        if headers and rows:
+            lines.append(_table(headers, rows))
+        elif section.get("text"):
+            lines.append(str(section.get("text")))
     if analysis.get("warnings"):
         lines.extend(["", "## Warnings", "", *[f"- {item}" for item in analysis["warnings"]]])
     return "\n".join(lines) + "\n"
@@ -239,6 +258,11 @@ def _resolve_run_dir(raw: str) -> Path:
         if text:
             return Path(text).resolve()
     raise SystemExit("No --run-dir provided and repair_training/latest_run.txt is missing")
+
+
+def _format_from_run_manifest(manifest: dict[str, Any]) -> str:
+    inputs = manifest.get("inputs") if isinstance(manifest.get("inputs"), dict) else {}
+    return normalize_format_name(str(inputs.get("format") or inputs.get("formats") or "zip"))
 
 
 def _read_json(path: Path, warnings: list[str]) -> dict[str, Any]:

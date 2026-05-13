@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 from typing import Any
 
-from sunpack.contracts.archive_knowledge import ArchiveKnowledge
 from sunpack.repair.job import RepairJob
 from sunpack.repair.pipeline.modules._common import (
     cached_repair_operation,
@@ -58,21 +57,93 @@ def password_fingerprint(password: Any) -> str:
 def _write_scan_summary_to_job_knowledge(job: RepairJob, scan: dict[str, Any]) -> None:
     if not isinstance(getattr(job, "knowledge", None), dict):
         return
-    knowledge = ArchiveKnowledge.from_any(job.knowledge)
     structure = scan.get("structure") if isinstance(scan.get("structure"), dict) else {}
     route_flags = [str(item) for item in scan.get("route_evidence_flags") or [] if str(item)]
     tags = [str(item) for item in scan.get("container_tags") or [] if str(item)]
     password_present = bool(scan.get("password_present"))
+    digest = _scan_summary_digest(structure, route_flags, tags, password_present)
+    meta = job.knowledge.setdefault("_meta", {})
+    if not isinstance(meta, dict):
+        meta = {}
+        job.knowledge["_meta"] = meta
+    markers = meta.setdefault("repair_cache_markers", {})
+    if not isinstance(markers, dict):
+        markers = {}
+        meta["repair_cache_markers"] = markers
+    if markers.get("seven_zip_scan_summary_digest") == digest:
+        return
     if structure:
-        knowledge.set("format.7z.structure", structure, source_layer="repair", source_module="seven_zip_scan")
+        _set_path(job.knowledge, "format.7z.structure", _jsonable(structure))
     if password_present:
-        knowledge.set("archive.password_present", True, source_layer="repair", source_module="seven_zip_scan")
+        _set_path(job.knowledge, "archive.password_present", True)
     if route_flags:
-        knowledge.add_flags("format.7z.route_evidence", route_flags, source_layer="repair", source_module="seven_zip_scan")
-        knowledge.add_flags("repair.route_evidence", route_flags, source_layer="repair", source_module="seven_zip_scan")
-        knowledge.add_flags("repair.damage", route_flags, source_layer="repair", source_module="seven_zip_scan")
-        knowledge.set("format.7z.route_evidence_flags", route_flags, source_layer="repair", source_module="seven_zip_scan")
+        _add_flags(job.knowledge, "format.7z.route_evidence", route_flags)
+        _add_flags(job.knowledge, "repair.route_evidence", route_flags)
+        _add_flags(job.knowledge, "repair.damage", route_flags)
+        _set_path(job.knowledge, "format.7z.route_evidence_flags", route_flags)
     if tags:
-        knowledge.set("format.7z.container_tags", tags, source_layer="repair", source_module="seven_zip_scan")
-    job.knowledge.clear()
-    job.knowledge.update(knowledge.to_dict())
+        _set_path(job.knowledge, "format.7z.container_tags", tags)
+    markers["seven_zip_scan_summary_digest"] = digest
+
+
+def _scan_summary_digest(structure: dict[str, Any], route_flags: list[str], tags: list[str], password_present: bool) -> str:
+    import json
+
+    payload = {
+        "structure": _jsonable(structure),
+        "route_flags": list(route_flags),
+        "tags": list(tags),
+        "password_present": bool(password_present),
+    }
+    data = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(data.encode("utf-8", errors="replace")).hexdigest()
+
+
+def _set_path(payload: dict[str, Any], path: str, value: Any) -> None:
+    current = payload
+    parts = [part for part in str(path or "").split(".") if part]
+    for part in parts[:-1]:
+        item = current.setdefault(part, {})
+        if not isinstance(item, dict):
+            item = {}
+            current[part] = item
+        current = item
+    if parts:
+        current[parts[-1]] = value
+
+
+def _get_path(payload: dict[str, Any], path: str, default: Any = None) -> Any:
+    current: Any = payload
+    for part in [part for part in str(path or "").split(".") if part]:
+        if not isinstance(current, dict) or part not in current:
+            return default
+        current = current[part]
+    return current
+
+
+def _add_flags(payload: dict[str, Any], namespace: str, flags: list[str]) -> None:
+    path = f"{namespace}.flags" if namespace else "flags"
+    existing = [str(item) for item in _get_path(payload, path, []) or [] if str(item)]
+    merged: list[str] = []
+    seen: set[str] = set()
+    for item in [*existing, *flags]:
+        if item in seen:
+            continue
+        seen.add(item)
+        merged.append(item)
+    _set_path(payload, path, merged)
+
+
+def _jsonable(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): _jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_jsonable(item) for item in value]
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    if hasattr(value, "to_dict"):
+        try:
+            return _jsonable(value.to_dict())
+        except Exception:
+            return str(value)
+    return str(value)

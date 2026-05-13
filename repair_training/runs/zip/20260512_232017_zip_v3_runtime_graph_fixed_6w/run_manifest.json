@@ -1,7 +1,7 @@
 {
   "collection_analysis": {
-    "json": "C:\\Users\\29402\\Desktop\\sunpack\\repair_training\\runs\\20260512_232017_zip_v3_runtime_graph_fixed_6w\\reports\\collection_analysis.json",
-    "markdown": "C:\\Users\\29402\\Desktop\\sunpack\\repair_training\\runs\\20260512_232017_zip_v3_runtime_graph_fixed_6w\\reports\\collection_analysis.md",
+    "json": "C:\\Users\\29402\\Desktop\\sunpack\\repair_training\\runs\\zip\\20260512_232017_zip_v3_runtime_graph_fixed_6w\\reports\\collection_analysis.json",
+    "markdown": "C:\\Users\\29402\\Desktop\\sunpack\\repair_training\\runs\\zip\\20260512_232017_zip_v3_runtime_graph_fixed_6w\\reports\\collection_analysis.md",
     "status": "ok"
   },
   "collector": "runtime_repair_graph",

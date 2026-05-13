@@ -158,8 +158,28 @@ def cached_repair_operation(job: RepairJob, namespace: str, operation: str, para
 
 
 def source_fingerprint_for_job(job: RepairJob) -> dict[str, Any]:
+    if isinstance(getattr(job, "knowledge", None), dict):
+        markers = _repair_cache_markers(job.knowledge)
+        cached = markers.get("source_fingerprint_for_job")
+        if isinstance(cached, dict):
+            return dict(cached)
     knowledge = ArchiveKnowledge.from_any(getattr(job, "knowledge", {}))
-    return knowledge_view.source_fingerprint(knowledge)
+    fingerprint = knowledge_view.source_fingerprint(knowledge)
+    if isinstance(getattr(job, "knowledge", None), dict):
+        _repair_cache_markers(job.knowledge)["source_fingerprint_for_job"] = _cache_jsonable(fingerprint)
+    return fingerprint
+
+
+def _repair_cache_markers(payload: dict[str, Any]) -> dict[str, Any]:
+    meta = payload.setdefault("_meta", {})
+    if not isinstance(meta, dict):
+        meta = {}
+        payload["_meta"] = meta
+    markers = meta.setdefault("repair_cache_markers", {})
+    if not isinstance(markers, dict):
+        markers = {}
+        meta["repair_cache_markers"] = markers
+    return markers
 
 
 def source_fingerprint(source_input: dict[str, Any]) -> dict[str, Any]:

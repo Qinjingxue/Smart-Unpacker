@@ -18,7 +18,7 @@ from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_MATERIAL_ROOT = Path("repair_training") / "material" / "seven_zip"
-DEFAULT_DISTRIBUTION = Path("repair_training") / "formats" / "seven_zip" / "distributions" / "damage_distribution_seven_zip_root_transition_v1.json"
+DEFAULT_DISTRIBUTION = Path("repair_training") / "formats" / "seven_zip" / "distributions" / "damage_distribution_seven_zip_root_transition_v2.json"
 SEVEN_Z_MAGIC = b"7z\xbc\xaf\x27\x1c"
 PASSWORD = "secret"
 
@@ -107,7 +107,7 @@ class SourceVariant:
             expected_files=expected_files,
             tags=[str(item) for item in row.get("container_tags") or [] if str(item)],
             compression_method=str(row.get("compression_method") or "LZMA2"),
-            compression_level=int(row.get("compression_level", 5) or 5),
+            compression_level=_int_default(row.get("compression_level"), 5),
             solid=bool(row.get("solid")),
             encoded_header=bool(row.get("encoded_header")),
             encrypted=bool(row.get("encrypted")),
@@ -137,9 +137,10 @@ def main(argv: list[str] | None = None) -> int:
     profiles = _expanded_profiles(profile_counts, rng, limit=int(args.limit or 0))
     source_root = material_root / "sources"
     variants = _ensure_source_variants(source_root, tool, args, rng)
+    _validate_clean_variant_matrix(variants, strict=_strict_v2_distribution(distribution_path) and not args.clean_variant_limit)
     if args.clean_only:
         report = _distribution_report([], distribution_path, seed, variants)
-        report_path = Path(args.distribution_report or material_root / "material_distribution_report_seven_zip_v1.json")
+        report_path = Path(args.distribution_report or material_root / _default_report_name(distribution_path))
         report_path.parent.mkdir(parents=True, exist_ok=True)
         report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True, default=str), encoding="utf-8")
         print(json.dumps({
@@ -157,9 +158,20 @@ def main(argv: list[str] | None = None) -> int:
     manifest_path = Path(args.manifest or material_root / "damage_manifest.jsonl")
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     records: list[dict[str, Any]] = []
+    variant_usage: Counter[str] = Counter()
+    profile_variant_usage: dict[str, Counter[str]] = defaultdict(Counter)
     for index, profile in enumerate(profiles):
         meta = dict(profile_meta.get(profile) or {})
-        variant = _choose_variant(profile, variants, rng)
+        variant = _choose_variant(
+            profile,
+            variants,
+            rng,
+            meta=meta,
+            variant_usage=variant_usage,
+            profile_variant_usage=profile_variant_usage,
+        )
+        variant_usage[variant.name] += 1
+        profile_variant_usage[profile][variant.name] += 1
         case_seed = rng.randrange(1, 2**31 - 1)
         record = _build_record(
             material_root=material_root,
@@ -177,7 +189,7 @@ def main(argv: list[str] | None = None) -> int:
             handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True, default=str) + "\n")
     _validate_profile_variant_coverage(profile_counts, variants)
     report = _distribution_report(records, distribution_path, seed, variants)
-    report_path = Path(args.distribution_report or material_root / "material_distribution_report_seven_zip_v1.json")
+    report_path = Path(args.distribution_report or material_root / _default_report_name(distribution_path))
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True, default=str), encoding="utf-8")
     summary = {
@@ -282,7 +294,7 @@ def _ensure_source_variants(root: Path, tool: Path, args: argparse.Namespace, rn
     matrix = _variant_matrix(Path(args.archive_variant_config) if args.archive_variant_config else None)
     if args.clean_variant_limit:
         matrix = matrix[: max(1, int(args.clean_variant_limit))]
-    bundles = _source_bundles(Path(args.source_material_root), root / "inputs", max(1, min(6, len(matrix))), rng)
+    bundles = _source_bundles(Path(args.source_material_root), root / "inputs", max(1, min(12, len(matrix))), rng)
     variants: dict[str, SourceVariant] = {}
     for index, spec in enumerate(matrix):
         bundle = bundles[index % len(bundles)]
@@ -317,20 +329,55 @@ def _variant_matrix(config_path: Path | None = None) -> list[dict[str, Any]]:
         variants = payload.get("variants") if isinstance(payload, dict) else payload
         if isinstance(variants, list) and variants:
             return [dict(item) for item in variants if isinstance(item, dict)]
-    return [
-        {"name": "normal_lzma2_mx5", "method": "LZMA2", "level": 5, "solid": False},
-        {"name": "normal_lzma_mx1_solid", "method": "LZMA", "level": 1, "solid": True},
-        {"name": "normal_ppmd_mx9", "method": "PPMd", "level": 9, "solid": False},
-        {"name": "normal_bzip2_mx5_solid", "method": "BZip2", "level": 5, "solid": True},
-        {"name": "normal_copy_mx0", "method": "Copy", "level": 0, "solid": False},
-        {"name": "encoded_lzma2_mx5", "method": "LZMA2", "level": 5, "solid": False, "encoded": True},
-        {"name": "encrypted_lzma2_mx9", "method": "LZMA2", "level": 9, "solid": False, "encoded": True, "encrypted": True},
-        {"name": "sfx_lzma2_mx5", "method": "LZMA2", "level": 5, "solid": False, "sfx": True},
+    variants: list[dict[str, Any]] = []
+    methods = ["LZMA2", "LZMA", "PPMd", "BZip2", "Copy"]
+    levels = [0, 1, 5, 9]
+    skipped_normal = {("LZMA2", 5), ("LZMA", 0), ("PPMd", 5), ("Copy", 9)}
+    for index, method in enumerate(methods):
+        for level in levels:
+            if (method, level) in skipped_normal:
+                continue
+            variants.append({
+                "name": f"normal_{method.lower()}_mx{level}_{'solid' if (index + level) % 2 == 0 else 'nonsolid'}",
+                "method": method,
+                "level": level,
+                "solid": (index + level) % 2 == 0,
+            })
+    variants.extend([
         {"name": "split_lzma2_mx5", "method": "LZMA2", "level": 5, "solid": False, "split": True, "volume_size": "1k"},
-        {"name": "split_ppmd_mx1", "method": "PPMd", "level": 1, "solid": False, "split": True, "volume_size": "1k"},
-        {"name": "solid_lzma2_mx9_encoded", "method": "LZMA2", "level": 9, "solid": True, "encoded": True},
+        {"name": "split_lzma2_mx9_encrypted_encoded", "method": "LZMA2", "level": 9, "solid": False, "split": True, "encrypted": True, "encoded": True, "volume_size": "1k"},
+        {"name": "split_lzma_mx1", "method": "LZMA", "level": 1, "solid": False, "split": True, "volume_size": "1k"},
+        {"name": "split_ppmd_mx5_encrypted", "method": "PPMd", "level": 5, "solid": False, "split": True, "encrypted": True, "volume_size": "1k"},
+        {"name": "split_bzip2_mx9_solid", "method": "BZip2", "level": 9, "solid": True, "split": True, "volume_size": "1k"},
+        {"name": "split_copy_mx0", "method": "Copy", "level": 0, "solid": False, "split": True, "volume_size": "1k"},
+        {"name": "split_sfx_lzma2_mx1_encrypted_encoded", "method": "LZMA2", "level": 1, "solid": False, "split": True, "sfx": True, "encrypted": True, "encoded": True, "volume_size": "1k"},
+        {"name": "split_sfx_lzma2_mx5", "method": "LZMA2", "level": 5, "solid": False, "split": True, "sfx": True, "volume_size": "1k"},
+        {"name": "split_sfx_lzma_mx1_encrypted", "method": "LZMA", "level": 1, "solid": False, "split": True, "sfx": True, "encrypted": True, "volume_size": "1k"},
+        {"name": "split_sfx_ppmd_mx5_encrypted", "method": "PPMd", "level": 5, "solid": False, "split": True, "sfx": True, "encrypted": True, "volume_size": "1k"},
+        {"name": "split_sfx_bzip2_mx9_encrypted", "method": "BZip2", "level": 9, "solid": False, "split": True, "sfx": True, "encrypted": True, "volume_size": "1k"},
+        {"name": "sfx_lzma2_mx5", "method": "LZMA2", "level": 5, "solid": False, "sfx": True},
+        {"name": "sfx_lzma2_mx9_encoded", "method": "LZMA2", "level": 9, "solid": False, "sfx": True, "encoded": True},
+        {"name": "sfx_lzma_mx1_solid", "method": "LZMA", "level": 1, "solid": True, "sfx": True},
+        {"name": "sfx_ppmd_mx5", "method": "PPMd", "level": 5, "solid": False, "sfx": True},
         {"name": "sfx_bzip2_mx1_solid", "method": "BZip2", "level": 1, "solid": True, "sfx": True},
-    ]
+        {"name": "sfx_copy_mx0", "method": "Copy", "level": 0, "solid": False, "sfx": True},
+        {"name": "sfx_lzma2_mx5_encrypted", "method": "LZMA2", "level": 5, "solid": False, "sfx": True, "encrypted": True},
+        {"name": "sfx_lzma2_mx9_encrypted_encoded", "method": "LZMA2", "level": 9, "solid": False, "sfx": True, "encrypted": True, "encoded": True},
+        {"name": "sfx_ppmd_mx5_encrypted_encoded", "method": "PPMd", "level": 5, "solid": False, "sfx": True, "encrypted": True, "encoded": True},
+        {"name": "encrypted_lzma2_mx5", "method": "LZMA2", "level": 5, "solid": False, "encrypted": True},
+        {"name": "encrypted_lzma2_mx9_encoded", "method": "LZMA2", "level": 9, "solid": False, "encrypted": True, "encoded": True},
+        {"name": "encrypted_lzma_mx1_solid", "method": "LZMA", "level": 1, "solid": True, "encrypted": True},
+        {"name": "encrypted_ppmd_mx5", "method": "PPMd", "level": 5, "solid": False, "encrypted": True},
+        {"name": "encrypted_bzip2_mx1_solid", "method": "BZip2", "level": 1, "solid": True, "encrypted": True},
+        {"name": "encrypted_copy_mx0", "method": "Copy", "level": 0, "solid": False, "encrypted": True},
+        {"name": "encrypted_split_lzma2_mx5", "method": "LZMA2", "level": 5, "solid": False, "encrypted": True, "split": True, "volume_size": "1k"},
+        {"name": "encrypted_sfx_lzma2_mx9_encoded", "method": "LZMA2", "level": 9, "solid": False, "encrypted": True, "sfx": True, "encoded": True},
+        {"name": "encoded_lzma2_mx5", "method": "LZMA2", "level": 5, "solid": False, "encoded": True},
+        {"name": "encoded_lzma2_mx9_solid", "method": "LZMA2", "level": 9, "solid": True, "encoded": True},
+        {"name": "encoded_ppmd_mx1", "method": "PPMd", "level": 1, "solid": False, "encoded": True},
+        {"name": "encoded_bzip2_mx5_solid", "method": "BZip2", "level": 5, "solid": True, "encoded": True},
+    ])
+    return variants
 
 
 def _source_bundles(source_root: Path, work_root: Path, count: int, rng: random.Random) -> list[tuple[str, Path, dict[str, bytes], list[str]]]:
@@ -377,7 +424,7 @@ def _create_source_variant(root: Path, tool: Path, spec: dict[str, Any], bundle:
     source_id, input_dir, expected, source_files = bundle
     name = str(spec.get("name") or f"variant_{source_id}")
     method = str(spec.get("method") or "LZMA2")
-    level = int(spec.get("level", 5) or 5)
+    level = _int_default(spec.get("level"), 5)
     solid = bool(spec.get("solid"))
     encoded = bool(spec.get("encoded"))
     encrypted = bool(spec.get("encrypted"))
@@ -410,7 +457,7 @@ def _create_source_variant(root: Path, tool: Path, spec: dict[str, Any], bundle:
     if split:
         cmd.append(f"-v{volume_size}")
     completed = subprocess.run(cmd, cwd=str(input_dir), capture_output=True, text=True)
-    parts = sorted(archive_dir.glob(f"{name}.7z.*")) if split else [base_archive]
+    parts = sorted(archive_dir.glob(f"{base_archive.name}.*")) if split else [base_archive]
     if completed.returncode != 0 or not parts or not parts[0].is_file():
         raise SystemExit(f"7z source variant failed ({name}): {completed.stderr or completed.stdout}")
     sfx_mode = ""
@@ -451,50 +498,80 @@ def _make_sfx_variant(tool: Path, base_archive: Path, output: Path, parts: list[
     if sfx_module.is_file() and base_archive.is_file():
         output.write_bytes(sfx_module.read_bytes() + base_archive.read_bytes())
         return output, [output], "real_sfx_module_concat"
+    if sfx_module.is_file() and parts:
+        output.write_bytes(sfx_module.read_bytes() + parts[0].read_bytes())
+        return output, [output, *parts[1:]], "real_sfx_module_split_prefix"
     output.write_bytes(b"MZ-SUNPACK-TRAINING-SFX\r\n" + parts[0].read_bytes())
-    return output, [output], "synthetic_prefix"
+    return output, [output, *parts[1:]], "synthetic_prefix"
 
 
 def _safe_name(name: str) -> str:
     return "".join(ch if ch.isalnum() or ch in ".-_" else "_" for ch in name)[:80] or "file"
 
 
-def _choose_variant(profile: str, variants: dict[str, SourceVariant], rng: random.Random) -> SourceVariant:
-    profile_l = profile.lower()
+def _choose_variant(
+    profile: str,
+    variants: dict[str, SourceVariant],
+    rng: random.Random,
+    *,
+    meta: dict[str, Any] | None = None,
+    variant_usage: Counter[str] | None = None,
+    profile_variant_usage: dict[str, Counter[str]] | None = None,
+) -> SourceVariant:
     candidates = list(variants.values())
-    if "split" in profile_l:
-        split = [variant for variant in candidates if variant.split]
-        if split:
-            return rng.choice(split)
-    if "sfx" in profile_l:
-        sfx = [variant for variant in candidates if variant.sfx]
-        if sfx:
-            return rng.choice(sfx)
-    if "encrypted" in profile_l:
-        encrypted = [variant for variant in candidates if variant.encrypted]
-        if encrypted:
-            return rng.choice(encrypted)
-    if "solid" in profile_l and "non_solid" not in profile_l:
-        solid = [variant for variant in candidates if variant.solid]
-        if solid:
-            return rng.choice(solid)
-    if "encoded" in profile_l:
-        encoded = [variant for variant in candidates if variant.encoded_header]
-        if encoded:
-            return rng.choice(encoded)
-    if "names" in profile_l or "utf16" in profile_l:
-        unicode_variants = [variant for variant in candidates if any("utf16" in tag or "names" in tag for tag in variant.tags)]
-        if unicode_variants:
-            return rng.choice(unicode_variants)
-    if "empty" in profile_l or "file_count" in profile_l:
-        empty = [variant for variant in candidates if any("empty" in tag for tag in variant.tags)]
-        if empty:
-            return rng.choice(empty)
-    if "non_solid" in profile_l:
-        non_solid = [variant for variant in candidates if not variant.solid]
-        if non_solid:
-            return rng.choice(non_solid)
-    return rng.choice(candidates)
+    requirements = _variant_requirements(profile, meta or {})
+    for requirement in requirements:
+        candidates = [variant for variant in candidates if _variant_matches_requirement(variant, requirement)]
+    if not candidates:
+        raise SystemExit(f"no 7z clean variant satisfies profile={profile!r} requirements={sorted(requirements)!r}")
+    profile_usage = (profile_variant_usage or {}).get(profile, Counter())
+    global_usage = variant_usage or Counter()
+    jitter: dict[str, float] = {variant.name: rng.random() for variant in candidates}
+    return min(candidates, key=lambda variant: (profile_usage[variant.name], global_usage[variant.name], jitter[variant.name], variant.name))
+
+
+def _variant_requirements(profile: str, meta: dict[str, Any]) -> set[str]:
+    profile_l = profile.lower()
+    requirements = {str(item).lower() for item in meta.get("variant_requirements") or [] if str(item)}
+    components = [str(item).lower() for item in meta.get("compound_components") or [] if str(item)]
+    haystack = " ".join([profile_l, *components])
+    if "split" in haystack:
+        requirements.add("split")
+    if "sfx" in haystack or "carrier" in haystack:
+        requirements.add("sfx")
+    if "encrypted" in haystack:
+        requirements.add("encrypted")
+    if "encoded" in haystack:
+        requirements.add("encoded")
+    if "non_solid" in haystack:
+        requirements.add("non_solid")
+    elif "solid" in haystack:
+        requirements.add("solid")
+    if "names" in haystack or "utf16" in haystack:
+        requirements.add("utf16_names")
+    if "empty" in haystack or "file_count" in haystack:
+        requirements.add("empty_streams")
+    return requirements
+
+
+def _variant_matches_requirement(variant: SourceVariant, requirement: str) -> bool:
+    if requirement == "split":
+        return bool(variant.split)
+    if requirement == "sfx":
+        return bool(variant.sfx)
+    if requirement == "encrypted":
+        return bool(variant.encrypted)
+    if requirement == "encoded":
+        return bool(variant.encoded_header)
+    if requirement == "solid":
+        return bool(variant.solid)
+    if requirement == "non_solid":
+        return not bool(variant.solid)
+    if requirement == "utf16_names":
+        return any("utf16" in tag or "names" in tag for tag in variant.tags)
+    if requirement == "empty_streams":
+        return any("empty" in tag for tag in variant.tags)
+    return requirement in variant.tags
 
 
 def _build_record(
@@ -585,6 +662,8 @@ def _build_record(
             "sfx": source.sfx,
             "split": source.split,
             "sfx_generation_mode": source.sfx_generation_mode,
+            "layer": str(meta.get("layer") or ("physical" if not physical_complete_expected else ("compound" if meta.get("compound_profile", profile.startswith("compound_")) else "basic"))),
+            "variant_requirements": sorted(_variant_requirements(profile, meta)),
             "compound_profile": bool(meta.get("compound_profile", profile.startswith("compound_"))),
             "compound_components": components,
             "expected_min_steps": int(meta.get("expected_min_steps", 1)),
@@ -837,11 +916,35 @@ def _expected_files_manifest(files: dict[str, bytes]) -> dict[str, dict[str, Any
 
 def _distribution_report(records: list[dict[str, Any]], distribution: Path, seed: int, variants: dict[str, SourceVariant] | None = None) -> dict[str, Any]:
     profile_counts = Counter(str(record.get("damage_profile") or "") for record in records)
-    layer_counts = Counter(str((record.get("source_derivation") or {}).get("compound_profile", False)) for record in records)
+    layer_counts = Counter(str((record.get("source_derivation") or {}).get("layer") or "unknown") for record in records)
     expected_steps = Counter(str(record.get("expected_min_steps") or 1) for record in records)
     physical = Counter(str(bool(record.get("physical_complete_expected", True))).lower() for record in records)
     tags = Counter(tag for record in records for tag in record.get("seven_zip_container_tags") or [])
     password_counts = Counter("present" if record.get("password") else "absent" for record in records)
+    source_derivations = [dict(record.get("source_derivation") or {}) for record in records]
+    profile_variant_counts: dict[str, dict[str, int]] = {}
+    for record in records:
+        profile = str(record.get("damage_profile") or "")
+        variant = str((record.get("source_derivation") or {}).get("source_variant") or "")
+        if profile and variant:
+            profile_variant_counts.setdefault(profile, {})
+            profile_variant_counts[profile][variant] = profile_variant_counts[profile].get(variant, 0) + 1
+    profile_variant_warnings = {
+        profile: {
+            "used_clean_variants": len(counts),
+            "minimum_expected": min(4, profile_counts.get(profile, 0)),
+        }
+        for profile, counts in sorted(profile_variant_counts.items())
+        if len(counts) < min(4, profile_counts.get(profile, 0))
+    }
+    damaged_presence = {
+        "split": sum(1 for item in source_derivations if item.get("split")),
+        "encrypted": sum(1 for item in source_derivations if item.get("encrypted")),
+        "sfx": sum(1 for item in source_derivations if item.get("sfx")),
+        "encoded_header": sum(1 for item in source_derivations if item.get("encoded_header")),
+        "solid": sum(1 for item in source_derivations if item.get("solid")),
+        "non_solid": sum(1 for item in source_derivations if not item.get("solid")),
+    }
     variant_values = list((variants or {}).values())
     clean_coverage = {
         "variant_count": len(variant_values),
@@ -853,6 +956,7 @@ def _distribution_report(records: list[dict[str, Any]], distribution: Path, seed
         "split_counts": dict(sorted(Counter(str(bool(variant.split)).lower() for variant in variant_values).items())),
         "encrypted_counts": dict(sorted(Counter(str(bool(variant.encrypted)).lower() for variant in variant_values).items())),
         "encoded_header_counts": dict(sorted(Counter(str(bool(variant.encoded_header)).lower() for variant in variant_values).items())),
+        "warnings": _clean_variant_matrix_warnings(variants or {}),
     }
     return {
         "format": "seven_zip",
@@ -865,6 +969,15 @@ def _distribution_report(records: list[dict[str, Any]], distribution: Path, seed
         "expected_min_steps_counts": dict(sorted(expected_steps.items())),
         "physical_complete_expected_counts": dict(sorted(physical.items())),
         "container_tag_counts": dict(sorted(tags.items())),
+        "damaged_container_presence_counts": damaged_presence,
+        "damaged_variant_coverage": {
+            "source_variant_counts": dict(sorted(Counter(str(item.get("source_variant") or "") for item in source_derivations).items())),
+            "source_id_counts": dict(sorted(Counter(str(item.get("source_id") or "") for item in source_derivations).items())),
+            "compression_methods": dict(sorted(Counter(str(item.get("compression_method") or "") for item in source_derivations).items())),
+            "compression_levels": dict(sorted(Counter(str(item.get("compression_level") or "") for item in source_derivations).items())),
+            "profile_variant_counts": {profile: dict(sorted(counts.items())) for profile, counts in sorted(profile_variant_counts.items())},
+            "profile_variant_warnings": profile_variant_warnings,
+        },
         "password_counts": dict(sorted(password_counts.items())),
     }
 
@@ -872,17 +985,57 @@ def _distribution_report(records: list[dict[str, Any]], distribution: Path, seed
 def _validate_profile_variant_coverage(profile_counts: dict[str, int], variants: dict[str, SourceVariant]) -> None:
     missing: dict[str, str] = {}
     for profile in profile_counts:
-        profile_l = profile.lower()
-        if "split" in profile_l and not any(variant.split for variant in variants.values()):
-            missing[profile] = "requires split clean variant"
-        elif "sfx" in profile_l and not any(variant.sfx for variant in variants.values()):
-            missing[profile] = "requires SFX clean variant"
-        elif "encrypted" in profile_l and not any(variant.encrypted for variant in variants.values()):
-            missing[profile] = "requires encrypted clean variant"
-        elif "solid" in profile_l and "non_solid" not in profile_l and not any(variant.solid for variant in variants.values()):
-            missing[profile] = "requires solid clean variant"
+        requirements = _variant_requirements(profile, {})
+        if any(not any(_variant_matches_requirement(variant, requirement) for variant in variants.values()) for requirement in requirements):
+            missing[profile] = f"requires clean variant matching {sorted(requirements)}"
     if missing:
         raise SystemExit(f"7z clean variant coverage is incomplete: {missing}")
+
+
+def _validate_clean_variant_matrix(variants: dict[str, SourceVariant], *, strict: bool) -> None:
+    warnings = _clean_variant_matrix_warnings(variants)
+    if strict and warnings:
+        raise SystemExit(f"7z V2 clean variant matrix is incomplete: {warnings}")
+
+
+def _clean_variant_matrix_warnings(variants: dict[str, SourceVariant]) -> dict[str, Any]:
+    values = list(variants.values())
+    warnings: dict[str, Any] = {}
+    methods = {variant.compression_method for variant in values}
+    levels = {int(variant.compression_level) for variant in values}
+    thresholds = {
+        "variant_count": (len(values), 48),
+        "split": (sum(1 for variant in values if variant.split), 8),
+        "encrypted": (sum(1 for variant in values if variant.encrypted), 8),
+        "sfx": (sum(1 for variant in values if variant.sfx), 8),
+        "encoded_header": (sum(1 for variant in values if variant.encoded_header), 10),
+        "solid": (sum(1 for variant in values if variant.solid), 16),
+        "non_solid": (sum(1 for variant in values if not variant.solid), 24),
+    }
+    for name, (actual, minimum) in thresholds.items():
+        if actual < minimum:
+            warnings[name] = {"actual": actual, "minimum": minimum}
+    expected_methods = {"LZMA2", "LZMA", "PPMd", "BZip2", "Copy"}
+    if missing_methods := sorted(expected_methods - methods):
+        warnings["missing_methods"] = missing_methods
+    expected_levels = {0, 1, 5, 9}
+    if missing_levels := sorted(expected_levels - levels):
+        warnings["missing_levels"] = missing_levels
+    return warnings
+
+
+def _strict_v2_distribution(path: Path) -> bool:
+    return "root_transition_v2" in path.name
+
+
+def _default_report_name(distribution: Path) -> str:
+    return "material_distribution_report_seven_zip_v2.json" if _strict_v2_distribution(distribution) else "material_distribution_report_seven_zip_v1.json"
+
+
+def _int_default(value: Any, default: int) -> int:
+    if value is None or value == "":
+        return default
+    return int(value)
 
 
 def _dedupe(values: list[str]) -> list[str]:

@@ -1,15 +1,32 @@
 import struct
+import subprocess
 import zlib
 
 from pathlib import Path
 
 import pytest
+from sunpack.repair.pipeline.modules.seven_zip.atomic import (
+    SevenZipQuarantineBadFolder,
+    SevenZipSalvageNonSolidEntries,
+    SevenZipSalvageSolidPrefix,
+)
 
 sunpack_native = pytest.importorskip("sunpack_native")
 seven_zip_atomic_repair = getattr(sunpack_native, "seven_zip_atomic_repair", None)
 seven_zip_scan_source = getattr(sunpack_native, "seven_zip_scan_source", None)
 if seven_zip_atomic_repair is None:
     pytest.skip("sunpack_native seven_zip_atomic_repair API is not installed", allow_module_level=True)
+
+
+def _seven_zip_tool() -> Path:
+    candidates = [
+        Path(__file__).resolve().parents[2] / "tools" / "7z.exe",
+        Path("tools") / "7z.exe",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    pytest.skip("7z.exe is required for this test")
 
 
 def _sz_vint(value: int) -> bytes:
@@ -204,6 +221,63 @@ def test_stream_crc_repairs_header_graph_ast(tmp_path):
     scan = seven_zip_scan_source({"kind": "bytes", "data": repaired})
     assert "stream_crc_bad" not in scan["route_evidence_flags"]
     assert scan["structure"]["stored_stream_crc"] == zlib.crc32(payload) & 0xFFFFFFFF
+
+
+def test_non_solid_salvage_outputs_same_format_7z_partial_container(tmp_path):
+    seven_zip = _seven_zip_tool()
+    source = tmp_path / "src"
+    nested = source / "nested"
+    nested.mkdir(parents=True)
+    (source / "alpha.txt").write_text("alpha payload", encoding="utf-8")
+    (nested / "beta.txt").write_bytes(b"beta payload")
+    (source / "empty.bin").write_bytes(b"")
+    archive = tmp_path / "input.7z"
+    subprocess.run(
+        [
+            str(seven_zip),
+            "a",
+            "-t7z",
+            "-mx=0",
+            "-ms=off",
+            str(archive),
+            "alpha.txt",
+            "nested\\beta.txt",
+            "empty.bin",
+        ],
+        cwd=source,
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+    result = seven_zip_atomic_repair({"kind": "file", "path": str(archive)}, str(tmp_path), "non_solid_entries")
+
+    assert result["status"] == "partial"
+    assert result["native_target"] == "non_solid_entries"
+    assert result["format"] == "7z"
+    assert result["selected_path"].endswith(".7z")
+    assert "output_container=7z" in result["patch_facts"]
+    assert "output_container=zip" not in result["patch_facts"]
+    assert "repacked_recovered_entries_as_7z" in result["patch_facts"]
+    assert result["recovered_entry_count"] == 3
+
+    output_dir = tmp_path / "out"
+    subprocess.run(
+        [str(seven_zip), "x", "-y", result["selected_path"], f"-o{output_dir}"],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    assert (output_dir / "alpha.txt").read_text(encoding="utf-8") == "alpha payload"
+    assert (output_dir / "nested" / "beta.txt").read_bytes() == b"beta payload"
+    assert (output_dir / "empty.bin").exists()
+    assert (output_dir / "empty.bin").stat().st_size == 0
+
+
+def test_seven_zip_salvage_modules_advertise_same_format_output():
+    assert SevenZipSalvageNonSolidEntries().format_hint == "7z"
+    assert SevenZipSalvageSolidPrefix().format_hint == "7z"
+    assert SevenZipQuarantineBadFolder().format_hint == "7z"
 
 
 def test_encoded_header_stream_crc_repairs_header_graph_ast(tmp_path):

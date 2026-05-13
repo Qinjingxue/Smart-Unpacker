@@ -7,6 +7,8 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
+from repair_training.core.plugin import load_training_format_plugin, normalize_format_name
+
 
 LATEST_RUN = Path("repair_training") / "latest_run.txt"
 
@@ -32,12 +34,15 @@ def analyze_run(run_dir: Path, *, material_report: Path | None = None) -> dict[s
     success_path = dataset_dir / "runtime_graph_success.jsonl"
     failure_path = dataset_dir / "runtime_graph_failure.jsonl"
     warnings: list[str] = []
+    run_manifest = _read_json(run_dir / "run_manifest.json", warnings)
+    format_name = _format_from_run_manifest(run_manifest)
+    plugin = load_training_format_plugin(format_name)
     summary = _read_json(summary_path, warnings)
     if material_report is None:
-        candidate = Path("repair_training/material/zip/material_distribution_report_v3.json")
-        material_report = candidate if candidate.is_file() else None
+        material_report = _resolve_material_report(run_dir, run_manifest, plugin, warnings)
     material_distribution = _read_json(material_report, warnings) if material_report else {}
-    material_index = _load_material_index(Path("repair_training/material/zip"), warnings)
+    material_index = _load_material_index_for_plugin(run_dir, run_manifest, plugin, warnings)
+    profile_lookup = _profile_lookup(material_distribution)
 
     row_type_counts: Counter[str] = Counter()
     label_counts: Counter[str] = Counter()
@@ -64,6 +69,7 @@ def analyze_run(run_dir: Path, *, material_report: Path | None = None) -> dict[s
             best_by_sample=best_by_sample,
             feature_contract_versions=feature_contract_versions,
             material_index=material_index,
+            profile_lookup=profile_lookup,
         )
         if bool(row.get("root_action")):
             root_rows += 1
@@ -86,6 +92,7 @@ def analyze_run(run_dir: Path, *, material_report: Path | None = None) -> dict[s
             best_by_sample=best_by_sample,
             feature_contract_versions=feature_contract_versions,
             material_index=material_index,
+            profile_lookup=profile_lookup,
         )
 
     best_values = [float(item.get("recovery", 0.0) or 0.0) for item in best_by_sample.values()]
@@ -137,7 +144,8 @@ def analyze_run(run_dir: Path, *, material_report: Path | None = None) -> dict[s
         "feature_contract_versions": dict(feature_contract_versions),
         "required_payload_miss_count": required_payload_miss,
         "phase_top_seconds": _top_mapping(phase_seconds, limit=20),
-        "material_distribution": _compact_material_distribution(material_distribution),
+        "material_distribution": plugin.compact_material_distribution(material_distribution) if plugin.compact_material_distribution else _default_compact_material_distribution(material_distribution),
+        "format_report_sections": plugin.collection_report_sections(material_distribution) if plugin.collection_report_sections else [],
         "actionable_findings": findings,
     }
 
@@ -154,6 +162,7 @@ def _accumulate_row(
     best_by_sample: dict[str, dict[str, Any]],
     feature_contract_versions: Counter[str],
     material_index: dict[str, dict[str, Any]],
+    profile_lookup: list[str],
 ) -> None:
     row_type = str(row.get("row_type") or "unknown")
     row_type_counts[row_type] += 1
@@ -163,7 +172,7 @@ def _accumulate_row(
         terminal_counts[str(row.get("terminal_status"))] += 1
     sample = str(row.get("sample_id") or "")
     material_meta = material_index.get(sample, {})
-    profile = str(row.get("damage_profile") or row.get("profile") or material_meta.get("damage_profile") or "")
+    profile = str(row.get("damage_profile") or row.get("profile") or material_meta.get("damage_profile") or _infer_profile_from_sample(sample, profile_lookup) or "")
     if profile:
         profile_rows[profile] += 1
     if profile and sample:
@@ -210,6 +219,20 @@ def _profile_best_summary(best_by_sample: dict[str, dict[str, Any]]) -> dict[str
             "mean_recovery": _mean(vals),
         }
     return dict(sorted(output.items()))
+
+
+def _profile_lookup(material_distribution: dict[str, Any]) -> list[str]:
+    profile_counts = material_distribution.get("profile_counts") if isinstance(material_distribution.get("profile_counts"), dict) else {}
+    return sorted((str(item) for item in profile_counts if str(item)), key=len, reverse=True)
+
+
+def _infer_profile_from_sample(sample_id: str, profiles: list[str]) -> str:
+    if not sample_id:
+        return ""
+    for profile in profiles:
+        if profile and profile in sample_id:
+            return profile
+    return ""
 
 
 def _collection_findings(summary: dict[str, Any], complete: int, zero: int, best_by_sample: dict[str, dict[str, Any]], payload_miss: int, profile_best: dict[str, dict[str, Any]]) -> list[str]:
@@ -291,12 +314,23 @@ def _markdown_report(analysis: dict[str, Any]) -> str:
         "",
         _table(["Phase", "Seconds"], [[k, f"{float(v):.3f}"] for k, v in analysis.get("phase_top_seconds", [])]),
     ]
+    for section in analysis.get("format_report_sections") or []:
+        if not isinstance(section, dict):
+            continue
+        title = str(section.get("title") or "Format Details")
+        rows = section.get("rows") if isinstance(section.get("rows"), list) else []
+        headers = section.get("headers") if isinstance(section.get("headers"), list) else []
+        lines.extend(["", f"## {title}", ""])
+        if headers and rows:
+            lines.append(_table(headers, rows))
+        elif section.get("text"):
+            lines.append(str(section.get("text")))
     if analysis.get("warnings"):
         lines.extend(["", "## Warnings", "", *[f"- {item}" for item in analysis["warnings"]]])
     return "\n".join(lines) + "\n"
 
 
-def _compact_material_distribution(report: dict[str, Any]) -> dict[str, Any]:
+def _default_compact_material_distribution(report: dict[str, Any]) -> dict[str, Any]:
     return {
         "profile_counts": report.get("profile_counts", {}),
         "layer_counts": report.get("layer_counts", {}),
@@ -305,23 +339,69 @@ def _compact_material_distribution(report: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _load_material_index(zip_dir: Path, warnings: list[str]) -> dict[str, dict[str, Any]]:
+def _load_material_index_from_manifest(manifest: Path | None, warnings: list[str]) -> dict[str, dict[str, Any]]:
     output: dict[str, dict[str, Any]] = {}
-    if not zip_dir.is_dir():
-        warnings.append(f"missing material zip dir for profile index: {zip_dir}")
+    if manifest is None or not manifest.is_file():
+        warnings.append(f"missing material manifest for profile index: {manifest}")
         return output
-    for manifest in zip_dir.glob("*/damage_manifest.jsonl"):
-        for row in _iter_jsonl(manifest, warnings):
-            sample_id = str(row.get("sample_id") or "")
-            if not sample_id:
-                continue
-            output[sample_id] = {
-                "damage_profile": row.get("damage_profile"),
-                "profile_layer": row.get("profile_layer"),
-                "damage_layer": row.get("damage_layer"),
-                "physical_complete_expected": row.get("physical_complete_expected"),
-            }
+    for row in _iter_jsonl(manifest, warnings):
+        sample_id = str(row.get("sample_id") or "")
+        if not sample_id:
+            continue
+        derivation = row.get("source_derivation") if isinstance(row.get("source_derivation"), dict) else {}
+        output[sample_id] = {
+            "damage_profile": row.get("damage_profile") or row.get("profile"),
+            "profile_layer": row.get("profile_layer") or row.get("damage_layer") or derivation.get("layer"),
+            "damage_layer": row.get("damage_layer") or derivation.get("layer"),
+            "physical_complete_expected": row.get("physical_complete_expected"),
+        }
     return output
+
+
+def _format_from_run_manifest(manifest: dict[str, Any]) -> str:
+    inputs = manifest.get("inputs") if isinstance(manifest.get("inputs"), dict) else {}
+    return normalize_format_name(str(inputs.get("format") or inputs.get("formats") or "zip"))
+
+
+def _resolve_material_report(run_dir: Path, run_manifest: dict[str, Any], plugin: Any, warnings: list[str]) -> Path | None:
+    if plugin.resolve_collection_material_report:
+        candidate = plugin.resolve_collection_material_report(run_dir, run_manifest)
+        if candidate and candidate.is_file():
+            return candidate
+    inputs = run_manifest.get("inputs") if isinstance(run_manifest.get("inputs"), dict) else {}
+    for key in ("material_distribution_report", "distribution_report"):
+        raw = str(inputs.get(key) or "").strip()
+        if raw:
+            path = Path(raw)
+            if path.is_file():
+                return path.resolve()
+    manifest = _manifest_path_from_run_manifest(run_manifest)
+    if manifest and manifest.is_file():
+        reports = sorted(manifest.parent.glob("material_distribution_report*.json"))
+        if reports:
+            return reports[0].resolve()
+    warnings.append("missing material distribution report")
+    return None
+
+
+def _load_material_index_for_plugin(run_dir: Path, run_manifest: dict[str, Any], plugin: Any, warnings: list[str]) -> dict[str, dict[str, Any]]:
+    if plugin.load_material_index:
+        try:
+            loaded = plugin.load_material_index(run_dir, run_manifest)
+            if loaded:
+                return loaded
+        except Exception as exc:
+            warnings.append(f"plugin material index failed: {exc}")
+    return _load_material_index_from_manifest(_manifest_path_from_run_manifest(run_manifest), warnings)
+
+
+def _manifest_path_from_run_manifest(run_manifest: dict[str, Any]) -> Path | None:
+    inputs = run_manifest.get("inputs") if isinstance(run_manifest.get("inputs"), dict) else {}
+    for key in ("manifest_abs", "manifest"):
+        raw = str(inputs.get(key) or "").strip()
+        if raw:
+            return Path(raw).resolve()
+    return None
 
 
 def _row_recovery(row: dict[str, Any]) -> float:
