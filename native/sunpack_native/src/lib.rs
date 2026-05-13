@@ -1,27 +1,30 @@
+use formats::carrier::{
+    archive_carrier_crop_recovery, archive_nested_payload_salvage, rar_block_chain_trim_recovery,
+    rar_end_block_repair, rar_file_quarantine_rebuild,
+};
+use formats::seven_zip::{seven_zip_atomic_repair, seven_zip_scan_source};
+use formats::stream::{
+    compression_stream_block_salvage, compression_stream_partial_recovery,
+    compression_stream_trailing_junk_trim, gzip_deflate_member_resync_repair,
+    gzip_footer_fix_repair, tar_boundary_repair, tar_compressed_partial_recovery,
+    tar_metadata_downgrade_recovery, tar_sparse_pax_longname_repair,
+    tar_truncated_partial_recovery, zstd_frame_salvage_repair,
+};
+use formats::zip::{
+    zip_cd_local_header_reconcile_salvage, zip_conflict_resolver_rebuild,
+    zip_deep_partial_recovery, zip_directory_field_repair, zip_rebuild_from_local_headers,
+    zip_remove_spurious_data_descriptor, zip_scan_source, zip_verified_entry_salvage,
+};
 use pyo3::prelude::*;
 
-mod analysis;
-mod archive_deep_repair;
-mod archive_state_ops;
-mod binary_profile;
-mod carrier;
-mod compression_stream_repair;
-mod directory_scan;
-mod file_crc;
-mod format_structure;
-mod magic;
-mod password_7z;
-mod password_input;
-mod password_rar;
-mod password_zip;
-mod pe_overlay;
-mod postprocess_ops;
+mod analysis_native;
+mod formats;
+mod io;
+mod password;
+mod postprocess;
 mod relations;
-mod repair_io;
-mod scene_semantics;
-mod util;
-mod zip_deep_repair;
-mod zip_names;
+mod scan;
+mod verification;
 
 #[cfg(test)]
 mod test_support {
@@ -54,29 +57,32 @@ fn scanner_version() -> &'static str {
 fn sunpack_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(native_available, m)?)?;
     m.add_function(wrap_pyfunction!(scanner_version, m)?)?;
-    m.add_class::<analysis::AnalysisBinaryView>()?;
-    m.add_class::<analysis::AnalysisMultiVolumeView>()?;
-    m.add_function(wrap_pyfunction!(magic::scan_after_markers, m)?)?;
-    m.add_function(wrap_pyfunction!(magic::scan_magics_anywhere, m)?)?;
+    m.add_class::<analysis_native::AnalysisBinaryView>()?;
+    m.add_class::<analysis_native::AnalysisMultiVolumeView>()?;
+    m.add_function(wrap_pyfunction!(scan::magic::scan_after_markers, m)?)?;
+    m.add_function(wrap_pyfunction!(scan::magic::scan_magics_anywhere, m)?)?;
     m.add_function(wrap_pyfunction!(
-        binary_profile::fuzzy_binary_profile_for_paths,
+        analysis_native::fuzzy_binary_profile_for_paths,
         m
     )?)?;
-    m.add_function(wrap_pyfunction!(carrier::scan_carrier_archive, m)?)?;
+    m.add_function(wrap_pyfunction!(scan::carrier::scan_carrier_archive, m)?)?;
     m.add_function(wrap_pyfunction!(
-        zip_names::scan_zip_central_directory_names,
-        m
-    )?)?;
-    m.add_function(wrap_pyfunction!(directory_scan::scan_directory_entries, m)?)?;
-    m.add_function(wrap_pyfunction!(
-        scene_semantics::scene_semantics_filter_entries,
+        scan::zip_names::scan_zip_central_directory_names,
         m
     )?)?;
     m.add_function(wrap_pyfunction!(
-        directory_scan::list_regular_files_in_directory,
+        scan::directory::scan_directory_entries,
         m
     )?)?;
-    m.add_function(wrap_pyfunction!(directory_scan::batch_file_head_facts, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        scan::scene_semantics::scene_semantics_filter_entries,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        scan::directory::list_regular_files_in_directory,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(scan::directory::batch_file_head_facts, m)?)?;
     m.add_function(wrap_pyfunction!(relations::relations_detect_split_role, m)?)?;
     m.add_function(wrap_pyfunction!(relations::relations_logical_name, m)?)?;
     m.add_function(wrap_pyfunction!(
@@ -88,210 +94,132 @@ fn sunpack_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
         relations::relations_build_candidate_groups,
         m
     )?)?;
-    m.add_function(wrap_pyfunction!(directory_scan::scan_output_tree, m)?)?;
+    m.add_function(wrap_pyfunction!(scan::directory::scan_output_tree, m)?)?;
     m.add_function(wrap_pyfunction!(
-        file_crc::compute_directory_crc_manifest,
+        verification::file_crc::compute_directory_crc_manifest,
         m
     )?)?;
     m.add_function(wrap_pyfunction!(
-        file_crc::match_archive_output_crc_coverage,
-        m
-    )?)?;
-    m.add_function(wrap_pyfunction!(file_crc::sample_directory_readability, m)?)?;
-    m.add_function(wrap_pyfunction!(
-        format_structure::inspect_zip_local_header,
+        verification::file_crc::match_archive_output_crc_coverage,
         m
     )?)?;
     m.add_function(wrap_pyfunction!(
-        format_structure::inspect_zip_eocd_structure,
+        verification::file_crc::sample_directory_readability,
         m
     )?)?;
     m.add_function(wrap_pyfunction!(
-        format_structure::inspect_seven_zip_structure,
+        analysis_native::inspect_zip_local_header,
         m
     )?)?;
     m.add_function(wrap_pyfunction!(
-        format_structure::inspect_rar_structure,
+        analysis_native::inspect_zip_eocd_structure,
         m
     )?)?;
     m.add_function(wrap_pyfunction!(
-        format_structure::inspect_tar_header_structure,
+        analysis_native::inspect_seven_zip_structure,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(analysis_native::inspect_rar_structure, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        analysis_native::inspect_tar_header_structure,
         m
     )?)?;
     m.add_function(wrap_pyfunction!(
-        format_structure::inspect_compression_stream_structure,
+        analysis_native::inspect_compression_stream_structure,
         m
     )?)?;
     m.add_function(wrap_pyfunction!(
-        format_structure::inspect_archive_container_structure,
+        analysis_native::inspect_archive_container_structure,
         m
     )?)?;
     m.add_function(wrap_pyfunction!(
-        pe_overlay::inspect_pe_overlay_structure,
+        scan::pe_overlay::inspect_pe_overlay_structure,
         m
     )?)?;
-    m.add_function(wrap_pyfunction!(postprocess_ops::scan_watch_candidates, m)?)?;
+    m.add_function(wrap_pyfunction!(postprocess::scan_watch_candidates, m)?)?;
+    m.add_function(wrap_pyfunction!(postprocess::watch_candidate_for_path, m)?)?;
     m.add_function(wrap_pyfunction!(
-        postprocess_ops::watch_candidate_for_path,
+        postprocess::flatten_single_branch_directories,
         m
     )?)?;
+    m.add_function(wrap_pyfunction!(postprocess::delete_files_batch, m)?)?;
     m.add_function(wrap_pyfunction!(
-        postprocess_ops::flatten_single_branch_directories,
-        m
-    )?)?;
-    m.add_function(wrap_pyfunction!(postprocess_ops::delete_files_batch, m)?)?;
-    m.add_function(wrap_pyfunction!(
-        password_7z::seven_zip_fast_verify_passwords,
+        password::seven_zip::seven_zip_fast_verify_passwords,
         m
     )?)?;
     m.add_function(wrap_pyfunction!(
-        password_7z::seven_zip_fast_verify_passwords_from_ranges,
+        password::seven_zip::seven_zip_fast_verify_passwords_from_ranges,
         m
     )?)?;
     m.add_function(wrap_pyfunction!(
-        password_rar::rar_fast_verify_passwords,
+        password::rar::rar_fast_verify_passwords,
         m
     )?)?;
     m.add_function(wrap_pyfunction!(
-        password_rar::rar_fast_verify_passwords_from_ranges,
+        password::rar::rar_fast_verify_passwords_from_ranges,
         m
     )?)?;
     m.add_function(wrap_pyfunction!(
-        password_zip::zip_fast_verify_passwords,
+        password::zip::zip_fast_verify_passwords,
         m
     )?)?;
     m.add_function(wrap_pyfunction!(
-        password_zip::zip_fast_verify_passwords_from_ranges,
+        password::zip::zip_fast_verify_passwords_from_ranges,
         m
     )?)?;
-    m.add_function(wrap_pyfunction!(repair_io::repair_read_file_range, m)?)?;
+    m.add_function(wrap_pyfunction!(io::repair::repair_read_file_range, m)?)?;
     m.add_function(wrap_pyfunction!(
-        repair_io::repair_concat_ranges_to_bytes,
+        io::repair::repair_concat_ranges_to_bytes,
         m
     )?)?;
-    m.add_function(wrap_pyfunction!(repair_io::repair_write_candidate, m)?)?;
-    m.add_function(wrap_pyfunction!(repair_io::repair_copy_range_to_file, m)?)?;
+    m.add_function(wrap_pyfunction!(io::repair::repair_write_candidate, m)?)?;
+    m.add_function(wrap_pyfunction!(io::repair::repair_copy_range_to_file, m)?)?;
     m.add_function(wrap_pyfunction!(
-        repair_io::repair_concat_ranges_to_file,
+        io::repair::repair_concat_ranges_to_file,
         m
     )?)?;
-    m.add_function(wrap_pyfunction!(repair_io::repair_patch_file, m)?)?;
+    m.add_function(wrap_pyfunction!(io::repair::repair_patch_file, m)?)?;
     m.add_function(wrap_pyfunction!(
-        archive_state_ops::archive_state_to_bytes_native,
-        m
-    )?)?;
-    m.add_function(wrap_pyfunction!(
-        archive_state_ops::archive_state_size_native,
+        io::archive_state::archive_state_to_bytes_native,
         m
     )?)?;
     m.add_function(wrap_pyfunction!(
-        archive_state_ops::archive_state_write_to_file_native,
+        io::archive_state::archive_state_size_native,
         m
     )?)?;
     m.add_function(wrap_pyfunction!(
-        archive_state_ops::archive_state_zip_manifest_native,
+        io::archive_state::archive_state_write_to_file_native,
         m
     )?)?;
     m.add_function(wrap_pyfunction!(
-        zip_deep_repair::zip_deep_partial_recovery,
+        io::archive_state::archive_state_zip_manifest_native,
         m
     )?)?;
-    m.add_function(wrap_pyfunction!(zip_deep_repair::zip_scan_source, m)?)?;
-    m.add_function(wrap_pyfunction!(
-        zip_deep_repair::zip_rebuild_from_local_headers,
-        m
-    )?)?;
-    m.add_function(wrap_pyfunction!(
-        zip_deep_repair::zip_directory_field_repair,
-        m
-    )?)?;
-    m.add_function(wrap_pyfunction!(
-        zip_deep_repair::zip_conflict_resolver_rebuild,
-        m
-    )?)?;
-    m.add_function(wrap_pyfunction!(
-        zip_deep_repair::zip_verified_entry_salvage,
-        m
-    )?)?;
-    m.add_function(wrap_pyfunction!(
-        zip_deep_repair::zip_cd_local_header_reconcile_salvage,
-        m
-    )?)?;
-    m.add_function(wrap_pyfunction!(
-        zip_deep_repair::zip_remove_spurious_data_descriptor,
-        m
-    )?)?;
-    m.add_function(wrap_pyfunction!(
-        compression_stream_repair::gzip_footer_fix_repair,
-        m
-    )?)?;
-    m.add_function(wrap_pyfunction!(
-        compression_stream_repair::gzip_deflate_member_resync_repair,
-        m
-    )?)?;
-    m.add_function(wrap_pyfunction!(
-        compression_stream_repair::zstd_frame_salvage_repair,
-        m
-    )?)?;
-    m.add_function(wrap_pyfunction!(
-        compression_stream_repair::tar_boundary_repair,
-        m
-    )?)?;
-    m.add_function(wrap_pyfunction!(
-        compression_stream_repair::tar_sparse_pax_longname_repair,
-        m
-    )?)?;
-    m.add_function(wrap_pyfunction!(
-        compression_stream_repair::compression_stream_partial_recovery,
-        m
-    )?)?;
-    m.add_function(wrap_pyfunction!(
-        compression_stream_repair::compression_stream_block_salvage,
-        m
-    )?)?;
-    m.add_function(wrap_pyfunction!(
-        compression_stream_repair::compression_stream_trailing_junk_trim,
-        m
-    )?)?;
-    m.add_function(wrap_pyfunction!(
-        compression_stream_repair::tar_compressed_partial_recovery,
-        m
-    )?)?;
-    m.add_function(wrap_pyfunction!(
-        compression_stream_repair::tar_truncated_partial_recovery,
-        m
-    )?)?;
-    m.add_function(wrap_pyfunction!(
-        compression_stream_repair::tar_metadata_downgrade_recovery,
-        m
-    )?)?;
-    m.add_function(wrap_pyfunction!(
-        archive_deep_repair::archive_carrier_crop_recovery,
-        m
-    )?)?;
-    m.add_function(wrap_pyfunction!(
-        archive_deep_repair::seven_zip_scan_source,
-        m
-    )?)?;
-    m.add_function(wrap_pyfunction!(
-        archive_deep_repair::seven_zip_atomic_repair,
-        m
-    )?)?;
-    m.add_function(wrap_pyfunction!(
-        archive_deep_repair::rar_file_quarantine_rebuild,
-        m
-    )?)?;
-    m.add_function(wrap_pyfunction!(
-        archive_deep_repair::archive_nested_payload_salvage,
-        m
-    )?)?;
-    m.add_function(wrap_pyfunction!(
-        archive_deep_repair::rar_block_chain_trim_recovery,
-        m
-    )?)?;
-    m.add_function(wrap_pyfunction!(
-        archive_deep_repair::rar_end_block_repair,
-        m
-    )?)?;
+    m.add_function(wrap_pyfunction!(zip_deep_partial_recovery, m)?)?;
+    m.add_function(wrap_pyfunction!(zip_scan_source, m)?)?;
+    m.add_function(wrap_pyfunction!(zip_rebuild_from_local_headers, m)?)?;
+    m.add_function(wrap_pyfunction!(zip_directory_field_repair, m)?)?;
+    m.add_function(wrap_pyfunction!(zip_conflict_resolver_rebuild, m)?)?;
+    m.add_function(wrap_pyfunction!(zip_verified_entry_salvage, m)?)?;
+    m.add_function(wrap_pyfunction!(zip_cd_local_header_reconcile_salvage, m)?)?;
+    m.add_function(wrap_pyfunction!(zip_remove_spurious_data_descriptor, m)?)?;
+    m.add_function(wrap_pyfunction!(gzip_footer_fix_repair, m)?)?;
+    m.add_function(wrap_pyfunction!(gzip_deflate_member_resync_repair, m)?)?;
+    m.add_function(wrap_pyfunction!(zstd_frame_salvage_repair, m)?)?;
+    m.add_function(wrap_pyfunction!(tar_boundary_repair, m)?)?;
+    m.add_function(wrap_pyfunction!(tar_sparse_pax_longname_repair, m)?)?;
+    m.add_function(wrap_pyfunction!(compression_stream_partial_recovery, m)?)?;
+    m.add_function(wrap_pyfunction!(compression_stream_block_salvage, m)?)?;
+    m.add_function(wrap_pyfunction!(compression_stream_trailing_junk_trim, m)?)?;
+    m.add_function(wrap_pyfunction!(tar_compressed_partial_recovery, m)?)?;
+    m.add_function(wrap_pyfunction!(tar_truncated_partial_recovery, m)?)?;
+    m.add_function(wrap_pyfunction!(tar_metadata_downgrade_recovery, m)?)?;
+    m.add_function(wrap_pyfunction!(archive_carrier_crop_recovery, m)?)?;
+    m.add_function(wrap_pyfunction!(seven_zip_scan_source, m)?)?;
+    m.add_function(wrap_pyfunction!(seven_zip_atomic_repair, m)?)?;
+    m.add_function(wrap_pyfunction!(rar_file_quarantine_rebuild, m)?)?;
+    m.add_function(wrap_pyfunction!(archive_nested_payload_salvage, m)?)?;
+    m.add_function(wrap_pyfunction!(rar_block_chain_trim_recovery, m)?)?;
+    m.add_function(wrap_pyfunction!(rar_end_block_repair, m)?)?;
     Ok(())
 }

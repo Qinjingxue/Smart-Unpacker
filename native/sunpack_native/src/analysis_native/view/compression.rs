@@ -1,0 +1,52 @@
+fn decompress_sample(
+    format: &str,
+    data: &[u8],
+    max_output: usize,
+) -> Result<Vec<u8>, &'static str> {
+    let cursor = Cursor::new(data);
+    let mut output = Vec::new();
+    let result = match format {
+        "gzip" => GzDecoder::new(cursor)
+            .take(max_output as u64)
+            .read_to_end(&mut output),
+        "bzip2" => BzDecoder::new(cursor)
+            .take(max_output as u64)
+            .read_to_end(&mut output),
+        "xz" => XzDecoder::new(cursor)
+            .take(max_output as u64)
+            .read_to_end(&mut output),
+        "zstd" => {
+            let decoder = ZstdDecoder::new(cursor).map_err(|_| "zstd_decoder_init_failed")?;
+            decoder.take(max_output as u64).read_to_end(&mut output)
+        }
+        _ => return Err("unsupported_compression_format"),
+    };
+    result.map_err(|_| "decompression_probe_failed")?;
+    Ok(output)
+}
+
+fn read_vint(data: &[u8], offset: usize) -> Option<(u64, usize)> {
+    let mut value = 0u64;
+    let mut shift = 0;
+    for index in offset..data.len().min(offset + 10) {
+        let byte = data[index];
+        value |= ((byte & 0x7F) as u64) << shift;
+        if byte & 0x80 == 0 {
+            return Some((value, index + 1));
+        }
+        shift += 7;
+    }
+    None
+}
+
+fn crc32(bytes: &[u8]) -> u32 {
+    let mut crc = 0xFFFF_FFFFu32;
+    for byte in bytes {
+        crc ^= *byte as u32;
+        for _ in 0..8 {
+            let mask = (crc & 1).wrapping_neg();
+            crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
+        }
+    }
+    !crc
+}

@@ -1,0 +1,20 @@
+use super::profile::{fuzzy_binary_profile as build_fuzzy_binary_profile, BinaryProfileConfig};
+use bzip2::read::BzDecoder;
+use flate2::read::GzDecoder;
+use pyo3::prelude::*;
+use pyo3::types::{PyBytes, PyDict, PyList};
+use std::collections::{HashMap, VecDeque};
+use std::fs::File;
+use std::io::{Cursor, Read, Seek, SeekFrom};
+use std::sync::{Condvar, Mutex, MutexGuard};
+use xz2::read::XzDecoder;
+use zstd::stream::read::Decoder as ZstdDecoder;
+
+include!("constants.rs");
+include!("types.rs");
+include!("binary.rs");
+include!("multivolume.rs");
+include!("impls.rs");
+include!("signatures.rs");
+include!("tar.rs");
+include!("compression.rs");

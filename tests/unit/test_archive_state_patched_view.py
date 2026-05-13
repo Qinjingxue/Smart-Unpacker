@@ -21,7 +21,7 @@ from sunpack.repair.pipeline.modules._native_candidates import candidates_from_n
 from sunpack.repair.pipeline.modules._common import source_input_for_job
 from sunpack.repair.pipeline.modules.tar.checksum_fix import TarHeaderChecksumFix
 from sunpack.repair.pipeline.modules.zip._rebuild import rebuild_zip_from_source
-from sunpack.repair.pipeline.modules.zip.trailing_junk_trim import ZipTrailingJunkTrim
+from sunpack.repair.pipeline.modules.zip.atomic import ZipTrimTrailingJunk
 from sunpack.support.archive_state_view import ArchiveStateByteView
 from sunpack.verification.archive_state_manifest import archive_state_manifest
 
@@ -113,7 +113,7 @@ def test_zip_repair_module_reads_patched_source_state(tmp_path):
         archive_state=state,
     )
 
-    result = ZipTrailingJunkTrim().repair(
+    result = ZipTrimTrailingJunk().repair(
         job,
         RepairDiagnosis(format="zip", confidence=0.9, categories=("boundary_repair",), repairable=True),
         str(tmp_path),
