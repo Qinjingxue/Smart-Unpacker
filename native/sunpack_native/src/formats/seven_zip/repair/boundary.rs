@@ -31,6 +31,27 @@ fn seven_zip_repair_boundary_target(
             warnings: candidate.warnings,
         });
     }
+    if require_prefix && written.is_empty() {
+        for offset in find_all(data, SEVEN_Z_MAGIC).into_iter().filter(|offset| *offset > 0).take(max_candidates.max(1)) {
+            let output_path = Path::new(workspace).join(format!("seven_zip_{target}_{:08x}.7z", offset));
+            let output_bytes = match write_slice_candidate(&data[offset..], &output_path) {
+                Ok(bytes) => bytes,
+                Err(_) => continue,
+            };
+            written.push(WrittenArchiveCandidate {
+                name: format!("{target}_{:08x}", offset),
+                path: output_path.to_string_lossy().to_string(),
+                format: "7z".to_string(),
+                status: "repaired".to_string(),
+                offset: offset as u64,
+                end_offset: data.len() as u64,
+                output_bytes,
+                confidence: 0.86,
+                actions: vec!["crop_7z_carrier_prefix".to_string()],
+                warnings: vec!["7z carrier prefix was cropped while header end is not yet reliable".to_string()],
+            });
+        }
+    }
     let Some(selected) = written.first() else {
         return seven_zip_atomic_status(py, "unrepairable", target, "7z", "", "no matching 7z boundary candidate", &[], &[], &[], 0.0, &[], &[]);
     };

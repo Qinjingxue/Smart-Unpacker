@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from sunpack.contracts.archive_state import PatchPlan
@@ -46,7 +47,7 @@ def candidates_from_native_result(
     runtime_source_input = source_input_for_job(job)
     for index, raw in enumerate(raw_candidates):
         item = _candidate_mapping(raw, index)
-        path = str(item.get("path") or "")
+        path = _absolute_path(item.get("path"))
         patch_plan = _patch_plan_from_item(item)
         use_patch_plan = bool(prefer_patch_plan and patch_plan is not None)
         if not path and not use_patch_plan:
@@ -55,7 +56,7 @@ def candidates_from_native_result(
         confidence = float(item.get("confidence", result.get("confidence", default_confidence)) or 0.0)
         actions = list(item.get("actions") or result.get("actions") or [])
         warnings = _dedupe([*list(result.get("warnings") or []), *list(item.get("warnings") or [])])
-        workspace_paths = [] if use_patch_plan else _dedupe([path, *[str(value) for value in result.get("workspace_paths") or []]])
+        workspace_paths = [] if use_patch_plan else _dedupe([path, *[_absolute_path(value) for value in result.get("workspace_paths") or []]])
         candidate_format = str(item.get("format") or fmt)
         details = {
             key: value
@@ -157,7 +158,15 @@ def _split_aware_crop_repaired_input(
 ) -> dict[str, Any] | None:
     facts = {str(value) for value in item.get("patch_facts") or result.get("patch_facts") or []}
     actions = {str(value) for value in item.get("actions") or result.get("actions") or []}
-    if "after_archive_carrier_crop" not in facts and "crop_archive_carrier_prefix" not in actions:
+    target = str(item.get("native_target") or result.get("native_target") or "")
+    is_crop_candidate = (
+        "after_archive_carrier_crop" in facts
+        or "cropped_carrier_prefix" in facts
+        or "crop_archive_carrier_prefix" in actions
+        or "crop_7z_carrier_prefix" in actions
+        or target in {"archive_carrier_crop", "carrier_prefix"}
+    )
+    if not is_crop_candidate:
         return None
     source_input = dict(getattr(job, "source_input", None) or {})
     if str(source_input.get("kind") or "") != "concat_ranges" and not source_input.get("parts"):
@@ -170,11 +179,11 @@ def _split_aware_crop_repaired_input(
         return None
     end = _crop_end(item, result)
     if _is_split_logical_source(source_input):
-        target = str(item.get("native_target") or result.get("native_target") or "")
         is_prefix_crop = (
             "crop_archive_carrier_prefix" in actions
             or "crop_7z_carrier_prefix" in actions
             or "after_archive_carrier_crop" in facts
+            or "cropped_carrier_prefix" in facts
             or target in {"archive_carrier_crop", "carrier_prefix"}
         )
         if is_prefix_crop:
@@ -218,6 +227,19 @@ def _candidate_mapping(raw: Any, index: int) -> dict[str, Any]:
     if isinstance(raw, str):
         return {"name": f"candidate_{index}", "path": raw}
     return {}
+
+
+def _absolute_path(value: Any) -> str:
+    text = str(value or "")
+    if not text:
+        return ""
+    try:
+        path = Path(text)
+        if path.is_absolute():
+            return str(path)
+        return str(path.resolve())
+    except (OSError, RuntimeError, ValueError):
+        return text
 
 
 def _patch_plan_from_item(item: dict[str, Any]) -> PatchPlan | None:

@@ -72,6 +72,28 @@ class ExtractionExitSignalMethod:
                 message=result.error,
                 path=result.archive or evidence.archive_path,
             ))
+        observations = _observations_from_manifest(evidence)
+        manifest = evidence.progress_manifest or {}
+        files_written = int(getattr(result, "files_written", 0) or manifest.get("files_written") or 0)
+        bytes_written = int(getattr(result, "bytes_written", 0) or manifest.get("bytes_written") or 0)
+        if not observations and files_written <= 0 and bytes_written <= 0:
+            return VerificationStepResult(
+                method=self.name,
+                status="failed",
+                completeness_hint=0.0,
+                source_integrity_hint=SOURCE_INTEGRITY_DAMAGED,
+                decision_hint=DECISION_REPAIR,
+                issues=[
+                    *issues,
+                    VerificationIssue(
+                        method=self.name,
+                        code="fail.extraction_success_empty",
+                        message="Extraction reported success but produced no output files",
+                        path=result.archive or evidence.archive_path,
+                        actual={"files_written": files_written, "bytes_written": bytes_written},
+                    ),
+                ],
+            )
 
         return VerificationStepResult(
             method=self.name,

@@ -244,12 +244,16 @@ class ArchiveAnalysisStage:
         record_state: bool = True,
         write_knowledge: bool = True,
     ) -> None:
+        selected = _best_selected(report)
         with _phase(phase_timer, f"{phase_prefix}_record_report_fact_bag_basic"):
             task.fact_bag.set("analysis.status", "extractable" if report.has_extractable else "not_extractable")
             task.fact_bag.set("analysis.read_bytes", report.read_bytes)
             task.fact_bag.set("analysis.cache_hits", report.cache_hits)
             task.fact_bag.set("analysis.prepass", report.prepass)
             task.fact_bag.set("analysis.fuzzy", report.fuzzy)
+            if selected is not None:
+                task.fact_bag.set("analysis.selected_format", selected.format)
+                task.fact_bag.set("analysis.confidence", float(selected.confidence or 0.0))
         with _phase(phase_timer, f"{phase_prefix}_record_report_evidence_payload"):
             evidences = [
                 {
@@ -275,7 +279,7 @@ class ArchiveAnalysisStage:
         with _phase(phase_timer, f"{phase_prefix}_record_state_get_archive_state"):
             state = task.archive_state()
         with _phase(phase_timer, f"{phase_prefix}_record_state_build_payload"):
-            selected = report.selected[0] if report.selected else None
+            selected = _best_selected(report)
             analysis = {
                 "status": "extractable" if report.has_extractable else "not_extractable",
                 "report_path": report.path,
@@ -310,6 +314,8 @@ class ArchiveAnalysisStage:
         for evidence in sorted(report.selected, key=lambda item: item.confidence, reverse=True):
             for segment in evidence.segments:
                 if segment.end_offset is None:
+                    continue
+                if int(segment.start_offset) <= 0 and str(getattr(segment, "role", "") or "primary") == "primary":
                     continue
                 candidates.append((evidence, segment, index))
                 index += 1
@@ -454,6 +460,8 @@ class ArchiveAnalysisStage:
                     "damage_flags": list(segment.damage_flags),
                 },
             )
+        if int(segment.start_offset) <= 0:
+            return None
         if evidence.format == "rar":
             return None
         ranges = self._logical_range_to_file_ranges(
@@ -537,3 +545,9 @@ def _phase(timer: Callable[..., Any] | None, name: str):
     if timer is None:
         return nullcontext()
     return timer(name)
+
+
+def _best_selected(report: ArchiveAnalysisReport) -> ArchiveFormatEvidence | None:
+    if not report.selected:
+        return None
+    return max(report.selected, key=lambda item: float(getattr(item, "confidence", 0.0) or 0.0))

@@ -128,7 +128,7 @@ struct SevenZipPasswordStatus {
     message: Option<String>,
 }
 
-fn seven_zip_password_status(data: &[u8], password: Option<&str>) -> SevenZipPasswordStatus {
+fn seven_zip_password_status(data: &[u8], _password: Option<&str>) -> SevenZipPasswordStatus {
     if !data.starts_with(SEVEN_Z_MAGIC) {
         return SevenZipPasswordStatus {
             archive_readable: false,
@@ -138,35 +138,12 @@ fn seven_zip_password_status(data: &[u8], password: Option<&str>) -> SevenZipPas
             message: None,
         };
     }
-    if password.is_none() {
-        return SevenZipPasswordStatus {
-            archive_readable: false,
-            password_required: false,
-            password_rejected: false,
-            encrypted_header: false,
-            message: None,
-        };
-    }
-    let mut cursor = Cursor::new(data.to_vec());
-    match Archive::read(&mut cursor, &seven_zip_password(password)) {
-        Ok(_) => SevenZipPasswordStatus {
-            archive_readable: true,
-            password_required: false,
-            password_rejected: false,
-            encrypted_header: false,
-            message: None,
-        },
-        Err(err) => {
-            let message = err.to_string();
-            let password_related = is_password_related_error(&message);
-            SevenZipPasswordStatus {
-                archive_readable: false,
-                password_required: password_related && password.is_none(),
-                password_rejected: password_related && password.is_some(),
-                encrypted_header: password_related,
-                message: if password_related { Some(message) } else { None },
-            }
-        }
+    SevenZipPasswordStatus {
+        archive_readable: false,
+        password_required: false,
+        password_rejected: false,
+        encrypted_header: false,
+        message: None,
     }
 }
 

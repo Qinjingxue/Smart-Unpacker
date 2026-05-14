@@ -192,6 +192,36 @@ def test_source_input_for_job_carries_password_for_file_concat_and_patched_state
     assert patched_input["password"] == "secret"
 
 
+def test_source_input_for_job_does_not_reexpand_materialized_logical_stream_parts(tmp_path):
+    repaired = tmp_path / "repaired-logical.7z"
+    original_part = tmp_path / "original.7z.001"
+    repaired.write_bytes(b"repaired")
+    original_part.write_bytes(b"original")
+
+    payload = source_input_for_job(RepairJob(
+        source_input={
+            "kind": "file",
+            "path": str(repaired),
+            "format_hint": "7z",
+            "parts": [{"path": str(original_part)}],
+            "use_parts_only": True,
+            "logical_stream_built": True,
+            "split_sidecars_available": True,
+        },
+        format="7z",
+        password="secret",
+        workspace=str(tmp_path / "workspace"),
+        repair_cache=RepairRuntimeCache(),
+    ))
+
+    assert payload["kind"] == "file"
+    assert payload["path"] == str(repaired)
+    assert payload["parts"] == [{"path": str(original_part)}]
+    assert payload["logical_stream_built"] is True
+    assert payload["split_sidecars_available"] is True
+    assert payload["password"] == "secret"
+
+
 def test_seven_zip_wrong_password_flags_are_vetoed_only_without_resolved_password():
     module = SevenZipFixStartHeaderCrc()
     job = RepairJob(

@@ -18,7 +18,7 @@ from sunpack_native import archive_carrier_crop_recovery as _native_archive_carr
 class ArchiveCarrierCropDeepRecovery:
     spec = RepairModuleSpec(
         name="archive_carrier_crop_deep_recovery",
-        formats=("7z", "seven_zip", "rar", "zip", "archive"),
+        formats=("7z", "seven_zip", "rar", "zip", "archive", "exe"),
         categories=("boundary_repair", "content_recovery", "directory_rebuild"),
         stage="deep",
         safe=True,
@@ -26,7 +26,7 @@ class ArchiveCarrierCropDeepRecovery:
         route_family="carrier_crop",
         routes=(
             RepairRoute(
-                formats=("7z", "seven_zip", "rar", "zip", "archive"),
+                formats=("7z", "seven_zip", "rar", "zip", "archive", "exe"),
                 require_any_categories=(),
                 require_any_flags=("carrier_archive", "sfx", "embedded_archive", "carrier_prefix", "boundary_unreliable", "start_trusted_only"),
                 require_any_fuzzy_hints=("carrier_prefix_likely", "entropy_boundary_shift"),
@@ -39,7 +39,7 @@ class ArchiveCarrierCropDeepRecovery:
     def can_handle(self, job: RepairJob, diagnosis: RepairDiagnosis, config: dict) -> float:
         flags = set(job.damage_flags)
         fmt = str(diagnosis.format or job.format or "").lower()
-        if fmt not in {"7z", "seven_zip", "rar", "zip", "archive"}:
+        if fmt not in {"7z", "seven_zip", "rar", "zip", "archive", "exe"}:
             return 0.0
         if "after_archive_carrier_crop" in flags or "already_tried:archive_carrier_crop_deep_recovery" in flags:
             return 0.0
@@ -49,6 +49,8 @@ class ArchiveCarrierCropDeepRecovery:
             return 0.98
         if fmt == "zip":
             return 0.0
+        if fmt == "exe" and flags & {"carrier_archive", "sfx", "embedded_archive", "carrier_prefix"}:
+            return 0.9
         if flags & {"carrier_archive", "sfx", "embedded_archive", "boundary_unreliable", "start_trusted_only"}:
             return 0.9
         if "boundary_repair" in diagnosis.categories and fmt in {"7z", "seven_zip", "rar"}:

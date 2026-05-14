@@ -25,6 +25,26 @@ def test_extraction_exit_signal_reports_unusable_failed_extraction(tmp_path):
     assert verification.issues[0].code == "fail.extraction_failed"
 
 
+def test_extraction_exit_signal_rejects_success_with_empty_output(tmp_path):
+    task = _task(tmp_path)
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    result = ExtractionResult(
+        success=True,
+        archive=task.main_path,
+        out_dir=str(out_dir),
+        all_parts=task.all_parts,
+        progress_manifest_payload={"files_written": 0, "bytes_written": 0, "files": []},
+    )
+
+    verification = _scheduler([{"name": "extraction_exit_signal"}]).verify(task, result)
+
+    assert verification.decision_hint == "repair"
+    assert verification.assessment_status == "unusable"
+    assert verification.completeness == 0.0
+    assert verification.issues[0].code == "fail.extraction_success_empty"
+
+
 def test_output_presence_reports_missing_or_empty_output_as_unusable(tmp_path):
     task = _task(tmp_path)
     result = ExtractionResult(success=True, archive=task.main_path, out_dir=str(tmp_path / "missing"), all_parts=task.all_parts)

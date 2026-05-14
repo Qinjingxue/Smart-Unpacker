@@ -12,7 +12,7 @@ from sunpack.support.archive_knowledge_writer import commit_task_knowledge, ensu
 
 def write_analysis_report(task: ArchiveTask, report: ArchiveAnalysisReport) -> None:
     knowledge = ensure_knowledge(task)
-    selected = report.selected[0] if report.selected else None
+    selected = _best_selected(report)
     write_payload(
         knowledge,
         "analysis",
@@ -54,7 +54,7 @@ def write_analysis_refresh(
     selected_segment: tuple[ArchiveFormatEvidence, ArchiveSegment, int] | None = None,
 ) -> None:
     knowledge = ensure_knowledge(task)
-    selected = report.selected[0] if report.selected else None
+    selected = _best_selected(report)
     write_payload(
         knowledge,
         "analysis",
@@ -328,3 +328,9 @@ def _evidence_payload(evidence: ArchiveFormatEvidence) -> dict[str, Any]:
         "details": dict(evidence.details),
         "segments": [asdict(segment) for segment in evidence.segments],
     }
+
+
+def _best_selected(report: ArchiveAnalysisReport) -> ArchiveFormatEvidence | None:
+    if not report.selected:
+        return None
+    return max(report.selected, key=lambda item: float(getattr(item, "confidence", 0.0) or 0.0))

@@ -78,6 +78,7 @@ class ArchiveInputDescriptor:
     open_mode: ArchiveOpenMode = "file"
     format_hint: str = ""
     logical_name: str = ""
+    password: str = ""
     parts: list[ArchiveInputPart] = field(default_factory=list)
     ranges: list[ArchiveInputRange] = field(default_factory=list)
     segment: ArchiveInputSegment | None = None
@@ -93,6 +94,8 @@ class ArchiveInputDescriptor:
             payload["format_hint"] = self.format_hint
         if self.logical_name:
             payload["logical_name"] = self.logical_name
+        if self.password:
+            payload["password"] = self.password
         if self.parts:
             payload["parts"] = [part.to_dict() for part in self.parts]
         if self.ranges:
@@ -105,11 +108,17 @@ class ArchiveInputDescriptor:
 
     def to_source_input(self) -> dict[str, Any]:
         if self.open_mode == "file":
-            return {"kind": "file", "path": self.entry_path, "format_hint": self.format_hint}
+            payload = {"kind": "file", "path": self.entry_path, "format_hint": self.format_hint}
+            if self.password:
+                payload["password"] = self.password
+            return payload
         if self.open_mode == "file_range":
             item_range = self._primary_range()
             if item_range is None:
-                return {"kind": "file", "path": self.entry_path, "format_hint": self.format_hint}
+                payload = {"kind": "file", "path": self.entry_path, "format_hint": self.format_hint}
+                if self.password:
+                    payload["password"] = self.password
+                return payload
             payload: dict[str, Any] = {
                 "kind": "file_range",
                 "path": item_range.path,
@@ -118,15 +127,20 @@ class ArchiveInputDescriptor:
             }
             if item_range.end is not None:
                 payload["end"] = int(item_range.end)
+            if self.password:
+                payload["password"] = self.password
             return payload
         if self.open_mode == "concat_ranges" and self.ranges:
-            return {
+            payload = {
                 "kind": "concat_ranges",
                 "ranges": [item.to_dict() for item in self.ranges],
                 "format_hint": self.format_hint,
             }
+            if self.password:
+                payload["password"] = self.password
+            return payload
         if self.parts:
-            return {
+            payload = {
                 "kind": "concat_ranges",
                 "ranges": [
                     {"path": part.path, "start": 0, "end": None}
@@ -134,7 +148,13 @@ class ArchiveInputDescriptor:
                 ],
                 "format_hint": self.format_hint,
             }
-        return {"kind": "file", "path": self.entry_path, "format_hint": self.format_hint}
+            if self.password:
+                payload["password"] = self.password
+            return payload
+        payload = {"kind": "file", "path": self.entry_path, "format_hint": self.format_hint}
+        if self.password:
+            payload["password"] = self.password
+        return payload
 
     def part_paths(self) -> list[str]:
         if self.open_mode == "concat_ranges" and self.ranges:
@@ -166,6 +186,7 @@ class ArchiveInputDescriptor:
             open_mode=self.open_mode,
             format_hint=self.format_hint,
             logical_name=self.logical_name,
+            password=self.password,
             parts=parts,
             ranges=ranges,
             segment=self.segment,
@@ -239,6 +260,7 @@ class ArchiveInputDescriptor:
             open_mode=open_mode,  # type: ignore[arg-type]
             format_hint=format_hint,
             logical_name=str(raw.get("logical_name") or ""),
+            password=str(raw.get("password") or ""),
             parts=parts,
             ranges=ranges,
             segment=segment,
@@ -252,7 +274,7 @@ class ArchiveInputDescriptor:
         if kind == "file":
             path = str(raw.get("path") or raw.get("archive_path") or archive_path)
             parts = [ArchiveInputPart(path=path, role="main", volume_number=1)]
-            return cls(entry_path=path, open_mode="file", format_hint=format_hint, parts=parts)
+            return cls(entry_path=path, open_mode="file", format_hint=format_hint, password=str(raw.get("password") or ""), parts=parts)
         if kind == "file_range":
             path = str(raw.get("path") or archive_path)
             start = int(raw.get("start", raw.get("start_offset", 0)) or 0)
@@ -262,6 +284,7 @@ class ArchiveInputDescriptor:
                 entry_path=path,
                 open_mode="file_range",
                 format_hint=format_hint,
+                password=str(raw.get("password") or ""),
                 parts=[ArchiveInputPart(path=path, range=ArchiveInputRange(path=path, start=start, end=end))],
                 segment=ArchiveInputSegment(start=start, end=end),
             )
@@ -281,13 +304,14 @@ class ArchiveInputDescriptor:
                 entry_path=archive_path,
                 open_mode="concat_ranges",
                 format_hint=format_hint,
+                password=str(raw.get("password") or ""),
                 ranges=ranges,
             )
         parts = [
             ArchiveInputPart(path=str(path), role="volume" if index else "main", volume_number=index + 1)
             for index, path in enumerate(part_paths or [archive_path])
         ]
-        return cls(entry_path=archive_path, open_mode="file" if len(parts) <= 1 else "native_volumes", format_hint=format_hint, parts=parts)
+        return cls(entry_path=archive_path, open_mode="file" if len(parts) <= 1 else "native_volumes", format_hint=format_hint, password=str(raw.get("password") or ""), parts=parts)
 
     @classmethod
     def from_parts(
@@ -298,6 +322,7 @@ class ArchiveInputDescriptor:
         format_hint: str = "",
         logical_name: str = "",
         open_mode: ArchiveOpenMode | None = None,
+        password: str = "",
     ) -> "ArchiveInputDescriptor":
         paths = list(part_paths or [archive_path])
         mode: ArchiveOpenMode = open_mode or ("file" if len(paths) <= 1 else "native_volumes")
@@ -306,6 +331,7 @@ class ArchiveInputDescriptor:
             open_mode=mode,
             format_hint=format_hint,
             logical_name=logical_name,
+            password=password,
             parts=[
                 ArchiveInputPart(path=str(path), role="volume" if index else "main", volume_number=index + 1)
                 for index, path in enumerate(paths)
@@ -333,6 +359,7 @@ class ArchiveInputDescriptor:
                     open_mode=descriptor.open_mode,
                     format_hint=format_hint,
                     logical_name=descriptor.logical_name or logical_name,
+                    password=descriptor.password,
                     parts=list(descriptor.parts),
                     ranges=list(descriptor.ranges),
                     segment=descriptor.segment,

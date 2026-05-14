@@ -364,6 +364,7 @@ class RepairLoopState:
                 "open_mode": "file",
                 "format_hint": format_hint,
                 "logical_name": str(self.task.logical_name or ""),
+                "password": repaired_input.get("password"),
                 "parts": [{"path": str(target), "role": "main"}],
                 "analysis": {
                     "source": "repair_loop",

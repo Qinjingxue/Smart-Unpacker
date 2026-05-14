@@ -123,6 +123,8 @@ DEFAULT_REPAIR_CONFIG = {
         {"name": "seven_zip_quarantine_bad_folder", "enabled": True},
         {"name": "seven_zip_fix_empty_stream_flags", "enabled": True},
         {"name": "seven_zip_fix_encoded_header_stream_crc", "enabled": True},
+        {"name": "seven_zip_fix_header_end_marker", "enabled": True},
+        {"name": "seven_zip_repair_encoded_header_coder_properties", "enabled": True},
         {"name": "seven_zip_fix_unpack_size", "enabled": True},
         {"name": "seven_zip_repair_folder_bind_pairs", "enabled": True},
         {"name": "seven_zip_repair_folder_stream_counts", "enabled": True},

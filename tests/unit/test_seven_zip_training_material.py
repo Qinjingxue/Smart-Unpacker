@@ -238,6 +238,63 @@ def test_split_aware_carrier_crop_candidate_uses_concat_ranges():
     assert "split_logical_stream_preserved_after_crop" in candidates[0].diagnosis["patch_facts"]
 
 
+def test_seven_zip_native_carrier_crop_preserves_split_metadata(tmp_path):
+    part1 = tmp_path / "archive.exe"
+    part2 = tmp_path / "archive.7z.002"
+    part1.write_bytes(b"carrier-prefix" + b"a" * 20)
+    part2.write_bytes(b"b" * 20)
+    source_input = {
+        "kind": "concat_ranges",
+        "format_hint": "7z",
+        "ranges": [
+            {"path": str(part1), "start": 0, "end": None, "part_index": 0},
+            {"path": str(part2), "start": 0, "end": None, "part_index": 1},
+        ],
+        "parts": [
+            {"path": str(part1), "index": 0, "volume_number": 1, "role": "carrier"},
+            {"path": str(part2), "index": 1, "volume_number": 2, "role": "volume"},
+        ],
+        "split_sidecars_available": True,
+        "logical_stream_built": True,
+    }
+    job = RepairJob(
+        source_input=source_input,
+        format="seven_zip",
+        password="secret",
+        workspace=str(tmp_path / "workspace"),
+        repair_cache=RepairRuntimeCache(),
+    )
+    result = {
+        "status": "repaired",
+        "format": "7z",
+        "native_target": "carrier_prefix",
+        "candidates": [{
+            "path": "debug-crop.7z",
+            "offset": 14,
+            "actions": ["crop_7z_carrier_prefix"],
+            "patch_facts": ["cropped_carrier_prefix", "cropped_start=14", "cropped_end=34"],
+        }],
+    }
+
+    candidates = candidates_from_native_result(
+        "seven_zip_crop_carrier_prefix",
+        result,
+        job,
+        RepairDiagnosis(format="seven_zip"),
+        native_key="native_7z_atomic_repair",
+    )
+
+    repaired_input = candidates[0].repaired_input
+    assert repaired_input["kind"] == "concat_ranges"
+    assert repaired_input["split_sidecars_available"] is True
+    assert repaired_input["logical_stream_built"] is True
+    assert repaired_input["ranges"][0]["path"] == str(part1)
+    assert repaired_input["ranges"][0]["start"] == 14
+    assert repaired_input["ranges"][1]["path"] == str(part2)
+    assert repaired_input["password"] == "secret"
+    assert "split_logical_stream_preserved_after_crop" in candidates[0].diagnosis["patch_facts"]
+
+
 def test_seven_zip_source_input_carries_password_for_file_concat_and_patched_state(tmp_path):
     source = tmp_path / "source.7z"
     part = tmp_path / "source.7z.001"

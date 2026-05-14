@@ -196,6 +196,28 @@ def test_analysis_stage_reuses_batch_report_for_equivalent_inputs(tmp_path):
     assert second.fact_bag.get("analysis.cache_hits") == 2
 
 
+def test_analysis_stage_does_not_treat_primary_multipart_archive_as_embedded_segment(tmp_path):
+    part1 = tmp_path / "archive.7z.001"
+    part2 = tmp_path / "archive.7z.002"
+    part1.write_bytes(b"7z-main")
+    part2.write_bytes(b"7z-tail")
+    evidence = ArchiveFormatEvidence(
+        format="7z",
+        confidence=0.97,
+        status="extractable",
+        segments=[ArchiveSegment(start_offset=0, end_offset=14, confidence=0.97, role="primary")],
+    )
+    task = _task(part1, parts=[part1, part2])
+    stage = ArchiveAnalysisStage({"analysis": {"enabled": False}})
+    stage.enabled = True
+    stage.scheduler = _FakeAnalysisScheduler(_report(part1, evidence))
+
+    stage.analyze_task(task)
+
+    assert task.fact_bag.get("analysis.selected_format") == "7z"
+    assert knowledge_view.analysis_extractable_segments(task) == []
+
+
 def test_analysis_stage_prefers_compressed_tar_over_stream_for_same_range(tmp_path):
     archive = tmp_path / "payload.tar.gz"
     archive.write_bytes(b"gzipped tar")

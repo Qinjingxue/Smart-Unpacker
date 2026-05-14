@@ -113,10 +113,10 @@ def _write_scan_summary_to_job_knowledge(job: RepairJob, scan: dict[str, Any]) -
     if password_present:
         _set_path(job.knowledge, "archive.password_present", True)
     if route_flags:
-        _replace_scan_flags(job.knowledge, "format.7z.route_evidence", route_flags)
-        _replace_scan_flags(job.knowledge, "repair.route_evidence", route_flags)
-        _replace_scan_flags(job.knowledge, "repair.damage", route_flags)
-        _set_path(job.knowledge, "format.7z.route_evidence_flags", route_flags)
+        _merge_scan_flags(job.knowledge, "format.7z.route_evidence", route_flags)
+        _merge_scan_flags(job.knowledge, "repair.route_evidence", route_flags)
+        _merge_scan_flags(job.knowledge, "repair.damage", route_flags)
+        _set_path(job.knowledge, "format.7z.route_evidence_flags", _merged_flags(job.knowledge, "format.7z.route_evidence.flags", route_flags))
     if tags:
         _set_path(job.knowledge, "format.7z.container_tags", tags)
     _bump_revision(job.knowledge)
@@ -182,13 +182,17 @@ def _add_flags(payload: dict[str, Any], namespace: str, flags: list[str]) -> Non
     _set_path(payload, path, merged)
 
 
-def _replace_scan_flags(payload: dict[str, Any], namespace: str, flags: list[str]) -> None:
+def _merge_scan_flags(payload: dict[str, Any], namespace: str, flags: list[str]) -> None:
     path = f"{namespace}.flags" if namespace else "flags"
+    _set_path(payload, path, _merged_flags(payload, path, flags))
+
+
+def _merged_flags(payload: dict[str, Any], path: str, flags: list[str]) -> list[str]:
     existing = [str(item) for item in _get_path(payload, path, []) or [] if str(item)]
     merged: list[str] = []
     seen: set[str] = set()
     for item in existing:
-        if item in SEVEN_Z_SCAN_ROUTE_FLAGS or item in seen:
+        if item in seen:
             continue
         seen.add(item)
         merged.append(item)
@@ -197,7 +201,7 @@ def _replace_scan_flags(payload: dict[str, Any], namespace: str, flags: list[str
             continue
         seen.add(item)
         merged.append(item)
-    _set_path(payload, path, merged)
+    return merged
 
 
 def _jsonable(value: Any) -> Any:

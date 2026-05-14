@@ -13,7 +13,12 @@ fn seven_zip_salvage_solid_prefix_native(
             return status_dict(py, "skipped", "", "7z", &message, &[], 0, 0, 0, 0.0, &[])
         }
     };
-    let recovered = match recover_seven_zip_entries_by_block(&data, max_entries.max(1), password.as_deref()) {
+    let recovered = match recover_seven_zip_entries_by_block(
+        &data,
+        max_entries.max(1),
+        password.as_deref(),
+        mb_to_bytes(max_output_size_mb).unwrap_or(512 * 1024 * 1024),
+    ) {
         Ok(entries) => entries,
         Err(message) => {
             let residual = password_residual_fact(&message, password.is_some());
@@ -109,7 +114,12 @@ fn seven_zip_salvage_non_solid_entries_native(
             return status_dict(py, "skipped", "", "7z", &message, &[], 0, 0, 0, 0.0, &[])
         }
     };
-    let recovered = match recover_seven_zip_entries_by_block(&data, max_entries.max(1), password.as_deref()) {
+    let recovered = match recover_seven_zip_entries_by_block(
+        &data,
+        max_entries.max(1),
+        password.as_deref(),
+        mb_to_bytes(max_output_size_mb).unwrap_or(512 * 1024 * 1024),
+    ) {
         Ok(entries) => entries,
         Err(message) => {
             let residual = password_residual_fact(&message, password.is_some());
@@ -203,14 +213,17 @@ fn recover_seven_zip_entries_by_block(
     data: &[u8],
     max_entries: usize,
     password: Option<&str>,
+    max_output_bytes: u64,
 ) -> Result<Vec<StoredZipEntry>, String> {
     if !data.starts_with(SEVEN_Z_MAGIC) {
         return Err("input does not start with a 7z signature".to_string());
     }
+    guard_seven_zip_salvage_header(data)?;
     let mut cursor = Cursor::new(data.to_vec());
     let password = seven_zip_password(password);
     let archive = Archive::read(&mut cursor, &password).map_err(|err| err.to_string())?;
     let mut output = Vec::new();
+    let mut output_bytes = 0u64;
     for file in &archive.files {
         if output.len() >= max_entries {
             break;
@@ -244,11 +257,20 @@ fn recover_seven_zip_entries_by_block(
             if name.is_empty() {
                 return Ok(true);
             }
+            let remaining = max_output_bytes.saturating_sub(output_bytes);
+            if remaining == 0 {
+                return Ok(false);
+            }
             let mut bytes = Vec::new();
-            reader.read_to_end(&mut bytes)?;
+            let mut limited = reader.take(remaining.saturating_add(1));
+            limited.read_to_end(&mut bytes)?;
+            if bytes.len() as u64 > remaining {
+                return Ok(false);
+            }
             if entry.has_crc && crc32(&bytes) as u64 != entry.crc {
                 return Ok(true);
             }
+            output_bytes = output_bytes.saturating_add(bytes.len() as u64);
             output.push(StoredZipEntry {
                 name: name.into_bytes(),
                 data: bytes,
@@ -257,6 +279,27 @@ fn recover_seven_zip_entries_by_block(
         });
     }
     Ok(output)
+}
+
+fn guard_seven_zip_salvage_header(data: &[u8]) -> Result<(), String> {
+    let Some(header) = parse_seven_zip_header(data, 0) else {
+        return Err("7z salvage requires a parseable start header".to_string());
+    };
+    if !header.start_crc_ok() {
+        return Err("7z salvage requires a valid start header CRC".to_string());
+    }
+    if !header.next_header_crc_ok() {
+        return Err("7z salvage requires a valid next header CRC before block decoding".to_string());
+    }
+    if header.next_header_nid == SZ_ENCODED_HEADER {
+        return Err("7z EncodedHeader must be decoded before entry salvage".to_string());
+    }
+    if !header.next_header_nid_valid {
+        return Err("7z salvage requires a valid Header or EncodedHeader NID".to_string());
+    }
+    parse_seven_zip_header_ast(data, &header)
+        .map(|_| ())
+        .map_err(|message| format!("7z salvage requires a parseable plain Header: {message}"))
 }
 fn write_stored_7z_entries(
     entries: &[StoredZipEntry],

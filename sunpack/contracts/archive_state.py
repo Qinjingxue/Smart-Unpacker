@@ -25,6 +25,7 @@ class ArchiveSource:
     open_mode: ArchiveOpenMode = "file"
     format_hint: str = ""
     logical_name: str = ""
+    password: str = ""
     parts: list[ArchiveInputPart] = field(default_factory=list)
     ranges: list[ArchiveInputRange] = field(default_factory=list)
     segment: ArchiveInputSegment | None = None
@@ -41,6 +42,8 @@ class ArchiveSource:
             payload["format_hint"] = self.format_hint
         if self.logical_name:
             payload["logical_name"] = self.logical_name
+        if self.password:
+            payload["password"] = self.password
         if self.parts:
             payload["parts"] = [part.to_dict() for part in self.parts]
         if self.ranges:
@@ -59,6 +62,7 @@ class ArchiveSource:
             open_mode=self.open_mode,
             format_hint=self.format_hint,
             logical_name=self.logical_name,
+            password=self.password,
             parts=list(self.parts),
             ranges=list(self.ranges),
             segment=self.segment,
@@ -86,6 +90,7 @@ class ArchiveSource:
             open_mode=descriptor.open_mode,
             format_hint=descriptor.format_hint,
             logical_name=descriptor.logical_name,
+            password=descriptor.password,
             parts=list(descriptor.parts),
             ranges=list(descriptor.ranges),
             segment=descriptor.segment,
@@ -284,6 +289,7 @@ class ArchiveState:
             open_mode=descriptor.open_mode,
             format_hint=self.format_hint or descriptor.format_hint,
             logical_name=self.logical_name or descriptor.logical_name,
+            password=descriptor.password,
             parts=list(descriptor.parts),
             ranges=list(descriptor.ranges),
             segment=descriptor.segment,

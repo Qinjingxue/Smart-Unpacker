@@ -173,6 +173,13 @@ pub(crate) fn seven_zip_scan_source(
                 Err(reason) => {
                     structure.set_item("encoded_header_decodable", false)?;
                     structure.set_item("encoded_header_decoder_method_supported", !reason.contains("unsupported"))?;
+                    structure.set_item(
+                        "encoded_header_coder_properties_bad",
+                        !reason.contains("password")
+                            && (reason.contains("coder_properties")
+                                || reason.contains("range decoder")
+                                || reason.contains("payload_crc_bad")),
+                    )?;
                     if reason.contains("password") {
                         structure.set_item(
                             if password.is_some() { "encoded_header_decode_password_rejected" } else { "encoded_header_decode_password_required" },
@@ -196,6 +203,18 @@ pub(crate) fn seven_zip_scan_source(
     if !structure.contains("pack_stream_size_bad")? {
         structure.set_item("pack_stream_size_bad", false)?;
     }
+    if !structure.contains("encoded_header_coder_properties_bad")? {
+        structure.set_item("encoded_header_coder_properties_bad", false)?;
+    }
+    if let Some(header) = &header {
+        let raw = data.get(header.next_header_start..header.archive_end).unwrap_or(&[]);
+        structure.set_item(
+            "header_end_marker_bad",
+            raw.last().copied().is_some_and(|item| item != SZ_END),
+        )?;
+    } else {
+        structure.set_item("header_end_marker_bad", false)?;
+    }
     structure.set_item("unpack_size_bad", false)?;
     if !structure.contains("stream_crc_bad")? {
         structure.set_item("stream_crc_bad", false)?;
@@ -211,13 +230,18 @@ pub(crate) fn seven_zip_scan_source(
                 "folder_bind_pairs_bad",
                 matches!(seven_zip_encoded_header_folder_bind_pairs_patch(raw), Ok(Some(_))),
             )?;
+            structure.set_item(
+                "folder_stream_counts_bad",
+                matches!(seven_zip_encoded_header_folder_stream_counts_patch(raw), Ok(Some(_))),
+            )?;
         } else {
             structure.set_item("folder_bind_pairs_bad", false)?;
+            structure.set_item("folder_stream_counts_bad", false)?;
         }
     } else {
         structure.set_item("folder_bind_pairs_bad", false)?;
+        structure.set_item("folder_stream_counts_bad", false)?;
     }
-    structure.set_item("folder_stream_counts_bad", false)?;
     structure.set_item("file_count_metadata_bad", false)?;
     structure.set_item("file_names_utf16_bad", false)?;
     structure.set_item("unreferenced_folder", false)?;
@@ -227,7 +251,7 @@ pub(crate) fn seven_zip_scan_source(
     structure.set_item("verified_folder_available", false)?;
     result.set_item("structure", structure)?;
 
-    let mut route_flags = seven_zip_route_flags(&data, offset, header.as_ref(), &loose);
+    let mut route_flags = seven_zip_route_flags(&data, offset, header.as_ref(), &loose, password.as_deref());
     if password_status.password_required {
         push_unique_string(&mut route_flags, "password_required");
         push_unique_string(&mut route_flags, "encrypted_header");
@@ -283,6 +307,7 @@ fn seven_zip_route_flags(
     offset: usize,
     header: Option<&SevenZipHeader>,
     loose: &SevenZipLooseHeaderFacts,
+    password: Option<&str>,
 ) -> Vec<String> {
     let mut flags = vec!["seven_zip_signature_found".to_string()];
     if offset + 8 <= data.len() && (data[offset + 6] != 0 || data[offset + 7] > 4) {
@@ -311,8 +336,14 @@ fn seven_zip_route_flags(
         if header.next_header_nid == SZ_ENCODED_HEADER {
             flags.push("encoded_header_present".to_string());
             let raw = data.get(header.next_header_start..header.archive_end).unwrap_or(&[]);
+            if raw.last().copied().is_some_and(|item| item != SZ_END) {
+                flags.push("header_end_marker_bad".to_string());
+            }
             if matches!(seven_zip_encoded_header_folder_bind_pairs_patch(raw), Ok(Some(_))) {
                 flags.push("folder_bind_pairs_bad".to_string());
+            }
+            if matches!(seven_zip_encoded_header_folder_stream_counts_patch(raw), Ok(Some(_))) {
+                flags.push("folder_stream_counts_bad".to_string());
             }
         }
         if !header.next_header_nid_valid {
@@ -357,6 +388,17 @@ fn seven_zip_route_flags(
                     }
                 } else if pack.pack_pos.value != 0 {
                     flags.push("pack_stream_offset_bad".to_string());
+                }
+            }
+        }
+        if header.next_header_nid == SZ_ENCODED_HEADER {
+            if let Err(reason) = decode_seven_zip_encoded_header_payload(data, header, password) {
+                if !reason.contains("password")
+                    && (reason.contains("coder_properties")
+                        || reason.contains("range decoder")
+                        || reason.contains("payload_crc_bad"))
+                {
+                    flags.push("encoded_header_coder_properties_bad".to_string());
                 }
             }
         }

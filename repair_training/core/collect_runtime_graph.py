@@ -1192,6 +1192,9 @@ def _write_record_knowledge(task: ArchiveTask, record: dict[str, Any]) -> None:
 
 def _attach_split_to_task(task: ArchiveTask, record: dict[str, Any]) -> None:
     source_input = dict(record.get("damaged_input") or {})
+    password = _record_password(record)
+    if password and not source_input.get("password"):
+        source_input["password"] = password
     attach_split_volumes(source_input, record)
     part_items = [dict(item) for item in source_input.get("parts") or [] if isinstance(item, dict) and item.get("path")]
     parts = _dedupe([str(item.get("path") or "") for item in part_items if item.get("path")])
@@ -1200,6 +1203,11 @@ def _attach_split_to_task(task: ArchiveTask, record: dict[str, Any]) -> None:
         parts.append(main_path)
         part_items.append({"path": main_path, "start": 0, "end": None, "role": "main"})
     if len(parts) <= 1:
+        if password and (source_input.get("path") or task.main_path):
+            source_input.setdefault("kind", "file")
+            source_input.setdefault("path", task.main_path)
+            source_input.setdefault("format_hint", _record_format(record))
+            task.set_archive_input(source_input)
         return
     task.all_parts = parts
     task.split_info.parts = parts
@@ -1212,7 +1220,22 @@ def _attach_split_to_task(task: ArchiveTask, record: dict[str, Any]) -> None:
         if path:
             ranges.append({"path": path, "start": int(item.get("start") or 0), "end": item.get("end")})
     if ranges:
-        task.set_archive_input({"kind": "concat_ranges", "ranges": ranges, "format_hint": _record_format(record), "path": main_path, "parts": part_items, "use_parts_only": bool(source_input.get("use_parts_only"))})
+        payload = {"kind": "concat_ranges", "ranges": ranges, "format_hint": _record_format(record), "path": main_path, "parts": part_items, "use_parts_only": bool(source_input.get("use_parts_only"))}
+        if password:
+            payload["password"] = password
+        task.set_archive_input(payload)
+
+
+def _record_password(record: dict[str, Any]) -> str | None:
+    for value in (
+        record.get("password"),
+        (record.get("damaged_input") or {}).get("password") if isinstance(record.get("damaged_input"), dict) else None,
+        (record.get("clean_input") or {}).get("password") if isinstance(record.get("clean_input"), dict) else None,
+    ):
+        text = str(value or "")
+        if text:
+            return text
+    return None
 
 
 def verify_extraction_output_against_oracle(extraction_result: Any, oracle: dict[str, Any], *, record: dict[str, Any] | None = None) -> dict[str, Any]:

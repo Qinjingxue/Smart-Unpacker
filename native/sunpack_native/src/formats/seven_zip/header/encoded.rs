@@ -18,6 +18,15 @@ fn decode_seven_zip_encoded_header_payload(data: &[u8], header: &SevenZipHeader,
     let raw = data
         .get(header.next_header_start..header.archive_end)
         .ok_or_else(|| "encoded_header_range_invalid".to_string())?;
+    decode_seven_zip_encoded_header_payload_from_raw(data, header, raw, password)
+}
+
+fn decode_seven_zip_encoded_header_payload_from_raw(
+    data: &[u8],
+    header: &SevenZipHeader,
+    raw: &[u8],
+    password: Option<&str>,
+) -> Result<Vec<u8>, String> {
     let mut pos = 0usize;
     if raw.get(pos).copied() != Some(SZ_ENCODED_HEADER) {
         return Err("encoded_header_nid_missing".to_string());
@@ -104,6 +113,11 @@ fn decode_seven_zip_encoded_folder(data: &[u8], folder: &SevenZipEncodedHeaderFo
 }
 
 fn decode_seven_zip_encoded_coder(data: &[u8], coder: &SevenZipEncodedHeaderCoder, password: Option<&str>, unpack_size: u64) -> Result<Vec<u8>, String> {
+    const MAX_ENCODED_HEADER_UNPACK_BYTES: u64 = 64 * 1024 * 1024;
+    const MAX_ENCODED_HEADER_DICT_BYTES: u32 = 64 * 1024 * 1024;
+    if unpack_size > MAX_ENCODED_HEADER_UNPACK_BYTES {
+        return Err("encoded_header_decoder_unsupported_method:unpack_size_too_large".to_string());
+    }
     if coder.method_id.as_slice() == EncoderMethod::ID_COPY {
         return Ok(data.to_vec());
     }
@@ -122,6 +136,9 @@ fn decode_seven_zip_encoded_coder(data: &[u8], coder: &SevenZipEncodedHeaderCode
             coder.properties[3],
             coder.properties[4],
         ]);
+        if dict_size > MAX_ENCODED_HEADER_DICT_BYTES {
+            return Err("encoded_header_decoder_unsupported_method:dictionary_too_large".to_string());
+        }
         let mut reader = LzmaReader::new_with_props(
             compressed,
             unpack_size,
@@ -141,6 +158,9 @@ fn decode_seven_zip_encoded_coder(data: &[u8], coder: &SevenZipEncodedHeaderCode
         };
         let dict_size = lzma2_dict_size(prop)
             .ok_or_else(|| "encoded_header_decoder_unsupported_method".to_string())?;
+        if dict_size > MAX_ENCODED_HEADER_DICT_BYTES {
+            return Err("encoded_header_decoder_unsupported_method:dictionary_too_large".to_string());
+        }
         let mut reader = Lzma2Reader::new(compressed, dict_size, None);
         reader
             .read_to_end(&mut decoded)

@@ -252,7 +252,7 @@ class SevenZipRepointNextHeader(_SevenZipAtomicRepair):
     repair_name = "seven_zip_repoint_next_header"
     native_target = "next_header_repoint"
     route_family = "seven_zip_next_header_fields"
-    require_flags = ("next_header_out_of_range", "encoded_header_candidate_found")
+    require_flags = ("next_header_out_of_range", "encoded_header_candidate_found", "next_header_offset_bad", "next_header_size_bad")
     base_score = 0.82
     confidence = 0.88
 
@@ -330,6 +330,27 @@ class SevenZipFixEncodedHeaderStreamCrc(_SevenZipAtomicRepair):
     reject_flags = WRONG_PASSWORD_FLAGS
     base_score = 0.82
     confidence = 0.85
+
+
+class SevenZipFixHeaderEndMarker(_SevenZipAtomicRepair):
+    module_name = "seven_zip_fix_header_end_marker"
+    repair_name = "seven_zip_fix_header_end_marker"
+    native_target = "header_end_marker"
+    route_family = "seven_zip_header_graph"
+    require_flags = ("header_end_marker_bad",)
+    base_score = 0.81
+    confidence = 0.84
+
+
+class SevenZipRepairEncodedHeaderCoderProperties(_SevenZipAtomicRepair):
+    module_name = "seven_zip_repair_encoded_header_coder_properties"
+    repair_name = "seven_zip_repair_encoded_header_coder_properties"
+    native_target = "encoded_header_coder_properties"
+    route_family = "seven_zip_encoded_header"
+    require_flags = ("encoded_header_coder_properties_bad", "encoded_header_present")
+    reject_flags = WRONG_PASSWORD_FLAGS
+    base_score = 0.81
+    confidence = 0.84
 
 
 class SevenZipFixUnpackSize(_SevenZipAtomicRepair):
@@ -532,6 +553,8 @@ def _compact_scan(scan: dict[str, Any]) -> dict[str, Any]:
                 "encoded_header_candidate_offset",
                 "encoded_header_candidate_size",
                 "encoded_header_decodable",
+                "encoded_header_coder_properties_bad",
+                "header_end_marker_bad",
                 "encoded_header_stream_crc_bad",
                 "pack_stream_offset_bad",
                 "pack_stream_size_bad",
@@ -675,6 +698,8 @@ for _module in (
     SevenZipQuarantineBadFolder(),
     SevenZipFixEmptyStreamFlags(),
     SevenZipFixEncodedHeaderStreamCrc(),
+    SevenZipFixHeaderEndMarker(),
+    SevenZipRepairEncodedHeaderCoderProperties(),
     SevenZipFixUnpackSize(),
     SevenZipRepairFolderBindPairs(),
     SevenZipRepairFolderStreamCounts(),

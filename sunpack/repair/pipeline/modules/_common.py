@@ -91,7 +91,7 @@ def source_input_for_job(job: RepairJob) -> dict[str, Any]:
             "format_hint": job.archive_state.format_hint or job.archive_state.source.format_hint or job.format,
             "patch_digest": digest,
         }
-    if str(base.get("kind") or "") != "concat_ranges" and isinstance(base.get("parts"), list) and base.get("parts"):
+    if _should_expand_parts_to_concat(base):
         ranges: list[dict[str, Any]] = []
         seen: set[str] = set()
         for item in base.get("parts") or []:
@@ -145,6 +145,19 @@ def source_input_for_job(job: RepairJob) -> dict[str, Any]:
     if job.password:
         base["password"] = job.password
     return base
+
+
+def _should_expand_parts_to_concat(source_input: dict[str, Any]) -> bool:
+    if str(source_input.get("kind") or "") == "concat_ranges":
+        return False
+    if not isinstance(source_input.get("parts"), list) or not source_input.get("parts"):
+        return False
+    # Once a split/logical stream has been materialized as a repaired file, the
+    # original parts are only metadata. Re-expanding them would discard the
+    # previous repair and send the loop back to the unmodified split source.
+    if str(source_input.get("kind") or "file") == "file" and source_input.get("path") and bool(source_input.get("logical_stream_built")):
+        return False
+    return True
 
 
 def repair_operation_cache_key(job: RepairJob, operation: str, params: dict[str, Any] | None = None) -> dict[str, Any]:

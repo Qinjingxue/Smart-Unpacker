@@ -630,6 +630,8 @@ def _build_record(
     if "wrong_or_missing_password" in profile:
         password = None
     damaged_input = {"kind": "file", "path": str(damaged_path.resolve()), "format_hint": "7z"}
+    if password:
+        damaged_input["password"] = password
     if source.split:
         damaged_input.update({
             "parts": damaged_parts,

@@ -73,12 +73,13 @@ def collection_record_context(record: dict[str, Any]) -> dict[str, Any]:
     ])
     profile = str(record.get("damage_profile") or record.get("profile") or "")
     source_derivation = dict(record.get("source_derivation") or {})
+    password = _record_password(record)
     archive_payload: dict[str, Any] = {
         "format": "7z",
-        "password_present": bool(record.get("password")),
+        "password_present": bool(password),
     }
-    if record.get("password"):
-        archive_payload["password"] = str(record.get("password"))
+    if password:
+        archive_payload["password"] = password
     return {
         "payloads": {
             "archive": archive_payload,
@@ -205,3 +206,15 @@ def _dedupe(values: list[str]) -> list[str]:
         if value and value not in output:
             output.append(value)
     return output
+
+
+def _record_password(record: dict[str, Any]) -> str | None:
+    for value in (
+        record.get("password"),
+        (record.get("damaged_input") or {}).get("password") if isinstance(record.get("damaged_input"), dict) else None,
+        (record.get("clean_input") or {}).get("password") if isinstance(record.get("clean_input"), dict) else None,
+    ):
+        text = str(value or "")
+        if text:
+            return text
+    return None

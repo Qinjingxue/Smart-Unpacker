@@ -150,6 +150,24 @@ def test_next_header_offset_keeps_compact_fixture_candidate(tmp_path):
     assert struct.unpack_from("<Q", repaired, 20)[0] == len(next_header)
 
 
+def test_next_header_offset_can_be_inferred_from_archive_end(tmp_path):
+    payload = b"payload bytes"
+    next_header = _encoded_packinfo_header(payload)
+    data = bytearray(_seven_zip_with_header(payload, next_header))
+    correct_offset = struct.unpack_from("<Q", data, 12)[0]
+    struct.pack_into("<Q", data, 12, correct_offset + 5)
+    start_header = bytes(data[12:32])
+    struct.pack_into("<I", data, 8, zlib.crc32(start_header) & 0xFFFFFFFF)
+
+    result = seven_zip_atomic_repair({"kind": "bytes", "data": bytes(data)}, str(tmp_path), "next_header_offset")
+
+    assert result["status"] == "repaired"
+    assert result["native_target"] == "next_header_offset"
+    repaired = Path(result["selected_path"]).read_bytes()
+    assert struct.unpack_from("<Q", repaired, 12)[0] == correct_offset
+    assert struct.unpack_from("<Q", repaired, 20)[0] == len(next_header)
+
+
 def test_signature_header_version_repairs_only_version_bytes(tmp_path):
     payload = b"payload bytes"
     data = bytearray(_seven_zip_with_header(payload, _packinfo_header(payload)))

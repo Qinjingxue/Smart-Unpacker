@@ -558,6 +558,7 @@ class ArchiveRepairStage:
                 open_mode="file",
                 format_hint=format_hint,
                 logical_name=str(task.logical_name or ""),
+                password=repaired_input.get("password"),
                 parts=[ArchiveInputPart(path=path)],
                 analysis={"source": "repair", "module": str(knowledge_view.get(task, "repair.last_result.module_name", ""))},
             )
