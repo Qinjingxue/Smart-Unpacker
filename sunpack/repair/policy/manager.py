@@ -7,6 +7,7 @@ from typing import Any
 from sunpack.contracts.archive_state import ArchiveState
 from sunpack.repair.candidate import RepairCandidate
 from sunpack.repair.job import RepairJob
+from sunpack.repair.policy.adapters import get_damage_analysis_adapter
 from sunpack.repair.policy.types import (
     DamageAnalysisRequest,
     DamageAnalysisResult,
@@ -405,6 +406,24 @@ def _coerce_damage_analysis(value: DamageAnalysisResult | dict[str, Any] | None,
     if isinstance(value, DamageAnalysisResult):
         return value
     if isinstance(value, dict):
+        scores = value.get("scores")
+        if isinstance(scores, dict) and not value.get("damage_labels"):
+            adapter = get_damage_analysis_adapter(fmt)
+            if adapter is None:
+                return DamageAnalysisResult(
+                    format=fmt,
+                    metadata={
+                        **dict(value.get("metadata") or {}),
+                        "provider_id": provider_id,
+                        "decision_reason": "damage_analysis_adapter_unavailable",
+                    },
+                )
+            result = adapter.postprocess_scores(
+                {str(label): _optional_float(score) or 0.0 for label, score in scores.items()},
+                value.get("thresholds") if isinstance(value.get("thresholds"), dict) else None,
+                metadata={**dict(value.get("metadata") or {}), "provider_id": provider_id},
+            )
+            return result
         return DamageAnalysisResult(
             format=str(value.get("format") or fmt),
             damage_labels=[str(item) for item in value.get("damage_labels") or [] if str(item)],

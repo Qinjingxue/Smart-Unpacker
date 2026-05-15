@@ -6,6 +6,7 @@ from typing import Any
 import random
 
 from repair_training.core.plugin import TrainingFeatureSpec, TrainingFormatPlugin, TrainingLabelSchema
+from sunpack.repair.policy.adapters.damage import get_damage_analysis_adapter
 from repair_training.formats.zip.build_material_impl import (
     _apply_profile_metadata,
     _choose_source_for_profile,
@@ -407,32 +408,14 @@ def zip_module_family(module_name: str) -> str:
 
 def postprocess_damage_prediction(raw_scores: dict[str, Any]) -> dict[str, Any]:
     scores = _score_map(raw_scores)
-    threshold = _float(raw_scores.get("threshold") if isinstance(raw_scores, dict) else None, default=0.5)
-    selected = {label: score for label, score in scores.items() if score >= threshold}
-    location_scores = {label: score for label, score in scores.items() if label.startswith(("zone:", "field:"))}
-    if not selected and location_scores:
-        label, score = max(location_scores.items(), key=lambda item: item[1])
-        selected[label] = score
-    damage_labels = sorted(selected)
-    zone_labels = [label.split(":", 1)[1] for label in damage_labels if label.startswith("zone:")]
-    for field in [label.split(":", 1)[1] for label in damage_labels if label.startswith("field:")]:
-        zone = _zone_from_field(field)
-        if zone:
-            zone_labels.append(zone)
-    return {
-        "format": "zip",
-        "damage_labels": damage_labels,
-        "damage_zones": [{"kind": zone, "path": zone} for zone in sorted(set(zone_labels))],
-        "confidence": max(selected.values(), default=0.0),
-        "route_hints": [],
-        "blocking_reasons": [],
-        "metadata": {
-            "threshold": threshold,
-            "selected_scores": selected,
-            "taxonomy": "zip",
-            "analysis_target": "location_only",
-        },
-    }
+    adapter = get_damage_analysis_adapter("zip")
+    threshold = raw_scores.get("threshold") if isinstance(raw_scores, dict) else None
+    result = adapter.postprocess_scores(  # type: ignore[union-attr]
+        scores,
+        raw_scores.get("thresholds") if isinstance(raw_scores, dict) else None,
+        threshold_override=_float(threshold) if threshold is not None else None,
+    )
+    return result.to_dict()
 
 
 def collection_record_context(record: dict[str, Any]) -> dict[str, Any]:
@@ -469,20 +452,6 @@ def _score_map(raw_scores: dict[str, Any]) -> dict[str, float]:
         if raw.get(label) is not None:
             output[label] = _float(raw.get(label))
     return output
-
-
-def _zone_from_field(field: str) -> str:
-    text = str(field or "")
-    if "." not in text:
-        return text
-    head = text.split(".", 1)[0]
-    if head == "sfx_prefix":
-        return "sfx_prefix"
-    if head == "split_volume":
-        return "split_volume"
-    if head == "zip64":
-        return "zip64"
-    return head
 
 
 def _dedupe(values: list[str]) -> list[str]:

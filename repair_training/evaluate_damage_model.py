@@ -15,10 +15,11 @@ from repair_training.core.damage_eval import (
     per_label_metrics,
     profile_summary,
 )
-from repair_training.core.damage_model_inference import DamageAnalysisModel, select_labels_from_model
+from repair_training.core.damage_model_inference import DamageAnalysisModel
 from repair_training.core.datasets import write_json, write_jsonl
 from repair_training.core.features import damage_labels_for_row
 from repair_training.core.plugin import load_training_format_plugin, normalize_format_name
+from sunpack.repair.policy.adapters.damage import get_damage_analysis_adapter
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -60,10 +61,13 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(f"damage eval leakage check failed: {reports / 'leakage_report.json'}")
 
     model = DamageAnalysisModel(model_dir=args.model_dir, plugin=plugin)
+    adapter = get_damage_analysis_adapter(fmt)
+    if adapter is None:
+        raise SystemExit(f"damage analysis adapter is not available for format: {fmt}")
     score_rows = model.predict_rows(rows)
     threshold_override = args.threshold if args.threshold is not None else None
     predictions = [
-        _prediction_row(row, scores, model=model, threshold=threshold_override)
+        _prediction_row(row, scores, model=model, adapter=adapter, threshold=threshold_override)
         for row, scores in zip(rows, score_rows)
     ]
     write_jsonl(predictions_dir / "predictions.jsonl", predictions)
@@ -96,13 +100,14 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-def _prediction_row(row: dict[str, Any], scores: dict[str, float], *, model: DamageAnalysisModel, threshold: float | None) -> dict[str, Any]:
+def _prediction_row(row: dict[str, Any], scores: dict[str, float], *, model: DamageAnalysisModel, adapter: Any, threshold: float | None) -> dict[str, Any]:
     target = row.get("damage_analysis_target") if isinstance(row.get("damage_analysis_target"), dict) else {}
     runtime = ((row.get("damage_analysis_input") or {}).get("runtime_context") or {})
     extraction = runtime.get("extraction_summary") if isinstance(runtime.get("extraction_summary"), dict) else {}
     analysis = runtime.get("analysis_summary") if isinstance(runtime.get("analysis_summary"), dict) else {}
     true_labels = damage_labels_for_row({"damage_analysis_target": target})
-    predicted = select_labels_from_model(scores, model, threshold=threshold)
+    result = adapter.postprocess_scores(scores, model.thresholds, threshold_override=threshold)
+    predicted = result.damage_labels
     return {
         "sample_id": row.get("sample_id"),
         "damage_profile": (row.get("metadata") or {}).get("damage_profile"),

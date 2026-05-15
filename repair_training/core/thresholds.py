@@ -4,8 +4,20 @@ from typing import Any
 
 import numpy as np
 
+from sunpack.repair.policy.adapters.damage import (
+    DEFAULT_THRESHOLD,
+    apply_location_hierarchy,
+    select_labels_with_thresholds,
+    zone_label_for_field,
+)
 
-DEFAULT_THRESHOLD = 0.5
+__all__ = [
+    "DEFAULT_THRESHOLD",
+    "apply_location_hierarchy",
+    "calibrate_binary_thresholds",
+    "select_labels_with_thresholds",
+    "zone_label_for_field",
+]
 
 
 def calibrate_binary_thresholds(
@@ -35,23 +47,6 @@ def calibrate_binary_thresholds(
         "thresholds": thresholds,
         "per_label": per_label,
     }
-
-
-def select_labels_with_thresholds(
-    scores: dict[str, float],
-    thresholds: dict[str, Any] | None = None,
-    *,
-    default_threshold: float = DEFAULT_THRESHOLD,
-) -> list[str]:
-    payload = thresholds if isinstance(thresholds, dict) else {}
-    per_label = payload.get("thresholds") if isinstance(payload.get("thresholds"), dict) else {}
-    default = float(payload.get("default_threshold", default_threshold) or default_threshold)
-    selected: list[str] = []
-    for label, score in scores.items():
-        threshold = float(per_label.get(label, default) or default)
-        if float(score or 0.0) >= threshold:
-            selected.append(label)
-    return sorted(selected)
 
 
 def _best_threshold(

@@ -16,6 +16,7 @@ from sunpack.extraction.result import ExtractionResult
 from sunpack.repair.candidate import RepairCandidate, RepairCandidateBatch
 from sunpack.repair.config import normalize_repair_config
 from sunpack.repair.job import RepairJob
+from sunpack.repair.policy.adapters import get_damage_analysis_adapter
 from sunpack.repair.policy.training_runtime import candidate_snapshot, runtime_context_from_job
 from sunpack.repair.result import RepairResult
 from sunpack.repair.scheduler import RepairScheduler
@@ -189,6 +190,39 @@ def test_dual_policy_loop_give_up(tmp_path, monkeypatch):
     assert result.status == "unrepairable"
     assert result.module_name == "policy_give_up"
     assert result.diagnosis["policy_loop"]["terminal_action"] == "give_up"
+
+
+def test_zip_damage_adapter_postprocesses_raw_scores():
+    adapter = get_damage_analysis_adapter("zip")
+
+    result = adapter.postprocess_scores(  # type: ignore[union-attr]
+        {"field:local_header.crc": 0.42, "zone:zip64": 0.1, "field:zip64.extra_length": 0.22},
+        {"default_threshold": 0.5, "thresholds": {"field:local_header.crc": 0.4, "field:zip64.extra_length": 0.21}},
+        metadata={"model_id": "unit"},
+    )
+
+    assert result.route_hints == []
+    assert "field:local_header.crc" in result.damage_labels
+    assert "zone:local_header" in result.damage_labels
+    assert "field:zip64.extra_length" in result.damage_labels
+    assert "zone:zip64" in result.damage_labels
+    assert {"kind": "local_header", "path": "local_header"} in result.damage_zones
+
+
+def test_policy_manager_coerces_raw_damage_scores(tmp_path, monkeypatch):
+    provider = _RawDamageScoreProvider()
+    _install_policy_package(monkeypatch, "sunpack_policy_test_raw_damage", provider)
+    from sunpack.repair.policy.manager import RepairPolicyManager
+
+    manager = RepairPolicyManager({"policy": {"provider_package": "sunpack_policy_test_raw_damage"}})
+    analysis, selection = manager.analyze_damage(job=_job(tmp_path))
+
+    assert selection["decision_status"] == "analyzed"
+    assert selection["provider_id"] == "raw_damage_policy"
+    assert analysis["route_hints"] == []
+    assert "field:zip64.extra_length" in analysis["damage_labels"]
+    assert "zone:zip64" in analysis["damage_labels"]
+    assert analysis["metadata"]["provider_id"] == "raw_damage_policy"
 
 
 def test_policy_probe_writes_public_request_and_decision(tmp_path, monkeypatch):
@@ -558,6 +592,25 @@ class _DualProvider:
                     return {"action": action, "selected_candidate_id": payload["candidate_id"], "confidence": 1.0}
             return {"action": "give_up", "reason": "missing_scripted_candidate"}
         return {"action": action, "confidence": 1.0, "reason": f"scripted_{action}"}
+
+
+class _RawDamageScoreProvider:
+    provider_id = "raw_damage_policy"
+    supported_formats = ("zip",)
+
+    def available(self):
+        return True
+
+    def analyze(self, request):
+        return {
+            "format": request.format,
+            "scores": {"field:zip64.extra_length": 0.22},
+            "thresholds": {"default_threshold": 0.5, "thresholds": {"field:zip64.extra_length": 0.21}},
+            "metadata": {"model_id": "raw_damage_unit"},
+        }
+
+    def choose(self, request):
+        return {"action": "give_up"}
 
 
 def _install_policy_package(monkeypatch, name: str, provider) -> None:

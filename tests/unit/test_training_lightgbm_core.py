@@ -80,7 +80,7 @@ def test_zip_postprocess_damage_prediction_routes_and_fallback():
     assert "field:eocd.cd_offset" in selected["damage_labels"]
     assert selected["route_hints"] == []
     assert {"kind": "eocd", "path": "eocd"} in selected["damage_zones"]
-    assert fallback["damage_labels"] == ["field:central_directory.local_header_offset"]
+    assert fallback["damage_labels"] == ["field:central_directory.local_header_offset", "zone:central_directory"]
     assert fallback["route_hints"] == []
 
 

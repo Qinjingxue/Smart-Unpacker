@@ -8,7 +8,7 @@ import numpy as np
 
 from repair_training.core.features import transform_rows
 from repair_training.core.plugin import TrainingFormatPlugin
-from repair_training.core.thresholds import select_labels_with_thresholds
+from sunpack.repair.policy.adapters.damage import select_labels_with_thresholds
 
 
 class DamageAnalysisModel:
@@ -58,7 +58,11 @@ class DamageAnalysisModel:
 
 
 def select_labels(scores: dict[str, float], *, threshold: float = 0.5) -> list[str]:
-    return sorted(label for label, score in scores.items() if float(score or 0.0) >= threshold)
+    return select_labels_with_thresholds(
+        scores,
+        {"default_threshold": float(threshold), "thresholds": {}},
+        default_threshold=float(threshold),
+    )
 
 
 def select_labels_from_model(scores: dict[str, float], model: DamageAnalysisModel, *, threshold: float | None = None) -> list[str]:
