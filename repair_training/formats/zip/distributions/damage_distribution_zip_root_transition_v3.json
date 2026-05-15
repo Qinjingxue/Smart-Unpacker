@@ -5,7 +5,7 @@
     "zip_data_descriptor_payload_bad": 90,
     "zip_data_descriptor_cd_conflict": 90,
     "zip_sfx_payload_damage": 80,
-    "zip_sfx_cd_damage": 80,
+    "zip_sfx_cd_damage": 220,
     "zip_duplicate_entry_crc_conflict": 70,
     "zip_non_utf8_filename_directory_rebuild": 70,
     "zip_zip64_extra_size_mismatch": 70,
@@ -20,7 +20,31 @@
   },
   "compound_profiles": {
     "compound_sfx_cd_offset_payload_partial": {
-      "count": 150,
+      "count": 70,
+      "base_source_requirements": ["sfx"],
+      "compound_components": ["sfx_prefix", "cd_offset", "payload_partial"],
+      "expected_min_steps": 3,
+      "expected_route_facts": ["sfx", "carrier_prefix", "central_directory_offset_bad", "payload_hash_mismatch"],
+      "physical_complete_expected": false
+    },
+    "compound_sfx_cd_offset_only": {
+      "count": 40,
+      "base_source_requirements": ["sfx"],
+      "compound_components": ["sfx_prefix", "cd_offset"],
+      "expected_min_steps": 2,
+      "expected_route_facts": ["sfx", "carrier_prefix", "central_directory_offset_bad"],
+      "physical_complete_expected": true
+    },
+    "compound_sfx_cd_offset_split_only": {
+      "count": 40,
+      "base_source_requirements": ["sfx", "split"],
+      "compound_components": ["sfx_prefix", "cd_offset", "split_missing_range"],
+      "expected_min_steps": 3,
+      "expected_route_facts": ["sfx", "carrier_prefix", "central_directory_offset_bad", "missing_volume"],
+      "physical_complete_expected": false
+    },
+    "compound_sfx_cd_offset_with_payload_no_local_header": {
+      "count": 60,
       "base_source_requirements": ["sfx"],
       "compound_components": ["sfx_prefix", "cd_offset", "payload_partial"],
       "expected_min_steps": 3,
@@ -28,7 +52,7 @@
       "physical_complete_expected": false
     },
     "compound_sfx_split_descriptor_payload_partial": {
-      "count": 130,
+      "count": 70,
       "base_source_requirements": ["sfx", "split", "data_descriptor"],
       "compound_components": ["sfx_prefix", "split_missing_range", "descriptor_conflict", "payload_partial"],
       "expected_min_steps": 4,
@@ -44,7 +68,7 @@
       "physical_complete_expected": true
     },
     "compound_zip64_locator_extra_trailing_junk": {
-      "count": 120,
+      "count": 110,
       "base_source_requirements": ["zip64"],
       "compound_components": ["zip64_locator", "zip64_extra_size", "trailing_junk"],
       "expected_min_steps": 3,
@@ -52,7 +76,7 @@
       "physical_complete_expected": true
     },
     "compound_non_utf8_duplicate_cd_offset": {
-      "count": 120,
+      "count": 100,
       "base_source_requirements": ["non_utf8", "duplicate_entries"],
       "compound_components": ["raw_filename_bytes", "duplicate_entries", "cd_offset"],
       "expected_min_steps": 3,
@@ -68,7 +92,7 @@
       "physical_complete_expected": true
     },
     "compound_boundary_drop_cd_payload_bad": {
-      "count": 110,
+      "count": 90,
       "base_source_requirements": ["normal_zip"],
       "compound_components": ["boundary_trailing_junk", "drop_cd", "payload_bad"],
       "expected_min_steps": 3,
@@ -110,21 +134,21 @@
   },
   "physical_profiles": {
     "partial_payload_many_entries_bad": {
-      "count": 150,
+      "count": 110,
       "compound_components": ["many_entry_payload_damage"],
       "expected_min_steps": 1,
       "expected_route_facts": ["payload_hash_mismatch", "partial_entries_remaining"],
       "physical_complete_expected": false
     },
     "partial_all_entry_payload_damage_with_directory": {
-      "count": 120,
+      "count": 90,
       "compound_components": ["all_entry_payload_damage", "directory_visible"],
       "expected_min_steps": 1,
       "expected_route_facts": ["payload_hash_mismatch", "directory_visible_payload_unreadable"],
       "physical_complete_expected": false
     },
     "partial_split_tail_payload_loss": {
-      "count": 120,
+      "count": 100,
       "base_source_requirements": ["split"],
       "compound_components": ["split_tail_loss", "payload_loss"],
       "expected_min_steps": 1,

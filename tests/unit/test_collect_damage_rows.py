@@ -1,18 +1,95 @@
 import json
+import zipfile
 from pathlib import Path
 
 from repair_training.build_features import main as build_features_main
 from repair_training.core.features import damage_labels_for_row, damage_location_labels_from_target
 from repair_training.collect_damage_rows import collect_damage_row
+from repair_training.formats.zip.corruption_impl import build_corpus_corruption_case
 from repair_training.formats.zip.plugin import damage_feature_spec
 from sunpack.analysis import ArchiveAnalysisReport
 from sunpack.analysis.knowledge import write_analysis_report
 from sunpack.analysis.result import ArchiveFormatEvidence
 from sunpack.contracts.detection import FactBag
 from sunpack.contracts.tasks import ArchiveTask
+from sunpack.detection.pipeline.processors.modules.format_structure.zip_directory_consistency import inspect_zip_directory_consistency
+from sunpack.detection.pipeline.processors.modules.format_structure.zip_eocd import inspect_zip_eocd_structure
 from sunpack.repair.policy.training_runtime import build_damage_analysis_request
 from sunpack.repair.job import RepairJob
 from sunpack.repair.scheduler import RepairScheduler
+
+
+def _write_source_zip(path: Path) -> None:
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("alpha.txt", b"alpha" * 80)
+        archive.writestr("beta.txt", b"beta" * 80)
+        archive.writestr("gamma.txt", b"gamma" * 80)
+
+
+def _profile_zones(tmp_path: Path, profile: str) -> set[str]:
+    source = tmp_path / f"{profile}.zip"
+    _write_source_zip(source)
+    case = build_corpus_corruption_case(
+        tmp_path / f"generated-{profile}",
+        source_path=source,
+        fmt="zip",
+        seed=123,
+        variant_index=0,
+        damage_profile=profile,
+    )
+    record = case.corpus_manifest_record(
+        source_archive_id="unit-source",
+        source_path=str(source),
+        damage_profile=profile,
+        variant_index=0,
+    )
+    return {str(item.get("zone") or "") for item in record.get("corruption_plan", [])}
+
+
+def test_zip_v3_distribution_keeps_total_and_sfx_mix():
+    path = Path("repair_training") / "formats" / "zip" / "distributions" / "damage_distribution_zip_root_transition_v3.json"
+    distribution = json.loads(path.read_text(encoding="utf-8"))
+
+    total = sum(int(value) for value in distribution["profiles"].values())
+    total += sum(int(value["count"]) for value in distribution["compound_profiles"].values())
+    total += sum(int(value["count"]) for value in distribution["physical_profiles"].values())
+
+    assert total == 2800
+    assert distribution["profiles"]["zip_sfx_cd_damage"] == 220
+    assert distribution["compound_profiles"]["compound_sfx_cd_offset_only"]["count"] == 40
+    assert distribution["compound_profiles"]["compound_sfx_cd_offset_split_only"]["count"] == 40
+    assert distribution["compound_profiles"]["compound_sfx_cd_offset_with_payload_no_local_header"]["count"] == 60
+
+
+def test_zip_sfx_compound_profiles_do_not_auto_add_local_header(tmp_path):
+    zones = _profile_zones(tmp_path, "compound_sfx_cd_offset_only")
+
+    assert "zip.sfx.prefix" in zones
+    assert any(zone.startswith("zip.central_directory") for zone in zones)
+    assert not any(zone.startswith("zip.local_header") for zone in zones)
+    assert not any("payload" in zone for zone in zones)
+
+    split_zones = _profile_zones(tmp_path, "compound_sfx_cd_offset_split_only")
+    assert "zip.missing_volume" in split_zones
+    assert not any(zone.startswith("zip.local_header") for zone in split_zones)
+    assert not any("payload" in zone for zone in split_zones)
+
+
+def test_zip_sfx_payload_no_local_header_profiles_are_explicit(tmp_path):
+    payload_zones = _profile_zones(tmp_path, "compound_sfx_cd_offset_with_payload_no_local_header")
+    legacy_payload_zones = _profile_zones(tmp_path, "compound_sfx_cd_offset_payload_partial")
+
+    assert "zip.sfx.prefix" in payload_zones
+    assert any("payload" in zone for zone in payload_zones)
+    assert not any(zone.startswith("zip.local_header") for zone in payload_zones)
+    assert any("payload" in zone for zone in legacy_payload_zones)
+    assert not any(zone.startswith("zip.local_header") for zone in legacy_payload_zones)
+
+
+def test_zip_non_sfx_compound_still_auto_adds_local_header(tmp_path):
+    zones = _profile_zones(tmp_path, "compound_boundary_drop_cd_payload_bad")
+
+    assert any(zone.startswith("zip.local_header") for zone in zones)
 
 
 def test_collect_damage_row_uses_location_only_targets(monkeypatch, tmp_path):
@@ -183,3 +260,83 @@ def test_zip_damage_feature_spec_excludes_compressed_route_flags():
     assert "runtime_context.analysis_native_probe.raw_structure." in spec.include_prefixes
     assert not any(prefix == "runtime_context.job_summary." for prefix in spec.include_prefixes)
     assert not any("route_evidence" in prefix or "damage_flags" in prefix for prefix in spec.include_prefixes)
+    assert "runtime_context.extraction_summary." not in spec.include_prefixes
+    assert "runtime_context.verification_summary." not in spec.include_prefixes
+    assert "runtime_context.extraction_summary.entry_outcomes." in spec.include_prefixes
+    assert "runtime_context.verification_summary.coverage_breakdown." in spec.include_prefixes
+    assert "runtime_context.analysis_native_probe.structure.eocd.entry_count_delta" in spec.ignore_paths
+    assert "runtime_context.analysis_native_probe.raw_structure.eocd.entry_count_delta" in spec.ignore_paths
+
+
+def test_zip_eocd_probe_exposes_tolerant_candidate_fields(tmp_path):
+    archive = tmp_path / "comment_mismatch.zip"
+    # Valid EOCD signature with a declared comment longer than physically present.
+    record = (
+        b"PK\x05\x06"
+        + b"\0" * 6
+        + (1).to_bytes(2, "little")
+        + (0).to_bytes(4, "little")
+        + (0).to_bytes(4, "little")
+        + (10).to_bytes(2, "little")
+        + b"abc"
+    )
+    archive.write_bytes(record)
+
+    payload = inspect_zip_eocd_structure(str(archive))
+
+    assert payload["eocd_candidate_found"] is True
+    assert payload["eocd_candidate_offset"] == 0
+    assert payload["eocd_candidate_declared_entry_count_present"] is True
+    assert "eocd_candidate_comment_available_delta" in payload
+
+
+def test_zip_directory_consistency_exposes_sfx_prefix_and_dual_offset_fields(tmp_path):
+    clean = tmp_path / "clean.zip"
+    with zipfile.ZipFile(clean, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("a.txt", "alpha")
+        archive.writestr("b.txt", "beta")
+    sfx = tmp_path / "sfx.zip"
+    prefix = b"MZ-SUNPACK-SFX-STUB"
+    sfx.write_bytes(prefix + clean.read_bytes())
+
+    payload = inspect_zip_directory_consistency(str(sfx), max_entries=8)
+    prefix_payload = payload["prefix"]
+
+    assert prefix_payload["first_local_header_found"] is True
+    assert prefix_payload["first_local_header_offset"] == len(prefix)
+    assert prefix_payload["prefix_bytes_before_first_local"] == len(prefix)
+    assert prefix_payload["prefix_has_executable_signature"] is True
+    assert prefix_payload["local_offset_only_valid_with_prefix_count"] >= 1
+    assert prefix_payload["local_offset_prefix_adjustment_success_ratio"] > 0
+
+
+def test_training_runtime_exposes_zip_observation_facts_in_structure(tmp_path):
+    archive = tmp_path / "bad.zip"
+    archive.write_bytes(b"PK\x03\x04bad")
+    knowledge = {
+        "source": {"input": {"kind": "file", "path": str(archive), "format_hint": "zip"}},
+        "analysis": {"summary": {"format": "zip", "confidence": 1.0}},
+        "format": {
+            "zip": {
+                "structure": {
+                    "directory_consistency": {"cd_entries_checked": 2, "central_local_crc_mismatch_count": 1},
+                    "evidence": {"payload_failure_without_header_mismatch": True},
+                }
+            }
+        },
+        "extraction": {"entry_outcomes": {"entry_failed_count": 1, "crc_error_count": 1}},
+        "verification": {"coverage_breakdown": {"failed_files": 1, "crc_mismatch_count": 1}, "summary": {"decision_hint": "repair"}},
+    }
+    job = RepairJob(
+        source_input={"kind": "file", "path": str(archive), "format_hint": "zip"},
+        format="zip",
+        knowledge=knowledge,
+        archive_key="unit",
+    )
+
+    request = build_damage_analysis_request(job, None, diagnosis={"format": "zip"})
+    structure = request.runtime_context["analysis_native_probe"]["structure"]
+
+    assert structure["extraction_entry_outcomes"]["entry_failed_count"] == 1
+    assert structure["verification_coverage_breakdown"]["crc_mismatch_count"] == 1
+    assert structure["evidence"]["payload_failure_without_header_mismatch"] is True

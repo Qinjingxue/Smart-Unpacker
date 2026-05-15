@@ -1326,7 +1326,10 @@ def _zip_compound_profile_mutations(
     if "crc" in profile:
         mutations.extend(_zip_cd_crc_mutations(cd_headers, randomizer))
     if profile.startswith("compound_"):
-        if not any(mutation.zone.startswith("zip.local_header") for mutation in mutations):
+        has_local_header_damage = any(mutation.zone.startswith("zip.local_header") for mutation in mutations)
+        explicit_local_header_damage = "local_header" in profile and "no_local_header" not in profile
+        auto_local_header_damage = not profile.startswith("compound_sfx_")
+        if not has_local_header_damage and (explicit_local_header_damage or auto_local_header_damage):
             mutations.extend(_zip_local_crc_mutations(entry_infos, randomizer))
         if not any("eocd" in mutation.zone or "central_directory" in mutation.zone for mutation in mutations):
             mutations.extend(_zip_eocd_directory_conflict_mutations(eocd))

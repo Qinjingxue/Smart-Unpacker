@@ -49,10 +49,12 @@ def write_verification_result(
             "output_confidence": output_quality["confidence"],
             "output_quality": output_quality,
             "archive_coverage": asdict(result.archive_coverage),
+            "coverage_breakdown": _coverage_breakdown(result),
             "repair_hints": dict(result.repair_hints or {}),
         }
     with _phase(phase_timer, f"{phase_prefix}_write_summary"):
         write_payload(knowledge, "verification.summary", summary, source_layer="verification", source_module="scheduler")
+        write_payload(knowledge, "verification", {"coverage_breakdown": summary["coverage_breakdown"]}, source_layer="verification", source_module="scheduler")
     with _phase(phase_timer, f"{phase_prefix}_write_observations"):
         write_payload(
             knowledge,
@@ -72,6 +74,13 @@ def write_verification_result(
             write_flags(knowledge, "repair.residual", residual, source_layer="verification", source_module="scheduler")
     with _phase(phase_timer, f"{phase_prefix}_commit"):
         commit_task_knowledge(task, knowledge, phase_timer=phase_timer, phase_prefix=f"{phase_prefix}_commit")
+    with _phase(phase_timer, f"{phase_prefix}_zip_runtime_evidence"):
+        try:
+            from sunpack.analysis.knowledge import write_zip_runtime_evidence_facts
+
+            write_zip_runtime_evidence_facts(task)
+        except Exception:
+            pass
 
 
 def _residual_flags(result: VerificationResult) -> list[str]:
@@ -87,6 +96,96 @@ def _residual_flags(result: VerificationResult) -> list[str]:
         if "crc" in text or "checksum" in text:
             flags.extend(["checksum_error", "crc_error", "payload_hash_mismatch"])
     return _dedupe(flags)
+
+
+def _coverage_breakdown(result: VerificationResult) -> dict[str, Any]:
+    coverage = result.archive_coverage
+    expected_files = int(coverage.expected_files or result.output_file_count or 0)
+    complete_files = int(coverage.complete_files or result.complete_files or 0)
+    partial_files = int(coverage.partial_files or result.partial_files or 0)
+    failed_files = int(coverage.failed_files or result.failed_files or 0)
+    missing_files = int(coverage.missing_files or result.missing_files or 0)
+    unverified_files = int(coverage.unverified_files or result.unverified_files or 0)
+    observed_total = expected_files or complete_files + partial_files + failed_files + missing_files + unverified_files
+    issue_counts = _issue_counts(result)
+    observation_counts = _observation_counts(result)
+    crc_mismatch = max(issue_counts["crc_mismatch_count"], observation_counts["crc_mismatch_count"])
+    size_mismatch = max(issue_counts["size_mismatch_count"], observation_counts["size_mismatch_count"])
+    output_missing = max(issue_counts["output_missing_count"], missing_files)
+    return {
+        "expected_files": expected_files,
+        "matched_files": int(coverage.matched_files or 0),
+        "complete_files": complete_files,
+        "partial_files": partial_files,
+        "failed_files": failed_files,
+        "missing_files": missing_files,
+        "unverified_files": unverified_files,
+        "complete_ratio": _ratio(complete_files, observed_total),
+        "partial_ratio": _ratio(partial_files, observed_total),
+        "failed_ratio": _ratio(failed_files, observed_total),
+        "missing_ratio": _ratio(missing_files, observed_total),
+        "unverified_ratio": _ratio(unverified_files, observed_total),
+        "expected_bytes": int(coverage.expected_bytes or 0),
+        "matched_bytes": int(coverage.matched_bytes or 0),
+        "complete_bytes": int(coverage.complete_bytes or 0),
+        "file_coverage": float(coverage.file_coverage or 0.0),
+        "byte_coverage": float(coverage.byte_coverage or 0.0),
+        "completeness": float(coverage.completeness or result.completeness or 0.0),
+        "crc_mismatch_count": crc_mismatch,
+        "size_mismatch_count": size_mismatch,
+        "output_missing_count": output_missing,
+        "payload_hash_mismatch_count": issue_counts["payload_hash_mismatch_count"],
+        "archive_crc_file_missing_count": issue_counts["archive_crc_file_missing_count"],
+        "archive_crc_test_failed_count": issue_counts["archive_crc_test_failed_count"],
+    }
+
+
+def _issue_counts(result: VerificationResult) -> dict[str, int]:
+    counts = {
+        "crc_mismatch_count": 0,
+        "size_mismatch_count": 0,
+        "output_missing_count": 0,
+        "payload_hash_mismatch_count": 0,
+        "archive_crc_file_missing_count": 0,
+        "archive_crc_test_failed_count": 0,
+    }
+    for issue in result.issues:
+        code = str(issue.code or "").lower()
+        message = str(issue.message or "").lower()
+        text = f"{code} {message}"
+        if "crc" in text or "checksum" in text:
+            counts["crc_mismatch_count"] += 1
+        if "size" in text or "length" in text:
+            counts["size_mismatch_count"] += 1
+        if "missing" in text or "output_missing" in text:
+            counts["output_missing_count"] += 1
+        if "payload_hash" in text or "hash_mismatch" in text:
+            counts["payload_hash_mismatch_count"] += 1
+        if "archive_crc_file_missing" in code:
+            counts["archive_crc_file_missing_count"] += 1
+        if "archive_crc_test_failed" in code:
+            counts["archive_crc_test_failed_count"] += 1
+    return counts
+
+
+def _observation_counts(result: VerificationResult) -> dict[str, int]:
+    counts = {"crc_mismatch_count": 0, "size_mismatch_count": 0}
+    for item in result.file_observations:
+        if item.crc_expected is not None and item.crc_actual is not None and item.crc_expected != item.crc_actual:
+            counts["crc_mismatch_count"] += 1
+        if item.expected_size is not None and item.bytes_written and int(item.bytes_written) != int(item.expected_size):
+            counts["size_mismatch_count"] += 1
+        for issue in item.issues:
+            text = f"{issue.code} {issue.message}".lower()
+            if "crc" in text or "checksum" in text:
+                counts["crc_mismatch_count"] += 1
+            if "size" in text or "length" in text:
+                counts["size_mismatch_count"] += 1
+    return counts
+
+
+def _ratio(value: int, total: int) -> float:
+    return float(value) / float(max(1, int(total or 0)))
 
 
 def _dedupe(values: list[str]) -> list[str]:

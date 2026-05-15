@@ -53,10 +53,11 @@ def runtime_context_from_job(job: RepairJob) -> dict[str, Any]:
     fuzzy = _dict_at(knowledge, "analysis.fuzzy")
     failure = _dict_at(knowledge, "extraction.failure")
     diagnostics = _dict_at(knowledge, "extraction.diagnostics")
+    entry_outcomes = _dict_at(knowledge, "extraction.entry_outcomes")
     verification = _dict_at(knowledge, "verification.summary")
+    coverage_breakdown = _dict_at(knowledge, "verification.coverage_breakdown") or _dict_at(knowledge, "verification.summary.coverage_breakdown")
     source = _dict_at(knowledge, "source.input")
     coverage = failure.get("archive_coverage") if isinstance(failure.get("archive_coverage"), dict) else _dict_at(knowledge, "verification.summary.archive_coverage")
-    output_quality = verification.get("output_quality") if isinstance(verification.get("output_quality"), dict) else {}
     route_evidence_flags = [str(flag) for flag in route_context.get("route_evidence_flags") or [] if str(flag)]
     damage_flags = [str(flag) for flag in route_context.get("damage_flags") or getattr(job, "damage_flags", []) if str(flag)]
     return {
@@ -89,12 +90,11 @@ def runtime_context_from_job(job: RepairJob) -> dict[str, Any]:
             "authentication_blocking": bool(authentication.get("authentication_blocking")),
         },
         "extraction_summary": {
-            "has_failure": bool(failure),
             "failure_stage": str(failure.get("failure_stage") or diagnostics.get("failure_stage") or ""),
             "failure_kind": str(failure.get("failure_kind") or diagnostics.get("failure_kind") or ""),
             "status": str(failure.get("status") or diagnostics.get("status") or ""),
             "native_status": str(diagnostics.get("native_status") or ""),
-            "error_kind_present": bool(failure.get("error") or diagnostics.get("error")),
+            "entry_outcomes": entry_outcomes,
         },
         "verification_summary": {
             "decision_hint": str(failure.get("decision_hint") or verification.get("decision_hint") or ""),
@@ -102,15 +102,6 @@ def runtime_context_from_job(job: RepairJob) -> dict[str, Any]:
             "source_integrity": str(failure.get("source_integrity") or verification.get("source_integrity") or ""),
             "completeness": _float(failure.get("completeness", verification.get("completeness"))),
             "recoverable_upper_bound": _float(failure.get("recoverable_upper_bound", verification.get("recoverable_upper_bound")), default=1.0),
-            "output_quality_score": _float(failure.get("output_quality_score", verification.get("output_quality_score", output_quality.get("score")))),
-            "output_complete_ratio": _float(failure.get("output_complete_ratio", verification.get("output_complete_ratio", output_quality.get("complete_ratio")))),
-            "output_failed_ratio": _float(failure.get("output_failed_ratio", verification.get("output_failed_ratio", output_quality.get("failed_ratio")))),
-            "output_file_count": _int(failure.get("output_file_count", verification.get("output_file_count", output_quality.get("file_count")))),
-            "output_total_bytes": _int(failure.get("output_total_bytes", verification.get("output_total_bytes", output_quality.get("total_bytes")))),
-            "complete_files": _int(failure.get("complete_files", verification.get("complete_files"))),
-            "partial_files": _int(failure.get("partial_files", verification.get("partial_files"))),
-            "failed_files": _int(failure.get("failed_files", verification.get("failed_files"))),
-            "missing_files": _int(failure.get("missing_files", verification.get("missing_files"))),
             "archive_coverage": {
                 "completeness": _float(coverage.get("completeness")),
                 "file_coverage": _float(coverage.get("file_coverage")),
@@ -118,6 +109,7 @@ def runtime_context_from_job(job: RepairJob) -> dict[str, Any]:
                 "expected_files": _int(coverage.get("expected_files")),
                 "matched_files": _int(coverage.get("matched_files")),
             },
+            "coverage_breakdown": coverage_breakdown,
         },
         "previous_actions": _list_values(history, "previous_actions") or _list_values(history, "path_actions"),
         "previous_modules": _list_values(history, "previous_modules") or _list_values(history, "path_modules"),
@@ -329,8 +321,15 @@ def _analysis_native_probe(job: RepairJob, knowledge: ArchiveKnowledge, route_ev
     }
     structure = zip_facts.get("structure") if isinstance(zip_facts.get("structure"), dict) else {}
     if structure:
-        probe["raw_structure"] = dict(structure)
-        probe["structure"] = dict(structure)
+        enriched = dict(structure)
+        extraction_outcomes = _dict_at(knowledge, "extraction.entry_outcomes")
+        coverage_breakdown = _dict_at(knowledge, "verification.coverage_breakdown") or _dict_at(knowledge, "verification.summary.coverage_breakdown")
+        if extraction_outcomes:
+            enriched["extraction_entry_outcomes"] = extraction_outcomes
+        if coverage_breakdown:
+            enriched["verification_coverage_breakdown"] = coverage_breakdown
+        probe["raw_structure"] = dict(enriched)
+        probe["structure"] = dict(enriched)
     for key, value in structure.items():
         probe[str(key)] = _safe_feature_value(value)
     for tag in zip_facts.get("container_tags") or []:

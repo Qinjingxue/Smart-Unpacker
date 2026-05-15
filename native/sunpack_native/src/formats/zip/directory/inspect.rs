@@ -49,6 +49,10 @@ pub(crate) fn inspect_zip_directory_consistency(
         result.set_item("error", "no_central_directory_entries_parseable")?;
         return Ok(result.unbind());
     }
+    let local_candidates = scan_zip_local_headers(&data, physical_cd_offset, max_entries.saturating_mul(4).max(32));
+    let local_spans = local_record_spans(&local_candidates, physical_cd_offset);
+    let first_local_offset = local_candidates.first().map(|local| local.offset).unwrap_or(0);
+    let prefix_len = first_local_offset;
 
     let mut local_missing = 0usize;
     let mut local_bad_sig = 0usize;
@@ -65,16 +69,86 @@ pub(crate) fn inspect_zip_directory_consistency(
     let mut descriptor_missing = 0usize;
     let mut descriptor_flag_mismatch = 0usize;
     let mut spurious_descriptor_candidates = 0usize;
+    let mut descriptor_candidate_span_overlap = 0usize;
+    let mut descriptor_payload_end_to_next_local_delta_min: Option<usize> = None;
+    let mut cd_compressed_size_points_into_descriptor = 0usize;
+    let mut compressed_size_ends_before_descriptor = 0usize;
+    let mut compressed_size_ends_inside_descriptor = 0usize;
+    let mut compressed_size_ends_after_next_local = 0usize;
+    let mut descriptor_span_between_payload_and_next_local = 0usize;
+    let mut cd_entry_span_conflict = 0usize;
+    let mut wrong_local_header_target = 0usize;
+    let mut local_header_offset_points_to_other_entry = 0usize;
+    let mut local_header_offset_points_to_descriptor_or_payload = 0usize;
+    let mut local_offset_valid_without_prefix = 0usize;
+    let mut local_offset_valid_with_prefix = 0usize;
+    let mut local_offset_only_valid_with_prefix = 0usize;
+    let mut local_offset_invalid_after_prefix_adjustment = 0usize;
     let mut zip64_extra_present = 0usize;
     let mut zip64_extra_size_mismatch = 0usize;
     let mut zip64_extra_value_mismatch = 0usize;
+    let mut parsed_payload_spans: Vec<(usize, usize)> = Vec::new();
 
     for (index, entry) in checked_entries.iter().enumerate() {
-        let Some(local_offset) = archive_offset.checked_add(entry.local_header_offset as usize) else {
+        let raw_local_offset = entry.local_header_offset as usize;
+        let Some(archive_adjusted_offset) = archive_offset.checked_add(entry.local_header_offset as usize) else {
             local_missing += 1;
             offset_suspicious += 1;
             continue;
         };
+        let prefix_adjusted_offset = raw_local_offset.saturating_add(prefix_len);
+        let local_offset = if prefix_len > 0 {
+            prefix_adjusted_offset
+        } else {
+            archive_adjusted_offset
+        };
+        let raw_local = parse_local_header(&data, raw_local_offset);
+        let archive_adjusted_local = parse_local_header(&data, archive_adjusted_offset);
+        let prefix_adjusted_local = if prefix_len > 0 {
+            parse_local_header(&data, prefix_adjusted_offset)
+        } else {
+            None
+        };
+        if raw_local.is_some() {
+            local_offset_valid_without_prefix += 1;
+        }
+        if prefix_len > 0 {
+            if prefix_adjusted_local.is_some() {
+                local_offset_valid_with_prefix += 1;
+                if raw_local.is_none() {
+                    local_offset_only_valid_with_prefix += 1;
+                }
+            } else {
+                local_offset_invalid_after_prefix_adjustment += 1;
+            }
+        }
+        let matched_local = prefix_adjusted_local
+            .clone()
+            .or_else(|| archive_adjusted_local.clone())
+            .or_else(|| raw_local.clone())
+            .or_else(|| local_candidates.iter().find(|candidate| candidate.name == entry.name).cloned());
+        if raw_local_offset != archive_adjusted_offset
+            && archive_adjusted_local.is_none()
+            && raw_local.is_some()
+        {
+            offset_suspicious += 1;
+        }
+        for candidate_offset in [raw_local_offset, archive_adjusted_offset, prefix_adjusted_offset] {
+            if candidate_offset < data.len()
+                && data.get(candidate_offset..candidate_offset.saturating_add(4)) != Some(LFH_SIG)
+                && offset_inside_local_or_data_span(candidate_offset, &local_spans)
+            {
+                local_header_offset_points_to_descriptor_or_payload += 1;
+            }
+        }
+        if let Some(local) = matched_local.as_ref() {
+            if local.offset != local_offset || local.name != entry.name {
+                wrong_local_header_target += 1;
+            }
+            if local.name != entry.name {
+                local_header_offset_points_to_other_entry += 1;
+            }
+        }
         if local_offset + 4 > data.len() {
             local_missing += 1;
             offset_suspicious += 1;
@@ -83,9 +157,15 @@ pub(crate) fn inspect_zip_directory_consistency(
         if data.get(local_offset..local_offset + 4) != Some(LFH_SIG) {
             local_bad_sig += 1;
             offset_suspicious += 1;
-            continue;
+            if parsed_payload_spans
+                .iter()
+                .any(|(start, end)| local_offset >= *start && local_offset < end.saturating_add(32))
+                || offset_inside_local_or_data_span(local_offset, &local_spans)
+            {
+                local_header_offset_points_to_descriptor_or_payload += 1;
+            }
         }
-        let Some(local) = parse_local_header(&data, local_offset) else {
+        let Some(local) = matched_local else {
             local_missing += 1;
             continue;
         };
@@ -140,6 +220,37 @@ pub(crate) fn inspect_zip_directory_consistency(
         else {
             continue;
         };
+        let payload_start = local
+            .offset
+            .checked_add(LOCAL_HEADER_LEN)
+            .and_then(|value| value.checked_add(local.name_len as usize))
+            .and_then(|value| value.checked_add(local.extra_len as usize))
+            .unwrap_or(local.offset);
+        parsed_payload_spans.push((payload_start, payload_end));
+        let next_boundary = checked_entries
+            .get(index + 1)
+            .map(|next| next.local_header_offset as usize + prefix_len)
+            .or_else(|| checked_entries.get(index + 1).map(|next| next.local_header_offset as usize))
+            .unwrap_or(physical_cd_offset)
+            .min(data.len());
+        if payload_end > next_boundary {
+            compressed_size_ends_after_next_local += 1;
+            cd_entry_span_conflict += 1;
+        }
+        if payload_end < next_boundary {
+            if let Some(descriptor_offset) = find_signature_between(&data, payload_end, next_boundary, DD_SIG) {
+                descriptor_span_between_payload_and_next_local += 1;
+                if payload_end < descriptor_offset {
+                    compressed_size_ends_before_descriptor += 1;
+                } else if payload_end < descriptor_offset.saturating_add(24) {
+                    compressed_size_ends_inside_descriptor += 1;
+                }
+                let delta = descriptor_offset.saturating_sub(payload_end);
+                descriptor_payload_end_to_next_local_delta_min =
+                    Some(descriptor_payload_end_to_next_local_delta_min.map_or(delta, |current| current.min(delta)));
+                cd_entry_span_conflict += 1;
+            }
+        }
         if entry.compressed_size != u32::MAX && payload_end <= data.len() {
             descriptor_checked += 1;
             let has_descriptor = descriptor_at(
@@ -159,6 +270,23 @@ pub(crate) fn inspect_zip_directory_consistency(
             }
             if zip_inspect_spurious_descriptor_candidate(&data, &all_entries, index, entry, &local, physical_cd_offset) {
                 spurious_descriptor_candidates += 1;
+            }
+            if let Some(next_entry) = checked_entries.get(index + 1) {
+                if let Some(next_local_offset) = (next_entry.local_header_offset as usize).checked_add(prefix_len) {
+                    if next_local_offset > payload_end {
+                        let delta = next_local_offset - payload_end;
+                        descriptor_payload_end_to_next_local_delta_min =
+                            Some(descriptor_payload_end_to_next_local_delta_min.map_or(delta, |current| current.min(delta)));
+                        if delta <= 32 {
+                            descriptor_candidate_span_overlap += 1;
+                            if has_descriptor || delta >= 12 {
+                                cd_compressed_size_points_into_descriptor += 1;
+                            }
+                        }
+                    } else if next_local_offset > payload_start {
+                        local_header_offset_points_to_descriptor_or_payload += 1;
+                    }
+                }
             }
         }
     }
@@ -180,7 +308,46 @@ pub(crate) fn inspect_zip_directory_consistency(
     descriptor.set_item("descriptor_missing_count", descriptor_missing)?;
     descriptor.set_item("descriptor_flag_mismatch_count", descriptor_flag_mismatch)?;
     descriptor.set_item("spurious_descriptor_candidate_count", spurious_descriptor_candidates)?;
+    descriptor.set_item("descriptor_candidate_span_overlap_count", descriptor_candidate_span_overlap)?;
+    descriptor.set_item(
+        "descriptor_payload_end_to_next_local_delta_min",
+        descriptor_payload_end_to_next_local_delta_min.unwrap_or(0),
+    )?;
+    descriptor.set_item("cd_compressed_size_points_into_descriptor_count", cd_compressed_size_points_into_descriptor)?;
+    descriptor.set_item("compressed_size_ends_before_descriptor_count", compressed_size_ends_before_descriptor)?;
+    descriptor.set_item("compressed_size_ends_inside_descriptor_count", compressed_size_ends_inside_descriptor)?;
+    descriptor.set_item("compressed_size_ends_after_next_local_count", compressed_size_ends_after_next_local)?;
+    descriptor.set_item("descriptor_span_between_payload_and_next_local_count", descriptor_span_between_payload_and_next_local)?;
+    descriptor.set_item("cd_entry_span_conflict_count", cd_entry_span_conflict)?;
+    descriptor.set_item("wrong_local_header_target_count", wrong_local_header_target)?;
+    descriptor.set_item("local_header_offset_points_to_other_entry_count", local_header_offset_points_to_other_entry)?;
+    descriptor.set_item(
+        "local_header_offset_points_to_descriptor_or_payload_count",
+        local_header_offset_points_to_descriptor_or_payload,
+    )?;
     result.set_item("descriptor", descriptor)?;
+
+    let prefix = PyDict::new(py);
+    prefix.set_item("first_local_header_found", !local_candidates.is_empty())?;
+    prefix.set_item("first_local_header_offset", first_local_offset)?;
+    prefix.set_item("prefix_bytes_before_first_local", prefix_len)?;
+    prefix.set_item("prefix_has_non_zip_bytes", prefix_len > 0 && data.get(0..4) != Some(LFH_SIG))?;
+    prefix.set_item(
+        "prefix_has_executable_signature",
+        prefix_len >= 2 && (data.get(0..2) == Some(b"MZ") || data.get(0..2) == Some(b"#!")),
+    )?;
+    prefix.set_item("local_offset_valid_without_prefix_count", local_offset_valid_without_prefix)?;
+    prefix.set_item("local_offset_valid_with_prefix_count", local_offset_valid_with_prefix)?;
+    prefix.set_item("local_offset_only_valid_with_prefix_count", local_offset_only_valid_with_prefix)?;
+    prefix.set_item(
+        "local_offset_invalid_after_prefix_adjustment_count",
+        local_offset_invalid_after_prefix_adjustment,
+    )?;
+    prefix.set_item(
+        "local_offset_prefix_adjustment_success_ratio",
+        local_offset_valid_with_prefix as f64 / checked_entries.len().max(1) as f64,
+    )?;
+    result.set_item("prefix", prefix)?;
 
     let zip64 = PyDict::new(py);
     let zip64_eocd = find_zip64_eocd(&data, eocd.offset);
@@ -234,6 +401,56 @@ fn zip_inspect_spurious_descriptor_candidate(
     cd_offset: usize,
 ) -> bool {
     spurious_descriptor_delete_for_entry(data, entries, index, entry, local, cd_offset).is_some()
+}
+
+fn scan_zip_local_headers(data: &[u8], before: usize, limit: usize) -> Vec<LocalHeader> {
+    let mut output = Vec::new();
+    let mut cursor = 0usize;
+    let end = before.min(data.len());
+    while cursor + LOCAL_HEADER_LEN <= end && output.len() < limit {
+        let Some(delta) = memmem::find(&data[cursor..end], LFH_SIG) else {
+            break;
+        };
+        let offset = cursor + delta;
+        if let Some(local) = parse_local_header(data, offset) {
+            output.push(local);
+        }
+        cursor = offset.saturating_add(1);
+    }
+    output
+}
+
+fn local_record_spans(locals: &[LocalHeader], cd_offset: usize) -> Vec<(usize, usize)> {
+    let mut offsets = locals.iter().map(|local| local.offset).collect::<Vec<_>>();
+    offsets.sort_unstable();
+    let mut output = Vec::new();
+    for local in locals {
+        let data_start = local
+            .offset
+            .checked_add(LOCAL_HEADER_LEN)
+            .and_then(|value| value.checked_add(local.name_len as usize))
+            .and_then(|value| value.checked_add(local.extra_len as usize))
+            .unwrap_or(local.offset);
+        let next_local = offsets
+            .iter()
+            .copied()
+            .find(|offset| *offset > local.offset)
+            .unwrap_or(cd_offset);
+        output.push((local.offset, next_local.max(data_start).max(local.offset + LOCAL_HEADER_LEN)));
+    }
+    output
+}
+
+fn offset_inside_local_or_data_span(offset: usize, spans: &[(usize, usize)]) -> bool {
+    spans.iter().any(|(start, end)| offset > *start && offset < *end)
+}
+
+fn find_signature_between(data: &[u8], start: usize, end: usize, signature: &[u8]) -> Option<usize> {
+    if start >= end || start >= data.len() {
+        return None;
+    }
+    let bounded_end = end.min(data.len());
+    memmem::find(&data[start..bounded_end], signature).map(|delta| start + delta)
 }
 
 fn zip_inspect_zip64_eocd_mismatch_count(

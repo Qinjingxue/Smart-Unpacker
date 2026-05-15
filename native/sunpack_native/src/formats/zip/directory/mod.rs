@@ -45,6 +45,7 @@ struct CentralEntry {
     local_header_offset: u32,
 }
 
+#[derive(Clone)]
 struct LocalHeader {
     offset: usize,
     flags: u16,

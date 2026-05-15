@@ -12,7 +12,7 @@ from sunpack.relations.knowledge import write_relation_task
 from sunpack.repair.knowledge import write_repair_result
 from sunpack.repair.result import RepairResult
 from sunpack.verification.knowledge import write_verification_result
-from sunpack.verification.result import ArchiveCoverageSummary, VerificationResult
+from sunpack.verification.result import ArchiveCoverageSummary, FileVerificationObservation, VerificationIssue, VerificationResult
 
 
 def test_layer_converters_write_archive_knowledge_namespaces(tmp_path):
@@ -46,6 +46,161 @@ def test_layer_converters_write_archive_knowledge_namespaces(tmp_path):
     assert payload["verification"]["summary"]["decision_hint"] == "repair"
     assert payload["repair"]["last_result"]["module_name"] == "zip_fix_cd_offset"
     assert "fixed_field=cd_offset" in payload["repair"]["patch_facts"]["flags"]
+
+
+def test_extraction_verification_and_zip_runtime_evidence_facts(tmp_path):
+    archive = tmp_path / "sample.zip"
+    archive.write_bytes(b"PK\x05\x06" + b"\0" * 18)
+    bag = FactBag()
+    bag.set("candidate.entry_path", str(archive))
+    bag.set("candidate.member_paths", [str(archive), str(tmp_path / "sample.z01")])
+    bag.set("file.detected_ext", "zip")
+    task = ArchiveTask.from_fact_bag(bag, score=10)
+    write_analysis_report(task, _analysis_report(str(archive)))
+    knowledge = task.knowledge()
+    knowledge.set("format.zip.structure.eocd", {"error": "bad_central_directory_signature", "physical_central_directory_offset": 10, "declared_central_directory_size": 40, "eocd_offset": 60}, source_layer="test")
+    knowledge.set("format.zip.structure.directory_consistency", {"file_size": 22, "cd_entries_checked": 2, "central_local_crc_mismatch_count": 1, "central_local_compressed_size_mismatch_count": 1}, source_layer="test")
+    task.set_knowledge(knowledge)
+    write_extraction_result(
+        task,
+        ExtractionResult(
+            success=False,
+            archive=str(archive),
+            out_dir=str(tmp_path / "out"),
+            all_parts=[str(archive), str(tmp_path / "sample.z01")],
+            error="checksum error",
+            diagnostics={"result": {"status": "failed", "failure_stage": "item_extract", "failure_kind": "checksum_error", "native_status": "damaged"}},
+            partial_outputs=True,
+            progress_manifest_payload={
+                "failure_stage": "item_extract",
+                "failure_kind": "checksum_error",
+                "files": [
+                    {"archive_path": "a.txt", "status": "failed", "bytes_written": 0, "crc_ok": False, "failure_kind": "checksum_error"},
+                    {"archive_path": "b.txt", "status": "complete", "bytes_written": 5, "crc_ok": True},
+                ],
+            },
+        ),
+    )
+    issue = VerificationIssue(method="archive_test_crc", code="fail.archive_crc_mismatch", message="crc mismatch", path="a.txt")
+    write_verification_result(
+        task,
+        VerificationResult(
+            completeness=0.5,
+            assessment_status="partial",
+            decision_hint="repair",
+            failed_files=1,
+            archive_coverage=ArchiveCoverageSummary(completeness=0.5, expected_files=2, matched_files=1, failed_files=1),
+            issues=[issue],
+            file_observations=[
+                FileVerificationObservation(path="a.txt", archive_path="a.txt", state="failed", bytes_written=1, expected_size=5, crc_expected=1, crc_actual=2, issues=[issue]),
+            ],
+        ),
+    )
+
+    payload = task.knowledge().to_dict()
+    outcomes = payload["extraction"]["entry_outcomes"]
+    breakdown = payload["verification"]["coverage_breakdown"]
+    structure = payload["format"]["zip"]["structure"]
+
+    assert outcomes["entry_failed_count"] == 1
+    assert outcomes["crc_error_count"] >= 1
+    assert breakdown["crc_mismatch_count"] >= 1
+    assert breakdown["size_mismatch_count"] >= 1
+    assert structure["directory_consistency"]["crc_mismatch_entry_count"] == 1
+    assert structure["directory_consistency"]["single_entry_mismatch"] is True
+    assert structure["evidence"]["cd_local_mismatch_with_crc_failure"] is True
+    assert structure["evidence"]["tail_truncation_likely"] is True
+    assert structure["evidence"]["has_split_sidecars"] is True
+    assert structure["evidence"]["payload_failure_without_header_mismatch"] is False
+    assert structure["evidence"]["descriptor_candidate_span_overlap_count"] == 0
+
+
+def test_zip_runtime_evidence_separates_structural_checksum_and_sfx_offset(tmp_path):
+    archive = tmp_path / "sample.zip"
+    archive.write_bytes(b"sfx-prefix" + b"PK\x05\x06" + b"\0" * 18)
+    bag = FactBag()
+    bag.set("candidate.entry_path", str(archive))
+    bag.set("file.detected_ext", "zip")
+    task = ArchiveTask.from_fact_bag(bag, score=10)
+    write_analysis_report(task, _analysis_report(str(archive)))
+    knowledge = task.knowledge()
+    knowledge.set(
+        "format.zip.structure.eocd",
+        {
+            "error": "comment_length_mismatch",
+            "archive_offset": 10,
+            "declared_central_directory_offset": 20,
+            "physical_central_directory_offset": 30,
+            "declared_central_directory_size": 12,
+            "physical_central_directory_size": 12,
+            "central_directory_offset_delta": -10,
+            "central_directory_size_delta": 0,
+        },
+        source_layer="test",
+    )
+    knowledge.set(
+        "format.zip.structure.directory_consistency",
+        {
+            "file_size": 44,
+            "cd_entries_checked": 1,
+            "local_header_missing_count": 1,
+            "central_local_offset_suspicious_count": 1,
+            "descriptor": {
+                "spurious_descriptor_candidate_count": 2,
+                "descriptor_flag_mismatch_count": 1,
+            },
+        },
+        source_layer="test",
+    )
+    knowledge.set("format.zip.structure.local_header", {"offset": 10, "plausible": True}, source_layer="test")
+    task.set_knowledge(knowledge)
+    write_extraction_result(
+        task,
+        ExtractionResult(
+            success=False,
+            archive=str(archive),
+            out_dir=str(tmp_path / "out"),
+            all_parts=[str(archive)],
+            error="checksum error",
+            diagnostics={"result": {"status": "failed", "failure_stage": "item_extract", "failure_kind": "checksum_error"}},
+            progress_manifest_payload={
+                "files": [{"archive_path": "a.txt", "status": "failed", "failure_kind": "checksum_error", "crc_ok": False}]
+            },
+        ),
+    )
+    write_verification_result(
+        task,
+        VerificationResult(
+            completeness=1.0,
+            assessment_status="complete",
+            decision_hint="accept",
+            archive_coverage=ArchiveCoverageSummary(completeness=1.0, expected_files=1, matched_files=1),
+            file_observations=[FileVerificationObservation(path="a.txt", archive_path="a.txt", state="complete")],
+        ),
+    )
+
+    structure = task.knowledge().to_dict()["format"]["zip"]["structure"]
+    descriptor = structure["directory_consistency"]["descriptor"]
+    evidence = structure["evidence"]
+
+    assert descriptor["descriptor_candidate_span_overlap_count"] == 2
+    assert evidence["payload_failure_without_header_mismatch"] is False
+    assert evidence["payload_failure_but_archive_coverage_complete"] is True
+    assert evidence["checksum_error_likely_structural_not_payload"] is True
+    assert evidence["cd_offset_delta_with_zero_cd_size_delta"] is True
+    assert evidence["local_header_link_error_without_payload_crc"] is True
+    assert evidence["cd_pointer_raw_likely"] is True
+    assert evidence["cd_pointer_error_likely"] is False
+    assert evidence["entry_count_delta_explained_by_cd_pointer_error"] is False
+    assert evidence["sfx_prefix_len"] == 10
+    assert evidence["cd_offset_error_explained_by_prefix"] is True
+    assert evidence["declared_cd_offset_plus_archive_offset_delta"] == 0
+    assert evidence["cd_offset_matches_after_sfx_adjustment"] is True
+    assert evidence["sfx_cd_offset_shift_likely"] is True
+    assert evidence["local_header_error_explained_by_sfx_offset"] is True
+    assert evidence["payload_verification_observed"] is True
+    assert evidence["payload_verified_intact"] is True
+    assert evidence["payload_unverified_but_no_failure"] is False
 
 
 def _analysis_report(path: str) -> ArchiveAnalysisReport:
