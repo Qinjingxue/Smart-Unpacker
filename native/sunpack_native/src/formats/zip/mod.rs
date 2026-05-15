@@ -15,3 +15,4 @@ include!("directory/parse.rs");
 include!("directory/local.rs");
 include!("directory/zip64.rs");
 include!("directory/eocd.rs");
+include!("directory/inspect.rs");

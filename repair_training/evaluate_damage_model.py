@@ -15,8 +15,9 @@ from repair_training.core.damage_eval import (
     per_label_metrics,
     profile_summary,
 )
-from repair_training.core.damage_model_inference import DamageAnalysisModel, select_labels
+from repair_training.core.damage_model_inference import DamageAnalysisModel, select_labels_from_model
 from repair_training.core.datasets import write_json, write_jsonl
+from repair_training.core.features import damage_labels_for_row
 from repair_training.core.plugin import load_training_format_plugin, normalize_format_name
 
 
@@ -60,18 +61,24 @@ def main(argv: list[str] | None = None) -> int:
 
     model = DamageAnalysisModel(model_dir=args.model_dir, plugin=plugin)
     score_rows = model.predict_rows(rows)
+    threshold_override = args.threshold if args.threshold is not None else None
     predictions = [
-        _prediction_row(row, scores, threshold=float(args.threshold or 0.5))
+        _prediction_row(row, scores, model=model, threshold=threshold_override)
         for row, scores in zip(rows, score_rows)
     ]
     write_jsonl(predictions_dir / "predictions.jsonl", predictions)
-    metrics = evaluate_predictions(predictions, threshold=float(args.threshold or 0.5))
+    metrics = evaluate_predictions(
+        predictions,
+        threshold=float(threshold_override) if threshold_override is not None else float(model.thresholds.get("default_threshold", 0.5) or 0.5),
+    )
     metrics.update({
         "format": fmt,
         "seed": seed,
         "samples_requested": samples,
         "rows": len(rows),
         "failures": len(failures),
+        "threshold_mode": "override" if threshold_override is not None else "model",
+        "thresholds_path": str(Path(args.model_dir) / "thresholds.json") if threshold_override is None else "",
         "elapsed_seconds": round(time.perf_counter() - started, 3),
         "acceptance": _acceptance(metrics),
         "plugin_metadata": plugin.damage_eval_metadata() if plugin.damage_eval_metadata else {},
@@ -89,20 +96,20 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-def _prediction_row(row: dict[str, Any], scores: dict[str, float], *, threshold: float) -> dict[str, Any]:
+def _prediction_row(row: dict[str, Any], scores: dict[str, float], *, model: DamageAnalysisModel, threshold: float | None) -> dict[str, Any]:
     target = row.get("damage_analysis_target") if isinstance(row.get("damage_analysis_target"), dict) else {}
     runtime = ((row.get("damage_analysis_input") or {}).get("runtime_context") or {})
     extraction = runtime.get("extraction_summary") if isinstance(runtime.get("extraction_summary"), dict) else {}
     analysis = runtime.get("analysis_summary") if isinstance(runtime.get("analysis_summary"), dict) else {}
-    true_labels = sorted(str(label) for label in target.get("damage_labels") or [])
-    predicted = select_labels(scores, threshold=threshold)
+    true_labels = damage_labels_for_row({"damage_analysis_target": target})
+    predicted = select_labels_from_model(scores, model, threshold=threshold)
     return {
         "sample_id": row.get("sample_id"),
         "damage_profile": (row.get("metadata") or {}).get("damage_profile"),
         "true_labels": true_labels,
         "predicted_labels": predicted,
         "scores": scores,
-        "threshold": float(threshold),
+        "threshold": float(threshold) if threshold is not None else "model",
         "runtime_summary": {
             "analysis_format": analysis.get("format"),
             "extraction_failure_kind": extraction.get("failure_kind"),
@@ -130,7 +137,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--samples", type=int, default=100)
     parser.add_argument("--workers", type=int, default=1)
     parser.add_argument("--keep-generated", action="store_true")
-    parser.add_argument("--threshold", type=float, default=0.5)
+    parser.add_argument("--threshold", type=float, default=None)
     return parser
 
 

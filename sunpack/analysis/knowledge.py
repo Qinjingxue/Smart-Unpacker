@@ -275,6 +275,16 @@ def _merge_zip_structure_facts(structure: dict[str, Any], task: ArchiveTask) -> 
         output["local_header"] = dict(local)
         for key, value in local.items():
             output.setdefault(f"local_header.{key}", value)
+    directory = get("zip.directory_consistency")
+    if isinstance(directory, dict) and directory:
+        output["directory_consistency"] = dict(directory)
+        for key, value in directory.items():
+            output.setdefault(f"directory_consistency.{key}", value)
+        zip64 = directory.get("zip64_consistency")
+        if isinstance(zip64, dict) and zip64:
+            output["zip64_consistency"] = dict(zip64)
+            for key, value in zip64.items():
+                output.setdefault(f"zip64_consistency.{key}", value)
     for fact_key, output_key in (
         ("zip.local_header_plausible", "local_header.plausible"),
         ("zip.local_header_offset", "local_header.offset"),

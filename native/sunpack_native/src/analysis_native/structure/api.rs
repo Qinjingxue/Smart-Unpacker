@@ -95,10 +95,16 @@ pub(crate) fn inspect_zip_eocd_structure(
     let central_directory_size = u32_le(eocd, 12) as u64;
     let central_directory_offset = u32_le(eocd, 16) as u64;
     let comment_length = u16_le(eocd, 20) as u64;
+    let eocd_end = eocd_offset + ZIP_EOCD_MIN_SIZE as u64 + comment_length;
+    let trailing_bytes_after_eocd = file_size.saturating_sub(eocd_end);
     if file_size - eocd_offset - ZIP_EOCD_MIN_SIZE as u64 != comment_length {
         result.set_item("error", "comment_length_mismatch")?;
         result.set_item("eocd_offset", eocd_offset)?;
         result.set_item("comment_length", comment_length)?;
+        result.set_item("declared_central_directory_offset", central_directory_offset)?;
+        result.set_item("declared_central_directory_size", central_directory_size)?;
+        result.set_item("declared_total_entries", total_entries)?;
+        result.set_item("trailing_bytes_after_eocd", trailing_bytes_after_eocd)?;
         return Ok(result.unbind());
     }
     if disk_number != 0 || central_directory_disk != 0 || disk_entries != total_entries {
@@ -108,6 +114,10 @@ pub(crate) fn inspect_zip_eocd_structure(
         result.set_item("central_directory_size", central_directory_size)?;
         result.set_item("total_entries", total_entries)?;
         result.set_item("comment_length", comment_length)?;
+        result.set_item("declared_central_directory_offset", central_directory_offset)?;
+        result.set_item("declared_central_directory_size", central_directory_size)?;
+        result.set_item("declared_total_entries", total_entries)?;
+        result.set_item("trailing_bytes_after_eocd", trailing_bytes_after_eocd)?;
         return Ok(result.unbind());
     }
     let physical_central_offset = eocd_offset.saturating_sub(central_directory_size);
@@ -119,6 +129,22 @@ pub(crate) fn inspect_zip_eocd_structure(
     result.set_item("eocd_offset", eocd_offset)?;
     result.set_item("central_directory_offset", physical_central_offset)?;
     result.set_item("central_directory_size", central_directory_size)?;
+    result.set_item("declared_central_directory_offset", central_directory_offset)?;
+    result.set_item("declared_central_directory_size", central_directory_size)?;
+    result.set_item("declared_total_entries", total_entries)?;
+    result.set_item("physical_central_directory_offset", physical_central_offset)?;
+    result.set_item("inferred_central_directory_offset", physical_central_offset)?;
+    result.set_item("inferred_central_directory_size", eocd_offset.saturating_sub(physical_central_offset))?;
+    result.set_item(
+        "central_directory_offset_delta",
+        physical_central_offset as i64 - central_directory_offset as i64,
+    )?;
+    result.set_item(
+        "central_directory_size_delta",
+        eocd_offset.saturating_sub(physical_central_offset) as i64 - central_directory_size as i64,
+    )?;
+    result.set_item("entry_count_delta", 0i64)?;
+    result.set_item("trailing_bytes_after_eocd", trailing_bytes_after_eocd)?;
     result.set_item("archive_offset", archive_offset)?;
     result.set_item("total_entries", total_entries)?;
     result.set_item("comment_length", comment_length)?;
@@ -127,6 +153,8 @@ pub(crate) fn inspect_zip_eocd_structure(
     result.set_item("central_directory_walk_ok", false)?;
     result.set_item("local_header_links_checked", 0)?;
     result.set_item("local_header_links_ok", false)?;
+    result.set_item("local_header_links_ok_count", 0)?;
+    result.set_item("local_header_links_error_count", 0)?;
     if physical_central_offset + central_directory_size != eocd_offset {
         result.set_item("error", "central_directory_size_mismatch")?;
         return Ok(result.unbind());
@@ -146,6 +174,7 @@ pub(crate) fn inspect_zip_eocd_structure(
     file.read_exact(&mut sig)?;
     if sig != ZIP_CENTRAL_DIRECTORY_SIGNATURE {
         result.set_item("error", "bad_central_directory_signature")?;
+        result.set_item("bad_central_directory_signature_offset", physical_central_offset)?;
         return Ok(result.unbind());
     }
     result.set_item("plausible", true)?;
@@ -161,13 +190,26 @@ pub(crate) fn inspect_zip_eocd_structure(
     )?;
     result.set_item("central_directory_entries_checked", walk.0)?;
     result.set_item("central_directory_walk_ok", walk.1)?;
+    result.set_item("entry_count_delta", walk.0 as i64 - total_entries as i64)?;
     result.set_item("local_header_links_checked", walk.2)?;
     result.set_item("local_header_links_ok", walk.3)?;
+    result.set_item("local_header_links_ok_count", walk.2)?;
+    result.set_item("local_header_links_error_count", if walk.3 { 0usize } else { 1usize })?;
     if !walk.4.is_empty() {
         result.set_item("error", walk.4)?;
         result.set_item("plausible", false)?;
     }
     Ok(result.unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (path, max_entries=128))]
+pub(crate) fn inspect_zip_directory_consistency(
+    py: Python<'_>,
+    path: &str,
+    max_entries: usize,
+) -> PyResult<Py<PyDict>> {
+    crate::formats::zip::inspect_zip_directory_consistency(py, path, max_entries)
 }
 
 #[pyfunction]

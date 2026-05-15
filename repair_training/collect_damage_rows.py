@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from repair_training.core.datasets import read_jsonl, sha256_file, write_json
-from repair_training.core.features import damage_labels_for_row
+from repair_training.core.features import damage_labels_for_row, damage_location_labels_from_target
 from repair_training.core.material_records import attach_split_volumes
 from repair_training.core.plugin import load_training_format_plugin, normalize_format_name
 from repair_training.core.run_layout import ensure_run_layout
@@ -32,6 +32,9 @@ from sunpack.contracts.detection import FactBag
 from sunpack.contracts.tasks import ArchiveTask
 from sunpack.coordinator.analysis_stage import ArchiveAnalysisStage
 from sunpack.analysis.knowledge import write_zip_structure_facts
+from sunpack.detection.pipeline.processors.modules.format_structure.zip_directory_consistency import (
+    inspect_zip_directory_consistency,
+)
 from sunpack.detection.pipeline.processors.modules.format_structure.zip_eocd import inspect_zip_eocd_structure
 from sunpack.detection.pipeline.processors.modules.format_structure.zip_local_header import inspect_zip_local_header
 from sunpack.extraction.knowledge import write_extraction_result
@@ -224,6 +227,11 @@ def _ensure_zip_structure_facts(task: ArchiveTask) -> None:
             fact_bag.set("zip.eocd_structure", inspect_zip_eocd_structure(path))
         except Exception as exc:
             fact_bag.set("zip.eocd_structure", {"error": str(exc) or type(exc).__name__})
+    if not isinstance(fact_bag.get("zip.directory_consistency"), dict):
+        try:
+            fact_bag.set("zip.directory_consistency", inspect_zip_directory_consistency(path))
+        except Exception as exc:
+            fact_bag.set("zip.directory_consistency", {"error": str(exc) or type(exc).__name__})
     if not isinstance(fact_bag.get("zip.local_header"), dict):
         try:
             local = inspect_zip_local_header(path, 0)
@@ -369,7 +377,7 @@ def _location_target(raw_target: dict[str, Any]) -> dict[str, Any]:
     allowed = set(plugin.damage_label_schema().labels if plugin.damage_label_schema else [])
     labels = [
         label
-        for label in damage_labels_for_row({"damage_analysis_target": raw_target})
+        for label in damage_location_labels_from_target(raw_target)
         if label in allowed and label.startswith(("zone:", "field:"))
     ]
     return {
@@ -392,7 +400,7 @@ def _summary(rows: list[dict[str, Any]], failures: list[dict[str, Any]], *, elap
     label_counts: Counter[str] = Counter()
     profile_counts: Counter[str] = Counter()
     for row in rows:
-        for label in (row.get("damage_analysis_target") or {}).get("damage_labels") or []:
+        for label in damage_labels_for_row(row):
             label_counts[str(label)] += 1
         profile = str((row.get("metadata") or {}).get("damage_profile") or "")
         if profile:
@@ -426,12 +434,20 @@ def _structure_coverage(rows: list[dict[str, Any]]) -> dict[str, Any]:
             counters["zip_eocd_structure_present"] += 1
         if isinstance(merged.get("local_header"), dict) or any(str(key).startswith("local_header.") for key in merged):
             counters["zip_local_header_present"] += 1
+        if isinstance(merged.get("directory_consistency"), dict) or any(
+            str(key).startswith("directory_consistency.") for key in merged
+        ):
+            counters["zip_directory_consistency_present"] += 1
+        if isinstance(merged.get("zip64_consistency"), dict) or any(str(key).startswith("zip64_consistency.") for key in merged):
+            counters["zip64_consistency_present"] += 1
     total = len(rows)
     return {
         name: {"count": int(counters.get(name, 0)), "ratio": float(counters.get(name, 0) / total) if total else 0.0}
         for name in (
             "zip_eocd_structure_present",
             "zip_local_header_present",
+            "zip_directory_consistency_present",
+            "zip64_consistency_present",
             "format_zip_structure_present",
             "analysis_native_probe_structure_present",
         )

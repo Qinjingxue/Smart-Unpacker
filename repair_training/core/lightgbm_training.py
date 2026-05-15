@@ -10,6 +10,7 @@ import numpy as np
 
 from repair_training.core.model_artifacts import write_model_artifacts
 from repair_training.core.plugin import TrainingFormatPlugin
+from repair_training.core.thresholds import calibrate_binary_thresholds
 
 
 def train_lightgbm_model(
@@ -68,6 +69,8 @@ def _train_damage_models(lgb, plugin: TrainingFormatPlugin, features_dir: Path, 
     models_dir.mkdir(parents=True, exist_ok=True)
     model_index: dict[str, str] = {}
     per_label: dict[str, dict[str, float]] = {}
+    valid_scores = np.zeros((len(valid["X"]), len(labels)), dtype=np.float32)
+    test_scores = np.zeros((len(test["X"]), len(labels)), dtype=np.float32)
     params = _params(plugin, "damage_analysis")
     for index, label in enumerate(labels):
         y = train["y"][:, index] if train["y"].ndim > 1 else train["y"]
@@ -76,7 +79,9 @@ def _train_damage_models(lgb, plugin: TrainingFormatPlugin, features_dir: Path, 
             model_path = models_dir / f"{_safe_name(label)}.constant.json"
             model_path.write_text(json.dumps({"constant_probability": constant}, sort_keys=True), encoding="utf-8")
             model_index[label] = str(model_path.relative_to(model_dir))
-            per_label[label] = _binary_metrics(np.full_like(_label_column(test["y"], index), constant), _label_column(test["y"], index))
+            valid_scores[:, index] = constant
+            test_scores[:, index] = constant
+            per_label[label] = _binary_metrics(_label_column(test_scores, index), _label_column(test["y"], index))
             continue
         model = lgb.LGBMClassifier(**params)
         eval_set = [(valid["X"], _label_column(valid["y"], index))] if len(valid["X"]) else None
@@ -87,10 +92,23 @@ def _train_damage_models(lgb, plugin: TrainingFormatPlugin, features_dir: Path, 
         model_index[label] = str(model_path.relative_to(model_dir))
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", message="X does not have valid feature names.*")
-            predicted = model.predict_proba(test["X"])[:, 1] if len(test["X"]) else np.array([], dtype=np.float32)
-        per_label[label] = _binary_metrics(predicted, _label_column(test["y"], index))
+            if len(valid["X"]):
+                valid_scores[:, index] = model.predict_proba(valid["X"])[:, 1]
+            if len(test["X"]):
+                test_scores[:, index] = model.predict_proba(test["X"])[:, 1]
+        per_label[label] = _binary_metrics(_label_column(test_scores, index), _label_column(test["y"], index))
     (model_dir / "models.json").write_text(json.dumps(model_index, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
-    return _damage_metrics(per_label)
+    calibration_scores = np.vstack([item for item in (valid_scores, test_scores) if len(item)])
+    calibration_y = np.vstack([item for item in (valid["y"], test["y"]) if len(item)])
+    thresholds = calibrate_binary_thresholds(calibration_scores, calibration_y, labels)
+    (model_dir / "thresholds.json").write_text(json.dumps(thresholds, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    metrics = _damage_metrics(per_label)
+    metrics["thresholds"] = {
+        "default_threshold": thresholds.get("default_threshold", 0.5),
+        "per_label_count": len(thresholds.get("thresholds") or {}),
+        "selection_metric": thresholds.get("selection_metric"),
+    }
+    return metrics
 
 
 def _train_action_ranker(lgb, plugin: TrainingFormatPlugin, features_dir: Path, model_dir: Path) -> dict[str, Any]:

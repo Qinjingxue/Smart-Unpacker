@@ -29,7 +29,9 @@ def write_model_artifacts(
     _write_json(model_dir / "metrics.json", metrics)
     _write_json(model_dir / "feature_schema.json", feature_schema)
     _write_json(model_dir / ("label_schema.json" if model_type == "damage_analysis" else "action_schema.json"), label_schema)
-    _write_json(model_dir / "thresholds.json", {"default_threshold": 0.5})
+    thresholds_path = model_dir / "thresholds.json"
+    if not thresholds_path.is_file():
+        _write_json(thresholds_path, {"default_threshold": 0.5, "thresholds": {}})
     input_payload = {
         key: {"path": str(path), "sha256": sha256_file(path) if Path(path).is_file() else ""}
         for key, path in input_files.items()

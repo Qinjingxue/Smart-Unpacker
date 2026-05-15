@@ -237,6 +237,11 @@ FACT_SCHEMA: dict[str, dict[str, Any]] = {
         "producer": "processors.zip_eocd_structure",
         "description": "ZIP EOCD and central directory structure check derived from the candidate file.",
     },
+    "zip.directory_consistency": {
+        "type": "dict",
+        "producer": "processors.zip_directory_consistency",
+        "description": "ZIP central directory, local header, descriptor, and ZIP64 consistency facts.",
+    },
     "tar.header_structure": {
         "type": "dict",
         "producer": "processors.tar_header_structure",

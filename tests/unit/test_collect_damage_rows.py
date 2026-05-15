@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 from repair_training.build_features import main as build_features_main
+from repair_training.core.features import damage_labels_for_row, damage_location_labels_from_target
 from repair_training.collect_damage_rows import collect_damage_row
 from repair_training.formats.zip.plugin import damage_feature_spec
 from sunpack.analysis import ArchiveAnalysisReport
@@ -111,6 +112,16 @@ def test_damage_rows_build_features_location_only(monkeypatch, tmp_path):
     assert all(label.startswith(("zone:", "field:")) for label in schema["labels"])
 
 
+def test_damage_label_normalizer_uses_explicit_labels_only():
+    target = {
+        "damage_labels": ["zone:central_directory"],
+        "labels": [{"zone": {"kind": "record", "path": "zip.central_directory"}}],
+    }
+
+    assert damage_labels_for_row({"damage_analysis_target": target}) == ["zone:central_directory"]
+    assert damage_location_labels_from_target(target) == ["zone:central_directory"]
+
+
 def test_zip_structure_facts_enter_archive_knowledge_and_damage_request(tmp_path):
     archive = tmp_path / "bad.zip"
     archive.write_bytes(b"PK\x03\x04bad")
@@ -119,6 +130,15 @@ def test_zip_structure_facts_enter_archive_knowledge_and_damage_request(tmp_path
     facts.set("archive.knowledge", {"source": {"input": {"kind": "file", "path": str(archive), "format_hint": "zip"}}})
     facts.set("zip.eocd_structure", {"error": "bad_central_directory_signature", "eocd_offset": 17, "plausible": False})
     facts.set("zip.local_header", {"offset": 0, "plausible": True, "filename_len": 4, "error": ""})
+    facts.set(
+        "zip.directory_consistency",
+        {
+            "cd_parseable": True,
+            "central_local_crc_mismatch_count": 1,
+            "descriptor": {"descriptor_flag_mismatch_count": 1},
+            "zip64_consistency": {"zip64_locator_present": True},
+        },
+    )
     facts.set("zip.local_header_plausible", True)
     facts.set("zip.local_header_offset", 0)
     facts.set("zip.local_header_error", "")
@@ -138,6 +158,8 @@ def test_zip_structure_facts_enter_archive_knowledge_and_damage_request(tmp_path
     assert structure["eocd.eocd_offset"] == 17
     assert structure["local_header"]["filename_len"] == 4
     assert structure["local_header.plausible"] is True
+    assert structure["directory_consistency"]["central_local_crc_mismatch_count"] == 1
+    assert structure["zip64_consistency"]["zip64_locator_present"] is True
 
     job = RepairJob(
         source_input={"kind": "file", "path": str(archive), "format_hint": "zip"},
@@ -150,6 +172,8 @@ def test_zip_structure_facts_enter_archive_knowledge_and_damage_request(tmp_path
 
     assert probe["structure"]["eocd"]["error"] == "bad_central_directory_signature"
     assert probe["raw_structure"]["local_header"]["filename_len"] == 4
+    assert probe["structure"]["directory_consistency"]["descriptor"]["descriptor_flag_mismatch_count"] == 1
+    assert probe["raw_structure"]["zip64_consistency"]["zip64_locator_present"] is True
 
 
 def test_zip_damage_feature_spec_excludes_compressed_route_flags():

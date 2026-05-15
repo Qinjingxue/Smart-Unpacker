@@ -60,6 +60,12 @@ def _add_structure_coverage(runtime: dict[str, Any], counts: Counter[str]) -> No
         counts["zip_eocd_structure_present"] += 1
     if isinstance(merged.get("local_header"), dict) or any(str(key).startswith("local_header.") for key in merged):
         counts["zip_local_header_present"] += 1
+    if isinstance(merged.get("directory_consistency"), dict) or any(
+        str(key).startswith("directory_consistency.") for key in merged
+    ):
+        counts["zip_directory_consistency_present"] += 1
+    if isinstance(merged.get("zip64_consistency"), dict) or any(str(key).startswith("zip64_consistency.") for key in merged):
+        counts["zip64_consistency_present"] += 1
 
 
 def _structure_coverage_payload(counts: Counter[str], total: int) -> dict[str, Any]:
@@ -68,6 +74,8 @@ def _structure_coverage_payload(counts: Counter[str], total: int) -> dict[str, A
         for name in (
             "zip_eocd_structure_present",
             "zip_local_header_present",
+            "zip_directory_consistency_present",
+            "zip64_consistency_present",
             "analysis_native_probe_structure_present",
         )
     }

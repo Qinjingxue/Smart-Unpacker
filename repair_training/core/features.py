@@ -185,14 +185,15 @@ def damage_labels_for_row(row: dict[str, Any]) -> list[str]:
         text = str(label or "")
         if text.startswith(("zone:", "field:")):
             labels.append(text)
-    for family in target.get("damage_families") or []:
-        text = str(family or "")
-        if text:
-            labels.append(f"family:{text}")
-    for hint in target.get("route_hints") or []:
-        text = str(hint or "")
-        if text:
-            labels.append(f"route:{text}")
+    return sorted(set(labels))
+
+
+def damage_location_labels_from_target(target: dict[str, Any]) -> list[str]:
+    labels: list[str] = []
+    for label in target.get("damage_labels") or []:
+        text = str(label or "")
+        if text.startswith(("zone:", "field:")):
+            labels.append(text)
     for item in target.get("labels") or []:
         if not isinstance(item, dict):
             continue
@@ -257,7 +258,6 @@ def _field_label(zone: dict[str, Any]) -> str:
         ("central_directory.flags", "central_directory.flags"),
         ("central_directory.crc", "central_directory.crc"),
         ("central_directory.extra", "central_directory.extra"),
-        ("central_directory", "central_directory.header"),
         ("local_header.compressed_size", "local_header.compressed_size"),
         ("local_header.extra_length", "local_header.extra_length"),
         ("local_header.extra_field", "local_header.extra"),
@@ -265,10 +265,8 @@ def _field_label(zone: dict[str, Any]) -> str:
         ("local_header.flags", "local_header.flags"),
         ("local_header.crc", "local_header.crc"),
         ("local_header.extra", "local_header.extra"),
-        ("local_header", "local_header.header"),
         ("data_descriptor.crc", "data_descriptor.crc"),
         ("data_descriptor.size", "data_descriptor.size"),
-        ("data_descriptor", "data_descriptor.record"),
         ("local_payload", "payload.compressed_data"),
         ("payload_hash_mismatch", "payload.crc_region"),
         ("crc_error", "payload.crc_region"),
@@ -278,7 +276,6 @@ def _field_label(zone: dict[str, Any]) -> str:
         ("extra.zip64.length", "zip64.extra_length"),
         ("zip64.locator", "zip64.locator"),
         ("zip64.eocd", "zip64.eocd"),
-        ("zip64", "zip64.extra"),
         ("archive.tail", "tail.trailing_bytes"),
         ("tail", "tail.trailing_bytes"),
         ("trailing_junk", "tail.trailing_bytes"),

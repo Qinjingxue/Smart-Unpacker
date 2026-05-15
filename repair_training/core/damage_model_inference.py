@@ -8,6 +8,7 @@ import numpy as np
 
 from repair_training.core.features import transform_rows
 from repair_training.core.plugin import TrainingFormatPlugin
+from repair_training.core.thresholds import select_labels_with_thresholds
 
 
 class DamageAnalysisModel:
@@ -16,6 +17,7 @@ class DamageAnalysisModel:
         self.plugin = plugin
         self.feature_schema = _read_json(self.model_dir / "feature_schema.json")
         self.label_schema = _read_json(self.model_dir / "label_schema.json")
+        self.thresholds = _read_json(self.model_dir / "thresholds.json")
         self.labels = list(self.label_schema.get("labels") or [])
         self.model_index = _read_json(self.model_dir / "models.json")
         self._models: dict[str, Any] = {}
@@ -57,6 +59,12 @@ class DamageAnalysisModel:
 
 def select_labels(scores: dict[str, float], *, threshold: float = 0.5) -> list[str]:
     return sorted(label for label, score in scores.items() if float(score or 0.0) >= threshold)
+
+
+def select_labels_from_model(scores: dict[str, float], model: DamageAnalysisModel, *, threshold: float | None = None) -> list[str]:
+    if threshold is not None:
+        return select_labels(scores, threshold=float(threshold))
+    return select_labels_with_thresholds(scores, model.thresholds)
 
 
 def _read_json(path: Path) -> dict[str, Any]:
