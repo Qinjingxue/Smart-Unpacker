@@ -157,6 +157,9 @@ def observe_damage_runtime(
     config: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     config = dict(config or {})
+    extraction_config = dict(config.get("extraction") or {})
+    extraction_config.setdefault("quiet", True)
+    config["extraction"] = extraction_config
     workspace = Path(workspace)
     workspace.mkdir(parents=True, exist_ok=True)
     state = job.archive_state or ArchiveState.from_archive_input(job.archive_input())
@@ -298,11 +301,6 @@ def _job_from_record(record: dict[str, Any], fmt: str) -> RepairJob:
     state = ArchiveState.from_archive_input(descriptor)
     knowledge = {
         "source": {"input": descriptor.to_dict()},
-        "training": {
-            "sample_id": record.get("sample_id"),
-            "damage_profile": record.get("damage_profile"),
-            "oracle": record.get("oracle"),
-        },
     }
     return RepairJob(
         source_input=source_input,

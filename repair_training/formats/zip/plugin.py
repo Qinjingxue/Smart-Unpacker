@@ -3,8 +3,16 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any
+import random
 
 from repair_training.core.plugin import TrainingFeatureSpec, TrainingFormatPlugin, TrainingLabelSchema
+from repair_training.formats.zip.build_material_impl import (
+    _apply_profile_metadata,
+    _choose_source_for_profile,
+    _distributed_zip_sources,
+    _profile_layer_name,
+    build_corpus_corruption_case,
+)
 from sunpack.repair.context import zip_route_evidence_flags
 
 
@@ -101,6 +109,33 @@ ZIP_MODULE_FAMILIES = {
         "zip_rebuild_cd_preserve_raw_names",
     },
 }
+ZIP_EVAL_PROFILES = (
+    "zip_comment_overlap_eocd_shifted",
+    "zip_data_descriptor_cd_conflict",
+    "zip_data_descriptor_payload_bad",
+    "zip_duplicate_entry_crc_conflict",
+    "zip_extra_field_length_bad",
+    "zip_mixed_method_one_entry_bad",
+    "zip_non_utf8_filename_directory_rebuild",
+    "zip_sfx_cd_damage",
+    "zip_sfx_payload_damage",
+    "zip_split_missing_middle_volume",
+    "zip_split_tail_volume_truncated",
+    "zip_zip64_eocd_locator_bad",
+    "zip_zip64_extra_size_mismatch",
+)
+ZIP_EVAL_COMPOUND_PROFILES = (
+    "compound_boundary_drop_cd_payload_bad",
+    "compound_comment_eocd_count_cd_rebuild",
+    "compound_descriptor_fake_span_flags_cd_offset",
+    "compound_duplicate_descriptor_name_conflict",
+    "compound_extra_field_cd_offset_payload_bad",
+    "compound_non_utf8_duplicate_cd_offset",
+    "compound_sfx_cd_offset_payload_partial",
+    "compound_sfx_split_descriptor_payload_partial",
+    "compound_split_sidecar_cd_count_local_header",
+    "compound_zip64_locator_extra_trailing_junk",
+)
 
 
 def get_training_plugin() -> TrainingFormatPlugin:
@@ -127,6 +162,9 @@ def get_training_plugin() -> TrainingFormatPlugin:
         lightgbm_params=lightgbm_params,
         postprocess_damage_prediction=postprocess_damage_prediction,
         action_label=action_label,
+        damage_eval_profile_plan=damage_eval_profile_plan,
+        generate_damage_eval_records=generate_damage_eval_records,
+        damage_eval_metadata=damage_eval_metadata,
     )
 
 
@@ -257,6 +295,98 @@ def action_label(row: dict[str, Any]) -> int:
     if action == "undo_patch" and next_score > current:
         label = max(label, 22 + int(min(6, round((next_score - current) * 6.0))))
     return int(max(0, min(31, label)))
+
+
+def damage_eval_profile_plan(samples: int, seed: int) -> list[str]:
+    rng = random.Random(int(seed or 0))
+    samples = max(0, int(samples or 0))
+    compound_count = int(round(samples * 0.45))
+    single_count = max(0, samples - compound_count)
+    plan = [
+        ZIP_EVAL_PROFILES[index % len(ZIP_EVAL_PROFILES)]
+        for index in range(single_count)
+    ] + [
+        ZIP_EVAL_COMPOUND_PROFILES[index % len(ZIP_EVAL_COMPOUND_PROFILES)]
+        for index in range(compound_count)
+    ]
+    rng.shuffle(plan)
+    return plan[:samples]
+
+
+def generate_damage_eval_records(
+    material_root: str | Path,
+    workspace: str | Path,
+    seed: int,
+    samples: int,
+    profile_plan: list[str],
+) -> list[dict[str, Any]]:
+    material_root = Path(material_root)
+    workspace = Path(workspace)
+    rng = random.Random(int(seed or 0))
+    sources = _distributed_zip_sources(material_root / "zip", set())
+    if not sources:
+        return []
+    profile_plan = list(profile_plan or damage_eval_profile_plan(samples, seed))
+    records: list[dict[str, Any]] = []
+    source_counts: dict[str, int] = {}
+    variant_counts: dict[str, int] = {}
+    for index, profile in enumerate(profile_plan[: max(0, int(samples or 0))]):
+        source_item = _choose_source_for_profile(sources, profile, CounterProxy(source_counts), rng)
+        source = Path(source_item["source"])
+        source_key = str(source)
+        variant_index = int(variant_counts.get(source_key, 0))
+        variant_counts[source_key] = variant_index + 1
+        source_counts[source_key] = int(source_counts.get(source_key, 0)) + 1
+        source_derivation = dict(source_item.get("source_derivation") or {})
+        zip_password = str(source_derivation.get("zip_password") or "")
+        case_root = workspace / str(source_item.get("source_archive_id") or source.stem) / f"eval_{index:05d}"
+        case = build_corpus_corruption_case(
+            case_root,
+            source_path=source,
+            fmt="zip",
+            seed=rng.randrange(1, 2**31 - 1) + index,
+            variant_index=variant_index,
+            damage_profile=profile,
+            source_derivation=source_derivation,
+            password=zip_password or None,
+        )
+        record = case.corpus_manifest_record(
+            source_archive_id=str(source_item.get("source_archive_id") or source.stem),
+            source_path=str(source),
+            damage_profile=profile,
+            variant_index=variant_index,
+            material_format="zip",
+            material_sample_id=str(Path(source_item.get("sample_dir") or "").name),
+        )
+        if zip_password and not record.get("password"):
+            record["password"] = zip_password
+        record["source_derivation"] = source_derivation
+        record["damage_layer"] = _profile_layer_name(profile)
+        record["requested_damage_layer"] = record["damage_layer"]
+        record["actual_damage_layer"] = record["damage_layer"]
+        record["damage_layer_weight"] = 1.0
+        _apply_profile_metadata(record, profile, {"profile_layer": record["damage_layer"]})
+        record.setdefault("metadata", {})["eval_seed"] = int(seed or 0)
+        record["eval_profile"] = profile
+        records.append(record)
+    return records
+
+
+def damage_eval_metadata() -> dict[str, Any]:
+    return {
+        "format": "zip",
+        "single_profiles": list(ZIP_EVAL_PROFILES),
+        "compound_profiles": list(ZIP_EVAL_COMPOUND_PROFILES),
+        "compound_target_ratio": 0.45,
+    }
+
+
+class CounterProxy:
+    def __init__(self, values: dict[str, int]):
+        self.values = values
+
+    def __getitem__(self, key: str) -> int:
+        return int(self.values.get(str(key), 0))
 
 
 def zip_module_family(module_name: str) -> str:

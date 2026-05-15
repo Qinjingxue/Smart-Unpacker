@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -84,7 +85,9 @@ def _train_damage_models(lgb, plugin: TrainingFormatPlugin, features_dir: Path, 
         model_path = models_dir / f"{_safe_name(label)}.txt"
         model.booster_.save_model(str(model_path))
         model_index[label] = str(model_path.relative_to(model_dir))
-        predicted = model.predict_proba(test["X"])[:, 1] if len(test["X"]) else np.array([], dtype=np.float32)
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message="X does not have valid feature names.*")
+            predicted = model.predict_proba(test["X"])[:, 1] if len(test["X"]) else np.array([], dtype=np.float32)
         per_label[label] = _binary_metrics(predicted, _label_column(test["y"], index))
     (model_dir / "models.json").write_text(json.dumps(model_index, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
     return _damage_metrics(per_label)
@@ -116,8 +119,8 @@ def _params(plugin: TrainingFormatPlugin, model_type: str) -> dict[str, Any]:
     else:
         params = {}
     if model_type == "damage_analysis":
-        return {"n_estimators": 40, "learning_rate": 0.05, "num_leaves": 15, "random_state": 17, **params}
-    return {"objective": "lambdarank", "n_estimators": 40, "learning_rate": 0.05, "num_leaves": 15, "random_state": 17, **params}
+        return {"n_estimators": 40, "learning_rate": 0.05, "num_leaves": 15, "random_state": 17, "verbosity": -1, **params}
+    return {"objective": "lambdarank", "n_estimators": 40, "learning_rate": 0.05, "num_leaves": 15, "random_state": 17, "verbosity": -1, **params}
 
 
 def _load_npz(path: Path) -> dict[str, np.ndarray]:

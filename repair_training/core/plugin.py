@@ -42,6 +42,9 @@ class TrainingFormatPlugin:
     lightgbm_params: Callable[[str], dict[str, Any]] | None = None
     postprocess_damage_prediction: Callable[[dict[str, Any]], dict[str, Any]] | None = None
     action_label: Callable[[dict[str, Any]], int | float] | None = None
+    damage_eval_profile_plan: Callable[[int, int], list[str]] | None = None
+    generate_damage_eval_records: Callable[[str | Path, str | Path, int, int, list[str]], list[dict[str, Any]]] | None = None
+    damage_eval_metadata: Callable[[], dict[str, Any]] | None = None
 
 
 def load_training_format_plugin(format_name: str) -> TrainingFormatPlugin:
