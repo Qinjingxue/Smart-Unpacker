@@ -31,6 +31,9 @@ from sunpack.contracts.archive_state import ArchiveState
 from sunpack.contracts.detection import FactBag
 from sunpack.contracts.tasks import ArchiveTask
 from sunpack.coordinator.analysis_stage import ArchiveAnalysisStage
+from sunpack.analysis.knowledge import write_zip_structure_facts
+from sunpack.detection.pipeline.processors.modules.format_structure.zip_eocd import inspect_zip_eocd_structure
+from sunpack.detection.pipeline.processors.modules.format_structure.zip_local_header import inspect_zip_local_header
 from sunpack.extraction.knowledge import write_extraction_result
 from sunpack.extraction.scheduler import ExtractionScheduler
 from sunpack.repair.job import RepairJob
@@ -165,6 +168,9 @@ def observe_damage_runtime(
     state = job.archive_state or ArchiveState.from_archive_input(job.archive_input())
     task = _task_for_job(job, state)
     ArchiveAnalysisStage(config).refresh_task_analysis(task)
+    if str(job.format or "").lower() == "zip":
+        _ensure_zip_structure_facts(task)
+        write_zip_structure_facts(task)
     extraction_result = None
     verification_result = None
     extractor = ExtractionScheduler(
@@ -198,12 +204,36 @@ def observe_damage_runtime(
         "state_digest": observed_state.effective_patch_digest(),
         "patch_depth": observed_state.patch_depth(),
         "analysis": _nested(knowledge, "analysis") or {},
+        "format_zip_structure": _nested(knowledge, "format", "zip", "structure") or {},
         "extraction": _nested(knowledge, "extraction") or {},
         "verification": _nested(knowledge, "verification") or {},
         "extraction_success": bool(getattr(extraction_result, "success", False)),
         "verification_status": getattr(verification_result, "assessment_status", ""),
     }
     return request_to_dict(request), observation
+
+
+def _ensure_zip_structure_facts(task: ArchiveTask) -> None:
+    fact_bag = task.fact_bag
+    path = str(fact_bag.get("file.path") or task.main_path or "")
+    if not path:
+        return
+    fact_bag.set("file.path", path)
+    if not isinstance(fact_bag.get("zip.eocd_structure"), dict):
+        try:
+            fact_bag.set("zip.eocd_structure", inspect_zip_eocd_structure(path))
+        except Exception as exc:
+            fact_bag.set("zip.eocd_structure", {"error": str(exc) or type(exc).__name__})
+    if not isinstance(fact_bag.get("zip.local_header"), dict):
+        try:
+            local = inspect_zip_local_header(path, 0)
+        except Exception as exc:
+            local = {"error": str(exc) or type(exc).__name__}
+        fact_bag.set("zip.local_header", local)
+        if isinstance(local, dict):
+            fact_bag.set("zip.local_header_plausible", bool(local.get("plausible")))
+            fact_bag.set("zip.local_header_offset", int(local.get("offset") or 0))
+            fact_bag.set("zip.local_header_error", str(local.get("error") or ""))
 
 
 def _records_for_args(args: argparse.Namespace, *, workspace: Path) -> list[dict[str, Any]]:
@@ -367,6 +397,7 @@ def _summary(rows: list[dict[str, Any]], failures: list[dict[str, Any]], *, elap
         profile = str((row.get("metadata") or {}).get("damage_profile") or "")
         if profile:
             profile_counts[profile] += 1
+    structure_coverage = _structure_coverage(rows)
     return {
         "schema_version": SCHEMA_VERSION,
         "rows": len(rows),
@@ -374,6 +405,36 @@ def _summary(rows: list[dict[str, Any]], failures: list[dict[str, Any]], *, elap
         "elapsed_seconds": round(float(elapsed), 3),
         "label_counts": dict(sorted(label_counts.items())),
         "profile_counts": dict(sorted(profile_counts.items())),
+        "structure_coverage": structure_coverage,
+    }
+
+
+def _structure_coverage(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    counters = Counter()
+    for row in rows:
+        runtime = ((row.get("damage_analysis_input") or {}).get("runtime_context") or {})
+        probe = runtime.get("analysis_native_probe") if isinstance(runtime.get("analysis_native_probe"), dict) else {}
+        structure = probe.get("structure") if isinstance(probe.get("structure"), dict) else {}
+        raw_structure = probe.get("raw_structure") if isinstance(probe.get("raw_structure"), dict) else {}
+        observation_structure = (row.get("runtime_observation") or {}).get("format_zip_structure")
+        if isinstance(observation_structure, dict) and observation_structure:
+            counters["format_zip_structure_present"] += 1
+        if structure or raw_structure:
+            counters["analysis_native_probe_structure_present"] += 1
+        merged = structure or raw_structure or (observation_structure if isinstance(observation_structure, dict) else {})
+        if isinstance(merged.get("eocd"), dict) or any(str(key).startswith("eocd.") for key in merged):
+            counters["zip_eocd_structure_present"] += 1
+        if isinstance(merged.get("local_header"), dict) or any(str(key).startswith("local_header.") for key in merged):
+            counters["zip_local_header_present"] += 1
+    total = len(rows)
+    return {
+        name: {"count": int(counters.get(name, 0)), "ratio": float(counters.get(name, 0) / total) if total else 0.0}
+        for name in (
+            "zip_eocd_structure_present",
+            "zip_local_header_present",
+            "format_zip_structure_present",
+            "analysis_native_probe_structure_present",
+        )
     }
 
 

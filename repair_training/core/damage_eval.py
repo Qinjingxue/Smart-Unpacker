@@ -22,6 +22,7 @@ def leakage_report(rows: list[dict[str, Any]]) -> dict[str, Any]:
     leaked: list[dict[str, Any]] = []
     bad_patch_depth = 0
     bad_patch_stack = 0
+    structure_counts: Counter[str] = Counter()
     for index, row in enumerate(rows):
         payload = row.get("damage_analysis_input") if isinstance(row.get("damage_analysis_input"), dict) else {}
         text = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).lower()
@@ -35,13 +36,40 @@ def leakage_report(rows: list[dict[str, Any]]) -> dict[str, Any]:
             bad_patch_stack += 1
         if tokens:
             leaked.append({"index": index, "sample_id": row.get("sample_id"), "tokens": tokens})
+        _add_structure_coverage(runtime, structure_counts)
+    structure_coverage = _structure_coverage_payload(structure_counts, len(rows))
     return {
         "row_count": len(rows),
         "leak_count": len(leaked),
         "leaks": leaked[:100],
         "bad_patch_depth": bad_patch_depth,
         "bad_patch_stack": bad_patch_stack,
+        "structure_coverage": structure_coverage,
         "ok": not leaked and bad_patch_depth == 0 and bad_patch_stack == 0,
+    }
+
+
+def _add_structure_coverage(runtime: dict[str, Any], counts: Counter[str]) -> None:
+    probe = runtime.get("analysis_native_probe") if isinstance(runtime.get("analysis_native_probe"), dict) else {}
+    structure = probe.get("structure") if isinstance(probe.get("structure"), dict) else {}
+    raw_structure = probe.get("raw_structure") if isinstance(probe.get("raw_structure"), dict) else {}
+    if structure or raw_structure:
+        counts["analysis_native_probe_structure_present"] += 1
+    merged = structure or raw_structure
+    if isinstance(merged.get("eocd"), dict) or any(str(key).startswith("eocd.") for key in merged):
+        counts["zip_eocd_structure_present"] += 1
+    if isinstance(merged.get("local_header"), dict) or any(str(key).startswith("local_header.") for key in merged):
+        counts["zip_local_header_present"] += 1
+
+
+def _structure_coverage_payload(counts: Counter[str], total: int) -> dict[str, Any]:
+    return {
+        name: {"count": int(counts.get(name, 0)), "ratio": float(counts.get(name, 0) / total) if total else 0.0}
+        for name in (
+            "zip_eocd_structure_present",
+            "zip_local_header_present",
+            "analysis_native_probe_structure_present",
+        )
     }
 
 

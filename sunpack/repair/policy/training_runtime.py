@@ -328,6 +328,9 @@ def _analysis_native_probe(job: RepairJob, knowledge: ArchiveKnowledge, route_ev
         "has_archive_state": bool(archive_state_for_job(job)),
     }
     structure = zip_facts.get("structure") if isinstance(zip_facts.get("structure"), dict) else {}
+    if structure:
+        probe["raw_structure"] = dict(structure)
+        probe["structure"] = dict(structure)
     for key, value in structure.items():
         probe[str(key)] = _safe_feature_value(value)
     for tag in zip_facts.get("container_tags") or []:

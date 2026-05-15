@@ -3,6 +3,14 @@ from pathlib import Path
 
 from repair_training.build_features import main as build_features_main
 from repair_training.collect_damage_rows import collect_damage_row
+from repair_training.formats.zip.plugin import damage_feature_spec
+from sunpack.analysis import ArchiveAnalysisReport
+from sunpack.analysis.knowledge import write_analysis_report
+from sunpack.analysis.result import ArchiveFormatEvidence
+from sunpack.contracts.detection import FactBag
+from sunpack.contracts.tasks import ArchiveTask
+from sunpack.repair.policy.training_runtime import build_damage_analysis_request
+from sunpack.repair.job import RepairJob
 from sunpack.repair.scheduler import RepairScheduler
 
 
@@ -101,3 +109,53 @@ def test_damage_rows_build_features_location_only(monkeypatch, tmp_path):
 
     assert schema["labels"]
     assert all(label.startswith(("zone:", "field:")) for label in schema["labels"])
+
+
+def test_zip_structure_facts_enter_archive_knowledge_and_damage_request(tmp_path):
+    archive = tmp_path / "bad.zip"
+    archive.write_bytes(b"PK\x03\x04bad")
+    facts = FactBag()
+    facts.set("file.path", str(archive))
+    facts.set("archive.knowledge", {"source": {"input": {"kind": "file", "path": str(archive), "format_hint": "zip"}}})
+    facts.set("zip.eocd_structure", {"error": "bad_central_directory_signature", "eocd_offset": 17, "plausible": False})
+    facts.set("zip.local_header", {"offset": 0, "plausible": True, "filename_len": 4, "error": ""})
+    facts.set("zip.local_header_plausible", True)
+    facts.set("zip.local_header_offset", 0)
+    facts.set("zip.local_header_error", "")
+    task = ArchiveTask(fact_bag=facts, score=10, main_path=str(archive), detected_ext="zip")
+    report = ArchiveAnalysisReport(
+        path=str(archive),
+        size=archive.stat().st_size,
+        evidences=[ArchiveFormatEvidence(format="zip", confidence=1.0, status="damaged", details={})],
+        selected=[ArchiveFormatEvidence(format="zip", confidence=1.0, status="damaged", details={})],
+    )
+
+    write_analysis_report(task, report)
+    knowledge = task.knowledge().to_dict()
+    structure = knowledge["format"]["zip"]["structure"]
+
+    assert structure["eocd"]["error"] == "bad_central_directory_signature"
+    assert structure["eocd.eocd_offset"] == 17
+    assert structure["local_header"]["filename_len"] == 4
+    assert structure["local_header.plausible"] is True
+
+    job = RepairJob(
+        source_input={"kind": "file", "path": str(archive), "format_hint": "zip"},
+        format="zip",
+        knowledge=knowledge,
+        archive_key="unit",
+    )
+    request = build_damage_analysis_request(job, None, diagnosis={"format": "zip"})
+    probe = request.runtime_context["analysis_native_probe"]
+
+    assert probe["structure"]["eocd"]["error"] == "bad_central_directory_signature"
+    assert probe["raw_structure"]["local_header"]["filename_len"] == 4
+
+
+def test_zip_damage_feature_spec_excludes_compressed_route_flags():
+    spec = damage_feature_spec()
+
+    assert "runtime_context.analysis_native_probe.structure." in spec.include_prefixes
+    assert "runtime_context.analysis_native_probe.raw_structure." in spec.include_prefixes
+    assert not any(prefix == "runtime_context.job_summary." for prefix in spec.include_prefixes)
+    assert not any("route_evidence" in prefix or "damage_flags" in prefix for prefix in spec.include_prefixes)
