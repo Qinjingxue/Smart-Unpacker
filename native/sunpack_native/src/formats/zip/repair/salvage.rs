@@ -112,23 +112,33 @@ pub(crate) fn zip_verified_entry_salvage(
         &output_path,
         options.max_output_bytes,
     ) {
-        Ok(stats) => salvage_status_dict(
-            py,
-            "partial",
-            &output_path.to_string_lossy(),
-            "ZIP verified entry salvage produced a candidate",
-            &scan.warnings,
-            scan.skipped_offsets.len(),
-            scan.encrypted_entries,
-            stats.entries,
-            stats.verified_entries,
-            stats.descriptor_entries,
-            scan.timed_out,
-            repair_name,
-            central_local_mismatch_count(&data),
-            exclude.len(),
-            &scan,
-        ),
+        Ok(stats) => {
+            let result = salvage_status_dict(
+                py,
+                "partial",
+                &output_path.to_string_lossy(),
+                "ZIP verified entry salvage produced a candidate",
+                &scan.warnings,
+                scan.skipped_offsets.len(),
+                scan.encrypted_entries,
+                stats.entries,
+                stats.verified_entries,
+                stats.descriptor_entries,
+                scan.timed_out,
+                repair_name,
+                central_local_mismatch_count(&data),
+                exclude.len(),
+                &scan,
+            )?;
+            if let Ok(bytes) = fs::read(&output_path) {
+                let action_refs = plan.actions.to_vec();
+                result.bind(py).set_item(
+                    "patch_plan",
+                    logical_archive_replace_patch_plan(py, repair_name, "zip", &data, &bytes, 0.91, &action_refs, repair_name)?,
+                )?;
+            }
+            Ok(result)
+        }
         Err(message) => salvage_status_dict(
             py,
             "unrepairable",
@@ -226,23 +236,33 @@ pub(crate) fn zip_cd_local_header_reconcile_salvage(
         &output_path,
         options.max_output_bytes,
     ) {
-        Ok(stats) => salvage_status_dict(
-            py,
-            "partial",
-            &output_path.to_string_lossy(),
-            "ZIP central directory entries were reconciled against verified local headers",
-            &scan.warnings,
-            scan.skipped_offsets.len(),
-            scan.encrypted_entries,
-            stats.entries,
-            stats.verified_entries,
-            stats.descriptor_entries,
-            scan.timed_out,
-            "zip_cd_local_header_reconcile_rebuild",
-            corrected_offsets,
-            0,
-            &scan,
-        ),
+        Ok(stats) => {
+            let result = salvage_status_dict(
+                py,
+                "partial",
+                &output_path.to_string_lossy(),
+                "ZIP central directory entries were reconciled against verified local headers",
+                &scan.warnings,
+                scan.skipped_offsets.len(),
+                scan.encrypted_entries,
+                stats.entries,
+                stats.verified_entries,
+                stats.descriptor_entries,
+                scan.timed_out,
+                "zip_cd_local_header_reconcile_rebuild",
+                corrected_offsets,
+                0,
+                &scan,
+            )?;
+            if let Ok(bytes) = fs::read(&output_path) {
+                let action_refs = plan.actions.to_vec();
+                result.bind(py).set_item(
+                    "patch_plan",
+                    logical_archive_replace_patch_plan(py, "zip_cd_local_header_reconcile_rebuild", "zip", &data, &bytes, 0.93, &action_refs, "zip_cd_local_header_reconcile_rebuild")?,
+                )?;
+            }
+            Ok(result)
+        }
         Err(message) => salvage_status_dict(
             py,
             "unrepairable",

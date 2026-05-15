@@ -4,11 +4,18 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+from sunpack.contracts.archive_state import PatchPlan
 from sunpack.repair.coverage import coverage_view_from_job
 from sunpack.repair.diagnosis import RepairDiagnosis
 from sunpack.repair.job import RepairJob
 from sunpack.repair.pipeline.module import RepairModuleSpec, RepairRoute
-from sunpack.repair.pipeline.modules._common import cached_repair_operation, cache_relevant_module_limits, source_input_for_job, module_limits
+from sunpack.repair.pipeline.modules._common import (
+    cached_repair_operation,
+    cache_relevant_module_limits,
+    module_limits,
+    patch_repair_result,
+    source_input_for_job,
+)
 from sunpack.repair.pipeline.modules._native_candidates import candidates_from_native_result
 from sunpack.repair.pipeline.registry import register_repair_module
 from sunpack.repair.result import RepairResult
@@ -342,34 +349,49 @@ class _ZipRebuildFromLocalHeaders:
         actions = ["scan_local_file_headers"]
         actions.append("preserve_raw_filename_bytes" if self.preserve_raw_names else "rebuild_zip_central_directory")
         actions.append("write_repaired_zip")
-        return RepairResult(
-            status="partial" if partial else "repaired",
-            confidence=max(0.1, min(0.98, confidence)),
-            format="zip",
-            repaired_input={"kind": "file", "path": str(candidate), "format_hint": "zip"},
-            actions=actions,
-            damage_flags=list(job.damage_flags),
-            warnings=scan.warnings,
-            workspace_paths=[str(candidate)],
-            partial=partial,
+        diagnosis_payload = {
+            **diagnosis.as_dict(),
+            "repair_name": self.module_name,
+            "native_key": "native_zip_rebuild",
+            "native_target": scan.native_target,
+            "candidate_status": scan.candidate_status,
+            "atomic_action_group": self.module_name,
+            "patch_facts": patch_facts,
+            "residual_facts": residual_facts,
+            "validation_details": scan.validation_details or {},
+            "logical_stream_built": bool(scan.logical_stream_built) or bool(source_input.get("logical_stream_built")) or str(source_input.get("kind") or "") == "concat_ranges",
+            "split_sidecars_available": bool(scan.split_sidecars_available) or "split_sidecars_available" in set(job.damage_flags),
+            "raw_name_bytes_preserved": bool((scan.validation_details or {}).get("raw_filename_bytes_preserved")),
+            "raw_name_source": "local_header" if "raw_name_source=local_header" in set(patch_facts) else "",
+            "archive_coverage": coverage.as_dict(),
+            "native_zip_rebuild": scan.__dict__,
+        }
+        try:
+            patch_plan = PatchPlan.from_dict(scan.patch_plan or {})
+        except (TypeError, ValueError):
+            return _unrepairable(
+                self.module_name,
+                diagnosis,
+                "native ZIP rebuild did not return a BytePatch plan",
+                warnings=scan.warnings,
+                native_key="native_zip_rebuild",
+                native_result={"native_target": scan.native_target, "candidate_status": scan.candidate_status},
+            )
+        return patch_repair_result(
+            job=job,
+            diagnosis=diagnosis_payload,
             module_name=self.module_name,
-            diagnosis={
-                **diagnosis.as_dict(),
-                "repair_name": self.module_name,
-                "native_key": "native_zip_rebuild",
-                "native_target": scan.native_target,
-                "candidate_status": scan.candidate_status,
-                "atomic_action_group": self.module_name,
-                "patch_facts": patch_facts,
-                "residual_facts": residual_facts,
-                "validation_details": scan.validation_details or {},
-                "logical_stream_built": bool(scan.logical_stream_built) or bool(source_input.get("logical_stream_built")) or str(source_input.get("kind") or "") == "concat_ranges",
-                "split_sidecars_available": bool(scan.split_sidecars_available) or "split_sidecars_available" in set(job.damage_flags),
-                "raw_name_bytes_preserved": bool((scan.validation_details or {}).get("raw_filename_bytes_preserved")),
-                "raw_name_source": "local_header" if "raw_name_source=local_header" in set(patch_facts) else "",
-                "archive_coverage": coverage.as_dict(),
-                "native_zip_rebuild": scan.__dict__,
-            },
+            fmt="zip",
+            patch_plan=patch_plan,
+            confidence=max(0.1, min(0.98, confidence)),
+            actions=actions,
+            workspace=workspace,
+            filename=f"{self.module_name}.zip",
+            config=config,
+            materialized_data=None,
+            status="partial" if partial else "repaired",
+            warnings=scan.warnings,
+            partial=partial,
         )
 
 
@@ -477,6 +499,7 @@ class ZipRemoveSpuriousDataDescriptor:
             partial_default=True,
             default_confidence=0.94,
             prefer_patch_plan=bool(config.get("virtual_patch_candidate", True)),
+            force_archive_state=True,
         )
 
 
@@ -585,6 +608,7 @@ class ZipReconcileCdLocalHeaders:
             repair_name=self.spec.name,
             atomic_action_group=self.spec.name,
             format_hint="zip", partial_default=True, default_confidence=0.91,
+            force_archive_state=True,
         )
 
 
@@ -742,6 +766,7 @@ class _ZipLocalHeaderPartialScan:
             repair_name=self.module_name,
             atomic_action_group=self.module_name,
             format_hint="zip", partial_default=True, default_confidence=self.default_confidence,
+            force_archive_state=True,
         )
         output = []
         for candidate in candidates:
@@ -827,6 +852,7 @@ class _ZipConflictResolver:
             repair_name=self.module_name,
             atomic_action_group=self.module_name,
             format_hint="zip", partial_default=True, default_confidence=0.74,
+            force_archive_state=True,
         )
 
 

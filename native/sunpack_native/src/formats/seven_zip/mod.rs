@@ -2,6 +2,7 @@ use aes::{
     cipher::{block_padding::NoPadding, BlockModeDecrypt, KeyIvInit},
     Aes256,
 };
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use lzma_rust2::{Lzma2Reader, LzmaReader};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList};

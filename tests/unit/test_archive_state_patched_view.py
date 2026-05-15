@@ -3,6 +3,8 @@ import zipfile
 import gzip
 import io
 import tarfile
+import base64
+import hashlib
 from pathlib import Path
 
 import pytest
@@ -23,7 +25,40 @@ from sunpack.repair.pipeline.modules.tar.checksum_fix import TarHeaderChecksumFi
 from sunpack.repair.pipeline.modules.zip._rebuild import rebuild_zip_from_source
 from sunpack.repair.pipeline.modules.zip.atomic import ZipTrimTrailingJunk
 from sunpack.support.archive_state_view import ArchiveStateByteView
+from sunpack.support.archive_state_view import ArchivePatchValidationError
 from sunpack.verification.archive_state_manifest import archive_state_manifest
+
+
+def test_archive_state_patch_contract_v2_round_trips_and_push_pop(tmp_path):
+    source = tmp_path / "sample.bin"
+    source.write_bytes(b"abcdef")
+    descriptor = ArchiveInputDescriptor.from_parts(archive_path=str(source), format_hint="zip")
+    root = ArchiveState.from_archive_input(descriptor)
+    operation = PatchOperation.replace_bytes(
+        offset=1,
+        data=b"ZZ",
+        expected=b"bc",
+        details={"reason": "unit"},
+    )
+    patch = PatchPlan(
+        module="zip_unit_patch",
+        format="zip",
+        operations=[operation],
+        provenance={"module": "zip_unit_patch"},
+        confidence=0.75,
+    )
+
+    pushed = root.push_patch(patch)
+    restored = ArchiveState.from_dict(pushed.to_dict(), archive_path=str(source))
+
+    assert restored.patches[0].schema_version == 2
+    assert restored.patches[0].module == "zip_unit_patch"
+    assert restored.patches[0].action_type == "apply_patch"
+    assert restored.patches[0].operations[0].schema_version == 2
+    assert restored.patches[0].operations[0].expected_b64 == base64.b64encode(b"bc").decode("ascii")
+    assert pushed.effective_patch_digest() != root.effective_patch_digest()
+    assert pushed.pop_patch().effective_patch_digest() == root.effective_patch_digest()
+    assert root.pop_patch().effective_patch_digest() == root.effective_patch_digest()
 
 
 def test_archive_state_byte_view_applies_replace_truncate_append(tmp_path):
@@ -46,6 +81,69 @@ def test_archive_state_byte_view_applies_replace_truncate_append(tmp_path):
     assert view.size == 10
     assert view.read_at(0, 20) == b"aZZdeftail"
     assert view.read_tail(4) == b"tail"
+
+
+def test_archive_state_byte_view_materialize_and_pop_do_not_mutate_source(tmp_path):
+    source = tmp_path / "sample.bin"
+    source.write_bytes(b"abcdef")
+    descriptor = ArchiveInputDescriptor.from_parts(archive_path=str(source), format_hint="zip")
+    state = ArchiveState.from_archive_input(
+        descriptor,
+        patches=[
+            PatchPlan(operations=[
+                PatchOperation.replace_bytes(offset=1, data=b"ZZ", expected=b"bc"),
+            ])
+        ],
+    )
+    target = tmp_path / "out" / "patched.bin"
+
+    materialized = ArchiveStateByteView(state).materialize(target)
+    popped = ArchiveStateByteView(state).with_popped_patch()
+
+    assert materialized == target
+    assert target.read_bytes() == b"aZZdef"
+    assert state.source.entry_path == str(source)
+    assert source.read_bytes() == b"abcdef"
+    assert popped.to_bytes() == b"abcdef"
+
+
+def test_archive_state_byte_view_rejects_expected_b64_mismatch(tmp_path):
+    source = tmp_path / "sample.bin"
+    source.write_bytes(b"abcdef")
+    descriptor = ArchiveInputDescriptor.from_parts(archive_path=str(source), format_hint="zip")
+    state = ArchiveState.from_archive_input(
+        descriptor,
+        patches=[
+            PatchPlan(operations=[
+                PatchOperation.replace_bytes(offset=1, data=b"ZZ", expected=b"xx"),
+            ])
+        ],
+    )
+
+    with pytest.raises(ArchivePatchValidationError):
+        ArchiveStateByteView(state).to_bytes()
+
+
+def test_archive_state_byte_view_rejects_expected_sha256_mismatch(tmp_path):
+    source = tmp_path / "sample.bin"
+    source.write_bytes(b"abcdef")
+    descriptor = ArchiveInputDescriptor.from_parts(archive_path=str(source), format_hint="zip")
+    state = ArchiveState.from_archive_input(
+        descriptor,
+        patches=[
+            PatchPlan(operations=[
+                PatchOperation(
+                    op="delete",
+                    offset=1,
+                    size=2,
+                    expected_sha256=hashlib.sha256(b"xx").hexdigest(),
+                ),
+            ])
+        ],
+    )
+
+    with pytest.raises(ArchivePatchValidationError):
+        ArchiveStateByteView(state).to_bytes()
 
 
 def test_archive_state_byte_view_applies_delete_insert(tmp_path):

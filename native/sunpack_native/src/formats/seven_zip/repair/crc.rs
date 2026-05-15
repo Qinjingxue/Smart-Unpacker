@@ -64,6 +64,7 @@ fn seven_zip_repair_crc_target(
         facts.push("updated_start_header_crc_after_next_header_crc");
     }
     set_seven_zip_atomic_fields(py, &result, target, &facts, &[])?;
+    add_seven_zip_candidate_replace_patch_plans(py, &result, data, target)?;
     Ok(result)
 }
 fn seven_zip_repair_signature_header_version(
@@ -123,6 +124,7 @@ fn seven_zip_repair_signature_header_version(
         &["fixed_field=signature_header_version", "signature_header_version_normalized", "source_format=7z"],
         &[],
     )?;
+    add_seven_zip_candidate_replace_patch_plans(py, &result, data, target)?;
 
     Ok(result)
 }

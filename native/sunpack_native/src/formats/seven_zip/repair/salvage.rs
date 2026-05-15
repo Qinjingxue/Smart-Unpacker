@@ -96,6 +96,7 @@ fn seven_zip_salvage_solid_prefix_native(
         &[selected.clone()],
     )?;
     result.bind(py).set_item("recovered_entry_count", recovered.len())?;
+    add_seven_zip_candidate_replace_patch_plans(py, &result, &data, "solid_prefix")?;
     Ok(result)
 }
 
@@ -201,6 +202,7 @@ fn seven_zip_salvage_non_solid_entries_native(
         &[selected.clone()],
     )?;
     result.bind(py).set_item("recovered_entry_count", recovered.len())?;
+    add_seven_zip_candidate_replace_patch_plans(py, &result, &data, "non_solid_entries")?;
     Ok(result)
 }
 

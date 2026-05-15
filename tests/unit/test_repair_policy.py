@@ -7,6 +7,8 @@ from pathlib import Path
 import pytest
 
 from sunpack.contracts.detection import FactBag
+from sunpack.contracts.archive_input import ArchiveInputDescriptor
+from sunpack.contracts.archive_state import ArchiveState, PatchOperation, PatchPlan
 from sunpack.contracts.tasks import ArchiveTask
 from sunpack.coordinator.repair_runtime_transition import RepairRuntimeTransitionEvaluator
 from sunpack.coordinator.repair_stage import ArchiveRepairStage
@@ -14,7 +16,7 @@ from sunpack.extraction.result import ExtractionResult
 from sunpack.repair.candidate import RepairCandidate, RepairCandidateBatch
 from sunpack.repair.config import normalize_repair_config
 from sunpack.repair.job import RepairJob
-from sunpack.repair.policy.runtime_features import policy_candidate_payload
+from sunpack.repair.policy.training_runtime import candidate_snapshot, runtime_context_from_job
 from sunpack.repair.result import RepairResult
 from sunpack.repair.scheduler import RepairScheduler
 from sunpack.support import archive_knowledge_projection as knowledge_view
@@ -77,8 +79,8 @@ def test_zip_policy_provider_selects_candidate_without_selector(tmp_path, monkey
     assert selection["policy"]["selected_candidate_id"]
     assert selection["policy"]["selected_candidate_id_valid"] is True
     assert "ltr_features" not in selection["candidates"][0]
-    assert "runtime_context" in selection["candidates"][0]
-    assert "candidate_proposal" in selection["candidates"][0]
+    assert selection["candidates"][0]["schema_version"] == 1
+    assert selection["candidates"][0]["candidate_id"]
 
 
 def test_zip_policy_request_includes_accept_current_state_candidate(tmp_path, monkeypatch):
@@ -99,11 +101,11 @@ def test_zip_policy_request_includes_accept_current_state_candidate(tmp_path, mo
     selection = result.diagnosis["candidate_selection"]
     noop_payloads = [
         payload for payload in selection["candidates"]
-        if payload.get("noop") or (payload.get("candidate_proposal") or {}).get("noop")
+        if payload.get("noop")
     ]
     assert len(noop_payloads) == 1
     assert noop_payloads[0]["branchable"] is False
-    assert noop_payloads[0]["candidate_proposal"]["control_action"] is True
+    assert noop_payloads[0]["control_action"] is True
 
 
 def test_zip_policy_can_select_accept_current_state_when_repair_generation_is_terminal(tmp_path, monkeypatch):
@@ -125,6 +127,68 @@ def test_zip_policy_can_select_accept_current_state_when_repair_generation_is_te
     policy = result.diagnosis["candidate_selection"]["policy"]
     assert policy["decision_status"] == "selected"
     assert policy["selected_candidate_id_valid"] is True
+
+
+def test_dual_policy_loop_applies_patch_candidate(tmp_path, monkeypatch):
+    _install_policy_package(monkeypatch, "sunpack_policy_test_dual_apply", _DualProvider(["apply_patch:patch_one", "stop"]))
+    source = tmp_path / "source.zip"
+    source.write_bytes(b"broken")
+    candidate = _patch_candidate("patch_one", source, b"fixed")
+    scheduler = RepairScheduler({
+        "repair": {
+            "workspace": str(tmp_path / "repair"),
+            "policy": {"provider_package": "sunpack_policy_test_dual_apply"},
+            "max_repair_rounds_per_task": 3,
+        }
+    })
+    scheduler.generate_repair_candidates = lambda job, **kwargs: RepairCandidateBatch(candidates=[] if job.attempts else [candidate], diagnosis={"format": "zip", "confidence": 0.5})  # type: ignore[method-assign]
+
+    result = scheduler.repair(_job(tmp_path))
+
+    assert result.ok is True
+    assert result.status == "partial"
+    assert result.repaired_state is not None
+    assert result.repaired_state.patch_depth() == 1
+    assert result.diagnosis["policy_loop"]["terminal_action"] == "stop"
+
+
+def test_dual_policy_loop_apply_then_undo_stops_on_empty_stack(tmp_path, monkeypatch):
+    _install_policy_package(monkeypatch, "sunpack_policy_test_dual_undo", _DualProvider(["apply_patch:patch_one", "undo_patch", "undo_patch"]))
+    source = tmp_path / "source.zip"
+    source.write_bytes(b"broken")
+    root = ArchiveState.from_archive_input(ArchiveInputDescriptor.from_parts(archive_path=str(source), format_hint="zip"))
+    candidate = _patch_candidate("patch_one", source, b"fixed")
+    scheduler = RepairScheduler({
+        "repair": {
+            "workspace": str(tmp_path / "repair"),
+            "policy": {"provider_package": "sunpack_policy_test_dual_undo"},
+            "max_repair_rounds_per_task": 4,
+        }
+    })
+    scheduler.generate_repair_candidates = lambda job, **kwargs: RepairCandidateBatch(candidates=[candidate] if job.archive_state and job.archive_state.patch_depth() == 0 else [], diagnosis={"format": "zip", "confidence": 0.5})  # type: ignore[method-assign]
+
+    result = scheduler.repair(replace(_job(tmp_path), archive_state=root))
+
+    assert result.status == "skipped"
+    assert result.diagnosis["policy_loop"]["stop_reason"] == "undo_empty_patch_stack"
+    assert result.diagnosis["policy_loop"]["patch_depth"] == 0
+
+
+def test_dual_policy_loop_give_up(tmp_path, monkeypatch):
+    _install_policy_package(monkeypatch, "sunpack_policy_test_dual_give_up", _DualProvider(["give_up"]))
+    scheduler = RepairScheduler({
+        "repair": {
+            "workspace": str(tmp_path / "repair"),
+            "policy": {"provider_package": "sunpack_policy_test_dual_give_up"},
+        }
+    })
+    scheduler.generate_repair_candidates = lambda job, **kwargs: RepairCandidateBatch(candidates=[], diagnosis={"format": "zip", "confidence": 0.5})  # type: ignore[method-assign]
+
+    result = scheduler.repair(_job(tmp_path))
+
+    assert result.status == "unrepairable"
+    assert result.module_name == "policy_give_up"
+    assert result.diagnosis["policy_loop"]["terminal_action"] == "give_up"
 
 
 def test_policy_probe_writes_public_request_and_decision(tmp_path, monkeypatch):
@@ -155,7 +219,7 @@ def test_policy_probe_writes_public_request_and_decision(tmp_path, monkeypatch):
     decision = events[1]
     assert request["run_id"] == "probe-run"
     assert request["candidate_set_hash"]
-    assert request["candidate_payloads"][0]["runtime_context"]
+    assert request["candidate_payloads"][0]["schema_version"] == 1
     assert "label" not in json.dumps(request, ensure_ascii=False)
     assert decision["policy"]["decision_status"] == "selected"
     assert decision["policy"]["selected_candidate_id"]
@@ -207,14 +271,11 @@ def test_invalid_candidate_id_policy_decision_falls_back_to_selector(tmp_path, m
 def test_duplicate_candidate_id_blocks_policy_selection(tmp_path, monkeypatch):
     _install_policy_package(monkeypatch, "sunpack_policy_test_duplicate_ids", _CandidateIdProvider(selected_candidate_id="same"))
     monkeypatch.setattr(
-        "sunpack.repair.scheduler._policy_candidate_payload",
+        "sunpack.repair.scheduler._policy_candidate_snapshot",
         lambda job, candidate, index=0: {
-            "feature_contract_version": 3,
             "candidate_id": "same",
             "module_name": candidate.module_name,
             "module": candidate.module_name,
-            "runtime_context": {},
-            "candidate_proposal": {},
         },
     )
     first = _candidate("selector_choice", tmp_path / "first.zip", confidence=0.95)
@@ -238,30 +299,6 @@ def test_duplicate_candidate_id_blocks_policy_selection(tmp_path, monkeypatch):
     assert result.diagnosis["candidate_selection"]["policy_fallback"] is True
 
 
-def test_policy_contract_miss_falls_back_to_selector(tmp_path, monkeypatch):
-    provider = _CandidateIdProvider(selected_module="model_choice")
-    provider.supported_feature_contract_version = 999
-    provider.required_payload_sections = ("runtime_context", "candidate_proposal")
-    _install_policy_package(monkeypatch, "sunpack_policy_test_contract", provider)
-    first = _candidate("selector_choice", tmp_path / "first.zip", confidence=0.95)
-    second = _candidate("model_choice", tmp_path / "second.zip", confidence=0.1)
-    scheduler = RepairScheduler({
-        "repair": {
-            "workspace": str(tmp_path / "repair"),
-            "policy": {"provider_package": "sunpack_policy_test_contract"},
-        }
-    })
-    scheduler.generate_repair_candidates = lambda job: RepairCandidateBatch(candidates=[first, second])  # type: ignore[method-assign]
-
-    result = scheduler.repair(_job(tmp_path))
-
-    assert result.ok
-    assert result.module_name == "selector_choice"
-    policy = result.diagnosis["candidate_selection"]["policy"]
-    assert policy["decision_status"] == "fallback"
-    assert "feature_contract_miss" in ";".join(policy["provider_errors"])
-
-
 def test_zip_policy_active_disables_beam_for_zip_only(tmp_path, monkeypatch):
     _install_policy_package(monkeypatch, "sunpack_policy_test_beam", _CandidateIdProvider(selected_module="zip"))
     stage = ArchiveRepairStage({
@@ -280,7 +317,7 @@ def test_zip_policy_active_disables_beam_for_zip_only(tmp_path, monkeypatch):
     assert stage.policy_active_for_verification(tar_task, tar_result, verification) is False
 
 
-def test_policy_candidate_payload_matches_training_minimal_shape_without_oracle(tmp_path):
+def test_candidate_snapshot_matches_training_action_shape_without_oracle(tmp_path):
     candidate = _candidate("zip_resolve_duplicate_entries", tmp_path / "fixed.zip", confidence=0.5)
     candidate = replace(
         candidate,
@@ -301,61 +338,14 @@ def test_policy_candidate_payload_matches_training_minimal_shape_without_oracle(
             },
         },
     )
-    job = _job(tmp_path)
-    knowledge = dict(job.knowledge)
-    knowledge.update({
-        "analysis": {
-            "summary": {"format": "zip", "confidence": 0.5},
-            "prepass": {
-                "status": "ok",
-                "selected_format": "zip",
-                "fuzzy": {
-                    "binary_profile": {
-                        "entropy_profile": {"head_entropy": 7.1, "overall_class": "binary"},
-                        "byte_class_profile": {"head": {"printable_ratio": 0.2}},
-                    }
-                },
-            },
-            "fuzzy": {
-                "entropy_profile": {"head_entropy": 7.1, "overall_class": "binary"},
-                "byte_class_profile": {"head": {"printable_ratio": 0.2}},
-            },
-        },
-        "format": {"zip": {"structure": {"has_duplicate_entries": True}, "container_tags": ["split_archive"], "route_evidence_flags": ["duplicate_entries"]}},
-        "extraction": {
-            "failure": {
-                "status": "failed",
-                "decision_hint": "repair",
-                "archive_coverage": {"completeness": 0.5, "expected_files": 2, "matched_files": 1},
-            }
-        },
-        "repair": {
-            "route_evidence": {"flags": ["duplicate_entries"]},
-            "history": {
-                "items": [],
-                "repair_history_flags": ["after_cd_rebuild"],
-                "residual_damage_flags": ["exact_match_failed"],
-                "runtime_state_summary": {"directory_detected": True, "entry_count": 2},
-            },
-            "residual": {"flags": ["exact_match_failed"]},
-        },
-    })
-    job = replace(
-        job,
-        attempts=2,
-        knowledge=knowledge,
-    )
+    payload = candidate_snapshot(candidate, index=3)
 
-    payload = policy_candidate_payload(job, candidate, index=3)
-
-    assert payload["feature_contract_version"] == 3
-    assert payload["round"] == 2
+    assert payload["schema_version"] == 1
     assert payload["current_rank"] == 3
-    assert payload["runtime_context"]["analysis_native_probe"]["has_duplicate_entries"] is True
-    assert payload["runtime_context"]["analysis_native_probe"]["route_evidence_duplicate_entries"] == 1
-    assert payload["runtime_context"]["job_summary"]["residual_damage_flags"] == ["exact_match_failed"]
-    assert payload["candidate_proposal"]["validation_details"]["policy"] == "crc_match"
-    assert payload["candidate_proposal"]["validation_details"]["kept_entry_crc_match_count"] == 1
+    assert payload["module_name"] == "zip_resolve_duplicate_entries"
+    assert payload["action_type"] == "apply_patch"
+    assert payload["patch_operation_count"] == 0
+    assert payload["validation_summary"]["accepted"] is True
     assert not _contains_forbidden_policy_key(payload)
 
 
@@ -405,7 +395,7 @@ def test_runtime_repair_job_includes_descriptor_route_evidence(tmp_path):
     assert "data_descriptor" in knowledge_view.repair_route_context(job.knowledge)["route_evidence_flags"]
 
 
-def test_runtime_features_do_not_backfill_missing_archive_knowledge_from_job_fields(tmp_path):
+def test_training_runtime_context_does_not_backfill_missing_archive_knowledge_from_job_fields(tmp_path):
     source = tmp_path / "source.zip"
     source.write_bytes(b"broken")
     job = RepairJob(
@@ -418,24 +408,19 @@ def test_runtime_features_do_not_backfill_missing_archive_knowledge_from_job_fie
         knowledge={},
     )
 
-    payload = policy_candidate_payload(job, _candidate("zip_salvage_verified_entries", tmp_path / "fixed.zip", confidence=0.5), index=0)
+    context = runtime_context_from_job(job)
 
-    assert "source.input" in payload["runtime_context"]["knowledge_projection"]["feature_contract_miss"]
-    assert payload["runtime_context"]["job_summary"]["route_evidence_flags"] == []
+    assert "source.input" in context["knowledge_projection"]["missing_paths"]
+    assert context["job_summary"]["route_evidence_flags"] == []
 
 
-def test_runtime_features_source_has_no_legacy_repair_job_fallbacks():
-    source = Path("sunpack/repair/policy/runtime_features.py").read_text(encoding="utf-8")
+def test_training_runtime_source_has_no_legacy_repair_job_fallbacks():
+    source = Path("sunpack/repair/policy/training_runtime.py").read_text(encoding="utf-8")
     forbidden = [
         "project_knowledge_sources",
         "_set_if_missing",
         "_feature_payload_sources",
         "_verification_summary_from_failure",
-        'getattr(job, "source_input"',
-        'getattr(job, "analysis_prepass"',
-        'getattr(job, "extraction_failure"',
-        'getattr(job, "repair_history"',
-        'getattr(job, "damage_flags"',
     ]
 
     for token in forbidden:
@@ -546,6 +531,35 @@ class _FakeVerifier:
         return self.verification
 
 
+class _DualProvider:
+    provider_id = "test_dual_policy"
+    supported_formats = ("zip",)
+
+    def __init__(self, actions):
+        self.actions = list(actions)
+
+    def available(self):
+        return True
+
+    def analyze(self, request):
+        return {
+            "format": request.format,
+            "damage_labels": list(getattr(request.job, "damage_flags", []) or []),
+            "confidence": 0.75,
+            "metadata": {"model_id": "fake_damage", "model_version": "test"},
+        }
+
+    def choose(self, request):
+        step = self.actions[min(max(0, request.round_index - 1), len(self.actions) - 1)] if self.actions else "give_up"
+        action, _, module = step.partition(":")
+        if action == "apply_patch":
+            for payload in request.candidate_payloads:
+                if module in {payload.get("module_name"), payload.get("module")}:
+                    return {"action": action, "selected_candidate_id": payload["candidate_id"], "confidence": 1.0}
+            return {"action": "give_up", "reason": "missing_scripted_candidate"}
+        return {"action": action, "confidence": 1.0, "reason": f"scripted_{action}"}
+
+
 def _install_policy_package(monkeypatch, name: str, provider) -> None:
     module = types.ModuleType(name)
     module.get_repair_policy_providers = lambda: [provider]
@@ -561,6 +575,29 @@ def _candidate(module: str, path: Path, *, confidence: float) -> RepairCandidate
         confidence=confidence,
         actions=[module],
         workspace_paths=[str(path)],
+    )
+
+
+def _patch_candidate(module: str, source: Path, replacement: bytes) -> RepairCandidate:
+    descriptor = ArchiveInputDescriptor.from_parts(archive_path=str(source), format_hint="zip")
+    base = ArchiveState.from_archive_input(descriptor)
+    patch = PatchPlan(
+        module=module,
+        format="zip",
+        operations=[
+            PatchOperation(op="truncate", offset=0, size=source.stat().st_size),
+            PatchOperation.append_bytes(replacement),
+        ],
+        confidence=0.8,
+    )
+    state = base.push_patch(patch)
+    return RepairCandidate(
+        module_name=module,
+        format="zip",
+        repaired_input={"kind": "archive_state", "patch_digest": state.effective_patch_digest(), "format_hint": "zip"},
+        confidence=0.8,
+        actions=[module],
+        plan={"archive_state": state.to_dict(), "patch_plan": patch.to_dict()},
     )
 
 

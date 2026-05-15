@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-import subprocess
-import sys
 import json
 from pathlib import Path
 from typing import Any
 
-from repair_training.core.plugin import TrainingFormatPlugin
+from repair_training.core.plugin import TrainingFeatureSpec, TrainingFormatPlugin, TrainingLabelSchema
+from repair_training.taxonomy import SEVEN_ZIP_DAMAGE_FAMILIES
 
 
 FORMAT_NAME = "seven_zip"
@@ -17,10 +16,7 @@ DEFAULT_DISTRIBUTION = PACKAGE_ROOT / "distributions" / "damage_distribution_sev
 def get_training_plugin() -> TrainingFormatPlugin:
     return TrainingFormatPlugin(
         format_name=FORMAT_NAME,
-        default_run_name="seven_zip_runtime_graph",
-        default_feature_view="runtime_minimal_native_validation",
-        default_target="root_transition_return_v1",
-        default_sample_weight_mode="root_transition_v1",
+        default_run_name="seven_zip_policy_lab",
         default_collection_budget={
             "workers": 6,
             "max_rounds": 6,
@@ -30,37 +26,74 @@ def get_training_plugin() -> TrainingFormatPlugin:
             "materialize_top_k": 8,
         },
         default_distribution=DEFAULT_DISTRIBUTION,
-        model_output_subdir=Path("models") / "seven_zip_runtime_policy",
+        model_output_subdir=Path("models") / "seven_zip_policy_lab",
         collection_record_context=collection_record_context,
         resolve_collection_material_report=resolve_collection_material_report,
         load_material_index=load_material_index,
         compact_material_distribution=compact_material_distribution,
         collection_report_sections=collection_report_sections,
-        analyze_collection=_analyze_collection,
-        analyze_training=_analyze_training,
+        damage_label_schema=damage_label_schema,
+        damage_feature_spec=damage_feature_spec,
+        action_feature_spec=action_feature_spec,
+        lightgbm_params=lightgbm_params,
+        action_label=action_label,
     )
 
 
-def _analyze_collection(run_dir: Path) -> int | None:
-    return subprocess.call([
-        sys.executable,
-        "-m",
-        "repair_training.core.analyze_collection",
-        "--run-dir",
-        str(run_dir),
-    ])
+def damage_label_schema() -> TrainingLabelSchema:
+    route_labels = (
+        "route:next_header_crc_bad",
+        "route:stream_crc_bad",
+        "route:encoded_header_present",
+        "route:split_sidecars_available",
+        "route:password_required",
+    )
+    return TrainingLabelSchema(
+        labels=tuple(sorted(f"family:{family}" for family in SEVEN_ZIP_DAMAGE_FAMILIES)) + route_labels,
+        metadata={"taxonomy": "seven_zip", "schema_version": 1},
+    )
 
 
-def _analyze_training(run_dir: Path, model_dir: Path) -> int | None:
-    return subprocess.call([
-        sys.executable,
-        "-m",
-        "repair_training.core.analyze_training",
-        "--run-dir",
-        str(run_dir),
-        "--model-dir",
-        str(model_dir),
-    ])
+def damage_feature_spec() -> TrainingFeatureSpec:
+    return TrainingFeatureSpec(
+        include_prefixes=("format", "runtime_context.", "diagnosis.", "repair_history."),
+        categorical_paths=(
+            "format",
+            "runtime_context.analysis_summary.format",
+            "runtime_context.archive_authentication.password_required",
+            "runtime_context.extraction_summary.failure_stage",
+            "runtime_context.extraction_summary.failure_kind",
+            "runtime_context.verification_summary.decision_hint",
+        ),
+        ignore_prefixes=("runtime_context.archive_state.state", "job.source_input.path"),
+    )
+
+
+def action_feature_spec() -> TrainingFeatureSpec:
+    return TrainingFeatureSpec(
+        include_prefixes=("action_type", "candidate_snapshot.", "damage_analysis_target.", "current_recovery.", "next_recovery.", "recovery_delta"),
+        categorical_paths=(
+            "action_type",
+            "candidate_snapshot.action_type",
+            "candidate_snapshot.module_name",
+            "candidate_snapshot.last_patch_module",
+            "candidate_snapshot.recovery_status",
+            "current_recovery.status",
+            "current_recovery.decision_hint",
+        ),
+        ignore_prefixes=("candidate_snapshot.patch_digest", "candidate_snapshot.recovery_snapshot.state_digest"),
+    )
+
+
+def lightgbm_params(model_type: str) -> dict[str, Any]:
+    if model_type == "repair_action":
+        return {"n_estimators": 60, "num_leaves": 15, "min_child_samples": 2}
+    return {"n_estimators": 50, "num_leaves": 15, "min_child_samples": 2}
+
+
+def action_label(row: dict[str, Any]) -> int:
+    value = float(row.get("long_term_value") or 0.0)
+    return int(max(0, min(31, round((value + 1.0) * 10.0))))
 
 
 def collection_record_context(record: dict[str, Any]) -> dict[str, Any]:

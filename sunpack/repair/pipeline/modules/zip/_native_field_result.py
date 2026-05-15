@@ -81,7 +81,7 @@ def repair_result_from_native_zip_field(
         patch_plan = patch_plan_for_byte_patches(job, module_name, patches, confidence=confidence, actions=actions)
     repaired_state = patched_state_for_job(job, patch_plan)
     selected_path = str(result.get("selected_path") or "")
-    if should_materialize_candidate(config):
+    if should_materialize_candidate(config, "zip"):
         repaired_input = {"kind": "file", "path": selected_path, "format_hint": "zip"}
         workspace_paths = list(result.get("workspace_paths") or ([selected_path] if selected_path else []))
     else:

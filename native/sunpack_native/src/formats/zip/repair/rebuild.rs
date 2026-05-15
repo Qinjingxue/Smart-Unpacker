@@ -212,6 +212,22 @@ pub(crate) fn zip_deep_partial_recovery(
         item.set_item("passthrough_entries", candidate.passthrough_entries)?;
         item.set_item("size", candidate.size)?;
         item.set_item("actions", PyList::new(py, &candidate.actions)?)?;
+        if let Ok(bytes) = fs::read(&candidate.path) {
+            let action_refs = candidate.actions.to_vec();
+            item.set_item(
+                "patch_plan",
+                logical_archive_replace_patch_plan(
+                    py,
+                    candidate.name,
+                    "zip",
+                    &data,
+                    &bytes,
+                    candidate.confidence,
+                    &action_refs,
+                    "zip_deep_partial_recovery",
+                )?,
+            )?;
+        }
         candidates.append(item)?;
     }
     result.set_item("candidates", candidates)?;
@@ -334,25 +350,49 @@ pub(crate) fn zip_rebuild_from_local_headers(
         Path::new(output_path),
         options.max_output_bytes,
     ) {
-        Ok(stats) => add_rebuild_target_metadata(py, rebuild_status_dict(
-            py,
-            if scan.skipped_offsets.is_empty() && scan.encrypted_entries == 0 && !scan.timed_out {
-                "repaired"
-            } else {
-                "partial"
-            },
-            output_path,
-            "ZIP local headers were rebuilt",
-            &scan.warnings,
-            scan.skipped_offsets.len(),
-            scan.encrypted_entries,
-            scan.descriptor_entries,
-            stats.entries,
-            stats.verified_entries,
-            scan.timed_out,
-            Some(&scan),
-            None,
-        )?, preserve_raw_names, logical_stream_built),
+        Ok(stats) => {
+            let result = add_rebuild_target_metadata(py, rebuild_status_dict(
+                py,
+                if scan.skipped_offsets.is_empty() && scan.encrypted_entries == 0 && !scan.timed_out {
+                    "repaired"
+                } else {
+                    "partial"
+                },
+                output_path,
+                "ZIP local headers were rebuilt",
+                &scan.warnings,
+                scan.skipped_offsets.len(),
+                scan.encrypted_entries,
+                scan.descriptor_entries,
+                stats.entries,
+                stats.verified_entries,
+                scan.timed_out,
+                Some(&scan),
+                None,
+            )?, preserve_raw_names, logical_stream_built)?;
+            if let Ok(bytes) = fs::read(output_path) {
+                let action_refs = plan.actions.to_vec();
+                let native_target = if preserve_raw_names {
+                    "rebuild_cd_preserve_raw_names"
+                } else {
+                    "rebuild_cd_from_local_headers"
+                };
+                result.bind(py).set_item(
+                    "patch_plan",
+                    logical_archive_replace_patch_plan(
+                        py,
+                        "zip_rebuild_from_local_headers",
+                        "zip",
+                        &data,
+                        &bytes,
+                        plan.confidence,
+                        &action_refs,
+                        native_target,
+                    )?,
+                )?;
+            }
+            Ok(result)
+        }
         Err(message) => rebuild_status_dict(
             py,
             "unrepairable",

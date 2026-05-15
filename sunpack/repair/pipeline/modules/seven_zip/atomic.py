@@ -125,6 +125,7 @@ class _SevenZipAtomicRepair:
             default_message=f"{self.module_name} produced a candidate",
             repair_name=self.repair_name,
             atomic_action_group=self.module_name,
+            force_archive_state=True,
         )
 
     def _run_native(self, job: RepairJob, workspace: str, config: dict) -> dict[str, Any]:

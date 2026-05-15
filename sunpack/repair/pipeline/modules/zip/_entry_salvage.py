@@ -2,10 +2,17 @@ from __future__ import annotations
 
 from typing import Any
 
+from sunpack.contracts.archive_state import PatchPlan
 from sunpack.repair.coverage import coverage_view_from_job
 from sunpack.repair.diagnosis import RepairDiagnosis
 from sunpack.repair.job import RepairJob
-from sunpack.repair.pipeline.modules._common import cached_repair_operation, cache_relevant_module_limits, source_input_for_job, module_limits
+from sunpack.repair.pipeline.modules._common import (
+    cached_repair_operation,
+    cache_relevant_module_limits,
+    module_limits,
+    patch_repair_result,
+    source_input_for_job,
+)
 from sunpack.repair.result import RepairResult
 from sunpack_native import zip_verified_entry_salvage as _native_zip_verified_entry_salvage
 
@@ -89,9 +96,43 @@ def run_verified_entry_salvage(
             message=str(result.get("message") or "ZIP verified entry salvage did not produce a candidate"),
         )
     coverage = coverage_view_from_job(job)
+    diagnosis_payload = {
+            **diagnosis.as_dict(),
+            "repair_name": repair_name or module_name,
+            "native_key": native_key,
+            "atomic_action_group": atomic_action_group or repair_name or module_name,
+            "archive_coverage": coverage.as_dict(),
+            "excluded_names": list(exclude_names or []),
+            native_key: result,
+    }
+    result_confidence = min(0.995, max(0.1, confidence + coverage.score_hint(payload=0.05, mixed=0.04, partial=0.03)))
+    raw_patch_plan = result.get("patch_plan")
+    if isinstance(raw_patch_plan, dict):
+        try:
+            patch_plan = PatchPlan.from_dict(raw_patch_plan)
+        except (TypeError, ValueError):
+            patch_plan = None
+        if patch_plan is not None:
+            return patch_repair_result(
+                job=job,
+                diagnosis=diagnosis_payload,
+                module_name=module_name,
+                fmt="zip",
+                patch_plan=patch_plan,
+                confidence=result_confidence,
+                actions=list(result.get("actions") or []),
+                workspace=workspace,
+                filename=f"{module_name}.zip",
+                config=config,
+                materialized_data=None,
+                status="partial",
+                warnings=list(result.get("warnings") or []),
+                partial=True,
+                message=message,
+            )
     return RepairResult(
         status="partial",
-        confidence=min(0.995, max(0.1, confidence + coverage.score_hint(payload=0.05, mixed=0.04, partial=0.03))),
+        confidence=result_confidence,
         format="zip",
         repaired_input={"kind": "file", "path": selected_path, "format_hint": "zip"},
         actions=list(result.get("actions") or []),
@@ -100,15 +141,7 @@ def run_verified_entry_salvage(
         workspace_paths=list(result.get("workspace_paths") or [selected_path]),
         partial=True,
         module_name=module_name,
-        diagnosis={
-            **diagnosis.as_dict(),
-            "repair_name": repair_name or module_name,
-            "native_key": native_key,
-            "atomic_action_group": atomic_action_group or repair_name or module_name,
-            "archive_coverage": coverage.as_dict(),
-            "excluded_names": list(exclude_names or []),
-            native_key: result,
-        },
+        diagnosis=diagnosis_payload,
         message=message,
     )
 

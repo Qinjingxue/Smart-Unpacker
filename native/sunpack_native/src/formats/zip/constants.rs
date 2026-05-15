@@ -1,7 +1,9 @@
 use flate2::{Decompress, FlushDecompress, Status};
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use memchr::memmem;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList};
+use sha2::{Digest, Sha256};
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};

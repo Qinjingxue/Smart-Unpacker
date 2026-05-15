@@ -301,17 +301,23 @@ def patch_plan_for_byte_patches(
     confidence: float,
     actions: list[str],
 ) -> PatchPlan:
+    base_state = base_archive_state_for_job(job)
+    base_bytes = archive_state_to_bytes(base_state)
     operations = [
         PatchOperation.replace_bytes(
             offset=int(patch["offset"]),
             data=bytes(patch["data"]),
+            expected=_slice_bytes(base_bytes, int(patch["offset"]), len(bytes(patch["data"]))),
             details={"module": module_name},
         )
         for patch in patches
     ]
     return PatchPlan(
+        module=module_name,
+        format=job.format,
+        action_type="apply_patch",
         operations=operations,
-        provenance={"module": module_name, "actions": list(actions), "base_patch_digest": base_archive_state_for_job(job).effective_patch_digest()},
+        provenance={"module": module_name, "actions": list(actions), "base_patch_digest": base_state.effective_patch_digest()},
         confidence=float(confidence),
     )
 
@@ -326,12 +332,16 @@ def patch_plan_for_insert(
     actions: list[str],
 ) -> PatchPlan:
     return PatchPlan(
+        module=module_name,
+        format=job.format,
+        action_type="apply_patch",
         operations=[
             PatchOperation(
                 op="insert",
                 offset=int(offset),
                 size=len(data),
                 data_b64=base64.b64encode(bytes(data)).decode("ascii"),
+                expected_b64="",
                 details={"module": module_name},
             )
         ],
@@ -341,9 +351,14 @@ def patch_plan_for_insert(
 
 
 def patch_plan_for_truncate(job: RepairJob, module_name: str, size: int, *, confidence: float, actions: list[str]) -> PatchPlan:
+    base = base_archive_state_for_job(job)
+    base_bytes = archive_state_to_bytes(base)
     return PatchPlan(
-        operations=[PatchOperation(op="truncate", offset=int(size), size=0, details={"module": module_name})],
-        provenance={"module": module_name, "actions": list(actions), "base_patch_digest": base_archive_state_for_job(job).effective_patch_digest()},
+        module=module_name,
+        format=job.format,
+        action_type="apply_patch",
+        operations=[PatchOperation(op="truncate", offset=int(size), size=0, expected_sha256=hashlib.sha256(base_bytes[int(size):]).hexdigest(), details={"module": module_name})],
+        provenance={"module": module_name, "actions": list(actions), "base_patch_digest": base.effective_patch_digest()},
         confidence=float(confidence),
     )
 
@@ -357,12 +372,17 @@ def patch_plan_for_truncate_append(
     confidence: float,
     actions: list[str],
 ) -> PatchPlan:
+    base = base_archive_state_for_job(job)
+    base_bytes = archive_state_to_bytes(base)
     return PatchPlan(
+        module=module_name,
+        format=job.format,
+        action_type="apply_patch",
         operations=[
-            PatchOperation(op="truncate", offset=int(size), size=0, details={"module": module_name}),
+            PatchOperation(op="truncate", offset=int(size), size=0, expected_sha256=hashlib.sha256(base_bytes[int(size):]).hexdigest(), details={"module": module_name}),
             PatchOperation.append_bytes(bytes(data), details={"module": module_name}),
         ],
-        provenance={"module": module_name, "actions": list(actions), "base_patch_digest": base_archive_state_for_job(job).effective_patch_digest()},
+        provenance={"module": module_name, "actions": list(actions), "base_patch_digest": base.effective_patch_digest()},
         confidence=float(confidence),
     )
 
@@ -378,13 +398,18 @@ def patch_plan_for_crop(
 ) -> PatchPlan:
     start = max(0, int(start))
     end = max(start, int(end))
+    base = base_archive_state_for_job(job)
+    base_bytes = archive_state_to_bytes(base)
     operations: list[PatchOperation] = []
     if start:
-        operations.append(PatchOperation.delete_range(offset=0, size=start, details={"module": module_name}))
-    operations.append(PatchOperation(op="truncate", offset=end - start, size=0, details={"module": module_name}))
+        operations.append(PatchOperation.delete_range(offset=0, size=start, expected=base_bytes[:start], details={"module": module_name}))
+    operations.append(PatchOperation(op="truncate", offset=end - start, size=0, expected_sha256=hashlib.sha256(base_bytes[end:]).hexdigest(), details={"module": module_name}))
     return PatchPlan(
+        module=module_name,
+        format=job.format,
+        action_type="apply_patch",
         operations=operations,
-        provenance={"module": module_name, "actions": list(actions), "base_patch_digest": base_archive_state_for_job(job).effective_patch_digest(), "crop_start": start, "crop_end": end},
+        provenance={"module": module_name, "actions": list(actions), "base_patch_digest": base.effective_patch_digest(), "crop_start": start, "crop_end": end},
         confidence=float(confidence),
     )
 
@@ -401,30 +426,68 @@ def patch_plan_for_crop_append(
 ) -> PatchPlan:
     start = max(0, int(start))
     end = max(start, int(end))
+    base = base_archive_state_for_job(job)
+    base_bytes = archive_state_to_bytes(base)
     operations: list[PatchOperation] = []
     if start:
-        operations.append(PatchOperation.delete_range(offset=0, size=start, details={"module": module_name}))
+        operations.append(PatchOperation.delete_range(offset=0, size=start, expected=base_bytes[:start], details={"module": module_name}))
     operations.extend([
-        PatchOperation(op="truncate", offset=end - start, size=0, details={"module": module_name}),
+        PatchOperation(op="truncate", offset=end - start, size=0, expected_sha256=hashlib.sha256(base_bytes[end:]).hexdigest(), details={"module": module_name}),
         PatchOperation.append_bytes(bytes(data), details={"module": module_name}),
     ])
     return PatchPlan(
+        module=module_name,
+        format=job.format,
+        action_type="apply_patch",
         operations=operations,
-        provenance={"module": module_name, "actions": list(actions), "base_patch_digest": base_archive_state_for_job(job).effective_patch_digest(), "crop_start": start, "crop_end": end},
+        provenance={"module": module_name, "actions": list(actions), "base_patch_digest": base.effective_patch_digest(), "crop_start": start, "crop_end": end},
+        confidence=float(confidence),
+    )
+
+
+def patch_plan_replace_logical_archive(
+    job: RepairJob,
+    module_name: str,
+    new_bytes: bytes,
+    *,
+    confidence: float,
+    actions: list[str],
+) -> PatchPlan:
+    base = base_archive_state_for_job(job)
+    base_bytes = archive_state_to_bytes(base)
+    return PatchPlan(
+        module=module_name,
+        format=job.format,
+        action_type="apply_patch",
+        operations=[
+            PatchOperation(
+                op="truncate",
+                offset=0,
+                size=0,
+                expected_sha256=hashlib.sha256(base_bytes).hexdigest(),
+                details={"module": module_name, "adapter": "replace_logical_archive"},
+            ),
+            PatchOperation.append_bytes(bytes(new_bytes), details={"module": module_name, "adapter": "replace_logical_archive"}),
+        ],
+        provenance={"module": module_name, "actions": list(actions), "base_patch_digest": base.effective_patch_digest(), "adapter": "replace_logical_archive"},
         confidence=float(confidence),
     )
 
 
 def patched_state_for_job(job: RepairJob, patch_plan: PatchPlan) -> ArchiveState:
     base = base_archive_state_for_job(job)
+    state = base.push_patch(patch_plan)
+    if state.format_hint or not job.format:
+        return state
     return ArchiveState(
-        source=base.source,
-        patches=[*base.patches, patch_plan],
+        source=state.source,
+        patches=list(state.patches),
         patch_digest="",
-        logical_name=base.logical_name,
-        format_hint=base.format_hint or job.format,
-        analysis=dict(base.analysis),
-        verification=dict(base.verification),
+        logical_name=state.logical_name,
+        format_hint=job.format,
+        analysis=dict(state.analysis),
+        verification=dict(state.verification),
+        knowledge=dict(state.knowledge),
     )
 
 
@@ -444,7 +507,9 @@ def virtual_patch_repaired_input(repaired_state: ArchiveState) -> dict[str, Any]
     }
 
 
-def should_materialize_candidate(config: dict[str, Any]) -> bool:
+def should_materialize_candidate(config: dict[str, Any], fmt: str = "") -> bool:
+    if str(fmt or "").lower().lstrip(".") in {"zip", "7z", "seven_zip", "sevenzip"}:
+        return bool(config.get("materialize_patch_candidate", False))
     return not bool(config.get("virtual_patch_candidate", False))
 
 
@@ -468,7 +533,7 @@ def patch_repair_result(
 ) -> RepairResult:
     repaired_state = patched_state_for_job(job, patch_plan)
     path = ""
-    if should_materialize_candidate(config):
+    if should_materialize_candidate(config, fmt):
         data = materialized_data if materialized_data is not None else archive_state_to_bytes(repaired_state)
         path = write_candidate(bytes(data), workspace, filename)
         repaired_input = {"kind": "file", "path": path, "format_hint": fmt}
@@ -492,6 +557,12 @@ def patch_repair_result(
         message=message,
         repaired_state=repaired_state,
     )
+
+
+def _slice_bytes(data: bytes, offset: int, size: int) -> bytes:
+    start = max(0, int(offset))
+    end = start + max(0, int(size))
+    return bytes(data[start:end])
 
 
 def write_candidate(data: bytes, workspace: str, filename: str) -> str:

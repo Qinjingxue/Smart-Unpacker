@@ -175,10 +175,7 @@ pub(crate) fn seven_zip_scan_source(
                     structure.set_item("encoded_header_decoder_method_supported", !reason.contains("unsupported"))?;
                     structure.set_item(
                         "encoded_header_coder_properties_bad",
-                        !reason.contains("password")
-                            && (reason.contains("coder_properties")
-                                || reason.contains("range decoder")
-                                || reason.contains("payload_crc_bad")),
+                        !reason.contains("password") && reason.contains("coder_properties"),
                     )?;
                     if reason.contains("password") {
                         structure.set_item(
@@ -394,9 +391,7 @@ fn seven_zip_route_flags(
         if header.next_header_nid == SZ_ENCODED_HEADER {
             if let Err(reason) = decode_seven_zip_encoded_header_payload(data, header, password) {
                 if !reason.contains("password")
-                    && (reason.contains("coder_properties")
-                        || reason.contains("range decoder")
-                        || reason.contains("payload_crc_bad"))
+                    && reason.contains("coder_properties")
                 {
                     flags.push("encoded_header_coder_properties_bad".to_string());
                 }

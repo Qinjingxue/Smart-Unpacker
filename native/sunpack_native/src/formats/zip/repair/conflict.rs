@@ -76,7 +76,9 @@ pub(crate) fn zip_conflict_resolver_rebuild(
         if let Ok(stats) = write_candidate_zip(&data, &scan.entries, &plan, &output_path, options.max_output_bytes) {
             let sel_path = output_path.to_string_lossy().into_owned();
             let sel = WrittenCandidate { name: "zip_conflict_resolver_rebuild", policy: "crc_match", path: sel_path.clone(), confidence: 0.91, actions: plan.actions.clone(), entries: stats.entries, verified_entries: stats.verified_entries, descriptor_entries: stats.descriptor_entries, passthrough_entries: stats.passthrough_entries, size: stats.size, rank_score: plan.rank_score };
-            return add_conflict_target_metadata(py, status_dict(py, "partial", &sel_path, "ZIP entries are already conflict-free", &scan.warnings, &[sel], scan.skipped_offsets.len(), scan.encrypted_entries, 0.91, Some(&scan), None)?, policy, conflict_count, selected_indices.len());
+            let result = status_dict(py, "partial", &sel_path, "ZIP entries are already conflict-free", &scan.warnings, &[sel], scan.skipped_offsets.len(), scan.encrypted_entries, 0.91, Some(&scan), None)?;
+            add_zip_candidate_replace_patch_plans(py, &result, &data, "zip_conflict_resolver_rebuild")?;
+            return add_conflict_target_metadata(py, result, policy, conflict_count, selected_indices.len());
         }
     }
     let policy_names: Vec<&'static str> = if policy == "crc_match" || policy == "all_candidates" {
@@ -143,7 +145,7 @@ pub(crate) fn zip_conflict_resolver_rebuild(
     warnings.push(format!(
         "ZIP conflict resolver dropped {conflict_count} duplicate or overlapping entries"
     ));
-    add_conflict_target_metadata(py, status_dict(
+    let result = status_dict(
         py,
         "partial",
         &selected.path,
@@ -155,6 +157,8 @@ pub(crate) fn zip_conflict_resolver_rebuild(
         0.91,
         Some(&scan),
         None,
-    )?, policy, conflict_count, selected.entries)
+    )?;
+    add_zip_candidate_replace_patch_plans(py, &result, &data, "zip_conflict_resolver_rebuild")?;
+    add_conflict_target_metadata(py, result, policy, conflict_count, selected.entries)
 }
 

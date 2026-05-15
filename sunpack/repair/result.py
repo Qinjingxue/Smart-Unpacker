@@ -35,7 +35,7 @@ class RepairResult:
 
     @property
     def ok(self) -> bool:
-        return self.status in {"repaired", "partial"} and self.repaired_input is not None
+        return self.status in {"repaired", "partial"} and (self.repaired_state is not None or self.repaired_input is not None)
 
     def archive_input(self, *, archive_path: str = "", part_paths: list[str] | None = None) -> ArchiveInputDescriptor | None:
         if self.repaired_state is not None:

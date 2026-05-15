@@ -36,6 +36,7 @@ class ZipScanResult:
     patch_facts: list[str] | None = None
     residual_facts: list[str] | None = None
     validation_details: dict[str, Any] | None = None
+    patch_plan: dict[str, Any] | None = None
     logical_stream_built: bool = False
     split_sidecars_available: bool = False
 
@@ -93,6 +94,7 @@ def rebuild_zip_from_source(
         patch_facts=[str(item) for item in result.get("patch_facts") or []],
         residual_facts=[str(item) for item in result.get("residual_facts") or []],
         validation_details=dict(result.get("validation_details") or {}),
+        patch_plan=dict(result.get("patch_plan") or {}) if isinstance(result.get("patch_plan"), dict) else None,
         logical_stream_built=bool(result.get("logical_stream_built")),
         split_sidecars_available=bool(result.get("split_sidecars_available")),
     )

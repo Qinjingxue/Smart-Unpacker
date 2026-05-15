@@ -7,7 +7,13 @@ from sunpack.contracts.archive_state import PatchPlan
 from sunpack.repair.candidate import CandidateValidation, RepairCandidate
 from sunpack.repair.diagnosis import RepairDiagnosis
 from sunpack.repair.job import RepairJob
-from sunpack.repair.pipeline.modules._common import crop_source_input_ranges, patched_state_for_job, patch_diagnosis, source_input_for_job, virtual_patch_repaired_input
+from sunpack.repair.pipeline.modules._common import (
+    crop_source_input_ranges,
+    patched_state_for_job,
+    patch_diagnosis,
+    source_input_for_job,
+    virtual_patch_repaired_input,
+)
 
 
 def candidates_from_native_result(
@@ -23,6 +29,7 @@ def candidates_from_native_result(
     default_confidence: float = 0.7,
     default_message: str = "native repair produced a candidate",
     prefer_patch_plan: bool = False,
+    force_archive_state: bool = False,
     repair_name: str | None = None,
     atomic_action_group: str | None = None,
 ) -> list[RepairCandidate]:
@@ -41,6 +48,7 @@ def candidates_from_native_result(
             "status": status,
             "confidence": result.get("confidence", default_confidence),
             "actions": list(result.get("actions") or []),
+            "patch_plan": result.get("patch_plan"),
         }]
 
     candidates: list[RepairCandidate] = []
@@ -49,7 +57,9 @@ def candidates_from_native_result(
         item = _candidate_mapping(raw, index)
         path = _absolute_path(item.get("path"))
         patch_plan = _patch_plan_from_item(item)
-        use_patch_plan = bool(prefer_patch_plan and patch_plan is not None)
+        use_patch_plan = bool((prefer_patch_plan or force_archive_state) and patch_plan is not None)
+        if force_archive_state and patch_plan is None:
+            continue
         if not path and not use_patch_plan:
             continue
         item_status = str(item.get("status") or status)
@@ -119,6 +129,8 @@ def candidates_from_native_result(
             }
             diagnosis_payload = patch_diagnosis(diagnosis_payload, patch_plan, repaired_state)
             requires_native_validation = False
+            path = ""
+            workspace_paths = []
         if job.password is not None:
             repaired_input["password"] = job.password
         candidates.append(RepairCandidate(
@@ -145,6 +157,7 @@ def candidates_from_native_result(
                 )
             ],
             plan=plan,
+            action_type="apply_patch" if use_patch_plan else "materialized",
         ))
     return candidates
 

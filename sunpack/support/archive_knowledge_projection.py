@@ -299,16 +299,27 @@ def _archive_authentication_uncached(knowledge: ArchiveKnowledge) -> dict[str, A
 
 def _repair_route_context_uncached(knowledge: ArchiveKnowledge) -> dict[str, Any]:
     flags: list[str] = []
-    for path in (
-        "format.zip.route_evidence_flags",
-        "format.zip.route_evidence.flags",
-        "format.7z.route_evidence_flags",
-        "format.7z.route_evidence.flags",
-        "repair.route_evidence.flags",
-        "repair.damage.flags",
-        "verification.residual.flags",
-        "repair.residual.flags",
-    ):
+    has_seven_zip_facts = bool(_dict(knowledge.get("format.7z.structure", {}))) or bool(knowledge.get("format.7z.route_evidence_flags", []))
+    has_zip_facts = bool(_dict(knowledge.get("format.zip.structure", {}))) or bool(knowledge.get("format.zip.route_evidence_flags", []))
+    if has_seven_zip_facts and not has_zip_facts:
+        route_paths = (
+            "format.7z.route_evidence_flags",
+            "format.7z.route_evidence.flags",
+            "verification.residual.flags",
+            "repair.residual.flags",
+        )
+    else:
+        route_paths = (
+            "format.zip.route_evidence_flags",
+            "format.zip.route_evidence.flags",
+            "format.7z.route_evidence_flags",
+            "format.7z.route_evidence.flags",
+            "repair.route_evidence.flags",
+            "repair.damage.flags",
+            "verification.residual.flags",
+            "repair.residual.flags",
+        )
+    for path in route_paths:
         value = knowledge.get(path, [])
         if isinstance(value, list):
             flags.extend(str(item) for item in value if str(item))

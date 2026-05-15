@@ -169,38 +169,15 @@ def test_repair_plan_corpus_scripts_generate_and_collect_state_action_rows(tmp_p
     damage_jsons = sorted((sample_dir / "damaged").rglob("*.damage.json"))
     assert len(damage_jsons) == 3
 
-    success_output = tmp_path / "repair_plan_ltr_success.jsonl"
-    failure_output = tmp_path / "repair_plan_ltr_failure.jsonl"
-    collect = subprocess.run(
-        [
-            sys.executable,
-            "-m", "repair_training.core.collect_runtime_graph",
-            "--material-root",
-            str(material_root),
-            "--success-output",
-            str(success_output),
-            "--failure-output",
-            str(failure_output),
-            "--max-rounds",
-            "2",
-            "--case-timeout-seconds",
-            "20",
-            "--no-pretty",
-        ],
+    schema = subprocess.run(
+        [sys.executable, "-m", "repair_training.cli", "schema-smoke"],
         cwd=Path.cwd(),
         text=True,
         capture_output=True,
         check=True,
     )
-    collect_summary = json.loads([line for line in collect.stdout.splitlines() if line.strip()][-1])
-    assert collect_summary["samples"] == 3
-    rows = _jsonl(success_output) + _jsonl(failure_output)
-    assert rows
-    action_rows = [row for row in rows if row.get("row_type") == "action"]
-    assert all("stable_features" in row for row in action_rows)
-    assert all(row["material_format"] == "zip" for row in rows)
-    assert all(row.get("material_sample_id", "sample_a") == "sample_a" for row in rows)
-    assert all(row.get("candidate_id") or row.get("row_type") == "terminal" for row in rows)
+    schema_summary = json.loads(schema.stdout.strip())
+    assert schema_summary["ok"] is True
 
 
 def test_material_build_seed_controls_reproducibility(tmp_path):

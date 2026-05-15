@@ -67,6 +67,7 @@ fn seven_zip_repair_next_header_target(
         _ => "fixed_field=next_header_repoint",
     };
     set_seven_zip_atomic_fields(py, &result, target, &[patch_fact, "updated_start_header_crc_after_next_header_field", "source_format=7z"], &[])?;
+    add_seven_zip_candidate_replace_patch_plans(py, &result, data, target)?;
     Ok(result)
 }
 

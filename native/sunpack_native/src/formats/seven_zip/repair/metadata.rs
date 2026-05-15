@@ -1039,30 +1039,14 @@ fn seven_zip_aes_property_candidate_values(properties: &[u8], relative_index: us
         return Vec::new();
     }
     let mut values = Vec::new();
-    let property_len = properties.len();
     let current_b0 = properties[0];
-    let current_b1 = properties[1];
-    let common_cycles = [19u8, 20, 18, 21, 17, 22, 16, 23, 15, 24];
+    let common_cycles = [19u8, 20, 18, 21];
     if relative_index == 0 {
+        let size_bits = current_b0 & 0xc0;
         for cycles in common_cycles {
-            for high in [0u8, 0x40, 0x80, 0xc0] {
-                let b0 = high | cycles;
-                let iv_size = usize::from(((b0 >> 6) & 1) + (current_b1 & 15));
-                let salt_size = usize::from(((b0 >> 7) & 1) + (current_b1 >> 4));
-                if 2 + salt_size + iv_size == property_len && b0 != current_b0 {
-                    values.push(b0);
-                }
-            }
-        }
-    } else if relative_index == 1 {
-        let cycles = current_b0 & 0x3f;
-        if cycles <= 24 {
-            for b1 in 0u8..=255 {
-                let iv_size = usize::from(((current_b0 >> 6) & 1) + (b1 & 15));
-                let salt_size = usize::from(((current_b0 >> 7) & 1) + (b1 >> 4));
-                if 2 + salt_size + iv_size == property_len && b1 != current_b1 {
-                    values.push(b1);
-                }
+            let b0 = size_bits | cycles;
+            if b0 != current_b0 {
+                values.push(b0);
             }
         }
     }
@@ -1075,43 +1059,140 @@ fn seven_zip_property_candidate_values(method_id: &[u8], properties: &[u8], rela
     if method_id == EncoderMethod::ID_AES256_SHA256 {
         return seven_zip_aes_property_candidate_values(properties, relative_index);
     }
-    if properties.len() <= 5
-        && (method_id == EncoderMethod::ID_LZMA || method_id == EncoderMethod::ID_LZMA2)
-    {
-        let mut values: Vec<u8> = (0u8..=255).collect();
-        values.retain(|item| *item != properties[relative_index]);
+    if method_id == EncoderMethod::ID_LZMA2 && properties.len() == 1 && relative_index == 0 {
+        let mut values: Vec<u8> = (0u8..=40).collect();
+        values.retain(|item| *item != properties[0]);
+        return values;
+    }
+    if method_id == EncoderMethod::ID_LZMA && properties.len() == 5 && relative_index == 0 {
+        let mut values: Vec<u8> = (0u8..=224).collect();
+        values.retain(|item| *item != properties[0]);
         return values;
     }
     Vec::new()
 }
 
-fn seven_zip_repair_encoded_header_coder_properties(
-    py: Python<'_>,
-    data: &[u8],
-    workspace: &str,
+#[derive(Clone)]
+enum SevenZipEncodedHeaderCoderPropertiesCacheValue {
+    Success(Vec<u8>),
+    Failure(String),
+}
+
+fn seven_zip_encoded_header_coder_properties_cache(
+) -> &'static std::sync::Mutex<std::collections::HashMap<String, SevenZipEncodedHeaderCoderPropertiesCacheValue>> {
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, SevenZipEncodedHeaderCoderPropertiesCacheValue>>,
+    > = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn seven_zip_encoded_header_pack_stream_range_from_raw(
     header: &SevenZipHeader,
-    target: &str,
+    raw: &[u8],
+) -> Option<(usize, usize)> {
+    let mut pos = 0usize;
+    if raw.get(pos).copied() != Some(SZ_ENCODED_HEADER) {
+        return None;
+    }
+    pos += 1;
+    loop {
+        let nid = raw.get(pos).copied()?;
+        pos += 1;
+        match nid {
+            SZ_END => return None,
+            SZ_PACK_INFO => {
+                let pack = parse_seven_zip_pack_info(raw, &mut pos).ok()?;
+                if pack.num_streams != 1 || pack.sizes.len() != 1 {
+                    return None;
+                }
+                let stream_start = SEVEN_Z_HEADER_SIZE.checked_add(usize::try_from(pack.pack_pos.value).ok()?)?;
+                let stream_size = usize::try_from(pack.sizes[0].value).ok()?;
+                let stream_end = stream_start.checked_add(stream_size)?;
+                if stream_start < SEVEN_Z_HEADER_SIZE || stream_end > header.next_header_start {
+                    return None;
+                }
+                return Some((stream_start, stream_end));
+            }
+            SZ_UNPACK_INFO => {
+                skip_seven_zip_unhandled_property_tree(raw, &mut pos, "EncodedHeader UnpackInfo").ok()?;
+            }
+            SZ_SUB_STREAMS_INFO => {
+                skip_seven_zip_unhandled_property_tree(raw, &mut pos, "EncodedHeader SubStreamsInfo").ok()?;
+            }
+            _ => return None,
+        }
+    }
+}
+
+fn seven_zip_encoded_header_coder_properties_cache_key(
+    data: &[u8],
+    header: &SevenZipHeader,
+    raw: &[u8],
     password: Option<&str>,
-) -> Result<Py<PyDict>, String> {
-    let raw = data
-        .get(header.next_header_start..header.archive_end)
-        .ok_or_else(|| "7z encoded header range is invalid".to_string())?;
+) -> String {
+    let mut sha = sha2::Sha256::default();
+    sha.update(b"7z-encoded-header-coder-properties-v1");
+    sha.update(raw);
+    if let Some((stream_start, stream_end)) = seven_zip_encoded_header_pack_stream_range_from_raw(header, raw) {
+        if let Some(stream) = data.get(stream_start..stream_end) {
+            sha.update(b"|stream|");
+            sha.update(stream);
+        }
+    }
+    sha.update(b"|password|");
+    if let Some(password) = password {
+        sha.update(password.as_bytes());
+    }
+    format!("{:x}", sha.finalize())
+}
+
+fn seven_zip_encoded_header_coder_properties_infer(
+    data: &[u8],
+    header: &SevenZipHeader,
+    raw: &[u8],
+    password: Option<&str>,
+) -> Result<Vec<u8>, String> {
+    let cache_key = seven_zip_encoded_header_coder_properties_cache_key(data, header, raw, password);
+    if let Ok(cache) = seven_zip_encoded_header_coder_properties_cache().lock() {
+        if let Some(cached) = cache.get(&cache_key) {
+            return match cached {
+                SevenZipEncodedHeaderCoderPropertiesCacheValue::Success(value) => Ok(value.clone()),
+                SevenZipEncodedHeaderCoderPropertiesCacheValue::Failure(message) => Err(message.clone()),
+            };
+        }
+    }
+
+    let result = seven_zip_encoded_header_coder_properties_infer_uncached(data, header, raw, password);
+    if let Ok(mut cache) = seven_zip_encoded_header_coder_properties_cache().lock() {
+        if cache.len() >= 2048 {
+            cache.clear();
+        }
+        let value = match &result {
+            Ok(header) => SevenZipEncodedHeaderCoderPropertiesCacheValue::Success(header.clone()),
+            Err(message) => SevenZipEncodedHeaderCoderPropertiesCacheValue::Failure(message.clone()),
+        };
+        cache.insert(cache_key, value);
+    }
+    result
+}
+
+fn seven_zip_encoded_header_coder_properties_infer_uncached(
+    data: &[u8],
+    header: &SevenZipHeader,
+    raw: &[u8],
+    password: Option<&str>,
+) -> Result<Vec<u8>, String> {
+    if let Ok(decoded) = decode_seven_zip_encoded_header_payload_from_raw(data, header, raw, password) {
+        if decoded.first().copied() == Some(SZ_HEADER) {
+            return Err("7z EncodedHeader coder properties are already decodable".to_string());
+        }
+    }
+
     let ranges = match seven_zip_encoded_header_coder_property_ranges(raw) {
         Ok(ranges) => ranges,
         Err(message) if message.contains("coder properties are truncated") => {
             if let Some(new_header) = seven_zip_encoded_header_coder_property_size_patch(raw)? {
-                return seven_zip_materialize_header_graph_patch(
-                    py,
-                    data,
-                    workspace,
-                    header,
-                    target,
-                    &new_header,
-                    "repair_7z_encoded_header_coder_properties",
-                    "fixed_field=encoded_header_coder_properties",
-                    "encoded_header_coder_property_size_canonicalized",
-                )
-                .map_err(|err| err.to_string());
+                return Ok(new_header);
             }
             return Err(message);
         }
@@ -1153,7 +1234,26 @@ fn seven_zip_repair_encoded_header_coder_properties(
     if candidates.len() > 1 {
         return Err("7z EncodedHeader coder properties repair is not unique".to_string());
     }
-    let new_header = candidates.remove(0);
+    Ok(candidates.remove(0))
+}
+
+fn seven_zip_repair_encoded_header_coder_properties(
+    py: Python<'_>,
+    data: &[u8],
+    workspace: &str,
+    header: &SevenZipHeader,
+    target: &str,
+    password: Option<&str>,
+) -> Result<Py<PyDict>, String> {
+    let raw = data
+        .get(header.next_header_start..header.archive_end)
+        .ok_or_else(|| "7z encoded header range is invalid".to_string())?;
+    let new_header = seven_zip_encoded_header_coder_properties_infer(data, header, raw, password)?;
+    let fact = if new_header.len() != raw.len() {
+        "encoded_header_coder_property_size_canonicalized"
+    } else {
+        "encoded_header_coder_properties_inferred_by_decode"
+    };
     seven_zip_materialize_header_graph_patch(
         py,
         data,
@@ -1163,7 +1263,7 @@ fn seven_zip_repair_encoded_header_coder_properties(
         &new_header,
         "repair_7z_encoded_header_coder_properties",
         "fixed_field=encoded_header_coder_properties",
-        "encoded_header_coder_properties_inferred_by_decode",
+        fact,
     )
     .map_err(|err| err.to_string())
 }
@@ -1485,6 +1585,7 @@ fn seven_zip_materialize_header_graph_patch(
         &[patch_fact, detail_fact, "rewrote_7z_header_graph_ast", "updated_next_header_crc", "updated_start_header_crc", "source_format=7z"],
         &[],
     )?;
+    add_seven_zip_candidate_replace_patch_plans(py, &result, data, target)?;
     Ok(result)
 }
 

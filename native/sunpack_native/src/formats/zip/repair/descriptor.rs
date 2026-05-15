@@ -83,7 +83,7 @@ pub(crate) fn zip_remove_spurious_data_descriptor(
         item.set_item("patch_facts", PyList::new(py, descriptor_delete_patch_facts(candidate))?)?;
         item.set_item("residual_facts", PyList::empty(py))?;
         item.set_item("validation_details", descriptor_delete_validation_details(py, candidate)?)?;
-        item.set_item("patch_plan", descriptor_delete_patch_plan(py, candidate)?)?;
+        item.set_item("patch_plan", descriptor_delete_patch_plan(py, &data, candidate)?)?;
         candidate_list.append(item)?;
     }
     result.set_item("candidates", candidate_list)?;

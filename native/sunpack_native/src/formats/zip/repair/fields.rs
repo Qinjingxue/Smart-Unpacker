@@ -63,6 +63,34 @@ pub(crate) fn zip_directory_field_repair(
     if let Some(truncate_at) = repair.truncate_at {
         result.set_item("truncate_at", truncate_at)?;
     }
+    let target = repair_name_to_target(repair_name);
+    let mut operations = Vec::new();
+    for patch in &repair.patches {
+        operations.push(replace_range_operation(
+            py,
+            &data,
+            patch.offset as usize,
+            &patch.data,
+            repair_name,
+            target,
+        )?);
+    }
+    if let Some(truncate_at) = repair.truncate_at {
+        operations.push(truncate_operation(
+            py,
+            &data,
+            truncate_at as usize,
+            repair_name,
+            target,
+        )?);
+    }
+    if !operations.is_empty() {
+        let action_refs = repair.actions.iter().map(|item| item.as_str()).collect::<Vec<_>>();
+        result.set_item(
+            "patch_plan",
+            patch_plan_dict(py, repair_name, "zip", repair.confidence, &action_refs, &operations, target)?,
+        )?;
+    }
     let patches = PyList::empty(py);
     for patch in &repair.patches {
         let item = PyDict::new(py);
@@ -71,7 +99,6 @@ pub(crate) fn zip_directory_field_repair(
         patches.append(item)?;
     }
     result.set_item("patches", patches)?;
-    let target = repair_name_to_target(repair_name);
     result.set_item("native_key", "native_zip_directory_field_repair")?;
     result.set_item("native_target", target)?;
     result.set_item("materialized_path", output_path.to_string_lossy().to_string())?;

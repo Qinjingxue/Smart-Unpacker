@@ -6,7 +6,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable
 
-from sunpack.contracts.archive_state import ArchiveState
+from sunpack.contracts.archive_state import ArchiveState, PatchPlan
 from sunpack.repair.pipeline.modules._common import module_limits
 from sunpack.repair.result import RepairResult, RepairStatus
 from sunpack.support.sevenzip_native import get_native_password_tester
@@ -43,10 +43,25 @@ class RepairCandidate:
     materializer: Callable[[], Any] | None = field(default=None, compare=False, repr=False)
     materialized: bool = True
     plan: dict[str, Any] = field(default_factory=dict)
+    action_type: str = "apply_patch"
 
     @property
     def is_lazy(self) -> bool:
         return self.materializer is not None and not self.materialized
+
+    @property
+    def repaired_state(self) -> ArchiveState | None:
+        return _archive_state_from_plan(self.plan)
+
+    @property
+    def patch_plan(self) -> PatchPlan | None:
+        raw = self.plan.get("patch_plan") if isinstance(self.plan, dict) else None
+        if not isinstance(raw, dict):
+            return None
+        try:
+            return PatchPlan.from_dict(raw)
+        except (TypeError, ValueError):
+            return None
 
     @classmethod
     def from_result(
@@ -57,12 +72,19 @@ class RepairCandidate:
         stage: str = "",
         requires_native_validation: bool = False,
     ) -> "RepairCandidate | None":
-        if not result.ok or not isinstance(result.repaired_input, dict):
+        if not result.ok:
+            return None
+        repaired_input = (
+            _virtual_patch_repaired_input(result.repaired_state)
+            if result.repaired_state is not None
+            else dict(result.repaired_input or {})
+        )
+        if not repaired_input:
             return None
         return cls(
             module_name=result.module_name,
             format=result.format,
-            repaired_input=dict(result.repaired_input),
+            repaired_input=repaired_input,
             status=result.status,
             stage=stage,
             confidence=float(result.confidence or 0.0),
@@ -84,17 +106,22 @@ class RepairCandidate:
             ],
             score_hint=float(score_hint or 0.0),
             plan=_result_plan(result),
+            action_type=str((result.diagnosis or {}).get("action_type") or "apply_patch"),
         )
 
     def to_result(self, *, selection: dict[str, Any] | None = None) -> RepairResult:
         diagnosis = dict(self.diagnosis)
         if selection:
             diagnosis["candidate_selection"] = dict(selection)
+        repaired_state = self.repaired_state
+        repaired_input = dict(self.repaired_input)
+        if repaired_state is not None and (_is_patch_primary_format(self.format) or str(repaired_input.get("kind") or "") == "archive_state"):
+            repaired_input = _virtual_patch_repaired_input(repaired_state)
         return RepairResult(
             status=self.status,
             confidence=self.confidence,
             format=self.format,
-            repaired_input=dict(self.repaired_input),
+            repaired_input=repaired_input,
             actions=list(self.actions),
             damage_flags=list(self.damage_flags),
             warnings=list(self.warnings),
@@ -103,7 +130,7 @@ class RepairCandidate:
             module_name=self.module_name,
             diagnosis=diagnosis,
             message=self.message,
-            repaired_state=_archive_state_from_plan(self.plan),
+            repaired_state=repaired_state,
         )
 
 
@@ -374,7 +401,7 @@ class CandidateSelector:
 
     @staticmethod
     def _accepted(candidate: RepairCandidate) -> bool:
-        return bool(candidate.repaired_input) and not candidate.is_lazy and all(item.accepted for item in candidate.validations)
+        return (bool(candidate.repaired_input) or _has_archive_state_plan(candidate)) and not candidate.is_lazy and all(item.accepted for item in candidate.validations)
 
     @staticmethod
     def generation_priority(candidate: RepairCandidate) -> float:
@@ -400,6 +427,8 @@ def candidate_feature_payload(candidate: RepairCandidate) -> dict[str, Any]:
     ranking = candidate_ranking_breakdown(candidate)
     history = candidate_history_features(candidate)
     plan_metrics = _candidate_plan_metrics(candidate)
+    archive_state = candidate.repaired_state
+    patch_plan = candidate.patch_plan
     return {
         "candidate_id": candidate_digest(candidate),
         "module": candidate.module_name,
@@ -412,6 +441,7 @@ def candidate_feature_payload(candidate: RepairCandidate) -> dict[str, Any]:
         "route_required_flags_matched": list(diagnosis.get("route_required_flags_matched") or []),
         "route_reject_reason": str(diagnosis.get("route_reject_reason") or ""),
         "native_target_mismatch": bool(diagnosis.get("native_target_mismatch")),
+        "action_type": candidate.action_type or (patch_plan.action_type if patch_plan is not None else "apply_patch"),
         "control_action": bool(diagnosis.get("control_action")),
         "noop": bool(diagnosis.get("noop")),
         "patch_facts": list(diagnosis.get("patch_facts") or []),
@@ -438,8 +468,12 @@ def candidate_feature_payload(candidate: RepairCandidate) -> dict[str, Any]:
         "actions": list(candidate.actions),
         "damage_flags": list(candidate.damage_flags),
         "patch_cost": _patch_plan_cost(candidate),
+        "patch_depth": archive_state.patch_depth() if archive_state is not None else 0,
+        "patch_count": plan_metrics["patch_count"],
         "patch_span_count": plan_metrics["patch_span_count"],
         "patch_operation_count": plan_metrics["patch_operation_count"],
+        "last_patch_module": _last_patch_module(archive_state),
+        "patch_digest": archive_state.effective_patch_digest() if archive_state is not None else "",
         "affected_entry_count": plan_metrics["affected_entry_count"],
         "benefit_score": ranking["benefit_score"],
         "evidence_score": ranking["evidence_score"],
@@ -932,6 +966,7 @@ def _candidate_plan_metrics(candidate: RepairCandidate) -> dict[str, int]:
         if "entry" in action or "file" in action or "payload" in action:
             affected_entry_count = max(affected_entry_count, 1)
     return {
+        "patch_count": len(patches),
         "patch_span_count": len(touched_offsets) if touched_offsets else operation_count,
         "patch_operation_count": operation_count,
         "affected_entry_count": affected_entry_count,
@@ -1266,6 +1301,30 @@ def _dedupe(values: list[str]) -> list[str]:
         seen.add(text)
         output.append(text)
     return output
+
+
+def _is_patch_primary_format(value: str) -> bool:
+    text = str(value or "").lower().lstrip(".")
+    return text in {"zip", "7z", "seven_zip", "sevenzip"}
+
+
+def _virtual_patch_repaired_input(state: ArchiveState | None) -> dict[str, Any]:
+    if state is None:
+        return {}
+    return {
+        "kind": "archive_state",
+        "patch_digest": state.effective_patch_digest(),
+        "format_hint": state.format_hint or state.source.format_hint,
+    }
+
+
+def _last_patch_module(state: ArchiveState | None) -> str:
+    if state is None:
+        return ""
+    patch = state.last_patch()
+    if patch is None:
+        return ""
+    return str(patch.module or patch.provenance.get("module") or "")
 
 
 def _result_plan(result: RepairResult) -> dict[str, Any]:

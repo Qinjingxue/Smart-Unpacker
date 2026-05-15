@@ -81,5 +81,53 @@ fn seven_zip_repair_boundary_target(
         &[boundary_fact, patch_fact, start_fact.as_str(), end_fact.as_str(), "source_format=7z"],
         &[],
     )?;
+    if let Ok(Some(candidates_obj)) = result.bind(py).get_item("candidates") {
+        if let Ok(candidate_list) = candidates_obj.downcast::<PyList>() {
+            for raw in candidate_list.iter() {
+                if let Ok(item) = raw.downcast::<PyDict>() {
+                    let offset = item
+                        .get_item("offset")?
+                        .and_then(|value| value.extract::<usize>().ok())
+                        .unwrap_or(0);
+                    let end_offset = item
+                        .get_item("end_offset")?
+                        .and_then(|value| value.extract::<usize>().ok())
+                        .unwrap_or(data.len());
+                    let confidence = item
+                        .get_item("confidence")?
+                        .and_then(|value| value.extract::<f64>().ok())
+                        .unwrap_or(0.0);
+                    let actions = seven_zip_string_list(item, "actions")?;
+                    let action_refs = actions.iter().map(|item| item.as_str()).collect::<Vec<_>>();
+                    let module = str_item(item, "name");
+                    let module = if module.is_empty() { target.to_string() } else { module };
+                    let mut operations = Vec::new();
+                    if offset > 0 {
+                        operations.push(seven_zip_delete_operation(py, data, 0, offset, &module, target)?);
+                    }
+                    if end_offset < data.len() {
+                        let details = PyDict::new(py);
+                        details.set_item("module", &module)?;
+                        details.set_item("native_target", target)?;
+                        let operation = PyDict::new(py);
+                        operation.set_item("schema_version", 2)?;
+                        operation.set_item("op", "truncate")?;
+                        operation.set_item("target", "logical")?;
+                        operation.set_item("offset", end_offset.saturating_sub(offset))?;
+                        operation.set_item("size", data.len().saturating_sub(end_offset))?;
+                        operation.set_item("expected_sha256", format!("{:x}", sha2::Sha256::digest(&data[end_offset..])))?;
+                        operation.set_item("details", details)?;
+                        operations.push(operation.unbind());
+                    }
+                    if !operations.is_empty() {
+                        item.set_item(
+                            "patch_plan",
+                            seven_zip_patch_plan_dict(py, &module, confidence, &action_refs, &operations, target)?,
+                        )?;
+                    }
+                }
+            }
+        }
+    }
     Ok(result)
 }

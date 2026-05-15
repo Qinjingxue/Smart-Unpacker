@@ -7,12 +7,24 @@ from typing import Any, Callable
 
 
 @dataclass(frozen=True)
+class TrainingFeatureSpec:
+    include_prefixes: tuple[str, ...] = ()
+    numeric_paths: tuple[str, ...] = ()
+    categorical_paths: tuple[str, ...] = ()
+    ignore_prefixes: tuple[str, ...] = ()
+    ignore_paths: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class TrainingLabelSchema:
+    labels: tuple[str, ...]
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class TrainingFormatPlugin:
     format_name: str
     default_run_name: str
-    default_feature_view: str
-    default_target: str
-    default_sample_weight_mode: str
     default_collection_budget: dict[str, Any] = field(default_factory=dict)
     default_distribution: Path | None = None
     model_output_subdir: Path | str = ""
@@ -24,9 +36,12 @@ class TrainingFormatPlugin:
     load_material_index: Callable[[Path, dict[str, Any]], dict[str, dict[str, Any]]] | None = None
     compact_material_distribution: Callable[[dict[str, Any]], dict[str, Any]] | None = None
     collection_report_sections: Callable[[dict[str, Any]], list[dict[str, Any]]] | None = None
-    training_report_sections: Callable[[dict[str, Any]], list[dict[str, Any]]] | None = None
-    analyze_collection: Callable[[Path], int | None] | None = None
-    analyze_training: Callable[[Path, Path], int | None] | None = None
+    damage_label_schema: Callable[[], TrainingLabelSchema | dict[str, Any]] | None = None
+    damage_feature_spec: Callable[[], TrainingFeatureSpec | dict[str, Any]] | None = None
+    action_feature_spec: Callable[[], TrainingFeatureSpec | dict[str, Any]] | None = None
+    lightgbm_params: Callable[[str], dict[str, Any]] | None = None
+    postprocess_damage_prediction: Callable[[dict[str, Any]], dict[str, Any]] | None = None
+    action_label: Callable[[dict[str, Any]], int | float] | None = None
 
 
 def load_training_format_plugin(format_name: str) -> TrainingFormatPlugin:

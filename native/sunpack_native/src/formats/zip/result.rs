@@ -123,6 +123,203 @@ fn build_validation_details(
     Ok(details.unbind())
 }
 
+fn patch_plan_dict(
+    py: Python<'_>,
+    module: &str,
+    format: &str,
+    confidence: f64,
+    actions: &[&str],
+    operations: &[Py<PyDict>],
+    native_target: &str,
+) -> PyResult<Py<PyDict>> {
+    let provenance = PyDict::new(py);
+    provenance.set_item("module", module)?;
+    provenance.set_item("native_target", native_target)?;
+    provenance.set_item("actions", PyList::new(py, actions)?)?;
+
+    let plan = PyDict::new(py);
+    plan.set_item("kind", "patch_plan")?;
+    plan.set_item("schema_version", 2)?;
+    plan.set_item("module", module)?;
+    plan.set_item("format", format)?;
+    plan.set_item("action_type", "apply_patch")?;
+    plan.set_item("operations", PyList::new(py, operations)?)?;
+    plan.set_item("provenance", provenance)?;
+    plan.set_item("confidence", confidence)?;
+    Ok(plan.unbind())
+}
+
+fn replace_range_operation(
+    py: Python<'_>,
+    source: &[u8],
+    offset: usize,
+    replacement: &[u8],
+    module: &str,
+    native_target: &str,
+) -> PyResult<Py<PyDict>> {
+    let expected = source.get(offset..offset.saturating_add(replacement.len())).unwrap_or(&[]);
+    let details = PyDict::new(py);
+    details.set_item("module", module)?;
+    details.set_item("native_target", native_target)?;
+
+    let operation = PyDict::new(py);
+    operation.set_item("schema_version", 2)?;
+    operation.set_item("op", "replace_range")?;
+    operation.set_item("target", "logical")?;
+    operation.set_item("offset", offset)?;
+    operation.set_item("size", replacement.len())?;
+    operation.set_item("data_b64", BASE64_STANDARD.encode(replacement))?;
+    operation.set_item("expected_b64", BASE64_STANDARD.encode(expected))?;
+    operation.set_item("details", details)?;
+    Ok(operation.unbind())
+}
+
+fn delete_range_operation(
+    py: Python<'_>,
+    source: &[u8],
+    offset: usize,
+    size: usize,
+    module: &str,
+    native_target: &str,
+) -> PyResult<Py<PyDict>> {
+    let expected = source.get(offset..offset.saturating_add(size)).unwrap_or(&[]);
+    let details = PyDict::new(py);
+    details.set_item("module", module)?;
+    details.set_item("native_target", native_target)?;
+
+    let operation = PyDict::new(py);
+    operation.set_item("schema_version", 2)?;
+    operation.set_item("op", "delete")?;
+    operation.set_item("target", "logical")?;
+    operation.set_item("offset", offset)?;
+    operation.set_item("size", size)?;
+    operation.set_item("expected_b64", BASE64_STANDARD.encode(expected))?;
+    operation.set_item("details", details)?;
+    Ok(operation.unbind())
+}
+
+fn truncate_operation(
+    py: Python<'_>,
+    source: &[u8],
+    offset: usize,
+    module: &str,
+    native_target: &str,
+) -> PyResult<Py<PyDict>> {
+    let expected = source.get(offset..).unwrap_or(&[]);
+    let details = PyDict::new(py);
+    details.set_item("module", module)?;
+    details.set_item("native_target", native_target)?;
+
+    let operation = PyDict::new(py);
+    operation.set_item("schema_version", 2)?;
+    operation.set_item("op", "truncate")?;
+    operation.set_item("target", "logical")?;
+    operation.set_item("offset", offset)?;
+    operation.set_item("size", expected.len())?;
+    operation.set_item("expected_sha256", sha256_hex(expected))?;
+    operation.set_item("details", details)?;
+    Ok(operation.unbind())
+}
+
+fn append_operation(
+    py: Python<'_>,
+    data: &[u8],
+    module: &str,
+    native_target: &str,
+) -> PyResult<Py<PyDict>> {
+    let details = PyDict::new(py);
+    details.set_item("module", module)?;
+    details.set_item("native_target", native_target)?;
+
+    let operation = PyDict::new(py);
+    operation.set_item("schema_version", 2)?;
+    operation.set_item("op", "append")?;
+    operation.set_item("target", "logical")?;
+    operation.set_item("offset", 0)?;
+    operation.set_item("size", data.len())?;
+    operation.set_item("data_b64", BASE64_STANDARD.encode(data))?;
+    operation.set_item("expected_b64", "")?;
+    operation.set_item("details", details)?;
+    Ok(operation.unbind())
+}
+
+fn logical_archive_replace_patch_plan(
+    py: Python<'_>,
+    module: &str,
+    format: &str,
+    source: &[u8],
+    replacement: &[u8],
+    confidence: f64,
+    actions: &[&str],
+    native_target: &str,
+) -> PyResult<Py<PyDict>> {
+    let truncate = truncate_operation(py, source, 0, module, native_target)?;
+    let append = append_operation(py, replacement, module, native_target)?;
+    patch_plan_dict(py, module, format, confidence, actions, &[truncate, append], native_target)
+}
+
+fn add_zip_candidate_replace_patch_plans(
+    py: Python<'_>,
+    result: &Py<PyDict>,
+    source: &[u8],
+    native_target: &str,
+) -> PyResult<()> {
+    let bound = result.bind(py);
+    if let Ok(Some(candidates_obj)) = bound.get_item("candidates") {
+        if let Ok(candidates) = candidates_obj.downcast::<PyList>() {
+            for raw in candidates.iter() {
+                if let Ok(item) = raw.downcast::<PyDict>() {
+                    let path = get_optional_string(item, "path")?.unwrap_or_default();
+                    if path.is_empty() || item.contains("patch_plan")? {
+                        continue;
+                    }
+                    let Ok(bytes) = fs::read(&path) else {
+                        continue;
+                    };
+                    let module = get_optional_string(item, "name")?.unwrap_or_else(|| native_target.to_string());
+                    let confidence = item
+                        .get_item("confidence")?
+                        .and_then(|value| value.extract::<f64>().ok())
+                        .unwrap_or(0.0);
+                    let actions = string_list(item, "actions")?;
+                    let action_refs = actions.iter().map(|item| item.as_str()).collect::<Vec<_>>();
+                    item.set_item(
+                        "patch_plan",
+                        logical_archive_replace_patch_plan(
+                            py,
+                            &module,
+                            "zip",
+                            source,
+                            &bytes,
+                            confidence,
+                            &action_refs,
+                            native_target,
+                        )?,
+                    )?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn sha256_hex(data: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(data))
+}
+
+fn string_list(dict: &Bound<'_, PyDict>, key: &str) -> PyResult<Vec<String>> {
+    let Some(value) = dict.get_item(key)? else {
+        return Ok(Vec::new());
+    };
+    let Ok(list) = value.downcast::<PyList>() else {
+        return Ok(Vec::new());
+    };
+    Ok(list
+        .iter()
+        .filter_map(|item| item.extract::<String>().ok())
+        .collect())
+}
+
 fn status_dict(
     py: Python<'_>,
     status: &str,

@@ -4,9 +4,18 @@ import importlib
 from dataclasses import asdict
 from typing import Any
 
+from sunpack.contracts.archive_state import ArchiveState
 from sunpack.repair.candidate import RepairCandidate
 from sunpack.repair.job import RepairJob
-from sunpack.repair.policy.types import PolicyCandidatePayload, RepairPolicyDecision, RepairPolicyRequest
+from sunpack.repair.policy.types import (
+    DamageAnalysisRequest,
+    DamageAnalysisResult,
+    PolicyCandidatePayload,
+    RepairActionDecision,
+    RepairActionRequest,
+    RepairPolicyDecision,
+    RepairPolicyRequest,
+)
 
 
 class RepairPolicyManager:
@@ -19,6 +28,12 @@ class RepairPolicyManager:
         self.provider_package = str(self.policy_config.get("provider_package") or "sunpack_repair_models")
         self._providers: list[Any] | None = None
         self.last_load_error: str = ""
+
+    def dual_model_active_for_job(self, job: RepairJob) -> bool:
+        if not self.enabled:
+            return False
+        fmt = _normalize_format(job.format)
+        return bool(fmt and self._damage_models(fmt) and self._action_models(fmt))
 
     def active_for_job(self, job: RepairJob) -> bool:
         if not self.enabled:
@@ -54,6 +69,142 @@ class RepairPolicyManager:
         if not any(self._provider_supports_format(provider, fmt) for provider in providers):
             return {**base, "decision_status": "unavailable", "fallback_reason": "unsupported_format"}
         return {**base, "decision_status": "available"}
+
+    def analyze_damage(
+        self,
+        *,
+        job: RepairJob,
+        archive_state: ArchiveState | None = None,
+        runtime_context: dict[str, Any] | None = None,
+        diagnosis: dict[str, Any] | None = None,
+        round_index: int = 0,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        base = {"enabled": self.enabled, "provider_package": self.provider_package}
+        fmt = _normalize_format(job.format)
+        request = DamageAnalysisRequest(
+            job=job,
+            format=fmt,
+            archive_state=archive_state,
+            runtime_context=dict(runtime_context or {}),
+            diagnosis=dict(diagnosis or {}),
+            knowledge_projection=dict(getattr(job, "knowledge", {}) or {}),
+            repair_history=dict(getattr(job, "repair_history", {}) or {}),
+            config=dict(self.config),
+            round_index=int(round_index or 0),
+        )
+        errors: list[str] = []
+        for provider in self._damage_models(fmt):
+            provider_id = self._provider_id(provider)
+            try:
+                result = _coerce_damage_analysis(provider.analyze(request), provider_id=provider_id, fmt=fmt)
+            except Exception as exc:
+                if self.strict_provider_errors:
+                    raise
+                errors.append(f"{provider_id}: {exc}")
+                continue
+            return result.to_dict(), {
+                **base,
+                "decision_status": "analyzed",
+                "provider_id": provider_id,
+                "confidence": result.confidence,
+                "metadata": _public_metadata(result.metadata),
+                "provider_errors": errors,
+            }
+        result = DamageAnalysisResult(
+            format=fmt,
+            damage_labels=[str(item) for item in getattr(job, "damage_flags", []) if str(item)],
+            confidence=float(getattr(job, "confidence", 0.0) or 0.0),
+            metadata={"decision_reason": "damage_analysis_unavailable"},
+        )
+        return result.to_dict(), {
+            **base,
+            "decision_status": "fallback",
+            "fallback_reason": "damage_analysis_unavailable",
+            "provider_errors": errors,
+            "load_error": self.last_load_error,
+        }
+
+    def choose_action(
+        self,
+        *,
+        job: RepairJob,
+        archive_state: ArchiveState | None,
+        candidates: list[RepairCandidate],
+        candidate_payloads: list[PolicyCandidatePayload],
+        damage_analysis: dict[str, Any],
+        current_recovery: dict[str, Any] | None = None,
+        best_seen_recovery: dict[str, Any] | None = None,
+        parent_recovery: dict[str, Any] | None = None,
+        diagnosis: dict[str, Any] | None = None,
+        round_index: int = 0,
+    ) -> tuple[RepairActionDecision, dict[str, Any]]:
+        base = {
+            "enabled": self.enabled,
+            "provider_package": self.provider_package,
+            "fallback_to_selector": self.fallback_to_selector,
+        }
+        fmt = _normalize_format(job.format)
+        candidate_by_id, duplicate_candidate_ids = _candidate_id_index(candidate_payloads)
+        if duplicate_candidate_ids:
+            return RepairActionDecision(action="give_up", reason="duplicate_candidate_id"), {
+                **base,
+                "decision_status": "fallback",
+                "fallback_reason": "duplicate_candidate_id",
+                "duplicate_candidate_id_count": len(duplicate_candidate_ids),
+                "duplicate_candidate_ids": duplicate_candidate_ids,
+            }
+        request = RepairActionRequest(
+            job=job,
+            format=fmt,
+            archive_state=archive_state,
+            candidates=list(candidates),
+            candidate_payloads=list(candidate_payloads),
+            damage_analysis=dict(damage_analysis or {}),
+            current_recovery=dict(current_recovery or {}),
+            best_seen_recovery=dict(best_seen_recovery or {}),
+            parent_recovery=dict(parent_recovery or {}),
+            diagnosis=dict(diagnosis or {}),
+            repair_history=dict(getattr(job, "repair_history", {}) or {}),
+            config=dict(self.config),
+            round_index=int(round_index or 0),
+        )
+        errors: list[str] = []
+        for provider in self._action_models(fmt):
+            provider_id = self._provider_id(provider)
+            try:
+                decision = _coerce_action_decision(provider.choose(request), provider_id=provider_id)
+            except Exception as exc:
+                if self.strict_provider_errors:
+                    raise
+                errors.append(f"{provider_id}: {exc}")
+                continue
+            invalid = _invalid_action_decision_reason(decision, candidate_by_id)
+            if invalid:
+                errors.append(f"{provider_id}: {invalid}")
+                continue
+            selected_index = candidate_by_id.get(decision.selected_candidate_id) if decision.selected_candidate_id else None
+            selected = candidates[selected_index] if selected_index is not None and selected_index < len(candidates) else None
+            return decision, {
+                **base,
+                "decision_status": "selected",
+                "provider_id": provider_id,
+                "action": decision.action,
+                "confidence": decision.confidence,
+                "reason": decision.reason,
+                "selected_candidate_id": decision.selected_candidate_id,
+                "selected_candidate_id_valid": bool(decision.selected_candidate_id) if decision.action == "apply_patch" else True,
+                "selected_module": selected.module_name if selected is not None else "",
+                "selected_format": selected.format if selected is not None else fmt,
+                "candidate_count": len(candidates),
+                "metadata": _public_metadata(decision.metadata),
+            }
+        return RepairActionDecision(action="give_up", reason="action_model_unavailable_or_invalid"), {
+            **base,
+            "decision_status": "fallback",
+            "fallback_reason": "action_model_unavailable_or_invalid",
+            "provider_errors": errors,
+            "load_error": self.last_load_error,
+        }
 
     def choose(
         self,
@@ -102,10 +253,6 @@ class RepairPolicyManager:
         errors: list[str] = []
         for provider in providers:
             provider_id = self._provider_id(provider)
-            contract_miss = _provider_contract_miss(provider, candidate_payloads)
-            if contract_miss:
-                errors.append(f"{provider_id}: feature_contract_miss:{','.join(contract_miss)}")
-                continue
             try:
                 decision = _coerce_decision(provider.choose(request), provider_id=provider_id)
             except Exception as exc:
@@ -165,11 +312,15 @@ class RepairPolicyManager:
         if hasattr(package, "get_repair_policy_providers"):
             loaded = package.get_repair_policy_providers()
             providers.extend(list(loaded or []))
-        elif hasattr(package, "register_repair_policies"):
+        if hasattr(package, "get_damage_analysis_models"):
+            providers.extend(list(package.get_damage_analysis_models() or []))
+        if hasattr(package, "get_repair_action_models"):
+            providers.extend(list(package.get_repair_action_models() or []))
+        if hasattr(package, "register_repair_policies"):
             self._providers = []
             package.register_repair_policies(self)
             providers.extend(self._providers)
-        elif hasattr(package, "PROVIDERS"):
+        if hasattr(package, "PROVIDERS"):
             providers.extend(list(getattr(package, "PROVIDERS") or []))
         return [provider for provider in providers if provider is not None]
 
@@ -179,6 +330,8 @@ class RepairPolicyManager:
         self._providers.append(provider)
 
     def _provider_can_handle(self, provider: Any, request: RepairPolicyRequest) -> bool:
+        if callable(getattr(provider, "analyze", None)):
+            return False
         if not self._provider_supports_format(provider, request.format):
             return False
         available = getattr(provider, "available", None)
@@ -205,6 +358,30 @@ class RepairPolicyManager:
             return None
         return candidate_by_id.get(str(decision.selected_candidate_id))
 
+    def _damage_models(self, fmt: str) -> list[Any]:
+        output: list[Any] = []
+        for provider in self.providers():
+            if not self._provider_supports_format(provider, fmt):
+                continue
+            available = getattr(provider, "available", None)
+            if callable(available) and not bool(available()):
+                continue
+            if callable(getattr(provider, "analyze", None)):
+                output.append(provider)
+        return output
+
+    def _action_models(self, fmt: str) -> list[Any]:
+        output: list[Any] = []
+        for provider in self.providers():
+            if not self._provider_supports_format(provider, fmt):
+                continue
+            available = getattr(provider, "available", None)
+            if callable(available) and not bool(available()):
+                continue
+            if callable(getattr(provider, "choose", None)) and callable(getattr(provider, "analyze", None)):
+                output.append(provider)
+        return output
+
 
 def _coerce_decision(value: RepairPolicyDecision | dict[str, Any] | str | None, *, provider_id: str) -> RepairPolicyDecision:
     if isinstance(value, RepairPolicyDecision):
@@ -222,6 +399,47 @@ def _coerce_decision(value: RepairPolicyDecision | dict[str, Any] | str | None, 
             metadata=dict(value.get("metadata") or {}),
         )
     return RepairPolicyDecision(provider_id=provider_id)
+
+
+def _coerce_damage_analysis(value: DamageAnalysisResult | dict[str, Any] | None, *, provider_id: str, fmt: str) -> DamageAnalysisResult:
+    if isinstance(value, DamageAnalysisResult):
+        return value
+    if isinstance(value, dict):
+        return DamageAnalysisResult(
+            format=str(value.get("format") or fmt),
+            damage_labels=[str(item) for item in value.get("damage_labels") or [] if str(item)],
+            damage_zones=[dict(item) for item in value.get("damage_zones") or [] if isinstance(item, dict)],
+            confidence=float(value.get("confidence") or 0.0),
+            route_hints=[str(item) for item in value.get("route_hints") or [] if str(item)],
+            blocking_reasons=[str(item) for item in value.get("blocking_reasons") or [] if str(item)],
+            metadata={**dict(value.get("metadata") or {}), "provider_id": provider_id},
+        )
+    return DamageAnalysisResult(format=fmt, metadata={"provider_id": provider_id, "decision_reason": "empty_damage_analysis"})
+
+
+def _coerce_action_decision(value: RepairActionDecision | dict[str, Any] | str | None, *, provider_id: str) -> RepairActionDecision:
+    if isinstance(value, RepairActionDecision):
+        if value.provider_id:
+            return value
+        return RepairActionDecision(**{**asdict(value), "provider_id": provider_id})
+    if isinstance(value, str):
+        action, _, candidate = value.partition(":")
+        if action in {"apply_patch", "undo_patch", "stop", "give_up"}:
+            return RepairActionDecision(action=action, selected_candidate_id=candidate, provider_id=provider_id)
+        return RepairActionDecision(action="apply_patch", selected_candidate_id=value, provider_id=provider_id)
+    if isinstance(value, dict):
+        action = str(value.get("action") or value.get("action_type") or "apply_patch")
+        if action not in {"apply_patch", "undo_patch", "stop", "give_up"}:
+            action = "give_up"
+        return RepairActionDecision(
+            action=action,  # type: ignore[arg-type]
+            selected_candidate_id=str(value.get("selected_candidate_id") or value.get("candidate_id") or ""),
+            confidence=_optional_float(value.get("confidence")),
+            provider_id=str(value.get("provider_id") or provider_id),
+            reason=str(value.get("reason") or ""),
+            metadata=dict(value.get("metadata") or {}),
+        )
+    return RepairActionDecision(provider_id=provider_id)
 
 
 def _candidate_id_index(candidate_payloads: list[PolicyCandidatePayload]) -> tuple[dict[str, int], list[str]]:
@@ -246,6 +464,17 @@ def _invalid_decision_reason(decision: RepairPolicyDecision, candidate_by_id: di
     if not decision.selected_candidate_id:
         return "invalid_policy_decision_missing_candidate_id"
     return "invalid_candidate_id" if str(decision.selected_candidate_id) not in candidate_by_id else "invalid_policy_decision"
+
+
+def _invalid_action_decision_reason(decision: RepairActionDecision, candidate_by_id: dict[str, int]) -> str:
+    if decision.action not in {"apply_patch", "undo_patch", "stop", "give_up"}:
+        return "invalid_action"
+    if decision.action == "apply_patch":
+        if not decision.selected_candidate_id:
+            return "invalid_action_missing_candidate_id"
+        if str(decision.selected_candidate_id) not in candidate_by_id:
+            return "invalid_action_candidate_id"
+    return ""
 
 
 def _first_invalid_reason(errors: list[str]) -> str:
@@ -273,33 +502,5 @@ def _normalize_format(value: Any) -> str:
 
 
 def _public_metadata(value: dict[str, Any]) -> dict[str, Any]:
-    allowed = {"model_id", "model_version", "feature_contract_version", "format", "decision_reason"}
+    allowed = {"model_id", "model_version", "format", "decision_reason", "provider_id"}
     return {key: value[key] for key in allowed if key in value}
-
-
-def _provider_contract_miss(provider: Any, candidate_payloads: list[PolicyCandidatePayload]) -> list[str]:
-    misses: list[str] = []
-    expected_version = getattr(provider, "supported_feature_contract_version", None)
-    if expected_version is not None:
-        for payload in candidate_payloads:
-            if isinstance(payload, dict) and payload.get("feature_contract_version") != expected_version:
-                misses.append("feature_contract_version")
-                break
-    required = getattr(provider, "required_payload_sections", None)
-    if required:
-        for section in required:
-            name = str(section)
-            if not name:
-                continue
-            if not all(isinstance(payload, dict) and _has_payload_path(payload, name) for payload in candidate_payloads):
-                misses.append(name)
-    return sorted(set(misses))
-
-
-def _has_payload_path(payload: dict[str, Any], path: str) -> bool:
-    current: Any = payload
-    for part in path.split("."):
-        if not isinstance(current, dict) or part not in current:
-            return False
-        current = current.get(part)
-    return True

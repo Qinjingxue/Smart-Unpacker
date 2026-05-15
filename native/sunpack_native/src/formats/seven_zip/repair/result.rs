@@ -84,6 +84,172 @@ fn set_seven_zip_atomic_fields(
     Ok(())
 }
 
+fn seven_zip_patch_plan_dict(
+    py: Python<'_>,
+    module: &str,
+    confidence: f64,
+    actions: &[&str],
+    operations: &[Py<PyDict>],
+    native_target: &str,
+) -> PyResult<Py<PyDict>> {
+    let provenance = PyDict::new(py);
+    provenance.set_item("module", module)?;
+    provenance.set_item("native_target", native_target)?;
+    provenance.set_item("actions", PyList::new(py, actions)?)?;
+
+    let plan = PyDict::new(py);
+    plan.set_item("kind", "patch_plan")?;
+    plan.set_item("schema_version", 2)?;
+    plan.set_item("module", module)?;
+    plan.set_item("format", "7z")?;
+    plan.set_item("action_type", "apply_patch")?;
+    plan.set_item("operations", PyList::new(py, operations)?)?;
+    plan.set_item("provenance", provenance)?;
+    plan.set_item("confidence", confidence)?;
+    Ok(plan.unbind())
+}
+
+fn seven_zip_delete_operation(
+    py: Python<'_>,
+    source: &[u8],
+    offset: usize,
+    size: usize,
+    module: &str,
+    native_target: &str,
+) -> PyResult<Py<PyDict>> {
+    let expected = source.get(offset..offset.saturating_add(size)).unwrap_or(&[]);
+    let details = PyDict::new(py);
+    details.set_item("module", module)?;
+    details.set_item("native_target", native_target)?;
+
+    let operation = PyDict::new(py);
+    operation.set_item("schema_version", 2)?;
+    operation.set_item("op", "delete")?;
+    operation.set_item("target", "logical")?;
+    operation.set_item("offset", offset)?;
+    operation.set_item("size", size)?;
+    operation.set_item("expected_b64", BASE64_STANDARD.encode(expected))?;
+    operation.set_item("details", details)?;
+    Ok(operation.unbind())
+}
+
+fn seven_zip_truncate_operation(
+    py: Python<'_>,
+    source: &[u8],
+    offset: usize,
+    module: &str,
+    native_target: &str,
+) -> PyResult<Py<PyDict>> {
+    let expected = source.get(offset..).unwrap_or(&[]);
+    let details = PyDict::new(py);
+    details.set_item("module", module)?;
+    details.set_item("native_target", native_target)?;
+
+    let operation = PyDict::new(py);
+    operation.set_item("schema_version", 2)?;
+    operation.set_item("op", "truncate")?;
+    operation.set_item("target", "logical")?;
+    operation.set_item("offset", offset)?;
+    operation.set_item("size", expected.len())?;
+    operation.set_item("expected_sha256", format!("{:x}", sha2::Sha256::digest(expected)))?;
+    operation.set_item("details", details)?;
+    Ok(operation.unbind())
+}
+
+fn seven_zip_append_operation(
+    py: Python<'_>,
+    data: &[u8],
+    module: &str,
+    native_target: &str,
+) -> PyResult<Py<PyDict>> {
+    let details = PyDict::new(py);
+    details.set_item("module", module)?;
+    details.set_item("native_target", native_target)?;
+
+    let operation = PyDict::new(py);
+    operation.set_item("schema_version", 2)?;
+    operation.set_item("op", "append")?;
+    operation.set_item("target", "logical")?;
+    operation.set_item("offset", 0)?;
+    operation.set_item("size", data.len())?;
+    operation.set_item("data_b64", BASE64_STANDARD.encode(data))?;
+    operation.set_item("expected_b64", "")?;
+    operation.set_item("details", details)?;
+    Ok(operation.unbind())
+}
+
+fn seven_zip_replace_logical_archive_patch_plan(
+    py: Python<'_>,
+    module: &str,
+    source: &[u8],
+    replacement: &[u8],
+    confidence: f64,
+    actions: &[&str],
+    native_target: &str,
+) -> PyResult<Py<PyDict>> {
+    let truncate = seven_zip_truncate_operation(py, source, 0, module, native_target)?;
+    let append = seven_zip_append_operation(py, replacement, module, native_target)?;
+    seven_zip_patch_plan_dict(py, module, confidence, actions, &[truncate, append], native_target)
+}
+
+fn add_seven_zip_candidate_replace_patch_plans(
+    py: Python<'_>,
+    result: &Py<PyDict>,
+    source: &[u8],
+    native_target: &str,
+) -> PyResult<()> {
+    let bound = result.bind(py);
+    if let Ok(Some(candidates_obj)) = bound.get_item("candidates") {
+        if let Ok(candidates) = candidates_obj.downcast::<PyList>() {
+            for raw in candidates.iter() {
+                if let Ok(item) = raw.downcast::<PyDict>() {
+                    let path = str_item(item, "path");
+                    if path.is_empty() || item.contains("patch_plan")? {
+                        continue;
+                    }
+                    let Ok(bytes) = fs::read(&path) else {
+                        continue;
+                    };
+                    let module = str_item(item, "name");
+                    let module = if module.is_empty() { native_target.to_string() } else { module };
+                    let confidence = item
+                        .get_item("confidence")?
+                        .and_then(|value| value.extract::<f64>().ok())
+                        .unwrap_or(0.0);
+                    let actions = seven_zip_string_list(item, "actions")?;
+                    let action_refs = actions.iter().map(|item| item.as_str()).collect::<Vec<_>>();
+                    item.set_item(
+                        "patch_plan",
+                        seven_zip_replace_logical_archive_patch_plan(
+                            py,
+                            &module,
+                            source,
+                            &bytes,
+                            confidence,
+                            &action_refs,
+                            native_target,
+                        )?,
+                    )?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn seven_zip_string_list(dict: &Bound<'_, PyDict>, key: &str) -> PyResult<Vec<String>> {
+    let Some(value) = dict.get_item(key)? else {
+        return Ok(Vec::new());
+    };
+    let Ok(list) = value.downcast::<PyList>() else {
+        return Ok(Vec::new());
+    };
+    Ok(list
+        .iter()
+        .filter_map(|item| item.extract::<String>().ok())
+        .collect())
+}
+
 fn status_to_candidate_status(status: &str) -> &str {
     match status {
         "repaired" => "complete",

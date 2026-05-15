@@ -25,7 +25,7 @@ def test_seven_zip_training_plugin_defaults():
     plugin = load_training_format_plugin("7z")
 
     assert plugin.format_name == "seven_zip"
-    assert plugin.model_output_subdir == Path("models") / "seven_zip_runtime_policy"
+    assert plugin.model_output_subdir == Path("models") / "seven_zip_policy_lab"
     assert plugin.default_collection_budget["root_branch_top_k"] == 5
 
 

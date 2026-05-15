@@ -17,6 +17,7 @@ from sunpack.contracts.archive_input import (
 
 PatchTarget = Literal["logical", "part"]
 PatchOperationKind = Literal["replace_range", "truncate", "append", "insert", "delete"]
+PATCH_SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -115,16 +116,20 @@ class ArchiveSource:
 @dataclass(frozen=True)
 class PatchOperation:
     op: PatchOperationKind
+    schema_version: int = PATCH_SCHEMA_VERSION
     target: PatchTarget = "logical"
     offset: int = 0
     size: int | None = None
     part_index: int | None = None
     data_b64: str = ""
     data_ref: str = ""
+    expected_b64: str = ""
+    expected_sha256: str = ""
     details: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
+            "schema_version": int(self.schema_version or PATCH_SCHEMA_VERSION),
             "op": self.op,
             "target": self.target,
             "offset": int(self.offset),
@@ -137,6 +142,10 @@ class PatchOperation:
             payload["data_b64"] = self.data_b64
         if self.data_ref:
             payload["data_ref"] = self.data_ref
+        if self.expected_b64:
+            payload["expected_b64"] = self.expected_b64
+        if self.expected_sha256:
+            payload["expected_sha256"] = self.expected_sha256
         if self.details:
             payload["details"] = dict(self.details)
         return payload
@@ -145,12 +154,15 @@ class PatchOperation:
     def from_dict(cls, raw: dict[str, Any]) -> "PatchOperation":
         return cls(
             op=str(raw.get("op") or "replace_range"),  # type: ignore[arg-type]
+            schema_version=int(raw.get("schema_version") or 1),
             target=str(raw.get("target") or "logical"),  # type: ignore[arg-type]
             offset=int(raw.get("offset", 0) or 0),
             size=int(raw["size"]) if raw.get("size") is not None else None,
             part_index=int(raw["part_index"]) if raw.get("part_index") is not None else None,
             data_b64=str(raw.get("data_b64") or ""),
             data_ref=str(raw.get("data_ref") or ""),
+            expected_b64=str(raw.get("expected_b64") or ""),
+            expected_sha256=str(raw.get("expected_sha256") or ""),
             details=dict(raw.get("details") or {}) if isinstance(raw.get("details"), dict) else {},
         )
 
@@ -161,6 +173,8 @@ class PatchOperation:
         offset: int,
         data: bytes,
         target: PatchTarget = "logical",
+        expected: bytes | None = None,
+        expected_sha256: str = "",
         details: dict[str, Any] | None = None,
     ) -> "PatchOperation":
         return cls(
@@ -169,6 +183,8 @@ class PatchOperation:
             offset=int(offset),
             size=len(data),
             data_b64=base64.b64encode(bytes(data)).decode("ascii"),
+            expected_b64=base64.b64encode(bytes(expected)).decode("ascii") if expected is not None else "",
+            expected_sha256=str(expected_sha256 or ""),
             details=dict(details or {}),
         )
 
@@ -178,6 +194,8 @@ class PatchOperation:
         data: bytes,
         *,
         target: PatchTarget = "logical",
+        expected: bytes | None = None,
+        expected_sha256: str = "",
         details: dict[str, Any] | None = None,
     ) -> "PatchOperation":
         return cls(
@@ -186,6 +204,8 @@ class PatchOperation:
             offset=0,
             size=len(data),
             data_b64=base64.b64encode(bytes(data)).decode("ascii"),
+            expected_b64=base64.b64encode(bytes(expected)).decode("ascii") if expected is not None else "",
+            expected_sha256=str(expected_sha256 or ""),
             details=dict(details or {}),
         )
 
@@ -196,6 +216,8 @@ class PatchOperation:
         offset: int,
         size: int,
         target: PatchTarget = "logical",
+        expected: bytes | None = None,
+        expected_sha256: str = "",
         details: dict[str, Any] | None = None,
     ) -> "PatchOperation":
         return cls(
@@ -203,6 +225,8 @@ class PatchOperation:
             target=target,
             offset=int(offset),
             size=max(0, int(size)),
+            expected_b64=base64.b64encode(bytes(expected)).decode("ascii") if expected is not None else "",
+            expected_sha256=str(expected_sha256 or ""),
             details=dict(details or {}),
         )
 
@@ -210,6 +234,10 @@ class PatchOperation:
 @dataclass(frozen=True)
 class PatchPlan:
     id: str = ""
+    schema_version: int = PATCH_SCHEMA_VERSION
+    module: str = ""
+    format: str = ""
+    action_type: str = "apply_patch"
     operations: list[PatchOperation] = field(default_factory=list)
     provenance: dict[str, Any] = field(default_factory=dict)
     confidence: float = 0.0
@@ -217,16 +245,26 @@ class PatchPlan:
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "kind": "patch_plan",
+            "schema_version": int(self.schema_version or PATCH_SCHEMA_VERSION),
             "id": self.id or self.digest(),
+            "action_type": self.action_type or "apply_patch",
             "operations": [operation.to_dict() for operation in self.operations],
             "confidence": float(self.confidence),
         }
+        if self.module:
+            payload["module"] = self.module
+        if self.format:
+            payload["format"] = self.format
         if self.provenance:
             payload["provenance"] = dict(self.provenance)
         return payload
 
     def digest(self) -> str:
         return _stable_digest({
+            "schema_version": self.schema_version,
+            "module": self.module,
+            "format": self.format,
+            "action_type": self.action_type,
             "operations": [operation.to_dict() for operation in self.operations],
             "provenance": self.provenance,
             "confidence": self.confidence,
@@ -239,10 +277,15 @@ class PatchPlan:
             for item in raw.get("operations") or []
             if isinstance(item, dict)
         ]
+        provenance = dict(raw.get("provenance") or {}) if isinstance(raw.get("provenance"), dict) else {}
         return cls(
             id=str(raw.get("id") or ""),
+            schema_version=int(raw.get("schema_version") or 1),
+            module=str(raw.get("module") or provenance.get("module") or ""),
+            format=str(raw.get("format") or ""),
+            action_type=str(raw.get("action_type") or "apply_patch"),
             operations=operations,
-            provenance=dict(raw.get("provenance") or {}) if isinstance(raw.get("provenance"), dict) else {},
+            provenance=provenance,
             confidence=float(raw.get("confidence", 0.0) or 0.0),
         )
 
@@ -278,7 +321,36 @@ class ArchiveState:
         return payload
 
     def effective_patch_digest(self) -> str:
-        return self.patch_digest or _stable_digest([patch.to_dict() for patch in self.patches])
+        return self.patch_digest or _stable_digest({
+            "source": self.source.to_dict(),
+            "patches": [patch.to_dict() for patch in self.patches],
+        })
+
+    def with_patches(self, patches: list[PatchPlan]) -> "ArchiveState":
+        return ArchiveState(
+            source=self.source,
+            patches=list(patches),
+            patch_digest="",
+            logical_name=self.logical_name,
+            format_hint=self.format_hint,
+            analysis=dict(self.analysis),
+            verification=dict(self.verification),
+            knowledge=dict(self.knowledge),
+        )
+
+    def push_patch(self, patch: PatchPlan) -> "ArchiveState":
+        return self.with_patches([*self.patches, patch])
+
+    def pop_patch(self) -> "ArchiveState":
+        if not self.patches:
+            return self
+        return self.with_patches(list(self.patches[:-1]))
+
+    def patch_depth(self) -> int:
+        return len(self.patches)
+
+    def last_patch(self) -> PatchPlan | None:
+        return self.patches[-1] if self.patches else None
 
     def to_archive_input_descriptor(self) -> ArchiveInputDescriptor:
         descriptor = self.source.to_archive_input_descriptor()

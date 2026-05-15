@@ -1,27 +1,112 @@
 from __future__ import annotations
 
-import subprocess
-import sys
 import json
 from pathlib import Path
 from typing import Any
 
-from repair_training.core.plugin import TrainingFormatPlugin
+from repair_training.core.plugin import TrainingFeatureSpec, TrainingFormatPlugin, TrainingLabelSchema
 from sunpack.repair.context import zip_route_evidence_flags
 
 
 FORMAT_NAME = "zip"
 PACKAGE_ROOT = Path(__file__).resolve().parent
 DEFAULT_DISTRIBUTION = PACKAGE_ROOT / "distributions" / "damage_distribution_zip_root_transition_v3.json"
+ZIP_ZONE_LABELS = (
+    "sfx_prefix",
+    "local_header",
+    "data_descriptor",
+    "extra_field",
+    "payload",
+    "central_directory",
+    "zip64",
+    "eocd",
+    "tail",
+    "split_volume",
+    "unknown",
+)
+ZIP_FIELD_LABELS = (
+    "eocd.comment",
+    "eocd.comment_length",
+    "eocd.cd_offset",
+    "eocd.entry_count",
+    "central_directory.header",
+    "central_directory.flags",
+    "central_directory.filename",
+    "central_directory.extra",
+    "central_directory.extra_length",
+    "central_directory.local_header_offset",
+    "central_directory.crc",
+    "central_directory.compressed_size",
+    "central_directory.external_attributes",
+    "local_header.header",
+    "local_header.flags",
+    "local_header.filename",
+    "local_header.extra",
+    "local_header.extra_length",
+    "local_header.crc",
+    "local_header.compressed_size",
+    "data_descriptor.record",
+    "data_descriptor.crc",
+    "data_descriptor.size",
+    "payload.crc_region",
+    "payload.compressed_data",
+    "zip64.eocd",
+    "zip64.locator",
+    "zip64.extra",
+    "zip64.extra_length",
+    "zip64.uncompressed_size",
+    "tail.comment",
+    "tail.trailing_bytes",
+    "sfx_prefix.bytes",
+    "split_volume.missing_range",
+)
+ZIP_MODULE_FAMILIES = {
+    "boundary": {
+        "zip_trim_trailing_junk",
+        "zip_fix_eocd_comment_length",
+    },
+    "pointer": {
+        "zip_fix_eocd_record",
+        "zip_fix_cd_offset",
+        "zip_fix_cd_entry_count",
+        "zip_fix_local_header_fields",
+    },
+    "zip64": {
+        "zip_fix_zip64_locator",
+        "zip_fix_zip64_eocd",
+        "zip_fix_zip64_extra_size",
+    },
+    "descriptor": {
+        "zip_rebuild_cd_from_data_descriptors",
+        "zip_remove_spurious_data_descriptor",
+        "zip_normalize_data_descriptor_flags",
+        "zip_reconcile_cd_entry_names_from_local_headers",
+        "zip_reconcile_cd_data_descriptor_conflict",
+    },
+    "rebuild": {
+        "zip_rebuild_cd_from_local_headers",
+        "zip_reconcile_cd_local_headers",
+    },
+    "salvage": {
+        "zip_quarantine_failed_entries",
+        "zip_salvage_verified_entries",
+        "zip_partial_salvage_missing_volume",
+        "zip_local_header_partial_scan",
+    },
+    "conflict": {
+        "zip_resolve_duplicate_entries",
+        "zip_resolve_overlapping_entries",
+    },
+    "naming": {
+        "zip_rebuild_cd_preserve_raw_names",
+    },
+}
 
 
 def get_training_plugin() -> TrainingFormatPlugin:
     return TrainingFormatPlugin(
         format_name=FORMAT_NAME,
-        default_run_name="zip_runtime_graph",
-        default_feature_view="runtime_minimal_native_validation",
-        default_target="root_transition_return_v1",
-        default_sample_weight_mode="root_transition_v1",
+        default_run_name="zip_policy_lab",
         default_collection_budget={
             "workers": 6,
             "max_rounds": 6,
@@ -31,36 +116,191 @@ def get_training_plugin() -> TrainingFormatPlugin:
             "materialize_top_k": 8,
         },
         default_distribution=DEFAULT_DISTRIBUTION,
-        model_output_subdir=Path("models") / "zip_runtime_policy",
+        model_output_subdir=Path("models") / "zip_policy_lab",
         collection_record_context=collection_record_context,
         resolve_collection_material_report=resolve_collection_material_report,
         load_material_index=load_material_index,
         compact_material_distribution=compact_material_distribution,
-        analyze_collection=_analyze_collection,
-        analyze_training=_analyze_training,
+        damage_label_schema=damage_label_schema,
+        damage_feature_spec=damage_feature_spec,
+        action_feature_spec=action_feature_spec,
+        lightgbm_params=lightgbm_params,
+        postprocess_damage_prediction=postprocess_damage_prediction,
+        action_label=action_label,
     )
 
 
-def _analyze_collection(run_dir: Path) -> int | None:
-    return subprocess.call([
-        sys.executable,
-        "-m",
-        "repair_training.core.analyze_collection",
-        "--run-dir",
-        str(run_dir),
-    ])
+def damage_label_schema() -> TrainingLabelSchema:
+    zone_labels = tuple(f"zone:{label}" for label in ZIP_ZONE_LABELS)
+    field_labels = tuple(f"field:{label}" for label in ZIP_FIELD_LABELS)
+    return TrainingLabelSchema(
+        labels=zone_labels + field_labels,
+        metadata={
+            "format": "zip",
+            "taxonomy": "zip",
+            "taxonomy_version": 2,
+            "schema_version": 2,
+            "analysis_target": "location_only",
+            "label_groups": {
+                "zone": list(zone_labels),
+                "field": list(field_labels),
+            },
+        },
+    )
 
 
-def _analyze_training(run_dir: Path, model_dir: Path) -> int | None:
-    return subprocess.call([
-        sys.executable,
-        "-m",
-        "repair_training.core.analyze_training",
-        "--run-dir",
-        str(run_dir),
-        "--model-dir",
-        str(model_dir),
-    ])
+def damage_feature_spec() -> TrainingFeatureSpec:
+    return TrainingFeatureSpec(
+        include_prefixes=(
+            "format",
+            "runtime_context.analysis_summary.",
+            "runtime_context.analysis_native_probe.",
+            "runtime_context.archive_authentication.",
+            "runtime_context.extraction_summary.",
+            "runtime_context.verification_summary.",
+            "runtime_context.job_summary.",
+            "runtime_context.archive_state.",
+            "diagnosis.",
+            "repair_history.",
+        ),
+        categorical_paths=(
+            "format",
+            "runtime_context.analysis_summary.format",
+            "runtime_context.analysis_summary.prepass_status",
+            "runtime_context.analysis_summary.prepass_format",
+            "runtime_context.analysis_summary.fuzzy_status",
+            "runtime_context.analysis_summary.fuzzy_archive_type",
+            "runtime_context.extraction_summary.failure_stage",
+            "runtime_context.extraction_summary.failure_kind",
+            "runtime_context.extraction_summary.native_status",
+            "runtime_context.verification_summary.decision_hint",
+            "runtime_context.verification_summary.assessment_status",
+            "runtime_context.verification_summary.source_integrity",
+            "runtime_context.job_summary.source_kind",
+            "runtime_context.job_summary.source_format_hint",
+        ),
+        ignore_prefixes=(
+            "runtime_context.archive_state.state",
+            "runtime_context.archive_state.patch_digest",
+            "job.source_input.path",
+            "runtime_context.knowledge_projection.source_fingerprint",
+        ),
+        ignore_paths=("source_identity.clean_sha256", "source_identity.corrupted_sha256"),
+    )
+
+
+def action_feature_spec() -> TrainingFeatureSpec:
+    return TrainingFeatureSpec(
+        include_prefixes=("action_type", "candidate_snapshot.", "damage_analysis_target.", "current_recovery.", "next_recovery.", "recovery_delta"),
+        categorical_paths=(
+            "action_type",
+            "candidate_snapshot.action_type",
+            "candidate_snapshot.module_name",
+            "candidate_snapshot.module_family",
+            "candidate_snapshot.last_patch_module",
+            "candidate_snapshot.recovery_status",
+            "candidate_snapshot.status",
+            "current_recovery.status",
+            "current_recovery.decision_hint",
+            "next_recovery.status",
+            "next_recovery.decision_hint",
+        ),
+        ignore_prefixes=(
+            "candidate_snapshot.patch_digest",
+            "candidate_snapshot.recovery_snapshot.state_digest",
+            "candidate_snapshot.recovery_snapshot.extraction.archive",
+            "candidate_snapshot.recovery_snapshot.extraction.out_dir",
+            "candidate_snapshot.recovery_snapshot.verification.files",
+            "candidate_snapshot.workspace_paths",
+            "candidate_snapshot.repaired_input.path",
+        ),
+    )
+
+
+def lightgbm_params(model_type: str) -> dict[str, Any]:
+    if model_type == "repair_action":
+        return {
+            "objective": "lambdarank",
+            "n_estimators": 80,
+            "learning_rate": 0.04,
+            "num_leaves": 15,
+            "min_child_samples": 2,
+            "subsample": 0.9,
+            "colsample_bytree": 0.9,
+        }
+    return {
+        "n_estimators": 70,
+        "learning_rate": 0.04,
+        "num_leaves": 15,
+        "min_child_samples": 2,
+        "is_unbalance": True,
+        "subsample": 0.9,
+        "colsample_bytree": 0.9,
+    }
+
+
+def action_label(row: dict[str, Any]) -> int:
+    action = str(row.get("action_type") or "")
+    value = _float(row.get("long_term_value"))
+    current = _float((row.get("current_recovery") or {}).get("score") if isinstance(row.get("current_recovery"), dict) else 0.0)
+    next_score = _float((row.get("next_recovery") or {}).get("score") if isinstance(row.get("next_recovery"), dict) else 0.0)
+    regret = _float(row.get("regret"))
+    label = int(round((value + 1.0) * 10.0))
+    if row.get("is_best_action"):
+        label = max(label, 24)
+    if regret > 0:
+        label -= int(min(12, round(regret * 8.0)))
+    if action == "give_up" and current > 0.0:
+        label = min(label, 3)
+    if action == "stop" and current >= 0.95:
+        label = max(label, 28)
+    if action == "undo_patch" and next_score > current:
+        label = max(label, 22 + int(min(6, round((next_score - current) * 6.0))))
+    return int(max(0, min(31, label)))
+
+
+def zip_module_family(module_name: str) -> str:
+    module = str(module_name or "")
+    if module == "undo_patch":
+        return "control_undo"
+    if module == "stop":
+        return "control_stop"
+    if module == "give_up":
+        return "control_give_up"
+    for family, modules in ZIP_MODULE_FAMILIES.items():
+        if module in modules:
+            return family
+    return "zip_other"
+
+
+def postprocess_damage_prediction(raw_scores: dict[str, Any]) -> dict[str, Any]:
+    scores = _score_map(raw_scores)
+    threshold = _float(raw_scores.get("threshold") if isinstance(raw_scores, dict) else None, default=0.5)
+    selected = {label: score for label, score in scores.items() if score >= threshold}
+    location_scores = {label: score for label, score in scores.items() if label.startswith(("zone:", "field:"))}
+    if not selected and location_scores:
+        label, score = max(location_scores.items(), key=lambda item: item[1])
+        selected[label] = score
+    damage_labels = sorted(selected)
+    zone_labels = [label.split(":", 1)[1] for label in damage_labels if label.startswith("zone:")]
+    for field in [label.split(":", 1)[1] for label in damage_labels if label.startswith("field:")]:
+        zone = _zone_from_field(field)
+        if zone:
+            zone_labels.append(zone)
+    return {
+        "format": "zip",
+        "damage_labels": damage_labels,
+        "damage_zones": [{"kind": zone, "path": zone} for zone in sorted(set(zone_labels))],
+        "confidence": max(selected.values(), default=0.0),
+        "route_hints": [],
+        "blocking_reasons": [],
+        "metadata": {
+            "threshold": threshold,
+            "selected_scores": selected,
+            "taxonomy": "zip",
+            "analysis_target": "location_only",
+        },
+    }
 
 
 def collection_record_context(record: dict[str, Any]) -> dict[str, Any]:
@@ -85,6 +325,47 @@ def collection_record_context(record: dict[str, Any]) -> dict[str, Any]:
         },
         "flags": {"format.zip.route_evidence": route_flags},
     }
+
+
+def _score_map(raw_scores: dict[str, Any]) -> dict[str, float]:
+    if not isinstance(raw_scores, dict):
+        return {}
+    raw = raw_scores.get("scores") if isinstance(raw_scores.get("scores"), dict) else raw_scores
+    schema = damage_label_schema()
+    output: dict[str, float] = {}
+    for label in schema.labels:
+        if raw.get(label) is not None:
+            output[label] = _float(raw.get(label))
+    return output
+
+
+def _zone_from_field(field: str) -> str:
+    text = str(field or "")
+    if "." not in text:
+        return text
+    head = text.split(".", 1)[0]
+    if head == "sfx_prefix":
+        return "sfx_prefix"
+    if head == "split_volume":
+        return "split_volume"
+    if head == "zip64":
+        return "zip64"
+    return head
+
+
+def _dedupe(values: list[str]) -> list[str]:
+    output: list[str] = []
+    for value in values:
+        if value and value not in output:
+            output.append(value)
+    return output
+
+
+def _float(value: Any, *, default: float = 0.0) -> float:
+    try:
+        return float(value if value is not None else default)
+    except (TypeError, ValueError):
+        return float(default)
 
 
 def resolve_collection_material_report(run_dir: Path, run_manifest: dict[str, Any]) -> Path | None:

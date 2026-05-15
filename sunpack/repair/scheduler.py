@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 from typing import Any
 
+from sunpack.contracts.archive_state import ArchiveState
 from sunpack.repair.candidate import CandidateSelector, CandidateValidation, RepairCandidate, RepairCandidateBatch, candidate_feature_payload, materialize_candidates
 from sunpack.repair.capability import ModuleCapabilityDecision, RepairCapabilityDecision
 from sunpack.repair.config import enabled_module_configs, repair_config
@@ -16,7 +17,14 @@ from sunpack.repair.pipeline.module import RepairRoute
 from sunpack.repair.pipeline.modules._common import job_source_size, repair_operation_cache_key
 from sunpack.repair.pipeline.registry import discover_repair_modules, get_repair_module_registry
 from sunpack.repair.policy import RepairPolicyManager
-from sunpack.repair.policy.runtime_features import policy_candidate_payload
+from sunpack.repair.policy.training_runtime import (
+    archive_state_for_job,
+    candidate_snapshot,
+    recovery_score_from_job,
+    runtime_context_from_job,
+    state_source_input,
+)
+from sunpack.repair.policy.recovery_evaluator import PolicyRecoverySnapshot, RecoveryEvaluator
 from sunpack.repair.result import RepairResult
 from sunpack.repair.runtime_cache import RepairRuntimeCache
 from sunpack.contracts.archive_knowledge import ArchiveKnowledge
@@ -27,6 +35,7 @@ from sunpack.support import repair_trace
 class RepairScheduler:
     def __init__(self, config: dict[str, Any] | None = None):
         self.config = repair_config(config or {})
+        self._module_selection_cache: dict[tuple[Any, ...], tuple[list[Any], RepairCapabilityDecision]] = {}
         cache_config = self.config.get("runtime_cache") if isinstance(self.config.get("runtime_cache"), dict) else {}
         self.repair_cache = RepairRuntimeCache(
             enabled=bool(cache_config.get("enabled", True)),
@@ -39,6 +48,8 @@ class RepairScheduler:
         return diagnose_repair_job(job, knowledge=knowledge)
 
     def repair(self, job: RepairJob) -> RepairResult:
+        if self.policy_manager.dual_model_active_for_job(job):
+            return self.repair_policy_loop(job)
         batch = self.generate_repair_candidates(job)
         terminal_policy_noop = (
             batch.terminal_result is not None
@@ -64,7 +75,7 @@ class RepairScheduler:
                 validated = self._validated_policy_candidates(selector, policy_candidates)
                 selectable = [candidate for candidate in validated if selector._accepted(candidate)]
                 policy_payloads = [
-                    _policy_candidate_payload(job, candidate, index=index)
+                    _policy_candidate_snapshot(job, candidate, index=index)
                     for index, candidate in enumerate(selectable)
                 ]
                 probe_query = _policy_probe_query(job)
@@ -144,7 +155,7 @@ class RepairScheduler:
                 self._write_telemetry(job, batch, result, selection)
                 selected_rank = _candidate_index(selectable if "selectable" in locals() else [], selected)
                 trace_candidate = (
-                    _policy_candidate_payload(job, selected, index=selected_rank)
+                    _policy_candidate_snapshot(job, selected, index=selected_rank)
                     if isinstance(selection.get("policy"), dict)
                     else candidate_feature_payload(selected)
                 )
@@ -183,6 +194,178 @@ class RepairScheduler:
             "candidate_count": len(batch.candidates),
         })
         return result
+
+    def repair_policy_loop(self, job: RepairJob) -> RepairResult:
+        selector = CandidateSelector(self.config)
+        current_state = _job_archive_state(job)
+        current_job = replace(
+            job,
+            archive_state=current_state,
+            source_input=_state_source_input(current_state, job),
+            repair_cache=job.repair_cache or self.repair_cache,
+        )
+        max_rounds = max(1, int(self.config.get("max_repair_rounds_per_task", 5) or 5))
+        max_attempts = max(1, int(self.config.get("max_attempts_per_task", max_rounds) or max_rounds))
+        max_rounds = min(max_rounds, max_attempts)
+        min_improvement = float(self.config.get("min_recovery_improvement", 0.0) or 0.0)
+        patience = max(0, int(self.config.get("stagnation_patience_rounds", 3) or 0))
+        history: list[dict[str, Any]] = []
+        seen_digests = {current_state.effective_patch_digest()} if current_state is not None else set()
+        recovery_evaluator = RecoveryEvaluator(self.config)
+        recovery_cache: dict[str, PolicyRecoverySnapshot] = {}
+        parent_by_digest: dict[str, str] = {}
+        current_recovery = recovery_evaluator.evaluate_state(current_job, current_state, mode="policy_light", cache=recovery_cache)
+        best_recovery_snapshot = current_recovery
+        best_recovery = float(current_recovery.score or 0.0)
+        stale_rounds = 0
+        last_batch = RepairCandidateBatch()
+        last_selection: dict[str, Any] = {}
+        warnings: list[str] = []
+        diagnosis_payload: dict[str, Any] = {"format": current_job.format, "confidence": current_job.confidence}
+
+        for round_index in range(1, max_rounds + 1):
+            runtime_context = runtime_context_from_job(current_job)
+            current_recovery = recovery_evaluator.evaluate_state(current_job, current_state, mode="policy_light", cache=recovery_cache)
+            current_digest = current_state.effective_patch_digest() if current_state is not None else ""
+            parent_recovery = PolicyRecoverySnapshot()
+            parent_digest = parent_by_digest.get(current_digest, "")
+            if parent_digest:
+                parent_recovery = recovery_cache.get(parent_digest, PolicyRecoverySnapshot(state_digest=parent_digest))
+            damage_analysis, analysis_selection = self.policy_manager.analyze_damage(
+                job=current_job,
+                archive_state=current_state,
+                runtime_context=runtime_context,
+                diagnosis=diagnosis_payload,
+                round_index=round_index,
+            )
+            try:
+                batch = self.generate_repair_candidates(current_job, lazy=True, phase_prefix=f"policy_loop_{round_index}")
+            except TypeError:
+                batch = self.generate_repair_candidates(current_job)
+            last_batch = batch
+            diagnosis_payload = dict(batch.diagnosis or diagnosis_payload)
+            if batch.terminal_result is not None and not batch.candidates:
+                warnings.extend(batch.warnings)
+            materialized = materialize_candidates(batch.candidates)
+            validated = [selector._with_native_validation(candidate) for candidate in materialized]
+            selectable = [candidate for candidate in validated if selector._accepted(candidate)]
+            candidate_recoveries = [
+                recovery_evaluator.evaluate_candidate(current_job, candidate, mode="policy_light", cache=recovery_cache)
+                for candidate in selectable
+            ]
+            candidate_payloads = [
+                _policy_candidate_snapshot_with_damage(
+                    current_job,
+                    candidate,
+                    damage_analysis,
+                    index=index,
+                    current_recovery=current_recovery.to_dict(),
+                    recovery_snapshot=candidate_recoveries[index].to_dict(),
+                )
+                for index, candidate in enumerate(selectable)
+            ]
+            decision, action_selection = self.policy_manager.choose_action(
+                job=current_job,
+                archive_state=current_state,
+                candidates=selectable,
+                candidate_payloads=candidate_payloads,
+                damage_analysis=damage_analysis,
+                current_recovery=current_recovery.to_dict(),
+                best_seen_recovery=best_recovery_snapshot.to_dict(),
+                parent_recovery=parent_recovery.to_dict(),
+                diagnosis=diagnosis_payload,
+                round_index=round_index,
+            )
+            last_selection = {
+                "policy_loop": True,
+                "round": round_index,
+                "analysis": analysis_selection,
+                "action": action_selection,
+                "damage_analysis": damage_analysis,
+                "candidate_count": len(selectable),
+                "candidates": candidate_payloads,
+            }
+            repair_trace.write_probe_event("policy_loop_decision", {
+                **_policy_probe_query(current_job),
+                "round": round_index,
+                "patch_depth": current_state.patch_depth() if current_state is not None else 0,
+                "patch_digest": current_state.effective_patch_digest() if current_state is not None else "",
+                "damage_analysis": damage_analysis,
+                "policy": _policy_selection_public(action_selection),
+            })
+            history.append({
+                "round": round_index,
+                "patch_digest": current_state.effective_patch_digest() if current_state is not None else "",
+                "patch_depth": current_state.patch_depth() if current_state is not None else 0,
+                "damage_analysis": damage_analysis,
+                "current_recovery": current_recovery.to_dict(),
+                "best_seen_recovery": best_recovery_snapshot.to_dict(),
+                "action": action_selection,
+            })
+
+            if decision.action == "apply_patch":
+                selected = _candidate_by_id(selectable, candidate_payloads, decision.selected_candidate_id)
+                if selected is None:
+                    warnings.append("policy selected a missing repair candidate")
+                    break
+                next_state = selected.repaired_state
+                if next_state is None:
+                    result = selected.to_result(selection=last_selection)
+                    next_state = result.repaired_state
+                if next_state is None:
+                    warnings.append("policy selected a candidate without repaired_state")
+                    break
+                next_digest = next_state.effective_patch_digest()
+                if next_digest in seen_digests:
+                    warnings.append("policy loop stopped because selected state was already visited")
+                    return _loop_stop_result(current_job, current_state, diagnosis_payload, last_selection, history, warnings, reason="repeated_patch_digest", recovery=current_recovery)
+                seen_digests.add(next_digest)
+                parent_by_digest[next_digest] = current_state.effective_patch_digest() if current_state is not None else ""
+                current_state = next_state
+                current_job = replace(
+                    current_job,
+                    archive_state=current_state,
+                    source_input=_state_source_input(current_state, current_job),
+                    attempts=round_index,
+                    repair_history=_loop_history_payload(history),
+                    damage_flags=list(selected.damage_flags or current_job.damage_flags),
+                )
+                selected_index = selectable.index(selected) if selected in selectable else -1
+                next_recovery = candidate_recoveries[selected_index] if selected_index >= 0 else recovery_evaluator.evaluate_state(current_job, current_state, mode="policy_light", cache=recovery_cache)
+                recovery = float(next_recovery.score or 0.0)
+                if recovery >= best_recovery + min_improvement:
+                    best_recovery = recovery
+                    best_recovery_snapshot = next_recovery
+                    stale_rounds = 0
+                else:
+                    stale_rounds += 1
+                if patience and stale_rounds >= patience:
+                    return _loop_stop_result(current_job, current_state, diagnosis_payload, last_selection, history, warnings, reason="policy_loop_stagnation", recovery=next_recovery)
+                continue
+
+            if decision.action == "undo_patch":
+                if current_state is None or current_state.patch_depth() <= 0:
+                    warnings.append("policy requested undo on an empty patch stack")
+                    return _loop_stop_result(current_job, current_state, diagnosis_payload, last_selection, history, warnings, reason="undo_empty_patch_stack", recovery=current_recovery)
+                current_state = current_state.pop_patch()
+                current_job = replace(
+                    current_job,
+                    archive_state=current_state,
+                    source_input=_state_source_input(current_state, current_job),
+                    attempts=round_index,
+                    repair_history=_loop_history_payload(history),
+                )
+                current_recovery = recovery_evaluator.evaluate_state(current_job, current_state, mode="policy_light", cache=recovery_cache)
+                seen_digests.add(current_state.effective_patch_digest())
+                continue
+
+            if decision.action == "stop":
+                return _loop_stop_result(current_job, current_state, diagnosis_payload, last_selection, history, warnings, reason=decision.reason or "policy_stop", recovery=current_recovery)
+
+            if decision.action == "give_up":
+                return _loop_give_up_result(current_job, diagnosis_payload, last_selection, history, warnings, reason=decision.reason or "policy_give_up", recovery=current_recovery)
+
+        return _loop_stop_result(current_job, current_state, diagnosis_payload, last_selection, history, warnings, reason="max_policy_loop_rounds_reached", batch=last_batch, recovery=current_recovery)
 
     def policy_active_for_job(self, job: RepairJob) -> bool:
         return self.policy_manager.active_for_job(job)
@@ -270,6 +453,8 @@ class RepairScheduler:
                 workspace,
                 module_configs,
                 lazy=lazy,
+                phase_timer=phase_timer,
+                phase_prefix=phase_prefix,
             )
         with _phase(phase_timer, f"{phase_prefix}_candidate_features"):
             repair_candidates = [
@@ -338,78 +523,82 @@ class RepairScheduler:
         module_configs: dict[str, dict[str, Any]],
         *,
         lazy: bool,
+        phase_timer: Any | None = None,
+        phase_prefix: str = "generate_candidates",
     ) -> tuple[list[RepairCandidate], list[str], RepairCapabilityDecision]:
         warnings: list[str] = []
         repair_candidates: list[RepairCandidate] = []
         for score, module, route_score, fine_score in modules:
-            module_config = self._module_runtime_config(module.spec.name, module_configs)
-            score_hint = max(score, route_score, fine_score)
-            if lazy:
-                repair_candidates.append(_lazy_module_candidate(
-                    module,
-                    job,
-                    diagnosis,
-                    str(workspace),
-                    module_config,
-                    score_hint=score_hint,
-                ))
-                continue
-            try:
-                if hasattr(module, "generate_candidates"):
-                    generated = module.generate_candidates(  # type: ignore[attr-defined]
+            module_phase = f"{phase_prefix}_run_module_{module.spec.name}"
+            with _phase(phase_timer, module_phase):
+                module_config = self._module_runtime_config(module.spec.name, module_configs)
+                score_hint = max(score, route_score, fine_score)
+                if lazy:
+                    repair_candidates.append(_lazy_module_candidate(
+                        module,
                         job,
                         diagnosis,
                         str(workspace),
                         module_config,
-                    )
-                    if not generated:
-                        capability = _record_module_feedback(
-                            capability,
-                            module.spec.name,
-                            "no_candidates",
-                            execution_status="no_candidates",
-                            execution_message="module produced no repair candidates",
-                        )
-                        warnings.append(f"{module.spec.name}: produced no repair candidates")
-                        continue
-                    for candidate in generated:
-                        candidate = _with_job_password_candidate(candidate, job)
-                        repair_candidates.append(replace(
-                            candidate,
-                            score_hint=max(score_hint, candidate.score_hint),
-                            stage=candidate.stage or module.spec.stage,
-                        ))
+                        score_hint=score_hint,
+                    ))
                     continue
+                try:
+                    if hasattr(module, "generate_candidates"):
+                        generated = module.generate_candidates(  # type: ignore[attr-defined]
+                            job,
+                            diagnosis,
+                            str(workspace),
+                            module_config,
+                        )
+                        if not generated:
+                            capability = _record_module_feedback(
+                                capability,
+                                module.spec.name,
+                                "no_candidates",
+                                execution_status="no_candidates",
+                                execution_message="module produced no repair candidates",
+                            )
+                            warnings.append(f"{module.spec.name}: produced no repair candidates")
+                            continue
+                        for candidate in generated:
+                            candidate = _with_job_password_candidate(candidate, job)
+                            repair_candidates.append(replace(
+                                candidate,
+                                score_hint=max(score_hint, candidate.score_hint),
+                                stage=candidate.stage or module.spec.stage,
+                            ))
+                        continue
 
-                result = module.repair(job, diagnosis, str(workspace), module_config)
-            except Exception as exc:
+                    result = module.repair(job, diagnosis, str(workspace), module_config)
+                except Exception as exc:
+                    capability = _record_module_feedback(
+                        capability,
+                        module.spec.name,
+                        "module_exception",
+                        execution_status="exception",
+                        execution_message=str(exc),
+                    )
+                    warnings.append(f"{module.spec.name}: {exc}")
+                    continue
+                if result.ok:
+                    candidate = RepairCandidate.from_result(
+                        _with_job_password_result(result, job),
+                        score_hint=score_hint,
+                        stage=module.spec.stage,
+                    )
+                    if candidate is not None:
+                        repair_candidates.append(candidate)
+                    continue
                 capability = _record_module_feedback(
                     capability,
                     module.spec.name,
-                    "module_exception",
-                    execution_status="exception",
-                    execution_message=str(exc),
+                    f"module_returned_{result.status}",
+                    execution_status=result.status,
+                    execution_message=result.message,
+                    execution_warnings=result.warnings,
                 )
-                warnings.append(f"{module.spec.name}: {exc}")
-                continue
-            if result.ok:
-                candidate = RepairCandidate.from_result(
-                    _with_job_password_result(result, job),
-                    score_hint=score_hint,
-                    stage=module.spec.stage,
-                )
-                if candidate is not None:
-                    repair_candidates.append(candidate)
-                continue
-            capability = _record_module_feedback(
-                capability,
-                module.spec.name,
-                f"module_returned_{result.status}",
-                execution_status=result.status,
-                execution_message=result.message,
-                execution_warnings=result.warnings,
-            )
-            warnings.extend(result.warnings)
+                warnings.extend(result.warnings)
         return repair_candidates, warnings, capability
 
     def _select_modules(
@@ -418,6 +607,10 @@ class RepairScheduler:
         diagnosis: RepairDiagnosis,
         context: RepairContext,
     ):
+        cache_key = _module_selection_cache_key(job, diagnosis, context, self.config) if self.config.get("training_module_selection_cache") else None
+        if cache_key is not None and cache_key in self._module_selection_cache:
+            selected, decision = self._module_selection_cache[cache_key]
+            return list(selected), decision
         enabled = enabled_module_configs(self.config)
         registry = get_repair_module_registry()
         candidates = []
@@ -522,6 +715,8 @@ class RepairScheduler:
             failure_kind=context.failure_kind,
             modules=decisions,
         )
+        if cache_key is not None:
+            self._module_selection_cache[cache_key] = (list(selected), decision)
         return selected, decision
 
     def _module_sort_key(self, score: float, module, route_score: float, fine_score: float, diagnosis_format: str = "") -> tuple:
@@ -812,8 +1007,45 @@ def _telemetry_selected_ids(
     }
 
 
-def _policy_candidate_payload(job: RepairJob, candidate: RepairCandidate, *, index: int = 0) -> dict[str, Any]:
-    return policy_candidate_payload(job, candidate, index=index)
+def _policy_candidate_snapshot(job: RepairJob, candidate: RepairCandidate, *, index: int = 0) -> dict[str, Any]:
+    return candidate_snapshot(candidate, index=index)
+
+
+def _module_selection_cache_key(
+    job: RepairJob,
+    diagnosis: RepairDiagnosis,
+    context: RepairContext,
+    config: dict[str, Any],
+) -> tuple[Any, ...]:
+    try:
+        size_mb = int(job_source_size(job) // (1024 * 1024))
+    except Exception:
+        size_mb = -1
+    enabled = tuple(sorted(enabled_module_configs(config).keys()))
+    limits = config.get("module_limits") if isinstance(config.get("module_limits"), dict) else {}
+    safety = config.get("safety") if isinstance(config.get("safety"), dict) else {}
+    return (
+        str(job.format or ""),
+        str(diagnosis.format or ""),
+        tuple(sorted(str(item) for item in diagnosis.categories)),
+        str(diagnosis.severity or ""),
+        bool(diagnosis.repairable),
+        tuple(sorted(str(item) for item in context.categories)),
+        tuple(sorted(str(item) for item in context.damage_flags)),
+        tuple(sorted(str(item) for item in context.route_evidence_flags)),
+        tuple(sorted(str(item) for item in context.repair_history_flags)),
+        tuple(sorted(str(item) for item in context.residual_damage_flags)),
+        str(context.failure_stage or ""),
+        str(context.failure_kind or ""),
+        str(context.failure_status or ""),
+        str(context.native_status or ""),
+        bool(job.password),
+        job.archive_state.patch_depth() if job.archive_state is not None else 0,
+        size_mb,
+        tuple(sorted((str(key), str(value)) for key, value in safety.items())),
+        tuple(sorted((str(key), str(value)) for key, value in limits.items() if key in {"max_input_size_mb", "allow_partial", "allow_lossy"})),
+        enabled,
+    )
 
 
 def _phase(timer: Any | None, name: str):
@@ -848,6 +1080,7 @@ def _policy_selection_public(selection: dict[str, Any]) -> dict[str, Any]:
             "provider_package",
             "fallback_to_selector",
             "decision_status",
+            "action",
             "fallback_reason",
             "provider_id",
             "confidence",
@@ -1027,6 +1260,145 @@ def _diagnosis_with_candidate_selection(diagnosis: dict[str, Any], selection: di
     if selection:
         payload["candidate_selection"] = dict(selection)
     return payload
+
+
+def _job_archive_state(job: RepairJob) -> ArchiveState | None:
+    return archive_state_for_job(job)
+
+
+def _state_source_input(state: ArchiveState | None, job: RepairJob) -> dict[str, Any]:
+    return state_source_input(state, job)
+
+
+def _policy_candidate_snapshot_with_damage(
+    job: RepairJob,
+    candidate: RepairCandidate,
+    damage_analysis: dict[str, Any],
+    *,
+    index: int,
+    current_recovery: dict[str, Any] | None = None,
+    recovery_snapshot: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return candidate_snapshot(
+        candidate,
+        index=index,
+        damage_analysis=damage_analysis,
+        current_recovery=current_recovery,
+        recovery_snapshot=recovery_snapshot,
+    )
+
+
+def _candidate_by_id(
+    candidates: list[RepairCandidate],
+    payloads: list[dict[str, Any]],
+    candidate_id: str,
+) -> RepairCandidate | None:
+    for candidate, payload in zip(candidates, payloads):
+        if str(payload.get("candidate_id") or "") == str(candidate_id or ""):
+            return candidate
+    return None
+
+
+def _loop_history_payload(history: list[dict[str, Any]]) -> dict[str, Any]:
+    modules = []
+    actions = []
+    for item in history:
+        action = item.get("action") if isinstance(item.get("action"), dict) else {}
+        module = str(action.get("selected_module") or "")
+        if module:
+            modules.append(module)
+        action_name = str(action.get("action") or "")
+        if action_name:
+            actions.append(action_name)
+    return {
+        "policy_loop": list(history),
+        "previous_modules": modules,
+        "previous_actions": actions,
+    }
+
+
+def _loop_stop_result(
+    job: RepairJob,
+    state: ArchiveState | None,
+    diagnosis: dict[str, Any],
+    selection: dict[str, Any],
+    history: list[dict[str, Any]],
+    warnings: list[str],
+    *,
+    reason: str,
+    batch: RepairCandidateBatch | None = None,
+    recovery: PolicyRecoverySnapshot | None = None,
+) -> RepairResult:
+    patch_depth = state.patch_depth() if state is not None else 0
+    recovery_score = float(recovery.score or 0.0) if recovery is not None else 0.0
+    decision_hint = recovery.decision_hint if recovery is not None else ""
+    if recovery_score >= 0.999 or decision_hint == "accept":
+        status = "repaired"
+    elif recovery_score > 0.0 or patch_depth > 0:
+        status = "partial"
+    else:
+        status = "skipped"
+    repaired_input = _state_source_input(state, job) if state is not None else dict(job.source_input or {})
+    payload = _diagnosis_with_candidate_selection(diagnosis, selection)
+    payload["policy_loop"] = {
+        "terminal_action": "stop",
+        "stop_reason": reason,
+        "rounds": list(history),
+        "patch_depth": patch_depth,
+        "patch_digest": state.effective_patch_digest() if state is not None else "",
+        "recovery": recovery.to_dict() if recovery is not None else {},
+    }
+    result = RepairResult(
+        status=status,
+        confidence=float(job.confidence or 0.0),
+        format=job.format,
+        repaired_input=repaired_input,
+        repaired_state=state if status in {"repaired", "partial"} and state is not None else None,
+        actions=["policy_stop"],
+        damage_flags=list(job.damage_flags),
+        warnings=_dedupe(warnings),
+        partial=status == "partial",
+        module_name="policy_stop",
+        diagnosis=payload,
+        message=reason,
+    )
+    if batch is not None:
+        return replace(result, warnings=_dedupe([*result.warnings, *batch.warnings]))
+    return result
+
+
+def _loop_give_up_result(
+    job: RepairJob,
+    diagnosis: dict[str, Any],
+    selection: dict[str, Any],
+    history: list[dict[str, Any]],
+    warnings: list[str],
+    *,
+    reason: str,
+    recovery: PolicyRecoverySnapshot | None = None,
+) -> RepairResult:
+    payload = _diagnosis_with_candidate_selection(diagnosis, selection)
+    payload["policy_loop"] = {
+        "terminal_action": "give_up",
+        "stop_reason": reason,
+        "rounds": list(history),
+        "recovery": recovery.to_dict() if recovery is not None else {},
+    }
+    return RepairResult(
+        status="unrepairable",
+        confidence=float(job.confidence or 0.0),
+        format=job.format,
+        actions=["policy_give_up"],
+        damage_flags=list(job.damage_flags),
+        warnings=_dedupe(warnings),
+        module_name="policy_give_up",
+        diagnosis=payload,
+        message=reason,
+    )
+
+
+def _loop_recovery_score(job: RepairJob) -> float:
+    return recovery_score_from_job(job)
 
 
 def _record_module_feedback(

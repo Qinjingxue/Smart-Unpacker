@@ -284,13 +284,19 @@ fn descriptor_delete_patch_facts(candidate: &DescriptorDeleteCandidate) -> Vec<S
 
 fn descriptor_delete_patch_plan(
     py: Python<'_>,
+    data: &[u8],
     candidate: &DescriptorDeleteCandidate,
 ) -> PyResult<Py<PyDict>> {
     let operation = PyDict::new(py);
+    operation.set_item("schema_version", 2)?;
     operation.set_item("op", "delete")?;
     operation.set_item("target", "logical")?;
     operation.set_item("offset", candidate.delete_offset)?;
     operation.set_item("size", candidate.delete_size)?;
+    let expected = data
+        .get(candidate.delete_offset..candidate.delete_offset.saturating_add(candidate.delete_size))
+        .unwrap_or(&[]);
+    operation.set_item("expected_b64", BASE64_STANDARD.encode(expected))?;
     let details = PyDict::new(py);
     details.set_item("module", "zip_remove_spurious_data_descriptor")?;
     details.set_item("native_target", "spurious_data_descriptor_delete")?;
@@ -307,6 +313,10 @@ fn descriptor_delete_patch_plan(
 
     let plan = PyDict::new(py);
     plan.set_item("kind", "patch_plan")?;
+    plan.set_item("schema_version", 2)?;
+    plan.set_item("module", "zip_remove_spurious_data_descriptor")?;
+    plan.set_item("format", "zip")?;
+    plan.set_item("action_type", "apply_patch")?;
     plan.set_item("operations", PyList::new(py, [operation])?)?;
     plan.set_item("confidence", candidate.confidence)?;
     plan.set_item("provenance", provenance)?;
