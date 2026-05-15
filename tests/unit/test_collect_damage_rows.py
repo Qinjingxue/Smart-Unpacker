@@ -1,3 +1,4 @@
+import base64
 import json
 import zipfile
 from pathlib import Path
@@ -7,6 +8,7 @@ from repair_training.core.features import damage_labels_for_row, damage_location
 from repair_training.collect_damage_rows import collect_damage_row
 from repair_training.formats.zip.corruption_impl import build_corpus_corruption_case
 from repair_training.formats.zip.plugin import damage_feature_spec
+from repair_training.taxonomy import normalize_damage_record
 from sunpack.analysis import ArchiveAnalysisReport
 from sunpack.analysis.knowledge import write_analysis_report
 from sunpack.analysis.result import ArchiveFormatEvidence
@@ -26,10 +28,10 @@ def _write_source_zip(path: Path) -> None:
         archive.writestr("gamma.txt", b"gamma" * 80)
 
 
-def _profile_zones(tmp_path: Path, profile: str) -> set[str]:
+def _profile_case(tmp_path: Path, profile: str):
     source = tmp_path / f"{profile}.zip"
     _write_source_zip(source)
-    case = build_corpus_corruption_case(
+    return build_corpus_corruption_case(
         tmp_path / f"generated-{profile}",
         source_path=source,
         fmt="zip",
@@ -37,13 +39,22 @@ def _profile_zones(tmp_path: Path, profile: str) -> set[str]:
         variant_index=0,
         damage_profile=profile,
     )
+
+
+def _profile_plan(tmp_path: Path, profile: str) -> list[dict]:
+    source = tmp_path / f"{profile}.zip"
+    case = _profile_case(tmp_path, profile)
     record = case.corpus_manifest_record(
         source_archive_id="unit-source",
         source_path=str(source),
         damage_profile=profile,
         variant_index=0,
     )
-    return {str(item.get("zone") or "") for item in record.get("corruption_plan", [])}
+    return list(record.get("corruption_plan", []))
+
+
+def _profile_zones(tmp_path: Path, profile: str) -> set[str]:
+    return {str(item.get("zone") or "") for item in _profile_plan(tmp_path, profile)}
 
 
 def test_zip_v3_distribution_keeps_total_and_sfx_mix():
@@ -90,6 +101,48 @@ def test_zip_non_sfx_compound_still_auto_adds_local_header(tmp_path):
     zones = _profile_zones(tmp_path, "compound_boundary_drop_cd_payload_bad")
 
     assert any(zone.startswith("zip.local_header") for zone in zones)
+
+
+def test_zip_descriptor_conflict_default_does_not_insert_fake_descriptor(tmp_path):
+    for profile in ("zip_data_descriptor_conflict", "zip_data_descriptor_cd_conflict", "zip_data_descriptor_payload_bad"):
+        plan = _profile_plan(tmp_path, profile)
+        descriptor_items = [item for item in plan if str(item.get("zone") or "") == "zip.data_descriptor"]
+
+        assert descriptor_items == []
+        assert not any((item.get("operation") or {}).get("op") == "insert" for item in plan if "descriptor" in str(item.get("name") or ""))
+
+
+def test_zip_descriptor_fake_span_profile_keeps_explicit_descriptor_and_cd_labels(tmp_path):
+    plan = _profile_plan(tmp_path, "compound_descriptor_fake_span_flags_cd_offset")
+    record = {"format": "zip", "corruption_plan": plan}
+    labels = set(damage_location_labels_from_target(normalize_damage_record(record).to_dict()))
+
+    assert any(item.get("zone") == "zip.data_descriptor" and (item.get("operation") or {}).get("op") == "insert" for item in plan)
+    assert "field:data_descriptor.record" in labels
+    assert "field:central_directory.local_header_offset" in labels
+    assert "field:central_directory.compressed_size" in labels
+
+
+def test_zip_cd_offset_near_valid_does_not_emit_noop_compressed_size(tmp_path):
+    plan = _profile_plan(tmp_path, "compound_descriptor_fake_span_flags_cd_offset")
+    compressed_size_items = [
+        item
+        for item in plan
+        if item.get("zone") == "zip.central_directory.compressed_size"
+    ]
+
+    assert compressed_size_items
+    case = _profile_case(tmp_path, "compound_descriptor_fake_span_flags_cd_offset")
+    clean = case.clean_data
+    for item in compressed_size_items:
+        operation = item.get("operation") or {}
+        offset = int(operation.get("offset") or 0)
+        size = int(operation.get("size") or 0)
+        data_b64 = str(operation.get("data_b64") or "")
+        assert data_b64
+
+        replacement = base64.b64decode(data_b64)
+        assert clean[offset : offset + size] != replacement
 
 
 def test_collect_damage_row_uses_location_only_targets(monkeypatch, tmp_path):
@@ -308,6 +361,41 @@ def test_zip_directory_consistency_exposes_sfx_prefix_and_dual_offset_fields(tmp
     assert prefix_payload["prefix_has_executable_signature"] is True
     assert prefix_payload["local_offset_only_valid_with_prefix_count"] >= 1
     assert prefix_payload["local_offset_prefix_adjustment_success_ratio"] > 0
+
+
+def test_zip_directory_consistency_exposes_descriptor_cd_offset_attribution(tmp_path):
+    source = tmp_path / "descriptor_source.zip"
+    _write_source_zip(source)
+    case = build_corpus_corruption_case(
+        tmp_path / "descriptor_case",
+        source_path=source,
+        fmt="zip",
+        seed=77,
+        variant_index=0,
+        damage_profile="compound_descriptor_fake_span_flags_cd_offset",
+    )
+
+    payload = inspect_zip_directory_consistency(str(case.source_input["path"]), max_entries=8)
+    descriptor = payload["descriptor"]
+
+    for field in (
+        "wrong_local_header_target_count",
+        "local_header_offset_points_to_other_entry_count",
+        "local_header_offset_points_inside_payload_count",
+        "local_header_offset_points_inside_descriptor_count",
+        "local_header_offset_points_outside_archive_count",
+        "local_header_offset_bad_signature_count",
+        "local_header_offset_target_conflict_ratio",
+        "compressed_size_ends_after_descriptor_count",
+        "compressed_size_ends_before_next_local_gap_count",
+        "descriptor_span_present_count",
+        "descriptor_span_conflicts_with_cd_size_count",
+        "cd_offset_size_joint_conflict_count",
+        "cd_offset_valid_but_size_conflict_count",
+        "cd_size_valid_but_offset_conflict_count",
+    ):
+        assert field in descriptor
+    assert descriptor["wrong_local_header_target_count"] > 0 or descriptor["local_header_offset_bad_signature_count"] > 0
 
 
 def test_training_runtime_exposes_zip_observation_facts_in_structure(tmp_path):

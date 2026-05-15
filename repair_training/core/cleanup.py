@@ -14,19 +14,23 @@ def remove_tree_fast(path: str | Path, *, root: str | Path) -> bool:
     if not target.exists():
         return False
     if os.name == "nt":
-        literal = str(target).replace("'", "''")
-        subprocess.run(
-            [
-                "powershell",
-                "-NoProfile",
-                "-NonInteractive",
-                "-Command",
-                f"Remove-Item -LiteralPath '{literal}' -Recurse -Force -ErrorAction SilentlyContinue",
-            ],
-            check=False,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        command = "& { param($p) Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction SilentlyContinue }"
+        for candidate in (str(target), "\\\\?\\" + str(target)):
+            subprocess.run(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    command,
+                    candidate,
+                ],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            if not target.exists():
+                return True
         return not target.exists()
     shutil.rmtree(target, ignore_errors=True)
     return not target.exists()

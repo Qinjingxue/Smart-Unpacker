@@ -10,6 +10,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+from repair_training.core.cleanup import remove_tree_fast
 from repair_training.core.datasets import read_jsonl, sha256_file, write_json
 from repair_training.core.features import damage_labels_for_row, damage_location_labels_from_target
 from repair_training.core.material_records import attach_split_volumes
@@ -61,21 +62,36 @@ def main(argv: list[str] | None = None) -> int:
     workspace.mkdir(parents=True, exist_ok=True)
     failure_output = Path(args.failure_output) if args.failure_output else output.with_name("damage_row_failures.jsonl")
     summary_output = Path(args.summary_output) if args.summary_output else output.with_name("damage_row_summary.json")
-    records = _records_for_args(args, workspace=workspace)
-    if args.limit:
-        records = records[: max(0, int(args.limit))]
-    started = time.perf_counter()
-    rows, failures = collect_damage_rows(
-        records,
-        workspace=workspace,
-        workers=max(1, int(args.workers or 1)),
-    )
-    _write_jsonl(output, rows)
-    _write_jsonl(failure_output, failures)
-    summary = _summary(rows, failures, elapsed=time.perf_counter() - started)
-    write_json(summary_output, summary)
-    print(json.dumps({"output": str(output), "failures": str(failure_output), **summary}, ensure_ascii=False, sort_keys=True))
-    return 0
+    cleanup_report: dict[str, Any] = {"enabled": not bool(args.keep_workspace), "removed": []}
+    try:
+        records = _records_for_args(args, workspace=workspace)
+        if args.limit:
+            records = records[: max(0, int(args.limit))]
+        started = time.perf_counter()
+        rows, failures = collect_damage_rows(
+            records,
+            workspace=workspace,
+            workers=max(1, int(args.workers or 1)),
+        )
+        _write_jsonl(output, rows)
+        _write_jsonl(failure_output, failures)
+        summary = _summary(rows, failures, elapsed=time.perf_counter() - started)
+        summary["cleanup"] = cleanup_report
+        write_json(summary_output, summary)
+        print(json.dumps({"output": str(output), "failures": str(failure_output), **summary}, ensure_ascii=False, sort_keys=True))
+        return 0
+    finally:
+        if not args.keep_workspace:
+            cleanup_report["removed"].append(_cleanup_workspace(workspace, run_root=run_root))
+            try:
+                write_json(summary_output.with_name(summary_output.stem + "_cleanup.json"), cleanup_report)
+                if summary_output.is_file():
+                    summary_payload = json.loads(summary_output.read_text(encoding="utf-8"))
+                    if isinstance(summary_payload, dict):
+                        summary_payload["cleanup"] = cleanup_report
+                        write_json(summary_output, summary_payload)
+            except Exception:
+                pass
 
 
 def collect_damage_rows(
@@ -440,6 +456,21 @@ def _structure_coverage(rows: list[dict[str, Any]]) -> dict[str, Any]:
             counters["zip_directory_consistency_present"] += 1
         if isinstance(merged.get("zip64_consistency"), dict) or any(str(key).startswith("zip64_consistency.") for key in merged):
             counters["zip64_consistency_present"] += 1
+        descriptor = _descriptor_structure(merged)
+        if descriptor:
+            counters["zip_descriptor_facts_present"] += 1
+            for field in (
+                "wrong_local_header_target_count",
+                "compressed_size_ends_inside_descriptor_count",
+                "descriptor_span_conflicts_with_cd_size_count",
+            ):
+                if field in descriptor:
+                    counters[f"{field}_present"] += 1
+                    try:
+                        if float(descriptor.get(field) or 0.0) != 0.0:
+                            counters[f"{field}_nonzero"] += 1
+                    except (TypeError, ValueError):
+                        pass
     total = len(rows)
     return {
         name: {"count": int(counters.get(name, 0)), "ratio": float(counters.get(name, 0) / total) if total else 0.0}
@@ -450,8 +481,41 @@ def _structure_coverage(rows: list[dict[str, Any]]) -> dict[str, Any]:
             "zip64_consistency_present",
             "format_zip_structure_present",
             "analysis_native_probe_structure_present",
+            "zip_descriptor_facts_present",
+            "wrong_local_header_target_count_present",
+            "wrong_local_header_target_count_nonzero",
+            "compressed_size_ends_inside_descriptor_count_present",
+            "compressed_size_ends_inside_descriptor_count_nonzero",
+            "descriptor_span_conflicts_with_cd_size_count_present",
+            "descriptor_span_conflicts_with_cd_size_count_nonzero",
         )
     }
+
+
+def _descriptor_structure(structure: dict[str, Any]) -> dict[str, Any]:
+    directory = structure.get("directory_consistency")
+    if isinstance(directory, dict):
+        descriptor = directory.get("descriptor")
+        if isinstance(descriptor, dict):
+            return descriptor
+    output: dict[str, Any] = {}
+    prefix = "directory_consistency.descriptor."
+    for key, value in structure.items():
+        key_text = str(key)
+        if key_text.startswith(prefix):
+            output[key_text[len(prefix):]] = value
+    return output
+
+
+def _cleanup_workspace(workspace: Path, *, run_root: Path) -> dict[str, Any]:
+    try:
+        resolved_workspace = workspace.resolve()
+        resolved_root = run_root.resolve()
+        if resolved_workspace == resolved_root or resolved_root not in resolved_workspace.parents:
+            return {"path": str(workspace), "ok": False, "reason": "outside_run_root"}
+        return {"path": str(workspace), "ok": remove_tree_fast(resolved_workspace, root=resolved_root)}
+    except Exception as exc:
+        return {"path": str(workspace), "ok": False, "reason": str(exc)}
 
 
 def _worker_collect_damage_row(index: int, record: dict[str, Any], workspace: str, config: dict[str, Any]) -> dict[str, Any]:
@@ -506,6 +570,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--failure-output", default="")
     parser.add_argument("--summary-output", default="")
     parser.add_argument("--workspace", default="")
+    parser.add_argument("--keep-workspace", action="store_true")
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--workers", type=int, default=1)
     parser.add_argument("--seed", default="20260515")

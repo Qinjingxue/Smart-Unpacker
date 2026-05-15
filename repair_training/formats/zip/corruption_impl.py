@@ -1304,7 +1304,10 @@ def _zip_compound_profile_mutations(
     if "rebuild_directory" in profile and eocd > 0:
         mutations.append(_truncate("corpus_compound_rebuild_directory_drop_cd", eocd, "zip.central_directory", "directory must be rebuilt while payload may remain bad"))
     if "descriptor" in profile:
-        mutations.extend(_zip_data_descriptor_conflict_mutations(data, cd_headers, entry_infos, randomizer))
+        if "fake_span" in profile:
+            mutations.extend(_zip_data_descriptor_fake_span_mutations(data, cd_headers, entry_infos, randomizer))
+        else:
+            mutations.extend(_zip_data_descriptor_conflict_mutations(data, cd_headers, entry_infos, randomizer))
     if "zip64" in profile:
         mutations.extend(_zip64_locator_mutations(data, randomizer))
         mutations.extend(_zip64_extra_mutations(data, randomizer))
@@ -1362,10 +1365,29 @@ def _zip_cd_offset_near_valid_mutations(data: bytes, cd_headers: list[int], entr
     if len(entry_infos) < 2:
         wrong_offset = max(0, wrong_offset + 4)
     wrong_offset = min(max(0, wrong_offset), max(0, len(data) - 4))
-    return [
-        _replace_bytes("corpus_zip_cd_offset_near_valid_wrong_entry", cd_headers[0] + 42, struct.pack("<I", wrong_offset), "zip.central_directory.local_header_offset", "central directory points near a valid local header but not the intended entry"),
-        _replace_bytes("corpus_zip_cd_compressed_size_near_valid", cd_headers[0] + 20, struct.pack("<I", max(0, int(target.get("compressed_size", 0) or 0))), "zip.central_directory.compressed_size", "directory size fields remain plausible"),
-    ]
+    output = _replace_if_changed(
+        data,
+        "corpus_zip_cd_offset_near_valid_wrong_entry",
+        cd_headers[0] + 42,
+        struct.pack("<I", wrong_offset),
+        "zip.central_directory.local_header_offset",
+        "central directory points near a valid local header but not the intended entry",
+    )
+    current_size = _u32_at(data, cd_headers[0] + 20)
+    replacement_size = max(0, int(target.get("compressed_size", 0) or 0)) & 0xFFFFFFFF
+    if current_size is not None and replacement_size == current_size:
+        replacement_size = (current_size + 1) & 0xFFFFFFFF
+    output.extend(
+        _replace_if_changed(
+            data,
+            "corpus_zip_cd_compressed_size_near_valid",
+            cd_headers[0] + 20,
+            struct.pack("<I", replacement_size),
+            "zip.central_directory.compressed_size",
+            "directory size fields remain plausible",
+        )
+    )
+    return output
 
 
 def _zip_local_crc_mutations(entry_infos: list[dict[str, Any]], randomizer: random.Random) -> list[BinaryMutation]:
@@ -1410,6 +1432,10 @@ def _zip_duplicate_entry_conflict_mutations(data: bytes, cd_headers: list[int], 
 
 
 def _zip_data_descriptor_conflict_mutations(data: bytes, cd_headers: list[int], entry_infos: list[dict[str, Any]], randomizer: random.Random) -> list[BinaryMutation]:
+    return _zip_data_descriptor_flag_conflict_mutations(data, cd_headers, entry_infos, randomizer)
+
+
+def _zip_data_descriptor_flag_conflict_mutations(data: bytes, cd_headers: list[int], entry_infos: list[dict[str, Any]], randomizer: random.Random) -> list[BinaryMutation]:
     target = _choose_middle_entry(entry_infos, randomizer) if entry_infos else {}
     local = int(target.get("header_offset", -1) or -1)
     output: list[BinaryMutation] = []
@@ -1426,10 +1452,33 @@ def _zip_data_descriptor_conflict_mutations(data: bytes, cd_headers: list[int], 
         except Exception:
             flags = 0
         output.append(_replace_bytes("corpus_zip_cd_data_descriptor_flag_conflict", header + 8, struct.pack("<H", flags), "zip.central_directory.flags", "central directory disagrees about data descriptor usage"))
+    return output
+
+
+def _zip_data_descriptor_fake_span_mutations(data: bytes, cd_headers: list[int], entry_infos: list[dict[str, Any]], randomizer: random.Random) -> list[BinaryMutation]:
+    target = _choose_middle_entry(entry_infos, randomizer) if entry_infos else {}
+    output = _zip_data_descriptor_flag_conflict_mutations(data, cd_headers, entry_infos, randomizer)
     payload_offset = int(target.get("payload_offset", 0) or 0) + int(target.get("compressed_size", 0) or 0)
     if 0 <= payload_offset <= len(data):
         output.append(_insert("corpus_zip_fake_data_descriptor", payload_offset, b"PK\x07\x08" + _random_junk(randomizer, "DD", 12, 12), "zip.data_descriptor", "fake data descriptor conflicts with metadata"))
     return output
+
+
+def _u32_at(data: bytes, offset: int) -> int | None:
+    if offset < 0 or offset + 4 > len(data):
+        return None
+    try:
+        return int(struct.unpack_from("<I", data, offset)[0])
+    except Exception:
+        return None
+
+
+def _replace_if_changed(data: bytes, name: str, offset: int, payload: bytes, zone: str, expected_effect: str) -> list[BinaryMutation]:
+    if offset < 0 or offset + len(payload) > len(data):
+        return []
+    if data[offset : offset + len(payload)] == payload:
+        return []
+    return [_replace_bytes(name, offset, payload, zone, expected_effect)]
 
 
 def _zip64_locator_mutations(data: bytes, randomizer: random.Random) -> list[BinaryMutation]:

@@ -51,6 +51,8 @@ pub(crate) fn inspect_zip_directory_consistency(
     }
     let local_candidates = scan_zip_local_headers(&data, physical_cd_offset, max_entries.saturating_mul(4).max(32));
     let local_spans = local_record_spans(&local_candidates, physical_cd_offset);
+    let (known_payload_spans, known_descriptor_spans) =
+        local_payload_descriptor_spans(&data, &local_candidates, physical_cd_offset);
     let first_local_offset = local_candidates.first().map(|local| local.offset).unwrap_or(0);
     let prefix_len = first_local_offset;
 
@@ -74,12 +76,29 @@ pub(crate) fn inspect_zip_directory_consistency(
     let mut cd_compressed_size_points_into_descriptor = 0usize;
     let mut compressed_size_ends_before_descriptor = 0usize;
     let mut compressed_size_ends_inside_descriptor = 0usize;
+    let mut compressed_size_ends_after_descriptor = 0usize;
     let mut compressed_size_ends_after_next_local = 0usize;
+    let mut compressed_size_ends_before_next_local_gap = 0usize;
     let mut descriptor_span_between_payload_and_next_local = 0usize;
     let mut cd_entry_span_conflict = 0usize;
     let mut wrong_local_header_target = 0usize;
     let mut local_header_offset_points_to_other_entry = 0usize;
     let mut local_header_offset_points_to_descriptor_or_payload = 0usize;
+    let mut local_header_offset_points_inside_payload = 0usize;
+    let mut local_header_offset_points_inside_descriptor = 0usize;
+    let mut local_header_offset_points_outside_archive = 0usize;
+    let mut local_header_offset_bad_signature = 0usize;
+    let mut descriptor_span_present = 0usize;
+    let mut descriptor_span_missing = 0usize;
+    let mut descriptor_between_payload_and_next_local = 0usize;
+    let mut descriptor_flag_set_but_span_missing = 0usize;
+    let mut descriptor_span_present_without_flag = 0usize;
+    let mut descriptor_span_conflicts_with_cd_size = 0usize;
+    let mut cd_size_points_to_descriptor_start = 0usize;
+    let mut cd_size_points_inside_descriptor = 0usize;
+    let mut cd_offset_size_joint_conflict = 0usize;
+    let mut cd_offset_valid_but_size_conflict = 0usize;
+    let mut cd_size_valid_but_offset_conflict = 0usize;
     let mut local_offset_valid_without_prefix = 0usize;
     let mut local_offset_valid_with_prefix = 0usize;
     let mut local_offset_only_valid_with_prefix = 0usize;
@@ -102,6 +121,19 @@ pub(crate) fn inspect_zip_directory_consistency(
         } else {
             archive_adjusted_offset
         };
+        let local_offset_outside_archive = local_offset + 4 > data.len();
+        let local_offset_has_signature =
+            !local_offset_outside_archive && data.get(local_offset..local_offset + 4) == Some(LFH_SIG);
+        if local_offset_outside_archive {
+            local_header_offset_points_outside_archive += 1;
+        } else if !local_offset_has_signature {
+            local_header_offset_bad_signature += 1;
+            if offset_inside_local_or_data_span(local_offset, &known_descriptor_spans) {
+                local_header_offset_points_inside_descriptor += 1;
+            } else if offset_inside_local_or_data_span(local_offset, &known_payload_spans) {
+                local_header_offset_points_inside_payload += 1;
+            }
+        }
         let raw_local = parse_local_header(&data, raw_local_offset);
         let archive_adjusted_local = parse_local_header(&data, archive_adjusted_offset);
         let prefix_adjusted_local = if prefix_len > 0 {
@@ -165,7 +197,7 @@ pub(crate) fn inspect_zip_directory_consistency(
                 local_header_offset_points_to_descriptor_or_payload += 1;
             }
         }
-        let Some(local) = matched_local else {
+        let Some(ref local) = matched_local else {
             local_missing += 1;
             continue;
         };
@@ -233,22 +265,48 @@ pub(crate) fn inspect_zip_directory_consistency(
             .or_else(|| checked_entries.get(index + 1).map(|next| next.local_header_offset as usize))
             .unwrap_or(physical_cd_offset)
             .min(data.len());
+        let mut entry_descriptor_span: Option<(usize, usize)> = None;
+        let mut entry_size_conflict = false;
         if payload_end > next_boundary {
             compressed_size_ends_after_next_local += 1;
             cd_entry_span_conflict += 1;
+            entry_size_conflict = true;
         }
         if payload_end < next_boundary {
+            if next_boundary.saturating_sub(payload_end) > 32 {
+                compressed_size_ends_before_next_local_gap += 1;
+            }
             if let Some(descriptor_offset) = find_signature_between(&data, payload_end, next_boundary, DD_SIG) {
                 descriptor_span_between_payload_and_next_local += 1;
-                if payload_end < descriptor_offset {
+                descriptor_between_payload_and_next_local += 1;
+                let descriptor_end = descriptor_at_impl(
+                    &data,
+                    descriptor_offset,
+                    entry.crc32,
+                    entry.compressed_size as u64,
+                    entry.uncompressed_size as u64,
+                )
+                .unwrap_or_else(|| descriptor_offset.saturating_add(16).min(next_boundary));
+                entry_descriptor_span = Some((descriptor_offset, descriptor_end));
+                if payload_end == descriptor_offset {
+                    cd_size_points_to_descriptor_start += 1;
+                } else if payload_end < descriptor_offset {
                     compressed_size_ends_before_descriptor += 1;
-                } else if payload_end < descriptor_offset.saturating_add(24) {
+                    entry_size_conflict = true;
+                    cd_entry_span_conflict += 1;
+                } else if payload_end < descriptor_end {
                     compressed_size_ends_inside_descriptor += 1;
+                    cd_size_points_inside_descriptor += 1;
+                    entry_size_conflict = true;
+                    cd_entry_span_conflict += 1;
+                } else if payload_end > descriptor_end && payload_end <= next_boundary {
+                    compressed_size_ends_after_descriptor += 1;
+                    entry_size_conflict = true;
+                    cd_entry_span_conflict += 1;
                 }
                 let delta = descriptor_offset.saturating_sub(payload_end);
                 descriptor_payload_end_to_next_local_delta_min =
                     Some(descriptor_payload_end_to_next_local_delta_min.map_or(delta, |current| current.min(delta)));
-                cd_entry_span_conflict += 1;
             }
         }
         if entry.compressed_size != u32::MAX && payload_end <= data.len() {
@@ -262,13 +320,30 @@ pub(crate) fn inspect_zip_directory_consistency(
             );
             if has_descriptor {
                 descriptor_present += 1;
+                descriptor_span_present += 1;
+                let descriptor_end = descriptor_at_impl(
+                    &data,
+                    payload_end,
+                    entry.crc32,
+                    entry.compressed_size as u64,
+                    entry.uncompressed_size as u64,
+                )
+                .unwrap_or(payload_end);
+                entry_descriptor_span = Some((payload_end, descriptor_end));
             } else if (entry.flags | local.flags) & 0x08 != 0 {
                 descriptor_missing += 1;
+                descriptor_span_missing += 1;
             }
             if (entry.flags & 0x08) != (local.flags & 0x08) {
                 descriptor_flag_mismatch += 1;
             }
-            if zip_inspect_spurious_descriptor_candidate(&data, &all_entries, index, entry, &local, physical_cd_offset) {
+            if ((entry.flags | local.flags) & 0x08) != 0 && !has_descriptor {
+                descriptor_flag_set_but_span_missing += 1;
+            }
+            if has_descriptor && ((entry.flags | local.flags) & 0x08) == 0 {
+                descriptor_span_present_without_flag += 1;
+            }
+            if zip_inspect_spurious_descriptor_candidate(&data, &all_entries, index, entry, local, physical_cd_offset) {
                 spurious_descriptor_candidates += 1;
             }
             if let Some(next_entry) = checked_entries.get(index + 1) {
@@ -288,6 +363,26 @@ pub(crate) fn inspect_zip_directory_consistency(
                     }
                 }
             }
+        }
+        let entry_offset_conflict =
+            local_offset_outside_archive || !local_offset_has_signature || matched_local.as_ref().is_some_and(|candidate| {
+                candidate.offset != local_offset || candidate.name != entry.name
+            });
+        if let Some((descriptor_start, descriptor_end)) = entry_descriptor_span {
+            if payload_end != descriptor_start {
+                descriptor_span_conflicts_with_cd_size += 1;
+                entry_size_conflict = true;
+            }
+            if local_offset > descriptor_start && local_offset < descriptor_end {
+                local_header_offset_points_inside_descriptor += 1;
+            }
+        }
+        if entry_offset_conflict && entry_size_conflict {
+            cd_offset_size_joint_conflict += 1;
+        } else if !entry_offset_conflict && entry_size_conflict {
+            cd_offset_valid_but_size_conflict += 1;
+        } else if entry_offset_conflict && !entry_size_conflict {
+            cd_size_valid_but_offset_conflict += 1;
         }
     }
 
@@ -316,7 +411,12 @@ pub(crate) fn inspect_zip_directory_consistency(
     descriptor.set_item("cd_compressed_size_points_into_descriptor_count", cd_compressed_size_points_into_descriptor)?;
     descriptor.set_item("compressed_size_ends_before_descriptor_count", compressed_size_ends_before_descriptor)?;
     descriptor.set_item("compressed_size_ends_inside_descriptor_count", compressed_size_ends_inside_descriptor)?;
+    descriptor.set_item("compressed_size_ends_after_descriptor_count", compressed_size_ends_after_descriptor)?;
     descriptor.set_item("compressed_size_ends_after_next_local_count", compressed_size_ends_after_next_local)?;
+    descriptor.set_item(
+        "compressed_size_ends_before_next_local_gap_count",
+        compressed_size_ends_before_next_local_gap,
+    )?;
     descriptor.set_item("descriptor_span_between_payload_and_next_local_count", descriptor_span_between_payload_and_next_local)?;
     descriptor.set_item("cd_entry_span_conflict_count", cd_entry_span_conflict)?;
     descriptor.set_item("wrong_local_header_target_count", wrong_local_header_target)?;
@@ -325,6 +425,40 @@ pub(crate) fn inspect_zip_directory_consistency(
         "local_header_offset_points_to_descriptor_or_payload_count",
         local_header_offset_points_to_descriptor_or_payload,
     )?;
+    descriptor.set_item("local_header_offset_points_inside_payload_count", local_header_offset_points_inside_payload)?;
+    descriptor.set_item(
+        "local_header_offset_points_inside_descriptor_count",
+        local_header_offset_points_inside_descriptor,
+    )?;
+    descriptor.set_item("local_header_offset_points_outside_archive_count", local_header_offset_points_outside_archive)?;
+    descriptor.set_item("local_header_offset_bad_signature_count", local_header_offset_bad_signature)?;
+    descriptor.set_item(
+        "local_header_offset_target_conflict_ratio",
+        wrong_local_header_target as f64 / checked_entries.len().max(1) as f64,
+    )?;
+    descriptor.set_item("descriptor_span_present_count", descriptor_span_present)?;
+    descriptor.set_item("descriptor_span_missing_count", descriptor_span_missing)?;
+    descriptor.set_item(
+        "descriptor_between_payload_and_next_local_count",
+        descriptor_between_payload_and_next_local,
+    )?;
+    descriptor.set_item(
+        "descriptor_flag_set_but_span_missing_count",
+        descriptor_flag_set_but_span_missing,
+    )?;
+    descriptor.set_item(
+        "descriptor_span_present_without_flag_count",
+        descriptor_span_present_without_flag,
+    )?;
+    descriptor.set_item(
+        "descriptor_span_conflicts_with_cd_size_count",
+        descriptor_span_conflicts_with_cd_size,
+    )?;
+    descriptor.set_item("cd_size_points_to_descriptor_start_count", cd_size_points_to_descriptor_start)?;
+    descriptor.set_item("cd_size_points_inside_descriptor_count", cd_size_points_inside_descriptor)?;
+    descriptor.set_item("cd_offset_size_joint_conflict_count", cd_offset_size_joint_conflict)?;
+    descriptor.set_item("cd_offset_valid_but_size_conflict_count", cd_offset_valid_but_size_conflict)?;
+    descriptor.set_item("cd_size_valid_but_offset_conflict_count", cd_size_valid_but_offset_conflict)?;
     result.set_item("descriptor", descriptor)?;
 
     let prefix = PyDict::new(py);
@@ -389,6 +523,46 @@ fn zip_directory_consistency_empty<'py>(py: Python<'py>) -> PyResult<Bound<'py, 
     result.set_item("central_local_uncompressed_size_mismatch_count", 0)?;
     result.set_item("local_extra_len_mismatch_count", 0)?;
     result.set_item("central_local_offset_suspicious_count", 0)?;
+    let descriptor = PyDict::new(py);
+    for key in [
+        "descriptor_checked_count",
+        "descriptor_present_count",
+        "descriptor_missing_count",
+        "descriptor_flag_mismatch_count",
+        "spurious_descriptor_candidate_count",
+        "descriptor_candidate_span_overlap_count",
+        "descriptor_payload_end_to_next_local_delta_min",
+        "cd_compressed_size_points_into_descriptor_count",
+        "compressed_size_ends_before_descriptor_count",
+        "compressed_size_ends_inside_descriptor_count",
+        "compressed_size_ends_after_descriptor_count",
+        "compressed_size_ends_after_next_local_count",
+        "compressed_size_ends_before_next_local_gap_count",
+        "descriptor_span_between_payload_and_next_local_count",
+        "cd_entry_span_conflict_count",
+        "wrong_local_header_target_count",
+        "local_header_offset_points_to_other_entry_count",
+        "local_header_offset_points_to_descriptor_or_payload_count",
+        "local_header_offset_points_inside_payload_count",
+        "local_header_offset_points_inside_descriptor_count",
+        "local_header_offset_points_outside_archive_count",
+        "local_header_offset_bad_signature_count",
+        "descriptor_span_present_count",
+        "descriptor_span_missing_count",
+        "descriptor_between_payload_and_next_local_count",
+        "descriptor_flag_set_but_span_missing_count",
+        "descriptor_span_present_without_flag_count",
+        "descriptor_span_conflicts_with_cd_size_count",
+        "cd_size_points_to_descriptor_start_count",
+        "cd_size_points_inside_descriptor_count",
+        "cd_offset_size_joint_conflict_count",
+        "cd_offset_valid_but_size_conflict_count",
+        "cd_size_valid_but_offset_conflict_count",
+    ] {
+        descriptor.set_item(key, 0)?;
+    }
+    descriptor.set_item("local_header_offset_target_conflict_ratio", 0.0)?;
+    result.set_item("descriptor", descriptor)?;
     Ok(result)
 }
 
@@ -439,6 +613,46 @@ fn local_record_spans(locals: &[LocalHeader], cd_offset: usize) -> Vec<(usize, u
         output.push((local.offset, next_local.max(data_start).max(local.offset + LOCAL_HEADER_LEN)));
     }
     output
+}
+
+fn local_payload_descriptor_spans(
+    data: &[u8],
+    locals: &[LocalHeader],
+    cd_offset: usize,
+) -> (Vec<(usize, usize)>, Vec<(usize, usize)>) {
+    let mut offsets = locals.iter().map(|local| local.offset).collect::<Vec<_>>();
+    offsets.sort_unstable();
+    let mut payload_spans = Vec::new();
+    let mut descriptor_spans = Vec::new();
+    for local in locals {
+        let Some(data_start) = local_data_start(local) else {
+            continue;
+        };
+        let next_local = offsets
+            .iter()
+            .copied()
+            .find(|offset| *offset > local.offset)
+            .unwrap_or(cd_offset)
+            .min(data.len());
+        if data_start >= next_local {
+            continue;
+        }
+        if let Some(descriptor_offset) = find_signature_between(data, data_start, next_local, DD_SIG) {
+            payload_spans.push((data_start, descriptor_offset));
+            descriptor_spans.push((descriptor_offset, descriptor_offset.saturating_add(24).min(next_local)));
+        } else {
+            payload_spans.push((data_start, next_local));
+        }
+    }
+    (payload_spans, descriptor_spans)
+}
+
+fn local_data_start(local: &LocalHeader) -> Option<usize> {
+    local
+        .offset
+        .checked_add(LOCAL_HEADER_LEN)?
+        .checked_add(local.name_len as usize)?
+        .checked_add(local.extra_len as usize)
 }
 
 fn offset_inside_local_or_data_span(offset: usize, spans: &[(usize, usize)]) -> bool {

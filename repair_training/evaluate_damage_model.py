@@ -37,67 +37,68 @@ def main(argv: list[str] | None = None) -> int:
         path.mkdir(parents=True, exist_ok=True)
 
     started = time.perf_counter()
-    seed = int(args.seed or 0)
-    samples = max(0, int(args.samples or 0))
-    profile_plan = plugin.damage_eval_profile_plan(samples, seed)
-    records = plugin.generate_damage_eval_records(
-        args.material_root,
-        tmp / "generated",
-        seed,
-        samples,
-        profile_plan,
-    )
-    rows, failures = collect_damage_rows(
-        records,
-        workspace=tmp / "observed",
-        workers=max(1, int(args.workers or 1)),
-    )
-    write_jsonl(datasets / "eval_damage_rows.jsonl", rows)
-    write_jsonl(datasets / "eval_failures.jsonl", failures)
-
-    leak = leakage_report(rows)
-    write_json(reports / "leakage_report.json", leak)
-    if not leak.get("ok"):
-        raise SystemExit(f"damage eval leakage check failed: {reports / 'leakage_report.json'}")
-
-    model = DamageAnalysisModel(model_dir=args.model_dir, plugin=plugin)
-    adapter = get_damage_analysis_adapter(fmt)
-    if adapter is None:
-        raise SystemExit(f"damage analysis adapter is not available for format: {fmt}")
-    score_rows = model.predict_rows(rows)
-    threshold_override = args.threshold if args.threshold is not None else None
-    predictions = [
-        _prediction_row(row, scores, model=model, adapter=adapter, threshold=threshold_override)
-        for row, scores in zip(rows, score_rows)
-    ]
-    write_jsonl(predictions_dir / "predictions.jsonl", predictions)
-    metrics = evaluate_predictions(
-        predictions,
-        threshold=float(threshold_override) if threshold_override is not None else float(model.thresholds.get("default_threshold", 0.5) or 0.5),
-    )
-    metrics.update({
-        "format": fmt,
-        "seed": seed,
-        "samples_requested": samples,
-        "rows": len(rows),
-        "failures": len(failures),
-        "threshold_mode": "override" if threshold_override is not None else "model",
-        "thresholds_path": str(Path(args.model_dir) / "thresholds.json") if threshold_override is None else "",
-        "elapsed_seconds": round(time.perf_counter() - started, 3),
-        "acceptance": _acceptance(metrics),
-        "plugin_metadata": plugin.damage_eval_metadata() if plugin.damage_eval_metadata else {},
-    })
-    write_json(reports / "metrics.json", metrics)
-    write_json(reports / "per_label_metrics.json", per_label_metrics(predictions))
-    write_json(reports / "profile_summary.json", profile_summary(predictions))
-    write_jsonl(reports / "hard_cases.jsonl", hard_cases(predictions))
-
     cleanup: dict[str, Any] = {"enabled": not bool(args.keep_generated), "removed": []}
-    if not args.keep_generated:
-        cleanup["removed"].append({"path": str(tmp), "ok": remove_tree_fast(tmp, root=output)})
-    write_json(reports / "cleanup_report.json", cleanup)
-    print(json.dumps({"output": str(output), "model_dir": str(args.model_dir), "metrics": metrics}, ensure_ascii=False, sort_keys=True))
-    return 0
+    try:
+        seed = int(args.seed or 0)
+        samples = max(0, int(args.samples or 0))
+        profile_plan = plugin.damage_eval_profile_plan(samples, seed)
+        records = plugin.generate_damage_eval_records(
+            args.material_root,
+            tmp / "generated",
+            seed,
+            samples,
+            profile_plan,
+        )
+        rows, failures = collect_damage_rows(
+            records,
+            workspace=tmp / "observed",
+            workers=max(1, int(args.workers or 1)),
+        )
+        write_jsonl(datasets / "eval_damage_rows.jsonl", rows)
+        write_jsonl(datasets / "eval_failures.jsonl", failures)
+
+        leak = leakage_report(rows)
+        write_json(reports / "leakage_report.json", leak)
+        if not leak.get("ok"):
+            raise SystemExit(f"damage eval leakage check failed: {reports / 'leakage_report.json'}")
+
+        model = DamageAnalysisModel(model_dir=args.model_dir, plugin=plugin)
+        adapter = get_damage_analysis_adapter(fmt)
+        if adapter is None:
+            raise SystemExit(f"damage analysis adapter is not available for format: {fmt}")
+        score_rows = model.predict_rows(rows)
+        threshold_override = args.threshold if args.threshold is not None else None
+        predictions = [
+            _prediction_row(row, scores, model=model, adapter=adapter, threshold=threshold_override)
+            for row, scores in zip(rows, score_rows)
+        ]
+        write_jsonl(predictions_dir / "predictions.jsonl", predictions)
+        metrics = evaluate_predictions(
+            predictions,
+            threshold=float(threshold_override) if threshold_override is not None else float(model.thresholds.get("default_threshold", 0.5) or 0.5),
+        )
+        metrics.update({
+            "format": fmt,
+            "seed": seed,
+            "samples_requested": samples,
+            "rows": len(rows),
+            "failures": len(failures),
+            "threshold_mode": "override" if threshold_override is not None else "model",
+            "thresholds_path": str(Path(args.model_dir) / "thresholds.json") if threshold_override is None else "",
+            "elapsed_seconds": round(time.perf_counter() - started, 3),
+            "acceptance": _acceptance(metrics),
+            "plugin_metadata": plugin.damage_eval_metadata() if plugin.damage_eval_metadata else {},
+        })
+        write_json(reports / "metrics.json", metrics)
+        write_json(reports / "per_label_metrics.json", per_label_metrics(predictions))
+        write_json(reports / "profile_summary.json", profile_summary(predictions))
+        write_jsonl(reports / "hard_cases.jsonl", hard_cases(predictions))
+        print(json.dumps({"output": str(output), "model_dir": str(args.model_dir), "metrics": metrics}, ensure_ascii=False, sort_keys=True))
+        return 0
+    finally:
+        if not args.keep_generated:
+            cleanup["removed"].append({"path": str(tmp), "ok": remove_tree_fast(tmp, root=output)})
+        write_json(reports / "cleanup_report.json", cleanup)
 
 
 def _prediction_row(row: dict[str, Any], scores: dict[str, float], *, model: DamageAnalysisModel, adapter: Any, threshold: float | None) -> dict[str, Any]:

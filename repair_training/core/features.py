@@ -267,6 +267,7 @@ def _field_label(zone: dict[str, Any]) -> str:
         ("local_header.extra", "local_header.extra"),
         ("data_descriptor.crc", "data_descriptor.crc"),
         ("data_descriptor.size", "data_descriptor.size"),
+        ("data_descriptor", "data_descriptor.record"),
         ("local_payload", "payload.compressed_data"),
         ("payload_hash_mismatch", "payload.crc_region"),
         ("crc_error", "payload.crc_region"),
