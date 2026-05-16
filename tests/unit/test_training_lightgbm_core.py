@@ -8,6 +8,7 @@ from repair_training.core.features import load_feature_schema
 from repair_training.core.datasets import read_jsonl, split_rows
 from repair_training.core.normal_structure_inference import NormalStructureModel
 from repair_training.core.plugin import load_training_format_plugin
+from repair_training.evaluate_normal_structure_model import main as evaluate_normal_structure_main
 from repair_training.formats.zip.plugin import postprocess_damage_prediction, zip_module_family
 from repair_training.train import main as train_main
 from sunpack.repair.policy.adapters.normal_structure import ZipNormalQueryBuilder, ZipNormalStructureAdapter
@@ -137,6 +138,11 @@ def test_zip_normal_query_builder_outputs_query_rows_without_raw_paths():
     assert any(row["target_field"] == "central_directory.compressed_size" and "payload_end_equals_next_local" in row["features"] for row in rows)
     assert "path" not in json.dumps(rows).lower()
     assert "clean_sha256" not in json.dumps(rows).lower()
+    for row in rows:
+        features = row.get("features") or {}
+        assert "candidate_source_delta_bucket" not in features
+        assert "violation_kind" not in features
+        assert "violation_severity" not in features
 
 
 def test_zip_normal_adapter_aggregates_query_scores():
@@ -147,9 +153,75 @@ def test_zip_normal_adapter_aggregates_query_scores():
     anomaly = adapter.build_anomaly_payload(rows, scores)
 
     assert anomaly["queries"]
+    assert anomaly["compact_attribution"]["top_queries"]
+    assert "eocd.cd_offset" in anomaly["compact_attribution"]["by_field"]
+    assert "field_value" in anomaly["compact_attribution"]["by_relation"]
+    assert "eocd|field_value" in anomaly["compact_attribution"]["by_zone_relation"]
+    assert "sfx_cd_offset" in anomaly["compact_attribution"]["conflict_pairs"]
     assert anomaly["summary"]["max_anomaly_by_field"]["eocd.cd_offset"] > 0.8
     assert "eocd" in anomaly["summary"]["mean_anomaly_by_zone"]
     assert "trusted_explanations" in anomaly["summary"]
+    assert "path" not in json.dumps(anomaly["compact_attribution"]["top_queries"]).lower()
+    assert "hash" not in json.dumps(anomaly["compact_attribution"]["top_queries"]).lower()
+
+
+def test_zip_normal_adapter_reads_structure_runtime_payload_facts():
+    adapter = ZipNormalStructureAdapter()
+    payload = {
+        "runtime_context": {
+            "analysis_native_probe": {
+                "structure": {
+                    "graph": _normal_query_graph(),
+                    "runtime": {
+                        "payload_content_failure_observed": True,
+                        "payload_verification_observed": True,
+                        "payload_verified_intact": False,
+                        "payload_unverified_but_no_failure": False,
+                        "no_payload_hash_crc_failure": False,
+                        "extraction_entry_outcomes": {
+                            "entry_failed_count": 2,
+                            "data_error_count": 1,
+                            "unexpected_end_count": 1,
+                        },
+                        "verification_coverage_breakdown": {
+                            "crc_mismatch_count": 3,
+                            "payload_hash_mismatch_count": 1,
+                        },
+                    },
+                },
+            },
+        },
+    }
+
+    rows = adapter.rows_from_request_payload(payload)
+    by_field = {row["target_field"]: row for row in rows}
+    payload_features = by_field["payload.compressed_data"]["features"]
+    crc_features = by_field["local_header.crc"]["features"]
+
+    assert payload_features["payload_content_failure_observed"] is True
+    assert payload_features["payload_verification_observed"] is True
+    assert payload_features["payload_verified_intact"] is False
+    assert payload_features["payload_unverified_but_no_failure"] is False
+    assert payload_features["no_payload_hash_crc_failure"] is False
+    assert payload_features["crc_mismatch_count"] == 3
+    assert payload_features["payload_hash_mismatch_count"] == 1
+    assert payload_features["entry_failed_count"] == 2
+    assert payload_features["data_error_count"] == 1
+    assert payload_features["unexpected_end_count"] == 1
+    assert payload_features["direct_field_violation_present"] is True
+    assert crc_features["crc_mismatch_count"] == 3
+    assert crc_features["verification_crc_failure"] is True
+
+
+def test_zip_damage_feature_spec_uses_structure_not_raw_structure():
+    plugin = load_training_format_plugin("zip")
+    spec = plugin.damage_feature_spec()
+
+    assert spec is not None
+    assert any(prefix.startswith("runtime_context.analysis_native_probe.structure.") for prefix in spec.include_prefixes)
+    assert not any("raw_structure" in prefix for prefix in spec.include_prefixes)
+    assert not any("raw_structure" in path for path in spec.categorical_paths)
+    assert not any("raw_structure" in prefix for prefix in spec.ignore_prefixes)
 
 
 def test_normal_structure_features_use_query_schema(tmp_path):
@@ -168,6 +240,9 @@ def test_normal_structure_features_use_query_schema(tmp_path):
     assert any(name.startswith("features.") for name in schema["feature_names"])
     assert not any(name.startswith("object_type") for name in schema["feature_names"])
     assert not any(name.startswith("candidate_kind") or name.startswith("candidate_source") for name in schema["feature_names"])
+    assert "features.candidate_source_delta_bucket" not in schema["feature_names"]
+    assert "features.violation_kind" not in schema["feature_names"]
+    assert "features.violation_severity" not in schema["feature_names"]
     assert not any("raw" in name or "path" in name for name in schema["feature_names"])
     assert (run_dir / "features" / "normal_structure" / "meta_train.jsonl").is_file()
 
@@ -214,6 +289,64 @@ def test_normal_structure_model_flags_unseen_structural_anomaly(tmp_path):
 
     assert anomaly["summary"]["max_anomaly_by_field"]["eocd.cd_offset"] > clean_anomaly["summary"]["max_anomaly_by_field"]["eocd.cd_offset"]
     assert anomaly["summary"]["max_anomaly_by_field"]["eocd.cd_offset"] > 0.05
+
+
+def test_evaluate_normal_structure_model_reports_attribution_metrics(tmp_path):
+    pytest.importorskip("lightgbm")
+    run_dir = tmp_path / "run"
+    datasets = run_dir / "datasets"
+    datasets.mkdir(parents=True)
+    clean = _normal_query_graph()
+    train_rows = []
+    for index in range(12):
+        train_rows.extend(ZipNormalQueryBuilder().build_training_queries(clean, sample_id=f"clean:{index}"))
+    _write_jsonl(datasets / "normal_structure_queries.jsonl", train_rows)
+    build_features_main(["--format", "zip", "--model", "normal_structure", "--run-dir", str(run_dir)])
+    train_main(["--format", "zip", "--model", "normal_structure", "--run-dir", str(run_dir)])
+
+    damaged = _normal_query_graph()
+    damaged["summary"]["declared_central_directory_offset"] = 64
+    damaged["violations"] = [{
+        "kind": "bad_reference",
+        "source_node": "eocd:0",
+        "field": "eocd.cd_offset",
+        "expected": 8,
+        "observed": 64,
+        "delta": 56,
+        "severity": "high",
+    }]
+    damage_rows = [{
+        "sample_id": "damaged:0",
+        "damage_analysis_input": {
+            "runtime_context": {
+                "analysis_native_probe": {
+                    "structure": {"graph": damaged},
+                },
+            },
+        },
+        "damage_analysis_target": {
+            "damage_labels": ["field:eocd.cd_offset", "zone:eocd"],
+        },
+    }]
+    _write_jsonl(datasets / "damage_rows_raw.jsonl", damage_rows)
+    output = run_dir / "reports" / "normal_eval"
+
+    assert evaluate_normal_structure_main([
+        "--format", "zip",
+        "--input", str(datasets / "damage_rows_raw.jsonl"),
+        "--normal-model-dir", str(run_dir / "models" / "normal_structure"),
+        "--output", str(output),
+        "--top-k", "3",
+    ]) == 0
+    metrics = json.loads((output / "normal_structure_attribution_metrics.json").read_text(encoding="utf-8"))
+
+    assert metrics["rows"] == 1
+    assert "field_top1_accuracy" in metrics
+    assert "field_top5_recall" in metrics
+    assert "zone_top1_accuracy" in metrics
+    assert "relation_kind_top3_recall" in metrics
+    assert "conflict_pair_top3_hit_rate" in metrics
+    assert (output / "normal_structure_attribution_predictions.jsonl").is_file()
 
 
 def _write_fake_run(tmp_path: Path) -> Path:

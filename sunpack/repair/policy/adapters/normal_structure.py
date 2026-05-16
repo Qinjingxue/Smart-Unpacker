@@ -7,6 +7,84 @@ from typing import Any
 
 QUERY_SCHEMA_VERSION = 1
 NEGATIVE_DELTAS = (-64, -16, -4, -1, 1, 4, 16, 64)
+TOP_COMPACT_QUERIES = 16
+COMPACT_FEATURE_ALLOWLIST = {
+    "abs_delta_to_expected_bucket",
+    "bit3_descriptor_flag_set",
+    "both_fields_present",
+    "candidate_inside_archive",
+    "candidate_comment_end_after_file_end",
+    "candidate_comment_end_before_file_end",
+    "candidate_comment_end_equals_file_end",
+    "candidate_points_to_expected_signature",
+    "candidate_points_to_local_header_signature",
+    "candidate_points_to_local_header_signature",
+    "count_delta_bucket",
+    "delta_equals_sfx_prefix_len",
+    "delta_explained",
+    "delta_matches_deleted_range",
+    "direct_field_violation_present",
+    "eocd_comment_tail_bytes_present",
+    "explanation_applies",
+    "explanation_present",
+    "graph_violation_present",
+    "mismatch_count_bucket",
+    "mismatch_ratio_bucket",
+    "missing_range_explanation_applies",
+    "available_comment_bytes_delta_bucket",
+    "crc_mismatch_count",
+    "data_error_count",
+    "entry_failed_count",
+    "no_payload_hash_crc_failure",
+    "payload_content_failure_observed",
+    "payload_crc_observed",
+    "payload_hash_mismatch_count",
+    "payload_unverified_but_no_failure",
+    "payload_verification_observed",
+    "payload_verified_intact",
+    "inside_descriptor_span",
+    "inside_payload_span",
+    "only_valid_with_missing_range",
+    "only_valid_with_sfx_prefix",
+    "payload_end_after_descriptor",
+    "payload_end_after_next_local",
+    "payload_end_before_next_local",
+    "payload_end_equals_descriptor_start",
+    "payload_end_equals_next_local",
+    "payload_end_inside_archive",
+    "payload_end_inside_descriptor",
+    "payload_failure_without_match_violation",
+    "points_to_expected_signature",
+    "points_to_other_entry",
+    "relative_delta_to_expected_bucket",
+    "span_present",
+    "span_conflict_count_bucket",
+    "tail_bytes_after_eocd_bucket",
+    "unexpected_end_count",
+    "valid_with_missing_range",
+    "valid_with_sfx_prefix",
+    "values_equal",
+    "verification_crc_failure",
+    "sfx_prefix_present",
+    "split_missing_range_present",
+    "zip64_extra_mismatch_present",
+    "zip64_extra_overrides_field",
+    "zip64_extra_present",
+}
+CONFLICT_PAIR_SPECS = {
+    "eocd_cd_offset": ("eocd.cd_offset", "points_to"),
+    "eocd_cd_size": ("eocd.cd_size", "owns_span"),
+    "eocd_entry_count": ("eocd.entry_count", "field_value"),
+    "cd_local_offset": ("central_directory.local_header_offset", "points_to"),
+    "cd_local_crc": ("local_header.crc", "should_match"),
+    "cd_local_flags": ("local_header.flags", "should_match"),
+    "cd_local_name": ("central_directory.filename", "should_match"),
+    "cd_compressed_size_span": ("central_directory.compressed_size", "owns_span"),
+    "payload_descriptor_span": ("data_descriptor.record", "owns_span"),
+    "sfx_cd_offset": ("sfx_prefix.bytes", "sfx_prefix_adjustment"),
+    "missing_range_payload_span": ("split_volume.missing_range", "missing_range_adjustment"),
+    "zip64_extra_override": ("zip64.extra", "zip64_extra_resolution"),
+}
 
 
 def get_normal_structure_adapter(fmt: str) -> "ZipNormalStructureAdapter | None":
@@ -24,14 +102,14 @@ class ZipNormalStructureAdapter:
         runtime = payload.get("runtime_context") if isinstance(payload.get("runtime_context"), dict) else {}
         probe = runtime.get("analysis_native_probe") if isinstance(runtime.get("analysis_native_probe"), dict) else {}
         structure = probe.get("structure") if isinstance(probe.get("structure"), dict) else {}
-        graph = structure.get("graph") if isinstance(structure.get("graph"), dict) else {}
-        if not graph:
+        if not isinstance(structure.get("graph"), dict):
             raw = probe.get("raw_structure") if isinstance(probe.get("raw_structure"), dict) else {}
-            graph = raw.get("graph") if isinstance(raw.get("graph"), dict) else {}
-        return self.rows_from_graph(graph)
+            if isinstance(raw.get("graph"), dict):
+                structure = raw
+        return ZipNormalQueryBuilder().build_runtime_queries(structure)
 
     def rows_from_graph(self, graph: dict[str, Any]) -> list[dict[str, Any]]:
-        return ZipNormalQueryBuilder().build_runtime_queries(graph)
+        return ZipNormalQueryBuilder().build_runtime_queries({"graph": graph})
 
     def training_rows_from_graph(
         self,
@@ -42,13 +120,14 @@ class ZipNormalStructureAdapter:
         rng: random.Random | None = None,
     ) -> list[dict[str, Any]]:
         return ZipNormalQueryBuilder(rng=rng).build_training_queries(
-            graph,
+            {"graph": graph},
             sample_id=sample_id,
             source_identity=source_identity,
         )
 
     def build_anomaly_payload(self, rows: list[dict[str, Any]], normal_scores: list[float]) -> dict[str, Any]:
         queries: list[dict[str, Any]] = []
+        compact_sources: list[dict[str, Any]] = []
         field_scores: dict[str, list[float]] = {}
         zone_scores: dict[str, list[float]] = {}
         trusted_explanations: dict[str, float] = {}
@@ -68,19 +147,27 @@ class ZipNormalStructureAdapter:
                 trusted_explanations[explanation] = max(trusted_explanations.get(explanation, 0.0), normal)
             if zone == "payload" and anomaly >= 0.5 and not trusted_explanations:
                 unexplained_payload += 1
-            queries.append({
+            query = {
                 "query_id": row.get("query_id") or f"query:{index}",
                 "query_type": row.get("query_type"),
                 "target_field": field,
                 "target_zone": zone,
-                "relation_kind": row.get("relation_kind"),
+                "relation_kind": _semantic_relation_kind(field, row.get("relation_kind") or row.get("query_type")),
+                "raw_relation_kind": row.get("relation_kind"),
                 "candidate_source": row.get("candidate_source"),
                 "normal_confidence": normal,
                 "anomaly_score": anomaly,
+            }
+            queries.append(query)
+            compact_sources.append({
+                **query,
+                "features": _compact_features(row.get("features") if isinstance(row.get("features"), dict) else {}),
             })
+        compact = _compact_attribution(compact_sources, trusted_explanations)
         return {
             "schema_version": QUERY_SCHEMA_VERSION,
             "queries": queries,
+            "compact_attribution": compact,
             "summary": {
                 "query_count": len(queries),
                 "max_anomaly": max((item["anomaly_score"] for item in queries), default=0.0),
@@ -142,6 +229,7 @@ class ZipNormalQueryBuilder:
             *self._field_match_queries(ctx),
             *self._span_relation_queries(ctx),
             *self._explanation_queries(ctx),
+            *self._targeted_field_queries(ctx),
             *self._violation_queries(ctx),
         ]
         for query in positives:
@@ -355,6 +443,32 @@ class ZipNormalQueryBuilder:
             ))
         return rows
 
+    def _targeted_field_queries(self, ctx: "_GraphContext") -> list[dict[str, Any]]:
+        specs = (
+            ("eocd", "eocd.comment_length", "field_value", "eocd_comment_length", ctx.comment_target_features()),
+            ("sfx_prefix", "sfx_prefix.bytes", "explanation", "sfx_prefix_field", ctx.sfx_prefix_target_features()),
+            ("split_volume", "split_volume.missing_range", "explanation", "missing_range_field", ctx.missing_range_target_features()),
+            ("payload", "payload.compressed_data", "span_relation", "payload_content_field", ctx.payload_content_target_features()),
+            ("central_directory", "central_directory.crc", "field_match", "central_directory_crc_field", ctx.field_match_target_features("central_directory.crc", "central_local_crc_mismatch_count")),
+            ("central_directory", "central_directory.flags", "field_match", "central_directory_flags_field", ctx.field_match_target_features("central_directory.flags", "central_local_flags_mismatch_count")),
+            ("local_header", "local_header.crc", "field_match", "local_header_crc_field", ctx.field_match_target_features("local_header.crc", "central_local_crc_mismatch_count")),
+            ("local_header", "local_header.compressed_size", "field_match", "local_header_compressed_size_field", ctx.field_match_target_features("local_header.compressed_size", "central_local_compressed_size_mismatch_count")),
+            ("zip64", "zip64.extra_length", "field_value", "zip64_extra_length_field", ctx.zip64_target_features("zip64.extra_length")),
+            ("zip64", "zip64.uncompressed_size", "field_value", "zip64_uncompressed_size_field", ctx.zip64_target_features("zip64.uncompressed_size")),
+        )
+        return [
+            _base_query(
+                query_type=query_type,
+                target_zone=zone,
+                target_field=field,
+                target_node_kind=zone,
+                relation_kind=relation,
+                candidate_source="targeted_field",
+                features=features,
+            )
+            for zone, field, query_type, relation, features in specs
+        ]
+
     def _violation_queries(self, ctx: "_GraphContext") -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
         for index, violation in enumerate(ctx.violations[:64]):
@@ -371,8 +485,6 @@ class ZipNormalQueryBuilder:
                 candidate_source="observed_graph_violation",
                 features={
                     "graph_violation_present": True,
-                    "violation_kind": kind,
-                    "violation_severity": str(violation.get("severity") or "unknown"),
                     "abs_delta_to_expected_bucket": _abs_delta_bucket(abs(_int(violation.get("delta")))),
                     "relative_delta_to_expected_bucket": _relative_delta_bucket(abs(_int(violation.get("delta"))), ctx.file_size),
                     "points_to_expected_signature": False,
@@ -394,13 +506,10 @@ class ZipNormalQueryBuilder:
             mutated = dict(features)
             mutated.update({
                 "graph_violation_present": True,
-                "violation_kind": str(query.get("relation_kind") or query.get("query_type") or "synthetic_counterfactual"),
-                "violation_severity": "synthetic",
                 "candidate_inside_archive": True,
                 "points_to_expected_signature": False,
                 "candidate_points_to_expected_signature": False,
                 "values_equal": False,
-                "candidate_source_delta_bucket": _abs_delta_bucket(abs(delta)),
                 "abs_delta_to_expected_bucket": _abs_delta_bucket(abs(delta)),
                 "relative_delta_to_expected_bucket": _relative_delta_bucket(abs(delta), ctx.file_size),
             })
@@ -414,6 +523,47 @@ class ZipNormalQueryBuilder:
                     "candidate_count_less_than_walked": delta < 0,
                     "candidate_count_greater_than_walked": delta > 0,
                     "count_delta_bucket": _count_bucket(abs(delta)),
+                })
+            elif "comment" in target:
+                mutated.update({
+                    "candidate_comment_end_equals_file_end": False,
+                    "candidate_comment_end_before_file_end": delta < 0,
+                    "candidate_comment_end_after_file_end": delta > 0,
+                    "eocd_comment_tail_bytes_present": True,
+                    "available_comment_bytes_delta_bucket": _abs_delta_bucket(abs(delta)),
+                })
+            elif target == "sfx_prefix.bytes":
+                mutated.update({
+                    "sfx_prefix_present": True,
+                    "explanation_applies": False,
+                    "delta_explained": False,
+                    "only_valid_with_sfx_prefix": False,
+                    "delta_equals_sfx_prefix_len": True,
+                })
+            elif target == "split_volume.missing_range":
+                mutated.update({
+                    "split_missing_range_present": True,
+                    "missing_range_explanation_applies": False,
+                    "explanation_applies": False,
+                    "only_valid_with_missing_range": False,
+                    "delta_matches_deleted_range": True,
+                })
+            elif target == "payload.compressed_data":
+                mutated.update(self._payload_negative_features(index))
+            elif target in {"central_directory.crc", "central_directory.flags", "local_header.crc"}:
+                mutated.update({
+                    "both_fields_present": True,
+                    "values_equal": False,
+                    "direct_field_violation_present": True,
+                    "mismatch_count_bucket": "one",
+                    "mismatch_ratio_bucket": "large",
+                })
+            elif target.startswith("zip64."):
+                mutated.update({
+                    "zip64_extra_present": True,
+                    "zip64_extra_mismatch_present": True,
+                    "zip64_extra_overrides_field": False,
+                    "direct_field_violation_present": True,
                 })
             elif query.get("query_type") == "explanation":
                 mutated.update({
@@ -458,6 +608,17 @@ class ZipNormalQueryBuilder:
         return dict(variants[index % len(variants)])
 
     @staticmethod
+    def _payload_negative_features(index: int) -> dict[str, Any]:
+        variants = (
+            {"payload_content_failure_observed": True, "payload_failure_without_match_violation": True},
+            {"payload_end_inside_archive": False, "span_present": True},
+            {"payload_end_after_next_local": True, "span_conflict_count_bucket": "one"},
+            {"valid_with_missing_range": True, "only_valid_with_missing_range": True},
+            {"payload_end_inside_descriptor": True},
+        )
+        return dict(variants[index % len(variants)])
+
+    @staticmethod
     def _compressed_size_negative_features(index: int) -> dict[str, Any]:
         variants = (
             {"payload_end_before_next_local": True, "payload_end_equals_next_local": False},
@@ -470,10 +631,16 @@ class ZipNormalQueryBuilder:
 
 
 class _GraphContext:
-    def __init__(self, graph: dict[str, Any]):
+    def __init__(self, structure: dict[str, Any]):
+        payload = structure if isinstance(structure, dict) else {}
+        graph = payload.get("graph") if isinstance(payload.get("graph"), dict) else payload
         self.graph = graph if isinstance(graph, dict) else {}
-        self.summary = self.graph.get("summary") if isinstance(self.graph.get("summary"), dict) else {}
-        self.runtime = self.graph.get("runtime") if isinstance(self.graph.get("runtime"), dict) else {}
+        graph_summary = self.graph.get("summary") if isinstance(self.graph.get("summary"), dict) else {}
+        structure_summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+        self.summary = graph_summary or structure_summary
+        self.runtime = payload.get("runtime") if isinstance(payload.get("runtime"), dict) else {}
+        self.extraction_outcomes = self.runtime.get("extraction_entry_outcomes") if isinstance(self.runtime.get("extraction_entry_outcomes"), dict) else {}
+        self.coverage_breakdown = self.runtime.get("verification_coverage_breakdown") if isinstance(self.runtime.get("verification_coverage_breakdown"), dict) else {}
         self.nodes = [item for item in self.graph.get("nodes") or [] if isinstance(item, dict)]
         self.edges = [item for item in self.graph.get("edges") or [] if isinstance(item, dict)]
         self.violations = [item for item in self.graph.get("violations") or [] if isinstance(item, dict)]
@@ -494,6 +661,11 @@ class _GraphContext:
         self.zip64_present = bool(self.summary.get("zip64_eocd_present") or self.summary.get("zip64_locator_present") or _int(self.summary.get("zip64_extra_present_count")) > 0)
         self.payload_nodes = self.nodes_by_kind.get("payload_span", [])
         self.descriptor_nodes = self.nodes_by_kind.get("descriptor_candidate", [])
+        self.explanations_by_kind = {
+            str(item.get("kind") or ""): item
+            for item in self.explanations
+            if isinstance(item, dict)
+        }
 
     def offset_features(self, *, candidate: int, expected: int, field: str) -> dict[str, Any]:
         delta = int(candidate) - int(expected)
@@ -545,6 +717,16 @@ class _GraphContext:
             "candidate_comment_end_after_file_end": False,
             "available_comment_bytes_delta_bucket": _abs_delta_bucket(trailing),
             "tail_bytes_after_eocd_bucket": _abs_delta_bucket(trailing),
+        }
+
+    def comment_target_features(self) -> dict[str, Any]:
+        trailing = _int(self.summary.get("trailing_bytes_after_eocd"))
+        direct = self.has_violation_field("eocd.comment_length") or self.has_violation_field("tail.trailing_bytes")
+        return {
+            **self.comment_features(),
+            "direct_field_violation_present": direct,
+            "eocd_comment_tail_bytes_present": trailing > 0,
+            "graph_violation_present": direct,
         }
 
     def local_offset_features(self, *, edge: dict[str, Any], index: int) -> dict[str, Any]:
@@ -618,6 +800,113 @@ class _GraphContext:
             "payload_end_inside_archive": conflicts == 0,
         }
 
+    def sfx_prefix_target_features(self) -> dict[str, Any]:
+        item = self.explanations_by_kind.get("sfx_prefix_adjustment") or {}
+        applies = bool(item.get("applies", item.get("valid", False)))
+        direct = self.has_violation_field("sfx_prefix.bytes") or self.sfx_prefix_len > 0
+        return {
+            **self.explanation_features("sfx_prefix_adjustment", item),
+            "sfx_prefix_present": self.sfx_prefix_len > 0,
+            "direct_field_violation_present": direct,
+            "graph_violation_present": direct,
+            "delta_equals_sfx_prefix_len": bool(self.summary.get("central_directory_offset_delta")) and self.sfx_prefix_len > 0,
+            "only_valid_with_sfx_prefix": applies,
+        }
+
+    def missing_range_target_features(self) -> dict[str, Any]:
+        item = self.explanations_by_kind.get("missing_range_adjustment") or {}
+        applies = bool(item.get("applies", item.get("valid", False)))
+        direct = self.has_violation_field("split_volume.missing_range") or applies
+        return {
+            **self.explanation_features("missing_range_adjustment", item),
+            "split_missing_range_present": applies,
+            "missing_range_explanation_applies": applies,
+            "direct_field_violation_present": direct,
+            "graph_violation_present": direct,
+            "valid_with_missing_range": applies,
+            "only_valid_with_missing_range": applies,
+            "delta_matches_deleted_range": applies,
+        }
+
+    def payload_content_target_features(self) -> dict[str, Any]:
+        span = self.span_features(kind="payload")
+        content_failure = bool(self.runtime.get("payload_content_failure_observed"))
+        verification_observed = bool(self.runtime.get("payload_verification_observed"))
+        verified_intact = bool(self.runtime.get("payload_verified_intact"))
+        unverified_no_failure = bool(self.runtime.get("payload_unverified_but_no_failure"))
+        no_payload_hash_crc_failure = bool(self.runtime.get("no_payload_hash_crc_failure", True))
+        crc_mismatch_count = self._crc_mismatch_count()
+        payload_hash_mismatch_count = _int(self.coverage_breakdown.get("payload_hash_mismatch_count"))
+        entry_failed_count = _int(self.extraction_outcomes.get("entry_failed_count"))
+        data_error_count = _int(self.extraction_outcomes.get("data_error_count"))
+        unexpected_end_count = _int(self.extraction_outcomes.get("unexpected_end_count"))
+        crc_failure = (not no_payload_hash_crc_failure) or crc_mismatch_count > 0 or payload_hash_mismatch_count > 0
+        extraction_payload_failure = data_error_count > 0 or unexpected_end_count > 0
+        direct = self.has_violation_field("payload.compressed_data") or content_failure or crc_failure or extraction_payload_failure
+        match_violation = any(
+            self.has_violation_field(field)
+            for field in ("local_header.crc", "central_directory.crc", "local_header.compressed_size", "central_directory.compressed_size")
+        )
+        return {
+            **span,
+            "payload_content_failure_observed": content_failure,
+            "payload_verification_observed": verification_observed,
+            "payload_verified_intact": verified_intact,
+            "payload_unverified_but_no_failure": unverified_no_failure,
+            "no_payload_hash_crc_failure": no_payload_hash_crc_failure,
+            "crc_mismatch_count": crc_mismatch_count,
+            "payload_hash_mismatch_count": payload_hash_mismatch_count,
+            "entry_failed_count": entry_failed_count,
+            "data_error_count": data_error_count,
+            "unexpected_end_count": unexpected_end_count,
+            "verification_crc_failure": crc_failure,
+            "payload_failure_without_match_violation": (direct or extraction_payload_failure) and not match_violation,
+            "direct_field_violation_present": direct,
+            "graph_violation_present": direct,
+        }
+
+    def field_match_target_features(self, field: str, count_key: str) -> dict[str, Any]:
+        mismatch = _int(self.summary.get(count_key))
+        direct = self.has_violation_field(field) or mismatch > 0
+        crc_mismatch_count = self._crc_mismatch_count()
+        payload_hash_mismatch_count = _int(self.coverage_breakdown.get("payload_hash_mismatch_count"))
+        data_error_count = _int(self.extraction_outcomes.get("data_error_count"))
+        unexpected_end_count = _int(self.extraction_outcomes.get("unexpected_end_count"))
+        no_payload_hash_crc_failure = bool(self.runtime.get("no_payload_hash_crc_failure", True))
+        return {
+            "both_fields_present": self.cd_entry_count > 0 and self.local_header_candidate_count > 0,
+            "values_equal": mismatch == 0 and not self.has_violation_field(field),
+            "mismatch_count_bucket": _count_bucket(mismatch),
+            "mismatch_ratio_bucket": _ratio_bucket(mismatch / max(1, self.cd_entry_count)),
+            "bit3_descriptor_flag_set": self.descriptor_present_count > 0,
+            "zip64_extra_overrides_field": self.zip64_present,
+            "payload_crc_observed": bool(self.runtime.get("payload_content_failure_observed")),
+            "payload_verification_observed": bool(self.runtime.get("payload_verification_observed")),
+            "payload_verified_intact": bool(self.runtime.get("payload_verified_intact")),
+            "no_payload_hash_crc_failure": no_payload_hash_crc_failure,
+            "crc_mismatch_count": crc_mismatch_count,
+            "payload_hash_mismatch_count": payload_hash_mismatch_count,
+            "entry_failed_count": _int(self.extraction_outcomes.get("entry_failed_count")),
+            "data_error_count": data_error_count,
+            "unexpected_end_count": unexpected_end_count,
+            "verification_crc_failure": (not no_payload_hash_crc_failure) or crc_mismatch_count > 0 or payload_hash_mismatch_count > 0,
+            "direct_field_violation_present": direct,
+            "graph_violation_present": direct,
+        }
+
+    def zip64_target_features(self, field: str) -> dict[str, Any]:
+        item = self.explanations_by_kind.get("zip64_extra_resolution") or {}
+        mismatch = _int(self.summary.get("zip64_extra_mismatch_count"))
+        direct = self.has_violation_field(field) or mismatch > 0
+        return {
+            **self.explanation_features("zip64_extra_resolution", item),
+            "zip64_extra_present": _int(self.summary.get("zip64_extra_present_count")) > 0,
+            "zip64_extra_mismatch_present": mismatch > 0,
+            "zip64_extra_overrides_field": bool(item.get("applies", item.get("valid", False))),
+            "direct_field_violation_present": direct,
+            "graph_violation_present": direct,
+        }
+
     def explanation_features(self, relation: str, item: dict[str, Any]) -> dict[str, Any]:
         applies = bool(item.get("applies", item.get("valid", False)))
         delta = abs(_int(item.get("delta")))
@@ -631,6 +920,16 @@ class _GraphContext:
             "descriptor_bit3_explanation_valid": relation == "descriptor_span_adjustment" and applies,
             "abs_delta_to_expected_bucket": _abs_delta_bucket(delta),
         }
+
+    def has_violation_field(self, field: str) -> bool:
+        return any(str(item.get("field") or "") == field for item in self.violations)
+
+    def _crc_mismatch_count(self) -> int:
+        return (
+            _int(self.coverage_breakdown.get("crc_mismatch_count"))
+            + _int(self.coverage_breakdown.get("archive_crc_test_failed_count"))
+            + _int(self.coverage_breakdown.get("archive_crc_file_missing_count"))
+        )
 
 
 def _base_query(
@@ -678,6 +977,200 @@ def _span_size(node: dict[str, Any]) -> int:
     if node.get("size") is not None:
         return _int(node.get("size"))
     return max(0, _int(node.get("end")) - _int(node.get("start")))
+
+
+def _compact_features(features: dict[str, Any]) -> dict[str, Any]:
+    output: dict[str, Any] = {}
+    for key in sorted(COMPACT_FEATURE_ALLOWLIST):
+        if key in features:
+            output[key] = features[key]
+    return output
+
+
+def _compact_attribution(queries: list[dict[str, Any]], trusted_explanations: dict[str, float]) -> dict[str, Any]:
+    ranked = sorted(queries, key=lambda item: float(item.get("anomaly_score") or 0.0), reverse=True)
+    top_queries = [
+        {
+            "rank": index + 1,
+            "query_id": item.get("query_id"),
+            "query_type": item.get("query_type"),
+            "target_field": item.get("target_field"),
+            "target_zone": item.get("target_zone") or _zone_for_field(str(item.get("target_field") or "")),
+            "relation_kind": item.get("relation_kind") or item.get("query_type"),
+            "anomaly_score": float(item.get("anomaly_score") or 0.0),
+            "normal_confidence": float(item.get("normal_confidence") or 0.0),
+            "features": dict(item.get("features") or {}),
+        }
+        for index, item in enumerate(ranked[:TOP_COMPACT_QUERIES])
+    ]
+    return {
+        "schema_version": QUERY_SCHEMA_VERSION,
+        "top_queries": top_queries,
+        "by_field": _compact_by_field(queries, trusted_explanations),
+        "by_relation": _compact_by_relation(queries),
+        "by_zone_relation": _compact_by_zone_relation(queries),
+        "conflict_pairs": _compact_conflict_pairs(queries, trusted_explanations),
+    }
+
+
+def _compact_by_field(queries: list[dict[str, Any]], trusted_explanations: dict[str, float]) -> dict[str, Any]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for query in queries:
+        field = str(query.get("target_field") or "")
+        if field:
+            grouped.setdefault(field, []).append(query)
+    output: dict[str, Any] = {}
+    for field, items in sorted(grouped.items()):
+        ranked = sorted(items, key=lambda item: float(item.get("anomaly_score") or 0.0), reverse=True)
+        scores = [float(item.get("anomaly_score") or 0.0) for item in ranked]
+        top = ranked[0] if ranked else {}
+        features = _merged_features(ranked[:3])
+        output[field] = {
+            "max": max(scores, default=0.0),
+            "mean_top3": sum(scores[:3]) / max(1, min(3, len(scores))),
+            "count_ge_50": sum(1 for score in scores if score >= 0.5),
+            "count_ge_80": sum(1 for score in scores if score >= 0.8),
+            "top_relation": str(top.get("relation_kind") or top.get("query_type") or ""),
+            "top_query_type": str(top.get("query_type") or ""),
+            "has_direct_violation": bool(features.get("graph_violation_present")),
+            "explained_by_sfx": _field_explained_by_sfx(field, features, trusted_explanations),
+            "explained_by_missing_range": _field_explained_by_missing_range(field, features, trusted_explanations),
+        }
+    return output
+
+
+def _compact_by_relation(queries: list[dict[str, Any]]) -> dict[str, Any]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for query in queries:
+        relation = str(query.get("relation_kind") or query.get("query_type") or "")
+        if relation:
+            grouped.setdefault(relation, []).append(query)
+    output: dict[str, Any] = {}
+    for relation, items in sorted(grouped.items()):
+        ranked = sorted(items, key=lambda item: float(item.get("anomaly_score") or 0.0), reverse=True)
+        scores = [float(item.get("anomaly_score") or 0.0) for item in ranked]
+        output[relation] = {
+            "max": max(scores, default=0.0),
+            "mean_top3": sum(scores[:3]) / max(1, min(3, len(scores))),
+            "count_ge_80": sum(1 for score in scores if score >= 0.8),
+            "top_field": str(ranked[0].get("target_field") or "") if ranked else "",
+        }
+    return output
+
+
+def _compact_by_zone_relation(queries: list[dict[str, Any]]) -> dict[str, float]:
+    output: dict[str, float] = {}
+    for query in queries:
+        field = str(query.get("target_field") or "")
+        zone = str(query.get("target_zone") or _zone_for_field(field))
+        relation = str(query.get("relation_kind") or query.get("query_type") or "")
+        if not zone or not relation:
+            continue
+        key = f"{zone}|{relation}"
+        output[key] = max(output.get(key, 0.0), float(query.get("anomaly_score") or 0.0))
+    return dict(sorted(output.items()))
+
+
+def _compact_conflict_pairs(queries: list[dict[str, Any]], trusted_explanations: dict[str, float]) -> dict[str, Any]:
+    output: dict[str, Any] = {}
+    for name, (field, relation) in CONFLICT_PAIR_SPECS.items():
+        candidates = [
+            query for query in queries
+            if _pair_field_match(str(query.get("target_field") or ""), field)
+            or _pair_relation_match(str(query.get("relation_kind") or query.get("query_type") or ""), relation)
+        ]
+        ranked = sorted(candidates, key=lambda item: float(item.get("anomaly_score") or 0.0), reverse=True)
+        top = ranked[0] if ranked else {}
+        features = _merged_features(ranked[:3])
+        output[name] = {
+            "score": float(top.get("anomaly_score") or 0.0),
+            "explained": _pair_explained(name, features, trusted_explanations),
+            "top_field": str(top.get("target_field") or field),
+            "top_relation": str(top.get("relation_kind") or top.get("query_type") or relation),
+        }
+    return output
+
+
+def _merged_features(queries: list[dict[str, Any]]) -> dict[str, Any]:
+    output: dict[str, Any] = {}
+    for query in queries:
+        features = query.get("features") if isinstance(query.get("features"), dict) else {}
+        for key, value in features.items():
+            if isinstance(value, bool):
+                output[key] = bool(output.get(key, False) or value)
+            elif key not in output:
+                output[key] = value
+    return output
+
+
+def _pair_field_match(actual: str, expected: str) -> bool:
+    if actual == expected:
+        return True
+    if expected == "zip64.extra":
+        return actual.startswith("zip64.")
+    return False
+
+
+def _pair_relation_match(actual: str, expected: str) -> bool:
+    return bool(actual and expected and actual == expected)
+
+
+def _pair_explained(name: str, features: dict[str, Any], trusted_explanations: dict[str, float]) -> bool:
+    if name == "sfx_cd_offset":
+        return bool(features.get("only_valid_with_sfx_prefix") or features.get("delta_equals_sfx_prefix_len") or trusted_explanations.get("sfx_prefix_adjustment", 0.0) >= 0.5)
+    if name == "missing_range_payload_span":
+        return bool(features.get("only_valid_with_missing_range") or features.get("delta_matches_deleted_range") or trusted_explanations.get("missing_range_adjustment", 0.0) >= 0.5)
+    if name == "zip64_extra_override":
+        return bool(features.get("zip64_extra_overrides_field") or trusted_explanations.get("zip64_extra_resolution", 0.0) >= 0.5)
+    if name == "payload_descriptor_span":
+        return bool(features.get("inside_descriptor_span") or features.get("payload_end_inside_descriptor") or trusted_explanations.get("descriptor_span_adjustment", 0.0) >= 0.5)
+    return False
+
+
+def _semantic_relation_kind(field: str, relation: Any) -> str:
+    text = str(relation or "")
+    if text in {
+        "points_to",
+        "owns_span",
+        "should_match",
+        "field_value",
+        "span_relation",
+        "sfx_prefix_adjustment",
+        "missing_range_adjustment",
+        "descriptor_span_adjustment",
+        "zip64_extra_resolution",
+    }:
+        return text
+    field_text = str(field or "")
+    if any(part in field_text for part in ("offset", "zip64.locator")):
+        return "points_to"
+    if any(part in field_text for part in ("compressed_size", "uncompressed_size", "payload", "record", "tail", "missing_range")):
+        return "owns_span"
+    if any(part in field_text for part in ("crc", "flags", "method", "filename", "header")):
+        return "should_match"
+    return "field_value"
+
+
+def _field_explained_by_sfx(field: str, features: dict[str, Any], trusted_explanations: dict[str, float]) -> bool:
+    return bool(
+        field in {"eocd.cd_offset", "central_directory.local_header_offset", "sfx_prefix.bytes"}
+        and (
+            features.get("only_valid_with_sfx_prefix")
+            or features.get("delta_equals_sfx_prefix_len")
+            or trusted_explanations.get("sfx_prefix_adjustment", 0.0) >= 0.5
+        )
+    )
+
+
+def _field_explained_by_missing_range(field: str, features: dict[str, Any], trusted_explanations: dict[str, float]) -> bool:
+    return bool(
+        field in {"payload.compressed_data", "split_volume.missing_range", "central_directory.local_header_offset"}
+        and (
+            features.get("only_valid_with_missing_range")
+            or features.get("delta_matches_deleted_range")
+            or trusted_explanations.get("missing_range_adjustment", 0.0) >= 0.5
+        )
+    )
 
 
 def _zone_for_field(field: str) -> str:

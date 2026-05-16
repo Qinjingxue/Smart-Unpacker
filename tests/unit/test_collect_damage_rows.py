@@ -380,7 +380,8 @@ def test_zip_damage_feature_spec_excludes_compressed_route_flags():
     assert "runtime_context.extraction_summary.entry_outcomes." in spec.include_prefixes
     assert "runtime_context.verification_summary.coverage_breakdown." in spec.include_prefixes
     assert "runtime_context.analysis_native_probe.structure.graph.nodes" in spec.ignore_prefixes
-    assert "runtime_context.analysis_native_probe.raw_structure.graph.edges" in spec.ignore_prefixes
+    assert not any("raw_structure" in prefix for prefix in spec.include_prefixes)
+    assert not any("raw_structure" in prefix for prefix in spec.ignore_prefixes)
 
 
 def test_zip_eocd_probe_exposes_tolerant_candidate_fields(tmp_path):

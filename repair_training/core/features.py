@@ -134,7 +134,12 @@ def feature_spec(plugin: TrainingFormatPlugin, model_type: str) -> TrainingFeatu
                 "entry_index_bucket",
             ),
             ignore_prefixes=("metadata.", "source_identity."),
-            ignore_paths=("normal_label",),
+            ignore_paths=(
+                "normal_label",
+                "features.candidate_source_delta_bucket",
+                "features.violation_kind",
+                "features.violation_severity",
+            ),
         )
     return TrainingFeatureSpec(
         include_prefixes=("action_type", "candidate_snapshot.", "damage_analysis_target.", "current_recovery.", "next_recovery.", "recovery_delta"),
