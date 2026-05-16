@@ -13,6 +13,9 @@ def attach_split_volumes(source_input: dict[str, Any], record: dict[str, Any]) -
     for key, value in record.items():
         if str(key).endswith("container_tags") and isinstance(value, list):
             tags.extend(str(item) for item in value if str(item))
+    source_derivation = record.get("source_derivation") if isinstance(record.get("source_derivation"), dict) else {}
+    if isinstance(source_derivation.get("zip_container_tags"), list):
+        tags.extend(str(item) for item in source_derivation.get("zip_container_tags") or [] if str(item))
     value = record.get("container_tags")
     if isinstance(value, list):
         tags.extend(str(item) for item in value if str(item))
@@ -42,6 +45,10 @@ def attach_split_volumes(source_input: dict[str, Any], record: dict[str, Any]) -
         for item in split_payload.get("volumes") or split_payload.get("parts") or []:
             if isinstance(item, dict) and item.get("path"):
                 volumes.append(dict(item))
+    source_split_payload = source_derivation.get("zip_split") if isinstance(source_derivation.get("zip_split"), dict) else {}
+    for item in source_split_payload.get("volumes") or source_split_payload.get("parts") or []:
+        if isinstance(item, dict) and item.get("path"):
+            volumes.append(dict(item))
     for item in damaged.get("parts") or []:
         if isinstance(item, dict) and item.get("path"):
             volumes.append(dict(item))
@@ -65,6 +72,13 @@ def attach_split_volumes(source_input: dict[str, Any], record: dict[str, Any]) -
     source_input["parts"] = source_input.get("parts") or []
     source_input["ranges"] = source_input.get("ranges") or []
     existing = {str(p.get("path", "")) for p in source_input.get("parts", []) if isinstance(p, dict)}
+    main_path = str(source_input.get("path") or source_input.get("archive_path") or record.get("damaged_path") or "")
+    if main_path:
+        resolved_main = str(Path(main_path).resolve())
+        if resolved_main not in existing:
+            source_input["parts"].insert(0, {"path": resolved_main, "role": "main", "volume_number": 1})
+            source_input["ranges"].insert(0, {"path": resolved_main, "start": 0, "end": None})
+            existing.add(resolved_main)
 
     def volume_sort_key(item: dict[str, Any]) -> tuple[int, str]:
         try:
@@ -75,8 +89,9 @@ def attach_split_volumes(source_input: dict[str, Any], record: dict[str, Any]) -
     for vol in sorted(volumes, key=volume_sort_key):
         vol_path = str(Path(str(vol.get("path") or "")).resolve())
         if vol_path not in existing:
-            source_input["parts"].append({"path": vol_path, "role": "volume"})
+            source_input["parts"].append({"path": vol_path, "role": "volume", "volume_number": int(vol.get("index") or len(source_input["parts"]) + 1)})
             source_input["ranges"].append({"path": vol_path, "start": 0, "end": None})
+            existing.add(vol_path)
     if source_input.get("parts"):
         source_input["split_sidecars_available"] = True
 

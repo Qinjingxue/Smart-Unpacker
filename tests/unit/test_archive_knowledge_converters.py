@@ -39,7 +39,7 @@ def test_layer_converters_write_archive_knowledge_namespaces(tmp_path):
     assert payload["relations"]["parts"] == [str(archive)]
     assert payload["detection"]["detected_ext"] == "zip"
     assert payload["analysis"]["selected_format"] == "zip"
-    assert payload["format"]["zip"]["structure"]["has_data_descriptor"] is True
+    assert "has_data_descriptor" not in payload["format"]["zip"].get("structure", {})
     assert payload["extraction"]["failure"]["failure_kind"] == "data_error"
     assert payload["archive"]["password"] == "secret"
     assert payload["archive"]["password_present"] is True
@@ -106,13 +106,14 @@ def test_extraction_verification_and_zip_runtime_evidence_facts(tmp_path):
     assert outcomes["crc_error_count"] >= 1
     assert breakdown["crc_mismatch_count"] >= 1
     assert breakdown["size_mismatch_count"] >= 1
-    assert structure["directory_consistency"]["crc_mismatch_entry_count"] == 1
-    assert structure["directory_consistency"]["single_entry_mismatch"] is True
-    assert structure["evidence"]["cd_local_mismatch_with_crc_failure"] is True
-    assert structure["evidence"]["tail_truncation_likely"] is True
-    assert structure["evidence"]["has_split_sidecars"] is True
-    assert structure["evidence"]["payload_failure_without_header_mismatch"] is False
-    assert structure["evidence"]["descriptor_candidate_span_overlap_count"] == 0
+    runtime = structure["runtime"]
+    assert "directory_consistency" not in structure
+    assert runtime["has_split_sidecars"] is True
+    assert runtime["split_part_count"] == 2
+    assert runtime["payload_content_failure_observed"] is True
+    assert runtime["no_payload_hash_crc_failure"] is False
+    assert runtime["extraction_entry_outcomes"]["entry_failed_count"] == 1
+    assert runtime["verification_coverage_breakdown"]["crc_mismatch_count"] >= 1
 
 
 def test_zip_runtime_evidence_separates_structural_checksum_and_sfx_offset(tmp_path):
@@ -180,27 +181,96 @@ def test_zip_runtime_evidence_separates_structural_checksum_and_sfx_offset(tmp_p
     )
 
     structure = task.knowledge().to_dict()["format"]["zip"]["structure"]
-    descriptor = structure["directory_consistency"]["descriptor"]
-    evidence = structure["evidence"]
+    evidence = structure["runtime"]
 
-    assert descriptor["descriptor_candidate_span_overlap_count"] == 2
-    assert evidence["payload_failure_without_header_mismatch"] is False
-    assert evidence["payload_failure_but_archive_coverage_complete"] is True
-    assert evidence["checksum_error_likely_structural_not_payload"] is True
-    assert evidence["cd_offset_delta_with_zero_cd_size_delta"] is True
-    assert evidence["local_header_link_error_without_payload_crc"] is True
-    assert evidence["cd_pointer_raw_likely"] is True
-    assert evidence["cd_pointer_error_likely"] is False
-    assert evidence["entry_count_delta_explained_by_cd_pointer_error"] is False
-    assert evidence["sfx_prefix_len"] == 10
-    assert evidence["cd_offset_error_explained_by_prefix"] is True
-    assert evidence["declared_cd_offset_plus_archive_offset_delta"] == 0
-    assert evidence["cd_offset_matches_after_sfx_adjustment"] is True
-    assert evidence["sfx_cd_offset_shift_likely"] is True
-    assert evidence["local_header_error_explained_by_sfx_offset"] is True
+    assert "directory_consistency" not in structure
     assert evidence["payload_verification_observed"] is True
     assert evidence["payload_verified_intact"] is True
     assert evidence["payload_unverified_but_no_failure"] is False
+    assert evidence["payload_content_failure_observed"] is False
+    assert evidence["no_payload_hash_crc_failure"] is True
+
+
+def test_zip_runtime_evidence_attributes_partial_payload_to_missing_range(tmp_path):
+    archive = tmp_path / "sample.zip"
+    part = tmp_path / "sample.z01"
+    archive.write_bytes(b"PK\x05\x06" + b"\0" * 18)
+    part.write_bytes(b"sidecar")
+    bag = FactBag()
+    bag.set("candidate.entry_path", str(archive))
+    bag.set("file.detected_ext", "zip")
+    task = ArchiveTask.from_fact_bag(bag, score=10)
+    write_analysis_report(task, _analysis_report(str(archive)))
+    knowledge = task.knowledge()
+    knowledge.set(
+        "source.input",
+        {
+            "kind": "file",
+            "path": str(archive),
+            "format_hint": "zip",
+            "parts": [{"path": str(archive), "role": "main"}, {"path": str(part), "role": "volume"}],
+        },
+        source_layer="test",
+    )
+    knowledge.set(
+        "format.zip.structure.eocd",
+        {
+            "declared_central_directory_offset": 1000,
+            "physical_central_directory_offset": 800,
+            "declared_central_directory_size": 30,
+            "physical_central_directory_size": 30,
+            "central_directory_offset_delta": 200,
+            "central_directory_size_delta": 0,
+        },
+        source_layer="test",
+    )
+    knowledge.set(
+        "format.zip.structure.directory_consistency",
+        {
+            "file_size": 830,
+            "cd_entries_checked": 2,
+            "descriptor": {
+                "local_header_offset_points_inside_payload_count": 1,
+                "local_header_offset_points_to_descriptor_or_payload_count": 1,
+            },
+        },
+        source_layer="test",
+    )
+    task.set_knowledge(knowledge)
+    write_extraction_result(
+        task,
+        ExtractionResult(
+            success=False,
+            archive=str(archive),
+            out_dir=str(tmp_path / "out"),
+            all_parts=[str(archive)],
+            error="data error",
+            diagnostics={"result": {"status": "failed", "failure_stage": "item_extract", "failure_kind": "data_error"}},
+            partial_outputs=True,
+            progress_manifest_payload={
+                "files": [{"archive_path": "a.txt", "status": "partial", "failure_kind": "data_error"}]
+            },
+        ),
+    )
+    write_verification_result(
+        task,
+        VerificationResult(
+            completeness=1.0,
+            assessment_status="partial",
+            decision_hint="repair",
+            archive_coverage=ArchiveCoverageSummary(completeness=1.0),
+        ),
+    )
+
+    structure = task.knowledge().to_dict()["format"]["zip"]["structure"]
+    evidence = structure["runtime"]
+
+    assert "evidence" not in structure
+    assert evidence["has_split_sidecars"] is True
+    assert evidence["split_part_count"] == 2
+    assert evidence["payload_content_failure_observed"] is False
+    assert evidence["no_payload_hash_crc_failure"] is True
+    assert evidence["payload_unverified_but_no_failure"] is True
 
 
 def _analysis_report(path: str) -> ArchiveAnalysisReport:

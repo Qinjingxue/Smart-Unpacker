@@ -353,11 +353,41 @@ def flatten(value: Any, *, prefix: str = "") -> dict[str, Any]:
         return output
     if isinstance(value, (list, tuple, set)):
         output[f"{prefix}.count" if prefix else "count"] = len(value)
+        dict_items = [item for item in value if isinstance(item, dict)]
+        if dict_items:
+            output.update(_flatten_dict_list_summary(dict_items, prefix=prefix))
+            return output
         for item in value:
             if isinstance(item, (str, int, float, bool)):
                 output[f"{prefix}.{_safe_token(item)}" if prefix else _safe_token(item)] = 1
         return output
     output[prefix] = value
+    return output
+
+
+def _flatten_dict_list_summary(items: list[dict[str, Any]], *, prefix: str = "") -> dict[str, Any]:
+    output: dict[str, Any] = {}
+    categorical_keys = ("kind", "type", "status", "field", "severity", "valid", "applies")
+    numeric_keys = ("delta", "confidence", "size", "start", "end")
+    for item in items:
+        for key in categorical_keys:
+            if key not in item:
+                continue
+            token = _safe_token(item.get(key))
+            name = f"{prefix}.{key}.{token}" if prefix else f"{key}.{token}"
+            output[name] = output.get(name, 0) + 1
+        for key in numeric_keys:
+            if key not in item or not _is_number(item.get(key)):
+                continue
+            value = _float(item.get(key))
+            base = f"{prefix}.{key}" if prefix else key
+            output[f"{base}.sum"] = output.get(f"{base}.sum", 0.0) + value
+            output[f"{base}.min"] = value if f"{base}.min" not in output else min(output[f"{base}.min"], value)
+            output[f"{base}.max"] = value if f"{base}.max" not in output else max(output[f"{base}.max"], value)
+    for key in numeric_keys:
+        base = f"{prefix}.{key}" if prefix else key
+        if f"{base}.sum" in output:
+            output[f"{base}.mean"] = output[f"{base}.sum"] / float(max(1, len(items)))
     return output
 
 

@@ -4,6 +4,7 @@ import zipfile
 from pathlib import Path
 
 from repair_training.build_features import main as build_features_main
+from repair_training.core.material_records import attach_split_volumes
 from repair_training.core.features import damage_labels_for_row, damage_location_labels_from_target
 from repair_training.collect_damage_rows import collect_damage_row
 from repair_training.formats.zip.corruption_impl import build_corpus_corruption_case
@@ -16,6 +17,7 @@ from sunpack.contracts.detection import FactBag
 from sunpack.contracts.tasks import ArchiveTask
 from sunpack.detection.pipeline.processors.modules.format_structure.zip_directory_consistency import inspect_zip_directory_consistency
 from sunpack.detection.pipeline.processors.modules.format_structure.zip_eocd import inspect_zip_eocd_structure
+from sunpack.detection.pipeline.processors.modules.format_structure.zip_structure_graph import inspect_zip_structure_graph
 from sunpack.repair.policy.training_runtime import build_damage_analysis_request
 from sunpack.repair.job import RepairJob
 from sunpack.repair.scheduler import RepairScheduler
@@ -103,6 +105,36 @@ def test_zip_non_sfx_compound_still_auto_adds_local_header(tmp_path):
     assert any(zone.startswith("zip.local_header") for zone in zones)
 
 
+def test_attach_split_volumes_reads_source_derivation_zip_split(tmp_path):
+    damaged = tmp_path / "damaged.zip"
+    z01 = tmp_path / "sample.z01"
+    z02 = tmp_path / "sample.z02"
+    damaged.write_bytes(b"bad")
+    z01.write_bytes(b"part1")
+    z02.write_bytes(b"part2")
+    source_input = {"kind": "file", "path": str(damaged), "format_hint": "zip"}
+    record = {
+        "damage_profile": "compound_sfx_cd_offset_split_only",
+        "damaged_input": source_input,
+        "source_derivation": {
+            "zip_container_tags": ["sfx", "split", "multi_volume"],
+            "zip_split": {
+                "volumes": [
+                    {"index": 1, "path": str(z01)},
+                    {"index": 2, "path": str(z02)},
+                ]
+            },
+        },
+    }
+
+    attach_split_volumes(source_input, record)
+
+    assert source_input["split_sidecars_available"] is True
+    assert "open_mode" not in source_input
+    assert [Path(item["path"]).name for item in source_input["parts"]] == ["damaged.zip", "sample.z01", "sample.z02"]
+    assert len(source_input["ranges"]) == 3
+
+
 def test_zip_descriptor_conflict_default_does_not_insert_fake_descriptor(tmp_path):
     for profile in ("zip_data_descriptor_conflict", "zip_data_descriptor_cd_conflict", "zip_data_descriptor_payload_bad"):
         plan = _profile_plan(tmp_path, profile)
@@ -110,6 +142,15 @@ def test_zip_descriptor_conflict_default_does_not_insert_fake_descriptor(tmp_pat
 
         assert descriptor_items == []
         assert not any((item.get("operation") or {}).get("op") == "insert" for item in plan if "descriptor" in str(item.get("name") or ""))
+
+
+def test_zip_split_missing_middle_volume_label_does_not_include_payload(tmp_path):
+    labels = set(damage_location_labels_from_target(normalize_damage_record({"format": "zip", "corruption_plan": _profile_plan(tmp_path, "zip_split_missing_middle_volume")}).to_dict()))
+
+    assert "field:split_volume.missing_range" in labels
+    assert "zone:split_volume" in labels
+    assert "field:payload.compressed_data" not in labels
+    assert "zone:payload" not in labels
 
 
 def test_zip_descriptor_fake_span_profile_keeps_explicit_descriptor_and_cd_labels(tmp_path):
@@ -258,20 +299,24 @@ def test_zip_structure_facts_enter_archive_knowledge_and_damage_request(tmp_path
     facts = FactBag()
     facts.set("file.path", str(archive))
     facts.set("archive.knowledge", {"source": {"input": {"kind": "file", "path": str(archive), "format_hint": "zip"}}})
-    facts.set("zip.eocd_structure", {"error": "bad_central_directory_signature", "eocd_offset": 17, "plausible": False})
-    facts.set("zip.local_header", {"offset": 0, "plausible": True, "filename_len": 4, "error": ""})
     facts.set(
-        "zip.directory_consistency",
+        "zip.structure_graph",
         {
-            "cd_parseable": True,
-            "central_local_crc_mismatch_count": 1,
-            "descriptor": {"descriptor_flag_mismatch_count": 1},
-            "zip64_consistency": {"zip64_locator_present": True},
+            "schema_version": 1,
+            "format": "zip",
+            "error": "",
+            "nodes": [{"id": "eocd:0", "kind": "eocd", "status": "parsed", "start": 17, "end": 39}],
+            "edges": [{"source_node": "eocd:0", "target_node": "central_directory:0", "kind": "points_to", "valid": False, "field": "eocd.cd_offset"}],
+            "violations": [{"kind": "bad_signature", "field": "eocd.cd_offset", "delta": 17, "severity": "high"}],
+            "explanations": [{"kind": "zip64_extra_resolution", "applies": True, "field": "zip64.locator", "delta": 0}],
+            "summary": {
+                "eocd_present": True,
+                "cd_entry_count": 1,
+                "zip64_locator_present": True,
+                "central_local_crc_mismatch_count": 1,
+            },
         },
     )
-    facts.set("zip.local_header_plausible", True)
-    facts.set("zip.local_header_offset", 0)
-    facts.set("zip.local_header_error", "")
     task = ArchiveTask(fact_bag=facts, score=10, main_path=str(archive), detected_ext="zip")
     report = ArchiveAnalysisReport(
         path=str(archive),
@@ -284,12 +329,11 @@ def test_zip_structure_facts_enter_archive_knowledge_and_damage_request(tmp_path
     knowledge = task.knowledge().to_dict()
     structure = knowledge["format"]["zip"]["structure"]
 
-    assert structure["eocd"]["error"] == "bad_central_directory_signature"
-    assert structure["eocd.eocd_offset"] == 17
-    assert structure["local_header"]["filename_len"] == 4
-    assert structure["local_header.plausible"] is True
-    assert structure["directory_consistency"]["central_local_crc_mismatch_count"] == 1
-    assert structure["zip64_consistency"]["zip64_locator_present"] is True
+    assert set(structure) == {"graph", "summary"}
+    assert structure["graph"]["nodes"][0]["kind"] == "eocd"
+    assert structure["graph"]["violations"][0]["field"] == "eocd.cd_offset"
+    assert structure["summary"]["central_local_crc_mismatch_count"] == 1
+    assert structure["summary"]["zip64_locator_present"] is True
 
     job = RepairJob(
         source_input={"kind": "file", "path": str(archive), "format_hint": "zip"},
@@ -300,25 +344,43 @@ def test_zip_structure_facts_enter_archive_knowledge_and_damage_request(tmp_path
     request = build_damage_analysis_request(job, None, diagnosis={"format": "zip"})
     probe = request.runtime_context["analysis_native_probe"]
 
-    assert probe["structure"]["eocd"]["error"] == "bad_central_directory_signature"
-    assert probe["raw_structure"]["local_header"]["filename_len"] == 4
-    assert probe["structure"]["directory_consistency"]["descriptor"]["descriptor_flag_mismatch_count"] == 1
-    assert probe["raw_structure"]["zip64_consistency"]["zip64_locator_present"] is True
+    assert probe["structure"]["graph"]["nodes"][0]["kind"] == "eocd"
+    assert probe["raw_structure"]["graph"]["violations"][0]["field"] == "eocd.cd_offset"
+    assert probe["structure"]["summary"]["central_local_crc_mismatch_count"] == 1
+    assert probe["raw_structure"]["summary"]["zip64_locator_present"] is True
+
+
+def test_zip_structure_graph_native_outputs_graph_shape(tmp_path):
+    archive = tmp_path / "clean.zip"
+    with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("a.txt", "hello")
+
+    graph = inspect_zip_structure_graph(str(archive))
+
+    assert graph["schema_version"] == 1
+    assert graph["summary"]["cd_entry_count"] == 1
+    assert any(node["kind"] == "eocd" for node in graph["nodes"])
+    assert any(node["kind"] == "cd_entry" for node in graph["nodes"])
+    assert any(node["kind"] == "local_header_candidate" for node in graph["nodes"])
+    assert any(edge["kind"] == "points_to" for edge in graph["edges"])
+    assert "directory_consistency" not in graph
 
 
 def test_zip_damage_feature_spec_excludes_compressed_route_flags():
     spec = damage_feature_spec()
 
-    assert "runtime_context.analysis_native_probe.structure." in spec.include_prefixes
-    assert "runtime_context.analysis_native_probe.raw_structure." in spec.include_prefixes
+    assert "runtime_context.analysis_native_probe.structure.graph.summary." in spec.include_prefixes
+    assert "runtime_context.analysis_native_probe.structure.graph.violations." in spec.include_prefixes
+    assert "runtime_context.analysis_native_probe.structure.graph.explanations." in spec.include_prefixes
+    assert "runtime_context.analysis_native_probe.structure.runtime." in spec.include_prefixes
     assert not any(prefix == "runtime_context.job_summary." for prefix in spec.include_prefixes)
     assert not any("route_evidence" in prefix or "damage_flags" in prefix for prefix in spec.include_prefixes)
     assert "runtime_context.extraction_summary." not in spec.include_prefixes
     assert "runtime_context.verification_summary." not in spec.include_prefixes
     assert "runtime_context.extraction_summary.entry_outcomes." in spec.include_prefixes
     assert "runtime_context.verification_summary.coverage_breakdown." in spec.include_prefixes
-    assert "runtime_context.analysis_native_probe.structure.eocd.entry_count_delta" in spec.ignore_paths
-    assert "runtime_context.analysis_native_probe.raw_structure.eocd.entry_count_delta" in spec.ignore_paths
+    assert "runtime_context.analysis_native_probe.structure.graph.nodes" in spec.ignore_prefixes
+    assert "runtime_context.analysis_native_probe.raw_structure.graph.edges" in spec.ignore_prefixes
 
 
 def test_zip_eocd_probe_exposes_tolerant_candidate_fields(tmp_path):
@@ -425,6 +487,6 @@ def test_training_runtime_exposes_zip_observation_facts_in_structure(tmp_path):
     request = build_damage_analysis_request(job, None, diagnosis={"format": "zip"})
     structure = request.runtime_context["analysis_native_probe"]["structure"]
 
-    assert structure["extraction_entry_outcomes"]["entry_failed_count"] == 1
-    assert structure["verification_coverage_breakdown"]["crc_mismatch_count"] == 1
+    assert structure["runtime"]["extraction_entry_outcomes"]["entry_failed_count"] == 1
+    assert structure["runtime"]["verification_coverage_breakdown"]["crc_mismatch_count"] == 1
     assert structure["evidence"]["payload_failure_without_header_mismatch"] is True

@@ -1237,7 +1237,7 @@ def _zip_corpus_mutations(data: bytes, randomizer: random.Random, profile: str, 
         if eocd >= 0 and eocd + 22 <= len(data):
             mutations.extend(_zip_eocd_directory_conflict_mutations(eocd))
         mutations.extend(_zip_damage_payloads(data, entry_infos, randomizer, all_entries=True, name="corpus_zip_all_entry_payload_damage", expected_effect="all entry payloads are damaged but names may remain recoverable"))
-    if layer in {"hard_negative", "deceptive_hard_negative"}:
+    if layer in {"hard_negative", "deceptive_hard_negative"} and "missing_volume" not in profile and "split" not in profile:
         payload_offset = _middle_offset(data, randomizer)
         mutations.append(_replace_byte("corpus_zip_flip_payload_byte", payload_offset, data[payload_offset] ^ 0x41, "zip.local_payload", "payload checksum may fail"))
     if ("missing_volume" in profile or (layer == "partial_recoverable" and not profile.startswith("zip_"))) and len(data) > 128:

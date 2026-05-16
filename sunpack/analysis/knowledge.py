@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+from pathlib import Path
 from typing import Any
 
 from sunpack.analysis import ArchiveAnalysisReport
@@ -192,14 +193,12 @@ def write_zip_runtime_evidence_facts(task: ArchiveTask) -> dict[str, Any]:
     structure = _dict_at(knowledge, "format.zip.structure")
     if not structure:
         return {}
-    evidence = _zip_runtime_evidence_payload(knowledge, structure)
-    if not evidence:
+    runtime_full = _zip_runtime_evidence_payload(knowledge, structure)
+    if not runtime_full:
         return {}
-    merged = dict(structure)
-    directory = merged.get("directory_consistency")
-    if isinstance(directory, dict):
-        merged["directory_consistency"] = _enrich_zip_directory_consistency(dict(directory))
-    merged["evidence"] = evidence
+    merged = _dedup_zip_structure(dict(structure))
+    merged["runtime"] = _zip_runtime_public_payload(runtime_full, knowledge)
+    _append_runtime_zip_graph_explanations(merged, runtime_full)
     write_payload(
         knowledge,
         "format.zip",
@@ -208,7 +207,7 @@ def write_zip_runtime_evidence_facts(task: ArchiveTask) -> dict[str, Any]:
         source_module="zip_runtime_evidence",
     )
     commit_task_knowledge(task, knowledge)
-    return evidence
+    return merged["runtime"]
 
 
 def _write_format_evidence(knowledge: Any, evidence: ArchiveFormatEvidence, *, task: ArchiveTask | None = None) -> None:
@@ -284,32 +283,31 @@ def _format_structure_payload(fmt: str, details: dict[str, Any], *, task: Archiv
 
 
 def _merge_zip_structure_facts(structure: dict[str, Any], task: ArchiveTask) -> dict[str, Any]:
-    output = dict(structure or {})
+    output = _dedup_zip_structure(dict(structure or {}))
     fact_bag = getattr(task, "fact_bag", None)
     get = getattr(fact_bag, "get", None)
     if not callable(get):
         return output
+    graph = get("zip.structure_graph")
+    if isinstance(graph, dict) and graph:
+        graph_payload = dict(graph)
+        summary = graph_payload.get("summary") if isinstance(graph_payload.get("summary"), dict) else {}
+        output["graph"] = graph_payload
+        output["summary"] = dict(summary or {})
+        return output
     eocd = get("zip.eocd_structure")
     if isinstance(eocd, dict) and eocd:
-        output["eocd"] = dict(eocd)
-        for key, value in eocd.items():
-            output.setdefault(f"eocd.{key}", value)
+        output.setdefault("summary", {})
+        output["summary"].update(_legacy_zip_summary_from_eocd(eocd))
     local = get("zip.local_header")
     if isinstance(local, dict) and local:
-        output["local_header"] = dict(local)
-        for key, value in local.items():
-            output.setdefault(f"local_header.{key}", value)
+        output.setdefault("summary", {})
+        output["summary"].update(_legacy_zip_summary_from_local(local))
     directory = get("zip.directory_consistency")
     if isinstance(directory, dict) and directory:
         enriched_directory = _enrich_zip_directory_consistency(dict(directory))
-        output["directory_consistency"] = enriched_directory
-        for key, value in enriched_directory.items():
-            output.setdefault(f"directory_consistency.{key}", value)
-        zip64 = enriched_directory.get("zip64_consistency")
-        if isinstance(zip64, dict) and zip64:
-            output["zip64_consistency"] = dict(zip64)
-            for key, value in zip64.items():
-                output.setdefault(f"zip64_consistency.{key}", value)
+        output.setdefault("summary", {})
+        output["summary"].update(_legacy_zip_summary_from_directory(enriched_directory))
     for fact_key, output_key in (
         ("zip.local_header_plausible", "local_header.plausible"),
         ("zip.local_header_offset", "local_header.offset"),
@@ -317,8 +315,71 @@ def _merge_zip_structure_facts(structure: dict[str, Any], task: ArchiveTask) -> 
     ):
         value = get(fact_key)
         if value not in (None, "", [], {}):
-            output.setdefault(output_key, value)
+            output.setdefault("summary", {})
+            output["summary"].setdefault(output_key.replace(".", "_"), value)
     return output
+
+
+def _dedup_zip_structure(structure: dict[str, Any]) -> dict[str, Any]:
+    output: dict[str, Any] = {}
+    for key in ("graph", "summary", "runtime"):
+        value = structure.get(key)
+        if isinstance(value, dict) and value:
+            output[key] = dict(value)
+    return output
+
+
+def _legacy_zip_summary_from_eocd(eocd: dict[str, Any]) -> dict[str, Any]:
+    keys = (
+        "schema_version",
+        "error",
+        "magic_matched",
+        "plausible",
+        "eocd_offset",
+        "declared_central_directory_offset",
+        "declared_central_directory_size",
+        "declared_total_entries",
+        "physical_central_directory_offset",
+        "central_directory_offset_delta",
+        "central_directory_size_delta",
+        "entry_count_delta",
+        "trailing_bytes_after_eocd",
+        "archive_offset",
+        "central_directory_present",
+        "central_directory_walk_ok",
+        "local_header_links_ok",
+    )
+    return {key: eocd.get(key) for key in keys if key in eocd}
+
+
+def _legacy_zip_summary_from_local(local: dict[str, Any]) -> dict[str, Any]:
+    return {
+        f"local_header_{key}": local.get(key)
+        for key in ("offset", "magic_matched", "plausible", "error", "compression_method", "filename_len", "extra_len")
+        if key in local
+    }
+
+
+def _legacy_zip_summary_from_directory(directory: dict[str, Any]) -> dict[str, Any]:
+    keys = (
+        "error",
+        "file_size",
+        "cd_parseable",
+        "cd_entries_checked",
+        "cd_entries_parseable",
+        "cd_entries_truncated_by_limit",
+        "entry_count_delta",
+        "local_header_missing_count",
+        "local_header_bad_signature_count",
+        "field_mismatch_entry_count",
+        "mismatch_entry_ratio",
+    )
+    summary = {key: directory.get(key) for key in keys if key in directory}
+    descriptor = directory.get("descriptor") if isinstance(directory.get("descriptor"), dict) else {}
+    for key in ("cd_entry_span_conflict_count", "wrong_local_header_target_count", "descriptor_span_conflicts_with_cd_size_count"):
+        if key in descriptor:
+            summary[f"descriptor_{key}"] = descriptor.get(key)
+    return summary
 
 
 def _enrich_zip_directory_consistency(directory: dict[str, Any]) -> dict[str, Any]:
@@ -360,11 +421,30 @@ def _enrich_zip_directory_consistency(directory: dict[str, Any]) -> dict[str, An
 
 
 def _zip_runtime_evidence_payload(knowledge: Any, structure: dict[str, Any]) -> dict[str, Any]:
+    graph = structure.get("graph") if isinstance(structure.get("graph"), dict) else {}
+    graph_summary = graph.get("summary") if isinstance(graph.get("summary"), dict) else {}
+    structure_summary = structure.get("summary") if isinstance(structure.get("summary"), dict) else {}
+    summary = {**dict(graph_summary or {}), **dict(structure_summary or {})}
     directory = structure.get("directory_consistency") if isinstance(structure.get("directory_consistency"), dict) else {}
     directory = _enrich_zip_directory_consistency(dict(directory))
     eocd = structure.get("eocd") if isinstance(structure.get("eocd"), dict) else {}
     local_header = structure.get("local_header") if isinstance(structure.get("local_header"), dict) else {}
     prefix = directory.get("prefix") if isinstance(directory.get("prefix"), dict) else {}
+    if summary and not directory:
+        directory = dict(summary)
+    if summary and not eocd:
+        eocd = dict(summary)
+    if summary and not local_header:
+        local_header = {
+            "offset": summary.get("local_header_offset"),
+            "plausible": summary.get("local_header_plausible"),
+            "error": summary.get("local_header_error"),
+        }
+    if summary and not prefix:
+        prefix = {
+            "prefix_bytes_before_first_local": summary.get("sfx_prefix_len") or summary.get("first_local_header_offset"),
+            "first_local_header_offset": summary.get("first_local_header_offset"),
+        }
     extraction = _dict_at(knowledge, "extraction.entry_outcomes")
     coverage = _dict_at(knowledge, "verification.coverage_breakdown")
     source = _dict_at(knowledge, "source.input")
@@ -435,15 +515,35 @@ def _zip_runtime_evidence_payload(knowledge: Any, structure: dict[str, Any]) -> 
     cd_offset_matches_after_sfx = declared_cd_offset_matches_with_prefix
     sfx_cd_offset_shift_likely = bool(sfx_prefix_len and (cd_offset_delta_equals_prefix_len or cd_offset_matches_after_sfx))
     local_header_error_explained_by_sfx_offset = bool(sfx_cd_offset_shift_likely and (local_link_errors or prefix_explains_local_offsets))
+    split_sidecars_available = len(split_parts) > 1
+    likely_missing_range = bool(
+        split_sidecars_available
+        or missing
+        or "missing" in str(extraction.get("first_failure_kind") or "").lower()
+        or "volume" in str(extraction.get("first_failure_kind") or "").lower()
+        or (cd_offset_delta and abs(cd_offset_delta) > max(64, sfx_prefix_len * 2))
+    )
+    local_offset_points_into_payload = _as_int(descriptor.get("local_header_offset_points_inside_payload_count")) + _as_int(descriptor.get("local_header_offset_points_to_descriptor_or_payload_count"))
+    local_offset_outside_archive = _as_int(descriptor.get("local_header_offset_points_outside_archive_count"))
+    cd_offset_delta_matches_deleted_range = bool(likely_missing_range and cd_offset_delta and local_offset_points_into_payload)
+    local_offset_error_explained_by_missing_range = bool(likely_missing_range and (local_offset_points_into_payload or local_offset_outside_archive or local_link_errors))
+    payload_partial_explained_by_missing_range = bool(likely_missing_range and (_as_int(extraction.get("entry_partial_count")) or _as_int(extraction.get("data_error_count")) or failed))
+    missing_range_likely_structural_cause = bool(likely_missing_range and (local_offset_error_explained_by_missing_range or payload_partial_explained_by_missing_range or cd_offset_delta_matches_deleted_range))
     payload_observed = _payload_verification_observed(coverage)
-    payload_failure_absent = not _coverage_has_payload_failure(coverage)
+    payload_content_failure_observed = _coverage_has_payload_failure(coverage)
+    no_payload_hash_crc_failure = not (
+        _as_int(coverage.get("crc_mismatch_count"))
+        or _as_int(coverage.get("payload_hash_mismatch_count"))
+        or _as_int(coverage.get("archive_crc_test_failed_count"))
+    )
+    payload_failure_absent = not payload_content_failure_observed
     payload_verified_intact = bool(payload_observed and payload_failure_absent)
     payload_unverified_but_no_failure = bool(not payload_observed and payload_failure_absent)
     eocd_error = str(eocd.get("error") or directory.get("error") or "")
     eocd_missing = eocd_error in {"eocd_not_found", "eocd_missing", "missing_eocd"}
     evidence = {
         "split_part_count": len(split_parts),
-        "has_split_sidecars": len(split_parts) > 1,
+        "has_split_sidecars": split_sidecars_available,
         "declared_cd_end": declared_cd_end,
         "physical_size_delta_to_cd_end": file_size - declared_cd_end if file_size or declared_cd_end else 0,
         "eocd_after_physical_end": bool(file_size and eocd_offset and eocd_offset > file_size),
@@ -451,12 +551,16 @@ def _zip_runtime_evidence_payload(knowledge: Any, structure: dict[str, Any]) -> 
         "trailing_bytes_after_eocd": trailing_after_eocd,
         "cd_local_mismatch_with_crc_failure": bool(cd_local_crc and payload_crc),
         "cd_local_mismatch_with_size_failure": bool(cd_local_size and failed),
-        "payload_failure_without_header_mismatch": bool(payload_content_failure and not cd_local_crc and not cd_local_size),
+        "payload_failure_without_header_mismatch": bool(payload_content_failure_observed and not cd_local_crc and not cd_local_size),
         "payload_failure_but_archive_coverage_complete": payload_failure_but_coverage_complete,
         "checksum_error_likely_structural_not_payload": checksum_structural_not_payload,
         "eocd_missing_with_payload_intact": bool(eocd_missing and coverage_complete and not payload_content_failure),
         "tail_truncation_explains_eocd_error": bool(file_size and declared_cd_end and file_size < declared_cd_end and eocd_error),
-        "split_truncation_explains_payload_failure": bool(len(split_parts) > 1 and (missing or failed or payload_crc)),
+        "split_truncation_explains_payload_failure": bool(split_sidecars_available and (missing or failed or payload_crc)),
+        "local_offset_error_explained_by_missing_range": local_offset_error_explained_by_missing_range,
+        "payload_partial_explained_by_missing_range": payload_partial_explained_by_missing_range,
+        "cd_offset_delta_matches_deleted_range": cd_offset_delta_matches_deleted_range,
+        "missing_range_likely_structural_cause": missing_range_likely_structural_cause,
         "cd_local_mismatch_ratio": float(max(cd_local_crc, cd_local_size, _as_int(directory.get("field_mismatch_entry_count")))) / float(checked),
         "descriptor_candidate_span_overlap_count": max(0, _as_int(descriptor.get("descriptor_candidate_span_overlap_count"))),
         "descriptor_payload_end_to_next_local_delta_min": _as_int(descriptor.get("descriptor_payload_end_to_next_local_delta_min")),
@@ -499,9 +603,53 @@ def _zip_runtime_evidence_payload(knowledge: Any, structure: dict[str, Any]) -> 
         "payload_verification_observed": payload_observed,
         "payload_verified_intact": payload_verified_intact,
         "payload_unverified_but_no_failure": payload_unverified_but_no_failure,
+        "no_payload_hash_crc_failure": no_payload_hash_crc_failure,
+        "payload_content_failure_observed": payload_content_failure_observed,
         "payload_failure_absent": payload_failure_absent,
     }
     return evidence
+
+
+def _append_runtime_zip_graph_explanations(structure: dict[str, Any], runtime: dict[str, Any]) -> None:
+    graph = structure.get("graph") if isinstance(structure.get("graph"), dict) else None
+    if graph is None:
+        return
+    explanations = graph.get("explanations")
+    if not isinstance(explanations, list):
+        explanations = []
+        graph["explanations"] = explanations
+    if runtime.get("missing_range_likely_structural_cause") and not any(
+        isinstance(item, dict) and item.get("kind") == "missing_range_adjustment"
+        for item in explanations
+    ):
+        explanations.append({
+            "kind": "missing_range_adjustment",
+            "applies": True,
+            "field": "split_volume.missing_range",
+            "delta": runtime.get("physical_size_delta_to_cd_end", 0),
+            "reason": "runtime split or missing-range evidence explains partial structure failures",
+        })
+
+
+def _zip_runtime_public_payload(runtime: dict[str, Any], knowledge: Any) -> dict[str, Any]:
+    split_count = max(0, _as_int(runtime.get("split_part_count")))
+    payload = {
+        "split_part_count": split_count,
+        "has_split_sidecars": bool(runtime.get("has_split_sidecars")),
+        "split_parts": [{"index": index, "role": "part"} for index in range(split_count)],
+        "payload_verification_observed": bool(runtime.get("payload_verification_observed")),
+        "payload_verified_intact": bool(runtime.get("payload_verified_intact")),
+        "payload_unverified_but_no_failure": bool(runtime.get("payload_unverified_but_no_failure")),
+        "payload_content_failure_observed": bool(runtime.get("payload_content_failure_observed")),
+        "no_payload_hash_crc_failure": bool(runtime.get("no_payload_hash_crc_failure")),
+    }
+    extraction = _dict_at(knowledge, "extraction.entry_outcomes")
+    coverage = _dict_at(knowledge, "verification.coverage_breakdown") or _dict_at(knowledge, "verification.summary.coverage_breakdown")
+    if extraction:
+        payload["extraction_entry_outcomes"] = extraction
+    if coverage:
+        payload["verification_coverage_breakdown"] = coverage
+    return payload
 
 
 def _payload_verification_observed(coverage: dict[str, Any]) -> bool:
@@ -564,11 +712,35 @@ def _source_parts(source: dict[str, Any], extraction_result: dict[str, Any]) -> 
     for key in ("part_paths", "parts", "all_parts"):
         raw = source.get(key)
         if isinstance(raw, list):
-            return [str(item) for item in raw if str(item)]
+            paths = _part_paths(raw)
+            if paths:
+                return paths
     raw = extraction_result.get("all_parts")
     if isinstance(raw, list):
-        return [str(item) for item in raw if str(item)]
+        return _part_paths(raw)
     return []
+
+
+def _part_paths(raw: list[Any]) -> list[str]:
+    output: list[str] = []
+    seen: set[str] = set()
+    for item in raw:
+        if isinstance(item, dict):
+            path = str(item.get("path") or "")
+        else:
+            path = str(item or "")
+        key = _path_identity(path)
+        if path and key not in seen:
+            seen.add(key)
+            output.append(path)
+    return output
+
+
+def _path_identity(path: str) -> str:
+    try:
+        return str(Path(path).resolve()).lower()
+    except Exception:
+        return str(path).lower()
 
 
 def _dict_at(knowledge: Any, path: str) -> dict[str, Any]:

@@ -213,6 +213,16 @@ pub(crate) fn inspect_zip_directory_consistency(
 }
 
 #[pyfunction]
+#[pyo3(signature = (path, max_entries=128))]
+pub(crate) fn inspect_zip_structure_graph(
+    py: Python<'_>,
+    path: &str,
+    max_entries: usize,
+) -> PyResult<Py<PyDict>> {
+    crate::formats::zip::inspect_zip_structure_graph(py, path, max_entries)
+}
+
+#[pyfunction]
 #[pyo3(signature = (path, magic_bytes=None, max_next_header_check_bytes=1048576))]
 pub(crate) fn inspect_seven_zip_structure(
     py: Python<'_>,

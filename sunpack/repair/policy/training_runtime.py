@@ -324,10 +324,13 @@ def _analysis_native_probe(job: RepairJob, knowledge: ArchiveKnowledge, route_ev
         enriched = dict(structure)
         extraction_outcomes = _dict_at(knowledge, "extraction.entry_outcomes")
         coverage_breakdown = _dict_at(knowledge, "verification.coverage_breakdown") or _dict_at(knowledge, "verification.summary.coverage_breakdown")
+        runtime = dict(enriched.get("runtime") or {}) if isinstance(enriched.get("runtime"), dict) else {}
         if extraction_outcomes:
-            enriched["extraction_entry_outcomes"] = extraction_outcomes
+            runtime["extraction_entry_outcomes"] = extraction_outcomes
         if coverage_breakdown:
-            enriched["verification_coverage_breakdown"] = coverage_breakdown
+            runtime["verification_coverage_breakdown"] = coverage_breakdown
+        if runtime:
+            enriched["runtime"] = runtime
         probe["raw_structure"] = dict(enriched)
         probe["structure"] = dict(enriched)
     for key, value in structure.items():

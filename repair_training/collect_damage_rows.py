@@ -38,6 +38,7 @@ from sunpack.detection.pipeline.processors.modules.format_structure.zip_director
 )
 from sunpack.detection.pipeline.processors.modules.format_structure.zip_eocd import inspect_zip_eocd_structure
 from sunpack.detection.pipeline.processors.modules.format_structure.zip_local_header import inspect_zip_local_header
+from sunpack.detection.pipeline.processors.modules.format_structure.zip_structure_graph import inspect_zip_structure_graph
 from sunpack.extraction.knowledge import write_extraction_result
 from sunpack.extraction.scheduler import ExtractionScheduler
 from sunpack.repair.job import RepairJob
@@ -187,6 +188,7 @@ def observe_damage_runtime(
     state = job.archive_state or ArchiveState.from_archive_input(job.archive_input())
     task = _task_for_job(job, state)
     ArchiveAnalysisStage(config).refresh_task_analysis(task)
+    _preserve_source_split_metadata(task, job)
     if str(job.format or "").lower() == "zip":
         _ensure_zip_structure_facts(task)
         write_zip_structure_facts(task)
@@ -248,6 +250,11 @@ def _ensure_zip_structure_facts(task: ArchiveTask) -> None:
             fact_bag.set("zip.directory_consistency", inspect_zip_directory_consistency(path))
         except Exception as exc:
             fact_bag.set("zip.directory_consistency", {"error": str(exc) or type(exc).__name__})
+    if not isinstance(fact_bag.get("zip.structure_graph"), dict):
+        try:
+            fact_bag.set("zip.structure_graph", inspect_zip_structure_graph(path))
+        except Exception as exc:
+            fact_bag.set("zip.structure_graph", {"error": str(exc) or type(exc).__name__})
     if not isinstance(fact_bag.get("zip.local_header"), dict):
         try:
             local = inspect_zip_local_header(path, 0)
@@ -353,8 +360,12 @@ def _job_from_record(record: dict[str, Any], fmt: str) -> RepairJob:
         format_hint=fmt,
     )
     state = ArchiveState.from_archive_input(descriptor)
+    source_payload = descriptor.to_dict()
+    for key in ("parts", "ranges", "split_sidecars_available"):
+        if source_input.get(key):
+            source_payload[key] = source_input.get(key)
     knowledge = {
-        "source": {"input": descriptor.to_dict()},
+        "source": {"input": source_payload},
     }
     return RepairJob(
         source_input=source_input,
@@ -385,7 +396,20 @@ def _task_for_job(job: RepairJob, state: ArchiveState) -> ArchiveTask:
         detected_ext=job.format,
     )
     task.set_archive_state(state)
+    _preserve_source_split_metadata(task, job)
     return task
+
+
+def _preserve_source_split_metadata(task: ArchiveTask, job: RepairJob) -> None:
+    source_input = ((job.knowledge or {}).get("source") or {}).get("input") if isinstance((job.knowledge or {}).get("source"), dict) else {}
+    if isinstance(source_input, dict) and any(source_input.get(key) for key in ("parts", "ranges", "split_sidecars_available")):
+        knowledge = task.knowledge()
+        merged_source = dict(knowledge.get("source.input") or {})
+        for key in ("parts", "ranges", "split_sidecars_available"):
+            if source_input.get(key):
+                merged_source[key] = source_input.get(key)
+        knowledge.set("source.input", merged_source, source_layer="training", source_module="collect_damage_rows")
+        task.set_knowledge(knowledge)
 
 
 def _location_target(raw_target: dict[str, Any]) -> dict[str, Any]:
@@ -446,6 +470,20 @@ def _structure_coverage(rows: list[dict[str, Any]]) -> dict[str, Any]:
         if structure or raw_structure:
             counters["analysis_native_probe_structure_present"] += 1
         merged = structure or raw_structure or (observation_structure if isinstance(observation_structure, dict) else {})
+        graph = merged.get("graph") if isinstance(merged.get("graph"), dict) else {}
+        graph_summary = graph.get("summary") if isinstance(graph.get("summary"), dict) else {}
+        if graph:
+            counters["zip_structure_graph_present"] += 1
+        try:
+            if float(graph_summary.get("cd_entry_count") or 0.0) > 0:
+                counters["zip_graph_cd_entries_present"] += 1
+        except (TypeError, ValueError):
+            pass
+        explanations = graph.get("explanations") if isinstance(graph.get("explanations"), list) else []
+        if any(isinstance(item, dict) and item.get("kind") == "sfx_prefix_adjustment" for item in explanations):
+            counters["zip_graph_sfx_explanation_present"] += 1
+        if any(isinstance(item, dict) and item.get("kind") == "missing_range_adjustment" for item in explanations):
+            counters["zip_graph_missing_range_explanation_present"] += 1
         if isinstance(merged.get("eocd"), dict) or any(str(key).startswith("eocd.") for key in merged):
             counters["zip_eocd_structure_present"] += 1
         if isinstance(merged.get("local_header"), dict) or any(str(key).startswith("local_header.") for key in merged):
@@ -481,6 +519,10 @@ def _structure_coverage(rows: list[dict[str, Any]]) -> dict[str, Any]:
             "zip64_consistency_present",
             "format_zip_structure_present",
             "analysis_native_probe_structure_present",
+            "zip_structure_graph_present",
+            "zip_graph_cd_entries_present",
+            "zip_graph_sfx_explanation_present",
+            "zip_graph_missing_range_explanation_present",
             "zip_descriptor_facts_present",
             "wrong_local_header_target_count_present",
             "wrong_local_header_target_count_nonzero",
@@ -493,6 +535,18 @@ def _structure_coverage(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def _descriptor_structure(structure: dict[str, Any]) -> dict[str, Any]:
+    graph = structure.get("graph") if isinstance(structure.get("graph"), dict) else {}
+    summary = graph.get("summary") if isinstance(graph.get("summary"), dict) else {}
+    if summary:
+        return {
+            key: summary.get(key)
+            for key in (
+                "wrong_local_header_target_count",
+                "compressed_size_ends_inside_descriptor_count",
+                "descriptor_span_conflicts_with_cd_size_count",
+            )
+            if key in summary
+        }
     directory = structure.get("directory_consistency")
     if isinstance(directory, dict):
         descriptor = directory.get("descriptor")

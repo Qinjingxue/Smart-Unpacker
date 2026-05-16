@@ -120,6 +120,10 @@ fn sunpack_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(
+        analysis_native::inspect_zip_structure_graph,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
         analysis_native::inspect_seven_zip_structure,
         m
     )?)?;

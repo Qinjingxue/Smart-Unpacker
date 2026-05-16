@@ -505,6 +505,313 @@ pub(crate) fn inspect_zip_directory_consistency(
     Ok(result.unbind())
 }
 
+pub(crate) fn inspect_zip_structure_graph(
+    py: Python<'_>,
+    path: &str,
+    max_entries: usize,
+) -> PyResult<Py<PyDict>> {
+    let result = PyDict::new(py);
+    result.set_item("schema_version", 1)?;
+    result.set_item("format", "zip")?;
+    result.set_item("error", "")?;
+    result.set_item("truncated", false)?;
+    let nodes = PyList::empty(py);
+    let edges = PyList::empty(py);
+    let violations = PyList::empty(py);
+    let explanations = PyList::empty(py);
+    let summary = PyDict::new(py);
+    result.set_item("nodes", &nodes)?;
+    result.set_item("edges", &edges)?;
+    result.set_item("violations", &violations)?;
+    result.set_item("explanations", &explanations)?;
+    result.set_item("summary", &summary)?;
+
+    let Ok(data) = fs::read(path) else {
+        result.set_item("error", "os_error")?;
+        summary.set_item("archive_readable", false)?;
+        return Ok(result.unbind());
+    };
+    let file_size = data.len();
+    summary.set_item("archive_readable", true)?;
+    summary.set_item("file_size", file_size)?;
+    zip_graph_node(py, &nodes, "archive:0", "archive", 0, file_size, "parsed")?;
+    zip_graph_node(py, &nodes, "physical_span:archive", "physical_span", 0, file_size, "observed")?;
+    zip_graph_edge(py, &edges, "archive:0", "physical_span:archive", "owns_span", "", true, 1.0)?;
+
+    let Some(eocd) = find_eocd_record(&data, true) else {
+        result.set_item("error", "eocd_not_found")?;
+        summary.set_item("eocd_present", false)?;
+        zip_graph_violation(py, &violations, "missing_node", "archive:0", "", "eocd", "", "", 0, "high")?;
+        return Ok(result.unbind());
+    };
+    summary.set_item("eocd_present", true)?;
+    let eocd_id = "eocd:0";
+    zip_graph_node(py, &nodes, eocd_id, "eocd", eocd.offset, eocd.end, "parsed")?;
+    zip_graph_edge(py, &edges, "archive:0", eocd_id, "contains", "", true, 1.0)?;
+    let trailing = file_size.saturating_sub(eocd.end);
+    summary.set_item("trailing_bytes_after_eocd", trailing)?;
+    if trailing > 0 {
+        zip_graph_node(py, &nodes, "physical_span:tail", "physical_span", eocd.end, file_size, "observed")?;
+        zip_graph_violation(
+            py,
+            &violations,
+            "unexpected_tail",
+            eocd_id,
+            "physical_span:tail",
+            "tail.trailing_bytes",
+            "0",
+            &trailing.to_string(),
+            trailing as i64,
+            "medium",
+        )?;
+        zip_graph_explanation(py, &explanations, "tail_truncation", false, "tail.trailing_bytes", 0, "tail bytes exist after EOCD")?;
+    }
+
+    let physical_cd_offset = eocd.offset.saturating_sub(eocd.cd_size as usize);
+    let archive_offset = physical_cd_offset.saturating_sub(eocd.cd_offset as usize);
+    let cd_end = physical_cd_offset
+        .saturating_add(eocd.cd_size as usize)
+        .min(file_size);
+    let cd_id = "central_directory:0";
+    summary.set_item("declared_central_directory_offset", eocd.cd_offset as usize)?;
+    summary.set_item("physical_central_directory_offset", physical_cd_offset)?;
+    summary.set_item("central_directory_offset_delta", physical_cd_offset as i64 - eocd.cd_offset as i64)?;
+    summary.set_item("central_directory_size_delta", cd_end.saturating_sub(physical_cd_offset) as i64 - eocd.cd_size as i64)?;
+    zip_graph_node(py, &nodes, cd_id, "central_directory", physical_cd_offset, cd_end, "candidate")?;
+    zip_graph_edge(py, &edges, eocd_id, cd_id, "points_to", "central_directory", physical_cd_offset + 4 <= file_size && data.get(physical_cd_offset..physical_cd_offset + 4) == Some(CD_SIG), 1.0)?;
+    if physical_cd_offset + 4 > file_size || data.get(physical_cd_offset..physical_cd_offset + 4) != Some(CD_SIG) {
+        result.set_item("error", "bad_central_directory_signature")?;
+        zip_graph_violation(
+            py,
+            &violations,
+            "bad_signature",
+            eocd_id,
+            cd_id,
+            "eocd.cd_offset",
+            "central_directory_signature",
+            "missing",
+            physical_cd_offset as i64 - eocd.cd_offset as i64,
+            "high",
+        )?;
+    }
+    if archive_offset > 0 {
+        zip_graph_node(py, &nodes, "physical_span:sfx_prefix", "physical_span", 0, archive_offset, "observed")?;
+        zip_graph_explanation(
+            py,
+            &explanations,
+            "sfx_prefix_adjustment",
+            physical_cd_offset == archive_offset.saturating_add(eocd.cd_offset as usize),
+            "eocd.cd_offset",
+            archive_offset as i64,
+            "archive offset explains central directory pointer",
+        )?;
+    }
+
+    let all_entries = parse_central_directory_entries(&data, physical_cd_offset, cd_end);
+    let checked_entries = all_entries.iter().take(max_entries).collect::<Vec<_>>();
+    result.set_item("truncated", all_entries.len() > checked_entries.len())?;
+    summary.set_item("cd_entry_count", all_entries.len())?;
+    summary.set_item("cd_entries_checked", checked_entries.len())?;
+    summary.set_item("entry_count_delta", all_entries.len() as i64 - eocd.total_entries as i64)?;
+    if all_entries.len() as u16 != eocd.total_entries {
+        zip_graph_violation(
+            py,
+            &violations,
+            "count_mismatch",
+            eocd_id,
+            cd_id,
+            "eocd.entry_count",
+            &eocd.total_entries.to_string(),
+            &all_entries.len().to_string(),
+            all_entries.len() as i64 - eocd.total_entries as i64,
+            "medium",
+        )?;
+    }
+
+    let local_candidates = scan_zip_local_headers(&data, physical_cd_offset, max_entries.saturating_mul(4).max(32));
+    let local_spans = local_record_spans(&local_candidates, physical_cd_offset);
+    let (known_payload_spans, known_descriptor_spans) =
+        local_payload_descriptor_spans(&data, &local_candidates, physical_cd_offset);
+    summary.set_item("local_header_candidate_count", local_candidates.len())?;
+    let first_local_offset = local_candidates.first().map(|local| local.offset).unwrap_or(0);
+    let prefix_len = first_local_offset;
+    summary.set_item("first_local_header_offset", first_local_offset)?;
+    summary.set_item("sfx_prefix_len", prefix_len)?;
+    for (index, local) in local_candidates.iter().take(max_entries).enumerate() {
+        let local_id = format!("local_header:{index}");
+        let end = local_data_start(local).unwrap_or(local.offset).min(file_size);
+        zip_graph_node(py, &nodes, &local_id, "local_header_candidate", local.offset, end, "parsed")?;
+        zip_graph_edge(py, &edges, "archive:0", &local_id, "contains", "", true, 0.8)?;
+    }
+    for (index, (start, end)) in known_payload_spans.iter().take(max_entries).enumerate() {
+        zip_graph_node(py, &nodes, &format!("payload_span:{index}"), "payload_span", *start, *end, "candidate")?;
+    }
+    for (index, (start, end)) in known_descriptor_spans.iter().take(max_entries).enumerate() {
+        zip_graph_node(py, &nodes, &format!("descriptor_candidate:{index}"), "descriptor_candidate", *start, *end, "candidate")?;
+    }
+
+    let mut name_mismatch = 0usize;
+    let mut flags_mismatch = 0usize;
+    let mut method_mismatch = 0usize;
+    let mut crc_mismatch = 0usize;
+    let mut compressed_mismatch = 0usize;
+    let mut uncompressed_mismatch = 0usize;
+    let mut local_offset_violations = 0usize;
+    let mut span_conflicts = 0usize;
+    let mut descriptor_conflicts = 0usize;
+    let mut zip64_extra_present = 0usize;
+    let mut zip64_extra_mismatch = 0usize;
+
+    for (index, entry) in checked_entries.iter().enumerate() {
+        let cd_entry_id = format!("cd_entry:{index}");
+        let cd_entry_end = entry.offset
+            .saturating_add(46)
+            .saturating_add(entry.name_len as usize)
+            .saturating_add(entry.extra_len as usize);
+        zip_graph_node(py, &nodes, &cd_entry_id, "cd_entry", entry.offset, cd_entry_end, "parsed")?;
+        zip_graph_edge(py, &edges, cd_id, &cd_entry_id, "owns_span", "", true, 1.0)?;
+        let raw_local_offset = entry.local_header_offset as usize;
+        let archive_adjusted_offset = archive_offset.saturating_add(raw_local_offset);
+        let prefix_adjusted_offset = raw_local_offset.saturating_add(prefix_len);
+        let raw_local = parse_local_header(&data, raw_local_offset);
+        let archive_adjusted_local = parse_local_header(&data, archive_adjusted_offset);
+        let prefix_adjusted_local = if prefix_len > 0 { parse_local_header(&data, prefix_adjusted_offset) } else { None };
+        let matched_local = prefix_adjusted_local
+            .clone()
+            .or_else(|| archive_adjusted_local.clone())
+            .or_else(|| raw_local.clone())
+            .or_else(|| local_candidates.iter().find(|candidate| candidate.name == entry.name).cloned());
+        let local_target_id = format!("local_header_target:{index}");
+        let local_ok = matched_local.as_ref().is_some_and(|local| local.name == entry.name);
+        zip_graph_edge(py, &edges, &cd_entry_id, &local_target_id, "points_to", "local_header_offset", local_ok, if local_ok { 1.0 } else { 0.0 })?;
+        if !local_ok {
+            local_offset_violations += 1;
+            let observed = if raw_local_offset >= file_size {
+                "outside_archive"
+            } else if offset_inside_local_or_data_span(raw_local_offset, &known_descriptor_spans) {
+                "inside_descriptor"
+            } else if offset_inside_local_or_data_span(raw_local_offset, &known_payload_spans) || offset_inside_local_or_data_span(raw_local_offset, &local_spans) {
+                "inside_payload_or_entry"
+            } else {
+                "bad_signature"
+            };
+            zip_graph_violation(
+                py,
+                &violations,
+                "bad_reference",
+                &cd_entry_id,
+                &local_target_id,
+                "central_directory.local_header_offset",
+                "local_header",
+                observed,
+                raw_local_offset as i64 - archive_adjusted_offset as i64,
+                "high",
+            )?;
+        }
+        let Some(local) = matched_local else {
+            continue;
+        };
+        zip_graph_node(py, &nodes, &local_target_id, "local_header_candidate", local.offset, local_data_start(&local).unwrap_or(local.offset), "matched")?;
+        if local.name != entry.name {
+            name_mismatch += 1;
+            zip_graph_violation(py, &violations, "field_mismatch", &cd_entry_id, &local_target_id, "central_directory.filename", "cd_name", "local_name", 0, "medium")?;
+        }
+        if local.flags != entry.flags {
+            flags_mismatch += 1;
+            zip_graph_violation(py, &violations, "field_mismatch", &cd_entry_id, &local_target_id, "local_header.flags", &entry.flags.to_string(), &local.flags.to_string(), local.flags as i64 - entry.flags as i64, "medium")?;
+        }
+        if local.method != entry.method {
+            method_mismatch += 1;
+            zip_graph_violation(py, &violations, "field_mismatch", &cd_entry_id, &local_target_id, "local_header.method", &entry.method.to_string(), &local.method.to_string(), local.method as i64 - entry.method as i64, "medium")?;
+        }
+        if entry.flags & 0x08 == 0 {
+            if local.crc32 != entry.crc32 {
+                crc_mismatch += 1;
+                zip_graph_violation(py, &violations, "field_mismatch", &cd_entry_id, &local_target_id, "local_header.crc", &entry.crc32.to_string(), &local.crc32.to_string(), local.crc32 as i64 - entry.crc32 as i64, "medium")?;
+            }
+            if entry.compressed_size != u32::MAX && local.compressed_size != entry.compressed_size {
+                compressed_mismatch += 1;
+                zip_graph_violation(py, &violations, "field_mismatch", &cd_entry_id, &local_target_id, "local_header.compressed_size", &entry.compressed_size.to_string(), &local.compressed_size.to_string(), local.compressed_size as i64 - entry.compressed_size as i64, "medium")?;
+            }
+            if entry.uncompressed_size != u32::MAX && local.uncompressed_size != entry.uncompressed_size {
+                uncompressed_mismatch += 1;
+                zip_graph_violation(py, &violations, "field_mismatch", &cd_entry_id, &local_target_id, "local_header.uncompressed_size", &entry.uncompressed_size.to_string(), &local.uncompressed_size.to_string(), local.uncompressed_size as i64 - entry.uncompressed_size as i64, "medium")?;
+            }
+        }
+        let data_start = local_data_start(&local).unwrap_or(local.offset);
+        let payload_end = data_start.saturating_add(entry.compressed_size as usize);
+        zip_graph_node(py, &nodes, &format!("payload_span:cd:{index}"), "payload_span", data_start, payload_end.min(file_size), "declared")?;
+        zip_graph_edge(py, &edges, &local_target_id, &format!("payload_span:cd:{index}"), "owns_span", "payload", payload_end <= file_size, 0.9)?;
+        let next_boundary = checked_entries
+            .get(index + 1)
+            .map(|next| next.local_header_offset as usize + prefix_len)
+            .or_else(|| checked_entries.get(index + 1).map(|next| next.local_header_offset as usize))
+            .unwrap_or(physical_cd_offset)
+            .min(file_size);
+        if payload_end > next_boundary {
+            span_conflicts += 1;
+            zip_graph_violation(py, &violations, "span_overlap", &format!("payload_span:cd:{index}"), "next_record", "central_directory.compressed_size", &next_boundary.to_string(), &payload_end.to_string(), payload_end as i64 - next_boundary as i64, "high")?;
+        }
+        if payload_end < next_boundary {
+            if let Some(descriptor_offset) = find_signature_between(&data, payload_end, next_boundary, DD_SIG) {
+                let descriptor_end = descriptor_at_impl(
+                    &data,
+                    descriptor_offset,
+                    entry.crc32,
+                    entry.compressed_size as u64,
+                    entry.uncompressed_size as u64,
+                )
+                .unwrap_or_else(|| descriptor_offset.saturating_add(16).min(next_boundary));
+                zip_graph_node(py, &nodes, &format!("descriptor_candidate:cd:{index}"), "descriptor_candidate", descriptor_offset, descriptor_end, "candidate")?;
+                zip_graph_edge(py, &edges, &format!("payload_span:cd:{index}"), &format!("descriptor_candidate:cd:{index}"), "adjacent_to", "data_descriptor", payload_end == descriptor_offset, 0.8)?;
+                if payload_end != descriptor_offset {
+                    descriptor_conflicts += 1;
+                    zip_graph_violation(py, &violations, "descriptor_span_gap", &format!("payload_span:cd:{index}"), &format!("descriptor_candidate:cd:{index}"), "data_descriptor.record", &payload_end.to_string(), &descriptor_offset.to_string(), descriptor_offset as i64 - payload_end as i64, "medium")?;
+                    zip_graph_explanation(py, &explanations, "descriptor_span_adjustment", true, "central_directory.compressed_size", descriptor_offset as i64 - payload_end as i64, "descriptor candidate explains payload boundary drift")?;
+                }
+            }
+        }
+        if parse_zip64_extra_tolerant(&entry.extra, entry.extra_offset).is_some()
+            || parse_zip64_extra_tolerant(&local.extra, local.extra_offset).is_some()
+        {
+            zip64_extra_present += 1;
+            zip_graph_explanation(py, &explanations, "zip64_extra_resolution", true, "zip64.extra", 0, "ZIP64 extra fields are present")?;
+        }
+        if let Some(central_zip64) = parse_zip64_extra_tolerant(&entry.extra, entry.extra_offset) {
+            if central_zip64.stored_size != central_zip64.values.len() * 8 {
+                zip64_extra_mismatch += 1;
+                zip_graph_violation(py, &violations, "zip64_extra_mismatch", &cd_entry_id, "zip64_extra", "zip64.extra_length", &(central_zip64.values.len() * 8).to_string(), &central_zip64.stored_size.to_string(), central_zip64.stored_size as i64 - (central_zip64.values.len() * 8) as i64, "medium")?;
+            }
+        }
+    }
+    summary.set_item("violation_count", violations.len())?;
+    summary.set_item("edge_count", edges.len())?;
+    summary.set_item("node_count", nodes.len())?;
+    summary.set_item("central_local_name_mismatch_count", name_mismatch)?;
+    summary.set_item("central_local_flags_mismatch_count", flags_mismatch)?;
+    summary.set_item("central_local_method_mismatch_count", method_mismatch)?;
+    summary.set_item("central_local_crc_mismatch_count", crc_mismatch)?;
+    summary.set_item("central_local_compressed_size_mismatch_count", compressed_mismatch)?;
+    summary.set_item("central_local_uncompressed_size_mismatch_count", uncompressed_mismatch)?;
+    summary.set_item("local_header_offset_violation_count", local_offset_violations)?;
+    summary.set_item("span_conflict_count", span_conflicts)?;
+    summary.set_item("descriptor_conflict_count", descriptor_conflicts)?;
+    summary.set_item("zip64_extra_present_count", zip64_extra_present)?;
+    summary.set_item("zip64_extra_mismatch_count", zip64_extra_mismatch)?;
+    let zip64_eocd = find_zip64_eocd(&data, eocd.offset);
+    let zip64_locator = find_zip64_locator(&data, eocd.offset);
+    summary.set_item("zip64_eocd_present", zip64_eocd.is_some())?;
+    summary.set_item("zip64_locator_present", zip64_locator.is_some())?;
+    if let Some(tail) = zip64_eocd {
+        zip_graph_node(py, &nodes, "zip64_eocd:0", "zip64_eocd", tail.offset, tail.end, "parsed")?;
+    }
+    if let Some(locator) = zip64_locator {
+        zip_graph_node(py, &nodes, "zip64_locator:0", "zip64_locator", locator.offset, locator.end, "parsed")?;
+        zip_graph_edge(py, &edges, "zip64_locator:0", "zip64_eocd:0", "points_to", "zip64_locator", zip64_eocd.is_some_and(|tail| locator.zip64_eocd_offset == tail.offset as u64), 0.9)?;
+    }
+    Ok(result.unbind())
+}
+
 fn zip_directory_consistency_empty<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
     let result = PyDict::new(py);
     result.set_item("schema_version", 1)?;
@@ -564,6 +871,87 @@ fn zip_directory_consistency_empty<'py>(py: Python<'py>) -> PyResult<Bound<'py, 
     descriptor.set_item("local_header_offset_target_conflict_ratio", 0.0)?;
     result.set_item("descriptor", descriptor)?;
     Ok(result)
+}
+
+fn zip_graph_node<'py>(
+    py: Python<'py>,
+    nodes: &Bound<'py, PyList>,
+    id: &str,
+    kind: &str,
+    start: usize,
+    end: usize,
+    status: &str,
+) -> PyResult<()> {
+    let node = PyDict::new(py);
+    node.set_item("id", id)?;
+    node.set_item("kind", kind)?;
+    node.set_item("start", start)?;
+    node.set_item("end", end)?;
+    node.set_item("size", end.saturating_sub(start))?;
+    node.set_item("status", status)?;
+    nodes.append(node)
+}
+
+fn zip_graph_edge<'py>(
+    py: Python<'py>,
+    edges: &Bound<'py, PyList>,
+    source: &str,
+    target: &str,
+    kind: &str,
+    field: &str,
+    valid: bool,
+    confidence: f64,
+) -> PyResult<()> {
+    let edge = PyDict::new(py);
+    edge.set_item("source_node", source)?;
+    edge.set_item("target_node", target)?;
+    edge.set_item("kind", kind)?;
+    edge.set_item("field", field)?;
+    edge.set_item("valid", valid)?;
+    edge.set_item("confidence", confidence)?;
+    edges.append(edge)
+}
+
+fn zip_graph_violation<'py>(
+    py: Python<'py>,
+    violations: &Bound<'py, PyList>,
+    kind: &str,
+    source: &str,
+    target: &str,
+    field: &str,
+    expected: &str,
+    observed: &str,
+    delta: i64,
+    severity: &str,
+) -> PyResult<()> {
+    let violation = PyDict::new(py);
+    violation.set_item("kind", kind)?;
+    violation.set_item("source_node", source)?;
+    violation.set_item("target_node", target)?;
+    violation.set_item("field", field)?;
+    violation.set_item("expected", expected)?;
+    violation.set_item("observed", observed)?;
+    violation.set_item("delta", delta)?;
+    violation.set_item("severity", severity)?;
+    violations.append(violation)
+}
+
+fn zip_graph_explanation<'py>(
+    py: Python<'py>,
+    explanations: &Bound<'py, PyList>,
+    kind: &str,
+    applies: bool,
+    field: &str,
+    delta: i64,
+    reason: &str,
+) -> PyResult<()> {
+    let explanation = PyDict::new(py);
+    explanation.set_item("kind", kind)?;
+    explanation.set_item("applies", applies)?;
+    explanation.set_item("field", field)?;
+    explanation.set_item("delta", delta)?;
+    explanation.set_item("reason", reason)?;
+    explanations.append(explanation)
 }
 
 fn zip_inspect_spurious_descriptor_candidate(

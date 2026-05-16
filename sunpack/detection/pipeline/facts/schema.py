@@ -242,6 +242,11 @@ FACT_SCHEMA: dict[str, dict[str, Any]] = {
         "producer": "processors.zip_directory_consistency",
         "description": "ZIP central directory, local header, descriptor, and ZIP64 consistency facts.",
     },
+    "zip.structure_graph": {
+        "type": "dict",
+        "producer": "processors.zip_structure_graph",
+        "description": "ZIP structure graph with nodes, edges, violations, explanations, and summary facts.",
+    },
     "tar.header_structure": {
         "type": "dict",
         "producer": "processors.tar_header_structure",
