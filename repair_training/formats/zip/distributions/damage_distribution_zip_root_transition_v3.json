@@ -2,16 +2,17 @@
   "description": "ZIP root-transition V3 distribution with balanced single-damage regression, multi-step compound damage, and physical best-partial upper-bound cases.",
   "total": 2800,
   "profiles": {
-    "zip_data_descriptor_payload_bad": 90,
-    "zip_data_descriptor_cd_conflict": 90,
+    "zip_data_descriptor_payload_bad": 80,
+    "zip_data_descriptor_cd_conflict": 80,
     "zip_sfx_payload_damage": 80,
-    "zip_sfx_cd_damage": 220,
+    "zip_sfx_cd_damage": 180,
     "zip_duplicate_entry_crc_conflict": 70,
     "zip_non_utf8_filename_directory_rebuild": 70,
     "zip_zip64_extra_size_mismatch": 70,
     "zip_split_missing_middle_volume": 60,
     "zip_split_tail_volume_truncated": 60,
     "zip_extra_field_length_bad": 50,
+    "zip_extra_field_local_header_bad": 120,
     "zip_zip64_eocd_locator_bad": 45,
     "zip_comment_overlap_eocd_shifted": 45,
     "zip_mixed_method_one_entry_bad": 40,
@@ -60,7 +61,7 @@
       "physical_complete_expected": false
     },
     "compound_descriptor_fake_span_flags_cd_offset": {
-      "count": 140,
+      "count": 120,
       "base_source_requirements": ["data_descriptor"],
       "compound_components": ["descriptor_fake_span", "descriptor_flag_conflict", "cd_offset"],
       "expected_min_steps": 3,
@@ -92,7 +93,7 @@
       "physical_complete_expected": true
     },
     "compound_boundary_drop_cd_payload_bad": {
-      "count": 90,
+      "count": 80,
       "base_source_requirements": ["normal_zip"],
       "compound_components": ["boundary_trailing_junk", "drop_cd", "payload_bad"],
       "expected_min_steps": 3,
@@ -134,14 +135,14 @@
   },
   "physical_profiles": {
     "partial_payload_many_entries_bad": {
-      "count": 110,
+      "count": 90,
       "compound_components": ["many_entry_payload_damage"],
       "expected_min_steps": 1,
       "expected_route_facts": ["payload_hash_mismatch", "partial_entries_remaining"],
       "physical_complete_expected": false
     },
     "partial_all_entry_payload_damage_with_directory": {
-      "count": 90,
+      "count": 80,
       "compound_components": ["all_entry_payload_damage", "directory_visible"],
       "expected_min_steps": 1,
       "expected_route_facts": ["payload_hash_mismatch", "directory_visible_payload_unreadable"],

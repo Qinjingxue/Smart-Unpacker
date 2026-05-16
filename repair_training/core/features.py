@@ -38,6 +38,9 @@ def build_feature_datasets(
     schema["label_schema"] = label_schema
     write_json(output_dir / "feature_schema.json", schema)
     write_json(output_dir / ("action_schema.json" if model_type == "repair_action" else "label_schema.json"), label_schema)
+    if model_type == "damage_location":
+        write_json(output_dir / "observed_label_schema.json", {"labels": list(label_schema.get("labels") or []), "metadata": dict(label_schema.get("metadata", {}).get("observed") or {})})
+        write_json(output_dir / "uncertain_label_schema.json", {"labels": list(label_schema.get("uncertain_labels") or []), "metadata": dict(label_schema.get("metadata", {}).get("uncertain") or {})})
     summary: dict[str, Any] = {"model_type": model_type, "format": plugin.format_name, "splits": {}}
     for split, split_rows_ in splits.items():
         if model_type == "repair_action":
@@ -76,12 +79,17 @@ def transform_rows(
                 x[row_index, col] = _float(flat.get(name))
     if model_type == "damage_location":
         labels = list((schema.get("label_schema") or {}).get("labels") or [])
-        y = np.zeros((len(rows), len(labels)), dtype=np.float32)
+        uncertain_labels = list((schema.get("label_schema") or {}).get("uncertain_labels") or [])
+        y = np.zeros((len(rows), len(labels) + len(uncertain_labels)), dtype=np.float32)
         label_index = {label: index for index, label in enumerate(labels)}
+        uncertain_index = {label: len(labels) + index for index, label in enumerate(uncertain_labels)}
         for row_index, row in enumerate(rows):
             for label in damage_labels_for_row(row):
                 if label in label_index:
                     y[row_index, label_index[label]] = 1.0
+            for label in uncertain_labels_for_row(row):
+                if label in uncertain_index:
+                    y[row_index, uncertain_index[label]] = 1.0
         return x, y
     if model_type == "normal_structure":
         y = np.array([1.0 if _float(row.get("normal_label")) >= 0.5 else 0.0 for row in rows], dtype=np.float32)
@@ -172,16 +180,60 @@ def labels_for_plugin(plugin: TrainingFormatPlugin, model_type: str) -> dict[str
 
 def filtered_damage_label_schema(rows: list[dict[str, Any]], label_schema: dict[str, Any]) -> dict[str, Any]:
     original_labels = list(label_schema.get("labels") or [])
-    counts = {label: 0 for label in original_labels}
+    observed_counts = {label: 0 for label in original_labels}
+    uncertain_counts = {label: 0 for label in original_labels}
     for row in rows:
         present = set(damage_labels_for_row(row))
+        uncertain_present = set(uncertain_labels_for_row(row))
         for label in original_labels:
             if label in present:
-                counts[label] += 1
+                observed_counts[label] += 1
+            if label in uncertain_present:
+                uncertain_counts[label] += 1
     total = len(rows)
+    active, observed_ignored, observed_priors = _active_label_split(original_labels, observed_counts, total)
+    uncertain_active, uncertain_ignored, uncertain_priors = _active_label_split(original_labels, uncertain_counts, total)
+    metadata = dict(label_schema.get("metadata") or {})
+    metadata["original_labels"] = original_labels
+    metadata["ignored_labels"] = observed_ignored
+    metadata["uncertain_ignored_labels"] = uncertain_ignored
+    metadata["route_priors"] = observed_priors
+    metadata["uncertain_route_priors"] = uncertain_priors
+    metadata["observed"] = _label_summary_payload(original_labels, active, observed_ignored, observed_counts, total)
+    metadata["uncertain"] = _label_summary_payload(original_labels, uncertain_active, uncertain_ignored, uncertain_counts, total)
+    metadata["label_summary"] = {
+        "total_rows": total,
+        "original_label_count": len(original_labels),
+        "active_label_count": len(active),
+        "uncertain_active_label_count": len(uncertain_active),
+        "ignored_label_count": len(observed_ignored),
+        "uncertain_ignored_label_count": len(uncertain_ignored),
+        "all_negative_count": sum(1 for item in observed_ignored if item["reason"] == "all_negative"),
+        "all_positive_count": sum(1 for item in observed_ignored if item["reason"] == "all_positive"),
+        "uncertain_all_negative_count": sum(1 for item in uncertain_ignored if item["reason"] == "all_negative"),
+        "uncertain_all_positive_count": sum(1 for item in uncertain_ignored if item["reason"] == "all_positive"),
+    }
+    metadata["label_positive_counts"] = {
+        label: {
+            "positive_count": int(observed_counts.get(label, 0)),
+            "positive_ratio": float(observed_counts.get(label, 0) / total) if total else 0.0,
+        }
+        for label in original_labels
+    }
+    metadata["uncertain_label_positive_counts"] = {
+        label: {
+            "positive_count": int(uncertain_counts.get(label, 0)),
+            "positive_ratio": float(uncertain_counts.get(label, 0) / total) if total else 0.0,
+        }
+        for label in original_labels
+    }
+    return {"labels": active, "uncertain_labels": uncertain_active, "metadata": metadata}
+
+
+def _active_label_split(original_labels: list[str], counts: dict[str, int], total: int) -> tuple[list[str], list[dict[str, Any]], dict[str, float]]:
     active: list[str] = []
     ignored: list[dict[str, Any]] = []
-    route_priors: dict[str, float] = {}
+    priors: dict[str, float] = {}
     for label in original_labels:
         positive = int(counts.get(label, 0))
         ratio = float(positive / total) if total else 0.0
@@ -202,35 +254,55 @@ def filtered_damage_label_schema(rows: list[dict[str, Any]], label_schema: dict[
                 "total_count": total,
                 "positive_ratio": ratio,
             })
-            route_priors[label] = ratio
+            priors[label] = ratio
             continue
         active.append(label)
-    metadata = dict(label_schema.get("metadata") or {})
-    metadata["original_labels"] = original_labels
-    metadata["ignored_labels"] = ignored
-    metadata["route_priors"] = route_priors
-    metadata["label_summary"] = {
+    return active, ignored, priors
+
+
+def _label_summary_payload(
+    original_labels: list[str],
+    active: list[str],
+    ignored: list[dict[str, Any]],
+    counts: dict[str, int],
+    total: int,
+) -> dict[str, Any]:
+    return {
         "total_rows": total,
         "original_label_count": len(original_labels),
         "active_label_count": len(active),
         "ignored_label_count": len(ignored),
         "all_negative_count": sum(1 for item in ignored if item["reason"] == "all_negative"),
         "all_positive_count": sum(1 for item in ignored if item["reason"] == "all_positive"),
+        "label_positive_counts": {
+            label: {
+                "positive_count": int(counts.get(label, 0)),
+                "positive_ratio": float(counts.get(label, 0) / total) if total else 0.0,
+            }
+            for label in original_labels
+        },
     }
-    metadata["label_positive_counts"] = {
-        label: {
-            "positive_count": int(counts.get(label, 0)),
-            "positive_ratio": float(counts.get(label, 0) / total) if total else 0.0,
-        }
-        for label in original_labels
-    }
-    return {"labels": active, "metadata": metadata}
 
 
 def damage_labels_for_row(row: dict[str, Any]) -> list[str]:
     target = row.get("damage_analysis_target") if isinstance(row.get("damage_analysis_target"), dict) else {}
+    source = target.get("observed_labels") if isinstance(target.get("observed_labels"), list) else target.get("damage_labels")
+    return _location_label_list(source)
+
+
+def uncertain_labels_for_row(row: dict[str, Any]) -> list[str]:
+    target = row.get("damage_analysis_target") if isinstance(row.get("damage_analysis_target"), dict) else {}
+    return _location_label_list(target.get("uncertain_labels") or [])
+
+
+def oracle_damage_labels_for_row(row: dict[str, Any]) -> list[str]:
+    target = row.get("damage_analysis_target") if isinstance(row.get("damage_analysis_target"), dict) else {}
+    return _location_label_list(target.get("damage_labels") or [])
+
+
+def _location_label_list(raw: Any) -> list[str]:
     labels: list[str] = []
-    for label in target.get("damage_labels") or []:
+    for label in raw or []:
         text = str(label or "")
         if text.startswith(("zone:", "field:")):
             labels.append(text)

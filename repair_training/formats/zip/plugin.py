@@ -116,6 +116,7 @@ ZIP_EVAL_PROFILES = (
     "zip_data_descriptor_payload_bad",
     "zip_duplicate_entry_crc_conflict",
     "zip_extra_field_length_bad",
+    "zip_extra_field_local_header_bad",
     "zip_mixed_method_one_entry_bad",
     "zip_non_utf8_filename_directory_rebuild",
     "zip_sfx_cd_damage",
@@ -247,6 +248,8 @@ def damage_feature_spec() -> TrainingFeatureSpec:
         ignore_paths=(
             "source_identity.clean_sha256",
             "source_identity.corrupted_sha256",
+            "runtime_context.analysis_native_probe.structure.runtime.payload_extraction_content_failure_observed",
+            "runtime_context.analysis_native_probe.raw_structure.runtime.payload_extraction_content_failure_observed",
         ),
     )
 

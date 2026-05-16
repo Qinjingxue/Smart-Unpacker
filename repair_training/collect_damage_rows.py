@@ -26,6 +26,7 @@ from repair_training.formats.zip.build_material_impl import (
     _profile_layer_name,
     build_corpus_corruption_case,
 )
+from repair_training.formats.zip.observability import apply_zip_observability
 from repair_training.taxonomy import normalize_damage_record
 from sunpack.contracts.archive_input import ArchiveInputDescriptor
 from sunpack.contracts.archive_state import ArchiveState
@@ -144,6 +145,8 @@ def collect_damage_row(
     target_payload = _location_target(target.to_dict())
     job = _job_from_record(record, target.format)
     request_payload, observation = observe_damage_runtime(job, workspace=workspace / "runtime", config=config)
+    if target.format == "zip":
+        target_payload = apply_zip_observability(target_payload, request_payload)
     source_input = dict(record.get("damaged_input") or {})
     return {
         "schema_version": SCHEMA_VERSION,

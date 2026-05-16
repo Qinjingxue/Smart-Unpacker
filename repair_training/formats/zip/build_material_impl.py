@@ -6,6 +6,7 @@ import json
 import math
 import random
 import shutil
+import struct
 import sys
 import time
 import zipfile
@@ -19,6 +20,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from repair_training.formats.zip.corruption_impl import (
     MATERIAL_FORMAT_DIRS,
+    _zip_entry_infos,
     build_corpus_corruption_case,
     detect_archive_format,
     material_dir_to_format,
@@ -578,6 +580,11 @@ def _choose_source_for_profile(
 ) -> dict[str, Any]:
     compatible = [item for item in sources if _source_compatible_with_profile(dict(item.get("source_derivation") or {}), profile)]
     choices = compatible or sources
+    profile_l = str(profile or "").lower()
+    if "local_header" in profile_l and "extra" in profile_l:
+        local_extra_choices = [item for item in choices if _zip_source_has_local_extra(Path(item["source"]))]
+        if local_extra_choices:
+            choices = local_extra_choices
     if _profile_requires_payload_source(profile):
         payload_choices = [item for item in choices if int(item.get("source_payload_bytes") or 0) > 0]
         if payload_choices:
@@ -604,6 +611,24 @@ def _zip_source_payload_bytes(path: Path) -> int:
             return int(sum(max(0, int(info.file_size or 0)) for info in archive.infolist() if not info.is_dir()))
     except Exception:
         return 0
+
+
+def _zip_source_has_local_extra(path: Path) -> bool:
+    try:
+        data = path.read_bytes()
+    except Exception:
+        return False
+    for info in _zip_entry_infos(data):
+        offset = int(info.get("header_offset", -1) or -1)
+        if offset < 0 or offset + 30 > len(data):
+            continue
+        try:
+            _, extra_len = struct.unpack_from("<HH", data, offset + 26)
+        except Exception:
+            continue
+        if int(extra_len) > 0:
+            return True
+    return False
 
 
 def _apply_profile_metadata(record: dict[str, Any], profile: str, metadata: dict[str, Any]) -> None:

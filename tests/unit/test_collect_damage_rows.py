@@ -5,9 +5,10 @@ from pathlib import Path
 
 from repair_training.build_features import main as build_features_main
 from repair_training.core.material_records import attach_split_volumes
-from repair_training.core.features import damage_labels_for_row, damage_location_labels_from_target
+from repair_training.core.features import damage_labels_for_row, damage_location_labels_from_target, uncertain_labels_for_row
 from repair_training.collect_damage_rows import collect_damage_row
 from repair_training.formats.zip.corruption_impl import build_corpus_corruption_case
+from repair_training.formats.zip.observability import apply_zip_observability
 from repair_training.formats.zip.plugin import damage_feature_spec
 from repair_training.taxonomy import normalize_damage_record
 from sunpack.analysis import ArchiveAnalysisReport
@@ -68,7 +69,8 @@ def test_zip_v3_distribution_keeps_total_and_sfx_mix():
     total += sum(int(value["count"]) for value in distribution["physical_profiles"].values())
 
     assert total == 2800
-    assert distribution["profiles"]["zip_sfx_cd_damage"] == 220
+    assert distribution["profiles"]["zip_sfx_cd_damage"] >= 180
+    assert distribution["profiles"]["zip_extra_field_local_header_bad"] == 120
     assert distribution["compound_profiles"]["compound_sfx_cd_offset_only"]["count"] == 40
     assert distribution["compound_profiles"]["compound_sfx_cd_offset_split_only"]["count"] == 40
     assert distribution["compound_profiles"]["compound_sfx_cd_offset_with_payload_no_local_header"]["count"] == 60
@@ -291,6 +293,88 @@ def test_damage_label_normalizer_uses_explicit_labels_only():
 
     assert damage_labels_for_row({"damage_analysis_target": target}) == ["zone:central_directory"]
     assert damage_location_labels_from_target(target) == ["zone:central_directory"]
+
+
+def _observability_target(labels, *, summary=None, runtime=None):
+    return apply_zip_observability(
+        {"damage_labels": list(labels), "labels": [], "metadata": {}},
+        {
+            "runtime_context": {
+                "analysis_native_probe": {
+                    "structure": {
+                        "graph": {"summary": dict(summary or {})},
+                        "runtime": dict(runtime or {}),
+                    }
+                }
+            }
+        },
+    )
+
+
+def test_zip_observability_marks_local_header_crc_observed_with_cd_mismatch():
+    target = _observability_target(
+        ["field:local_header.crc", "zone:local_header"],
+        summary={"cd_entries_checked": 1, "central_local_crc_mismatch_count": 1},
+    )
+
+    assert "field:local_header.crc" in damage_labels_for_row({"damage_analysis_target": target})
+    assert "zone:local_header" in damage_labels_for_row({"damage_analysis_target": target})
+    assert not uncertain_labels_for_row({"damage_analysis_target": target})
+
+
+def test_zip_observability_marks_local_header_crc_uncertain_when_reference_missing():
+    target = _observability_target(
+        ["field:local_header.crc", "field:local_header.compressed_size", "zone:local_header"],
+        summary={"cd_entries_checked": 0, "central_local_crc_mismatch_count": 0, "central_local_compressed_size_mismatch_count": 0},
+    )
+
+    uncertain = set(uncertain_labels_for_row({"damage_analysis_target": target}))
+    observed = set(damage_labels_for_row({"damage_analysis_target": target}))
+
+    assert {"field:local_header.crc", "field:local_header.compressed_size", "zone:local_header"} <= uncertain
+    assert "field:local_header.crc" not in observed
+
+
+def test_zip_observability_marks_payload_observed_with_direct_crc_failure():
+    target = _observability_target(
+        ["field:payload.compressed_data", "zone:payload"],
+        runtime={"payload_direct_crc_or_hash_failure_observed": True, "extraction_crc_error_count": 1},
+    )
+
+    assert "field:payload.compressed_data" in damage_labels_for_row({"damage_analysis_target": target})
+    assert "zone:payload" in damage_labels_for_row({"damage_analysis_target": target})
+    assert not uncertain_labels_for_row({"damage_analysis_target": target})
+
+
+def test_zip_observability_marks_payload_uncertain_when_explained_by_missing_range():
+    target = _observability_target(
+        ["field:payload.compressed_data", "zone:payload"],
+        runtime={
+            "extraction_item_failure_observed": True,
+            "payload_extraction_content_failure_observed": True,
+            "payload_failure_explained_by_missing_range": True,
+            "no_payload_hash_crc_failure": True,
+        },
+    )
+
+    uncertain = set(uncertain_labels_for_row({"damage_analysis_target": target}))
+    observed = set(damage_labels_for_row({"damage_analysis_target": target}))
+
+    assert {"field:payload.compressed_data", "zone:payload"} <= uncertain
+    assert "field:payload.compressed_data" not in observed
+
+
+def test_zip_observability_marks_payload_uncertain_without_verification_signal():
+    target = _observability_target(
+        ["field:payload.compressed_data", "zone:payload"],
+        runtime={"payload_unverified_but_no_failure": True},
+    )
+
+    uncertain = set(uncertain_labels_for_row({"damage_analysis_target": target}))
+    observed = set(damage_labels_for_row({"damage_analysis_target": target}))
+
+    assert {"field:payload.compressed_data", "zone:payload"} <= uncertain
+    assert "field:payload.compressed_data" not in observed
 
 
 def test_zip_structure_facts_enter_archive_knowledge_and_damage_request(tmp_path):

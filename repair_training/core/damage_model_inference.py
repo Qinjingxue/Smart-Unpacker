@@ -17,33 +17,59 @@ class DamageAnalysisModel:
         self.plugin = plugin
         self.feature_schema = _read_json(self.model_dir / "feature_schema.json")
         self.label_schema = _read_json(self.model_dir / "label_schema.json")
-        self.thresholds = _read_json(self.model_dir / "thresholds.json")
+        self.thresholds = _read_json(self.model_dir / "thresholds_observed.json") or _read_json(self.model_dir / "thresholds.json")
+        self.uncertain_thresholds = _read_json(self.model_dir / "thresholds_uncertain.json")
         self.labels = list(self.label_schema.get("labels") or [])
-        self.model_index = _read_json(self.model_dir / "models.json")
+        self.uncertain_labels = list(self.label_schema.get("uncertain_labels") or [])
+        self.model_index = _read_json(self.model_dir / "models_observed.json") or _read_json(self.model_dir / "models.json")
+        self.uncertain_model_index = _read_json(self.model_dir / "models_uncertain.json")
         self._models: dict[str, Any] = {}
+        self._uncertain_models: dict[str, Any] = {}
 
     def predict_rows(self, rows: list[dict[str, Any]]) -> list[dict[str, float]]:
         if not rows:
             return []
         model_type = str(self.feature_schema.get("model_type") or "damage_location")
         x, _ = transform_rows(rows, schema=self.feature_schema, plugin=self.plugin, model_type=model_type)
-        return [self._predict_one(x[index]) for index in range(x.shape[0])]
+        return [self._predict_one(x[index], labels=self.labels, model_index=self.model_index, cache=self._models) for index in range(x.shape[0])]
 
-    def _predict_one(self, vector: np.ndarray) -> dict[str, float]:
+    def predict_uncertain_rows(self, rows: list[dict[str, Any]]) -> list[dict[str, float]]:
+        if not rows:
+            return []
+        model_type = str(self.feature_schema.get("model_type") or "damage_location")
+        x, _ = transform_rows(rows, schema=self.feature_schema, plugin=self.plugin, model_type=model_type)
+        return [
+            self._predict_one(
+                x[index],
+                labels=self.uncertain_labels,
+                model_index=self.uncertain_model_index,
+                cache=self._uncertain_models,
+            )
+            for index in range(x.shape[0])
+        ]
+
+    def _predict_one(
+        self,
+        vector: np.ndarray,
+        *,
+        labels: list[str],
+        model_index: dict[str, Any],
+        cache: dict[str, Any],
+    ) -> dict[str, float]:
         output: dict[str, float] = {}
         matrix = vector.reshape(1, -1)
-        for label in self.labels:
-            model = self._model_for_label(label)
+        for label in labels:
+            model = self._model_for_label(label, model_index=model_index, cache=cache)
             if isinstance(model, dict) and "constant_probability" in model:
                 output[label] = float(model.get("constant_probability") or 0.0)
             else:
                 output[label] = float(model.predict(matrix)[0])
         return output
 
-    def _model_for_label(self, label: str) -> Any:
-        if label in self._models:
-            return self._models[label]
-        rel = str(self.model_index.get(label) or "")
+    def _model_for_label(self, label: str, *, model_index: dict[str, Any], cache: dict[str, Any]) -> Any:
+        if label in cache:
+            return cache[label]
+        rel = str(model_index.get(label) or "")
         if not rel:
             model = {"constant_probability": 0.0}
         elif rel.endswith(".constant.json"):
@@ -54,7 +80,7 @@ class DamageAnalysisModel:
             except Exception as exc:  # pragma: no cover
                 raise SystemExit("LightGBM is required for damage model evaluation") from exc
             model = lgb.Booster(model_file=str(self.model_dir / rel))
-        self._models[label] = model
+        cache[label] = model
         return model
 
 

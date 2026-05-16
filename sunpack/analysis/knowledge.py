@@ -531,22 +531,51 @@ def _zip_runtime_evidence_payload(knowledge: Any, structure: dict[str, Any]) -> 
     local_offset_error_explained_by_missing_range = bool(likely_missing_range and (local_offset_points_into_payload or local_offset_outside_archive or local_link_errors))
     payload_partial_explained_by_missing_range = bool(likely_missing_range and (_as_int(extraction.get("entry_partial_count")) or _as_int(extraction.get("data_error_count")) or failed))
     missing_range_likely_structural_cause = bool(likely_missing_range and (local_offset_error_explained_by_missing_range or payload_partial_explained_by_missing_range or cd_offset_delta_matches_deleted_range))
-    payload_observed = _payload_verification_observed(coverage)
-    coverage_payload_failure_observed = _coverage_has_payload_failure(coverage)
-    payload_extraction_content_failure_observed = bool(extraction_crc or extraction_data_error or extraction_unexpected_end)
-    payload_content_failure_observed = bool(
-        coverage_payload_failure_observed
-        or (
-            payload_extraction_content_failure_observed
-            and not payload_observed
-            and not missing_range_likely_structural_cause
-        )
-    )
     no_payload_hash_crc_failure = not (
         _as_int(coverage.get("crc_mismatch_count"))
         or _as_int(coverage.get("payload_hash_mismatch_count"))
         or _as_int(coverage.get("archive_crc_test_failed_count"))
     )
+    payload_observed = _payload_verification_observed(coverage)
+    coverage_payload_failure_observed = _coverage_has_payload_failure(coverage)
+    extraction_item_failure_observed = bool(extraction_crc or extraction_data_error or extraction_unexpected_end or failed)
+    payload_failure_explained_by_missing_range = bool(
+        missing_range_likely_structural_cause
+        or payload_partial_explained_by_missing_range
+        or local_offset_error_explained_by_missing_range
+        or cd_offset_delta_matches_deleted_range
+    )
+    payload_failure_explained_by_cd_pointer = bool(cd_pointer_error_likely or cd_pointer_raw or entry_count_delta_explained_by_cd_pointer)
+    payload_failure_explained_by_sfx_or_split = bool(
+        split_sidecars_available
+        or sfx_cd_offset_shift_likely
+        or local_header_error_explained_by_sfx_offset
+        or prefix_explains_local_offsets
+    )
+    payload_failure_explained_by_structure = bool(
+        payload_failure_explained_by_missing_range
+        or payload_failure_explained_by_cd_pointer
+        or payload_failure_explained_by_sfx_or_split
+    )
+    payload_direct_crc_or_hash_failure_observed = bool(coverage_payload_failure_observed and not no_payload_hash_crc_failure)
+    payload_size_or_content_mismatch_observed = bool(
+        _as_int(coverage.get("size_mismatch_count"))
+        or _as_int(coverage.get("output_missing_count"))
+        or (coverage_payload_failure_observed and not payload_failure_explained_by_structure)
+    )
+    payload_extraction_content_failure_observed = bool(extraction_crc or extraction_data_error or extraction_unexpected_end)
+    payload_content_failure_observed = bool(
+        payload_direct_crc_or_hash_failure_observed
+        or payload_size_or_content_mismatch_observed
+        or (
+            payload_extraction_content_failure_observed
+            and not payload_observed
+            and not no_payload_hash_crc_failure
+            and not payload_failure_explained_by_structure
+        )
+    )
+    if no_payload_hash_crc_failure and payload_observed:
+        payload_direct_crc_or_hash_failure_observed = False
     payload_failure_absent = not payload_content_failure_observed
     payload_verified_intact = bool(payload_observed and payload_failure_absent)
     payload_unverified_but_no_failure = bool(not payload_observed and payload_failure_absent)
@@ -616,6 +645,12 @@ def _zip_runtime_evidence_payload(knowledge: Any, structure: dict[str, Any]) -> 
         "payload_unverified_but_no_failure": payload_unverified_but_no_failure,
         "no_payload_hash_crc_failure": no_payload_hash_crc_failure,
         "payload_coverage_content_failure_observed": coverage_payload_failure_observed,
+        "extraction_item_failure_observed": extraction_item_failure_observed,
+        "payload_direct_crc_or_hash_failure_observed": payload_direct_crc_or_hash_failure_observed,
+        "payload_size_or_content_mismatch_observed": payload_size_or_content_mismatch_observed,
+        "payload_failure_explained_by_missing_range": payload_failure_explained_by_missing_range,
+        "payload_failure_explained_by_cd_pointer": payload_failure_explained_by_cd_pointer,
+        "payload_failure_explained_by_sfx_or_split": payload_failure_explained_by_sfx_or_split,
         "payload_extraction_content_failure_observed": payload_extraction_content_failure_observed,
         "extraction_crc_error_count": extraction_crc,
         "extraction_data_error_count": extraction_data_error,
@@ -658,6 +693,12 @@ def _zip_runtime_public_payload(runtime: dict[str, Any], knowledge: Any) -> dict
         "payload_unverified_but_no_failure": bool(runtime.get("payload_unverified_but_no_failure")),
         "payload_content_failure_observed": bool(runtime.get("payload_content_failure_observed")),
         "payload_coverage_content_failure_observed": bool(runtime.get("payload_coverage_content_failure_observed")),
+        "extraction_item_failure_observed": bool(runtime.get("extraction_item_failure_observed")),
+        "payload_direct_crc_or_hash_failure_observed": bool(runtime.get("payload_direct_crc_or_hash_failure_observed")),
+        "payload_size_or_content_mismatch_observed": bool(runtime.get("payload_size_or_content_mismatch_observed")),
+        "payload_failure_explained_by_missing_range": bool(runtime.get("payload_failure_explained_by_missing_range")),
+        "payload_failure_explained_by_cd_pointer": bool(runtime.get("payload_failure_explained_by_cd_pointer")),
+        "payload_failure_explained_by_sfx_or_split": bool(runtime.get("payload_failure_explained_by_sfx_or_split")),
         "payload_extraction_content_failure_observed": bool(runtime.get("payload_extraction_content_failure_observed")),
         "extraction_crc_error_count": _as_int(runtime.get("extraction_crc_error_count")),
         "extraction_data_error_count": _as_int(runtime.get("extraction_data_error_count")),

@@ -35,10 +35,16 @@ COMPACT_FEATURE_ALLOWLIST = {
     "crc_mismatch_count",
     "data_error_count",
     "entry_failed_count",
+    "extraction_item_failure_observed",
     "no_payload_hash_crc_failure",
     "payload_content_failure_observed",
     "payload_crc_observed",
+    "payload_direct_crc_or_hash_failure_observed",
+    "payload_failure_explained_by_cd_pointer",
+    "payload_failure_explained_by_missing_range",
+    "payload_failure_explained_by_sfx_or_split",
     "payload_hash_mismatch_count",
+    "payload_size_or_content_mismatch_observed",
     "payload_unverified_but_no_failure",
     "payload_verification_observed",
     "payload_verified_intact",
@@ -370,7 +376,11 @@ class ZipNormalQueryBuilder:
                     "mismatch_ratio_bucket": _ratio_bucket(mismatch / max(1, ctx.cd_entry_count)),
                     "bit3_descriptor_flag_set": ctx.descriptor_present_count > 0,
                     "zip64_extra_overrides_field": ctx.zip64_present,
-                    "payload_crc_observed": bool(ctx.runtime.get("payload_content_failure_observed")),
+                    "payload_crc_observed": bool(
+                        ctx.runtime.get("payload_direct_crc_or_hash_failure_observed")
+                        or ctx.runtime.get("payload_size_or_content_mismatch_observed")
+                        or ctx.runtime.get("payload_content_failure_observed")
+                    ),
                     "verification_crc_failure": bool(ctx.runtime.get("no_payload_hash_crc_failure") is False),
                 },
             ))
@@ -610,7 +620,7 @@ class ZipNormalQueryBuilder:
     @staticmethod
     def _payload_negative_features(index: int) -> dict[str, Any]:
         variants = (
-            {"payload_content_failure_observed": True, "payload_failure_without_match_violation": True},
+            {"payload_direct_crc_or_hash_failure_observed": True, "payload_failure_without_match_violation": True},
             {"payload_end_inside_archive": False, "span_present": True},
             {"payload_end_after_next_local": True, "span_conflict_count_bucket": "one"},
             {"valid_with_missing_range": True, "only_valid_with_missing_range": True},
@@ -831,6 +841,12 @@ class _GraphContext:
     def payload_content_target_features(self) -> dict[str, Any]:
         span = self.span_features(kind="payload")
         content_failure = bool(self.runtime.get("payload_content_failure_observed"))
+        direct_crc_or_hash = bool(self.runtime.get("payload_direct_crc_or_hash_failure_observed"))
+        size_or_content_mismatch = bool(self.runtime.get("payload_size_or_content_mismatch_observed"))
+        extraction_item_failure = bool(self.runtime.get("extraction_item_failure_observed"))
+        explained_missing = bool(self.runtime.get("payload_failure_explained_by_missing_range"))
+        explained_cd_pointer = bool(self.runtime.get("payload_failure_explained_by_cd_pointer"))
+        explained_sfx_or_split = bool(self.runtime.get("payload_failure_explained_by_sfx_or_split"))
         verification_observed = bool(self.runtime.get("payload_verification_observed"))
         verified_intact = bool(self.runtime.get("payload_verified_intact"))
         unverified_no_failure = bool(self.runtime.get("payload_unverified_but_no_failure"))
@@ -841,8 +857,8 @@ class _GraphContext:
         data_error_count = _int(self.extraction_outcomes.get("data_error_count"))
         unexpected_end_count = _int(self.extraction_outcomes.get("unexpected_end_count"))
         crc_failure = (not no_payload_hash_crc_failure) or crc_mismatch_count > 0 or payload_hash_mismatch_count > 0
-        extraction_payload_failure = data_error_count > 0 or unexpected_end_count > 0
-        direct = self.has_violation_field("payload.compressed_data") or content_failure or crc_failure or extraction_payload_failure
+        extraction_payload_failure = extraction_item_failure and not (explained_missing or explained_cd_pointer or explained_sfx_or_split)
+        direct = self.has_violation_field("payload.compressed_data") or content_failure or direct_crc_or_hash or size_or_content_mismatch or crc_failure or extraction_payload_failure
         match_violation = any(
             self.has_violation_field(field)
             for field in ("local_header.crc", "central_directory.crc", "local_header.compressed_size", "central_directory.compressed_size")
@@ -850,6 +866,12 @@ class _GraphContext:
         return {
             **span,
             "payload_content_failure_observed": content_failure,
+            "payload_direct_crc_or_hash_failure_observed": direct_crc_or_hash,
+            "payload_size_or_content_mismatch_observed": size_or_content_mismatch,
+            "payload_failure_explained_by_missing_range": explained_missing,
+            "payload_failure_explained_by_cd_pointer": explained_cd_pointer,
+            "payload_failure_explained_by_sfx_or_split": explained_sfx_or_split,
+            "extraction_item_failure_observed": extraction_item_failure,
             "payload_verification_observed": verification_observed,
             "payload_verified_intact": verified_intact,
             "payload_unverified_but_no_failure": unverified_no_failure,
@@ -860,7 +882,7 @@ class _GraphContext:
             "data_error_count": data_error_count,
             "unexpected_end_count": unexpected_end_count,
             "verification_crc_failure": crc_failure,
-            "payload_failure_without_match_violation": (direct or extraction_payload_failure) and not match_violation,
+            "payload_failure_without_match_violation": direct and not match_violation,
             "direct_field_violation_present": direct,
             "graph_violation_present": direct,
         }
@@ -880,7 +902,11 @@ class _GraphContext:
             "mismatch_ratio_bucket": _ratio_bucket(mismatch / max(1, self.cd_entry_count)),
             "bit3_descriptor_flag_set": self.descriptor_present_count > 0,
             "zip64_extra_overrides_field": self.zip64_present,
-            "payload_crc_observed": bool(self.runtime.get("payload_content_failure_observed")),
+            "payload_crc_observed": bool(
+                self.runtime.get("payload_direct_crc_or_hash_failure_observed")
+                or self.runtime.get("payload_size_or_content_mismatch_observed")
+                or self.runtime.get("payload_content_failure_observed")
+            ),
             "payload_verification_observed": bool(self.runtime.get("payload_verification_observed")),
             "payload_verified_intact": bool(self.runtime.get("payload_verified_intact")),
             "no_payload_hash_crc_failure": no_payload_hash_crc_failure,

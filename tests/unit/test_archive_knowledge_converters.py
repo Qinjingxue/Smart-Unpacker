@@ -111,6 +111,8 @@ def test_extraction_verification_and_zip_runtime_evidence_facts(tmp_path):
     assert runtime["has_split_sidecars"] is True
     assert runtime["split_part_count"] == 2
     assert runtime["payload_content_failure_observed"] is True
+    assert runtime["payload_direct_crc_or_hash_failure_observed"] is True
+    assert runtime["payload_size_or_content_mismatch_observed"] is True
     assert runtime["no_payload_hash_crc_failure"] is False
     assert runtime["extraction_entry_outcomes"]["entry_failed_count"] == 1
     assert runtime["verification_coverage_breakdown"]["crc_mismatch_count"] >= 1
@@ -188,6 +190,7 @@ def test_zip_runtime_evidence_separates_structural_checksum_and_sfx_offset(tmp_p
     assert evidence["payload_verified_intact"] is True
     assert evidence["payload_unverified_but_no_failure"] is False
     assert evidence["payload_content_failure_observed"] is False
+    assert evidence["payload_direct_crc_or_hash_failure_observed"] is False
     assert evidence["no_payload_hash_crc_failure"] is True
 
 
@@ -269,6 +272,9 @@ def test_zip_runtime_evidence_attributes_partial_payload_to_missing_range(tmp_pa
     assert evidence["has_split_sidecars"] is True
     assert evidence["split_part_count"] == 2
     assert evidence["payload_content_failure_observed"] is False
+    assert evidence["extraction_item_failure_observed"] is True
+    assert evidence["payload_failure_explained_by_missing_range"] is True
+    assert evidence["payload_direct_crc_or_hash_failure_observed"] is False
     assert evidence["no_payload_hash_crc_failure"] is True
     assert evidence["payload_unverified_but_no_failure"] is True
 

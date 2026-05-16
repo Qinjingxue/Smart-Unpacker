@@ -23,6 +23,8 @@ class DamageAnalysisAdapter(Protocol):
         *,
         metadata: dict[str, Any] | None = None,
         threshold_override: float | None = None,
+        uncertainty_scores: dict[str, float] | None = None,
+        uncertainty_thresholds: dict[str, Any] | None = None,
     ) -> DamageAnalysisResult:
         ...
 
@@ -86,6 +88,8 @@ class ZipDamageAnalysisAdapter:
         *,
         metadata: dict[str, Any] | None = None,
         threshold_override: float | None = None,
+        uncertainty_scores: dict[str, float] | None = None,
+        uncertainty_thresholds: dict[str, Any] | None = None,
     ) -> DamageAnalysisResult:
         clean_scores = {str(label): _float(score) for label, score in scores.items() if str(label).startswith(("zone:", "field:"))}
         selected_scores = _selected_scores(clean_scores, thresholds, threshold_override=threshold_override)
@@ -93,13 +97,27 @@ class ZipDamageAnalysisAdapter:
             label, score = max(clean_scores.items(), key=lambda item: item[1])
             selected_scores[label] = score
         labels = apply_location_hierarchy(sorted(selected_scores))
+        uncertain_clean_scores = {
+            str(label): _float(score)
+            for label, score in (uncertainty_scores or {}).items()
+            if str(label).startswith(("zone:", "field:"))
+        }
+        uncertain_selected_scores = _selected_scores(
+            uncertain_clean_scores,
+            uncertainty_thresholds,
+            threshold_override=threshold_override,
+        )
+        uncertain_labels = apply_location_hierarchy(sorted(uncertain_selected_scores))
         zone_labels = sorted({label.split(":", 1)[1] for label in labels if label.startswith("zone:")})
         meta = dict(metadata or {})
         meta.update({
             "threshold_mode": "override" if threshold_override is not None else "model",
             "taxonomy": "zip",
-            "analysis_target": "location_only",
+            "analysis_target": "observed_location_with_uncertainty",
             "selected_scores": selected_scores,
+            "uncertain_labels": uncertain_labels,
+            "uncertain_scores": uncertain_selected_scores,
+            "observability_summary": _observability_summary(uncertain_labels),
         })
         return DamageAnalysisResult(
             format="zip",
@@ -128,6 +146,15 @@ def _selected_scores(
         label: score
         for label, score in scores.items()
         if score >= float(per_label.get(label, default) or default)
+    }
+
+
+def _observability_summary(labels: list[str]) -> dict[str, Any]:
+    zones = sorted({zone_label_for_field(label.split(":", 1)[1]) for label in labels if label.startswith("field:")})
+    zones.extend(label.split(":", 1)[1] for label in labels if label.startswith("zone:"))
+    return {
+        "uncertain_label_count": len(labels),
+        "uncertain_zones": sorted({zone for zone in zones if zone}),
     }
 
 

@@ -1139,6 +1139,9 @@ def _zip_corpus_mutations(data: bytes, randomizer: random.Random, profile: str, 
         elif profile == "zip_extra_field_length_bad":
             mutations.extend(_zip_extra_field_length_mutations(data, entry_infos, randomizer))
             mutations.extend(_zip_eocd_count_mutations(eocd, count_delta=1))
+        elif profile == "zip_extra_field_local_header_bad":
+            mutations.extend(_zip_local_header_extra_mutations(data, entry_infos, randomizer))
+            mutations.extend(_zip_eocd_count_mutations(eocd, count_delta=1))
         elif profile == "zip_mixed_method_one_entry_bad":
             mutations.extend(_zip_damage_payloads(data, entry_infos, randomizer, all_entries=False, name="corpus_zip_mixed_method_one_entry_bad", expected_effect="one mixed-method entry payload is damaged"))
             mutations.extend(_zip_eocd_count_mutations(eocd, count_delta=1))
@@ -1537,6 +1540,46 @@ def _zip_extra_field_length_mutations(data: bytes, entry_infos: list[dict[str, A
         except Exception:
             extra_len = 0
         output.append(_replace_bytes("corpus_zip_cd_extra_length_bad", header + 30, struct.pack("<H", max(0, min(65535, extra_len + 5))), "zip.central_directory.extra_length", "central directory extra length is inconsistent"))
+    return output
+
+
+def _zip_local_header_extra_mutations(data: bytes, entry_infos: list[dict[str, Any]], randomizer: random.Random) -> list[BinaryMutation]:
+    output: list[BinaryMutation] = []
+    candidates: list[tuple[dict[str, Any], int, int, int]] = []
+    for info in entry_infos:
+        local = int(info.get("header_offset", -1) or -1)
+        if local < 0 or local + 30 > len(data):
+            continue
+        try:
+            name_len, extra_len = struct.unpack_from("<HH", data, local + 26)
+        except Exception:
+            continue
+        if int(extra_len) > 0 and local + 30 + int(name_len) + int(extra_len) <= len(data):
+            candidates.append((info, local, int(name_len), int(extra_len)))
+    if not candidates:
+        return _zip_extra_field_length_mutations(data, entry_infos, randomizer)
+    _, local, name_len, extra_len = candidates[randomizer.randrange(0, len(candidates))]
+    extra_start = local + 30 + name_len
+    output.append(
+        _replace_byte(
+            "corpus_zip_local_extra_payload_bad",
+            extra_start,
+            data[extra_start] ^ 0x20,
+            "zip.local_header.extra_field",
+            "local header extra field payload is damaged",
+        )
+    )
+    replacement_len = max(0, min(65535, extra_len + 3))
+    output.extend(
+        _replace_if_changed(
+            data,
+            "corpus_zip_local_extra_length_bad",
+            local + 28,
+            struct.pack("<H", replacement_len),
+            "zip.local_header.extra_length",
+            "local header extra field length is inconsistent",
+        )
+    )
     return output
 
 

@@ -69,7 +69,76 @@ def _train_damage_models(lgb, plugin: TrainingFormatPlugin, features_dir: Path, 
     valid = _load_npz(features_dir / "valid.npz")
     test = _load_npz(features_dir / "test.npz")
     labels = list(label_schema.get("labels") or [])
-    models_dir = model_dir / "models"
+    uncertain_labels = list(label_schema.get("uncertain_labels") or [])
+    observed = _train_damage_head(
+        lgb,
+        plugin,
+        train,
+        valid,
+        test,
+        labels,
+        model_dir=model_dir,
+        models_subdir="models/observed",
+        index_name="models_observed.json",
+        thresholds_name="thresholds_observed.json",
+        y_offset=0,
+    )
+    uncertain = _train_damage_head(
+        lgb,
+        plugin,
+        train,
+        valid,
+        test,
+        uncertain_labels,
+        model_dir=model_dir,
+        models_subdir="models/uncertain",
+        index_name="models_uncertain.json",
+        thresholds_name="thresholds_uncertain.json",
+        y_offset=len(labels),
+    )
+    (model_dir / "models.json").write_text((model_dir / "models_observed.json").read_text(encoding="utf-8"), encoding="utf-8")
+    (model_dir / "thresholds.json").write_text((model_dir / "thresholds_observed.json").read_text(encoding="utf-8"), encoding="utf-8")
+    metrics = {
+        "observed": observed["metrics"],
+        "uncertain": uncertain["metrics"],
+        "observed_macro_f1": observed["metrics"].get("macro_f1", 0.0),
+        "observed_micro_f1": observed["metrics"].get("micro_f1", 0.0),
+        "uncertain_macro_f1": uncertain["metrics"].get("macro_f1", 0.0),
+        "uncertain_micro_f1": uncertain["metrics"].get("micro_f1", 0.0),
+        "oracle_reconstructed_f1": _reconstructed_f1(
+            observed["test_scores"],
+            observed["test_y"],
+            uncertain["test_scores"],
+            uncertain["test_y"],
+            observed["thresholds"],
+            uncertain["thresholds"],
+        ),
+        "label_count": len(labels),
+        "uncertain_label_count": len(uncertain_labels),
+    }
+    metrics["thresholds"] = {
+        "default_threshold": observed["thresholds"].get("default_threshold", 0.5),
+        "per_label_count": len(observed["thresholds"].get("thresholds") or {}),
+        "selection_metric": observed["thresholds"].get("selection_metric"),
+    }
+    return metrics
+
+
+def _train_damage_head(
+    lgb,
+    plugin: TrainingFormatPlugin,
+    train: dict[str, Any],
+    valid: dict[str, Any],
+    test: dict[str, Any],
+    labels: list[str],
+    *,
+    model_dir: Path,
+    models_subdir: str,
+    index_name: str,
+    thresholds_name: str,
+    y_offset: int,
+) -> dict[str, Any]:
+    models_dir = model_dir / models_subdir
     models_dir.mkdir(parents=True, exist_ok=True)
     model_index: dict[str, str] = {}
     per_label: dict[str, dict[str, float]] = {}
@@ -77,7 +146,8 @@ def _train_damage_models(lgb, plugin: TrainingFormatPlugin, features_dir: Path, 
     test_scores = np.zeros((len(test["X"]), len(labels)), dtype=np.float32)
     params = _params(plugin, "damage_location")
     for index, label in enumerate(labels):
-        y = train["y"][:, index] if train["y"].ndim > 1 else train["y"]
+        col = y_offset + index
+        y = _label_column(train["y"], col)
         if len(set(float(v) for v in y)) < 2:
             constant = float(y[0]) if len(y) else 0.0
             model_path = models_dir / f"{_safe_name(label)}.constant.json"
@@ -85,10 +155,10 @@ def _train_damage_models(lgb, plugin: TrainingFormatPlugin, features_dir: Path, 
             model_index[label] = str(model_path.relative_to(model_dir))
             valid_scores[:, index] = constant
             test_scores[:, index] = constant
-            per_label[label] = _binary_metrics(_label_column(test_scores, index), _label_column(test["y"], index))
+            per_label[label] = _binary_metrics(_label_column(test_scores, index), _label_column(test["y"], col))
             continue
         model = lgb.LGBMClassifier(**params)
-        eval_set = [(valid["X"], _label_column(valid["y"], index))] if len(valid["X"]) else None
+        eval_set = [(valid["X"], _label_column(valid["y"], col))] if len(valid["X"]) else None
         fit_kwargs = {"eval_set": eval_set} if eval_set else {}
         model.fit(train["X"], y, **fit_kwargs)
         model_path = models_dir / f"{_safe_name(label)}.txt"
@@ -100,24 +170,25 @@ def _train_damage_models(lgb, plugin: TrainingFormatPlugin, features_dir: Path, 
                 valid_scores[:, index] = model.predict_proba(valid["X"])[:, 1]
             if len(test["X"]):
                 test_scores[:, index] = model.predict_proba(test["X"])[:, 1]
-        per_label[label] = _binary_metrics(_label_column(test_scores, index), _label_column(test["y"], index))
-    (model_dir / "models.json").write_text(json.dumps(model_index, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+        per_label[label] = _binary_metrics(_label_column(test_scores, index), _label_column(test["y"], col))
+    (model_dir / index_name).write_text(json.dumps(model_index, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
     calibration_score_parts = [item for item in (valid_scores, test_scores) if len(item)]
-    calibration_y_parts = [item for item in (valid["y"], test["y"]) if len(item)]
-    if calibration_score_parts and calibration_y_parts:
+    calibration_y_parts = [_slice_y(item, y_offset, len(labels)) for item in (valid["y"], test["y"]) if len(item)]
+    if calibration_score_parts and calibration_y_parts and labels:
         calibration_scores = np.vstack(calibration_score_parts)
         calibration_y = np.vstack(calibration_y_parts)
         thresholds = calibrate_binary_thresholds(calibration_scores, calibration_y, labels)
     else:
         thresholds = {"default_threshold": 0.5, "thresholds": {}, "selection_metric": "default_no_calibration_rows"}
-    (model_dir / "thresholds.json").write_text(json.dumps(thresholds, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    (model_dir / thresholds_name).write_text(json.dumps(thresholds, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
     metrics = _damage_metrics(per_label)
-    metrics["thresholds"] = {
-        "default_threshold": thresholds.get("default_threshold", 0.5),
-        "per_label_count": len(thresholds.get("thresholds") or {}),
-        "selection_metric": thresholds.get("selection_metric"),
+    metrics["micro_f1"] = _micro_f1(test_scores, _slice_y(test["y"], y_offset, len(labels)))
+    return {
+        "metrics": metrics,
+        "thresholds": thresholds,
+        "test_scores": test_scores,
+        "test_y": _slice_y(test["y"], y_offset, len(labels)),
     }
-    return metrics
 
 
 def _train_action_ranker(lgb, plugin: TrainingFormatPlugin, features_dir: Path, model_dir: Path) -> dict[str, Any]:
@@ -198,6 +269,51 @@ def _label_column(y: np.ndarray, index: int) -> np.ndarray:
     return y[:, index]
 
 
+def _slice_y(y: np.ndarray, offset: int, width: int) -> np.ndarray:
+    if width <= 0:
+        return np.zeros((y.shape[0], 0), dtype=np.float32)
+    if y.ndim == 1:
+        return y.reshape(-1, 1) if offset == 0 and width == 1 else np.zeros((y.shape[0], width), dtype=np.float32)
+    output = np.zeros((y.shape[0], width), dtype=np.float32)
+    available = max(0, min(width, y.shape[1] - offset))
+    if available:
+        output[:, :available] = y[:, offset:offset + available]
+    return output
+
+
+def _reconstructed_f1(
+    observed_scores: np.ndarray,
+    observed_y: np.ndarray,
+    uncertain_scores: np.ndarray,
+    uncertain_y: np.ndarray,
+    observed_thresholds: dict[str, Any],
+    uncertain_thresholds: dict[str, Any],
+) -> float:
+    if len(observed_y) == 0 and len(uncertain_y) == 0:
+        return 0.0
+    observed_default = float(observed_thresholds.get("default_threshold", 0.5) or 0.5)
+    uncertain_default = float(uncertain_thresholds.get("default_threshold", 0.5) or 0.5)
+    observed_pred = observed_scores >= observed_default if observed_scores.size else np.zeros_like(observed_y, dtype=bool)
+    uncertain_pred = uncertain_scores >= uncertain_default if uncertain_scores.size else np.zeros_like(uncertain_y, dtype=bool)
+    observed_truth = observed_y >= 0.5
+    uncertain_truth = uncertain_y >= 0.5
+    tp = float(np.sum(observed_pred & observed_truth) + np.sum(uncertain_pred & uncertain_truth))
+    fp = float(np.sum(observed_pred & ~observed_truth) + np.sum(uncertain_pred & ~uncertain_truth))
+    fn = float(np.sum(~observed_pred & observed_truth) + np.sum(~uncertain_pred & uncertain_truth))
+    return _prf(tp, fp, fn)["f1"]
+
+
+def _micro_f1(scores: np.ndarray, y: np.ndarray) -> float:
+    if scores.size == 0 or y.size == 0:
+        return 0.0
+    pred = scores >= 0.5
+    truth = y >= 0.5
+    tp = float(np.sum(pred & truth))
+    fp = float(np.sum(pred & ~truth))
+    fn = float(np.sum(~pred & truth))
+    return _prf(tp, fp, fn)["f1"]
+
+
 def _binary_metrics(scores: np.ndarray, y: np.ndarray) -> dict[str, float]:
     if len(y) == 0:
         return {"precision": 0.0, "recall": 0.0, "f1": 0.0}
@@ -206,6 +322,13 @@ def _binary_metrics(scores: np.ndarray, y: np.ndarray) -> dict[str, float]:
     tp = float(np.sum(pred & truth))
     fp = float(np.sum(pred & ~truth))
     fn = float(np.sum(~pred & truth))
+    precision = tp / max(1.0, tp + fp)
+    recall = tp / max(1.0, tp + fn)
+    f1 = 2 * precision * recall / max(1e-9, precision + recall)
+    return {"precision": precision, "recall": recall, "f1": f1}
+
+
+def _prf(tp: float, fp: float, fn: float) -> dict[str, float]:
     precision = tp / max(1.0, tp + fp)
     recall = tp / max(1.0, tp + fn)
     f1 = 2 * precision * recall / max(1e-9, precision + recall)

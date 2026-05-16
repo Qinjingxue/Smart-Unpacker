@@ -429,8 +429,17 @@ def _coerce_damage_analysis(value: DamageAnalysisResult | dict[str, Any] | None,
                 metadata["structure_anomaly"] = dict(value.get("structure_anomaly") or {})
             result = adapter.postprocess_scores(
                 {str(label): _optional_float(score) or 0.0 for label, score in scores.items()},
-                value.get("thresholds") if isinstance(value.get("thresholds"), dict) else None,
+                (
+                    value.get("thresholds_observed")
+                    if isinstance(value.get("thresholds_observed"), dict)
+                    else value.get("thresholds") if isinstance(value.get("thresholds"), dict) else None
+                ),
                 metadata=metadata,
+                uncertainty_scores={
+                    str(label): _optional_float(score) or 0.0
+                    for label, score in (value.get("damage_uncertainty_scores") or {}).items()
+                } if isinstance(value.get("damage_uncertainty_scores"), dict) else None,
+                uncertainty_thresholds=value.get("thresholds_uncertain") if isinstance(value.get("thresholds_uncertain"), dict) else None,
             )
             return result
         return DamageAnalysisResult(

@@ -174,6 +174,9 @@ def test_zip_normal_adapter_reads_structure_runtime_payload_facts():
                     "graph": _normal_query_graph(),
                     "runtime": {
                         "payload_content_failure_observed": True,
+                        "payload_direct_crc_or_hash_failure_observed": True,
+                        "payload_size_or_content_mismatch_observed": True,
+                        "extraction_item_failure_observed": True,
                         "payload_verification_observed": True,
                         "payload_verified_intact": False,
                         "payload_unverified_but_no_failure": False,
@@ -199,6 +202,9 @@ def test_zip_normal_adapter_reads_structure_runtime_payload_facts():
     crc_features = by_field["local_header.crc"]["features"]
 
     assert payload_features["payload_content_failure_observed"] is True
+    assert payload_features["payload_direct_crc_or_hash_failure_observed"] is True
+    assert payload_features["payload_size_or_content_mismatch_observed"] is True
+    assert payload_features["extraction_item_failure_observed"] is True
     assert payload_features["payload_verification_observed"] is True
     assert payload_features["payload_verified_intact"] is False
     assert payload_features["payload_unverified_but_no_failure"] is False
@@ -222,6 +228,7 @@ def test_zip_damage_feature_spec_uses_structure_not_raw_structure():
     assert not any("raw_structure" in prefix for prefix in spec.include_prefixes)
     assert not any("raw_structure" in path for path in spec.categorical_paths)
     assert not any("raw_structure" in prefix for prefix in spec.ignore_prefixes)
+    assert "runtime_context.analysis_native_probe.structure.runtime.payload_extraction_content_failure_observed" in spec.ignore_paths
 
 
 def test_normal_structure_features_use_query_schema(tmp_path):

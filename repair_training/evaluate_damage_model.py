@@ -18,7 +18,7 @@ from repair_training.core.damage_eval import (
 from repair_training.core.damage_model_inference import DamageAnalysisModel
 from repair_training.core.normal_structure_inference import NormalStructureModel
 from repair_training.core.datasets import write_json, write_jsonl
-from repair_training.core.features import damage_labels_for_row
+from repair_training.core.features import damage_labels_for_row, oracle_damage_labels_for_row, uncertain_labels_for_row
 from repair_training.core.plugin import load_training_format_plugin, normalize_format_name
 from sunpack.repair.policy.adapters.damage import get_damage_analysis_adapter
 from sunpack.repair.policy.adapters.normal_structure import get_normal_structure_adapter
@@ -91,16 +91,19 @@ def main(argv: list[str] | None = None) -> int:
         if adapter is None:
             raise SystemExit(f"damage analysis adapter is not available for format: {fmt}")
         score_rows = model.predict_rows(rows)
+        uncertain_score_rows = model.predict_uncertain_rows(rows)
         threshold_override = args.threshold if args.threshold is not None else None
         predictions = [
-            _prediction_row(row, scores, model=model, adapter=adapter, threshold=threshold_override)
-            for row, scores in zip(rows, score_rows)
+            _prediction_row(row, scores, uncertain_scores, model=model, adapter=adapter, threshold=threshold_override)
+            for row, scores, uncertain_scores in zip(rows, score_rows, uncertain_score_rows)
         ]
         write_jsonl(predictions_dir / "predictions.jsonl", predictions)
         metrics = evaluate_predictions(
             predictions,
             threshold=float(threshold_override) if threshold_override is not None else float(model.thresholds.get("default_threshold", 0.5) or 0.5),
         )
+        metrics["uncertain"] = evaluate_predictions(_uncertain_prediction_view(predictions), threshold=0.5)
+        metrics["oracle_reconstructed"] = evaluate_predictions(_oracle_reconstructed_view(predictions), threshold=0.5)
         metrics.update({
             "format": fmt,
             "seed": seed,
@@ -125,20 +128,41 @@ def main(argv: list[str] | None = None) -> int:
         write_json(reports / "cleanup_report.json", cleanup)
 
 
-def _prediction_row(row: dict[str, Any], scores: dict[str, float], *, model: DamageAnalysisModel, adapter: Any, threshold: float | None) -> dict[str, Any]:
+def _prediction_row(
+    row: dict[str, Any],
+    scores: dict[str, float],
+    uncertain_scores: dict[str, float],
+    *,
+    model: DamageAnalysisModel,
+    adapter: Any,
+    threshold: float | None,
+) -> dict[str, Any]:
     target = row.get("damage_analysis_target") if isinstance(row.get("damage_analysis_target"), dict) else {}
     runtime = ((row.get("damage_analysis_input") or {}).get("runtime_context") or {})
     extraction = runtime.get("extraction_summary") if isinstance(runtime.get("extraction_summary"), dict) else {}
     analysis = runtime.get("analysis_summary") if isinstance(runtime.get("analysis_summary"), dict) else {}
     true_labels = damage_labels_for_row({"damage_analysis_target": target})
-    result = adapter.postprocess_scores(scores, model.thresholds, threshold_override=threshold)
+    true_uncertain_labels = uncertain_labels_for_row({"damage_analysis_target": target})
+    oracle_labels = oracle_damage_labels_for_row({"damage_analysis_target": target})
+    result = adapter.postprocess_scores(
+        scores,
+        model.thresholds,
+        threshold_override=threshold,
+        uncertainty_scores=uncertain_scores,
+        uncertainty_thresholds=model.uncertain_thresholds,
+    )
     predicted = result.damage_labels
+    predicted_uncertain = list((result.metadata or {}).get("uncertain_labels") or [])
     return {
         "sample_id": row.get("sample_id"),
         "damage_profile": (row.get("metadata") or {}).get("damage_profile"),
         "true_labels": true_labels,
+        "true_uncertain_labels": true_uncertain_labels,
+        "oracle_labels": oracle_labels,
         "predicted_labels": predicted,
+        "predicted_uncertain_labels": predicted_uncertain,
         "scores": scores,
+        "uncertain_scores": uncertain_scores,
         "threshold": float(threshold) if threshold is not None else "model",
         "runtime_summary": {
             "analysis_format": analysis.get("format"),
@@ -146,6 +170,29 @@ def _prediction_row(row: dict[str, Any], scores: dict[str, float], *, model: Dam
             "extraction_failure_stage": extraction.get("failure_stage"),
         },
     }
+
+
+def _uncertain_prediction_view(predictions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            **row,
+            "true_labels": list(row.get("true_uncertain_labels") or []),
+            "predicted_labels": list(row.get("predicted_uncertain_labels") or []),
+            "scores": dict(row.get("uncertain_scores") or {}),
+        }
+        for row in predictions
+    ]
+
+
+def _oracle_reconstructed_view(predictions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            **row,
+            "true_labels": list(row.get("oracle_labels") or []),
+            "predicted_labels": sorted(set(row.get("predicted_labels") or []) | set(row.get("predicted_uncertain_labels") or [])),
+        }
+        for row in predictions
+    ]
 
 
 def _acceptance(metrics: dict[str, Any]) -> dict[str, Any]:
