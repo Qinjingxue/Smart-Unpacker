@@ -94,6 +94,7 @@ def _evaluate_one(index: int, record: dict[str, Any], *, fmt: str, config: dict[
             "module_name": result.module_name,
             "actions": list(result.actions or []),
             "final_recovery": recovery.to_dict(),
+            "final_recovery_status": _final_recovery_status(recovery.to_dict(), float(recovery.score or 0.0)),
             "final_recovery_score": float(recovery.score or 0.0),
             "oracle_best_recovery": oracle,
             "oracle_gap": max(0.0, oracle - float(recovery.score or 0.0)) if oracle is not None else None,
@@ -112,6 +113,7 @@ def _evaluate_one(index: int, record: dict[str, Any], *, fmt: str, config: dict[
             "status": "error",
             "error": str(exc),
             "error_type": type(exc).__name__,
+            "final_recovery_status": "error",
             "final_recovery_score": 0.0,
             "oracle_best_recovery": _oracle_value_for(sample_id, oracle_best),
             "round_count": 0,
@@ -165,22 +167,49 @@ def _decision_stats(rounds: list[dict[str, Any]]) -> dict[str, Any]:
 def _summary(runs: list[dict[str, Any]], *, elapsed: float) -> dict[str, Any]:
     scores = [_float(item.get("final_recovery_score")) for item in runs]
     statuses = Counter(str(item.get("status") or "") for item in runs)
+    final_statuses = Counter(_run_final_recovery_status(item) for item in runs)
+    oracle_scores = [_float(item.get("oracle_best_recovery")) for item in runs if item.get("oracle_best_recovery") is not None]
     gaps = [_float(item.get("oracle_gap")) for item in runs if item.get("oracle_gap") is not None]
     decision = _sum_decision_stats(runs)
+    sample_count = max(1, len(runs))
+    final_complete_rate = final_statuses.get("complete", 0) / sample_count
+    oracle_complete_rate = _rate_or_none(oracle_scores, 0.999)
     return {
         "samples": len(runs),
         "errors": statuses.get("error", 0),
         "status_counts": dict(statuses),
+        "scheduler_status_counts": dict(statuses),
+        "final_recovery_status_counts": dict(final_statuses),
         "final_recovery_mean": _mean(scores),
         "final_recovery_ge_0_5": _rate(scores, 0.5),
         "final_recovery_ge_0_8": _rate(scores, 0.8),
         "final_recovery_ge_0_95": _rate(scores, 0.95),
-        "repaired_rate": statuses.get("repaired", 0) / max(1, len(runs)),
-        "partial_rate": statuses.get("partial", 0) / max(1, len(runs)),
-        "give_up_rate": statuses.get("unrepairable", 0) / max(1, len(runs)),
-        "skipped_rate": statuses.get("skipped", 0) / max(1, len(runs)),
-        "oracle_gap_mean": _mean(gaps),
-        "oracle_gap_p90": _percentile(gaps, 0.9),
+        "final_recovery_complete_rate": final_complete_rate,
+        "policy_final_complete_rate": final_complete_rate,
+        "oracle_best_available_count": len(oracle_scores),
+        "oracle_best_missing_count": len(runs) - len(oracle_scores),
+        "oracle_best_recovery_mean": _mean_or_none(oracle_scores),
+        "oracle_best_ge_0_5": _rate_or_none(oracle_scores, 0.5),
+        "oracle_best_ge_0_8": _rate_or_none(oracle_scores, 0.8),
+        "oracle_best_ge_0_95": _rate_or_none(oracle_scores, 0.95),
+        "oracle_best_complete_rate": oracle_complete_rate,
+        "oracle_repaired_rate": oracle_complete_rate,
+        "policy_vs_oracle_complete_rate_gap": (oracle_complete_rate - final_complete_rate) if oracle_complete_rate is not None else None,
+        "scheduler_repaired_rate": statuses.get("repaired", 0) / sample_count,
+        "scheduler_partial_rate": statuses.get("partial", 0) / sample_count,
+        "scheduler_give_up_rate": statuses.get("unrepairable", 0) / sample_count,
+        "scheduler_skipped_rate": statuses.get("skipped", 0) / sample_count,
+        "repaired_rate": statuses.get("repaired", 0) / sample_count,
+        "partial_rate": statuses.get("partial", 0) / sample_count,
+        "give_up_rate": statuses.get("unrepairable", 0) / sample_count,
+        "skipped_rate": statuses.get("skipped", 0) / sample_count,
+        "scheduler_partial_but_final_complete_count": sum(
+            1 for item in runs if str(item.get("status") or "") == "partial" and _run_final_recovery_status(item) == "complete"
+        ),
+        "oracle_gap_available_count": len(gaps),
+        "oracle_gap_missing_count": len(runs) - len(gaps),
+        "oracle_gap_mean": _mean_or_none(gaps),
+        "oracle_gap_p90": _percentile_or_none(gaps, 0.9),
         "decision_quality": decision,
         "elapsed_seconds": round(elapsed, 6),
     }
@@ -193,13 +222,25 @@ def _profile_summary(runs: list[dict[str, Any]]) -> dict[str, Any]:
     output = {}
     for profile, items in sorted(grouped.items()):
         scores = [_float(item.get("final_recovery_score")) for item in items]
+        oracle_scores = [_float(item.get("oracle_best_recovery")) for item in items if item.get("oracle_best_recovery") is not None]
         gaps = [_float(item.get("oracle_gap")) for item in items if item.get("oracle_gap") is not None]
+        final_statuses = Counter(_run_final_recovery_status(item) for item in items)
+        final_complete_rate = final_statuses.get("complete", 0) / max(1, len(items))
+        oracle_complete_rate = _rate_or_none(oracle_scores, 0.999)
         output[profile] = {
             "count": len(items),
             "final_recovery_mean": _mean(scores),
             "ge_0_8": _rate(scores, 0.8),
-            "oracle_gap_mean": _mean(gaps),
+            "lt_0_5": 1.0 - _rate(scores, 0.5),
+            "final_recovery_complete_rate": final_complete_rate,
+            "oracle_best_available_count": len(oracle_scores),
+            "oracle_best_recovery_mean": _mean_or_none(oracle_scores),
+            "oracle_best_complete_rate": oracle_complete_rate,
+            "policy_vs_oracle_complete_rate_gap": (oracle_complete_rate - final_complete_rate) if oracle_complete_rate is not None else None,
+            "oracle_gap_available_count": len(gaps),
+            "oracle_gap_mean": _mean_or_none(gaps),
             "status_counts": dict(Counter(str(item.get("status") or "") for item in items)),
+            "final_recovery_status_counts": dict(final_statuses),
         }
     return output
 
@@ -210,9 +251,22 @@ def _hard_cases(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
         score = _float(item.get("final_recovery_score"))
         gap = item.get("oracle_gap")
         stats = item.get("decision_stats") if isinstance(item.get("decision_stats"), dict) else {}
-        if item.get("status") == "error" or (gap is not None and _float(gap) >= 0.25) or stats.get("high_gap_stop_count") or stats.get("bad_undo_count"):
-            cases.append(item)
-    cases.sort(key=lambda item: (_float(item.get("oracle_gap")) if item.get("oracle_gap") is not None else 0.0, -_float(item.get("final_recovery_score"))), reverse=True)
+        reasons = []
+        if item.get("status") == "error":
+            reasons.append("error")
+        if gap is not None and _float(gap) >= 0.25:
+            reasons.append("oracle_gap_ge_0_25")
+        if score <= 0.0:
+            reasons.append("zero_final_recovery")
+        elif score < 0.5:
+            reasons.append("low_final_recovery_lt_0_5")
+        if stats.get("high_gap_stop_count"):
+            reasons.append("high_gap_stop")
+        if stats.get("bad_undo_count"):
+            reasons.append("bad_undo")
+        if reasons:
+            cases.append({**item, "hard_case_reasons": reasons})
+    cases.sort(key=_hard_case_sort_key, reverse=True)
     return cases[:200]
 
 
@@ -238,8 +292,39 @@ def _sum_decision_stats(runs: list[dict[str, Any]]) -> dict[str, Any]:
     return {**dict(total), "actions": dict(actions)}
 
 
+def _run_final_recovery_status(item: dict[str, Any]) -> str:
+    status = str(item.get("final_recovery_status") or "")
+    if status:
+        return status
+    recovery = item.get("final_recovery") if isinstance(item.get("final_recovery"), dict) else {}
+    return _final_recovery_status(recovery, _float(item.get("final_recovery_score")))
+
+
+def _final_recovery_status(recovery: dict[str, Any], score: float) -> str:
+    status = str(recovery.get("status") or "")
+    if status:
+        return status
+    decision_hint = str(recovery.get("decision_hint") or "")
+    if score >= 0.999 or decision_hint == "accept":
+        return "complete"
+    if score > 0.0:
+        return "partial"
+    return "none"
+
+
+def _hard_case_sort_key(item: dict[str, Any]) -> tuple[float, float, float, float, float]:
+    reasons = set(item.get("hard_case_reasons") if isinstance(item.get("hard_case_reasons"), list) else [])
+    return (
+        1.0 if "error" in reasons else 0.0,
+        _float(item.get("oracle_gap")) if item.get("oracle_gap") is not None else 0.0,
+        1.0 if "zero_final_recovery" in reasons else 0.0,
+        1.0 if {"high_gap_stop", "bad_undo"} & reasons else 0.0,
+        1.0 - _float(item.get("final_recovery_score")),
+    )
+
+
 def _scheduler_config(*, workspace: Path, model_root: Path, max_rounds: int) -> dict[str, Any]:
-    return {
+    repair = {
         "workspace": str(workspace),
         "max_repair_rounds_per_task": max_rounds,
         "max_attempts_per_task": max_rounds,
@@ -257,7 +342,15 @@ def _scheduler_config(*, workspace: Path, model_root: Path, max_rounds: int) -> 
         "runtime_cache": {"enabled": True, "max_entries": 512},
         "training_module_selection_cache": True,
         "extraction": {"quiet": True},
+        "verification": {
+            "enabled": True,
+            "methods": [
+                {"name": "extraction_exit_signal", "enabled": True},
+                {"name": "output_presence", "enabled": True},
+            ],
+        },
     }
+    return {**repair, "repair": repair}
 
 
 def _validate_model_root(path: Path) -> Path:
@@ -314,8 +407,20 @@ def _mean(values: list[float]) -> float:
     return sum(values) / max(1, len(values))
 
 
+def _mean_or_none(values: list[float]) -> float | None:
+    if not values:
+        return None
+    return _mean(values)
+
+
 def _rate(values: list[float], threshold: float) -> float:
     return sum(1 for value in values if value >= threshold) / max(1, len(values))
+
+
+def _rate_or_none(values: list[float], threshold: float) -> float | None:
+    if not values:
+        return None
+    return _rate(values, threshold)
 
 
 def _percentile(values: list[float], q: float) -> float:
@@ -324,6 +429,12 @@ def _percentile(values: list[float], q: float) -> float:
     ordered = sorted(values)
     index = min(len(ordered) - 1, max(0, int(round((len(ordered) - 1) * q))))
     return ordered[index]
+
+
+def _percentile_or_none(values: list[float], q: float) -> float | None:
+    if not values:
+        return None
+    return _percentile(values, q)
 
 
 def _float(value: Any) -> float:

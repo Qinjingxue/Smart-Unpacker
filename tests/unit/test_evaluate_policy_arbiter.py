@@ -2,6 +2,7 @@ import pytest
 
 from repair_training.evaluate_policy_arbiter import (
     _decision_stats,
+    _hard_cases,
     _summary,
     _validate_model_root,
 )
@@ -64,13 +65,17 @@ def test_policy_arbiter_summary_includes_oracle_and_decision_quality():
     runs = [
         {
             "status": "repaired",
+            "final_recovery": {"status": "complete"},
             "final_recovery_score": 1.0,
+            "oracle_best_recovery": 1.0,
             "oracle_gap": 0.0,
             "decision_stats": {"actions": {"apply_patch": 1}, "high_gap_stop_count": 0},
         },
         {
             "status": "partial",
+            "final_recovery": {"status": "partial"},
             "final_recovery_score": 0.5,
+            "oracle_best_recovery": 0.75,
             "oracle_gap": 0.25,
             "decision_stats": {"actions": {"stop": 1}, "high_gap_stop_count": 1},
         },
@@ -81,6 +86,54 @@ def test_policy_arbiter_summary_includes_oracle_and_decision_quality():
     assert summary["samples"] == 2
     assert summary["final_recovery_mean"] == 0.75
     assert summary["repaired_rate"] == 0.5
+    assert summary["scheduler_repaired_rate"] == 0.5
+    assert summary["oracle_repaired_rate"] == 0.5
+    assert summary["oracle_best_complete_rate"] == 0.5
+    assert summary["oracle_best_recovery_mean"] == 0.875
+    assert summary["policy_vs_oracle_complete_rate_gap"] == 0.0
+    assert summary["final_recovery_status_counts"] == {"complete": 1, "partial": 1}
     assert summary["oracle_gap_mean"] == 0.125
+    assert summary["oracle_gap_available_count"] == 2
+    assert summary["oracle_gap_missing_count"] == 0
     assert summary["decision_quality"]["actions"] == {"apply_patch": 1, "stop": 1}
     assert summary["decision_quality"]["high_gap_stop_count"] == 1
+
+
+def test_policy_arbiter_summary_does_not_report_zero_oracle_gap_when_missing():
+    summary = _summary(
+        [
+            {
+                "status": "partial",
+                "final_recovery": {"status": "complete"},
+                "final_recovery_score": 1.0,
+                "oracle_best_recovery": None,
+                "oracle_gap": None,
+                "decision_stats": {},
+            }
+        ],
+        elapsed=1.0,
+    )
+
+    assert summary["oracle_gap_available_count"] == 0
+    assert summary["oracle_gap_missing_count"] == 1
+    assert summary["oracle_gap_mean"] is None
+    assert summary["oracle_gap_p90"] is None
+    assert summary["scheduler_partial_but_final_complete_count"] == 1
+    assert summary["repaired_rate"] == 0.0
+    assert summary["policy_final_complete_rate"] == 1.0
+    assert summary["oracle_repaired_rate"] is None
+    assert summary["oracle_best_complete_rate"] is None
+
+
+def test_policy_arbiter_hard_cases_include_low_and_zero_recovery_without_oracle_gap():
+    cases = _hard_cases(
+        [
+            {"index": 1, "status": "partial", "final_recovery_score": 1.0, "oracle_gap": None, "decision_stats": {}},
+            {"index": 2, "status": "partial", "final_recovery_score": 0.4, "oracle_gap": None, "decision_stats": {}},
+            {"index": 3, "status": "partial", "final_recovery_score": 0.0, "oracle_gap": None, "decision_stats": {}},
+        ]
+    )
+
+    assert [case["index"] for case in cases] == [3, 2]
+    assert cases[0]["hard_case_reasons"] == ["zero_final_recovery"]
+    assert cases[1]["hard_case_reasons"] == ["low_final_recovery_lt_0_5"]

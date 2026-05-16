@@ -301,18 +301,19 @@ class RecoveryEvaluator:
         if mode != "training_oracle":
             return self.config
         verification = dict(self.config.get("verification") or {})
-        if verification.get("methods"):
-            return self.config
+        methods = list(verification.get("methods") or [])
+        method_names = {str(item.get("name") or "") for item in methods if isinstance(item, dict)}
+        if "oracle_expected_output_match" not in method_names:
+            methods.insert(0, {"name": "oracle_expected_output_match", "enabled": True})
+        for name in ("extraction_exit_signal", "output_presence"):
+            if name not in method_names:
+                methods.append({"name": name, "enabled": True})
         return {
             **self.config,
             "verification": {
                 **verification,
                 "enabled": True,
-                "methods": [
-                    {"name": "oracle_expected_output_match", "enabled": True},
-                    {"name": "extraction_exit_signal", "enabled": True},
-                    {"name": "output_presence", "enabled": True},
-                ],
+                "methods": methods,
             },
         }
 
@@ -382,19 +383,17 @@ def _snapshot_from_parts(
     verification = dict(verification or {})
     native_validation = dict(native_validation or {})
     oracle_payload = _oracle_payload(oracle)
-    coverage = _coverage_payload(verification, native_validation)
+    coverage = _coverage_payload(verification)
     completeness = _first_float(coverage, "completeness", "file_coverage", "byte_coverage")
     if completeness <= 0:
         completeness = _first_float(verification, "completeness", "complete_ratio")
     output_quality = _first_float(verification, "output_quality_score", "output_quality")
     output_complete = _first_float(verification, "output_complete_ratio", "complete_ratio")
-    native_score = _native_score(native_validation)
     score, source = _score(
         mode=mode,
         oracle=oracle_payload,
         coverage_score=completeness,
         verification_score=_first_positive(completeness, output_quality, output_complete),
-        native_score=native_score,
     )
     complete_files = max(_first_int(verification, "complete_files"), _int(coverage.get("complete_files")))
     partial_files = max(_first_int(verification, "partial_files"), _int(coverage.get("partial_files")))
@@ -429,7 +428,7 @@ def _snapshot_from_parts(
     )
 
 
-def _score(*, mode: str, oracle: dict[str, Any], coverage_score: float, verification_score: float, native_score: float) -> tuple[float, str]:
+def _score(*, mode: str, oracle: dict[str, Any], coverage_score: float, verification_score: float) -> tuple[float, str]:
     oracle_score = _float(oracle.get("score"))
     if mode == "training_oracle" and oracle.get("available"):
         return oracle_score, "oracle"
@@ -437,8 +436,6 @@ def _score(*, mode: str, oracle: dict[str, Any], coverage_score: float, verifica
         return coverage_score, "archive_coverage"
     if verification_score > 0:
         return verification_score, "verification"
-    if native_score > 0:
-        return native_score, "native_validation"
     return 0.0, "none"
 
 
@@ -496,6 +493,8 @@ def _phase_timer(output: dict[str, float]):
 def _verification_from_job(job: RepairJob) -> dict[str, Any]:
     failure = job.extraction_failure if isinstance(job.extraction_failure, dict) else {}
     verification = failure.get("verification") if isinstance(failure.get("verification"), dict) else {}
+    if not verification:
+        verification = _nested_dict(job.knowledge, "verification", "summary")
     coverage = failure.get("archive_coverage") if isinstance(failure.get("archive_coverage"), dict) else verification.get("archive_coverage")
     payload = {**verification, **{key: value for key, value in failure.items() if key not in {"verification"}}}
     if isinstance(coverage, dict):
@@ -598,6 +597,15 @@ def _extraction_from_job(job: RepairJob) -> dict[str, Any]:
     }
 
 
+def _nested_dict(payload: Any, *keys: str) -> dict[str, Any]:
+    current = payload
+    for key in keys:
+        if not isinstance(current, dict):
+            return {}
+        current = current.get(key)
+    return dict(current) if isinstance(current, dict) else {}
+
+
 def _extraction_payload(result: ExtractionResult | dict[str, Any] | None) -> dict[str, Any]:
     if result is None:
         return {}
@@ -677,29 +685,27 @@ def _verification_payload(result: VerificationResult | dict[str, Any] | None) ->
     }
 
 
-def _coverage_payload(verification: dict[str, Any], native_validation: dict[str, Any]) -> dict[str, Any]:
-    for source in (verification.get("archive_coverage"), native_validation.get("archive_coverage")):
-        if isinstance(source, dict) and source:
-            return dict(source)
-    return {}
-
-
-def _native_score(native_validation: dict[str, Any]) -> float:
-    if not native_validation:
-        return 0.0
-    coverage = native_validation.get("archive_coverage") if isinstance(native_validation.get("archive_coverage"), dict) else {}
-    if coverage:
-        value = _first_float(coverage, "completeness", "file_coverage", "byte_coverage")
-        if value > 0:
-            return value
-    dry_run = native_validation.get("dry_run") if isinstance(native_validation.get("dry_run"), dict) else {}
-    if dry_run.get("ok"):
-        return 1.0
-    if _int(dry_run.get("files_written")) > 0:
-        return 0.55
-    if _int(dry_run.get("bytes_written")) > 0:
-        return 0.35
-    return _float(native_validation.get("score"))
+def _coverage_payload(verification: dict[str, Any]) -> dict[str, Any]:
+    source = verification.get("archive_coverage")
+    if not isinstance(source, dict) or not source:
+        return {}
+    coverage = dict(source)
+    coverage_values = [_float(coverage.get(key)) for key in ("completeness", "file_coverage", "byte_coverage") if coverage.get(key) is not None]
+    if any(value < 0.0 for value in coverage_values):
+        raise ValueError(f"invalid archive_coverage sentinel: {coverage}")
+    has_observation = (
+        _float(coverage.get("confidence")) > 0.0
+        or _int(coverage.get("expected_files")) > 0
+        or _int(coverage.get("matched_files")) > 0
+        or bool(coverage.get("sources"))
+    )
+    if not has_observation:
+        if any(value > 0.0 for value in coverage_values):
+            raise ValueError(f"archive_coverage has positive score without observations: {coverage}")
+        return {}
+    if coverage_values and max(coverage_values) > 1.0:
+        raise ValueError(f"archive_coverage score out of range: {coverage}")
+    return coverage
 
 
 def _failure_snapshot(state: ArchiveState | None, exc: Exception) -> PolicyRecoverySnapshot:

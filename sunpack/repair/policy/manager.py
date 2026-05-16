@@ -125,20 +125,28 @@ class PolicyDecisionArbiter:
                 details.update({"parent_value": parent_value, "value_delta": value_delta, "recovery_delta": recovery_delta})
             elif prior.action == "stop":
                 gap = value_gap
-                if current_score >= 0.95 or (gap <= self.stop_epsilon and current_value > self.low_value_threshold):
+                better_apply_available = best_candidate_value_delta >= self.apply_margin
+                better_undo_available = parent_value_delta >= self.undo_margin and parent_recovery_delta >= self.undo_margin
+                better_action_available = better_apply_available or better_undo_available
+                if (current_score >= 0.95 or (gap <= self.stop_epsilon and current_value > self.low_value_threshold)) and not better_action_available:
                     score += 1.0
                     details["selected_reason"] = "value_gap_satisfied"
                 else:
                     score -= max(0.0, gap)
-                if gap > self.continue_margin and (best_candidate_value_delta >= self.apply_margin or parent_value_delta >= self.undo_margin or has_apply or has_undo):
+                if gap > self.continue_margin and (better_action_available or has_apply or has_undo):
                     score -= self.hard_guard_penalty
                     details["hard_guard"] = "stop_blocked_high_value_gap"
+                elif better_action_available:
+                    score -= self.hard_guard_penalty
+                    details["hard_guard"] = "stop_blocked_better_action"
                 details.update({
                     "value_gap": gap,
                     "stop_epsilon": self.stop_epsilon,
                     "continue_margin": self.continue_margin,
                     "best_candidate_value_delta": best_candidate_value_delta,
                     "parent_value_delta": parent_value_delta,
+                    "better_apply_available": better_apply_available,
+                    "better_undo_available": better_undo_available,
                 })
             elif prior.action == "give_up":
                 if current_value <= self.low_value_threshold and max_apply_prior <= 0.0 and not has_undo:

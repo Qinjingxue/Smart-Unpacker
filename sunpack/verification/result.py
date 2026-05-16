@@ -50,9 +50,9 @@ class FileVerificationObservation:
 
 @dataclass(frozen=True)
 class ArchiveCoverageSummary:
-    completeness: float = 1.0
-    file_coverage: float = 1.0
-    byte_coverage: float = 1.0
+    completeness: float = -1.0
+    file_coverage: float = -1.0
+    byte_coverage: float = -1.0
     expected_files: int = 0
     matched_files: int = 0
     complete_files: int = 0

@@ -29,6 +29,7 @@ from sunpack.repair.policy.training_runtime import (
     state_source_input,
 )
 from sunpack.repair.policy.recovery_evaluator import PolicyRecoverySnapshot, RecoveryEvaluator
+from sunpack.repair.policy.types import RepairActionDecision
 from sunpack.repair.result import RepairResult
 from sunpack.repair.runtime_cache import RepairRuntimeCache
 from sunpack.contracts.archive_knowledge import ArchiveKnowledge
@@ -218,11 +219,37 @@ class RepairScheduler:
         seen_digests = {current_state.effective_patch_digest()} if current_state is not None else set()
         recovery_evaluator = RecoveryEvaluator(self.config)
         recovery_cache: dict[str, PolicyRecoverySnapshot] = {}
+        best_recovery_cache: dict[str, PolicyRecoverySnapshot] = {}
         state_value_cache: dict[str, dict[str, Any]] = {}
         parent_by_digest: dict[str, str] = {}
-        current_recovery = recovery_evaluator.evaluate_state(current_job, current_state, mode="policy_light", cache=recovery_cache)
-        best_recovery_snapshot = current_recovery
-        best_recovery = float(current_recovery.score or 0.0)
+        current_recovery = recovery_evaluator.evaluate_state(current_job, current_state, mode="policy_light")
+        current_best_recovery = _evaluate_policy_best_state_recovery(
+            recovery_evaluator,
+            current_job,
+            current_state,
+            current_recovery,
+            self.config,
+            best_recovery_cache,
+        )
+        best_state = current_state
+        best_recovery_snapshot = current_best_recovery
+        best_recovery = float(current_best_recovery.score or 0.0)
+        best_round_index = 0
+
+        def update_best_state(state: ArchiveState | None, recovery: PolicyRecoverySnapshot, *, round_index: int) -> None:
+            nonlocal best_state, best_recovery_snapshot, best_recovery, best_round_index
+            score = float(recovery.score or 0.0)
+            depth = state.patch_depth() if state is not None else 0
+            best_depth = best_state.patch_depth() if best_state is not None else 0
+            if score > best_recovery + min_improvement:
+                best_state = state
+                best_recovery_snapshot = recovery
+                best_recovery = score
+                best_round_index = round_index
+            elif score >= best_recovery and _policy_recovery_tie_breaks_best(recovery, best_recovery_snapshot, depth=depth, best_depth=best_depth):
+                best_state = state
+                best_recovery_snapshot = recovery
+                best_recovery = score
         stale_rounds = 0
         last_batch = RepairCandidateBatch()
         last_selection: dict[str, Any] = {}
@@ -239,6 +266,15 @@ class RepairScheduler:
                 warnings.append(observation_warning)
             runtime_context = runtime_context_from_job(current_job)
             current_recovery = recovery_evaluator.evaluate_state(current_job, current_state, mode="policy_light", cache=recovery_cache)
+            current_best_recovery = _evaluate_policy_best_state_recovery(
+                recovery_evaluator,
+                current_job,
+                current_state,
+                current_recovery,
+                self.config,
+                best_recovery_cache,
+            )
+            update_best_state(current_state, current_best_recovery, round_index=max(0, round_index - 1))
             current_digest = current_state.effective_patch_digest() if current_state is not None else ""
             parent_recovery = PolicyRecoverySnapshot()
             parent_digest = parent_by_digest.get(current_digest, "")
@@ -265,10 +301,14 @@ class RepairScheduler:
             materialized = materialize_candidates(batch.candidates)
             validated = [selector._with_native_validation(candidate) for candidate in materialized]
             selectable = [candidate for candidate in validated if selector._accepted(candidate)]
-            candidate_recoveries = [
-                recovery_evaluator.evaluate_candidate(current_job, candidate, mode="policy_light", cache=recovery_cache)
-                for candidate in selectable
-            ]
+            candidate_recoveries = _evaluate_policy_candidate_recoveries(
+                recovery_evaluator,
+                current_job,
+                selectable,
+                self.config,
+                round_index=round_index,
+                cache=recovery_cache,
+            )
             candidate_payloads = [
                 _policy_candidate_snapshot_with_damage(
                     current_job,
@@ -328,6 +368,23 @@ class RepairScheduler:
                 diagnosis=diagnosis_payload,
                 round_index=round_index,
             )
+            if decision.action == "stop" and not _policy_loop_stop_plateau_satisfied(
+                round_index=round_index,
+                max_rounds=max_rounds,
+                best_round_index=best_round_index,
+                current_recovery=current_recovery,
+                config=self.config,
+            ):
+                alternate = _policy_loop_alternate_decision(action_selection, candidate_payloads)
+                if alternate is not None:
+                    action_selection = _policy_selection_with_deferred_stop(
+                        action_selection,
+                        alternate=alternate,
+                        round_index=round_index,
+                        best_round_index=best_round_index,
+                        max_rounds=max_rounds,
+                    )
+                    decision = alternate
             last_selection = {
                 "policy_loop": True,
                 "round": round_index,
@@ -378,7 +435,7 @@ class RepairScheduler:
                 next_digest = next_state.effective_patch_digest()
                 if next_digest in seen_digests:
                     warnings.append("policy loop stopped because selected state was already visited")
-                    return _loop_stop_result(current_job, current_state, diagnosis_payload, last_selection, history, warnings, reason="repeated_patch_digest", recovery=current_recovery)
+                    return _loop_stop_result(current_job, best_state, diagnosis_payload, last_selection, history, warnings, reason="repeated_patch_digest", recovery=best_recovery_snapshot, current_state=current_state, current_recovery=current_recovery)
                 seen_digests.add(next_digest)
                 parent_by_digest[next_digest] = current_state.effective_patch_digest() if current_state is not None else ""
                 current_state = next_state
@@ -392,21 +449,28 @@ class RepairScheduler:
                 )
                 selected_index = selectable.index(selected) if selected in selectable else -1
                 next_recovery = candidate_recoveries[selected_index] if selected_index >= 0 else recovery_evaluator.evaluate_state(current_job, current_state, mode="policy_light", cache=recovery_cache)
-                recovery = float(next_recovery.score or 0.0)
+                next_best_recovery = _evaluate_policy_best_state_recovery(
+                    recovery_evaluator,
+                    current_job,
+                    current_state,
+                    next_recovery,
+                    self.config,
+                    best_recovery_cache,
+                )
+                recovery = float(next_best_recovery.score or 0.0)
                 if recovery >= best_recovery + min_improvement:
-                    best_recovery = recovery
-                    best_recovery_snapshot = next_recovery
+                    update_best_state(next_state, next_best_recovery, round_index=round_index)
                     stale_rounds = 0
                 else:
                     stale_rounds += 1
                 if patience and stale_rounds >= patience:
-                    return _loop_stop_result(current_job, current_state, diagnosis_payload, last_selection, history, warnings, reason="policy_loop_stagnation", recovery=next_recovery)
+                    return _loop_stop_result(current_job, best_state, diagnosis_payload, last_selection, history, warnings, reason="policy_loop_stagnation", recovery=best_recovery_snapshot, current_state=current_state, current_recovery=next_best_recovery)
                 continue
 
             if decision.action == "undo_patch":
                 if current_state is None or current_state.patch_depth() <= 0:
                     warnings.append("policy requested undo on an empty patch stack")
-                    return _loop_stop_result(current_job, current_state, diagnosis_payload, last_selection, history, warnings, reason="undo_empty_patch_stack", recovery=current_recovery)
+                    return _loop_stop_result(current_job, best_state, diagnosis_payload, last_selection, history, warnings, reason="undo_empty_patch_stack", recovery=best_recovery_snapshot, current_state=current_state, current_recovery=current_recovery)
                 current_state = current_state.pop_patch()
                 current_job = replace(
                     current_job,
@@ -417,16 +481,25 @@ class RepairScheduler:
                     damage_flags=[],
                 )
                 current_recovery = recovery_evaluator.evaluate_state(current_job, current_state, mode="policy_light", cache=recovery_cache)
+                current_best_recovery = _evaluate_policy_best_state_recovery(
+                    recovery_evaluator,
+                    current_job,
+                    current_state,
+                    current_recovery,
+                    self.config,
+                    best_recovery_cache,
+                )
+                update_best_state(current_state, current_best_recovery, round_index=round_index)
                 seen_digests.add(current_state.effective_patch_digest())
                 continue
 
             if decision.action == "stop":
-                return _loop_stop_result(current_job, current_state, diagnosis_payload, last_selection, history, warnings, reason=decision.reason or "policy_stop", recovery=current_recovery)
+                return _loop_stop_result(current_job, best_state, diagnosis_payload, last_selection, history, warnings, reason=decision.reason or "policy_stop", recovery=best_recovery_snapshot, current_state=current_state, current_recovery=current_recovery)
 
             if decision.action == "give_up":
                 return _loop_give_up_result(current_job, diagnosis_payload, last_selection, history, warnings, reason=decision.reason or "policy_give_up", recovery=current_recovery)
 
-        return _loop_stop_result(current_job, current_state, diagnosis_payload, last_selection, history, warnings, reason="max_policy_loop_rounds_reached", batch=last_batch, recovery=current_recovery)
+        return _loop_stop_result(current_job, best_state, diagnosis_payload, last_selection, history, warnings, reason="max_policy_loop_rounds_reached", batch=last_batch, recovery=best_recovery_snapshot, current_state=current_state, current_recovery=current_recovery)
 
     def policy_active_for_job(self, job: RepairJob) -> bool:
         return self.policy_manager.active_for_job(job)
@@ -1662,6 +1735,172 @@ def _loop_history_payload(history: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _policy_loop_stop_plateau_satisfied(
+    *,
+    round_index: int,
+    max_rounds: int,
+    best_round_index: int,
+    current_recovery: PolicyRecoverySnapshot,
+    config: dict[str, Any],
+) -> bool:
+    if float(current_recovery.score or 0.0) >= 0.999 or current_recovery.decision_hint == "accept":
+        return True
+    policy = config.get("policy") if isinstance(config.get("policy"), dict) else {}
+    ratio = float(policy.get("stop_plateau_window_ratio", 0.5) or 0.5)
+    minimum = max(1, int(policy.get("stop_plateau_min_rounds", 2) or 2))
+    window = max(minimum, int(max(1, max_rounds) * max(0.0, ratio) + 0.999999))
+    return max(0, int(round_index) - int(best_round_index)) >= window
+
+
+def _evaluate_policy_best_state_recovery(
+    evaluator: RecoveryEvaluator,
+    job: RepairJob,
+    state: ArchiveState | None,
+    fallback: PolicyRecoverySnapshot,
+    config: dict[str, Any],
+    cache: dict[str, PolicyRecoverySnapshot],
+) -> PolicyRecoverySnapshot:
+    if state is None:
+        return fallback
+    policy = config.get("policy") if isinstance(config.get("policy"), dict) else {}
+    mode = str(policy.get("best_state_recovery_mode") or "policy_full")
+    if mode not in {"policy_light", "policy_full", "training_oracle"}:
+        mode = "policy_full"
+    if mode == "policy_light":
+        return fallback
+    evaluated = evaluator.evaluate_state(job, state, mode=mode, cache=cache)
+    source = str((evaluated.metadata or {}).get("score_source") or "")
+    if float(evaluated.score or 0.0) <= 0.0 and source in {"", "none", "error"} and float(fallback.score or 0.0) > 0.0:
+        return fallback
+    return evaluated
+
+
+def _evaluate_policy_candidate_recoveries(
+    evaluator: RecoveryEvaluator,
+    job: RepairJob,
+    candidates: list[RepairCandidate],
+    config: dict[str, Any],
+    *,
+    round_index: int,
+    cache: dict[str, PolicyRecoverySnapshot],
+) -> list[PolicyRecoverySnapshot]:
+    budget = _candidate_recovery_budget(config, round_index)
+    output = []
+    for index, candidate in enumerate(candidates):
+        if index < budget:
+            output.append(evaluator.evaluate_candidate(job, candidate, mode="policy_full", cache=cache))
+        else:
+            output.append(_unverified_candidate_recovery(candidate))
+    return output
+
+
+def _candidate_recovery_budget(config: dict[str, Any], round_index: int) -> int:
+    policy = config.get("policy") if isinstance(config.get("policy"), dict) else {}
+    raw = policy.get("candidate_recovery_budget_root" if int(round_index or 0) <= 1 else "candidate_recovery_budget_branch")
+    if raw is None:
+        return _candidate_value_budget(config, round_index)
+    return max(0, int(raw or 0))
+
+
+def _unverified_candidate_recovery(candidate: RepairCandidate) -> PolicyRecoverySnapshot:
+    state = candidate.repaired_state
+    from sunpack.repair.policy.recovery_evaluator import native_validation_summary
+
+    return PolicyRecoverySnapshot(
+        state_digest=state.effective_patch_digest() if state is not None else "",
+        patch_depth=state.patch_depth() if state is not None else 0,
+        score=0.0,
+        status="unverified",
+        decision_hint="none",
+        native_validation=native_validation_summary(candidate),
+        metadata={
+            "score_source": "unverified",
+            "module_name": candidate.module_name,
+            "candidate_status": candidate.status,
+            "recovery_unverified": True,
+        },
+    )
+
+
+def _policy_recovery_tie_breaks_best(
+    recovery: PolicyRecoverySnapshot,
+    best_recovery: PolicyRecoverySnapshot,
+    *,
+    depth: int,
+    best_depth: int,
+) -> bool:
+    source = str((recovery.metadata or {}).get("score_source") or "")
+    best_source = str((best_recovery.metadata or {}).get("score_source") or "")
+    if source == "native_validation_capped" and best_source == "native_validation_capped":
+        native_score = _native_validation_raw_score(recovery.native_validation)
+        best_native_score = _native_validation_raw_score(best_recovery.native_validation)
+        if native_score != best_native_score:
+            return native_score > best_native_score
+        return depth < best_depth
+    return depth > best_depth
+
+
+def _native_validation_raw_score(payload: dict[str, Any]) -> float:
+    try:
+        return float((payload or {}).get("score") or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _policy_loop_alternate_decision(
+    selection: dict[str, Any],
+    candidate_payloads: list[dict[str, Any]],
+) -> RepairActionDecision | None:
+    arbiter = selection.get("arbiter") if isinstance(selection.get("arbiter"), dict) else {}
+    scores = arbiter.get("scores") if isinstance(arbiter.get("scores"), list) else []
+    candidate_ids = {str(item.get("candidate_id") or "") for item in candidate_payloads if isinstance(item, dict)}
+    for item in scores:
+        if not isinstance(item, dict):
+            continue
+        if item.get("hard_guard"):
+            continue
+        action = str(item.get("action") or "")
+        if action == "apply_patch":
+            candidate_id = str(item.get("candidate_id") or "")
+            if candidate_id and candidate_id in candidate_ids:
+                return RepairActionDecision(
+                    action="apply_patch",
+                    selected_candidate_id=candidate_id,
+                    reason=f"policy_stop_deferred:{item.get('selected_reason') or action}",
+                    metadata={"deferred_stop": True, "arbiter_score": item.get("final_score")},
+                )
+        if action == "undo_patch":
+            return RepairActionDecision(
+                action="undo_patch",
+                reason=f"policy_stop_deferred:{item.get('selected_reason') or action}",
+                metadata={"deferred_stop": True, "arbiter_score": item.get("final_score")},
+            )
+    return None
+
+
+def _policy_selection_with_deferred_stop(
+    selection: dict[str, Any],
+    *,
+    alternate: RepairActionDecision,
+    round_index: int,
+    best_round_index: int,
+    max_rounds: int,
+) -> dict[str, Any]:
+    payload = dict(selection)
+    payload["deferred_stop_original_action"] = selection.get("action") or selection.get("decision") or "stop"
+    payload["action"] = alternate.action
+    payload["decision"] = alternate.action
+    payload["selected_candidate_id"] = alternate.selected_candidate_id
+    payload["reason"] = alternate.reason
+    payload["stop_deferred"] = {
+        "reason": "recent_best_state_in_plateau_window",
+        "round": int(round_index),
+        "best_round": int(best_round_index),
+        "max_rounds": int(max_rounds),
+    }
+    return payload
+
+
 def _loop_stop_result(
     job: RepairJob,
     state: ArchiveState | None,
@@ -1673,6 +1912,8 @@ def _loop_stop_result(
     reason: str,
     batch: RepairCandidateBatch | None = None,
     recovery: PolicyRecoverySnapshot | None = None,
+    current_state: ArchiveState | None = None,
+    current_recovery: PolicyRecoverySnapshot | None = None,
 ) -> RepairResult:
     patch_depth = state.patch_depth() if state is not None else 0
     recovery_score = float(recovery.score or 0.0) if recovery is not None else 0.0
@@ -1693,6 +1934,13 @@ def _loop_stop_result(
         "patch_digest": state.effective_patch_digest() if state is not None else "",
         "recovery": recovery.to_dict() if recovery is not None else {},
     }
+    if current_state is not None and state is not current_state:
+        payload["policy_loop"]["terminal_patch_depth"] = current_state.patch_depth()
+        payload["policy_loop"]["terminal_patch_digest"] = current_state.effective_patch_digest()
+        payload["policy_loop"]["terminal_recovery"] = current_recovery.to_dict() if current_recovery is not None else {}
+        payload["policy_loop"]["final_state_selection"] = "best_seen_recovery"
+    else:
+        payload["policy_loop"]["final_state_selection"] = "terminal_state"
     result = RepairResult(
         status=status,
         confidence=float(job.confidence or 0.0),

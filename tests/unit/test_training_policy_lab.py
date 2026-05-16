@@ -93,6 +93,63 @@ def test_recovery_evaluator_scores_verification_and_oracle(tmp_path):
     assert oracle.metadata["score_source"] == "oracle"
 
 
+def test_policy_light_ignores_pure_native_validation_score(tmp_path):
+    source = tmp_path / "broken.zip"
+    source.write_bytes(b"abc")
+    descriptor = ArchiveInputDescriptor.from_parts(archive_path=str(source), format_hint="zip")
+    state = ArchiveState.from_archive_input(descriptor)
+    patch = PatchPlan(
+        module="zip_fix_cd_offset",
+        format="zip",
+        operations=[PatchOperation.append_bytes(b"fixed")],
+        confidence=0.9,
+    )
+    repaired = state.push_patch(patch)
+    candidate = RepairCandidate(
+        module_name="zip_fix_cd_offset",
+        format="zip",
+        repaired_input={"kind": "archive_state"},
+        confidence=0.9,
+        validations=[CandidateValidation(name="native", accepted=True, score=0.9)],
+        plan={"archive_state": repaired.to_dict(), "patch_plan": patch.to_dict()},
+    )
+
+    snapshot = RecoveryEvaluator().evaluate_candidate(
+        RepairJob(source_input={"path": str(source)}, format="zip"),
+        candidate,
+        mode="policy_light",
+    )
+
+    assert snapshot.score == 0.0
+    assert snapshot.metadata["score_source"] == "none"
+
+
+def test_recovery_evaluator_reads_verification_summary_from_job_knowledge(tmp_path):
+    source = tmp_path / "observed.zip"
+    source.write_bytes(b"abc")
+    state = ArchiveState.from_archive_input(ArchiveInputDescriptor.from_parts(archive_path=str(source), format_hint="zip"))
+    job = RepairJob(
+        source_input={"path": str(source), "format_hint": "zip"},
+        format="zip",
+        knowledge={
+            "verification": {
+                "summary": {
+                    "assessment_status": "partial",
+                    "decision_hint": "accept_partial",
+                    "completeness": 0.8,
+                    "archive_coverage": {"completeness": 0.8, "complete_files": 4, "expected_files": 5},
+                }
+            }
+        },
+    )
+
+    snapshot = RecoveryEvaluator().evaluate_state(job, state, mode="policy_light")
+
+    assert snapshot.score == 0.8
+    assert snapshot.complete_files == 4
+    assert snapshot.metadata["score_source"] == "archive_coverage"
+
+
 def test_recovery_evaluator_failure_snapshot_is_stable(monkeypatch, tmp_path):
     source = tmp_path / "broken.zip"
     source.write_bytes(b"abc")
@@ -147,8 +204,9 @@ def test_episode_collector_emits_patch_state_episode(tmp_path):
     assert any(t.selected_action and t.selected_action.action_type == "stop" for t in restored.transitions)
     assert any(t.candidate_snapshots for t in restored.transitions)
     first_apply = next(t for t in restored.transitions if t.selected_action and t.selected_action.action_type == "apply_patch")
-    assert first_apply.verification_after.details["recovery_snapshot"]["score"] == 0.9
-    assert first_apply.candidate_snapshots[0].metadata["recovery_score"] == 0.9
+    assert first_apply.verification_after.details["recovery_snapshot"]["score"] == 0.0
+    assert first_apply.verification_after.details["recovery_snapshot"]["metadata"]["score_source"] == "none"
+    assert first_apply.candidate_snapshots[0].metadata["recovery_score"] == 0.0
     serialized = json.dumps(episode.to_dict(), sort_keys=True)
     assert "data_b64" not in serialized
     assert "expected_b64" not in serialized
