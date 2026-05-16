@@ -26,7 +26,7 @@ def analyze_run(run_dir: str | Path) -> dict[str, Any]:
     timings = read_jsonl(datasets / "collection_timings.jsonl")
     failures = read_jsonl(datasets / "episode_failures.jsonl")
     damage_rows = read_jsonl(datasets / "damage_rows.jsonl")
-    action_rows = read_jsonl(datasets / "action_values.jsonl")
+    action_rows = read_jsonl(datasets / "action_policy_rows.jsonl")
     collection_summary = _read_json(datasets / "collection_summary.json")
     feature_summary = _read_json(run_dir / "features" / "damage_analysis" / "feature_summary.json")
 

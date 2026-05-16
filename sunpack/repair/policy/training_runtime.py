@@ -11,7 +11,7 @@ from sunpack.repair.candidate import (
     materialize_candidates,
 )
 from sunpack.repair.job import RepairJob
-from sunpack.repair.policy.types import DamageAnalysisRequest, RepairActionRequest
+from sunpack.repair.policy.types import DamageAnalysisRequest, RepairActionRequest, StateValueRequest
 from sunpack.repair.policy.recovery_evaluator import RecoveryEvaluator
 from sunpack.support import archive_knowledge_projection as knowledge_view
 
@@ -184,6 +184,79 @@ def build_repair_action_request(
     )
 
 
+def build_state_value_request(
+    job: RepairJob,
+    state: ArchiveState | None,
+    damage_analysis: dict[str, Any],
+    *,
+    candidate_payloads: list[dict[str, Any]] | None = None,
+    diagnosis: dict[str, Any] | None = None,
+    current_recovery: dict[str, Any] | None = None,
+    best_seen_recovery: dict[str, Any] | None = None,
+    parent_recovery: dict[str, Any] | None = None,
+    round_index: int = 0,
+) -> StateValueRequest:
+    return StateValueRequest(
+        job=job,
+        format=_normalize_format(job.format),
+        archive_state=state,
+        damage_analysis=dict(damage_analysis or {}),
+        current_recovery=dict(current_recovery or {}),
+        best_seen_recovery=dict(best_seen_recovery or {}),
+        parent_recovery=dict(parent_recovery or {}),
+        candidate_summaries=candidate_summaries_for_state(candidate_payloads or []),
+        repair_history=dict(getattr(job, "repair_history", {}) or {}),
+        diagnosis=dict(diagnosis or {}),
+        config={},
+        round_index=int(round_index or 0),
+    )
+
+
+def candidate_summaries_for_state(candidate_payloads: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        candidate_summary_for_state(payload)
+        for payload in candidate_payloads
+        if isinstance(payload, dict)
+    ]
+
+
+def candidate_summary_for_state(candidate_payload: dict[str, Any]) -> dict[str, Any]:
+    validation = candidate_payload.get("validation_summary") if isinstance(candidate_payload.get("validation_summary"), dict) else {}
+    return {
+        "candidate_id": str(candidate_payload.get("candidate_id") or ""),
+        "module_name": str(candidate_payload.get("module_name") or candidate_payload.get("module") or ""),
+        "module_family": str(candidate_payload.get("module_family") or candidate_payload.get("last_patch_module") or ""),
+        "action_type": str(candidate_payload.get("action_type") or "apply_patch"),
+        "patch_operation_count": _int(candidate_payload.get("patch_operation_count")),
+        "patch_depth": _int(candidate_payload.get("patch_depth")),
+        "confidence": _float(candidate_payload.get("confidence")),
+        "recovery_score": _float(candidate_payload.get("recovery_score")),
+        "recovery_delta": _float(candidate_payload.get("recovery_delta")),
+        "accepted": bool(validation.get("accepted", False)),
+        "validation_score": _float(validation.get("score")),
+        "status": str(candidate_payload.get("status") or ""),
+        "recovery_status": str(candidate_payload.get("recovery_status") or ""),
+    }
+
+
+def state_value_feature_payload(request: StateValueRequest) -> dict[str, Any]:
+    candidates = list(request.candidate_summaries or [])
+    return {
+        "episode_id": "",
+        "format": request.format,
+        "state_digest": request.archive_state.effective_patch_digest() if request.archive_state is not None else "",
+        "round_index": int(request.round_index or 0),
+        "patch_depth": request.archive_state.patch_depth() if request.archive_state is not None else 0,
+        "damage_analysis": dict(request.damage_analysis or {}),
+        "current_recovery": dict(request.current_recovery or {}),
+        "best_seen_recovery": dict(request.best_seen_recovery or {}),
+        "parent_recovery": dict(request.parent_recovery or {}),
+        "repair_history": dict(request.repair_history or {}),
+        "candidate_summary": _candidate_summary_from_payloads(candidates),
+        "reachable_recovery_value": _float((request.current_recovery or {}).get("score")),
+    }
+
+
 def candidate_snapshot(
     candidate: RepairCandidate,
     *,
@@ -271,11 +344,11 @@ def recovery_score_from_job(job: RepairJob) -> float:
     return float(RecoveryEvaluator().evaluate_state(job, archive_state_for_job(job), mode="policy_light").score or 0.0)
 
 
-def request_to_dict(request: DamageAnalysisRequest | RepairActionRequest) -> dict[str, Any]:
+def request_to_dict(request: DamageAnalysisRequest | RepairActionRequest | StateValueRequest) -> dict[str, Any]:
     state = request.archive_state
     payload: dict[str, Any] = {
         "format": request.format,
-        "archive_state": state.to_dict() if state is not None else None,
+        "archive_state": _state_summary(state) if state is not None else None,
         "runtime_context": dict(getattr(request, "runtime_context", {}) or {}),
         "diagnosis": dict(getattr(request, "diagnosis", {}) or {}),
         "knowledge_projection": dict(getattr(request, "knowledge_projection", {}) or {}),
@@ -300,7 +373,47 @@ def request_to_dict(request: DamageAnalysisRequest | RepairActionRequest) -> dic
             "parent_recovery": dict(request.parent_recovery or {}),
         })
         payload["candidates"] = [candidate_snapshot(candidate, index=index) for index, candidate in enumerate(request.candidates)]
+    if isinstance(request, StateValueRequest):
+        payload.update({
+            "damage_analysis": dict(request.damage_analysis or {}),
+            "current_recovery": dict(request.current_recovery or {}),
+            "best_seen_recovery": dict(request.best_seen_recovery or {}),
+            "parent_recovery": dict(request.parent_recovery or {}),
+            "candidate_summaries": [dict(item) for item in request.candidate_summaries],
+        })
     return payload
+
+
+def _candidate_summary_from_payloads(candidates: list[dict[str, Any]]) -> dict[str, Any]:
+    recoveries = [_float(item.get("recovery_score")) for item in candidates]
+    deltas = [_float(item.get("recovery_delta")) for item in candidates]
+    confidences = [_float(item.get("confidence")) for item in candidates]
+    modules: dict[str, int] = {}
+    families: dict[str, int] = {}
+    accepted = 0
+    for item in candidates:
+        module = str(item.get("module_name") or "")
+        family = str(item.get("module_family") or "")
+        if module:
+            modules[module] = modules.get(module, 0) + 1
+        if family:
+            families[family] = families.get(family, 0) + 1
+        accepted += 1 if item.get("accepted") else 0
+    return {
+        "candidate_count": len(candidates),
+        "has_candidate": bool(candidates),
+        "accepted_count": accepted,
+        "accepted_ratio": accepted / max(1, len(candidates)),
+        "max_candidate_recovery": max(recoveries, default=0.0),
+        "mean_candidate_recovery": sum(recoveries) / max(1, len(recoveries)),
+        "max_recovery_delta": max(deltas, default=0.0),
+        "mean_recovery_delta": sum(deltas) / max(1, len(deltas)),
+        "min_recovery_delta": min(deltas, default=0.0),
+        "max_confidence": max(confidences, default=0.0),
+        "mean_confidence": sum(confidences) / max(1, len(confidences)),
+        "module_counts": modules,
+        "module_family_counts": families,
+    }
 
 
 def _analysis_native_probe(job: RepairJob, knowledge: ArchiveKnowledge, route_evidence_flags: list[str]) -> dict[str, Any]:
@@ -345,12 +458,16 @@ def _analysis_native_probe(job: RepairJob, knowledge: ArchiveKnowledge, route_ev
 
 
 def _state_summary(state: ArchiveState) -> dict[str, Any]:
+    source = state.source.to_archive_input_descriptor().to_source_input()
     return {
         "schema_version": getattr(state, "schema_version", 0),
         "format": state.format_hint,
         "patch_depth": state.patch_depth(),
+        "patch_count": state.patch_depth(),
         "patch_digest": state.effective_patch_digest(),
-        "state": state.to_dict(),
+        "source_kind": source.get("kind") or source.get("open_mode") or "",
+        "source_format_hint": source.get("format_hint") or source.get("format") or "",
+        "source_part_count": len(source.get("parts") or []) if isinstance(source.get("parts"), list) else 1,
     }
 
 

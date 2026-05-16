@@ -23,7 +23,7 @@ from sunpack.repair.diagnosis import RepairDiagnosis
 from sunpack.repair.candidate import CandidateSelector, CandidateValidation, RepairCandidate, materialize_candidate
 from sunpack.repair import RepairJob, RepairScheduler
 from sunpack.repair.pipeline.module import RepairModuleSpec, RepairRoute
-from sunpack.repair.pipeline.modules._common import repair_operation_cache_key, source_input_for_job
+from sunpack.repair.pipeline.modules._common import base_archive_state_for_job, repair_operation_cache_key, source_input_for_job
 from sunpack.repair.pipeline.modules.seven_zip._scan import password_fingerprint
 from sunpack.repair.pipeline.modules.seven_zip.atomic import SevenZipFixStartHeaderCrc
 from sunpack.repair.pipeline.registry import get_repair_module_registry, register_repair_module
@@ -216,10 +216,29 @@ def test_source_input_for_job_does_not_reexpand_materialized_logical_stream_part
 
     assert payload["kind"] == "file"
     assert payload["path"] == str(repaired)
-    assert payload["parts"] == [{"path": str(original_part)}]
+    assert "parts" not in payload
+    assert payload["source_parts_metadata"] == [{"path": str(original_part)}]
     assert payload["logical_stream_built"] is True
     assert payload["split_sidecars_available"] is True
     assert payload["password"] == "secret"
+
+
+def test_base_archive_state_for_job_uses_logical_split_source_instead_of_stale_file_state(tmp_path):
+    source = tmp_path / "split.zip"
+    part = tmp_path / "split.z01"
+    source.write_bytes(b"tail")
+    part.write_bytes(b"head")
+
+    stale_file_state = ArchiveState.from_archive_input(ArchiveInputDescriptor.from_parts(archive_path=str(source), format_hint="zip"))
+    state = base_archive_state_for_job(RepairJob(
+        source_input={"kind": "file", "path": str(source), "format_hint": "zip", "parts": [{"path": str(part)}]},
+        archive_state=stale_file_state,
+        format="zip",
+        archive_key="split.zip",
+    ))
+
+    assert state.source.open_mode == "concat_ranges"
+    assert [item.path for item in state.source.ranges] == [str(part), str(source)]
 
 
 def test_seven_zip_wrong_password_flags_are_vetoed_only_without_resolved_password():

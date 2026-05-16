@@ -164,6 +164,7 @@ def get_training_plugin() -> TrainingFormatPlugin:
         damage_label_schema=damage_label_schema,
         damage_feature_spec=damage_feature_spec,
         action_feature_spec=action_feature_spec,
+        state_value_feature_spec=state_value_feature_spec,
         lightgbm_params=lightgbm_params,
         postprocess_damage_prediction=postprocess_damage_prediction,
         action_label=action_label,
@@ -205,9 +206,6 @@ def damage_feature_spec() -> TrainingFeatureSpec:
             "runtime_context.analysis_native_probe.structure.graph.explanations.",
             "runtime_context.analysis_native_probe.structure.summary.",
             "runtime_context.analysis_native_probe.structure.runtime.",
-            "runtime_context.analysis_native_probe.structure.anomaly.summary.",
-            "runtime_context.analysis_native_probe.structure.anomaly.compact_attribution.",
-            "runtime_context.analysis_native_probe.structure.anomaly.objects.",
             "runtime_context.archive_authentication.",
             "runtime_context.extraction_summary.failure_stage",
             "runtime_context.extraction_summary.failure_kind",
@@ -244,6 +242,7 @@ def damage_feature_spec() -> TrainingFeatureSpec:
             "runtime_context.knowledge_projection.source_fingerprint",
             "runtime_context.analysis_native_probe.structure.graph.nodes",
             "runtime_context.analysis_native_probe.structure.graph.edges",
+            "runtime_context.analysis_native_probe.structure.anomaly",
         ),
         ignore_paths=(
             "source_identity.clean_sha256",
@@ -256,7 +255,7 @@ def damage_feature_spec() -> TrainingFeatureSpec:
 
 def action_feature_spec() -> TrainingFeatureSpec:
     return TrainingFeatureSpec(
-        include_prefixes=("action_type", "candidate_snapshot.", "damage_analysis_target.", "current_recovery.", "next_recovery.", "recovery_delta"),
+        include_prefixes=("action_type", "candidate_snapshot.", "damage_analysis.", "current_recovery.", "next_recovery.", "recovery_delta"),
         categorical_paths=(
             "action_type",
             "candidate_snapshot.action_type",
@@ -282,6 +281,41 @@ def action_feature_spec() -> TrainingFeatureSpec:
     )
 
 
+def state_value_feature_spec() -> TrainingFeatureSpec:
+    return TrainingFeatureSpec(
+        include_prefixes=(
+            "format",
+            "round_index",
+            "patch_depth",
+            "damage_analysis.",
+            "current_recovery.",
+            "best_seen_recovery.",
+            "parent_recovery.",
+            "repair_history.",
+            "candidate_summary.",
+        ),
+        categorical_paths=(
+            "format",
+            "current_recovery.status",
+            "current_recovery.decision_hint",
+            "current_recovery.metadata.score_source",
+            "current_recovery.extraction.failure_kind",
+            "current_recovery.extraction.failure_stage",
+            "best_seen_recovery.status",
+            "parent_recovery.status",
+        ),
+        ignore_prefixes=(
+            "current_recovery.state_digest",
+            "best_seen_recovery.state_digest",
+            "parent_recovery.state_digest",
+            "current_recovery.extraction.archive",
+            "current_recovery.extraction.out_dir",
+            "current_recovery.verification.files",
+            "candidate_summary.patch_digest",
+        ),
+    )
+
+
 def lightgbm_params(model_type: str) -> dict[str, Any]:
     if model_type == "repair_action":
         return {
@@ -303,6 +337,16 @@ def lightgbm_params(model_type: str) -> dict[str, Any]:
             "subsample": 0.9,
             "colsample_bytree": 0.9,
         }
+    if model_type == "state_value":
+        return {
+            "objective": "regression",
+            "n_estimators": 100,
+            "learning_rate": 0.04,
+            "num_leaves": 31,
+            "min_child_samples": 2,
+            "subsample": 0.9,
+            "colsample_bytree": 0.9,
+        }
     return {
         "n_estimators": 70,
         "learning_rate": 0.04,
@@ -316,22 +360,71 @@ def lightgbm_params(model_type: str) -> dict[str, Any]:
 
 def action_label(row: dict[str, Any]) -> int:
     action = str(row.get("action_type") or "")
-    value = _float(row.get("long_term_value"))
-    current = _float((row.get("current_recovery") or {}).get("score") if isinstance(row.get("current_recovery"), dict) else 0.0)
-    next_score = _float((row.get("next_recovery") or {}).get("score") if isinstance(row.get("next_recovery"), dict) else 0.0)
-    regret = _float(row.get("regret"))
-    label = int(round((value + 1.0) * 10.0))
+    if "policy_prior_label" in row:
+        return int(max(0, min(31, round(_float(row.get("policy_prior_label"))))))
+    current = _recovery_score(row.get("current_recovery"))
+    next_score = _recovery_score(row.get("next_recovery"))
+    improvement = next_score - current
+    label = 8
     if row.get("is_best_action"):
-        label = max(label, 24)
-    if regret > 0:
-        label -= int(min(12, round(regret * 8.0)))
-    if action == "give_up" and current > 0.0:
-        label = min(label, 3)
-    if action == "stop" and current >= 0.95:
-        label = max(label, 28)
-    if action == "undo_patch" and next_score > current:
-        label = max(label, 22 + int(min(6, round((next_score - current) * 6.0))))
+        label = 28
+    if action == "give_up":
+        label = 18 if current <= 0.02 and not _is_recovery_candidate(row) else 2
+    elif action == "stop":
+        label = 28 if current >= 0.95 else 6
+    elif action == "undo_patch":
+        label = 24 if improvement > 0.20 else (18 if improvement > 0.02 else 8)
+    elif action == "apply_patch":
+        if _is_recovery_candidate(row):
+            label = max(label, 18)
+        if _is_salvage_or_rebuild_candidate(row):
+            label = max(label, 20)
+        if improvement > 0.20:
+            label = max(label, 30)
+        elif improvement > 0.05:
+            label = max(label, 24)
     return int(max(0, min(31, label)))
+
+
+def _recovery_score(value: Any) -> float:
+    if isinstance(value, dict):
+        return _float(value.get("score"))
+    return _float(value)
+
+
+def _state_value_score(*values: Any, default: float = 0.0) -> float:
+    for value in values:
+        if isinstance(value, dict):
+            for key in ("reachable_recovery_value", "score", "value"):
+                if key in value:
+                    return max(0.0, min(1.0, _float(value.get(key))))
+        elif value not in (None, ""):
+            return max(0.0, min(1.0, _float(value)))
+    return max(0.0, min(1.0, _float(default)))
+
+
+def _is_recovery_candidate(row: dict[str, Any]) -> bool:
+    snapshot = row.get("candidate_snapshot") if isinstance(row.get("candidate_snapshot"), dict) else {}
+    validation = snapshot.get("validation_summary") if isinstance(snapshot.get("validation_summary"), dict) else {}
+    return bool(validation.get("accepted")) or _is_salvage_or_rebuild_candidate(row)
+
+
+def _is_salvage_or_rebuild_candidate(row: dict[str, Any]) -> bool:
+    snapshot = row.get("candidate_snapshot") if isinstance(row.get("candidate_snapshot"), dict) else {}
+    metadata = snapshot.get("metadata") if isinstance(snapshot.get("metadata"), dict) else {}
+    tokens = " ".join(
+        str(value or "")
+        for value in (
+            snapshot.get("module_name"),
+            snapshot.get("module"),
+            snapshot.get("module_family"),
+            snapshot.get("last_patch_module"),
+            metadata.get("last_patch_module"),
+            metadata.get("module_name"),
+            row.get("candidate_id"),
+        )
+    ).lower()
+    return any(token in tokens for token in ("salvage", "rebuild", "carrier_crop", "deep_recovery"))
 
 
 def damage_eval_profile_plan(samples: int, seed: int) -> list[str]:

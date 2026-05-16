@@ -1,4 +1,5 @@
 import json
+import zlib
 import zipfile
 
 from sunpack.contracts.detection import FactBag
@@ -119,8 +120,63 @@ def test_expected_name_presence_skips_without_manifest_names(tmp_path):
 
     verification = _scheduler([{"name": "expected_name_presence"}]).verify(task, result)
 
+
+def test_oracle_expected_output_match_reports_complete_crc_and_size_match(tmp_path):
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    payload = b"hello oracle"
+    (out_dir / "a.txt").write_bytes(payload)
+    task = _task(tmp_path, oracle={
+        "expected_files": {
+            "a.txt": {
+                "name": "a.txt",
+                "size": len(payload),
+                "crc32": zlib.crc32(payload) & 0xFFFFFFFF,
+            }
+        },
+        "oracle_strength": "entry_hash",
+    })
+    result = ExtractionResult(success=True, archive=task.main_path, out_dir=str(out_dir), all_parts=task.all_parts)
+
+    verification = _scheduler([{"name": "oracle_expected_output_match"}]).verify(task, result)
+
     assert verification.decision_hint == "accept"
-    assert verification.assessment_status == "complete"
+    assert verification.archive_coverage.expected_files == 1
+    assert verification.archive_coverage.complete_files == 1
+    assert verification.archive_coverage.completeness == 1.0
+
+
+def test_oracle_expected_output_match_reports_missing_and_crc_failure(tmp_path):
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    (out_dir / "bad.bin").write_bytes(b"wrong")
+    task = _task(tmp_path, oracle={
+        "expected_files": {
+            "bad.bin": {"name": "bad.bin", "size": 5, "crc32": zlib.crc32(b"right") & 0xFFFFFFFF},
+            "missing.bin": {"name": "missing.bin", "size": 4, "crc32": 1234},
+        }
+    })
+    result = ExtractionResult(success=True, archive=task.main_path, out_dir=str(out_dir), all_parts=task.all_parts)
+
+    verification = _scheduler([{"name": "oracle_expected_output_match"}]).verify(task, result)
+
+    assert verification.decision_hint == "repair"
+    assert verification.archive_coverage.expected_files == 2
+    assert verification.archive_coverage.failed_files == 1
+    assert verification.archive_coverage.missing_files == 1
+    assert verification.archive_coverage.completeness < 1.0
+
+
+def test_oracle_expected_output_match_skips_without_oracle_expected_files(tmp_path):
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    task = _task(tmp_path)
+    result = ExtractionResult(success=True, archive=task.main_path, out_dir=str(out_dir), all_parts=task.all_parts)
+
+    verification = _scheduler([{"name": "oracle_expected_output_match"}]).verify(task, result)
+
+    assert verification.methods_run == ["oracle_expected_output_match"]
+    assert verification.archive_coverage.expected_files == 0
     assert verification.steps[0].status == "skipped"
 
 
@@ -245,7 +301,7 @@ def test_output_presence_uses_worker_manifest_progress_as_completeness(tmp_path)
     assert round(verification.archive_coverage.completeness, 3) == 0.5
 
 
-def _task(tmp_path, analysis=None):
+def _task(tmp_path, analysis=None, oracle=None):
     archive = tmp_path / "sample.zip"
     archive.write_bytes(b"zip")
     bag = FactBag()
@@ -256,6 +312,8 @@ def _task(tmp_path, analysis=None):
         knowledge.set("analysis.prepass", analysis, source_layer="test", source_module="fixture")
         if analysis.get("expected_names"):
             knowledge.set("verification.expected_names", analysis["expected_names"], source_layer="test", source_module="fixture")
+    if oracle is not None:
+        knowledge.set("verification.oracle", oracle, source_layer="test", source_module="fixture")
     task.set_knowledge(knowledge)
     return task
 

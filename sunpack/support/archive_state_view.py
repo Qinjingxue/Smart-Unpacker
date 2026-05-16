@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -35,7 +36,7 @@ class ArchiveStateByteView:
         self.path = state.source.entry_path
         self._read_bytes = 0
         self._validated = False
-        self.size = int(_native_archive_state_size(state.source.to_dict(), [patch.to_dict() for patch in state.patches]))
+        self.size = _logical_size_unchecked(state)
 
     def read_at(self, offset: int, size: int, validate: bool = True) -> bytes:
         if validate:
@@ -68,13 +69,31 @@ class ArchiveStateByteView:
     def to_bytes(self, validate: bool = True) -> bytes:
         if validate:
             self._validate()
-        return bytes(_native_archive_state_to_bytes(self.state.source.to_dict(), [patch.to_dict() for patch in self.state.patches]))
+        try:
+            return bytes(_native_archive_state_to_bytes(self.state.source.to_dict(), [patch.to_dict() for patch in self.state.patches]))
+        except ValueError as exc:
+            raise _translate_native_patch_error(exc) from exc
 
     def materialize(self, path: str | Path, validate: bool = True) -> Path:
-        target = Path(path)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(self.to_bytes(validate=validate))
+        target, _timing = self.materialize_with_timing(path, validate=validate)
         return target
+
+    def materialize_with_timing(self, path: str | Path, validate: bool = True) -> tuple[Path, dict[str, float]]:
+        timing: dict[str, float] = {}
+        target = Path(path)
+        started = time.perf_counter()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        timing["mkdir"] = time.perf_counter() - started
+        started = time.perf_counter()
+        try:
+            data = bytes(_native_archive_state_to_bytes(self.state.source.to_dict(), [patch.to_dict() for patch in self.state.patches]))
+        except ValueError as exc:
+            raise _translate_native_patch_error(exc) from exc
+        timing["to_bytes"] = time.perf_counter() - started
+        started = time.perf_counter()
+        target.write_bytes(data)
+        timing["write_bytes"] = time.perf_counter() - started
+        return target, timing
 
     def with_popped_patch(self) -> "ArchiveStateByteView":
         return ArchiveStateByteView(self.state.pop_patch())
@@ -82,7 +101,10 @@ class ArchiveStateByteView:
     def _validate(self) -> None:
         if self._validated:
             return
-        _validate_patch_stack(self.state)
+        try:
+            _native_archive_state_size(self.state.source.to_dict(), [patch.to_dict() for patch in self.state.patches])
+        except ValueError as exc:
+            raise _translate_native_patch_error(exc) from exc
         self._validated = True
 
 
@@ -108,6 +130,48 @@ def archive_state_from_source_input(
         logical_name=logical_name,
     )
     return ArchiveState.from_archive_input(descriptor)
+
+
+def _logical_size_unchecked(state: ArchiveState) -> int:
+    try:
+        size = int(_native_archive_state_size(state.source.to_dict(), []))
+    except Exception:
+        size = 0
+    for patch in state.patches:
+        for operation in patch.operations:
+            raw = operation.to_dict()
+            op = str(raw.get("op") or "replace_range")
+            offset = max(0, int(raw.get("offset") or 0))
+            if op == "truncate":
+                size = min(size, offset)
+            elif op == "append":
+                size += _operation_data_len(raw)
+            elif op == "insert":
+                size += _operation_data_len(raw)
+            elif op == "delete":
+                size -= min(max(0, int(raw.get("size") or 0)), max(0, size - offset))
+            elif op == "replace_range":
+                replaced = max(0, int(raw.get("size") or _operation_data_len(raw)))
+                size = size - replaced + _operation_data_len(raw)
+            size = max(0, size)
+    return int(size)
+
+
+def _operation_data_len(operation: dict[str, Any]) -> int:
+    data_b64 = str(operation.get("data_b64") or "")
+    if not data_b64:
+        return 0
+    try:
+        return len(base64.b64decode(data_b64.encode("ascii"), validate=True))
+    except Exception:
+        return 0
+
+
+def _translate_native_patch_error(exc: ValueError) -> ValueError:
+    message = str(exc)
+    if "patch precondition" in message or "expected_" in message:
+        return ArchivePatchValidationError(message)
+    return exc
 
 
 def _validate_patch_stack(state: ArchiveState) -> None:

@@ -149,6 +149,11 @@ def test_episode_collector_emits_patch_state_episode(tmp_path):
     first_apply = next(t for t in restored.transitions if t.selected_action and t.selected_action.action_type == "apply_patch")
     assert first_apply.verification_after.details["recovery_snapshot"]["score"] == 0.9
     assert first_apply.candidate_snapshots[0].metadata["recovery_score"] == 0.9
+    serialized = json.dumps(episode.to_dict(), sort_keys=True)
+    assert "data_b64" not in serialized
+    assert "expected_b64" not in serialized
+    assert "patches" not in json.dumps(first_apply.damage_analysis_request.get("archive_state") or {}, sort_keys=True)
+    assert len(serialized.encode("utf-8")) < 150_000
 
 
 def test_value_labeler_propagates_delayed_reward_to_early_actions():
@@ -243,19 +248,21 @@ def test_value_labeler_stop_and_give_up_terminal_choices():
 
 def test_value_labeler_cli_outputs_action_and_damage_rows(tmp_path):
     episodes = tmp_path / "episodes.jsonl"
-    output = tmp_path / "action_values.jsonl"
     episode = _chain_episode([("root", "fixed", "fix", 0.0, 1.0)])
     episodes.write_text(json.dumps(episode.to_dict(), sort_keys=True) + "\n", encoding="utf-8")
 
     from repair_training.value_labeler import main
 
-    assert main(["--episodes", str(episodes), "--output", str(output)]) == 0
-    action_rows = [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()]
-    damage_rows = [json.loads(line) for line in output.with_name("damage_rows.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert main(["--episodes", str(episodes), "--output-dir", str(tmp_path)]) == 0
+    action_rows = [json.loads(line) for line in (tmp_path / "action_policy_rows.jsonl").read_text(encoding="utf-8").splitlines()]
+    value_rows = [json.loads(line) for line in (tmp_path / "state_value_rows.jsonl").read_text(encoding="utf-8").splitlines()]
+    damage_rows = [json.loads(line) for line in (tmp_path / "damage_rows.jsonl").read_text(encoding="utf-8").splitlines()]
 
     assert action_rows
+    assert value_rows
     assert damage_rows
     assert any(row["is_best_action"] for row in action_rows)
+    assert "state_value" not in action_rows[0]
     assert {"current_recovery", "next_recovery", "recovery_delta", "score_source"}.issubset(action_rows[0])
 
 

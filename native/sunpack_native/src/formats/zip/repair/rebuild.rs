@@ -16,7 +16,8 @@ pub(crate) fn zip_scan_source(
     max_seconds: f64,
     verify_candidates: bool,
 ) -> PyResult<Py<PyDict>> {
-    let started = Instant::now();
+    let native_started = Instant::now();
+    let started = native_started;
     let password = extract_password(source_input);
     let options = DeepZipOptions {
         max_candidates: 1,
@@ -84,7 +85,8 @@ pub(crate) fn zip_deep_partial_recovery(
     max_seconds: f64,
     verify_candidates: bool,
 ) -> PyResult<Py<PyDict>> {
-    let started = Instant::now();
+    let native_started = Instant::now();
+    let started = native_started;
     let password = extract_password(source_input);
     let options = DeepZipOptions {
         max_candidates: max_candidates.max(1),
@@ -97,11 +99,15 @@ pub(crate) fn zip_deep_partial_recovery(
         allow_unverified_entries: false,
         password,
     };
+    let timing_read_started = Instant::now();
     let data = match read_source_input(source_input, options.max_input_bytes) {
         Ok(data) => data,
         Err(message) => return status_dict(py, "skipped", "", &message, &[], &[], 0, 0, 0.0, None, Some("input_read_failed")),
     };
+    let read_seconds = timing_read_started.elapsed().as_secs_f64();
+    let timing_scan_started = Instant::now();
     let scan = scan_entries(&data, &options, started);
+    let scan_seconds = timing_scan_started.elapsed().as_secs_f64();
     let mut plans = candidate_plans(&scan, &options);
     if plans.is_empty() {
         if scan.entries.is_empty() {
@@ -126,18 +132,25 @@ pub(crate) fn zip_deep_partial_recovery(
     let mut written = Vec::new();
     let workspace = Path::new(workspace);
     for plan in plans.into_iter().take(options.max_candidates) {
-        let output_path = workspace.join(format!("{}.zip", plan.name));
-        match write_candidate_zip(
+        let action_refs = plan.actions.to_vec();
+        let timing_semantic_started = Instant::now();
+        if let Some((patch_plan, stats)) = central_directory_suffix_patch_and_stats(
+            py,
+            plan.name,
+            "zip",
             &data,
             &scan.entries,
             &plan,
-            &output_path,
-            options.max_output_bytes,
-        ) {
-            Ok(stats) => written.push(WrittenCandidate {
+            plan.confidence,
+            &action_refs,
+            "zip_deep_partial_recovery",
+        )? {
+            let semantic_seconds = timing_semantic_started.elapsed().as_secs_f64();
+            written.push(WrittenCandidate {
                 name: plan.name,
                 policy: "",
-                path: output_path.to_string_lossy().to_string(),
+                path: String::new(),
+                patch_plan: Some(patch_plan),
                 confidence: plan.confidence,
                 actions: plan.actions,
                 entries: stats.entries,
@@ -146,7 +159,37 @@ pub(crate) fn zip_deep_partial_recovery(
                 passthrough_entries: stats.passthrough_entries,
                 size: stats.size,
                 rank_score: plan.rank_score,
-            }),
+            });
+            continue;
+        }
+        let semantic_seconds = timing_semantic_started.elapsed().as_secs_f64();
+        let output_path = workspace.join(format!("{}.zip", plan.name));
+        let timing_write_started = Instant::now();
+        match write_candidate_zip(
+            &data,
+            &scan.entries,
+            &plan,
+            &output_path,
+            options.max_output_bytes,
+        ) {
+            Ok(stats) => {
+                let _write_seconds = timing_write_started.elapsed().as_secs_f64();
+                let _ = semantic_seconds;
+                written.push(WrittenCandidate {
+                name: plan.name,
+                policy: "",
+                path: output_path.to_string_lossy().to_string(),
+                patch_plan: None,
+                confidence: plan.confidence,
+                actions: plan.actions,
+                entries: stats.entries,
+                verified_entries: stats.verified_entries,
+                descriptor_entries: stats.descriptor_entries,
+                passthrough_entries: stats.passthrough_entries,
+                size: stats.size,
+                rank_score: plan.rank_score,
+            })
+            },
             Err(message) => {
                 let mut warnings = scan.warnings.clone();
                 warnings.push(format!("{}: {message}", plan.name));
@@ -193,6 +236,11 @@ pub(crate) fn zip_deep_partial_recovery(
     result.set_item("message", "ZIP deep partial recovery produced a candidate")?;
     result.set_item("actions", PyList::new(py, &selected.actions)?)?;
     result.set_item("warnings", PyList::new(py, &scan.warnings)?)?;
+    result.set_item("native_timing", native_timing_with_scan(py, &scan, &[
+        ("read_source", read_seconds),
+        ("scan_entries", scan_seconds),
+        ("total", native_started.elapsed().as_secs_f64()),
+    ])?)?;
     result.set_item("skipped_entries", scan.skipped_offsets.len())?;
     result.set_item("encrypted_entries", scan.encrypted_entries)?;
     result.set_item("unsupported_entries", scan.unsupported_entries)?;
@@ -212,6 +260,10 @@ pub(crate) fn zip_deep_partial_recovery(
         item.set_item("passthrough_entries", candidate.passthrough_entries)?;
         item.set_item("size", candidate.size)?;
         item.set_item("actions", PyList::new(py, &candidate.actions)?)?;
+        if let Some(patch_plan) = &candidate.patch_plan {
+            item.set_item("patch_plan", patch_plan)?;
+        }
+        if candidate.patch_plan.is_none() {
         if let Ok(bytes) = fs::read(&candidate.path) {
             let action_refs = candidate.actions.to_vec();
             item.set_item(
@@ -227,6 +279,7 @@ pub(crate) fn zip_deep_partial_recovery(
                     "zip_deep_partial_recovery",
                 )?,
             )?;
+        }
         }
         candidates.append(item)?;
     }
@@ -266,7 +319,8 @@ pub(crate) fn zip_rebuild_from_local_headers(
     max_output_size_mb: f64,
     verify_candidates: bool,
 ) -> PyResult<Py<PyDict>> {
-    let started = Instant::now();
+    let native_started = Instant::now();
+    let started = native_started;
     let password = extract_password(source_input);
     let logical_stream_built = get_optional_string(source_input, "kind")
         .ok()
@@ -283,13 +337,17 @@ pub(crate) fn zip_rebuild_from_local_headers(
         allow_unverified_entries: preserve_raw_names,
         password,
     };
+    let timing_read_started = Instant::now();
     let data = match read_source_input(source_input, options.max_input_bytes) {
         Ok(data) => data,
         Err(message) => {
             return rebuild_status_dict(py, "skipped", "", &message, &[], 0, 0, 0, 0, 0, false, None, Some("input_read_failed"))
         }
     };
+    let read_seconds = timing_read_started.elapsed().as_secs_f64();
+    let timing_scan_started = Instant::now();
     let scan = scan_entries(&data, &options, started);
+    let scan_seconds = timing_scan_started.elapsed().as_secs_f64();
     let mut indices = scan
         .entries
         .iter()
@@ -343,6 +401,55 @@ pub(crate) fn zip_rebuild_from_local_headers(
             ]
         },
     );
+    let action_refs = plan.actions.to_vec();
+    let native_target = if preserve_raw_names {
+        "rebuild_cd_preserve_raw_names"
+    } else {
+        "rebuild_cd_from_local_headers"
+    };
+    let timing_semantic_started = Instant::now();
+    if let Some((patch_plan, stats)) = central_directory_suffix_patch_and_stats(
+        py,
+        "zip_rebuild_from_local_headers",
+        "zip",
+        &data,
+        &scan.entries,
+        &plan,
+        plan.confidence,
+        &action_refs,
+        native_target,
+    )? {
+        let semantic_seconds = timing_semantic_started.elapsed().as_secs_f64();
+        let result = add_rebuild_target_metadata(py, rebuild_status_dict(
+            py,
+            if scan.skipped_offsets.is_empty() && scan.encrypted_entries == 0 && !scan.timed_out {
+                "repaired"
+            } else {
+                "partial"
+            },
+            "",
+            "ZIP local headers were rebuilt as a semantic BytePatch",
+            &scan.warnings,
+            scan.skipped_offsets.len(),
+            scan.encrypted_entries,
+            scan.descriptor_entries,
+            stats.entries,
+            stats.verified_entries,
+            scan.timed_out,
+            Some(&scan),
+            None,
+        )?, preserve_raw_names, logical_stream_built)?;
+        result.bind(py).set_item("patch_plan", patch_plan)?;
+        result.bind(py).set_item("native_timing", native_timing_with_scan(py, &scan, &[
+            ("read_source", read_seconds),
+            ("scan_entries", scan_seconds),
+            ("semantic_patch", semantic_seconds),
+            ("total", native_started.elapsed().as_secs_f64()),
+        ])?)?;
+        return Ok(result);
+    }
+    let semantic_seconds = timing_semantic_started.elapsed().as_secs_f64();
+    let timing_write_started = Instant::now();
     match write_candidate_zip(
         &data,
         &scan.entries,
@@ -351,6 +458,7 @@ pub(crate) fn zip_rebuild_from_local_headers(
         options.max_output_bytes,
     ) {
         Ok(stats) => {
+            let write_seconds = timing_write_started.elapsed().as_secs_f64();
             let result = add_rebuild_target_metadata(py, rebuild_status_dict(
                 py,
                 if scan.skipped_offsets.is_empty() && scan.encrypted_entries == 0 && !scan.timed_out {
@@ -370,15 +478,19 @@ pub(crate) fn zip_rebuild_from_local_headers(
                 Some(&scan),
                 None,
             )?, preserve_raw_names, logical_stream_built)?;
-            if let Ok(bytes) = fs::read(output_path) {
-                let action_refs = plan.actions.to_vec();
-                let native_target = if preserve_raw_names {
-                    "rebuild_cd_preserve_raw_names"
-                } else {
-                    "rebuild_cd_from_local_headers"
-                };
-                result.bind(py).set_item(
-                    "patch_plan",
+            let patch_plan = match cd_suffix_patch_plan_for_preserved_entries(
+                py,
+                "zip_rebuild_from_local_headers",
+                "zip",
+                &data,
+                &scan.entries,
+                &plan,
+                plan.confidence,
+                &action_refs,
+                native_target,
+            )? {
+                Some(plan) => Some(plan),
+                None => fs::read(output_path).ok().map(|bytes| {
                     logical_archive_replace_patch_plan(
                         py,
                         "zip_rebuild_from_local_headers",
@@ -388,9 +500,19 @@ pub(crate) fn zip_rebuild_from_local_headers(
                         plan.confidence,
                         &action_refs,
                         native_target,
-                    )?,
-                )?;
+                    )
+                }).transpose()?,
+            };
+            if let Some(patch_plan) = patch_plan {
+                result.bind(py).set_item("patch_plan", patch_plan)?;
             }
+            result.bind(py).set_item("native_timing", native_timing_with_scan(py, &scan, &[
+                ("read_source", read_seconds),
+                ("scan_entries", scan_seconds),
+                ("semantic_patch", semantic_seconds),
+                ("write_candidate", write_seconds),
+                ("total", native_started.elapsed().as_secs_f64()),
+            ])?)?;
             Ok(result)
         }
         Err(message) => rebuild_status_dict(

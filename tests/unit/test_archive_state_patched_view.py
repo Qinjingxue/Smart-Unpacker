@@ -370,6 +370,9 @@ def test_native_zip_rebuild_accepts_patched_state_bytes_source(tmp_path):
     scan = rebuild_zip_from_source(source_input_for_job(job), rebuilt)
 
     assert scan.entries == 1
+    assert scan.patch_plan
+    rebuilt_state = state.push_patch(PatchPlan.from_dict(scan.patch_plan))
+    ArchiveStateByteView(rebuilt_state).materialize(rebuilt)
     with zipfile.ZipFile(rebuilt) as zf:
         assert zf.read("inside.txt") == b"ok"
 

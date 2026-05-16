@@ -39,6 +39,7 @@ class TrainingFormatPlugin:
     damage_label_schema: Callable[[], TrainingLabelSchema | dict[str, Any]] | None = None
     damage_feature_spec: Callable[[], TrainingFeatureSpec | dict[str, Any]] | None = None
     action_feature_spec: Callable[[], TrainingFeatureSpec | dict[str, Any]] | None = None
+    state_value_feature_spec: Callable[[], TrainingFeatureSpec | dict[str, Any]] | None = None
     lightgbm_params: Callable[[str], dict[str, Any]] | None = None
     postprocess_damage_prediction: Callable[[dict[str, Any]], dict[str, Any]] | None = None
     action_label: Callable[[dict[str, Any]], int | float] | None = None

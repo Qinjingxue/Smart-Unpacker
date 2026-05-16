@@ -8,6 +8,7 @@ from sunpack.repair.candidate import CandidateValidation, RepairCandidate
 from sunpack.repair.diagnosis import RepairDiagnosis
 from sunpack.repair.job import RepairJob
 from sunpack.repair.pipeline.modules._common import (
+    compact_replace_logical_patch_plan,
     crop_source_input_ranges,
     patched_state_for_job,
     patch_diagnosis,
@@ -121,6 +122,7 @@ def candidates_from_native_result(
             diagnosis_payload["validation_details"] = validation_details
         requires_native_validation = True
         if use_patch_plan and patch_plan is not None:
+            patch_plan = compact_replace_logical_patch_plan(job, patch_plan)
             repaired_state = patched_state_for_job(job, patch_plan)
             repaired_input = virtual_patch_repaired_input(repaired_state)
             plan = {

@@ -1,6 +1,7 @@
 use base64::Engine;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList};
+use sha2::{Digest, Sha256};
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -117,6 +118,7 @@ fn build_segments(
             let op =
                 optional_string(operation, "op")?.unwrap_or_else(|| "replace_range".to_string());
             let offset = optional_u64(operation, "offset")?.unwrap_or(0);
+            validate_operation_expected(&segments, operation, &op, offset)?;
             match op.as_str() {
                 "replace_range" => {
                     let data = operation_data(operation)?;
@@ -169,6 +171,97 @@ fn build_segments(
         .into_iter()
         .filter(|segment| segment.len() > 0)
         .collect())
+}
+
+fn validate_operation_expected(
+    segments: &[Segment],
+    operation: &Bound<'_, PyDict>,
+    op: &str,
+    offset: u64,
+) -> PyResult<()> {
+    let expected_b64 = optional_string(operation, "expected_b64")?.unwrap_or_default();
+    let expected_sha256 = optional_string(operation, "expected_sha256")?.unwrap_or_default();
+    if expected_b64.is_empty() && expected_sha256.is_empty() {
+        return Ok(());
+    }
+    let total = segments_size(segments);
+    let effective_offset = if op == "append" { total } else { offset };
+    if effective_offset > total {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "patch precondition offset is outside the current virtual archive",
+        ));
+    }
+    let expected = if expected_b64.is_empty() {
+        None
+    } else {
+        Some(
+            base64::engine::general_purpose::STANDARD
+                .decode(expected_b64.as_bytes())
+                .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?,
+        )
+    };
+    let expected_len = match expected.as_ref() {
+        Some(data) => Some(data.len() as u64),
+        None => expected_length_for_operation(operation, op)?,
+    };
+    let actual = read_segments_range(segments, effective_offset, expected_len)?;
+    if let Some(expected) = expected {
+        if actual != expected {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "patch precondition failed: expected bytes do not match",
+            ));
+        }
+    }
+    if !expected_sha256.is_empty() {
+        let digest = format!("{:x}", Sha256::digest(&actual));
+        if digest != expected_sha256 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "patch precondition failed: expected sha256 does not match",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn expected_length_for_operation(
+    operation: &Bound<'_, PyDict>,
+    op: &str,
+) -> PyResult<Option<u64>> {
+    match op {
+        "replace_range" | "delete" => optional_u64(operation, "size"),
+        "insert" | "append" => Ok(Some(0)),
+        _ => Ok(None),
+    }
+}
+
+fn read_segments_range(
+    segments: &[Segment],
+    offset: u64,
+    len: Option<u64>,
+) -> PyResult<Vec<u8>> {
+    let total = segments_size(segments);
+    if offset > total {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "patch precondition range is outside the current virtual archive",
+        ));
+    }
+    let end = match len {
+        Some(len) => offset.checked_add(len).ok_or_else(|| {
+            pyo3::exceptions::PyValueError::new_err("patch precondition range overflow")
+        })?,
+        None => total,
+    };
+    if end > total {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "patch precondition range is outside the current virtual archive",
+        ));
+    }
+    let range = slice_segments(segments, offset, end)?;
+    let mut output = Vec::with_capacity((end - offset).min(COPY_CHUNK_SIZE as u64) as usize);
+    for segment in &range {
+        append_segment(&mut output, segment)?;
+    }
+    Ok(output)
 }
 
 fn source_segments(source: &Bound<'_, PyDict>) -> PyResult<Vec<Segment>> {

@@ -4,6 +4,7 @@ import zipfile
 from pathlib import Path
 
 from repair_training.build_features import main as build_features_main
+import repair_training.collect_damage_rows as collect_damage_rows_module
 from repair_training.core.material_records import attach_split_volumes
 from repair_training.core.features import damage_labels_for_row, damage_location_labels_from_target, uncertain_labels_for_row
 from repair_training.collect_damage_rows import collect_damage_row
@@ -74,6 +75,47 @@ def test_zip_v3_distribution_keeps_total_and_sfx_mix():
     assert distribution["compound_profiles"]["compound_sfx_cd_offset_only"]["count"] == 40
     assert distribution["compound_profiles"]["compound_sfx_cd_offset_split_only"]["count"] == 40
     assert distribution["compound_profiles"]["compound_sfx_cd_offset_with_payload_no_local_header"]["count"] == 60
+
+
+def test_collect_damage_rows_limit_auto_expands_per_source(monkeypatch, tmp_path):
+    class FakeCase:
+        def __init__(self, profile: str, variant_index: int):
+            self.profile = profile
+            self.variant_index = variant_index
+
+        def corpus_manifest_record(self, **kwargs):
+            return {
+                "sample_id": f"{kwargs['source_archive_id']}:{self.variant_index}",
+                "source_archive_id": kwargs["source_archive_id"],
+                "source_path": kwargs["source_path"],
+                "damage_profile": self.profile,
+                "variant_index": self.variant_index,
+                "damaged_input": {"kind": "file", "path": str(tmp_path / "fake.zip"), "format_hint": "zip"},
+                "corruption_plan": [],
+            }
+
+    sources = [
+        {"source": tmp_path / f"source{i}.zip", "source_archive_id": f"source{i}", "source_derivation": {}}
+        for i in range(3)
+    ]
+    monkeypatch.setattr(collect_damage_rows_module, "_load_profile_distribution", lambda path: ({"profiles": {"p": 9}}, {"p": {}}))
+    monkeypatch.setattr(collect_damage_rows_module, "_expanded_profile_plan", lambda distribution, rng: [f"profile{i}" for i in range(9)])
+    monkeypatch.setattr(collect_damage_rows_module, "_distributed_zip_sources", lambda zip_dir, selected: sources)
+    monkeypatch.setattr(collect_damage_rows_module, "_choose_source_for_profile", lambda items, profile, counts, rng: items[0])
+    monkeypatch.setattr(collect_damage_rows_module, "build_corpus_corruption_case", lambda *args, damage_profile, variant_index, **kwargs: FakeCase(damage_profile, variant_index))
+    monkeypatch.setattr(collect_damage_rows_module, "_profile_layer_name", lambda profile: "unit")
+    monkeypatch.setattr(collect_damage_rows_module, "_apply_profile_metadata", lambda record, profile, metadata: None)
+
+    records = collect_damage_rows_module._generate_zip_records(
+        material_root=tmp_path,
+        workspace=tmp_path / "generated",
+        seed=123,
+        per_source=1,
+        limit=9,
+        distribution_path=tmp_path / "distribution.json",
+    )
+
+    assert len(records) == 9
 
 
 def test_zip_sfx_compound_profiles_do_not_auto_add_local_header(tmp_path):
@@ -463,7 +505,9 @@ def test_zip_damage_feature_spec_excludes_compressed_route_flags():
     assert "runtime_context.verification_summary." not in spec.include_prefixes
     assert "runtime_context.extraction_summary.entry_outcomes." in spec.include_prefixes
     assert "runtime_context.verification_summary.coverage_breakdown." in spec.include_prefixes
+    assert not any("structure.anomaly" in prefix for prefix in spec.include_prefixes)
     assert "runtime_context.analysis_native_probe.structure.graph.nodes" in spec.ignore_prefixes
+    assert "runtime_context.analysis_native_probe.structure.anomaly" in spec.ignore_prefixes
     assert not any("raw_structure" in prefix for prefix in spec.include_prefixes)
     assert not any("raw_structure" in prefix for prefix in spec.ignore_prefixes)
 

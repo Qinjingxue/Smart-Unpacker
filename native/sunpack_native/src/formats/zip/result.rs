@@ -123,6 +123,29 @@ fn build_validation_details(
     Ok(details.unbind())
 }
 
+fn native_timing_dict(py: Python<'_>, timings: &[(&str, f64)]) -> PyResult<Py<PyDict>> {
+    let payload = PyDict::new(py);
+    for (key, value) in timings {
+        payload.set_item(*key, *value)?;
+    }
+    Ok(payload.unbind())
+}
+
+fn native_timing_with_scan(py: Python<'_>, scan: &ScanResult, timings: &[(&str, f64)]) -> PyResult<Py<PyDict>> {
+    let payload = PyDict::new(py);
+    for (key, value) in timings {
+        payload.set_item(*key, *value)?;
+    }
+    payload.set_item("scan_parse_entry", scan.timing.parse_entry_seconds)?;
+    payload.set_item("scan_verify_deflate", scan.timing.verify_deflate_seconds)?;
+    payload.set_item("scan_verify_store", scan.timing.verify_store_seconds)?;
+    payload.set_item("scan_descriptor_probe", scan.timing.descriptor_probe_seconds)?;
+    payload.set_item("scan_descriptor_find_next", scan.timing.descriptor_find_next_seconds)?;
+    payload.set_item("scan_descriptor_check", scan.timing.descriptor_check_seconds)?;
+    payload.set_item("scan_deflate_resync", scan.timing.deflate_resync_seconds)?;
+    Ok(payload.unbind())
+}
+
 fn patch_plan_dict(
     py: Python<'_>,
     module: &str,
@@ -253,9 +276,41 @@ fn logical_archive_replace_patch_plan(
     actions: &[&str],
     native_target: &str,
 ) -> PyResult<Py<PyDict>> {
-    let truncate = truncate_operation(py, source, 0, module, native_target)?;
-    let append = append_operation(py, replacement, module, native_target)?;
-    patch_plan_dict(py, module, format, confidence, actions, &[truncate, append], native_target)
+    let prefix = common_prefix_len(source, replacement);
+    let suffix = common_suffix_len(&source[prefix..], &replacement[prefix..]);
+    let source_mid_len = source.len().saturating_sub(prefix + suffix);
+    let replacement_mid = &replacement[prefix..replacement.len().saturating_sub(suffix)];
+
+    let mut operations: Vec<Py<PyDict>> = Vec::new();
+    if suffix == 0 {
+        if prefix < source.len() {
+            operations.push(truncate_operation(py, source, prefix, module, native_target)?);
+        }
+        if !replacement_mid.is_empty() {
+            operations.push(append_operation(py, replacement_mid, module, native_target)?);
+        }
+    } else if source_mid_len == replacement_mid.len() {
+        operations.push(replace_range_operation(py, source, prefix, replacement_mid, module, native_target)?);
+    } else {
+        operations.push(truncate_operation(py, source, 0, module, native_target)?);
+        operations.push(append_operation(py, replacement, module, native_target)?);
+    }
+    patch_plan_dict(py, module, format, confidence, actions, &operations, native_target)
+}
+
+fn common_prefix_len(left: &[u8], right: &[u8]) -> usize {
+    left.iter()
+        .zip(right.iter())
+        .take_while(|(a, b)| a == b)
+        .count()
+}
+
+fn common_suffix_len(left: &[u8], right: &[u8]) -> usize {
+    left.iter()
+        .rev()
+        .zip(right.iter().rev())
+        .take_while(|(a, b)| a == b)
+        .count()
 }
 
 fn add_zip_candidate_replace_patch_plans(
@@ -369,6 +424,9 @@ fn status_dict(
         item.set_item("rank_score", candidate.rank_score)?;
         item.set_item("policy", candidate.policy)?;
         item.set_item("actions", PyList::new(py, &candidate.actions)?)?;
+        if let Some(patch_plan) = &candidate.patch_plan {
+            item.set_item("patch_plan", patch_plan)?;
+        }
         if !candidate.policy.is_empty() {
             let patch_facts = vec![
                 "resolved_duplicate_entries".to_string(),

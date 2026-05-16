@@ -10,7 +10,7 @@ from sunpack.contracts.archive_state import ArchiveState, PatchOperation, PatchP
 from sunpack.repair.job import RepairJob
 from sunpack.repair.result import RepairResult
 from sunpack.repair.runtime_cache import stable_cache_key
-from sunpack.support.archive_state_view import archive_state_from_source_input, archive_state_to_bytes
+from sunpack.support.archive_state_view import ArchiveStateByteView, archive_state_from_source_input, archive_state_to_bytes
 
 from sunpack_native import (
     repair_concat_ranges_to_bytes as _native_concat_ranges_to_bytes,
@@ -94,6 +94,7 @@ def source_input_for_job(job: RepairJob) -> dict[str, Any]:
     if _should_expand_parts_to_concat(base):
         ranges: list[dict[str, Any]] = []
         seen: set[str] = set()
+        source_parts_metadata = [_cache_jsonable(item) for item in base.get("parts") or [] if isinstance(item, dict)]
         for item in base.get("parts") or []:
             if not isinstance(item, dict):
                 continue
@@ -110,14 +111,14 @@ def source_input_for_job(job: RepairJob) -> dict[str, Any]:
                 "kind": "concat_ranges",
                 "ranges": ranges,
                 "format_hint": base.get("format_hint") or job.format,
-                "parts": base.get("parts"),
                 "use_parts_only": bool(base.get("use_parts_only")),
                 "split_sidecars_available": True,
                 "logical_stream_built": True,
+                "source_parts_metadata": source_parts_metadata,
             }
     if str(base.get("kind") or "") == "concat_ranges":
         base["logical_stream_built"] = True
-        if base.get("parts") or len(list(base.get("ranges") or [])) > 1:
+        if len(list(base.get("ranges") or [])) > 1:
             base["split_sidecars_available"] = True
     if str(base.get("kind") or "") == "concat_ranges" and getattr(job, "repair_cache", None) is not None and str(job.workspace or ""):
         fingerprint = source_fingerprint(base)
@@ -133,15 +134,23 @@ def source_input_for_job(job: RepairJob) -> dict[str, Any]:
         )
         path = str(payload.get("path") or output_path)
         if Path(path).is_file():
+            split_sidecars_available = bool(base.get("split_sidecars_available")) or len(list(base.get("ranges") or [])) > 1
             base = {
                 "kind": "file",
                 "path": path,
                 "format_hint": base.get("format_hint") or job.format,
-                "parts": base.get("parts"),
                 "use_parts_only": bool(base.get("use_parts_only")),
                 "logical_stream_built": True,
-                "split_sidecars_available": bool(base.get("split_sidecars_available")) or bool(base.get("parts")) or len(list(base.get("ranges") or [])) > 1,
+                "split_sidecars_available": split_sidecars_available,
+                "source_parts_metadata": base.get("source_parts_metadata"),
             }
+    if (
+        str(base.get("kind") or "file") == "file"
+        and bool(base.get("logical_stream_built"))
+        and isinstance(base.get("parts"), list)
+    ):
+        base["source_parts_metadata"] = [_cache_jsonable(item) for item in base.get("parts") or [] if isinstance(item, dict)]
+        base.pop("parts", None)
     if job.password:
         base["password"] = job.password
     return base
@@ -176,7 +185,17 @@ def cached_repair_operation(job: RepairJob, namespace: str, operation: str, para
 
 
 def source_fingerprint_for_job(job: RepairJob) -> dict[str, Any]:
-    fingerprint = source_fingerprint(source_input_for_job(job))
+    if job.archive_state is not None and job.archive_state.patches:
+        source = job.archive_state.source.to_archive_input_descriptor().to_source_input()
+        fingerprint = {
+            "kind": "archive_state",
+            "source": source_fingerprint(source),
+            "patch_digest": job.archive_state.effective_patch_digest(),
+            "patch_depth": job.archive_state.patch_depth(),
+            "format_hint": job.archive_state.format_hint or job.archive_state.source.format_hint or job.format,
+        }
+    else:
+        fingerprint = source_fingerprint(source_input_for_job(job))
     if isinstance(getattr(job, "knowledge", None), dict):
         _repair_cache_markers(job.knowledge)["source_fingerprint_for_job"] = _cache_jsonable(fingerprint)
     return fingerprint
@@ -192,6 +211,19 @@ def _repair_cache_markers(payload: dict[str, Any]) -> dict[str, Any]:
         markers = {}
         meta["repair_cache_markers"] = markers
     return markers
+
+
+def _hash_view_range(view: ArchiveStateByteView, offset: int, size: int, *, chunk_size: int = 1024 * 1024) -> str:
+    offset = max(0, int(offset))
+    remaining = max(0, int(size))
+    digest = hashlib.sha256()
+    cursor = offset
+    while remaining > 0:
+        take = min(chunk_size, remaining)
+        digest.update(view.read_at(cursor, take))
+        cursor += take
+        remaining -= take
+    return digest.hexdigest()
 
 
 def source_fingerprint(source_input: dict[str, Any]) -> dict[str, Any]:
@@ -284,13 +316,29 @@ def job_source_size(job: RepairJob) -> int | None:
 
 
 def base_archive_state_for_job(job: RepairJob) -> ArchiveState:
-    if job.archive_state is not None:
+    if job.archive_state is not None and job.archive_state.patches:
+        return job.archive_state
+    source_input = source_input_for_job(job)
+    if job.archive_state is not None and not _is_logical_source_input(source_input):
         return job.archive_state
     return archive_state_from_source_input(
-        job.source_input,
+        source_input,
         format_hint=job.format,
         logical_name=str(job.archive_key or ""),
     )
+
+
+def _is_logical_source_input(source_input: dict[str, Any]) -> bool:
+    kind = str(source_input.get("kind") or "")
+    if kind == "concat_ranges":
+        return True
+    if bool(source_input.get("logical_stream_built")) or bool(source_input.get("split_sidecars_available")):
+        return True
+    if isinstance(source_input.get("parts"), list) and source_input.get("parts"):
+        return True
+    if isinstance(source_input.get("ranges"), list) and source_input.get("ranges"):
+        return True
+    return False
 
 
 def patch_plan_for_byte_patches(
@@ -302,12 +350,12 @@ def patch_plan_for_byte_patches(
     actions: list[str],
 ) -> PatchPlan:
     base_state = base_archive_state_for_job(job)
-    base_bytes = archive_state_to_bytes(base_state)
+    view = ArchiveStateByteView(base_state)
     operations = [
         PatchOperation.replace_bytes(
             offset=int(patch["offset"]),
             data=bytes(patch["data"]),
-            expected=_slice_bytes(base_bytes, int(patch["offset"]), len(bytes(patch["data"]))),
+            expected=view.read_at(int(patch["offset"]), len(bytes(patch["data"]))),
             details={"module": module_name},
         )
         for patch in patches
@@ -352,12 +400,13 @@ def patch_plan_for_insert(
 
 def patch_plan_for_truncate(job: RepairJob, module_name: str, size: int, *, confidence: float, actions: list[str]) -> PatchPlan:
     base = base_archive_state_for_job(job)
-    base_bytes = archive_state_to_bytes(base)
+    view = ArchiveStateByteView(base)
+    offset = max(0, min(int(size), view.size))
     return PatchPlan(
         module=module_name,
         format=job.format,
         action_type="apply_patch",
-        operations=[PatchOperation(op="truncate", offset=int(size), size=0, expected_sha256=hashlib.sha256(base_bytes[int(size):]).hexdigest(), details={"module": module_name})],
+        operations=[PatchOperation(op="truncate", offset=int(size), size=0, expected_sha256=_hash_view_range(view, offset, view.size - offset), details={"module": module_name})],
         provenance={"module": module_name, "actions": list(actions), "base_patch_digest": base.effective_patch_digest()},
         confidence=float(confidence),
     )
@@ -373,13 +422,14 @@ def patch_plan_for_truncate_append(
     actions: list[str],
 ) -> PatchPlan:
     base = base_archive_state_for_job(job)
-    base_bytes = archive_state_to_bytes(base)
+    view = ArchiveStateByteView(base)
+    offset = max(0, min(int(size), view.size))
     return PatchPlan(
         module=module_name,
         format=job.format,
         action_type="apply_patch",
         operations=[
-            PatchOperation(op="truncate", offset=int(size), size=0, expected_sha256=hashlib.sha256(base_bytes[int(size):]).hexdigest(), details={"module": module_name}),
+            PatchOperation(op="truncate", offset=int(size), size=0, expected_sha256=_hash_view_range(view, offset, view.size - offset), details={"module": module_name}),
             PatchOperation.append_bytes(bytes(data), details={"module": module_name}),
         ],
         provenance={"module": module_name, "actions": list(actions), "base_patch_digest": base.effective_patch_digest()},
@@ -399,11 +449,12 @@ def patch_plan_for_crop(
     start = max(0, int(start))
     end = max(start, int(end))
     base = base_archive_state_for_job(job)
-    base_bytes = archive_state_to_bytes(base)
+    view = ArchiveStateByteView(base)
+    end = min(end, view.size)
     operations: list[PatchOperation] = []
     if start:
-        operations.append(PatchOperation.delete_range(offset=0, size=start, expected=base_bytes[:start], details={"module": module_name}))
-    operations.append(PatchOperation(op="truncate", offset=end - start, size=0, expected_sha256=hashlib.sha256(base_bytes[end:]).hexdigest(), details={"module": module_name}))
+        operations.append(PatchOperation.delete_range(offset=0, size=start, expected=view.read_at(0, min(start, view.size)), details={"module": module_name}))
+    operations.append(PatchOperation(op="truncate", offset=end - start, size=0, expected_sha256=_hash_view_range(view, end, view.size - end), details={"module": module_name}))
     return PatchPlan(
         module=module_name,
         format=job.format,
@@ -427,12 +478,13 @@ def patch_plan_for_crop_append(
     start = max(0, int(start))
     end = max(start, int(end))
     base = base_archive_state_for_job(job)
-    base_bytes = archive_state_to_bytes(base)
+    view = ArchiveStateByteView(base)
+    end = min(end, view.size)
     operations: list[PatchOperation] = []
     if start:
-        operations.append(PatchOperation.delete_range(offset=0, size=start, expected=base_bytes[:start], details={"module": module_name}))
+        operations.append(PatchOperation.delete_range(offset=0, size=start, expected=view.read_at(0, min(start, view.size)), details={"module": module_name}))
     operations.extend([
-        PatchOperation(op="truncate", offset=end - start, size=0, expected_sha256=hashlib.sha256(base_bytes[end:]).hexdigest(), details={"module": module_name}),
+        PatchOperation(op="truncate", offset=end - start, size=0, expected_sha256=_hash_view_range(view, end, view.size - end), details={"module": module_name}),
         PatchOperation.append_bytes(bytes(data), details={"module": module_name}),
     ])
     return PatchPlan(
@@ -472,6 +524,86 @@ def patch_plan_replace_logical_archive(
         provenance={"module": module_name, "actions": list(actions), "base_patch_digest": base.effective_patch_digest(), "adapter": "replace_logical_archive"},
         confidence=float(confidence),
     )
+
+
+def compact_replace_logical_patch_plan(job: RepairJob, patch_plan: PatchPlan, *, min_saved_bytes: int = 4096) -> PatchPlan:
+    operations = list(patch_plan.operations)
+    if len(operations) != 2:
+        return patch_plan
+    first, second = operations
+    if first.op != "truncate" or int(first.offset or 0) != 0 or second.op != "append" or not second.data_b64:
+        return patch_plan
+    try:
+        replacement = base64.b64decode(second.data_b64.encode("ascii"), validate=True)
+    except Exception:
+        return patch_plan
+    base = base_archive_state_for_job(job)
+    source = archive_state_to_bytes(base)
+    compact_ops = _diff_patch_operations(
+        source,
+        replacement,
+        module=patch_plan.module,
+        native_target=str(first.details.get("native_target") or second.details.get("native_target") or ""),
+    )
+    if not compact_ops:
+        return patch_plan
+    old_bytes = sum(_operation_data_len(op) + len(op.expected_b64) for op in operations)
+    new_bytes = sum(_operation_data_len(op) + len(op.expected_b64) for op in compact_ops)
+    if old_bytes - new_bytes < int(min_saved_bytes):
+        return patch_plan
+    provenance = dict(patch_plan.provenance)
+    provenance["compact_diff_adapter"] = {
+        "source_size": len(source),
+        "replacement_size": len(replacement),
+        "original_operations": len(operations),
+        "compact_operations": len(compact_ops),
+    }
+    return PatchPlan(
+        schema_version=patch_plan.schema_version,
+        module=patch_plan.module,
+        format=patch_plan.format,
+        action_type=patch_plan.action_type,
+        operations=compact_ops,
+        provenance=provenance,
+        confidence=patch_plan.confidence,
+    )
+
+
+def _diff_patch_operations(source: bytes, replacement: bytes, *, module: str, native_target: str = "") -> list[PatchOperation]:
+    if source == replacement:
+        return []
+    prefix = 0
+    limit = min(len(source), len(replacement))
+    while prefix < limit and source[prefix] == replacement[prefix]:
+        prefix += 1
+    suffix = 0
+    max_suffix = min(len(source) - prefix, len(replacement) - prefix)
+    while suffix < max_suffix and source[len(source) - 1 - suffix] == replacement[len(replacement) - 1 - suffix]:
+        suffix += 1
+    source_mid = source[prefix:len(source) - suffix if suffix else len(source)]
+    replacement_mid = replacement[prefix:len(replacement) - suffix if suffix else len(replacement)]
+    details = {"module": module, "adapter": "compact_binary_diff"}
+    if native_target:
+        details["native_target"] = native_target
+    if not source_mid:
+        return [PatchOperation(op="insert", offset=prefix, size=len(replacement_mid), data_b64=base64.b64encode(replacement_mid).decode("ascii"), expected_b64="", details=details)]
+    if not replacement_mid:
+        return [PatchOperation.delete_range(offset=prefix, size=len(source_mid), expected=source_mid if len(source_mid) <= 4096 else None, expected_sha256=hashlib.sha256(source_mid).hexdigest() if len(source_mid) > 4096 else "", details=details)]
+    if len(source_mid) == len(replacement_mid):
+        return [PatchOperation.replace_bytes(offset=prefix, data=replacement_mid, expected=source_mid if len(source_mid) <= 4096 else None, expected_sha256=hashlib.sha256(source_mid).hexdigest() if len(source_mid) > 4096 else "", details=details)]
+    return [
+        PatchOperation.delete_range(offset=prefix, size=len(source_mid), expected=source_mid if len(source_mid) <= 4096 else None, expected_sha256=hashlib.sha256(source_mid).hexdigest() if len(source_mid) > 4096 else "", details=details),
+        PatchOperation(op="insert", offset=prefix, size=len(replacement_mid), data_b64=base64.b64encode(replacement_mid).decode("ascii"), expected_b64="", details=details),
+    ]
+
+
+def _operation_data_len(operation: PatchOperation) -> int:
+    if not operation.data_b64:
+        return 0
+    try:
+        return len(base64.b64decode(operation.data_b64.encode("ascii"), validate=True))
+    except Exception:
+        return len(operation.data_b64)
 
 
 def patched_state_for_job(job: RepairJob, patch_plan: PatchPlan) -> ArchiveState:
@@ -531,6 +663,7 @@ def patch_repair_result(
     partial: bool = False,
     message: str = "",
 ) -> RepairResult:
+    patch_plan = compact_replace_logical_patch_plan(job, patch_plan)
     repaired_state = patched_state_for_job(job, patch_plan)
     path = ""
     if should_materialize_candidate(config, fmt):

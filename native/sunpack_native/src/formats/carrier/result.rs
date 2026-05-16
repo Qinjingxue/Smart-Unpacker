@@ -113,3 +113,10 @@ fn status_dict_with_candidates(
     Ok(result.unbind())
 }
 
+fn carrier_timing_dict(py: Python<'_>, timings: &[(&str, f64)]) -> PyResult<Py<PyDict>> {
+    let payload = PyDict::new(py);
+    for (key, value) in timings {
+        payload.set_item(*key, *value)?;
+    }
+    Ok(payload.unbind())
+}

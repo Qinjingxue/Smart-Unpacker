@@ -13,25 +13,6 @@ RepairActionKind = Literal["apply_patch", "undo_patch", "stop", "give_up"]
 
 
 @dataclass(frozen=True)
-class RepairPolicyRequest:
-    job: RepairJob
-    format: str
-    candidates: list[RepairCandidate]
-    candidate_payloads: list[PolicyCandidatePayload]
-    diagnosis: dict[str, Any] = field(default_factory=dict)
-    config: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass(frozen=True)
-class RepairPolicyDecision:
-    selected_candidate_id: str = ""
-    confidence: float | None = None
-    provider_id: str = ""
-    reason: str = ""
-    metadata: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass(frozen=True)
 class DamageAnalysisRequest:
     job: RepairJob
     format: str
@@ -93,6 +74,60 @@ class RepairActionDecision:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class RepairActionPrior:
+    action: RepairActionKind = "give_up"
+    candidate_id: str = ""
+    prior_score: float = 0.0
+    confidence: float | None = None
+    provider_id: str = ""
+    reason: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "action": self.action,
+            "candidate_id": self.candidate_id,
+            "prior_score": float(self.prior_score or 0.0),
+            "confidence": self.confidence,
+            "provider_id": self.provider_id,
+            "reason": self.reason,
+            "metadata": dict(self.metadata),
+        }
+
+
+@dataclass(frozen=True)
+class StateValueRequest:
+    job: RepairJob
+    format: str
+    archive_state: ArchiveState | None = None
+    damage_analysis: dict[str, Any] = field(default_factory=dict)
+    current_recovery: dict[str, Any] = field(default_factory=dict)
+    best_seen_recovery: dict[str, Any] = field(default_factory=dict)
+    parent_recovery: dict[str, Any] = field(default_factory=dict)
+    candidate_summaries: list[PolicyCandidatePayload] = field(default_factory=list)
+    repair_history: dict[str, Any] = field(default_factory=dict)
+    diagnosis: dict[str, Any] = field(default_factory=dict)
+    config: dict[str, Any] = field(default_factory=dict)
+    round_index: int = 0
+
+
+@dataclass(frozen=True)
+class StateValueResult:
+    reachable_recovery_value: float = 0.0
+    confidence: float | None = None
+    provider_id: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "reachable_recovery_value": float(self.reachable_recovery_value or 0.0),
+            "confidence": self.confidence,
+            "provider_id": self.provider_id,
+            "metadata": dict(self.metadata),
+        }
+
+
 @runtime_checkable
 class DamageAnalysisModel(Protocol):
     provider_id: str
@@ -113,20 +148,17 @@ class RepairActionModel(Protocol):
     def available(self) -> bool:
         ...
 
-    def choose(self, request: RepairActionRequest) -> RepairActionDecision | dict[str, Any] | str | None:
+    def choose(self, request: RepairActionRequest) -> dict[str, Any] | list[dict[str, Any]] | None:
         ...
 
 
 @runtime_checkable
-class RepairPolicyProvider(Protocol):
+class StateValueModel(Protocol):
     provider_id: str
     supported_formats: tuple[str, ...] | list[str]
 
     def available(self) -> bool:
         ...
 
-    def can_handle(self, request: RepairPolicyRequest) -> bool:
-        ...
-
-    def choose(self, request: RepairPolicyRequest) -> RepairPolicyDecision | dict[str, Any] | str | None:
+    def estimate(self, request: StateValueRequest) -> StateValueResult | dict[str, Any] | float | None:
         ...

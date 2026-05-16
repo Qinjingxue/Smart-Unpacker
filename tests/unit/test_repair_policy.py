@@ -19,6 +19,7 @@ from sunpack.repair.job import RepairJob
 from sunpack.repair.context import build_repair_context
 from sunpack.repair.diagnosis import RepairDiagnosis
 from sunpack.repair.policy.adapters import get_damage_analysis_adapter
+from sunpack.repair.policy.manager import RepairPolicyManager
 from sunpack.repair.policy.training_runtime import candidate_snapshot, runtime_context_from_job
 from sunpack.repair.result import RepairResult
 from sunpack.repair.scheduler import RepairScheduler, _policy_route_rejects_are_soft
@@ -60,76 +61,135 @@ def test_missing_policy_package_falls_back_to_selector(tmp_path):
     assert result.diagnosis["candidate_selection"]["policy_fallback"] is True
 
 
-def test_zip_policy_provider_selects_candidate_without_selector(tmp_path, monkeypatch):
-    _install_policy_package(monkeypatch, "sunpack_policy_test_zip", _CandidateIdProvider(selected_module="model_choice"))
-    first = _candidate("selector_would_prefer", tmp_path / "first.zip", confidence=0.95)
-    second = _candidate("model_choice", tmp_path / "second.zip", confidence=0.1)
-    scheduler = RepairScheduler({
-        "repair": {
-            "workspace": str(tmp_path / "repair"),
-            "policy": {"provider_package": "sunpack_policy_test_zip"},
-        }
-    })
-    scheduler.generate_repair_candidates = lambda job: RepairCandidateBatch(candidates=[first, second])  # type: ignore[method-assign]
-
-    result = scheduler.repair(_job(tmp_path))
-
-    assert result.ok
-    assert result.module_name == "model_choice"
-    selection = result.diagnosis["candidate_selection"]
-    assert selection["policy"]["decision_status"] == "selected"
-    assert selection["policy"]["provider_id"] == "test_zip_policy"
-    assert selection["policy"]["selected_candidate_id"]
-    assert selection["policy"]["selected_candidate_id_valid"] is True
-    assert "ltr_features" not in selection["candidates"][0]
-    assert selection["candidates"][0]["schema_version"] == 1
-    assert selection["candidates"][0]["candidate_id"]
-
-
-def test_zip_policy_request_includes_accept_current_state_candidate(tmp_path, monkeypatch):
-    _install_policy_package(monkeypatch, "sunpack_policy_test_noop", _CandidateIdProvider(selected_module="repair_accept_current_state"))
-    candidate = _candidate("ordinary_repair", tmp_path / "ordinary.zip", confidence=0.95)
-    scheduler = RepairScheduler({
-        "repair": {
-            "workspace": str(tmp_path / "repair"),
-            "policy": {"provider_package": "sunpack_policy_test_noop"},
-        }
-    })
-    scheduler.generate_repair_candidates = lambda job: RepairCandidateBatch(candidates=[candidate])  # type: ignore[method-assign]
-
-    result = scheduler.repair(_job(tmp_path))
-
-    assert result.status == "skipped"
-    assert result.module_name == "repair_accept_current_state"
-    selection = result.diagnosis["candidate_selection"]
-    noop_payloads = [
-        payload for payload in selection["candidates"]
-        if payload.get("noop")
-    ]
-    assert len(noop_payloads) == 1
-    assert noop_payloads[0]["branchable"] is False
-    assert noop_payloads[0]["control_action"] is True
-
-
-def test_zip_policy_can_select_accept_current_state_when_repair_generation_is_terminal(tmp_path, monkeypatch):
-    _install_policy_package(monkeypatch, "sunpack_policy_test_terminal_noop", _CandidateIdProvider(selected_module="repair_accept_current_state"))
-    scheduler = RepairScheduler({
-        "repair": {
-            "workspace": str(tmp_path / "repair"),
-            "policy": {"provider_package": "sunpack_policy_test_terminal_noop", "fallback_to_selector": False},
-        }
-    })
-    scheduler.generate_repair_candidates = lambda job: RepairCandidateBatch(  # type: ignore[method-assign]
-        terminal_result=RepairResult(status="unrepairable", format="zip", message="no repair modules")
+def test_state_value_manager_fallback_and_provider_result(tmp_path, monkeypatch):
+    manager = RepairPolicyManager({"policy": {"provider_package": "sunpack_policy_test_missing_value"}})
+    fallback, fallback_selection = manager.estimate_state_value(
+        job=_job(tmp_path),
+        archive_state=None,
+        damage_analysis={},
+        current_recovery={"score": 0.42},
     )
 
-    result = scheduler.repair(_job(tmp_path))
+    assert fallback["reachable_recovery_value"] == 0.42
+    assert fallback_selection["fallback_reason"] == "state_value_unavailable"
 
-    assert result.status == "skipped"
-    assert result.module_name == "repair_accept_current_state"
-    policy = result.diagnosis["candidate_selection"]["policy"]
-    assert policy["decision_status"] == "selected"
-    assert policy["selected_candidate_id_valid"] is True
+    provider = _StateValueProvider(0.87)
+    _install_policy_package(monkeypatch, "sunpack_policy_test_value", provider)
+    manager = RepairPolicyManager({"policy": {"provider_package": "sunpack_policy_test_value"}})
+    result, selection = manager.estimate_state_value(
+        job=_job(tmp_path),
+        archive_state=None,
+        damage_analysis={"damage_labels": ["field:eocd.cd_offset"]},
+        current_recovery={"score": 0.1},
+        candidate_summaries=[{"module_name": "zip_fix_cd_offset"}],
+    )
+
+    assert result["reachable_recovery_value"] == 0.87
+    assert result["provider_id"] == "test_value_policy"
+    assert selection["decision_status"] == "estimated"
+
+
+def test_action_prior_arbiter_prefers_high_value_apply(tmp_path, monkeypatch):
+    candidate_id = "candidate-a"
+    _install_policy_package(
+        monkeypatch,
+        "sunpack_policy_test_prior_apply",
+        _PriorProvider([
+            {"action": "stop", "prior_score": 0.4},
+            {"action": "apply_patch", "candidate_id": candidate_id, "prior_score": 0.35},
+        ]),
+    )
+    manager = RepairPolicyManager({"policy": {"provider_package": "sunpack_policy_test_prior_apply"}})
+
+    decision, selection = manager.choose_action(
+        job=_job(tmp_path),
+        archive_state=None,
+        candidates=[],
+        candidate_payloads=[{"candidate_id": candidate_id, "recovery_delta": 0.0, "module_name": "zip_rebuild_cd"}],
+        damage_analysis={},
+        current_recovery={"score": 0.0},
+        state_value={"reachable_recovery_value": 0.1},
+        candidate_state_values={candidate_id: {"reachable_recovery_value": 0.8}},
+    )
+
+    assert decision.action == "apply_patch"
+    assert decision.selected_candidate_id == candidate_id
+    assert selection["arbiter"]["selected_by"] == "arbiter"
+
+
+def test_action_prior_arbiter_prefers_stop_when_value_gap_is_small(tmp_path, monkeypatch):
+    _install_policy_package(
+        monkeypatch,
+        "sunpack_policy_test_prior_stop",
+        _PriorProvider([
+            {"action": "apply_patch", "candidate_id": "candidate-a", "prior_score": 0.3},
+            {"action": "stop", "prior_score": 0.2},
+        ]),
+    )
+    manager = RepairPolicyManager({"policy": {"provider_package": "sunpack_policy_test_prior_stop"}})
+
+    decision, _selection = manager.choose_action(
+        job=_job(tmp_path),
+        archive_state=None,
+        candidates=[],
+        candidate_payloads=[{"candidate_id": "candidate-a", "recovery_delta": 0.0, "module_name": "zip_fix_cd_offset"}],
+        damage_analysis={},
+        current_recovery={"score": 0.96},
+        state_value={"reachable_recovery_value": 0.97},
+        candidate_state_values={"candidate-a": {"reachable_recovery_value": 0.97}},
+    )
+
+    assert decision.action == "stop"
+
+
+def test_action_prior_arbiter_prefers_undo_when_parent_value_is_higher(tmp_path, monkeypatch):
+    _install_policy_package(
+        monkeypatch,
+        "sunpack_policy_test_prior_undo",
+        _PriorProvider([
+            {"action": "undo_patch", "prior_score": 0.2},
+            {"action": "stop", "prior_score": 0.25},
+        ]),
+    )
+    manager = RepairPolicyManager({"policy": {"provider_package": "sunpack_policy_test_prior_undo"}})
+
+    decision, _selection = manager.choose_action(
+        job=_job(tmp_path),
+        archive_state=None,
+        candidates=[],
+        candidate_payloads=[],
+        damage_analysis={},
+        current_recovery={"score": 0.1},
+        parent_recovery={"score": 0.5},
+        state_value={"reachable_recovery_value": 0.2},
+        parent_state_value={"reachable_recovery_value": 0.8},
+    )
+
+    assert decision.action == "undo_patch"
+
+
+def test_action_prior_arbiter_prefers_give_up_when_value_is_low(tmp_path, monkeypatch):
+    _install_policy_package(
+        monkeypatch,
+        "sunpack_policy_test_prior_give_up",
+        _PriorProvider([
+            {"action": "give_up", "prior_score": 0.1},
+            {"action": "stop", "prior_score": 0.2},
+        ]),
+    )
+    manager = RepairPolicyManager({"policy": {"provider_package": "sunpack_policy_test_prior_give_up"}})
+
+    decision, _selection = manager.choose_action(
+        job=_job(tmp_path),
+        archive_state=None,
+        candidates=[],
+        candidate_payloads=[],
+        damage_analysis={},
+        current_recovery={"score": 0.0},
+        state_value={"reachable_recovery_value": 0.02},
+    )
+
+    assert decision.action == "give_up"
 
 
 def test_dual_policy_loop_applies_patch_candidate(tmp_path, monkeypatch):
@@ -232,6 +292,9 @@ def test_zip_damage_adapter_postprocesses_raw_scores():
     assert "field:zip64.extra_length" in result.damage_labels
     assert "zone:zip64" in result.damage_labels
     assert {"kind": "local_header", "path": "local_header"} in result.damage_zones
+    assert result.metadata["analysis_target"] == "parallel_world_and_location_models"
+    assert result.metadata["location_model"]["raw_scores"]["field:local_header.crc"] == 0.42
+    assert result.metadata["location_model"]["raw_scores"]["zone:zip64"] == 0.1
 
 
 def test_policy_manager_coerces_raw_damage_scores(tmp_path, monkeypatch):
@@ -248,132 +311,7 @@ def test_policy_manager_coerces_raw_damage_scores(tmp_path, monkeypatch):
     assert "field:zip64.extra_length" in analysis["damage_labels"]
     assert "zone:zip64" in analysis["damage_labels"]
     assert analysis["metadata"]["provider_id"] == "raw_damage_policy"
-
-
-def test_policy_probe_writes_public_request_and_decision(tmp_path, monkeypatch):
-    _install_policy_package(monkeypatch, "sunpack_policy_test_probe", _CandidateIdProvider(selected_module="model_choice"))
-    probe_path = tmp_path / "policy_probe.jsonl"
-    monkeypatch.setenv("SUNPACK_REPAIR_POLICY_PROBE_JSONL", str(probe_path))
-    monkeypatch.setenv("SUNPACK_REPAIR_POLICY_PROBE_RUN_ID", "probe-run")
-    first = _candidate("selector_would_prefer", tmp_path / "first.zip", confidence=0.95)
-    second = _candidate("model_choice", tmp_path / "second.zip", confidence=0.1)
-    scheduler = RepairScheduler({
-        "repair": {
-            "workspace": str(tmp_path / "repair"),
-            "policy": {"provider_package": "sunpack_policy_test_probe"},
-        }
-    })
-    scheduler.generate_repair_candidates = lambda job: RepairCandidateBatch(candidates=[first, second])  # type: ignore[method-assign]
-
-    result = scheduler.repair(_job(tmp_path))
-
-    assert result.ok
-    events = [json.loads(line) for line in probe_path.read_text(encoding="utf-8").splitlines()]
-    assert [event["event"] for event in events] == [
-        "policy_probe_request",
-        "policy_probe_decision",
-        "policy_probe_selected_result",
-    ]
-    request = events[0]
-    decision = events[1]
-    assert request["run_id"] == "probe-run"
-    assert request["candidate_set_hash"]
-    assert request["candidate_payloads"][0]["schema_version"] == 1
-    assert "label" not in json.dumps(request, ensure_ascii=False)
-    assert decision["policy"]["decision_status"] == "selected"
-    assert decision["policy"]["selected_candidate_id"]
-    assert decision["selected_candidate"]["module_name"] == "model_choice"
-
-
-def test_policy_decision_without_candidate_id_falls_back_to_selector(tmp_path, monkeypatch):
-    _install_policy_package(monkeypatch, "sunpack_policy_test_invalid", _MissingCandidateIdProvider())
-    first = _candidate("selector_choice", tmp_path / "first.zip", confidence=0.95)
-    second = _candidate("other", tmp_path / "second.zip", confidence=0.1)
-    scheduler = RepairScheduler({
-        "repair": {
-            "workspace": str(tmp_path / "repair"),
-            "policy": {"provider_package": "sunpack_policy_test_invalid"},
-        }
-    })
-    scheduler.generate_repair_candidates = lambda job: RepairCandidateBatch(candidates=[first, second])  # type: ignore[method-assign]
-
-    result = scheduler.repair(_job(tmp_path))
-
-    assert result.ok
-    assert result.module_name == "selector_choice"
-    assert result.diagnosis["candidate_selection"]["policy"]["decision_status"] == "fallback"
-    assert result.diagnosis["candidate_selection"]["policy"]["invalid_candidate_id_reason"] == "invalid_policy_decision_missing_candidate_id"
-    assert result.diagnosis["candidate_selection"]["policy_fallback"] is True
-
-
-def test_invalid_candidate_id_policy_decision_falls_back_to_selector(tmp_path, monkeypatch):
-    _install_policy_package(monkeypatch, "sunpack_policy_test_invalid_id", _CandidateIdProvider(selected_candidate_id="missing"))
-    first = _candidate("selector_choice", tmp_path / "first.zip", confidence=0.95)
-    second = _candidate("other", tmp_path / "second.zip", confidence=0.1)
-    scheduler = RepairScheduler({
-        "repair": {
-            "workspace": str(tmp_path / "repair"),
-            "policy": {"provider_package": "sunpack_policy_test_invalid_id"},
-        }
-    })
-    scheduler.generate_repair_candidates = lambda job: RepairCandidateBatch(candidates=[first, second])  # type: ignore[method-assign]
-
-    result = scheduler.repair(_job(tmp_path))
-
-    assert result.ok
-    assert result.module_name == "selector_choice"
-    assert result.diagnosis["candidate_selection"]["policy"]["decision_status"] == "fallback"
-    assert result.diagnosis["candidate_selection"]["policy"]["invalid_candidate_id_reason"] == "invalid_candidate_id"
-    assert result.diagnosis["candidate_selection"]["policy_fallback"] is True
-
-
-def test_duplicate_candidate_id_blocks_policy_selection(tmp_path, monkeypatch):
-    _install_policy_package(monkeypatch, "sunpack_policy_test_duplicate_ids", _CandidateIdProvider(selected_candidate_id="same"))
-    monkeypatch.setattr(
-        "sunpack.repair.scheduler._policy_candidate_snapshot",
-        lambda job, candidate, index=0: {
-            "candidate_id": "same",
-            "module_name": candidate.module_name,
-            "module": candidate.module_name,
-        },
-    )
-    first = _candidate("selector_choice", tmp_path / "first.zip", confidence=0.95)
-    second = _candidate("model_choice", tmp_path / "second.zip", confidence=0.1)
-    scheduler = RepairScheduler({
-        "repair": {
-            "workspace": str(tmp_path / "repair"),
-            "policy": {"provider_package": "sunpack_policy_test_duplicate_ids"},
-        }
-    })
-    scheduler.generate_repair_candidates = lambda job: RepairCandidateBatch(candidates=[first, second])  # type: ignore[method-assign]
-
-    result = scheduler.repair(_job(tmp_path))
-
-    assert result.ok
-    assert result.module_name == "selector_choice"
-    policy = result.diagnosis["candidate_selection"]["policy"]
-    assert policy["decision_status"] == "fallback"
-    assert policy["fallback_reason"] == "duplicate_candidate_id"
-    assert policy["duplicate_candidate_id_count"] == 1
-    assert result.diagnosis["candidate_selection"]["policy_fallback"] is True
-
-
-def test_zip_policy_active_disables_beam_for_zip_only(tmp_path, monkeypatch):
-    _install_policy_package(monkeypatch, "sunpack_policy_test_beam", _CandidateIdProvider(selected_module="zip"))
-    stage = ArchiveRepairStage({
-        "repair": {
-            "workspace": str(tmp_path / "repair"),
-            "policy": {"provider_package": "sunpack_policy_test_beam"},
-        }
-    })
-    zip_task = _task(tmp_path / "broken.zip", fmt="zip")
-    tar_task = _task(tmp_path / "broken.tar", fmt="tar")
-    result = ExtractionResult(success=True, archive=zip_task.main_path, out_dir=str(tmp_path / "out"), all_parts=[zip_task.main_path])
-    verification = _verification()
-
-    assert stage.policy_active_for_verification(zip_task, result, verification) is True
-    tar_result = ExtractionResult(success=True, archive=tar_task.main_path, out_dir=str(tmp_path / "out2"), all_parts=[tar_task.main_path])
-    assert stage.policy_active_for_verification(tar_task, tar_result, verification) is False
+    assert analysis["metadata"]["location_model"]["raw_scores"]["field:zip64.extra_length"] == 0.22
 
 
 def test_candidate_snapshot_matches_training_action_shape_without_oracle(tmp_path):
@@ -569,6 +507,27 @@ class _CandidateIdProvider:
         }
 
 
+class _PriorProvider:
+    provider_id = "test_action_prior_policy"
+    supported_formats = ("zip",)
+
+    def __init__(self, priors):
+        self.priors = list(priors)
+
+    def available(self):
+        return True
+
+    def analyze(self, request):
+        return {"format": "zip", "damage_labels": [], "metadata": {"model_id": "test_damage"}}
+
+    def choose(self, request):
+        return {
+            "provider_id": self.provider_id,
+            "action_priors": list(self.priors),
+            "metadata": {"model_id": "test_action_prior"},
+        }
+
+
 class _FakeExtractor:
     def __init__(self, result):
         self.result = result
@@ -614,9 +573,9 @@ class _DualProvider:
         if action == "apply_patch":
             for payload in request.candidate_payloads:
                 if module in {payload.get("module_name"), payload.get("module")}:
-                    return {"action": action, "selected_candidate_id": payload["candidate_id"], "confidence": 1.0}
-            return {"action": "give_up", "reason": "missing_scripted_candidate"}
-        return {"action": action, "confidence": 1.0, "reason": f"scripted_{action}"}
+                    return {"action_priors": [{"action": action, "candidate_id": payload["candidate_id"], "prior_score": 1.0, "confidence": 1.0}]}
+            return {"action_priors": [{"action": "give_up", "prior_score": 1.0, "reason": "missing_scripted_candidate"}]}
+        return {"action_priors": [{"action": action, "prior_score": 1.0, "confidence": 1.0, "reason": f"scripted_{action}"}]}
 
 
 class _RawDamageScoreProvider:
@@ -635,12 +594,34 @@ class _RawDamageScoreProvider:
         }
 
     def choose(self, request):
-        return {"action": "give_up"}
+        return {"action_priors": [{"action": "give_up", "prior_score": 1.0}]}
+
+
+class _StateValueProvider:
+    provider_id = "test_value_policy"
+    supported_formats = ("zip",)
+
+    def __init__(self, value):
+        self.value = value
+        self.requests = []
+
+    def available(self):
+        return True
+
+    def estimate(self, request):
+        self.requests.append(request)
+        return {
+            "reachable_recovery_value": self.value,
+            "confidence": 0.9,
+            "metadata": {"model_id": "test_value"},
+        }
 
 
 def _install_policy_package(monkeypatch, name: str, provider) -> None:
     module = types.ModuleType(name)
-    module.get_repair_policy_providers = lambda: [provider]
+    module.get_damage_analysis_models = lambda: [provider] if callable(getattr(provider, "analyze", None)) else []
+    module.get_repair_action_models = lambda: [provider] if callable(getattr(provider, "choose", None)) else []
+    module.get_state_value_models = lambda: [provider] if callable(getattr(provider, "estimate", None)) else []
     monkeypatch.setitem(sys.modules, name, module)
 
 

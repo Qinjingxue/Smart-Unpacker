@@ -6,12 +6,13 @@ from sunpack.repair.policy.types import (
     DamageAnalysisResult,
     PolicyCandidatePayload,
     RepairActionDecision,
+    RepairActionPrior,
     RepairActionKind,
     RepairActionModel,
     RepairActionRequest,
-    RepairPolicyDecision,
-    RepairPolicyProvider,
-    RepairPolicyRequest,
+    StateValueModel,
+    StateValueRequest,
+    StateValueResult,
 )
 
 __all__ = [
@@ -23,11 +24,12 @@ __all__ = [
     "PolicyRecoverySnapshot",
     "RecoveryEvaluator",
     "RepairActionDecision",
+    "RepairActionPrior",
     "RepairActionKind",
     "RepairActionModel",
     "RepairActionRequest",
-    "RepairPolicyDecision",
     "RepairPolicyManager",
-    "RepairPolicyProvider",
-    "RepairPolicyRequest",
+    "StateValueModel",
+    "StateValueRequest",
+    "StateValueResult",
 ]

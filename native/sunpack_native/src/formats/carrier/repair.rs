@@ -18,11 +18,14 @@ pub(crate) fn archive_carrier_crop_recovery(
     max_input_size_mb: f64,
     max_candidates: usize,
 ) -> PyResult<Py<PyDict>> {
+    let native_started = std::time::Instant::now();
     let target = TargetFormat::from_name(format);
+    let read_started = std::time::Instant::now();
     let data = match read_source_input(source_input, mb_to_bytes(max_input_size_mb)) {
         Ok(data) => data,
         Err(message) => {
-            return status_dict(
+            let result_started = std::time::Instant::now();
+            let result = status_dict(
                 py,
                 "skipped",
                 "",
@@ -34,13 +37,25 @@ pub(crate) fn archive_carrier_crop_recovery(
                 0,
                 0.0,
                 &[],
-            )
+            )?;
+            result.bind(py).set_item("native_timing", carrier_timing_dict(py, &[
+                ("read_source", read_started.elapsed().as_secs_f64()),
+                ("scan_signatures", 0.0),
+                ("write_candidates", 0.0),
+                ("result_build", result_started.elapsed().as_secs_f64()),
+                ("total", native_started.elapsed().as_secs_f64()),
+            ])?)?;
+            return Ok(result);
         }
     };
+    let read_seconds = read_started.elapsed().as_secs_f64();
 
+    let scan_started = std::time::Instant::now();
     let candidates = scan_archive_signatures(&data, target, true, max_candidates.max(1));
+    let scan_seconds = scan_started.elapsed().as_secs_f64();
     if candidates.is_empty() {
-        return status_dict(
+        let result_started = std::time::Instant::now();
+        let result = status_dict(
             py,
             "unrepairable",
             "",
@@ -52,11 +67,20 @@ pub(crate) fn archive_carrier_crop_recovery(
             0,
             0.0,
             &[],
-        );
+        )?;
+        result.bind(py).set_item("native_timing", carrier_timing_dict(py, &[
+            ("read_source", read_seconds),
+            ("scan_signatures", scan_seconds),
+            ("write_candidates", 0.0),
+            ("result_build", result_started.elapsed().as_secs_f64()),
+            ("total", native_started.elapsed().as_secs_f64()),
+        ])?)?;
+        return Ok(result);
     };
 
     let mut written = Vec::new();
     let mut write_warnings = Vec::new();
+    let write_started = std::time::Instant::now();
     for candidate in candidates {
         let output_path = Path::new(workspace).join(format!(
             "archive_carrier_crop_{:08x}{}",
@@ -90,8 +114,10 @@ pub(crate) fn archive_carrier_crop_recovery(
             warnings,
         });
     }
+    let write_seconds = write_started.elapsed().as_secs_f64();
     let Some(selected) = written.first() else {
-        return status_dict(
+        let result_started = std::time::Instant::now();
+        let result = status_dict(
             py,
             "unrepairable",
             "",
@@ -103,9 +129,18 @@ pub(crate) fn archive_carrier_crop_recovery(
             0,
             0.0,
             &[],
-        );
+        )?;
+        result.bind(py).set_item("native_timing", carrier_timing_dict(py, &[
+            ("read_source", read_seconds),
+            ("scan_signatures", scan_seconds),
+            ("write_candidates", write_seconds),
+            ("result_build", result_started.elapsed().as_secs_f64()),
+            ("total", native_started.elapsed().as_secs_f64()),
+        ])?)?;
+        return Ok(result);
     };
-    status_dict_with_candidates(
+    let result_started = std::time::Instant::now();
+    let result = status_dict_with_candidates(
         py,
         "repaired",
         &selected.path,
@@ -118,6 +153,14 @@ pub(crate) fn archive_carrier_crop_recovery(
         selected.confidence,
         &["crop_embedded_archive_from_carrier"],
         &written,
-    )
+    )?;
+    result.bind(py).set_item("native_timing", carrier_timing_dict(py, &[
+        ("read_source", read_seconds),
+        ("scan_signatures", scan_seconds),
+        ("write_candidates", write_seconds),
+        ("result_build", result_started.elapsed().as_secs_f64()),
+        ("total", native_started.elapsed().as_secs_f64()),
+    ])?)?;
+    Ok(result)
 }
 

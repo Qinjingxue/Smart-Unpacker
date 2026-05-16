@@ -72,17 +72,19 @@ def main(argv: list[str] | None = None) -> int:
             if normal_adapter is None:
                 raise SystemExit(f"normal structure adapter is not available for format: {fmt}")
             normal_model = NormalStructureModel(model_dir=normal_dir, plugin=plugin)
-            enriched_rows: list[dict[str, Any]] = []
+            world_rows: list[dict[str, Any]] = []
             for row in rows:
                 payload = row.get("damage_analysis_input") if isinstance(row.get("damage_analysis_input"), dict) else {}
                 normal_rows = normal_adapter.rows_from_request_payload(payload)
                 normal_scores = normal_model.predict_rows(normal_rows)
                 anomaly = normal_adapter.build_anomaly_payload(normal_rows, normal_scores)
                 out = dict(row)
-                out["damage_analysis_input"] = normal_adapter.inject_anomaly_payload(payload, anomaly)
-                enriched_rows.append(out)
-            rows = enriched_rows
-            write_jsonl(datasets / "eval_damage_rows_with_anomaly.jsonl", rows)
+                out["world_model"] = {
+                    "query_count": len(normal_rows),
+                    "structure_anomaly": anomaly,
+                }
+                world_rows.append(out)
+            write_jsonl(datasets / "eval_world_model_outputs.jsonl", world_rows)
             damage_model_dir = location_dir
         else:
             damage_model_dir = model_root

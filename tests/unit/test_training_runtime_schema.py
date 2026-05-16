@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from sunpack.contracts.archive_input import ArchiveInputDescriptor
@@ -9,6 +11,7 @@ from sunpack.repair.policy.training_runtime import (
     build_damage_analysis_request,
     build_repair_action_request,
     candidate_snapshot,
+    request_to_dict,
     validate_policy_candidates,
 )
 from repair_training.schemas import (
@@ -101,6 +104,11 @@ def test_training_runtime_adapter_builds_requests_and_snapshots(tmp_path):
 
     assert damage_request.round_index == 2
     assert damage_request.runtime_context["archive_state"]["patch_digest"] == root.effective_patch_digest()
+    damage_payload = request_to_dict(build_damage_analysis_request(job, repaired, diagnosis={"format": "zip"}, round_index=3))
+    assert damage_payload["archive_state"]["patch_digest"] == repaired.effective_patch_digest()
+    assert "patches" not in json.dumps(damage_payload["archive_state"], sort_keys=True)
+    assert "data_b64" not in json.dumps(damage_payload, sort_keys=True)
+    assert "expected_b64" not in json.dumps(damage_payload, sort_keys=True)
     assert action_request.candidate_payloads[0]["candidate_id"] == snapshot["candidate_id"]
     assert action_request.candidate_payloads[0]["damage_analysis"]["damage_labels"] == ["central_directory_offset_bad"]
     assert snapshot["patch_depth"] == 1

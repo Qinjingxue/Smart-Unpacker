@@ -37,6 +37,7 @@ class ZipScanResult:
     residual_facts: list[str] | None = None
     validation_details: dict[str, Any] | None = None
     patch_plan: dict[str, Any] | None = None
+    native_timing: dict[str, Any] | None = None
     logical_stream_built: bool = False
     split_sidecars_available: bool = False
 
@@ -57,11 +58,18 @@ def rebuild_zip_from_source(
     cache_job: RepairJob | None = None,
 ) -> ZipScanResult:
     limits = module_limits(config)
+    # CD suffix rebuilds only need a structural local-header scan. Payload
+    # extraction/verification runs later on the selected patched state, so doing
+    # CRC/deflate work for every competing CD candidate is duplicated cost.
+    verify_scan = bool(limits.get("verify_candidates", True))
+    if not require_data_descriptor:
+        verify_scan = bool(limits.get("verify_cd_rebuild_payloads", False))
     params = {
         "source_input": source_input,
         "output_path": str(output_path),
         "require_data_descriptor": bool(require_data_descriptor),
         "preserve_raw_names": bool(preserve_raw_names),
+        "verify_scan": bool(verify_scan),
         "limits": cache_relevant_module_limits(config),
     }
 
@@ -74,7 +82,7 @@ def rebuild_zip_from_source(
             int(limits.get("max_entries", 20000) or 20000),
             float(limits.get("max_input_size_mb", 512) or 0),
             float(limits.get("max_output_size_mb", 2048) or 0),
-            True,
+            bool(verify_scan),
         ))
 
     result = dict(cached_repair_operation(cache_job, "native_zip_rebuild_from_local_headers", "zip_rebuild_from_local_headers", params, compute) if cache_job is not None else compute())
@@ -95,6 +103,7 @@ def rebuild_zip_from_source(
         residual_facts=[str(item) for item in result.get("residual_facts") or []],
         validation_details=dict(result.get("validation_details") or {}),
         patch_plan=dict(result.get("patch_plan") or {}) if isinstance(result.get("patch_plan"), dict) else None,
+        native_timing=dict(result.get("native_timing") or {}) if isinstance(result.get("native_timing"), dict) else None,
         logical_stream_built=bool(result.get("logical_stream_built")),
         split_sidecars_available=bool(result.get("split_sidecars_available")),
     )

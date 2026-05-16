@@ -43,6 +43,8 @@ def train_lightgbm_model(
         metrics = _train_damage_models(lgb, plugin, features_dir, model_dir, label_schema)
     elif model_type == "normal_structure":
         metrics = _train_normal_structure_model(lgb, plugin, features_dir, model_dir)
+    elif model_type == "state_value":
+        metrics = _train_state_value_model(lgb, plugin, features_dir, model_dir)
     elif model_type == "repair_action":
         metrics = _train_action_ranker(lgb, plugin, features_dir, model_dir)
     else:
@@ -60,8 +62,24 @@ def train_lightgbm_model(
             "valid": features_dir / "valid.npz",
             "test": features_dir / "test.npz",
         },
+        extra=_model_card_extra(model_type),
     )
     return metrics
+
+
+def _model_card_extra(model_type: str) -> dict[str, Any]:
+    if model_type == "repair_action":
+        return {
+            "model_role": "action_prior",
+            "does_not_use_state_value": True,
+            "final_decision_by": "PolicyDecisionArbiter",
+        }
+    if model_type == "state_value":
+        return {
+            "model_role": "reachable_recovery_value",
+            "final_decision_by": "PolicyDecisionArbiter",
+        }
+    return {}
 
 
 def _train_damage_models(lgb, plugin: TrainingFormatPlugin, features_dir: Path, model_dir: Path, label_schema: dict[str, Any]) -> dict[str, Any]:
@@ -241,6 +259,25 @@ def _train_normal_structure_model(lgb, plugin: TrainingFormatPlugin, features_di
     return _normal_structure_metrics(scores, test["y"], meta=_read_jsonl(features_dir / "meta_test.jsonl"))
 
 
+def _train_state_value_model(lgb, plugin: TrainingFormatPlugin, features_dir: Path, model_dir: Path) -> dict[str, Any]:
+    model_dir.mkdir(parents=True, exist_ok=True)
+    train = _load_npz(features_dir / "train.npz")
+    valid = _load_npz(features_dir / "valid.npz")
+    test = _load_npz(features_dir / "test.npz")
+    params = _params(plugin, "state_value")
+    model = lgb.LGBMRegressor(**params)
+    fit_kwargs: dict[str, Any] = {}
+    if len(valid["X"]):
+        fit_kwargs["eval_set"] = [(valid["X"], valid["y"])]
+    model.fit(train["X"], train["y"], **fit_kwargs)
+    model.booster_.save_model(str(model_dir / "model.txt"))
+    joblib.dump(model, model_dir / "model.joblib")
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message="X does not have valid feature names.*")
+        scores = model.predict(test["X"]) if len(test["X"]) else np.array([], dtype=np.float32)
+    return _state_value_metrics(np.asarray(scores, dtype=np.float32), test["y"])
+
+
 def _params(plugin: TrainingFormatPlugin, model_type: str) -> dict[str, Any]:
     model_type = normalize_model_type(model_type)
     if plugin.lightgbm_params is not None:
@@ -251,6 +288,8 @@ def _params(plugin: TrainingFormatPlugin, model_type: str) -> dict[str, Any]:
         return {"n_estimators": 40, "learning_rate": 0.05, "num_leaves": 15, "random_state": 17, "verbosity": -1, **params}
     if model_type == "normal_structure":
         return {"objective": "binary", "n_estimators": 80, "learning_rate": 0.04, "num_leaves": 31, "random_state": 17, "verbosity": -1, **params}
+    if model_type == "state_value":
+        return {"objective": "regression", "n_estimators": 80, "learning_rate": 0.04, "num_leaves": 31, "random_state": 17, "verbosity": -1, **params}
     return {"objective": "lambdarank", "n_estimators": 40, "learning_rate": 0.05, "num_leaves": 15, "random_state": 17, "verbosity": -1, **params}
 
 
@@ -364,6 +403,34 @@ def _normal_structure_metrics(scores: np.ndarray, y: np.ndarray, *, meta: list[d
     output["clean_observed_false_positive_rate"] = _clean_observed_false_positive_rate(scores, y1, meta)
     output["hard_negative_recall"] = _hard_negative_recall(scores, y1, meta)
     return output
+
+
+def _state_value_metrics(scores: np.ndarray, y: np.ndarray) -> dict[str, Any]:
+    y1 = y[:, 0] if getattr(y, "ndim", 1) > 1 else y
+    if len(y1) == 0:
+        return {"rows": 0, "mae": 0.0, "rmse": 0.0, "r2": 0.0, "bucket_accuracy": 0.0, "high_value_recall": 0.0, "bias": 0.0}
+    clipped = np.clip(scores, 0.0, 1.0)
+    err = clipped - y1
+    mae = float(np.mean(np.abs(err)))
+    rmse = float(np.sqrt(np.mean(err * err)))
+    variance = float(np.sum((y1 - np.mean(y1)) ** 2))
+    r2 = 1.0 - float(np.sum(err * err)) / variance if variance > 1e-9 else 0.0
+    truth_bucket = np.floor(np.clip(y1, 0.0, 0.999999) * 5.0).astype(int)
+    pred_bucket = np.floor(np.clip(clipped, 0.0, 0.999999) * 5.0).astype(int)
+    high_truth = y1 >= 0.8
+    high_pred = clipped >= 0.8
+    return {
+        "rows": int(len(y1)),
+        "mae": mae,
+        "rmse": rmse,
+        "r2": float(r2),
+        "bucket_accuracy": float(np.mean(truth_bucket == pred_bucket)),
+        "high_value_recall": float(np.sum(high_truth & high_pred) / max(1.0, np.sum(high_truth))),
+        "high_value_precision": float(np.sum(high_truth & high_pred) / max(1.0, np.sum(high_pred))),
+        "bias": float(np.mean(err)),
+        "overestimation_mean": float(np.mean(np.maximum(err, 0.0))),
+        "underestimation_mean": float(np.mean(np.maximum(-err, 0.0))),
+    }
 
 
 def _normal_group_metrics(scores: np.ndarray, y: np.ndarray, meta: list[dict[str, Any]], key: str) -> dict[str, Any]:

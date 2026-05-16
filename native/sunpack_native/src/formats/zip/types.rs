@@ -60,6 +60,19 @@ struct ScanResult {
     descriptor_no_signature_entries: usize,
     deflate_resync_partial_entries: usize,
     timed_out: bool,
+    timing: ScanTiming,
+}
+
+#[derive(Debug, Default)]
+struct ScanTiming {
+    parse_entry_seconds: f64,
+    verify_deflate_seconds: f64,
+    verify_store_seconds: f64,
+    descriptor_probe_seconds: f64,
+    descriptor_find_next_seconds: f64,
+    descriptor_check_seconds: f64,
+    descriptor_find_next_calls: usize,
+    deflate_resync_seconds: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,11 +102,12 @@ struct WriteStats {
     size: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct WrittenCandidate {
     name: &'static str,
     policy: &'static str,
     path: String,
+    patch_plan: Option<Py<PyDict>>,
     confidence: f64,
     actions: Vec<&'static str>,
     entries: usize,

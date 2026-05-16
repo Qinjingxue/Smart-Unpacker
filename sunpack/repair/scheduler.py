@@ -22,6 +22,7 @@ from sunpack.repair.pipeline.registry import discover_repair_modules, get_repair
 from sunpack.repair.policy import RepairPolicyManager
 from sunpack.repair.policy.training_runtime import (
     archive_state_for_job,
+    candidate_summaries_for_state,
     candidate_snapshot,
     recovery_score_from_job,
     runtime_context_from_job,
@@ -57,7 +58,7 @@ class RepairScheduler:
         batch = self.generate_repair_candidates(job)
         terminal_policy_noop = (
             batch.terminal_result is not None
-            and self.policy_manager.active_for_job(job)
+            and False
             and _terminal_result_allows_policy_noop(batch.terminal_result)
         )
         if batch.terminal_result is not None and not terminal_policy_noop:
@@ -74,7 +75,7 @@ class RepairScheduler:
         selection: dict[str, Any] = {}
         if batch.candidates or terminal_policy_noop:
             selected = None
-            if self.policy_manager.active_for_job(job):
+            if False:
                 policy_candidates = _with_job_password_candidates(with_accept_current_state_candidate(batch.candidates, job), job)
                 validated = self._validated_policy_candidates(selector, policy_candidates)
                 selectable = [candidate for candidate in validated if selector._accepted(candidate)]
@@ -217,6 +218,7 @@ class RepairScheduler:
         seen_digests = {current_state.effective_patch_digest()} if current_state is not None else set()
         recovery_evaluator = RecoveryEvaluator(self.config)
         recovery_cache: dict[str, PolicyRecoverySnapshot] = {}
+        state_value_cache: dict[str, dict[str, Any]] = {}
         parent_by_digest: dict[str, str] = {}
         current_recovery = recovery_evaluator.evaluate_state(current_job, current_state, mode="policy_light", cache=recovery_cache)
         best_recovery_snapshot = current_recovery
@@ -278,6 +280,39 @@ class RepairScheduler:
                 )
                 for index, candidate in enumerate(selectable)
             ]
+            candidate_summaries = candidate_summaries_for_state(candidate_payloads)
+            state_value, state_value_selection = self.policy_manager.estimate_state_value(
+                job=current_job,
+                archive_state=current_state,
+                damage_analysis=damage_analysis,
+                candidate_summaries=candidate_summaries,
+                current_recovery=current_recovery.to_dict(),
+                best_seen_recovery=best_recovery_snapshot.to_dict(),
+                parent_recovery=parent_recovery.to_dict(),
+                diagnosis=diagnosis_payload,
+                round_index=round_index,
+            )
+            state_value_cache[current_digest] = dict(state_value)
+            parent_state_value = state_value_cache.get(parent_digest, {
+                "reachable_recovery_value": float(parent_recovery.score or 0.0),
+                "confidence": 0.0,
+                "metadata": {"decision_reason": "parent_state_value_fallback"},
+            })
+            candidate_state_values = _estimate_candidate_state_values(
+                self.policy_manager,
+                current_job,
+                selectable,
+                candidate_payloads,
+                candidate_recoveries,
+                damage_analysis,
+                state_value_cache,
+                current_recovery.to_dict(),
+                best_recovery_snapshot.to_dict(),
+                parent_recovery.to_dict(),
+                diagnosis_payload,
+                round_index,
+                budget=4 if round_index == 1 else 2,
+            )
             decision, action_selection = self.policy_manager.choose_action(
                 job=current_job,
                 archive_state=current_state,
@@ -287,6 +322,9 @@ class RepairScheduler:
                 current_recovery=current_recovery.to_dict(),
                 best_seen_recovery=best_recovery_snapshot.to_dict(),
                 parent_recovery=parent_recovery.to_dict(),
+                state_value=state_value,
+                parent_state_value=parent_state_value,
+                candidate_state_values=candidate_state_values,
                 diagnosis=diagnosis_payload,
                 round_index=round_index,
             )
@@ -294,8 +332,12 @@ class RepairScheduler:
                 "policy_loop": True,
                 "round": round_index,
                 "analysis": analysis_selection,
+                "state_value": state_value_selection,
                 "action": action_selection,
                 "damage_analysis": damage_analysis,
+                "state_value_result": state_value,
+                "candidate_state_values": candidate_state_values,
+                "value_gap": float(state_value.get("reachable_recovery_value") or 0.0) - float(current_recovery.score or 0.0),
                 "candidate_count": len(selectable),
                 "candidates": candidate_payloads,
             }
@@ -315,6 +357,9 @@ class RepairScheduler:
                 "analysis_route_flags": list(analysis_route_flags),
                 "current_recovery": current_recovery.to_dict(),
                 "best_seen_recovery": best_recovery_snapshot.to_dict(),
+                "state_value": state_value,
+                "candidate_state_values": candidate_state_values,
+                "value_gap": float(state_value.get("reachable_recovery_value") or 0.0) - float(current_recovery.score or 0.0),
                 "action": action_selection,
             })
 
@@ -1529,6 +1574,53 @@ def _policy_candidate_snapshot_with_damage(
         current_recovery=current_recovery,
         recovery_snapshot=recovery_snapshot,
     )
+
+
+def _estimate_candidate_state_values(
+    policy_manager,
+    job: RepairJob,
+    candidates: list[RepairCandidate],
+    candidate_payloads: list[dict[str, Any]],
+    candidate_recoveries,
+    damage_analysis: dict[str, Any],
+    cache: dict[str, dict[str, Any]],
+    current_recovery: dict[str, Any],
+    best_seen_recovery: dict[str, Any],
+    parent_recovery: dict[str, Any],
+    diagnosis: dict[str, Any],
+    round_index: int,
+    *,
+    budget: int,
+) -> dict[str, dict[str, Any]]:
+    output: dict[str, dict[str, Any]] = {}
+    limit = max(0, int(budget or 0))
+    for index, (candidate, payload) in enumerate(zip(candidates, candidate_payloads)):
+        candidate_id = str(payload.get("candidate_id") or "")
+        state = candidate.repaired_state
+        if not candidate_id or state is None:
+            continue
+        digest = state.effective_patch_digest()
+        if digest in cache:
+            output[candidate_id] = dict(cache[digest])
+            continue
+        if len(output) >= limit:
+            output[candidate_id] = {"reachable_recovery_value": float(current_recovery.get("score") or 0.0), "confidence": 0.0, "metadata": {"decision_reason": "candidate_value_budget_fallback"}}
+            continue
+        recovery = candidate_recoveries[index].to_dict() if index < len(candidate_recoveries) else current_recovery
+        value, _selection = policy_manager.estimate_state_value(
+            job=job,
+            archive_state=state,
+            damage_analysis=damage_analysis,
+            candidate_summaries=[],
+            current_recovery=recovery,
+            best_seen_recovery=best_seen_recovery,
+            parent_recovery=parent_recovery,
+            diagnosis=diagnosis,
+            round_index=round_index,
+        )
+        cache[digest] = dict(value)
+        output[candidate_id] = dict(value)
+    return output
 
 
 def _candidate_by_id(

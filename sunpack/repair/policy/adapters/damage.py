@@ -110,15 +110,29 @@ class ZipDamageAnalysisAdapter:
         uncertain_labels = apply_location_hierarchy(sorted(uncertain_selected_scores))
         zone_labels = sorted({label.split(":", 1)[1] for label in labels if label.startswith("zone:")})
         meta = dict(metadata or {})
+        world_model = _world_model_payload(meta)
+        location_model = {
+            "raw_scores": clean_scores,
+            "selected_scores": selected_scores,
+            "uncertainty_raw_scores": uncertain_clean_scores,
+            "uncertainty_selected_scores": uncertain_selected_scores,
+            "uncertain_labels": uncertain_labels,
+            "observability_summary": _observability_summary(uncertain_labels),
+        }
         meta.update({
             "threshold_mode": "override" if threshold_override is not None else "model",
             "taxonomy": "zip",
-            "analysis_target": "observed_location_with_uncertainty",
-            "selected_scores": selected_scores,
-            "uncertain_labels": uncertain_labels,
-            "uncertain_scores": uncertain_selected_scores,
-            "observability_summary": _observability_summary(uncertain_labels),
+            "analysis_target": "parallel_world_and_location_models",
+            "location_model": location_model,
+            "world_model": world_model,
         })
+        # Temporary compatibility for existing diagnostics/providers; new consumers should read location_model/world_model.
+        meta.setdefault("damage_location_scores", clean_scores)
+        meta.setdefault("damage_uncertainty_scores", uncertain_clean_scores)
+        meta.setdefault("selected_scores", selected_scores)
+        meta.setdefault("uncertain_labels", uncertain_labels)
+        meta.setdefault("uncertain_scores", uncertain_selected_scores)
+        meta.setdefault("observability_summary", location_model["observability_summary"])
         return DamageAnalysisResult(
             format="zip",
             damage_labels=labels,
@@ -156,6 +170,22 @@ def _observability_summary(labels: list[str]) -> dict[str, Any]:
         "uncertain_label_count": len(labels),
         "uncertain_zones": sorted({zone for zone in zones if zone}),
     }
+
+
+def _world_model_payload(metadata: dict[str, Any]) -> dict[str, Any]:
+    anomaly = metadata.get("structure_anomaly") if isinstance(metadata.get("structure_anomaly"), dict) else {}
+    compact = anomaly.get("compact_attribution") if isinstance(anomaly.get("compact_attribution"), dict) else {}
+    summary = anomaly.get("summary") if isinstance(anomaly.get("summary"), dict) else {}
+    payload = {
+        "structure_anomaly": anomaly,
+        "compact_attribution": compact,
+        "summary": summary,
+    }
+    if isinstance(metadata.get("normal_structure_scores"), dict):
+        payload["score_summary"] = dict(metadata.get("normal_structure_scores") or {})
+    if isinstance(metadata.get("normal_structure_metadata"), dict):
+        payload["metadata"] = dict(metadata.get("normal_structure_metadata") or {})
+    return {key: value for key, value in payload.items() if value not in ({}, [], None)}
 
 
 def _normalize_format(fmt: str) -> str:

@@ -9,7 +9,10 @@ fn scan_entries(data: &[u8], options: &DeepZipOptions, started: Instant) -> Scan
                 .push("ZIP deep recovery time budget reached".to_string());
             break;
         }
-        match parse_entry(data, offset, options) {
+        let parse_started = Instant::now();
+        let outcome = parse_entry(data, offset, options, &mut result.timing);
+        result.timing.parse_entry_seconds += parse_started.elapsed().as_secs_f64();
+        match outcome {
             EntryOutcome::Recovered(entry) => {
                 if entry.descriptor {
                     result.descriptor_entries += 1;
@@ -54,7 +57,7 @@ enum EntryOutcome {
     Skipped(String),
 }
 
-fn parse_entry(data: &[u8], offset: usize, options: &DeepZipOptions) -> EntryOutcome {
+fn parse_entry(data: &[u8], offset: usize, options: &DeepZipOptions, timing: &mut ScanTiming) -> EntryOutcome {
     if offset + LOCAL_HEADER_LEN > data.len() {
         return EntryOutcome::Skipped("short local header".to_string());
     }
@@ -102,6 +105,7 @@ fn parse_entry(data: &[u8], offset: usize, options: &DeepZipOptions) -> EntryOut
             mod_time,
             mod_date,
             options,
+            timing,
         );
     }
 
@@ -119,6 +123,7 @@ fn parse_entry(data: &[u8], offset: usize, options: &DeepZipOptions) -> EntryOut
     let data_end = match data_start.checked_add(compressed_size as usize) {
         Some(end) if end <= data.len() => end,
         Some(_) if method == 8 && options.verify_candidates => {
+            let verify_started = Instant::now();
             match verified_deflate_payload_end(
                 data,
                 data_start,
@@ -128,19 +133,28 @@ fn parse_entry(data: &[u8], offset: usize, options: &DeepZipOptions) -> EntryOut
                 options,
             ) {
                 Some((end, source)) => {
+                    timing.verify_deflate_seconds += verify_started.elapsed().as_secs_f64();
                     boundary_source = source;
                     end
                 }
-                None => return EntryOutcome::Skipped("entry payload is truncated".to_string()),
+                None => {
+                    timing.verify_deflate_seconds += verify_started.elapsed().as_secs_f64();
+                    return EntryOutcome::Skipped("entry payload is truncated".to_string());
+                }
             }
         }
         Some(_) if method == 0 && options.verify_candidates => {
+            let verify_started = Instant::now();
             match verified_store_payload_end(data, data_start, header_crc32, uncompressed_size) {
                 Some((end, source)) => {
+                    timing.verify_store_seconds += verify_started.elapsed().as_secs_f64();
                     boundary_source = source;
                     end
                 }
-                None => return EntryOutcome::Skipped("stored entry payload is truncated".to_string()),
+                None => {
+                    timing.verify_store_seconds += verify_started.elapsed().as_secs_f64();
+                    return EntryOutcome::Skipped("stored entry payload is truncated".to_string());
+                }
             }
         }
         Some(_) => return EntryOutcome::Skipped("entry payload is truncated".to_string()),
@@ -152,6 +166,7 @@ fn parse_entry(data: &[u8], offset: usize, options: &DeepZipOptions) -> EntryOut
     let data_end = if entry_is_encrypted {
         data_end
     } else if method == 8 && options.verify_candidates {
+        let verify_started = Instant::now();
         match verified_deflate_payload_end(
             data,
             data_start,
@@ -161,18 +176,27 @@ fn parse_entry(data: &[u8], offset: usize, options: &DeepZipOptions) -> EntryOut
             options,
         ) {
             Some((end, source)) => {
+                timing.verify_deflate_seconds += verify_started.elapsed().as_secs_f64();
                 boundary_source = source;
                 end
             }
-            None => data_end,
+            None => {
+                timing.verify_deflate_seconds += verify_started.elapsed().as_secs_f64();
+                data_end
+            }
         }
     } else if method == 0 && options.verify_candidates {
+        let verify_started = Instant::now();
         match verified_store_payload_end(data, data_start, header_crc32, uncompressed_size) {
             Some((end, source)) => {
+                timing.verify_store_seconds += verify_started.elapsed().as_secs_f64();
                 boundary_source = source;
                 end
             }
-            None => data_end,
+            None => {
+                timing.verify_store_seconds += verify_started.elapsed().as_secs_f64();
+                data_end
+            }
         }
     } else {
         data_end
@@ -195,6 +219,7 @@ fn parse_entry(data: &[u8], offset: usize, options: &DeepZipOptions) -> EntryOut
         false,
         boundary_source,
         options,
+        timing,
     )
 }
 
@@ -211,8 +236,10 @@ fn parse_descriptor_entry(
     mod_time: u16,
     mod_date: u16,
     options: &DeepZipOptions,
+    timing: &mut ScanTiming,
 ) -> EntryOutcome {
-    if method == 8 {
+    if method == 8 && options.verify_candidates {
+        let verify_started = Instant::now();
         match verify_deflate(
             &data[data_start..],
             None,
@@ -221,6 +248,7 @@ fn parse_descriptor_entry(
             false,
         ) {
             Ok(info) => {
+                timing.verify_deflate_seconds += verify_started.elapsed().as_secs_f64();
                 let data_end = data_start + info.consumed;
                 let _descriptor = descriptor_at(
                     data,
@@ -252,6 +280,8 @@ fn parse_descriptor_entry(
                 });
             }
             Err(_) => {
+                timing.verify_deflate_seconds += verify_started.elapsed().as_secs_f64();
+                let resync_started = Instant::now();
                 if let Some(entry) = deflate_resync_partial_entry(
                     data,
                     local_header_offset,
@@ -264,17 +294,22 @@ fn parse_descriptor_entry(
                     mod_date,
                     options,
                 ) {
+                    timing.deflate_resync_seconds += resync_started.elapsed().as_secs_f64();
                     return EntryOutcome::Recovered(entry);
                 }
+                timing.deflate_resync_seconds += resync_started.elapsed().as_secs_f64();
             }
         }
     }
 
+    let descriptor_started = Instant::now();
     let Some((descriptor_start, crc32, compressed_size, uncompressed_size)) =
-        descriptor_before_next_record(data, data_start)
+        descriptor_before_next_record(data, data_start, Some(&mut *timing))
     else {
+        timing.descriptor_probe_seconds += descriptor_started.elapsed().as_secs_f64();
         return EntryOutcome::Skipped("data descriptor could not be recovered".to_string());
     };
+    timing.descriptor_probe_seconds += descriptor_started.elapsed().as_secs_f64();
     let data_end = descriptor_start;
     if method == 0 {
         return classify_entry(
@@ -295,6 +330,7 @@ fn parse_descriptor_entry(
             true,
             BoundarySource::Descriptor,
             options,
+            timing,
         );
     }
     if compressed_size > u32::MAX as u64 || uncompressed_size > u32::MAX as u64 {
@@ -342,15 +378,22 @@ fn classify_entry(
     descriptor: bool,
     boundary_source: BoundarySource,
     options: &DeepZipOptions,
+    timing: &mut ScanTiming,
 ) -> EntryOutcome {
     let payload = &data[data_start..data_end];
     let verified = match method {
-        0 => {
+        0 if options.verify_candidates => {
+            let verify_started = Instant::now();
+            let ok =
             payload.len() as u64 == uncompressed_size
                 && compressed_size == uncompressed_size
-                && crc32_bytes(payload) == crc32
+                && crc32_bytes(payload) == crc32;
+            timing.verify_store_seconds += verify_started.elapsed().as_secs_f64();
+            ok
         }
+        0 => false,
         8 if options.verify_candidates => {
+            let verify_started = Instant::now();
             match verify_deflate(
                 payload,
                 Some(crc32),
@@ -358,8 +401,14 @@ fn classify_entry(
                 options.max_entry_uncompressed_bytes,
                 true,
             ) {
-                Ok(info) => info.consumed == payload.len(),
-                Err(_) => false,
+                Ok(info) => {
+                    timing.verify_deflate_seconds += verify_started.elapsed().as_secs_f64();
+                    info.consumed == payload.len()
+                }
+                Err(_) => {
+                    timing.verify_deflate_seconds += verify_started.elapsed().as_secs_f64();
+                    false
+                }
             }
         }
         8 => false,

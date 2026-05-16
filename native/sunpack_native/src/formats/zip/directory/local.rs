@@ -147,18 +147,18 @@ fn find_local_for_central_offset_only(data: &[u8], entry: &CentralEntry) -> Opti
 }
 
 fn cd_local_reconcile_indices(data: &[u8], entries: &[RecoveredEntry]) -> (Vec<usize>, usize) {
-    let verified = entries
+    let structurally_available = entries
         .iter()
         .enumerate()
-        .filter(|(_, entry)| entry.verified)
+        .filter(|(_, entry)| entry.verified || entry.passthrough)
         .collect::<Vec<_>>();
-    if verified.is_empty() {
+    if structurally_available.is_empty() {
         return (Vec::new(), 0);
     }
     let central_entries = parse_best_central_entries(data);
     if central_entries.is_empty() {
         return (
-            verified.into_iter().map(|(index, _)| index).collect::<Vec<_>>(),
+            structurally_available.into_iter().map(|(index, _)| index).collect::<Vec<_>>(),
             0,
         );
     }
@@ -168,7 +168,7 @@ fn cd_local_reconcile_indices(data: &[u8], entries: &[RecoveredEntry]) -> (Vec<u
     for central in &central_entries {
         let mut best: Option<(i64, usize, bool)> = None;
         for (index, local) in entries.iter().enumerate() {
-            if !local.verified || used.contains(&index) {
+            if !(local.verified || local.passthrough) || used.contains(&index) {
                 continue;
             }
             let score = reconcile_score(central, local);
@@ -199,7 +199,7 @@ fn cd_local_reconcile_indices(data: &[u8], entries: &[RecoveredEntry]) -> (Vec<u
         selected = entries
             .iter()
             .enumerate()
-            .filter_map(|(index, entry)| entry.verified.then_some(index))
+            .filter_map(|(index, entry)| (entry.verified || entry.passthrough).then_some(index))
             .collect();
     }
     selected.sort_by_key(|index| entries[*index].local_header_offset);

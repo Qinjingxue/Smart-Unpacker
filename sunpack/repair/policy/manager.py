@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import importlib
-from dataclasses import asdict
 from typing import Any
 
 from sunpack.contracts.archive_state import ArchiveState
@@ -13,10 +12,101 @@ from sunpack.repair.policy.types import (
     DamageAnalysisResult,
     PolicyCandidatePayload,
     RepairActionDecision,
+    RepairActionPrior,
     RepairActionRequest,
-    RepairPolicyDecision,
-    RepairPolicyRequest,
+    StateValueRequest,
+    StateValueResult,
 )
+
+
+DEFAULT_ARBITER_CONFIG = {
+    "stop_epsilon": 0.035,
+    "low_value_threshold": 0.06,
+    "value_weight": 1.0,
+    "recovery_weight": 0.4,
+    "step_cost": 0.01,
+    "undo_cost": 0.005,
+}
+
+
+class PolicyDecisionArbiter:
+    def __init__(self, config: dict[str, Any] | None = None):
+        payload = {**DEFAULT_ARBITER_CONFIG, **dict(config or {})}
+        self.stop_epsilon = float(payload["stop_epsilon"])
+        self.low_value_threshold = float(payload["low_value_threshold"])
+        self.value_weight = float(payload["value_weight"])
+        self.recovery_weight = float(payload["recovery_weight"])
+        self.step_cost = float(payload["step_cost"])
+        self.undo_cost = float(payload["undo_cost"])
+
+    def decide(
+        self,
+        *,
+        priors: list[RepairActionPrior],
+        candidate_payloads: list[PolicyCandidatePayload],
+        candidate_state_values: dict[str, dict[str, Any]] | None,
+        current_recovery: dict[str, Any] | None,
+        state_value: dict[str, Any] | None,
+        parent_state_value: dict[str, Any] | None,
+        parent_recovery: dict[str, Any] | None,
+    ) -> tuple[RepairActionDecision, dict[str, Any]]:
+        current_score = _optional_float((current_recovery or {}).get("score")) or 0.0
+        current_value = _state_value_score(state_value, default=current_score)
+        parent_score = _optional_float((parent_recovery or {}).get("score")) or 0.0
+        parent_value = _state_value_score(parent_state_value, default=parent_score)
+        candidate_by_id = {str(item.get("candidate_id") or ""): dict(item) for item in candidate_payloads if isinstance(item, dict)}
+        value_by_id = candidate_state_values or {}
+        scored: list[tuple[float, RepairActionPrior, dict[str, Any]]] = []
+        max_apply_prior = max((prior.prior_score for prior in priors if prior.action == "apply_patch"), default=0.0)
+        for prior in priors:
+            candidate_id = str(prior.candidate_id or "")
+            details: dict[str, Any] = {
+                "prior_score": float(prior.prior_score or 0.0),
+                "action": prior.action,
+                "candidate_id": candidate_id,
+            }
+            score = float(prior.prior_score or 0.0)
+            if prior.action == "apply_patch":
+                payload = candidate_by_id.get(candidate_id, {})
+                recovery_delta = _optional_float(payload.get("recovery_delta")) or 0.0
+                next_value = _state_value_score(value_by_id.get(candidate_id), default=current_value)
+                value_delta = next_value - current_value
+                score += self.value_weight * value_delta + self.recovery_weight * recovery_delta - self.step_cost
+                details.update({"next_value": next_value, "value_delta": value_delta, "recovery_delta": recovery_delta})
+            elif prior.action == "undo_patch":
+                value_delta = parent_value - current_value
+                score += self.value_weight * value_delta - self.undo_cost
+                details.update({"parent_value": parent_value, "value_delta": value_delta})
+            elif prior.action == "stop":
+                gap = current_value - current_score
+                score += 1.0 if gap <= self.stop_epsilon and current_value > self.low_value_threshold else -max(0.0, gap)
+                details.update({"value_gap": gap, "stop_epsilon": self.stop_epsilon})
+            elif prior.action == "give_up":
+                if current_value <= self.low_value_threshold and max_apply_prior <= 0.0:
+                    score += 1.0
+                else:
+                    score -= max(0.0, current_value)
+                details.update({"current_value": current_value, "low_value_threshold": self.low_value_threshold})
+            details["arbiter_score"] = score
+            scored.append((score, prior, details))
+        if not scored:
+            return RepairActionDecision(action="give_up", reason="no_action_priors"), {"scores": [], "selected_by": "arbiter"}
+        scored.sort(key=lambda item: item[0], reverse=True)
+        score, prior, details = scored[0]
+        return RepairActionDecision(
+            action=prior.action,
+            selected_candidate_id=prior.candidate_id if prior.action == "apply_patch" else "",
+            confidence=prior.confidence,
+            provider_id=prior.provider_id,
+            reason=f"arbiter:{prior.reason or prior.action}",
+            metadata={"arbiter_score": score, "prior_score": prior.prior_score, **dict(prior.metadata or {})},
+        ), {
+            "selected_by": "arbiter",
+            "scores": [item[2] for item in scored],
+            "config": dict(DEFAULT_ARBITER_CONFIG),
+            "current_value": current_value,
+            "current_recovery": current_score,
+        }
 
 
 class RepairPolicyManager:
@@ -37,18 +127,7 @@ class RepairPolicyManager:
         return bool(fmt and self._damage_models(fmt) and self._action_models(fmt))
 
     def active_for_job(self, job: RepairJob) -> bool:
-        if not self.enabled:
-            return False
-        fmt = _normalize_format(job.format)
-        if not fmt:
-            return False
-        for provider in self.providers():
-            available = getattr(provider, "available", None)
-            if callable(available) and not bool(available()):
-                continue
-            if self._provider_supports_format(provider, fmt):
-                return True
-        return False
+        return self.dual_model_active_for_job(job)
 
     def status_for_job(self, job: RepairJob) -> dict[str, Any]:
         base = {
@@ -136,6 +215,9 @@ class RepairPolicyManager:
         current_recovery: dict[str, Any] | None = None,
         best_seen_recovery: dict[str, Any] | None = None,
         parent_recovery: dict[str, Any] | None = None,
+        state_value: dict[str, Any] | None = None,
+        parent_state_value: dict[str, Any] | None = None,
+        candidate_state_values: dict[str, dict[str, Any]] | None = None,
         diagnosis: dict[str, Any] | None = None,
         round_index: int = 0,
     ) -> tuple[RepairActionDecision, dict[str, Any]]:
@@ -173,32 +255,46 @@ class RepairPolicyManager:
         for provider in self._action_models(fmt):
             provider_id = self._provider_id(provider)
             try:
-                decision = _coerce_action_decision(provider.choose(request), provider_id=provider_id)
+                raw = provider.choose(request)
             except Exception as exc:
                 if self.strict_provider_errors:
                     raise
                 errors.append(f"{provider_id}: {exc}")
                 continue
-            invalid = _invalid_action_decision_reason(decision, candidate_by_id)
-            if invalid:
-                errors.append(f"{provider_id}: {invalid}")
-                continue
-            selected_index = candidate_by_id.get(decision.selected_candidate_id) if decision.selected_candidate_id else None
-            selected = candidates[selected_index] if selected_index is not None and selected_index < len(candidates) else None
-            return decision, {
-                **base,
-                "decision_status": "selected",
-                "provider_id": provider_id,
-                "action": decision.action,
-                "confidence": decision.confidence,
-                "reason": decision.reason,
-                "selected_candidate_id": decision.selected_candidate_id,
-                "selected_candidate_id_valid": bool(decision.selected_candidate_id) if decision.action == "apply_patch" else True,
-                "selected_module": selected.module_name if selected is not None else "",
-                "selected_format": selected.format if selected is not None else fmt,
-                "candidate_count": len(candidates),
-                "metadata": _public_metadata(decision.metadata),
-            }
+            priors = _coerce_action_priors(raw, provider_id=provider_id)
+            if priors:
+                decision, arbiter_payload = PolicyDecisionArbiter(self.policy_config.get("arbiter") if isinstance(self.policy_config.get("arbiter"), dict) else {}).decide(
+                    priors=priors,
+                    candidate_payloads=candidate_payloads,
+                    candidate_state_values=candidate_state_values,
+                    current_recovery=current_recovery,
+                    state_value=state_value,
+                    parent_state_value=parent_state_value,
+                    parent_recovery=parent_recovery,
+                )
+                invalid = _invalid_action_decision_reason(decision, candidate_by_id)
+                if invalid:
+                    errors.append(f"{provider_id}: {invalid}")
+                    continue
+                selected_index = candidate_by_id.get(decision.selected_candidate_id) if decision.selected_candidate_id else None
+                selected = candidates[selected_index] if selected_index is not None and selected_index < len(candidates) else None
+                return decision, {
+                    **base,
+                    "decision_status": "selected",
+                    "provider_id": provider_id,
+                    "action": decision.action,
+                    "confidence": decision.confidence,
+                    "reason": decision.reason,
+                    "selected_candidate_id": decision.selected_candidate_id,
+                    "selected_candidate_id_valid": bool(decision.selected_candidate_id) if decision.action == "apply_patch" else True,
+                    "selected_module": selected.module_name if selected is not None else "",
+                    "selected_format": selected.format if selected is not None else fmt,
+                    "candidate_count": len(candidates),
+                    "action_priors": [prior.to_dict() for prior in priors],
+                    "arbiter": arbiter_payload,
+                    "metadata": _public_metadata(decision.metadata),
+                }
+            errors.append(f"{provider_id}: action_prior_list_required")
         return RepairActionDecision(action="give_up", reason="action_model_unavailable_or_invalid"), {
             **base,
             "decision_status": "fallback",
@@ -207,92 +303,65 @@ class RepairPolicyManager:
             "load_error": self.last_load_error,
         }
 
-    def choose(
+    def estimate_state_value(
         self,
         *,
         job: RepairJob,
-        candidates: list[RepairCandidate],
-        candidate_payloads: list[PolicyCandidatePayload],
+        archive_state: ArchiveState | None,
+        damage_analysis: dict[str, Any],
+        candidate_summaries: list[PolicyCandidatePayload] | None = None,
+        current_recovery: dict[str, Any] | None = None,
+        best_seen_recovery: dict[str, Any] | None = None,
+        parent_recovery: dict[str, Any] | None = None,
         diagnosis: dict[str, Any] | None = None,
-    ) -> tuple[RepairCandidate | None, dict[str, Any]]:
-        base = {
-            "enabled": self.enabled,
-            "provider_package": self.provider_package,
-            "fallback_to_selector": self.fallback_to_selector,
-        }
-        if not self.enabled:
-            return None, {**base, "decision_status": "disabled", "fallback_reason": "policy_disabled"}
-        if not candidates:
-            return None, {**base, "decision_status": "no_candidates", "fallback_reason": "no_candidates"}
-        request = RepairPolicyRequest(
+        round_index: int = 0,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        fmt = _normalize_format(job.format)
+        current_score = _optional_float((current_recovery or {}).get("score")) or 0.0
+        base = {"enabled": self.enabled, "provider_package": self.provider_package}
+        request = StateValueRequest(
             job=job,
-            format=_normalize_format(job.format),
-            candidates=list(candidates),
-            candidate_payloads=list(candidate_payloads),
+            format=fmt,
+            archive_state=archive_state,
+            damage_analysis=dict(damage_analysis or {}),
+            current_recovery=dict(current_recovery or {}),
+            best_seen_recovery=dict(best_seen_recovery or {}),
+            parent_recovery=dict(parent_recovery or {}),
+            candidate_summaries=[dict(item) for item in candidate_summaries or []],
+            repair_history=dict(getattr(job, "repair_history", {}) or {}),
             diagnosis=dict(diagnosis or {}),
             config=dict(self.config),
+            round_index=int(round_index or 0),
         )
-        providers = [provider for provider in self.providers() if self._provider_can_handle(provider, request)]
-        if not providers:
-            reason = "policy_unavailable" if not self.providers() else "unsupported_format"
-            return None, {
-                **base,
-                "decision_status": "unavailable",
-                "fallback_reason": reason,
-                "load_error": self.last_load_error,
-            }
-
-        candidate_by_id, duplicate_candidate_ids = _candidate_id_index(candidate_payloads)
-        if duplicate_candidate_ids:
-            return None, {
-                **base,
-                "decision_status": "fallback",
-                "fallback_reason": "duplicate_candidate_id",
-                "duplicate_candidate_id_count": len(duplicate_candidate_ids),
-                "duplicate_candidate_ids": duplicate_candidate_ids,
-            }
         errors: list[str] = []
-        for provider in providers:
+        for provider in self._state_value_models(fmt):
             provider_id = self._provider_id(provider)
             try:
-                decision = _coerce_decision(provider.choose(request), provider_id=provider_id)
+                result = _coerce_state_value(provider.estimate(request), provider_id=provider_id, fallback=current_score)
             except Exception as exc:
                 if self.strict_provider_errors:
                     raise
                 errors.append(f"{provider_id}: {exc}")
                 continue
-            selected_candidate_index = self._selected_candidate_index(decision, candidate_by_id)
-            if selected_candidate_index is None:
-                errors.append(f"{provider_id}: {_invalid_decision_reason(decision, candidate_by_id)}")
-                continue
-            selected = candidates[selected_candidate_index]
-            selected_payload = (
-                candidate_payloads[selected_candidate_index]
-                if selected_candidate_index < len(candidate_payloads)
-                else {}
-            )
-            selected_candidate_id = str(selected_payload.get("candidate_id") or "")
-            return selected, {
+            return result.to_dict(), {
                 **base,
-                "decision_status": "selected",
+                "decision_status": "estimated",
                 "provider_id": provider_id,
-                "confidence": decision.confidence,
-                "reason": decision.reason,
-                "selected_candidate_id": selected_candidate_id,
-                "selected_candidate_id_valid": bool(selected_candidate_id),
-                "selected_module": selected.module_name,
-                "selected_format": selected.format,
-                "candidate_count": len(candidates),
-                "duplicate_candidate_id_count": 0,
-                "candidates": list(candidate_payloads),
-                "metadata": _public_metadata(decision.metadata),
+                "confidence": result.confidence,
+                "metadata": _public_metadata(result.metadata),
+                "provider_errors": errors,
             }
-        return None, {
+        result = StateValueResult(
+            reachable_recovery_value=current_score,
+            confidence=0.0,
+            metadata={"decision_reason": "state_value_unavailable", "fallback": True},
+        )
+        return result.to_dict(), {
             **base,
             "decision_status": "fallback",
-            "fallback_reason": "provider_error_or_invalid_decision",
+            "fallback_reason": "state_value_unavailable",
             "provider_errors": errors,
-            "invalid_candidate_id_reason": _first_invalid_reason(errors),
+            "load_error": self.last_load_error,
         }
 
     def providers(self) -> list[Any]:
@@ -310,38 +379,18 @@ class RepairPolicyManager:
             return []
 
         providers: list[Any] = []
-        if hasattr(package, "get_repair_policy_providers"):
-            loaded = package.get_repair_policy_providers()
-            providers.extend(list(loaded or []))
         if hasattr(package, "get_damage_analysis_models"):
             providers.extend(list(package.get_damage_analysis_models() or []))
         if hasattr(package, "get_repair_action_models"):
             providers.extend(list(package.get_repair_action_models() or []))
-        if hasattr(package, "register_repair_policies"):
-            self._providers = []
-            package.register_repair_policies(self)
-            providers.extend(self._providers)
-        if hasattr(package, "PROVIDERS"):
-            providers.extend(list(getattr(package, "PROVIDERS") or []))
+        if hasattr(package, "get_state_value_models"):
+            providers.extend(list(package.get_state_value_models() or []))
         return [provider for provider in providers if provider is not None]
 
     def register(self, provider: Any) -> None:
         if self._providers is None:
             self._providers = []
         self._providers.append(provider)
-
-    def _provider_can_handle(self, provider: Any, request: RepairPolicyRequest) -> bool:
-        if callable(getattr(provider, "analyze", None)):
-            return False
-        if not self._provider_supports_format(provider, request.format):
-            return False
-        available = getattr(provider, "available", None)
-        if callable(available) and not bool(available()):
-            return False
-        can_handle = getattr(provider, "can_handle", None)
-        if callable(can_handle):
-            return bool(can_handle(request))
-        return True
 
     @staticmethod
     def _provider_supports_format(provider: Any, fmt: str) -> bool:
@@ -352,12 +401,6 @@ class RepairPolicyManager:
     @staticmethod
     def _provider_id(provider: Any) -> str:
         return str(getattr(provider, "provider_id", "") or provider.__class__.__name__ or "repair_policy")
-
-    @staticmethod
-    def _selected_candidate_index(decision: RepairPolicyDecision, candidate_by_id: dict[str, int]) -> int | None:
-        if not decision.selected_candidate_id:
-            return None
-        return candidate_by_id.get(str(decision.selected_candidate_id))
 
     def _damage_models(self, fmt: str) -> list[Any]:
         output: list[Any] = []
@@ -383,23 +426,17 @@ class RepairPolicyManager:
                 output.append(provider)
         return output
 
-
-def _coerce_decision(value: RepairPolicyDecision | dict[str, Any] | str | None, *, provider_id: str) -> RepairPolicyDecision:
-    if isinstance(value, RepairPolicyDecision):
-        if value.provider_id:
-            return value
-        return RepairPolicyDecision(**{**asdict(value), "provider_id": provider_id})
-    if isinstance(value, str):
-        return RepairPolicyDecision(selected_candidate_id=value, provider_id=provider_id)
-    if isinstance(value, dict):
-        return RepairPolicyDecision(
-            selected_candidate_id=str(value.get("selected_candidate_id") or value.get("candidate_id") or ""),
-            confidence=_optional_float(value.get("confidence")),
-            provider_id=str(value.get("provider_id") or provider_id),
-            reason=str(value.get("reason") or ""),
-            metadata=dict(value.get("metadata") or {}),
-        )
-    return RepairPolicyDecision(provider_id=provider_id)
+    def _state_value_models(self, fmt: str) -> list[Any]:
+        output: list[Any] = []
+        for provider in self.providers():
+            if not self._provider_supports_format(provider, fmt):
+                continue
+            available = getattr(provider, "available", None)
+            if callable(available) and not bool(available()):
+                continue
+            if callable(getattr(provider, "estimate", None)):
+                output.append(provider)
+        return output
 
 
 def _coerce_damage_analysis(value: DamageAnalysisResult | dict[str, Any] | None, *, provider_id: str, fmt: str) -> DamageAnalysisResult:
@@ -454,29 +491,53 @@ def _coerce_damage_analysis(value: DamageAnalysisResult | dict[str, Any] | None,
     return DamageAnalysisResult(format=fmt, metadata={"provider_id": provider_id, "decision_reason": "empty_damage_analysis"})
 
 
-def _coerce_action_decision(value: RepairActionDecision | dict[str, Any] | str | None, *, provider_id: str) -> RepairActionDecision:
-    if isinstance(value, RepairActionDecision):
+def _coerce_action_priors(value: Any, *, provider_id: str) -> list[RepairActionPrior]:
+    if isinstance(value, dict):
+        raw = value.get("action_priors")
+        if raw is None:
+            raw = value.get("scores")
+        if isinstance(raw, list):
+            return [_coerce_action_prior(item, provider_id=provider_id) for item in raw if isinstance(item, dict)]
+    if isinstance(value, list):
+        return [_coerce_action_prior(item, provider_id=provider_id) for item in value if isinstance(item, dict)]
+    return []
+
+
+def _coerce_action_prior(value: dict[str, Any], *, provider_id: str) -> RepairActionPrior:
+    action = str(value.get("action") or value.get("action_type") or "apply_patch")
+    if action not in {"apply_patch", "undo_patch", "stop", "give_up"}:
+        action = "give_up"
+    return RepairActionPrior(
+        action=action,  # type: ignore[arg-type]
+        candidate_id=str(value.get("candidate_id") or value.get("selected_candidate_id") or ""),
+        prior_score=float(_optional_float(value.get("prior_score", value.get("score", value.get("confidence", 0.0)))) or 0.0),
+        confidence=_optional_float(value.get("confidence")),
+        provider_id=str(value.get("provider_id") or provider_id),
+        reason=str(value.get("reason") or ""),
+        metadata=dict(value.get("metadata") or {}),
+    )
+
+
+def _coerce_state_value(value: StateValueResult | dict[str, Any] | float | int | None, *, provider_id: str, fallback: float) -> StateValueResult:
+    if isinstance(value, StateValueResult):
         if value.provider_id:
             return value
-        return RepairActionDecision(**{**asdict(value), "provider_id": provider_id})
-    if isinstance(value, str):
-        action, _, candidate = value.partition(":")
-        if action in {"apply_patch", "undo_patch", "stop", "give_up"}:
-            return RepairActionDecision(action=action, selected_candidate_id=candidate, provider_id=provider_id)
-        return RepairActionDecision(action="apply_patch", selected_candidate_id=value, provider_id=provider_id)
+        return StateValueResult(**{**value.to_dict(), "provider_id": provider_id})
+    if isinstance(value, (float, int)):
+        return StateValueResult(reachable_recovery_value=_clamp01(float(value)), provider_id=provider_id)
     if isinstance(value, dict):
-        action = str(value.get("action") or value.get("action_type") or "apply_patch")
-        if action not in {"apply_patch", "undo_patch", "stop", "give_up"}:
-            action = "give_up"
-        return RepairActionDecision(
-            action=action,  # type: ignore[arg-type]
-            selected_candidate_id=str(value.get("selected_candidate_id") or value.get("candidate_id") or ""),
+        parsed = _optional_float(value.get("reachable_recovery_value", value.get("value", value.get("score", fallback))))
+        return StateValueResult(
+            reachable_recovery_value=_clamp01(parsed if parsed is not None else fallback),
             confidence=_optional_float(value.get("confidence")),
             provider_id=str(value.get("provider_id") or provider_id),
-            reason=str(value.get("reason") or ""),
             metadata=dict(value.get("metadata") or {}),
         )
-    return RepairActionDecision(provider_id=provider_id)
+    return StateValueResult(
+        reachable_recovery_value=_clamp01(fallback),
+        provider_id=provider_id,
+        metadata={"decision_reason": "empty_state_value"},
+    )
 
 
 def _candidate_id_index(candidate_payloads: list[PolicyCandidatePayload]) -> tuple[dict[str, int], list[str]]:
@@ -493,14 +554,6 @@ def _candidate_id_index(candidate_payloads: list[PolicyCandidatePayload]) -> tup
             continue
         candidate_by_id[candidate_id] = index
     return candidate_by_id, sorted(duplicate_ids)
-
-
-def _invalid_decision_reason(decision: RepairPolicyDecision, candidate_by_id: dict[str, int]) -> str:
-    if decision.reason.startswith("abstain:"):
-        return decision.reason
-    if not decision.selected_candidate_id:
-        return "invalid_policy_decision_missing_candidate_id"
-    return "invalid_candidate_id" if str(decision.selected_candidate_id) not in candidate_by_id else "invalid_policy_decision"
 
 
 def _invalid_action_decision_reason(decision: RepairActionDecision, candidate_by_id: dict[str, int]) -> str:
@@ -531,6 +584,15 @@ def _optional_float(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _clamp01(value: float) -> float:
+    return max(0.0, min(1.0, float(value or 0.0)))
+
+
+def _state_value_score(value: dict[str, Any] | None, *, default: float = 0.0) -> float:
+    parsed = _optional_float((value or {}).get("reachable_recovery_value"))
+    return _clamp01(parsed if parsed is not None else default)
 
 
 def _normalize_format(value: Any) -> str:

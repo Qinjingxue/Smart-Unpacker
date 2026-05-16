@@ -25,8 +25,7 @@ def main(argv: list[str] | None = None) -> int:
             "collect_normal_queries",
             "features:normal_structure",
             "train:normal_structure",
-            "collect_damage_raw",
-            "apply_normal",
+            "collect_damage",
             "features:damage_location",
             "train:damage_location",
         ]}, ensure_ascii=False, sort_keys=True))
@@ -53,7 +52,7 @@ def main(argv: list[str] | None = None) -> int:
         elif stage == "collect_damage":
             if args.model not in {"", "damage_analysis", "damage_location"}:
                 raise SystemExit("collect_damage is only valid for --model damage_analysis or damage_location")
-            damage_output = run_dir / "datasets" / ("damage_rows_raw.jsonl" if args.model == "damage_analysis" else "damage_rows.jsonl")
+            damage_output = run_dir / "datasets" / "damage_rows.jsonl"
             _run([
                 sys.executable, "-m", "repair_training.collect_damage_rows",
                 "--format", fmt,
@@ -74,8 +73,9 @@ def main(argv: list[str] | None = None) -> int:
             _run([
                 sys.executable, "-m", "repair_training.value_labeler",
                 "--episodes", str(run_dir / "datasets" / "episodes.jsonl"),
-                "--output", str(run_dir / "datasets" / "action_values.jsonl"),
+                "--output-dir", str(run_dir / "datasets"),
                 "--damage-output", str(run_dir / "datasets" / "damage_rows.jsonl"),
+                "--report-output", str(run_dir / "reports" / "oracle_recovery_report.json"),
             ])
         elif stage == "features":
             for model in _models(args.model):
@@ -97,7 +97,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--format", default="zip")
     parser.add_argument("--run-dir", default="")
     parser.add_argument("--run-name", default="")
-    parser.add_argument("--model", choices=["", "damage_analysis", "damage_location", "normal_structure", "repair_action"], default="")
+    parser.add_argument("--model", choices=["", "damage_analysis", "damage_location", "normal_structure", "state_value", "repair_action"], default="")
     parser.add_argument("--stage", default="features,train")
     parser.add_argument("--material-root", default=str(Path("repair_training") / "material"))
     parser.add_argument("--manifest", default="")
@@ -126,18 +126,11 @@ def _run_damage_analysis_pipeline(args: argparse.Namespace, *, fmt: str, run_dir
         sys.executable, "-m", "repair_training.collect_damage_rows",
         "--format", fmt,
         "--material-root", args.material_root,
-        "--output", str(run_dir / "datasets" / "damage_rows_raw.jsonl"),
+        "--output", str(run_dir / "datasets" / "damage_rows.jsonl"),
         "--seed", args.seed,
         "--per-source", str(args.per_source),
         "--workers", str(args.workers),
     ] + (["--manifest", args.manifest] if args.manifest else []) + (["--limit", str(args.limit)] if args.limit else []))
-    _run([
-        sys.executable, "-m", "repair_training.apply_normal_structure_model",
-        "--format", fmt,
-        "--input", str(run_dir / "datasets" / "damage_rows_raw.jsonl"),
-        "--normal-model-dir", str(run_dir / "models" / "normal_structure"),
-        "--output", str(run_dir / "datasets" / "damage_rows.jsonl"),
-    ])
     _run([sys.executable, "-m", "repair_training.build_features", "--format", fmt, "--model", "damage_location", "--run-dir", str(run_dir)])
     _run([sys.executable, "-m", "repair_training.train", "--format", fmt, "--model", "damage_location", "--run-dir", str(run_dir)])
 
@@ -147,7 +140,7 @@ def _models(model: str) -> tuple[str, ...]:
         return ("normal_structure", "damage_location")
     if model:
         return (normalize_model_type(model),)
-    return ("normal_structure", "damage_location", "repair_action")
+    return ("normal_structure", "damage_location", "state_value", "repair_action")
 
 
 if __name__ == "__main__":

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import random
 import time
 from collections import Counter
@@ -291,7 +292,7 @@ def _records_for_args(args: argparse.Namespace, *, workspace: Path) -> list[dict
         material_root=Path(args.material_root),
         workspace=workspace / "generated",
         seed=_seed(args.seed),
-        per_source=max(1, int(args.per_source or 1)),
+        per_source=max(0, int(args.per_source or 0)),
         limit=max(0, int(args.limit or 0)),
         distribution_path=Path(args.profile_distribution or DEFAULT_ZIP_V3_DISTRIBUTION),
     )
@@ -313,7 +314,11 @@ def _generate_zip_records(
     sources = _distributed_zip_sources(zip_dir, set())
     if not sources:
         return []
-    total = limit or min(len(profile_plan) or len(sources) * per_source, len(sources) * per_source)
+    requested_total = limit or len(profile_plan) or len(sources) * max(1, per_source)
+    effective_per_source = max(1, per_source or math.ceil(requested_total / len(sources)))
+    if limit:
+        effective_per_source = max(effective_per_source, math.ceil(limit / len(sources)))
+    total = limit or min(requested_total, len(sources) * effective_per_source)
     if not profile_plan:
         profile_plan = ["structural_directory"] * total
     records: list[dict[str, Any]] = []
@@ -325,8 +330,8 @@ def _generate_zip_records(
         source_item = _choose_source_for_profile(sources, profile, source_counts, rng)
         source = Path(source_item["source"])
         source_key = str(source)
-        if per_source and source_counts[source_key] >= per_source:
-            available = [item for item in sources if source_counts[str(item["source"])] < per_source]
+        if effective_per_source and source_counts[source_key] >= effective_per_source:
+            available = [item for item in sources if source_counts[str(item["source"])] < effective_per_source]
             if not available:
                 break
             source_item = _choose_source_for_profile(available, profile, source_counts, rng)
@@ -642,10 +647,10 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--summary-output", default="")
     parser.add_argument("--workspace", default="")
     parser.add_argument("--keep-workspace", action="store_true")
-    parser.add_argument("--limit", type=int, default=0)
+    parser.add_argument("--limit", type=int, default=0, help="Target number of generated damage rows. When set, collection auto-expands per-source variants as needed.")
     parser.add_argument("--workers", type=int, default=1)
     parser.add_argument("--seed", default="20260515")
-    parser.add_argument("--per-source", type=int, default=1)
+    parser.add_argument("--per-source", type=int, default=0, help="Target variants per clean source. 0 means auto; --limit is never capped by this value.")
     parser.add_argument("--profile-distribution", default=str(DEFAULT_ZIP_V3_DISTRIBUTION))
     return parser
 

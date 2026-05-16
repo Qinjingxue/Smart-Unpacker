@@ -77,6 +77,147 @@ fn write_candidate_zip(
     }
 }
 
+fn write_stats_for_plan(entries: &[RecoveredEntry], plan: &CandidatePlan, size: u64) -> WriteStats {
+    let mut verified_entries = 0usize;
+    let mut descriptor_entries = 0usize;
+    let mut passthrough_entries = 0usize;
+    for index in &plan.indices {
+        if let Some(entry) = entries.get(*index) {
+            if entry.verified {
+                verified_entries += 1;
+            }
+            if entry.descriptor {
+                descriptor_entries += 1;
+            }
+            if entry.passthrough {
+                passthrough_entries += 1;
+            }
+        }
+    }
+    WriteStats {
+        entries: plan.indices.len(),
+        verified_entries,
+        descriptor_entries,
+        passthrough_entries,
+        size,
+    }
+}
+
+fn central_directory_suffix_patch_and_stats(
+    py: Python<'_>,
+    module: &str,
+    format: &str,
+    source: &[u8],
+    entries: &[RecoveredEntry],
+    plan: &CandidatePlan,
+    confidence: f64,
+    actions: &[&str],
+    native_target: &str,
+) -> PyResult<Option<(Py<PyDict>, WriteStats)>> {
+    let Some((cd_start, suffix)) = central_directory_suffix_for_preserved_entries(source, entries, plan) else {
+        return Ok(None);
+    };
+    let operations = vec![
+        truncate_operation(py, source, cd_start, module, native_target)?,
+        append_operation(py, &suffix, module, native_target)?,
+    ];
+    let patch = patch_plan_dict(py, module, format, confidence, actions, &operations, native_target)?;
+    let provenance = patch.bind(py).get_item("provenance")?;
+    if let Some(provenance) = provenance {
+        if let Ok(provenance) = provenance.downcast::<PyDict>() {
+            provenance.set_item("semantic_patch", "central_directory_suffix")?;
+            provenance.set_item("semantic_cd_start", cd_start)?;
+            provenance.set_item("semantic_suffix_size", suffix.len())?;
+        }
+    }
+    let stats = write_stats_for_plan(entries, plan, cd_start.saturating_add(suffix.len()) as u64);
+    Ok(Some((patch, stats)))
+}
+
+fn cd_suffix_patch_plan_for_preserved_entries(
+    py: Python<'_>,
+    module: &str,
+    format: &str,
+    source: &[u8],
+    entries: &[RecoveredEntry],
+    plan: &CandidatePlan,
+    confidence: f64,
+    actions: &[&str],
+    native_target: &str,
+) -> PyResult<Option<Py<PyDict>>> {
+    Ok(central_directory_suffix_patch_and_stats(
+        py,
+        module,
+        format,
+        source,
+        entries,
+        plan,
+        confidence,
+        actions,
+        native_target,
+    )?
+    .map(|(patch, _)| patch))
+}
+
+fn central_directory_suffix_for_preserved_entries(
+    source: &[u8],
+    entries: &[RecoveredEntry],
+    plan: &CandidatePlan,
+) -> Option<(usize, Vec<u8>)> {
+    if plan.indices.is_empty() {
+        return None;
+    }
+    let mut selected = Vec::with_capacity(plan.indices.len());
+    for index in &plan.indices {
+        let entry = entries.get(*index)?;
+        if !entry_can_be_preserved_as_is(entry) {
+            return None;
+        }
+        let end = recovered_entry_record_end(source, entry)?;
+        if end > source.len() || entry.local_header_offset >= end {
+            return None;
+        }
+        selected.push((*index, end));
+    }
+    selected.sort_by_key(|(index, _)| entries[*index].local_header_offset);
+    let cd_start = selected.iter().map(|(_, end)| *end).max()?;
+    let mut central_directory = Vec::new();
+    for (index, _) in &selected {
+        let entry = &entries[*index];
+        if entry.local_header_offset > u32::MAX as usize {
+            return None;
+        }
+        append_central_directory(&mut central_directory, entry, entry.local_header_offset as u32);
+    }
+    if cd_start > u32::MAX as usize || central_directory.len() > u32::MAX as usize || selected.len() > u16::MAX as usize {
+        return None;
+    }
+    let cd_size = central_directory.len();
+    let mut suffix = central_directory;
+    append_eocd_bytes(&mut suffix, selected.len(), cd_size, cd_start)?;
+    Some((cd_start, suffix))
+}
+
+fn entry_can_be_preserved_as_is(entry: &RecoveredEntry) -> bool {
+    entry.payload_override.is_none()
+        && !entry.descriptor
+        && !entry.experimental_deflate_resync
+        && entry.data_start <= entry.data_end
+        && entry.data_end <= u32::MAX as usize
+        && entry.compressed_size <= u32::MAX as u64
+        && entry.uncompressed_size <= u32::MAX as u64
+}
+
+fn recovered_entry_record_end(source: &[u8], entry: &RecoveredEntry) -> Option<usize> {
+    if entry.data_end > source.len() {
+        return None;
+    }
+    if entry.local_header_offset.checked_add(LOCAL_HEADER_LEN)? > entry.data_start {
+        return None;
+    }
+    Some(entry.data_end)
+}
+
 fn write_local_header(file: &mut File, entry: &RecoveredEntry) -> std::io::Result<()> {
     let flags = entry.flags & !0x08;
     file.write_all(&0x0403_4B50u32.to_le_bytes())?;
@@ -133,6 +274,21 @@ fn write_eocd(
     file.write_all(&(cd_offset as u32).to_le_bytes())?;
     file.write_all(&0u16.to_le_bytes())?;
     Ok(())
+}
+
+fn append_eocd_bytes(output: &mut Vec<u8>, entries: usize, cd_size: usize, cd_offset: usize) -> Option<()> {
+    if entries > u16::MAX as usize || cd_size > u32::MAX as usize || cd_offset > u32::MAX as usize {
+        return None;
+    }
+    output.extend_from_slice(&0x0605_4B50u32.to_le_bytes());
+    output.extend_from_slice(&0u16.to_le_bytes());
+    output.extend_from_slice(&0u16.to_le_bytes());
+    output.extend_from_slice(&(entries as u16).to_le_bytes());
+    output.extend_from_slice(&(entries as u16).to_le_bytes());
+    output.extend_from_slice(&(cd_size as u32).to_le_bytes());
+    output.extend_from_slice(&(cd_offset as u32).to_le_bytes());
+    output.extend_from_slice(&0u16.to_le_bytes());
+    Some(())
 }
 
 fn verify_deflate(
@@ -359,8 +515,28 @@ fn descriptor_at_impl(
     None
 }
 
-fn descriptor_before_next_record(data: &[u8], data_start: usize) -> Option<(usize, u32, u64, u64)> {
-    let next = find_next_zip_record(data, data_start)?;
+fn descriptor_before_next_record(
+    data: &[u8],
+    data_start: usize,
+    timing: Option<&mut ScanTiming>,
+) -> Option<(usize, u32, u64, u64)> {
+    let mut timing = timing;
+    let find_started = Instant::now();
+    let next = match find_next_zip_record(data, data_start) {
+        Some(next) => next,
+        None => {
+            if let Some(timing) = timing.as_deref_mut() {
+                timing.descriptor_find_next_seconds += find_started.elapsed().as_secs_f64();
+                timing.descriptor_find_next_calls += 1;
+            }
+            return None;
+        }
+    };
+    if let Some(timing) = timing.as_deref_mut() {
+        timing.descriptor_find_next_seconds += find_started.elapsed().as_secs_f64();
+        timing.descriptor_find_next_calls += 1;
+    }
+    let check_started = Instant::now();
     for (len, has_sig, zip64) in [
         (24usize, true, true),
         (20, false, true),
@@ -386,8 +562,14 @@ fn descriptor_before_next_record(data: &[u8], data_start: usize) -> Option<(usiz
             (u32_le(data, base + 4) as u64, u32_le(data, base + 8) as u64)
         };
         if compressed == (descriptor_start - data_start) as u64 {
+            if let Some(timing) = timing.as_deref_mut() {
+                timing.descriptor_check_seconds += check_started.elapsed().as_secs_f64();
+            }
             return Some((descriptor_start, crc32, compressed, uncompressed));
         }
+    }
+    if let Some(timing) = timing.as_deref_mut() {
+        timing.descriptor_check_seconds += check_started.elapsed().as_secs_f64();
     }
     None
 }
@@ -463,10 +645,19 @@ fn verified_store_payload_end(
 }
 
 fn find_next_zip_record(data: &[u8], start: usize) -> Option<usize> {
-    [LFH_SIG, CD_SIG, EOCD_SIG, ZIP64_EOCD_SIG, ZIP64_LOCATOR_SIG]
-        .iter()
-        .filter_map(|sig| memmem::find(&data[start..], sig).map(|index| start + index))
-        .min()
+    if start >= data.len() {
+        return None;
+    }
+    for index in memmem::find_iter(&data[start..], b"PK").map(|offset| start + offset) {
+        if index + 4 > data.len() {
+            return None;
+        }
+        match &data[index..index + 4] {
+            LFH_SIG | CD_SIG | EOCD_SIG | ZIP64_EOCD_SIG | ZIP64_LOCATOR_SIG => return Some(index),
+            _ => {}
+        }
+    }
+    None
 }
 
 fn zip64_sizes(extra: &[u8], compressed: u32, uncompressed: u32) -> Option<(u64, u64)> {
