@@ -458,6 +458,8 @@ def _zip_runtime_evidence_payload(knowledge: Any, structure: dict[str, Any]) -> 
         _as_int(directory.get("central_local_uncompressed_size_mismatch_count")),
     )
     extraction_crc = _as_int(extraction.get("crc_error_count"))
+    extraction_data_error = _as_int(extraction.get("data_error_count"))
+    extraction_unexpected_end = _as_int(extraction.get("unexpected_end_count"))
     verification_crc = _as_int(coverage.get("crc_mismatch_count")) + _as_int(coverage.get("payload_hash_mismatch_count"))
     payload_crc = extraction_crc + verification_crc
     failed = _as_int(extraction.get("entry_failed_count")) + _as_int(coverage.get("failed_files"))
@@ -530,7 +532,16 @@ def _zip_runtime_evidence_payload(knowledge: Any, structure: dict[str, Any]) -> 
     payload_partial_explained_by_missing_range = bool(likely_missing_range and (_as_int(extraction.get("entry_partial_count")) or _as_int(extraction.get("data_error_count")) or failed))
     missing_range_likely_structural_cause = bool(likely_missing_range and (local_offset_error_explained_by_missing_range or payload_partial_explained_by_missing_range or cd_offset_delta_matches_deleted_range))
     payload_observed = _payload_verification_observed(coverage)
-    payload_content_failure_observed = _coverage_has_payload_failure(coverage)
+    coverage_payload_failure_observed = _coverage_has_payload_failure(coverage)
+    payload_extraction_content_failure_observed = bool(extraction_crc or extraction_data_error or extraction_unexpected_end)
+    payload_content_failure_observed = bool(
+        coverage_payload_failure_observed
+        or (
+            payload_extraction_content_failure_observed
+            and not payload_observed
+            and not missing_range_likely_structural_cause
+        )
+    )
     no_payload_hash_crc_failure = not (
         _as_int(coverage.get("crc_mismatch_count"))
         or _as_int(coverage.get("payload_hash_mismatch_count"))
@@ -604,6 +615,11 @@ def _zip_runtime_evidence_payload(knowledge: Any, structure: dict[str, Any]) -> 
         "payload_verified_intact": payload_verified_intact,
         "payload_unverified_but_no_failure": payload_unverified_but_no_failure,
         "no_payload_hash_crc_failure": no_payload_hash_crc_failure,
+        "payload_coverage_content_failure_observed": coverage_payload_failure_observed,
+        "payload_extraction_content_failure_observed": payload_extraction_content_failure_observed,
+        "extraction_crc_error_count": extraction_crc,
+        "extraction_data_error_count": extraction_data_error,
+        "extraction_unexpected_end_count": extraction_unexpected_end,
         "payload_content_failure_observed": payload_content_failure_observed,
         "payload_failure_absent": payload_failure_absent,
     }
@@ -641,6 +657,11 @@ def _zip_runtime_public_payload(runtime: dict[str, Any], knowledge: Any) -> dict
         "payload_verified_intact": bool(runtime.get("payload_verified_intact")),
         "payload_unverified_but_no_failure": bool(runtime.get("payload_unverified_but_no_failure")),
         "payload_content_failure_observed": bool(runtime.get("payload_content_failure_observed")),
+        "payload_coverage_content_failure_observed": bool(runtime.get("payload_coverage_content_failure_observed")),
+        "payload_extraction_content_failure_observed": bool(runtime.get("payload_extraction_content_failure_observed")),
+        "extraction_crc_error_count": _as_int(runtime.get("extraction_crc_error_count")),
+        "extraction_data_error_count": _as_int(runtime.get("extraction_data_error_count")),
+        "extraction_unexpected_end_count": _as_int(runtime.get("extraction_unexpected_end_count")),
         "no_payload_hash_crc_failure": bool(runtime.get("no_payload_hash_crc_failure")),
     }
     extraction = _dict_at(knowledge, "extraction.entry_outcomes")
@@ -678,6 +699,13 @@ def _coverage_has_payload_failure(coverage: dict[str, Any]) -> bool:
 def _coverage_breakdown_complete(coverage: dict[str, Any]) -> bool:
     if not coverage:
         return False
+    if "coverage_confidence" in coverage and _safe_float(coverage.get("coverage_confidence")) <= 0.0:
+        observed = sum(
+            _as_int(coverage.get(key))
+            for key in ("expected_files", "matched_files", "complete_files", "partial_files", "failed_files", "missing_files", "unverified_files")
+        )
+        if observed <= 0:
+            return False
     mismatch_count = (
         _as_int(coverage.get("crc_mismatch_count"))
         + _as_int(coverage.get("payload_hash_mismatch_count"))

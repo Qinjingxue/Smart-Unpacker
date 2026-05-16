@@ -112,6 +112,10 @@ def _coverage_breakdown(result: VerificationResult) -> dict[str, Any]:
     crc_mismatch = max(issue_counts["crc_mismatch_count"], observation_counts["crc_mismatch_count"])
     size_mismatch = max(issue_counts["size_mismatch_count"], observation_counts["size_mismatch_count"])
     output_missing = max(issue_counts["output_missing_count"], missing_files)
+    coverage_confident = float(coverage.confidence or 0.0) > 0.0
+    completeness = float(coverage.completeness if coverage_confident else result.completeness or 0.0)
+    file_coverage = float(coverage.file_coverage if coverage_confident else 0.0)
+    byte_coverage = float(coverage.byte_coverage if coverage_confident else 0.0)
     return {
         "expected_files": expected_files,
         "matched_files": int(coverage.matched_files or 0),
@@ -128,9 +132,10 @@ def _coverage_breakdown(result: VerificationResult) -> dict[str, Any]:
         "expected_bytes": int(coverage.expected_bytes or 0),
         "matched_bytes": int(coverage.matched_bytes or 0),
         "complete_bytes": int(coverage.complete_bytes or 0),
-        "file_coverage": float(coverage.file_coverage or 0.0),
-        "byte_coverage": float(coverage.byte_coverage or 0.0),
-        "completeness": float(coverage.completeness or result.completeness or 0.0),
+        "file_coverage": file_coverage,
+        "byte_coverage": byte_coverage,
+        "completeness": completeness,
+        "coverage_confidence": float(coverage.confidence or 0.0),
         "crc_mismatch_count": crc_mismatch,
         "size_mismatch_count": size_mismatch,
         "output_missing_count": output_missing,

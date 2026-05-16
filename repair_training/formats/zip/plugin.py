@@ -169,6 +169,9 @@ def get_training_plugin() -> TrainingFormatPlugin:
         damage_eval_profile_plan=damage_eval_profile_plan,
         generate_damage_eval_records=generate_damage_eval_records,
         damage_eval_metadata=damage_eval_metadata,
+        diagnostic_feature_groups=diagnostic_feature_groups,
+        diagnostic_profile_pairs=diagnostic_profile_pairs,
+        diagnostic_focus_labels=diagnostic_focus_labels,
     )
 
 
@@ -409,6 +412,62 @@ def damage_eval_metadata() -> dict[str, Any]:
         "single_profiles": list(ZIP_EVAL_PROFILES),
         "compound_profiles": list(ZIP_EVAL_COMPOUND_PROFILES),
         "compound_target_ratio": 0.45,
+    }
+
+
+def diagnostic_focus_labels() -> list[str]:
+    return [
+        "field:payload.compressed_data",
+        "field:local_header.crc",
+        "field:local_header.compressed_size",
+        "field:local_header.flags",
+        "field:sfx_prefix.bytes",
+        "field:split_volume.missing_range",
+    ]
+
+
+def diagnostic_profile_pairs() -> list[tuple[str, str]]:
+    return [
+        ("compound_sfx_cd_offset_split_only", "compound_sfx_cd_offset_payload_partial"),
+        ("compound_sfx_cd_offset_split_only", "compound_sfx_cd_offset_with_payload_no_local_header"),
+        ("zip_sfx_cd_damage", "compound_sfx_cd_offset_only"),
+        ("zip_sfx_cd_damage", "compound_sfx_cd_offset_payload_partial"),
+        ("zip_split_missing_middle_volume", "compound_sfx_cd_offset_split_only"),
+        ("compound_descriptor_fake_span_flags_cd_offset", "zip_data_descriptor_cd_conflict"),
+        ("compound_descriptor_fake_span_flags_cd_offset", "zip_data_descriptor_payload_bad"),
+        ("compound_comment_eocd_count_cd_rebuild", "zip_comment_overlap_eocd_shifted"),
+        ("compound_comment_eocd_count_cd_rebuild", "compound_boundary_drop_cd_payload_bad"),
+    ]
+
+
+def diagnostic_feature_groups() -> dict[str, list[str]]:
+    return {
+        "graph_summary": [
+            "runtime_context.analysis_native_probe.structure.graph.summary.",
+            "runtime_context.analysis_native_probe.structure.summary.",
+        ],
+        "graph_violations": [
+            "runtime_context.analysis_native_probe.structure.graph.violations.",
+        ],
+        "graph_explanations": [
+            "runtime_context.analysis_native_probe.structure.graph.explanations.",
+        ],
+        "runtime_payload": [
+            "runtime_context.analysis_native_probe.structure.runtime.payload_",
+            "runtime_context.analysis_native_probe.structure.runtime.no_payload_",
+        ],
+        "normal_anomaly": [
+            "runtime_context.analysis_native_probe.structure.anomaly.summary.",
+            "runtime_context.analysis_native_probe.structure.anomaly.compact_attribution.",
+        ],
+        "extraction_entry_outcomes": [
+            "runtime_context.extraction_summary.entry_outcomes.",
+            "runtime_context.analysis_native_probe.structure.runtime.extraction_entry_outcomes.",
+        ],
+        "verification_coverage": [
+            "runtime_context.verification_summary.coverage_breakdown.",
+            "runtime_context.analysis_native_probe.structure.runtime.verification_coverage_breakdown.",
+        ],
     }
 
 

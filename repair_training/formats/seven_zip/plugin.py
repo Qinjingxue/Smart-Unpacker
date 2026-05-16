@@ -37,6 +37,9 @@ def get_training_plugin() -> TrainingFormatPlugin:
         action_feature_spec=action_feature_spec,
         lightgbm_params=lightgbm_params,
         action_label=action_label,
+        diagnostic_feature_groups=diagnostic_feature_groups,
+        diagnostic_profile_pairs=diagnostic_profile_pairs,
+        diagnostic_focus_labels=diagnostic_focus_labels,
     )
 
 
@@ -94,6 +97,29 @@ def lightgbm_params(model_type: str) -> dict[str, Any]:
 def action_label(row: dict[str, Any]) -> int:
     value = float(row.get("long_term_value") or 0.0)
     return int(max(0, min(31, round((value + 1.0) * 10.0))))
+
+
+def diagnostic_focus_labels() -> list[str]:
+    return [
+        "route:next_header_crc_bad",
+        "route:stream_crc_bad",
+        "route:encoded_header_present",
+        "route:split_sidecars_available",
+        "route:password_required",
+    ]
+
+
+def diagnostic_profile_pairs() -> list[tuple[str, str]]:
+    return []
+
+
+def diagnostic_feature_groups() -> dict[str, list[str]]:
+    return {
+        "runtime_context": ["runtime_context."],
+        "analysis": ["runtime_context.analysis_summary."],
+        "extraction": ["runtime_context.extraction_summary."],
+        "verification": ["runtime_context.verification_summary."],
+    }
 
 
 def collection_record_context(record: dict[str, Any]) -> dict[str, Any]:

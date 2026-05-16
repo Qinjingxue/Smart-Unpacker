@@ -179,7 +179,7 @@ def observe_damage_runtime(
     workspace: str | Path,
     config: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    config = dict(config or {})
+    config = _damage_observation_config(config)
     extraction_config = dict(config.get("extraction") or {})
     extraction_config.setdefault("quiet", True)
     config["extraction"] = extraction_config
@@ -232,6 +232,20 @@ def observe_damage_runtime(
         "verification_status": getattr(verification_result, "assessment_status", ""),
     }
     return request_to_dict(request), observation
+
+
+def _damage_observation_config(config: dict[str, Any] | None) -> dict[str, Any]:
+    merged = dict(config or {})
+    verification = dict(merged.get("verification") or {})
+    if "enabled" not in verification:
+        verification["enabled"] = True
+    if not verification.get("methods"):
+        verification["methods"] = [
+            {"name": "extraction_exit_signal", "enabled": True},
+            {"name": "output_presence", "enabled": True},
+        ]
+    merged["verification"] = verification
+    return merged
 
 
 def _ensure_zip_structure_facts(task: ArchiveTask) -> None:

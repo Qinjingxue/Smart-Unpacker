@@ -45,6 +45,9 @@ class TrainingFormatPlugin:
     damage_eval_profile_plan: Callable[[int, int], list[str]] | None = None
     generate_damage_eval_records: Callable[[str | Path, str | Path, int, int, list[str]], list[dict[str, Any]]] | None = None
     damage_eval_metadata: Callable[[], dict[str, Any]] | None = None
+    diagnostic_feature_groups: Callable[[], dict[str, list[str]]] | None = None
+    diagnostic_profile_pairs: Callable[[], list[tuple[str, str]]] | None = None
+    diagnostic_focus_labels: Callable[[], list[str]] | None = None
 
 
 def load_training_format_plugin(format_name: str) -> TrainingFormatPlugin:
