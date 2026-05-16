@@ -22,10 +22,16 @@ from sunpack.repair.policy.types import (
 DEFAULT_ARBITER_CONFIG = {
     "stop_epsilon": 0.035,
     "low_value_threshold": 0.06,
+    "continue_margin": 0.12,
+    "apply_margin": 0.06,
+    "undo_margin": 0.08,
     "value_weight": 1.0,
     "recovery_weight": 0.4,
     "step_cost": 0.01,
     "undo_cost": 0.005,
+    "loop_penalty": 0.20,
+    "invalid_candidate_penalty": 2.0,
+    "hard_guard_penalty": 2.0,
 }
 
 
@@ -34,10 +40,16 @@ class PolicyDecisionArbiter:
         payload = {**DEFAULT_ARBITER_CONFIG, **dict(config or {})}
         self.stop_epsilon = float(payload["stop_epsilon"])
         self.low_value_threshold = float(payload["low_value_threshold"])
+        self.continue_margin = float(payload["continue_margin"])
+        self.apply_margin = float(payload["apply_margin"])
+        self.undo_margin = float(payload["undo_margin"])
         self.value_weight = float(payload["value_weight"])
         self.recovery_weight = float(payload["recovery_weight"])
         self.step_cost = float(payload["step_cost"])
         self.undo_cost = float(payload["undo_cost"])
+        self.loop_penalty = float(payload["loop_penalty"])
+        self.invalid_candidate_penalty = float(payload["invalid_candidate_penalty"])
+        self.hard_guard_penalty = float(payload["hard_guard_penalty"])
 
     def decide(
         self,
@@ -58,12 +70,23 @@ class PolicyDecisionArbiter:
         value_by_id = candidate_state_values or {}
         scored: list[tuple[float, RepairActionPrior, dict[str, Any]]] = []
         max_apply_prior = max((prior.prior_score for prior in priors if prior.action == "apply_patch"), default=0.0)
+        best_candidate_value_delta = max(
+            (_state_value_score(value_by_id.get(candidate_id), default=current_value) - current_value for candidate_id in candidate_by_id),
+            default=0.0,
+        )
+        parent_value_delta = parent_value - current_value
+        parent_recovery_delta = parent_score - current_score
+        value_gap = current_value - current_score
+        has_apply = any(prior.action == "apply_patch" for prior in priors)
+        has_undo = any(prior.action == "undo_patch" for prior in priors)
         for prior in priors:
             candidate_id = str(prior.candidate_id or "")
             details: dict[str, Any] = {
                 "prior_score": float(prior.prior_score or 0.0),
                 "action": prior.action,
                 "candidate_id": candidate_id,
+                "hard_guard": "",
+                "selected_reason": prior.reason or prior.action,
             }
             score = float(prior.prior_score or 0.0)
             if prior.action == "apply_patch":
@@ -72,21 +95,62 @@ class PolicyDecisionArbiter:
                 next_value = _state_value_score(value_by_id.get(candidate_id), default=current_value)
                 value_delta = next_value - current_value
                 score += self.value_weight * value_delta + self.recovery_weight * recovery_delta - self.step_cost
+                if not payload:
+                    score -= self.invalid_candidate_penalty
+                    details["hard_guard"] = "missing_candidate_payload"
+                if bool(payload.get("repeated_digest")):
+                    score -= self.loop_penalty
+                    details["hard_guard"] = "repeated_digest"
+                if bool(payload.get("noop")) or bool((payload.get("metadata") or {}).get("noop")):
+                    score -= self.invalid_candidate_penalty
+                    details["hard_guard"] = "noop_candidate"
+                validation = payload.get("validation_summary") if isinstance(payload.get("validation_summary"), dict) else {}
+                if validation and not bool(validation.get("accepted", True)):
+                    score -= self.invalid_candidate_penalty
+                    details["hard_guard"] = "validation_rejected"
+                if value_delta >= self.apply_margin:
+                    score += self.apply_margin
+                    details["selected_reason"] = "candidate_value_improves"
                 details.update({"next_value": next_value, "value_delta": value_delta, "recovery_delta": recovery_delta})
             elif prior.action == "undo_patch":
-                value_delta = parent_value - current_value
-                score += self.value_weight * value_delta - self.undo_cost
-                details.update({"parent_value": parent_value, "value_delta": value_delta})
+                value_delta = parent_value_delta
+                recovery_delta = parent_recovery_delta
+                score += self.value_weight * value_delta + self.recovery_weight * recovery_delta - self.undo_cost
+                if value_delta >= self.undo_margin:
+                    score += self.undo_margin
+                    details["selected_reason"] = "parent_value_improves"
+                elif parent_value <= 0.0 and parent_score <= 0.0:
+                    score -= self.hard_guard_penalty
+                    details["hard_guard"] = "missing_parent_value"
+                details.update({"parent_value": parent_value, "value_delta": value_delta, "recovery_delta": recovery_delta})
             elif prior.action == "stop":
-                gap = current_value - current_score
-                score += 1.0 if gap <= self.stop_epsilon and current_value > self.low_value_threshold else -max(0.0, gap)
-                details.update({"value_gap": gap, "stop_epsilon": self.stop_epsilon})
-            elif prior.action == "give_up":
-                if current_value <= self.low_value_threshold and max_apply_prior <= 0.0:
+                gap = value_gap
+                if current_score >= 0.95 or (gap <= self.stop_epsilon and current_value > self.low_value_threshold):
                     score += 1.0
+                    details["selected_reason"] = "value_gap_satisfied"
+                else:
+                    score -= max(0.0, gap)
+                if gap > self.continue_margin and (best_candidate_value_delta >= self.apply_margin or parent_value_delta >= self.undo_margin or has_apply or has_undo):
+                    score -= self.hard_guard_penalty
+                    details["hard_guard"] = "stop_blocked_high_value_gap"
+                details.update({
+                    "value_gap": gap,
+                    "stop_epsilon": self.stop_epsilon,
+                    "continue_margin": self.continue_margin,
+                    "best_candidate_value_delta": best_candidate_value_delta,
+                    "parent_value_delta": parent_value_delta,
+                })
+            elif prior.action == "give_up":
+                if current_value <= self.low_value_threshold and max_apply_prior <= 0.0 and not has_undo:
+                    score += 1.0
+                    details["selected_reason"] = "low_value_no_actions"
                 else:
                     score -= max(0.0, current_value)
+                    if has_apply or has_undo:
+                        score -= self.hard_guard_penalty
+                        details["hard_guard"] = "give_up_blocked_actions_available"
                 details.update({"current_value": current_value, "low_value_threshold": self.low_value_threshold})
+            details["final_score"] = score
             details["arbiter_score"] = score
             scored.append((score, prior, details))
         if not scored:
@@ -103,9 +167,24 @@ class PolicyDecisionArbiter:
         ), {
             "selected_by": "arbiter",
             "scores": [item[2] for item in scored],
-            "config": dict(DEFAULT_ARBITER_CONFIG),
+            "config": {
+                **dict(DEFAULT_ARBITER_CONFIG),
+                "stop_epsilon": self.stop_epsilon,
+                "low_value_threshold": self.low_value_threshold,
+                "continue_margin": self.continue_margin,
+                "apply_margin": self.apply_margin,
+                "undo_margin": self.undo_margin,
+                "value_weight": self.value_weight,
+                "recovery_weight": self.recovery_weight,
+                "step_cost": self.step_cost,
+                "undo_cost": self.undo_cost,
+                "loop_penalty": self.loop_penalty,
+            },
             "current_value": current_value,
             "current_recovery": current_score,
+            "value_gap": value_gap,
+            "best_candidate_value_delta": best_candidate_value_delta,
+            "parent_value_delta": parent_value_delta,
         }
 
 

@@ -1,4 +1,1 @@
-{
-  "seven_zip": "C:\\Users\\29402\\Desktop\\sunpack\\repair_training\\runs\\seven_zip\\20260514_055707_metadata_edge_40_after_end_marker",
-  "zip": "C:\\Users\\29402\\Desktop\\sunpack\\repair_training\\runs\\zip\\20260516_151348_payload_evidence_strict_20260516_full2800"
-}
+{"eval":"repair_training\\runs\\zip\\20260517_arbiter_four_model_analysis\\reports\\policy_arbiter_eval500_uniqueid","train":"repair_training\\runs\\zip\\20260517_arbiter_four_model_analysis"}

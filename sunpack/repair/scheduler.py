@@ -311,7 +311,7 @@ class RepairScheduler:
                 parent_recovery.to_dict(),
                 diagnosis_payload,
                 round_index,
-                budget=4 if round_index == 1 else 2,
+                budget=_candidate_value_budget(self.config, round_index),
             )
             decision, action_selection = self.policy_manager.choose_action(
                 job=current_job,
@@ -1621,6 +1621,16 @@ def _estimate_candidate_state_values(
         cache[digest] = dict(value)
         output[candidate_id] = dict(value)
     return output
+
+
+def _candidate_value_budget(config: dict[str, Any], round_index: int) -> int:
+    repair_config = config.get("repair") if isinstance(config.get("repair"), dict) else {}
+    policy = repair_config.get("policy") if isinstance(repair_config.get("policy"), dict) else config.get("policy")
+    policy = policy if isinstance(policy, dict) else {}
+    arbiter = policy.get("arbiter") if isinstance(policy.get("arbiter"), dict) else {}
+    if int(round_index or 0) <= 1:
+        return max(0, int(arbiter.get("candidate_value_budget_root", policy.get("candidate_value_budget_root", 4)) or 0))
+    return max(0, int(arbiter.get("candidate_value_budget_branch", policy.get("candidate_value_budget_branch", 2)) or 0))
 
 
 def _candidate_by_id(

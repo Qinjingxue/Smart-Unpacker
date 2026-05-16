@@ -117,6 +117,34 @@ def test_action_prior_arbiter_prefers_high_value_apply(tmp_path, monkeypatch):
     assert selection["arbiter"]["selected_by"] == "arbiter"
 
 
+def test_action_prior_arbiter_blocks_stop_when_value_gap_is_high(tmp_path, monkeypatch):
+    candidate_id = "candidate-a"
+    _install_policy_package(
+        monkeypatch,
+        "sunpack_policy_test_prior_high_gap",
+        _PriorProvider([
+            {"action": "stop", "prior_score": 0.95},
+            {"action": "apply_patch", "candidate_id": candidate_id, "prior_score": 0.2},
+        ]),
+    )
+    manager = RepairPolicyManager({"policy": {"provider_package": "sunpack_policy_test_prior_high_gap"}})
+
+    decision, selection = manager.choose_action(
+        job=_job(tmp_path),
+        archive_state=None,
+        candidates=[],
+        candidate_payloads=[{"candidate_id": candidate_id, "recovery_delta": 0.0, "module_name": "zip_rebuild_cd"}],
+        damage_analysis={},
+        current_recovery={"score": 0.0},
+        state_value={"reachable_recovery_value": 0.6},
+        candidate_state_values={candidate_id: {"reachable_recovery_value": 0.72}},
+    )
+
+    assert decision.action == "apply_patch"
+    stop_score = next(score for score in selection["arbiter"]["scores"] if score["action"] == "stop")
+    assert stop_score["hard_guard"] == "stop_blocked_high_value_gap"
+
+
 def test_action_prior_arbiter_prefers_stop_when_value_gap_is_small(tmp_path, monkeypatch):
     _install_policy_package(
         monkeypatch,
@@ -140,6 +168,34 @@ def test_action_prior_arbiter_prefers_stop_when_value_gap_is_small(tmp_path, mon
     )
 
     assert decision.action == "stop"
+
+
+def test_action_prior_arbiter_penalizes_repeated_digest_candidate(tmp_path, monkeypatch):
+    candidate_id = "candidate-a"
+    _install_policy_package(
+        monkeypatch,
+        "sunpack_policy_test_prior_repeated_digest",
+        _PriorProvider([
+            {"action": "apply_patch", "candidate_id": candidate_id, "prior_score": 0.42},
+            {"action": "stop", "prior_score": 0.4},
+        ]),
+    )
+    manager = RepairPolicyManager({"policy": {"provider_package": "sunpack_policy_test_prior_repeated_digest"}})
+
+    decision, selection = manager.choose_action(
+        job=_job(tmp_path),
+        archive_state=None,
+        candidates=[],
+        candidate_payloads=[{"candidate_id": candidate_id, "repeated_digest": True, "module_name": "zip_fix_cd_offset"}],
+        damage_analysis={},
+        current_recovery={"score": 0.95},
+        state_value={"reachable_recovery_value": 0.96},
+        candidate_state_values={candidate_id: {"reachable_recovery_value": 0.96}},
+    )
+
+    assert decision.action == "stop"
+    apply_score = next(score for score in selection["arbiter"]["scores"] if score["action"] == "apply_patch")
+    assert apply_score["hard_guard"] == "repeated_digest"
 
 
 def test_action_prior_arbiter_prefers_undo_when_parent_value_is_higher(tmp_path, monkeypatch):

@@ -197,9 +197,15 @@ def feature_spec(plugin: TrainingFormatPlugin, model_type: str) -> TrainingFeatu
             ),
         )
     return TrainingFeatureSpec(
-        include_prefixes=("action_type", "candidate_snapshot.", "damage_analysis.", "current_recovery.", "next_recovery.", "recovery_delta"),
+        include_prefixes=("action_type", "candidate_snapshot.", "damage_analysis.", "current_recovery."),
         categorical_paths=("action_type", "candidate_snapshot.module_name", "candidate_snapshot.action_type"),
-        ignore_prefixes=("candidate_snapshot.patch_digest",),
+        ignore_prefixes=(
+            "candidate_snapshot.candidate_id",
+            "candidate_snapshot.patch_digest",
+            "candidate_snapshot.metadata.recovery_",
+            "candidate_snapshot.metadata.verification_summary",
+            "candidate_snapshot.recovery_",
+        ),
     )
 
 
@@ -625,8 +631,6 @@ def _feature_row(row: dict[str, Any], *, model_type: str) -> dict[str, Any]:
             "candidate_snapshot": row.get("candidate_snapshot") if isinstance(row.get("candidate_snapshot"), dict) else {},
             "damage_analysis": row.get("damage_analysis") if isinstance(row.get("damage_analysis"), dict) else {},
             "current_recovery": row.get("current_recovery") if isinstance(row.get("current_recovery"), dict) else {},
-            "next_recovery": row.get("next_recovery") if isinstance(row.get("next_recovery"), dict) else {},
-            "recovery_delta": row.get("recovery_delta"),
         }
     return flatten(payload)
 

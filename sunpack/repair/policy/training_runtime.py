@@ -280,7 +280,7 @@ def candidate_snapshot(
     ]
     snapshot = {
         "schema_version": REPAIR_ACTION_FEATURE_SCHEMA_VERSION,
-        "candidate_id": payload.get("candidate_id"),
+        "candidate_id": _unique_candidate_id(payload.get("candidate_id"), index),
         "module_name": payload.get("module_name") or payload.get("module") or candidate.module_name,
         "module": payload.get("module") or candidate.module_name,
         "format": candidate.format,
@@ -321,6 +321,12 @@ def candidate_snapshot(
         snapshot["score_source"] = str((recovery.get("metadata") or {}).get("score_source") or "")
         snapshot["recovery_delta"] = float(recovery.get("score") or 0.0) - float(current.get("score") or 0.0)
     return snapshot
+
+
+def _unique_candidate_id(candidate_id: object, index: int) -> str:
+    base = str(candidate_id or "")
+    suffix = f"#{max(0, int(index or 0)):04d}"
+    return f"{base}{suffix}" if base else suffix
 
 
 def candidate_snapshots(
