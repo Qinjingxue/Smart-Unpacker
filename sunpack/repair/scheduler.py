@@ -2,10 +2,13 @@ from dataclasses import replace
 from contextlib import nullcontext
 import json
 import os
+import tempfile
 from pathlib import Path
 from typing import Any
 
 from sunpack.contracts.archive_state import ArchiveState
+from sunpack.contracts.detection import FactBag
+from sunpack.contracts.tasks import ArchiveTask
 from sunpack.repair.candidate import CandidateSelector, CandidateValidation, RepairCandidate, RepairCandidateBatch, candidate_feature_payload, materialize_candidates
 from sunpack.repair.capability import ModuleCapabilityDecision, RepairCapabilityDecision
 from sunpack.repair.config import enabled_module_configs, repair_config
@@ -29,6 +32,7 @@ from sunpack.repair.result import RepairResult
 from sunpack.repair.runtime_cache import RepairRuntimeCache
 from sunpack.contracts.archive_knowledge import ArchiveKnowledge
 from sunpack.support import archive_knowledge_projection as knowledge_view
+from sunpack.support.archive_state_view import ArchiveStateByteView
 from sunpack.support import repair_trace
 
 
@@ -201,7 +205,7 @@ class RepairScheduler:
         current_job = replace(
             job,
             archive_state=current_state,
-            source_input=_state_source_input(current_state, job),
+            source_input=dict(job.source_input or {}),
             repair_cache=job.repair_cache or self.repair_cache,
         )
         max_rounds = max(1, int(self.config.get("max_repair_rounds_per_task", 5) or 5))
@@ -224,6 +228,13 @@ class RepairScheduler:
         diagnosis_payload: dict[str, Any] = {"format": current_job.format, "confidence": current_job.confidence}
 
         for round_index in range(1, max_rounds + 1):
+            current_job, current_state, observation_warning = _refresh_policy_loop_observation(
+                current_job,
+                current_state,
+                self.config,
+            )
+            if observation_warning:
+                warnings.append(observation_warning)
             runtime_context = runtime_context_from_job(current_job)
             current_recovery = recovery_evaluator.evaluate_state(current_job, current_state, mode="policy_light", cache=recovery_cache)
             current_digest = current_state.effective_patch_digest() if current_state is not None else ""
@@ -238,6 +249,9 @@ class RepairScheduler:
                 diagnosis=diagnosis_payload,
                 round_index=round_index,
             )
+            analysis_route_flags = _route_flags_from_damage_analysis(damage_analysis)
+            if analysis_route_flags:
+                current_job = _job_with_policy_route_flags(current_job, analysis_route_flags)
             try:
                 batch = self.generate_repair_candidates(current_job, lazy=True, phase_prefix=f"policy_loop_{round_index}")
             except TypeError:
@@ -298,6 +312,7 @@ class RepairScheduler:
                 "patch_digest": current_state.effective_patch_digest() if current_state is not None else "",
                 "patch_depth": current_state.patch_depth() if current_state is not None else 0,
                 "damage_analysis": damage_analysis,
+                "analysis_route_flags": list(analysis_route_flags),
                 "current_recovery": current_recovery.to_dict(),
                 "best_seen_recovery": best_recovery_snapshot.to_dict(),
                 "action": action_selection,
@@ -325,10 +340,10 @@ class RepairScheduler:
                 current_job = replace(
                     current_job,
                     archive_state=current_state,
-                    source_input=_state_source_input(current_state, current_job),
+                    source_input=dict(current_job.source_input or {}),
                     attempts=round_index,
                     repair_history=_loop_history_payload(history),
-                    damage_flags=list(selected.damage_flags or current_job.damage_flags),
+                    damage_flags=[],
                 )
                 selected_index = selectable.index(selected) if selected in selectable else -1
                 next_recovery = candidate_recoveries[selected_index] if selected_index >= 0 else recovery_evaluator.evaluate_state(current_job, current_state, mode="policy_light", cache=recovery_cache)
@@ -351,9 +366,10 @@ class RepairScheduler:
                 current_job = replace(
                     current_job,
                     archive_state=current_state,
-                    source_input=_state_source_input(current_state, current_job),
+                    source_input=dict(current_job.source_input or {}),
                     attempts=round_index,
                     repair_history=_loop_history_payload(history),
+                    damage_flags=[],
                 )
                 current_recovery = recovery_evaluator.evaluate_state(current_job, current_state, mode="policy_light", cache=recovery_cache)
                 seen_digests.add(current_state.effective_patch_digest())
@@ -743,7 +759,8 @@ class RepairScheduler:
     def _single_route_score(self, route: RepairRoute, context: RepairContext, *, atomic: bool = False) -> float:
         if route.formats and not _format_matches(context.format, route.formats):
             return 0.0
-        if _intersects(route.reject_any_flags, context.damage_flags):
+        rejected_flags = {str(item) for item in route.reject_any_flags if str(item)} & {str(item) for item in context.damage_flags if str(item)}
+        if rejected_flags and not _policy_route_rejects_are_soft(context.damage_flags, rejected_flags):
             return 0.0
         if context.failure_stage and _intersects(route.reject_any_failure_stages, (context.failure_stage,)):
             return 0.0
@@ -785,7 +802,8 @@ class RepairScheduler:
         for route in routes:
             if route.formats and not _format_matches(context.format, route.formats):
                 continue
-            if _intersects(route.reject_any_flags, context.damage_flags):
+            rejected_flags = {str(item) for item in route.reject_any_flags if str(item)} & {str(item) for item in context.damage_flags if str(item)}
+            if rejected_flags and not _policy_route_rejects_are_soft(context.damage_flags, rejected_flags):
                 reasons.append("route_rejected_flags")
                 continue
             if context.failure_stage and _intersects(route.reject_any_failure_stages, (context.failure_stage,)):
@@ -1268,6 +1286,231 @@ def _job_archive_state(job: RepairJob) -> ArchiveState | None:
 
 def _state_source_input(state: ArchiveState | None, job: RepairJob) -> dict[str, Any]:
     return state_source_input(state, job)
+
+
+def _refresh_policy_loop_observation(
+    job: RepairJob,
+    state: ArchiveState | None,
+    config: dict[str, Any],
+) -> tuple[RepairJob, ArchiveState | None, str]:
+    policy = config.get("policy") if isinstance(config.get("policy"), dict) else {}
+    if not bool(policy.get("refresh_runtime_observation", True)):
+        return job, state, ""
+    if state is None:
+        return job, state, ""
+    try:
+        from sunpack.coordinator.analysis_stage import ArchiveAnalysisStage
+        from sunpack.extraction.knowledge import write_extraction_result
+        from sunpack.extraction.scheduler import ExtractionScheduler
+        from sunpack.verification.knowledge import write_verification_result
+        from sunpack.verification.scheduler import VerificationScheduler
+
+        task = _task_for_policy_observation(job, state)
+        fmt = _normalize_format(state.format_hint or job.format or task.detected_ext)
+        with tempfile.TemporaryDirectory(prefix="sunpack_policy_loop_obs_") as tmp:
+            ArchiveAnalysisStage(config).refresh_task_analysis(task)
+            if fmt == "zip":
+                _ensure_zip_structure_facts_for_state(task, state, Path(tmp))
+            extractor = ExtractionScheduler(
+                process_config=dict(config.get("process") or {}),
+                output_config=dict(config.get("output") or {}),
+                extraction_config={**dict(config.get("extraction") or {}), "quiet": True},
+            )
+            try:
+                extracted = extractor.extract(task, str(Path(tmp) / "extract"))
+                write_extraction_result(task, extracted)
+                verification = VerificationScheduler(config).verify(task, extracted)
+                write_verification_result(task, verification)
+            finally:
+                extractor.close()
+        observed_state = task.archive_state()
+        knowledge = task.knowledge().to_dict()
+        observed_job = replace(
+            job,
+            archive_state=observed_state,
+            source_input=dict(job.source_input or {}),
+            knowledge=knowledge,
+            extraction_failure=_nested(knowledge, "extraction", "failure") or {},
+            extraction_diagnostics=_nested(knowledge, "extraction", "diagnostics") or {},
+        )
+        return observed_job, observed_state, ""
+    except Exception as exc:
+        return job, state, f"policy loop observation refresh failed: {exc}"
+
+
+def _task_for_policy_observation(job: RepairJob, state: ArchiveState) -> ArchiveTask:
+    descriptor = state.to_archive_input_descriptor()
+    main_path = descriptor.entry_path or str(job.source_input.get("path") or job.source_input.get("archive_path") or "")
+    parts = descriptor.part_paths() or [main_path]
+    bag = FactBag()
+    fmt = state.format_hint or job.format or descriptor.format_hint
+    source_payload = descriptor.to_dict()
+    knowledge = ArchiveKnowledge.from_any(job.knowledge)
+    if not knowledge.to_dict():
+        knowledge.set("source.input", source_payload, source_layer="repair", source_module="policy_loop_observation")
+    knowledge.set("repair.damage.flags", [], source_layer="repair", source_module="policy_loop_observation")
+    if _normalize_format(fmt) == "zip":
+        knowledge.set("format.zip.route_evidence_flags", [], source_layer="repair", source_module="policy_loop_observation")
+    bag.set("analysis.selected_format", fmt)
+    bag.set("archive.input", source_payload)
+    bag.set("archive.knowledge", knowledge.to_dict())
+    task = ArchiveTask(
+        fact_bag=bag,
+        score=10,
+        key=job.archive_key or main_path,
+        main_path=main_path,
+        all_parts=parts,
+        logical_name=state.logical_name or descriptor.logical_name or job.archive_key,
+        detected_ext=fmt,
+    )
+    task.set_archive_state(state)
+    return task
+
+
+def _ensure_zip_structure_facts_for_state(task: ArchiveTask, state: ArchiveState, tmp_dir: Path) -> None:
+    from sunpack.analysis.knowledge import write_zip_structure_facts
+    from sunpack.detection.pipeline.processors.modules.format_structure.zip_directory_consistency import inspect_zip_directory_consistency
+    from sunpack.detection.pipeline.processors.modules.format_structure.zip_eocd import inspect_zip_eocd_structure
+    from sunpack.detection.pipeline.processors.modules.format_structure.zip_local_header import inspect_zip_local_header
+    from sunpack.detection.pipeline.processors.modules.format_structure.zip_structure_graph import inspect_zip_structure_graph
+
+    probe_path = str(task.main_path or "")
+    if state.patch_depth() > 0:
+        probe_path = str(ArchiveStateByteView(state).materialize(tmp_dir / "policy_loop_patched.zip"))
+    if not probe_path:
+        return
+    fact_bag = task.fact_bag
+    fact_bag.set("file.path", probe_path)
+    try:
+        fact_bag.set("zip.eocd_structure", inspect_zip_eocd_structure(probe_path))
+    except Exception as exc:
+        fact_bag.set("zip.eocd_structure", {"error": str(exc) or type(exc).__name__})
+    try:
+        fact_bag.set("zip.directory_consistency", inspect_zip_directory_consistency(probe_path))
+    except Exception as exc:
+        fact_bag.set("zip.directory_consistency", {"error": str(exc) or type(exc).__name__})
+    try:
+        fact_bag.set("zip.structure_graph", inspect_zip_structure_graph(probe_path))
+    except Exception as exc:
+        fact_bag.set("zip.structure_graph", {"error": str(exc) or type(exc).__name__})
+    try:
+        local = inspect_zip_local_header(probe_path, 0)
+    except Exception as exc:
+        local = {"error": str(exc) or type(exc).__name__}
+    fact_bag.set("zip.local_header", local)
+    if isinstance(local, dict):
+        fact_bag.set("zip.local_header_plausible", bool(local.get("plausible")))
+        fact_bag.set("zip.local_header_offset", int(local.get("offset") or 0))
+        fact_bag.set("zip.local_header_error", str(local.get("error") or ""))
+    write_zip_structure_facts(task)
+
+
+def _nested(payload: dict[str, Any], *path: str) -> Any:
+    current: Any = payload
+    for key in path:
+        if not isinstance(current, dict):
+            return {}
+        current = current.get(key)
+    return current if isinstance(current, dict) else {}
+
+
+def _route_flags_from_damage_analysis(damage_analysis: dict[str, Any]) -> list[str]:
+    labels = [str(item) for item in damage_analysis.get("damage_labels") or [] if str(item)]
+    metadata = damage_analysis.get("metadata") if isinstance(damage_analysis.get("metadata"), dict) else {}
+    labels.extend(str(item) for item in metadata.get("uncertain_labels") or [] if str(item))
+    flags: list[str] = ["policy_damage_analysis_route"]
+    for label in labels:
+        name = label.split(":", 1)[1] if ":" in label else label
+        flags.append(name.replace(".", "_"))
+        if name.startswith("eocd."):
+            flags.append("eocd_bad")
+        if name in {"eocd.cd_offset", "central_directory.offset"}:
+            flags.append("central_directory_offset_bad")
+        if name in {"eocd.entry_count", "central_directory.entry_count"}:
+            flags.append("central_directory_count_bad")
+        if name == "eocd.comment_length":
+            flags.extend(["zip_comment_length_bad", "comment_length_bad"])
+        if name.startswith("central_directory."):
+            flags.append("central_directory_bad")
+        if name == "central_directory.local_header_offset":
+            flags.extend(["central_directory_offset_bad", "local_header_conflict"])
+        if name in {"central_directory.compressed_size", "local_header.compressed_size", "local_header.uncompressed_size"}:
+            flags.extend(["compressed_size_bad", "local_header_size_bad"])
+        if name in {"central_directory.crc", "central_directory.flags", "central_directory.filename"}:
+            flags.append("local_header_conflict")
+        if name.startswith("local_header."):
+            flags.append("local_header_bad")
+        if name in {"local_header.extra", "local_header.extra_length", "central_directory.extra", "central_directory.extra_length"}:
+            flags.extend(["extra_field_bad", "extra_field_length_bad", "extra_length_bad"])
+        if name.startswith("data_descriptor."):
+            flags.extend(["data_descriptor", "bit3_data_descriptor"])
+        if name == "data_descriptor.record":
+            flags.extend(["spurious_data_descriptor_candidate", "compressed_size_bad"])
+        if name.startswith("payload."):
+            flags.extend(["entry_payload_bad", "payload_damaged", "checksum_error"])
+        if name.startswith("split_volume."):
+            flags.extend(["missing_volume", "input_truncated", "stream_truncated", "local_header_recovery"])
+        if name.startswith("sfx_prefix."):
+            flags.extend(["sfx", "carrier_prefix", "carrier_archive"])
+        if name.startswith("zip64."):
+            flags.append("zip64")
+            if "locator" in name:
+                flags.append("zip64_locator_bad")
+            elif "extra" in name:
+                flags.extend(["zip64_extra_bad", "zip64_extra_size_bad"])
+            else:
+                flags.append("zip64_eocd_bad")
+        if name.startswith("tail.") or name == "trailing_junk":
+            flags.extend(["trailing_junk", "boundary_unreliable"])
+        if label == "zone:eocd":
+            flags.append("eocd_bad")
+        if label == "zone:central_directory":
+            flags.append("central_directory_bad")
+        if label == "zone:local_header":
+            flags.append("local_header_bad")
+        if label == "zone:data_descriptor":
+            flags.append("data_descriptor")
+        if label == "zone:payload":
+            flags.append("entry_payload_bad")
+        if label == "zone:split_volume":
+            flags.extend(["missing_volume", "input_truncated", "stream_truncated"])
+        if label == "zone:sfx_prefix":
+            flags.extend(["sfx", "carrier_prefix"])
+        if label == "zone:zip64":
+            flags.append("zip64")
+    return _dedupe(flags)
+
+
+def _job_with_policy_route_flags(job: RepairJob, flags: list[str]) -> RepairJob:
+    knowledge = ArchiveKnowledge.from_any(job.knowledge)
+    normalized = _dedupe([str(flag) for flag in flags if str(flag)])
+    knowledge.set("repair.damage.flags", normalized, source_layer="policy", source_module="damage_analysis_route_bridge")
+    if _normalize_format(job.format) == "zip":
+        knowledge.set("format.zip.route_evidence_flags", normalized, source_layer="policy", source_module="damage_analysis_route_bridge")
+    return replace(job, damage_flags=normalized, knowledge=knowledge.to_dict())
+
+
+def _policy_route_rejects_are_soft(context_flags, rejected_flags: set[str]) -> bool:
+    flags = {str(item) for item in context_flags if str(item)}
+    if "policy_damage_analysis_route" not in flags:
+        return False
+    soft = {
+        "checksum_error",
+        "crc_error",
+        "entry_payload_bad",
+        "payload_bad",
+        "payload_damaged",
+        "damaged",
+        "content_integrity_bad_or_unknown",
+        "data_error",
+        "corrupted_data",
+        "partial_entries_remaining",
+        "partial_extract_available",
+        "post_validate",
+        "item_extract",
+        "unknown",
+    }
+    return bool(rejected_flags) and rejected_flags <= soft
 
 
 def _policy_candidate_snapshot_with_damage(

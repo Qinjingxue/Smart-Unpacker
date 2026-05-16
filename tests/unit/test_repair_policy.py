@@ -16,10 +16,12 @@ from sunpack.extraction.result import ExtractionResult
 from sunpack.repair.candidate import RepairCandidate, RepairCandidateBatch
 from sunpack.repair.config import normalize_repair_config
 from sunpack.repair.job import RepairJob
+from sunpack.repair.context import build_repair_context
+from sunpack.repair.diagnosis import RepairDiagnosis
 from sunpack.repair.policy.adapters import get_damage_analysis_adapter
 from sunpack.repair.policy.training_runtime import candidate_snapshot, runtime_context_from_job
 from sunpack.repair.result import RepairResult
-from sunpack.repair.scheduler import RepairScheduler
+from sunpack.repair.scheduler import RepairScheduler, _policy_route_rejects_are_soft
 from sunpack.support import archive_knowledge_projection as knowledge_view
 from sunpack.verification.result import ArchiveCoverageSummary, VerificationResult
 
@@ -190,6 +192,29 @@ def test_dual_policy_loop_give_up(tmp_path, monkeypatch):
     assert result.status == "unrepairable"
     assert result.module_name == "policy_give_up"
     assert result.diagnosis["policy_loop"]["terminal_action"] == "give_up"
+
+
+def test_repair_context_includes_policy_job_damage_flags(tmp_path):
+    job = replace(
+        _job(tmp_path),
+        damage_flags=["policy_damage_analysis_route", "central_directory_offset_bad"],
+        knowledge={"source": {"input": {"format_hint": "zip"}}},
+    )
+    context = build_repair_context(
+        job,
+        RepairDiagnosis(format="zip", categories=["directory_rebuild"], repairable=True),
+    )
+
+    assert "policy_damage_analysis_route" in context.damage_flags
+    assert "central_directory_offset_bad" in context.damage_flags
+
+
+def test_policy_route_bridge_softens_only_generic_content_rejects():
+    flags = ["policy_damage_analysis_route", "central_directory_offset_bad", "checksum_error", "partial_entries_remaining"]
+
+    assert _policy_route_rejects_are_soft(flags, {"checksum_error", "partial_entries_remaining"})
+    assert not _policy_route_rejects_are_soft(flags, {"wrong_password"})
+    assert not _policy_route_rejects_are_soft(["central_directory_offset_bad", "checksum_error"], {"checksum_error"})
 
 
 def test_zip_damage_adapter_postprocesses_raw_scores():

@@ -64,6 +64,7 @@ def build_repair_context(job: RepairJob, diagnosis: RepairDiagnosis, *, knowledg
     context_format = _normalize_format(diagnosis.format or knowledge_view.analysis_summary(knowledge).get("format") or "")
     damage_flags = _dedupe([
         *list(route_context.get("damage_flags") or []),
+        *[str(flag) for flag in getattr(job, "damage_flags", []) or [] if str(flag)],
         *[flag for item in diagnosis.evidence for flag in item.damage_flags],
         *_failure_damage_flags(job, failure, failure_kind, failure_stage),
         *route_evidence_flags,
