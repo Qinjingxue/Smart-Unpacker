@@ -21,6 +21,7 @@ def build_feature_datasets(
     model_type: str,
     output_dir: str | Path,
 ) -> dict[str, Any]:
+    model_type = normalize_model_type(model_type)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     if model_type == "repair_action":
@@ -28,7 +29,7 @@ def build_feature_datasets(
     splits = split_rows(rows)
     spec = feature_spec(plugin, model_type)
     label_schema = labels_for_plugin(plugin, model_type)
-    if model_type == "damage_analysis":
+    if model_type == "damage_location":
         label_schema = filtered_damage_label_schema(rows, label_schema)
     schema = _fit_schema(splits["train"] or rows, spec=spec, model_type=model_type)
     schema["model_type"] = model_type
@@ -36,7 +37,7 @@ def build_feature_datasets(
     schema["feature_schema_version"] = FEATURE_SCHEMA_VERSION
     schema["label_schema"] = label_schema
     write_json(output_dir / "feature_schema.json", schema)
-    write_json(output_dir / ("label_schema.json" if model_type == "damage_analysis" else "action_schema.json"), label_schema)
+    write_json(output_dir / ("action_schema.json" if model_type == "repair_action" else "label_schema.json"), label_schema)
     summary: dict[str, Any] = {"model_type": model_type, "format": plugin.format_name, "splits": {}}
     for split, split_rows_ in splits.items():
         if model_type == "repair_action":
@@ -46,8 +47,10 @@ def build_feature_datasets(
         if model_type == "repair_action":
             groups = group_sizes(split_rows_, key_fn=action_query_id)
             (output_dir / f"group_{split}.txt").write_text("\n".join(str(item) for item in groups), encoding="utf-8")
+        if model_type == "normal_structure":
+            _write_normal_structure_meta(output_dir / f"meta_{split}.jsonl", split_rows_)
         summary["splits"][split] = {"rows": len(split_rows_), "features": int(x.shape[1]), "labels": int(y.shape[1]) if y.ndim > 1 else 1}
-    if model_type == "damage_analysis":
+    if model_type == "damage_location":
         summary["label_summary"] = dict((label_schema.get("metadata") or {}).get("label_summary") or {})
     write_json(output_dir / "feature_summary.json", summary)
     return summary
@@ -60,6 +63,7 @@ def transform_rows(
     plugin: TrainingFormatPlugin,
     model_type: str,
 ) -> tuple[np.ndarray, np.ndarray]:
+    model_type = normalize_model_type(model_type)
     feature_names = list(schema.get("feature_names") or [])
     categorical_maps = {key: dict(value) for key, value in (schema.get("categorical_maps") or {}).items()}
     x = np.zeros((len(rows), len(feature_names)), dtype=np.float32)
@@ -70,7 +74,7 @@ def transform_rows(
                 x[row_index, col] = float(categorical_maps[name].get(str(flat.get(name) or UNK), categorical_maps[name].get(UNK, 0)))
             else:
                 x[row_index, col] = _float(flat.get(name))
-    if model_type == "damage_analysis":
+    if model_type == "damage_location":
         labels = list((schema.get("label_schema") or {}).get("labels") or [])
         y = np.zeros((len(rows), len(labels)), dtype=np.float32)
         label_index = {label: index for index, label in enumerate(labels)}
@@ -79,12 +83,16 @@ def transform_rows(
                 if label in label_index:
                     y[row_index, label_index[label]] = 1.0
         return x, y
+    if model_type == "normal_structure":
+        y = np.array([1.0 if _float(row.get("normal_label")) >= 0.5 else 0.0 for row in rows], dtype=np.float32)
+        return x, y
     y = np.array([action_label(plugin, row) for row in rows], dtype=np.float32)
     return x, y
 
 
 def feature_spec(plugin: TrainingFormatPlugin, model_type: str) -> TrainingFeatureSpec:
-    raw = plugin.damage_feature_spec() if model_type == "damage_analysis" and plugin.damage_feature_spec else None
+    model_type = normalize_model_type(model_type)
+    raw = plugin.damage_feature_spec() if model_type == "damage_location" and plugin.damage_feature_spec else None
     if raw is None and model_type == "repair_action" and plugin.action_feature_spec:
         raw = plugin.action_feature_spec()
     if isinstance(raw, TrainingFeatureSpec):
@@ -97,10 +105,36 @@ def feature_spec(plugin: TrainingFormatPlugin, model_type: str) -> TrainingFeatu
             ignore_prefixes=tuple(raw.get("ignore_prefixes") or ()),
             ignore_paths=tuple(raw.get("ignore_paths") or ()),
         )
-    if model_type == "damage_analysis":
+    if model_type == "damage_location":
         return TrainingFeatureSpec(
             include_prefixes=("damage_analysis_input.",),
             ignore_prefixes=("damage_analysis_input.job.source_input.path", "damage_analysis_input.archive_state.state"),
+        )
+    if model_type == "normal_structure":
+        return TrainingFeatureSpec(
+            include_prefixes=(
+                "query_type",
+                "target_zone",
+                "target_field",
+                "target_node_kind",
+                "source_node_kind",
+                "relation_kind",
+                "explanation_kind",
+                "entry_index_bucket",
+                "features.",
+            ),
+            categorical_paths=(
+                "query_type",
+                "target_zone",
+                "target_field",
+                "target_node_kind",
+                "source_node_kind",
+                "relation_kind",
+                "explanation_kind",
+                "entry_index_bucket",
+            ),
+            ignore_prefixes=("metadata.", "source_identity."),
+            ignore_paths=("normal_label",),
         )
     return TrainingFeatureSpec(
         include_prefixes=("action_type", "candidate_snapshot.", "damage_analysis_target.", "current_recovery.", "next_recovery.", "recovery_delta"),
@@ -110,14 +144,24 @@ def feature_spec(plugin: TrainingFormatPlugin, model_type: str) -> TrainingFeatu
 
 
 def labels_for_plugin(plugin: TrainingFormatPlugin, model_type: str) -> dict[str, Any]:
-    if model_type == "damage_analysis" and plugin.damage_label_schema:
+    model_type = normalize_model_type(model_type)
+    if model_type == "damage_location" and plugin.damage_label_schema:
         raw = plugin.damage_label_schema()
         if isinstance(raw, TrainingLabelSchema):
             return {"labels": list(raw.labels), "metadata": dict(raw.metadata)}
         if isinstance(raw, dict):
             return {"labels": list(raw.get("labels") or []), "metadata": dict(raw.get("metadata") or {})}
-    if model_type == "damage_analysis":
+    if model_type == "damage_location":
         return {"labels": ["family:unknown"], "metadata": {}}
+    if model_type == "normal_structure":
+        return {
+            "labels": ["normal_label"],
+            "metadata": {
+                "kind": "binary_normal_structure",
+                "positive_label": 1,
+                "negative_label": 0,
+            },
+        }
     return {"labels": ["apply_patch", "undo_patch", "stop", "give_up"], "metadata": {"kind": "ranking_actions"}}
 
 
@@ -329,9 +373,37 @@ def _fit_schema(rows: list[dict[str, Any]], *, spec: TrainingFeatureSpec, model_
     }
 
 
+def _write_normal_structure_meta(path: Path, rows: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as handle:
+        for row in rows:
+            payload = {
+                "query_type": row.get("query_type"),
+                "target_field": row.get("target_field"),
+                "target_zone": row.get("target_zone"),
+                "candidate_kind": row.get("candidate_kind"),
+                "candidate_source": row.get("candidate_source"),
+                "normal_label": row.get("normal_label"),
+            }
+            handle.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
+
+
 def _feature_row(row: dict[str, Any], *, model_type: str) -> dict[str, Any]:
-    if model_type == "damage_analysis":
+    model_type = normalize_model_type(model_type)
+    if model_type == "damage_location":
         payload = row.get("damage_analysis_input") if isinstance(row.get("damage_analysis_input"), dict) else row
+    elif model_type == "normal_structure":
+        payload = {
+            "query_type": row.get("query_type"),
+            "target_zone": row.get("target_zone"),
+            "target_field": row.get("target_field"),
+            "target_node_kind": row.get("target_node_kind"),
+            "source_node_kind": row.get("source_node_kind"),
+            "relation_kind": row.get("relation_kind"),
+            "explanation_kind": row.get("explanation_kind"),
+            "entry_index_bucket": row.get("entry_index_bucket"),
+            "features": row.get("features") if isinstance(row.get("features"), dict) else {},
+        }
     else:
         payload = {
             "action_type": row.get("action_type"),
@@ -342,6 +414,13 @@ def _feature_row(row: dict[str, Any], *, model_type: str) -> dict[str, Any]:
             "recovery_delta": row.get("recovery_delta"),
         }
     return flatten(payload)
+
+
+def normalize_model_type(model_type: str) -> str:
+    text = str(model_type or "").strip()
+    if text == "damage_analysis":
+        return "damage_location"
+    return text
 
 
 def flatten(value: Any, *, prefix: str = "") -> dict[str, Any]:

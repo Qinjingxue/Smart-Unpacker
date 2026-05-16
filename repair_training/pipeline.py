@@ -8,6 +8,7 @@ from pathlib import Path
 
 from repair_training.core.plugin import load_training_format_plugin, normalize_format_name
 from repair_training.core.run_layout import create_or_resolve_run_dir, ensure_run_layout, write_latest_run
+from repair_training.core.features import normalize_model_type
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -17,15 +18,47 @@ def main(argv: list[str] | None = None) -> int:
     run_dir = create_or_resolve_run_dir(format_name=fmt, run_name=args.run_name or plugin.default_run_name, run_dir=args.run_dir)
     ensure_run_layout(run_dir)
     stages = [item.strip() for item in args.stage.split(",") if item.strip()]
+    if args.model == "damage_analysis" and stages == ["collect_damage", "features", "train"]:
+        _run_damage_analysis_pipeline(args, fmt=fmt, run_dir=run_dir)
+        write_latest_run(fmt, run_dir)
+        print(json.dumps({"format": fmt, "run_dir": str(run_dir), "stages": [
+            "collect_normal_queries",
+            "features:normal_structure",
+            "train:normal_structure",
+            "collect_damage_raw",
+            "apply_normal",
+            "features:damage_location",
+            "train:damage_location",
+        ]}, ensure_ascii=False, sort_keys=True))
+        return 0
     for stage in stages:
-        if stage == "collect_damage":
-            if args.model not in {"", "damage_analysis"}:
-                raise SystemExit("collect_damage is only valid for --model damage_analysis")
+        if stage == "collect_normal":
+            if args.model not in {"", "damage_analysis", "normal_structure"}:
+                raise SystemExit("collect_normal is only valid for --model damage_analysis or normal_structure")
+            _run([
+                sys.executable, "-m", "repair_training.collect_normal_structure_queries",
+                "--format", fmt,
+                "--material-root", args.material_root,
+                "--output", str(run_dir / "datasets" / "normal_structure_queries.jsonl"),
+                "--seed", args.seed,
+            ] + (["--limit", str(args.limit)] if args.limit else []))
+        elif stage == "apply_normal":
+            _run([
+                sys.executable, "-m", "repair_training.apply_normal_structure_model",
+                "--format", fmt,
+                "--input", str(run_dir / "datasets" / "damage_rows_raw.jsonl"),
+                "--normal-model-dir", str(run_dir / "models" / "normal_structure"),
+                "--output", str(run_dir / "datasets" / "damage_rows.jsonl"),
+            ])
+        elif stage == "collect_damage":
+            if args.model not in {"", "damage_analysis", "damage_location"}:
+                raise SystemExit("collect_damage is only valid for --model damage_analysis or damage_location")
+            damage_output = run_dir / "datasets" / ("damage_rows_raw.jsonl" if args.model == "damage_analysis" else "damage_rows.jsonl")
             _run([
                 sys.executable, "-m", "repair_training.collect_damage_rows",
                 "--format", fmt,
                 "--material-root", args.material_root,
-                "--output", str(run_dir / "datasets" / "damage_rows.jsonl"),
+                "--output", str(damage_output),
                 "--seed", args.seed,
                 "--per-source", str(args.per_source),
                 "--workers", str(args.workers),
@@ -64,7 +97,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--format", default="zip")
     parser.add_argument("--run-dir", default="")
     parser.add_argument("--run-name", default="")
-    parser.add_argument("--model", choices=["", "damage_analysis", "repair_action"], default="")
+    parser.add_argument("--model", choices=["", "damage_analysis", "damage_location", "normal_structure", "repair_action"], default="")
     parser.add_argument("--stage", default="features,train")
     parser.add_argument("--material-root", default=str(Path("repair_training") / "material"))
     parser.add_argument("--manifest", default="")
@@ -79,10 +112,42 @@ def _run(command: list[str]) -> None:
     subprocess.run(command, check=True)
 
 
+def _run_damage_analysis_pipeline(args: argparse.Namespace, *, fmt: str, run_dir: Path) -> None:
+    _run([
+        sys.executable, "-m", "repair_training.collect_normal_structure_queries",
+        "--format", fmt,
+        "--material-root", args.material_root,
+        "--output", str(run_dir / "datasets" / "normal_structure_queries.jsonl"),
+        "--seed", args.seed,
+    ] + (["--limit", str(args.limit)] if args.limit else []))
+    _run([sys.executable, "-m", "repair_training.build_features", "--format", fmt, "--model", "normal_structure", "--run-dir", str(run_dir)])
+    _run([sys.executable, "-m", "repair_training.train", "--format", fmt, "--model", "normal_structure", "--run-dir", str(run_dir)])
+    _run([
+        sys.executable, "-m", "repair_training.collect_damage_rows",
+        "--format", fmt,
+        "--material-root", args.material_root,
+        "--output", str(run_dir / "datasets" / "damage_rows_raw.jsonl"),
+        "--seed", args.seed,
+        "--per-source", str(args.per_source),
+        "--workers", str(args.workers),
+    ] + (["--manifest", args.manifest] if args.manifest else []) + (["--limit", str(args.limit)] if args.limit else []))
+    _run([
+        sys.executable, "-m", "repair_training.apply_normal_structure_model",
+        "--format", fmt,
+        "--input", str(run_dir / "datasets" / "damage_rows_raw.jsonl"),
+        "--normal-model-dir", str(run_dir / "models" / "normal_structure"),
+        "--output", str(run_dir / "datasets" / "damage_rows.jsonl"),
+    ])
+    _run([sys.executable, "-m", "repair_training.build_features", "--format", fmt, "--model", "damage_location", "--run-dir", str(run_dir)])
+    _run([sys.executable, "-m", "repair_training.train", "--format", fmt, "--model", "damage_location", "--run-dir", str(run_dir)])
+
+
 def _models(model: str) -> tuple[str, ...]:
+    if model == "damage_analysis":
+        return ("normal_structure", "damage_location")
     if model:
-        return (model,)
-    return ("damage_analysis", "repair_action")
+        return (normalize_model_type(model),)
+    return ("normal_structure", "damage_location", "repair_action")
 
 
 if __name__ == "__main__":

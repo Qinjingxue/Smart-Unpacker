@@ -25,7 +25,8 @@ class DamageAnalysisModel:
     def predict_rows(self, rows: list[dict[str, Any]]) -> list[dict[str, float]]:
         if not rows:
             return []
-        x, _ = transform_rows(rows, schema=self.feature_schema, plugin=self.plugin, model_type="damage_analysis")
+        model_type = str(self.feature_schema.get("model_type") or "damage_location")
+        x, _ = transform_rows(rows, schema=self.feature_schema, plugin=self.plugin, model_type=model_type)
         return [self._predict_one(x[index]) for index in range(x.shape[0])]
 
     def _predict_one(self, vector: np.ndarray) -> dict[str, float]:

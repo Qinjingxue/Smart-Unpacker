@@ -6,9 +6,11 @@ import pytest
 from repair_training.build_features import main as build_features_main
 from repair_training.core.features import load_feature_schema
 from repair_training.core.datasets import read_jsonl, split_rows
+from repair_training.core.normal_structure_inference import NormalStructureModel
 from repair_training.core.plugin import load_training_format_plugin
 from repair_training.formats.zip.plugin import postprocess_damage_prediction, zip_module_family
 from repair_training.train import main as train_main
+from sunpack.repair.policy.adapters.normal_structure import ZipNormalQueryBuilder, ZipNormalStructureAdapter
 
 
 def test_split_rows_keeps_sample_groups_together():
@@ -120,6 +122,100 @@ def test_lightgbm_training_writes_model_artifacts(tmp_path):
     assert (run_dir / "models" / "repair_action" / "model_card.json").is_file()
 
 
+def test_zip_normal_query_builder_outputs_query_rows_without_raw_paths():
+    graph = _normal_query_graph()
+    rows = ZipNormalQueryBuilder().build_training_queries(
+        graph,
+        sample_id="clean:0",
+        source_identity={"source_archive_id": "clean"},
+    )
+
+    assert rows
+    assert {row["row_type"] for row in rows} == {"normal_structure_query"}
+    assert {"field_value", "field_match", "span_relation", "explanation"}.issubset({row["query_type"] for row in rows})
+    assert any(row["target_field"] == "central_directory.local_header_offset" and row["candidate_kind"] == "counterfactual" for row in rows)
+    assert any(row["target_field"] == "central_directory.compressed_size" and "payload_end_equals_next_local" in row["features"] for row in rows)
+    assert "path" not in json.dumps(rows).lower()
+    assert "clean_sha256" not in json.dumps(rows).lower()
+
+
+def test_zip_normal_adapter_aggregates_query_scores():
+    adapter = ZipNormalStructureAdapter()
+    rows = adapter.rows_from_graph(_normal_query_graph())
+    scores = [0.1 if row["target_field"] == "eocd.cd_offset" else 0.95 for row in rows]
+
+    anomaly = adapter.build_anomaly_payload(rows, scores)
+
+    assert anomaly["queries"]
+    assert anomaly["summary"]["max_anomaly_by_field"]["eocd.cd_offset"] > 0.8
+    assert "eocd" in anomaly["summary"]["mean_anomaly_by_zone"]
+    assert "trusted_explanations" in anomaly["summary"]
+
+
+def test_normal_structure_features_use_query_schema(tmp_path):
+    run_dir = tmp_path / "run"
+    datasets = run_dir / "datasets"
+    datasets.mkdir(parents=True)
+    rows = ZipNormalQueryBuilder().build_training_queries(_normal_query_graph(), sample_id="clean:0")
+    with (datasets / "normal_structure_queries.jsonl").open("w", encoding="utf-8") as handle:
+        for row in rows:
+            handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+
+    assert build_features_main(["--format", "zip", "--model", "normal_structure", "--run-dir", str(run_dir)]) == 0
+    schema = load_feature_schema(run_dir / "features" / "normal_structure" / "feature_schema.json")
+
+    assert "target_field" in schema["categorical_features"]
+    assert any(name.startswith("features.") for name in schema["feature_names"])
+    assert not any(name.startswith("object_type") for name in schema["feature_names"])
+    assert not any(name.startswith("candidate_kind") or name.startswith("candidate_source") for name in schema["feature_names"])
+    assert not any("raw" in name or "path" in name for name in schema["feature_names"])
+    assert (run_dir / "features" / "normal_structure" / "meta_train.jsonl").is_file()
+
+
+def test_normal_structure_model_flags_unseen_structural_anomaly(tmp_path):
+    pytest.importorskip("lightgbm")
+    plugin = load_training_format_plugin("zip")
+    run_dir = tmp_path / "run"
+    datasets = run_dir / "datasets"
+    datasets.mkdir(parents=True)
+    clean = _normal_query_graph()
+    train_rows = []
+    for index in range(12):
+        train_rows.extend(ZipNormalQueryBuilder().build_training_queries(clean, sample_id=f"clean:{index}"))
+    with (datasets / "normal_structure_queries.jsonl").open("w", encoding="utf-8") as handle:
+        for row in train_rows:
+            handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+    build_features_main(["--format", "zip", "--model", "normal_structure", "--run-dir", str(run_dir)])
+    train_main(["--format", "zip", "--model", "normal_structure", "--run-dir", str(run_dir)])
+
+    damaged = _normal_query_graph()
+    damaged["summary"]["declared_central_directory_offset"] = 64
+    damaged["summary"]["central_directory_offset_delta"] = 56
+    damaged["edges"][0]["valid"] = False
+    damaged["violations"] = [
+        {
+            "kind": "bad_reference",
+            "source_node": "eocd:0",
+            "target_node": "central_directory:0",
+            "field": "eocd.cd_offset",
+            "expected": 8,
+            "observed": 64,
+            "delta": 56,
+            "severity": "high",
+        }
+    ]
+    adapter = ZipNormalStructureAdapter()
+    clean_rows = adapter.rows_from_graph(clean)
+    clean_scores = NormalStructureModel(model_dir=run_dir / "models" / "normal_structure", plugin=plugin).predict_rows(clean_rows)
+    clean_anomaly = adapter.build_anomaly_payload(clean_rows, clean_scores)
+    runtime_rows = adapter.rows_from_graph(damaged)
+    scores = NormalStructureModel(model_dir=run_dir / "models" / "normal_structure", plugin=plugin).predict_rows(runtime_rows)
+    anomaly = adapter.build_anomaly_payload(runtime_rows, scores)
+
+    assert anomaly["summary"]["max_anomaly_by_field"]["eocd.cd_offset"] > clean_anomaly["summary"]["max_anomaly_by_field"]["eocd.cd_offset"]
+    assert anomaly["summary"]["max_anomaly_by_field"]["eocd.cd_offset"] > 0.05
+
+
 def _write_fake_run(tmp_path: Path) -> Path:
     run_dir = tmp_path / "run"
     datasets = run_dir / "datasets"
@@ -190,6 +286,53 @@ def _write_fake_run(tmp_path: Path) -> Path:
     _write_jsonl(datasets / "action_values.jsonl", action_rows)
     assert read_jsonl(datasets / "damage_rows.jsonl")
     return run_dir
+
+
+def _normal_query_graph() -> dict:
+    return {
+        "schema_version": 1,
+        "format": "zip",
+        "nodes": [
+            {"id": "archive:0", "kind": "archive", "start": 0, "end": 200, "size": 200},
+            {"id": "eocd:0", "kind": "eocd", "start": 178, "end": 200, "size": 22},
+            {"id": "central_directory:0", "kind": "central_directory", "start": 120, "end": 178, "size": 58},
+            {"id": "cd_entry:0", "kind": "cd_entry", "start": 120, "end": 178, "size": 58},
+            {"id": "local_header:0", "kind": "local_header_candidate", "start": 0, "end": 40, "size": 40},
+            {"id": "payload_span:0", "kind": "payload_span", "start": 40, "end": 100, "size": 60},
+            {"id": "descriptor_candidate:0", "kind": "descriptor_candidate", "start": 100, "end": 116, "size": 16},
+        ],
+        "edges": [
+            {"source_node": "eocd:0", "target_node": "central_directory:0", "kind": "points_to", "field": "central_directory", "valid": True},
+            {"source_node": "cd_entry:0", "target_node": "local_header:0", "kind": "points_to", "field": "local_header_offset", "valid": True},
+            {"source_node": "local_header:0", "target_node": "payload_span:0", "kind": "owns_span", "field": "payload", "valid": True},
+        ],
+        "violations": [],
+        "explanations": [
+            {"kind": "sfx_prefix_adjustment", "applies": False, "delta": 0},
+            {"kind": "descriptor_span_adjustment", "applies": True, "delta": 0},
+        ],
+        "summary": {
+            "file_size": 200,
+            "eocd_present": True,
+            "declared_central_directory_offset": 120,
+            "physical_central_directory_offset": 120,
+            "central_directory_offset_delta": 0,
+            "central_directory_size_delta": 0,
+            "cd_entry_count": 1,
+            "cd_entries_checked": 1,
+            "entry_count_delta": 0,
+            "local_header_candidate_count": 1,
+            "sfx_prefix_len": 0,
+            "trailing_bytes_after_eocd": 0,
+            "central_local_crc_mismatch_count": 0,
+            "central_local_flags_mismatch_count": 0,
+            "central_local_method_mismatch_count": 0,
+            "central_local_name_mismatch_count": 0,
+            "central_local_compressed_size_mismatch_count": 0,
+            "span_conflict_count": 0,
+            "descriptor_conflict_count": 0,
+        },
+    }
 
 
 def _write_jsonl(path: Path, rows: list[dict]) -> None:

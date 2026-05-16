@@ -16,10 +16,12 @@ from repair_training.core.damage_eval import (
     profile_summary,
 )
 from repair_training.core.damage_model_inference import DamageAnalysisModel
+from repair_training.core.normal_structure_inference import NormalStructureModel
 from repair_training.core.datasets import write_json, write_jsonl
 from repair_training.core.features import damage_labels_for_row
 from repair_training.core.plugin import load_training_format_plugin, normalize_format_name
 from sunpack.repair.policy.adapters.damage import get_damage_analysis_adapter
+from sunpack.repair.policy.adapters.normal_structure import get_normal_structure_adapter
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -62,7 +64,29 @@ def main(argv: list[str] | None = None) -> int:
         if not leak.get("ok"):
             raise SystemExit(f"damage eval leakage check failed: {reports / 'leakage_report.json'}")
 
-        model = DamageAnalysisModel(model_dir=args.model_dir, plugin=plugin)
+        model_root = Path(args.model_dir)
+        normal_dir = model_root / "normal_structure"
+        location_dir = model_root / "damage_location"
+        if normal_dir.is_dir() and location_dir.is_dir():
+            normal_adapter = get_normal_structure_adapter(fmt)
+            if normal_adapter is None:
+                raise SystemExit(f"normal structure adapter is not available for format: {fmt}")
+            normal_model = NormalStructureModel(model_dir=normal_dir, plugin=plugin)
+            enriched_rows: list[dict[str, Any]] = []
+            for row in rows:
+                payload = row.get("damage_analysis_input") if isinstance(row.get("damage_analysis_input"), dict) else {}
+                normal_rows = normal_adapter.rows_from_request_payload(payload)
+                normal_scores = normal_model.predict_rows(normal_rows)
+                anomaly = normal_adapter.build_anomaly_payload(normal_rows, normal_scores)
+                out = dict(row)
+                out["damage_analysis_input"] = normal_adapter.inject_anomaly_payload(payload, anomaly)
+                enriched_rows.append(out)
+            rows = enriched_rows
+            write_jsonl(datasets / "eval_damage_rows_with_anomaly.jsonl", rows)
+            damage_model_dir = location_dir
+        else:
+            damage_model_dir = model_root
+        model = DamageAnalysisModel(model_dir=damage_model_dir, plugin=plugin)
         adapter = get_damage_analysis_adapter(fmt)
         if adapter is None:
             raise SystemExit(f"damage analysis adapter is not available for format: {fmt}")
@@ -84,7 +108,7 @@ def main(argv: list[str] | None = None) -> int:
             "rows": len(rows),
             "failures": len(failures),
             "threshold_mode": "override" if threshold_override is not None else "model",
-            "thresholds_path": str(Path(args.model_dir) / "thresholds.json") if threshold_override is None else "",
+            "thresholds_path": str(Path(damage_model_dir) / "thresholds.json") if threshold_override is None else "",
             "elapsed_seconds": round(time.perf_counter() - started, 3),
             "acceptance": _acceptance(metrics),
             "plugin_metadata": plugin.damage_eval_metadata() if plugin.damage_eval_metadata else {},

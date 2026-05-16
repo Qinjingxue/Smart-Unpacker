@@ -406,7 +406,9 @@ def _coerce_damage_analysis(value: DamageAnalysisResult | dict[str, Any] | None,
     if isinstance(value, DamageAnalysisResult):
         return value
     if isinstance(value, dict):
-        scores = value.get("scores")
+        scores = value.get("damage_location_scores")
+        if not isinstance(scores, dict):
+            scores = value.get("scores")
         if isinstance(scores, dict) and not value.get("damage_labels"):
             adapter = get_damage_analysis_adapter(fmt)
             if adapter is None:
@@ -418,10 +420,17 @@ def _coerce_damage_analysis(value: DamageAnalysisResult | dict[str, Any] | None,
                         "decision_reason": "damage_analysis_adapter_unavailable",
                     },
                 )
+            metadata = {**dict(value.get("metadata") or {}), "provider_id": provider_id}
+            if isinstance(value.get("normal_structure_scores"), dict):
+                metadata["normal_structure_scores"] = dict(value.get("normal_structure_scores") or {})
+            if isinstance(value.get("normal_structure_metadata"), dict):
+                metadata["normal_structure_metadata"] = dict(value.get("normal_structure_metadata") or {})
+            if isinstance(value.get("structure_anomaly"), dict):
+                metadata["structure_anomaly"] = dict(value.get("structure_anomaly") or {})
             result = adapter.postprocess_scores(
                 {str(label): _optional_float(score) or 0.0 for label, score in scores.items()},
                 value.get("thresholds") if isinstance(value.get("thresholds"), dict) else None,
-                metadata={**dict(value.get("metadata") or {}), "provider_id": provider_id},
+                metadata=metadata,
             )
             return result
         return DamageAnalysisResult(

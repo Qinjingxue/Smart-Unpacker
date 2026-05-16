@@ -11,6 +11,7 @@ import numpy as np
 from repair_training.core.model_artifacts import write_model_artifacts
 from repair_training.core.plugin import TrainingFormatPlugin
 from repair_training.core.thresholds import calibrate_binary_thresholds
+from repair_training.core.features import normalize_model_type
 
 
 def train_lightgbm_model(
@@ -21,6 +22,7 @@ def train_lightgbm_model(
     model_dir: str | Path,
     run_id: str = "",
 ) -> dict[str, Any]:
+    model_type = normalize_model_type(model_type)
     try:
         import lightgbm as lgb
     except Exception as exc:  # pragma: no cover - depends on optional training environment
@@ -29,7 +31,7 @@ def train_lightgbm_model(
     features_dir = Path(features_dir)
     model_dir = Path(model_dir)
     feature_schema = _read_json(features_dir / "feature_schema.json")
-    label_schema = _read_json(features_dir / ("label_schema.json" if model_type == "damage_analysis" else "action_schema.json"))
+    label_schema = _read_json(features_dir / ("action_schema.json" if model_type == "repair_action" else "label_schema.json"))
     training_config = {
         "run_id": run_id,
         "format": plugin.format_name,
@@ -37,8 +39,10 @@ def train_lightgbm_model(
         "lightgbm_params": _params(plugin, model_type),
         "taxonomy_version": 1,
     }
-    if model_type == "damage_analysis":
+    if model_type == "damage_location":
         metrics = _train_damage_models(lgb, plugin, features_dir, model_dir, label_schema)
+    elif model_type == "normal_structure":
+        metrics = _train_normal_structure_model(lgb, plugin, features_dir, model_dir)
     elif model_type == "repair_action":
         metrics = _train_action_ranker(lgb, plugin, features_dir, model_dir)
     else:
@@ -71,7 +75,7 @@ def _train_damage_models(lgb, plugin: TrainingFormatPlugin, features_dir: Path, 
     per_label: dict[str, dict[str, float]] = {}
     valid_scores = np.zeros((len(valid["X"]), len(labels)), dtype=np.float32)
     test_scores = np.zeros((len(test["X"]), len(labels)), dtype=np.float32)
-    params = _params(plugin, "damage_analysis")
+    params = _params(plugin, "damage_location")
     for index, label in enumerate(labels):
         y = train["y"][:, index] if train["y"].ndim > 1 else train["y"]
         if len(set(float(v) for v in y)) < 2:
@@ -98,9 +102,14 @@ def _train_damage_models(lgb, plugin: TrainingFormatPlugin, features_dir: Path, 
                 test_scores[:, index] = model.predict_proba(test["X"])[:, 1]
         per_label[label] = _binary_metrics(_label_column(test_scores, index), _label_column(test["y"], index))
     (model_dir / "models.json").write_text(json.dumps(model_index, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
-    calibration_scores = np.vstack([item for item in (valid_scores, test_scores) if len(item)])
-    calibration_y = np.vstack([item for item in (valid["y"], test["y"]) if len(item)])
-    thresholds = calibrate_binary_thresholds(calibration_scores, calibration_y, labels)
+    calibration_score_parts = [item for item in (valid_scores, test_scores) if len(item)]
+    calibration_y_parts = [item for item in (valid["y"], test["y"]) if len(item)]
+    if calibration_score_parts and calibration_y_parts:
+        calibration_scores = np.vstack(calibration_score_parts)
+        calibration_y = np.vstack(calibration_y_parts)
+        thresholds = calibrate_binary_thresholds(calibration_scores, calibration_y, labels)
+    else:
+        thresholds = {"default_threshold": 0.5, "thresholds": {}, "selection_metric": "default_no_calibration_rows"}
     (model_dir / "thresholds.json").write_text(json.dumps(thresholds, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
     metrics = _damage_metrics(per_label)
     metrics["thresholds"] = {
@@ -131,13 +140,46 @@ def _train_action_ranker(lgb, plugin: TrainingFormatPlugin, features_dir: Path, 
     return _rank_metrics(scores, test["y"], _read_group(features_dir / "group_test.txt"))
 
 
+def _train_normal_structure_model(lgb, plugin: TrainingFormatPlugin, features_dir: Path, model_dir: Path) -> dict[str, Any]:
+    model_dir.mkdir(parents=True, exist_ok=True)
+    train = _load_npz(features_dir / "train.npz")
+    valid = _load_npz(features_dir / "valid.npz")
+    test = _load_npz(features_dir / "test.npz")
+    params = _params(plugin, "normal_structure")
+    y = train["y"]
+    if y.ndim > 1:
+        y = y[:, 0]
+    if len(set(float(v) for v in y)) < 2:
+        constant = float(y[0]) if len(y) else 0.0
+        (model_dir / "model.constant.json").write_text(json.dumps({"constant_probability": constant}, sort_keys=True), encoding="utf-8")
+        scores = np.full((len(test["X"]),), constant, dtype=np.float32)
+        metrics = _normal_structure_metrics(scores, test["y"], meta=_read_jsonl(features_dir / "meta_test.jsonl"))
+        metrics["constant_probability"] = constant
+        return metrics
+    model = lgb.LGBMClassifier(**params)
+    fit_kwargs: dict[str, Any] = {}
+    if len(valid["X"]):
+        valid_y = valid["y"][:, 0] if valid["y"].ndim > 1 else valid["y"]
+        fit_kwargs["eval_set"] = [(valid["X"], valid_y)]
+    model.fit(train["X"], y, **fit_kwargs)
+    model.booster_.save_model(str(model_dir / "model.txt"))
+    joblib.dump(model, model_dir / "model.joblib")
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message="X does not have valid feature names.*")
+        scores = model.predict_proba(test["X"])[:, 1] if len(test["X"]) else np.array([], dtype=np.float32)
+    return _normal_structure_metrics(scores, test["y"], meta=_read_jsonl(features_dir / "meta_test.jsonl"))
+
+
 def _params(plugin: TrainingFormatPlugin, model_type: str) -> dict[str, Any]:
+    model_type = normalize_model_type(model_type)
     if plugin.lightgbm_params is not None:
         params = dict(plugin.lightgbm_params(model_type) or {})
     else:
         params = {}
-    if model_type == "damage_analysis":
+    if model_type == "damage_location":
         return {"n_estimators": 40, "learning_rate": 0.05, "num_leaves": 15, "random_state": 17, "verbosity": -1, **params}
+    if model_type == "normal_structure":
+        return {"objective": "binary", "n_estimators": 80, "learning_rate": 0.04, "num_leaves": 31, "random_state": 17, "verbosity": -1, **params}
     return {"objective": "lambdarank", "n_estimators": 40, "learning_rate": 0.05, "num_leaves": 15, "random_state": 17, "verbosity": -1, **params}
 
 
@@ -177,6 +219,70 @@ def _damage_metrics(per_label: dict[str, dict[str, float]]) -> dict[str, Any]:
     return {"label_count": len(per_label), "macro_f1": macro, "per_label": per_label}
 
 
+def _normal_structure_metrics(scores: np.ndarray, y: np.ndarray, *, meta: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    y1 = y[:, 0] if getattr(y, "ndim", 1) > 1 else y
+    binary = _binary_metrics(scores, y1)
+    output: dict[str, Any] = {"rows": int(len(y1)), **binary}
+    try:
+        from sklearn.metrics import roc_auc_score  # type: ignore
+        if len(set(float(v) for v in y1)) >= 2:
+            output["auc"] = float(roc_auc_score(y1, scores))
+    except Exception:
+        output["auc"] = 0.0
+    if len(y1):
+        truth = y1 >= 0.5
+        pred = scores >= 0.5
+        clean = truth
+        output["clean_false_positive_rate"] = float(np.sum((~pred) & clean) / max(1.0, np.sum(clean)))
+        output["anomaly_recall"] = float(np.sum((~truth) & (~pred)) / max(1.0, np.sum(~truth)))
+    meta = meta or []
+    output["per_query_type"] = _normal_group_metrics(scores, y1, meta, "query_type")
+    output["per_target_field"] = _normal_group_metrics(scores, y1, meta, "target_field")
+    output["clean_observed_false_positive_rate"] = _clean_observed_false_positive_rate(scores, y1, meta)
+    output["hard_negative_recall"] = _hard_negative_recall(scores, y1, meta)
+    return output
+
+
+def _normal_group_metrics(scores: np.ndarray, y: np.ndarray, meta: list[dict[str, Any]], key: str) -> dict[str, Any]:
+    grouped: dict[str, dict[str, list[float]]] = {}
+    for index, row in enumerate(meta[: len(y)]):
+        group = str(row.get(key) or "")
+        if not group:
+            continue
+        grouped.setdefault(group, {"scores": [], "labels": []})
+        grouped[group]["scores"].append(float(scores[index]) if index < len(scores) else 1.0)
+        grouped[group]["labels"].append(float(y[index]) if index < len(y) else 0.0)
+    return {
+        group: {
+            **_binary_metrics(np.array(values["scores"], dtype=np.float32), np.array(values["labels"], dtype=np.float32)),
+            "rows": len(values["labels"]),
+        }
+        for group, values in sorted(grouped.items())
+    }
+
+
+def _clean_observed_false_positive_rate(scores: np.ndarray, y: np.ndarray, meta: list[dict[str, Any]]) -> float:
+    indexes = [
+        index
+        for index, row in enumerate(meta[: len(y)])
+        if str(row.get("candidate_kind") or "") == "observed" and float(y[index]) >= 0.5
+    ]
+    if not indexes:
+        return 0.0
+    return float(sum(1 for index in indexes if float(scores[index]) < 0.5) / max(1, len(indexes)))
+
+
+def _hard_negative_recall(scores: np.ndarray, y: np.ndarray, meta: list[dict[str, Any]]) -> float:
+    indexes = [
+        index
+        for index, row in enumerate(meta[: len(y)])
+        if str(row.get("candidate_kind") or "") == "counterfactual" and float(y[index]) < 0.5
+    ]
+    if not indexes:
+        return 0.0
+    return float(sum(1 for index in indexes if float(scores[index]) < 0.5) / max(1, len(indexes)))
+
+
 def _rank_metrics(scores: np.ndarray, labels: np.ndarray, groups: list[int]) -> dict[str, Any]:
     if len(scores) == 0:
         return {"groups": 0, "best_action_accuracy": 0.0, "ndcg_at_1": 0.0, "mean_regret": 0.0}
@@ -205,6 +311,20 @@ def _read_group(path: Path) -> list[int]:
 
 def _read_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+
+
+def _read_jsonl(path: Path) -> list[dict[str, Any]]:
+    if not path.is_file():
+        return []
+    rows: list[dict[str, Any]] = []
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            payload = json.loads(line)
+            if isinstance(payload, dict):
+                rows.append(payload)
+    return rows
 
 
 def _safe_name(value: str) -> str:
