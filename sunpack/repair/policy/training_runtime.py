@@ -328,7 +328,7 @@ def _unique_candidate_id(candidate_id: object, index: int) -> str:
 
 def _graph_candidate_action_type(value: Any) -> str:
     text = str(value or "").strip()
-    if text in {"expand_edge", "checkout_node", "exhaust_branch", "stop_signal"}:
+    if text in {"expand_edge", "checkout_node", "stop_signal"}:
         return text
     return "expand_edge"
 

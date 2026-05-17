@@ -91,7 +91,6 @@ def test_zip_action_label_control_heuristics():
     assert _zip_label({"action_type": "expand_edge", "long_term_value": 1.0, "is_best_action": True}) >= 24
     assert _zip_label({"action_type": "stop_signal", "long_term_value": 0.1, "current_recovery": {"score": 0.97}}) >= 28
     assert _zip_label({"action_type": "checkout_node", "long_term_value": 0.0, "current_recovery": {"score": 0.1}}) >= 14
-    assert _zip_label({"action_type": "exhaust_branch", "long_term_value": 1.0, "current_recovery": {"score": 0.4}}) <= 8
     assert _zip_label({
         "action_type": "stop_signal",
         "current_recovery": {"score": 0.77},
@@ -104,12 +103,6 @@ def test_zip_action_label_control_heuristics():
         "state_value": {"reachable_recovery_value": 0.8},
         "long_term_value": 1.0,
     }) <= 8
-    assert _zip_label({
-        "action_type": "exhaust_branch",
-        "current_recovery": {"score": 0.0},
-        "state_value": {"reachable_recovery_value": 0.03},
-        "long_term_value": 0.0,
-    }) >= 18
     assert _zip_label({
         "action_type": "expand_edge",
         "current_recovery": {"score": 0.2},
@@ -462,7 +455,6 @@ def _write_fake_run(tmp_path: Path) -> Path:
         for action_type, candidate_id, value in (
             ("expand_edge", f"cand{index}", 1.0 if index % 2 == 0 else 0.2),
             ("stop_signal", "", 0.1),
-            ("exhaust_branch", "", 0.0),
         ):
             action_rows.append({
                 "episode_id": episode,

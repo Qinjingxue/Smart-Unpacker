@@ -261,7 +261,7 @@ def test_value_labeler_prefers_undo_when_child_state_is_worse():
     assert undo["long_term_value"] > 0
 
 
-def test_value_labeler_stop_and_give_up_terminal_choices():
+def test_value_labeler_stop_terminal_choice():
     stop_episode = TrainingEpisode(
         episode_id="stop",
         format="zip",
@@ -279,31 +279,10 @@ def test_value_labeler_stop_and_give_up_terminal_choices():
             )
         ],
     )
-    give_up_episode = TrainingEpisode(
-        episode_id="give_up",
-        format="zip",
-        source_identity={},
-        corrupted_input={},
-        transitions=[
-            TrainingTransition(
-                round_index=0,
-                state_digest="empty",
-                patch_depth=0,
-                selected_action=TrainingAction(action_type="exhaust_branch"),
-                verification_before=TrainingVerificationSnapshot(score=0.0),
-                verification_after=TrainingVerificationSnapshot(score=0.0),
-                terminal=True,
-            )
-        ],
-    )
-
     stop_rows, _ = label_episode_values(stop_episode)
-    give_up_rows, _ = label_episode_values(give_up_episode)
 
     assert stop_rows[0]["is_best_action"] is True
     assert stop_rows[0]["long_term_value"] > 0
-    assert give_up_rows[0]["is_best_action"] is True
-    assert give_up_rows[0]["long_term_value"] == -0.01
 
 
 def test_value_labeler_cli_outputs_action_and_damage_rows(tmp_path):

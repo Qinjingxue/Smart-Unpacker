@@ -6,7 +6,9 @@ from sunpack.contracts.detection import FactBag
 from sunpack.contracts.run_context import RunContext
 from sunpack.contracts.tasks import ArchiveTask
 from sunpack.coordinator.extraction_batch import ExtractionBatchRunner
+from sunpack.coordinator.repair_loop import RepairLoopLimits, RepairLoopState
 from sunpack.extraction.result import ExtractionResult
+from sunpack.repair.result import RepairResult
 from sunpack.repair.candidate import RepairCandidate, RepairCandidateBatch
 from sunpack.verification.result import ArchiveCoverageSummary, VerificationResult
 
@@ -122,6 +124,34 @@ def test_verification_repair_uses_beam_to_select_complete_candidate(tmp_path):
     assert selected_input.entry_path.endswith("round_01_good_candidate.zip")
     assert Path(selected_input.entry_path).read_bytes() == good.read_bytes()
     assert (out_dir / "good.txt").exists()
+
+
+def test_policy_stop_records_final_extraction_gate(tmp_path):
+    source = tmp_path / "broken.zip"
+    source.write_bytes(b"broken")
+    task = _task(source)
+    state = RepairLoopState(task, RepairLoopLimits(max_rounds=3))
+    result = RepairResult(
+        status="partial",
+        module_name="policy_finish",
+        format="zip",
+        actions=["policy_finish"],
+        repaired_input={"kind": "file", "path": str(source), "format_hint": "zip"},
+        diagnosis={
+            "policy_stop_signal": True,
+            "policy_loop": {"terminal_action": "stop", "policy_stop_signal": True},
+        },
+        partial=True,
+        message="policy_step_stop",
+    )
+
+    handled = state.record_result(result, trigger="verification_policy")
+
+    assert handled is True
+    assert task.fact_bag.get("repair.loop.terminal_reason") == "policy_stop"
+    assert task.fact_bag.get("repair.loop.policy_stop_after_next_extraction") is True
+    assert task.fact_bag.get("repair.loop.repair_disabled_after_policy_stop") is True
+    assert RepairLoopState(task, RepairLoopLimits(max_rounds=3)).can_attempt(trigger="verification") is False
 
 
 class _FakeOutputScanPolicy:

@@ -5,8 +5,8 @@ from typing import Any, Literal
 
 
 TRAINING_EPISODE_SCHEMA_VERSION = 2
-TrainingActionKind = Literal["expand_edge", "checkout_node", "exhaust_branch", "stop_signal"]
-_ACTION_KINDS = {"expand_edge", "checkout_node", "exhaust_branch", "stop_signal"}
+TrainingActionKind = Literal["expand_edge", "checkout_node", "stop_signal"]
+_ACTION_KINDS = {"expand_edge", "checkout_node", "stop_signal"}
 
 
 @dataclass(frozen=True)

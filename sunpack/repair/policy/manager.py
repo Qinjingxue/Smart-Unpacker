@@ -211,6 +211,7 @@ class RepairPolicyManager:
         events: dict[str, Any] | None = None,
         current_recovery: dict[str, Any] | None = None,
         best_seen_recovery: dict[str, Any] | None = None,
+        state_value: dict[str, Any] | None = None,
         round_index: int = 0,
         max_expansions: int = 0,
     ) -> tuple[PolicyGraphAction, dict[str, Any]]:
@@ -218,33 +219,28 @@ class RepairPolicyManager:
         current_score = _optional_float((current_recovery or {}).get("score")) or 0.0
         best_score = _optional_float((best_seen_recovery or {}).get("score")) or 0.0
         policy = self.policy_config if isinstance(self.policy_config, dict) else {}
-        complete_threshold = float(policy.get("complete_threshold", 0.999) or 0.999)
         stale_patience = max(0, int(policy.get("graph_stale_expansion_patience", policy.get("stop_plateau_min_rounds", 2)) or 0))
         frontier = graph.active_frontier_edges()
         selected_prior = _best_graph_prior(action_priors, graph)
         best_edge = _best_graph_frontier_edge(frontier)
         final_node_id = graph.best_node_id or graph.current_node_id
         stop_controller = {
-            "complete_threshold": complete_threshold,
             "best_score": best_score,
             "current_score": current_score,
             "frontier_count": len(frontier),
             "events": events,
             "selected_prior": selected_prior.to_dict() if selected_prior is not None else {},
         }
-        if best_score >= complete_threshold or str((best_seen_recovery or {}).get("decision_hint") or "") == "accept":
-            return PolicyGraphAction(action="finish", reason="verified_complete", terminal_action="finish", final_node_id=final_node_id), {
-                "stop_controller": {**stop_controller, "finish_reason": "verified_complete"},
-                "model_priors": action_selection,
-            }
-        if bool(events.get("max_expansions_reached")) or (max_expansions and graph.expansion_count >= max_expansions):
-            return PolicyGraphAction(action="finish", reason="max_expansions_reached", terminal_action="finish", final_node_id=final_node_id), {
-                "stop_controller": {**stop_controller, "finish_reason": "max_expansions_reached"},
-                "model_priors": action_selection,
-            }
-        if stale_patience and graph.stale_expansion_count >= stale_patience and not _frontier_has_high_value(frontier, best_score, margin=float(policy.get("graph_continue_margin", 0.02) or 0.02)):
-            return PolicyGraphAction(action="finish", reason="graph_stale_expansions", terminal_action="finish", final_node_id=final_node_id), {
+        if stale_patience and graph.stale_expansion_count >= stale_patience:
+            return PolicyGraphAction(action="finish", reason="graph_stale_expansions", terminal_action="stop", final_node_id=final_node_id), {
                 "stop_controller": {**stop_controller, "finish_reason": "graph_stale_expansions"},
+                "model_priors": action_selection,
+            }
+        stop_dominance = _graph_stop_absolute_advantage(action_priors, state_value=state_value or {}, best_seen_recovery=best_seen_recovery or {}, policy=policy)
+        if stop_dominance.get("stop_dominates"):
+            prior = stop_dominance.get("stop_prior") if isinstance(stop_dominance.get("stop_prior"), dict) else {}
+            return PolicyGraphAction(action="finish", reason=str(prior.get("reason") or "model_stop_absolute_advantage"), terminal_action="stop", final_node_id=final_node_id), {
+                "stop_controller": {**stop_controller, "finish_reason": "model_stop_absolute_advantage", "stop_dominance": stop_dominance},
                 "model_priors": action_selection,
             }
         if selected_prior is not None and selected_prior.action_type == "expand_edge":
@@ -264,18 +260,6 @@ class RepairPolicyManager:
                 "stop_controller": {**stop_controller, "finish_reason": ""},
                 "model_priors": action_selection,
             }
-        if selected_prior is not None and selected_prior.action_type == "exhaust_branch":
-            return PolicyGraphAction(action="exhaust", node_id=graph.current_node_id, reason=selected_prior.reason or "model_exhaust_branch", metadata={"prior": selected_prior.to_dict()}), {
-                "stop_controller": {**stop_controller, "finish_reason": ""},
-                "model_priors": action_selection,
-            }
-        if selected_prior is not None and selected_prior.action_type == "stop_signal":
-            plateau = bool(events.get("plateau_satisfied") or events.get("frontier_empty"))
-            if plateau:
-                return PolicyGraphAction(action="finish", reason=selected_prior.reason or "policy_stop_signal", terminal_action="finish", final_node_id=final_node_id), {
-                    "stop_controller": {**stop_controller, "finish_reason": "policy_stop_signal"},
-                    "model_priors": action_selection,
-                }
         if best_edge is not None:
             if best_edge.from_node_id == graph.current_node_id:
                 return PolicyGraphAction(action="expand", candidate_id=best_edge.candidate_id, reason="continue_best_frontier", metadata={"edge_id": best_edge.edge_id}), {
@@ -286,8 +270,8 @@ class RepairPolicyManager:
                 "stop_controller": {**stop_controller, "finish_reason": ""},
                 "model_priors": action_selection,
             }
-        return PolicyGraphAction(action="finish", reason="frontier_empty", terminal_action="finish", final_node_id=final_node_id), {
-            "stop_controller": {**stop_controller, "finish_reason": "frontier_empty"},
+        return PolicyGraphAction(action="checkout", reason="no_executable_graph_action", metadata={"checkout_semantics": "undo_parent", "stop_dominance": stop_dominance}), {
+            "stop_controller": {**stop_controller, "finish_reason": "", "no_executable_graph_action": True, "stop_dominance": stop_dominance},
             "model_priors": action_selection,
         }
 
@@ -511,6 +495,48 @@ def _frontier_has_high_value(edges: list[PolicyGraphEdge], best_score: float, *,
     return False
 
 
+def _graph_stop_absolute_advantage(
+    priors: list[GraphActionPrior],
+    *,
+    state_value: dict[str, Any],
+    best_seen_recovery: dict[str, Any],
+    policy: dict[str, Any],
+) -> dict[str, Any]:
+    stop_priors = [prior for prior in priors if prior.action_type == "stop_signal"]
+    if not stop_priors:
+        return {"stop_dominates": False, "reason": "no_stop_prior"}
+    stop_prior = max(stop_priors, key=lambda item: float(item.prior_score or 0.0))
+    other_priors = [prior for prior in priors if prior.action_type in {"expand_edge", "checkout_node"}]
+    best_other_score = max((float(prior.prior_score or 0.0) for prior in other_priors), default=float("-inf"))
+    stop_score = float(stop_prior.prior_score or 0.0)
+    confidence = 1.0 if stop_prior.confidence is None else float(stop_prior.confidence or 0.0)
+    action_margin = float(policy.get("stop_absolute_action_margin", 0.25) or 0.25)
+    min_stop_score = float(policy.get("stop_absolute_min_score", 0.75) or 0.75)
+    min_confidence = float(policy.get("stop_absolute_min_confidence", 0.65) or 0.65)
+    value_margin = float(policy.get("stop_absolute_value_margin", 0.01) or 0.01)
+    best_score = _optional_float((best_seen_recovery or {}).get("score")) or 0.0
+    reachable_value = _optional_float((state_value or {}).get("reachable_recovery_value", (state_value or {}).get("value")))
+    if reachable_value is None:
+        reachable_value = best_score
+    action_dominates = stop_score >= min_stop_score and confidence >= min_confidence and (not other_priors or stop_score >= best_other_score + action_margin)
+    value_allows_stop = float(reachable_value) <= float(best_score) + value_margin
+    return {
+        "stop_dominates": bool(action_dominates and value_allows_stop),
+        "action_dominates": bool(action_dominates),
+        "value_allows_stop": bool(value_allows_stop),
+        "stop_score": stop_score,
+        "best_non_stop_score": None if best_other_score == float("-inf") else best_other_score,
+        "action_margin": action_margin,
+        "min_stop_score": min_stop_score,
+        "confidence": confidence,
+        "min_confidence": min_confidence,
+        "best_recovery": float(best_score),
+        "reachable_recovery_value": float(reachable_value),
+        "value_margin": value_margin,
+        "stop_prior": stop_prior.to_dict(),
+    }
+
+
 def _graph_edge_score(edge: PolicyGraphEdge) -> float:
     prior = _optional_float((edge.action_prior or {}).get("prior_score"))
     if prior is None:
@@ -557,7 +583,7 @@ def _coerce_graph_action_priors(value: Any, *, provider_id: str) -> list[GraphAc
 
 def _coerce_graph_action_prior(value: dict[str, Any], *, provider_id: str) -> GraphActionPrior:
     action = str(value.get("action_type") or value.get("action") or "expand_edge")
-    if action not in {"expand_edge", "checkout_node", "exhaust_branch", "stop_signal"}:
+    if action not in {"expand_edge", "checkout_node", "stop_signal"}:
         raise ValueError(f"unsupported graph action prior: {action}")
     return GraphActionPrior(
         action_type=action,  # type: ignore[arg-type]

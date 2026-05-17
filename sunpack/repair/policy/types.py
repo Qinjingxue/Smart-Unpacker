@@ -9,8 +9,8 @@ from sunpack.repair.job import RepairJob
 
 
 PolicyCandidatePayload = dict[str, Any]
-GraphPolicyActionKind = Literal["expand_edge", "checkout_node", "exhaust_branch", "stop_signal"]
-PolicyGraphActionKind = Literal["expand", "checkout", "exhaust", "finish"]
+GraphPolicyActionKind = Literal["expand_edge", "checkout_node", "stop_signal"]
+PolicyGraphActionKind = Literal["expand", "checkout", "finish"]
 
 
 @dataclass(frozen=True)
@@ -73,7 +73,7 @@ class GraphActionRequest:
 
 @dataclass(frozen=True)
 class GraphActionPrior:
-    action_type: GraphPolicyActionKind = "exhaust_branch"
+    action_type: GraphPolicyActionKind = "stop_signal"
     edge_id: str = ""
     candidate_id: str = ""
     node_id: str = ""
@@ -108,6 +108,10 @@ class PolicyGraphNode:
     status: str = "active"
     created_round: int = 0
     expanded_candidate_ids: set[str] = field(default_factory=set)
+    module_name: str = ""
+    patch_status: str = "root"
+    failure_reason: str = ""
+    created_step: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -120,6 +124,11 @@ class PolicyGraphNode:
             "status": self.status,
             "created_round": int(self.created_round or 0),
             "expanded_candidate_ids": sorted(self.expanded_candidate_ids),
+            "archive_state": self.archive_state.to_dict() if self.archive_state is not None else {},
+            "module_name": self.module_name,
+            "patch_status": self.patch_status,
+            "failure_reason": self.failure_reason,
+            "created_step": int(self.created_step or self.created_round or 0),
         }
 
 

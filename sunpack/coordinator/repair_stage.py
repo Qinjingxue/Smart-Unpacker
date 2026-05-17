@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 from contextlib import nullcontext
 from dataclasses import asdict
 from pathlib import Path
@@ -30,6 +31,7 @@ from sunpack.repair.scheduler import RepairScheduler
 from sunpack.support import repair_trace
 from sunpack.support import archive_knowledge_projection as knowledge_view
 from sunpack.verification.result import VerificationResult
+from sunpack.coordinator.repair_loop import is_policy_stop_result
 
 
 class ArchiveRepairStage:
@@ -109,10 +111,31 @@ class ArchiveRepairStage:
             return result
         else:
             task.set_archive_state(ArchiveState.from_archive_input(descriptor))
+        if is_policy_stop_result(result):
+            self._cleanup_policy_stop_temporary_outputs(result)
         if job.password is not None:
             write_repair_archive_status(task, password=job.password)
         write_repair_archive_status(task, repaired=True)
         return result
+
+    def _cleanup_policy_stop_temporary_outputs(self, result: RepairResult) -> None:
+        workspace = self._workspace_root().resolve()
+        for raw_path in result.workspace_paths or []:
+            if not raw_path:
+                continue
+            try:
+                path = Path(raw_path).resolve()
+            except OSError:
+                continue
+            if path == workspace or workspace not in path.parents:
+                continue
+            try:
+                if path.is_dir():
+                    shutil.rmtree(path, ignore_errors=True)
+                elif path.exists():
+                    path.unlink()
+            except OSError:
+                continue
 
     def _job_from_verification_assessment(
         self,
@@ -388,6 +411,7 @@ class ArchiveRepairStage:
             patch_facts.extend(str(item) for item in candidate.get("patch_facts") or [] if str(item))
             residual_flags.extend(str(item) for item in candidate.get("residual_facts") or [] if str(item))
         return {
+            "items": list(history),
             "previous_actions": list(previous_actions),
             "previous_modules": list(previous_modules),
             "path_actions": list(previous_actions),

@@ -381,9 +381,7 @@ def action_label(row: dict[str, Any]) -> int:
     label = 8
     if row.get("is_best_action"):
         label = 28
-    if action == "exhaust_branch":
-        label = 18 if current <= 0.02 and not _is_recovery_candidate(row) else 8
-    elif action == "stop_signal":
+    if action == "stop_signal":
         label = 28 if current >= 0.95 else 6
     elif action == "checkout_node":
         label = max(label, 14)

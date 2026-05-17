@@ -185,8 +185,6 @@ def _q_value(
     current_score = float(edge.verification_before.score or 0.0)
     if action == "stop_signal":
         return current_score - step_cost
-    if action == "exhaust_branch":
-        return max(current_score, float(graph_best_value or 0.0)) - step_cost
     if edge.next_state_digest and edge.next_state_digest in visiting:
         return repeat_penalty
     return _immediate_reward(edge, step_cost=step_cost) + gamma * value_fn(edge.next_state_digest, visiting)
@@ -269,8 +267,6 @@ def _policy_prior_label(edge: TrainingTransition, *, action_type: str, is_best: 
         return 18 if improvement > 0.02 else 8
     if action_type == "stop_signal":
         return 24 if current >= 0.95 else 6
-    if action_type == "exhaust_branch":
-        return 16 if current <= 0.02 else 2
     return 0
 
 
@@ -387,7 +383,6 @@ def _candidate_summary_from_action_rows(rows: list[dict[str, Any]]) -> dict[str,
         "has_candidate": bool(apply_rows),
         "has_checkout_action": any(str(row.get("action_type") or "") == "checkout_node" for row in rows),
         "has_stop_signal": any(str(row.get("action_type") or "") == "stop_signal" for row in rows),
-        "has_exhaust_branch": any(str(row.get("action_type") or "") == "exhaust_branch" for row in rows),
     }
 
 

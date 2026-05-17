@@ -119,6 +119,31 @@ class RepairLoopState:
                 "workspace_paths": list(result.workspace_paths),
             }
 
+        if is_policy_stop_result(result):
+            with _phase(phase_timer, f"{phase_prefix}_policy_stop_digest"):
+                next_digest = input_digest(self.task)
+            with _phase(phase_timer, f"{phase_prefix}_policy_stop_generated_paths"):
+                generated_file_count, generated_bytes = self._generated_path_totals(result)
+            round_payload.update({
+                "output_digest": next_digest,
+                "completeness": _result_recovery_score(result),
+                "exit_reason": "policy_stop_after_next_extraction",
+            })
+            with _phase(phase_timer, f"{phase_prefix}_policy_stop_commit"):
+                self._commit_policy_stop_update(
+                    trigger=trigger,
+                    result=result,
+                    round_payload=round_payload,
+                    generated_update={
+                        "generated_file_count": generated_file_count,
+                        "generated_bytes": generated_bytes,
+                        "current_digest": next_digest,
+                        "seen_input_digests": _dedupe([*self.seen_input_digests, next_digest]),
+                        "seen_action_signatures": _dedupe([*self.seen_action_signatures, _action_signature(result, previous_digest)]),
+                    },
+                )
+            return True
+
         if result.status in TERMINAL_REPAIR_STATUSES:
             with _phase(phase_timer, f"{phase_prefix}_terminal_add_generated_paths"):
                 generated_file_count, generated_bytes = self._generated_path_totals(result)
@@ -321,6 +346,43 @@ class RepairLoopState:
         )
         LOGGER.warning("archive repair loop stopped: %s", terminal_payload)
 
+    def _commit_policy_stop_update(
+        self,
+        *,
+        trigger: str,
+        result: RepairResult,
+        round_payload: dict[str, Any],
+        generated_update: dict[str, Any],
+    ) -> None:
+        if self.terminal_reason:
+            return
+        rounds = _loop_value(self.task, "rounds", [])
+        items = list(rounds) if isinstance(rounds, list) else []
+        items.append(dict(round_payload))
+        terminal_payload = {
+            "reason": "policy_stop",
+            "trigger": trigger,
+            "rounds": len(items),
+            "status": result.status,
+            "module": result.module_name,
+            "message": result.message,
+            "policy_stop_after_next_extraction": True,
+        }
+        write_repair_loop_update(
+            self.task,
+            {
+                **dict(generated_update or {}),
+                "rounds": items,
+                "terminal_reason": "policy_stop",
+                "terminal": terminal_payload,
+                "policy_stop_after_next_extraction": True,
+                "repair_disabled_after_policy_stop": True,
+            },
+            stop_reason="policy_stop",
+            stop_payload=terminal_payload,
+        )
+        LOGGER.warning("archive repair loop policy stop requested final extraction: %s", terminal_payload)
+
     def _add_seen_input_digest(self, digest: str) -> None:
         values = self.seen_input_digests
         values.append(digest)
@@ -511,6 +573,16 @@ def terminal_failure_reason(result: ExtractionResult) -> str:
         if flag in flags:
             return flag
     return ""
+
+
+def is_policy_stop_result(result: RepairResult | None) -> bool:
+    if result is None:
+        return False
+    diagnosis = result.diagnosis if isinstance(result.diagnosis, dict) else {}
+    if bool(diagnosis.get("policy_stop_signal")):
+        return True
+    loop = diagnosis.get("policy_loop") if isinstance(diagnosis.get("policy_loop"), dict) else {}
+    return bool(loop.get("policy_stop_signal")) or str(loop.get("terminal_action") or "") == "stop"
 
 
 def _looks_like_split_name(path: str) -> bool:

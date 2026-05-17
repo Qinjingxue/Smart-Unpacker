@@ -571,7 +571,6 @@ def collect_episode(
             actions.append(TrainingAction(action_type="checkout_node", reason="checkout_parent", metadata={"target_state_digest": parent_digest, "target_node_id": _training_node_id(parent_digest)}))
         actions.extend([
             TrainingAction(action_type="stop_signal", reason="stop_signal"),
-            TrainingAction(action_type="exhaust_branch", reason="exhaust_branch"),
         ])
         before = _training_verification_snapshot(state_recovery)
 
@@ -634,7 +633,6 @@ def collect_episode(
             ))
         transitions.extend([
             _terminal_transition(depth, state, parent_digest, damage_request_dict, {**damage_target_dict, "model_damage_analysis": _compact_damage_analysis(damage_analysis)}, candidate_snapshots, actions, before, "stop_signal"),
-            _terminal_transition(depth, state, parent_digest, damage_request_dict, {**damage_target_dict, "model_damage_analysis": _compact_damage_analysis(damage_analysis)}, candidate_snapshots, actions, before, "exhaust_branch"),
         ])
 
     recovery_evaluator.close()
@@ -1271,7 +1269,7 @@ def _terminal_transition(
         terminal=False,
         node_id=_training_node_id(state.effective_patch_digest()),
         parent_node_id=_training_node_id(parent_digest) if parent_digest else "",
-        graph_action={"action_type": action_type, "action": "exhaust" if action_type == "exhaust_branch" else "signal"},
+        graph_action={"action_type": action_type, "action": "signal"},
         graph_best_node_id=_training_node_id(state.effective_patch_digest()),
         branch_status="active",
     )

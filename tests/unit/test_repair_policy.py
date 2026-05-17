@@ -22,8 +22,9 @@ from sunpack.repair.policy.adapters import get_damage_analysis_adapter
 from sunpack.repair.policy.manager import RepairPolicyManager
 from sunpack.repair.policy.recovery_evaluator import PolicyRecoverySnapshot
 from sunpack.repair.policy.training_runtime import candidate_snapshot, runtime_context_from_job
+from sunpack.repair.policy.types import GraphActionPrior, PolicyExplorationGraph, PolicyGraphEdge, PolicyGraphNode
 from sunpack.repair.result import RepairResult
-from sunpack.repair.scheduler import RepairScheduler, _policy_loop_stop_plateau_satisfied, _policy_route_rejects_are_soft
+from sunpack.repair.scheduler import RepairScheduler, _policy_loop_stop_plateau_satisfied, _policy_route_rejects_are_soft, _policy_step_decide_action
 from sunpack.support import archive_knowledge_projection as knowledge_view
 from sunpack.support.archive_state_view import ArchiveStateByteView
 from sunpack.verification.result import ArchiveCoverageSummary, VerificationResult
@@ -111,7 +112,7 @@ def test_dual_policy_loop_applies_patch_candidate(tmp_path, monkeypatch):
     assert result.status == "partial"
     assert result.repaired_state is not None
     assert result.repaired_state.patch_depth() == 1
-    assert result.diagnosis["policy_loop"]["terminal_action"] == "finish"
+    assert result.diagnosis["policy_loop"]["terminal_action"] == "stop"
 
 
 def test_policy_loop_does_not_preverify_candidates_but_keeps_state_values(tmp_path, monkeypatch):
@@ -227,7 +228,7 @@ def test_policy_loop_excludes_file_only_candidates_from_model_selection(tmp_path
 
 
 def test_policy_loop_materializes_only_selected_lazy_proposal(tmp_path, monkeypatch):
-    provider = _DualValueProvider(["expand_edge:patch_one", "stop_signal"], value=0.7)
+    provider = _DualValueProvider(["expand_edge:patch_one", "stop_signal"], value=0.4)
     _install_policy_package(monkeypatch, "sunpack_policy_test_dual_lazy_expand", provider)
     source = tmp_path / "source.zip"
     source.write_bytes(b"broken")
@@ -336,6 +337,128 @@ def test_policy_loop_failed_lazy_materialization_exhausts_edge_and_continues(tmp
     assert "policy selected a proposal that did not materialize to repaired_state" in result.warnings
 
 
+def test_policy_step_mode_executes_one_expand_and_returns(tmp_path, monkeypatch):
+    provider = _DualValueProvider(["expand_edge:patch_one", "expand_edge:patch_two"], value=0.7)
+    _install_policy_package(monkeypatch, "sunpack_policy_test_step_once", provider)
+    source = tmp_path / "source.zip"
+    source.write_bytes(b"broken")
+    calls = {"evaluate": 0}
+
+    def recovery(self, job, state, **kwargs):
+        calls["evaluate"] += 1
+        return PolicyRecoverySnapshot(
+            state_digest=state.effective_patch_digest() if state is not None else "",
+            patch_depth=state.patch_depth() if state is not None else 0,
+            score=0.0,
+            status="empty",
+        )
+
+    monkeypatch.setattr("sunpack.repair.scheduler.RecoveryEvaluator.evaluate_state", recovery)
+    scheduler = RepairScheduler({
+        "repair": {
+            "workspace": str(tmp_path / "repair"),
+            "policy": {"provider_package": "sunpack_policy_test_step_once", "step_mode": True},
+            "max_repair_rounds_per_task": 5,
+        }
+    })
+    scheduler.generate_policy_repair_candidates = lambda job, **kwargs: RepairCandidateBatch(  # type: ignore[method-assign]
+        candidates=[_patch_candidate("patch_one", source, b"one"), _patch_candidate("patch_two", source, b"two")],
+        diagnosis={"format": "zip", "confidence": 0.5},
+    )
+
+    result = scheduler.repair(_job(tmp_path))
+
+    assert result.ok is True
+    assert result.module_name == "patch_one"
+    assert result.repaired_state is not None
+    assert ArchiveStateByteView(result.repaired_state).to_bytes().endswith(b"one")
+    assert result.diagnosis["policy_loop"]["step_mode"] is True
+    assert result.diagnosis["policy_loop"]["graph_summary"]["expansion_count"] == 1
+    assert calls["evaluate"] <= 2
+
+
+def test_policy_step_mode_failed_materialization_returns_empty_patch_node(tmp_path, monkeypatch):
+    provider = _DualValueProvider(["expand_edge:bad_lazy"], value=0.7)
+    _install_policy_package(monkeypatch, "sunpack_policy_test_step_empty_patch", provider)
+    bad = RepairCandidate(
+        module_name="bad_lazy",
+        format="zip",
+        confidence=0.9,
+        actions=["plan_repair", "bad_lazy"],
+        materializer=lambda: [],
+        materialized=False,
+        diagnosis={"repair_name": "bad_lazy"},
+    )
+
+    monkeypatch.setattr(
+        "sunpack.repair.scheduler.RecoveryEvaluator.evaluate_state",
+        lambda self, job, state, **kwargs: PolicyRecoverySnapshot(
+            state_digest=state.effective_patch_digest() if state is not None else "",
+            patch_depth=state.patch_depth() if state is not None else 0,
+            score=0.0,
+            status="empty",
+        ),
+    )
+    scheduler = RepairScheduler({
+        "repair": {
+            "workspace": str(tmp_path / "repair"),
+            "policy": {"provider_package": "sunpack_policy_test_step_empty_patch", "step_mode": True},
+            "max_repair_rounds_per_task": 5,
+        }
+    })
+    scheduler.generate_policy_repair_candidates = lambda job, **kwargs: RepairCandidateBatch(  # type: ignore[method-assign]
+        candidates=[bad],
+        diagnosis={"format": "zip", "confidence": 0.5},
+    )
+
+    result = scheduler.repair(_job(tmp_path))
+
+    loop = result.diagnosis["policy_loop"]
+    assert result.ok is True
+    assert result.status == "partial"
+    assert result.repaired_state is not None
+    assert result.repaired_state.patch_depth() == 1
+    assert loop["graph_operation"]["patch_status"] == "empty_failed"
+    assert loop["graph_summary"]["edge_status_counts"]["expanded_failed"] == 1
+
+
+def test_policy_step_stop_signal_requires_absolute_advantage():
+    graph = PolicyExplorationGraph(
+        nodes={"root": PolicyGraphNode(node_id="root", recovery={"score": 0.4})},
+        edges={"e1": PolicyGraphEdge(edge_id="e1", from_node_id="root", candidate_id="c1", module_name="zip_fix")},
+        current_node_id="root",
+        best_node_id="root",
+        frontier=["e1"],
+    )
+    close_stop = [
+        GraphActionPrior(action_type="stop_signal", prior_score=0.8, confidence=0.9, reason="too_close"),
+        GraphActionPrior(action_type="expand_edge", edge_id="e1", candidate_id="c1", prior_score=0.7, confidence=0.9),
+    ]
+    dominant_stop = [
+        GraphActionPrior(action_type="stop_signal", prior_score=1.0, confidence=0.95, reason="dominant"),
+        GraphActionPrior(action_type="expand_edge", edge_id="e1", candidate_id="c1", prior_score=0.2, confidence=0.9),
+    ]
+
+    keep_going = _policy_step_decide_action(
+        graph,
+        close_stop,
+        stop_readiness={"should_force_stop": False},
+        state_value={"reachable_recovery_value": 0.4},
+        policy_config={},
+    )
+    stop = _policy_step_decide_action(
+        graph,
+        dominant_stop,
+        stop_readiness={"should_force_stop": False},
+        state_value={"reachable_recovery_value": 0.4},
+        policy_config={},
+    )
+
+    assert keep_going.action == "expand"
+    assert stop.action == "finish"
+    assert stop.reason == "dominant"
+
+
 def test_dual_policy_loop_apply_then_undo_checkouts_parent_without_dropping_best(tmp_path, monkeypatch):
     _install_policy_package(monkeypatch, "sunpack_policy_test_dual_checkout", _DualProvider(["expand_edge:patch_one", "checkout_node", "checkout_node"]))
     source = tmp_path / "source.zip"
@@ -361,29 +484,29 @@ def test_dual_policy_loop_apply_then_undo_checkouts_parent_without_dropping_best
     assert result.diagnosis["policy_loop"]["graph_summary"]["node_count"] == 2
 
 
-def test_dual_policy_loop_exhaust_branch(tmp_path, monkeypatch):
-    _install_policy_package(monkeypatch, "sunpack_policy_test_dual_exhaust", _DualProvider(["exhaust_branch"]))
+def test_dual_policy_loop_stop_signal_finishes(tmp_path, monkeypatch):
+    _install_policy_package(monkeypatch, "sunpack_policy_test_dual_stop_empty", _DualProvider(["stop_signal"]))
     scheduler = RepairScheduler({
         "repair": {
             "workspace": str(tmp_path / "repair"),
-            "policy": {"provider_package": "sunpack_policy_test_dual_exhaust"},
+            "policy": {"provider_package": "sunpack_policy_test_dual_stop_empty"},
         }
     })
     scheduler.generate_policy_repair_candidates = lambda job, **kwargs: RepairCandidateBatch(candidates=[], diagnosis={"format": "zip", "confidence": 0.5})  # type: ignore[method-assign]
 
     result = scheduler.repair(_job(tmp_path))
 
-    assert result.status == "skipped"
+    assert result.status == "partial"
     assert result.module_name == "policy_finish"
-    assert result.diagnosis["policy_loop"]["terminal_action"] == "finish"
+    assert result.diagnosis["policy_loop"]["terminal_action"] == "stop"
     assert result.diagnosis["policy_loop"]["final_state_selection"] == "best_seen_graph_node"
 
 
-def test_dual_policy_loop_exhaust_checkouts_remaining_frontier(tmp_path, monkeypatch):
+def test_dual_policy_loop_checkout_reaches_remaining_frontier(tmp_path, monkeypatch):
     _install_policy_package(
         monkeypatch,
-        "sunpack_policy_test_dual_exhaust_frontier",
-        _DualProvider(["expand_edge:patch_one", "exhaust_branch", "expand_edge:patch_alt", "exhaust_branch"]),
+        "sunpack_policy_test_dual_checkout_frontier",
+        _DualProvider(["expand_edge:patch_one", "checkout_node", "expand_edge:patch_alt", "stop_signal"]),
     )
     source = tmp_path / "source.zip"
     source.write_bytes(b"broken")
@@ -423,7 +546,7 @@ def test_dual_policy_loop_exhaust_checkouts_remaining_frontier(tmp_path, monkeyp
     scheduler = RepairScheduler({
         "repair": {
             "workspace": str(tmp_path / "repair"),
-            "policy": {"provider_package": "sunpack_policy_test_dual_exhaust_frontier"},
+            "policy": {"provider_package": "sunpack_policy_test_dual_checkout_frontier"},
             "max_repair_rounds_per_task": 4,
         }
     })
@@ -435,15 +558,15 @@ def test_dual_policy_loop_exhaust_checkouts_remaining_frontier(tmp_path, monkeyp
     assert result.repaired_state is not None
     assert ArchiveStateByteView(result.repaired_state).to_bytes().endswith(b"alt")
     assert loop["graph_summary"]["node_count"] == 3
-    assert any(item["graph_action"]["action"] == "exhaust" for item in loop["rounds"])
+    assert any(item["graph_action"]["action"] == "checkout" for item in loop["rounds"])
     assert loop["final_state_selection"] == "best_seen_graph_node"
 
 
-def test_dual_policy_loop_exhaust_returns_best_seen_state(tmp_path, monkeypatch):
+def test_dual_policy_loop_stop_signal_returns_best_seen_state(tmp_path, monkeypatch):
     _install_policy_package(
         monkeypatch,
-        "sunpack_policy_test_dual_exhaust_best_seen",
-        _DualProvider(["expand_edge:patch_one", "expand_edge:patch_two", "exhaust_branch"]),
+        "sunpack_policy_test_dual_stop_best_seen",
+        _DualProvider(["expand_edge:patch_one", "expand_edge:patch_two", "stop_signal"]),
     )
     source = tmp_path / "source.zip"
     source.write_bytes(b"broken")
@@ -476,7 +599,7 @@ def test_dual_policy_loop_exhaust_returns_best_seen_state(tmp_path, monkeypatch)
     scheduler = RepairScheduler({
         "repair": {
             "workspace": str(tmp_path / "repair"),
-            "policy": {"provider_package": "sunpack_policy_test_dual_exhaust_best_seen"},
+            "policy": {"provider_package": "sunpack_policy_test_dual_stop_best_seen"},
             "max_repair_rounds_per_task": 3,
         }
     })
@@ -488,7 +611,7 @@ def test_dual_policy_loop_exhaust_returns_best_seen_state(tmp_path, monkeypatch)
     assert result.repaired_state is not None
     assert result.repaired_state.patch_depth() == 1
     loop = result.diagnosis["policy_loop"]
-    assert loop["terminal_action"] == "finish"
+    assert loop["terminal_action"] == "stop"
     assert loop["terminal_patch_depth"] == 2
     assert loop["patch_depth"] == 1
     assert loop["final_state_selection"] == "best_seen_graph_node"
@@ -573,7 +696,7 @@ def test_policy_loop_stop_plateau_requires_recent_window_without_best_state():
         current_recovery=recovery,
         config=config,
     )
-    assert _policy_loop_stop_plateau_satisfied(
+    assert not _policy_loop_stop_plateau_satisfied(
         round_index=2,
         max_rounds=6,
         best_round_index=2,
@@ -896,7 +1019,7 @@ class _DualProvider:
         }
 
     def choose_graph_action(self, request):
-        step = self.actions[min(max(0, request.round_index - 1), len(self.actions) - 1)] if self.actions else "exhaust_branch"
+        step = self.actions[min(max(0, request.round_index - 1), len(self.actions) - 1)] if self.actions else "stop_signal"
         action, _, module = step.partition(":")
         if action == "expand_edge":
             for payload in request.candidate_payloads:
@@ -905,7 +1028,7 @@ class _DualProvider:
             for edge in request.frontier:
                 if module == edge.get("module_name"):
                     return {"graph_action_priors": [{"action_type": action, "candidate_id": edge["candidate_id"], "edge_id": edge["edge_id"], "prior_score": 1.0, "confidence": 1.0}]}
-            return {"graph_action_priors": [{"action_type": "exhaust_branch", "prior_score": 1.0, "reason": "missing_scripted_candidate"}]}
+            return {"graph_action_priors": [{"action_type": "stop_signal", "prior_score": 1.0, "reason": "missing_scripted_candidate"}]}
         if action == "checkout_node":
             graph = request.graph if isinstance(request.graph, dict) else {}
             nodes = graph.get("nodes") if isinstance(graph.get("nodes"), dict) else {}
@@ -950,7 +1073,7 @@ class _RawDamageScoreProvider:
         }
 
     def choose_graph_action(self, request):
-        return {"graph_action_priors": [{"action_type": "exhaust_branch", "prior_score": 1.0}]}
+        return {"graph_action_priors": [{"action_type": "stop_signal", "prior_score": 1.0}]}
 
 
 class _StateValueProvider:

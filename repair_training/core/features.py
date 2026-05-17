@@ -308,7 +308,6 @@ def _candidate_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "module_family_counts": families,
         "has_checkout_action": any(str(row.get("action_type") or "") == "checkout_node" for row in rows),
         "has_stop_signal": any(str(row.get("action_type") or "") == "stop_signal" for row in rows),
-        "has_exhaust_branch": any(str(row.get("action_type") or "") == "exhaust_branch" for row in rows),
     }
 
 
