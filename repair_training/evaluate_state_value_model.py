@@ -21,7 +21,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.limit and args.limit > 0:
         rows = rows[: args.limit]
     schema = _read_json(model_dir / "feature_schema.json")
-    x, y = transform_rows(rows, schema=schema, plugin=plugin, model_type="state_value")
+    x, y = transform_rows(rows, schema=schema, plugin=plugin, model_type="graph_state_value")
     scores = _predict(model_dir, x)
     report = _metrics(scores, y)
     report.update({

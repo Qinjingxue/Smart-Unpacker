@@ -18,8 +18,8 @@ def main(argv: list[str] | None = None) -> int:
     default_input = {
         "normal_structure": "normal_structure_queries.jsonl",
         "damage_location": "damage_rows.jsonl",
-        "repair_action": "action_policy_rows.jsonl",
-        "state_value": "state_value_rows.jsonl",
+        "graph_action": "action_policy_rows.jsonl",
+        "graph_state_value": "state_value_rows.jsonl",
     }.get(model_type, "")
     input_path = Path(args.input) if args.input else run_dir / "datasets" / default_input
     if model_type == "normal_structure" and not input_path.is_file() and not args.input:
@@ -35,7 +35,7 @@ def main(argv: list[str] | None = None) -> int:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Build dual-model LightGBM feature matrices.")
     parser.add_argument("--format", default="zip")
-    parser.add_argument("--model", choices=["damage_analysis", "damage_location", "normal_structure", "repair_action", "state_value"], required=True)
+    parser.add_argument("--model", choices=["damage_analysis", "damage_location", "normal_structure", "graph_action", "graph_state_value"], required=True)
     parser.add_argument("--run-dir", required=True)
     parser.add_argument("--input", default="")
     parser.add_argument("--output-dir", default="")

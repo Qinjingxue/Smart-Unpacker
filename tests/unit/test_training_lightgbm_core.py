@@ -60,7 +60,7 @@ def test_zip_plugin_declares_rich_labels_and_module_families():
     assert zip_module_family("zip_local_header_partial_scan") == "salvage"
     assert zip_module_family("zip_resolve_duplicate_entries") == "conflict"
     assert zip_module_family("zip_rebuild_cd_preserve_raw_names") == "naming"
-    assert zip_module_family("undo_patch") == "control_undo"
+    assert zip_module_family("checkout_node") == "zip_other"
     assert zip_module_family("unknown_zip_module") == "zip_other"
 
 
@@ -88,62 +88,59 @@ def test_zip_postprocess_damage_prediction_routes_and_fallback():
 
 
 def test_zip_action_label_control_heuristics():
-    assert _zip_label({"action_type": "apply_patch", "long_term_value": 1.0, "is_best_action": True}) >= 24
-    assert _zip_label({"action_type": "stop", "long_term_value": 0.1, "current_recovery": {"score": 0.97}}) >= 28
-    assert _zip_label({"action_type": "undo_patch", "long_term_value": 0.0, "current_recovery": {"score": 0.1}, "next_recovery": {"score": 0.8}}) >= 22
-    assert _zip_label({"action_type": "give_up", "long_term_value": 1.0, "current_recovery": {"score": 0.4}}) <= 3
+    assert _zip_label({"action_type": "expand_edge", "long_term_value": 1.0, "is_best_action": True}) >= 24
+    assert _zip_label({"action_type": "stop_signal", "long_term_value": 0.1, "current_recovery": {"score": 0.97}}) >= 28
+    assert _zip_label({"action_type": "checkout_node", "long_term_value": 0.0, "current_recovery": {"score": 0.1}}) >= 14
+    assert _zip_label({"action_type": "exhaust_branch", "long_term_value": 1.0, "current_recovery": {"score": 0.4}}) <= 8
     assert _zip_label({
-        "action_type": "stop",
+        "action_type": "stop_signal",
         "current_recovery": {"score": 0.77},
         "state_value": {"reachable_recovery_value": 0.79},
         "long_term_value": 0.0,
     }) <= 8
     assert _zip_label({
-        "action_type": "stop",
+        "action_type": "stop_signal",
         "current_recovery": {"score": 0.2},
         "state_value": {"reachable_recovery_value": 0.8},
         "long_term_value": 1.0,
     }) <= 8
     assert _zip_label({
-        "action_type": "give_up",
+        "action_type": "exhaust_branch",
         "current_recovery": {"score": 0.0},
         "state_value": {"reachable_recovery_value": 0.03},
         "long_term_value": 0.0,
     }) >= 18
     assert _zip_label({
-        "action_type": "apply_patch",
+        "action_type": "expand_edge",
         "current_recovery": {"score": 0.2},
-        "next_recovery": {"score": 0.78},
+        "candidate_snapshot": {"validation_summary": {"accepted": True}},
         "state_value": {"reachable_recovery_value": 0.8},
         "long_term_value": 0.0,
-    }) >= 30
+    }) >= 18
     assert _zip_label({
-        "action_type": "undo_patch",
+        "action_type": "checkout_node",
         "current_recovery": {"score": 0.2},
-        "next_recovery": {"score": 0.7},
         "state_value": {"reachable_recovery_value": 0.25},
         "parent_state_value": {"reachable_recovery_value": 0.75},
         "long_term_value": 0.0,
-    }) >= 22
+    }) >= 14
     assert _zip_label({
-        "action_type": "stop",
+        "action_type": "stop_signal",
         "current_recovery": {"score": 0.0},
         "state_value": {"reachable_recovery_value": 0.3},
         "long_term_value": 1.0,
     }) <= 8
     assert _zip_label({
-        "action_type": "apply_patch",
+        "action_type": "expand_edge",
         "candidate_snapshot": {"module_name": "zip_partial_salvage_missing_volume"},
         "current_recovery": {"score": 0.0},
-        "next_recovery": {"score": 0.0},
         "state_value": {"reachable_recovery_value": 0.3},
         "long_term_value": -0.2,
     }) >= 18
     assert _zip_label({
-        "action_type": "apply_patch",
+        "action_type": "expand_edge",
         "candidate_snapshot": {"module_name": "zip_fix_cd_offset", "validation_summary": {"accepted": True}},
         "current_recovery": {"score": 0.0},
-        "next_recovery": {"score": 0.0},
         "state_value": {"reachable_recovery_value": 0.3},
         "long_term_value": -0.2,
     }) >= 14
@@ -153,13 +150,13 @@ def test_build_features_writes_npz_and_schema(tmp_path):
     run_dir = _write_fake_run(tmp_path)
 
     assert build_features_main(["--format", "zip", "--model", "damage_analysis", "--run-dir", str(run_dir)]) == 0
-    assert build_features_main(["--format", "zip", "--model", "repair_action", "--run-dir", str(run_dir)]) == 0
+    assert build_features_main(["--format", "zip", "--model", "graph_action", "--run-dir", str(run_dir)]) == 0
 
     assert (run_dir / "features" / "damage_analysis" / "train.npz").is_file()
     assert (run_dir / "features" / "damage_analysis" / "feature_schema.json").is_file()
-    assert (run_dir / "features" / "repair_action" / "train.npz").is_file()
-    assert (run_dir / "features" / "repair_action" / "group_train.txt").is_file()
-    schema = load_feature_schema(run_dir / "features" / "repair_action" / "feature_schema.json")
+    assert (run_dir / "features" / "graph_action" / "train.npz").is_file()
+    assert (run_dir / "features" / "graph_action" / "group_train.txt").is_file()
+    schema = load_feature_schema(run_dir / "features" / "graph_action" / "feature_schema.json")
     assert "candidate_snapshot.module_family" in schema["categorical_features"]
     assert not any(
         name.startswith(("next_recovery", "recovery_delta"))
@@ -180,15 +177,15 @@ def test_lightgbm_training_writes_model_artifacts(tmp_path):
     pytest.importorskip("lightgbm")
     run_dir = _write_fake_run(tmp_path)
     build_features_main(["--format", "zip", "--model", "damage_analysis", "--run-dir", str(run_dir)])
-    build_features_main(["--format", "zip", "--model", "repair_action", "--run-dir", str(run_dir)])
+    build_features_main(["--format", "zip", "--model", "graph_action", "--run-dir", str(run_dir)])
 
     assert train_main(["--format", "zip", "--model", "damage_analysis", "--run-dir", str(run_dir)]) == 0
-    assert train_main(["--format", "zip", "--model", "repair_action", "--run-dir", str(run_dir)]) == 0
+    assert train_main(["--format", "zip", "--model", "graph_action", "--run-dir", str(run_dir)]) == 0
 
     assert (run_dir / "models" / "damage_analysis" / "models.json").is_file()
     assert (run_dir / "models" / "damage_analysis" / "model_card.json").is_file()
-    assert (run_dir / "models" / "repair_action" / "model.txt").is_file()
-    assert (run_dir / "models" / "repair_action" / "model_card.json").is_file()
+    assert (run_dir / "models" / "graph_action" / "model.txt").is_file()
+    assert (run_dir / "models" / "graph_action" / "model_card.json").is_file()
 
 
 def test_zip_normal_query_builder_outputs_query_rows_without_raw_paths():
@@ -463,9 +460,9 @@ def _write_fake_run(tmp_path: Path) -> Path:
             },
         })
         for action_type, candidate_id, value in (
-            ("apply_patch", f"cand{index}", 1.0 if index % 2 == 0 else 0.2),
-            ("stop", "", 0.1),
-            ("give_up", "", 0.0),
+            ("expand_edge", f"cand{index}", 1.0 if index % 2 == 0 else 0.2),
+            ("stop_signal", "", 0.1),
+            ("exhaust_branch", "", 0.0),
         ):
             action_rows.append({
                 "episode_id": episode,
@@ -487,10 +484,14 @@ def _write_fake_run(tmp_path: Path) -> Path:
                 },
                 "damage_analysis_target": {"damage_families": [family], "route_hints": []},
                 "current_recovery": {"score": 0.0, "status": "empty", "decision_hint": "repair"},
-                "next_recovery": {"score": value, "status": "partial", "decision_hint": "repair"},
-                "recovery_delta": value,
-                "policy_prior_label": 28 if action_type == "apply_patch" else 4,
-                "is_best_action": action_type == "apply_patch",
+                "node_id": f"node:{index}",
+                "parent_node_id": "",
+                "frontier_edge_id": f"edge:{index}" if candidate_id else "",
+                "graph_action": {"action_type": action_type, "edge_id": f"edge:{index}" if candidate_id else ""},
+                "graph_best_node_id": f"node:{index}",
+                "branch_status": "active",
+                "policy_prior_label": 28 if action_type == "expand_edge" else 4,
+                "is_best_action": action_type == "expand_edge",
             })
         value_rows.append({
             "episode_id": episode,
@@ -503,7 +504,9 @@ def _write_fake_run(tmp_path: Path) -> Path:
             "best_seen_recovery": {"score": 0.0},
             "parent_recovery": {"score": 0.0},
             "repair_history": {},
-            "candidate_summary": {"candidate_count": 1, "has_candidate": True, "max_candidate_recovery": 1.0 if index % 2 == 0 else 0.2},
+            "graph_summary": {"node_count": 1, "edge_count": 1, "frontier_count": 1, "best_recovery": 0.0},
+            "frontier_summary": {"frontier_count": 1, "module_count": 1, "top_prior": 1.0 if index % 2 == 0 else 0.2},
+            "branch_status": "active",
             "reachable_recovery_value": 1.0 if index % 2 == 0 else 0.5,
         })
     _write_jsonl(datasets / "damage_rows.jsonl", damage_rows)
@@ -519,18 +522,18 @@ def test_state_value_rows_are_written_by_run_fixture(tmp_path):
 
     assert len(value_rows) == 8
     assert all(0.0 <= row["reachable_recovery_value"] <= 1.0 for row in value_rows)
-    assert all("candidate_summary" in row for row in value_rows)
-    assert any(row["candidate_summary"]["candidate_count"] == 1 for row in value_rows)
+    assert all("frontier_summary" in row for row in value_rows)
+    assert any(row["frontier_summary"]["frontier_count"] == 1 for row in value_rows)
 
 
 def test_build_features_and_train_state_value(tmp_path):
     pytest.importorskip("lightgbm")
     run_dir = _write_fake_run(tmp_path)
 
-    assert build_features_main(["--format", "zip", "--model", "state_value", "--run-dir", str(run_dir)]) == 0
-    schema = load_feature_schema(run_dir / "features" / "state_value" / "feature_schema.json")
+    assert build_features_main(["--format", "zip", "--model", "graph_state_value", "--run-dir", str(run_dir)]) == 0
+    schema = load_feature_schema(run_dir / "features" / "graph_state_value" / "feature_schema.json")
     assert "current_recovery.score" in schema["feature_names"]
-    assert "candidate_summary.candidate_count" in schema["feature_names"]
+    assert "frontier_summary.frontier_count" in schema["feature_names"]
     assert not any(
         "path" in name
         or "patch_digest" in name
@@ -540,10 +543,10 @@ def test_build_features_and_train_state_value(tmp_path):
         for name in schema["feature_names"]
     )
 
-    assert train_main(["--format", "zip", "--model", "state_value", "--run-dir", str(run_dir)]) == 0
-    metrics = json.loads((run_dir / "models" / "state_value" / "metrics.json").read_text(encoding="utf-8"))
+    assert train_main(["--format", "zip", "--model", "graph_state_value", "--run-dir", str(run_dir)]) == 0
+    metrics = json.loads((run_dir / "models" / "graph_state_value" / "metrics.json").read_text(encoding="utf-8"))
     assert "mae" in metrics
-    assert (run_dir / "models" / "state_value" / "model.txt").is_file()
+    assert (run_dir / "models" / "graph_state_value" / "model.txt").is_file()
 
 
 def _normal_query_graph() -> dict:

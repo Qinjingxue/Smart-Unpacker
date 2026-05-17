@@ -124,7 +124,6 @@ def label_episode_values(
             action_type = str(action.get("action_type") or "")
             candidate_id = str(action.get("candidate_id") or "")
             current_recovery = _compact_action_recovery(_recovery_snapshot(edge.verification_before))
-            next_recovery = _compact_action_recovery(_recovery_snapshot(edge.verification_after))
             damage_analysis = _damage_analysis_for_edge(edge, fallback_target=state_damage_target, fallback_candidates=state_candidate_snapshots)
             action_rows.append({
                 "episode_id": episode.episode_id,
@@ -139,9 +138,7 @@ def label_episode_values(
                 "damage_analysis_target": {},
                 "damage_analysis": damage_analysis,
                 "current_recovery": current_recovery,
-                "next_recovery": next_recovery,
-                "recovery_delta": float(edge.verification_after.score or 0.0) - float(edge.verification_before.score or 0.0),
-                "score_source": str((next_recovery.get("metadata") or {}).get("score_source") or (current_recovery.get("metadata") or {}).get("score_source") or ""),
+                "score_source": str((current_recovery.get("metadata") or {}).get("score_source") or ""),
                 "immediate_reward": _immediate_reward(edge, step_cost=step_cost),
                 "long_term_value": score,
                 "policy_prior_label": _policy_prior_label(edge, action_type=action_type, is_best=index == best_index),
@@ -151,6 +148,12 @@ def label_episode_values(
                 "regret": best_score - score,
                 "next_state_digest": edge.next_state_digest,
                 "terminal": bool(edge.terminal),
+                "node_id": edge.node_id,
+                "parent_node_id": edge.parent_node_id,
+                "frontier_edge_id": edge.frontier_edge_id,
+                "graph_action": dict(edge.graph_action or {}),
+                "graph_best_node_id": edge.graph_best_node_id,
+                "branch_status": edge.branch_status,
             })
         if state_digest not in damage_seen:
             first = edges[0]
@@ -180,9 +183,9 @@ def _q_value(
 ) -> float:
     action = edge.selected_action.action_type if edge.selected_action is not None else ""
     current_score = float(edge.verification_before.score or 0.0)
-    if action == "stop":
+    if action == "stop_signal":
         return current_score - step_cost
-    if action == "give_up":
+    if action == "exhaust_branch":
         return max(current_score, float(graph_best_value or 0.0)) - step_cost
     if edge.next_state_digest and edge.next_state_digest in visiting:
         return repeat_penalty
@@ -193,9 +196,9 @@ def _immediate_reward(edge: TrainingTransition, *, step_cost: float) -> float:
     action = edge.selected_action.action_type if edge.selected_action is not None else ""
     current_score = float(edge.verification_before.score or 0.0)
     next_score = float(edge.verification_after.score or 0.0)
-    if action == "undo_patch":
+    if action == "checkout_node":
         return next_score - current_score - (step_cost * 0.5)
-    if action == "apply_patch":
+    if action == "expand_edge":
         return next_score - current_score - step_cost
     return 0.0
 
@@ -254,7 +257,7 @@ def _policy_prior_label(edge: TrainingTransition, *, action_type: str, is_best: 
     improvement = next_score - current
     if is_best:
         return 30
-    if action_type == "apply_patch":
+    if action_type == "expand_edge":
         if improvement > 0.20:
             return 28
         if improvement > 0.05:
@@ -262,11 +265,11 @@ def _policy_prior_label(edge: TrainingTransition, *, action_type: str, is_best: 
         if improvement >= -0.01:
             return 14
         return 6
-    if action_type == "undo_patch":
+    if action_type == "checkout_node":
         return 18 if improvement > 0.02 else 8
-    if action_type == "stop":
+    if action_type == "stop_signal":
         return 24 if current >= 0.95 else 6
-    if action_type == "give_up":
+    if action_type == "exhaust_branch":
         return 16 if current <= 0.02 else 2
     return 0
 
@@ -361,6 +364,9 @@ def _state_value_rows_from_action_rows(rows: list[dict[str, Any]]) -> list[dict[
             "parent_recovery": base.get("parent_recovery") if isinstance(base.get("parent_recovery"), dict) else {},
             "repair_history": base.get("repair_history") if isinstance(base.get("repair_history"), dict) else {},
             "candidate_summary": _candidate_summary_from_action_rows(group),
+            "graph_summary": _graph_summary_from_action_rows(group),
+            "frontier_summary": _frontier_summary_from_action_rows(group),
+            "branch_status": str(base.get("branch_status") or ""),
             "reachable_recovery_value": max(float(row.get("state_value") or 0.0) for row in group),
         })
     return output
@@ -368,20 +374,36 @@ def _state_value_rows_from_action_rows(rows: list[dict[str, Any]]) -> list[dict[
 
 def _action_policy_row(row: dict[str, Any]) -> dict[str, Any]:
     output = dict(row)
-    for key in ("state_value", "value_gap", "long_term_value", "regret", "next_recovery", "recovery_delta", "score_source", "next_state_digest"):
+    for key in ("state_value", "value_gap", "long_term_value", "regret", "score_source", "next_state_digest"):
         output.pop(key, None)
     output["candidate_snapshot"] = _scrub_candidate_training_input(output.get("candidate_snapshot") or {})
     return output
 
 
 def _candidate_summary_from_action_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    apply_rows = [row for row in rows if str(row.get("action_type") or "") == "apply_patch"]
+    apply_rows = [row for row in rows if str(row.get("action_type") or "") == "expand_edge"]
     return {
         "candidate_count": len(apply_rows),
         "has_candidate": bool(apply_rows),
-        "has_undo_action": any(str(row.get("action_type") or "") == "undo_patch" for row in rows),
-        "has_stop_action": any(str(row.get("action_type") or "") == "stop" for row in rows),
-        "has_give_up_action": any(str(row.get("action_type") or "") == "give_up" for row in rows),
+        "has_checkout_action": any(str(row.get("action_type") or "") == "checkout_node" for row in rows),
+        "has_stop_signal": any(str(row.get("action_type") or "") == "stop_signal" for row in rows),
+        "has_exhaust_branch": any(str(row.get("action_type") or "") == "exhaust_branch" for row in rows),
+    }
+
+
+def _graph_summary_from_action_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    node_ids = {str(row.get("node_id") or "") for row in rows if row.get("node_id")}
+    return {
+        "node_count_seen": len(node_ids),
+        "has_parent": any(bool(row.get("parent_node_id")) for row in rows),
+    }
+
+
+def _frontier_summary_from_action_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    edge_ids = {str(row.get("frontier_edge_id") or "") for row in rows if row.get("frontier_edge_id")}
+    return {
+        "frontier_count": len(edge_ids),
+        "has_frontier": bool(edge_ids),
     }
 
 

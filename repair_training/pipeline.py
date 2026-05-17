@@ -97,7 +97,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--format", default="zip")
     parser.add_argument("--run-dir", default="")
     parser.add_argument("--run-name", default="")
-    parser.add_argument("--model", choices=["", "damage_analysis", "damage_location", "normal_structure", "state_value", "repair_action"], default="")
+    parser.add_argument("--model", choices=["", "damage_analysis", "damage_location", "normal_structure", "graph_state_value", "graph_action"], default="")
     parser.add_argument("--stage", default="features,train")
     parser.add_argument("--material-root", default=str(Path("repair_training") / "material"))
     parser.add_argument("--manifest", default="")
@@ -140,7 +140,7 @@ def _models(model: str) -> tuple[str, ...]:
         return ("normal_structure", "damage_location")
     if model:
         return (normalize_model_type(model),)
-    return ("normal_structure", "damage_location", "state_value", "repair_action")
+    return ("normal_structure", "damage_location", "graph_state_value", "graph_action")
 
 
 if __name__ == "__main__":

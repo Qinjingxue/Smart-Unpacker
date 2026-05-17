@@ -24,9 +24,9 @@ def build_feature_datasets(
     model_type = normalize_model_type(model_type)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    if model_type == "repair_action":
+    if model_type == "graph_action":
         rows = sort_for_groups(rows)
-    if model_type == "state_value":
+    if model_type == "graph_state_value":
         if not all("reachable_recovery_value" in row for row in rows):
             rows = state_value_rows(rows)
     splits = split_rows(rows)
@@ -40,17 +40,17 @@ def build_feature_datasets(
     schema["feature_schema_version"] = FEATURE_SCHEMA_VERSION
     schema["label_schema"] = label_schema
     write_json(output_dir / "feature_schema.json", schema)
-    write_json(output_dir / ("action_schema.json" if model_type == "repair_action" else "label_schema.json"), label_schema)
+    write_json(output_dir / ("action_schema.json" if model_type == "graph_action" else "label_schema.json"), label_schema)
     if model_type == "damage_location":
         write_json(output_dir / "observed_label_schema.json", {"labels": list(label_schema.get("labels") or []), "metadata": dict(label_schema.get("metadata", {}).get("observed") or {})})
         write_json(output_dir / "uncertain_label_schema.json", {"labels": list(label_schema.get("uncertain_labels") or []), "metadata": dict(label_schema.get("metadata", {}).get("uncertain") or {})})
     summary: dict[str, Any] = {"model_type": model_type, "format": plugin.format_name, "splits": {}}
     for split, split_rows_ in splits.items():
-        if model_type == "repair_action":
+        if model_type == "graph_action":
             split_rows_ = sort_for_groups(split_rows_)
         x, y = transform_rows(split_rows_, schema=schema, plugin=plugin, model_type=model_type)
         np.savez_compressed(output_dir / f"{split}.npz", X=x, y=y)
-        if model_type == "repair_action":
+        if model_type == "graph_action":
             groups = group_sizes(split_rows_, key_fn=action_query_id)
             (output_dir / f"group_{split}.txt").write_text("\n".join(str(item) for item in groups), encoding="utf-8")
         if model_type == "normal_structure":
@@ -97,7 +97,7 @@ def transform_rows(
     if model_type == "normal_structure":
         y = np.array([1.0 if _float(row.get("normal_label")) >= 0.5 else 0.0 for row in rows], dtype=np.float32)
         return x, y
-    if model_type == "state_value":
+    if model_type == "graph_state_value":
         y = np.array([_clamp01(_float(row.get("reachable_recovery_value"))) for row in rows], dtype=np.float32)
         return x, y
     y = np.array([action_label(plugin, row) for row in rows], dtype=np.float32)
@@ -107,7 +107,7 @@ def transform_rows(
 def feature_spec(plugin: TrainingFormatPlugin, model_type: str) -> TrainingFeatureSpec:
     model_type = normalize_model_type(model_type)
     raw = plugin.damage_feature_spec() if model_type == "damage_location" and plugin.damage_feature_spec else None
-    if raw is None and model_type == "repair_action" and plugin.action_feature_spec:
+    if raw is None and model_type == "graph_action" and plugin.action_feature_spec:
         raw = plugin.action_feature_spec()
     if isinstance(raw, TrainingFeatureSpec):
         return raw
@@ -119,7 +119,7 @@ def feature_spec(plugin: TrainingFormatPlugin, model_type: str) -> TrainingFeatu
             ignore_prefixes=tuple(raw.get("ignore_prefixes") or ()),
             ignore_paths=tuple(raw.get("ignore_paths") or ()),
         )
-    if model_type == "state_value":
+    if model_type == "graph_state_value":
         raw = plugin.state_value_feature_spec() if plugin.state_value_feature_spec else None
         if isinstance(raw, TrainingFeatureSpec):
             return raw
@@ -167,7 +167,7 @@ def feature_spec(plugin: TrainingFormatPlugin, model_type: str) -> TrainingFeatu
                 "features.violation_severity",
             ),
         )
-    if model_type == "state_value":
+    if model_type == "graph_state_value":
         return TrainingFeatureSpec(
             include_prefixes=(
                 "format",
@@ -179,6 +179,9 @@ def feature_spec(plugin: TrainingFormatPlugin, model_type: str) -> TrainingFeatu
                 "parent_recovery.",
                 "repair_history.",
                 "candidate_summary.",
+                "graph_summary.",
+                "frontier_summary.",
+                "branch_status",
             ),
             categorical_paths=(
                 "format",
@@ -186,6 +189,7 @@ def feature_spec(plugin: TrainingFormatPlugin, model_type: str) -> TrainingFeatu
                 "current_recovery.decision_hint",
                 "best_seen_recovery.status",
                 "parent_recovery.status",
+                "branch_status",
             ),
             ignore_prefixes=(
                 "current_recovery.state_digest",
@@ -197,14 +201,16 @@ def feature_spec(plugin: TrainingFormatPlugin, model_type: str) -> TrainingFeatu
             ),
         )
     return TrainingFeatureSpec(
-        include_prefixes=("action_type", "candidate_snapshot.", "damage_analysis.", "current_recovery."),
-        categorical_paths=("action_type", "candidate_snapshot.module_name", "candidate_snapshot.action_type"),
+        include_prefixes=("action_type", "candidate_snapshot.", "damage_analysis.", "current_recovery.", "branch_status", "graph_action."),
+        categorical_paths=("action_type", "candidate_snapshot.module_name", "candidate_snapshot.action_type", "branch_status", "graph_action.action_type"),
         ignore_prefixes=(
             "candidate_snapshot.candidate_id",
             "candidate_snapshot.patch_digest",
             "candidate_snapshot.metadata.recovery_",
             "candidate_snapshot.metadata.verification_summary",
             "candidate_snapshot.recovery_",
+            "graph_action.next_recovery",
+            "graph_action.recovery_delta",
         ),
     )
 
@@ -228,7 +234,7 @@ def labels_for_plugin(plugin: TrainingFormatPlugin, model_type: str) -> dict[str
                 "negative_label": 0,
             },
         }
-    if model_type == "state_value":
+    if model_type == "graph_state_value":
         return {
             "labels": ["reachable_recovery_value"],
             "metadata": {
@@ -237,7 +243,7 @@ def labels_for_plugin(plugin: TrainingFormatPlugin, model_type: str) -> dict[str
                 "range": [0.0, 1.0],
             },
         }
-    return {"labels": ["action_prior"], "metadata": {"kind": "ranking_action_prior", "target": "repair_experience_prior"}}
+    return {"labels": ["graph_action_prior"], "metadata": {"kind": "ranking_graph_action_prior", "target": "graph_experience_prior"}}
 
 
 def state_value_rows(action_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -265,13 +271,16 @@ def state_value_rows(action_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "parent_recovery": base.get("parent_recovery") if isinstance(base.get("parent_recovery"), dict) else {},
             "repair_history": base.get("repair_history") if isinstance(base.get("repair_history"), dict) else {},
             "candidate_summary": candidate_summary,
+            "graph_summary": base.get("graph_summary") if isinstance(base.get("graph_summary"), dict) else {},
+            "frontier_summary": base.get("frontier_summary") if isinstance(base.get("frontier_summary"), dict) else {},
+            "branch_status": str(base.get("branch_status") or ""),
             "reachable_recovery_value": value,
         })
     return rows
 
 
 def _candidate_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    apply_rows = [row for row in rows if str(row.get("action_type") or "") == "apply_patch"]
+    apply_rows = [row for row in rows if str(row.get("action_type") or "") == "expand_edge"]
     confidences = [_float((row.get("candidate_snapshot") or {}).get("confidence")) for row in apply_rows if isinstance(row.get("candidate_snapshot"), dict)]
     accepted = [
         bool(((row.get("candidate_snapshot") or {}).get("validation_summary") or {}).get("accepted"))
@@ -297,9 +306,9 @@ def _candidate_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "mean_confidence": sum(confidences) / max(1, len(confidences)),
         "module_counts": modules,
         "module_family_counts": families,
-        "has_undo_action": any(str(row.get("action_type") or "") == "undo_patch" for row in rows),
-        "has_stop_action": any(str(row.get("action_type") or "") == "stop" for row in rows),
-        "has_give_up_action": any(str(row.get("action_type") or "") == "give_up" for row in rows),
+        "has_checkout_action": any(str(row.get("action_type") or "") == "checkout_node" for row in rows),
+        "has_stop_signal": any(str(row.get("action_type") or "") == "stop_signal" for row in rows),
+        "has_exhaust_branch": any(str(row.get("action_type") or "") == "exhaust_branch" for row in rows),
     }
 
 
@@ -606,7 +615,7 @@ def _feature_row(row: dict[str, Any], *, model_type: str) -> dict[str, Any]:
             "entry_index_bucket": row.get("entry_index_bucket"),
             "features": row.get("features") if isinstance(row.get("features"), dict) else {},
         }
-    elif model_type == "state_value":
+    elif model_type == "graph_state_value":
         payload = {
             "format": row.get("format"),
             "round_index": row.get("round_index"),
@@ -617,6 +626,9 @@ def _feature_row(row: dict[str, Any], *, model_type: str) -> dict[str, Any]:
             "parent_recovery": row.get("parent_recovery") if isinstance(row.get("parent_recovery"), dict) else {},
             "repair_history": row.get("repair_history") if isinstance(row.get("repair_history"), dict) else {},
             "candidate_summary": row.get("candidate_summary") if isinstance(row.get("candidate_summary"), dict) else {},
+            "graph_summary": row.get("graph_summary") if isinstance(row.get("graph_summary"), dict) else {},
+            "frontier_summary": row.get("frontier_summary") if isinstance(row.get("frontier_summary"), dict) else {},
+            "branch_status": row.get("branch_status"),
         }
     else:
         payload = {
@@ -624,6 +636,8 @@ def _feature_row(row: dict[str, Any], *, model_type: str) -> dict[str, Any]:
             "candidate_snapshot": _scrub_candidate_training_input(row.get("candidate_snapshot") if isinstance(row.get("candidate_snapshot"), dict) else {}),
             "damage_analysis": row.get("damage_analysis") if isinstance(row.get("damage_analysis"), dict) else {},
             "current_recovery": row.get("current_recovery") if isinstance(row.get("current_recovery"), dict) else {},
+            "branch_status": row.get("branch_status"),
+            "graph_action": row.get("graph_action") if isinstance(row.get("graph_action"), dict) else {},
         }
     return flatten(payload)
 

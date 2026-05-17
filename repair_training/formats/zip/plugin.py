@@ -302,10 +302,13 @@ def state_value_feature_spec() -> TrainingFeatureSpec:
             "best_seen_recovery.",
             "parent_recovery.",
             "repair_history.",
-            "candidate_summary.",
+            "graph_summary.",
+            "frontier_summary.",
+            "branch_status",
         ),
         categorical_paths=(
             "format",
+            "branch_status",
             "current_recovery.status",
             "current_recovery.decision_hint",
             "current_recovery.metadata.score_source",
@@ -322,12 +325,14 @@ def state_value_feature_spec() -> TrainingFeatureSpec:
             "current_recovery.extraction.out_dir",
             "current_recovery.verification.files",
             "candidate_summary.patch_digest",
+            "graph_summary.node_ids",
+            "frontier_summary.edge_ids",
         ),
     )
 
 
 def lightgbm_params(model_type: str) -> dict[str, Any]:
-    if model_type == "repair_action":
+    if model_type == "graph_action":
         return {
             "objective": "lambdarank",
             "n_estimators": 80,
@@ -347,7 +352,7 @@ def lightgbm_params(model_type: str) -> dict[str, Any]:
             "subsample": 0.9,
             "colsample_bytree": 0.9,
         }
-    if model_type == "state_value":
+    if model_type == "graph_state_value":
         return {
             "objective": "regression",
             "n_estimators": 100,
@@ -373,26 +378,20 @@ def action_label(row: dict[str, Any]) -> int:
     if "policy_prior_label" in row:
         return int(max(0, min(31, round(_float(row.get("policy_prior_label"))))))
     current = _recovery_score(row.get("current_recovery"))
-    next_score = _recovery_score(row.get("next_recovery"))
-    improvement = next_score - current
     label = 8
     if row.get("is_best_action"):
         label = 28
-    if action == "give_up":
-        label = 18 if current <= 0.02 and not _is_recovery_candidate(row) else 2
-    elif action == "stop":
+    if action == "exhaust_branch":
+        label = 18 if current <= 0.02 and not _is_recovery_candidate(row) else 8
+    elif action == "stop_signal":
         label = 28 if current >= 0.95 else 6
-    elif action == "undo_patch":
-        label = 24 if improvement > 0.20 else (18 if improvement > 0.02 else 8)
-    elif action == "apply_patch":
+    elif action == "checkout_node":
+        label = max(label, 14)
+    elif action == "expand_edge":
         if _is_recovery_candidate(row):
             label = max(label, 18)
         if _is_salvage_or_rebuild_candidate(row):
             label = max(label, 20)
-        if improvement > 0.20:
-            label = max(label, 30)
-        elif improvement > 0.05:
-            label = max(label, 24)
     return int(max(0, min(31, label)))
 
 
@@ -587,12 +586,6 @@ class CounterProxy:
 
 def zip_module_family(module_name: str) -> str:
     module = str(module_name or "")
-    if module == "undo_patch":
-        return "control_undo"
-    if module == "stop":
-        return "control_stop"
-    if module == "give_up":
-        return "control_give_up"
     for family, modules in ZIP_MODULE_FAMILIES.items():
         if module in modules:
             return family

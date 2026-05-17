@@ -22,14 +22,13 @@ from sunpack.repair.pipeline.registry import discover_repair_modules, get_repair
 from sunpack.repair.policy import RepairPolicyManager
 from sunpack.repair.policy.training_runtime import (
     archive_state_for_job,
-    candidate_summaries_for_state,
     candidate_snapshot,
     recovery_score_from_job,
     runtime_context_from_job,
     state_source_input,
 )
 from sunpack.repair.policy.recovery_evaluator import PolicyRecoverySnapshot, RecoveryEvaluator
-from sunpack.repair.policy.types import PolicyExplorationGraph, PolicyGraphAction, PolicyGraphEdge, PolicyGraphNode, RepairActionDecision
+from sunpack.repair.policy.types import PolicyExplorationGraph, PolicyGraphAction, PolicyGraphEdge, PolicyGraphNode
 from sunpack.repair.result import RepairResult
 from sunpack.repair.runtime_cache import RepairRuntimeCache
 from sunpack.contracts.archive_knowledge import ArchiveKnowledge
@@ -285,7 +284,7 @@ class RepairScheduler:
                     history,
                     warnings,
                     reason="graph_current_node_missing",
-                    terminal_action="stop",
+                    terminal_action="finish",
                     recovery=best_recovery_snapshot,
                     current_state=current_state,
                     current_recovery=current_recovery,
@@ -365,15 +364,16 @@ class RepairScheduler:
                 )
                 for index, candidate in enumerate(selectable)
             ]
-            candidate_summaries = candidate_summaries_for_state(candidate_payloads)
             state_value, state_value_selection = self.policy_manager.estimate_state_value(
                 job=current_job,
                 archive_state=current_state,
                 damage_analysis=damage_analysis,
-                candidate_summaries=candidate_summaries,
                 current_recovery=current_recovery.to_dict(),
                 best_seen_recovery=best_recovery_snapshot.to_dict(),
                 parent_recovery=parent_recovery.to_dict(),
+                graph_summary=graph.summary(),
+                frontier_summary=_policy_graph_frontier_summary(graph),
+                branch_status=current_node.status,
                 diagnosis=diagnosis_payload,
                 round_index=round_index,
             )
@@ -384,39 +384,23 @@ class RepairScheduler:
                 "confidence": 0.0,
                 "metadata": {"decision_reason": "parent_state_value_fallback"},
             })
-            candidate_state_values = _estimate_candidate_state_values(
-                self.policy_manager,
-                current_job,
-                selectable,
-                candidate_payloads,
-                damage_analysis,
-                state_value_cache,
-                current_recovery.to_dict(),
-                best_recovery_snapshot.to_dict(),
-                parent_recovery.to_dict(),
-                diagnosis_payload,
-                round_index,
-                budget=_candidate_value_budget(self.config, round_index),
-            )
             _policy_graph_register_frontier(
                 graph,
                 current_node=current_node,
                 candidate_payloads=candidate_payloads,
-                candidate_state_values=candidate_state_values,
                 round_index=round_index,
             )
-            decision, action_selection = self.policy_manager.choose_action(
+            action_priors, action_selection = self.policy_manager.choose_graph_priors(
                 job=current_job,
                 archive_state=current_state,
-                candidates=selectable,
                 candidate_payloads=candidate_payloads,
+                graph=graph,
                 damage_analysis=damage_analysis,
                 current_recovery=current_recovery.to_dict(),
                 best_seen_recovery=best_recovery_snapshot.to_dict(),
                 parent_recovery=parent_recovery.to_dict(),
                 state_value=state_value,
                 parent_state_value=parent_state_value,
-                candidate_state_values=candidate_state_values,
                 diagnosis=diagnosis_payload,
                 round_index=round_index,
             )
@@ -436,7 +420,7 @@ class RepairScheduler:
             }
             graph_action, graph_selection = self.policy_manager.decide_graph_action(
                 graph=graph,
-                legacy_decision=decision,
+                action_priors=action_priors,
                 action_selection=action_selection,
                 events=graph_events,
                 current_recovery=current_recovery.to_dict(),
@@ -454,7 +438,6 @@ class RepairScheduler:
                 "graph_decision": graph_selection,
                 "damage_analysis": damage_analysis,
                 "state_value_result": state_value,
-                "candidate_state_values": candidate_state_values,
                 "value_gap": float(state_value.get("reachable_recovery_value") or 0.0) - float(current_recovery.score or 0.0),
                 "candidate_count": len(selectable),
                 "candidates": candidate_payloads,
@@ -479,15 +462,13 @@ class RepairScheduler:
                 "current_recovery": current_recovery.to_dict(),
                 "best_seen_recovery": best_recovery_snapshot.to_dict(),
                 "state_value": state_value,
-                "candidate_state_values": candidate_state_values,
                 "value_gap": float(state_value.get("reachable_recovery_value") or 0.0) - float(current_recovery.score or 0.0),
                 "candidates": candidate_payloads,
-                "action": action_selection,
                 "graph_action": graph_action.to_dict(),
                 "graph_summary": graph.summary(),
                 "frontier_top": _policy_graph_frontier_top(graph),
                 "stop_controller": graph_selection.get("stop_controller", {}),
-                "model_priors": graph_selection.get("legacy_action", action_selection),
+                "model_priors": graph_selection.get("model_priors", action_selection),
             })
 
             if graph_action.action == "finish":
@@ -498,8 +479,8 @@ class RepairScheduler:
                     last_selection,
                     history,
                     warnings,
-                    reason=graph_action.reason or decision.reason or "policy_finish",
-                    terminal_action=graph_action.terminal_action or decision.action,
+                    reason=graph_action.reason or "policy_finish",
+                    terminal_action=graph_action.terminal_action or "finish",
                     batch=last_batch,
                     recovery=best_recovery_snapshot,
                     current_state=current_state,
@@ -507,8 +488,6 @@ class RepairScheduler:
                 )
 
             if graph_action.action == "checkout":
-                if graph_action.metadata.get("exhaust_current"):
-                    current_node.status = "exhausted"
                 if graph_action.node_id in graph.nodes:
                     graph.current_node_id = graph_action.node_id
                     continue
@@ -521,7 +500,27 @@ class RepairScheduler:
                     history,
                     warnings,
                     reason="graph_checkout_target_missing",
-                    terminal_action="stop",
+                    terminal_action="finish",
+                    recovery=best_recovery_snapshot,
+                    current_state=current_state,
+                    current_recovery=current_recovery,
+                )
+
+            if graph_action.action == "exhaust":
+                current_node.status = "exhausted"
+                best_edge = _policy_graph_best_frontier_edge(graph)
+                if best_edge is not None:
+                    graph.current_node_id = best_edge.from_node_id
+                    continue
+                return _loop_graph_finish_result(
+                    current_job,
+                    graph,
+                    diagnosis_payload,
+                    last_selection,
+                    history,
+                    warnings,
+                    reason="frontier_empty_after_exhaust",
+                    terminal_action="finish",
                     recovery=best_recovery_snapshot,
                     current_state=current_state,
                     current_recovery=current_recovery,
@@ -537,7 +536,7 @@ class RepairScheduler:
                     history,
                     warnings,
                     reason="graph_action_unsupported",
-                    terminal_action="stop",
+                    terminal_action="finish",
                     recovery=best_recovery_snapshot,
                     current_state=current_state,
                     current_recovery=current_recovery,
@@ -614,7 +613,7 @@ class RepairScheduler:
             history,
             warnings,
             reason="max_expansions_reached",
-            terminal_action="stop",
+            terminal_action="finish",
             batch=last_batch,
             recovery=best_recovery_snapshot,
             current_state=current_state,
@@ -1930,7 +1929,6 @@ def _policy_graph_register_frontier(
     *,
     current_node: PolicyGraphNode,
     candidate_payloads: list[dict[str, Any]],
-    candidate_state_values: dict[str, dict[str, Any]],
     round_index: int,
 ) -> None:
     for payload in candidate_payloads:
@@ -1948,7 +1946,6 @@ def _policy_graph_register_frontier(
             from_node_id=current_node.node_id,
             candidate_id=candidate_id,
             module_name=str(payload.get("module_name") or payload.get("module") or ""),
-            candidate_value=dict(candidate_state_values.get(candidate_id) or {}),
             status="frontier",
             created_round=round_index,
         )
@@ -1958,26 +1955,13 @@ def _policy_graph_register_frontier(
 
 def _policy_graph_update_edge_priors(graph: PolicyExplorationGraph, action_selection: dict[str, Any]) -> None:
     priors: list[dict[str, Any]] = []
+    if isinstance(action_selection.get("model_priors"), list):
+        priors.extend(item for item in action_selection.get("model_priors", []) if isinstance(item, dict))
     if isinstance(action_selection.get("action_priors"), list):
         priors.extend(item for item in action_selection.get("action_priors", []) if isinstance(item, dict))
-    arbiter = action_selection.get("arbiter") if isinstance(action_selection.get("arbiter"), dict) else {}
-    if isinstance(arbiter.get("scores"), list):
-        priors.extend(item for item in arbiter.get("scores", []) if isinstance(item, dict))
-    selected_candidate_id = str(action_selection.get("selected_candidate_id") or "")
-    if selected_candidate_id:
-        priors.append({
-            "candidate_id": selected_candidate_id,
-            "action": action_selection.get("action") or action_selection.get("decision"),
-            "prior_score": action_selection.get("prior_score"),
-            "final_score": action_selection.get("final_score"),
-            "selected": True,
-        })
     for prior in priors:
-        candidate_id = str(prior.get("candidate_id") or "")
-        if not candidate_id:
-            continue
         for edge in graph.edges.values():
-            if edge.candidate_id == candidate_id and edge.status == "frontier":
+            if (str(prior.get("edge_id") or "") == edge.edge_id or str(prior.get("candidate_id") or "") == edge.candidate_id) and edge.status == "frontier":
                 merged = dict(edge.action_prior or {})
                 merged.update({key: value for key, value in prior.items() if value is not None})
                 edge.action_prior = merged
@@ -1990,7 +1974,6 @@ def _policy_graph_frontier_top(graph: PolicyExplorationGraph, *, limit: int = 5)
 
 def _policy_graph_edge_score(edge: PolicyGraphEdge) -> float:
     action_prior = edge.action_prior or {}
-    candidate_value = edge.candidate_value or {}
     for key in ("final_score", "arbiter_score", "prior_score"):
         try:
             value = action_prior.get(key)
@@ -1998,59 +1981,30 @@ def _policy_graph_edge_score(edge: PolicyGraphEdge) -> float:
                 return float(value)
         except (TypeError, ValueError):
             pass
-    try:
-        return float(candidate_value.get("reachable_recovery_value") or 0.0)
-    except (TypeError, ValueError):
-        return 0.0
+    return 0.0
 
 
-def _estimate_candidate_state_values(
-    policy_manager,
-    job: RepairJob,
-    candidates: list[RepairCandidate],
-    candidate_payloads: list[dict[str, Any]],
-    damage_analysis: dict[str, Any],
-    cache: dict[str, dict[str, Any]],
-    current_recovery: dict[str, Any],
-    best_seen_recovery: dict[str, Any],
-    parent_recovery: dict[str, Any],
-    diagnosis: dict[str, Any],
-    round_index: int,
-    *,
-    budget: int,
-) -> dict[str, dict[str, Any]]:
-    output: dict[str, dict[str, Any]] = {}
-    limit = max(0, int(budget or 0))
-    for candidate, payload in zip(candidates, candidate_payloads):
-        candidate_id = str(payload.get("candidate_id") or "")
-        state = candidate.repaired_state
-        if not candidate_id or state is None:
-            continue
-        digest = state.effective_patch_digest()
-        if digest in cache:
-            output[candidate_id] = dict(cache[digest])
-            continue
-        if len(output) >= limit:
-            output[candidate_id] = {
-                "reachable_recovery_value": float(current_recovery.get("score") or 0.0),
-                "confidence": 0.0,
-                "metadata": {"decision_reason": "candidate_value_budget_fallback"},
-            }
-            continue
-        value, _selection = policy_manager.estimate_state_value(
-            job=job,
-            archive_state=state,
-            damage_analysis=damage_analysis,
-            candidate_summaries=[],
-            current_recovery=current_recovery,
-            best_seen_recovery=best_seen_recovery,
-            parent_recovery=parent_recovery,
-            diagnosis=diagnosis,
-            round_index=round_index,
-        )
-        cache[digest] = dict(value)
-        output[candidate_id] = dict(value)
-    return output
+def _policy_graph_best_frontier_edge(graph: PolicyExplorationGraph) -> PolicyGraphEdge | None:
+    edges = graph.active_frontier_edges()
+    if not edges:
+        return None
+    return max(edges, key=_policy_graph_edge_score)
+
+
+def _policy_graph_frontier_summary(graph: PolicyExplorationGraph) -> dict[str, Any]:
+    edges = graph.active_frontier_edges()
+    modules: dict[str, int] = {}
+    scores: list[float] = []
+    for edge in edges:
+        if edge.module_name:
+            modules[edge.module_name] = modules.get(edge.module_name, 0) + 1
+        scores.append(_policy_graph_edge_score(edge))
+    return {
+        "frontier_count": len(edges),
+        "module_counts": modules,
+        "max_prior_score": max(scores, default=0.0),
+        "mean_prior_score": sum(scores) / max(1, len(scores)),
+    }
 
 
 def _candidate_value_budget(config: dict[str, Any], round_index: int) -> int:
@@ -2157,60 +2111,6 @@ def _native_validation_raw_score(payload: dict[str, Any]) -> float:
         return 0.0
 
 
-def _policy_loop_alternate_decision(
-    selection: dict[str, Any],
-    candidate_payloads: list[dict[str, Any]],
-) -> RepairActionDecision | None:
-    arbiter = selection.get("arbiter") if isinstance(selection.get("arbiter"), dict) else {}
-    scores = arbiter.get("scores") if isinstance(arbiter.get("scores"), list) else []
-    candidate_ids = {str(item.get("candidate_id") or "") for item in candidate_payloads if isinstance(item, dict)}
-    for item in scores:
-        if not isinstance(item, dict):
-            continue
-        if item.get("hard_guard"):
-            continue
-        action = str(item.get("action") or "")
-        if action == "apply_patch":
-            candidate_id = str(item.get("candidate_id") or "")
-            if candidate_id and candidate_id in candidate_ids:
-                return RepairActionDecision(
-                    action="apply_patch",
-                    selected_candidate_id=candidate_id,
-                    reason=f"policy_stop_deferred:{item.get('selected_reason') or action}",
-                    metadata={"deferred_stop": True, "arbiter_score": item.get("final_score")},
-                )
-        if action == "undo_patch":
-            return RepairActionDecision(
-                action="undo_patch",
-                reason=f"policy_stop_deferred:{item.get('selected_reason') or action}",
-                metadata={"deferred_stop": True, "arbiter_score": item.get("final_score")},
-            )
-    return None
-
-
-def _policy_selection_with_deferred_stop(
-    selection: dict[str, Any],
-    *,
-    alternate: RepairActionDecision,
-    round_index: int,
-    best_round_index: int,
-    max_rounds: int,
-) -> dict[str, Any]:
-    payload = dict(selection)
-    payload["deferred_stop_original_action"] = selection.get("action") or selection.get("decision") or "stop"
-    payload["action"] = alternate.action
-    payload["decision"] = alternate.action
-    payload["selected_candidate_id"] = alternate.selected_candidate_id
-    payload["reason"] = alternate.reason
-    payload["stop_deferred"] = {
-        "reason": "recent_best_state_in_plateau_window",
-        "round": int(round_index),
-        "best_round": int(best_round_index),
-        "max_rounds": int(max_rounds),
-    }
-    return payload
-
-
 def _loop_graph_finish_result(
     job: RepairJob,
     graph: PolicyExplorationGraph,
@@ -2240,8 +2140,8 @@ def _loop_graph_finish_result(
     else:
         status = "skipped"
     repaired_input = _state_source_input(state, job) if state is not None else dict(job.source_input or {})
-    terminal = terminal_action if terminal_action in {"stop", "give_up", "undo_patch", "apply_patch"} else "stop"
-    module_name = "policy_give_up" if terminal == "give_up" else "policy_stop"
+    terminal = terminal_action if terminal_action else "finish"
+    module_name = "policy_finish"
     payload = _diagnosis_with_candidate_selection(diagnosis, selection)
     payload["policy_loop"] = {
         "terminal_action": terminal,
@@ -2278,121 +2178,6 @@ def _loop_graph_finish_result(
     if batch is not None:
         return replace(result, warnings=_dedupe([*result.warnings, *batch.warnings]))
     return result
-
-
-def _loop_stop_result(
-    job: RepairJob,
-    state: ArchiveState | None,
-    diagnosis: dict[str, Any],
-    selection: dict[str, Any],
-    history: list[dict[str, Any]],
-    warnings: list[str],
-    *,
-    reason: str,
-    batch: RepairCandidateBatch | None = None,
-    recovery: PolicyRecoverySnapshot | None = None,
-    current_state: ArchiveState | None = None,
-    current_recovery: PolicyRecoverySnapshot | None = None,
-) -> RepairResult:
-    patch_depth = state.patch_depth() if state is not None else 0
-    recovery_score = float(recovery.score or 0.0) if recovery is not None else 0.0
-    decision_hint = recovery.decision_hint if recovery is not None else ""
-    if recovery_score >= 0.999 or decision_hint == "accept":
-        status = "repaired"
-    elif recovery_score > 0.0 or patch_depth > 0:
-        status = "partial"
-    else:
-        status = "skipped"
-    repaired_input = _state_source_input(state, job) if state is not None else dict(job.source_input or {})
-    payload = _diagnosis_with_candidate_selection(diagnosis, selection)
-    payload["policy_loop"] = {
-        "terminal_action": "stop",
-        "stop_reason": reason,
-        "rounds": list(history),
-        "patch_depth": patch_depth,
-        "patch_digest": state.effective_patch_digest() if state is not None else "",
-        "recovery": recovery.to_dict() if recovery is not None else {},
-    }
-    if _policy_states_differ(state, current_state):
-        payload["policy_loop"]["terminal_patch_depth"] = current_state.patch_depth()
-        payload["policy_loop"]["terminal_patch_digest"] = current_state.effective_patch_digest()
-        payload["policy_loop"]["terminal_recovery"] = current_recovery.to_dict() if current_recovery is not None else {}
-        payload["policy_loop"]["final_state_selection"] = "best_seen_recovery"
-    else:
-        payload["policy_loop"]["final_state_selection"] = "terminal_state"
-    result = RepairResult(
-        status=status,
-        confidence=float(job.confidence or 0.0),
-        format=job.format,
-        repaired_input=repaired_input,
-        repaired_state=state if status in {"repaired", "partial"} and state is not None else None,
-        actions=["policy_stop"],
-        damage_flags=list(job.damage_flags),
-        warnings=_dedupe(warnings),
-        partial=status == "partial",
-        module_name="policy_stop",
-        diagnosis=payload,
-        message=reason,
-    )
-    if batch is not None:
-        return replace(result, warnings=_dedupe([*result.warnings, *batch.warnings]))
-    return result
-
-
-def _loop_give_up_result(
-    job: RepairJob,
-    state: ArchiveState | None,
-    diagnosis: dict[str, Any],
-    selection: dict[str, Any],
-    history: list[dict[str, Any]],
-    warnings: list[str],
-    *,
-    reason: str,
-    recovery: PolicyRecoverySnapshot | None = None,
-    current_state: ArchiveState | None = None,
-    current_recovery: PolicyRecoverySnapshot | None = None,
-) -> RepairResult:
-    patch_depth = state.patch_depth() if state is not None else 0
-    recovery_score = float(recovery.score or 0.0) if recovery is not None else 0.0
-    decision_hint = recovery.decision_hint if recovery is not None else ""
-    if recovery_score >= 0.999 or decision_hint == "accept":
-        status = "repaired"
-    elif recovery_score > 0.0 or patch_depth > 0:
-        status = "partial"
-    else:
-        status = "skipped"
-    repaired_input = _state_source_input(state, job) if state is not None else dict(job.source_input or {})
-    payload = _diagnosis_with_candidate_selection(diagnosis, selection)
-    payload["policy_loop"] = {
-        "terminal_action": "give_up",
-        "stop_reason": reason,
-        "rounds": list(history),
-        "patch_depth": patch_depth,
-        "patch_digest": state.effective_patch_digest() if state is not None else "",
-        "recovery": recovery.to_dict() if recovery is not None else {},
-    }
-    if _policy_states_differ(state, current_state):
-        payload["policy_loop"]["terminal_patch_depth"] = current_state.patch_depth()
-        payload["policy_loop"]["terminal_patch_digest"] = current_state.effective_patch_digest()
-        payload["policy_loop"]["terminal_recovery"] = current_recovery.to_dict() if current_recovery is not None else {}
-        payload["policy_loop"]["final_state_selection"] = "best_seen_recovery"
-    else:
-        payload["policy_loop"]["final_state_selection"] = "terminal_state"
-    return RepairResult(
-        status=status,
-        confidence=float(job.confidence or 0.0),
-        format=job.format,
-        repaired_input=repaired_input,
-        repaired_state=state if status in {"repaired", "partial"} and state is not None else None,
-        actions=["policy_give_up"],
-        damage_flags=list(job.damage_flags),
-        warnings=_dedupe(warnings),
-        partial=status == "partial",
-        module_name="policy_give_up",
-        diagnosis=payload,
-        message=reason,
-    )
-
 
 def _policy_states_differ(state: ArchiveState | None, current_state: ArchiveState | None) -> bool:
     if state is None or current_state is None:

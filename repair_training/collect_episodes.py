@@ -559,17 +559,19 @@ def collect_episode(
             )
             for index, candidate in enumerate(candidates)
         ]
+        for item in candidate_dicts:
+            item["action_type"] = "expand_edge"
         candidate_snapshots = [TrainingCandidateSnapshot.from_dict(_with_snapshot_metadata(item)) for item in candidate_dicts]
         actions = [
-            TrainingAction(action_type="apply_patch", candidate_id=str(item["candidate_id"]))
+            TrainingAction(action_type="expand_edge", candidate_id=str(item["candidate_id"]), metadata={"edge_id": _training_edge_id(state_digest, str(item["candidate_id"]))})
             for item in candidate_dicts
             if item.get("candidate_id")
         ]
         if state.patch_depth() > 0 and parent_digest:
-            actions.append(TrainingAction(action_type="undo_patch", reason="checkout_parent", metadata={"target_state_digest": parent_digest, "graph_semantics": "checkout_parent"}))
+            actions.append(TrainingAction(action_type="checkout_node", reason="checkout_parent", metadata={"target_state_digest": parent_digest, "target_node_id": _training_node_id(parent_digest)}))
         actions.extend([
-            TrainingAction(action_type="stop", reason="stop_signal", metadata={"graph_semantics": "stop_signal"}),
-            TrainingAction(action_type="give_up", reason="exhaust_branch", metadata={"graph_semantics": "exhaust_branch"}),
+            TrainingAction(action_type="stop_signal", reason="stop_signal"),
+            TrainingAction(action_type="exhaust_branch", reason="exhaust_branch"),
         ])
         before = _training_verification_snapshot(state_recovery)
 
@@ -587,12 +589,18 @@ def collect_episode(
                 damage_analysis_target={**damage_target_dict, "model_damage_analysis": _compact_damage_analysis(damage_analysis)},
                 candidate_snapshots=candidate_snapshots,
                 available_actions=actions,
-                selected_action=TrainingAction(action_type="apply_patch", candidate_id=str(snapshot.get("candidate_id") or "")),
+                selected_action=TrainingAction(action_type="expand_edge", candidate_id=str(snapshot.get("candidate_id") or ""), metadata={"edge_id": _training_edge_id(state_digest, str(snapshot.get("candidate_id") or ""))}),
                 next_state_digest=next_digest,
                 verification_before=before,
                 verification_after=after,
                 reward=after.score - before.score,
                 terminal=False,
+                node_id=_training_node_id(state_digest),
+                parent_node_id=_training_node_id(parent_digest) if parent_digest else "",
+                frontier_edge_id=_training_edge_id(state_digest, str(snapshot.get("candidate_id") or "")),
+                graph_action={"action": "expand", "action_type": "expand_edge", "candidate_id": str(snapshot.get("candidate_id") or "")},
+                graph_best_node_id=_training_node_id(state_digest),
+                branch_status="active",
             ))
             if depth + 1 <= max_depth:
                 if next_digest in seen:
@@ -613,15 +621,20 @@ def collect_episode(
                 damage_analysis_target={**damage_target_dict, "model_damage_analysis": _compact_damage_analysis(damage_analysis)},
                 candidate_snapshots=candidate_snapshots,
                 available_actions=actions,
-                selected_action=TrainingAction(action_type="undo_patch", reason="checkout_parent", metadata={"target_state_digest": parent_digest, "graph_semantics": "checkout_parent"}),
+                selected_action=TrainingAction(action_type="checkout_node", reason="checkout_parent", metadata={"target_state_digest": parent_digest, "target_node_id": _training_node_id(parent_digest)}),
                 next_state_digest=parent_digest,
                 verification_before=before,
                 verification_after=parent_after,
                 reward=parent_after.score - before.score,
+                node_id=_training_node_id(state_digest),
+                parent_node_id=_training_node_id(parent_digest),
+                graph_action={"action": "checkout", "action_type": "checkout_node", "node_id": _training_node_id(parent_digest)},
+                graph_best_node_id=_training_node_id(state_digest),
+                branch_status="active",
             ))
         transitions.extend([
-            _terminal_transition(depth, state, damage_request_dict, {**damage_target_dict, "model_damage_analysis": _compact_damage_analysis(damage_analysis)}, candidate_snapshots, actions, before, "stop"),
-            _terminal_transition(depth, state, damage_request_dict, {**damage_target_dict, "model_damage_analysis": _compact_damage_analysis(damage_analysis)}, candidate_snapshots, actions, before, "give_up"),
+            _terminal_transition(depth, state, parent_digest, damage_request_dict, {**damage_target_dict, "model_damage_analysis": _compact_damage_analysis(damage_analysis)}, candidate_snapshots, actions, before, "stop_signal"),
+            _terminal_transition(depth, state, parent_digest, damage_request_dict, {**damage_target_dict, "model_damage_analysis": _compact_damage_analysis(damage_analysis)}, candidate_snapshots, actions, before, "exhaust_branch"),
         ])
 
     recovery_evaluator.close()
@@ -1231,6 +1244,7 @@ def _oracle_from_record(record: dict[str, Any]) -> dict[str, Any]:
 def _terminal_transition(
     round_index: int,
     state: ArchiveState,
+    parent_digest: str,
     damage_request: dict[str, Any],
     target: dict[str, Any],
     candidate_snapshots: list[TrainingCandidateSnapshot],
@@ -1248,14 +1262,18 @@ def _terminal_transition(
         available_actions=actions,
         selected_action=TrainingAction(
             action_type=action_type,
-            reason="stop_signal" if action_type == "stop" else "exhaust_branch",
-            metadata={"graph_semantics": "stop_signal" if action_type == "stop" else "exhaust_branch"},
+            reason=action_type,
         ),
         next_state_digest="",
         verification_before=before,
         verification_after=before,
         reward=0.0,
         terminal=False,
+        node_id=_training_node_id(state.effective_patch_digest()),
+        parent_node_id=_training_node_id(parent_digest) if parent_digest else "",
+        graph_action={"action_type": action_type, "action": "exhaust" if action_type == "exhaust_branch" else "signal"},
+        graph_best_node_id=_training_node_id(state.effective_patch_digest()),
+        branch_status="active",
     )
 
 
@@ -1273,6 +1291,15 @@ def _with_snapshot_metadata(snapshot: dict[str, Any]) -> dict[str, Any]:
         "validation_summary",
     }
     return {**snapshot, "metadata": {key: value for key, value in snapshot.items() if key not in known}}
+
+
+def _training_node_id(state_digest: str) -> str:
+    digest = str(state_digest or "root")
+    return f"node_{digest[:16]}"
+
+
+def _training_edge_id(state_digest: str, candidate_id: str) -> str:
+    return f"{_training_node_id(state_digest)}::{candidate_id}"
 
 
 def _scrub_candidate_training_input(snapshot: dict[str, Any]) -> dict[str, Any]:

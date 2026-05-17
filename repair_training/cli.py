@@ -52,8 +52,8 @@ def _schema_smoke() -> int:
                 candidate_snapshots=[
                     TrainingCandidateSnapshot(candidate_id="c1", module_name="smoke", format="zip")
                 ],
-                available_actions=[TrainingAction(action_type="apply_patch", candidate_id="c1")],
-                selected_action=TrainingAction(action_type="apply_patch", candidate_id="c1"),
+                available_actions=[TrainingAction(action_type="expand_edge", candidate_id="c1")],
+                selected_action=TrainingAction(action_type="expand_edge", candidate_id="c1"),
                 next_state_digest="patched",
                 verification_before=TrainingVerificationSnapshot(score=0.0),
                 verification_after=TrainingVerificationSnapshot(score=1.0),

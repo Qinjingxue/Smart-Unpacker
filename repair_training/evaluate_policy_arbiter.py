@@ -18,7 +18,7 @@ from sunpack.repair.policy.recovery_evaluator import RecoveryEvaluator
 from sunpack.repair.scheduler import RepairScheduler
 
 
-REQUIRED_MODEL_DIRS = ("normal_structure", "damage_location", "state_value", "repair_action")
+REQUIRED_MODEL_DIRS = ("normal_structure", "damage_location", "graph_state_value", "graph_action")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -103,6 +103,8 @@ def _evaluate_one(index: int, record: dict[str, Any], *, fmt: str, config: dict[
             "terminal_action": loop_payload.get("terminal_action") or "",
             "stop_reason": loop_payload.get("stop_reason") or result.message,
             "decision_stats": decision_stats,
+            "graph_summary": loop_payload.get("graph_summary") if isinstance(loop_payload.get("graph_summary"), dict) else {},
+            "best_node_recovery": loop_payload.get("recovery") if isinstance(loop_payload.get("recovery"), dict) else {},
             "warnings": list(result.warnings or []),
             "elapsed_seconds": round(time.perf_counter() - started, 6),
         }
@@ -125,43 +127,41 @@ def _evaluate_one(index: int, record: dict[str, Any], *, fmt: str, config: dict[
 
 def _decision_stats(rounds: list[dict[str, Any]]) -> dict[str, Any]:
     actions = Counter()
-    high_gap_stop = 0
-    premature_stop = 0
-    bad_undo = 0
-    loop_prevented = 0
-    apply_zero_value_delta = 0
-    candidate_value_predictions = 0
-    candidate_count = 0
+    stop_signal_overridden = 0
+    frontier_available_at_finish = 0
+    exhaust_then_recovered = 0
+    checkout_count = 0
+    exhaust_count = 0
+    graph_expansions = 0
     for item in rounds:
-        action = item.get("action") if isinstance(item.get("action"), dict) else {}
-        selection = action.get("arbiter") if isinstance(action.get("arbiter"), dict) else action
-        decision = str((action.get("decision") if isinstance(action.get("decision"), str) else "") or action.get("action") or "")
-        if decision:
-            actions[decision] += 1
-        value_gap = _float(item.get("value_gap"))
-        scores = selection.get("scores") if isinstance(selection.get("scores"), list) else []
-        if decision == "stop" and value_gap > 0.12:
-            high_gap_stop += 1
-        if decision == "stop" and any(str(score.get("action") or "") == "apply_patch" and _float(score.get("value_delta")) > 0.06 for score in scores if isinstance(score, dict)):
-            premature_stop += 1
-        if decision == "undo_patch" and any(str(score.get("action") or "") == "undo_patch" and _float(score.get("value_delta")) < 0.0 for score in scores if isinstance(score, dict)):
-            bad_undo += 1
-        if any(str(score.get("hard_guard") or "") == "repeated_digest" for score in scores if isinstance(score, dict)):
-            loop_prevented += 1
-        apply_zero_value_delta += sum(1 for score in scores if isinstance(score, dict) and str(score.get("action") or "") == "apply_patch" and abs(_float(score.get("value_delta"))) < 1e-9)
-        candidate_values = item.get("candidate_state_values") if isinstance(item.get("candidate_state_values"), dict) else {}
-        candidate_value_predictions += sum(1 for value in candidate_values.values() if not (isinstance(value, dict) and (value.get("metadata") or {}).get("decision_reason") == "candidate_value_budget_fallback"))
-        candidates = item.get("candidate_state_values") if isinstance(item.get("candidate_state_values"), dict) else {}
-        candidate_count += len(candidates)
+        graph_action = item.get("graph_action") if isinstance(item.get("graph_action"), dict) else {}
+        action = str(graph_action.get("action") or "")
+        if action:
+            actions[action] += 1
+        if action == "expand":
+            graph_expansions += 1
+        if action == "checkout":
+            checkout_count += 1
+        if action == "exhaust":
+            exhaust_count += 1
+        stop_controller = item.get("stop_controller") if isinstance(item.get("stop_controller"), dict) else {}
+        selected_prior = stop_controller.get("selected_prior") if isinstance(stop_controller.get("selected_prior"), dict) else {}
+        if str(selected_prior.get("action_type") or "") == "stop_signal" and action != "finish":
+            stop_signal_overridden += 1
+        graph_summary = item.get("graph_summary") if isinstance(item.get("graph_summary"), dict) else {}
+        if action == "finish" and int(graph_summary.get("frontier_count") or 0) > 0:
+            frontier_available_at_finish += 1
+        if action == "exhaust" and _float((item.get("best_seen_recovery") or {}).get("score") if isinstance(item.get("best_seen_recovery"), dict) else 0.0) > 0.0:
+            exhaust_then_recovered += 1
     return {
         "actions": dict(actions),
-        "high_gap_stop_count": high_gap_stop,
-        "premature_stop_count": premature_stop,
-        "bad_undo_count": bad_undo,
-        "loop_prevented_count": loop_prevented,
-        "apply_zero_value_delta_count": apply_zero_value_delta,
-        "candidate_value_predictions": candidate_value_predictions,
-        "candidate_value_count": candidate_count,
+        "graph_expansions": graph_expansions,
+        "checkout_count": checkout_count,
+        "exhaust_count": exhaust_count,
+        "stop_signal_overridden": stop_signal_overridden,
+        "frontier_available_at_finish": frontier_available_at_finish,
+        "exhaust_then_recovered": exhaust_then_recovered,
+        "oracle_edge_missing": 0,
     }
 
 
@@ -198,11 +198,11 @@ def _summary(runs: list[dict[str, Any]], *, elapsed: float) -> dict[str, Any]:
         "policy_vs_oracle_complete_rate_gap": (oracle_complete_rate - final_complete_rate) if oracle_complete_rate is not None else None,
         "scheduler_repaired_rate": statuses.get("repaired", 0) / sample_count,
         "scheduler_partial_rate": statuses.get("partial", 0) / sample_count,
-        "scheduler_give_up_rate": statuses.get("unrepairable", 0) / sample_count,
+        "scheduler_unrepairable_rate": statuses.get("unrepairable", 0) / sample_count,
         "scheduler_skipped_rate": statuses.get("skipped", 0) / sample_count,
         "repaired_rate": statuses.get("repaired", 0) / sample_count,
         "partial_rate": statuses.get("partial", 0) / sample_count,
-        "give_up_rate": statuses.get("unrepairable", 0) / sample_count,
+        "unrepairable_rate": statuses.get("unrepairable", 0) / sample_count,
         "skipped_rate": statuses.get("skipped", 0) / sample_count,
         "scheduler_partial_but_final_complete_count": sum(
             1 for item in runs if str(item.get("status") or "") == "partial" and _run_final_recovery_status(item) == "complete"
@@ -261,10 +261,10 @@ def _hard_cases(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
             reasons.append("zero_final_recovery")
         elif score < 0.5:
             reasons.append("low_final_recovery_lt_0_5")
-        if stats.get("high_gap_stop_count"):
-            reasons.append("high_gap_stop")
-        if stats.get("bad_undo_count"):
-            reasons.append("bad_undo")
+        if stats.get("frontier_available_at_finish"):
+            reasons.append("frontier_available_at_finish")
+        if stats.get("oracle_edge_missing"):
+            reasons.append("oracle_edge_missing")
         if reasons:
             cases.append({**item, "hard_case_reasons": reasons})
     cases.sort(key=_hard_case_sort_key, reverse=True)
@@ -287,7 +287,7 @@ def _sum_decision_stats(runs: list[dict[str, Any]]) -> dict[str, Any]:
     actions = Counter()
     for item in runs:
         stats = item.get("decision_stats") if isinstance(item.get("decision_stats"), dict) else {}
-        for key in ("high_gap_stop_count", "premature_stop_count", "bad_undo_count", "loop_prevented_count", "apply_zero_value_delta_count", "candidate_value_predictions", "candidate_value_count"):
+        for key in ("graph_expansions", "checkout_count", "exhaust_count", "stop_signal_overridden", "frontier_available_at_finish", "exhaust_then_recovered", "oracle_edge_missing"):
             total[key] += int(stats.get(key) or 0)
         actions.update(stats.get("actions") if isinstance(stats.get("actions"), dict) else {})
     return {**dict(total), "actions": dict(actions)}
@@ -319,7 +319,7 @@ def _hard_case_sort_key(item: dict[str, Any]) -> tuple[float, float, float, floa
         1.0 if "error" in reasons else 0.0,
         _float(item.get("oracle_gap")) if item.get("oracle_gap") is not None else 0.0,
         1.0 if "zero_final_recovery" in reasons else 0.0,
-        1.0 if {"high_gap_stop", "bad_undo"} & reasons else 0.0,
+        1.0 if {"frontier_available_at_finish", "oracle_edge_missing"} & reasons else 0.0,
         1.0 - _float(item.get("final_recovery_score")),
     )
 

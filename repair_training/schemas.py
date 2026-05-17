@@ -4,9 +4,9 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 
-TRAINING_EPISODE_SCHEMA_VERSION = 1
-TrainingActionKind = Literal["apply_patch", "undo_patch", "stop", "give_up"]
-_ACTION_KINDS = {"apply_patch", "undo_patch", "stop", "give_up"}
+TRAINING_EPISODE_SCHEMA_VERSION = 2
+TrainingActionKind = Literal["expand_edge", "checkout_node", "exhaust_branch", "stop_signal"]
+_ACTION_KINDS = {"expand_edge", "checkout_node", "exhaust_branch", "stop_signal"}
 
 
 @dataclass(frozen=True)
@@ -69,7 +69,7 @@ class TrainingVerificationSnapshot:
 @dataclass(frozen=True)
 class TrainingCandidateSnapshot:
     candidate_id: str
-    action_type: TrainingActionKind = "apply_patch"
+    action_type: TrainingActionKind = "expand_edge"
     module_name: str = ""
     format: str = ""
     patch_depth: int = 0
@@ -95,7 +95,7 @@ class TrainingCandidateSnapshot:
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "TrainingCandidateSnapshot":
-        action_type = _action_kind(payload.get("action_type") or "apply_patch")
+        action_type = _action_kind(payload.get("action_type") or "expand_edge")
         return cls(
             candidate_id=str(payload.get("candidate_id") or ""),
             action_type=action_type,
@@ -120,9 +120,9 @@ class TrainingAction:
     def __post_init__(self) -> None:
         action = _action_kind(self.action_type)
         object.__setattr__(self, "action_type", action)
-        if action == "apply_patch" and not str(self.candidate_id or ""):
-            raise ValueError("apply_patch training action requires candidate_id")
-        if action != "apply_patch" and self.candidate_id:
+        if action == "expand_edge" and not str(self.candidate_id or ""):
+            raise ValueError("expand_edge training action requires candidate_id")
+        if action != "expand_edge" and self.candidate_id:
             object.__setattr__(self, "candidate_id", "")
 
     def to_dict(self) -> dict[str, Any]:
@@ -158,6 +158,12 @@ class TrainingTransition:
     verification_after: TrainingVerificationSnapshot = field(default_factory=TrainingVerificationSnapshot)
     reward: float = 0.0
     terminal: bool = False
+    node_id: str = ""
+    parent_node_id: str = ""
+    frontier_edge_id: str = ""
+    graph_action: dict[str, Any] = field(default_factory=dict)
+    graph_best_node_id: str = ""
+    branch_status: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -174,6 +180,12 @@ class TrainingTransition:
             "verification_after": self.verification_after.to_dict(),
             "reward": float(self.reward or 0.0),
             "terminal": bool(self.terminal),
+            "node_id": self.node_id,
+            "parent_node_id": self.parent_node_id,
+            "frontier_edge_id": self.frontier_edge_id,
+            "graph_action": dict(self.graph_action),
+            "graph_best_node_id": self.graph_best_node_id,
+            "branch_status": self.branch_status,
         }
 
     @classmethod
@@ -201,6 +213,12 @@ class TrainingTransition:
             verification_after=TrainingVerificationSnapshot.from_dict(payload.get("verification_after")),
             reward=_float(payload.get("reward")),
             terminal=bool(payload.get("terminal")),
+            node_id=str(payload.get("node_id") or ""),
+            parent_node_id=str(payload.get("parent_node_id") or ""),
+            frontier_edge_id=str(payload.get("frontier_edge_id") or ""),
+            graph_action=dict(payload.get("graph_action") or {}),
+            graph_best_node_id=str(payload.get("graph_best_node_id") or ""),
+            branch_status=str(payload.get("branch_status") or ""),
         )
 
 

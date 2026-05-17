@@ -9,8 +9,8 @@ from sunpack.repair.job import RepairJob
 
 
 PolicyCandidatePayload = dict[str, Any]
-RepairActionKind = Literal["apply_patch", "undo_patch", "stop", "give_up"]
-PolicyGraphActionKind = Literal["expand", "checkout", "finish"]
+GraphPolicyActionKind = Literal["expand_edge", "checkout_node", "exhaust_branch", "stop_signal"]
+PolicyGraphActionKind = Literal["expand", "checkout", "exhaust", "finish"]
 
 
 @dataclass(frozen=True)
@@ -49,16 +49,22 @@ class DamageAnalysisResult:
 
 
 @dataclass(frozen=True)
-class RepairActionRequest:
+class GraphActionRequest:
     job: RepairJob
     format: str
+    graph: dict[str, Any]
+    current_node_id: str
+    best_node_id: str
     archive_state: ArchiveState | None
-    candidates: list[RepairCandidate]
-    candidate_payloads: list[PolicyCandidatePayload]
+    frontier: list[dict[str, Any]] = field(default_factory=list)
+    candidate_payloads: list[PolicyCandidatePayload] = field(default_factory=list)
     damage_analysis: dict[str, Any] = field(default_factory=dict)
     current_recovery: dict[str, Any] = field(default_factory=dict)
     best_seen_recovery: dict[str, Any] = field(default_factory=dict)
     parent_recovery: dict[str, Any] = field(default_factory=dict)
+    state_value: dict[str, Any] = field(default_factory=dict)
+    parent_state_value: dict[str, Any] = field(default_factory=dict)
+    graph_summary: dict[str, Any] = field(default_factory=dict)
     diagnosis: dict[str, Any] = field(default_factory=dict)
     repair_history: dict[str, Any] = field(default_factory=dict)
     config: dict[str, Any] = field(default_factory=dict)
@@ -66,19 +72,11 @@ class RepairActionRequest:
 
 
 @dataclass(frozen=True)
-class RepairActionDecision:
-    action: RepairActionKind = "give_up"
-    selected_candidate_id: str = ""
-    confidence: float | None = None
-    provider_id: str = ""
-    reason: str = ""
-    metadata: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass(frozen=True)
-class RepairActionPrior:
-    action: RepairActionKind = "give_up"
+class GraphActionPrior:
+    action_type: GraphPolicyActionKind = "exhaust_branch"
+    edge_id: str = ""
     candidate_id: str = ""
+    node_id: str = ""
     prior_score: float = 0.0
     confidence: float | None = None
     provider_id: str = ""
@@ -87,8 +85,10 @@ class RepairActionPrior:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "action": self.action,
+            "action_type": self.action_type,
+            "edge_id": self.edge_id,
             "candidate_id": self.candidate_id,
+            "node_id": self.node_id,
             "prior_score": float(self.prior_score or 0.0),
             "confidence": self.confidence,
             "provider_id": self.provider_id,
@@ -131,7 +131,6 @@ class PolicyGraphEdge:
     candidate_id: str = ""
     module_name: str = ""
     action_prior: dict[str, Any] = field(default_factory=dict)
-    candidate_value: dict[str, Any] = field(default_factory=dict)
     status: str = "frontier"
     created_round: int = 0
 
@@ -143,7 +142,6 @@ class PolicyGraphEdge:
             "candidate_id": self.candidate_id,
             "module_name": self.module_name,
             "action_prior": dict(self.action_prior or {}),
-            "candidate_value": dict(self.candidate_value or {}),
             "status": self.status,
             "created_round": int(self.created_round or 0),
         }
@@ -239,6 +237,9 @@ class StateValueRequest:
     candidate_summaries: list[PolicyCandidatePayload] = field(default_factory=list)
     repair_history: dict[str, Any] = field(default_factory=dict)
     diagnosis: dict[str, Any] = field(default_factory=dict)
+    graph_summary: dict[str, Any] = field(default_factory=dict)
+    frontier_summary: dict[str, Any] = field(default_factory=dict)
+    branch_status: str = ""
     config: dict[str, Any] = field(default_factory=dict)
     round_index: int = 0
 
@@ -272,19 +273,19 @@ class DamageAnalysisModel(Protocol):
 
 
 @runtime_checkable
-class RepairActionModel(Protocol):
+class GraphActionModel(Protocol):
     provider_id: str
     supported_formats: tuple[str, ...] | list[str]
 
     def available(self) -> bool:
         ...
 
-    def choose(self, request: RepairActionRequest) -> dict[str, Any] | list[dict[str, Any]] | None:
+    def choose_graph_action(self, request: GraphActionRequest) -> dict[str, Any] | list[dict[str, Any]] | None:
         ...
 
 
 @runtime_checkable
-class StateValueModel(Protocol):
+class GraphStateValueModel(Protocol):
     provider_id: str
     supported_formats: tuple[str, ...] | list[str]
 

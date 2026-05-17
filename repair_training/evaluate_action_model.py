@@ -24,7 +24,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.limit and args.limit > 0:
         rows = _limit_groups(rows, args.limit)
     schema = _read_json(model_dir / "feature_schema.json")
-    x, y = transform_rows(rows, schema=schema, plugin=plugin, model_type="repair_action")
+    x, y = transform_rows(rows, schema=schema, plugin=plugin, model_type="graph_action")
     scores = _predict(model_dir, x)
     report = evaluate_ranked_actions(rows, scores, y)
     report["format"] = fmt
@@ -89,8 +89,8 @@ def evaluate_ranked_actions(rows: list[dict[str, Any]], scores: np.ndarray, labe
                 "best_label": float(group_labels[best_pos]),
                 "regret": regret,
                 "current_recovery": _score(best_row.get("current_recovery")),
-                "selected_recovery_delta": selected_row.get("recovery_delta"),
-                "best_recovery_delta": best_row.get("recovery_delta"),
+                "selected_graph_action": selected_row.get("graph_action"),
+                "best_graph_action": best_row.get("graph_action"),
             })
     group_count = max(1, len(groups))
     profile_report = {
@@ -154,11 +154,11 @@ def _limit_groups(rows: list[dict[str, Any]], limit: int) -> list[dict[str, Any]
 
 def _action_name(row: dict[str, Any]) -> str:
     action_type = str(row.get("action_type") or "")
-    if action_type == "apply_patch":
+    if action_type == "expand_edge":
         candidate = row.get("candidate_snapshot") if isinstance(row.get("candidate_snapshot"), dict) else {}
         metadata = candidate.get("metadata") if isinstance(candidate.get("metadata"), dict) else {}
         module = candidate.get("module_name") or metadata.get("last_patch_module")
-        return f"apply_patch:{module or row.get('candidate_id') or 'unknown'}"
+        return f"expand_edge:{module or row.get('candidate_id') or 'unknown'}"
     return action_type or "unknown"
 
 

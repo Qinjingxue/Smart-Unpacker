@@ -100,7 +100,7 @@ def action_feature_spec() -> TrainingFeatureSpec:
 
 
 def lightgbm_params(model_type: str) -> dict[str, Any]:
-    if model_type == "repair_action":
+    if model_type == "graph_action":
         return {"n_estimators": 60, "num_leaves": 15, "min_child_samples": 2}
     return {"n_estimators": 50, "num_leaves": 15, "min_child_samples": 2}
 

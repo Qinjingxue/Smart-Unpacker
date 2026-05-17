@@ -28,7 +28,7 @@ def write_model_artifacts(
     _write_json(model_dir / "training_config.json", training_config)
     _write_json(model_dir / "metrics.json", metrics)
     _write_json(model_dir / "feature_schema.json", feature_schema)
-    _write_json(model_dir / ("action_schema.json" if model_type == "repair_action" else "label_schema.json"), label_schema)
+    _write_json(model_dir / ("action_schema.json" if model_type == "graph_action" else "label_schema.json"), label_schema)
     thresholds_path = model_dir / "thresholds.json"
     if not thresholds_path.is_file():
         _write_json(thresholds_path, {"default_threshold": 0.5, "thresholds": {}})
@@ -41,6 +41,7 @@ def write_model_artifacts(
         "format": format_name,
         "model_type": model_type,
         "algorithm": "lightgbm",
+        "policy_semantics": "graph_v1" if model_type in {"graph_action", "graph_state_value"} else "",
         "created_at": _dt.datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
         "training_run_id": str(training_config.get("run_id") or ""),
         "taxonomy_version": int(training_config.get("taxonomy_version", 1) or 1),

@@ -11,14 +11,14 @@ from sunpack.repair.candidate import (
     materialize_candidates,
 )
 from sunpack.repair.job import RepairJob
-from sunpack.repair.policy.types import DamageAnalysisRequest, RepairActionRequest, StateValueRequest
+from sunpack.repair.policy.types import DamageAnalysisRequest, GraphActionRequest, StateValueRequest
 from sunpack.repair.policy.recovery_evaluator import RecoveryEvaluator
 from sunpack.support import archive_knowledge_projection as knowledge_view
 
 
 POLICY_TRAINING_RUNTIME_SCHEMA_VERSION = 1
 DAMAGE_ANALYSIS_FEATURE_SCHEMA_VERSION = 1
-REPAIR_ACTION_FEATURE_SCHEMA_VERSION = 1
+GRAPH_ACTION_FEATURE_SCHEMA_VERSION = 1
 
 
 def archive_state_for_job(job: RepairJob) -> ArchiveState | None:
@@ -63,7 +63,7 @@ def runtime_context_from_job(job: RepairJob) -> dict[str, Any]:
     return {
         "schema_version": POLICY_TRAINING_RUNTIME_SCHEMA_VERSION,
         "damage_analysis_feature_schema_version": DAMAGE_ANALYSIS_FEATURE_SCHEMA_VERSION,
-        "repair_action_feature_schema_version": REPAIR_ACTION_FEATURE_SCHEMA_VERSION,
+        "graph_action_feature_schema_version": GRAPH_ACTION_FEATURE_SCHEMA_VERSION,
         "knowledge_projection": {
             "source_count": 1 if knowledge.to_dict() else 0,
             "has_archive_knowledge": bool(knowledge.to_dict()),
@@ -155,24 +155,31 @@ def build_damage_analysis_request(
     )
 
 
-def build_repair_action_request(
+def build_graph_action_request(
     job: RepairJob,
     state: ArchiveState | None,
-    candidates: list[RepairCandidate],
+    graph: dict[str, Any],
     damage_analysis: dict[str, Any],
     *,
+    candidate_payloads: list[dict[str, Any]] | None = None,
+    frontier: list[dict[str, Any]] | None = None,
     diagnosis: dict[str, Any] | None = None,
     current_recovery: dict[str, Any] | None = None,
     best_seen_recovery: dict[str, Any] | None = None,
     parent_recovery: dict[str, Any] | None = None,
     round_index: int = 0,
-) -> RepairActionRequest:
-    return RepairActionRequest(
+) -> GraphActionRequest:
+    graph_payload = dict(graph or {})
+    return GraphActionRequest(
         job=job,
         format=_normalize_format(job.format),
+        graph=graph_payload,
+        graph_summary=dict(graph_payload.get("summary") or {}),
+        current_node_id=str(graph_payload.get("current_node_id") or ""),
+        best_node_id=str(graph_payload.get("best_node_id") or ""),
         archive_state=state,
-        candidates=list(candidates),
-        candidate_payloads=candidate_snapshots(candidates, damage_analysis=damage_analysis),
+        frontier=[dict(item) for item in frontier or [] if isinstance(item, dict)],
+        candidate_payloads=[dict(item) for item in candidate_payloads or [] if isinstance(item, dict)],
         damage_analysis=dict(damage_analysis or {}),
         current_recovery=dict(current_recovery or {}),
         best_seen_recovery=dict(best_seen_recovery or {}),
@@ -204,7 +211,6 @@ def build_state_value_request(
         current_recovery=dict(current_recovery or {}),
         best_seen_recovery=dict(best_seen_recovery or {}),
         parent_recovery=dict(parent_recovery or {}),
-        candidate_summaries=candidate_summaries_for_state(candidate_payloads or []),
         repair_history=dict(getattr(job, "repair_history", {}) or {}),
         diagnosis=dict(diagnosis or {}),
         config={},
@@ -226,7 +232,7 @@ def candidate_summary_for_state(candidate_payload: dict[str, Any]) -> dict[str, 
         "candidate_id": str(candidate_payload.get("candidate_id") or ""),
         "module_name": str(candidate_payload.get("module_name") or candidate_payload.get("module") or ""),
         "module_family": str(candidate_payload.get("module_family") or candidate_payload.get("last_patch_module") or ""),
-        "action_type": str(candidate_payload.get("action_type") or "apply_patch"),
+        "action_type": str(candidate_payload.get("action_type") or "expand_edge"),
         "patch_operation_count": _int(candidate_payload.get("patch_operation_count")),
         "patch_depth": _int(candidate_payload.get("patch_depth")),
         "confidence": _float(candidate_payload.get("confidence")),
@@ -234,17 +240,10 @@ def candidate_summary_for_state(candidate_payload: dict[str, Any]) -> dict[str, 
         "validation_score": _float(validation.get("score")),
         "status": str(candidate_payload.get("status") or ""),
     }
-    if "recovery_score" in candidate_payload:
-        summary["recovery_score"] = _float(candidate_payload.get("recovery_score"))
-    if "recovery_delta" in candidate_payload:
-        summary["recovery_delta"] = _float(candidate_payload.get("recovery_delta"))
-    if "recovery_status" in candidate_payload:
-        summary["recovery_status"] = str(candidate_payload.get("recovery_status") or "")
     return summary
 
 
 def state_value_feature_payload(request: StateValueRequest) -> dict[str, Any]:
-    candidates = list(request.candidate_summaries or [])
     return {
         "episode_id": "",
         "format": request.format,
@@ -256,7 +255,10 @@ def state_value_feature_payload(request: StateValueRequest) -> dict[str, Any]:
         "best_seen_recovery": dict(request.best_seen_recovery or {}),
         "parent_recovery": dict(request.parent_recovery or {}),
         "repair_history": dict(request.repair_history or {}),
-        "candidate_summary": _candidate_summary_from_payloads(candidates),
+        "candidate_summary": {},
+        "graph_summary": dict(getattr(request, "graph_summary", {}) or {}),
+        "frontier_summary": dict(getattr(request, "frontier_summary", {}) or {}),
+        "branch_status": str(getattr(request, "branch_status", "") or ""),
         "reachable_recovery_value": _float((request.current_recovery or {}).get("score")),
     }
 
@@ -283,12 +285,12 @@ def candidate_snapshot(
         for validation in candidate.validations
     ]
     snapshot = {
-        "schema_version": REPAIR_ACTION_FEATURE_SCHEMA_VERSION,
+        "schema_version": GRAPH_ACTION_FEATURE_SCHEMA_VERSION,
         "candidate_id": _unique_candidate_id(payload.get("candidate_id"), index),
         "module_name": payload.get("module_name") or payload.get("module") or candidate.module_name,
         "module": payload.get("module") or candidate.module_name,
         "format": candidate.format,
-        "action_type": candidate.action_type or payload.get("action_type") or "apply_patch",
+        "action_type": _graph_candidate_action_type(candidate.action_type or payload.get("action_type")),
         "current_rank": int(index or 0),
         "patch_depth": state.patch_depth() if state is not None else 0,
         "patch_count": state.patch_depth() if state is not None else 0,
@@ -315,15 +317,6 @@ def candidate_snapshot(
     }
     if damage_analysis is not None:
         snapshot["damage_analysis"] = dict(damage_analysis or {})
-    if recovery_snapshot is not None:
-        recovery = dict(recovery_snapshot or {})
-        current = dict(current_recovery or {})
-        snapshot["recovery_snapshot"] = recovery
-        snapshot["recovery_score"] = float(recovery.get("score") or 0.0)
-        snapshot["recovery_status"] = str(recovery.get("status") or "")
-        snapshot["verification_summary"] = dict(recovery.get("verification") or {})
-        snapshot["score_source"] = str((recovery.get("metadata") or {}).get("score_source") or "")
-        snapshot["recovery_delta"] = float(recovery.get("score") or 0.0) - float(current.get("score") or 0.0)
     return snapshot
 
 
@@ -331,6 +324,13 @@ def _unique_candidate_id(candidate_id: object, index: int) -> str:
     base = str(candidate_id or "")
     suffix = f"#{max(0, int(index or 0)):04d}"
     return f"{base}{suffix}" if base else suffix
+
+
+def _graph_candidate_action_type(value: Any) -> str:
+    text = str(value or "").strip()
+    if text in {"expand_edge", "checkout_node", "exhaust_branch", "stop_signal"}:
+        return text
+    return "expand_edge"
 
 
 def candidate_snapshots(
@@ -354,7 +354,7 @@ def recovery_score_from_job(job: RepairJob) -> float:
     return float(RecoveryEvaluator().evaluate_state(job, archive_state_for_job(job), mode="policy_light").score or 0.0)
 
 
-def request_to_dict(request: DamageAnalysisRequest | RepairActionRequest | StateValueRequest) -> dict[str, Any]:
+def request_to_dict(request: DamageAnalysisRequest | GraphActionRequest | StateValueRequest) -> dict[str, Any]:
     state = request.archive_state
     payload: dict[str, Any] = {
         "format": request.format,
@@ -374,59 +374,30 @@ def request_to_dict(request: DamageAnalysisRequest | RepairActionRequest | State
         "source_input": dict(request.job.source_input or {}),
         "damage_flags": list(request.job.damage_flags),
     }
-    if isinstance(request, RepairActionRequest):
+    if isinstance(request, GraphActionRequest):
         payload.update({
+            "graph": dict(request.graph or {}),
+            "graph_summary": dict(request.graph_summary or {}),
+            "current_node_id": request.current_node_id,
+            "best_node_id": request.best_node_id,
+            "frontier": [dict(item) for item in request.frontier],
             "candidate_payloads": [dict(item) for item in request.candidate_payloads],
             "damage_analysis": dict(request.damage_analysis or {}),
             "current_recovery": dict(request.current_recovery or {}),
             "best_seen_recovery": dict(request.best_seen_recovery or {}),
             "parent_recovery": dict(request.parent_recovery or {}),
         })
-        payload["candidates"] = [candidate_snapshot(candidate, index=index) for index, candidate in enumerate(request.candidates)]
     if isinstance(request, StateValueRequest):
         payload.update({
             "damage_analysis": dict(request.damage_analysis or {}),
             "current_recovery": dict(request.current_recovery or {}),
             "best_seen_recovery": dict(request.best_seen_recovery or {}),
             "parent_recovery": dict(request.parent_recovery or {}),
-            "candidate_summaries": [dict(item) for item in request.candidate_summaries],
+            "graph_summary": dict(request.graph_summary or {}),
+            "frontier_summary": dict(request.frontier_summary or {}),
+            "branch_status": request.branch_status,
         })
     return payload
-
-
-def _candidate_summary_from_payloads(candidates: list[dict[str, Any]]) -> dict[str, Any]:
-    recoveries = [_float(item.get("recovery_score")) for item in candidates if "recovery_score" in item]
-    deltas = [_float(item.get("recovery_delta")) for item in candidates if "recovery_delta" in item]
-    confidences = [_float(item.get("confidence")) for item in candidates]
-    modules: dict[str, int] = {}
-    families: dict[str, int] = {}
-    accepted = 0
-    for item in candidates:
-        module = str(item.get("module_name") or "")
-        family = str(item.get("module_family") or "")
-        if module:
-            modules[module] = modules.get(module, 0) + 1
-        if family:
-            families[family] = families.get(family, 0) + 1
-        accepted += 1 if item.get("accepted") else 0
-    summary = {
-        "candidate_count": len(candidates),
-        "has_candidate": bool(candidates),
-        "accepted_count": accepted,
-        "accepted_ratio": accepted / max(1, len(candidates)),
-        "max_confidence": max(confidences, default=0.0),
-        "mean_confidence": sum(confidences) / max(1, len(confidences)),
-        "module_counts": modules,
-        "module_family_counts": families,
-    }
-    if recoveries:
-        summary["max_candidate_recovery"] = max(recoveries, default=0.0)
-        summary["mean_candidate_recovery"] = sum(recoveries) / max(1, len(recoveries))
-    if deltas:
-        summary["max_recovery_delta"] = max(deltas, default=0.0)
-        summary["mean_recovery_delta"] = sum(deltas) / max(1, len(deltas))
-        summary["min_recovery_delta"] = min(deltas, default=0.0)
-    return summary
 
 
 def _analysis_native_probe(job: RepairJob, knowledge: ArchiveKnowledge, route_evidence_flags: list[str]) -> dict[str, Any]:

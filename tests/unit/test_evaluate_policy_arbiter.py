@@ -11,8 +11,8 @@ from repair_training.evaluate_policy_arbiter import (
 
 def test_policy_arbiter_eval_model_root_requires_four_models(tmp_path):
     model_root = tmp_path / "models"
-    (model_root / "repair_action").mkdir(parents=True)
-    (model_root / "state_value").mkdir()
+    (model_root / "graph_action").mkdir(parents=True)
+    (model_root / "graph_state_value").mkdir()
 
     with pytest.raises(SystemExit) as exc:
         _validate_model_root(model_root)
@@ -24,7 +24,7 @@ def test_policy_arbiter_eval_model_root_requires_four_models(tmp_path):
 
 def test_policy_arbiter_eval_accepts_complete_model_root(tmp_path):
     model_root = tmp_path / "models"
-    for name in ("normal_structure", "damage_location", "state_value", "repair_action"):
+    for name in ("normal_structure", "damage_location", "graph_state_value", "graph_action"):
         (model_root / name).mkdir(parents=True)
 
     assert _validate_model_root(model_root) == model_root.resolve()
@@ -64,54 +64,51 @@ def test_policy_arbiter_scheduler_config_inherits_advanced_verification(monkeypa
 def test_policy_arbiter_decision_stats_reads_scheduler_history_shape():
     rounds = [
         {
-            "value_gap": 0.4,
-            "candidate_state_values": {
-                "a": {"reachable_recovery_value": 0.8},
-                "b": {"metadata": {"decision_reason": "candidate_value_budget_fallback"}},
+            "graph_action": {"action": "checkout", "node_id": "node:0"},
+            "stop_controller": {
+                "selected_prior": {"action_type": "stop_signal", "prior_score": 0.92},
             },
-            "action": {
-                "action": "stop",
-                "arbiter": {
-                    "scores": [
-                        {"action": "stop", "value_gap": 0.4, "hard_guard": "stop_blocked_high_value_gap"},
-                        {"action": "apply_patch", "candidate_id": "a", "value_delta": 0.2},
-                        {"action": "apply_patch", "candidate_id": "b", "value_delta": 0.0, "hard_guard": "repeated_digest"},
-                    ],
-                },
-            },
+            "graph_summary": {"frontier_count": 2},
+        },
+        {
+            "graph_action": {"action": "finish", "reason": "plateau"},
+            "graph_summary": {"frontier_count": 1},
+        },
+        {
+            "graph_action": {"action": "exhaust"},
+            "best_seen_recovery": {"score": 0.5},
         }
     ]
 
     stats = _decision_stats(rounds)
 
-    assert stats["actions"] == {"stop": 1}
-    assert stats["high_gap_stop_count"] == 1
-    assert stats["premature_stop_count"] == 1
-    assert stats["loop_prevented_count"] == 1
-    assert stats["apply_zero_value_delta_count"] == 1
-    assert stats["candidate_value_predictions"] == 1
-    assert stats["candidate_value_count"] == 2
+    assert stats["actions"] == {"checkout": 1, "finish": 1, "exhaust": 1}
+    assert stats["checkout_count"] == 1
+    assert stats["exhaust_count"] == 1
+    assert stats["stop_signal_overridden"] == 1
+    assert stats["frontier_available_at_finish"] == 1
+    assert stats["exhaust_then_recovered"] == 1
 
 
 def test_policy_arbiter_summary_includes_oracle_and_decision_quality():
     runs = [
-        {
-            "status": "repaired",
-            "final_recovery": {"status": "complete"},
-            "final_recovery_score": 1.0,
-            "oracle_best_recovery": 1.0,
-            "oracle_gap": 0.0,
-            "decision_stats": {"actions": {"apply_patch": 1}, "high_gap_stop_count": 0},
-        },
-        {
-            "status": "partial",
-            "final_recovery": {"status": "partial"},
-            "final_recovery_score": 0.5,
-            "oracle_best_recovery": 0.75,
-            "oracle_gap": 0.25,
-            "decision_stats": {"actions": {"stop": 1}, "high_gap_stop_count": 1},
-        },
-    ]
+            {
+                "status": "repaired",
+                "final_recovery": {"status": "complete"},
+                "final_recovery_score": 1.0,
+                "oracle_best_recovery": 1.0,
+                "oracle_gap": 0.0,
+                "decision_stats": {"actions": {"expand": 1}, "graph_expansions": 1},
+            },
+            {
+                "status": "partial",
+                "final_recovery": {"status": "partial"},
+                "final_recovery_score": 0.5,
+                "oracle_best_recovery": 0.75,
+                "oracle_gap": 0.25,
+                "decision_stats": {"actions": {"finish": 1}, "frontier_available_at_finish": 1},
+            },
+        ]
 
     summary = _summary(runs, elapsed=3.0)
 
@@ -127,8 +124,9 @@ def test_policy_arbiter_summary_includes_oracle_and_decision_quality():
     assert summary["oracle_gap_mean"] == 0.125
     assert summary["oracle_gap_available_count"] == 2
     assert summary["oracle_gap_missing_count"] == 0
-    assert summary["decision_quality"]["actions"] == {"apply_patch": 1, "stop": 1}
-    assert summary["decision_quality"]["high_gap_stop_count"] == 1
+    assert summary["decision_quality"]["actions"] == {"expand": 1, "finish": 1}
+    assert summary["decision_quality"]["graph_expansions"] == 1
+    assert summary["decision_quality"]["frontier_available_at_finish"] == 1
 
 
 def test_policy_arbiter_summary_does_not_report_zero_oracle_gap_when_missing():

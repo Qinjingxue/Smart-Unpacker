@@ -31,7 +31,7 @@ def train_lightgbm_model(
     features_dir = Path(features_dir)
     model_dir = Path(model_dir)
     feature_schema = _read_json(features_dir / "feature_schema.json")
-    label_schema = _read_json(features_dir / ("action_schema.json" if model_type == "repair_action" else "label_schema.json"))
+    label_schema = _read_json(features_dir / ("action_schema.json" if model_type == "graph_action" else "label_schema.json"))
     training_config = {
         "run_id": run_id,
         "format": plugin.format_name,
@@ -43,9 +43,9 @@ def train_lightgbm_model(
         metrics = _train_damage_models(lgb, plugin, features_dir, model_dir, label_schema)
     elif model_type == "normal_structure":
         metrics = _train_normal_structure_model(lgb, plugin, features_dir, model_dir)
-    elif model_type == "state_value":
+    elif model_type == "graph_state_value":
         metrics = _train_state_value_model(lgb, plugin, features_dir, model_dir)
-    elif model_type == "repair_action":
+    elif model_type == "graph_action":
         metrics = _train_action_ranker(lgb, plugin, features_dir, model_dir)
     else:
         raise SystemExit(f"unsupported model type: {model_type}")
@@ -68,16 +68,18 @@ def train_lightgbm_model(
 
 
 def _model_card_extra(model_type: str) -> dict[str, Any]:
-    if model_type == "repair_action":
+    if model_type == "graph_action":
         return {
-            "model_role": "action_prior",
+            "model_role": "graph_action_prior",
             "does_not_use_state_value": True,
-            "final_decision_by": "PolicyDecisionArbiter",
+            "policy_semantics": "graph_v1",
+            "final_decision_by": "PolicyManager",
         }
-    if model_type == "state_value":
+    if model_type == "graph_state_value":
         return {
             "model_role": "reachable_recovery_value",
-            "final_decision_by": "PolicyDecisionArbiter",
+            "policy_semantics": "graph_v1",
+            "final_decision_by": "PolicyManager",
         }
     return {}
 
@@ -216,7 +218,7 @@ def _train_action_ranker(lgb, plugin: TrainingFormatPlugin, features_dir: Path, 
     test = _load_npz(features_dir / "test.npz")
     train_group = _read_group(features_dir / "group_train.txt")
     valid_group = _read_group(features_dir / "group_valid.txt")
-    params = _params(plugin, "repair_action")
+    params = _params(plugin, "graph_action")
     model = lgb.LGBMRanker(**params)
     fit_kwargs: dict[str, Any] = {"group": train_group}
     if len(valid["X"]) and valid_group:
@@ -264,7 +266,7 @@ def _train_state_value_model(lgb, plugin: TrainingFormatPlugin, features_dir: Pa
     train = _load_npz(features_dir / "train.npz")
     valid = _load_npz(features_dir / "valid.npz")
     test = _load_npz(features_dir / "test.npz")
-    params = _params(plugin, "state_value")
+    params = _params(plugin, "graph_state_value")
     model = lgb.LGBMRegressor(**params)
     fit_kwargs: dict[str, Any] = {}
     if len(valid["X"]):
@@ -288,7 +290,7 @@ def _params(plugin: TrainingFormatPlugin, model_type: str) -> dict[str, Any]:
         return {"n_estimators": 40, "learning_rate": 0.05, "num_leaves": 15, "random_state": 17, "verbosity": -1, **params}
     if model_type == "normal_structure":
         return {"objective": "binary", "n_estimators": 80, "learning_rate": 0.04, "num_leaves": 31, "random_state": 17, "verbosity": -1, **params}
-    if model_type == "state_value":
+    if model_type == "graph_state_value":
         return {"objective": "regression", "n_estimators": 80, "learning_rate": 0.04, "num_leaves": 31, "random_state": 17, "verbosity": -1, **params}
     return {"objective": "lambdarank", "n_estimators": 40, "learning_rate": 0.05, "num_leaves": 15, "random_state": 17, "verbosity": -1, **params}
 
