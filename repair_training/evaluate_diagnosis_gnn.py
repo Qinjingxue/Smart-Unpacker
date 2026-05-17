@@ -12,6 +12,7 @@ from repair_training.core.diagnosis_gnn.metrics import (
     binary_multilabel_metrics,
     calibrate_global_threshold,
     clean_false_positive_rate,
+    multilabel_set_metrics,
 )
 from repair_training.core.diagnosis_gnn.tensorize import metadata_for_sample
 from repair_training.core.plugin import normalize_format_name
@@ -32,8 +33,7 @@ def main(argv: list[str] | None = None) -> int:
     zone_labels: list[list[str]] = []
     theory_edge_scores: list[list[float]] = []
     theory_edge_labels: list[list[float]] = []
-    for sample in samples:
-        pred = model.predict_sample(sample)
+    for sample, pred in zip(samples, model.predict_samples(samples)):
         metadata = metadata_for_sample(sample)
         scores_by_node = dict((pred.get("root_cause") or {}).get("cause_scores") or {})
         score_row = [float(scores_by_node.get(node_id, 0.0)) for node_id in metadata.cause_node_ids]
@@ -64,6 +64,7 @@ def main(argv: list[str] | None = None) -> int:
         "rows": len(samples),
         "thresholds": thresholds,
         "cause": binary_multilabel_metrics(cause_scores_rows, cause_label_rows, threshold=float(thresholds["cause_threshold"])),
+        "cause_set": multilabel_set_metrics(cause_scores_rows, cause_label_rows),
         "clean_false_positive_rate": clean_false_positive_rate(cause_scores_rows, cause_label_rows, threshold=float(thresholds["cause_threshold"])),
         "field": _label_score_metrics(field_scores, field_labels, threshold=float(thresholds["field_threshold"])),
         "field_per_label": _per_label_topk(field_scores, field_labels),

@@ -7,7 +7,7 @@ from typing import Any
 from repair_training.core.diagnosis_graph.schema import DIAGNOSIS_GRAPH_SCHEMA_VERSION, DiagnosisGraphSample
 from repair_training.core.diagnosis_gnn import DIAGNOSIS_GNN_SEMANTICS
 from repair_training.core.diagnosis_gnn.model import build_diagnosis_gnn_model
-from repair_training.core.diagnosis_gnn.tensorize import metadata_for_sample, tensorize_sample
+from repair_training.core.diagnosis_gnn.tensorize import THEORY_DEPENDS_EDGE_TYPE, metadata_for_sample, tensorize_sample
 
 
 class DiagnosisGNNModel:
@@ -30,18 +30,46 @@ class DiagnosisGNNModel:
         checkpoint = torch.load(self.model_dir / "model.pt", map_location="cpu")
         self.metadata = (list(checkpoint.get("metadata", ([], []))[0]), [tuple(item) for item in checkpoint.get("metadata", ([], []))[1]])
         self.config = dict(checkpoint.get("config") or {})
+        self.config = _normalize_checkpoint_config(self.config, checkpoint.get("state_dict") or {})
         self.device = _resolve_device(device, torch)
         self.model = build_diagnosis_gnn_model(metadata=self.metadata, config=self.config).to(self.device)
         self.model.load_state_dict(checkpoint["state_dict"])
         self.model.eval()
 
     def predict_sample(self, sample: DiagnosisGraphSample) -> dict[str, Any]:
-        data = tensorize_sample(sample).to(self.device)
-        metadata = metadata_for_sample(sample)
+        return self.predict_samples([sample])[0]
+
+    def predict_samples(self, samples: list[DiagnosisGraphSample]) -> list[dict[str, Any]]:
+        if not samples:
+            return []
+        from torch_geometric.loader import DataLoader
+
+        data_items = []
+        for index, sample in enumerate(samples):
+            data = tensorize_sample(sample)
+            data.sample_index = self.torch.tensor([index], dtype=self.torch.long)
+            data_items.append(data)
+        metadatas = [metadata_for_sample(sample) for sample in samples]
+        outputs: list[dict[str, Any] | None] = [None] * len(samples)
+        loader = DataLoader(data_items, batch_size=16)
         with self.torch.no_grad():
-            out = self.model(data.x_dict, data.edge_index_dict)
-            scores = self.torch.sigmoid(out["cause"]).detach().cpu().tolist()
-            edge_scores_raw = self.torch.sigmoid(out.get("theory_edge", self.torch.empty(0, device=self.device))).detach().cpu().tolist()
+            for batch in loader:
+                indices = [int(item) for item in batch.sample_index.detach().cpu().view(-1).tolist()]
+                batch = batch.to(self.device)
+                out = self.model(batch.x_dict, batch.edge_index_dict)
+                cause_scores_all = self.torch.sigmoid(out["cause"]).detach().cpu()
+                edge_scores_all = self.torch.sigmoid(out.get("theory_edge", self.torch.empty(0, device=self.device))).detach().cpu()
+                cause_batch = batch["cause"].batch.detach().cpu()
+                edge_batch = _edge_batch_for_theory_depends(batch)
+                for local_index, sample_index in enumerate(indices):
+                    metadata = metadatas[sample_index]
+                    sample = samples[sample_index]
+                    cause_scores = cause_scores_all[cause_batch == local_index].tolist()
+                    edge_scores_raw = edge_scores_all[edge_batch == local_index].tolist() if edge_batch is not None else []
+                    outputs[sample_index] = self._format_prediction(sample, metadata, cause_scores, edge_scores_raw)
+        return [item for item in outputs if item is not None]
+
+    def _format_prediction(self, sample: DiagnosisGraphSample, metadata, scores: list[float], edge_scores_raw: list[float]) -> dict[str, Any]:
         cause_scores = {
             node_id: float(score)
             for node_id, score in zip(metadata.cause_node_ids, scores)
@@ -84,8 +112,28 @@ class DiagnosisGNNModel:
             },
         }
 
-    def predict_samples(self, samples: list[DiagnosisGraphSample]) -> list[dict[str, Any]]:
-        return [self.predict_sample(sample) for sample in samples]
+
+def _edge_batch_for_theory_depends(batch):
+    try:
+        edge_index = batch[THEORY_DEPENDS_EDGE_TYPE].edge_index
+        theory_batch = batch["theory"].batch.detach().cpu()
+    except Exception:
+        return None
+    if edge_index.numel() == 0:
+        return None
+    return theory_batch[edge_index[0].detach().cpu()]
+
+
+def _normalize_checkpoint_config(config: dict[str, Any], state_dict: dict[str, Any]) -> dict[str, Any]:
+    output = dict(config)
+    arch = str(output.get("arch") or output.get("algorithm") or "").lower().replace("-", "_")
+    if arch == "hgt":
+        has_layernorm_weights = any(str(key).startswith("norms.") for key in state_dict)
+        if "layernorm" not in output:
+            output["layernorm"] = has_layernorm_weights
+        if "residual" not in output:
+            output["residual"] = has_layernorm_weights
+    return output
 
 
 def _resolve_device(device: str, torch_module) -> str:

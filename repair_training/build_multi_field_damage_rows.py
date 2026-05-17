@@ -115,26 +115,26 @@ def build_multi_field_records(
         ]
         for field in fields
     }
+    fields_by_source = _fields_by_source(sources, fields, compatible_by_field)
     for size in combo_sizes:
         target = samples_per_size
         failed_attempts = 0
         while generated_by_size[size] < target and failed_attempts < target * 80:
             attempts_by_size[size] += 1
             failed_attempts += 1
-            combo = tuple(sorted(rng.sample(fields, min(size, len(fields)))))
-            compatible = _compatible_sources_for_combo(combo, compatible_by_field)
-            if not compatible:
+            compatible_sources = [item for item in sources if len(fields_by_source.get(str(item["source"]), [])) >= size]
+            if not compatible_sources:
                 skipped.setdefault(str(size), {})
-                skipped[str(size)]["no_compatible_combo_count"] = int(skipped[str(size)].get("no_compatible_combo_count") or 0)
+                skipped[str(size)]["no_compatible_source_count"] = int(skipped[str(size)].get("no_compatible_source_count") or 0) + 1
                 skipped[str(size)].setdefault("examples", [])
-                skipped[str(size)]["no_compatible_combo_count"] += 1
                 if len(skipped[str(size)]["examples"]) < 8:
-                    skipped[str(size)]["examples"].append(list(combo))
+                    skipped[str(size)]["examples"].append({"required_fields": size})
                 continue
-            min_count = min(source_counts[str(item["source"])] for item in compatible)
-            least_used = [item for item in compatible if source_counts[str(item["source"])] == min_count]
+            min_count = min(source_counts[str(item["source"])] for item in compatible_sources)
+            least_used = [item for item in compatible_sources if source_counts[str(item["source"])] == min_count]
             source_item = dict(rng.choice(least_used))
             source = Path(source_item["source"])
+            combo = tuple(sorted(rng.sample(fields_by_source[str(source)], size)))
             source_key = str(source)
             variant_index = int(variant_counts[source_key])
             try:
@@ -260,6 +260,18 @@ def _compatible_sources_for_combo(combo: tuple[str, ...], compatible_by_field: d
     shared = set.intersection(*source_sets) if source_sets else set()
     first = compatible_by_field.get(combo[0], [])
     return [item for item in first if str(item["source"]) in shared]
+
+
+def _fields_by_source(
+    sources: list[dict[str, Any]],
+    fields: list[str],
+    compatible_by_field: dict[str, list[dict[str, Any]]],
+) -> dict[str, list[str]]:
+    source_to_fields: dict[str, list[str]] = {str(source["source"]): [] for source in sources}
+    for field in fields:
+        for item in compatible_by_field.get(field, []):
+            source_to_fields.setdefault(str(item["source"]), []).append(field)
+    return {source: sorted(set(values)) for source, values in source_to_fields.items()}
 
 
 def _per_combo_report(rows: list[dict[str, Any]], failures: list[dict[str, Any]], generation_report: dict[str, Any]) -> dict[str, Any]:

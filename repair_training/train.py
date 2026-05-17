@@ -36,6 +36,17 @@ def main(argv: list[str] | None = None) -> int:
                 "weight_decay": args.weight_decay,
                 "early_stopping_patience": args.early_stopping_patience,
                 "edge_loss_weight": args.edge_loss_weight,
+                "arch": args.arch,
+                "heads": args.heads,
+                "num_bases": args.num_bases,
+                "residual": args.residual,
+                "layernorm": args.layernorm,
+                "amp": args.amp,
+                "loss": args.loss,
+                "focal_gamma": args.focal_gamma,
+                "pos_weight_max": args.pos_weight_max,
+                "sample_weighting": args.sample_weighting,
+                "tensor_cache_dir": args.tensor_cache_dir,
             }.items()
             if value is not None
         }
@@ -80,7 +91,27 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--weight-decay", type=float, default=None)
     parser.add_argument("--early-stopping-patience", type=int, default=None)
     parser.add_argument("--edge-loss-weight", type=float, default=None)
+    parser.add_argument("--arch", choices=["hetero_graphsage", "rgcn", "hgt"], default=None)
+    parser.add_argument("--heads", type=int, default=None)
+    parser.add_argument("--num-bases", type=int, default=None)
+    parser.add_argument("--residual", type=_bool_arg, default=None)
+    parser.add_argument("--layernorm", type=_bool_arg, default=None)
+    parser.add_argument("--amp", action="store_true")
+    parser.add_argument("--loss", choices=["bce", "weighted_bce", "focal"], default=None)
+    parser.add_argument("--focal-gamma", type=float, default=None)
+    parser.add_argument("--pos-weight-max", type=float, default=None)
+    parser.add_argument("--sample-weighting", choices=["multi_field_root_count", "none"], default=None)
+    parser.add_argument("--tensor-cache-dir", default="")
     return parser
+
+
+def _bool_arg(value: str) -> bool:
+    text = str(value or "").strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    raise argparse.ArgumentTypeError(f"expected boolean value, got {value!r}")
 
 
 if __name__ == "__main__":
