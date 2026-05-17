@@ -12,6 +12,7 @@ import zlib
 import pytest
 
 from sunpack.repair import RepairJob, RepairScheduler
+from sunpack.repair.candidate import materialize_candidates
 from sunpack.support.sevenzip_worker import dry_run_archive
 from tests.helpers.real_archives import ArchiveFixtureFactory, apply_split_issue
 from tests.helpers.tool_config import get_optional_rar
@@ -60,6 +61,36 @@ def test_archive_nested_payload_salvage_extracts_inner_zip(tmp_path):
     assert result.module_name == "archive_nested_payload_salvage"
     with zipfile.ZipFile(result.repaired_input["path"]) as archive:
         assert archive.read("inner.txt") == inner_entries["inner.txt"]
+
+
+def test_archive_nested_payload_salvage_materializes_policy_patch_state(tmp_path):
+    inner_entries = {"inner.txt": b"nested payload"}
+    inner_zip = _zip_bytes(inner_entries)
+    source = tmp_path / "damaged-outer.bin"
+    source.write_bytes(b"broken outer header" + inner_zip + b"broken tail")
+    scheduler = RepairScheduler({
+        "repair": {
+            "workspace": str(tmp_path / "repair"),
+            "module_limits": {"verify_candidates": False, "max_candidates_per_module": 4},
+            "modules": [{"name": "archive_nested_payload_salvage", "enabled": True}],
+        }
+    })
+    job = RepairJob(
+        source_input={"kind": "file", "path": str(source), "format_hint": "zip"},
+        format="zip",
+        confidence=0.82,
+        damage_flags=["outer_container_bad", "nested_archive", "damaged"],
+        archive_key=source.name,
+    )
+
+    batch = scheduler.generate_repair_candidates(job, lazy=True)
+    candidates = materialize_candidates(batch.candidates)
+
+    assert candidates
+    assert candidates[0].module_name == "archive_nested_payload_salvage"
+    assert candidates[0].repaired_state is not None
+    assert candidates[0].repaired_input["kind"] == "archive_state"
+    assert candidates[0].patch_plan is not None
 
 
 def test_tar_sparse_pax_longname_repair_drops_metadata_and_preserves_payload(tmp_path):

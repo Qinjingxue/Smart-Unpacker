@@ -566,8 +566,11 @@ def collect_episode(
             if item.get("candidate_id")
         ]
         if state.patch_depth() > 0 and parent_digest:
-            actions.append(TrainingAction(action_type="undo_patch", reason="pop_previous_patch", metadata={"target_state_digest": parent_digest}))
-        actions.extend([TrainingAction(action_type="stop", reason="control_stop"), TrainingAction(action_type="give_up", reason="control_give_up")])
+            actions.append(TrainingAction(action_type="undo_patch", reason="checkout_parent", metadata={"target_state_digest": parent_digest, "graph_semantics": "checkout_parent"}))
+        actions.extend([
+            TrainingAction(action_type="stop", reason="stop_signal", metadata={"graph_semantics": "stop_signal"}),
+            TrainingAction(action_type="give_up", reason="exhaust_branch", metadata={"graph_semantics": "exhaust_branch"}),
+        ])
         before = _training_verification_snapshot(state_recovery)
 
         for candidate, snapshot, candidate_recovery in zip(candidates, candidate_dicts, candidate_recoveries):
@@ -610,7 +613,7 @@ def collect_episode(
                 damage_analysis_target={**damage_target_dict, "model_damage_analysis": _compact_damage_analysis(damage_analysis)},
                 candidate_snapshots=candidate_snapshots,
                 available_actions=actions,
-                selected_action=TrainingAction(action_type="undo_patch", metadata={"target_state_digest": parent_digest}),
+                selected_action=TrainingAction(action_type="undo_patch", reason="checkout_parent", metadata={"target_state_digest": parent_digest, "graph_semantics": "checkout_parent"}),
                 next_state_digest=parent_digest,
                 verification_before=before,
                 verification_after=parent_after,
@@ -1243,18 +1246,21 @@ def _terminal_transition(
         damage_analysis_target=target,
         candidate_snapshots=candidate_snapshots,
         available_actions=actions,
-        selected_action=TrainingAction(action_type=action_type, reason=f"control_{action_type}"),
+        selected_action=TrainingAction(
+            action_type=action_type,
+            reason="stop_signal" if action_type == "stop" else "exhaust_branch",
+            metadata={"graph_semantics": "stop_signal" if action_type == "stop" else "exhaust_branch"},
+        ),
         next_state_digest="",
         verification_before=before,
         verification_after=before,
         reward=0.0,
-        terminal=True,
+        terminal=False,
     )
 
 
 def _with_snapshot_metadata(snapshot: dict[str, Any]) -> dict[str, Any]:
-    snapshot = dict(snapshot or {})
-    snapshot.pop("recovery_snapshot", None)
+    snapshot = _scrub_candidate_training_input(snapshot)
     known = {
         "candidate_id",
         "action_type",
@@ -1262,12 +1268,48 @@ def _with_snapshot_metadata(snapshot: dict[str, Any]) -> dict[str, Any]:
         "module",
         "format",
         "patch_depth",
-        "patch_digest",
         "patch_operation_count",
         "confidence",
         "validation_summary",
     }
     return {**snapshot, "metadata": {key: value for key, value in snapshot.items() if key not in known}}
+
+
+def _scrub_candidate_training_input(snapshot: dict[str, Any]) -> dict[str, Any]:
+    output = dict(snapshot or {})
+    for key in (
+        "patch_digest",
+        "patch_depth",
+        "patch_count",
+        "last_patch_module",
+        "has_archive_state_plan",
+        "branchable",
+        "recovery_snapshot",
+        "recovery_score",
+        "recovery_status",
+        "recovery_delta",
+        "verification_summary",
+        "score_source",
+        "workspace_paths",
+        "repaired_input",
+    ):
+        output.pop(key, None)
+    metadata = output.get("metadata") if isinstance(output.get("metadata"), dict) else {}
+    if metadata:
+        output["metadata"] = {
+            key: value
+            for key, value in metadata.items()
+            if not str(key).startswith("recovery_")
+            and key not in {"verification_summary", "score_source", "candidate_status", "status_reason"}
+        }
+    validation = output.get("validation_summary") if isinstance(output.get("validation_summary"), dict) else {}
+    if validation:
+        output["validation_summary"] = {
+            key: value
+            for key, value in validation.items()
+            if not str(key).startswith("recovery_") and key not in {"verification_summary", "score_source"}
+        }
+    return output
 
 
 def _dedupe_transition_payloads(transitions: list[TrainingTransition]) -> list[TrainingTransition]:

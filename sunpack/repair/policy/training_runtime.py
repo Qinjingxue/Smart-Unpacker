@@ -222,7 +222,7 @@ def candidate_summaries_for_state(candidate_payloads: list[dict[str, Any]]) -> l
 
 def candidate_summary_for_state(candidate_payload: dict[str, Any]) -> dict[str, Any]:
     validation = candidate_payload.get("validation_summary") if isinstance(candidate_payload.get("validation_summary"), dict) else {}
-    return {
+    summary = {
         "candidate_id": str(candidate_payload.get("candidate_id") or ""),
         "module_name": str(candidate_payload.get("module_name") or candidate_payload.get("module") or ""),
         "module_family": str(candidate_payload.get("module_family") or candidate_payload.get("last_patch_module") or ""),
@@ -230,13 +230,17 @@ def candidate_summary_for_state(candidate_payload: dict[str, Any]) -> dict[str, 
         "patch_operation_count": _int(candidate_payload.get("patch_operation_count")),
         "patch_depth": _int(candidate_payload.get("patch_depth")),
         "confidence": _float(candidate_payload.get("confidence")),
-        "recovery_score": _float(candidate_payload.get("recovery_score")),
-        "recovery_delta": _float(candidate_payload.get("recovery_delta")),
         "accepted": bool(validation.get("accepted", False)),
         "validation_score": _float(validation.get("score")),
         "status": str(candidate_payload.get("status") or ""),
-        "recovery_status": str(candidate_payload.get("recovery_status") or ""),
     }
+    if "recovery_score" in candidate_payload:
+        summary["recovery_score"] = _float(candidate_payload.get("recovery_score"))
+    if "recovery_delta" in candidate_payload:
+        summary["recovery_delta"] = _float(candidate_payload.get("recovery_delta"))
+    if "recovery_status" in candidate_payload:
+        summary["recovery_status"] = str(candidate_payload.get("recovery_status") or "")
+    return summary
 
 
 def state_value_feature_payload(request: StateValueRequest) -> dict[str, Any]:
@@ -391,8 +395,8 @@ def request_to_dict(request: DamageAnalysisRequest | RepairActionRequest | State
 
 
 def _candidate_summary_from_payloads(candidates: list[dict[str, Any]]) -> dict[str, Any]:
-    recoveries = [_float(item.get("recovery_score")) for item in candidates]
-    deltas = [_float(item.get("recovery_delta")) for item in candidates]
+    recoveries = [_float(item.get("recovery_score")) for item in candidates if "recovery_score" in item]
+    deltas = [_float(item.get("recovery_delta")) for item in candidates if "recovery_delta" in item]
     confidences = [_float(item.get("confidence")) for item in candidates]
     modules: dict[str, int] = {}
     families: dict[str, int] = {}
@@ -405,21 +409,24 @@ def _candidate_summary_from_payloads(candidates: list[dict[str, Any]]) -> dict[s
         if family:
             families[family] = families.get(family, 0) + 1
         accepted += 1 if item.get("accepted") else 0
-    return {
+    summary = {
         "candidate_count": len(candidates),
         "has_candidate": bool(candidates),
         "accepted_count": accepted,
         "accepted_ratio": accepted / max(1, len(candidates)),
-        "max_candidate_recovery": max(recoveries, default=0.0),
-        "mean_candidate_recovery": sum(recoveries) / max(1, len(recoveries)),
-        "max_recovery_delta": max(deltas, default=0.0),
-        "mean_recovery_delta": sum(deltas) / max(1, len(deltas)),
-        "min_recovery_delta": min(deltas, default=0.0),
         "max_confidence": max(confidences, default=0.0),
         "mean_confidence": sum(confidences) / max(1, len(confidences)),
         "module_counts": modules,
         "module_family_counts": families,
     }
+    if recoveries:
+        summary["max_candidate_recovery"] = max(recoveries, default=0.0)
+        summary["mean_candidate_recovery"] = sum(recoveries) / max(1, len(recoveries))
+    if deltas:
+        summary["max_recovery_delta"] = max(deltas, default=0.0)
+        summary["mean_recovery_delta"] = sum(deltas) / max(1, len(deltas))
+        summary["min_recovery_delta"] = min(deltas, default=0.0)
+    return summary
 
 
 def _analysis_native_probe(job: RepairJob, knowledge: ArchiveKnowledge, route_evidence_flags: list[str]) -> dict[str, Any]:

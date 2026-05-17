@@ -13,6 +13,7 @@ from typing import Any
 
 from repair_training.collect_episodes import _job_from_record, _load_records, _record_id
 from repair_training.core.plugin import normalize_format_name
+from sunpack.config.loader import load_config
 from sunpack.repair.policy.recovery_evaluator import RecoveryEvaluator
 from sunpack.repair.scheduler import RepairScheduler
 
@@ -324,7 +325,9 @@ def _hard_case_sort_key(item: dict[str, Any]) -> tuple[float, float, float, floa
 
 
 def _scheduler_config(*, workspace: Path, model_root: Path, max_rounds: int) -> dict[str, Any]:
-    repair = {
+    base = load_config()
+    verification = dict(base.get("verification") or {})
+    repair = _deep_merge_dicts(dict(base.get("repair") or {}), {
         "workspace": str(workspace),
         "max_repair_rounds_per_task": max_rounds,
         "max_attempts_per_task": max_rounds,
@@ -342,15 +345,21 @@ def _scheduler_config(*, workspace: Path, model_root: Path, max_rounds: int) -> 
         "runtime_cache": {"enabled": True, "max_entries": 512},
         "training_module_selection_cache": True,
         "extraction": {"quiet": True},
-        "verification": {
-            "enabled": True,
-            "methods": [
-                {"name": "extraction_exit_signal", "enabled": True},
-                {"name": "output_presence", "enabled": True},
-            ],
-        },
-    }
-    return {**repair, "repair": repair}
+    })
+    if verification:
+        repair["verification"] = verification
+    return {**base, **repair, "verification": verification, "repair": repair}
+
+
+def _deep_merge_dicts(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(base)
+    for key, value in override.items():
+        current = merged.get(key)
+        if isinstance(current, dict) and isinstance(value, dict):
+            merged[key] = _deep_merge_dicts(current, value)
+        else:
+            merged[key] = value
+    return merged
 
 
 def _validate_model_root(path: Path) -> Path:

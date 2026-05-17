@@ -161,6 +161,19 @@ def test_build_features_writes_npz_and_schema(tmp_path):
     assert (run_dir / "features" / "repair_action" / "group_train.txt").is_file()
     schema = load_feature_schema(run_dir / "features" / "repair_action" / "feature_schema.json")
     assert "candidate_snapshot.module_family" in schema["categorical_features"]
+    assert not any(
+        name.startswith(("next_recovery", "recovery_delta"))
+        or "candidate_snapshot.recovery" in name
+        or "candidate_snapshot.patch_digest" in name
+        or "candidate_snapshot.patch_depth" in name
+        or "candidate_snapshot.patch_count" in name
+        or "candidate_snapshot.last_patch_module" in name
+        or "candidate_snapshot.has_archive_state_plan" in name
+        or "candidate_snapshot.branchable" in name
+        or "candidate_snapshot.metadata.score_source" in name
+        or "candidate_snapshot.verification_summary" in name
+        for name in schema["feature_names"]
+    )
 
 
 def test_lightgbm_training_writes_model_artifacts(tmp_path):
@@ -518,7 +531,14 @@ def test_build_features_and_train_state_value(tmp_path):
     schema = load_feature_schema(run_dir / "features" / "state_value" / "feature_schema.json")
     assert "current_recovery.score" in schema["feature_names"]
     assert "candidate_summary.candidate_count" in schema["feature_names"]
-    assert not any("path" in name or "patch_digest" in name for name in schema["feature_names"])
+    assert not any(
+        "path" in name
+        or "patch_digest" in name
+        or "candidate_summary.max_candidate_recovery" in name
+        or "candidate_summary.mean_candidate_recovery" in name
+        or "candidate_summary.recovery_delta" in name
+        for name in schema["feature_names"]
+    )
 
     assert train_main(["--format", "zip", "--model", "state_value", "--run-dir", str(run_dir)]) == 0
     metrics = json.loads((run_dir / "models" / "state_value" / "metrics.json").read_text(encoding="utf-8"))

@@ -3,6 +3,7 @@ import pytest
 from repair_training.evaluate_policy_arbiter import (
     _decision_stats,
     _hard_cases,
+    _scheduler_config,
     _summary,
     _validate_model_root,
 )
@@ -27,6 +28,37 @@ def test_policy_arbiter_eval_accepts_complete_model_root(tmp_path):
         (model_root / name).mkdir(parents=True)
 
     assert _validate_model_root(model_root) == model_root.resolve()
+
+
+def test_policy_arbiter_scheduler_config_inherits_advanced_verification(monkeypatch, tmp_path):
+    def fake_load_config():
+        return {
+            "verification": {
+                "enabled": True,
+                "methods": [
+                    {"name": "extraction_exit_signal", "enabled": True},
+                    {"name": "archive_test_crc", "enabled": True, "max_items": 123},
+                    {"name": "sample_readability", "enabled": True},
+                ],
+            },
+            "repair": {
+                "workspace": "original",
+                "policy": {"enabled": False, "strict_provider_errors": True},
+            },
+        }
+
+    monkeypatch.setattr("repair_training.evaluate_policy_arbiter.load_config", fake_load_config)
+
+    config = _scheduler_config(workspace=tmp_path / "workspace", model_root=tmp_path / "models", max_rounds=6)
+
+    methods = [item["name"] for item in config["verification"]["methods"]]
+    assert methods == ["extraction_exit_signal", "archive_test_crc", "sample_readability"]
+    assert config["repair"]["verification"] == config["verification"]
+    assert config["repair"]["workspace"] == str(tmp_path / "workspace")
+    assert config["repair"]["max_repair_rounds_per_task"] == 6
+    assert config["repair"]["policy"]["enabled"] is True
+    assert config["repair"]["policy"]["strict_provider_errors"] is True
+    assert config["repair"]["policy"]["policy_model_root"] == str(tmp_path / "models")
 
 
 def test_policy_arbiter_decision_stats_reads_scheduler_history_shape():

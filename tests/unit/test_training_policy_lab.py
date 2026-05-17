@@ -206,7 +206,9 @@ def test_episode_collector_emits_patch_state_episode(tmp_path):
     first_apply = next(t for t in restored.transitions if t.selected_action and t.selected_action.action_type == "apply_patch")
     assert first_apply.verification_after.details["recovery_snapshot"]["score"] == 0.0
     assert first_apply.verification_after.details["recovery_snapshot"]["metadata"]["score_source"] == "none"
-    assert first_apply.candidate_snapshots[0].metadata["recovery_score"] == 0.0
+    assert "recovery_score" not in first_apply.candidate_snapshots[0].metadata
+    assert "score_source" not in first_apply.candidate_snapshots[0].metadata
+    assert first_apply.candidate_snapshots[0].patch_digest == ""
     serialized = json.dumps(episode.to_dict(), sort_keys=True)
     assert "data_b64" not in serialized
     assert "expected_b64" not in serialized
@@ -301,7 +303,7 @@ def test_value_labeler_stop_and_give_up_terminal_choices():
     assert stop_rows[0]["is_best_action"] is True
     assert stop_rows[0]["long_term_value"] > 0
     assert give_up_rows[0]["is_best_action"] is True
-    assert give_up_rows[0]["long_term_value"] == 0.0
+    assert give_up_rows[0]["long_term_value"] == -0.01
 
 
 def test_value_labeler_cli_outputs_action_and_damage_rows(tmp_path):
@@ -321,7 +323,25 @@ def test_value_labeler_cli_outputs_action_and_damage_rows(tmp_path):
     assert damage_rows
     assert any(row["is_best_action"] for row in action_rows)
     assert "state_value" not in action_rows[0]
-    assert {"current_recovery", "next_recovery", "recovery_delta", "score_source"}.issubset(action_rows[0])
+    assert "current_recovery" in action_rows[0]
+    assert not {"next_recovery", "recovery_delta", "score_source", "next_state_digest"} & set(action_rows[0])
+    apply_row = next(row for row in action_rows if row["action_type"] == "apply_patch")
+    candidate_keys = set(apply_row["candidate_snapshot"])
+    candidate_metadata_keys = set((apply_row["candidate_snapshot"].get("metadata") or {}))
+    assert not {
+        "patch_digest",
+        "patch_depth",
+        "patch_count",
+        "last_patch_module",
+        "has_archive_state_plan",
+        "branchable",
+        "recovery_snapshot",
+        "recovery_score",
+        "recovery_delta",
+        "verification_summary",
+        "score_source",
+    } & candidate_keys
+    assert not {"recovery_score", "score_source", "verification_summary"} & candidate_metadata_keys
 
 
 class _FakeScheduler:

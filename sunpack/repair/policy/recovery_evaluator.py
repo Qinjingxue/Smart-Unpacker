@@ -665,6 +665,7 @@ def _verification_payload(result: VerificationResult | dict[str, Any] | None) ->
     completeness = 0.0 if empty_unobserved else result.completeness
     decision_hint = "none" if empty_unobserved and result.decision_hint == "accept" else result.decision_hint
     return {
+        "methods_run": list(getattr(result, "methods_run", []) or []),
         "decision_hint": decision_hint,
         "assessment_status": result.assessment_status,
         "source_integrity": result.source_integrity,

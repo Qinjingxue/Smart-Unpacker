@@ -11,6 +11,9 @@ from sunpack.repair.policy.types import (
     DamageAnalysisRequest,
     DamageAnalysisResult,
     PolicyCandidatePayload,
+    PolicyExplorationGraph,
+    PolicyGraphAction,
+    PolicyGraphEdge,
     RepairActionDecision,
     RepairActionPrior,
     RepairActionRequest,
@@ -91,10 +94,9 @@ class PolicyDecisionArbiter:
             score = float(prior.prior_score or 0.0)
             if prior.action == "apply_patch":
                 payload = candidate_by_id.get(candidate_id, {})
-                recovery_delta = _optional_float(payload.get("recovery_delta")) or 0.0
                 next_value = _state_value_score(value_by_id.get(candidate_id), default=current_value)
                 value_delta = next_value - current_value
-                score += self.value_weight * value_delta + self.recovery_weight * recovery_delta - self.step_cost
+                score += self.value_weight * value_delta - self.step_cost
                 if not payload:
                     score -= self.invalid_candidate_penalty
                     details["hard_guard"] = "missing_candidate_payload"
@@ -111,7 +113,7 @@ class PolicyDecisionArbiter:
                 if value_delta >= self.apply_margin:
                     score += self.apply_margin
                     details["selected_reason"] = "candidate_value_improves"
-                details.update({"next_value": next_value, "value_delta": value_delta, "recovery_delta": recovery_delta})
+                details.update({"next_value": next_value, "value_delta": value_delta})
             elif prior.action == "undo_patch":
                 value_delta = parent_value_delta
                 recovery_delta = parent_recovery_delta
@@ -390,6 +392,107 @@ class RepairPolicyManager:
             "load_error": self.last_load_error,
         }
 
+    def decide_graph_action(
+        self,
+        *,
+        graph: PolicyExplorationGraph,
+        legacy_decision: RepairActionDecision,
+        action_selection: dict[str, Any],
+        events: dict[str, Any] | None = None,
+        current_recovery: dict[str, Any] | None = None,
+        best_seen_recovery: dict[str, Any] | None = None,
+        round_index: int = 0,
+        max_expansions: int = 0,
+    ) -> tuple[PolicyGraphAction, dict[str, Any]]:
+        events = dict(events or {})
+        current_score = _optional_float((current_recovery or {}).get("score")) or 0.0
+        best_score = _optional_float((best_seen_recovery or {}).get("score")) or 0.0
+        policy = self.policy_config if isinstance(self.policy_config, dict) else {}
+        complete_threshold = float(policy.get("complete_threshold", 0.999) or 0.999)
+        stale_patience = max(0, int(policy.get("graph_stale_expansion_patience", policy.get("stop_plateau_min_rounds", 2)) or 0))
+        frontier = graph.active_frontier_edges()
+        best_edge = _best_graph_frontier_edge(frontier)
+        final_node_id = graph.best_node_id or graph.current_node_id
+        stop_controller = {
+            "complete_threshold": complete_threshold,
+            "best_score": best_score,
+            "current_score": current_score,
+            "frontier_count": len(frontier),
+            "events": events,
+            "legacy_action": legacy_decision.action,
+            "legacy_reason": legacy_decision.reason,
+        }
+        if best_score >= complete_threshold or str((best_seen_recovery or {}).get("decision_hint") or "") == "accept":
+            return PolicyGraphAction(action="finish", reason="verified_complete", terminal_action="stop", final_node_id=final_node_id), {
+                "stop_controller": {**stop_controller, "finish_reason": "verified_complete"},
+                "legacy_action": action_selection,
+            }
+        if bool(events.get("max_expansions_reached")) or (max_expansions and graph.expansion_count >= max_expansions):
+            return PolicyGraphAction(action="finish", reason="max_expansions_reached", terminal_action="stop", final_node_id=final_node_id), {
+                "stop_controller": {**stop_controller, "finish_reason": "max_expansions_reached"},
+                "legacy_action": action_selection,
+            }
+        if stale_patience and graph.stale_expansion_count >= stale_patience and not _frontier_has_high_value(frontier, best_score, margin=float(policy.get("graph_continue_margin", 0.02) or 0.02)):
+            return PolicyGraphAction(action="finish", reason="graph_stale_expansions", terminal_action="stop", final_node_id=final_node_id), {
+                "stop_controller": {**stop_controller, "finish_reason": "graph_stale_expansions"},
+                "legacy_action": action_selection,
+            }
+        if legacy_decision.action == "apply_patch":
+            edge = _graph_edge_for_candidate(graph, legacy_decision.selected_candidate_id)
+            if edge is not None and edge.status == "frontier":
+                if edge.from_node_id == graph.current_node_id:
+                    return PolicyGraphAction(action="expand", candidate_id=edge.candidate_id, reason=legacy_decision.reason, metadata={"edge_id": edge.edge_id}), {
+                        "stop_controller": {**stop_controller, "finish_reason": ""},
+                        "legacy_action": action_selection,
+                    }
+                return PolicyGraphAction(action="checkout", node_id=edge.from_node_id, reason="checkout_frontier_source", metadata={"edge_id": edge.edge_id, "candidate_id": edge.candidate_id}), {
+                    "stop_controller": {**stop_controller, "finish_reason": ""},
+                    "legacy_action": action_selection,
+                }
+        if legacy_decision.action == "undo_patch":
+            current = graph.current_node()
+            if current is not None and current.parent_id and current.parent_id in graph.nodes:
+                return PolicyGraphAction(action="checkout", node_id=current.parent_id, reason=legacy_decision.reason or "undo_checkout_parent"), {
+                    "stop_controller": {**stop_controller, "finish_reason": ""},
+                    "legacy_action": action_selection,
+                }
+        if legacy_decision.action in {"give_up", "undo_patch"}:
+            if best_edge is not None:
+                return PolicyGraphAction(
+                    action="checkout",
+                    node_id=best_edge.from_node_id,
+                    reason=legacy_decision.reason or legacy_decision.action,
+                    metadata={"edge_id": best_edge.edge_id, "candidate_id": best_edge.candidate_id, "exhaust_current": legacy_decision.action == "give_up"},
+                ), {
+                    "stop_controller": {**stop_controller, "finish_reason": ""},
+                    "legacy_action": action_selection,
+                }
+            return PolicyGraphAction(action="finish", reason=legacy_decision.reason or "frontier_empty", terminal_action="give_up", final_node_id=final_node_id), {
+                "stop_controller": {**stop_controller, "finish_reason": "frontier_empty"},
+                "legacy_action": action_selection,
+            }
+        if legacy_decision.action == "stop":
+            plateau = bool(events.get("plateau_satisfied") or events.get("frontier_empty"))
+            if plateau:
+                return PolicyGraphAction(action="finish", reason=legacy_decision.reason or "policy_stop", terminal_action="stop", final_node_id=final_node_id), {
+                    "stop_controller": {**stop_controller, "finish_reason": "policy_stop"},
+                    "legacy_action": action_selection,
+                }
+        if best_edge is not None:
+            if best_edge.from_node_id == graph.current_node_id:
+                return PolicyGraphAction(action="expand", candidate_id=best_edge.candidate_id, reason="continue_best_frontier", metadata={"edge_id": best_edge.edge_id}), {
+                    "stop_controller": {**stop_controller, "finish_reason": ""},
+                    "legacy_action": action_selection,
+                }
+            return PolicyGraphAction(action="checkout", node_id=best_edge.from_node_id, reason="checkout_best_frontier", metadata={"edge_id": best_edge.edge_id, "candidate_id": best_edge.candidate_id}), {
+                "stop_controller": {**stop_controller, "finish_reason": ""},
+                "legacy_action": action_selection,
+            }
+        return PolicyGraphAction(action="finish", reason="frontier_empty", terminal_action="stop", final_node_id=final_node_id), {
+            "stop_controller": {**stop_controller, "finish_reason": "frontier_empty"},
+            "legacy_action": action_selection,
+        }
+
     def estimate_state_value(
         self,
         *,
@@ -576,6 +679,38 @@ def _coerce_damage_analysis(value: DamageAnalysisResult | dict[str, Any] | None,
             metadata={**dict(value.get("metadata") or {}), "provider_id": provider_id},
         )
     return DamageAnalysisResult(format=fmt, metadata={"provider_id": provider_id, "decision_reason": "empty_damage_analysis"})
+
+
+def _best_graph_frontier_edge(edges: list[PolicyGraphEdge]) -> PolicyGraphEdge | None:
+    if not edges:
+        return None
+    return max(edges, key=_graph_edge_score)
+
+
+def _graph_edge_for_candidate(graph: PolicyExplorationGraph, candidate_id: str) -> PolicyGraphEdge | None:
+    wanted = str(candidate_id or "")
+    if not wanted:
+        return None
+    for edge in graph.edges.values():
+        if edge.candidate_id == wanted:
+            return edge
+    return None
+
+
+def _frontier_has_high_value(edges: list[PolicyGraphEdge], best_score: float, *, margin: float) -> bool:
+    for edge in edges:
+        value = _state_value_score(edge.candidate_value, default=best_score)
+        if value >= float(best_score or 0.0) + float(margin or 0.0):
+            return True
+    return False
+
+
+def _graph_edge_score(edge: PolicyGraphEdge) -> float:
+    prior = _optional_float((edge.action_prior or {}).get("prior_score"))
+    if prior is None:
+        prior = _optional_float((edge.action_prior or {}).get("final_score"))
+    value = _state_value_score(edge.candidate_value, default=0.0)
+    return float(prior or 0.0) + value
 
 
 def _coerce_action_priors(value: Any, *, provider_id: str) -> list[RepairActionPrior]:

@@ -75,6 +75,7 @@ class ArchiveCarrierCropDeepRecovery:
             default_confidence=0.78,
             default_message="archive carrier crop produced a candidate",
             prefer_patch_plan=bool(config.get("virtual_patch_candidate")),
+            force_archive_state=bool(config.get("virtual_patch_candidate")),
         )
 
     def _run_native(self, job: RepairJob, diagnosis: RepairDiagnosis, workspace: str, config: dict) -> dict:

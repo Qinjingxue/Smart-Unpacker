@@ -74,6 +74,7 @@ class RarCarrierCropDeepRecovery:
             default_confidence=0.86,
             default_message="RAR carrier crop produced a candidate",
             prefer_patch_plan=bool(config.get("virtual_patch_candidate")),
+            force_archive_state=bool(config.get("virtual_patch_candidate")),
         )
         return [
             _trim_rar_candidate(_isolate_candidate_path(_boost_rar_specific_candidate(candidate), workspace))

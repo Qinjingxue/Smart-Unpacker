@@ -13,7 +13,7 @@ from sunpack.contracts.tasks import ArchiveTask
 from sunpack.coordinator.repair_runtime_transition import RepairRuntimeTransitionEvaluator
 from sunpack.coordinator.repair_stage import ArchiveRepairStage
 from sunpack.extraction.result import ExtractionResult
-from sunpack.repair.candidate import RepairCandidate, RepairCandidateBatch
+from sunpack.repair.candidate import CandidateValidation, RepairCandidate, RepairCandidateBatch
 from sunpack.repair.config import normalize_repair_config
 from sunpack.repair.job import RepairJob
 from sunpack.repair.context import build_repair_context
@@ -25,6 +25,7 @@ from sunpack.repair.policy.training_runtime import candidate_snapshot, runtime_c
 from sunpack.repair.result import RepairResult
 from sunpack.repair.scheduler import RepairScheduler, _policy_loop_stop_plateau_satisfied, _policy_route_rejects_are_soft
 from sunpack.support import archive_knowledge_projection as knowledge_view
+from sunpack.support.archive_state_view import ArchiveStateByteView
 from sunpack.verification.result import ArchiveCoverageSummary, VerificationResult
 
 
@@ -290,7 +291,7 @@ def test_dual_policy_loop_applies_patch_candidate(tmp_path, monkeypatch):
             "max_repair_rounds_per_task": 3,
         }
     })
-    scheduler.generate_repair_candidates = lambda job, **kwargs: RepairCandidateBatch(candidates=[] if job.attempts else [candidate], diagnosis={"format": "zip", "confidence": 0.5})  # type: ignore[method-assign]
+    scheduler.generate_policy_repair_candidates = lambda job, **kwargs: RepairCandidateBatch(candidates=[] if job.attempts else [candidate], diagnosis={"format": "zip", "confidence": 0.5})  # type: ignore[method-assign]
 
     result = scheduler.repair(_job(tmp_path))
 
@@ -301,7 +302,119 @@ def test_dual_policy_loop_applies_patch_candidate(tmp_path, monkeypatch):
     assert result.diagnosis["policy_loop"]["terminal_action"] == "stop"
 
 
-def test_dual_policy_loop_apply_then_undo_stops_on_empty_stack(tmp_path, monkeypatch):
+def test_policy_loop_does_not_preverify_candidates_but_keeps_state_values(tmp_path, monkeypatch):
+    provider = _DualValueProvider(["apply_patch:patch_one", "stop"], value=0.82)
+    _install_policy_package(monkeypatch, "sunpack_policy_test_dual_pure_apply", provider)
+    source = tmp_path / "source.zip"
+    source.write_bytes(b"broken")
+    candidate = _patch_candidate("patch_one", source, b"fixed")
+
+    monkeypatch.setattr(
+        "sunpack.repair.scheduler.RecoveryEvaluator.evaluate_state",
+        lambda self, job, state, **kwargs: PolicyRecoverySnapshot(
+            state_digest=state.effective_patch_digest() if state is not None else "",
+            patch_depth=state.patch_depth() if state is not None else 0,
+            score=0.4 if state is not None and state.patch_depth() > 0 else 0.0,
+            status="partial" if state is not None and state.patch_depth() > 0 else "empty",
+        ),
+    )
+
+    def fail_candidate_verification(*args, **kwargs):
+        raise AssertionError("policy loop must not verify unchosen candidates")
+
+    monkeypatch.setattr("sunpack.repair.scheduler.RecoveryEvaluator.evaluate_candidate", fail_candidate_verification)
+    scheduler = RepairScheduler({
+        "repair": {
+            "workspace": str(tmp_path / "repair"),
+            "policy": {"provider_package": "sunpack_policy_test_dual_pure_apply"},
+            "max_repair_rounds_per_task": 3,
+        }
+    })
+    scheduler.generate_policy_repair_candidates = lambda job, **kwargs: RepairCandidateBatch(candidates=[] if job.attempts else [candidate], diagnosis={"format": "zip", "confidence": 0.5})  # type: ignore[method-assign]
+
+    result = scheduler.repair(_job(tmp_path))
+
+    assert result.repaired_state is not None
+    assert result.repaired_state.patch_depth() == 1
+    first_choose = provider.choose_requests[0]
+    assert first_choose.candidate_payloads
+    assert not {"recovery_score", "recovery_delta", "recovery_status"} & set(first_choose.candidate_payloads[0])
+    assert result.diagnosis["policy_loop"]["rounds"][0]["candidate_state_values"]
+    assert any(
+        request.archive_state is not None and request.archive_state.patch_depth() == 1
+        for request in provider.estimate_requests
+    )
+
+
+def test_policy_loop_does_not_selector_filter_validation_rejected_candidates(tmp_path, monkeypatch):
+    provider = _DualValueProvider(["apply_patch:patch_one", "stop"], value=0.7)
+    _install_policy_package(monkeypatch, "sunpack_policy_test_dual_validation_reject", provider)
+    source = tmp_path / "source.zip"
+    source.write_bytes(b"broken")
+    candidate = replace(
+        _patch_candidate("patch_one", source, b"fixed"),
+        validations=[
+            CandidateValidation(
+                name="native_candidate_validation",
+                accepted=False,
+                score=0.0,
+                warnings=["selector would reject this candidate"],
+            )
+        ],
+    )
+
+    monkeypatch.setattr(
+        "sunpack.repair.scheduler.RecoveryEvaluator.evaluate_state",
+        lambda self, job, state, **kwargs: PolicyRecoverySnapshot(
+            state_digest=state.effective_patch_digest() if state is not None else "",
+            patch_depth=state.patch_depth() if state is not None else 0,
+            score=0.3 if state is not None and state.patch_depth() > 0 else 0.0,
+            status="partial" if state is not None and state.patch_depth() > 0 else "empty",
+        ),
+    )
+    scheduler = RepairScheduler({
+        "repair": {
+            "workspace": str(tmp_path / "repair"),
+            "policy": {"provider_package": "sunpack_policy_test_dual_validation_reject"},
+            "max_repair_rounds_per_task": 3,
+        }
+    })
+    scheduler.generate_policy_repair_candidates = lambda job, **kwargs: RepairCandidateBatch(candidates=[] if job.attempts else [candidate], diagnosis={"format": "zip", "confidence": 0.5})  # type: ignore[method-assign]
+
+    result = scheduler.repair(_job(tmp_path))
+
+    assert result.repaired_state is not None
+    assert result.repaired_state.patch_depth() == 1
+    payload = provider.choose_requests[0].candidate_payloads[0]
+    assert payload["module_name"] == "patch_one"
+    assert payload["validation_summary"]["items"][0]["accepted"] is False
+
+
+def test_policy_loop_excludes_file_only_candidates_from_model_selection(tmp_path, monkeypatch):
+    provider = _DualValueProvider(["apply_patch:patch_one", "stop"], value=0.7)
+    _install_policy_package(monkeypatch, "sunpack_policy_test_dual_state_only", provider)
+    source = tmp_path / "source.zip"
+    source.write_bytes(b"broken")
+    file_only = _candidate("file_only", tmp_path / "file-only.zip", confidence=0.9)
+    patch_candidate = _patch_candidate("patch_one", source, b"fixed")
+
+    scheduler = RepairScheduler({
+        "repair": {
+            "workspace": str(tmp_path / "repair"),
+            "policy": {"provider_package": "sunpack_policy_test_dual_state_only", "refresh_runtime_observation": False, "best_state_recovery_mode": "policy_light"},
+            "max_repair_rounds_per_task": 3,
+        }
+    })
+    scheduler.generate_policy_repair_candidates = lambda job, **kwargs: RepairCandidateBatch(candidates=[] if job.attempts else [file_only, patch_candidate], diagnosis={"format": "zip", "confidence": 0.5})  # type: ignore[method-assign]
+
+    result = scheduler.repair(_job(tmp_path))
+
+    assert result.repaired_state is not None
+    modules = [payload["module_name"] for payload in provider.choose_requests[0].candidate_payloads]
+    assert modules == ["patch_one"]
+
+
+def test_dual_policy_loop_apply_then_undo_checkouts_parent_without_dropping_best(tmp_path, monkeypatch):
     _install_policy_package(monkeypatch, "sunpack_policy_test_dual_undo", _DualProvider(["apply_patch:patch_one", "undo_patch", "undo_patch"]))
     source = tmp_path / "source.zip"
     source.write_bytes(b"broken")
@@ -314,15 +427,16 @@ def test_dual_policy_loop_apply_then_undo_stops_on_empty_stack(tmp_path, monkeyp
             "max_repair_rounds_per_task": 4,
         }
     })
-    scheduler.generate_repair_candidates = lambda job, **kwargs: RepairCandidateBatch(candidates=[candidate] if job.archive_state and job.archive_state.patch_depth() == 0 else [], diagnosis={"format": "zip", "confidence": 0.5})  # type: ignore[method-assign]
+    scheduler.generate_policy_repair_candidates = lambda job, **kwargs: RepairCandidateBatch(candidates=[candidate] if job.archive_state and job.archive_state.patch_depth() == 0 else [], diagnosis={"format": "zip", "confidence": 0.5})  # type: ignore[method-assign]
 
     result = scheduler.repair(replace(_job(tmp_path), archive_state=root))
 
     assert result.status == "partial"
-    assert result.diagnosis["policy_loop"]["stop_reason"] == "undo_empty_patch_stack"
+    assert result.diagnosis["policy_loop"]["terminal_action"] == "give_up"
     assert result.diagnosis["policy_loop"]["patch_depth"] == 1
     assert result.diagnosis["policy_loop"]["terminal_patch_depth"] == 0
-    assert result.diagnosis["policy_loop"]["final_state_selection"] == "best_seen_recovery"
+    assert result.diagnosis["policy_loop"]["final_state_selection"] == "best_seen_graph_node"
+    assert result.diagnosis["policy_loop"]["graph_summary"]["node_count"] == 2
 
 
 def test_dual_policy_loop_give_up(tmp_path, monkeypatch):
@@ -333,13 +447,131 @@ def test_dual_policy_loop_give_up(tmp_path, monkeypatch):
             "policy": {"provider_package": "sunpack_policy_test_dual_give_up"},
         }
     })
-    scheduler.generate_repair_candidates = lambda job, **kwargs: RepairCandidateBatch(candidates=[], diagnosis={"format": "zip", "confidence": 0.5})  # type: ignore[method-assign]
+    scheduler.generate_policy_repair_candidates = lambda job, **kwargs: RepairCandidateBatch(candidates=[], diagnosis={"format": "zip", "confidence": 0.5})  # type: ignore[method-assign]
 
     result = scheduler.repair(_job(tmp_path))
 
-    assert result.status == "unrepairable"
+    assert result.status == "skipped"
     assert result.module_name == "policy_give_up"
     assert result.diagnosis["policy_loop"]["terminal_action"] == "give_up"
+    assert result.diagnosis["policy_loop"]["final_state_selection"] == "best_seen_graph_node"
+
+
+def test_dual_policy_loop_give_up_checkouts_remaining_frontier(tmp_path, monkeypatch):
+    _install_policy_package(
+        monkeypatch,
+        "sunpack_policy_test_dual_give_up_frontier",
+        _DualProvider(["apply_patch:patch_one", "give_up", "apply_patch:patch_alt", "give_up"]),
+    )
+    source = tmp_path / "source.zip"
+    source.write_bytes(b"broken")
+    root = ArchiveState.from_archive_input(ArchiveInputDescriptor.from_parts(archive_path=str(source), format_hint="zip"))
+
+    def recovery_for_state(state):
+        depth = state.patch_depth() if state is not None else 0
+        digest = state.effective_patch_digest() if state is not None else ""
+        score = 0.0
+        if depth == 1:
+            raw = ArchiveStateByteView(state).to_bytes()
+            score = 0.9 if raw.endswith(b"alt") else 0.2
+        return PolicyRecoverySnapshot(
+            state_digest=digest,
+            patch_depth=depth,
+            score=score,
+            status="partial" if score > 0 else "empty",
+        )
+
+    monkeypatch.setattr(
+        "sunpack.repair.scheduler.RecoveryEvaluator.evaluate_state",
+        lambda self, job, state, **kwargs: recovery_for_state(state),
+    )
+
+    def generate_candidates(job, **kwargs):
+        state = job.archive_state or root
+        if state.patch_depth() == 0:
+            return RepairCandidateBatch(
+                candidates=[
+                    _patch_candidate_from_state("patch_one", state, b"one"),
+                    _patch_candidate_from_state("patch_alt", state, b"alt"),
+                ],
+                diagnosis={"format": "zip", "confidence": 0.5},
+            )
+        return RepairCandidateBatch(candidates=[], diagnosis={"format": "zip", "confidence": 0.5})
+
+    scheduler = RepairScheduler({
+        "repair": {
+            "workspace": str(tmp_path / "repair"),
+            "policy": {"provider_package": "sunpack_policy_test_dual_give_up_frontier"},
+            "max_repair_rounds_per_task": 4,
+        }
+    })
+    scheduler.generate_policy_repair_candidates = generate_candidates  # type: ignore[method-assign]
+
+    result = scheduler.repair(replace(_job(tmp_path), archive_state=root))
+
+    loop = result.diagnosis["policy_loop"]
+    assert result.repaired_state is not None
+    assert ArchiveStateByteView(result.repaired_state).to_bytes().endswith(b"alt")
+    assert loop["graph_summary"]["node_count"] == 3
+    assert any(item["graph_action"]["action"] == "checkout" for item in loop["rounds"])
+    assert loop["final_state_selection"] == "best_seen_graph_node"
+
+
+def test_dual_policy_loop_give_up_returns_best_seen_state(tmp_path, monkeypatch):
+    _install_policy_package(
+        monkeypatch,
+        "sunpack_policy_test_dual_give_up_best_seen",
+        _DualProvider(["apply_patch:patch_one", "apply_patch:patch_two", "give_up"]),
+    )
+    source = tmp_path / "source.zip"
+    source.write_bytes(b"broken")
+
+    def recovery_for_state(state):
+        depth = state.patch_depth() if state is not None else 0
+        score = {0: 0.0, 1: 0.8, 2: 0.2}.get(depth, 0.0)
+        return PolicyRecoverySnapshot(
+            state_digest=state.effective_patch_digest() if state is not None else "",
+            patch_depth=depth,
+            score=score,
+            status="partial" if score > 0 else "empty",
+        )
+
+    monkeypatch.setattr(
+        "sunpack.repair.scheduler.RecoveryEvaluator.evaluate_state",
+        lambda self, job, state, **kwargs: recovery_for_state(state),
+    )
+
+    def generate_candidates(job, **kwargs):
+        state = job.archive_state or ArchiveState.from_archive_input(
+            ArchiveInputDescriptor.from_parts(archive_path=str(source), format_hint="zip")
+        )
+        if state.patch_depth() == 0:
+            return RepairCandidateBatch(candidates=[_patch_candidate_from_state("patch_one", state, b"one")], diagnosis={"format": "zip", "confidence": 0.5})
+        if state.patch_depth() == 1:
+            return RepairCandidateBatch(candidates=[_patch_candidate_from_state("patch_two", state, b"two")], diagnosis={"format": "zip", "confidence": 0.5})
+        return RepairCandidateBatch(candidates=[], diagnosis={"format": "zip", "confidence": 0.5})
+
+    scheduler = RepairScheduler({
+        "repair": {
+            "workspace": str(tmp_path / "repair"),
+            "policy": {"provider_package": "sunpack_policy_test_dual_give_up_best_seen"},
+            "max_repair_rounds_per_task": 3,
+        }
+    })
+    scheduler.generate_policy_repair_candidates = generate_candidates  # type: ignore[method-assign]
+
+    result = scheduler.repair(_job(tmp_path))
+
+    assert result.status == "partial"
+    assert result.repaired_state is not None
+    assert result.repaired_state.patch_depth() == 1
+    loop = result.diagnosis["policy_loop"]
+    assert loop["terminal_action"] == "give_up"
+    assert loop["terminal_patch_depth"] == 2
+    assert loop["patch_depth"] == 1
+    assert loop["final_state_selection"] == "best_seen_graph_node"
+    assert loop["recovery"]["score"] == 0.8
+    assert loop["terminal_recovery"]["score"] == 0.2
 
 
 def test_dual_policy_loop_stop_returns_best_seen_state(tmp_path, monkeypatch):
@@ -387,7 +619,7 @@ def test_dual_policy_loop_stop_returns_best_seen_state(tmp_path, monkeypatch):
             "max_repair_rounds_per_task": 3,
         }
     })
-    scheduler.generate_repair_candidates = generate_candidates  # type: ignore[method-assign]
+    scheduler.generate_policy_repair_candidates = generate_candidates  # type: ignore[method-assign]
 
     result = scheduler.repair(_job(tmp_path))
 
@@ -396,7 +628,7 @@ def test_dual_policy_loop_stop_returns_best_seen_state(tmp_path, monkeypatch):
     loop = result.diagnosis["policy_loop"]
     assert loop["terminal_patch_depth"] == 2
     assert loop["patch_depth"] == 1
-    assert loop["final_state_selection"] == "best_seen_recovery"
+    assert loop["final_state_selection"] == "best_seen_graph_node"
     assert loop["recovery"]["score"] == 0.9
     assert loop["terminal_recovery"]["score"] == 0.2
 
@@ -750,6 +982,26 @@ class _DualProvider:
                     return {"action_priors": [{"action": action, "candidate_id": payload["candidate_id"], "prior_score": 1.0, "confidence": 1.0}]}
             return {"action_priors": [{"action": "give_up", "prior_score": 1.0, "reason": "missing_scripted_candidate"}]}
         return {"action_priors": [{"action": action, "prior_score": 1.0, "confidence": 1.0, "reason": f"scripted_{action}"}]}
+
+
+class _DualValueProvider(_DualProvider):
+    def __init__(self, actions, value: float = 0.75):
+        super().__init__(actions)
+        self.value = value
+        self.choose_requests = []
+        self.estimate_requests = []
+
+    def choose(self, request):
+        self.choose_requests.append(request)
+        return super().choose(request)
+
+    def estimate(self, request):
+        self.estimate_requests.append(request)
+        return {
+            "reachable_recovery_value": self.value,
+            "confidence": 0.9,
+            "metadata": {"model_id": "test_value"},
+        }
 
 
 class _RawDamageScoreProvider:

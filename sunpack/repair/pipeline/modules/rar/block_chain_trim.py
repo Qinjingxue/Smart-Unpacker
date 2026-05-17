@@ -61,6 +61,7 @@ class RarBlockChainTrim:
             default_confidence=0.72,
             default_message="RAR block-chain trim produced a candidate",
             prefer_patch_plan=bool(config.get("virtual_patch_candidate")),
+            force_archive_state=bool(config.get("virtual_patch_candidate")),
         )
 
     def _run_native(self, job: RepairJob, workspace: str, config: dict) -> dict:

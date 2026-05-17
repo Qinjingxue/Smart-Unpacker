@@ -55,6 +55,7 @@ class RarEndBlockRepair:
             default_confidence=0.8,
             default_message="RAR end-block repair produced a candidate",
             prefer_patch_plan=bool(config.get("virtual_patch_candidate")),
+            force_archive_state=bool(config.get("virtual_patch_candidate")),
         )
         if candidates:
             return candidates

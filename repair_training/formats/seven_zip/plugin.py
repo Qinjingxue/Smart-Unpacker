@@ -74,17 +74,28 @@ def damage_feature_spec() -> TrainingFeatureSpec:
 
 def action_feature_spec() -> TrainingFeatureSpec:
     return TrainingFeatureSpec(
-        include_prefixes=("action_type", "candidate_snapshot.", "damage_analysis_target.", "current_recovery.", "next_recovery.", "recovery_delta"),
+        include_prefixes=("action_type", "candidate_snapshot.", "damage_analysis_target.", "current_recovery."),
         categorical_paths=(
             "action_type",
             "candidate_snapshot.action_type",
             "candidate_snapshot.module_name",
-            "candidate_snapshot.last_patch_module",
-            "candidate_snapshot.recovery_status",
             "current_recovery.status",
             "current_recovery.decision_hint",
         ),
-        ignore_prefixes=("candidate_snapshot.patch_digest", "candidate_snapshot.recovery_snapshot.state_digest"),
+        ignore_prefixes=(
+            "candidate_snapshot.patch_digest",
+            "candidate_snapshot.patch_depth",
+            "candidate_snapshot.patch_count",
+            "candidate_snapshot.last_patch_module",
+            "candidate_snapshot.has_archive_state_plan",
+            "candidate_snapshot.branchable",
+            "candidate_snapshot.recovery_",
+            "candidate_snapshot.recovery_snapshot",
+            "candidate_snapshot.verification_summary",
+            "candidate_snapshot.metadata.recovery_",
+            "candidate_snapshot.metadata.verification_summary",
+            "candidate_snapshot.metadata.score_source",
+        ),
     )
 
 

@@ -272,8 +272,6 @@ def state_value_rows(action_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def _candidate_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
     apply_rows = [row for row in rows if str(row.get("action_type") or "") == "apply_patch"]
-    recoveries = [_float((row.get("candidate_snapshot") or {}).get("recovery_score")) for row in apply_rows if isinstance(row.get("candidate_snapshot"), dict)]
-    deltas = [_float(row.get("recovery_delta")) for row in apply_rows]
     confidences = [_float((row.get("candidate_snapshot") or {}).get("confidence")) for row in apply_rows if isinstance(row.get("candidate_snapshot"), dict)]
     accepted = [
         bool(((row.get("candidate_snapshot") or {}).get("validation_summary") or {}).get("accepted"))
@@ -295,11 +293,6 @@ def _candidate_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "has_candidate": bool(apply_rows),
         "accepted_count": sum(1 for item in accepted if item),
         "accepted_ratio": sum(1 for item in accepted if item) / max(1, len(accepted)),
-        "max_candidate_recovery": max(recoveries, default=0.0),
-        "mean_candidate_recovery": sum(recoveries) / max(1, len(recoveries)),
-        "max_recovery_delta": max(deltas, default=0.0),
-        "mean_recovery_delta": sum(deltas) / max(1, len(deltas)),
-        "min_recovery_delta": min(deltas, default=0.0),
         "max_confidence": max(confidences, default=0.0),
         "mean_confidence": sum(confidences) / max(1, len(confidences)),
         "module_counts": modules,
@@ -628,7 +621,7 @@ def _feature_row(row: dict[str, Any], *, model_type: str) -> dict[str, Any]:
     else:
         payload = {
             "action_type": row.get("action_type"),
-            "candidate_snapshot": row.get("candidate_snapshot") if isinstance(row.get("candidate_snapshot"), dict) else {},
+            "candidate_snapshot": _scrub_candidate_training_input(row.get("candidate_snapshot") if isinstance(row.get("candidate_snapshot"), dict) else {}),
             "damage_analysis": row.get("damage_analysis") if isinstance(row.get("damage_analysis"), dict) else {},
             "current_recovery": row.get("current_recovery") if isinstance(row.get("current_recovery"), dict) else {},
         }
@@ -698,6 +691,8 @@ def load_feature_schema(path: str | Path) -> dict[str, Any]:
 
 
 def _allowed(key: str, spec: TrainingFeatureSpec) -> bool:
+    if _candidate_state_leak_key(key):
+        return False
     if key in spec.ignore_paths:
         return False
     if any(key.startswith(prefix) for prefix in spec.ignore_prefixes):
@@ -705,6 +700,74 @@ def _allowed(key: str, spec: TrainingFeatureSpec) -> bool:
     if spec.include_prefixes and not any(key == prefix or key.startswith(prefix) for prefix in spec.include_prefixes):
         return False
     return True
+
+
+def _scrub_candidate_training_input(snapshot: dict[str, Any]) -> dict[str, Any]:
+    output = dict(snapshot or {})
+    for key in (
+        "patch_digest",
+        "patch_depth",
+        "patch_count",
+        "last_patch_module",
+        "has_archive_state_plan",
+        "branchable",
+        "recovery_snapshot",
+        "recovery_score",
+        "recovery_status",
+        "recovery_delta",
+        "verification_summary",
+        "score_source",
+        "workspace_paths",
+        "repaired_input",
+    ):
+        output.pop(key, None)
+    metadata = output.get("metadata") if isinstance(output.get("metadata"), dict) else {}
+    if metadata:
+        output["metadata"] = {
+            key: value
+            for key, value in metadata.items()
+            if not str(key).startswith("recovery_")
+            and key not in {"verification_summary", "score_source", "candidate_status", "status_reason"}
+        }
+    validation = output.get("validation_summary") if isinstance(output.get("validation_summary"), dict) else {}
+    if validation:
+        output["validation_summary"] = {
+            key: value
+            for key, value in validation.items()
+            if not str(key).startswith("recovery_") and key not in {"verification_summary", "score_source"}
+        }
+    return output
+
+
+def _candidate_state_leak_key(key: str) -> bool:
+    leak_tokens = (
+        "candidate_snapshot.patch_digest",
+        "candidate_snapshot.patch_depth",
+        "candidate_snapshot.patch_count",
+        "candidate_snapshot.last_patch_module",
+        "candidate_snapshot.has_archive_state_plan",
+        "candidate_snapshot.branchable",
+        "candidate_snapshot.recovery_",
+        "candidate_snapshot.recovery_snapshot",
+        "candidate_snapshot.verification_summary",
+        "candidate_snapshot.score_source",
+        "candidate_snapshot.metadata.recovery_",
+        "candidate_snapshot.metadata.verification_summary",
+        "candidate_snapshot.metadata.score_source",
+        "candidate_snapshot.metadata.candidate_status",
+        "candidate_snapshot.metadata.status_reason",
+        "candidate_snapshot.validation_summary.recovery_",
+        "candidate_snapshot.validation_summary.verification_summary",
+        "candidate_snapshot.validation_summary.score_source",
+        "candidate_summary.max_candidate_recovery",
+        "candidate_summary.mean_candidate_recovery",
+        "candidate_summary.max_recovery_delta",
+        "candidate_summary.mean_recovery_delta",
+        "candidate_summary.min_recovery_delta",
+        "next_recovery",
+        "recovery_delta",
+    )
+    return any(key == token or key.startswith(token) for token in leak_tokens)
 
 
 def _safe_token(value: Any) -> str:

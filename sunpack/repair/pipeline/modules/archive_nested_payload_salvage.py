@@ -5,7 +5,11 @@ from sunpack.repair.job import RepairJob
 from sunpack.repair.pipeline.module import RepairModuleSpec, RepairRoute
 from sunpack.repair.pipeline.modules._common import source_input_for_job, module_limits
 from sunpack.repair.pipeline.modules._native_candidates import candidates_from_native_result
-from sunpack.repair.pipeline.modules.archive_carrier_crop import _result_from_native
+from sunpack.repair.pipeline.modules.archive_carrier_crop import (
+    _result_from_native,
+    attach_native_crop_patch_plans,
+    normalize_native_candidate_lengths,
+)
 from sunpack.repair.pipeline.registry import register_repair_module
 from sunpack_native import archive_nested_payload_salvage as _native_nested_payload_salvage
 
@@ -43,6 +47,9 @@ class ArchiveNestedPayloadSalvage:
 
     def generate_candidates(self, job: RepairJob, diagnosis: RepairDiagnosis, workspace: str, config: dict):
         result = self._run_native(job, workspace, config)
+        normalize_native_candidate_lengths(result)
+        if bool(config.get("virtual_patch_candidate")):
+            attach_native_crop_patch_plans(result, job, self.spec.name)
         return candidates_from_native_result(
             self.spec.name,
             result,
@@ -52,6 +59,8 @@ class ArchiveNestedPayloadSalvage:
             partial_default=True,
             default_confidence=0.72,
             default_message="nested archive salvage produced a candidate",
+            prefer_patch_plan=bool(config.get("virtual_patch_candidate")),
+            force_archive_state=bool(config.get("virtual_patch_candidate")),
         )
 
     def _run_native(self, job: RepairJob, workspace: str, config: dict) -> dict:

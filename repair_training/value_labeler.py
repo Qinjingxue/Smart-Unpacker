@@ -74,8 +74,14 @@ def label_episode_values(
     repeat_penalty: float = DEFAULT_REPEAT_PENALTY,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     transitions_by_state: dict[str, list[TrainingTransition]] = defaultdict(list)
+    graph_best_value = 0.0
     for transition in episode.transitions:
         transitions_by_state[transition.state_digest].append(transition)
+        graph_best_value = max(
+            graph_best_value,
+            float(transition.verification_before.score or 0.0),
+            float(transition.verification_after.score or 0.0),
+        )
     memo: dict[str, float] = {}
 
     def value(state_digest: str, visiting: set[str] | None = None) -> float:
@@ -91,7 +97,7 @@ def label_episode_values(
         if not edges:
             memo[state_digest] = 0.0
             return 0.0
-        best = max(_q_value(edge, value, visiting, gamma=gamma, step_cost=step_cost, repeat_penalty=repeat_penalty) for edge in edges)
+        best = max(_q_value(edge, value, visiting, gamma=gamma, step_cost=step_cost, repeat_penalty=repeat_penalty, graph_best_value=graph_best_value) for edge in edges)
         memo[state_digest] = best
         return best
 
@@ -104,7 +110,7 @@ def label_episode_values(
     damage_seen: set[str] = set()
     for state_digest, edges in transitions_by_state.items():
         scored = [
-            (edge, _q_value(edge, value, set(), gamma=gamma, step_cost=step_cost, repeat_penalty=repeat_penalty))
+            (edge, _q_value(edge, value, set(), gamma=gamma, step_cost=step_cost, repeat_penalty=repeat_penalty, graph_best_value=graph_best_value))
             for edge in edges
         ]
         if not scored:
@@ -170,13 +176,14 @@ def _q_value(
     gamma: float,
     step_cost: float,
     repeat_penalty: float,
+    graph_best_value: float = 0.0,
 ) -> float:
     action = edge.selected_action.action_type if edge.selected_action is not None else ""
     current_score = float(edge.verification_before.score or 0.0)
     if action == "stop":
         return current_score - step_cost
     if action == "give_up":
-        return 0.0 if current_score <= 0.0 else -0.5 - current_score
+        return max(current_score, float(graph_best_value or 0.0)) - step_cost
     if edge.next_state_digest and edge.next_state_digest in visiting:
         return repeat_penalty
     return _immediate_reward(edge, step_cost=step_cost) + gamma * value_fn(edge.next_state_digest, visiting)
@@ -198,17 +205,17 @@ def _candidate_snapshot_for_action(edge: TrainingTransition, candidate_id: str, 
         return {}
     for candidate in edge.candidate_snapshots:
         if candidate.candidate_id == candidate_id:
-            return candidate.to_dict()
+            return _scrub_candidate_training_input(candidate.to_dict())
     for candidate in fallback_candidates or []:
         if str(candidate.get("candidate_id") or "") == candidate_id:
-            return dict(candidate)
+            return _scrub_candidate_training_input(candidate)
     return {}
 
 
 def _state_candidate_snapshots(edges: list[TrainingTransition]) -> list[dict[str, Any]]:
     for edge in edges:
         if edge.candidate_snapshots:
-            return [candidate.to_dict() for candidate in edge.candidate_snapshots]
+            return [_scrub_candidate_training_input(candidate.to_dict()) for candidate in edge.candidate_snapshots]
     return []
 
 
@@ -361,8 +368,9 @@ def _state_value_rows_from_action_rows(rows: list[dict[str, Any]]) -> list[dict[
 
 def _action_policy_row(row: dict[str, Any]) -> dict[str, Any]:
     output = dict(row)
-    for key in ("state_value", "value_gap", "long_term_value", "regret"):
+    for key in ("state_value", "value_gap", "long_term_value", "regret", "next_recovery", "recovery_delta", "score_source", "next_state_digest"):
         output.pop(key, None)
+    output["candidate_snapshot"] = _scrub_candidate_training_input(output.get("candidate_snapshot") or {})
     return output
 
 
@@ -371,12 +379,47 @@ def _candidate_summary_from_action_rows(rows: list[dict[str, Any]]) -> dict[str,
     return {
         "candidate_count": len(apply_rows),
         "has_candidate": bool(apply_rows),
-        "max_recovery_delta": max((float(row.get("recovery_delta") or 0.0) for row in apply_rows), default=0.0),
-        "mean_recovery_delta": sum(float(row.get("recovery_delta") or 0.0) for row in apply_rows) / max(1, len(apply_rows)),
         "has_undo_action": any(str(row.get("action_type") or "") == "undo_patch" for row in rows),
         "has_stop_action": any(str(row.get("action_type") or "") == "stop" for row in rows),
         "has_give_up_action": any(str(row.get("action_type") or "") == "give_up" for row in rows),
     }
+
+
+def _scrub_candidate_training_input(snapshot: dict[str, Any]) -> dict[str, Any]:
+    output = dict(snapshot or {})
+    for key in (
+        "patch_digest",
+        "patch_depth",
+        "patch_count",
+        "last_patch_module",
+        "has_archive_state_plan",
+        "branchable",
+        "recovery_snapshot",
+        "recovery_score",
+        "recovery_status",
+        "recovery_delta",
+        "verification_summary",
+        "score_source",
+        "workspace_paths",
+        "repaired_input",
+    ):
+        output.pop(key, None)
+    metadata = output.get("metadata") if isinstance(output.get("metadata"), dict) else {}
+    if metadata:
+        output["metadata"] = {
+            key: value
+            for key, value in metadata.items()
+            if not str(key).startswith("recovery_")
+            and key not in {"verification_summary", "score_source", "candidate_status", "status_reason"}
+        }
+    validation = output.get("validation_summary") if isinstance(output.get("validation_summary"), dict) else {}
+    if validation:
+        output["validation_summary"] = {
+            key: value
+            for key, value in validation.items()
+            if not str(key).startswith("recovery_") and key not in {"verification_summary", "score_source"}
+        }
+    return output
 
 
 class _OracleRecoveryStats:
