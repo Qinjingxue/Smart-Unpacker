@@ -8,6 +8,7 @@ import numpy as np
 
 from repair_training.core.datasets import action_query_id, group_sizes, sort_for_groups, split_rows, write_json
 from repair_training.core.plugin import TrainingFeatureSpec, TrainingFormatPlugin, TrainingLabelSchema
+from repair_training.core.world_field import WORLD_SEMANTICS, world_field_rows
 
 
 FEATURE_SCHEMA_VERSION = 1
@@ -29,6 +30,8 @@ def build_feature_datasets(
     if model_type == "step_value":
         if not all("reachable_recovery_value" in row for row in rows):
             rows = state_value_rows(rows)
+    if model_type == "normal_structure":
+        rows = world_field_rows(rows)
     splits = split_rows(rows)
     spec = feature_spec(plugin, model_type)
     label_schema = labels_for_plugin(plugin, model_type)
@@ -95,7 +98,7 @@ def transform_rows(
                     y[row_index, uncertain_index[label]] = 1.0
         return x, y
     if model_type == "normal_structure":
-        y = np.array([1.0 if _float(row.get("normal_label")) >= 0.5 else 0.0 for row in rows], dtype=np.float32)
+        y = np.array([_float(row.get("target_numeric")) if str(row.get("value_type") or "") == "numeric" else 0.0 for row in rows], dtype=np.float32)
         return x, y
     if model_type == "step_value":
         y = np.array([_clamp01(_float(row.get("reachable_recovery_value"))) for row in rows], dtype=np.float32)
@@ -138,8 +141,9 @@ def feature_spec(plugin: TrainingFormatPlugin, model_type: str) -> TrainingFeatu
         )
     if model_type == "normal_structure":
         return TrainingFeatureSpec(
-            include_prefixes=("knowledge_payload.",),
-            ignore_prefixes=("knowledge_payload.source.input.path", "knowledge_payload.archive_state.state"),
+            include_prefixes=("context.", "field_path", "value_type"),
+            categorical_paths=("field_path", "value_type", "context.__masked_field_path", "context.__masked_field_leaf", "context.__masked_field_namespace"),
+            ignore_prefixes=(),
         )
     if model_type == "step_value":
         return TrainingFeatureSpec(
@@ -201,11 +205,10 @@ def labels_for_plugin(plugin: TrainingFormatPlugin, model_type: str) -> dict[str
         return {"labels": ["family:unknown"], "metadata": {}}
     if model_type == "normal_structure":
         return {
-            "labels": ["normal_label"],
+            "labels": ["target_value"],
             "metadata": {
-                "kind": "binary_normal_structure",
-                "positive_label": 1,
-                "negative_label": 0,
+                "kind": "masked_archive_knowledge_field_prediction",
+                "world_semantics": WORLD_SEMANTICS,
             },
         }
     if model_type == "step_value":
@@ -561,12 +564,7 @@ def _write_normal_structure_meta(path: Path, rows: list[dict[str, Any]]) -> None
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as handle:
         for row in rows:
-            payload = {
-                "sample_id": row.get("sample_id"),
-                "state_digest": row.get("state_digest"),
-                "normal_label": row.get("normal_label"),
-            }
-            handle.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
+            handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True, default=str) + "\n")
 
 
 def _feature_row(row: dict[str, Any], *, model_type: str) -> dict[str, Any]:
@@ -574,7 +572,11 @@ def _feature_row(row: dict[str, Any], *, model_type: str) -> dict[str, Any]:
     if model_type == "damage_location":
         payload = {"knowledge_payload": row.get("knowledge_payload") if isinstance(row.get("knowledge_payload"), dict) else row}
     elif model_type == "normal_structure":
-        payload = {"knowledge_payload": row.get("knowledge_payload") if isinstance(row.get("knowledge_payload"), dict) else row}
+        payload = {
+            "field_path": row.get("field_path"),
+            "value_type": row.get("value_type"),
+            "context": row.get("context") if isinstance(row.get("context"), dict) else {},
+        }
     elif model_type == "step_value":
         payload = {
             "format": row.get("format"),

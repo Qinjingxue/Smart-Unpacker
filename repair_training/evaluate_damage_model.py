@@ -71,12 +71,13 @@ def main(argv: list[str] | None = None) -> int:
             world_rows: list[dict[str, Any]] = []
             for row in rows:
                 payload = row.get("knowledge_payload") if isinstance(row.get("knowledge_payload"), dict) else {}
-                normal_scores = normal_model.predict_rows([{"knowledge_payload": payload}])
-                world_score = float(normal_scores[0]) if normal_scores else 0.0
+                world = normal_model.analyze_knowledge(payload)
                 out = dict(row)
                 out["world_model"] = {
-                    "world_scores": {"normal": world_score, "anomaly": 1.0 - world_score},
-                    "structure_anomaly": {"summary": {"world_score": world_score, "max_anomaly": 1.0 - world_score}},
+                    "world_field_scores": dict(world.get("world_field_scores") or {}),
+                    "world_field_predictions": dict(world.get("world_field_predictions") or {}),
+                    "world_summary": dict(world.get("world_summary") or {}),
+                    "structure_anomaly": dict(world.get("structure_anomaly") or {}),
                 }
                 world_rows.append(out)
             write_jsonl(datasets / "eval_world_model_outputs.jsonl", world_rows)

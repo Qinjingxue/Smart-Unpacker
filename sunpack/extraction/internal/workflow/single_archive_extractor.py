@@ -193,6 +193,9 @@ class SingleArchiveExtractor:
                     if run_result.returncode == 0:
                         with _phase(phase_timer, f"{phase_prefix}_diagnostics_success"):
                             diagnostics = self._diagnostics_from(run_result)
+                        with _phase(phase_timer, f"{phase_prefix}_output_stats_success"):
+                            output_stats = self._directory_stats(out_dir)
+                            self._fill_success_output_counts(diagnostics, output_stats)
                         with _phase(phase_timer, f"{phase_prefix}_empty_repaired_success_check"):
                             empty_repaired_success = self._empty_repaired_success(diagnostics, task)
                         if empty_repaired_success:
@@ -233,6 +236,8 @@ class SingleArchiveExtractor:
                             diagnostics=diagnostics,
                             progress_manifest=manifest_path,
                             progress_manifest_payload=manifest_payload,
+                            files_written=output_stats["file_count"],
+                            bytes_written=output_stats["total_bytes"],
                         )
 
                     err = f"{run_result.stdout}\n{run_result.stderr}".lower()
@@ -550,6 +555,8 @@ class SingleArchiveExtractor:
                 partial_outputs=any_partial and not all(item.get("success") for item in segment_results),
                 progress_manifest=manifest_path,
                 progress_manifest_payload=manifest_payload,
+                files_written=totals["file_count"],
+                bytes_written=totals["total_bytes"],
             )
         self._log(f"[EXTRACT] embedded segments 失败: {archive}")
         return self._failed(
@@ -595,6 +602,17 @@ class SingleArchiveExtractor:
                 except OSError:
                     pass
         return {"file_count": file_count, "total_bytes": total_bytes}
+
+    @staticmethod
+    def _fill_success_output_counts(diagnostics: dict[str, Any], stats: dict[str, int]) -> None:
+        result = diagnostics.get("result")
+        if not isinstance(result, dict):
+            result = {}
+            diagnostics["result"] = result
+        result.setdefault("status", "ok")
+        result["files_written"] = int(stats.get("file_count", 0) or 0)
+        result["bytes_written"] = int(stats.get("total_bytes", 0) or 0)
+        result["item_count"] = max(int(result.get("item_count", 0) or 0), int(stats.get("file_count", 0) or 0))
 
     def _log(self, message: str) -> None:
         if not self.quiet:

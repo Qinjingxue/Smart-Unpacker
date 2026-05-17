@@ -39,8 +39,9 @@ class _FakeSplitEntryResolver:
 
 
 class _FakeSevenZipRunner:
-    def __init__(self):
+    def __init__(self, *, include_output_counts: bool = True):
         self.sources = []
+        self.include_output_counts = bool(include_output_counts)
 
     def run_extract(self, *, out_dir, task, **_kwargs):
         state = task.archive_state()
@@ -52,16 +53,18 @@ class _FakeSevenZipRunner:
         os.makedirs(out_dir, exist_ok=True)
         with open(os.path.join(out_dir, f"{name}.txt"), "wb") as handle:
             handle.write(b"ok")
+        result = {
+            "status": "ok",
+            "item_count": 1 if self.include_output_counts else 0,
+        }
+        if self.include_output_counts:
+            result.update({
+                "files_written": 1,
+                "bytes_written": 2,
+            })
         return SimpleNamespace(
             returncode=0,
-            worker_diagnostics={
-                "result": {
-                    "status": "ok",
-                    "item_count": 1,
-                    "files_written": 1,
-                    "bytes_written": 2,
-                }
-            },
+            worker_diagnostics={"result": result},
         )
 
 
@@ -134,3 +137,33 @@ def test_extractor_runs_analysis_segments_inside_same_task_and_restores_source(t
     assert (tmp_path / "out" / "embedded_02_rar" / "rar.txt").exists()
     assert len(result.diagnostics["embedded_segments"]) == 2
     assert task.archive_state().to_archive_input_descriptor().open_mode == "file"
+
+
+def test_extractor_fills_success_output_counts_when_worker_omits_them(tmp_path):
+    archive = tmp_path / "case.zip"
+    archive.write_bytes(b"PK\x05\x06" + b"\0" * 18)
+    task = _task(archive)
+    runner = _FakeSevenZipRunner(include_output_counts=False)
+    extractor = SingleArchiveExtractor(
+        seven_z_path="7z",
+        password_store=_FakePasswordStore(),
+        password_resolver=_FakePasswordResolver(),
+        metadata_scanner=None,
+        rename_scheduler=_FakeRenameScheduler(),
+        ensure_space=lambda _gb: True,
+        retry_policy=_FakeRetryPolicy(),
+        split_entry_resolver=_FakeSplitEntryResolver(),
+        sevenzip_runner=runner,
+        best_effort=True,
+        write_progress_manifest=True,
+    )
+
+    result = extractor.extract(task, str(tmp_path / "out"), allow_embedded_segments=False)
+
+    assert result.success is True
+    assert result.files_written == 1
+    assert result.bytes_written == 2
+    assert result.diagnostics["result"]["files_written"] == 1
+    assert result.diagnostics["result"]["bytes_written"] == 2
+    assert result.progress_manifest_payload["files_written"] == 1
+    assert result.progress_manifest_payload["bytes_written"] == 2

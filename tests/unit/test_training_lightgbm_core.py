@@ -8,6 +8,7 @@ from repair_training.core.features import load_feature_schema
 from repair_training.core.datasets import read_jsonl, split_rows
 from repair_training.core.normal_structure_inference import NormalStructureModel
 from repair_training.core.plugin import load_training_format_plugin
+from repair_training.core.world_field import WORLD_SEMANTICS, flatten_world_payload, world_field_rows
 from repair_training.evaluate_normal_structure_model import main as evaluate_normal_structure_main
 from repair_training.formats.zip.plugin import postprocess_damage_prediction, zip_module_family
 from repair_training.train import main as train_main
@@ -206,12 +207,63 @@ def test_zip_normal_query_builder_outputs_query_rows_without_raw_paths():
 def test_zip_normal_adapter_aggregates_query_scores():
     adapter = ZipNormalStructureAdapter()
     row = adapter.row_from_knowledge_payload({"format": {"zip": {"structure": {"graph": _normal_query_graph()}}}}, normal_label=1)
-    world = adapter.world_payload(0.1)
+    world = adapter.world_payload({
+        "world_field_scores": {"format.zip.structure.graph.summary.eocd_present": 0.9},
+        "world_field_predictions": {},
+        "world_summary": {"max_anomaly": 0.9, "top_fields": []},
+    })
 
     assert row["knowledge_payload"]["format"]["zip"]["structure"]["graph"]["summary"]["eocd_present"] is True
     assert row["normal_label"] == 1
-    assert world["world_scores"]["anomaly"] > 0.8
+    assert world["world_field_scores"]["format.zip.structure.graph.summary.eocd_present"] > 0.8
     assert world["structure_anomaly"]["summary"]["max_anomaly"] > 0.8
+
+
+def test_world_field_rows_mask_archive_knowledge_without_path_leaks():
+    rows = [{
+        "sample_id": "clean:0",
+        "knowledge_payload": {
+            "source": {"input": {"path": "C:/secret/a.zip", "format_hint": "zip"}},
+            "format": {"zip": {"summary": {"eocd_present": True, "entry_count": 2, "sha256": "abc"}}},
+        },
+    }]
+
+    flat = flatten_world_payload(rows[0]["knowledge_payload"])
+    masked_rows = world_field_rows(rows)
+
+    assert "format.zip.summary.eocd_present" in flat
+    assert not any("path" in key.lower() or "sha" in key.lower() for key in flat)
+    assert masked_rows
+    assert {row["row_type"] for row in masked_rows} == {"world_field_masked"}
+    assert all(row["field_path"] not in row["context"] for row in masked_rows)
+    assert WORLD_SEMANTICS == "masked_archive_knowledge_v1"
+
+
+def test_world_flatten_adds_scalar_summary_and_relation_fields():
+    payload = {
+        "format": {
+            "zip": {
+                "entries": [
+                    {"method": "deflate", "compressed_size": 10, "uncompressed_size": 20, "crc": 7},
+                    {"method": "stored", "compressed_size": 30, "uncompressed_size": 30, "crc": 7},
+                ],
+                "checks": [
+                    {"field": "cd_offset", "expected": 100, "observed": 104, "delta": 4},
+                ],
+                "central_directory": {"crc": 7},
+                "local_header": {"crc": 8},
+            }
+        }
+    }
+
+    flat = flatten_world_payload(payload)
+
+    assert flat["summary.format.zip.entries.count"] == 2
+    assert flat["summary.format.zip.entries.compressed_size.mean"] == 20
+    assert flat["summary.format.zip.entries.method.distinct_count"] == 2
+    assert flat["relations.format.zip.checks.expected_observed_abs_delta"] == 4
+    assert flat["relations.format.zip.checks.delta_consistency_error"] == 0
+    assert flat["relations.same_leaf.crc.range"] == 1
 
 
 def test_zip_normal_adapter_reads_structure_runtime_payload_facts():
@@ -270,7 +322,7 @@ def test_normal_structure_features_use_query_schema(tmp_path):
     assert build_features_main(["--format", "zip", "--model", "normal_structure", "--run-dir", str(run_dir)]) == 0
     schema = load_feature_schema(run_dir / "features" / "normal_structure" / "feature_schema.json")
 
-    assert any(name.startswith("knowledge_payload.") for name in schema["feature_names"])
+    assert any(name.startswith("context.") for name in schema["feature_names"])
     assert not any("source.input.path" in name for name in schema["feature_names"])
     assert (run_dir / "features" / "normal_structure" / "meta_train.jsonl").is_file()
 
@@ -308,10 +360,27 @@ def test_normal_structure_model_flags_unseen_structural_anomaly(tmp_path):
     build_features_main(["--format", "zip", "--model", "normal_structure", "--run-dir", str(run_dir)])
     train_main(["--format", "zip", "--model", "normal_structure", "--run-dir", str(run_dir)])
     model = NormalStructureModel(model_dir=run_dir / "models" / "normal_structure", plugin=plugin)
-    clean_score = model.predict_rows([{"knowledge_payload": {"format": {"zip": {"structure": {"graph": clean}}}}}])[0]
-    damaged_score = model.predict_rows([{"knowledge_payload": {"format": {"zip": {"structure": {"graph": damaged}}}}}])[0]
+    clean_world = model.analyze_knowledge({"format": {"zip": {"structure": {"graph": clean}}}})
+    damaged_world = model.analyze_knowledge({"format": {"zip": {"structure": {"graph": damaged}}}})
+    batch_world = model.analyze_knowledge_batch([
+        {"format": {"zip": {"structure": {"graph": clean}}}},
+        {"format": {"zip": {"structure": {"graph": damaged}}}},
+    ])
 
-    assert clean_score >= damaged_score
+    assert "world_field_scores" in clean_world
+    assert batch_world[0]["world_field_scores"] == clean_world["world_field_scores"]
+    assert batch_world[1]["world_field_scores"] == damaged_world["world_field_scores"]
+    assert damaged_world["world_summary"]["max_anomaly"] >= 0.0
+
+
+def test_normal_structure_model_rejects_legacy_binary_world_card(tmp_path):
+    model_dir = tmp_path / "legacy"
+    model_dir.mkdir()
+    (model_dir / "feature_schema.json").write_text(json.dumps({"feature_names": []}), encoding="utf-8")
+    (model_dir / "model_card.json").write_text(json.dumps({"model_type": "normal_structure"}), encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="unsupported World model semantics|masked ArchiveKnowledge"):
+        NormalStructureModel(model_dir=model_dir, plugin=load_training_format_plugin("zip"))
 
 
 def test_evaluate_normal_structure_model_reports_attribution_metrics(tmp_path):

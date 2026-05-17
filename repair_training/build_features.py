@@ -25,10 +25,6 @@ def main(argv: list[str] | None = None) -> int:
     output_name = args.model if args.model == "damage_analysis" else model_type
     output_dir = Path(args.output_dir) if args.output_dir else run_dir / "features" / output_name
     rows = read_jsonl(input_path)
-    if model_type == "normal_structure" and not args.input:
-        damage_rows = run_dir / "datasets" / "damage_rows.jsonl"
-        if damage_rows.is_file():
-            rows.extend(read_jsonl(damage_rows))
     summary = build_feature_datasets(rows, plugin=plugin, model_type=model_type, output_dir=output_dir)
     print(json.dumps({"format": fmt, "model": model_type, "input": str(input_path), "output_dir": str(output_dir), **summary}, ensure_ascii=False, sort_keys=True))
     return 0

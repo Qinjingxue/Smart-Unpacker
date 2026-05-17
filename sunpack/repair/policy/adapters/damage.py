@@ -181,10 +181,12 @@ def _world_model_payload(metadata: dict[str, Any]) -> dict[str, Any]:
         "compact_attribution": compact,
         "summary": summary,
     }
-    if isinstance(metadata.get("normal_structure_scores"), dict):
-        payload["score_summary"] = dict(metadata.get("normal_structure_scores") or {})
-    if isinstance(metadata.get("world_scores"), dict):
-        payload["world_scores"] = dict(metadata.get("world_scores") or {})
+    if isinstance(metadata.get("world_field_scores"), dict):
+        payload["world_field_scores"] = dict(metadata.get("world_field_scores") or {})
+    if isinstance(metadata.get("world_field_predictions"), dict):
+        payload["world_field_predictions"] = dict(metadata.get("world_field_predictions") or {})
+    if isinstance(metadata.get("world_summary"), dict):
+        payload["world_summary"] = dict(metadata.get("world_summary") or {})
     if isinstance(metadata.get("normal_structure_metadata"), dict):
         payload["metadata"] = dict(metadata.get("normal_structure_metadata") or {})
     return {key: value for key, value in payload.items() if value not in ({}, [], None)}

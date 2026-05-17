@@ -110,11 +110,13 @@ class ZipNormalStructureAdapter:
             row["normal_label"] = int(normal_label)
         return row
 
-    def world_payload(self, score: float) -> dict[str, Any]:
-        normal = max(0.0, min(1.0, float(score or 0.0)))
+    def world_payload(self, world: dict[str, Any]) -> dict[str, Any]:
+        summary = world.get("world_summary") if isinstance(world.get("world_summary"), dict) else {}
         return {
-            "world_scores": {"normal": normal, "anomaly": 1.0 - normal},
-            "structure_anomaly": {"summary": {"world_score": normal, "max_anomaly": 1.0 - normal}},
+            "world_field_scores": dict(world.get("world_field_scores") or {}),
+            "world_field_predictions": dict(world.get("world_field_predictions") or {}),
+            "world_summary": summary,
+            "structure_anomaly": {"summary": summary},
         }
 
 

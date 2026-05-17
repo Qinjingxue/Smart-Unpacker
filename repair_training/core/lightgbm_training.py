@@ -11,7 +11,9 @@ import numpy as np
 from repair_training.core.model_artifacts import write_model_artifacts
 from repair_training.core.plugin import TrainingFormatPlugin
 from repair_training.core.thresholds import calibrate_binary_thresholds
-from repair_training.core.features import normalize_model_type
+from repair_training.core.features import normalize_model_type, transform_rows
+from repair_training.core.world_field import WORLD_FIELD_INDEX, WORLD_SEMANTICS, safe_field_name
+from repair_training.core.world_field import world_field_rank_weight
 
 
 def train_lightgbm_model(
@@ -80,6 +82,11 @@ def _model_card_extra(model_type: str) -> dict[str, Any]:
             "model_role": "reachable_recovery_value",
             "policy_semantics": "step_q_v1",
             "final_decision_by": "PolicyManager",
+        }
+    if model_type == "normal_structure":
+        return {
+            "model_role": "world_field_model",
+            "world_semantics": WORLD_SEMANTICS,
         }
     return {}
 
@@ -233,32 +240,167 @@ def _train_action_ranker(lgb, plugin: TrainingFormatPlugin, features_dir: Path, 
 
 def _train_normal_structure_model(lgb, plugin: TrainingFormatPlugin, features_dir: Path, model_dir: Path) -> dict[str, Any]:
     model_dir.mkdir(parents=True, exist_ok=True)
-    train = _load_npz(features_dir / "train.npz")
-    valid = _load_npz(features_dir / "valid.npz")
-    test = _load_npz(features_dir / "test.npz")
-    params = _params(plugin, "normal_structure")
-    y = train["y"]
-    if y.ndim > 1:
-        y = y[:, 0]
-    if len(set(float(v) for v in y)) < 2:
-        constant = float(y[0]) if len(y) else 0.0
-        (model_dir / "model.constant.json").write_text(json.dumps({"constant_probability": constant}, sort_keys=True), encoding="utf-8")
-        scores = np.full((len(test["X"]),), constant, dtype=np.float32)
-        metrics = _normal_structure_metrics(scores, test["y"], meta=_read_jsonl(features_dir / "meta_test.jsonl"))
-        metrics["constant_probability"] = constant
-        return metrics
-    model = lgb.LGBMClassifier(**params)
-    fit_kwargs: dict[str, Any] = {}
-    if len(valid["X"]):
-        valid_y = valid["y"][:, 0] if valid["y"].ndim > 1 else valid["y"]
-        fit_kwargs["eval_set"] = [(valid["X"], valid_y)]
-    model.fit(train["X"], y, **fit_kwargs)
-    model.booster_.save_model(str(model_dir / "model.txt"))
-    joblib.dump(model, model_dir / "model.joblib")
-    with warnings.catch_warnings():
-        warnings.filterwarnings("ignore", message="X does not have valid feature names.*")
-        scores = model.predict_proba(test["X"])[:, 1] if len(test["X"]) else np.array([], dtype=np.float32)
-    return _normal_structure_metrics(scores, test["y"], meta=_read_jsonl(features_dir / "meta_test.jsonl"))
+    schema = _read_json(features_dir / "feature_schema.json")
+    train_rows = _read_jsonl(features_dir / "meta_train.jsonl")
+    valid_rows = _read_jsonl(features_dir / "meta_valid.jsonl")
+    test_rows = _read_jsonl(features_dir / "meta_test.jsonl")
+    grouped: dict[str, dict[str, list[dict[str, Any]]]] = {}
+    for split, rows in (("train", train_rows), ("valid", valid_rows), ("test", test_rows)):
+        for row in rows:
+            field = str(row.get("field_path") or "")
+            if not field:
+                continue
+            grouped.setdefault(field, {"train": [], "valid": [], "test": []})[split].append(row)
+    models_dir = model_dir / "heads"
+    models_dir.mkdir(parents=True, exist_ok=True)
+    index: dict[str, Any] = {}
+    metrics = {
+        "world_semantics": WORLD_SEMANTICS,
+        "field_count": len(grouped),
+        "trained_heads": 0,
+        "constant_heads": 0,
+        "skipped_heads": 0,
+        "numeric_mae": 0.0,
+        "categorical_accuracy": 0.0,
+        "per_field": {},
+    }
+    numeric_errors: list[float] = []
+    categorical_hits: list[float] = []
+    base_params = _params(plugin, "normal_structure")
+    for field, splits in sorted(grouped.items()):
+        rows = splits["train"]
+        if not rows:
+            metrics["skipped_heads"] += 1
+            continue
+        vtype = str(rows[0].get("value_type") or "categorical")
+        safe = safe_field_name(field)
+        head: dict[str, Any] = {"field_path": field, "value_type": vtype, "rank_weight": world_field_rank_weight(field)}
+        if vtype == "numeric":
+            y = np.array([float(row.get("target_numeric") or 0.0) for row in rows], dtype=np.float32)
+            valid_y_for_calibration = np.array([float(row.get("target_numeric") or 0.0) for row in splits["valid"]], dtype=np.float32)
+            if len(set(float(item) for item in y)) < 2 or len(rows) < 4:
+                constant = float(np.mean(y)) if len(y) else 0.0
+                path = models_dir / f"{safe}.constant.json"
+                path.write_text(json.dumps({"constant": constant}, sort_keys=True), encoding="utf-8")
+                pred = np.full((len(splits["test"]),), constant, dtype=np.float32)
+                valid_pred = np.full((len(valid_y_for_calibration),), constant, dtype=np.float32)
+                metrics["constant_heads"] += 1
+                head.update({"kind": "constant_numeric", "path": str(path.relative_to(model_dir)), "constant": constant})
+            else:
+                x, _ = transform_rows(rows, schema=schema, plugin=plugin, model_type="normal_structure")
+                vx, _ = transform_rows(splits["valid"], schema=schema, plugin=plugin, model_type="normal_structure")
+                tx, _ = transform_rows(splits["test"], schema=schema, plugin=plugin, model_type="normal_structure")
+                params = {**base_params, "objective": "regression"}
+                model = lgb.LGBMRegressor(**params)
+                fit_kwargs = {"eval_set": [(vx, np.array([float(row.get("target_numeric") or 0.0) for row in splits["valid"]], dtype=np.float32))]} if len(vx) else {}
+                model.fit(x, y, **fit_kwargs)
+                path = models_dir / f"{safe}.txt"
+                model.booster_.save_model(str(path))
+                with warnings.catch_warnings():
+                    warnings.filterwarnings("ignore", message="X does not have valid feature names.*")
+                    pred = model.predict(tx) if len(tx) else np.array([], dtype=np.float32)
+                    valid_pred = model.predict(vx) if len(vx) else np.array([], dtype=np.float32)
+                metrics["trained_heads"] += 1
+                head.update({"kind": "numeric_regressor", "path": str(path.relative_to(model_dir))})
+            calibration = _numeric_calibration(np.abs(valid_pred - valid_y_for_calibration) if len(valid_y_for_calibration) else np.array([], dtype=np.float32))
+            head.update(calibration)
+            test_y = np.array([float(row.get("target_numeric") or 0.0) for row in splits["test"]], dtype=np.float32)
+            mae = float(np.mean(np.abs(pred - test_y))) if len(test_y) and len(pred) else 0.0
+            numeric_errors.append(mae)
+            metrics["per_field"][field] = {"value_type": vtype, "mae": mae, "rows": len(rows)}
+        else:
+            labels = sorted({str(row.get("target_category") or "") for row in rows})
+            valid_truth = [str(row.get("target_category") or "") for row in splits["valid"]]
+            if len(labels) < 2 or len(rows) < 4:
+                constant = labels[0] if labels else ""
+                path = models_dir / f"{safe}.constant.json"
+                path.write_text(json.dumps({"constant": constant, "classes": labels}, sort_keys=True), encoding="utf-8")
+                pred_labels = [constant for _ in splits["test"]]
+                valid_errors = np.array([0.0 if truth == constant else 1.0 for truth in valid_truth], dtype=np.float32)
+                metrics["constant_heads"] += 1
+                head.update({"kind": "constant_categorical", "path": str(path.relative_to(model_dir)), "constant": constant, "classes": labels})
+            else:
+                label_index = {label: idx for idx, label in enumerate(labels)}
+                y = np.array([label_index[str(row.get("target_category") or "")] for row in rows], dtype=np.int32)
+                x, _ = transform_rows(rows, schema=schema, plugin=plugin, model_type="normal_structure")
+                vx, _ = transform_rows(splits["valid"], schema=schema, plugin=plugin, model_type="normal_structure")
+                tx, _ = transform_rows(splits["test"], schema=schema, plugin=plugin, model_type="normal_structure")
+                params = {**base_params, "objective": "multiclass" if len(labels) > 2 else "binary"}
+                if len(labels) > 2:
+                    params["num_class"] = len(labels)
+                model = lgb.LGBMClassifier(**params)
+                fit_kwargs = {"eval_set": [(vx, np.array([label_index.get(str(row.get("target_category") or ""), 0) for row in splits["valid"]], dtype=np.int32))]} if len(vx) else {}
+                model.fit(x, y, **fit_kwargs)
+                path = models_dir / f"{safe}.txt"
+                model.booster_.save_model(str(path))
+                with warnings.catch_warnings():
+                    warnings.filterwarnings("ignore", message="X does not have valid feature names.*")
+                    pred_raw = model.predict(tx) if len(tx) else np.array([], dtype=np.float32)
+                    valid_proba = model.predict_proba(vx) if len(vx) else np.zeros((0, len(labels)), dtype=np.float32)
+                pred_labels = [labels[int(item)] if int(item) < len(labels) else "" for item in pred_raw]
+                valid_errors = _categorical_validation_errors(valid_proba, valid_truth, labels)
+                metrics["trained_heads"] += 1
+                head.update({"kind": "categorical_classifier", "path": str(path.relative_to(model_dir)), "classes": labels})
+            head.update(_categorical_calibration(valid_errors))
+            truth = [str(row.get("target_category") or "") for row in splits["test"]]
+            accuracy = float(sum(1 for pred_item, truth_item in zip(pred_labels, truth) if pred_item == truth_item) / max(1, len(truth))) if truth else 0.0
+            categorical_hits.append(accuracy)
+            metrics["per_field"][field] = {"value_type": vtype, "accuracy": accuracy, "rows": len(rows)}
+        index[field] = head
+    (model_dir / WORLD_FIELD_INDEX).write_text(json.dumps({"world_semantics": WORLD_SEMANTICS, "heads": index}, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    metrics["numeric_mae"] = float(np.mean(numeric_errors)) if numeric_errors else 0.0
+    metrics["categorical_accuracy"] = float(np.mean(categorical_hits)) if categorical_hits else 0.0
+    return metrics
+
+
+def _numeric_calibration(errors: np.ndarray) -> dict[str, Any]:
+    values = np.asarray(errors, dtype=np.float32)
+    if not len(values):
+        return {"calibration": {"kind": "numeric_residual_quantile", "p50": 0.0, "p90": 0.0, "p95": 0.0, "p99": 1.0}}
+    return {
+        "residual_scale": max(1e-6, float(np.percentile(values, 95))),
+        "calibration": {
+            "kind": "numeric_residual_quantile",
+            "p50": float(np.percentile(values, 50)),
+            "p90": float(np.percentile(values, 90)),
+            "p95": float(np.percentile(values, 95)),
+            "p99": float(np.percentile(values, 99)),
+        },
+    }
+
+
+def _categorical_calibration(errors: np.ndarray) -> dict[str, Any]:
+    values = np.asarray(errors, dtype=np.float32)
+    if not len(values):
+        return {"calibration": {"kind": "categorical_error_quantile", "p50": 0.0, "p90": 0.0, "p95": 0.0, "p99": 1.0}}
+    return {
+        "calibration": {
+            "kind": "categorical_error_quantile",
+            "p50": float(np.percentile(values, 50)),
+            "p90": float(np.percentile(values, 90)),
+            "p95": float(np.percentile(values, 95)),
+            "p99": float(np.percentile(values, 99)),
+        },
+    }
+
+
+def _categorical_validation_errors(proba: Any, truth: list[str], labels: list[str]) -> np.ndarray:
+    arr = np.asarray(proba)
+    errors: list[float] = []
+    for index, actual in enumerate(truth):
+        if index >= len(arr):
+            break
+        if arr.ndim == 1:
+            prob = float(arr[index])
+            if len(labels) == 1:
+                actual_prob = 1.0 if actual == labels[0] else 0.0
+            else:
+                actual_prob = prob if actual == labels[1] else 1.0 - prob if actual == labels[0] else 0.0
+        else:
+            col = labels.index(actual) if actual in labels else -1
+            actual_prob = float(arr[index, col]) if 0 <= col < arr.shape[1] else 0.0
+        errors.append(1.0 - max(0.0, min(1.0, actual_prob)))
+    return np.asarray(errors, dtype=np.float32)
 
 
 def _train_state_value_model(lgb, plugin: TrainingFormatPlugin, features_dir: Path, model_dir: Path) -> dict[str, Any]:
@@ -289,7 +431,7 @@ def _params(plugin: TrainingFormatPlugin, model_type: str) -> dict[str, Any]:
     if model_type == "damage_location":
         return {"n_estimators": 40, "learning_rate": 0.05, "num_leaves": 15, "random_state": 17, "verbosity": -1, **params}
     if model_type == "normal_structure":
-        return {"objective": "binary", "n_estimators": 80, "learning_rate": 0.04, "num_leaves": 31, "random_state": 17, "verbosity": -1, **params}
+        return {"objective": "regression", "n_estimators": 80, "learning_rate": 0.04, "num_leaves": 31, "random_state": 17, "verbosity": -1, **params}
     if model_type == "step_value":
         return {"objective": "regression", "n_estimators": 80, "learning_rate": 0.04, "num_leaves": 31, "random_state": 17, "verbosity": -1, **params}
     return {"objective": "lambdarank", "n_estimators": 40, "learning_rate": 0.05, "num_leaves": 15, "random_state": 17, "verbosity": -1, **params}

@@ -23,13 +23,18 @@ def main(argv: list[str] | None = None) -> int:
     per_profile: dict[str, _MetricTotals] = defaultdict(_MetricTotals)
     per_field: dict[str, Counter] = defaultdict(Counter)
 
-    for index, row in enumerate(rows):
-        payload = row.get("knowledge_payload") if isinstance(row.get("knowledge_payload"), dict) else {}
-        scores = model.predict_rows([{"knowledge_payload": payload}])
-        world_score = float(scores[0]) if scores else 0.0
-        anomaly = {"summary": {"world_score": world_score, "max_anomaly": 1.0 - world_score}}
+    worlds = model.analyze_knowledge_batch([
+        row.get("knowledge_payload") if isinstance(row.get("knowledge_payload"), dict) else {}
+        for row in rows
+    ])
+    for index, (row, world) in enumerate(zip(rows, worlds)):
+        summary = world.get("world_summary") if isinstance(world.get("world_summary"), dict) else {}
         truth = _truth_from_row(row)
-        ranked_fields: list[str] = []
+        ranked_fields = [
+            {"field": str(item.get("field_path") or ""), "score": float(item.get("score") or 0.0)}
+            for item in (summary.get("top_fields") or [])
+            if isinstance(item, dict) and item.get("field_path")
+        ]
         ranked_zones: list[str] = []
         ranked_relations: list[str] = []
         ranked_pairs: list[str] = []
@@ -48,7 +53,7 @@ def main(argv: list[str] | None = None) -> int:
             "top_zones": ranked_zones[: args.top_k],
             "top_relations": ranked_relations[: args.top_k],
             "top_conflict_pairs": ranked_pairs[: args.top_k],
-            "max_anomaly": float((anomaly.get("summary") or {}).get("max_anomaly") or 0.0),
+            "max_anomaly": float(summary.get("max_anomaly") or 0.0),
         }
         predictions.append(record)
         totals.add(record)

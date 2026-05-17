@@ -436,10 +436,12 @@ def _coerce_damage_analysis(value: DamageAnalysisResult | dict[str, Any] | None,
                     },
                 )
             metadata = {**dict(value.get("metadata") or {}), "provider_id": provider_id}
-            if isinstance(value.get("normal_structure_scores"), dict):
-                metadata["normal_structure_scores"] = dict(value.get("normal_structure_scores") or {})
-            if isinstance(value.get("world_scores"), dict):
-                metadata["world_scores"] = dict(value.get("world_scores") or {})
+            if isinstance(value.get("world_field_scores"), dict):
+                metadata["world_field_scores"] = dict(value.get("world_field_scores") or {})
+            if isinstance(value.get("world_field_predictions"), dict):
+                metadata["world_field_predictions"] = dict(value.get("world_field_predictions") or {})
+            if isinstance(value.get("world_summary"), dict):
+                metadata["world_summary"] = dict(value.get("world_summary") or {})
             if isinstance(value.get("normal_structure_metadata"), dict):
                 metadata["normal_structure_metadata"] = dict(value.get("normal_structure_metadata") or {})
             if isinstance(value.get("structure_anomaly"), dict):

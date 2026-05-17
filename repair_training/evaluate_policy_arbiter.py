@@ -103,6 +103,7 @@ def _evaluate_one(index: int, record: dict[str, Any], *, fmt: str, config: dict[
             "terminal_action": loop_payload.get("terminal_action") or "",
             "stop_reason": loop_payload.get("stop_reason") or result.message,
             "decision_stats": decision_stats,
+            "world_top_fields": _world_top_fields(loop_payload),
             "graph_summary": loop_payload.get("graph_summary") if isinstance(loop_payload.get("graph_summary"), dict) else {},
             "best_node_recovery": loop_payload.get("recovery") if isinstance(loop_payload.get("recovery"), dict) else {},
             "warnings": list(result.warnings or []),
@@ -163,6 +164,38 @@ def _decision_stats(rounds: list[dict[str, Any]]) -> dict[str, Any]:
         "exhaust_then_recovered": exhaust_then_recovered,
         "oracle_edge_missing": 0,
     }
+
+
+def _world_top_fields(payload: dict[str, Any], *, limit: int = 8) -> list[dict[str, Any]]:
+    summary = _find_world_summary(payload)
+    top = summary.get("top_fields") if isinstance(summary.get("top_fields"), list) else []
+    output = []
+    for item in top[:limit]:
+        if not isinstance(item, dict):
+            continue
+        output.append({
+            "field_path": str(item.get("field_path") or ""),
+            "namespace": str(item.get("namespace") or ""),
+            "score": _float(item.get("score")),
+        })
+    return output
+
+
+def _find_world_summary(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        summary = value.get("world_summary")
+        if isinstance(summary, dict):
+            return summary
+        for item in value.values():
+            found = _find_world_summary(item)
+            if found:
+                return found
+    if isinstance(value, list):
+        for item in value:
+            found = _find_world_summary(item)
+            if found:
+                return found
+    return {}
 
 
 def _summary(runs: list[dict[str, Any]], *, elapsed: float) -> dict[str, Any]:

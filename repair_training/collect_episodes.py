@@ -894,9 +894,7 @@ def _analyze_damage_for_action_features(
         if damage_adapter is None:
             return dict(fallback)
         payload = damage_adapter.prepare_input(request)
-        normal_scores = normal_model.predict_rows([{"knowledge_payload": payload}])
-        world_score = float(normal_scores[0]) if normal_scores else 0.0
-        anomaly = {"summary": {"world_score": world_score, "max_anomaly": 1.0 - world_score}}
+        world = normal_model.analyze_knowledge(payload)
         row = {"knowledge_payload": payload}
         observed_scores = damage_model.predict_rows([row])[0]
         uncertain_scores = damage_model.predict_uncertain_rows([row])[0]
@@ -907,8 +905,10 @@ def _analyze_damage_for_action_features(
             uncertainty_thresholds=damage_model.uncertain_thresholds,
             metadata={
                 "training_damage_model_dir": str(root),
-                "world_scores": {"normal": world_score, "anomaly": 1.0 - world_score},
-                "structure_anomaly": anomaly,
+                "world_field_scores": dict(world.get("world_field_scores") or {}),
+                "world_field_predictions": dict(world.get("world_field_predictions") or {}),
+                "world_summary": dict(world.get("world_summary") or {}),
+                "structure_anomaly": dict(world.get("structure_anomaly") or {}),
             },
         )
         return result.to_dict()
@@ -926,8 +926,8 @@ def _compact_damage_analysis(payload: dict[str, Any]) -> dict[str, Any]:
     uncertainty_head_scores = location_model.get("uncertainty_raw_scores") if isinstance(location_model.get("uncertainty_raw_scores"), dict) else metadata.get("damage_uncertainty_scores") if isinstance(metadata.get("damage_uncertainty_scores"), dict) else {}
     selected_scores = location_model.get("selected_scores") if isinstance(location_model.get("selected_scores"), dict) else metadata.get("selected_scores") if isinstance(metadata.get("selected_scores"), dict) else {}
     uncertain_scores = location_model.get("uncertainty_selected_scores") if isinstance(location_model.get("uncertainty_selected_scores"), dict) else metadata.get("uncertain_scores") if isinstance(metadata.get("uncertain_scores"), dict) else {}
-    score_summary = world_model.get("score_summary") if isinstance(world_model.get("score_summary"), dict) else metadata.get("normal_structure_scores") if isinstance(metadata.get("normal_structure_scores"), dict) else {}
-    top_anomalies = score_summary.get("top_anomalies") if isinstance(score_summary.get("top_anomalies"), list) else []
+    world_summary = world_model.get("world_summary") if isinstance(world_model.get("world_summary"), dict) else metadata.get("world_summary") if isinstance(metadata.get("world_summary"), dict) else {}
+    top_fields = world_summary.get("top_fields") if isinstance(world_summary.get("top_fields"), list) else []
     compact_attribution = world_model.get("compact_attribution") if isinstance(world_model.get("compact_attribution"), dict) else {}
     compact_metadata = {
         "provider_id": metadata.get("provider_id"),
@@ -941,18 +941,19 @@ def _compact_damage_analysis(payload: dict[str, Any]) -> dict[str, Any]:
                 "uncertainty_selected_scores": _top_score_dict(uncertain_scores, limit=16),
             },
             "world_model": {
-                "world_scores": world_model.get("world_scores") if isinstance(world_model.get("world_scores"), dict) else metadata.get("world_scores"),
+                "world_summary": world_summary,
+                "world_field_scores": _top_score_dict(
+                    world_model.get("world_field_scores") if isinstance(world_model.get("world_field_scores"), dict) else metadata.get("world_field_scores") if isinstance(metadata.get("world_field_scores"), dict) else {},
+                    limit=32,
+                ),
                 "compact_attribution": _compact_world_attribution(compact_attribution),
-                "top_anomalies": [
+                "top_fields": [
             {
-                "target_field": item.get("target_field"),
-                "target_zone": item.get("target_zone"),
-                "query_type": item.get("query_type"),
-                "relation_kind": item.get("relation_kind"),
-                "anomaly_score": item.get("anomaly_score"),
-                "normal_confidence": item.get("normal_confidence"),
+                "field_path": item.get("field_path"),
+                "namespace": item.get("namespace"),
+                "score": item.get("score"),
             }
-            for item in top_anomalies[:8]
+            for item in top_fields[:8]
             if isinstance(item, dict)
         ],
             },

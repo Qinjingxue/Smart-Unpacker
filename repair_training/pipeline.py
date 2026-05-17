@@ -40,6 +40,8 @@ def main(argv: list[str] | None = None) -> int:
                 "--material-root", args.material_root,
                 "--output", str(run_dir / "datasets" / "normal_structure_rows.jsonl"),
                 "--seed", args.seed,
+                "--workers", str(args.workers),
+                "--workspace", str(run_dir / "tmp" / "normal_world_collect"),
             ] + (["--limit", str(args.limit)] if args.limit else []))
         elif stage == "apply_normal":
             _run([
@@ -119,6 +121,8 @@ def _run_damage_analysis_pipeline(args: argparse.Namespace, *, fmt: str, run_dir
         "--material-root", args.material_root,
         "--output", str(run_dir / "datasets" / "normal_structure_rows.jsonl"),
         "--seed", args.seed,
+        "--workers", str(args.workers),
+        "--workspace", str(run_dir / "tmp" / "normal_world_collect"),
     ] + (["--limit", str(args.limit)] if args.limit else []))
     _run([
         sys.executable, "-m", "repair_training.collect_damage_rows",

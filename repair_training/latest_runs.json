@@ -1,1 +1,5 @@
-{"eval":"","train":"repair_training\\runs\\zip\\step_q_v1_pending"}
+{
+  "eval": "",
+  "train": "repair_training\\runs\\zip\\step_q_v1_pending",
+  "zip": "C:\\Users\\29402\\Desktop\\sunpack\\repair_training\\runs\\zip\\20260517_175943_20260517_world_field_zip_directory_semantics"
+}
