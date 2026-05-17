@@ -82,6 +82,7 @@ DEFAULT_CONFIG_DATA: dict[str, Any] = {
                 "sfx_stub",
                 "duplicate_entries",
                 "zip64_forced",
+                "zip64_eocd_locator",
                 "non_utf8_names",
                 "split_zip",
                 "sfx_split_zip",
@@ -95,6 +96,7 @@ DEFAULT_CONFIG_DATA: dict[str, Any] = {
                 "sfx_stub": 1.2,
                 "duplicate_entries": 1.1,
                 "zip64_forced": 0.8,
+                "zip64_eocd_locator": 0.8,
                 "non_utf8_names": 0.8,
                 "split_zip": 1.0,
                 "sfx_split_zip": 0.7,
@@ -548,7 +550,7 @@ def _zip_variant_method_levels(variant: str, cfg: dict[str, Any], levels: list[i
         return [("deflate", level) for level in levels]
     if variant == "mixed_store_deflate":
         return [("mixed", level) for level in levels]
-    if variant in {"data_descriptor_bit3", "long_comment", "sfx_stub", "duplicate_entries", "zip64_forced", "non_utf8_names", "split_zip", "sfx_split_zip", "encrypted_zipcrypto"}:
+    if variant in {"data_descriptor_bit3", "long_comment", "sfx_stub", "duplicate_entries", "zip64_forced", "zip64_eocd_locator", "non_utf8_names", "split_zip", "sfx_split_zip", "encrypted_zipcrypto"}:
         return [("deflate", level) for level in levels]
     methods = [str(item) for item in _as_list(cfg.get("methods") or ["deflate"])]
     return [(method, level) for method in methods for level in levels]
@@ -682,6 +684,8 @@ def _run_zip_python(task: DeriveTask, timeout: float) -> None:
     variant = str(task.zip_variant or "normal_deflate")
     if variant == "data_descriptor_bit3":
         _write_zip_data_descriptor(task.source_dir, task.output_path, int(task.level or 6))
+    elif variant == "zip64_eocd_locator":
+        _write_zip64_eocd_locator(task.source_dir, task.output_path, str(task.method or "deflate"), int(task.level or 6))
     else:
         _write_zipfile_variant(task.source_dir, task.output_path, variant, str(task.method or "deflate"), int(task.level or 6))
     if variant in {"sfx_stub", "sfx_split_zip"}:
@@ -835,6 +839,94 @@ def _write_zip_data_descriptor(source_dir: Path, output: Path, level: int) -> No
     cd_offset = len(body)
     body.extend(central)
     body.extend(struct.pack("<IHHHHIIH", 0x06054B50, 0, 0, len(files), len(files), len(central), cd_offset, 0))
+    output.write_bytes(bytes(body))
+
+
+def _write_zip64_eocd_locator(source_dir: Path, output: Path, method: str, level: int) -> None:
+    files = _source_files(source_dir)
+    body = bytearray()
+    central = bytearray()
+    compression_method = 0 if method == "store" else 8
+    for path in files:
+        arcname = str(path.relative_to(source_dir)).replace("\\", "/").encode("utf-8")
+        payload = path.read_bytes()
+        if compression_method == 0:
+            compressed = payload
+        else:
+            compressor = zlib.compressobj(max(0, min(9, int(level))), zlib.DEFLATED, -15)
+            compressed = compressor.compress(payload) + compressor.flush()
+        crc = binascii.crc32(payload) & 0xFFFFFFFF
+        local_offset = len(body)
+        local_extra = struct.pack("<HHQQ", 0x0001, 16, len(payload), len(compressed))
+        body.extend(struct.pack(
+            "<IHHHHHIIIHH",
+            0x04034B50,
+            45,
+            0x0800,
+            compression_method,
+            0,
+            0,
+            crc,
+            len(compressed),
+            len(payload),
+            len(arcname),
+            len(local_extra),
+        ))
+        body.extend(arcname)
+        body.extend(local_extra)
+        body.extend(compressed)
+        central_extra = struct.pack("<HHQQQ", 0x0001, 24, len(payload), len(compressed), local_offset)
+        central.extend(struct.pack(
+            "<IHHHHHHIIIHHHHHII",
+            0x02014B50,
+            45,
+            45,
+            0x0800,
+            compression_method,
+            0,
+            0,
+            crc,
+            len(compressed),
+            len(payload),
+            len(arcname),
+            len(central_extra),
+            0,
+            0,
+            0,
+            0,
+            local_offset,
+        ))
+        central.extend(arcname)
+        central.extend(central_extra)
+    cd_offset = len(body)
+    body.extend(central)
+    zip64_offset = len(body)
+    entry_count = len(files)
+    body.extend(struct.pack(
+        "<IQHHIIQQQQ",
+        0x06064B50,
+        44,
+        45,
+        45,
+        0,
+        0,
+        entry_count,
+        entry_count,
+        len(central),
+        cd_offset,
+    ))
+    body.extend(struct.pack("<IIQI", 0x07064B50, 0, zip64_offset, 1))
+    body.extend(struct.pack(
+        "<IHHHHIIH",
+        0x06054B50,
+        0,
+        0,
+        min(entry_count, 0xFFFF),
+        min(entry_count, 0xFFFF),
+        min(len(central), 0xFFFFFFFF),
+        min(cd_offset, 0xFFFFFFFF),
+        0,
+    ))
     output.write_bytes(bytes(body))
 
 
@@ -1006,6 +1098,7 @@ def _zip_variant_tags(variant: str) -> tuple[str, ...]:
         "sfx_stub": ("sfx", "carrier_prefix"),
         "duplicate_entries": ("duplicate_entries", "entry_mapping"),
         "zip64_forced": ("zip64", "extra_field"),
+        "zip64_eocd_locator": ("zip64", "zip64_eocd", "zip64_locator", "extra_field"),
         "non_utf8_names": ("filename_encoding", "non_utf8_names"),
         "split_zip": ("split", "multi_volume"),
         "sfx_split_zip": ("sfx", "split", "multi_volume"),
@@ -1025,6 +1118,8 @@ def _zip_variant_features(variant: str, method: str, level: int) -> dict[str, An
         "has_split_sidecars": "split" in tags,
         "has_duplicate_entries": "duplicate_entries" in tags,
         "has_zip64_extra": "zip64" in tags,
+        "has_zip64_eocd": "zip64_eocd" in tags,
+        "has_zip64_locator": "zip64_locator" in tags,
         "has_long_comment": "long_comment" in tags,
         "has_filename_encoding_risk": "filename_encoding" in tags,
         "has_mixed_methods": "mixed_methods" in tags,

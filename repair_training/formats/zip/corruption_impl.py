@@ -1374,6 +1374,7 @@ SINGLE_FIELD_PROFILE_TO_FIELD: dict[str, str] = {
     "single_field_data_descriptor_size": "data_descriptor.size",
     "single_field_zip64_extra_length": "zip64.extra_length",
     "single_field_zip64_uncompressed_size": "zip64.uncompressed_size",
+    "single_field_zip64_eocd": "zip64.eocd",
     "single_field_zip64_locator": "zip64.locator",
     "single_field_tail_trailing_bytes": "tail.trailing_bytes",
     "single_field_sfx_prefix_bytes": "sfx_prefix.bytes",
@@ -1554,6 +1555,10 @@ def _zip_single_zip64_field_mutation(data: bytes, randomizer: random.Random, fie
         locator = data.rfind(b"PK\x06\x07")
         if locator >= 0 and locator + 20 <= len(data):
             return [_replace_bytes("single_field_zip64_locator", locator + 8, struct.pack("<Q", 0), "zip.zip64.locator", "single-field ZIP64 locator offset")]
+    if field == "zip64.eocd":
+        eocd64 = data.rfind(b"PK\x06\x06")
+        if eocd64 >= 0 and eocd64 + 56 <= len(data):
+            return [_replace_bytes("single_field_zip64_eocd", eocd64 + 32, struct.pack("<Q", randomizer.randrange(2, 16)), "zip.zip64.eocd.entry_count", "single-field ZIP64 EOCD entry count")]
     return []
 
 

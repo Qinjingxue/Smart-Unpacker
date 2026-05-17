@@ -71,6 +71,7 @@ struct Zip64Extra {
 struct Zip64Eocd {
     offset: usize,
     end: usize,
+    total_entries: u64,
     cd_size: u64,
     cd_offset: u64,
 }
@@ -85,6 +86,17 @@ struct Zip64Locator {
 
 #[derive(Clone, Copy)]
 struct DataDescriptorRecord {
+    crc32: u32,
+    compressed_size: u64,
+    uncompressed_size: u64,
+    has_signature: bool,
+}
+
+#[derive(Clone, Copy)]
+struct PayloadProbe {
+    consumed: usize,
+    end: usize,
+    uncompressed_size: u64,
     crc32: u32,
 }
 

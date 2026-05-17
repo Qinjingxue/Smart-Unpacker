@@ -77,13 +77,17 @@ THEORY_DEPENDENCIES: tuple[tuple[str, str, str], ...] = (
     ("data_descriptor.record", "payload.span", "describes_payload"),
     ("data_descriptor.crc", "central_directory.crc", "matches_field"),
     ("data_descriptor.size", "central_directory.compressed_size", "matches_field"),
+    ("data_descriptor.size", "payload.span", "describes_payload"),
     ("zip64.extra", "central_directory.compressed_size", "overrides"),
     ("zip64.extra", "central_directory.local_header_offset", "overrides"),
+    ("zip64.extra_length", "zip64.extra", "bounds"),
+    ("zip64.uncompressed_size", "payload.span", "matches_payload"),
     ("zip64.locator", "zip64.eocd", "points_to"),
     ("tail.trailing_bytes", "eocd.comment_length", "bounds"),
     ("sfx_prefix.bytes", "eocd.cd_offset", "shifts_offset"),
     ("sfx_prefix.bytes", "central_directory.local_header_offset", "shifts_offset"),
     ("split_volume.missing_range", "payload.span", "removes_span"),
+    ("split_volume.missing_range", "central_directory.local_header_offset", "propagates_to"),
 )
 
 THEORY_EDGE_BY_ENDPOINT: dict[tuple[str, str], str] = {
@@ -123,19 +127,31 @@ FIELD_TO_THEORY_EDGES: dict[str, tuple[str, ...]] = {
         THEORY_EDGE_BY_ENDPOINT[("central_directory.flags", "data_descriptor.record")],
         THEORY_EDGE_BY_ENDPOINT[("data_descriptor.record", "payload.span")],
     ),
+    "data_descriptor.size": (
+        THEORY_EDGE_BY_ENDPOINT[("data_descriptor.size", "central_directory.compressed_size")],
+        THEORY_EDGE_BY_ENDPOINT[("data_descriptor.size", "payload.span")],
+    ),
     "zip64.extra": (
         THEORY_EDGE_BY_ENDPOINT[("zip64.extra", "central_directory.compressed_size")],
         THEORY_EDGE_BY_ENDPOINT[("zip64.extra", "central_directory.local_header_offset")],
     ),
     "zip64.extra_length": (
+        THEORY_EDGE_BY_ENDPOINT[("zip64.extra_length", "zip64.extra")],
         THEORY_EDGE_BY_ENDPOINT[("zip64.extra", "central_directory.compressed_size")],
         THEORY_EDGE_BY_ENDPOINT[("zip64.extra", "central_directory.local_header_offset")],
     ),
     "zip64.uncompressed_size": (
         THEORY_EDGE_BY_ENDPOINT[("zip64.extra", "central_directory.compressed_size")],
+        THEORY_EDGE_BY_ENDPOINT[("zip64.uncompressed_size", "payload.span")],
     ),
     "zip64.locator": (
         THEORY_EDGE_BY_ENDPOINT[("zip64.locator", "zip64.eocd")],
+    ),
+    "zip64.eocd": (
+        THEORY_EDGE_BY_ENDPOINT[("zip64.locator", "zip64.eocd")],
+        THEORY_EDGE_BY_ENDPOINT[("eocd.entry_count", "central_directory.entry_count")],
+        THEORY_EDGE_BY_ENDPOINT[("eocd.cd_size", "central_directory.span")],
+        THEORY_EDGE_BY_ENDPOINT[("eocd.cd_offset", "central_directory.span")],
     ),
     "tail.trailing_bytes": (
         THEORY_EDGE_BY_ENDPOINT[("tail.trailing_bytes", "eocd.comment_length")],
@@ -146,6 +162,7 @@ FIELD_TO_THEORY_EDGES: dict[str, tuple[str, ...]] = {
     ),
     "split_volume.missing_range": (
         THEORY_EDGE_BY_ENDPOINT[("split_volume.missing_range", "payload.span")],
+        THEORY_EDGE_BY_ENDPOINT[("split_volume.missing_range", "central_directory.local_header_offset")],
     ),
 }
 
@@ -174,6 +191,7 @@ SUMMARY_TO_THEORY = {
     "central_directory_offset_delta": ("eocd.cd_offset", "central_directory.span"),
     "central_directory_size_delta": ("eocd.cd_size", "central_directory.span"),
     "declared_central_directory_size": ("eocd.cd_size", "central_directory.span"),
+    "eocd_cd_size_mismatch_count": ("eocd.cd_size", "central_directory.span"),
     "entry_count_delta": ("eocd.entry_count", "central_directory.entry_count"),
     "local_header_offset_violation_count": ("central_directory.local_header_offset",),
     "central_local_flags_mismatch_count": ("central_directory.flags", "local_header.flags"),
@@ -191,13 +209,22 @@ SUMMARY_TO_THEORY = {
     "descriptor_crc_cd_mismatch_count": ("data_descriptor.crc", "central_directory.crc"),
     "descriptor_crc_payload_mismatch_count": ("data_descriptor.crc", "payload.crc_region"),
     "descriptor_crc_likely_bad_count": ("data_descriptor.crc",),
+    "descriptor_record_mismatch_count": ("data_descriptor.record",),
+    "descriptor_size_mismatch_count": ("data_descriptor.size", "payload.span"),
+    "central_directory_compressed_size_likely_bad_count": ("central_directory.compressed_size", "payload.span"),
     "span_conflict_count": ("payload.span",),
     "trailing_bytes_after_eocd": ("tail.trailing_bytes", "eocd.comment_length"),
     "sfx_prefix_len": ("sfx_prefix.bytes", "eocd.cd_offset", "central_directory.local_header_offset"),
     "zip64_extra_mismatch_count": ("zip64.extra", "zip64.extra_length", "zip64.uncompressed_size"),
+    "zip64_extra_length_mismatch_count": ("zip64.extra_length", "zip64.extra"),
+    "zip64_uncompressed_size_mismatch_count": ("zip64.uncompressed_size", "payload.span"),
     "zip64_extra_present_count": ("zip64.extra",),
+    "zip64_locator_mismatch_count": ("zip64.locator", "zip64.eocd"),
+    "zip64_eocd_mismatch_count": ("zip64.eocd", "central_directory.span", "central_directory.entry_count"),
+    "zip64_eocd_field_mismatch_count": ("zip64.eocd", "central_directory.span", "central_directory.entry_count"),
     "zip64_locator_present": ("zip64.locator",),
     "zip64_eocd_present": ("zip64.eocd",),
+    "split_volume_missing_range_evidence_count": ("split_volume.missing_range",),
 }
 
 OBSERVATION_PREFIXES = (

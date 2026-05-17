@@ -658,6 +658,10 @@ def _source_compatible_with_profile(source_derivation: dict[str, Any], profile: 
     tags = {str(item).lower() for item in source_derivation.get("zip_container_tags") or []}
     features = source_derivation.get("zip_structure_features") if isinstance(source_derivation.get("zip_structure_features"), dict) else {}
     if profile_l.startswith("single_field_"):
+        if "zip64_locator" in profile_l:
+            return variant == "zip64_eocd_locator" or "zip64_locator" in tags or bool(features.get("has_zip64_locator"))
+        if "zip64_eocd" in profile_l:
+            return variant == "zip64_eocd_locator" or "zip64_eocd" in tags or bool(features.get("has_zip64_eocd"))
         if "zip64" in profile_l:
             return variant == "zip64_forced" or "zip64" in tags or bool(features.get("has_zip64_extra"))
         if "data_descriptor" in profile_l:
@@ -675,6 +679,8 @@ def _source_compatible_with_profile(source_derivation: dict[str, Any], profile: 
         return variant in {"split_zip", "sfx_split_zip"} or "split" in tags or bool(features.get("has_split_sidecars"))
     if "data_descriptor" in profile_l or "descriptor" in profile_l:
         return variant == "data_descriptor_bit3" or "data_descriptor" in tags or bool(features.get("has_data_descriptor"))
+    if "zip64_eocd_locator" in profile_l:
+        return variant == "zip64_eocd_locator" or bool(features.get("has_zip64_locator")) or bool(features.get("has_zip64_eocd"))
     if "zip64" in profile_l:
         return variant == "zip64_forced" or "zip64" in tags or bool(features.get("has_zip64_extra"))
     if "non_utf8" in profile_l or "filename" in profile_l:

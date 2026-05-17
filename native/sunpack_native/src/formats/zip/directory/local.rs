@@ -70,6 +70,7 @@ fn find_zip64_eocd(data: &[u8], before: usize) -> Option<Zip64Eocd> {
     Some(Zip64Eocd {
         offset: pos,
         end,
+        total_entries: u64_le(data, pos + 32),
         cd_size: u64_le(data, pos + 40),
         cd_offset: u64_le(data, pos + 48),
     })
