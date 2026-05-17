@@ -389,14 +389,14 @@ def _candidate_pre_score(candidate: RepairCandidate, state: RepairBeamState) -> 
         predicted_gain = progress_score * max(0.1, 1.0 - state_completeness)
     else:
         predicted_gain = max(0.0, predicted_completeness - state_completeness)
-    prior_score = min(1.0, max(0.0, state.score)) * 0.03
+    logic_score = min(1.0, max(0.0, state.score)) * 0.03
     prior_completeness = state_completeness * 0.04
     low_gain_penalty = 0.08 if state_completeness >= 0.2 and predicted_gain <= 0.01 and cost_penalty > 0.25 else 0.0
     return (
         selector_score
         + progress_score * 0.05
         + predicted_gain * 0.18
-        + prior_score
+        + logic_score
         + prior_completeness
         - cost_penalty * 0.08
         - risk_penalty * 0.04

@@ -560,17 +560,17 @@ def collect_episode(
             for index, candidate in enumerate(candidates)
         ]
         for item in candidate_dicts:
-            item["action_type"] = "expand_edge"
+            item["action_type"] = "module"
         candidate_snapshots = [TrainingCandidateSnapshot.from_dict(_with_snapshot_metadata(item)) for item in candidate_dicts]
         actions = [
-            TrainingAction(action_type="expand_edge", candidate_id=str(item["candidate_id"]), metadata={"edge_id": _training_edge_id(state_digest, str(item["candidate_id"]))})
+            TrainingAction(action_type="module", candidate_id=str(item["candidate_id"]), metadata={"edge_id": _training_edge_id(state_digest, str(item["candidate_id"]))})
             for item in candidate_dicts
             if item.get("candidate_id")
         ]
         if state.patch_depth() > 0 and parent_digest:
-            actions.append(TrainingAction(action_type="checkout_node", reason="checkout_parent", metadata={"target_state_digest": parent_digest, "target_node_id": _training_node_id(parent_digest)}))
+            actions.append(TrainingAction(action_type="undo", reason="checkout_parent", metadata={"target_state_digest": parent_digest, "target_node_id": _training_node_id(parent_digest)}))
         actions.extend([
-            TrainingAction(action_type="stop_signal", reason="stop_signal"),
+            TrainingAction(action_type="stop", reason="stop"),
         ])
         before = _training_verification_snapshot(state_recovery)
 
@@ -588,7 +588,7 @@ def collect_episode(
                 damage_analysis_target={**damage_target_dict, "model_damage_analysis": _compact_damage_analysis(damage_analysis)},
                 candidate_snapshots=candidate_snapshots,
                 available_actions=actions,
-                selected_action=TrainingAction(action_type="expand_edge", candidate_id=str(snapshot.get("candidate_id") or ""), metadata={"edge_id": _training_edge_id(state_digest, str(snapshot.get("candidate_id") or ""))}),
+                selected_action=TrainingAction(action_type="module", candidate_id=str(snapshot.get("candidate_id") or ""), metadata={"edge_id": _training_edge_id(state_digest, str(snapshot.get("candidate_id") or ""))}),
                 next_state_digest=next_digest,
                 verification_before=before,
                 verification_after=after,
@@ -597,7 +597,7 @@ def collect_episode(
                 node_id=_training_node_id(state_digest),
                 parent_node_id=_training_node_id(parent_digest) if parent_digest else "",
                 frontier_edge_id=_training_edge_id(state_digest, str(snapshot.get("candidate_id") or "")),
-                graph_action={"action": "expand", "action_type": "expand_edge", "candidate_id": str(snapshot.get("candidate_id") or "")},
+                step_action={"action": "expand", "action_type": "module", "candidate_id": str(snapshot.get("candidate_id") or "")},
                 graph_best_node_id=_training_node_id(state_digest),
                 branch_status="active",
             ))
@@ -620,19 +620,19 @@ def collect_episode(
                 damage_analysis_target={**damage_target_dict, "model_damage_analysis": _compact_damage_analysis(damage_analysis)},
                 candidate_snapshots=candidate_snapshots,
                 available_actions=actions,
-                selected_action=TrainingAction(action_type="checkout_node", reason="checkout_parent", metadata={"target_state_digest": parent_digest, "target_node_id": _training_node_id(parent_digest)}),
+                selected_action=TrainingAction(action_type="undo", reason="checkout_parent", metadata={"target_state_digest": parent_digest, "target_node_id": _training_node_id(parent_digest)}),
                 next_state_digest=parent_digest,
                 verification_before=before,
                 verification_after=parent_after,
                 reward=parent_after.score - before.score,
                 node_id=_training_node_id(state_digest),
                 parent_node_id=_training_node_id(parent_digest),
-                graph_action={"action": "checkout", "action_type": "checkout_node", "node_id": _training_node_id(parent_digest)},
+                step_action={"action": "checkout", "action_type": "undo", "node_id": _training_node_id(parent_digest)},
                 graph_best_node_id=_training_node_id(state_digest),
                 branch_status="active",
             ))
         transitions.extend([
-            _terminal_transition(depth, state, parent_digest, damage_request_dict, {**damage_target_dict, "model_damage_analysis": _compact_damage_analysis(damage_analysis)}, candidate_snapshots, actions, before, "stop_signal"),
+            _terminal_transition(depth, state, parent_digest, damage_request_dict, {**damage_target_dict, "model_damage_analysis": _compact_damage_analysis(damage_analysis)}, candidate_snapshots, actions, before, "stop"),
         ])
 
     recovery_evaluator.close()
@@ -872,7 +872,6 @@ def _analyze_damage_for_action_features(
         from repair_training.core.damage_model_inference import DamageAnalysisModel
         from repair_training.core.normal_structure_inference import NormalStructureModel
         from sunpack.repair.policy.adapters.damage import get_damage_analysis_adapter
-        from sunpack.repair.policy.adapters.normal_structure import get_normal_structure_adapter
 
         root = Path(model_dir)
         if (root / "models").is_dir():
@@ -882,25 +881,23 @@ def _analyze_damage_for_action_features(
         if cached is None:
             plugin = load_training_format_plugin(fmt)
             damage_adapter = get_damage_analysis_adapter(fmt)
-            normal_adapter = get_normal_structure_adapter(fmt)
-            if damage_adapter is None or normal_adapter is None:
+            if damage_adapter is None:
                 return dict(fallback)
             cached = (
                 plugin,
-                normal_adapter,
                 NormalStructureModel(model_dir=root / "normal_structure", plugin=plugin),
                 DamageAnalysisModel(model_dir=root / "damage_location", plugin=plugin),
             )
             _DAMAGE_MODEL_CACHE[key] = cached
-        plugin, normal_adapter, normal_model, damage_model = cached
+        plugin, normal_model, damage_model = cached
         damage_adapter = get_damage_analysis_adapter(fmt)
         if damage_adapter is None:
             return dict(fallback)
         payload = damage_adapter.prepare_input(request)
-        normal_rows = normal_adapter.rows_from_request_payload(payload)
-        normal_scores = normal_model.predict_rows(normal_rows)
-        anomaly = normal_adapter.build_anomaly_payload(normal_rows, normal_scores)
-        row = {"damage_analysis_input": payload}
+        normal_scores = normal_model.predict_rows([{"knowledge_payload": payload}])
+        world_score = float(normal_scores[0]) if normal_scores else 0.0
+        anomaly = {"summary": {"world_score": world_score, "max_anomaly": 1.0 - world_score}}
+        row = {"knowledge_payload": payload}
         observed_scores = damage_model.predict_rows([row])[0]
         uncertain_scores = damage_model.predict_uncertain_rows([row])[0]
         result = damage_adapter.postprocess_scores(
@@ -910,7 +907,7 @@ def _analyze_damage_for_action_features(
             uncertainty_thresholds=damage_model.uncertain_thresholds,
             metadata={
                 "training_damage_model_dir": str(root),
-                "normal_query_count": len(normal_rows),
+                "world_scores": {"normal": world_score, "anomaly": 1.0 - world_score},
                 "structure_anomaly": anomaly,
             },
         )
@@ -944,7 +941,7 @@ def _compact_damage_analysis(payload: dict[str, Any]) -> dict[str, Any]:
                 "uncertainty_selected_scores": _top_score_dict(uncertain_scores, limit=16),
             },
             "world_model": {
-                "query_count": (world_model.get("metadata") or {}).get("query_count") if isinstance(world_model.get("metadata"), dict) else metadata.get("normal_query_count"),
+                "world_scores": world_model.get("world_scores") if isinstance(world_model.get("world_scores"), dict) else metadata.get("world_scores"),
                 "compact_attribution": _compact_world_attribution(compact_attribution),
                 "top_anomalies": [
             {
@@ -1269,7 +1266,7 @@ def _terminal_transition(
         terminal=False,
         node_id=_training_node_id(state.effective_patch_digest()),
         parent_node_id=_training_node_id(parent_digest) if parent_digest else "",
-        graph_action={"action_type": action_type, "action": "signal"},
+        step_action={"action_type": action_type, "action": "signal"},
         graph_best_node_id=_training_node_id(state.effective_patch_digest()),
         branch_status="active",
     )
@@ -1473,3 +1470,4 @@ def _parser() -> argparse.ArgumentParser:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

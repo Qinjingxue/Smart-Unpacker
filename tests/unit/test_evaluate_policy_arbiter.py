@@ -11,8 +11,8 @@ from repair_training.evaluate_policy_arbiter import (
 
 def test_policy_arbiter_eval_model_root_requires_four_models(tmp_path):
     model_root = tmp_path / "models"
-    (model_root / "graph_action").mkdir(parents=True)
-    (model_root / "graph_state_value").mkdir()
+    (model_root / "step_action").mkdir(parents=True)
+    (model_root / "step_value").mkdir()
 
     with pytest.raises(SystemExit) as exc:
         _validate_model_root(model_root)
@@ -24,7 +24,7 @@ def test_policy_arbiter_eval_model_root_requires_four_models(tmp_path):
 
 def test_policy_arbiter_eval_accepts_complete_model_root(tmp_path):
     model_root = tmp_path / "models"
-    for name in ("normal_structure", "damage_location", "graph_state_value", "graph_action"):
+    for name in ("normal_structure", "damage_location", "step_value", "step_action"):
         (model_root / name).mkdir(parents=True)
 
     assert _validate_model_root(model_root) == model_root.resolve()
@@ -64,18 +64,18 @@ def test_policy_arbiter_scheduler_config_inherits_advanced_verification(monkeypa
 def test_policy_arbiter_decision_stats_reads_scheduler_history_shape():
     rounds = [
         {
-            "graph_action": {"action": "checkout", "node_id": "node:0"},
+            "step_action": {"action": "checkout", "node_id": "node:0"},
             "stop_controller": {
-                "selected_prior": {"action_type": "stop_signal", "prior_score": 0.92},
+                "selected_score": {"action_type": "stop", "logic_score": 0.92},
             },
             "graph_summary": {"frontier_count": 2},
         },
         {
-            "graph_action": {"action": "finish", "reason": "plateau"},
+            "step_action": {"action": "finish", "reason": "plateau"},
             "graph_summary": {"frontier_count": 1},
         },
         {
-            "graph_action": {"action": "exhaust"},
+            "step_action": {"action": "exhaust"},
             "best_seen_recovery": {"score": 0.5},
         }
     ]
@@ -85,7 +85,7 @@ def test_policy_arbiter_decision_stats_reads_scheduler_history_shape():
     assert stats["actions"] == {"checkout": 1, "finish": 1, "exhaust": 1}
     assert stats["checkout_count"] == 1
     assert stats["exhaust_count"] == 1
-    assert stats["stop_signal_overridden"] == 1
+    assert stats["stop_overridden"] == 1
     assert stats["frontier_available_at_finish"] == 1
     assert stats["exhaust_then_recovered"] == 1
 
@@ -167,3 +167,4 @@ def test_policy_arbiter_hard_cases_include_low_and_zero_recovery_without_oracle_
     assert [case["index"] for case in cases] == [3, 2]
     assert cases[0]["hard_case_reasons"] == ["zero_final_recovery"]
     assert cases[1]["hard_case_reasons"] == ["low_final_recovery_lt_0_5"]
+

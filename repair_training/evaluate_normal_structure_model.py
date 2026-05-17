@@ -10,16 +10,12 @@ from repair_training.core.datasets import read_jsonl, write_json, write_jsonl
 from repair_training.core.features import damage_labels_for_row
 from repair_training.core.normal_structure_inference import NormalStructureModel
 from repair_training.core.plugin import load_training_format_plugin, normalize_format_name
-from sunpack.repair.policy.adapters.normal_structure import get_normal_structure_adapter
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     fmt = normalize_format_name(args.format)
     plugin = load_training_format_plugin(fmt)
-    adapter = get_normal_structure_adapter(fmt)
-    if adapter is None:
-        raise SystemExit(f"no normal structure adapter for format: {fmt}")
     model = NormalStructureModel(model_dir=args.normal_model_dir, plugin=plugin)
     rows = read_jsonl(args.input)
     predictions: list[dict[str, Any]] = []
@@ -28,15 +24,15 @@ def main(argv: list[str] | None = None) -> int:
     per_field: dict[str, Counter] = defaultdict(Counter)
 
     for index, row in enumerate(rows):
-        payload = row.get("damage_analysis_input") if isinstance(row.get("damage_analysis_input"), dict) else {}
-        query_rows = adapter.rows_from_request_payload(payload)
-        scores = model.predict_rows(query_rows)
-        anomaly = adapter.build_anomaly_payload(query_rows, scores)
+        payload = row.get("knowledge_payload") if isinstance(row.get("knowledge_payload"), dict) else {}
+        scores = model.predict_rows([{"knowledge_payload": payload}])
+        world_score = float(scores[0]) if scores else 0.0
+        anomaly = {"summary": {"world_score": world_score, "max_anomaly": 1.0 - world_score}}
         truth = _truth_from_row(row)
-        ranked_fields = _ranked_fields(anomaly)
-        ranked_zones = _ranked_zones(anomaly)
-        ranked_relations = _ranked_relations(anomaly)
-        ranked_pairs = _ranked_conflict_pairs(anomaly)
+        ranked_fields: list[str] = []
+        ranked_zones: list[str] = []
+        ranked_relations: list[str] = []
+        ranked_pairs: list[str] = []
         expected_relations = sorted({_expected_relation_for_field(field) for field in truth["fields"] if _expected_relation_for_field(field)})
         expected_pairs = sorted({_expected_pair_for_field(field) for field in truth["fields"] if _expected_pair_for_field(field)})
         record = {
@@ -318,7 +314,7 @@ def _rate(numerator: int | float, denominator: int | float) -> float:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Evaluate NormalStructureModel field attribution against damage labels.")
     parser.add_argument("--format", default="zip")
-    parser.add_argument("--input", required=True, help="damage_rows.jsonl or raw damage rows with damage_analysis_input/target")
+    parser.add_argument("--input", required=True, help="damage_rows.jsonl or rows with knowledge_payload/target")
     parser.add_argument("--normal-model-dir", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--top-k", type=int, default=3)

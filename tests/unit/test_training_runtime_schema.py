@@ -9,7 +9,7 @@ from sunpack.repair.job import RepairJob
 from sunpack.repair.policy.training_runtime import (
     archive_state_for_job,
     build_damage_analysis_request,
-    build_repair_action_request,
+    build_step_action_request,
     candidate_snapshot,
     request_to_dict,
     validate_policy_candidates,
@@ -42,10 +42,10 @@ def test_training_episode_schema_round_trip_with_archive_state_digest(tmp_path):
                 patch_depth=0,
                 candidate_snapshots=[TrainingCandidateSnapshot(candidate_id="c1", module_name="zip_fix", format="zip")],
                 available_actions=[
-                    TrainingAction(action_type="apply_patch", candidate_id="c1"),
+                    TrainingAction(action_type="module", candidate_id="c1"),
                     TrainingAction(action_type="stop"),
                 ],
-                selected_action=TrainingAction(action_type="apply_patch", candidate_id="c1"),
+                selected_action=TrainingAction(action_type="module", candidate_id="c1"),
                 next_state_digest="next",
                 verification_before=TrainingVerificationSnapshot(score=0.1),
                 verification_after=TrainingVerificationSnapshot(score=0.9),
@@ -62,11 +62,10 @@ def test_training_episode_schema_round_trip_with_archive_state_digest(tmp_path):
 
 def test_training_action_validation_and_control_action_normalization():
     with pytest.raises(ValueError):
-        TrainingAction(action_type="apply_patch")
+        TrainingAction(action_type="module")
 
-    assert TrainingAction(action_type="undo_patch", candidate_id="ignored").candidate_id == ""
+    assert TrainingAction(action_type="undo", candidate_id="ignored").candidate_id == ""
     assert TrainingAction(action_type="stop", candidate_id="ignored").candidate_id == ""
-    assert TrainingAction(action_type="give_up", candidate_id="ignored").candidate_id == ""
 
 
 def test_training_runtime_adapter_builds_requests_and_snapshots(tmp_path):
@@ -98,15 +97,21 @@ def test_training_runtime_adapter_builds_requests_and_snapshots(tmp_path):
 
     assert archive_state_for_job(job) is root
     damage_request = build_damage_analysis_request(job, root, diagnosis={"format": "zip"}, round_index=2)
-    action_request = build_repair_action_request(job, root, [candidate], {"damage_labels": ["central_directory_offset_bad"]}, round_index=2)
-    snapshot = candidate_snapshot(candidate, index=0)
+    snapshot = candidate_snapshot(candidate, index=0, damage_analysis={"damage_labels": ["central_directory_offset_bad"]})
+    action_request = build_step_action_request(
+        job,
+        root,
+        {"current_node_id": "root", "best_node_id": "root"},
+        {"damage_labels": ["central_directory_offset_bad"]},
+        candidate_payloads=[snapshot],
+        round_index=2,
+    )
     validated = validate_policy_candidates({}, [candidate])
 
     assert damage_request.round_index == 2
-    assert damage_request.runtime_context["archive_state"]["patch_digest"] == root.effective_patch_digest()
+    assert damage_request.runtime_context["source"]["input"] == descriptor.to_source_input()
     damage_payload = request_to_dict(build_damage_analysis_request(job, repaired, diagnosis={"format": "zip"}, round_index=3))
-    assert damage_payload["archive_state"]["patch_digest"] == repaired.effective_patch_digest()
-    assert "patches" not in json.dumps(damage_payload["archive_state"], sort_keys=True)
+    assert damage_payload["source"]["input"] == descriptor.to_source_input()
     assert "data_b64" not in json.dumps(damage_payload, sort_keys=True)
     assert "expected_b64" not in json.dumps(damage_payload, sort_keys=True)
     assert action_request.candidate_payloads[0]["candidate_id"] == snapshot["candidate_id"]

@@ -579,10 +579,10 @@ def is_policy_stop_result(result: RepairResult | None) -> bool:
     if result is None:
         return False
     diagnosis = result.diagnosis if isinstance(result.diagnosis, dict) else {}
-    if bool(diagnosis.get("policy_stop_signal")):
+    if bool(diagnosis.get("policy_stop_requested")):
         return True
     loop = diagnosis.get("policy_loop") if isinstance(diagnosis.get("policy_loop"), dict) else {}
-    return bool(loop.get("policy_stop_signal")) or str(loop.get("terminal_action") or "") == "stop"
+    return bool(loop.get("policy_stop_requested")) or str(loop.get("terminal_action") or "") == "stop"
 
 
 def _looks_like_split_name(path: str) -> bool:

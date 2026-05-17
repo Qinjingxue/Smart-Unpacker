@@ -60,7 +60,7 @@ def test_zip_plugin_declares_rich_labels_and_module_families():
     assert zip_module_family("zip_local_header_partial_scan") == "salvage"
     assert zip_module_family("zip_resolve_duplicate_entries") == "conflict"
     assert zip_module_family("zip_rebuild_cd_preserve_raw_names") == "naming"
-    assert zip_module_family("checkout_node") == "zip_other"
+    assert zip_module_family("undo") == "zip_other"
     assert zip_module_family("unknown_zip_module") == "zip_other"
 
 
@@ -88,50 +88,50 @@ def test_zip_postprocess_damage_prediction_routes_and_fallback():
 
 
 def test_zip_action_label_control_heuristics():
-    assert _zip_label({"action_type": "expand_edge", "long_term_value": 1.0, "is_best_action": True}) >= 24
-    assert _zip_label({"action_type": "stop_signal", "long_term_value": 0.1, "current_recovery": {"score": 0.97}}) >= 28
-    assert _zip_label({"action_type": "checkout_node", "long_term_value": 0.0, "current_recovery": {"score": 0.1}}) >= 14
+    assert _zip_label({"action_type": "module", "long_term_value": 1.0, "is_best_action": True}) >= 24
+    assert _zip_label({"action_type": "stop", "long_term_value": 0.1, "current_recovery": {"score": 0.97}}) >= 28
+    assert _zip_label({"action_type": "undo", "long_term_value": 0.0, "current_recovery": {"score": 0.1}}) >= 14
     assert _zip_label({
-        "action_type": "stop_signal",
+        "action_type": "stop",
         "current_recovery": {"score": 0.77},
         "state_value": {"reachable_recovery_value": 0.79},
         "long_term_value": 0.0,
     }) <= 8
     assert _zip_label({
-        "action_type": "stop_signal",
+        "action_type": "stop",
         "current_recovery": {"score": 0.2},
         "state_value": {"reachable_recovery_value": 0.8},
         "long_term_value": 1.0,
     }) <= 8
     assert _zip_label({
-        "action_type": "expand_edge",
+        "action_type": "module",
         "current_recovery": {"score": 0.2},
         "candidate_snapshot": {"validation_summary": {"accepted": True}},
         "state_value": {"reachable_recovery_value": 0.8},
         "long_term_value": 0.0,
     }) >= 18
     assert _zip_label({
-        "action_type": "checkout_node",
+        "action_type": "undo",
         "current_recovery": {"score": 0.2},
         "state_value": {"reachable_recovery_value": 0.25},
         "parent_state_value": {"reachable_recovery_value": 0.75},
         "long_term_value": 0.0,
     }) >= 14
     assert _zip_label({
-        "action_type": "stop_signal",
+        "action_type": "stop",
         "current_recovery": {"score": 0.0},
         "state_value": {"reachable_recovery_value": 0.3},
         "long_term_value": 1.0,
     }) <= 8
     assert _zip_label({
-        "action_type": "expand_edge",
+        "action_type": "module",
         "candidate_snapshot": {"module_name": "zip_partial_salvage_missing_volume"},
         "current_recovery": {"score": 0.0},
         "state_value": {"reachable_recovery_value": 0.3},
         "long_term_value": -0.2,
     }) >= 18
     assert _zip_label({
-        "action_type": "expand_edge",
+        "action_type": "module",
         "candidate_snapshot": {"module_name": "zip_fix_cd_offset", "validation_summary": {"accepted": True}},
         "current_recovery": {"score": 0.0},
         "state_value": {"reachable_recovery_value": 0.3},
@@ -143,13 +143,13 @@ def test_build_features_writes_npz_and_schema(tmp_path):
     run_dir = _write_fake_run(tmp_path)
 
     assert build_features_main(["--format", "zip", "--model", "damage_analysis", "--run-dir", str(run_dir)]) == 0
-    assert build_features_main(["--format", "zip", "--model", "graph_action", "--run-dir", str(run_dir)]) == 0
+    assert build_features_main(["--format", "zip", "--model", "step_action", "--run-dir", str(run_dir)]) == 0
 
     assert (run_dir / "features" / "damage_analysis" / "train.npz").is_file()
     assert (run_dir / "features" / "damage_analysis" / "feature_schema.json").is_file()
-    assert (run_dir / "features" / "graph_action" / "train.npz").is_file()
-    assert (run_dir / "features" / "graph_action" / "group_train.txt").is_file()
-    schema = load_feature_schema(run_dir / "features" / "graph_action" / "feature_schema.json")
+    assert (run_dir / "features" / "step_action" / "train.npz").is_file()
+    assert (run_dir / "features" / "step_action" / "group_train.txt").is_file()
+    schema = load_feature_schema(run_dir / "features" / "step_action" / "feature_schema.json")
     assert "candidate_snapshot.module_family" in schema["categorical_features"]
     assert not any(
         name.startswith(("next_recovery", "recovery_delta"))
@@ -170,15 +170,15 @@ def test_lightgbm_training_writes_model_artifacts(tmp_path):
     pytest.importorskip("lightgbm")
     run_dir = _write_fake_run(tmp_path)
     build_features_main(["--format", "zip", "--model", "damage_analysis", "--run-dir", str(run_dir)])
-    build_features_main(["--format", "zip", "--model", "graph_action", "--run-dir", str(run_dir)])
+    build_features_main(["--format", "zip", "--model", "step_action", "--run-dir", str(run_dir)])
 
     assert train_main(["--format", "zip", "--model", "damage_analysis", "--run-dir", str(run_dir)]) == 0
-    assert train_main(["--format", "zip", "--model", "graph_action", "--run-dir", str(run_dir)]) == 0
+    assert train_main(["--format", "zip", "--model", "step_action", "--run-dir", str(run_dir)]) == 0
 
     assert (run_dir / "models" / "damage_analysis" / "models.json").is_file()
     assert (run_dir / "models" / "damage_analysis" / "model_card.json").is_file()
-    assert (run_dir / "models" / "graph_action" / "model.txt").is_file()
-    assert (run_dir / "models" / "graph_action" / "model_card.json").is_file()
+    assert (run_dir / "models" / "step_action" / "model.txt").is_file()
+    assert (run_dir / "models" / "step_action" / "model_card.json").is_file()
 
 
 def test_zip_normal_query_builder_outputs_query_rows_without_raw_paths():
@@ -190,7 +190,7 @@ def test_zip_normal_query_builder_outputs_query_rows_without_raw_paths():
     )
 
     assert rows
-    assert {row["row_type"] for row in rows} == {"normal_structure_query"}
+    assert {row["row_type"] for row in rows} == {"normal_structure_relation_row"}
     assert {"field_value", "field_match", "span_relation", "explanation"}.issubset({row["query_type"] for row in rows})
     assert any(row["target_field"] == "central_directory.local_header_offset" and row["candidate_kind"] == "counterfactual" for row in rows)
     assert any(row["target_field"] == "central_directory.compressed_size" and "payload_end_equals_next_local" in row["features"] for row in rows)
@@ -205,22 +205,13 @@ def test_zip_normal_query_builder_outputs_query_rows_without_raw_paths():
 
 def test_zip_normal_adapter_aggregates_query_scores():
     adapter = ZipNormalStructureAdapter()
-    rows = adapter.rows_from_graph(_normal_query_graph())
-    scores = [0.1 if row["target_field"] == "eocd.cd_offset" else 0.95 for row in rows]
+    row = adapter.row_from_knowledge_payload({"format": {"zip": {"structure": {"graph": _normal_query_graph()}}}}, normal_label=1)
+    world = adapter.world_payload(0.1)
 
-    anomaly = adapter.build_anomaly_payload(rows, scores)
-
-    assert anomaly["queries"]
-    assert anomaly["compact_attribution"]["top_queries"]
-    assert "eocd.cd_offset" in anomaly["compact_attribution"]["by_field"]
-    assert "field_value" in anomaly["compact_attribution"]["by_relation"]
-    assert "eocd|field_value" in anomaly["compact_attribution"]["by_zone_relation"]
-    assert "sfx_cd_offset" in anomaly["compact_attribution"]["conflict_pairs"]
-    assert anomaly["summary"]["max_anomaly_by_field"]["eocd.cd_offset"] > 0.8
-    assert "eocd" in anomaly["summary"]["mean_anomaly_by_zone"]
-    assert "trusted_explanations" in anomaly["summary"]
-    assert "path" not in json.dumps(anomaly["compact_attribution"]["top_queries"]).lower()
-    assert "hash" not in json.dumps(anomaly["compact_attribution"]["top_queries"]).lower()
+    assert row["knowledge_payload"]["format"]["zip"]["structure"]["graph"]["summary"]["eocd_present"] is True
+    assert row["normal_label"] == 1
+    assert world["world_scores"]["anomaly"] > 0.8
+    assert world["structure_anomaly"]["summary"]["max_anomaly"] > 0.8
 
 
 def test_zip_normal_adapter_reads_structure_runtime_payload_facts():
@@ -254,27 +245,10 @@ def test_zip_normal_adapter_reads_structure_runtime_payload_facts():
         },
     }
 
-    rows = adapter.rows_from_request_payload(payload)
-    by_field = {row["target_field"]: row for row in rows}
-    payload_features = by_field["payload.compressed_data"]["features"]
-    crc_features = by_field["local_header.crc"]["features"]
+    row = adapter.row_from_knowledge_payload(payload, normal_label=0)
 
-    assert payload_features["payload_content_failure_observed"] is True
-    assert payload_features["payload_direct_crc_or_hash_failure_observed"] is True
-    assert payload_features["payload_size_or_content_mismatch_observed"] is True
-    assert payload_features["extraction_item_failure_observed"] is True
-    assert payload_features["payload_verification_observed"] is True
-    assert payload_features["payload_verified_intact"] is False
-    assert payload_features["payload_unverified_but_no_failure"] is False
-    assert payload_features["no_payload_hash_crc_failure"] is False
-    assert payload_features["crc_mismatch_count"] == 3
-    assert payload_features["payload_hash_mismatch_count"] == 1
-    assert payload_features["entry_failed_count"] == 2
-    assert payload_features["data_error_count"] == 1
-    assert payload_features["unexpected_end_count"] == 1
-    assert payload_features["direct_field_violation_present"] is True
-    assert crc_features["crc_mismatch_count"] == 3
-    assert crc_features["verification_crc_failure"] is True
+    assert row["knowledge_payload"] == payload
+    assert row["normal_label"] == 0
 
 
 def test_zip_damage_feature_spec_uses_structure_not_raw_structure():
@@ -282,35 +256,22 @@ def test_zip_damage_feature_spec_uses_structure_not_raw_structure():
     spec = plugin.damage_feature_spec()
 
     assert spec is not None
-    assert any(prefix.startswith("runtime_context.analysis_native_probe.structure.") for prefix in spec.include_prefixes)
-    assert not any("structure.anomaly" in prefix for prefix in spec.include_prefixes)
-    assert "runtime_context.analysis_native_probe.structure.anomaly" in spec.ignore_prefixes
-    assert not any("raw_structure" in prefix for prefix in spec.include_prefixes)
-    assert not any("raw_structure" in path for path in spec.categorical_paths)
-    assert not any("raw_structure" in prefix for prefix in spec.ignore_prefixes)
-    assert "runtime_context.analysis_native_probe.structure.runtime.payload_extraction_content_failure_observed" in spec.ignore_paths
+    assert spec.include_prefixes == ("knowledge_payload.",)
+    assert "knowledge_payload.source.input.path" in spec.ignore_prefixes
 
 
 def test_normal_structure_features_use_query_schema(tmp_path):
     run_dir = tmp_path / "run"
     datasets = run_dir / "datasets"
     datasets.mkdir(parents=True)
-    rows = ZipNormalQueryBuilder().build_training_queries(_normal_query_graph(), sample_id="clean:0")
-    with (datasets / "normal_structure_queries.jsonl").open("w", encoding="utf-8") as handle:
-        for row in rows:
-            handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+    rows = [{"knowledge_payload": {"format": {"zip": {"structure": {"graph": _normal_query_graph()}}}}, "normal_label": 1}]
+    _write_jsonl(datasets / "normal_structure_rows.jsonl", rows)
 
     assert build_features_main(["--format", "zip", "--model", "normal_structure", "--run-dir", str(run_dir)]) == 0
     schema = load_feature_schema(run_dir / "features" / "normal_structure" / "feature_schema.json")
 
-    assert "target_field" in schema["categorical_features"]
-    assert any(name.startswith("features.") for name in schema["feature_names"])
-    assert not any(name.startswith("object_type") for name in schema["feature_names"])
-    assert not any(name.startswith("candidate_kind") or name.startswith("candidate_source") for name in schema["feature_names"])
-    assert "features.candidate_source_delta_bucket" not in schema["feature_names"]
-    assert "features.violation_kind" not in schema["feature_names"]
-    assert "features.violation_severity" not in schema["feature_names"]
-    assert not any("raw" in name or "path" in name for name in schema["feature_names"])
+    assert any(name.startswith("knowledge_payload.") for name in schema["feature_names"])
+    assert not any("source.input.path" in name for name in schema["feature_names"])
     assert (run_dir / "features" / "normal_structure" / "meta_train.jsonl").is_file()
 
 
@@ -323,12 +284,7 @@ def test_normal_structure_model_flags_unseen_structural_anomaly(tmp_path):
     clean = _normal_query_graph()
     train_rows = []
     for index in range(12):
-        train_rows.extend(ZipNormalQueryBuilder().build_training_queries(clean, sample_id=f"clean:{index}"))
-    with (datasets / "normal_structure_queries.jsonl").open("w", encoding="utf-8") as handle:
-        for row in train_rows:
-            handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
-    build_features_main(["--format", "zip", "--model", "normal_structure", "--run-dir", str(run_dir)])
-    train_main(["--format", "zip", "--model", "normal_structure", "--run-dir", str(run_dir)])
+        train_rows.append({"sample_id": f"clean:{index}", "knowledge_payload": {"format": {"zip": {"structure": {"graph": clean}}}}, "normal_label": 1})
 
     damaged = _normal_query_graph()
     damaged["summary"]["declared_central_directory_offset"] = 64
@@ -346,16 +302,16 @@ def test_normal_structure_model_flags_unseen_structural_anomaly(tmp_path):
             "severity": "high",
         }
     ]
-    adapter = ZipNormalStructureAdapter()
-    clean_rows = adapter.rows_from_graph(clean)
-    clean_scores = NormalStructureModel(model_dir=run_dir / "models" / "normal_structure", plugin=plugin).predict_rows(clean_rows)
-    clean_anomaly = adapter.build_anomaly_payload(clean_rows, clean_scores)
-    runtime_rows = adapter.rows_from_graph(damaged)
-    scores = NormalStructureModel(model_dir=run_dir / "models" / "normal_structure", plugin=plugin).predict_rows(runtime_rows)
-    anomaly = adapter.build_anomaly_payload(runtime_rows, scores)
+    for index in range(12):
+        train_rows.append({"sample_id": f"damaged:{index}", "knowledge_payload": {"format": {"zip": {"structure": {"graph": damaged}}}}, "normal_label": 0})
+    _write_jsonl(datasets / "normal_structure_rows.jsonl", train_rows)
+    build_features_main(["--format", "zip", "--model", "normal_structure", "--run-dir", str(run_dir)])
+    train_main(["--format", "zip", "--model", "normal_structure", "--run-dir", str(run_dir)])
+    model = NormalStructureModel(model_dir=run_dir / "models" / "normal_structure", plugin=plugin)
+    clean_score = model.predict_rows([{"knowledge_payload": {"format": {"zip": {"structure": {"graph": clean}}}}}])[0]
+    damaged_score = model.predict_rows([{"knowledge_payload": {"format": {"zip": {"structure": {"graph": damaged}}}}}])[0]
 
-    assert anomaly["summary"]["max_anomaly_by_field"]["eocd.cd_offset"] > clean_anomaly["summary"]["max_anomaly_by_field"]["eocd.cd_offset"]
-    assert anomaly["summary"]["max_anomaly_by_field"]["eocd.cd_offset"] > 0.05
+    assert clean_score >= damaged_score
 
 
 def test_evaluate_normal_structure_model_reports_attribution_metrics(tmp_path):
@@ -366,10 +322,7 @@ def test_evaluate_normal_structure_model_reports_attribution_metrics(tmp_path):
     clean = _normal_query_graph()
     train_rows = []
     for index in range(12):
-        train_rows.extend(ZipNormalQueryBuilder().build_training_queries(clean, sample_id=f"clean:{index}"))
-    _write_jsonl(datasets / "normal_structure_queries.jsonl", train_rows)
-    build_features_main(["--format", "zip", "--model", "normal_structure", "--run-dir", str(run_dir)])
-    train_main(["--format", "zip", "--model", "normal_structure", "--run-dir", str(run_dir)])
+        train_rows.append({"sample_id": f"clean:{index}", "knowledge_payload": {"format": {"zip": {"structure": {"graph": clean}}}}, "normal_label": 1})
 
     damaged = _normal_query_graph()
     damaged["summary"]["declared_central_directory_offset"] = 64
@@ -382,15 +335,14 @@ def test_evaluate_normal_structure_model_reports_attribution_metrics(tmp_path):
         "delta": 56,
         "severity": "high",
     }]
+    for index in range(12):
+        train_rows.append({"sample_id": f"damaged:{index}", "knowledge_payload": {"format": {"zip": {"structure": {"graph": damaged}}}}, "normal_label": 0})
+    _write_jsonl(datasets / "normal_structure_rows.jsonl", train_rows)
+    build_features_main(["--format", "zip", "--model", "normal_structure", "--run-dir", str(run_dir)])
+    train_main(["--format", "zip", "--model", "normal_structure", "--run-dir", str(run_dir)])
     damage_rows = [{
         "sample_id": "damaged:0",
-        "damage_analysis_input": {
-            "runtime_context": {
-                "analysis_native_probe": {
-                    "structure": {"graph": damaged},
-                },
-            },
-        },
+        "knowledge_payload": {"format": {"zip": {"structure": {"graph": damaged}}}},
         "damage_analysis_target": {
             "damage_labels": ["field:eocd.cd_offset", "zone:eocd"],
         },
@@ -432,14 +384,10 @@ def _write_fake_run(tmp_path: Path) -> Path:
             "source_identity": {"source_archive_id": f"src{index // 2}"},
             "state_digest": f"state{index}",
             "round_index": 0,
-            "damage_analysis_input": {
-                "format": "zip",
-                "runtime_context": {
-                    "analysis_summary": {"format": "zip", "confidence": 1.0},
-                    "extraction_summary": {"failure_stage": "extract", "failure_kind": family},
-                    "verification_summary": {"decision_hint": "repair", "completeness": 0.0},
-                    "job_summary": {"damage_flag_count": index % 3},
-                },
+            "knowledge_payload": {
+                "analysis": {"summary": {"format": "zip", "confidence": 1.0}},
+                "extraction": {"failure": {"failure_stage": "extract", "failure_kind": family}},
+                "verification": {"summary": {"decision_hint": "repair", "completeness": 0.0}},
             },
             "damage_analysis_target": {
                 "labels": [
@@ -453,8 +401,8 @@ def _write_fake_run(tmp_path: Path) -> Path:
             },
         })
         for action_type, candidate_id, value in (
-            ("expand_edge", f"cand{index}", 1.0 if index % 2 == 0 else 0.2),
-            ("stop_signal", "", 0.1),
+            ("module", f"cand{index}", 1.0 if index % 2 == 0 else 0.2),
+            ("stop", "", 0.1),
         ):
             action_rows.append({
                 "episode_id": episode,
@@ -479,11 +427,11 @@ def _write_fake_run(tmp_path: Path) -> Path:
                 "node_id": f"node:{index}",
                 "parent_node_id": "",
                 "frontier_edge_id": f"edge:{index}" if candidate_id else "",
-                "graph_action": {"action_type": action_type, "edge_id": f"edge:{index}" if candidate_id else ""},
+                "step_action": {"action_type": action_type, "edge_id": f"edge:{index}" if candidate_id else ""},
                 "graph_best_node_id": f"node:{index}",
                 "branch_status": "active",
-                "policy_prior_label": 28 if action_type == "expand_edge" else 4,
-                "is_best_action": action_type == "expand_edge",
+                "policy_prior_label": 28 if action_type == "module" else 4,
+                "is_best_action": action_type == "module",
             })
         value_rows.append({
             "episode_id": episode,
@@ -522,8 +470,8 @@ def test_build_features_and_train_state_value(tmp_path):
     pytest.importorskip("lightgbm")
     run_dir = _write_fake_run(tmp_path)
 
-    assert build_features_main(["--format", "zip", "--model", "graph_state_value", "--run-dir", str(run_dir)]) == 0
-    schema = load_feature_schema(run_dir / "features" / "graph_state_value" / "feature_schema.json")
+    assert build_features_main(["--format", "zip", "--model", "step_value", "--run-dir", str(run_dir)]) == 0
+    schema = load_feature_schema(run_dir / "features" / "step_value" / "feature_schema.json")
     assert "current_recovery.score" in schema["feature_names"]
     assert "frontier_summary.frontier_count" in schema["feature_names"]
     assert not any(
@@ -535,10 +483,10 @@ def test_build_features_and_train_state_value(tmp_path):
         for name in schema["feature_names"]
     )
 
-    assert train_main(["--format", "zip", "--model", "graph_state_value", "--run-dir", str(run_dir)]) == 0
-    metrics = json.loads((run_dir / "models" / "graph_state_value" / "metrics.json").read_text(encoding="utf-8"))
+    assert train_main(["--format", "zip", "--model", "step_value", "--run-dir", str(run_dir)]) == 0
+    metrics = json.loads((run_dir / "models" / "step_value" / "metrics.json").read_text(encoding="utf-8"))
     assert "mae" in metrics
-    assert (run_dir / "models" / "graph_state_value" / "model.txt").is_file()
+    assert (run_dir / "models" / "step_value" / "model.txt").is_file()
 
 
 def _normal_query_graph() -> dict:
@@ -597,3 +545,4 @@ def _write_jsonl(path: Path, rows: list[dict]) -> None:
 def _zip_label(row: dict) -> int:
     plugin = load_training_format_plugin("zip")
     return int(plugin.action_label(row))
+

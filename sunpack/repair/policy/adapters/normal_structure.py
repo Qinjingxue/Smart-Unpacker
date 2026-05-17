@@ -104,101 +104,18 @@ def get_normal_structure_adapter(fmt: str) -> "ZipNormalStructureAdapter | None"
 class ZipNormalStructureAdapter:
     format: str = "zip"
 
-    def rows_from_request_payload(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
-        runtime = payload.get("runtime_context") if isinstance(payload.get("runtime_context"), dict) else {}
-        probe = runtime.get("analysis_native_probe") if isinstance(runtime.get("analysis_native_probe"), dict) else {}
-        structure = probe.get("structure") if isinstance(probe.get("structure"), dict) else {}
-        if not isinstance(structure.get("graph"), dict):
-            raw = probe.get("raw_structure") if isinstance(probe.get("raw_structure"), dict) else {}
-            if isinstance(raw.get("graph"), dict):
-                structure = raw
-        return ZipNormalQueryBuilder().build_runtime_queries(structure)
+    def row_from_knowledge_payload(self, payload: dict[str, Any], *, normal_label: int | None = None) -> dict[str, Any]:
+        row = {"knowledge_payload": dict(payload or {})}
+        if normal_label is not None:
+            row["normal_label"] = int(normal_label)
+        return row
 
-    def rows_from_graph(self, graph: dict[str, Any]) -> list[dict[str, Any]]:
-        return ZipNormalQueryBuilder().build_runtime_queries({"graph": graph})
-
-    def training_rows_from_graph(
-        self,
-        graph: dict[str, Any],
-        *,
-        sample_id: str,
-        source_identity: dict[str, Any] | None = None,
-        rng: random.Random | None = None,
-    ) -> list[dict[str, Any]]:
-        return ZipNormalQueryBuilder(rng=rng).build_training_queries(
-            {"graph": graph},
-            sample_id=sample_id,
-            source_identity=source_identity,
-        )
-
-    def build_anomaly_payload(self, rows: list[dict[str, Any]], normal_scores: list[float]) -> dict[str, Any]:
-        queries: list[dict[str, Any]] = []
-        compact_sources: list[dict[str, Any]] = []
-        field_scores: dict[str, list[float]] = {}
-        zone_scores: dict[str, list[float]] = {}
-        trusted_explanations: dict[str, float] = {}
-        unexplained_payload = 0
-        for index, row in enumerate(rows):
-            score = float(normal_scores[index]) if index < len(normal_scores) else 1.0
-            normal = max(0.0, min(1.0, score))
-            anomaly = 1.0 - normal
-            field = str(row.get("target_field") or "")
-            zone = str(row.get("target_zone") or _zone_for_field(field))
-            explanation = str(row.get("explanation_kind") or row.get("relation_kind") or "")
-            if field:
-                field_scores.setdefault(field, []).append(anomaly)
-            if zone:
-                zone_scores.setdefault(zone, []).append(anomaly)
-            if str(row.get("query_type") or "") == "explanation" and explanation:
-                trusted_explanations[explanation] = max(trusted_explanations.get(explanation, 0.0), normal)
-            if zone == "payload" and anomaly >= 0.5 and not trusted_explanations:
-                unexplained_payload += 1
-            query = {
-                "query_id": row.get("query_id") or f"query:{index}",
-                "query_type": row.get("query_type"),
-                "target_field": field,
-                "target_zone": zone,
-                "relation_kind": _semantic_relation_kind(field, row.get("relation_kind") or row.get("query_type")),
-                "raw_relation_kind": row.get("relation_kind"),
-                "candidate_source": row.get("candidate_source"),
-                "normal_confidence": normal,
-                "anomaly_score": anomaly,
-            }
-            queries.append(query)
-            compact_sources.append({
-                **query,
-                "features": _compact_features(row.get("features") if isinstance(row.get("features"), dict) else {}),
-            })
-        compact = _compact_attribution(compact_sources, trusted_explanations)
+    def world_payload(self, score: float) -> dict[str, Any]:
+        normal = max(0.0, min(1.0, float(score or 0.0)))
         return {
-            "schema_version": QUERY_SCHEMA_VERSION,
-            "queries": queries,
-            "compact_attribution": compact,
-            "summary": {
-                "query_count": len(queries),
-                "max_anomaly": max((item["anomaly_score"] for item in queries), default=0.0),
-                "max_anomaly_by_field": {key: max(values) for key, values in sorted(field_scores.items())},
-                "mean_anomaly_by_zone": {key: sum(values) / max(1, len(values)) for key, values in sorted(zone_scores.items())},
-                "trusted_explanations": dict(sorted(trusted_explanations.items())),
-                "explained_by_sfx_ratio": _trusted_ratio(trusted_explanations, "sfx_prefix_adjustment"),
-                "explained_by_missing_range_ratio": _trusted_ratio(trusted_explanations, "missing_range_adjustment"),
-                "unexplained_payload_span_anomaly_count": unexplained_payload,
-            },
+            "world_scores": {"normal": normal, "anomaly": 1.0 - normal},
+            "structure_anomaly": {"summary": {"world_score": normal, "max_anomaly": 1.0 - normal}},
         }
-
-    def inject_anomaly_payload(self, damage_analysis_input: dict[str, Any], anomaly: dict[str, Any]) -> dict[str, Any]:
-        payload = dict(damage_analysis_input or {})
-        runtime = dict(payload.get("runtime_context") or {})
-        probe = dict(runtime.get("analysis_native_probe") or {})
-        structure = dict(probe.get("structure") or {})
-        raw_structure = dict(probe.get("raw_structure") or {})
-        structure["anomaly"] = dict(anomaly or {})
-        raw_structure["anomaly"] = dict(anomaly or {})
-        probe["structure"] = structure
-        probe["raw_structure"] = raw_structure
-        runtime["analysis_native_probe"] = probe
-        payload["runtime_context"] = runtime
-        return payload
 
 
 class ZipNormalQueryBuilder:
@@ -598,7 +515,7 @@ class ZipNormalQueryBuilder:
     ) -> dict[str, Any]:
         row = dict(query)
         row.setdefault("schema_version", QUERY_SCHEMA_VERSION)
-        row.setdefault("row_type", "normal_structure_query")
+        row.setdefault("row_type", "normal_structure_relation_row")
         row.setdefault("format", "zip")
         row["sample_id"] = sample_id
         row["source_identity"] = dict(source_identity or {})
@@ -980,7 +897,7 @@ def _base_query(
     ])
     return {
         "schema_version": QUERY_SCHEMA_VERSION,
-        "row_type": "normal_structure_query",
+        "row_type": "normal_structure_relation_row",
         "format": "zip",
         "query_id": query_id,
         "query_type": query_type,

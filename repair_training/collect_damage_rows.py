@@ -145,9 +145,9 @@ def collect_damage_row(
     target = normalize_damage_record(record)
     target_payload = _location_target(target.to_dict())
     job = _job_from_record(record, target.format)
-    request_payload, observation = observe_damage_runtime(job, workspace=workspace / "runtime", config=config)
+    knowledge_payload, observation = observe_damage_runtime(job, workspace=workspace / "runtime", config=config)
     if target.format == "zip":
-        target_payload = apply_zip_observability(target_payload, request_payload)
+        target_payload = apply_zip_observability(target_payload, knowledge_payload)
     source_input = dict(record.get("damaged_input") or {})
     return {
         "schema_version": SCHEMA_VERSION,
@@ -161,10 +161,11 @@ def collect_damage_row(
             "clean_sha256": record.get("clean_sha256"),
             "corrupted_sha256": record.get("corrupted_sha256") or _sha256_path(source_input.get("path")),
         },
-        "state_digest": str((request_payload.get("archive_state") or {}).get("patch_digest") or observation.get("state_digest") or ""),
+        "state_digest": str(observation.get("state_digest") or ""),
         "round_index": 0,
         "patch_depth": 0,
-        "damage_analysis_input": request_payload,
+        "knowledge_payload": knowledge_payload,
+        "normal_label": 0,
         "damage_analysis_target": target_payload,
         "oracle_damage": [label.to_dict() for label in target.training_labels()],
         "runtime_observation": observation,
@@ -482,10 +483,9 @@ def _summary(rows: list[dict[str, Any]], failures: list[dict[str, Any]], *, elap
 def _structure_coverage(rows: list[dict[str, Any]]) -> dict[str, Any]:
     counters = Counter()
     for row in rows:
-        runtime = ((row.get("damage_analysis_input") or {}).get("runtime_context") or {})
-        probe = runtime.get("analysis_native_probe") if isinstance(runtime.get("analysis_native_probe"), dict) else {}
-        structure = probe.get("structure") if isinstance(probe.get("structure"), dict) else {}
-        raw_structure = probe.get("raw_structure") if isinstance(probe.get("raw_structure"), dict) else {}
+        knowledge = row.get("knowledge_payload") if isinstance(row.get("knowledge_payload"), dict) else {}
+        structure = _nested(knowledge, "format", "zip", "structure") or {}
+        raw_structure = {}
         observation_structure = (row.get("runtime_observation") or {}).get("format_zip_structure")
         if isinstance(observation_structure, dict) and observation_structure:
             counters["format_zip_structure_present"] += 1

@@ -23,7 +23,7 @@ def test_constant_damage_model_predicts_scores(tmp_path):
     _write_json(model_dir / "models" / "zone_eocd.constant.json", {"constant_probability": 0.75})
 
     model = DamageAnalysisModel(model_dir=model_dir, plugin=TrainingFormatPlugin(format_name="zip", default_run_name="x"))
-    scores = model.predict_rows([{"damage_analysis_input": {}}])[0]
+    scores = model.predict_rows([{"knowledge_payload": {}}])[0]
 
     assert scores["zone:eocd"] == 0.75
     assert select_labels(scores, threshold=0.5) == ["zone:eocd"]
@@ -36,8 +36,8 @@ def test_damage_eval_metrics_and_leakage_detection():
     ]
     metrics = evaluate_predictions(predictions)
     leak = leakage_report([
-        {"damage_analysis_input": {"runtime_context": {"archive_state": {"patch_depth": 0, "state": {"patches": []}}}}},
-        {"damage_analysis_input": {"corruption_plan": []}},
+        {"knowledge_payload": {"source": {"input": {"format_hint": "zip"}}}},
+        {"knowledge_payload": {"corruption_plan": []}},
     ])
 
     assert metrics["zone_micro_f1"] > 0.99
@@ -55,26 +55,16 @@ def test_damage_feature_analysis_filters_by_feature_spec(tmp_path):
             "sample_id": "s1",
             "metadata": {"damage_profile": "payload"},
             "damage_analysis_target": {"damage_labels": ["field:payload.compressed_data"]},
-            "damage_analysis_input": {
-                "runtime_context": {
-                    "analysis_native_probe": {
-                        "structure": {"runtime": {"payload_content_failure_observed": True}},
-                        "raw_structure": {"debug_should_not_enter": 1},
-                    }
-                }
+            "knowledge_payload": {
+                "format": {"zip": {"structure": {"runtime": {"payload_content_failure_observed": True}}}},
             },
         },
         {
             "sample_id": "s2",
             "metadata": {"damage_profile": "split"},
             "damage_analysis_target": {"damage_labels": ["field:split_volume.missing_range"]},
-            "damage_analysis_input": {
-                "runtime_context": {
-                    "analysis_native_probe": {
-                        "structure": {"runtime": {"payload_content_failure_observed": False}},
-                        "raw_structure": {"debug_should_not_enter": 1},
-                    }
-                }
+            "knowledge_payload": {
+                "format": {"zip": {"structure": {"runtime": {"payload_content_failure_observed": False}}}},
             },
         },
     ]
@@ -93,12 +83,12 @@ def test_damage_feature_analysis_filters_by_feature_spec(tmp_path):
         format_name="zip",
         default_run_name="x",
         damage_feature_spec=lambda: TrainingFeatureSpec(
-            include_prefixes=("runtime_context.analysis_native_probe.structure.",),
-            ignore_prefixes=("runtime_context.analysis_native_probe.raw_structure.",),
+                include_prefixes=("format.zip.structure.",),
+                ignore_prefixes=("format.zip.raw_structure.",),
         ),
         diagnostic_focus_labels=lambda: ["field:payload.compressed_data"],
         diagnostic_profile_pairs=lambda: [("payload", "split")],
-        diagnostic_feature_groups=lambda: {"runtime": ["runtime_context.analysis_native_probe.structure.runtime."]},
+            diagnostic_feature_groups=lambda: {"runtime": ["format.zip.structure.runtime."]},
     )
 
     summary = analyze_damage_features(

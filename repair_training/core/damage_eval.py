@@ -24,16 +24,10 @@ def leakage_report(rows: list[dict[str, Any]]) -> dict[str, Any]:
     bad_patch_stack = 0
     structure_counts: Counter[str] = Counter()
     for index, row in enumerate(rows):
-        payload = row.get("damage_analysis_input") if isinstance(row.get("damage_analysis_input"), dict) else {}
+        payload = row.get("knowledge_payload") if isinstance(row.get("knowledge_payload"), dict) else {}
         text = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).lower()
         tokens = [token for token in FORBIDDEN_INPUT_TOKENS if token in text]
-        runtime = payload.get("runtime_context") if isinstance(payload.get("runtime_context"), dict) else {}
-        archive_state = runtime.get("archive_state") if isinstance(runtime.get("archive_state"), dict) else {}
-        state = archive_state.get("state") if isinstance(archive_state.get("state"), dict) else {}
-        if int(archive_state.get("patch_depth") or 0) != 0:
-            bad_patch_depth += 1
-        if state.get("patches"):
-            bad_patch_stack += 1
+        runtime = payload
         if tokens:
             leaked.append({"index": index, "sample_id": row.get("sample_id"), "tokens": tokens})
         _add_structure_coverage(runtime, structure_counts)
@@ -50,9 +44,10 @@ def leakage_report(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def _add_structure_coverage(runtime: dict[str, Any], counts: Counter[str]) -> None:
-    probe = runtime.get("analysis_native_probe") if isinstance(runtime.get("analysis_native_probe"), dict) else {}
-    structure = probe.get("structure") if isinstance(probe.get("structure"), dict) else {}
-    raw_structure = probe.get("raw_structure") if isinstance(probe.get("raw_structure"), dict) else {}
+    fmt = runtime.get("format") if isinstance(runtime.get("format"), dict) else {}
+    zip_payload = fmt.get("zip") if isinstance(fmt.get("zip"), dict) else {}
+    structure = zip_payload.get("structure") if isinstance(zip_payload.get("structure"), dict) else {}
+    raw_structure = {}
     if structure or raw_structure:
         counts["analysis_native_probe_structure_present"] += 1
     merged = structure or raw_structure

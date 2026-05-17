@@ -21,7 +21,6 @@ from repair_training.core.datasets import write_json, write_jsonl
 from repair_training.core.features import damage_labels_for_row, oracle_damage_labels_for_row, uncertain_labels_for_row
 from repair_training.core.plugin import load_training_format_plugin, normalize_format_name
 from sunpack.repair.policy.adapters.damage import get_damage_analysis_adapter
-from sunpack.repair.policy.adapters.normal_structure import get_normal_structure_adapter
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -68,20 +67,16 @@ def main(argv: list[str] | None = None) -> int:
         normal_dir = model_root / "normal_structure"
         location_dir = model_root / "damage_location"
         if normal_dir.is_dir() and location_dir.is_dir():
-            normal_adapter = get_normal_structure_adapter(fmt)
-            if normal_adapter is None:
-                raise SystemExit(f"normal structure adapter is not available for format: {fmt}")
             normal_model = NormalStructureModel(model_dir=normal_dir, plugin=plugin)
             world_rows: list[dict[str, Any]] = []
             for row in rows:
-                payload = row.get("damage_analysis_input") if isinstance(row.get("damage_analysis_input"), dict) else {}
-                normal_rows = normal_adapter.rows_from_request_payload(payload)
-                normal_scores = normal_model.predict_rows(normal_rows)
-                anomaly = normal_adapter.build_anomaly_payload(normal_rows, normal_scores)
+                payload = row.get("knowledge_payload") if isinstance(row.get("knowledge_payload"), dict) else {}
+                normal_scores = normal_model.predict_rows([{"knowledge_payload": payload}])
+                world_score = float(normal_scores[0]) if normal_scores else 0.0
                 out = dict(row)
                 out["world_model"] = {
-                    "query_count": len(normal_rows),
-                    "structure_anomaly": anomaly,
+                    "world_scores": {"normal": world_score, "anomaly": 1.0 - world_score},
+                    "structure_anomaly": {"summary": {"world_score": world_score, "max_anomaly": 1.0 - world_score}},
                 }
                 world_rows.append(out)
             write_jsonl(datasets / "eval_world_model_outputs.jsonl", world_rows)
@@ -140,9 +135,9 @@ def _prediction_row(
     threshold: float | None,
 ) -> dict[str, Any]:
     target = row.get("damage_analysis_target") if isinstance(row.get("damage_analysis_target"), dict) else {}
-    runtime = ((row.get("damage_analysis_input") or {}).get("runtime_context") or {})
-    extraction = runtime.get("extraction_summary") if isinstance(runtime.get("extraction_summary"), dict) else {}
-    analysis = runtime.get("analysis_summary") if isinstance(runtime.get("analysis_summary"), dict) else {}
+    knowledge = row.get("knowledge_payload") if isinstance(row.get("knowledge_payload"), dict) else {}
+    extraction = _nested(knowledge, "extraction", "failure") or _nested(knowledge, "extraction", "diagnostics") or {}
+    analysis = _nested(knowledge, "analysis", "summary") or _nested(knowledge, "analysis") or {}
     true_labels = damage_labels_for_row({"damage_analysis_target": target})
     true_uncertain_labels = uncertain_labels_for_row({"damage_analysis_target": target})
     oracle_labels = oracle_damage_labels_for_row({"damage_analysis_target": target})
@@ -204,6 +199,15 @@ def _acceptance(metrics: dict[str, Any]) -> dict[str, Any]:
         "field_macro_f1": float(metrics.get("field_macro_f1") or 0.0) >= 0.65,
     }
     return {"ok": all(checks.values()), "checks": checks}
+
+
+def _nested(payload: dict[str, Any], *path: str) -> dict[str, Any]:
+    current: Any = payload
+    for key in path:
+        if not isinstance(current, dict):
+            return {}
+        current = current.get(key)
+    return current if isinstance(current, dict) else {}
 
 
 def _parser() -> argparse.ArgumentParser:

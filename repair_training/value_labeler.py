@@ -151,7 +151,7 @@ def label_episode_values(
                 "node_id": edge.node_id,
                 "parent_node_id": edge.parent_node_id,
                 "frontier_edge_id": edge.frontier_edge_id,
-                "graph_action": dict(edge.graph_action or {}),
+                "step_action": dict(edge.step_action or {}),
                 "graph_best_node_id": edge.graph_best_node_id,
                 "branch_status": edge.branch_status,
             })
@@ -163,7 +163,7 @@ def label_episode_values(
                 "state_digest": state_digest,
                 "round_index": first.round_index,
                 "patch_depth": first.patch_depth,
-                "damage_analysis_input": dict(first.damage_analysis_request or state_damage_request),
+                "knowledge_payload": dict(first.damage_analysis_request or state_damage_request),
                 "damage_analysis_target": dict(first.damage_analysis_target or state_damage_target),
                 "oracle_damage": [label.to_dict() for label in episode.oracle_damage],
             })
@@ -183,7 +183,7 @@ def _q_value(
 ) -> float:
     action = edge.selected_action.action_type if edge.selected_action is not None else ""
     current_score = float(edge.verification_before.score or 0.0)
-    if action == "stop_signal":
+    if action == "stop":
         return current_score - step_cost
     if edge.next_state_digest and edge.next_state_digest in visiting:
         return repeat_penalty
@@ -194,9 +194,9 @@ def _immediate_reward(edge: TrainingTransition, *, step_cost: float) -> float:
     action = edge.selected_action.action_type if edge.selected_action is not None else ""
     current_score = float(edge.verification_before.score or 0.0)
     next_score = float(edge.verification_after.score or 0.0)
-    if action == "checkout_node":
+    if action == "undo":
         return next_score - current_score - (step_cost * 0.5)
-    if action == "expand_edge":
+    if action == "module":
         return next_score - current_score - step_cost
     return 0.0
 
@@ -255,7 +255,7 @@ def _policy_prior_label(edge: TrainingTransition, *, action_type: str, is_best: 
     improvement = next_score - current
     if is_best:
         return 30
-    if action_type == "expand_edge":
+    if action_type == "module":
         if improvement > 0.20:
             return 28
         if improvement > 0.05:
@@ -263,9 +263,9 @@ def _policy_prior_label(edge: TrainingTransition, *, action_type: str, is_best: 
         if improvement >= -0.01:
             return 14
         return 6
-    if action_type == "checkout_node":
+    if action_type == "undo":
         return 18 if improvement > 0.02 else 8
-    if action_type == "stop_signal":
+    if action_type == "stop":
         return 24 if current >= 0.95 else 6
     return 0
 
@@ -377,12 +377,12 @@ def _action_policy_row(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def _candidate_summary_from_action_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    apply_rows = [row for row in rows if str(row.get("action_type") or "") == "expand_edge"]
+    apply_rows = [row for row in rows if str(row.get("action_type") or "") == "module"]
     return {
         "candidate_count": len(apply_rows),
         "has_candidate": bool(apply_rows),
-        "has_checkout_action": any(str(row.get("action_type") or "") == "checkout_node" for row in rows),
-        "has_stop_signal": any(str(row.get("action_type") or "") == "stop_signal" for row in rows),
+        "has_checkout_action": any(str(row.get("action_type") or "") == "undo" for row in rows),
+        "has_stop": any(str(row.get("action_type") or "") == "stop" for row in rows),
     }
 
 
@@ -630,3 +630,4 @@ def _parser() -> argparse.ArgumentParser:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

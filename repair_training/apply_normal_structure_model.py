@@ -8,26 +8,24 @@ from typing import Any
 from repair_training.core.datasets import read_jsonl, write_json, write_jsonl
 from repair_training.core.normal_structure_inference import NormalStructureModel
 from repair_training.core.plugin import load_training_format_plugin, normalize_format_name
-from sunpack.repair.policy.adapters.normal_structure import get_normal_structure_adapter
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     fmt = normalize_format_name(args.format)
     plugin = load_training_format_plugin(fmt)
-    adapter = get_normal_structure_adapter(fmt)
-    if adapter is None:
-        raise SystemExit(f"no normal structure adapter for format: {fmt}")
     model = NormalStructureModel(model_dir=args.normal_model_dir, plugin=plugin)
     rows = read_jsonl(args.input)
     output_rows: list[dict[str, Any]] = []
     for row in rows:
-        payload = row.get("damage_analysis_input") if isinstance(row.get("damage_analysis_input"), dict) else {}
-        normal_rows = adapter.rows_from_request_payload(payload)
-        scores = model.predict_rows(normal_rows)
-        anomaly = adapter.build_anomaly_payload(normal_rows, scores)
+        payload = row.get("knowledge_payload") if isinstance(row.get("knowledge_payload"), dict) else {}
+        scores = model.predict_rows([{"knowledge_payload": payload}])
+        world_score = float(scores[0]) if scores else 0.0
         out = dict(row)
-        out["damage_analysis_input"] = adapter.inject_anomaly_payload(payload, anomaly)
+        out["world_model"] = {
+            "world_scores": {"normal": world_score, "anomaly": 1.0 - world_score},
+            "structure_anomaly": {"summary": {"world_score": world_score, "max_anomaly": 1.0 - world_score}},
+        }
         out.setdefault("metadata", {})
         if isinstance(out["metadata"], dict):
             out["metadata"]["normal_structure_applied"] = True

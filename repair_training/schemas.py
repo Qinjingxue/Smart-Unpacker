@@ -5,8 +5,8 @@ from typing import Any, Literal
 
 
 TRAINING_EPISODE_SCHEMA_VERSION = 2
-TrainingActionKind = Literal["expand_edge", "checkout_node", "stop_signal"]
-_ACTION_KINDS = {"expand_edge", "checkout_node", "stop_signal"}
+TrainingActionKind = Literal["module", "undo", "stop"]
+_ACTION_KINDS = {"module", "undo", "stop"}
 
 
 @dataclass(frozen=True)
@@ -69,7 +69,7 @@ class TrainingVerificationSnapshot:
 @dataclass(frozen=True)
 class TrainingCandidateSnapshot:
     candidate_id: str
-    action_type: TrainingActionKind = "expand_edge"
+    action_type: TrainingActionKind = "module"
     module_name: str = ""
     format: str = ""
     patch_depth: int = 0
@@ -95,7 +95,7 @@ class TrainingCandidateSnapshot:
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "TrainingCandidateSnapshot":
-        action_type = _action_kind(payload.get("action_type") or "expand_edge")
+        action_type = _action_kind(payload.get("action_type") or "module")
         return cls(
             candidate_id=str(payload.get("candidate_id") or ""),
             action_type=action_type,
@@ -120,9 +120,9 @@ class TrainingAction:
     def __post_init__(self) -> None:
         action = _action_kind(self.action_type)
         object.__setattr__(self, "action_type", action)
-        if action == "expand_edge" and not str(self.candidate_id or ""):
-            raise ValueError("expand_edge training action requires candidate_id")
-        if action != "expand_edge" and self.candidate_id:
+        if action == "module" and not str(self.candidate_id or ""):
+            raise ValueError("module training action requires candidate_id")
+        if action != "module" and self.candidate_id:
             object.__setattr__(self, "candidate_id", "")
 
     def to_dict(self) -> dict[str, Any]:
@@ -161,7 +161,7 @@ class TrainingTransition:
     node_id: str = ""
     parent_node_id: str = ""
     frontier_edge_id: str = ""
-    graph_action: dict[str, Any] = field(default_factory=dict)
+    step_action: dict[str, Any] = field(default_factory=dict)
     graph_best_node_id: str = ""
     branch_status: str = ""
 
@@ -183,7 +183,7 @@ class TrainingTransition:
             "node_id": self.node_id,
             "parent_node_id": self.parent_node_id,
             "frontier_edge_id": self.frontier_edge_id,
-            "graph_action": dict(self.graph_action),
+            "step_action": dict(self.step_action),
             "graph_best_node_id": self.graph_best_node_id,
             "branch_status": self.branch_status,
         }
@@ -216,7 +216,7 @@ class TrainingTransition:
             node_id=str(payload.get("node_id") or ""),
             parent_node_id=str(payload.get("parent_node_id") or ""),
             frontier_edge_id=str(payload.get("frontier_edge_id") or ""),
-            graph_action=dict(payload.get("graph_action") or {}),
+            step_action=dict(payload.get("step_action") or {}),
             graph_best_node_id=str(payload.get("graph_best_node_id") or ""),
             branch_status=str(payload.get("branch_status") or ""),
         )
@@ -299,3 +299,4 @@ def _float(value: Any, *, default: float = 0.0) -> float:
         return float(value)
     except Exception:
         return default
+

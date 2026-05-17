@@ -63,7 +63,7 @@ def analyze_damage_features(
 
 
 def _prepared_row(row: dict[str, Any], spec: TrainingFeatureSpec) -> dict[str, Any]:
-    payload = row.get("damage_analysis_input") if isinstance(row.get("damage_analysis_input"), dict) else row
+    payload = row.get("knowledge_payload") if isinstance(row.get("knowledge_payload"), dict) else row
     flat = flatten(payload)
     filtered = {key: value for key, value in flat.items() if _allowed_feature(key, spec)}
     sample_id = str(row.get("sample_id") or (row.get("metadata") or {}).get("sample_id") or "")
@@ -433,7 +433,7 @@ def _top_sample_features(features: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _top_anomaly_attribution(row: dict[str, Any]) -> dict[str, Any]:
-    payload = row.get("damage_analysis_input") if isinstance(row.get("damage_analysis_input"), dict) else {}
+    payload = row.get("knowledge_payload") if isinstance(row.get("knowledge_payload"), dict) else {}
     structure = (((payload.get("runtime_context") or {}).get("analysis_native_probe") or {}).get("structure") or {})
     anomaly = structure.get("anomaly") if isinstance(structure.get("anomaly"), dict) else {}
     compact = anomaly.get("compact_attribution") if isinstance(anomaly.get("compact_attribution"), dict) else {}

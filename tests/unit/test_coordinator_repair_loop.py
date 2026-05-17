@@ -138,8 +138,8 @@ def test_policy_stop_records_final_extraction_gate(tmp_path):
         actions=["policy_finish"],
         repaired_input={"kind": "file", "path": str(source), "format_hint": "zip"},
         diagnosis={
-            "policy_stop_signal": True,
-            "policy_loop": {"terminal_action": "stop", "policy_stop_signal": True},
+            "policy_stop_requested": True,
+            "policy_loop": {"terminal_action": "stop", "policy_stop_requested": True},
         },
         partial=True,
         message="policy_step_stop",

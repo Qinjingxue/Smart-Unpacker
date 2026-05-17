@@ -22,10 +22,10 @@ def main(argv: list[str] | None = None) -> int:
         _run_damage_analysis_pipeline(args, fmt=fmt, run_dir=run_dir)
         write_latest_run(fmt, run_dir)
         print(json.dumps({"format": fmt, "run_dir": str(run_dir), "stages": [
-            "collect_normal_queries",
+            "collect_normal",
+            "collect_damage",
             "features:normal_structure",
             "train:normal_structure",
-            "collect_damage",
             "features:damage_location",
             "train:damage_location",
         ]}, ensure_ascii=False, sort_keys=True))
@@ -35,10 +35,10 @@ def main(argv: list[str] | None = None) -> int:
             if args.model not in {"", "damage_analysis", "normal_structure"}:
                 raise SystemExit("collect_normal is only valid for --model damage_analysis or normal_structure")
             _run([
-                sys.executable, "-m", "repair_training.collect_normal_structure_queries",
+                sys.executable, "-m", "repair_training.collect_normal_structure_rows",
                 "--format", fmt,
                 "--material-root", args.material_root,
-                "--output", str(run_dir / "datasets" / "normal_structure_queries.jsonl"),
+                "--output", str(run_dir / "datasets" / "normal_structure_rows.jsonl"),
                 "--seed", args.seed,
             ] + (["--limit", str(args.limit)] if args.limit else []))
         elif stage == "apply_normal":
@@ -97,7 +97,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--format", default="zip")
     parser.add_argument("--run-dir", default="")
     parser.add_argument("--run-name", default="")
-    parser.add_argument("--model", choices=["", "damage_analysis", "damage_location", "normal_structure", "graph_state_value", "graph_action"], default="")
+    parser.add_argument("--model", choices=["", "damage_analysis", "damage_location", "normal_structure", "step_value", "step_action"], default="")
     parser.add_argument("--stage", default="features,train")
     parser.add_argument("--material-root", default=str(Path("repair_training") / "material"))
     parser.add_argument("--manifest", default="")
@@ -114,14 +114,12 @@ def _run(command: list[str]) -> None:
 
 def _run_damage_analysis_pipeline(args: argparse.Namespace, *, fmt: str, run_dir: Path) -> None:
     _run([
-        sys.executable, "-m", "repair_training.collect_normal_structure_queries",
+        sys.executable, "-m", "repair_training.collect_normal_structure_rows",
         "--format", fmt,
         "--material-root", args.material_root,
-        "--output", str(run_dir / "datasets" / "normal_structure_queries.jsonl"),
+        "--output", str(run_dir / "datasets" / "normal_structure_rows.jsonl"),
         "--seed", args.seed,
     ] + (["--limit", str(args.limit)] if args.limit else []))
-    _run([sys.executable, "-m", "repair_training.build_features", "--format", fmt, "--model", "normal_structure", "--run-dir", str(run_dir)])
-    _run([sys.executable, "-m", "repair_training.train", "--format", fmt, "--model", "normal_structure", "--run-dir", str(run_dir)])
     _run([
         sys.executable, "-m", "repair_training.collect_damage_rows",
         "--format", fmt,
@@ -131,6 +129,8 @@ def _run_damage_analysis_pipeline(args: argparse.Namespace, *, fmt: str, run_dir
         "--per-source", str(args.per_source),
         "--workers", str(args.workers),
     ] + (["--manifest", args.manifest] if args.manifest else []) + (["--limit", str(args.limit)] if args.limit else []))
+    _run([sys.executable, "-m", "repair_training.build_features", "--format", fmt, "--model", "normal_structure", "--run-dir", str(run_dir)])
+    _run([sys.executable, "-m", "repair_training.train", "--format", fmt, "--model", "normal_structure", "--run-dir", str(run_dir)])
     _run([sys.executable, "-m", "repair_training.build_features", "--format", fmt, "--model", "damage_location", "--run-dir", str(run_dir)])
     _run([sys.executable, "-m", "repair_training.train", "--format", fmt, "--model", "damage_location", "--run-dir", str(run_dir)])
 
@@ -140,7 +140,7 @@ def _models(model: str) -> tuple[str, ...]:
         return ("normal_structure", "damage_location")
     if model:
         return (normalize_model_type(model),)
-    return ("normal_structure", "damage_location", "graph_state_value", "graph_action")
+    return ("normal_structure", "damage_location", "step_value", "step_action")
 
 
 if __name__ == "__main__":

@@ -18,7 +18,7 @@ from sunpack.repair.policy.recovery_evaluator import RecoveryEvaluator
 from sunpack.repair.scheduler import RepairScheduler
 
 
-REQUIRED_MODEL_DIRS = ("normal_structure", "damage_location", "graph_state_value", "graph_action")
+REQUIRED_MODEL_DIRS = ("normal_structure", "damage_location", "step_value", "step_action")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -127,15 +127,15 @@ def _evaluate_one(index: int, record: dict[str, Any], *, fmt: str, config: dict[
 
 def _decision_stats(rounds: list[dict[str, Any]]) -> dict[str, Any]:
     actions = Counter()
-    stop_signal_overridden = 0
+    stop_overridden = 0
     frontier_available_at_finish = 0
     exhaust_then_recovered = 0
     checkout_count = 0
     exhaust_count = 0
     graph_expansions = 0
     for item in rounds:
-        graph_action = item.get("graph_action") if isinstance(item.get("graph_action"), dict) else {}
-        action = str(graph_action.get("action") or "")
+        step_action = item.get("step_action") if isinstance(item.get("step_action"), dict) else {}
+        action = str(step_action.get("action") or "")
         if action:
             actions[action] += 1
         if action == "expand":
@@ -145,9 +145,9 @@ def _decision_stats(rounds: list[dict[str, Any]]) -> dict[str, Any]:
         if action == "exhaust":
             exhaust_count += 1
         stop_controller = item.get("stop_controller") if isinstance(item.get("stop_controller"), dict) else {}
-        selected_prior = stop_controller.get("selected_prior") if isinstance(stop_controller.get("selected_prior"), dict) else {}
-        if str(selected_prior.get("action_type") or "") == "stop_signal" and action != "finish":
-            stop_signal_overridden += 1
+        selected_score = stop_controller.get("selected_score") if isinstance(stop_controller.get("selected_score"), dict) else {}
+        if str(selected_score.get("action_type") or "") == "stop" and action != "finish":
+            stop_overridden += 1
         graph_summary = item.get("graph_summary") if isinstance(item.get("graph_summary"), dict) else {}
         if action == "finish" and int(graph_summary.get("frontier_count") or 0) > 0:
             frontier_available_at_finish += 1
@@ -158,7 +158,7 @@ def _decision_stats(rounds: list[dict[str, Any]]) -> dict[str, Any]:
         "graph_expansions": graph_expansions,
         "checkout_count": checkout_count,
         "exhaust_count": exhaust_count,
-        "stop_signal_overridden": stop_signal_overridden,
+        "stop_overridden": stop_overridden,
         "frontier_available_at_finish": frontier_available_at_finish,
         "exhaust_then_recovered": exhaust_then_recovered,
         "oracle_edge_missing": 0,
@@ -287,7 +287,7 @@ def _sum_decision_stats(runs: list[dict[str, Any]]) -> dict[str, Any]:
     actions = Counter()
     for item in runs:
         stats = item.get("decision_stats") if isinstance(item.get("decision_stats"), dict) else {}
-        for key in ("graph_expansions", "checkout_count", "exhaust_count", "stop_signal_overridden", "frontier_available_at_finish", "exhaust_then_recovered", "oracle_edge_missing"):
+        for key in ("graph_expansions", "checkout_count", "exhaust_count", "stop_overridden", "frontier_available_at_finish", "exhaust_then_recovered", "oracle_edge_missing"):
             total[key] += int(stats.get(key) or 0)
         actions.update(stats.get("actions") if isinstance(stats.get("actions"), dict) else {})
     return {**dict(total), "actions": dict(actions)}
@@ -469,3 +469,4 @@ def _parser() -> argparse.ArgumentParser:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

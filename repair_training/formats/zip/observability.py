@@ -9,9 +9,9 @@ UNCERTAIN_AMBIGUOUS_OVERLAP = "uncertain_ambiguous_overlap"
 OBSERVED = "observed"
 
 
-def apply_zip_observability(target: dict[str, Any], damage_analysis_input: dict[str, Any]) -> dict[str, Any]:
+def apply_zip_observability(target: dict[str, Any], knowledge_payload: dict[str, Any]) -> dict[str, Any]:
     oracle = sorted({str(label) for label in target.get("damage_labels") or [] if str(label).startswith(("zone:", "field:"))})
-    structure = _structure(damage_analysis_input)
+    structure = _structure(knowledge_payload)
     summary = _graph_summary(structure)
     runtime = structure.get("runtime") if isinstance(structure.get("runtime"), dict) else {}
     observed: set[str] = set()
@@ -109,6 +109,11 @@ def _field_observability(field: str, summary: dict[str, Any], runtime: dict[str,
 
 
 def _structure(payload: dict[str, Any]) -> dict[str, Any]:
+    fmt = payload.get("format") if isinstance(payload.get("format"), dict) else {}
+    zip_payload = fmt.get("zip") if isinstance(fmt.get("zip"), dict) else {}
+    structure = zip_payload.get("structure") if isinstance(zip_payload.get("structure"), dict) else {}
+    if structure:
+        return structure
     runtime_context = payload.get("runtime_context") if isinstance(payload.get("runtime_context"), dict) else {}
     probe = runtime_context.get("analysis_native_probe") if isinstance(runtime_context.get("analysis_native_probe"), dict) else {}
     structure = probe.get("structure") if isinstance(probe.get("structure"), dict) else {}

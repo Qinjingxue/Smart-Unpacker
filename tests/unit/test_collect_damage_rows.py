@@ -243,15 +243,10 @@ def test_collect_damage_row_uses_location_only_targets(monkeypatch, tmp_path):
         "repair_training.collect_damage_rows.observe_damage_runtime",
         lambda job, *, workspace, config=None: (
             {
-                "format": "zip",
-                "archive_state": {"patch_digest": "digest", "patches": []},
-                "runtime_context": {
-                    "archive_state": {"patch_depth": 0, "patch_digest": "digest"},
-                    "analysis_summary": {"format": "zip", "confidence": 1.0},
-                    "analysis_native_probe": {"format": "zip"},
-                    "extraction_summary": {"has_failure": True, "failure_kind": "bad"},
-                    "verification_summary": {"completeness": 0.0},
-                },
+                "analysis": {"summary": {"format": "zip", "confidence": 1.0}},
+                "format": {"zip": {"structure": {"graph": {"summary": {}}}}},
+                "extraction": {"failure": {"failure_kind": "bad"}},
+                "verification": {"summary": {"completeness": 0.0}},
             },
             {"state_digest": "digest", "patch_depth": 0},
         ),
@@ -276,8 +271,8 @@ def test_collect_damage_row_uses_location_only_targets(monkeypatch, tmp_path):
 
     assert labels == {"zone:eocd", "field:eocd.cd_offset", "zone:tail", "field:tail.trailing_bytes"}
     assert all(label.startswith(("zone:", "field:")) for label in labels)
-    assert row["damage_analysis_input"]["runtime_context"]["archive_state"]["patch_depth"] == 0
-    assert "candidate" not in json.dumps(row["damage_analysis_input"]).lower()
+    assert row["knowledge_payload"]["analysis"]["summary"]["format"] == "zip"
+    assert "candidate" not in json.dumps(row["knowledge_payload"]).lower()
     assert not called_candidates
 
 
@@ -286,15 +281,10 @@ def test_damage_rows_build_features_location_only(monkeypatch, tmp_path):
         "repair_training.collect_damage_rows.observe_damage_runtime",
         lambda job, *, workspace, config=None: (
             {
-                "format": "zip",
-                "archive_state": {"patch_digest": "digest", "patches": []},
-                "runtime_context": {
-                    "archive_state": {"patch_depth": 0, "patch_digest": "digest"},
-                    "analysis_summary": {"format": "zip", "confidence": 1.0},
-                    "analysis_native_probe": {"format": "zip"},
-                    "extraction_summary": {"has_failure": True, "failure_kind": "bad"},
-                    "verification_summary": {"completeness": 0.0},
-                },
+                "analysis": {"summary": {"format": "zip", "confidence": 1.0}},
+                "format": {"zip": {"structure": {"graph": {"summary": {}}}}},
+                "extraction": {"failure": {"failure_kind": "bad"}},
+                "verification": {"summary": {"completeness": 0.0}},
             },
             {"state_digest": "digest", "patch_depth": 0},
         ),
@@ -341,8 +331,8 @@ def _observability_target(labels, *, summary=None, runtime=None):
     return apply_zip_observability(
         {"damage_labels": list(labels), "labels": [], "metadata": {}},
         {
-            "runtime_context": {
-                "analysis_native_probe": {
+            "format": {
+                "zip": {
                     "structure": {
                         "graph": {"summary": dict(summary or {})},
                         "runtime": dict(runtime or {}),
@@ -468,12 +458,12 @@ def test_zip_structure_facts_enter_archive_knowledge_and_damage_request(tmp_path
         archive_key="unit",
     )
     request = build_damage_analysis_request(job, None, diagnosis={"format": "zip"})
-    probe = request.runtime_context["analysis_native_probe"]
+    structure = request.runtime_context["format"]["zip"]["structure"]
 
-    assert probe["structure"]["graph"]["nodes"][0]["kind"] == "eocd"
-    assert probe["raw_structure"]["graph"]["violations"][0]["field"] == "eocd.cd_offset"
-    assert probe["structure"]["summary"]["central_local_crc_mismatch_count"] == 1
-    assert probe["raw_structure"]["summary"]["zip64_locator_present"] is True
+    assert structure["graph"]["nodes"][0]["kind"] == "eocd"
+    assert structure["graph"]["violations"][0]["field"] == "eocd.cd_offset"
+    assert structure["summary"]["central_local_crc_mismatch_count"] == 1
+    assert structure["summary"]["zip64_locator_present"] is True
 
 
 def test_zip_structure_graph_native_outputs_graph_shape(tmp_path):
@@ -495,21 +485,8 @@ def test_zip_structure_graph_native_outputs_graph_shape(tmp_path):
 def test_zip_damage_feature_spec_excludes_compressed_route_flags():
     spec = damage_feature_spec()
 
-    assert "runtime_context.analysis_native_probe.structure.graph.summary." in spec.include_prefixes
-    assert "runtime_context.analysis_native_probe.structure.graph.violations." in spec.include_prefixes
-    assert "runtime_context.analysis_native_probe.structure.graph.explanations." in spec.include_prefixes
-    assert "runtime_context.analysis_native_probe.structure.runtime." in spec.include_prefixes
-    assert not any(prefix == "runtime_context.job_summary." for prefix in spec.include_prefixes)
-    assert not any("route_evidence" in prefix or "damage_flags" in prefix for prefix in spec.include_prefixes)
-    assert "runtime_context.extraction_summary." not in spec.include_prefixes
-    assert "runtime_context.verification_summary." not in spec.include_prefixes
-    assert "runtime_context.extraction_summary.entry_outcomes." in spec.include_prefixes
-    assert "runtime_context.verification_summary.coverage_breakdown." in spec.include_prefixes
-    assert not any("structure.anomaly" in prefix for prefix in spec.include_prefixes)
-    assert "runtime_context.analysis_native_probe.structure.graph.nodes" in spec.ignore_prefixes
-    assert "runtime_context.analysis_native_probe.structure.anomaly" in spec.ignore_prefixes
-    assert not any("raw_structure" in prefix for prefix in spec.include_prefixes)
-    assert not any("raw_structure" in prefix for prefix in spec.ignore_prefixes)
+    assert spec.include_prefixes == ("knowledge_payload.",)
+    assert "knowledge_payload.source.input.path" in spec.ignore_prefixes
 
 
 def test_zip_eocd_probe_exposes_tolerant_candidate_fields(tmp_path):
@@ -614,8 +591,7 @@ def test_training_runtime_exposes_zip_observation_facts_in_structure(tmp_path):
     )
 
     request = build_damage_analysis_request(job, None, diagnosis={"format": "zip"})
-    structure = request.runtime_context["analysis_native_probe"]["structure"]
+    structure = request.runtime_context["format"]["zip"]["structure"]
 
-    assert structure["runtime"]["extraction_entry_outcomes"]["entry_failed_count"] == 1
-    assert structure["runtime"]["verification_coverage_breakdown"]["crc_mismatch_count"] == 1
+    assert structure["directory_consistency"]["central_local_crc_mismatch_count"] == 1
     assert structure["evidence"]["payload_failure_without_header_mismatch"] is True

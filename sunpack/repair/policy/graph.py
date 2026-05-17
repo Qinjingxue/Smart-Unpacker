@@ -19,7 +19,7 @@ class GraphOperationResult:
     node_id: str
     edge_id: str = ""
     archive_state: ArchiveState | None = None
-    stop_signal: bool = False
+    stop_requested: bool = False
     module_name: str = ""
     patch_status: str = "applied"
     diagnostics: dict[str, Any] = field(default_factory=dict)
@@ -91,7 +91,7 @@ class PolicyRepairGraph:
                 to_node_id=str(raw.get("to_node_id") or ""),
                 candidate_id=str(raw.get("candidate_id") or ""),
                 module_name=str(raw.get("module_name") or ""),
-                action_prior=dict(raw.get("action_prior") or {}),
+                step_action_score=dict(raw.get("step_action_score") or {}),
                 status=str(raw.get("status") or "frontier"),
                 created_round=int(raw.get("created_round") or 0),
             )
@@ -252,7 +252,7 @@ class PolicyRepairGraph:
         best_id = best_node_id(self.graph)
         self.graph.best_node_id = best_id
         node = self.graph.nodes.get(best_id)
-        return GraphOperationResult(action="stop", node_id=best_id, archive_state=node.archive_state if node is not None else None, stop_signal=True, module_name=node.module_name if node is not None else "", patch_status=node.patch_status if node is not None else "", diagnostics={"best_node_id": best_id})
+        return GraphOperationResult(action="stop", node_id=best_id, archive_state=node.archive_state if node is not None else None, stop_requested=True, module_name=node.module_name if node is not None else "", patch_status=node.patch_status if node is not None else "", diagnostics={"best_node_id": best_id})
 
 
 def empty_policy_patch(*, base_state: ArchiveState, module_name: str, reason: str, diagnostics: dict[str, Any] | None = None) -> PatchPlan:

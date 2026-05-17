@@ -9,8 +9,8 @@ from sunpack.repair.job import RepairJob
 
 
 PolicyCandidatePayload = dict[str, Any]
-GraphPolicyActionKind = Literal["expand_edge", "checkout_node", "stop_signal"]
-PolicyGraphActionKind = Literal["expand", "checkout", "finish"]
+StepOperationKind = Literal["module", "undo", "stop"]
+PolicyStepDecisionKind = Literal["expand", "checkout", "finish"]
 
 
 @dataclass(frozen=True)
@@ -49,7 +49,7 @@ class DamageAnalysisResult:
 
 
 @dataclass(frozen=True)
-class GraphActionRequest:
+class StepActionRequest:
     job: RepairJob
     format: str
     graph: dict[str, Any]
@@ -72,12 +72,12 @@ class GraphActionRequest:
 
 
 @dataclass(frozen=True)
-class GraphActionPrior:
-    action_type: GraphPolicyActionKind = "stop_signal"
+class StepActionScore:
+    action_type: StepOperationKind = "stop"
     edge_id: str = ""
     candidate_id: str = ""
     node_id: str = ""
-    prior_score: float = 0.0
+    logic_score: float = 0.0
     confidence: float | None = None
     provider_id: str = ""
     reason: str = ""
@@ -89,7 +89,7 @@ class GraphActionPrior:
             "edge_id": self.edge_id,
             "candidate_id": self.candidate_id,
             "node_id": self.node_id,
-            "prior_score": float(self.prior_score or 0.0),
+            "logic_score": float(self.logic_score or 0.0),
             "confidence": self.confidence,
             "provider_id": self.provider_id,
             "reason": self.reason,
@@ -139,7 +139,7 @@ class PolicyGraphEdge:
     to_node_id: str = ""
     candidate_id: str = ""
     module_name: str = ""
-    action_prior: dict[str, Any] = field(default_factory=dict)
+    step_action_score: dict[str, Any] = field(default_factory=dict)
     status: str = "frontier"
     created_round: int = 0
 
@@ -150,7 +150,7 @@ class PolicyGraphEdge:
             "to_node_id": self.to_node_id,
             "candidate_id": self.candidate_id,
             "module_name": self.module_name,
-            "action_prior": dict(self.action_prior or {}),
+            "step_action_score": dict(self.step_action_score or {}),
             "status": self.status,
             "created_round": int(self.created_round or 0),
         }
@@ -205,8 +205,8 @@ class PolicyExplorationGraph:
 
 
 @dataclass(frozen=True)
-class PolicyGraphAction:
-    action: PolicyGraphActionKind = "finish"
+class PolicyStepDecision:
+    action: PolicyStepDecisionKind = "finish"
     candidate_id: str = ""
     node_id: str = ""
     reason: str = ""
@@ -235,7 +235,7 @@ def _count_statuses(values) -> dict[str, int]:
 
 
 @dataclass(frozen=True)
-class StateValueRequest:
+class StepValueRequest:
     job: RepairJob
     format: str
     archive_state: ArchiveState | None = None
@@ -254,8 +254,9 @@ class StateValueRequest:
 
 
 @dataclass(frozen=True)
-class StateValueResult:
+class StepValueResult:
     reachable_recovery_value: float = 0.0
+    action_values: list[StepActionScore] = field(default_factory=list)
     confidence: float | None = None
     provider_id: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -263,6 +264,7 @@ class StateValueResult:
     def to_dict(self) -> dict[str, Any]:
         return {
             "reachable_recovery_value": float(self.reachable_recovery_value or 0.0),
+            "action_values": [item.to_dict() for item in self.action_values],
             "confidence": self.confidence,
             "provider_id": self.provider_id,
             "metadata": dict(self.metadata),
@@ -282,24 +284,24 @@ class DamageAnalysisModel(Protocol):
 
 
 @runtime_checkable
-class GraphActionModel(Protocol):
+class StepActionModel(Protocol):
     provider_id: str
     supported_formats: tuple[str, ...] | list[str]
 
     def available(self) -> bool:
         ...
 
-    def choose_graph_action(self, request: GraphActionRequest) -> dict[str, Any] | list[dict[str, Any]] | None:
+    def score_step_actions(self, request: StepActionRequest) -> dict[str, Any] | list[dict[str, Any]] | None:
         ...
 
 
 @runtime_checkable
-class GraphStateValueModel(Protocol):
+class StepValueModel(Protocol):
     provider_id: str
     supported_formats: tuple[str, ...] | list[str]
 
     def available(self) -> bool:
         ...
 
-    def estimate(self, request: StateValueRequest) -> StateValueResult | dict[str, Any] | float | None:
+    def estimate(self, request: StepValueRequest) -> StepValueResult | dict[str, Any] | float | None:
         ...

@@ -200,10 +200,10 @@ def test_episode_collector_emits_patch_state_episode(tmp_path):
     assert restored.episode_id == "case1"
     assert restored.initial_state_digest == root.effective_patch_digest()
     assert stats["candidate_count"] >= 1
-    assert any(t.selected_action and t.selected_action.action_type == "expand_edge" for t in restored.transitions)
-    assert any(t.selected_action and t.selected_action.action_type == "stop_signal" for t in restored.transitions)
+    assert any(t.selected_action and t.selected_action.action_type == "module" for t in restored.transitions)
+    assert any(t.selected_action and t.selected_action.action_type == "stop" for t in restored.transitions)
     assert any(t.candidate_snapshots for t in restored.transitions)
-    first_apply = next(t for t in restored.transitions if t.selected_action and t.selected_action.action_type == "expand_edge")
+    first_apply = next(t for t in restored.transitions if t.selected_action and t.selected_action.action_type == "module")
     assert first_apply.verification_after.details["recovery_snapshot"]["score"] == 0.0
     assert first_apply.verification_after.details["recovery_snapshot"]["metadata"]["score_source"] == "none"
     assert "recovery_score" not in first_apply.candidate_snapshots[0].metadata
@@ -224,7 +224,7 @@ def test_value_labeler_propagates_delayed_reward_to_early_actions():
     ])
 
     rows, _ = label_episode_values(episode, gamma=0.85, step_cost=0.0)
-    by_state = {row["state_digest"]: row for row in rows if row["action_type"] == "expand_edge"}
+    by_state = {row["state_digest"]: row for row in rows if row["action_type"] == "module"}
 
     assert by_state["root"]["long_term_value"] > 0
     assert by_state["a"]["long_term_value"] > 0
@@ -245,8 +245,8 @@ def test_value_labeler_prefers_undo_when_child_state_is_worse():
                 round_index=1,
                 state_digest="child",
                 patch_depth=1,
-                available_actions=[TrainingAction(action_type="checkout_node")],
-                selected_action=TrainingAction(action_type="checkout_node", metadata={"target_state_digest": "root"}),
+                available_actions=[TrainingAction(action_type="undo")],
+                selected_action=TrainingAction(action_type="undo", metadata={"target_state_digest": "root"}),
                 next_state_digest="root",
                 verification_before=TrainingVerificationSnapshot(score=0.1),
                 verification_after=TrainingVerificationSnapshot(score=0.5),
@@ -255,7 +255,7 @@ def test_value_labeler_prefers_undo_when_child_state_is_worse():
     )
 
     rows, _ = label_episode_values(episode, gamma=0.0, step_cost=0.0)
-    undo = next(row for row in rows if row["action_type"] == "checkout_node")
+    undo = next(row for row in rows if row["action_type"] == "undo")
 
     assert undo["is_best_action"] is True
     assert undo["long_term_value"] > 0
@@ -272,7 +272,7 @@ def test_value_labeler_stop_terminal_choice():
                 round_index=0,
                 state_digest="good",
                 patch_depth=1,
-                selected_action=TrainingAction(action_type="stop_signal"),
+                selected_action=TrainingAction(action_type="stop"),
                 verification_before=TrainingVerificationSnapshot(score=0.95),
                 verification_after=TrainingVerificationSnapshot(score=0.95),
                 terminal=True,
@@ -304,7 +304,7 @@ def test_value_labeler_cli_outputs_action_and_damage_rows(tmp_path):
     assert "state_value" not in action_rows[0]
     assert "current_recovery" in action_rows[0]
     assert not {"next_recovery", "recovery_delta", "score_source", "next_state_digest"} & set(action_rows[0])
-    apply_row = next(row for row in action_rows if row["action_type"] == "expand_edge")
+    apply_row = next(row for row in action_rows if row["action_type"] == "module")
     candidate_keys = set(apply_row["candidate_snapshot"])
     candidate_metadata_keys = set((apply_row["candidate_snapshot"].get("metadata") or {}))
     assert not {
@@ -343,7 +343,7 @@ def _chain_episode(edges):
         round_index=len(edges),
         state_digest=edges[-1][1],
         patch_depth=len(edges),
-        selected_action=TrainingAction(action_type="stop_signal"),
+        selected_action=TrainingAction(action_type="stop"),
         verification_before=TrainingVerificationSnapshot(score=edges[-1][4]),
         verification_after=TrainingVerificationSnapshot(score=edges[-1][4]),
         terminal=True,
@@ -364,9 +364,10 @@ def _edge(source, target, candidate_id, before, after):
         state_digest=source,
         patch_depth=0,
         candidate_snapshots=[TrainingCandidateSnapshot(candidate_id=candidate_id, module_name=candidate_id, format="zip")],
-        available_actions=[TrainingAction(action_type="expand_edge", candidate_id=candidate_id)],
-        selected_action=TrainingAction(action_type="expand_edge", candidate_id=candidate_id),
+        available_actions=[TrainingAction(action_type="module", candidate_id=candidate_id)],
+        selected_action=TrainingAction(action_type="module", candidate_id=candidate_id),
         next_state_digest=target,
         verification_before=TrainingVerificationSnapshot(score=before),
         verification_after=TrainingVerificationSnapshot(score=after),
     )
+

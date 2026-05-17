@@ -32,7 +32,7 @@ def main(argv: list[str] | None = None) -> int:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Train format-specific dual LightGBM policy models.")
     parser.add_argument("--format", default="zip")
-    parser.add_argument("--model", choices=["damage_analysis", "damage_location", "normal_structure", "graph_action", "graph_state_value"], required=True)
+    parser.add_argument("--model", choices=["damage_analysis", "damage_location", "normal_structure", "step_action", "step_value"], required=True)
     parser.add_argument("--run-dir", required=True)
     parser.add_argument("--features-dir", default="")
     parser.add_argument("--model-dir", default="")

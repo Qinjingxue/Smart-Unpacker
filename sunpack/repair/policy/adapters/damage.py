@@ -183,6 +183,8 @@ def _world_model_payload(metadata: dict[str, Any]) -> dict[str, Any]:
     }
     if isinstance(metadata.get("normal_structure_scores"), dict):
         payload["score_summary"] = dict(metadata.get("normal_structure_scores") or {})
+    if isinstance(metadata.get("world_scores"), dict):
+        payload["world_scores"] = dict(metadata.get("world_scores") or {})
     if isinstance(metadata.get("normal_structure_metadata"), dict):
         payload["metadata"] = dict(metadata.get("normal_structure_metadata") or {})
     return {key: value for key, value in payload.items() if value not in ({}, [], None)}

@@ -198,57 +198,10 @@ def damage_label_schema() -> TrainingLabelSchema:
 
 def damage_feature_spec() -> TrainingFeatureSpec:
     return TrainingFeatureSpec(
-        include_prefixes=(
-            "format",
-            "runtime_context.analysis_summary.",
-            "runtime_context.analysis_native_probe.structure.graph.summary.",
-            "runtime_context.analysis_native_probe.structure.graph.violations.",
-            "runtime_context.analysis_native_probe.structure.graph.explanations.",
-            "runtime_context.analysis_native_probe.structure.summary.",
-            "runtime_context.analysis_native_probe.structure.runtime.",
-            "runtime_context.archive_authentication.",
-            "runtime_context.extraction_summary.failure_stage",
-            "runtime_context.extraction_summary.failure_kind",
-            "runtime_context.extraction_summary.status",
-            "runtime_context.extraction_summary.native_status",
-            "runtime_context.extraction_summary.entry_outcomes.",
-            "runtime_context.verification_summary.decision_hint",
-            "runtime_context.verification_summary.assessment_status",
-            "runtime_context.verification_summary.source_integrity",
-            "runtime_context.verification_summary.coverage_breakdown.",
-            "runtime_context.archive_state.patch_depth",
-            "diagnosis.",
-            "repair_history.",
-        ),
-        categorical_paths=(
-            "format",
-            "runtime_context.analysis_summary.format",
-            "runtime_context.analysis_summary.prepass_status",
-            "runtime_context.analysis_summary.prepass_format",
-            "runtime_context.analysis_summary.fuzzy_status",
-            "runtime_context.analysis_summary.fuzzy_archive_type",
-            "runtime_context.extraction_summary.failure_stage",
-            "runtime_context.extraction_summary.failure_kind",
-            "runtime_context.extraction_summary.native_status",
-            "runtime_context.verification_summary.decision_hint",
-            "runtime_context.verification_summary.assessment_status",
-            "runtime_context.verification_summary.source_integrity",
-            "runtime_context.analysis_native_probe.structure.graph.error",
-        ),
+        include_prefixes=("knowledge_payload.",),
         ignore_prefixes=(
-            "runtime_context.archive_state.state",
-            "runtime_context.archive_state.patch_digest",
-            "job.source_input.path",
-            "runtime_context.knowledge_projection.source_fingerprint",
-            "runtime_context.analysis_native_probe.structure.graph.nodes",
-            "runtime_context.analysis_native_probe.structure.graph.edges",
-            "runtime_context.analysis_native_probe.structure.anomaly",
-        ),
-        ignore_paths=(
-            "source_identity.clean_sha256",
-            "source_identity.corrupted_sha256",
-            "runtime_context.analysis_native_probe.structure.runtime.payload_extraction_content_failure_observed",
-            "runtime_context.analysis_native_probe.raw_structure.runtime.payload_extraction_content_failure_observed",
+            "knowledge_payload.source.input.path",
+            "knowledge_payload.archive_state.state",
         ),
     )
 
@@ -332,7 +285,7 @@ def state_value_feature_spec() -> TrainingFeatureSpec:
 
 
 def lightgbm_params(model_type: str) -> dict[str, Any]:
-    if model_type == "graph_action":
+    if model_type == "step_action":
         return {
             "objective": "lambdarank",
             "n_estimators": 80,
@@ -352,7 +305,7 @@ def lightgbm_params(model_type: str) -> dict[str, Any]:
             "subsample": 0.9,
             "colsample_bytree": 0.9,
         }
-    if model_type == "graph_state_value":
+    if model_type == "step_value":
         return {
             "objective": "regression",
             "n_estimators": 100,
@@ -381,11 +334,11 @@ def action_label(row: dict[str, Any]) -> int:
     label = 8
     if row.get("is_best_action"):
         label = 28
-    if action == "stop_signal":
+    if action == "stop":
         label = 28 if current >= 0.95 else 6
-    elif action == "checkout_node":
+    elif action == "undo":
         label = max(label, 14)
-    elif action == "expand_edge":
+    elif action == "module":
         if _is_recovery_candidate(row):
             label = max(label, 18)
         if _is_salvage_or_rebuild_candidate(row):
@@ -546,30 +499,30 @@ def diagnostic_profile_pairs() -> list[tuple[str, str]]:
 def diagnostic_feature_groups() -> dict[str, list[str]]:
     return {
         "graph_summary": [
-            "runtime_context.analysis_native_probe.structure.graph.summary.",
-            "runtime_context.analysis_native_probe.structure.summary.",
+            "knowledge_payload.format.zip.structure.graph.summary.",
+            "knowledge_payload.format.zip.structure.summary.",
         ],
         "graph_violations": [
-            "runtime_context.analysis_native_probe.structure.graph.violations.",
+            "knowledge_payload.format.zip.structure.graph.violations.",
         ],
         "graph_explanations": [
-            "runtime_context.analysis_native_probe.structure.graph.explanations.",
+            "knowledge_payload.format.zip.structure.graph.explanations.",
         ],
         "runtime_payload": [
-            "runtime_context.analysis_native_probe.structure.runtime.payload_",
-            "runtime_context.analysis_native_probe.structure.runtime.no_payload_",
+            "knowledge_payload.format.zip.structure.runtime.payload_",
+            "knowledge_payload.format.zip.structure.runtime.no_payload_",
         ],
         "normal_anomaly": [
-            "runtime_context.analysis_native_probe.structure.anomaly.summary.",
-            "runtime_context.analysis_native_probe.structure.anomaly.compact_attribution.",
+            "knowledge_payload.format.zip.structure.anomaly.summary.",
+            "knowledge_payload.format.zip.structure.anomaly.compact_attribution.",
         ],
         "extraction_entry_outcomes": [
-            "runtime_context.extraction_summary.entry_outcomes.",
-            "runtime_context.analysis_native_probe.structure.runtime.extraction_entry_outcomes.",
+            "knowledge_payload.extraction.entry_outcomes.",
+            "knowledge_payload.format.zip.structure.runtime.extraction_entry_outcomes.",
         ],
         "verification_coverage": [
-            "runtime_context.verification_summary.coverage_breakdown.",
-            "runtime_context.analysis_native_probe.structure.runtime.verification_coverage_breakdown.",
+            "knowledge_payload.verification.coverage_breakdown.",
+            "knowledge_payload.format.zip.structure.runtime.verification_coverage_breakdown.",
         ],
     }
 
@@ -722,3 +675,4 @@ def _index_manifest(path: Path) -> dict[str, dict[str, Any]]:
                 "physical_complete_expected": row.get("physical_complete_expected"),
             }
     return output
+

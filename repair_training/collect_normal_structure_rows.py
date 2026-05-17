@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import random
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -10,7 +9,6 @@ from typing import Any
 from repair_training.core.datasets import sha256_file, write_json, write_jsonl
 from repair_training.core.plugin import normalize_format_name
 from sunpack.detection.pipeline.processors.modules.format_structure.zip_structure_graph import inspect_zip_structure_graph
-from sunpack.repair.policy.adapters.normal_structure import ZipNormalStructureAdapter
 
 
 SCHEMA_VERSION = 1
@@ -20,7 +18,7 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     fmt = normalize_format_name(args.format)
     if fmt != "zip":
-        raise SystemExit("collect_normal_structure_queries currently supports --format zip only")
+        raise SystemExit("collect_normal_structure_rows currently supports --format zip only")
     output = Path(args.output)
     rows = collect_normal_structure_rows(
         material_root=Path(args.material_root),
@@ -30,7 +28,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     write_jsonl(output, rows)
     summary = _summary(rows)
-    summary_path = Path(args.summary_output) if args.summary_output else output.with_name("normal_structure_query_summary.json")
+    summary_path = Path(args.summary_output) if args.summary_output else output.with_name("normal_structure_row_summary.json")
     write_json(summary_path, summary)
     print(json.dumps({"output": str(output), "summary": str(summary_path), **summary}, ensure_ascii=False, sort_keys=True))
     return 0
@@ -43,8 +41,6 @@ def collect_normal_structure_rows(
     seed: int = 20260516,
     max_entries: int = 128,
 ) -> list[dict[str, Any]]:
-    rng = random.Random(seed)
-    adapter = ZipNormalStructureAdapter()
     sources = _zip_sources(Path(material_root))
     if limit:
         sources = sources[:limit]
@@ -56,12 +52,30 @@ def collect_normal_structure_rows(
             "source_path": str(path),
             "clean_sha256": _sha256(path),
         }
-        rows.extend(adapter.training_rows_from_graph(
-            graph,
-            sample_id=f"clean:{index:06d}",
-            source_identity=source_identity,
-            rng=rng,
-        ))
+        rows.append({
+            "schema_version": SCHEMA_VERSION,
+            "row_type": "normal_structure_supervised",
+            "sample_id": f"clean:{index:06d}",
+            "format": "zip",
+            "source_identity": source_identity,
+            "state_digest": source_identity["clean_sha256"],
+            "knowledge_payload": {
+                "format": {
+                    "zip": {
+                        "structure": {
+                            "graph": graph,
+                        }
+                    }
+                },
+                "source": {
+                    "input": {
+                        "kind": "path",
+                        "format_hint": "zip",
+                    }
+                },
+            },
+            "normal_label": 1,
+        })
     return rows
 
 
@@ -70,14 +84,16 @@ def rows_from_graph(
     *,
     sample_id: str,
     source_identity: dict[str, Any] | None = None,
-    rng: random.Random | None = None,
 ) -> list[dict[str, Any]]:
-    return ZipNormalStructureAdapter().training_rows_from_graph(
-        graph,
-        sample_id=sample_id,
-        source_identity=source_identity,
-        rng=rng or random.Random(0),
-    )
+    return [{
+        "schema_version": SCHEMA_VERSION,
+        "row_type": "normal_structure_supervised",
+        "sample_id": sample_id,
+        "format": "zip",
+        "source_identity": dict(source_identity or {}),
+        "knowledge_payload": {"format": {"zip": {"structure": {"graph": graph}}}},
+        "normal_label": 1,
+    }]
 
 
 def _zip_sources(material_root: Path) -> list[Path]:
@@ -91,15 +107,11 @@ def _zip_sources(material_root: Path) -> list[Path]:
 
 def _summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
     labels = Counter(int(row.get("normal_label") or 0) for row in rows)
-    query_types = Counter(str(row.get("query_type") or "") for row in rows)
-    target_fields = Counter(str(row.get("target_field") or "") for row in rows)
     return {
         "schema_version": SCHEMA_VERSION,
         "rows": len(rows),
         "normal_rows": int(labels.get(1, 0)),
         "anomaly_rows": int(labels.get(0, 0)),
-        "query_type_counts": dict(sorted(query_types.items())),
-        "target_field_counts": dict(sorted(target_fields.items())),
     }
 
 
