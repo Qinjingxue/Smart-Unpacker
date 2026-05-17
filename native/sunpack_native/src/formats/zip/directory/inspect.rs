@@ -518,11 +518,13 @@ pub(crate) fn inspect_zip_structure_graph(
     let nodes = PyList::empty(py);
     let edges = PyList::empty(py);
     let violations = PyList::empty(py);
+    let relation_violations = PyList::empty(py);
     let explanations = PyList::empty(py);
     let summary = PyDict::new(py);
     result.set_item("nodes", &nodes)?;
     result.set_item("edges", &edges)?;
     result.set_item("violations", &violations)?;
+    result.set_item("relation_violations", &relation_violations)?;
     result.set_item("explanations", &explanations)?;
     result.set_item("summary", &summary)?;
 
@@ -661,6 +663,16 @@ pub(crate) fn inspect_zip_structure_graph(
     let mut descriptor_conflicts = 0usize;
     let mut zip64_extra_present = 0usize;
     let mut zip64_extra_mismatch = 0usize;
+    let mut central_local_flags_relation_mismatch = 0usize;
+    let mut central_directory_flags_likely_bad = 0usize;
+    let mut local_header_flags_likely_bad = 0usize;
+    let mut flags_relation_ambiguous = 0usize;
+    let mut bad_local_header_target_signature = 0usize;
+    let mut local_header_offset_points_to_descriptor_or_payload = 0usize;
+    let mut local_header_offset_points_outside_archive = 0usize;
+    let mut descriptor_crc_cd_mismatch = 0usize;
+    let mut descriptor_crc_payload_mismatch = 0usize;
+    let mut descriptor_crc_likely_bad = 0usize;
 
     for (index, entry) in checked_entries.iter().enumerate() {
         let cd_entry_id = format!("cd_entry:{index}");
@@ -673,9 +685,15 @@ pub(crate) fn inspect_zip_structure_graph(
         let raw_local_offset = entry.local_header_offset as usize;
         let archive_adjusted_offset = archive_offset.saturating_add(raw_local_offset);
         let prefix_adjusted_offset = raw_local_offset.saturating_add(prefix_len);
+        let declared_local_offset = if prefix_len > 0 { prefix_adjusted_offset } else { archive_adjusted_offset };
         let raw_local = parse_local_header(&data, raw_local_offset);
         let archive_adjusted_local = parse_local_header(&data, archive_adjusted_offset);
         let prefix_adjusted_local = if prefix_len > 0 { parse_local_header(&data, prefix_adjusted_offset) } else { None };
+        let declared_local_ok = if prefix_len > 0 {
+            prefix_adjusted_local.is_some()
+        } else {
+            archive_adjusted_local.is_some()
+        };
         let matched_local = prefix_adjusted_local
             .clone()
             .or_else(|| archive_adjusted_local.clone())
@@ -684,13 +702,17 @@ pub(crate) fn inspect_zip_structure_graph(
         let local_target_id = format!("local_header_target:{index}");
         let local_ok = matched_local.as_ref().is_some_and(|local| local.name == entry.name);
         zip_graph_edge(py, &edges, &cd_entry_id, &local_target_id, "points_to", "local_header_offset", local_ok, if local_ok { 1.0 } else { 0.0 })?;
-        if !local_ok {
+        if !declared_local_ok {
             local_offset_violations += 1;
-            let observed = if raw_local_offset >= file_size {
+            bad_local_header_target_signature += 1;
+            let observed = if declared_local_offset >= file_size {
+                local_header_offset_points_outside_archive += 1;
                 "outside_archive"
-            } else if offset_inside_local_or_data_span(raw_local_offset, &known_descriptor_spans) {
+            } else if offset_inside_local_or_data_span(declared_local_offset, &known_descriptor_spans) {
+                local_header_offset_points_to_descriptor_or_payload += 1;
                 "inside_descriptor"
-            } else if offset_inside_local_or_data_span(raw_local_offset, &known_payload_spans) || offset_inside_local_or_data_span(raw_local_offset, &local_spans) {
+            } else if offset_inside_local_or_data_span(declared_local_offset, &known_payload_spans) || offset_inside_local_or_data_span(declared_local_offset, &local_spans) {
+                local_header_offset_points_to_descriptor_or_payload += 1;
                 "inside_payload_or_entry"
             } else {
                 "bad_signature"
@@ -704,8 +726,26 @@ pub(crate) fn inspect_zip_structure_graph(
                 "central_directory.local_header_offset",
                 "local_header",
                 observed,
-                raw_local_offset as i64 - archive_adjusted_offset as i64,
+                declared_local_offset as i64 - archive_adjusted_offset as i64,
                 "high",
+            )?;
+            let target_signature = signature_hex_at(&data, declared_local_offset);
+            zip_graph_relation_violation(
+                py,
+                &relation_violations,
+                &violations,
+                "local_header_offset_target_mismatch",
+                "central_directory.local_header_offset",
+                "central_directory.local_header_offset",
+                "local_header.signature",
+                "points_to",
+                index,
+                entry.local_header_offset as u64,
+                declared_local_offset as u64,
+                "central_directory.local_header_offset",
+                0.95,
+                "high",
+                &[("target_kind", observed), ("target_signature", &target_signature), ("expected_signature", "504b0304")],
             )?;
         }
         let Some(local) = matched_local else {
@@ -718,7 +758,39 @@ pub(crate) fn inspect_zip_structure_graph(
         }
         if local.flags != entry.flags {
             flags_mismatch += 1;
-            zip_graph_violation(py, &violations, "field_mismatch", &cd_entry_id, &local_target_id, "local_header.flags", &entry.flags.to_string(), &local.flags.to_string(), local.flags as i64 - entry.flags as i64, "medium")?;
+            let descriptor_present = descriptor_record_for_entry(&data, entry, &local).is_some();
+            let cd_bit3 = entry.flags & 0x08 != 0;
+            let local_bit3 = local.flags & 0x08 != 0;
+            let (likely_bad_side, confidence, severity) = if descriptor_present == local_bit3 && descriptor_present != cd_bit3 {
+                ("central_directory.flags", 0.9, "high")
+            } else if descriptor_present == cd_bit3 && descriptor_present != local_bit3 {
+                ("local_header.flags", 0.9, "high")
+            } else {
+                ("ambiguous", 0.45, "medium")
+            };
+            central_local_flags_relation_mismatch += 1;
+            match likely_bad_side {
+                "central_directory.flags" => central_directory_flags_likely_bad += 1,
+                "local_header.flags" => local_header_flags_likely_bad += 1,
+                _ => flags_relation_ambiguous += 1,
+            }
+            zip_graph_relation_violation(
+                py,
+                &relation_violations,
+                &violations,
+                "field_relation_mismatch",
+                if likely_bad_side == "ambiguous" { "central_directory.flags" } else { likely_bad_side },
+                "central_directory.flags",
+                "local_header.flags",
+                "matches_field",
+                index,
+                entry.flags as u64,
+                local.flags as u64,
+                likely_bad_side,
+                confidence,
+                severity,
+                &[("source_bit3", if cd_bit3 { "true" } else { "false" }), ("target_bit3", if local_bit3 { "true" } else { "false" }), ("descriptor_present", if descriptor_present { "true" } else { "false" })],
+            )?;
         }
         if local.method != entry.method {
             method_mismatch += 1;
@@ -771,6 +843,56 @@ pub(crate) fn inspect_zip_structure_graph(
                 }
             }
         }
+        if let Some(descriptor) = descriptor_record_for_entry(&data, entry, &local) {
+            if descriptor.crc32 != entry.crc32 {
+                let payload_crc = payload_crc_for_entry(&data, entry, &local);
+                let payload_matches_cd = payload_crc.is_some_and(|value| value == entry.crc32);
+                let payload_matches_descriptor = payload_crc.is_some_and(|value| value == descriptor.crc32);
+                let (likely_bad_side, confidence) = if payload_matches_cd && !payload_matches_descriptor {
+                    ("data_descriptor.crc", 0.95)
+                } else if payload_matches_descriptor && !payload_matches_cd {
+                    ("central_directory.crc", 0.9)
+                } else if payload_crc.is_some() && !payload_matches_cd && !payload_matches_descriptor {
+                    ("payload.compressed_data", 0.8)
+                } else {
+                    ("ambiguous", 0.45)
+                };
+                descriptor_crc_cd_mismatch += 1;
+                if payload_crc.is_some() && !payload_matches_descriptor {
+                    descriptor_crc_payload_mismatch += 1;
+                }
+                if likely_bad_side == "data_descriptor.crc" {
+                    descriptor_crc_likely_bad += 1;
+                }
+                let descriptor_crc_string = descriptor.crc32.to_string();
+                let central_directory_crc_string = entry.crc32.to_string();
+                let payload_crc_string = payload_crc.map(|value| value.to_string()).unwrap_or_default();
+                zip_graph_relation_violation(
+                    py,
+                    &relation_violations,
+                    &violations,
+                    "data_descriptor_crc_mismatch",
+                    if likely_bad_side == "ambiguous" { "data_descriptor.crc" } else { likely_bad_side },
+                    "data_descriptor.crc",
+                    "central_directory.crc",
+                    "matches_field",
+                    index,
+                    descriptor.crc32 as u64,
+                    entry.crc32 as u64,
+                    likely_bad_side,
+                    confidence,
+                    "high",
+                    &[
+                        ("descriptor_crc", &descriptor_crc_string),
+                        ("central_directory_crc", &central_directory_crc_string),
+                        ("payload_crc", &payload_crc_string),
+                        ("descriptor_matches_cd", "false"),
+                        ("payload_matches_cd", if payload_matches_cd { "true" } else { "false" }),
+                        ("payload_matches_descriptor", if payload_matches_descriptor { "true" } else { "false" }),
+                    ],
+                )?;
+            }
+        }
         if parse_zip64_extra_tolerant(&entry.extra, entry.extra_offset).is_some()
             || parse_zip64_extra_tolerant(&local.extra, local.extra_offset).is_some()
         {
@@ -794,6 +916,16 @@ pub(crate) fn inspect_zip_structure_graph(
     summary.set_item("central_local_compressed_size_mismatch_count", compressed_mismatch)?;
     summary.set_item("central_local_uncompressed_size_mismatch_count", uncompressed_mismatch)?;
     summary.set_item("local_header_offset_violation_count", local_offset_violations)?;
+    summary.set_item("central_local_flags_relation_mismatch_count", central_local_flags_relation_mismatch)?;
+    summary.set_item("central_directory_flags_likely_bad_count", central_directory_flags_likely_bad)?;
+    summary.set_item("local_header_flags_likely_bad_count", local_header_flags_likely_bad)?;
+    summary.set_item("flags_relation_ambiguous_count", flags_relation_ambiguous)?;
+    summary.set_item("bad_local_header_target_signature_count", bad_local_header_target_signature)?;
+    summary.set_item("local_header_offset_points_to_descriptor_or_payload_count", local_header_offset_points_to_descriptor_or_payload)?;
+    summary.set_item("local_header_offset_points_outside_archive_count", local_header_offset_points_outside_archive)?;
+    summary.set_item("descriptor_crc_cd_mismatch_count", descriptor_crc_cd_mismatch)?;
+    summary.set_item("descriptor_crc_payload_mismatch_count", descriptor_crc_payload_mismatch)?;
+    summary.set_item("descriptor_crc_likely_bad_count", descriptor_crc_likely_bad)?;
     summary.set_item("span_conflict_count", span_conflicts)?;
     summary.set_item("descriptor_conflict_count", descriptor_conflicts)?;
     summary.set_item("zip64_extra_present_count", zip64_extra_present)?;
@@ -936,6 +1068,51 @@ fn zip_graph_violation<'py>(
     violations.append(violation)
 }
 
+#[allow(clippy::too_many_arguments)]
+fn zip_graph_relation_violation<'py>(
+    py: Python<'py>,
+    relation_violations: &Bound<'py, PyList>,
+    violations: &Bound<'py, PyList>,
+    kind: &str,
+    field: &str,
+    source_field: &str,
+    target_field: &str,
+    relation: &str,
+    entry_index: usize,
+    source_value: u64,
+    target_value: u64,
+    likely_bad_side: &str,
+    evidence_confidence: f64,
+    severity: &str,
+    extra: &[(&str, &str)],
+) -> PyResult<()> {
+    let violation = PyDict::new(py);
+    violation.set_item("kind", kind)?;
+    violation.set_item("field", field)?;
+    violation.set_item("source_field", source_field)?;
+    violation.set_item("target_field", target_field)?;
+    violation.set_item("relation", relation)?;
+    violation.set_item("entry_index", entry_index)?;
+    violation.set_item("source_value", source_value)?;
+    violation.set_item("target_value", target_value)?;
+    violation.set_item("likely_bad_side", likely_bad_side)?;
+    violation.set_item("evidence_confidence", evidence_confidence)?;
+    violation.set_item("severity", severity)?;
+    violation.set_item("valid", false)?;
+    for (key, value) in extra {
+        if value.is_empty() {
+            continue;
+        }
+        match *value {
+            "true" => violation.set_item(*key, true)?,
+            "false" => violation.set_item(*key, false)?,
+            _ => violation.set_item(*key, *value)?,
+        }
+    }
+    relation_violations.append(&violation)?;
+    violations.append(violation)
+}
+
 fn zip_graph_explanation<'py>(
     py: Python<'py>,
     explanations: &Bound<'py, PyList>,
@@ -1041,6 +1218,87 @@ fn local_data_start(local: &LocalHeader) -> Option<usize> {
         .checked_add(LOCAL_HEADER_LEN)?
         .checked_add(local.name_len as usize)?
         .checked_add(local.extra_len as usize)
+}
+
+fn descriptor_record_for_entry(
+    data: &[u8],
+    entry: &CentralEntry,
+    local: &LocalHeader,
+) -> Option<DataDescriptorRecord> {
+    if (entry.flags | local.flags) & 0x08 == 0 {
+        return None;
+    }
+    let payload_end = local_data_start(local)?.checked_add(entry.compressed_size as usize)?;
+    if payload_end + 16 <= data.len() && data.get(payload_end..payload_end + 4) == Some(DD_SIG) {
+        return Some(DataDescriptorRecord {
+            crc32: u32_le(data, payload_end + 4),
+        });
+    }
+    if local.flags & 0x08 != 0 && payload_end + 12 <= data.len() {
+        return Some(DataDescriptorRecord {
+            crc32: u32_le(data, payload_end),
+        });
+    }
+    None
+}
+
+fn payload_crc_for_entry(data: &[u8], entry: &CentralEntry, local: &LocalHeader) -> Option<u32> {
+    let start = local_data_start(local)?;
+    let end = start.checked_add(entry.compressed_size as usize)?;
+    let payload = data.get(start..end)?;
+    match entry.method {
+        0 => Some(crc32_bytes(payload)),
+        8 => deflate_payload_crc32(payload, Some(entry.uncompressed_size as u64)),
+        _ => None,
+    }
+}
+
+fn deflate_payload_crc32(input: &[u8], expected_size: Option<u64>) -> Option<u32> {
+    let mut decompressor = Decompress::new(false);
+    let mut output = vec![0u8; COPY_CHUNK_SIZE.min(64 * 1024)];
+    let mut crc = Crc32::new();
+    loop {
+        let before_in = decompressor.total_in();
+        let before_out = decompressor.total_out();
+        let input_offset = before_in as usize;
+        if input_offset > input.len() {
+            return None;
+        }
+        let status = decompressor
+            .decompress(&input[input_offset..], &mut output, FlushDecompress::None)
+            .ok()?;
+        let produced = decompressor.total_out().saturating_sub(before_out) as usize;
+        if produced > output.len() {
+            return None;
+        }
+        if produced > 0 {
+            crc.update(&output[..produced]);
+        }
+        if expected_size.is_some_and(|limit| decompressor.total_out() > limit) {
+            return None;
+        }
+        if status == Status::StreamEnd {
+            if decompressor.total_in() as usize != input.len() {
+                return None;
+            }
+            if expected_size.is_some_and(|value| value != decompressor.total_out()) {
+                return None;
+            }
+            return Some(crc.finish());
+        }
+        if decompressor.total_in() as usize >= input.len() {
+            return None;
+        }
+        if before_in == decompressor.total_in() && before_out == decompressor.total_out() {
+            return None;
+        }
+    }
+}
+
+fn signature_hex_at(data: &[u8], offset: usize) -> String {
+    data.get(offset..offset.saturating_add(4))
+        .map(|bytes| bytes.iter().map(|byte| format!("{byte:02x}")).collect::<String>())
+        .unwrap_or_default()
 }
 
 fn offset_inside_local_or_data_span(offset: usize, spans: &[(usize, usize)]) -> bool {

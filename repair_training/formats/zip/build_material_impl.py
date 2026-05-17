@@ -657,6 +657,16 @@ def _source_compatible_with_profile(source_derivation: dict[str, Any], profile: 
     variant = str(source_derivation.get("zip_variant") or "").lower()
     tags = {str(item).lower() for item in source_derivation.get("zip_container_tags") or []}
     features = source_derivation.get("zip_structure_features") if isinstance(source_derivation.get("zip_structure_features"), dict) else {}
+    if profile_l.startswith("single_field_"):
+        if "zip64" in profile_l:
+            return variant == "zip64_forced" or "zip64" in tags or bool(features.get("has_zip64_extra"))
+        if "data_descriptor" in profile_l:
+            return variant == "data_descriptor_bit3" or "data_descriptor" in tags or bool(features.get("has_data_descriptor"))
+        if "split_volume" in profile_l:
+            return variant in {"split_zip", "sfx_split_zip"} or "split" in tags or bool(features.get("has_split_sidecars"))
+        if "sfx_prefix" in profile_l:
+            return True
+        return True
     if "no_sidecar" in profile_l:
         return variant not in {"split_zip", "sfx_split_zip"} and "split" not in tags and not bool(features.get("has_split_sidecars"))
     if "sfx" in profile_l:

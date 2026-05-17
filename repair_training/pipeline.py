@@ -79,11 +79,97 @@ def main(argv: list[str] | None = None) -> int:
                 "--damage-output", str(run_dir / "datasets" / "damage_rows.jsonl"),
                 "--report-output", str(run_dir / "reports" / "oracle_recovery_report.json"),
             ])
+        elif stage in {"graphs", "graphs:diagnosis_gnn"}:
+            input_path = run_dir / "datasets" / "damage_rows.jsonl"
+            if not input_path.is_file():
+                input_path = run_dir / "datasets" / "world_damage_probe_rows.jsonl"
+            _run([
+                sys.executable, "-m", "repair_training.build_diagnosis_graphs",
+                "--format", "auto",
+                "--input", str(input_path),
+                "--output", str(run_dir / "datasets" / "diagnosis_graph_rows.jsonl"),
+                "--summary-output", str(run_dir / "reports" / "diagnosis_graph_summary.json"),
+            ])
+        elif stage in {"graphs_synthetic", "graphs_synthetic:diagnosis_gnn"}:
+            clean_input = run_dir / "datasets" / "diagnosis_graph_clean_rows.jsonl"
+            if not clean_input.is_file():
+                _run([
+                    sys.executable, "-m", "repair_training.build_diagnosis_graphs",
+                    "--format", "auto",
+                    "--input", str(run_dir / "datasets" / "normal_structure_rows.jsonl"),
+                    "--output", str(clean_input),
+                    "--summary-output", str(run_dir / "reports" / "diagnosis_graph_clean_summary.json"),
+                ])
+            _run([
+                sys.executable, "-m", "repair_training.build_diagnosis_graph_synthetic",
+                "--format", fmt,
+                "--input", str(clean_input),
+                "--output", str(run_dir / "datasets" / "diagnosis_graph_synthetic_rows.jsonl"),
+                "--summary-output", str(run_dir / "reports" / "diagnosis_graph_synthetic_summary.json"),
+                "--per-sample", "3",
+            ])
+            _concat_jsonl([
+                clean_input,
+                run_dir / "datasets" / "diagnosis_graph_rows.jsonl",
+                run_dir / "datasets" / "diagnosis_graph_synthetic_rows.jsonl",
+            ], run_dir / "datasets" / "diagnosis_graph_train_rows.jsonl")
+        elif stage in {"single_field", "single_field:diagnosis_gnn"}:
+            clean_input = run_dir / "datasets" / "diagnosis_graph_clean_rows.jsonl"
+            if not clean_input.is_file():
+                _run([
+                    sys.executable, "-m", "repair_training.build_diagnosis_graphs",
+                    "--format", "auto",
+                    "--input", str(run_dir / "datasets" / "normal_structure_rows.jsonl"),
+                    "--output", str(clean_input),
+                    "--summary-output", str(run_dir / "reports" / "diagnosis_graph_clean_summary.json"),
+                ])
+            _run([
+                sys.executable, "-m", "repair_training.build_single_field_damage_rows",
+                "--format", fmt,
+                "--material-root", args.material_root,
+                "--output", str(run_dir / "datasets" / "single_field_damage_rows.jsonl"),
+                "--graph-output", str(run_dir / "datasets" / "diagnosis_graph_single_field_rows.jsonl"),
+                "--summary-output", str(run_dir / "reports" / "single_field_summary.json"),
+                "--per-field-report-output", str(run_dir / "reports" / "single_field_per_field_report.json"),
+                "--samples-per-field", "30",
+                "--workers", str(args.workers),
+                "--workspace", str(run_dir / "tmp" / "single_field_damage_rows"),
+            ])
+            _concat_jsonl([
+                clean_input,
+                run_dir / "datasets" / "diagnosis_graph_single_field_rows.jsonl",
+            ], run_dir / "datasets" / "diagnosis_graph_train_single_field_rows.jsonl")
         elif stage == "features":
             for model in _models(args.model):
                 _run([sys.executable, "-m", "repair_training.build_features", "--format", fmt, "--model", model, "--run-dir", str(run_dir)])
         elif stage == "analyze":
             _run([sys.executable, "-m", "repair_training.analyze_run", "--run-dir", str(run_dir)])
+        elif stage in {"eval", "eval:diagnosis_gnn"}:
+            _run([
+                sys.executable, "-m", "repair_training.evaluate_diagnosis_gnn",
+                "--format", fmt,
+                "--input", str(run_dir / "datasets" / "diagnosis_graph_rows.jsonl"),
+                "--model-dir", str(run_dir / "models" / "diagnosis_gnn"),
+                "--output", str(run_dir / "reports" / "diagnosis_gnn_eval"),
+            ])
+        elif stage in {"heldout", "heldout:diagnosis_gnn"}:
+            input_path = run_dir / "datasets" / "diagnosis_graph_train_rows.jsonl"
+            if not input_path.is_file():
+                input_path = run_dir / "datasets" / "diagnosis_graph_rows.jsonl"
+            _run([
+                sys.executable, "-m", "repair_training.evaluate_diagnosis_gnn_heldout",
+                "--format", fmt,
+                "--input", str(input_path),
+                "--output", str(run_dir / "reports" / "diagnosis_gnn_heldout_min8_profiles"),
+                "--min-count", "8",
+            ])
+            _run([
+                sys.executable, "-m", "repair_training.evaluate_diagnosis_gnn_heldout",
+                "--format", fmt,
+                "--input", str(input_path),
+                "--output", str(run_dir / "reports" / "diagnosis_gnn_heldout_weak_profiles"),
+                "--profiles", "zip_comment_overlap_eocd_shifted,zip_non_utf8_filename_directory_rebuild,zip_data_descriptor_payload_bad,zip_duplicate_entry_crc_conflict,zip_zip64_extra_size_mismatch,compound_zip64_locator_extra_trailing_junk,zip_data_descriptor_cd_conflict",
+            ])
         elif stage == "train":
             for model in _models(args.model):
                 _run([sys.executable, "-m", "repair_training.train", "--format", fmt, "--model", model, "--run-dir", str(run_dir)])
@@ -99,7 +185,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--format", default="zip")
     parser.add_argument("--run-dir", default="")
     parser.add_argument("--run-name", default="")
-    parser.add_argument("--model", choices=["", "damage_analysis", "damage_location", "normal_structure", "step_value", "step_action"], default="")
+    parser.add_argument("--model", choices=["", "damage_analysis", "damage_location", "normal_structure", "step_value", "step_action", "diagnosis_gnn"], default="")
     parser.add_argument("--stage", default="features,train")
     parser.add_argument("--material-root", default=str(Path("repair_training") / "material"))
     parser.add_argument("--manifest", default="")
@@ -112,6 +198,18 @@ def _parser() -> argparse.ArgumentParser:
 
 def _run(command: list[str]) -> None:
     subprocess.run(command, check=True)
+
+
+def _concat_jsonl(inputs: list[Path], output: Path) -> None:
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with output.open("w", encoding="utf-8") as handle:
+        for path in inputs:
+            if not path.is_file():
+                continue
+            with path.open("r", encoding="utf-8") as source:
+                for line in source:
+                    if line.strip():
+                        handle.write(line)
 
 
 def _run_damage_analysis_pipeline(args: argparse.Namespace, *, fmt: str, run_dir: Path) -> None:

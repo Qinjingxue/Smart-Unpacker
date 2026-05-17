@@ -1102,6 +1102,12 @@ def _zip_corpus_mutations(data: bytes, randomizer: random.Random, profile: str, 
     eocd = data.rfind(b"PK\x05\x06")
     cd_offset = _safe_zip_cd_offset(data)
     cd_headers = _zip_central_directory_header_offsets(data, cd_offset, eocd)
+    single_field = _single_field_from_profile(profile)
+    if single_field:
+        mutations = _zip_single_field_mutations(data, entry_infos, cd_headers, eocd, randomizer, single_field)
+        if not mutations:
+            raise ValueError(f"single-field ZIP profile is unsupported for this source: {profile}")
+        return mutations[:1], _single_field_damage_flags(single_field)
     if eocd >= 0 and eocd + 22 <= len(data):
         if profile.startswith("compound_") or profile.startswith("partial_"):
             mutations.extend(_zip_compound_profile_mutations(data, entry_infos, cd_headers, eocd, randomizer, profile))
@@ -1348,6 +1354,234 @@ def _zip_eocd_directory_conflict_mutations(eocd: int) -> list[BinaryMutation]:
         _replace_bytes("corpus_zip_bad_eocd_cd_offset", eocd + 16, struct.pack("<I", 0), "zip.eocd.cd_offset", "central directory offset points at start"),
         _replace_bytes("corpus_zip_bad_eocd_comment_length", eocd + 20, struct.pack("<H", 0), "zip.eocd.comment_length", "comment boundary is untrusted"),
     ]
+
+
+SINGLE_FIELD_PROFILE_PREFIX = "single_field_"
+SINGLE_FIELD_PROFILE_TO_FIELD: dict[str, str] = {
+    "single_field_eocd_cd_offset": "eocd.cd_offset",
+    "single_field_eocd_cd_size": "eocd.cd_size",
+    "single_field_eocd_entry_count": "eocd.entry_count",
+    "single_field_eocd_comment_length": "eocd.comment_length",
+    "single_field_central_directory_local_header_offset": "central_directory.local_header_offset",
+    "single_field_central_directory_flags": "central_directory.flags",
+    "single_field_central_directory_crc": "central_directory.crc",
+    "single_field_central_directory_compressed_size": "central_directory.compressed_size",
+    "single_field_local_header_flags": "local_header.flags",
+    "single_field_local_header_crc": "local_header.crc",
+    "single_field_local_header_compressed_size": "local_header.compressed_size",
+    "single_field_data_descriptor_record": "data_descriptor.record",
+    "single_field_data_descriptor_crc": "data_descriptor.crc",
+    "single_field_data_descriptor_size": "data_descriptor.size",
+    "single_field_zip64_extra_length": "zip64.extra_length",
+    "single_field_zip64_uncompressed_size": "zip64.uncompressed_size",
+    "single_field_zip64_locator": "zip64.locator",
+    "single_field_tail_trailing_bytes": "tail.trailing_bytes",
+    "single_field_sfx_prefix_bytes": "sfx_prefix.bytes",
+    "single_field_split_volume_missing_range": "split_volume.missing_range",
+}
+SINGLE_FIELD_FIELDS: tuple[str, ...] = tuple(SINGLE_FIELD_PROFILE_TO_FIELD.values())
+
+
+def single_field_profile_for_field(field: str) -> str:
+    for profile, mapped in SINGLE_FIELD_PROFILE_TO_FIELD.items():
+        if mapped == field:
+            return profile
+    raise KeyError(field)
+
+
+def single_field_fields() -> tuple[str, ...]:
+    return SINGLE_FIELD_FIELDS
+
+
+def _single_field_from_profile(profile: str) -> str:
+    profile_l = str(profile or "").lower()
+    if profile_l in SINGLE_FIELD_PROFILE_TO_FIELD:
+        return SINGLE_FIELD_PROFILE_TO_FIELD[profile_l]
+    if profile_l.startswith(SINGLE_FIELD_PROFILE_PREFIX):
+        field = profile_l[len(SINGLE_FIELD_PROFILE_PREFIX):].replace("__", ".").replace("_", ".")
+        if field in SINGLE_FIELD_FIELDS:
+            return field
+    return ""
+
+
+def _zip_single_field_mutations(
+    data: bytes,
+    entry_infos: list[dict[str, Any]],
+    cd_headers: list[int],
+    eocd: int,
+    randomizer: random.Random,
+    field: str,
+) -> list[BinaryMutation]:
+    if field.startswith("eocd."):
+        return _zip_single_eocd_field_mutation(data, eocd, randomizer, field)
+    if field.startswith("central_directory."):
+        return _zip_single_cd_field_mutation(data, cd_headers, entry_infos, randomizer, field)
+    if field.startswith("local_header."):
+        return _zip_single_local_header_field_mutation(data, entry_infos, randomizer, field)
+    if field.startswith("data_descriptor."):
+        return _zip_single_data_descriptor_field_mutation(data, entry_infos, randomizer, field)
+    if field.startswith("zip64."):
+        return _zip_single_zip64_field_mutation(data, randomizer, field)
+    if field == "tail.trailing_bytes":
+        return [_append("single_field_tail_trailing_bytes", _random_junk(randomizer, "SFTAIL", 12, 48), "archive.tail", "single-field tail trailing bytes")]
+    if field == "sfx_prefix.bytes":
+        return [_insert("single_field_sfx_prefix_bytes", 0, b"MZ-SUNPACK-SINGLE" + _random_junk(randomizer, "SFX", 8, 24), "zip.sfx.prefix", "single-field SFX prefix bytes")]
+    if field == "split_volume.missing_range":
+        if len(data) <= 128:
+            return []
+        return [_delete("single_field_split_volume_missing_range", max(1, len(data) // 2), max(8, len(data) // 24), "zip.missing_volume", "single-field split missing range")]
+    return []
+
+
+def _zip_single_eocd_field_mutation(data: bytes, eocd: int, randomizer: random.Random, field: str) -> list[BinaryMutation]:
+    if eocd < 0 or eocd + 22 > len(data):
+        return []
+    if field == "eocd.cd_offset":
+        current = _u32_at(data, eocd + 16)
+        replacement = 0 if current not in {0, None} else min(len(data), eocd)
+        return [_replace_bytes("single_field_eocd_cd_offset", eocd + 16, struct.pack("<I", replacement), "zip.eocd.cd_offset", "single-field EOCD central directory offset")]
+    if field == "eocd.cd_size":
+        current = _u32_at(data, eocd + 12) or 0
+        replacement = (current + 7) & 0xFFFFFFFF
+        return [_replace_bytes("single_field_eocd_cd_size", eocd + 12, struct.pack("<I", replacement), "zip.eocd.cd_size", "single-field EOCD central directory size")]
+    if field == "eocd.entry_count":
+        try:
+            current = int(struct.unpack_from("<H", data, eocd + 10)[0])
+        except Exception:
+            current = 0
+        replacement = max(0, current + 2) & 0xFFFF
+        return [_replace_bytes("single_field_eocd_entry_count", eocd + 10, struct.pack("<H", replacement), "zip.eocd.entry_count_total", "single-field EOCD entry count")]
+    if field == "eocd.comment_length":
+        try:
+            current = int(struct.unpack_from("<H", data, eocd + 20)[0])
+        except Exception:
+            current = 0
+        replacement = min(0xFFFF, current + randomizer.randrange(3, 17))
+        return [_replace_bytes("single_field_eocd_comment_length", eocd + 20, struct.pack("<H", replacement), "zip.eocd.comment_length", "single-field EOCD comment length")]
+    return []
+
+
+def _zip_single_cd_field_mutation(data: bytes, cd_headers: list[int], entry_infos: list[dict[str, Any]], randomizer: random.Random, field: str) -> list[BinaryMutation]:
+    if not cd_headers:
+        return []
+    header = cd_headers[randomizer.randrange(0, len(cd_headers))]
+    if field == "central_directory.local_header_offset":
+        current = _u32_at(data, header + 42) or 0
+        replacement = (current + 4) & 0xFFFFFFFF
+        return [_replace_bytes("single_field_central_directory_local_header_offset", header + 42, struct.pack("<I", replacement), "zip.central_directory.local_header_offset", "single-field central directory local-header offset")]
+    if field == "central_directory.flags":
+        try:
+            current = int(struct.unpack_from("<H", data, header + 8)[0])
+        except Exception:
+            current = 0
+        return [_replace_bytes("single_field_central_directory_flags", header + 8, struct.pack("<H", current ^ 0x08), "zip.central_directory.flags", "single-field central directory flags")]
+    if field == "central_directory.crc":
+        current = _u32_at(data, header + 16) or 0
+        return [_replace_bytes("single_field_central_directory_crc", header + 16, struct.pack("<I", current ^ 0xA5A5A5A5), "zip.central_directory.crc", "single-field central directory CRC")]
+    if field == "central_directory.compressed_size":
+        current = _u32_at(data, header + 20) or 0
+        return [_replace_bytes("single_field_central_directory_compressed_size", header + 20, struct.pack("<I", (current + 1) & 0xFFFFFFFF), "zip.central_directory.compressed_size", "single-field central directory compressed size")]
+    return []
+
+
+def _zip_single_local_header_field_mutation(data: bytes, entry_infos: list[dict[str, Any]], randomizer: random.Random, field: str) -> list[BinaryMutation]:
+    if not entry_infos:
+        return []
+    target = _choose_middle_entry(entry_infos, randomizer)
+    local = int(target.get("header_offset", -1))
+    if local < 0 or local + 30 > len(data):
+        return []
+    if field == "local_header.flags":
+        try:
+            current = int(struct.unpack_from("<H", data, local + 6)[0])
+        except Exception:
+            current = 0
+        return [_replace_bytes("single_field_local_header_flags", local + 6, struct.pack("<H", current ^ 0x08), "zip.local_header.flags", "single-field local header flags")]
+    if field == "local_header.crc":
+        current = _u32_at(data, local + 14) or 0
+        return [_replace_bytes("single_field_local_header_crc", local + 14, struct.pack("<I", current ^ 0x5A5A5A5A), "zip.local_header.crc", "single-field local header CRC")]
+    if field == "local_header.compressed_size":
+        current = _u32_at(data, local + 18) or 0
+        return [_replace_bytes("single_field_local_header_compressed_size", local + 18, struct.pack("<I", (current + 1) & 0xFFFFFFFF), "zip.local_header.compressed_size", "single-field local header compressed size")]
+    return []
+
+
+def _zip_single_data_descriptor_field_mutation(data: bytes, entry_infos: list[dict[str, Any]], randomizer: random.Random, field: str) -> list[BinaryMutation]:
+    descriptor = _zip_data_descriptor_offsets(data, entry_infos, randomizer)
+    if not descriptor:
+        return []
+    if field == "data_descriptor.record":
+        return [_replace_byte("single_field_data_descriptor_record", descriptor["record"], data[descriptor["record"]] ^ 0x20, "zip.data_descriptor", "single-field data descriptor record")]
+    if field == "data_descriptor.crc":
+        return [_replace_bytes("single_field_data_descriptor_crc", descriptor["crc"], struct.pack("<I", (_u32_at(data, descriptor["crc"]) or 0) ^ 0xCAFEBABE), "zip.data_descriptor.crc", "single-field data descriptor CRC")]
+    if field == "data_descriptor.size":
+        return [_replace_bytes("single_field_data_descriptor_size", descriptor["size"], struct.pack("<I", ((_u32_at(data, descriptor["size"]) or 0) + 1) & 0xFFFFFFFF), "zip.data_descriptor.size", "single-field data descriptor size")]
+    return []
+
+
+def _zip_data_descriptor_offsets(data: bytes, entry_infos: list[dict[str, Any]], randomizer: random.Random) -> dict[str, int]:
+    candidates: list[dict[str, int]] = []
+    for info in entry_infos:
+        local = int(info.get("header_offset", -1))
+        if local < 0 or local + 8 > len(data):
+            continue
+        try:
+            flags = int(struct.unpack_from("<H", data, local + 6)[0])
+        except Exception:
+            flags = 0
+        if not (flags & 0x08):
+            continue
+        start = int(info.get("payload_offset", 0) or 0) + int(info.get("compressed_size", 0) or 0)
+        if start < 0 or start + 12 > len(data):
+            continue
+        if data[start:start + 4] == b"PK\x07\x08" and start + 16 <= len(data):
+            candidates.append({"record": start, "crc": start + 4, "size": start + 8})
+        else:
+            candidates.append({"record": start, "crc": start, "size": start + 4})
+    return dict(randomizer.choice(candidates)) if candidates else {}
+
+
+def _zip_single_zip64_field_mutation(data: bytes, randomizer: random.Random, field: str) -> list[BinaryMutation]:
+    if field in {"zip64.extra_length", "zip64.uncompressed_size"}:
+        extra = _zip64_extra_offsets(data)
+        if not extra:
+            return []
+        if field == "zip64.extra_length":
+            size = extra["size"]
+            return [_replace_bytes("single_field_zip64_extra_length", extra["size_offset"], struct.pack("<H", max(0, size - 1)), "zip.extra.zip64.length", "single-field ZIP64 extra length")]
+        return [_replace_bytes("single_field_zip64_uncompressed_size", extra["data_offset"], struct.pack("<Q", randomizer.randrange(1, 4096)), "zip.extra.zip64.uncompressed_size", "single-field ZIP64 uncompressed size")]
+    if field == "zip64.locator":
+        locator = data.rfind(b"PK\x06\x07")
+        if locator >= 0 and locator + 20 <= len(data):
+            return [_replace_bytes("single_field_zip64_locator", locator + 8, struct.pack("<Q", 0), "zip.zip64.locator", "single-field ZIP64 locator offset")]
+    return []
+
+
+def _zip64_extra_offsets(data: bytes) -> dict[str, int]:
+    offset = data.find(b"\x01\x00")
+    while offset >= 0 and offset + 4 <= len(data):
+        try:
+            size = int(struct.unpack_from("<H", data, offset + 2)[0])
+        except Exception:
+            size = 0
+        if 8 <= size <= 32 and offset + 4 + size <= len(data):
+            return {"header": offset, "size_offset": offset + 2, "data_offset": offset + 4, "size": size}
+        offset = data.find(b"\x01\x00", offset + 1)
+    return {}
+
+
+def _single_field_damage_flags(field: str) -> list[str]:
+    zone = field.split(".", 1)[0]
+    flags = ["single_field_root_cause", f"single_field:{field}"]
+    if zone == "zip64":
+        flags.append("zip64_metadata")
+    if zone == "data_descriptor":
+        flags.append("metadata_semantics_conflict")
+    if zone == "split_volume":
+        flags.extend(["missing_volume", "input_truncated"])
+    if zone == "sfx_prefix":
+        flags.extend(["trailing_junk", "boundary_unreliable"])
+    return flags
 
 
 def _zip_eocd_count_mutations(eocd: int, *, count_delta: int) -> list[BinaryMutation]:

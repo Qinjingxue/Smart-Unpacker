@@ -83,3 +83,8 @@ struct Zip64Locator {
     total_disks: u32,
 }
 
+#[derive(Clone, Copy)]
+struct DataDescriptorRecord {
+    crc32: u32,
+}
+

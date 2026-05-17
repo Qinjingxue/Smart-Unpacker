@@ -148,6 +148,7 @@ def collect_damage_row(
     knowledge_payload, observation = observe_damage_runtime(job, workspace=workspace / "runtime", config=config)
     if target.format == "zip":
         target_payload = apply_zip_observability(target_payload, knowledge_payload)
+    target_payload = _enforce_single_field_target(record, target_payload)
     source_input = dict(record.get("damaged_input") or {})
     return {
         "schema_version": SCHEMA_VERSION,
@@ -457,6 +458,37 @@ def _location_target(raw_target: dict[str, Any]) -> dict[str, Any]:
             "label_source": "corruptor",
         },
     }
+
+
+def _enforce_single_field_target(record: dict[str, Any], target_payload: dict[str, Any]) -> dict[str, Any]:
+    field = str(record.get("single_field_root") or "")
+    if not field:
+        return target_payload
+    field_label = f"field:{field}"
+    zone = _single_field_zone(field)
+    zone_label = f"zone:{zone}" if zone else ""
+    labels = set(str(item) for item in target_payload.get("damage_labels") or [] if str(item))
+    labels.add(field_label)
+    if zone_label:
+        labels.add(zone_label)
+    target_payload = dict(target_payload)
+    target_payload["damage_labels"] = sorted(labels)
+    target_payload["labels"] = [
+        {"label": label, "zone": {"kind": label.split(":", 1)[0], "path": label.split(":", 1)[1]}}
+        for label in sorted(labels)
+    ]
+    metadata = dict(target_payload.get("metadata") or {})
+    metadata["single_field_root"] = field
+    target_payload["metadata"] = metadata
+    return target_payload
+
+
+def _single_field_zone(field: str) -> str:
+    if field.startswith("sfx_prefix."):
+        return "sfx_prefix"
+    if field.startswith("split_volume."):
+        return "split_volume"
+    return field.split(".", 1)[0] if "." in field else ""
 
 
 def _summary(rows: list[dict[str, Any]], failures: list[dict[str, Any]], *, elapsed: float) -> dict[str, Any]:

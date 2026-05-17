@@ -479,6 +479,7 @@ def _field_label(zone: dict[str, Any]) -> str:
         ("eocd.entry_count_total", "eocd.entry_count"),
         ("eocd.entry_count_disk", "eocd.entry_count"),
         ("eocd.cd_offset", "eocd.cd_offset"),
+        ("eocd.cd_size", "eocd.cd_size"),
         ("eocd.comment_length", "eocd.comment_length"),
         ("eocd.comment", "eocd.comment"),
         ("central_directory.local_header_offset", "central_directory.local_header_offset"),

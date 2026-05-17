@@ -37,6 +37,7 @@ ZIP_FIELD_LABELS = (
     "eocd.comment",
     "eocd.comment_length",
     "eocd.cd_offset",
+    "eocd.cd_size",
     "eocd.entry_count",
     "central_directory.header",
     "central_directory.flags",

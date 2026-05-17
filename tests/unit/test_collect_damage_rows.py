@@ -276,6 +276,38 @@ def test_collect_damage_row_uses_location_only_targets(monkeypatch, tmp_path):
     assert not called_candidates
 
 
+def test_collect_damage_row_preserves_single_field_root_after_observability(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "repair_training.collect_damage_rows.observe_damage_runtime",
+        lambda job, *, workspace, config=None: (
+            {
+                "analysis": {"summary": {"format": "zip", "confidence": 1.0}},
+                "format": {"zip": {"structure": {"graph": {"summary": {"cd_entries_checked": 0}}}}},
+                "extraction": {"failure": {"failure_kind": "bad"}},
+                "verification": {"summary": {"completeness": 0.0}},
+            },
+            {"state_digest": "digest", "patch_depth": 0},
+        ),
+    )
+    damaged = tmp_path / "bad.zip"
+    damaged.write_bytes(b"PK\x03\x04bad")
+
+    row = collect_damage_row(
+        {
+            "sample_id": "single",
+            "format": "zip",
+            "single_field_root": "local_header.crc",
+            "damaged_input": {"kind": "file", "path": str(damaged), "format_hint": "zip"},
+            "corruption_plan": [{"zone": "zip.local_header.crc", "offset": 1, "size": 4}],
+        },
+        workspace=tmp_path / "workspace-single",
+    )
+
+    labels = set(row["damage_analysis_target"]["damage_labels"])
+    assert "field:local_header.crc" in labels
+    assert "zone:local_header" in labels
+
+
 def test_damage_rows_build_features_location_only(monkeypatch, tmp_path):
     monkeypatch.setattr(
         "repair_training.collect_damage_rows.observe_damage_runtime",
