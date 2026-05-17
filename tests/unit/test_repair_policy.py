@@ -226,6 +226,116 @@ def test_policy_loop_excludes_file_only_candidates_from_model_selection(tmp_path
     assert modules == ["patch_one"]
 
 
+def test_policy_loop_materializes_only_selected_lazy_proposal(tmp_path, monkeypatch):
+    provider = _DualValueProvider(["expand_edge:patch_one", "stop_signal"], value=0.7)
+    _install_policy_package(monkeypatch, "sunpack_policy_test_dual_lazy_expand", provider)
+    source = tmp_path / "source.zip"
+    source.write_bytes(b"broken")
+    calls = {"patch_one": 0, "patch_alt": 0}
+
+    def lazy_candidate(module: str, replacement: bytes) -> RepairCandidate:
+        def materialize():
+            calls[module] += 1
+            return _patch_candidate(module, source, replacement)
+
+        return RepairCandidate(
+            module_name=module,
+            format="zip",
+            confidence=0.8,
+            actions=["plan_repair", module],
+            materializer=materialize,
+            materialized=False,
+            diagnosis={"repair_name": module},
+        )
+
+    monkeypatch.setattr(
+        "sunpack.repair.scheduler.RecoveryEvaluator.evaluate_state",
+        lambda self, job, state, **kwargs: PolicyRecoverySnapshot(
+            state_digest=state.effective_patch_digest() if state is not None else "",
+            patch_depth=state.patch_depth() if state is not None else 0,
+            score=0.4 if state is not None and state.patch_depth() > 0 else 0.0,
+            status="partial" if state is not None and state.patch_depth() > 0 else "empty",
+        ),
+    )
+    scheduler = RepairScheduler({
+        "repair": {
+            "workspace": str(tmp_path / "repair"),
+            "policy": {"provider_package": "sunpack_policy_test_dual_lazy_expand"},
+            "max_repair_rounds_per_task": 3,
+        }
+    })
+    scheduler.generate_policy_repair_candidates = lambda job, **kwargs: RepairCandidateBatch(  # type: ignore[method-assign]
+        candidates=[] if job.attempts else [lazy_candidate("patch_one", b"fixed"), lazy_candidate("patch_alt", b"alt")],
+        diagnosis={"format": "zip", "confidence": 0.5},
+    )
+
+    result = scheduler.repair(_job(tmp_path))
+
+    assert result.repaired_state is not None
+    assert result.repaired_state.patch_depth() == 1
+    assert calls == {"patch_one": 1, "patch_alt": 0}
+    payloads = provider.choose_requests[0].candidate_payloads
+    assert {payload["module_name"] for payload in payloads} == {"patch_one", "patch_alt"}
+    assert all(payload["lazy"] is True for payload in payloads)
+    assert all(payload["has_archive_state_plan"] is False for payload in payloads)
+
+
+def test_policy_loop_failed_lazy_materialization_exhausts_edge_and_continues(tmp_path, monkeypatch):
+    provider = _DualValueProvider(["expand_edge:bad_lazy", "expand_edge:patch_alt", "stop_signal"], value=0.7)
+    _install_policy_package(monkeypatch, "sunpack_policy_test_dual_lazy_failed_expand", provider)
+    source = tmp_path / "source.zip"
+    source.write_bytes(b"broken")
+
+    bad = RepairCandidate(
+        module_name="bad_lazy",
+        format="zip",
+        confidence=0.9,
+        actions=["plan_repair", "bad_lazy"],
+        materializer=lambda: [],
+        materialized=False,
+        diagnosis={"repair_name": "bad_lazy"},
+    )
+    good = RepairCandidate(
+        module_name="patch_alt",
+        format="zip",
+        confidence=0.8,
+        actions=["plan_repair", "patch_alt"],
+        materializer=lambda: _patch_candidate("patch_alt", source, b"alt"),
+        materialized=False,
+        diagnosis={"repair_name": "patch_alt"},
+    )
+
+    monkeypatch.setattr(
+        "sunpack.repair.scheduler.RecoveryEvaluator.evaluate_state",
+        lambda self, job, state, **kwargs: PolicyRecoverySnapshot(
+            state_digest=state.effective_patch_digest() if state is not None else "",
+            patch_depth=state.patch_depth() if state is not None else 0,
+            score=0.5 if state is not None and state.patch_depth() > 0 else 0.0,
+            status="partial" if state is not None and state.patch_depth() > 0 else "empty",
+        ),
+    )
+    scheduler = RepairScheduler({
+        "repair": {
+            "workspace": str(tmp_path / "repair"),
+            "policy": {"provider_package": "sunpack_policy_test_dual_lazy_failed_expand"},
+            "max_repair_rounds_per_task": 3,
+        }
+    })
+    scheduler.generate_policy_repair_candidates = lambda job, **kwargs: RepairCandidateBatch(  # type: ignore[method-assign]
+        candidates=[bad, good] if not job.attempts else [],
+        diagnosis={"format": "zip", "confidence": 0.5},
+    )
+
+    result = scheduler.repair(_job(tmp_path))
+
+    loop = result.diagnosis["policy_loop"]
+    assert result.repaired_state is not None
+    assert result.repaired_state.patch_depth() == 1
+    assert loop["graph_summary"]["edge_status_counts"]["failed_materialization"] == 1
+    assert loop["graph_summary"]["edge_status_counts"]["expanded"] == 1
+    assert "policy selected a proposal that did not materialize to repaired_state" in result.warnings
+
+
 def test_dual_policy_loop_apply_then_undo_checkouts_parent_without_dropping_best(tmp_path, monkeypatch):
     _install_policy_package(monkeypatch, "sunpack_policy_test_dual_checkout", _DualProvider(["expand_edge:patch_one", "checkout_node", "checkout_node"]))
     source = tmp_path / "source.zip"
@@ -792,6 +902,9 @@ class _DualProvider:
             for payload in request.candidate_payloads:
                 if module in {payload.get("module_name"), payload.get("module")}:
                     return {"graph_action_priors": [{"action_type": action, "candidate_id": payload["candidate_id"], "prior_score": 1.0, "confidence": 1.0}]}
+            for edge in request.frontier:
+                if module == edge.get("module_name"):
+                    return {"graph_action_priors": [{"action_type": action, "candidate_id": edge["candidate_id"], "edge_id": edge["edge_id"], "prior_score": 1.0, "confidence": 1.0}]}
             return {"graph_action_priors": [{"action_type": "exhaust_branch", "prior_score": 1.0, "reason": "missing_scripted_candidate"}]}
         if action == "checkout_node":
             graph = request.graph if isinstance(request.graph, dict) else {}

@@ -9,7 +9,7 @@ from typing import Any
 from sunpack.contracts.archive_state import ArchiveState
 from sunpack.contracts.detection import FactBag
 from sunpack.contracts.tasks import ArchiveTask
-from sunpack.repair.candidate import CandidateSelector, CandidateValidation, RepairCandidate, RepairCandidateBatch, candidate_feature_payload, materialize_candidates
+from sunpack.repair.candidate import CandidateSelector, CandidateValidation, RepairCandidate, RepairCandidateBatch, candidate_feature_payload, materialize_candidate, materialize_candidates
 from sunpack.repair.capability import ModuleCapabilityDecision, RepairCapabilityDecision
 from sunpack.repair.config import enabled_module_configs, repair_config
 from sunpack.repair.context import RepairContext, build_repair_context
@@ -217,6 +217,7 @@ class RepairScheduler:
         recovery_cache: dict[str, PolicyRecoverySnapshot] = {}
         best_recovery_cache: dict[str, PolicyRecoverySnapshot] = {}
         state_value_cache: dict[str, dict[str, Any]] = {}
+        proposal_cache: dict[str, RepairCandidate] = {}
         current_recovery = recovery_evaluator.evaluate_state(current_job, current_state, mode="policy_light")
         current_best_recovery = _evaluate_policy_best_state_recovery(
             recovery_evaluator,
@@ -353,8 +354,7 @@ class RepairScheduler:
             diagnosis_payload = dict(batch.diagnosis or diagnosis_payload)
             if batch.terminal_result is not None and not batch.candidates:
                 warnings.extend(batch.warnings)
-            materialized = materialize_candidates(batch.candidates)
-            selectable = [candidate for candidate in materialized if _policy_candidate_available(candidate)]
+            selectable = [candidate for candidate in batch.candidates if _policy_candidate_available(candidate)]
             candidate_payloads = [
                 _policy_candidate_snapshot_with_damage(
                     current_job,
@@ -390,6 +390,10 @@ class RepairScheduler:
                 candidate_payloads=candidate_payloads,
                 round_index=round_index,
             )
+            for candidate, payload in zip(selectable, candidate_payloads):
+                candidate_id = str(payload.get("candidate_id") or "")
+                if candidate_id:
+                    proposal_cache[_policy_graph_edge_id(current_node.node_id, candidate_id)] = candidate
             action_priors, action_selection = self.policy_manager.choose_graph_priors(
                 job=current_job,
                 archive_state=current_state,
@@ -440,6 +444,7 @@ class RepairScheduler:
                 "state_value_result": state_value,
                 "value_gap": float(state_value.get("reachable_recovery_value") or 0.0) - float(current_recovery.score or 0.0),
                 "candidate_count": len(selectable),
+                "proposal_count": len(selectable),
                 "candidates": candidate_payloads,
                 "graph_summary": graph.summary(),
             }
@@ -544,16 +549,38 @@ class RepairScheduler:
 
             edge_id = str(graph_action.metadata.get("edge_id") or _policy_graph_edge_id(current_node.node_id, graph_action.candidate_id))
             edge = graph.edges.get(edge_id)
-            selected = _candidate_by_id(selectable, candidate_payloads, graph_action.candidate_id)
+            selected = _candidate_by_id(selectable, candidate_payloads, graph_action.candidate_id) or proposal_cache.get(edge_id)
             if edge is None or selected is None:
                 if edge is not None:
                     edge.status = "failed"
                     _policy_graph_remove_frontier(graph, edge.edge_id)
                 warnings.append("policy selected a missing graph repair candidate")
                 continue
-            next_state = selected.repaired_state
+            materialized = materialize_candidate(selected)
+            materialized_candidates = [candidate for candidate in materialized if candidate.repaired_state is not None]
+            selected_materialized = _policy_select_materialized_candidate(materialized_candidates)
+            if selected_materialized is None:
+                edge.status = "failed_materialization"
+                edge.action_prior = {
+                    **dict(edge.action_prior or {}),
+                    "materialization_failed": True,
+                    "materialization_errors": _policy_materialization_errors(materialized),
+                    "materialized_candidate_count": len(materialized),
+                    "patch_state_candidate_count": 0,
+                }
+                _policy_graph_remove_frontier(graph, edge.edge_id)
+                current_node.expanded_candidate_ids.add(edge.candidate_id)
+                warnings.append("policy selected a proposal that did not materialize to repaired_state")
+                continue
+            edge.action_prior = {
+                **dict(edge.action_prior or {}),
+                "materialized_candidate_count": len(materialized),
+                "patch_state_candidate_count": len(materialized_candidates),
+                "materialized_module_name": selected_materialized.module_name,
+            }
+            next_state = selected_materialized.repaired_state
             if next_state is None:
-                edge.status = "failed"
+                edge.status = "failed_materialization"
                 _policy_graph_remove_frontier(graph, edge.edge_id)
                 warnings.append("policy selected a candidate without repaired_state")
                 continue
@@ -1899,8 +1926,33 @@ def _policy_candidate_snapshot_with_damage(
 
 def _policy_candidate_available(candidate: RepairCandidate) -> bool:
     if candidate.is_lazy:
-        return False
+        return True
     return candidate.repaired_state is not None
+
+
+def _policy_select_materialized_candidate(candidates: list[RepairCandidate]) -> RepairCandidate | None:
+    if not candidates:
+        return None
+    return max(
+        candidates,
+        key=lambda candidate: (
+            float(candidate.score_hint or 0.0),
+            float(candidate.confidence or 0.0),
+            0 if candidate.partial else 1,
+        ),
+    )
+
+
+def _policy_materialization_errors(candidates: list[RepairCandidate]) -> list[str]:
+    errors: list[str] = []
+    for candidate in candidates:
+        diagnosis = candidate.diagnosis if isinstance(candidate.diagnosis, dict) else {}
+        error = str(diagnosis.get("materialization_error") or "")
+        if error:
+            errors.append(error)
+            continue
+        errors.extend(str(item) for item in candidate.warnings or [] if str(item))
+    return _dedupe(errors)
 
 
 def _policy_graph_node_id(patch_digest: str, index: int) -> str:
@@ -2339,6 +2391,7 @@ def _lazy_module_candidate(
                 {
                     "module_config": module_config,
                     "virtual_patch_candidate": True,
+                    "materialization_semantics": "graph_patch_state_v2",
                     "score_hint": round(float(score_hint or 0.0), 8),
                 },
             ),

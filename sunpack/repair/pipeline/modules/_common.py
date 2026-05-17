@@ -70,7 +70,9 @@ def load_source_bytes(source_input: dict[str, Any]) -> bytes:
 
 def source_input_for_job(job: RepairJob) -> dict[str, Any]:
     if job.archive_state is None or not job.archive_state.patches:
-        base = dict(job.source_input)
+        base = dict(job.source_input or {})
+        if not base and job.archive_state is not None:
+            base = job.archive_state.source.to_archive_input_descriptor().to_source_input()
     else:
         digest = job.archive_state.effective_patch_digest()
         cache = getattr(job, "repair_cache", None)
@@ -312,7 +314,7 @@ def job_source_size(job: RepairJob) -> int | None:
             return int(ArchiveStateByteView(job.archive_state).size)
         except (OSError, ValueError):
             return None
-    return source_input_size(job.source_input)
+    return source_input_size(source_input_for_job(job))
 
 
 def base_archive_state_for_job(job: RepairJob) -> ArchiveState:

@@ -61,6 +61,23 @@ def test_archive_state_patch_contract_v2_round_trips_and_push_pop(tmp_path):
     assert root.pop_patch().effective_patch_digest() == root.effective_patch_digest()
 
 
+def test_source_input_for_job_falls_back_to_root_archive_state_source(tmp_path):
+    source = tmp_path / "sample.zip"
+    source.write_bytes(b"PK\x05\x06" + b"\x00" * 18)
+    descriptor = ArchiveInputDescriptor.from_parts(archive_path=str(source), format_hint="zip")
+    state = ArchiveState.from_archive_input(descriptor)
+    job = RepairJob(
+        archive_key="sample.zip",
+        format="zip",
+        source_input={},
+        archive_state=state,
+    )
+
+    source_input = source_input_for_job(job)
+
+    assert source_input == {"kind": "file", "path": str(source), "format_hint": "zip"}
+
+
 def test_archive_state_byte_view_applies_replace_truncate_append(tmp_path):
     source = tmp_path / "sample.bin"
     source.write_bytes(b"abcdefjunk")

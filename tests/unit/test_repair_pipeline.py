@@ -131,6 +131,23 @@ def test_repair_runtime_cache_reuses_same_lazy_materialization(tmp_path):
     assert scheduler.repair_cache.stats()["by_namespace"]["materialize_candidate"]["hits"] == 1
 
 
+def test_lazy_materialization_failure_is_diagnostic():
+    candidate = RepairCandidate(
+        module_name="test_lazy_empty_module",
+        format="zip",
+        materializer=lambda: [],
+        materialized=False,
+        diagnosis={"repair_name": "test_lazy_empty_module"},
+    )
+
+    materialized = materialize_candidate(candidate)
+
+    assert len(materialized) == 1
+    assert materialized[0].diagnosis["materialization_failed"] is True
+    assert materialized[0].diagnosis["candidate_status"] == "materialization_failed"
+    assert "repair plan produced no candidate" in materialized[0].warnings
+
+
 def test_repair_operation_cache_key_changes_when_file_changes(tmp_path):
     source = tmp_path / "damaged.zip"
     source.write_bytes(b"one")

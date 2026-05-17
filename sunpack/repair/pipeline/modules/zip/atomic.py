@@ -114,6 +114,11 @@ class _ZipDirectoryFieldRepair:
         return score
 
     def repair(self, job: RepairJob, diagnosis: RepairDiagnosis, workspace: str, config: dict) -> RepairResult:
+        flags = set(job.damage_flags)
+        if flags & set(self.reject_flags):
+            return _unrepairable(self.module_name, diagnosis, "ZIP field repair rejected by current damage flags")
+        if self.require_flags and not (flags & set(self.require_flags)):
+            return _unrepairable(self.module_name, diagnosis, "ZIP field repair required evidence is missing")
         limits = module_limits(config)
         result = dict(_native_zip_directory_field_repair(
             source_input_for_job(job),

@@ -1028,10 +1028,17 @@ def _coerce_materialized_candidate(plan: RepairCandidate, item: Any) -> RepairCa
 
 
 def _materialization_failed(candidate: RepairCandidate, message: str) -> RepairCandidate:
+    diagnosis = dict(candidate.diagnosis)
+    diagnosis.update({
+        "materialization_failed": True,
+        "materialization_error": str(message or "repair plan produced no candidate"),
+        "candidate_status": "materialization_failed",
+    })
     return replace(
         candidate,
         materializer=None,
         materialized=True,
+        diagnosis=diagnosis,
         validations=[
             *candidate.validations,
             CandidateValidation(
