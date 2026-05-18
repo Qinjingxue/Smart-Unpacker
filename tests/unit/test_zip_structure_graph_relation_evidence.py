@@ -69,6 +69,59 @@ def test_zip_structure_graph_local_header_offset_target_evidence(tmp_path: Path)
     assert graph["summary"]["bad_local_header_target_signature_count"] >= 1
 
 
+def test_zip_structure_graph_local_header_signature_evidence(tmp_path: Path):
+    archive = _basic_zip(tmp_path)
+    _mutate_local_signature(archive)
+
+    graph = inspect_zip_structure_graph(str(archive), identity=("local-signature", archive.stat().st_size, archive.stat().st_mtime_ns))
+    relation = _first_relation(graph, "local_header_signature_mismatch")
+
+    assert relation["field"] == "local_header.signature"
+    assert relation["source_field"] == "central_directory.local_header_offset"
+    assert relation["target_field"] == "local_header.signature"
+    assert relation["likely_bad_side"] == "local_header.signature"
+    assert relation["offset_is_plausible"] is True
+    assert graph["summary"]["local_header_signature_mismatch_count"] >= 1
+
+
+def test_zip_structure_graph_payload_decode_failure_evidence(tmp_path: Path):
+    archive = _basic_zip(tmp_path)
+    _mutate_payload_byte(archive)
+
+    graph = inspect_zip_structure_graph(str(archive), identity=("payload", archive.stat().st_size, archive.stat().st_mtime_ns))
+    relation = _first_relation(graph, "payload_decode_failure")
+
+    assert relation["field"] == "payload.compressed_data"
+    assert relation["likely_bad_side"] == "payload.compressed_data"
+    assert graph["summary"]["payload_decode_failure_count"] >= 1
+
+
+def test_zip_structure_graph_local_header_crc_evidence(tmp_path: Path):
+    archive = _basic_zip(tmp_path)
+    _mutate_local_crc(archive)
+
+    graph = inspect_zip_structure_graph(str(archive), identity=("local-crc", archive.stat().st_size, archive.stat().st_mtime_ns))
+    relation = _first_relation(graph, "central_local_crc_mismatch")
+
+    assert relation["field"] == "local_header.crc"
+    assert relation["likely_bad_side"] == "local_header.crc"
+    assert relation["payload_matches_cd"] is True
+    assert graph["summary"]["local_header_crc_likely_bad_count"] >= 1
+
+
+def test_zip_structure_graph_extra_field_structure_evidence(tmp_path: Path):
+    archive = _basic_zip(tmp_path)
+    _add_truncated_local_extra(archive)
+
+    graph = inspect_zip_structure_graph(str(archive), identity=("extra", archive.stat().st_size, archive.stat().st_mtime_ns))
+    relation = _first_relation(graph, "extra_field_structure_mismatch")
+
+    assert relation["field"] == "generic_extra_field"
+    assert relation["likely_bad_side"] == "generic_extra_field"
+    assert relation["truncated"] is True
+    assert graph["summary"]["extra_field_structure_mismatch_count"] >= 1
+
+
 def test_zip_structure_graph_descriptor_crc_relation_evidence(tmp_path: Path):
     source = tmp_path / "src"
     source.mkdir()
@@ -156,6 +209,18 @@ def test_zip_structure_graph_non_bit3_cd_compressed_size_evidence(tmp_path: Path
     assert graph["summary"]["central_directory_compressed_size_likely_bad_count"] >= 1
 
 
+def test_zip_structure_graph_local_header_compressed_size_evidence(tmp_path: Path):
+    archive = _basic_zip(tmp_path)
+    _mutate_local_compressed_size(archive, delta=1)
+
+    graph = inspect_zip_structure_graph(str(archive), identity=("local-csize", archive.stat().st_size, archive.stat().st_mtime_ns))
+    relation = _first_relation(graph, "central_local_compressed_size_mismatch")
+
+    assert relation["field"] == "local_header.compressed_size"
+    assert relation["likely_bad_side"] == "local_header.compressed_size"
+    assert graph["summary"]["local_header_compressed_size_likely_bad_count"] >= 1
+
+
 def test_zip_structure_graph_eocd_cd_size_not_split_evidence(tmp_path: Path):
     archive = _basic_zip(tmp_path)
     _mutate_eocd_cd_size(archive, delta=7)
@@ -167,6 +232,18 @@ def test_zip_structure_graph_eocd_cd_size_not_split_evidence(tmp_path: Path):
     assert relation["likely_bad_side"] == "eocd.cd_size"
     assert graph["summary"]["eocd_cd_size_mismatch_count"] == 1
     assert graph["summary"]["split_volume_missing_range_evidence_count"] == 0
+
+
+def test_zip_structure_graph_eocd_entry_count_evidence(tmp_path: Path):
+    archive = _basic_zip(tmp_path)
+    _mutate_eocd_entry_count(archive, delta=2)
+
+    graph = inspect_zip_structure_graph(str(archive), identity=("eocd-entry-count", archive.stat().st_size, archive.stat().st_mtime_ns))
+    relation = _first_relation(graph, "eocd_entry_count_mismatch")
+
+    assert relation["field"] == "eocd.entry_count"
+    assert relation["likely_bad_side"] == "eocd.entry_count"
+    assert graph["summary"]["eocd_entry_count_mismatch_count"] == 1
 
 
 def _basic_zip(tmp_path: Path) -> Path:
@@ -222,10 +299,61 @@ def _mutate_cd_crc(path: Path) -> None:
     path.write_bytes(bytes(payload))
 
 
+def _mutate_local_crc(path: Path) -> None:
+    data, entries = _entries(path)
+    payload = bytearray(data)
+    offset = entries[0].local_header_offset + 14
+    crc = struct.unpack_from("<I", payload, offset)[0]
+    struct.pack_into("<I", payload, offset, crc ^ 0x5A5A5A5A)
+    path.write_bytes(bytes(payload))
+
+
+def _mutate_local_signature(path: Path) -> None:
+    data, entries = _entries(path)
+    payload = bytearray(data)
+    payload[entries[0].local_header_offset] ^= 0x20
+    path.write_bytes(bytes(payload))
+
+
+def _mutate_payload_byte(path: Path) -> None:
+    data, entries = _entries(path)
+    payload = bytearray(data)
+    local_offset = entries[0].local_header_offset
+    name_len = struct.unpack_from("<H", payload, local_offset + 26)[0]
+    extra_len = struct.unpack_from("<H", payload, local_offset + 28)[0]
+    data_start = local_offset + 30 + name_len + extra_len
+    payload[data_start] ^= 0xFF
+    path.write_bytes(bytes(payload))
+
+
+def _add_truncated_local_extra(path: Path) -> None:
+    data, entries = _entries(path)
+    payload = bytearray(data)
+    local_offset = entries[0].local_header_offset
+    name_len = struct.unpack_from("<H", payload, local_offset + 26)[0]
+    extra_len = struct.unpack_from("<H", payload, local_offset + 28)[0]
+    extra_start = local_offset + 30 + name_len
+    payload[local_offset + 28 : local_offset + 30] = struct.pack("<H", extra_len + 5)
+    payload[extra_start:extra_start] = b"\xfe\xca\x08\x00x"
+    eocd = find_eocd(bytes(payload))
+    assert eocd is not None
+    struct.pack_into("<I", payload, eocd.offset + 16, eocd.cd_offset + 5)
+    path.write_bytes(bytes(payload))
+
+
 def _mutate_cd_compressed_size(path: Path, *, delta: int) -> None:
     data, entries = _entries(path)
     payload = bytearray(data)
     offset = entries[0].offset + 20
+    size = struct.unpack_from("<I", payload, offset)[0]
+    struct.pack_into("<I", payload, offset, size + delta)
+    path.write_bytes(bytes(payload))
+
+
+def _mutate_local_compressed_size(path: Path, *, delta: int) -> None:
+    data, entries = _entries(path)
+    payload = bytearray(data)
+    offset = entries[0].local_header_offset + 18
     size = struct.unpack_from("<I", payload, offset)[0]
     struct.pack_into("<I", payload, offset, size + delta)
     path.write_bytes(bytes(payload))
@@ -238,6 +366,19 @@ def _mutate_eocd_cd_size(path: Path, *, delta: int) -> None:
     size_offset = eocd.offset + 12
     size = struct.unpack_from("<I", payload, size_offset)[0]
     struct.pack_into("<I", payload, size_offset, size + delta)
+    path.write_bytes(bytes(payload))
+
+
+def _mutate_eocd_entry_count(path: Path, *, delta: int) -> None:
+    payload = bytearray(path.read_bytes())
+    eocd = find_eocd(bytes(payload))
+    assert eocd is not None
+    disk_count_offset = eocd.offset + 8
+    total_count_offset = eocd.offset + 10
+    disk_count = struct.unpack_from("<H", payload, disk_count_offset)[0]
+    total_count = struct.unpack_from("<H", payload, total_count_offset)[0]
+    struct.pack_into("<H", payload, disk_count_offset, disk_count + delta)
+    struct.pack_into("<H", payload, total_count_offset, total_count + delta)
     path.write_bytes(bytes(payload))
 
 

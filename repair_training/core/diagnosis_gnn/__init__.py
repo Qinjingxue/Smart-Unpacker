@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-DIAGNOSIS_GNN_SEMANTICS = "root_cause_v1"
+from repair_training.core.diagnosis_gnn.root_cases import ROOT_CASE_SEMANTICS
+
+DIAGNOSIS_GNN_SEMANTICS = ROOT_CASE_SEMANTICS
 DIAGNOSIS_GNN_ALGORITHM = "hetero_graphsage"
 
 __all__ = ["DIAGNOSIS_GNN_ALGORITHM", "DIAGNOSIS_GNN_SEMANTICS"]

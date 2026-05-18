@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from repair_training.core.diagnosis_gnn.tensorize import NODE_FEATURE_DIM, THEORY_DEPENDS_EDGE_TYPE, require_pyg
+from repair_training.core.diagnosis_gnn.root_cases import ROOT_CASES
 
 try:  # Keep the package importable when optional GNN deps are absent.
     import torch.nn as _torch_nn
@@ -76,6 +77,12 @@ class _DiagnosisBase(_BASE_MODULE):
         import torch.nn as nn
         from torch_geometric.nn import Linear
 
+        self.root_case_head = nn.Sequential(
+            Linear(hidden_dim * 3, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(float(dropout)),
+            Linear(hidden_dim, len(ROOT_CASES)),
+        )
         self.cause_head = Linear(hidden_dim, 1)
         self.theory_head = Linear(hidden_dim, 1)
         self.theory_edge_head = nn.Sequential(
@@ -95,6 +102,29 @@ class _DiagnosisBase(_BASE_MODULE):
         source = x_dict["theory"][edge_index[0]]
         target = x_dict["theory"][edge_index[1]]
         return self.theory_edge_head(torch.cat([source, target], dim=-1)).view(-1)
+
+    def _score_root_cases(self, x_dict, batch_dict=None):
+        import torch
+
+        pooled = []
+        graph_count = 1
+        if batch_dict:
+            graph_count = max((int(batch.max().item()) + 1 for batch in batch_dict.values() if batch.numel()), default=1)
+        for node_type in ("observation", "theory", "cause"):
+            x = x_dict.get(node_type)
+            if x is None:
+                pooled.append(torch.zeros((graph_count, self.hidden_dim), device=next(self.parameters()).device))
+                continue
+            if batch_dict and node_type in batch_dict:
+                batch = batch_dict[node_type].to(x.device)
+                output = torch.zeros((graph_count, x.shape[-1]), device=x.device)
+                counts = torch.zeros((graph_count, 1), device=x.device)
+                output.index_add_(0, batch, x)
+                counts.index_add_(0, batch, torch.ones((x.shape[0], 1), device=x.device))
+                pooled.append(output / counts.clamp(min=1.0))
+            else:
+                pooled.append(x.mean(dim=0, keepdim=True))
+        return self.root_case_head(torch.cat(pooled, dim=-1))
 
 
 class DiagnosisHeteroGraphSAGE(_DiagnosisBase):
@@ -128,7 +158,7 @@ class DiagnosisHeteroGraphSAGE(_DiagnosisBase):
             self.convs.append(HeteroConv(convs, aggr="sum"))
         self._init_common_heads(self.hidden_dim, self.dropout)
 
-    def forward(self, x_dict, edge_index_dict):
+    def forward(self, x_dict, edge_index_dict, batch_dict=None):
         x_dict = {
             node_type: self.activation(self.node_encoders[node_type](x))
             for node_type, x in x_dict.items()
@@ -140,10 +170,11 @@ class DiagnosisHeteroGraphSAGE(_DiagnosisBase):
                 node_type: self.dropout_layer(self.activation(out.get(node_type, x)))
                 for node_type, x in x_dict.items()
             }
+        root_case_logits = self._score_root_cases(x_dict, batch_dict)
         cause_logits = self.cause_head(x_dict["cause"]).view(-1)
         theory_logits = self.theory_head(x_dict["theory"]).view(-1)
         theory_edge_logits = self._score_theory_edges(x_dict, edge_index_dict)
-        return {"cause": cause_logits, "theory": theory_logits, "theory_edge": theory_edge_logits}
+        return {"root_case": root_case_logits, "cause": cause_logits, "theory": theory_logits, "theory_edge": theory_edge_logits}
 
 
 class DiagnosisRGCN(_DiagnosisBase):
@@ -183,7 +214,7 @@ class DiagnosisRGCN(_DiagnosisBase):
         ])
         self._init_common_heads(self.hidden_dim, self.dropout)
 
-    def forward(self, x_dict, edge_index_dict):
+    def forward(self, x_dict, edge_index_dict, batch_dict=None):
         import torch
 
         encoded = {
@@ -225,10 +256,11 @@ class DiagnosisRGCN(_DiagnosisBase):
             node_type: x[offsets[node_type]: offsets[node_type] + sizes[node_type]]
             for node_type in node_order
         }
+        root_case_logits = self._score_root_cases(out_dict, batch_dict)
         cause_logits = self.cause_head(out_dict["cause"]).view(-1)
         theory_logits = self.theory_head(out_dict["theory"]).view(-1)
         theory_edge_logits = self._score_theory_edges(out_dict, edge_index_dict)
-        return {"cause": cause_logits, "theory": theory_logits, "theory_edge": theory_edge_logits}
+        return {"root_case": root_case_logits, "cause": cause_logits, "theory": theory_logits, "theory_edge": theory_edge_logits}
 
 
 class DiagnosisHGT(_DiagnosisBase):
@@ -272,7 +304,7 @@ class DiagnosisHGT(_DiagnosisBase):
             self.norms = nn.ModuleList()
         self._init_common_heads(self.hidden_dim, self.dropout)
 
-    def forward(self, x_dict, edge_index_dict):
+    def forward(self, x_dict, edge_index_dict, batch_dict=None):
         x_dict = {
             node_type: self.activation(self.node_encoders[node_type](x))
             for node_type, x in x_dict.items()
@@ -291,7 +323,8 @@ class DiagnosisHGT(_DiagnosisBase):
                     value = self.norms[index][node_type](value)
                 next_dict[node_type] = self.dropout_layer(value)
             x_dict = next_dict
+        root_case_logits = self._score_root_cases(x_dict, batch_dict)
         cause_logits = self.cause_head(x_dict["cause"]).view(-1)
         theory_logits = self.theory_head(x_dict["theory"]).view(-1)
         theory_edge_logits = self._score_theory_edges(x_dict, edge_index_dict)
-        return {"cause": cause_logits, "theory": theory_logits, "theory_edge": theory_edge_logits}
+        return {"root_case": root_case_logits, "cause": cause_logits, "theory": theory_logits, "theory_edge": theory_edge_logits}

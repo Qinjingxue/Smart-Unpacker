@@ -16,6 +16,7 @@ from repair_training.core.diagnosis_gnn.metrics import (
     multilabel_set_metrics,
 )
 from repair_training.core.diagnosis_gnn.model import build_diagnosis_gnn_model, normalize_diagnosis_gnn_arch
+from repair_training.core.diagnosis_gnn.root_cases import ROOT_CASES
 from repair_training.core.diagnosis_gnn.tensorize import (
     THEORY_DEPENDS_EDGE_TYPE,
     metadata_for_sample,
@@ -43,11 +44,16 @@ DEFAULT_CONFIG = {
     "amp": False,
     "loss": "bce",
     "focal_gamma": 2.0,
+    "asym_gamma_pos": 1.0,
+    "asym_gamma_neg": 3.0,
+    "rank_loss_weight": 0.0,
+    "rank_loss_top_negatives": 8,
     "pos_weight_max": 8.0,
     "sample_weighting": "multi_field_root_count",
+    "score_normalization": "raw",
 }
 
-TENSOR_CACHE_VERSION = "diagnosis_gnn_tensor_cache_v1"
+TENSOR_CACHE_VERSION = "diagnosis_gnn_tensor_cache_root_case_v1"
 
 
 def train_diagnosis_gnn_model(
@@ -122,12 +128,14 @@ def train_diagnosis_gnn_model(
             batch = batch.to(resolved_device)
             optimizer.zero_grad()
             with _autocast_context(resolved_device, amp_enabled):
-                out = model(batch.x_dict, batch.edge_index_dict)
-                cause_loss = _cause_loss(out, batch, F, config=config, pos_weight=cause_pos_weight)
+                out = model(batch.x_dict, batch.edge_index_dict, _batch_dict(batch))
+                cause_loss = _root_case_loss(out, batch, F, config=config, pos_weight=cause_pos_weight)
+                rank_loss = _set_rank_loss(out, batch, config=config)
                 theory_loss = _theory_loss(out, batch, F)
                 edge_loss = _theory_edge_loss(out, batch, F)
                 loss = (
                     cause_loss
+                    + float(config.get("rank_loss_weight", 0.0) or 0.0) * rank_loss
                     + float(config["aux_loss_weight"]) * theory_loss
                     + float(config["edge_loss_weight"]) * edge_loss
                 )
@@ -171,7 +179,7 @@ def train_diagnosis_gnn_model(
     train_pred = _predict_score_rows(model, train_data, resolved_device)
     valid_pred = _predict_score_rows(model, valid_data, resolved_device)
     test_pred = _predict_score_rows(model, test_data, resolved_device)
-    thresholds = _calibrate_thresholds(valid_pred or train_pred)
+    thresholds = _calibrate_thresholds(valid_pred or train_pred, label_names=_cause_label_names(samples))
     metrics = {
         "train": _metrics_from_predictions(train_pred, thresholds=thresholds),
         "valid": _metrics_from_predictions(valid_pred, thresholds=thresholds),
@@ -220,24 +228,38 @@ def _eval_loss(model, loader, device, F, *, aux_weight: float, edge_weight: floa
         for batch in loader:
             batch = batch.to(device)
             with _autocast_context(device, amp_enabled):
-                out = model(batch.x_dict, batch.edge_index_dict)
-                cause_loss = _cause_loss(out, batch, F, config=config, pos_weight=cause_pos_weight)
+                out = model(batch.x_dict, batch.edge_index_dict, _batch_dict(batch))
+                cause_loss = _root_case_loss(out, batch, F, config=config, pos_weight=cause_pos_weight)
+                rank_loss = _set_rank_loss(out, batch, config=config)
                 theory_loss = _theory_loss(out, batch, F)
                 edge_loss = _theory_edge_loss(out, batch, F)
-            total += float((cause_loss + aux_weight * theory_loss + edge_weight * edge_loss).detach().cpu())
+            total += float((
+                cause_loss
+                + float(config.get("rank_loss_weight", 0.0) or 0.0) * rank_loss
+                + aux_weight * theory_loss
+                + edge_weight * edge_loss
+            ).detach().cpu())
             batches += 1
     return total / max(1, batches)
 
 
-def _cause_loss(out: dict[str, Any], batch, F, *, config: dict[str, Any], pos_weight):
-    logits = out["cause"]
-    labels = batch["cause"].y.float()
+def _root_case_loss(out: dict[str, Any], batch, F, *, config: dict[str, Any], pos_weight):
+    logits = out["root_case"]
+    labels = batch.root_case_y.float().view_as(logits)
     loss_kind = str(config.get("loss") or "bce").lower()
-    weight = _node_sample_weights(batch, "cause")
+    weight = _graph_sample_weights(batch, logits)
     if loss_kind == "weighted_bce":
         element = F.binary_cross_entropy_with_logits(logits, labels, reduction="none", pos_weight=_expanded_pos_weight(pos_weight, labels))
     elif loss_kind == "focal":
         element = _focal_bce_with_logits(logits, labels, gamma=float(config.get("focal_gamma", 2.0)), pos_weight=_expanded_pos_weight(pos_weight, labels))
+    elif loss_kind == "asymmetric_focal":
+        element = _asymmetric_focal_bce_with_logits(
+            logits,
+            labels,
+            gamma_pos=float(config.get("asym_gamma_pos", 1.0)),
+            gamma_neg=float(config.get("asym_gamma_neg", 3.0)),
+            pos_weight=_expanded_pos_weight(pos_weight, labels),
+        )
     else:
         element = F.binary_cross_entropy_with_logits(logits, labels, reduction="none")
     if weight is not None and weight.numel() == element.numel():
@@ -257,10 +279,10 @@ def _theory_edge_loss(out: dict[str, Any], batch, F):
     try:
         labels = batch[THEORY_DEPENDS_EDGE_TYPE].edge_label.float()
     except Exception:
-        return out["cause"].sum() * 0.0
+        return out["root_case"].sum() * 0.0
     logits = out.get("theory_edge")
     if logits is None or logits.numel() == 0 or labels.numel() == 0:
-        return out["cause"].sum() * 0.0
+        return out["root_case"].sum() * 0.0
     element = F.binary_cross_entropy_with_logits(logits, labels, reduction="none")
     weight = _theory_edge_sample_weights(batch)
     if weight is not None and weight.numel() == element.numel():
@@ -278,9 +300,45 @@ def _focal_bce_with_logits(logits, labels, *, gamma: float, pos_weight):
     return bce * (1.0 - p_t).pow(float(gamma))
 
 
+def _asymmetric_focal_bce_with_logits(logits, labels, *, gamma_pos: float, gamma_neg: float, pos_weight):
+    import torch
+    import torch.nn.functional as F
+
+    bce = F.binary_cross_entropy_with_logits(logits, labels, reduction="none", pos_weight=_expanded_pos_weight(pos_weight, labels))
+    probability = torch.sigmoid(logits)
+    factors = labels * (1.0 - probability).pow(float(gamma_pos)) + (1.0 - labels) * probability.pow(float(gamma_neg))
+    return bce * factors
+
+
+def _set_rank_loss(out: dict[str, Any], batch, *, config: dict[str, Any]):
+    import torch
+    import torch.nn.functional as F
+
+    if float(config.get("rank_loss_weight", 0.0) or 0.0) <= 0.0:
+        return out["root_case"].sum() * 0.0
+    logits = out["root_case"]
+    labels = batch.root_case_y.float().view_as(logits)
+    top_negatives = max(1, int(config.get("rank_loss_top_negatives", 8) or 8))
+    losses = []
+    for graph_index in range(int(getattr(batch, "num_graphs", logits.shape[0]) or logits.shape[0])):
+        graph_logits = logits[graph_index]
+        graph_labels = labels[graph_index]
+        positives = graph_logits[graph_labels >= 0.5]
+        negatives = graph_logits[graph_labels < 0.5]
+        if positives.numel() == 0 or negatives.numel() == 0:
+            continue
+        hard_negatives = torch.topk(negatives, k=min(top_negatives, negatives.numel())).values
+        losses.append(F.softplus(hard_negatives.view(1, -1) - positives.view(-1, 1)).mean())
+    if not losses:
+        return logits.sum() * 0.0
+    return torch.stack(losses).mean()
+
+
 def _expanded_pos_weight(pos_weight, labels):
     if pos_weight is None or pos_weight.numel() == 0:
         return None
+    if labels.dim() >= 2 and pos_weight.numel() == labels.shape[-1]:
+        return pos_weight
     if pos_weight.numel() == labels.numel():
         return pos_weight
     if labels.numel() % pos_weight.numel() == 0:
@@ -294,7 +352,7 @@ def _pos_weight_from_dataset(dataset: list[Any], torch_module, *, max_value: flo
     rows = []
     for data in dataset:
         try:
-            rows.append(data["cause"].y.float())
+            rows.append(data.root_case_y.float())
         except Exception:
             pass
     if not rows:
@@ -305,6 +363,26 @@ def _pos_weight_from_dataset(dataset: list[Any], torch_module, *, max_value: flo
     weights = negatives / positives.clamp(min=1.0)
     weights = weights.clamp(min=1.0, max=float(max_value))
     return weights
+
+
+def _graph_sample_weights(batch, logits):
+    try:
+        graph_weight = batch.graph_weight.float().to(logits.device)
+    except Exception:
+        return None
+    if graph_weight.numel() == logits.shape[0]:
+        return graph_weight.view(-1, 1)
+    return None
+
+
+def _batch_dict(batch) -> dict[str, Any]:
+    output = {}
+    for node_type in batch.x_dict:
+        try:
+            output[node_type] = batch[node_type].batch
+        except Exception:
+            pass
+    return output
 
 
 def _node_sample_weights(batch, node_type: str):
@@ -343,7 +421,7 @@ def _attach_graph_weights(dataset: list[Any], samples: list[DiagnosisGraphSample
 def _sample_weight(sample: DiagnosisGraphSample, config: dict[str, Any]) -> float:
     if str(config.get("sample_weighting") or "").lower() in {"", "none", "false", "0"}:
         return 1.0
-    root_count = len([label for label in sample.labels.field_labels if str(label).startswith("field:")])
+    root_count = len(sample.labels.root_case_labels)
     return min(2.0, 1.0 + 0.12 * max(0, root_count - 1))
 
 
@@ -421,16 +499,15 @@ def _predict_score_rows(model, dataset, device) -> dict[str, Any]:
         loader = DataLoader(dataset, batch_size=32)
         for batch in loader:
             batch = batch.to(device)
-            out = model(batch.x_dict, batch.edge_index_dict)
-            cause_values = torch.sigmoid(out["cause"]).detach().cpu()
+            out = model(batch.x_dict, batch.edge_index_dict, _batch_dict(batch))
+            cause_values = torch.sigmoid(out["root_case"]).detach().cpu()
             theory_values = torch.sigmoid(out["theory"]).detach().cpu()
-            cause_batch = batch["cause"].batch.detach().cpu()
             theory_batch = batch["theory"].batch.detach().cpu()
             edge_values = torch.sigmoid(out["theory_edge"]).detach().cpu()
             edge_batch = _edge_batch_for_predictions(batch)
             for index in range(int(getattr(batch, "num_graphs", 1) or 1)):
-                scores.append(cause_values[cause_batch == index].tolist())
-                labels.append(batch["cause"].y.detach().cpu()[cause_batch == index].tolist())
+                scores.append(cause_values[index].tolist())
+                labels.append(batch.root_case_y.detach().cpu().view(cause_values.shape)[index].tolist())
                 theory_scores.append(theory_values[theory_batch == index].tolist())
                 theory_labels.append(batch["theory"].y_alignment.detach().cpu()[theory_batch == index].tolist())
                 if edge_batch is not None:
@@ -464,7 +541,7 @@ def _edge_batch_for_predictions(batch):
     return theory_batch[edge_index[0].detach().cpu()]
 
 
-def _calibrate_thresholds(predictions: dict[str, Any]) -> dict[str, Any]:
+def _calibrate_thresholds(predictions: dict[str, Any], *, label_names: list[str]) -> dict[str, Any]:
     cause = calibrate_global_threshold(predictions["cause_scores"], predictions["cause_labels"])
     theory = calibrate_global_threshold(predictions["theory_scores"], predictions["theory_labels"], max_clean_false_positive_rate=None)
     theory_edge = calibrate_global_threshold(
@@ -472,19 +549,37 @@ def _calibrate_thresholds(predictions: dict[str, Any]) -> dict[str, Any]:
         predictions.get("theory_edge_labels", []),
         max_clean_false_positive_rate=None,
     )
+    label_thresholds = _calibrate_label_thresholds(predictions["cause_scores"], predictions["cause_labels"], label_names)
     return {
         "selection_split": "valid",
-        "cause": cause,
+        "root_case": cause,
         "theory_alignment": theory,
         "theory_edge_alignment": theory_edge,
         "default_threshold": float(cause.get("threshold", 0.5)),
-        "field_threshold": float(cause.get("threshold", 0.5)),
-        "zone_threshold": float(cause.get("threshold", 0.5)),
+        "root_case_threshold": float(cause.get("threshold", 0.5)),
+        "root_case_label_thresholds": label_thresholds,
     }
 
 
+def _calibrate_label_thresholds(scores: list[list[float]], labels: list[list[float]], label_names: list[str]) -> dict[str, float]:
+    output: dict[str, float] = {}
+    for index, label_name in enumerate(label_names):
+        if not label_name:
+            continue
+        column_scores = [[float(row[index])] for row in scores if index < len(row)]
+        column_labels = [[float(row[index])] for row in labels if index < len(row)]
+        if not column_scores:
+            continue
+        output[label_name] = float(calibrate_global_threshold(
+            column_scores,
+            column_labels,
+            max_clean_false_positive_rate=None,
+        ).get("threshold", 0.5))
+    return output
+
+
 def _metrics_from_predictions(predictions: dict[str, Any], *, thresholds: dict[str, Any]) -> dict[str, Any]:
-    cause_threshold = float((thresholds.get("cause") or {}).get("threshold", thresholds.get("default_threshold", 0.5)))
+    cause_threshold = float((thresholds.get("root_case") or {}).get("threshold", thresholds.get("default_threshold", 0.5)))
     theory_threshold = float((thresholds.get("theory_alignment") or {}).get("threshold", 0.5))
     theory_edge_threshold = float((thresholds.get("theory_edge_alignment") or {}).get("threshold", theory_threshold))
     cause = binary_multilabel_metrics(predictions["cause_scores"], predictions["cause_labels"], threshold=cause_threshold)
@@ -497,13 +592,13 @@ def _metrics_from_predictions(predictions: dict[str, Any], *, thresholds: dict[s
     )
     return {
         "rows": len(predictions["cause_scores"]),
-        "cause_threshold": cause_threshold,
-        "cause_micro_f1": cause["micro_f1"],
-        "cause_micro_precision": cause["micro_precision"],
-        "cause_micro_recall": cause["micro_recall"],
-        "cause_top1_hit": cause["top1_hit"],
-        "cause_top3_hit": cause["top3_hit"],
-        "cause_top5_hit": cause["top5_hit"],
+        "root_case_threshold": cause_threshold,
+        "root_case_micro_f1": cause["micro_f1"],
+        "root_case_micro_precision": cause["micro_precision"],
+        "root_case_micro_recall": cause["micro_recall"],
+        "root_case_top1_hit": cause["top1_hit"],
+        "root_case_top3_hit": cause["top3_hit"],
+        "root_case_top5_hit": cause["top5_hit"],
         "set_recall_top5": cause_set["recall_top5"],
         "set_recall_topN": cause_set["recall_topN"],
         "set_exact_top5": cause_set["exact_top5"],
@@ -518,14 +613,19 @@ def _metrics_from_predictions(predictions: dict[str, Any], *, thresholds: dict[s
 
 
 def _label_schema(samples: list[DiagnosisGraphSample]) -> dict[str, Any]:
-    cause_labels = sorted({label for sample in samples for label in metadata_for_sample(sample).cause_labels if label})
     return {
-        "labels": cause_labels,
+        "labels": list(ROOT_CASES),
         "metadata": {
-            "kind": "diagnosis_gnn_root_cause",
+            "kind": "diagnosis_gnn_root_case",
             "diagnosis_semantics": DIAGNOSIS_GNN_SEMANTICS,
         },
     }
+
+
+def _cause_label_names(samples: list[DiagnosisGraphSample]) -> list[str]:
+    if not samples:
+        return []
+    return list(ROOT_CASES)
 
 
 def _resolve_device(device: str, torch_module) -> str:

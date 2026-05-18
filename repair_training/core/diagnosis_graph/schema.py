@@ -9,8 +9,10 @@ DIAGNOSIS_GRAPH_SCHEMA_VERSION = "diagnosis_graph_v1"
 NODE_LAYERS = frozenset({"observation", "theory", "cause"})
 EDGE_TYPES = frozenset({
     "observes_theory",
+    "observes_root_direction",
     "theory_depends_on",
     "theory_explains_obs",
+    "root_direction_explains_obs",
     "cause_affects_theory",
     "theory_supports_cause",
     "same_zone",
@@ -113,6 +115,7 @@ class DiagnosisGraph:
 
 @dataclass(frozen=True)
 class DiagnosisLabels:
+    root_case_labels: list[str] = field(default_factory=list)
     cause_node_ids: list[str] = field(default_factory=list)
     field_labels: list[str] = field(default_factory=list)
     zone_labels: list[str] = field(default_factory=list)
@@ -126,6 +129,9 @@ class DiagnosisLabels:
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "root_case": {
+                "labels": sorted(set(self.root_case_labels)),
+            },
             "root_cause": {
                 "cause_node_ids": sorted(set(self.cause_node_ids)),
                 "field_labels": sorted(set(self.field_labels)),
@@ -147,9 +153,11 @@ class DiagnosisLabels:
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "DiagnosisLabels":
         root = payload.get("root_cause") if isinstance(payload.get("root_cause"), dict) else {}
+        root_case = payload.get("root_case") if isinstance(payload.get("root_case"), dict) else {}
         theory = payload.get("theory_alignment") if isinstance(payload.get("theory_alignment"), dict) else {}
         symptoms = payload.get("propagated_symptoms") if isinstance(payload.get("propagated_symptoms"), dict) else {}
         return cls(
+            root_case_labels=[str(item) for item in root_case.get("labels") or []],
             cause_node_ids=[str(item) for item in root.get("cause_node_ids") or []],
             field_labels=[str(item) for item in root.get("field_labels") or []],
             zone_labels=[str(item) for item in root.get("zone_labels") or []],

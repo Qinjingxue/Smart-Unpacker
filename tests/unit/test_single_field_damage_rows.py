@@ -44,6 +44,7 @@ def test_single_field_profiles_emit_exact_root_labels(tmp_path: Path):
         "central_directory.local_header_offset": "zip.central_directory.local_header_offset",
         "central_directory.flags": "zip.central_directory.flags",
         "local_header.crc": "zip.local_header.crc",
+        "payload.compressed_data": "zip.payload.compressed_data",
         "tail.trailing_bytes": "archive.tail",
         "sfx_prefix.bytes": "zip.sfx.prefix",
     }

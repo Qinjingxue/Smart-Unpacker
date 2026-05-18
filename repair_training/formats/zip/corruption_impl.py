@@ -1362,17 +1362,33 @@ SINGLE_FIELD_PROFILE_TO_FIELD: dict[str, str] = {
     "single_field_eocd_cd_size": "eocd.cd_size",
     "single_field_eocd_entry_count": "eocd.entry_count",
     "single_field_eocd_comment_length": "eocd.comment_length",
+    "single_field_tail_comment": "tail.comment",
+    "single_field_central_directory_header": "central_directory.header",
     "single_field_central_directory_local_header_offset": "central_directory.local_header_offset",
     "single_field_central_directory_flags": "central_directory.flags",
+    "single_field_central_directory_method": "central_directory.method",
+    "single_field_central_directory_filename": "central_directory.filename",
+    "single_field_central_directory_extra_length": "central_directory.extra_length",
+    "single_field_central_directory_extra": "central_directory.extra",
     "single_field_central_directory_crc": "central_directory.crc",
     "single_field_central_directory_compressed_size": "central_directory.compressed_size",
+    "single_field_central_directory_external_attributes": "central_directory.external_attributes",
+    "single_field_central_directory_metadata": "central_directory.metadata",
+    "single_field_local_header_signature": "local_header.signature",
     "single_field_local_header_flags": "local_header.flags",
+    "single_field_local_header_method": "local_header.method",
+    "single_field_local_header_filename": "local_header.filename",
+    "single_field_local_header_extra_length": "local_header.extra_length",
+    "single_field_local_header_extra": "local_header.extra",
     "single_field_local_header_crc": "local_header.crc",
     "single_field_local_header_compressed_size": "local_header.compressed_size",
+    "single_field_local_header_metadata": "local_header.metadata",
     "single_field_data_descriptor_record": "data_descriptor.record",
     "single_field_data_descriptor_crc": "data_descriptor.crc",
     "single_field_data_descriptor_size": "data_descriptor.size",
+    "single_field_payload_compressed_data": "payload.compressed_data",
     "single_field_zip64_extra_length": "zip64.extra_length",
+    "single_field_zip64_extra": "zip64.extra",
     "single_field_zip64_uncompressed_size": "zip64.uncompressed_size",
     "single_field_zip64_eocd": "zip64.eocd",
     "single_field_zip64_locator": "zip64.locator",
@@ -1421,10 +1437,14 @@ def _zip_single_field_mutations(
         return _zip_single_local_header_field_mutation(data, entry_infos, randomizer, field)
     if field.startswith("data_descriptor."):
         return _zip_single_data_descriptor_field_mutation(data, entry_infos, randomizer, field)
+    if field.startswith("payload."):
+        return _zip_single_payload_field_mutation(data, entry_infos, randomizer, field)
     if field.startswith("zip64."):
         return _zip_single_zip64_field_mutation(data, randomizer, field)
     if field == "tail.trailing_bytes":
         return [_append("single_field_tail_trailing_bytes", _random_junk(randomizer, "SFTAIL", 12, 48), "archive.tail", "single-field tail trailing bytes")]
+    if field == "tail.comment":
+        return _zip_single_tail_comment_mutation(data, eocd, randomizer)
     if field == "sfx_prefix.bytes":
         return [_insert("single_field_sfx_prefix_bytes", 0, b"MZ-SUNPACK-SINGLE" + _random_junk(randomizer, "SFX", 8, 24), "zip.sfx.prefix", "single-field SFX prefix bytes")]
     if field == "split_volume.missing_range":
@@ -1462,10 +1482,35 @@ def _zip_single_eocd_field_mutation(data: bytes, eocd: int, randomizer: random.R
     return []
 
 
+def _zip_single_tail_comment_mutation(data: bytes, eocd: int, randomizer: random.Random) -> list[BinaryMutation]:
+    if eocd < 0 or eocd + 22 > len(data):
+        return []
+    try:
+        comment_len = int(struct.unpack_from("<H", data, eocd + 20)[0])
+    except Exception:
+        comment_len = 0
+    comment_start = eocd + 22
+    if comment_len <= 0 or comment_start >= len(data):
+        return []
+    offset = comment_start + randomizer.randrange(0, min(comment_len, len(data) - comment_start))
+    return [_replace_byte("single_field_tail_comment", offset, data[offset] ^ 0x31, "zip.tail.comment", "single-field EOCD comment bytes")]
+
+
 def _zip_single_cd_field_mutation(data: bytes, cd_headers: list[int], entry_infos: list[dict[str, Any]], randomizer: random.Random, field: str) -> list[BinaryMutation]:
     if not cd_headers:
         return []
     header = cd_headers[randomizer.randrange(0, len(cd_headers))]
+    if header + 46 > len(data):
+        return []
+    try:
+        name_len, extra_len, comment_len = struct.unpack_from("<HHH", data, header + 28)
+    except Exception:
+        name_len = extra_len = comment_len = 0
+    name_start = header + 46
+    extra_start = name_start + int(name_len)
+    comment_start = extra_start + int(extra_len)
+    if field == "central_directory.header":
+        return [_replace_byte("single_field_central_directory_header", header, data[header] ^ 0x20, "zip.central_directory.header", "single-field central directory header signature")]
     if field == "central_directory.local_header_offset":
         current = _u32_at(data, header + 42) or 0
         replacement = (current + 4) & 0xFFFFFFFF
@@ -1476,12 +1521,43 @@ def _zip_single_cd_field_mutation(data: bytes, cd_headers: list[int], entry_info
         except Exception:
             current = 0
         return [_replace_bytes("single_field_central_directory_flags", header + 8, struct.pack("<H", current ^ 0x08), "zip.central_directory.flags", "single-field central directory flags")]
+    if field == "central_directory.method":
+        try:
+            current = int(struct.unpack_from("<H", data, header + 10)[0])
+        except Exception:
+            current = 0
+        replacement = 99 if current != 99 else 0
+        return [_replace_bytes("single_field_central_directory_method", header + 10, struct.pack("<H", replacement), "zip.central_directory.method", "single-field central directory compression method")]
+    if field == "central_directory.filename":
+        if name_len <= 0 or name_start >= len(data):
+            return []
+        offset = name_start + randomizer.randrange(0, min(int(name_len), len(data) - name_start))
+        return [_replace_byte("single_field_central_directory_filename", offset, data[offset] ^ 0x80, "zip.central_directory.filename", "single-field central directory filename bytes")]
+    if field == "central_directory.extra_length":
+        replacement = (int(extra_len) + 1) & 0xFFFF
+        return [_replace_bytes("single_field_central_directory_extra_length", header + 30, struct.pack("<H", replacement), "zip.central_directory.extra_length", "single-field central directory extra length")]
+    if field == "central_directory.extra":
+        if extra_len <= 0 or extra_start >= len(data):
+            return []
+        offset = extra_start + randomizer.randrange(0, min(int(extra_len), len(data) - extra_start))
+        return [_replace_byte("single_field_central_directory_extra", offset, data[offset] ^ 0x44, "zip.central_directory.extra", "single-field central directory extra body")]
     if field == "central_directory.crc":
         current = _u32_at(data, header + 16) or 0
         return [_replace_bytes("single_field_central_directory_crc", header + 16, struct.pack("<I", current ^ 0xA5A5A5A5), "zip.central_directory.crc", "single-field central directory CRC")]
     if field == "central_directory.compressed_size":
         current = _u32_at(data, header + 20) or 0
         return [_replace_bytes("single_field_central_directory_compressed_size", header + 20, struct.pack("<I", (current + 1) & 0xFFFFFFFF), "zip.central_directory.compressed_size", "single-field central directory compressed size")]
+    if field == "central_directory.external_attributes":
+        current = _u32_at(data, header + 38) or 0
+        return [_replace_bytes("single_field_central_directory_external_attributes", header + 38, struct.pack("<I", current ^ 0x01000000), "zip.central_directory.external_attributes", "single-field central directory external attributes")]
+    if field == "central_directory.metadata":
+        choices = [header + 4, header + 5, header + 6, header + 7, header + 12, header + 13, header + 14, header + 15, header + 32, header + 33, header + 34, header + 35, header + 36, header + 37]
+        choices.extend(range(comment_start, min(comment_start + int(comment_len), len(data))))
+        valid = [offset for offset in choices if 0 <= int(offset) < len(data)]
+        if not valid:
+            return []
+        offset = int(randomizer.choice(valid))
+        return [_replace_byte("single_field_central_directory_metadata", offset, data[offset] ^ 0x21, "zip.central_directory.metadata", "single-field central directory metadata misc")]
     return []
 
 
@@ -1492,18 +1568,53 @@ def _zip_single_local_header_field_mutation(data: bytes, entry_infos: list[dict[
     local = int(target.get("header_offset", -1))
     if local < 0 or local + 30 > len(data):
         return []
+    try:
+        name_len, extra_len = struct.unpack_from("<HH", data, local + 26)
+    except Exception:
+        name_len = extra_len = 0
+    name_start = local + 30
+    extra_start = name_start + int(name_len)
+    if field == "local_header.signature":
+        return [_replace_byte("single_field_local_header_signature", local, data[local] ^ 0x20, "zip.local_header.signature", "single-field local header signature")]
     if field == "local_header.flags":
         try:
             current = int(struct.unpack_from("<H", data, local + 6)[0])
         except Exception:
             current = 0
         return [_replace_bytes("single_field_local_header_flags", local + 6, struct.pack("<H", current ^ 0x08), "zip.local_header.flags", "single-field local header flags")]
+    if field == "local_header.method":
+        try:
+            current = int(struct.unpack_from("<H", data, local + 8)[0])
+        except Exception:
+            current = 0
+        replacement = 99 if current != 99 else 0
+        return [_replace_bytes("single_field_local_header_method", local + 8, struct.pack("<H", replacement), "zip.local_header.method", "single-field local header compression method")]
+    if field == "local_header.filename":
+        if name_len <= 0 or name_start >= len(data):
+            return []
+        offset = name_start + randomizer.randrange(0, min(int(name_len), len(data) - name_start))
+        return [_replace_byte("single_field_local_header_filename", offset, data[offset] ^ 0x80, "zip.local_header.filename", "single-field local header filename bytes")]
+    if field == "local_header.extra_length":
+        replacement = (int(extra_len) + 1) & 0xFFFF
+        return [_replace_bytes("single_field_local_header_extra_length", local + 28, struct.pack("<H", replacement), "zip.local_header.extra_length", "single-field local header extra length")]
+    if field == "local_header.extra":
+        if extra_len <= 0 or extra_start >= len(data):
+            return []
+        offset = extra_start + randomizer.randrange(0, min(int(extra_len), len(data) - extra_start))
+        return [_replace_byte("single_field_local_header_extra", offset, data[offset] ^ 0x44, "zip.local_header.extra", "single-field local header extra body")]
     if field == "local_header.crc":
         current = _u32_at(data, local + 14) or 0
         return [_replace_bytes("single_field_local_header_crc", local + 14, struct.pack("<I", current ^ 0x5A5A5A5A), "zip.local_header.crc", "single-field local header CRC")]
     if field == "local_header.compressed_size":
         current = _u32_at(data, local + 18) or 0
         return [_replace_bytes("single_field_local_header_compressed_size", local + 18, struct.pack("<I", (current + 1) & 0xFFFFFFFF), "zip.local_header.compressed_size", "single-field local header compressed size")]
+    if field == "local_header.metadata":
+        choices = [local + 4, local + 5, local + 10, local + 11, local + 12, local + 13, local + 22, local + 23, local + 24, local + 25]
+        valid = [offset for offset in choices if 0 <= int(offset) < len(data)]
+        if not valid:
+            return []
+        offset = int(randomizer.choice(valid))
+        return [_replace_byte("single_field_local_header_metadata", offset, data[offset] ^ 0x21, "zip.local_header.metadata", "single-field local header metadata misc")]
     return []
 
 
@@ -1542,11 +1653,42 @@ def _zip_data_descriptor_offsets(data: bytes, entry_infos: list[dict[str, Any]],
     return dict(randomizer.choice(candidates)) if candidates else {}
 
 
+def _zip_single_payload_field_mutation(data: bytes, entry_infos: list[dict[str, Any]], randomizer: random.Random, field: str) -> list[BinaryMutation]:
+    if field != "payload.compressed_data":
+        return []
+    candidates = [
+        info for info in entry_infos
+        if int(info.get("compressed_size", 0) or 0) > 0
+        and 0 <= int(info.get("payload_offset", -1) or -1) < len(data)
+    ]
+    if not candidates:
+        return []
+    target = _choose_middle_entry(candidates, randomizer)
+    payload_offset = int(target.get("payload_offset", 0) or 0)
+    compressed_size = int(target.get("compressed_size", 0) or 0)
+    span = max(1, min(compressed_size, len(data) - payload_offset))
+    offset = payload_offset + randomizer.randrange(0, span)
+    return [_replace_byte(
+        "single_field_payload_compressed_data",
+        offset,
+        data[offset] ^ 0x55,
+        "zip.payload.compressed_data",
+        f"single-field compressed payload bytes: {target.get('name') or ''}",
+    )]
+
+
 def _zip_single_zip64_field_mutation(data: bytes, randomizer: random.Random, field: str) -> list[BinaryMutation]:
-    if field in {"zip64.extra_length", "zip64.uncompressed_size"}:
+    if field in {"zip64.extra", "zip64.extra_length", "zip64.uncompressed_size"}:
         extra = _zip64_extra_offsets(data)
         if not extra:
             return []
+        if field == "zip64.extra":
+            data_offset = int(extra["data_offset"])
+            size = int(extra["size"])
+            if size <= 0 or data_offset >= len(data):
+                return []
+            offset = data_offset + randomizer.randrange(0, min(size, len(data) - data_offset))
+            return [_replace_byte("single_field_zip64_extra", offset, data[offset] ^ 0x55, "zip.extra.zip64.body", "single-field ZIP64 extra body")]
         if field == "zip64.extra_length":
             size = extra["size"]
             return [_replace_bytes("single_field_zip64_extra_length", extra["size_offset"], struct.pack("<H", max(0, size - 1)), "zip.extra.zip64.length", "single-field ZIP64 extra length")]
@@ -1578,6 +1720,8 @@ def _zip64_extra_offsets(data: bytes) -> dict[str, int]:
 def _single_field_damage_flags(field: str) -> list[str]:
     zone = field.split(".", 1)[0]
     flags = ["single_field_root_cause", f"single_field:{field}"]
+    if zone == "payload":
+        flags.extend(["payload_crc_bad", "payload_hash_mismatch", "payload_content_failure"])
     if zone == "zip64":
         flags.append("zip64_metadata")
     if zone == "data_descriptor":

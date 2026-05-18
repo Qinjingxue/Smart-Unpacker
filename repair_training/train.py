@@ -44,8 +44,13 @@ def main(argv: list[str] | None = None) -> int:
                 "amp": args.amp,
                 "loss": args.loss,
                 "focal_gamma": args.focal_gamma,
+                "asym_gamma_pos": args.asym_gamma_pos,
+                "asym_gamma_neg": args.asym_gamma_neg,
+                "rank_loss_weight": args.rank_loss_weight,
+                "rank_loss_top_negatives": args.rank_loss_top_negatives,
                 "pos_weight_max": args.pos_weight_max,
                 "sample_weighting": args.sample_weighting,
+                "score_normalization": args.score_normalization,
                 "tensor_cache_dir": args.tensor_cache_dir,
             }.items()
             if value is not None
@@ -97,10 +102,15 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--residual", type=_bool_arg, default=None)
     parser.add_argument("--layernorm", type=_bool_arg, default=None)
     parser.add_argument("--amp", action="store_true")
-    parser.add_argument("--loss", choices=["bce", "weighted_bce", "focal"], default=None)
+    parser.add_argument("--loss", choices=["bce", "weighted_bce", "focal", "asymmetric_focal"], default=None)
     parser.add_argument("--focal-gamma", type=float, default=None)
+    parser.add_argument("--asym-gamma-pos", type=float, default=None)
+    parser.add_argument("--asym-gamma-neg", type=float, default=None)
+    parser.add_argument("--rank-loss-weight", type=float, default=None)
+    parser.add_argument("--rank-loss-top-negatives", type=int, default=None)
     parser.add_argument("--pos-weight-max", type=float, default=None)
     parser.add_argument("--sample-weighting", choices=["multi_field_root_count", "none"], default=None)
+    parser.add_argument("--score-normalization", choices=["raw", "zone_aware"], default=None)
     parser.add_argument("--tensor-cache-dir", default="")
     return parser
 

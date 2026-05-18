@@ -14,8 +14,15 @@ from repair_training.core.diagnosis_graph.schema import (
     DiagnosisNode,
     GraphFragment,
 )
+from repair_training.core.diagnosis_gnn.root_cases import (
+    FIELD_TO_ROOT_CASE,
+    IGNORED_ROOT_FIELDS,
+    ROOT_CASES,
+    ROOT_CASE_SET,
+    canonical_root_case,
+)
 from repair_training.core.features import damage_labels_for_row, oracle_damage_labels_for_row, uncertain_labels_for_row
-from repair_training.formats.zip.plugin import ZIP_FIELD_LABELS, ZIP_ZONE_LABELS
+from repair_training.formats.zip.plugin import ZIP_ZONE_LABELS
 
 
 FORMAT = "zip"
@@ -29,14 +36,24 @@ THEORY_FIELDS: tuple[tuple[str, str, str], ...] = (
     ("central_directory.entry_count", "central_directory", "count_field"),
     ("central_directory.local_header_offset", "central_directory", "offset_field"),
     ("central_directory.flags", "central_directory", "flag_field"),
+    ("central_directory.method", "central_directory", "method_field"),
     ("central_directory.filename", "central_directory", "name_field"),
+    ("central_directory.extra", "central_directory", "extra_field"),
+    ("central_directory.extra_length", "central_directory", "size_field"),
     ("central_directory.crc", "central_directory", "crc_field"),
     ("central_directory.compressed_size", "central_directory", "size_field"),
+    ("central_directory.external_attributes", "central_directory", "attributes_field"),
+    ("central_directory.header", "central_directory", "header_misc"),
+    ("central_directory.metadata", "central_directory", "metadata_misc"),
     ("local_header.signature", "local_header", "signature"),
     ("local_header.flags", "local_header", "flag_field"),
+    ("local_header.method", "local_header", "method_field"),
     ("local_header.filename", "local_header", "name_field"),
+    ("local_header.extra", "local_header", "extra_field"),
+    ("local_header.extra_length", "local_header", "size_field"),
     ("local_header.crc", "local_header", "crc_field"),
     ("local_header.compressed_size", "local_header", "size_field"),
+    ("local_header.metadata", "local_header", "metadata_misc"),
     ("payload.span", "payload", "span"),
     ("payload.crc_region", "payload", "crc_field"),
     ("payload.compressed_data", "payload", "payload"),
@@ -60,6 +77,10 @@ ZONE_TO_THEORY = {
     for zone in ZIP_ZONE_LABELS
 }
 
+REPAIR_ROOT_FIELDS = ROOT_CASES
+REPAIR_ROOT_FIELD_SET = ROOT_CASE_SET
+FIELD_TO_REPAIR_ROOT = FIELD_TO_ROOT_CASE
+
 THEORY_DEPENDENCIES: tuple[tuple[str, str, str], ...] = (
     ("eocd.cd_offset", "central_directory.span", "points_to"),
     ("eocd.cd_size", "central_directory.span", "owns_span"),
@@ -67,8 +88,12 @@ THEORY_DEPENDENCIES: tuple[tuple[str, str, str], ...] = (
     ("eocd.comment_length", "tail.comment", "bounds"),
     ("central_directory.local_header_offset", "local_header.signature", "points_to"),
     ("central_directory.flags", "local_header.flags", "matches_field"),
+    ("central_directory.method", "local_header.method", "matches_field"),
     ("central_directory.flags", "data_descriptor.record", "expects_descriptor"),
     ("central_directory.filename", "local_header.filename", "matches_field"),
+    ("central_directory.extra", "local_header.extra", "matches_semantics"),
+    ("central_directory.extra_length", "central_directory.extra", "bounds"),
+    ("local_header.extra_length", "local_header.extra", "bounds"),
     ("central_directory.crc", "local_header.crc", "matches_field"),
     ("central_directory.crc", "payload.crc_region", "validates"),
     ("central_directory.compressed_size", "local_header.compressed_size", "matches_field"),
@@ -96,6 +121,17 @@ THEORY_EDGE_BY_ENDPOINT: dict[tuple[str, str], str] = {
 }
 
 FIELD_TO_THEORY_EDGES: dict[str, tuple[str, ...]] = {
+    "compression_method": (
+        THEORY_EDGE_BY_ENDPOINT[("central_directory.method", "local_header.method")],
+    ),
+    "entry_name": (
+        THEORY_EDGE_BY_ENDPOINT[("central_directory.filename", "local_header.filename")],
+    ),
+    "generic_extra_field": (
+        THEORY_EDGE_BY_ENDPOINT[("central_directory.extra", "local_header.extra")],
+        THEORY_EDGE_BY_ENDPOINT[("central_directory.extra_length", "central_directory.extra")],
+        THEORY_EDGE_BY_ENDPOINT[("local_header.extra_length", "local_header.extra")],
+    ),
     "central_directory.local_header_offset": (
         THEORY_EDGE_BY_ENDPOINT[("central_directory.local_header_offset", "local_header.signature")],
         THEORY_EDGE_BY_ENDPOINT[("sfx_prefix.bytes", "central_directory.local_header_offset")],
@@ -104,6 +140,29 @@ FIELD_TO_THEORY_EDGES: dict[str, tuple[str, ...]] = {
     "central_directory.flags": (
         THEORY_EDGE_BY_ENDPOINT[("central_directory.flags", "local_header.flags")],
         THEORY_EDGE_BY_ENDPOINT[("central_directory.flags", "data_descriptor.record")],
+    ),
+    "central_directory.method": (
+        THEORY_EDGE_BY_ENDPOINT[("central_directory.method", "local_header.method")],
+    ),
+    "central_directory.filename": (
+        THEORY_EDGE_BY_ENDPOINT[("central_directory.filename", "local_header.filename")],
+    ),
+    "central_directory.extra": (
+        THEORY_EDGE_BY_ENDPOINT[("central_directory.extra", "local_header.extra")],
+        THEORY_EDGE_BY_ENDPOINT[("central_directory.extra_length", "central_directory.extra")],
+    ),
+    "central_directory.extra_length": (
+        THEORY_EDGE_BY_ENDPOINT[("central_directory.extra_length", "central_directory.extra")],
+    ),
+    "central_directory.header": (
+        THEORY_EDGE_BY_ENDPOINT[("eocd.cd_size", "central_directory.span")],
+        THEORY_EDGE_BY_ENDPOINT[("eocd.cd_offset", "central_directory.span")],
+    ),
+    "central_directory.metadata": (
+        THEORY_EDGE_BY_ENDPOINT[("central_directory.filename", "local_header.filename")],
+    ),
+    "central_directory.external_attributes": (
+        THEORY_EDGE_BY_ENDPOINT[("eocd.entry_count", "central_directory.entry_count")],
     ),
     "central_directory.compressed_size": (
         THEORY_EDGE_BY_ENDPOINT[("central_directory.compressed_size", "local_header.compressed_size")],
@@ -122,6 +181,25 @@ FIELD_TO_THEORY_EDGES: dict[str, tuple[str, ...]] = {
         THEORY_EDGE_BY_ENDPOINT[("central_directory.compressed_size", "payload.span")],
         THEORY_EDGE_BY_ENDPOINT[("local_header.compressed_size", "payload.span")],
         THEORY_EDGE_BY_ENDPOINT[("data_descriptor.record", "payload.span")],
+    ),
+    "local_header.signature": (
+        THEORY_EDGE_BY_ENDPOINT[("central_directory.local_header_offset", "local_header.signature")],
+    ),
+    "local_header.method": (
+        THEORY_EDGE_BY_ENDPOINT[("central_directory.method", "local_header.method")],
+    ),
+    "local_header.filename": (
+        THEORY_EDGE_BY_ENDPOINT[("central_directory.filename", "local_header.filename")],
+    ),
+    "local_header.extra": (
+        THEORY_EDGE_BY_ENDPOINT[("central_directory.extra", "local_header.extra")],
+        THEORY_EDGE_BY_ENDPOINT[("local_header.extra_length", "local_header.extra")],
+    ),
+    "local_header.extra_length": (
+        THEORY_EDGE_BY_ENDPOINT[("local_header.extra_length", "local_header.extra")],
+    ),
+    "local_header.metadata": (
+        THEORY_EDGE_BY_ENDPOINT[("central_directory.filename", "local_header.filename")],
     ),
     "data_descriptor.record": (
         THEORY_EDGE_BY_ENDPOINT[("central_directory.flags", "data_descriptor.record")],
@@ -156,6 +234,9 @@ FIELD_TO_THEORY_EDGES: dict[str, tuple[str, ...]] = {
     "tail.trailing_bytes": (
         THEORY_EDGE_BY_ENDPOINT[("tail.trailing_bytes", "eocd.comment_length")],
     ),
+    "tail.comment": (
+        THEORY_EDGE_BY_ENDPOINT[("eocd.comment_length", "tail.comment")],
+    ),
     "sfx_prefix.bytes": (
         THEORY_EDGE_BY_ENDPOINT[("sfx_prefix.bytes", "eocd.cd_offset")],
         THEORY_EDGE_BY_ENDPOINT[("sfx_prefix.bytes", "central_directory.local_header_offset")],
@@ -166,32 +247,12 @@ FIELD_TO_THEORY_EDGES: dict[str, tuple[str, ...]] = {
     ),
 }
 
-PROFILE_ROOT_FIELD_OVERRIDES: dict[str, tuple[str, ...]] = {
-    "zip_zip64_extra_size_mismatch": (
-        "zip64.extra_length",
-        "zip64.uncompressed_size",
-    ),
-    "compound_duplicate_descriptor_name_conflict": (
-        "central_directory.flags",
-        "data_descriptor.record",
-    ),
-    "compound_descriptor_fake_span_flags_cd_offset": (
-        "central_directory.compressed_size",
-        "central_directory.flags",
-        "central_directory.local_header_offset",
-        "data_descriptor.record",
-    ),
-}
-
-PROPAGATED_SYMPTOM_FIELDS = {
-    "central_directory.external_attributes",
-}
-
 SUMMARY_TO_THEORY = {
     "central_directory_offset_delta": ("eocd.cd_offset", "central_directory.span"),
     "central_directory_size_delta": ("eocd.cd_size", "central_directory.span"),
     "declared_central_directory_size": ("eocd.cd_size", "central_directory.span"),
     "eocd_cd_size_mismatch_count": ("eocd.cd_size", "central_directory.span"),
+    "eocd_entry_count_mismatch_count": ("eocd.entry_count", "central_directory.entry_count"),
     "entry_count_delta": ("eocd.entry_count", "central_directory.entry_count"),
     "local_header_offset_violation_count": ("central_directory.local_header_offset",),
     "central_local_flags_mismatch_count": ("central_directory.flags", "local_header.flags"),
@@ -204,14 +265,21 @@ SUMMARY_TO_THEORY = {
     "central_local_compressed_size_mismatch_count": ("central_directory.compressed_size", "local_header.compressed_size", "payload.span"),
     "descriptor_conflict_count": ("data_descriptor.record", "data_descriptor.crc", "data_descriptor.size"),
     "bad_local_header_target_signature_count": ("central_directory.local_header_offset", "local_header.signature"),
+    "local_header_signature_mismatch_count": ("local_header.signature",),
     "local_header_offset_points_to_descriptor_or_payload_count": ("central_directory.local_header_offset", "data_descriptor.record", "payload.span"),
     "local_header_offset_points_outside_archive_count": ("central_directory.local_header_offset",),
+    "payload_decode_failure_count": ("payload.compressed_data", "payload.span"),
+    "payload_crc_mismatch_count": ("payload.compressed_data", "payload.crc_region"),
     "descriptor_crc_cd_mismatch_count": ("data_descriptor.crc", "central_directory.crc"),
     "descriptor_crc_payload_mismatch_count": ("data_descriptor.crc", "payload.crc_region"),
     "descriptor_crc_likely_bad_count": ("data_descriptor.crc",),
+    "local_header_crc_likely_bad_count": ("local_header.crc",),
+    "crc_direction_unresolved_count": ("central_directory.crc", "local_header.crc", "data_descriptor.crc", "payload.crc_region"),
     "descriptor_record_mismatch_count": ("data_descriptor.record",),
     "descriptor_size_mismatch_count": ("data_descriptor.size", "payload.span"),
     "central_directory_compressed_size_likely_bad_count": ("central_directory.compressed_size", "payload.span"),
+    "local_header_compressed_size_likely_bad_count": ("local_header.compressed_size", "payload.span"),
+    "extra_field_structure_mismatch_count": ("central_directory.extra", "local_header.extra"),
     "span_conflict_count": ("payload.span",),
     "trailing_bytes_after_eocd": ("tail.trailing_bytes", "eocd.comment_length"),
     "sfx_prefix_len": ("sfx_prefix.bytes", "eocd.cd_offset", "central_directory.local_header_offset"),
@@ -294,6 +362,9 @@ class ZipDiagnosisGraphPlugin:
             for theory_field in _theory_targets_for_violation(item):
                 edges.append(_edge("observes_theory", obs_id, _theory_id(theory_field), evidence="violation"))
                 edges.append(_edge("theory_explains_obs", _theory_id(theory_field), obs_id, evidence="violation"))
+            for theory_field in _direction_theory_targets_for_violation(item):
+                edges.append(_edge("observes_root_direction", obs_id, _theory_id(theory_field), evidence="likely_bad_side"))
+                edges.append(_edge("root_direction_explains_obs", _theory_id(theory_field), obs_id, evidence="likely_bad_side"))
         for index, item in enumerate(graph.get("explanations") or []):
             if not isinstance(item, dict):
                 continue
@@ -306,16 +377,10 @@ class ZipDiagnosisGraphPlugin:
     def build_cause_graph(self) -> GraphFragment:
         nodes: list[DiagnosisNode] = []
         edges: list[DiagnosisEdge] = []
-        for zone in ZIP_ZONE_LABELS:
-            label = f"zone:{zone}"
-            nodes.append(_cause_node(label=label, zone=zone, node_type="zone_cause"))
-            for field in ZONE_TO_THEORY.get(zone, []):
-                edges.append(_edge("cause_affects_theory", _cause_id(label), _theory_id(field)))
-                edges.append(_edge("theory_supports_cause", _theory_id(field), _cause_id(label)))
-        for field in ZIP_FIELD_LABELS:
-            label = f"field:{field}"
-            zone = field.split(".", 1)[0]
-            nodes.append(_cause_node(label=label, zone=zone, node_type="field_cause", field_path=field))
+        for field in REPAIR_ROOT_FIELDS:
+            label = f"root_case:{field}"
+            zone = _zone_for_repair_root(field)
+            nodes.append(_cause_node(label=label, zone=zone, node_type="root_case", field_path=field))
             for theory_field in _theory_targets_for_field(field):
                 edges.append(_edge("cause_affects_theory", _cause_id(label), _theory_id(theory_field)))
                 edges.append(_edge("theory_supports_cause", _theory_id(theory_field), _cause_id(label)))
@@ -324,23 +389,21 @@ class ZipDiagnosisGraphPlugin:
     def build_labels(self, row: dict[str, Any]) -> DiagnosisLabels:
         root_source_labels = oracle_damage_labels_for_row(row)
         observed_source_labels = damage_labels_for_row(row)
-        all_field_labels = sorted(label for label in root_source_labels if label.startswith("field:"))
-        all_zone_labels = sorted(label for label in root_source_labels if label.startswith("zone:"))
+        root_case_labels = _canonical_root_case_labels(root_source_labels)
+        field_labels = [f"field:{label}" for label in root_case_labels]
+        zone_labels: list[str] = []
         observed_field_labels = sorted(label for label in observed_source_labels if label.startswith("field:"))
         observed_zone_labels = sorted(label for label in observed_source_labels if label.startswith("zone:"))
         uncertain = uncertain_labels_for_row(row)
         metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
-        field_labels, zone_labels, symptom_field_labels, symptom_zone_labels = _split_root_and_symptom_labels(
-            damage_profile=str(metadata.get("damage_profile") or ""),
-            field_labels=all_field_labels,
-            zone_labels=all_zone_labels,
-        )
-        symptom_field_labels = sorted(set(symptom_field_labels).union(set(observed_field_labels) - set(field_labels)))
-        symptom_zone_labels = sorted(set(symptom_zone_labels).union(set(observed_zone_labels) - set(zone_labels)))
-        cause_node_ids = [_cause_id(label) for label in [*field_labels, *zone_labels] if _known_cause_label(label)]
+        knowledge_payload = row.get("knowledge_payload") if isinstance(row.get("knowledge_payload"), dict) else {}
+        observation_symptom_fields, observation_symptom_zones = _symptom_labels_from_knowledge_payload(knowledge_payload)
+        symptom_field_labels = sorted((set(observed_field_labels) | observation_symptom_fields) - set(field_labels))
+        symptom_zone_labels = sorted((set(observed_zone_labels) | observation_symptom_zones) - set(zone_labels))
+        cause_node_ids = [_cause_id(f"root_case:{label}") for label in root_case_labels if _known_cause_label(label)]
         theory_node_ids: set[str] = set()
-        for label in field_labels:
-            for field in _theory_targets_for_field(field_from_label(label)):
+        for label in root_case_labels:
+            for field in _theory_targets_for_field(label):
                 theory_node_ids.add(_theory_id(field))
         for label in zone_labels:
             for field in ZONE_TO_THEORY.get(label_zone(label), []):
@@ -354,8 +417,11 @@ class ZipDiagnosisGraphPlugin:
                 symptom_theory_node_ids.add(_theory_id(field))
         theory_edge_ids = set(_theory_edge_ids_for_labels(field_labels=field_labels, zone_labels=[]))
         symptom_theory_edge_ids = set(_theory_edge_ids_for_labels(field_labels=symptom_field_labels, zone_labels=[]))
-        clean = not bool(all_field_labels or all_zone_labels)
+        theory_node_ids.update(symptom_theory_node_ids)
+        theory_edge_ids.update(symptom_theory_edge_ids)
+        clean = not bool(field_labels or zone_labels)
         return DiagnosisLabels(
+            root_case_labels=root_case_labels,
             cause_node_ids=sorted(set(cause_node_ids)),
             field_labels=field_labels,
             zone_labels=zone_labels,
@@ -367,11 +433,14 @@ class ZipDiagnosisGraphPlugin:
             symptom_theory_edge_ids=sorted(symptom_theory_edge_ids),
             auxiliary={
                 "clean": clean,
+                "has_observed_symptoms": bool(symptom_field_labels or symptom_zone_labels),
                 "damage_profile": str(metadata.get("damage_profile") or ""),
+                "root_label_source": "injection_or_clean_layout",
+                "symptom_label_source": "observed_archive_knowledge",
                 "uncertain_labels": sorted(set(uncertain)),
                 "observed_field_labels": observed_field_labels,
                 "observed_zone_labels": observed_zone_labels,
-                "injected_cause": sorted(set([*field_labels, *zone_labels])),
+                "injected_cause": sorted(set(root_case_labels)),
             },
         )
 
@@ -504,12 +573,15 @@ def _theory_targets_for_field(field: str) -> tuple[str, ...]:
     text = str(field or "").lower().replace("zip.", "").replace("-", "_")
     aliases = {
         "central_directory.header": ("central_directory.span",),
-        "central_directory.extra": ("zip64.extra",),
-        "central_directory.extra_length": ("zip64.extra_length", "zip64.extra"),
+        "central_directory.extra": ("central_directory.extra",),
+        "central_directory.extra_length": ("central_directory.extra_length", "central_directory.extra"),
         "central_directory.external_attributes": ("central_directory.entry_count",),
         "local_header.header": ("local_header.signature",),
-        "local_header.extra": ("zip64.extra",),
-        "local_header.extra_length": ("zip64.extra_length", "zip64.extra"),
+        "local_header.extra": ("local_header.extra",),
+        "local_header.extra_length": ("local_header.extra_length", "local_header.extra"),
+        "compression_method": ("central_directory.method", "local_header.method"),
+        "entry_name": ("central_directory.filename", "local_header.filename"),
+        "generic_extra_field": ("central_directory.extra", "central_directory.extra_length", "local_header.extra", "local_header.extra_length"),
         "data_descriptor.record": ("data_descriptor.record",),
         "payload.crc_region": ("payload.crc_region", "central_directory.crc"),
         "payload.compressed_data": ("payload.compressed_data", "payload.span"),
@@ -530,10 +602,13 @@ def _theory_targets_for_field(field: str) -> tuple[str, ...]:
 
 
 def _theory_targets_for_violation(item: dict[str, Any]) -> tuple[str, ...]:
+    directional = _direction_theory_targets_for_violation(item)
+    if directional:
+        return directional
     fields: list[str] = []
-    for key in ("field", "source_field", "target_field", "likely_bad_side"):
+    for key in ("field", "source_field", "target_field"):
         value = str(item.get(key) or "")
-        if value and value != "ambiguous":
+        if value and not _is_non_directional_likely_bad_side(value):
             fields.append(value)
     output: set[str] = set()
     for field in fields:
@@ -541,12 +616,21 @@ def _theory_targets_for_violation(item: dict[str, Any]) -> tuple[str, ...]:
     return tuple(sorted(output))
 
 
+def _direction_theory_targets_for_violation(item: dict[str, Any]) -> tuple[str, ...]:
+    likely = str(item.get("likely_bad_side") or "")
+    if _is_non_directional_likely_bad_side(likely):
+        return ()
+    targets = _theory_targets_for_field(likely)
+    return tuple(sorted(target for target in targets if target in THEORY_FIELD_SET))
+
+
+def _is_non_directional_likely_bad_side(value: str) -> bool:
+    text = str(value or "").strip().lower()
+    return not text or text in {"ambiguous", "none", "unknown", "crc_direction_unresolved", "unresolved"}
+
+
 def _known_cause_label(label: str) -> bool:
-    if label.startswith("zone:"):
-        return label.split(":", 1)[1] in ZIP_ZONE_LABELS
-    if label.startswith("field:"):
-        return label.split(":", 1)[1] in ZIP_FIELD_LABELS
-    return False
+    return str(label or "") in REPAIR_ROOT_FIELD_SET
 
 
 def zip_theory_id(field: str) -> str:
@@ -578,6 +662,39 @@ def zip_theory_edges_for_zone(zone: str) -> tuple[str, ...]:
     return tuple(sorted(edge_ids))
 
 
+def _canonical_root_case_labels(labels: list[str]) -> list[str]:
+    roots: set[str] = set()
+    for label in labels:
+        if not str(label).startswith("field:"):
+            continue
+        field = field_from_label(label)
+        root = _repair_root_for_field(field)
+        if root:
+            roots.add(root)
+    return sorted(roots)
+
+
+def _repair_root_for_field(field: str) -> str:
+    text = str(field or "").lower().replace("zip.", "")
+    return canonical_root_case(text)
+
+
+def _zone_labels_for_repair_roots(field_labels: list[str]) -> list[str]:
+    zones: set[str] = set()
+    for label in field_labels:
+        zone = _zone_for_repair_root(field_from_label(label))
+        if zone in ZIP_ZONE_LABELS:
+            zones.add(f"zone:{zone}")
+    return sorted(zones)
+
+
+def _zone_for_repair_root(field: str) -> str:
+    text = str(field or "").lower()
+    if text in {"compression_method", "entry_name", "generic_extra_field"}:
+        return "extra_field" if text == "generic_extra_field" else "central_directory"
+    return _zone_for_field(text)
+
+
 def _theory_edge_ids_for_labels(*, field_labels: list[str], zone_labels: list[str]) -> tuple[str, ...]:
     edge_ids: set[str] = set()
     for label in field_labels:
@@ -589,27 +706,55 @@ def _theory_edge_ids_for_labels(*, field_labels: list[str], zone_labels: list[st
     return tuple(sorted(edge_ids))
 
 
-def _split_root_and_symptom_labels(
-    *,
-    damage_profile: str,
-    field_labels: list[str],
-    zone_labels: list[str],
-) -> tuple[list[str], list[str], list[str], list[str]]:
-    observed_fields = {field_from_label(label) for label in field_labels}
-    override = PROFILE_ROOT_FIELD_OVERRIDES.get(damage_profile)
-    if override:
-        root_fields = {field for field in override if field in observed_fields}
-    else:
-        root_fields = {field for field in observed_fields if field not in PROPAGATED_SYMPTOM_FIELDS}
-    symptom_fields = observed_fields - root_fields
-    root_zones = {_zone_for_field(field) for field in root_fields if _zone_for_field(field)}
-    observed_zones = {label_zone(label) for label in zone_labels}
-    symptom_zones = observed_zones - root_zones
-    root_field_labels = sorted(f"field:{field}" for field in root_fields if f"field:{field}" in field_labels)
-    root_zone_labels = sorted(f"zone:{zone}" for zone in root_zones if f"zone:{zone}" in zone_labels)
-    symptom_field_labels = sorted(f"field:{field}" for field in symptom_fields if f"field:{field}" in field_labels)
-    symptom_zone_labels = sorted(f"zone:{zone}" for zone in symptom_zones if f"zone:{zone}" in zone_labels)
-    return root_field_labels, root_zone_labels, symptom_field_labels, symptom_zone_labels
+def _symptom_labels_from_knowledge_payload(knowledge_payload: dict[str, Any]) -> tuple[set[str], set[str]]:
+    graph = _nested(knowledge_payload, "format", "zip", "structure", "graph") or {}
+    fields: set[str] = set()
+    zones: set[str] = set()
+    for item in _graph_violation_items(graph):
+        for theory_field in _theory_targets_for_violation(item):
+            if theory_field in THEORY_FIELD_SET:
+                fields.add(f"field:{theory_field}")
+                zone = _zone_for_field(theory_field)
+                if zone:
+                    zones.add(f"zone:{zone}")
+    summary = _zip_summary(knowledge_payload)
+    for key, value in summary.items():
+        if not _summary_key_is_symptom(str(key)) or not _summary_value_is_active(value):
+            continue
+        for theory_field in SUMMARY_TO_THEORY.get(str(key), ()):
+            if theory_field in THEORY_FIELD_SET:
+                fields.add(f"field:{theory_field}")
+                zone = _zone_for_field(theory_field)
+                if zone:
+                    zones.add(f"zone:{zone}")
+    return fields, zones
+
+
+def _summary_value_is_active(value: Any) -> bool:
+    if isinstance(value, bool):
+        return bool(value)
+    if isinstance(value, (int, float)):
+        return float(value) != 0.0
+    return False
+
+
+def _summary_key_is_symptom(key: str) -> bool:
+    text = str(key or "").lower()
+    return any(
+        token in text
+        for token in (
+            "mismatch",
+            "violation",
+            "conflict",
+            "delta",
+            "likely_bad",
+            "ambiguous",
+            "points_",
+            "outside_archive",
+            "missing_range_evidence",
+            "failure",
+        )
+    )
 
 
 def _edge_id(edge_type: str, source: str, target: str) -> str:

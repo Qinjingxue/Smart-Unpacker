@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from repair_training.core.diagnosis_graph.schema import DiagnosisGraphSample
+from repair_training.core.diagnosis_gnn.root_cases import ROOT_CASES, ROOT_CASE_INDEX
 
 
 NODE_TYPES = ("observation", "theory", "cause")
@@ -18,6 +19,7 @@ class TensorizedGraphMetadata:
     cause_labels: list[str]
     theory_node_ids: list[str]
     theory_edge_ids: list[str]
+    root_cases: list[str]
 
 
 def require_pyg():
@@ -61,6 +63,12 @@ def tensorize_sample(sample: DiagnosisGraphSample):
             if not y:
                 y = [0.0]
             data[node_type].y_alignment = torch.tensor(y, dtype=torch.float32)
+    root_y = [0.0] * len(ROOT_CASES)
+    for label in sample.labels.root_case_labels:
+        index = ROOT_CASE_INDEX.get(str(label))
+        if index is not None:
+            root_y[index] = 1.0
+    data.root_case_y = torch.tensor(root_y, dtype=torch.float32)
 
     edge_groups: dict[tuple[str, str, str], list[tuple[int, int]]] = {}
     edge_ids_by_type: dict[tuple[str, str, str], list[str]] = {}
@@ -100,6 +108,7 @@ def metadata_for_sample(sample: DiagnosisGraphSample) -> TensorizedGraphMetadata
         cause_labels=[node.label for node in cause_nodes],
         theory_node_ids=[node.node_id for node in theory_nodes],
         theory_edge_ids=[edge.edge_id for edge in theory_edges],
+        root_cases=list(ROOT_CASES),
     )
 
 

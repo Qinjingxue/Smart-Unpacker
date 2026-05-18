@@ -7,6 +7,7 @@ from typing import Any
 from repair_training.core.diagnosis_graph.schema import DIAGNOSIS_GRAPH_SCHEMA_VERSION, DiagnosisGraphSample
 from repair_training.core.diagnosis_gnn import DIAGNOSIS_GNN_SEMANTICS
 from repair_training.core.diagnosis_gnn.model import build_diagnosis_gnn_model
+from repair_training.core.diagnosis_gnn.root_cases import ROOT_CASES
 from repair_training.core.diagnosis_gnn.tensorize import THEORY_DEPENDS_EDGE_TYPE, metadata_for_sample, tensorize_sample
 
 
@@ -56,40 +57,30 @@ class DiagnosisGNNModel:
             for batch in loader:
                 indices = [int(item) for item in batch.sample_index.detach().cpu().view(-1).tolist()]
                 batch = batch.to(self.device)
-                out = self.model(batch.x_dict, batch.edge_index_dict)
-                cause_scores_all = self.torch.sigmoid(out["cause"]).detach().cpu()
+                out = self.model(batch.x_dict, batch.edge_index_dict, _batch_dict(batch))
+                root_scores_all = self.torch.sigmoid(out["root_case"]).detach().cpu()
                 edge_scores_all = self.torch.sigmoid(out.get("theory_edge", self.torch.empty(0, device=self.device))).detach().cpu()
-                cause_batch = batch["cause"].batch.detach().cpu()
                 edge_batch = _edge_batch_for_theory_depends(batch)
                 for local_index, sample_index in enumerate(indices):
                     metadata = metadatas[sample_index]
                     sample = samples[sample_index]
-                    cause_scores = cause_scores_all[cause_batch == local_index].tolist()
+                    root_scores = root_scores_all[local_index].tolist()
                     edge_scores_raw = edge_scores_all[edge_batch == local_index].tolist() if edge_batch is not None else []
-                    outputs[sample_index] = self._format_prediction(sample, metadata, cause_scores, edge_scores_raw)
+                    outputs[sample_index] = self._format_prediction(sample, metadata, root_scores, edge_scores_raw)
         return [item for item in outputs if item is not None]
 
     def _format_prediction(self, sample: DiagnosisGraphSample, metadata, scores: list[float], edge_scores_raw: list[float]) -> dict[str, Any]:
-        cause_scores = {
-            node_id: float(score)
-            for node_id, score in zip(metadata.cause_node_ids, scores)
-        }
-        field_scores: dict[str, float] = {}
-        zone_scores: dict[str, float] = {}
-        for label, score in zip(metadata.cause_labels, scores):
-            if not label:
-                continue
-            if label.startswith("field:"):
-                field_scores[label] = max(float(score), field_scores.get(label, 0.0))
-            if label.startswith("zone:"):
-                zone = label.split(":", 1)[1]
-                zone_scores[zone] = max(float(score), zone_scores.get(zone, 0.0))
+        root_scores = {label: float(score) for label, score in zip(ROOT_CASES, scores)}
+        ranked = [
+            {"root_case": label, "score": float(score)}
+            for label, score in sorted(root_scores.items(), key=lambda item: item[1], reverse=True)
+        ]
+        threshold = float((self.thresholds.get("root_case") or {}).get("threshold", self.thresholds.get("root_case_threshold", 0.5)))
         return {
-            "root_cause": {
-                "cause_scores": dict(sorted(cause_scores.items())),
-                "field_scores": dict(sorted(field_scores.items())),
-                "zone_scores": dict(sorted(zone_scores.items())),
-                "top_evidence": [],
+            "root_case": {
+                "scores": dict(sorted(root_scores.items())),
+                "ranked": ranked,
+                "selected": [item["root_case"] for item in ranked if float(item["score"]) >= threshold],
             },
             "diagnostics": {
                 "model_type": "diagnosis_gnn",
@@ -122,6 +113,16 @@ def _edge_batch_for_theory_depends(batch):
     if edge_index.numel() == 0:
         return None
     return theory_batch[edge_index[0].detach().cpu()]
+
+
+def _batch_dict(batch) -> dict[str, Any]:
+    output = {}
+    for node_type in batch.x_dict:
+        try:
+            output[node_type] = batch[node_type].batch
+        except Exception:
+            pass
+    return output
 
 
 def _normalize_checkpoint_config(config: dict[str, Any], state_dict: dict[str, Any]) -> dict[str, Any]:

@@ -632,7 +632,9 @@ pub(crate) fn inspect_zip_structure_graph(
     summary.set_item("cd_entry_count", all_entries.len())?;
     summary.set_item("cd_entries_checked", checked_entries.len())?;
     summary.set_item("entry_count_delta", all_entries.len() as i64 - eocd.total_entries as i64)?;
+    let mut eocd_entry_count_mismatch = 0usize;
     if all_entries.len() as u16 != eocd.total_entries {
+        eocd_entry_count_mismatch = 1;
         zip_graph_violation(
             py,
             &violations,
@@ -644,6 +646,30 @@ pub(crate) fn inspect_zip_structure_graph(
             &all_entries.len().to_string(),
             all_entries.len() as i64 - eocd.total_entries as i64,
             "medium",
+        )?;
+        let declared_entries = eocd.total_entries.to_string();
+        let parsed_entries = all_entries.len().to_string();
+        let disk_entries = eocd.disk_entries.to_string();
+        zip_graph_relation_violation(
+            py,
+            &relation_violations,
+            &violations,
+            "eocd_entry_count_mismatch",
+            "eocd.entry_count",
+            "eocd.entry_count",
+            "central_directory.entry_count",
+            "counts_entries",
+            0,
+            eocd.total_entries as u64,
+            all_entries.len() as u64,
+            "eocd.entry_count",
+            0.95,
+            "high",
+            &[
+                ("declared_total_entries", &declared_entries),
+                ("declared_disk_entries", &disk_entries),
+                ("parsed_central_directory_entries", &parsed_entries),
+            ],
         )?;
     }
 
@@ -734,9 +760,16 @@ pub(crate) fn inspect_zip_structure_graph(
     let mut descriptor_record_mismatch = 0usize;
     let mut descriptor_size_mismatch = 0usize;
     let mut central_directory_compressed_size_likely_bad = 0usize;
+    let mut local_header_compressed_size_likely_bad = 0usize;
     let mut zip64_extra_length_mismatch = 0usize;
     let mut zip64_uncompressed_size_mismatch = 0usize;
     let mut split_volume_missing_range_evidence = 0usize;
+    let mut local_header_signature_mismatch = 0usize;
+    let mut payload_decode_failure = 0usize;
+    let mut payload_crc_mismatch = 0usize;
+    let mut local_header_crc_likely_bad = 0usize;
+    let mut crc_direction_unresolved = 0usize;
+    let mut extra_field_structure_mismatch = 0usize;
 
     for (index, entry) in checked_entries.iter().enumerate() {
         let cd_entry_id = format!("cd_entry:{index}");
@@ -753,20 +786,64 @@ pub(crate) fn inspect_zip_structure_graph(
         let raw_local = parse_local_header(&data, raw_local_offset);
         let archive_adjusted_local = parse_local_header(&data, archive_adjusted_offset);
         let prefix_adjusted_local = if prefix_len > 0 { parse_local_header(&data, prefix_adjusted_offset) } else { None };
+        let raw_local_tolerant = parse_local_header_ignoring_signature(&data, raw_local_offset, entry);
+        let archive_adjusted_local_tolerant =
+            parse_local_header_ignoring_signature(&data, archive_adjusted_offset, entry);
+        let prefix_adjusted_local_tolerant = if prefix_len > 0 {
+            parse_local_header_ignoring_signature(&data, prefix_adjusted_offset, entry)
+        } else {
+            None
+        };
         let declared_local_ok = if prefix_len > 0 {
             prefix_adjusted_local.is_some()
         } else {
             archive_adjusted_local.is_some()
         };
+        let declared_local_signature_bad = !declared_local_ok
+            && if prefix_len > 0 {
+                prefix_adjusted_local_tolerant.is_some()
+            } else {
+                archive_adjusted_local_tolerant.is_some()
+            };
         let matched_local = prefix_adjusted_local
             .clone()
             .or_else(|| archive_adjusted_local.clone())
             .or_else(|| raw_local.clone())
+            .or_else(|| prefix_adjusted_local_tolerant.clone())
+            .or_else(|| archive_adjusted_local_tolerant.clone())
+            .or_else(|| raw_local_tolerant.clone())
             .or_else(|| local_candidates.iter().find(|candidate| candidate.name == entry.name).cloned());
         let local_target_id = format!("local_header_target:{index}");
         let local_ok = matched_local.as_ref().is_some_and(|local| local.name == entry.name);
         zip_graph_edge(py, &edges, &cd_entry_id, &local_target_id, "points_to", "local_header_offset", local_ok, if local_ok { 1.0 } else { 0.0 })?;
-        if !declared_local_ok {
+        if declared_local_signature_bad {
+            local_header_signature_mismatch += 1;
+            let target_signature = signature_hex_at(&data, declared_local_offset);
+            let declared_local_offset_string = declared_local_offset.to_string();
+            zip_graph_relation_violation(
+                py,
+                &relation_violations,
+                &violations,
+                "local_header_signature_mismatch",
+                "local_header.signature",
+                "central_directory.local_header_offset",
+                "local_header.signature",
+                "points_to",
+                index,
+                entry.local_header_offset as u64,
+                declared_local_offset as u64,
+                "local_header.signature",
+                0.95,
+                "high",
+                &[
+                    ("target_kind", "bad_signature"),
+                    ("target_signature", &target_signature),
+                    ("expected_signature", "504b0304"),
+                    ("offset_is_plausible", "true"),
+                    ("declared_local_offset", &declared_local_offset_string),
+                ],
+            )?;
+        } else if !declared_local_ok {
             local_offset_violations += 1;
             bad_local_header_target_signature += 1;
             let observed = if declared_local_offset >= file_size {
@@ -875,8 +952,14 @@ pub(crate) fn inspect_zip_structure_graph(
                 } else if payload_crc.is_some() && !payload_matches_cd && !payload_matches_local {
                     ("payload.compressed_data", 0.8)
                 } else {
-                    ("ambiguous", 0.45)
+                    ("crc_direction_unresolved", 0.35)
                 };
+                match likely_bad_side {
+                    "local_header.crc" => local_header_crc_likely_bad += 1,
+                    "payload.compressed_data" => payload_crc_mismatch += 1,
+                    "crc_direction_unresolved" => crc_direction_unresolved += 1,
+                    _ => {}
+                }
                 let central_directory_crc_string = entry.crc32.to_string();
                 let local_header_crc_string = local.crc32.to_string();
                 let payload_crc_string = payload_crc.map(|value| value.to_string()).unwrap_or_default();
@@ -885,7 +968,7 @@ pub(crate) fn inspect_zip_structure_graph(
                     &relation_violations,
                     &violations,
                     "central_local_crc_mismatch",
-                    if likely_bad_side == "ambiguous" { "central_directory.crc" } else { likely_bad_side },
+                    if likely_bad_side == "crc_direction_unresolved" { "central_directory.crc" } else { likely_bad_side },
                     "central_directory.crc",
                     "local_header.crc",
                     "matches_field",
@@ -923,6 +1006,35 @@ pub(crate) fn inspect_zip_structure_graph(
         let payload_end = data_start.saturating_add(entry.compressed_size as usize);
         zip_graph_node(py, &nodes, &format!("payload_span:cd:{index}"), "payload_span", data_start, payload_end.min(file_size), "declared")?;
         zip_graph_edge(py, &edges, &local_target_id, &format!("payload_span:cd:{index}"), "owns_span", "payload", payload_end <= file_size, 0.9)?;
+        if entry.method == 8 && payload_probe.is_none() && data_start < next_boundary {
+            payload_decode_failure += 1;
+            let data_start_string = data_start.to_string();
+            let next_boundary_string = next_boundary.to_string();
+            let expected_size_string = entry.uncompressed_size.to_string();
+            zip_graph_relation_violation(
+                py,
+                &relation_violations,
+                &violations,
+                "payload_decode_failure",
+                "payload.compressed_data",
+                "payload.compressed_data",
+                "payload.span",
+                "decodes_to",
+                index,
+                data_start as u64,
+                next_boundary as u64,
+                "payload.compressed_data",
+                0.9,
+                "high",
+                &[
+                    ("method", "deflate"),
+                    ("payload_start", &data_start_string),
+                    ("payload_next_boundary", &next_boundary_string),
+                    ("expected_uncompressed_size", &expected_size_string),
+                    ("inflate_error_kind", "deflate_probe_failed"),
+                ],
+            )?;
+        }
         if entry.flags & 0x08 == 0
             && entry.compressed_size != u32::MAX
             && local.compressed_size != entry.compressed_size
@@ -950,6 +1062,8 @@ pub(crate) fn inspect_zip_structure_graph(
             };
             if likely_bad_side == "central_directory.compressed_size" {
                 central_directory_compressed_size_likely_bad += 1;
+            } else if likely_bad_side == "local_header.compressed_size" {
+                local_header_compressed_size_likely_bad += 1;
             }
             let cd_size_string = cd_size.to_string();
             let local_size_string = local_size.to_string();
@@ -1131,7 +1245,7 @@ pub(crate) fn inspect_zip_structure_graph(
                 } else if payload_crc.is_some() && !payload_matches_cd && !payload_matches_descriptor {
                     ("payload.compressed_data", 0.8)
                 } else {
-                    ("ambiguous", 0.45)
+                    ("crc_direction_unresolved", 0.35)
                 };
                 descriptor_crc_cd_mismatch += 1;
                 if payload_crc.is_some() && !payload_matches_descriptor {
@@ -1139,6 +1253,10 @@ pub(crate) fn inspect_zip_structure_graph(
                 }
                 if likely_bad_side == "data_descriptor.crc" {
                     descriptor_crc_likely_bad += 1;
+                } else if likely_bad_side == "payload.compressed_data" {
+                    payload_crc_mismatch += 1;
+                } else if likely_bad_side == "crc_direction_unresolved" {
+                    crc_direction_unresolved += 1;
                 }
                 let descriptor_crc_string = descriptor.crc32.to_string();
                 let central_directory_crc_string = entry.crc32.to_string();
@@ -1148,7 +1266,7 @@ pub(crate) fn inspect_zip_structure_graph(
                     &relation_violations,
                     &violations,
                     "data_descriptor_crc_mismatch",
-                    if likely_bad_side == "ambiguous" { "data_descriptor.crc" } else { likely_bad_side },
+                    if likely_bad_side == "crc_direction_unresolved" { "data_descriptor.crc" } else { likely_bad_side },
                     "data_descriptor.crc",
                     "central_directory.crc",
                     "matches_field",
@@ -1244,6 +1362,44 @@ pub(crate) fn inspect_zip_structure_graph(
                 }
             }
         }
+        for diagnostic in [
+            extra_field_diagnostic(&entry.extra, entry.extra_offset, "central_directory"),
+            extra_field_diagnostic(&local.extra, local.extra_offset, "local_header"),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            extra_field_structure_mismatch += 1;
+            let declared_size = diagnostic.declared_size.to_string();
+            let parseable_size = diagnostic.parseable_size.to_string();
+            let header_id = format!("{:04x}", diagnostic.header_id);
+            let offset = diagnostic.offset.to_string();
+            zip_graph_relation_violation(
+                py,
+                &relation_violations,
+                &violations,
+                "extra_field_structure_mismatch",
+                "generic_extra_field",
+                diagnostic.theory_field,
+                "generic_extra_field",
+                "extra_tlv_bounds",
+                index,
+                diagnostic.declared_size as u64,
+                diagnostic.parseable_size as u64,
+                "generic_extra_field",
+                0.9,
+                "high",
+                &[
+                    ("extra_location", diagnostic.location),
+                    ("extra_header_id", &header_id),
+                    ("declared_size", &declared_size),
+                    ("parseable_size", &parseable_size),
+                    ("extra_offset", &offset),
+                    ("truncated", if diagnostic.truncated { "true" } else { "false" }),
+                    ("overlong", if diagnostic.overlong { "true" } else { "false" }),
+                ],
+            )?;
+        }
     }
     let cd_offset_delta = physical_cd_offset as i64 - eocd.cd_offset as i64;
     if local_offset_violations >= 2
@@ -1286,6 +1442,7 @@ pub(crate) fn inspect_zip_structure_graph(
     summary.set_item("central_local_crc_mismatch_count", crc_mismatch)?;
     summary.set_item("central_local_compressed_size_mismatch_count", compressed_mismatch)?;
     summary.set_item("central_local_uncompressed_size_mismatch_count", uncompressed_mismatch)?;
+    summary.set_item("eocd_entry_count_mismatch_count", eocd_entry_count_mismatch)?;
     summary.set_item("eocd_cd_size_mismatch_count", eocd_cd_size_mismatch)?;
     summary.set_item("local_header_offset_violation_count", local_offset_violations)?;
     summary.set_item("central_local_flags_relation_mismatch_count", central_local_flags_relation_mismatch)?;
@@ -1293,14 +1450,21 @@ pub(crate) fn inspect_zip_structure_graph(
     summary.set_item("local_header_flags_likely_bad_count", local_header_flags_likely_bad)?;
     summary.set_item("flags_relation_ambiguous_count", flags_relation_ambiguous)?;
     summary.set_item("bad_local_header_target_signature_count", bad_local_header_target_signature)?;
+    summary.set_item("local_header_signature_mismatch_count", local_header_signature_mismatch)?;
     summary.set_item("local_header_offset_points_to_descriptor_or_payload_count", local_header_offset_points_to_descriptor_or_payload)?;
     summary.set_item("local_header_offset_points_outside_archive_count", local_header_offset_points_outside_archive)?;
+    summary.set_item("payload_decode_failure_count", payload_decode_failure)?;
+    summary.set_item("payload_crc_mismatch_count", payload_crc_mismatch)?;
     summary.set_item("descriptor_crc_cd_mismatch_count", descriptor_crc_cd_mismatch)?;
     summary.set_item("descriptor_crc_payload_mismatch_count", descriptor_crc_payload_mismatch)?;
     summary.set_item("descriptor_crc_likely_bad_count", descriptor_crc_likely_bad)?;
+    summary.set_item("local_header_crc_likely_bad_count", local_header_crc_likely_bad)?;
+    summary.set_item("crc_direction_unresolved_count", crc_direction_unresolved)?;
     summary.set_item("descriptor_record_mismatch_count", descriptor_record_mismatch)?;
     summary.set_item("descriptor_size_mismatch_count", descriptor_size_mismatch)?;
     summary.set_item("central_directory_compressed_size_likely_bad_count", central_directory_compressed_size_likely_bad)?;
+    summary.set_item("local_header_compressed_size_likely_bad_count", local_header_compressed_size_likely_bad)?;
+    summary.set_item("extra_field_structure_mismatch_count", extra_field_structure_mismatch)?;
     summary.set_item("span_conflict_count", span_conflicts)?;
     summary.set_item("descriptor_conflict_count", descriptor_conflicts)?;
     summary.set_item("zip64_extra_present_count", zip64_extra_present)?;
@@ -1727,6 +1891,113 @@ fn descriptor_sizes_match_entry(
         && local.compressed_size as u64 == compressed_size
         && local.uncompressed_size as u64 == uncompressed_size;
     central_matches || local_matches
+}
+
+#[derive(Clone, Copy)]
+struct ExtraFieldDiagnostic<'a> {
+    location: &'a str,
+    theory_field: &'a str,
+    header_id: u16,
+    declared_size: usize,
+    parseable_size: usize,
+    offset: usize,
+    truncated: bool,
+    overlong: bool,
+}
+
+fn parse_local_header_ignoring_signature(
+    data: &[u8],
+    offset: usize,
+    entry: &CentralEntry,
+) -> Option<LocalHeader> {
+    if offset + LOCAL_HEADER_LEN > data.len() {
+        return None;
+    }
+    let name_len = u16_le(data, offset + 26);
+    let extra_len = u16_le(data, offset + 28);
+    let name_start = offset + LOCAL_HEADER_LEN;
+    let extra_start = name_start.checked_add(name_len as usize)?;
+    let data_start = extra_start.checked_add(extra_len as usize)?;
+    if data_start > data.len() {
+        return None;
+    }
+    let name = data[name_start..extra_start].to_vec();
+    if name != entry.name {
+        return None;
+    }
+    Some(LocalHeader {
+        offset,
+        flags: u16_le(data, offset + 6),
+        method: u16_le(data, offset + 8),
+        crc32: u32_le(data, offset + 14),
+        compressed_size: u32_le(data, offset + 18),
+        uncompressed_size: u32_le(data, offset + 22),
+        name,
+        extra: data[extra_start..data_start].to_vec(),
+        extra_offset: extra_start,
+        name_len,
+        extra_len,
+    })
+}
+
+fn extra_field_diagnostic<'a>(
+    extra: &[u8],
+    absolute_extra_offset: usize,
+    location: &'a str,
+) -> Option<ExtraFieldDiagnostic<'a>> {
+    let mut pos = 0usize;
+    while pos < extra.len() {
+        if pos + 4 > extra.len() {
+            return Some(ExtraFieldDiagnostic {
+                location,
+                theory_field: extra_theory_field_for_location(location),
+                header_id: 0,
+                declared_size: 4usize.saturating_sub(extra.len().saturating_sub(pos)),
+                parseable_size: extra.len().saturating_sub(pos),
+                offset: absolute_extra_offset + pos,
+                truncated: true,
+                overlong: false,
+            });
+        }
+        let header_id = u16_le(extra, pos);
+        let declared_size = u16_le(extra, pos + 2) as usize;
+        let value_start = pos + 4;
+        let value_end = value_start.saturating_add(declared_size);
+        if value_end > extra.len() {
+            return Some(ExtraFieldDiagnostic {
+                location,
+                theory_field: extra_theory_field_for_location(location),
+                header_id,
+                declared_size,
+                parseable_size: extra.len().saturating_sub(value_start),
+                offset: absolute_extra_offset + pos,
+                truncated: true,
+                overlong: false,
+            });
+        }
+        if header_id == 0x0001 && declared_size % 8 != 0 {
+            return Some(ExtraFieldDiagnostic {
+                location,
+                theory_field: "zip64.extra",
+                header_id,
+                declared_size,
+                parseable_size: declared_size - (declared_size % 8),
+                offset: absolute_extra_offset + pos,
+                truncated: false,
+                overlong: true,
+            });
+        }
+        pos = value_end;
+    }
+    None
+}
+
+fn extra_theory_field_for_location(location: &str) -> &'static str {
+    match location {
+        "central_directory" => "central_directory.extra",
+        "local_header" => "local_header.extra",
+        _ => "zip64.extra",
+    }
 }
 
 fn payload_probe_for_entry(
