@@ -30,6 +30,7 @@ class DiagnosisGNNModel:
             raise RuntimeError(f"unsupported DiagnosisGNN graph schema: {self.model_card.get('graph_schema')!r}")
         checkpoint = torch.load(self.model_dir / "model.pt", map_location="cpu")
         self.metadata = (list(checkpoint.get("metadata", ([], []))[0]), [tuple(item) for item in checkpoint.get("metadata", ([], []))[1]])
+        self.edge_types = {tuple(item) for item in self.metadata[1]}
         self.config = dict(checkpoint.get("config") or {})
         self.config = _normalize_checkpoint_config(self.config, checkpoint.get("state_dict") or {})
         self.device = _resolve_device(device, torch)
@@ -57,6 +58,13 @@ class DiagnosisGNNModel:
             for batch in loader:
                 indices = [int(item) for item in batch.sample_index.detach().cpu().view(-1).tolist()]
                 batch = batch.to(self.device)
+                runtime_edge_types = {tuple(edge_type) for edge_type in batch.edge_index_dict}
+                unknown_edge_types = sorted(runtime_edge_types - self.edge_types)
+                if unknown_edge_types:
+                    raise RuntimeError(
+                        "DiagnosisGNN runtime graph has edge types that were not present in training metadata: "
+                        f"{unknown_edge_types}. Rebuild diagnosis graph rows and retrain the model."
+                    )
                 out = self.model(batch.x_dict, batch.edge_index_dict, _batch_dict(batch))
                 root_scores_all = self.torch.sigmoid(out["root_case"]).detach().cpu()
                 edge_scores_all = self.torch.sigmoid(out.get("theory_edge", self.torch.empty(0, device=self.device))).detach().cpu()
@@ -86,6 +94,7 @@ class DiagnosisGNNModel:
                 "model_type": "diagnosis_gnn",
                 "graph_schema": DIAGNOSIS_GRAPH_SCHEMA_VERSION,
                 "thresholds": dict(self.thresholds),
+                "root_case_score_summary": _root_case_score_summary(ranked, threshold),
                 "node_count": len(sample.graph.nodes),
                 "edge_count": len(sample.graph.edges),
                 "theory_edge_scores": dict(sorted({
@@ -102,6 +111,29 @@ class DiagnosisGNNModel:
                 ],
             },
         }
+
+
+def _root_case_score_summary(ranked: list[dict[str, Any]], threshold: float) -> dict[str, Any]:
+    if not ranked:
+        return {"top_score": 0.0, "top_margin": 0.0, "threshold_excess": 0.0}
+    top_score = _clamp01(float(ranked[0].get("score") or 0.0))
+    second_score = _clamp01(float(ranked[1].get("score") or 0.0)) if len(ranked) > 1 else 0.0
+    top_margin = _clamp01(top_score - second_score)
+    threshold = _clamp01(float(threshold or 0.0))
+    threshold_excess = 0.0
+    if threshold < 1.0:
+        threshold_excess = _clamp01((top_score - threshold) / max(1.0 - threshold, 1e-6))
+    return {
+        "top_score": top_score,
+        "second_score": second_score,
+        "top_margin": top_margin,
+        "threshold": threshold,
+        "threshold_excess": threshold_excess,
+    }
+
+
+def _clamp01(value: float) -> float:
+    return max(0.0, min(1.0, float(value)))
 
 
 def _edge_batch_for_theory_depends(batch):

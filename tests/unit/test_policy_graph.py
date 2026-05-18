@@ -94,6 +94,49 @@ def test_policy_graph_undo_and_stop_best(tmp_path: Path):
     assert stop.archive_state is not None
 
 
+def test_policy_graph_fresh_first_after_undo_uses_exploration_stats(tmp_path: Path):
+    job = _job(tmp_path)
+    graph = PolicyRepairGraph.initialize(job, PolicyRecoverySnapshot(score=0.1, status="partial"))
+    root_id = graph.graph.current_node_id
+    graph.register_proposals([{"candidate_id": "c1", "module_name": "zip_fix_cd", "route_family": "cd"}], step=1)
+    child = graph.forward(candidate_id="c1", module_name="zip_fix_cd", materialized_candidate=None, failure={"failure_reason": "failed"}, step=1)
+
+    undo = graph.undo(step=2)
+    proposals = graph.register_proposals([
+        {"candidate_id": "c1", "module_name": "zip_fix_cd", "route_family": "cd"},
+        {"candidate_id": "c2", "module_name": "zip_fix_cd_alt", "route_family": "cd"},
+    ], step=2)
+    parent = graph.graph.nodes[root_id]
+
+    assert undo.node_id == root_id
+    assert undo.diagnostics["from_node_id"] == child.node_id
+    assert [edge.candidate_id for edge in proposals] == ["c2"]
+    assert parent.exploration["outgoing_action_count"] == 2
+    assert parent.exploration["expanded_action_count"] == 1
+    assert parent.exploration["fresh_action_count"] == 1
+    assert parent.exploration["exhaustion_ratio"] == 0.5
+    assert next(iter(graph.graph.edges.values())).exploration["undo_count_after_attempt"] == 1
+
+
+def test_policy_graph_reopens_attempted_candidate_after_exhaustion(tmp_path: Path):
+    job = _job(tmp_path)
+    graph = PolicyRepairGraph.initialize(job, PolicyRecoverySnapshot(score=0.1, status="partial"))
+    graph.register_proposals([{"candidate_id": "c1", "module_name": "zip_fix_cd", "route_family": "cd"}], step=1)
+    graph.forward(candidate_id="c1", module_name="zip_fix_cd", materialized_candidate=None, failure={"failure_reason": "failed"}, step=1)
+    graph.undo(step=2)
+
+    proposals = graph.register_proposals([{
+        "candidate_id": "c1",
+        "module_name": "zip_fix_cd",
+        "route_family": "cd",
+    }], step=3)
+
+    assert [edge.candidate_id for edge in proposals] == ["c1"]
+    assert proposals[0].exploration["reopened_after_exhaustion"] is True
+    assert graph.graph.current_node().exploration["fresh_action_count"] == 0
+    assert graph.graph.current_node().exploration["reopened_action_count"] == 1
+
+
 def test_policy_graph_stop_readiness_tracks_stale_best_updates(tmp_path: Path):
     job = _job(tmp_path)
     graph = PolicyRepairGraph.initialize(job, PolicyRecoverySnapshot(score=0.1, status="partial"))

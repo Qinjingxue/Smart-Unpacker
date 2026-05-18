@@ -36,11 +36,57 @@ def main(argv: list[str] | None = None) -> int:
                 "--output", str(run_dir / "datasets" / "policy_graph_rows.jsonl"),
                 "--summary-output", str(run_dir / "reports" / "policy_graph_rows_summary.json"),
             ])
+        elif stage in {"graphs:policy_teacher", "teacher:policy_transformer"}:
+            input_path = Path(args.input) if args.input else run_dir / "datasets" / "policy_runtime_logs.jsonl"
+            _run([
+                sys.executable, "-m", "repair_training.build_policy_teacher_rows",
+                "--format", fmt,
+                "--input", str(input_path),
+                "--output", str(run_dir / "datasets" / "policy_teacher_rows.jsonl"),
+                "--summary-output", str(run_dir / "reports" / "policy_teacher_rows_summary.json"),
+            ])
+        elif stage == "transitions:policy_transformer":
+            input_path = Path(args.input) if args.input else run_dir / "datasets" / "damage_rows.jsonl"
+            _run([
+                sys.executable, "-m", "repair_training.build_policy_transition_rows",
+                "--format", fmt,
+                "--input", str(input_path),
+                "--output", str(run_dir / "datasets" / "policy_transition_rows.jsonl"),
+                "--summary-output", str(run_dir / "reports" / "policy_transition_rows_summary.json"),
+            ])
+        elif stage == "world_rows:policy_transformer":
+            input_path = Path(args.input) if args.input else run_dir / "datasets" / "policy_transition_rows.jsonl"
+            _run([
+                sys.executable, "-m", "repair_training.build_policy_world_rows",
+                "--format", fmt,
+                "--input", str(input_path),
+                "--output", str(run_dir / "datasets" / "policy_world_rows.jsonl"),
+                "--summary-output", str(run_dir / "reports" / "policy_world_rows_summary.json"),
+            ])
+        elif stage in {"replay:policy_transformer", "replay_predictions:policy_transformer"}:
+            input_path = Path(args.input) if args.input else run_dir / "datasets" / "policy_transition_rows.jsonl"
+            replayed_path = run_dir / "datasets" / "policy_transition_rows_replayed.jsonl"
+            _run([
+                sys.executable, "-m", "repair_training.replay_policy_transition_predictions",
+                "--input", str(input_path),
+                "--output", str(replayed_path),
+                "--model-dir", str(run_dir / "models" / "repair_policy_transformer_world_pretrain"),
+                "--summary-output", str(run_dir / "reports" / "policy_transition_prediction_replay_summary.json"),
+            ])
+            _run([
+                sys.executable, "-m", "repair_training.build_policy_world_rows",
+                "--format", fmt,
+                "--input", str(replayed_path),
+                "--output", str(run_dir / "datasets" / "policy_world_rows_replayed.jsonl"),
+                "--summary-output", str(run_dir / "reports" / "policy_world_rows_replayed_summary.json"),
+            ])
         elif stage in {"train", "train:diagnosis_gnn"}:
             model = args.model if args.model else "diagnosis_gnn"
             _run([sys.executable, "-m", "repair_training.train", "--format", fmt, "--model", model, "--run-dir", str(run_dir)])
         elif stage == "train:policy_transformer":
             _run([sys.executable, "-m", "repair_training.train", "--format", fmt, "--model", "repair_policy_transformer", "--run-dir", str(run_dir)])
+        elif stage == "train:policy_world":
+            _run([sys.executable, "-m", "repair_training.train", "--format", fmt, "--model", "repair_policy_transformer", "--run-dir", str(run_dir), "--training-task", "joint"])
         elif stage in {"eval", "eval:diagnosis_gnn"}:
             _run([
                 sys.executable, "-m", "repair_training.evaluate_diagnosis_gnn",
@@ -50,10 +96,23 @@ def main(argv: list[str] | None = None) -> int:
                 "--output", str(run_dir / "reports" / "diagnosis_gnn_eval"),
             ])
         elif stage == "eval:policy_transformer":
+            input_path = run_dir / "datasets" / "policy_world_rows.jsonl"
+            if not input_path.is_file():
+                input_path = run_dir / "datasets" / "policy_teacher_rows.jsonl"
+            if not input_path.is_file():
+                input_path = run_dir / "datasets" / "policy_graph_rows.jsonl"
             _run([
                 sys.executable, "-m", "repair_training.evaluate_policy_transformer",
                 "--format", fmt,
-                "--input", str(run_dir / "datasets" / "policy_graph_rows.jsonl"),
+                "--input", str(input_path),
+                "--model-dir", str(run_dir / "models" / "repair_policy_transformer"),
+                "--output", str(run_dir / "reports" / "repair_policy_transformer_eval"),
+            ])
+        elif stage == "eval:policy_world":
+            _run([
+                sys.executable, "-m", "repair_training.evaluate_policy_transformer",
+                "--format", fmt,
+                "--input", str(run_dir / "datasets" / "policy_world_rows.jsonl"),
                 "--model-dir", str(run_dir / "models" / "repair_policy_transformer"),
                 "--output", str(run_dir / "reports" / "repair_policy_transformer_eval"),
             ])

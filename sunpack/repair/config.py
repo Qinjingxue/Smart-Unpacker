@@ -7,8 +7,8 @@ DEFAULT_REPAIR_CONFIG = {
     "workspace": ".sunpack_repair",
     "keep_candidates": False,
     "max_attempts_per_task": 3,
-    "max_repair_rounds_per_task": 5,
-    "max_repair_seconds_per_task": 120.0,
+    "max_repair_rounds_per_task": 100,
+    "max_repair_seconds_per_task": 200.0,
     "max_repair_generated_files_per_task": 16,
     "max_repair_generated_mb_per_task": 2048.0,
     "stagnation_patience_rounds": 3,
@@ -51,7 +51,7 @@ DEFAULT_REPAIR_CONFIG = {
         "enabled": True,
         "strict_provider_errors": False,
         "provider_package": "sunpack_repair_models",
-        "graph_stop_stale_patience": 3,
+        "graph_stop_stale_patience": 100,
         "min_best_recovery_improvement": 0.01,
     },
     "telemetry": {
@@ -320,7 +320,7 @@ def _normalize_policy(value: Any) -> dict[str, Any]:
         "enabled": _bool_value(value.get("enabled", True), "repair.policy.enabled"),
         "strict_provider_errors": _bool_value(value.get("strict_provider_errors", False), "repair.policy.strict_provider_errors"),
         "provider_package": provider_package,
-        "graph_stop_stale_patience": _int_at_least(value, "graph_stop_stale_patience", 0) if "graph_stop_stale_patience" in value else 3,
+        "graph_stop_stale_patience": _int_at_least(value, "graph_stop_stale_patience", 0) if "graph_stop_stale_patience" in value else 100,
         "min_best_recovery_improvement": _float_at_least(value, "min_best_recovery_improvement", 0.0) if "min_best_recovery_improvement" in value else 0.01,
     }
 

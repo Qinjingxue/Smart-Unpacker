@@ -469,9 +469,10 @@
     "enabled": true,
     "workspace": ".sunpack_repair",
     "keep_candidates": false,
-    "max_attempts_per_task": 1,
-    "max_repair_rounds_per_task": 3,
-    "max_repair_seconds_per_task": 120,
+    "max_attempts_per_task": 100,
+    "max_repair_rounds_per_task": 100,
+    "max_repair_seconds_per_task": 200,
+    "comparison_no_improvement_patience_rounds": 20,
     "max_repair_generated_files_per_task": 16,
     "max_repair_generated_mb_per_task": 2048,
     "safety": {

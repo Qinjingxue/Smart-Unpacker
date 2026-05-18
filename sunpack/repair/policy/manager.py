@@ -81,7 +81,7 @@ class RepairPolicyManager:
                     raise
                 errors.append(f"{provider_id}: {exc}")
                 continue
-            return result.to_dict(), {**base, "decision_status": "diagnosed", "provider_id": provider_id, "confidence": result.confidence, "provider_errors": errors}
+            return result.to_dict(), {**base, "decision_status": "diagnosed", "provider_id": provider_id, "provider_errors": errors}
         return {}, {**base, "decision_status": "unavailable", "fallback_reason": "diagnosis_hgt_unavailable", "provider_errors": errors, "load_error": self.last_load_error}
 
     def score_graph_actions(
@@ -122,6 +122,9 @@ class RepairPolicyManager:
                 if self.strict_provider_errors:
                     raise
                 errors.append(f"{provider_id}: {exc}")
+                continue
+            if not _has_action_predictions(raw):
+                errors.append(f"{provider_id}: policy_prediction_unavailable")
                 continue
             scores = _coerce_policy_graph_actions(raw, provider_id=provider_id)
             valid = _valid_policy_graph_actions(scores, available_actions)
@@ -203,7 +206,6 @@ def _coerce_diagnosis_hgt(value: DiagnosisHGTResult | dict[str, Any] | None, *, 
         root_case_scores={str(key): float(_optional_float(score) or 0.0) for key, score in scores.items()},
         selected_root_cases=[str(item) for item in selected or [] if str(item)],
         ranked_root_cases=[dict(item) for item in ranked or [] if isinstance(item, dict)],
-        confidence=float(value.get("confidence") or 0.0),
         diagnostics={**dict(value.get("diagnostics") or {}), "provider_id": provider_id},
     )
 
@@ -212,6 +214,7 @@ def _coerce_policy_graph_actions(value: Any, *, provider_id: str) -> list[Policy
     raw = value.get("action_scores") if isinstance(value, dict) else value
     if not isinstance(raw, list):
         return []
+    predictions = value.get("action_predictions") if isinstance(value, dict) and isinstance(value.get("action_predictions"), dict) else {}
     output: list[PolicyGraphAction] = []
     for item in raw:
         if isinstance(item, PolicyGraphAction):
@@ -222,16 +225,38 @@ def _coerce_policy_graph_actions(value: Any, *, provider_id: str) -> list[Policy
         action = str(item.get("action_type") or item.get("action") or "module")
         if action not in {"module", "undo", "stop"}:
             continue
+        action_id = str(item.get("action_id") or item.get("candidate_id") or "")
+        module_name = str(item.get("module_name") or item.get("module") or "")
+        metadata = dict(item.get("metadata") or {})
+        prediction = metadata.get("predicted_next_state")
+        if prediction is None:
+            prediction = predictions.get(action_id) or predictions.get(f"module:{module_name}") or predictions.get(module_name)
+        if isinstance(prediction, dict):
+            metadata["predicted_next_state"] = prediction
         output.append(PolicyGraphAction(
             action_type=action,  # type: ignore[arg-type]
-            module_name=str(item.get("module_name") or item.get("module") or ""),
-            action_id=str(item.get("action_id") or item.get("candidate_id") or ""),
+            module_name=module_name,
+            action_id=action_id,
             score=float(_optional_float(item.get("score", item.get("logic_score", 0.0))) or 0.0),
             confidence=_optional_float(item.get("confidence")),
             reason=str(item.get("reason") or ""),
-            metadata={**dict(item.get("metadata") or {}), "provider_id": provider_id},
+            metadata={**metadata, "provider_id": provider_id},
         ))
     return output
+
+
+def _has_action_predictions(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    predictions = value.get("action_predictions")
+    if isinstance(predictions, dict) and predictions:
+        return True
+    for item in value.get("action_scores") or []:
+        if isinstance(item, dict):
+            metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+            if isinstance(metadata.get("predicted_next_state"), dict):
+                return True
+    return False
 
 
 def _valid_policy_graph_actions(scores: list[PolicyGraphAction], available_actions: list[dict[str, Any]]) -> list[PolicyGraphAction]:

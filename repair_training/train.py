@@ -62,7 +62,11 @@ def main(argv: list[str] | None = None) -> int:
             device=args.device,
         )
     elif model_type == "repair_policy_transformer":
-        input_path = Path(args.input) if args.input else run_dir / "datasets" / "policy_graph_rows.jsonl"
+        input_path = Path(args.input) if args.input else run_dir / "datasets" / "policy_world_rows.jsonl"
+        if not input_path.is_file() and not args.input:
+            input_path = run_dir / "datasets" / "policy_teacher_rows.jsonl"
+        if not input_path.is_file() and not args.input:
+            input_path = run_dir / "datasets" / "policy_graph_rows.jsonl"
         model_dir = Path(args.model_dir) if args.model_dir else run_dir / "models" / "repair_policy_transformer"
         policy_config = {
             key: value
@@ -70,10 +74,27 @@ def main(argv: list[str] | None = None) -> int:
                 "hidden_dim": args.hidden_dim,
                 "layers": args.layers,
                 "dropout": args.dropout,
+                "batch_size": args.batch_size,
                 "epochs": args.epochs,
                 "lr": args.lr,
                 "weight_decay": args.weight_decay,
                 "heads": args.heads,
+                "rank_loss_weight": args.rank_loss_weight,
+                "softmax_loss_weight": args.softmax_loss_weight,
+                "q_regression_weight": args.q_regression_weight,
+                "q_temperature": args.q_temperature,
+                "best_tie_margin": args.best_tie_margin,
+                "rank_q_gap_min": args.rank_q_gap_min,
+                "premature_stop_loss_weight": args.premature_stop_loss_weight,
+                "undo_loss_weight": args.undo_loss_weight,
+                "undo_margin": args.undo_margin,
+                "promising_loss_weight": args.promising_loss_weight,
+                "stop_margin": args.stop_margin,
+                "transition_loss_weight": args.transition_loss_weight,
+                "masked_graph_loss_weight": args.masked_graph_loss_weight,
+                "repeat_action_loss_weight": args.repeat_action_loss_weight,
+                "repeat_action_margin": args.repeat_action_margin,
+                "training_task": args.training_task,
             }.items()
             if value is not None
         }
@@ -120,6 +141,21 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--asym-gamma-pos", type=float, default=None)
     parser.add_argument("--asym-gamma-neg", type=float, default=None)
     parser.add_argument("--rank-loss-weight", type=float, default=None)
+    parser.add_argument("--softmax-loss-weight", type=float, default=None)
+    parser.add_argument("--q-regression-weight", type=float, default=None)
+    parser.add_argument("--q-temperature", type=float, default=None)
+    parser.add_argument("--best-tie-margin", type=float, default=None)
+    parser.add_argument("--rank-q-gap-min", type=float, default=None)
+    parser.add_argument("--premature-stop-loss-weight", type=float, default=None)
+    parser.add_argument("--undo-loss-weight", type=float, default=None)
+    parser.add_argument("--undo-margin", type=float, default=None)
+    parser.add_argument("--promising-loss-weight", type=float, default=None)
+    parser.add_argument("--stop-margin", type=float, default=None)
+    parser.add_argument("--transition-loss-weight", type=float, default=None)
+    parser.add_argument("--masked-graph-loss-weight", type=float, default=None)
+    parser.add_argument("--repeat-action-loss-weight", type=float, default=None)
+    parser.add_argument("--repeat-action-margin", type=float, default=None)
+    parser.add_argument("--training-task", choices=["world_pretrain", "policy_finetune", "joint"], default=None)
     parser.add_argument("--rank-loss-top-negatives", type=int, default=None)
     parser.add_argument("--pos-weight-max", type=float, default=None)
     parser.add_argument("--sample-weighting", choices=["multi_field_root_count", "none"], default=None)

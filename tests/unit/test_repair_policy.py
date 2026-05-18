@@ -6,10 +6,13 @@ import pytest
 
 from sunpack.contracts.archive_input import ArchiveInputDescriptor
 from sunpack.contracts.archive_state import ArchiveState, PatchOperation, PatchPlan
-from sunpack.repair.candidate import RepairCandidate, RepairCandidateBatch
+from sunpack.repair.candidate import RepairCandidate, materialize_candidate
 from sunpack.repair.config import normalize_repair_config
 from sunpack.repair.job import RepairJob
+from sunpack.repair.pipeline.module import RepairModuleSpec, RepairRoute
+from sunpack.repair.policy.formats import zip as zip_policy_plugin
 from sunpack.repair.policy.recovery_evaluator import PolicyRecoverySnapshot
+from sunpack.repair.policy.formats.registry import ModuleMaterializationResult, PolicyModuleProposal
 from sunpack.repair.policy.types import PolicyGraphAction
 from sunpack.repair.scheduler import RepairScheduler
 
@@ -96,7 +99,7 @@ def test_policy_step_executes_one_selected_module_and_exits(tmp_path, monkeypatc
     source.write_bytes(b"broken")
     candidate = _patch_candidate("patch_one", source, b"fixed")
     scheduler = _scheduler(tmp_path, "sunpack_policy_test_module_step")
-    scheduler.generate_policy_repair_candidates = lambda job, **kwargs: RepairCandidateBatch(candidates=[candidate], diagnosis={"format": "zip"})  # type: ignore[method-assign]
+    _install_policy_plugin(monkeypatch, [candidate])
     _patch_recovery(monkeypatch, root_score=0.0, patched_score=0.4)
 
     result = scheduler.repair(_job(tmp_path, source=source))
@@ -107,6 +110,8 @@ def test_policy_step_executes_one_selected_module_and_exits(tmp_path, monkeypatc
     assert result.diagnosis["policy_loop"]["policy_step"] is True
     assert result.diagnosis["policy_loop"]["terminal_action"] == ""
     assert result.diagnosis["policy_loop"]["graph_operation"]["action"] == "forward"
+    edge = next(iter(result.diagnosis["policy_loop"]["graph"]["edges"].values()))
+    assert edge["predicted_next_state"]["predicted_recovery"]["score"] == pytest.approx(0.3)
     assert len(provider.score_requests) == 1
 
 
@@ -122,7 +127,7 @@ def test_policy_step_failed_module_creates_empty_patch_node(tmp_path, monkeypatc
         materialized=False,
     )
     scheduler = _scheduler(tmp_path, "sunpack_policy_test_empty_patch")
-    scheduler.generate_policy_repair_candidates = lambda job, **kwargs: RepairCandidateBatch(candidates=[bad], diagnosis={"format": "zip"})  # type: ignore[method-assign]
+    _install_policy_plugin(monkeypatch, [bad])
     _patch_recovery(monkeypatch, root_score=0.0, patched_score=0.0)
 
     result = scheduler.repair(_job(tmp_path))
@@ -140,14 +145,14 @@ def test_policy_step_undo_moves_to_parent_without_deleting_child(tmp_path, monke
     source = tmp_path / "source.zip"
     source.write_bytes(b"broken")
     scheduler = _scheduler(tmp_path, "sunpack_policy_test_undo_module")
-    scheduler.generate_policy_repair_candidates = lambda job, **kwargs: RepairCandidateBatch(candidates=[_patch_candidate("patch_one", source, b"fixed")], diagnosis={"format": "zip"})  # type: ignore[method-assign]
+    _install_policy_plugin(monkeypatch, [_patch_candidate("patch_one", source, b"fixed")])
     _patch_recovery(monkeypatch, root_score=0.0, patched_score=0.5)
     first = scheduler.repair(_job(tmp_path, source=source))
 
     undo_provider = _GraphProvider([PolicyGraphAction(action_type="undo", action_id="undo", score=1.0)])
     _install_policy_package(monkeypatch, "sunpack_policy_test_undo_parent", undo_provider)
     scheduler = _scheduler(tmp_path, "sunpack_policy_test_undo_parent")
-    scheduler.generate_policy_repair_candidates = lambda job, **kwargs: RepairCandidateBatch(candidates=[], diagnosis={"format": "zip"})  # type: ignore[method-assign]
+    _install_policy_plugin(monkeypatch, [])
     job = _job(tmp_path, source=source, archive_state=first.repaired_state, repair_history={"items": [{"diagnosis": first.diagnosis}]})
 
     result = scheduler.repair(job)
@@ -157,13 +162,15 @@ def test_policy_step_undo_moves_to_parent_without_deleting_child(tmp_path, monke
     assert result.repaired_state.patch_depth() == 0
     assert loop["graph_operation"]["action"] == "undo"
     assert len(loop["graph"]["nodes"]) == 2
+    child = next(node for node in loop["graph"]["nodes"].values() if node.get("parent_id"))
+    assert child["prediction_error_from_parent"]["overall_prediction_error"] >= 0.0
 
 
 def test_policy_step_stop_returns_best_state_and_sets_stop_signal(tmp_path, monkeypatch):
     provider = _GraphProvider([PolicyGraphAction(action_type="stop", action_id="stop", score=1.0, reason="model_stop")])
     _install_policy_package(monkeypatch, "sunpack_policy_test_stop", provider)
     scheduler = _scheduler(tmp_path, "sunpack_policy_test_stop")
-    scheduler.generate_policy_repair_candidates = lambda job, **kwargs: RepairCandidateBatch(candidates=[], diagnosis={"format": "zip"})  # type: ignore[method-assign]
+    _install_policy_plugin(monkeypatch, [])
     _patch_recovery(monkeypatch, root_score=0.25, patched_score=0.25)
 
     result = scheduler.repair(_job(tmp_path))
@@ -189,7 +196,7 @@ def test_stale_best_forces_stop_before_policy_scorer(tmp_path, monkeypatch):
             "policy": {"provider_package": "sunpack_policy_test_stale_stop", "graph_stop_stale_patience": 3},
         }
     })
-    scheduler.generate_policy_repair_candidates = lambda job, **kwargs: RepairCandidateBatch(candidates=[], diagnosis={"format": "zip"})  # type: ignore[method-assign]
+    _install_policy_plugin(monkeypatch, [])
     _patch_recovery(monkeypatch, root_score=0.1, patched_score=0.1)
 
     result = scheduler.repair(job)
@@ -197,6 +204,30 @@ def test_stale_best_forces_stop_before_policy_scorer(tmp_path, monkeypatch):
     assert result.diagnosis["policy_loop"]["terminal_action"] == "stop"
     assert result.diagnosis["policy_loop"]["stop_reason"] == "graph_stale_best"
     assert provider.score_requests == []
+
+
+def test_zip_policy_plugin_enumerates_registry_without_rule_context(tmp_path, monkeypatch):
+    module = _FakeZipModule()
+    monkeypatch.setattr(zip_policy_plugin, "get_repair_module_registry", lambda: _FakeRegistry({"zip_fake_fix": module}))
+    monkeypatch.setattr(zip_policy_plugin, "enabled_module_configs", lambda config: {})
+    scheduler = _scheduler(tmp_path, "sunpack_policy_test_graph_provider")
+    scheduler.generate_policy_repair_candidates = lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("old policy candidate path must not run"))  # type: ignore[attr-defined]
+    scheduler.diagnose = lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("rule diagnosis must not run"))  # type: ignore[method-assign]
+
+    proposals = zip_policy_plugin.ZipRepairFormatRuntimePlugin().available_modules(
+        scheduler=scheduler,
+        job=_job(tmp_path),
+        diagnosis_hgt={"root_case": {"scores": {"eocd.cd_size": 0.9}, "selected": ["eocd.cd_size"]}},
+        graph=_root_graph(_job(tmp_path)),
+    )
+
+    assert [proposal.module_name for proposal in proposals] == ["zip_fake_fix"]
+    assert proposals[0].to_action_payload() == {
+        "action_type": "module",
+        "action_id": "zip_fake_fix:0",
+        "candidate_id": "zip_fake_fix:0",
+        "module_name": "zip_fake_fix",
+    }
 
 
 class _GraphProvider:
@@ -221,14 +252,23 @@ class _GraphProvider:
                 "ranked": [{"root_case": "eocd.cd_size", "score": 0.9}],
                 "selected": ["eocd.cd_size"],
             },
-            "confidence": 0.9,
         }
 
     def score_actions(self, request):
         if self.raise_on_score:
             raise AssertionError("policy scorer should not be called")
         self.score_requests.append(request)
-        return list(self.actions)
+        predictions = {
+            action.action_id or action.module_name or action.action_type: _test_prediction()
+            for action in self.actions
+        }
+        return {
+            "action_scores": [
+                {**action.to_dict(), "metadata": {**dict(action.metadata or {}), "predicted_next_state": predictions[action.action_id or action.module_name or action.action_type]}}
+                for action in self.actions
+            ],
+            "action_predictions": predictions,
+        }
 
 
 def _install_policy_package(monkeypatch, name: str, provider) -> None:
@@ -236,6 +276,71 @@ def _install_policy_package(monkeypatch, name: str, provider) -> None:
     module.get_diagnosis_hgt_models = lambda: [provider]
     module.get_policy_graph_scorers = lambda: [provider]
     monkeypatch.setitem(sys.modules, name, module)
+
+
+def _test_prediction() -> dict:
+    return {
+        "predicted_recovery": {"score": 0.3, "completeness": 0.3},
+        "predicted_recovery_delta": 0.1,
+        "predicted_patch_status_hash": 0.2,
+        "predicted_best_updated": False,
+        "predicted_diagnosis_root_scores": {"eocd.cd_size": 0.8},
+        "predicted_verification_summary": {"completeness": 0.3},
+    }
+
+
+def _install_policy_plugin(monkeypatch, candidates: list[RepairCandidate]) -> None:
+    plugin = _TestPolicyPlugin(candidates)
+    monkeypatch.setattr("sunpack.repair.scheduler.get_repair_format_plugin", lambda fmt: plugin if fmt == "zip" else None)
+
+
+class _TestPolicyPlugin:
+    format_name = "zip"
+
+    def __init__(self, candidates: list[RepairCandidate]):
+        self.candidates = list(candidates)
+
+    def available_modules(self, *, scheduler, job, diagnosis_hgt, graph):
+        proposals = []
+        for index, candidate in enumerate(self.candidates):
+            action_id = candidate.module_name or f"candidate_{index}"
+            proposals.append(PolicyModuleProposal(
+                action_id=action_id,
+                module_name=candidate.module_name,
+                payload={"action_id": action_id, "candidate_id": action_id, "module_name": candidate.module_name},
+                candidate=candidate,
+            ))
+        return proposals
+
+    def build_module_job(self, *, job, module_name, graph):
+        return job
+
+    def materialize_module(self, *, scheduler, proposal, job):
+        materialized = materialize_candidate(proposal.candidate) if proposal.candidate is not None else []
+        patched = [candidate for candidate in materialized if candidate.repaired_state is not None]
+        if patched:
+            return ModuleMaterializationResult(candidate=patched[0])
+        return ModuleMaterializationResult(candidate=None, failure={"failure_reason": "proposal_materialization_failed"})
+
+
+class _FakeRegistry:
+    def __init__(self, modules):
+        self._modules = modules
+
+    def all(self):
+        return dict(self._modules)
+
+
+class _FakeZipModule:
+    spec = RepairModuleSpec(
+        name="zip_fake_fix",
+        formats=("zip",),
+        routes=(RepairRoute(formats=("zip",), require_any_flags=("field:eocd.cd_size",), base_score=0.7),),
+        atomic=True,
+    )
+
+    def repair(self, job, diagnosis, workspace, config):
+        raise AssertionError("proposal enumeration must not materialize the module")
 
 
 def _scheduler(tmp_path: Path, provider_package: str) -> RepairScheduler:

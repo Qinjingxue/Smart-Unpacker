@@ -381,6 +381,13 @@ class ExtractionBatchRunner:
                         return selected
                 if verification.decision_hint == DECISION_REPAIR:
                     state = RepairLoopState(task, self.repair_loop_limits)
+                    if self._comparison_no_improvement_patience_exhausted(
+                        state,
+                        current_outcome,
+                        trigger="verification_comparison",
+                    ):
+                        selected = self._selected_acceptable_outcome(incumbent_outcome, current_outcome, out_dir, final=True)
+                        return selected or current_outcome
                     if state.can_attempt(trigger="verification", failure=result):
                         handled = self._repair_after_verification_decision_with_beam(
                             task,
@@ -415,6 +422,13 @@ class ExtractionBatchRunner:
 
             if verification.decision_hint == DECISION_REPAIR:
                 state = RepairLoopState(task, self.repair_loop_limits)
+                if self._comparison_no_improvement_patience_exhausted(
+                    state,
+                    outcome,
+                    trigger="verification_comparison",
+                ):
+                    selected = self._selected_acceptable_outcome(incumbent_outcome, outcome, out_dir, final=True)
+                    return selected or outcome
                 if state.can_attempt(trigger="verification"):
                     if self._repair_policy_disables_beam(task, result, verification):
                         handled = self._repair_after_verification_with_scheduler(
@@ -627,6 +641,26 @@ class ExtractionBatchRunner:
             return max(0.0, float(verification_config.get("recovery_min_improvement", 0.0) or 0.0))
         except (TypeError, ValueError):
             return 0.0
+
+    def _comparison_no_improvement_patience_exhausted(
+        self,
+        loop_state: RepairLoopState,
+        outcome: BatchExtractionOutcome,
+        *,
+        trigger: str,
+    ) -> bool:
+        comparison = outcome.comparison if isinstance(outcome.comparison, dict) else {}
+        if str(comparison.get("stop_reason") or "") != "no_improvement":
+            loop_state.record_recovery_comparison(comparison, trigger=trigger)
+            return False
+        exhausted = loop_state.record_recovery_comparison(comparison, trigger=trigger)
+        _append_repair_candidate_log(loop_state.task, {
+            "phase": "comparison_no_improvement_patience",
+            "trigger": trigger,
+            "exhausted": bool(exhausted),
+            "comparison": dict(comparison),
+        })
+        return exhausted
 
     def _shelve_outcome_if_needed(self, outcome: BatchExtractionOutcome | None, out_dir: str) -> None:
         if outcome is None:
@@ -907,6 +941,24 @@ class ExtractionBatchRunner:
         )
         selected = self._select_better_recovery_outcome(incumbent_outcome, beam_outcome)
         if selected is not beam_outcome:
+            if self._comparison_no_improvement_patience_exhausted(
+                loop_state,
+                beam_outcome,
+                trigger="verification_beam_comparison",
+            ):
+                _append_repair_candidate_log(task, {
+                    "phase": "beam_stop",
+                    "reason": "comparison_no_improvement_patience",
+                    "candidate": candidate_feature_payload(evaluation.candidate),
+                    "comparison": dict(beam_outcome.comparison),
+                })
+                self._cleanup_beam_evaluations({evaluation.outcome.attempt_id: (
+                    evaluation.candidate,
+                    evaluation.result,
+                    evaluation.verification,
+                    evaluation.temp_dir,
+                )})
+                return False
             _append_repair_candidate_log(task, {
                 "phase": "beam_rejected",
                 "reason": "no_repair_improvement",
@@ -959,6 +1011,25 @@ class ExtractionBatchRunner:
             return beam_outcome
 
         if not bool(beam_outcome.comparison.get("should_continue_repair", True)):
+            if not self._comparison_no_improvement_patience_exhausted(
+                loop_state,
+                beam_outcome,
+                trigger="verification_beam_comparison",
+            ):
+                _append_repair_candidate_log(task, {
+                    "phase": "beam_continue",
+                    "reason": "comparison_no_improvement_under_patience",
+                    "candidate": candidate_feature_payload(evaluation.candidate),
+                    "comparison": dict(beam_outcome.comparison),
+                })
+                self._cleanup_beam_evaluations({evaluation.outcome.attempt_id: (
+                    evaluation.candidate,
+                    evaluation.result,
+                    evaluation.verification,
+                    evaluation.temp_dir,
+                )})
+                shutil.rmtree(out_dir, ignore_errors=True)
+                return True
             _append_repair_candidate_log(task, {
                 "phase": "beam_stop",
                 "reason": "comparison_should_not_continue",

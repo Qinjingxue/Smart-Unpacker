@@ -154,6 +154,24 @@ def test_policy_stop_records_final_extraction_gate(tmp_path):
     assert RepairLoopState(task, RepairLoopLimits(max_rounds=3)).can_attempt(trigger="verification") is False
 
 
+def test_recovery_no_improvement_requires_patience(tmp_path):
+    source = tmp_path / "broken.zip"
+    source.write_bytes(b"broken")
+    task = _task(source)
+    state = RepairLoopState(
+        task,
+        RepairLoopLimits(max_rounds=100, comparison_no_improvement_patience_rounds=20),
+    )
+    comparison = {"stop_reason": "no_improvement", "should_continue_repair": False}
+
+    for _ in range(19):
+        assert state.record_recovery_comparison(comparison, trigger="verification_comparison") is False
+        assert not task.fact_bag.get("repair.loop.terminal_reason")
+
+    assert state.record_recovery_comparison(comparison, trigger="verification_comparison") is True
+    assert task.fact_bag.get("repair.loop.terminal_reason") == "comparison_no_improvement_patience"
+
+
 class _FakeOutputScanPolicy:
     def scan_roots_from_outputs(self, outputs):
         return list(outputs)

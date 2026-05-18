@@ -32,6 +32,7 @@ TERMINAL_FAILURE_FLAGS = {
     "process_failure",
 }
 DEFAULT_STAGNATION_PATIENCE_ROUNDS = 3
+DEFAULT_COMPARISON_NO_IMPROVEMENT_PATIENCE_ROUNDS = 20
 DEFAULT_MIN_RECOVERY_IMPROVEMENT = 0.01
 COMPLETENESS_REGRESSION_THRESHOLD = 0.3
 
@@ -43,6 +44,7 @@ class RepairLoopLimits:
     max_generated_files: int = 16
     max_generated_bytes: int = 2048 * 1024 * 1024
     stagnation_patience_rounds: int = DEFAULT_STAGNATION_PATIENCE_ROUNDS
+    comparison_no_improvement_patience_rounds: int = DEFAULT_COMPARISON_NO_IMPROVEMENT_PATIENCE_ROUNDS
     min_recovery_improvement: float = DEFAULT_MIN_RECOVERY_IMPROVEMENT
     continue_after_partial: bool = True
 
@@ -54,6 +56,16 @@ class RepairLoopLimits:
             max_generated_files=max(0, int(config.get("max_repair_generated_files_per_task", 16) or 0)),
             max_generated_bytes=int(max(0.0, float(config.get("max_repair_generated_mb_per_task", 2048.0) or 0.0)) * 1024 * 1024),
             stagnation_patience_rounds=max(0, int(config.get("stagnation_patience_rounds", DEFAULT_STAGNATION_PATIENCE_ROUNDS) or 0)),
+            comparison_no_improvement_patience_rounds=max(
+                0,
+                int(
+                    config.get(
+                        "comparison_no_improvement_patience_rounds",
+                        DEFAULT_COMPARISON_NO_IMPROVEMENT_PATIENCE_ROUNDS,
+                    )
+                    or 0
+                ),
+            ),
             min_recovery_improvement=max(0.0, float(config.get("min_recovery_improvement", DEFAULT_MIN_RECOVERY_IMPROVEMENT) or 0.0)),
             continue_after_partial=bool(config.get("continue_after_partial", True)),
         )
@@ -315,6 +327,30 @@ class RepairLoopState:
         write_repair_loop_state(self.task, {"terminal_reason": reason, "terminal": payload})
         write_repair_stop(self.task, reason, payload)
         LOGGER.warning("archive repair loop stopped: %s", payload)
+
+    def record_recovery_comparison(self, comparison: dict[str, Any], *, trigger: str = "") -> bool:
+        """Return True when comparison no-improvement patience is exhausted."""
+        reason = str((comparison or {}).get("stop_reason") or "")
+        should_continue = bool((comparison or {}).get("should_continue_repair", True))
+        if reason != "no_improvement" or should_continue:
+            if int(_loop_value(self.task, "comparison_no_improvement_rounds", 0) or 0):
+                write_repair_loop_state(self.task, {"comparison_no_improvement_rounds": 0})
+            return False
+        patience = int(self.limits.comparison_no_improvement_patience_rounds or 0)
+        if patience <= 0:
+            return False
+        rounds_without = int(_loop_value(self.task, "comparison_no_improvement_rounds", 0) or 0) + 1
+        write_repair_loop_state(
+            self.task,
+            {
+                "comparison_no_improvement_rounds": rounds_without,
+                "comparison_no_improvement_patience_rounds": patience,
+            },
+        )
+        if rounds_without >= patience:
+            self.stop("comparison_no_improvement_patience", trigger=trigger)
+            return True
+        return False
 
     def _ensure_initial_digest(self) -> None:
         if not self.seen_input_digests:

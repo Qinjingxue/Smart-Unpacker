@@ -323,6 +323,7 @@ def _compact_repair_result_payload(result: RepairResult) -> dict[str, Any]:
             "patch_facts": [str(item) for item in diagnosis.get("patch_facts") or [] if str(item)],
             "residual_facts": [str(item) for item in diagnosis.get("residual_facts") or [] if str(item)],
             "candidate_selection": dict(candidate_selection),
+            **_compact_policy_loop(diagnosis),
             **{
                 key: diagnosis.get(key)
                 for key in ("failure_kind", "failure_stage", "native_status", "message")
@@ -331,6 +332,56 @@ def _compact_repair_result_payload(result: RepairResult) -> dict[str, Any]:
         },
         "repaired_input": _compact_repaired_input(repaired_input),
     }
+
+
+def _compact_policy_loop(diagnosis: dict[str, Any]) -> dict[str, Any]:
+    loop = diagnosis.get("policy_loop") if isinstance(diagnosis.get("policy_loop"), dict) else {}
+    if not loop:
+        return {}
+    payload: dict[str, Any] = {
+        "policy_loop": {
+            key: loop.get(key)
+            for key in (
+                "policy_step",
+                "terminal_action",
+                "stop_reason",
+                "patch_depth",
+                "patch_digest",
+                "graph_summary",
+                "current_node_id",
+                "best_node_id",
+                "final_state_selection",
+                "policy_stop_requested",
+                "graph_operation",
+            )
+            if loop.get(key) not in (None, "", [], {})
+        }
+    }
+    graph = loop.get("graph") if isinstance(loop.get("graph"), dict) else {}
+    if graph:
+        payload["policy_loop"]["graph"] = graph
+    rounds = loop.get("rounds") if isinstance(loop.get("rounds"), list) else []
+    if rounds:
+        payload["policy_loop"]["rounds"] = [
+            {
+                key: item.get(key)
+                for key in (
+                    "round",
+                    "node_id",
+                    "patch_digest",
+                    "patch_depth",
+                    "current_recovery",
+                    "best_seen_recovery",
+                    "graph_action",
+                    "graph_summary",
+                    "stop_readiness",
+                )
+                if isinstance(item, dict) and item.get(key) not in (None, "", [], {})
+            }
+            for item in rounds[-8:]
+            if isinstance(item, dict)
+        ]
+    return payload
 
 
 def _compact_repaired_input(repaired_input: dict[str, Any]) -> dict[str, Any]:

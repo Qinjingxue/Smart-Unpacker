@@ -154,13 +154,16 @@ class RepairScheduler:
         )
 
         proposals = plugin.available_modules(scheduler=self, job=current_job, diagnosis_hgt=diagnosis_hgt, graph=graph)
+        module_action_payloads = [proposal.to_action_payload() for proposal in proposals]
+        exposed_edges = repair_graph.register_proposals(module_action_payloads, step=round_index)
+        exposed_candidate_ids = {edge.candidate_id for edge in exposed_edges}
+        proposals = [proposal for proposal in proposals if proposal.action_id in exposed_candidate_ids]
         proposal_by_action_id = {proposal.action_id: proposal for proposal in proposals}
         action_payloads = [proposal.to_action_payload() for proposal in proposals]
         action_payloads.extend([
             {"action_type": "undo", "action_id": "undo", "module_name": ""},
             {"action_type": "stop", "action_id": "stop", "module_name": ""},
         ])
-        repair_graph.register_proposals(action_payloads, step=round_index)
         best_node = graph.best_node() or current_node
         if stop_readiness.get("should_force_stop"):
             action_scores = []
@@ -198,6 +201,24 @@ class RepairScheduler:
             if stop_readiness.get("should_force_stop")
             else selected_action.to_dict() if selected_action is not None else {"action_type": "stop", "reason": "no_action"}
         )
+        repair_trace.write_probe_event("policy_probe_action_scores", {
+            "run_id": _policy_probe_run_id(),
+            "query_id": f"{current_job.archive_key or current_job.source_path or ''}:policy_step:{round_index}",
+            "format": current_job.format,
+            "round": int(round_index),
+            "current_node_id": graph.current_node_id,
+            "best_node_id": graph.best_node_id,
+            "proposal_count": len(proposals),
+            "available_action_count": len(action_payloads),
+            "diagnosis_root_ranked": _policy_probe_root_ranked(diagnosis_hgt),
+            "selected_action": dict(graph_action),
+            "top_action_scores": [
+                score.to_dict()
+                for score in sorted(action_scores, key=lambda item: float(item.score or 0.0), reverse=True)[:12]
+            ],
+            "graph_summary": graph.summary(),
+            "stop_readiness": stop_readiness,
+        })
         selection = {
             "policy_step": True,
             "diagnosis_hgt_model": diagnosis_selection,
@@ -267,6 +288,7 @@ class RepairScheduler:
             failure=materialized.failure,
             step=round_index,
         )
+        _attach_selected_prediction(graph, op.edge_id or edge_id, selected_action.to_dict() if selected_action is not None else {}, round_index)
         if op.archive_state is None:
             return _policy_step_no_patch_result(current_job, graph, diagnosis_payload, selection, history, "proposal_missing_repaired_state", warnings)
         return _policy_step_state_result(
@@ -396,65 +418,6 @@ class RepairScheduler:
                 warnings,
             ),
             message="registered repair modules did not produce a candidate",
-        )
-
-    def generate_policy_repair_candidates(self, job: RepairJob, *, phase_timer: Any | None = None, phase_prefix: str = "policy_generate_candidates") -> RepairCandidateBatch:
-        with _phase(phase_timer, f"{phase_prefix}_knowledge"):
-            knowledge = ArchiveKnowledge.from_any(job.knowledge)
-        with _phase(phase_timer, f"{phase_prefix}_pre_route_scan"):
-            job, knowledge = self._apply_pre_route_scan(job, knowledge)
-        with _phase(phase_timer, f"{phase_prefix}_diagnose"):
-            diagnosis = self.diagnose(job, knowledge=knowledge)
-        with _phase(phase_timer, f"{phase_prefix}_build_context"):
-            context = build_repair_context(job, diagnosis, knowledge=knowledge)
-        with _phase(phase_timer, f"{phase_prefix}_effective_job"):
-            effective_job = replace(job, damage_flags=list(context.damage_flags), repair_cache=job.repair_cache or self.repair_cache)
-        if not self.config.get("enabled", True):
-            result = self._result("skipped", job, diagnosis, "repair layer is disabled")
-            return RepairCandidateBatch(terminal_result=result, diagnosis=diagnosis.as_dict(), message="repair layer is disabled")
-        if not diagnosis.repairable:
-            message = "; ".join(diagnosis.notes) or "repair is blocked"
-            result = self._result("unrepairable", job, diagnosis, message)
-            return RepairCandidateBatch(terminal_result=result, diagnosis=diagnosis.as_dict(), message=message)
-
-        with _phase(phase_timer, f"{phase_prefix}_policy_modules"):
-            modules, capability = self._policy_candidate_modules(effective_job, diagnosis, context)
-        if not modules:
-            result = self._result("unsupported", job, diagnosis, "no enabled format-compatible repair module is available for policy", capability)
-            return RepairCandidateBatch(terminal_result=result, diagnosis=result.diagnosis, message=result.message)
-
-        with _phase(phase_timer, f"{phase_prefix}_workspace"):
-            workspace = self._workspace_for(job)
-            workspace.mkdir(parents=True, exist_ok=True)
-        with _phase(phase_timer, f"{phase_prefix}_module_configs"):
-            module_configs = enabled_module_configs(self.config)
-            runtime_job = replace(effective_job, workspace=str(workspace))
-        with _phase(phase_timer, f"{phase_prefix}_run_modules"):
-            repair_candidates, warnings, capability = self._run_modules(
-                runtime_job,
-                diagnosis,
-                modules,
-                capability,
-                workspace,
-                module_configs,
-                lazy=True,
-                phase_timer=phase_timer,
-                phase_prefix=phase_prefix,
-            )
-        with _phase(phase_timer, f"{phase_prefix}_candidate_features"):
-            repair_candidates = [
-                _with_candidate_features(replace(candidate, diagnosis=_with_capability_diagnosis(candidate.diagnosis, capability)))
-                for candidate in repair_candidates
-            ]
-        return RepairCandidateBatch(
-            candidates=repair_candidates,
-            warnings=_dedupe(warnings),
-            diagnosis=_with_generation_diagnosis(
-                _with_capability_diagnosis(diagnosis.as_dict(), capability),
-                repair_candidates,
-                warnings,
-            ),
-            message="policy module candidates generated",
         )
 
     def _apply_pre_route_scan(self, job: RepairJob, knowledge: ArchiveKnowledge) -> tuple[RepairJob, ArchiveKnowledge]:
@@ -692,80 +655,6 @@ class RepairScheduler:
         if cache_key is not None:
             self._module_selection_cache[cache_key] = (list(selected), decision)
         return selected, decision
-
-    def _policy_candidate_modules(
-        self,
-        job: RepairJob,
-        diagnosis: RepairDiagnosis,
-        context: RepairContext,
-    ):
-        enabled = enabled_module_configs(self.config)
-        registry = get_repair_module_registry()
-        candidates = []
-        decisions: list[ModuleCapabilityDecision] = []
-        for name, module in registry.all().items():
-            if name not in enabled:
-                continue
-            reasons: list[str] = []
-            declarative_reasons: list[str] = []
-            policy_reasons: list[str] = []
-            dynamic_reasons: list[str] = []
-            format_supported = _format_matches(diagnosis.format, module.spec.formats)
-            atomic = bool(getattr(module.spec, "atomic", False))
-            route_score = self._route_score(module.spec.routes, context, atomic=atomic)
-            route_reasons = self._route_reasons(module.spec.routes, context, atomic=atomic) if route_score <= 0 else []
-            if route_score <= 0 and route_reasons:
-                declarative_reasons.extend(route_reasons)
-            if not format_supported:
-                reasons.append("format_not_supported")
-                decisions.append(_module_decision(module, format_supported, reasons, declarative_reasons, policy_reasons, dynamic_reasons, route_score=route_score))
-                continue
-            module_config = self._module_runtime_config(name, enabled)
-            safety_reasons = self._safety_reasons(module, module_config)
-            if safety_reasons:
-                reasons.extend(safety_reasons)
-                policy_reasons.extend(safety_reasons)
-                decisions.append(_module_decision(module, format_supported, reasons, declarative_reasons, policy_reasons, dynamic_reasons, route_score=route_score))
-                continue
-            if not self._module_input_allowed(job, module_config):
-                reasons.append("module_input_size_blocked")
-                policy_reasons.append("module_input_size_blocked")
-                decisions.append(_module_decision(module, format_supported, reasons, declarative_reasons, policy_reasons, dynamic_reasons, route_score=route_score))
-                continue
-            try:
-                fine_score = float(module.can_handle(job, diagnosis, module_config) or 0.0)
-            except Exception:
-                fine_score = 0.0
-                dynamic_reasons.append("can_handle_exception")
-            score = max(float(route_score or 0.0), float(fine_score or 0.0), 0.01)
-            reasons.append("policy_candidate")
-            if declarative_reasons:
-                reasons.extend(f"policy_ignored_{reason}" for reason in declarative_reasons)
-            if fine_score <= 0:
-                dynamic_reasons.append("policy_ignored_can_handle_rejected")
-            decisions.append(_module_decision(
-                module,
-                format_supported,
-                reasons,
-                declarative_reasons,
-                policy_reasons,
-                dynamic_reasons,
-                selected=True,
-                score=score,
-                route_score=route_score,
-                fine_score=fine_score,
-            ))
-            candidates.append((score, module, route_score, fine_score))
-        candidates.sort(key=lambda item: self._module_sort_key(item[0], item[1], item[2], item[3], diagnosis.format))
-        decision = RepairCapabilityDecision(
-            format=context.format,
-            categories=tuple(context.categories),
-            damage_flags=tuple(context.damage_flags),
-            failure_stage=context.failure_stage,
-            failure_kind=context.failure_kind,
-            modules=decisions,
-        )
-        return candidates, decision
 
     def _module_sort_key(self, score: float, module, route_score: float, fine_score: float, diagnosis_format: str = "") -> tuple:
         return (
@@ -1581,10 +1470,10 @@ def _policy_graph_from_payload(payload: dict[str, Any]) -> PolicyExplorationGrap
             patch_digest=str(raw.get("patch_digest") or ""),
             archive_state=archive_state,
             recovery=dict(raw.get("recovery") or {}),
-            state_value=dict(raw.get("state_value") or {}),
             status=str(raw.get("status") or "active"),
             created_round=int(raw.get("created_round") or 0),
             expanded_candidate_ids={str(item) for item in raw.get("expanded_candidate_ids") or [] if str(item)},
+            exploration=dict(raw.get("exploration") or {}),
         )
     edges = payload.get("edges") if isinstance(payload.get("edges"), dict) else {}
     for edge_id, raw in edges.items():
@@ -1596,9 +1485,11 @@ def _policy_graph_from_payload(payload: dict[str, Any]) -> PolicyExplorationGrap
             to_node_id=str(raw.get("to_node_id") or ""),
             candidate_id=str(raw.get("candidate_id") or ""),
             module_name=str(raw.get("module_name") or ""),
+            module_family=str(raw.get("module_family") or raw.get("route_family") or ""),
             action_score=dict(raw.get("action_score") or {}),
             status=str(raw.get("status") or "frontier"),
             created_round=int(raw.get("created_round") or 0),
+            exploration=dict(raw.get("exploration") or {}),
         )
     graph.frontier = [edge_id for edge_id in graph.frontier if edge_id in graph.edges and graph.edges[edge_id].status == "frontier"]
     if not graph.current_node_id or graph.current_node_id not in graph.nodes:
@@ -1759,6 +1650,7 @@ def _policy_graph_register_frontier(
             from_node_id=current_node.node_id,
             candidate_id=candidate_id,
             module_name=str(payload.get("module_name") or payload.get("module") or ""),
+            module_family=str(payload.get("module_family") or payload.get("route_family") or payload.get("atomic_action_group") or payload.get("module_name") or payload.get("module") or ""),
             status="frontier",
             created_round=round_index,
         )
@@ -1774,7 +1666,7 @@ def _policy_graph_update_edge_scores(graph: PolicyExplorationGraph, step_action_
         scores.extend(item for item in step_action_selection.get("raw_action_scores", []) if isinstance(item, dict))
     for score in scores:
         for edge in graph.edges.values():
-            if (str(score.get("edge_id") or "") == edge.edge_id or str(score.get("candidate_id") or "") == edge.candidate_id) and edge.status == "frontier":
+            if str(score.get("edge_id") or "") == edge.edge_id or str(score.get("candidate_id") or "") == edge.candidate_id:
                 merged = dict(edge.action_score or {})
                 merged.update({key: value for key, value in score.items() if value is not None})
                 edge.action_score = merged
@@ -1787,8 +1679,6 @@ def _policy_graph_update_action_scores(graph: PolicyExplorationGraph, scores: li
         if not action_id and not module_name:
             continue
         for edge in graph.edges.values():
-            if edge.status != "frontier":
-                continue
             if action_id and edge.candidate_id != action_id:
                 continue
             if not action_id and module_name and edge.module_name != module_name:
@@ -1798,6 +1688,64 @@ def _policy_graph_update_action_scores(graph: PolicyExplorationGraph, scores: li
             if "score" in merged and "logic_score" not in merged:
                 merged["logic_score"] = merged["score"]
             edge.action_score = merged
+            metadata = score.get("metadata") if isinstance(score.get("metadata"), dict) else {}
+            prediction = metadata.get("predicted_next_state") if isinstance(metadata.get("predicted_next_state"), dict) else {}
+            if prediction:
+                edge.predicted_next_state = dict(prediction)
+                edge.prediction_model_version = str(metadata.get("provider_id") or "repair_policy_transformer")
+            uncertainty = metadata.get("predicted_uncertainty") if isinstance(metadata.get("predicted_uncertainty"), dict) else {}
+            if uncertainty:
+                merged_uncertainty = dict(edge.uncertainty or {})
+                merged_uncertainty.update(uncertainty)
+                edge.uncertainty = merged_uncertainty
+
+
+def _attach_selected_prediction(graph: PolicyExplorationGraph, edge_id: str, action: dict[str, Any], round_index: int) -> None:
+    edge = graph.edges.get(str(edge_id or ""))
+    if edge is None:
+        return
+    metadata = action.get("metadata") if isinstance(action.get("metadata"), dict) else {}
+    prediction = metadata.get("predicted_next_state") if isinstance(metadata.get("predicted_next_state"), dict) else {}
+    if not prediction:
+        return
+    edge.predicted_next_state = dict(prediction)
+    edge.prediction_model_version = str(metadata.get("provider_id") or "repair_policy_transformer")
+    edge.predicted_at_step = int(round_index or 0)
+    uncertainty = metadata.get("predicted_uncertainty") if isinstance(metadata.get("predicted_uncertainty"), dict) else {}
+    if uncertainty:
+        merged_uncertainty = dict(edge.uncertainty or {})
+        merged_uncertainty.update(uncertainty)
+        edge.uncertainty = merged_uncertainty
+
+
+def _policy_probe_root_ranked(diagnosis_hgt: dict[str, Any], *, limit: int = 8) -> list[dict[str, Any]]:
+    root = diagnosis_hgt.get("root_case") if isinstance(diagnosis_hgt.get("root_case"), dict) else {}
+    ranked = root.get("ranked") if isinstance(root.get("ranked"), list) else []
+    output: list[dict[str, Any]] = []
+    for item in ranked[:limit]:
+        if not isinstance(item, dict):
+            continue
+        try:
+            score = float(item.get("score") or 0.0)
+        except (TypeError, ValueError):
+            score = 0.0
+        output.append({"root_case": str(item.get("root_case") or ""), "score": score})
+    if output:
+        return output
+    scores = root.get("scores") if isinstance(root.get("scores"), dict) else {}
+    pairs = []
+    for key, value in scores.items():
+        try:
+            pairs.append((str(key), float(value or 0.0)))
+        except (TypeError, ValueError):
+            pairs.append((str(key), 0.0))
+    return [{"root_case": key, "score": value} for key, value in sorted(pairs, key=lambda item: item[1], reverse=True)[:limit]]
+
+
+def _policy_probe_run_id() -> str:
+    import os
+
+    return str(os.environ.get("SUNPACK_REPAIR_POLICY_PROBE_RUN_ID") or "")
 
 
 def _verification_from_job(job: RepairJob) -> dict[str, Any]:
