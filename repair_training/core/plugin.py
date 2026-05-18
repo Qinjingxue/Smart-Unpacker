@@ -38,11 +38,6 @@ class TrainingFormatPlugin:
     collection_report_sections: Callable[[dict[str, Any]], list[dict[str, Any]]] | None = None
     damage_label_schema: Callable[[], TrainingLabelSchema | dict[str, Any]] | None = None
     damage_feature_spec: Callable[[], TrainingFeatureSpec | dict[str, Any]] | None = None
-    action_feature_spec: Callable[[], TrainingFeatureSpec | dict[str, Any]] | None = None
-    state_value_feature_spec: Callable[[], TrainingFeatureSpec | dict[str, Any]] | None = None
-    lightgbm_params: Callable[[str], dict[str, Any]] | None = None
-    postprocess_damage_prediction: Callable[[dict[str, Any]], dict[str, Any]] | None = None
-    action_label: Callable[[dict[str, Any]], int | float] | None = None
     damage_eval_profile_plan: Callable[[int, int], list[str]] | None = None
     generate_damage_eval_records: Callable[[str | Path, str | Path, int, int, list[str]], list[dict[str, Any]]] | None = None
     damage_eval_metadata: Callable[[], dict[str, Any]] | None = None

@@ -80,6 +80,8 @@ class PolicyRepairGraph:
                 patch_status=str(raw.get("patch_status") or ("root" if not raw.get("parent_id") else "applied")),
                 failure_reason=str(raw.get("failure_reason") or ""),
                 created_step=int(raw.get("created_step") or raw.get("created_round") or 0),
+                diagnosis_hgt=dict(raw.get("diagnosis_hgt") or {}),
+                verification=dict(raw.get("verification") or {}),
             )
         edges = payload.get("edges") if isinstance(payload.get("edges"), dict) else {}
         for edge_id, raw in edges.items():
@@ -91,7 +93,7 @@ class PolicyRepairGraph:
                 to_node_id=str(raw.get("to_node_id") or ""),
                 candidate_id=str(raw.get("candidate_id") or ""),
                 module_name=str(raw.get("module_name") or ""),
-                step_action_score=dict(raw.get("step_action_score") or {}),
+                action_score=dict(raw.get("action_score") or {}),
                 status=str(raw.get("status") or "frontier"),
                 created_round=int(raw.get("created_round") or 0),
             )
@@ -129,6 +131,22 @@ class PolicyRepairGraph:
             if self.graph.expansion_count > 0 or current.node_id != self.graph.best_node_id:
                 self.graph.stale_expansion_count += 1
         return self.stop_readiness()
+
+    def observe_current_state(
+        self,
+        *,
+        recovery: PolicyRecoverySnapshot | dict[str, Any] | None = None,
+        diagnosis_hgt: dict[str, Any] | None = None,
+        verification: dict[str, Any] | None = None,
+        min_improvement: float = 0.0,
+    ) -> dict[str, Any]:
+        current = self.graph.current_node()
+        if current is not None:
+            if diagnosis_hgt is not None:
+                current.diagnosis_hgt = dict(diagnosis_hgt or {})
+            if verification is not None:
+                current.verification = dict(verification or {})
+        return self.observe_current_recovery(recovery, min_improvement=min_improvement)
 
     def stop_readiness(self, *, stale_patience: int = 0) -> dict[str, Any]:
         best_id = best_node_id(self.graph)
@@ -273,7 +291,7 @@ def empty_policy_patch(*, base_state: ArchiveState, module_name: str, reason: st
 
 def policy_graph_node_id(patch_digest: str, index: int) -> str:
     digest = str(patch_digest or "root")
-    return f"node_{int(index):04d}_{digest[:16]}"
+    return f"node_{digest[:32]}"
 
 
 def policy_graph_edge_id(node_id: str, candidate_id: str) -> str:

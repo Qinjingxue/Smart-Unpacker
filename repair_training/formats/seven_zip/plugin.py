@@ -34,9 +34,6 @@ def get_training_plugin() -> TrainingFormatPlugin:
         collection_report_sections=collection_report_sections,
         damage_label_schema=damage_label_schema,
         damage_feature_spec=damage_feature_spec,
-        action_feature_spec=action_feature_spec,
-        lightgbm_params=lightgbm_params,
-        action_label=action_label,
         diagnostic_feature_groups=diagnostic_feature_groups,
         diagnostic_profile_pairs=diagnostic_profile_pairs,
         diagnostic_focus_labels=diagnostic_focus_labels,
@@ -70,44 +67,6 @@ def damage_feature_spec() -> TrainingFeatureSpec:
         ),
         ignore_prefixes=("runtime_context.archive_state.state", "job.source_input.path"),
     )
-
-
-def action_feature_spec() -> TrainingFeatureSpec:
-    return TrainingFeatureSpec(
-        include_prefixes=("action_type", "candidate_snapshot.", "damage_analysis_target.", "current_recovery."),
-        categorical_paths=(
-            "action_type",
-            "candidate_snapshot.action_type",
-            "candidate_snapshot.module_name",
-            "current_recovery.status",
-            "current_recovery.decision_hint",
-        ),
-        ignore_prefixes=(
-            "candidate_snapshot.patch_digest",
-            "candidate_snapshot.patch_depth",
-            "candidate_snapshot.patch_count",
-            "candidate_snapshot.last_patch_module",
-            "candidate_snapshot.has_archive_state_plan",
-            "candidate_snapshot.branchable",
-            "candidate_snapshot.recovery_",
-            "candidate_snapshot.recovery_snapshot",
-            "candidate_snapshot.verification_summary",
-            "candidate_snapshot.metadata.recovery_",
-            "candidate_snapshot.metadata.verification_summary",
-            "candidate_snapshot.metadata.score_source",
-        ),
-    )
-
-
-def lightgbm_params(model_type: str) -> dict[str, Any]:
-    if model_type == "step_action":
-        return {"n_estimators": 60, "num_leaves": 15, "min_child_samples": 2}
-    return {"n_estimators": 50, "num_leaves": 15, "min_child_samples": 2}
-
-
-def action_label(row: dict[str, Any]) -> int:
-    value = float(row.get("long_term_value") or 0.0)
-    return int(max(0, min(31, round((value + 1.0) * 10.0))))
 
 
 def diagnostic_focus_labels() -> list[str]:

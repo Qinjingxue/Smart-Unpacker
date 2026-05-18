@@ -65,9 +65,6 @@ class ArchiveRepairStage:
     ) -> bool:
         if not self.enabled or self.scheduler is None:
             return False
-        policy = self.config.get("policy") if isinstance(self.config.get("policy"), dict) else {}
-        if not bool(policy.get("disable_beam_when_model_active", True)):
-            return False
         repair_trace.write_probe_event("policy_probe_active_check_start", {
             "run_id": _policy_probe_run_id(task),
             "query_id": f"{task.key or task.main_path}:policy_active",

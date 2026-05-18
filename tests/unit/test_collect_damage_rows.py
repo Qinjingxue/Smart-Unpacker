@@ -3,7 +3,6 @@ import json
 import zipfile
 from pathlib import Path
 
-from repair_training.build_features import main as build_features_main
 import repair_training.collect_damage_rows as collect_damage_rows_module
 from repair_training.core.material_records import attach_split_volumes
 from repair_training.core.features import damage_labels_for_row, damage_location_labels_from_target, uncertain_labels_for_row
@@ -308,47 +307,6 @@ def test_collect_damage_row_preserves_single_field_root_after_observability(monk
     assert "zone:local_header" in labels
 
 
-def test_damage_rows_build_features_location_only(monkeypatch, tmp_path):
-    monkeypatch.setattr(
-        "repair_training.collect_damage_rows.observe_damage_runtime",
-        lambda job, *, workspace, config=None: (
-            {
-                "analysis": {"summary": {"format": "zip", "confidence": 1.0}},
-                "format": {"zip": {"structure": {"graph": {"summary": {}}}}},
-                "extraction": {"failure": {"failure_kind": "bad"}},
-                "verification": {"summary": {"completeness": 0.0}},
-            },
-            {"state_digest": "digest", "patch_depth": 0},
-        ),
-    )
-    run_dir = tmp_path / "run"
-    datasets = run_dir / "datasets"
-    datasets.mkdir(parents=True)
-    damaged = tmp_path / "bad.zip"
-    damaged.write_bytes(b"PK\x03\x04bad")
-    rows = [
-        collect_damage_row(
-            {
-                "sample_id": f"sample{i}",
-                "format": "zip",
-                "damaged_input": {"kind": "file", "path": str(damaged), "format_hint": "zip"},
-                "corruption_plan": [{"zone": "zip.eocd.cd_offset" if i % 2 == 0 else "archive.tail", "offset": i, "size": 4}],
-            },
-            workspace=tmp_path / f"workspace{i}",
-        )
-        for i in range(4)
-    ]
-    with (datasets / "damage_rows.jsonl").open("w", encoding="utf-8") as handle:
-        for row in rows:
-            handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
-
-    assert build_features_main(["--format", "zip", "--model", "damage_analysis", "--run-dir", str(run_dir)]) == 0
-    schema = json.loads((run_dir / "features" / "damage_analysis" / "label_schema.json").read_text(encoding="utf-8"))
-
-    assert schema["labels"]
-    assert all(label.startswith(("zone:", "field:")) for label in schema["labels"])
-
-
 def test_damage_label_normalizer_uses_explicit_labels_only():
     target = {
         "damage_labels": ["zone:central_directory"],
@@ -490,7 +448,7 @@ def test_zip_structure_facts_enter_archive_knowledge_and_damage_request(tmp_path
         archive_key="unit",
     )
     request = build_damage_analysis_request(job, None, diagnosis={"format": "zip"})
-    structure = request.runtime_context["format"]["zip"]["structure"]
+    structure = request["format"]["zip"]["structure"]
 
     assert structure["graph"]["nodes"][0]["kind"] == "eocd"
     assert structure["graph"]["violations"][0]["field"] == "eocd.cd_offset"
@@ -623,7 +581,7 @@ def test_training_runtime_exposes_zip_observation_facts_in_structure(tmp_path):
     )
 
     request = build_damage_analysis_request(job, None, diagnosis={"format": "zip"})
-    structure = request.runtime_context["format"]["zip"]["structure"]
+    structure = request["format"]["zip"]["structure"]
 
     assert structure["directory_consistency"]["central_local_crc_mismatch_count"] == 1
     assert structure["evidence"]["payload_failure_without_header_mismatch"] is True

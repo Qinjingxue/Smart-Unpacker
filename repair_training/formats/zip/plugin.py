@@ -6,7 +6,6 @@ from typing import Any
 import random
 
 from repair_training.core.plugin import TrainingFeatureSpec, TrainingFormatPlugin, TrainingLabelSchema
-from sunpack.repair.policy.adapters.damage import get_damage_analysis_adapter
 from repair_training.formats.zip.build_material_impl import (
     _apply_profile_metadata,
     _choose_source_for_profile,
@@ -169,11 +168,6 @@ def get_training_plugin() -> TrainingFormatPlugin:
         compact_material_distribution=compact_material_distribution,
         damage_label_schema=damage_label_schema,
         damage_feature_spec=damage_feature_spec,
-        action_feature_spec=action_feature_spec,
-        state_value_feature_spec=state_value_feature_spec,
-        lightgbm_params=lightgbm_params,
-        postprocess_damage_prediction=postprocess_damage_prediction,
-        action_label=action_label,
         damage_eval_profile_plan=damage_eval_profile_plan,
         generate_damage_eval_records=generate_damage_eval_records,
         damage_eval_metadata=damage_eval_metadata,
@@ -210,187 +204,6 @@ def damage_feature_spec() -> TrainingFeatureSpec:
             "knowledge_payload.archive_state.state",
         ),
     )
-
-
-def action_feature_spec() -> TrainingFeatureSpec:
-    return TrainingFeatureSpec(
-        include_prefixes=("action_type", "candidate_snapshot.", "damage_analysis.", "current_recovery."),
-        categorical_paths=(
-            "action_type",
-            "candidate_snapshot.action_type",
-            "candidate_snapshot.module_name",
-            "candidate_snapshot.module_family",
-            "candidate_snapshot.status",
-            "current_recovery.status",
-            "current_recovery.decision_hint",
-        ),
-        ignore_prefixes=(
-            "candidate_snapshot.candidate_id",
-            "candidate_snapshot.patch_digest",
-            "candidate_snapshot.patch_depth",
-            "candidate_snapshot.patch_count",
-            "candidate_snapshot.last_patch_module",
-            "candidate_snapshot.has_archive_state_plan",
-            "candidate_snapshot.branchable",
-            "candidate_snapshot.metadata.recovery_",
-            "candidate_snapshot.metadata.score_source",
-            "candidate_snapshot.metadata.verification_summary",
-            "candidate_snapshot.metadata.status",
-            "candidate_snapshot.metadata.candidate_status",
-            "candidate_snapshot.metadata.recovery_status",
-            "candidate_snapshot.recovery_",
-            "candidate_snapshot.recovery_snapshot.state_digest",
-            "candidate_snapshot.recovery_snapshot.extraction.archive",
-            "candidate_snapshot.recovery_snapshot.extraction.out_dir",
-            "candidate_snapshot.recovery_snapshot.verification.files",
-            "candidate_snapshot.validation_summary.recovery_",
-            "candidate_snapshot.workspace_paths",
-            "candidate_snapshot.repaired_input.path",
-        ),
-    )
-
-
-def state_value_feature_spec() -> TrainingFeatureSpec:
-    return TrainingFeatureSpec(
-        include_prefixes=(
-            "format",
-            "round_index",
-            "patch_depth",
-            "damage_analysis.",
-            "current_recovery.",
-            "best_seen_recovery.",
-            "parent_recovery.",
-            "repair_history.",
-            "graph_summary.",
-            "frontier_summary.",
-            "branch_status",
-        ),
-        categorical_paths=(
-            "format",
-            "branch_status",
-            "current_recovery.status",
-            "current_recovery.decision_hint",
-            "current_recovery.metadata.score_source",
-            "current_recovery.extraction.failure_kind",
-            "current_recovery.extraction.failure_stage",
-            "best_seen_recovery.status",
-            "parent_recovery.status",
-        ),
-        ignore_prefixes=(
-            "current_recovery.state_digest",
-            "best_seen_recovery.state_digest",
-            "parent_recovery.state_digest",
-            "current_recovery.extraction.archive",
-            "current_recovery.extraction.out_dir",
-            "current_recovery.verification.files",
-            "candidate_summary.patch_digest",
-            "graph_summary.node_ids",
-            "frontier_summary.edge_ids",
-        ),
-    )
-
-
-def lightgbm_params(model_type: str) -> dict[str, Any]:
-    if model_type == "step_action":
-        return {
-            "objective": "lambdarank",
-            "n_estimators": 80,
-            "learning_rate": 0.04,
-            "num_leaves": 15,
-            "min_child_samples": 2,
-            "subsample": 0.9,
-            "colsample_bytree": 0.9,
-        }
-    if model_type == "normal_structure":
-        return {
-            "objective": "binary",
-            "n_estimators": 90,
-            "learning_rate": 0.04,
-            "num_leaves": 31,
-            "min_child_samples": 2,
-            "subsample": 0.9,
-            "colsample_bytree": 0.9,
-        }
-    if model_type == "step_value":
-        return {
-            "objective": "regression",
-            "n_estimators": 100,
-            "learning_rate": 0.04,
-            "num_leaves": 31,
-            "min_child_samples": 2,
-            "subsample": 0.9,
-            "colsample_bytree": 0.9,
-        }
-    return {
-        "n_estimators": 70,
-        "learning_rate": 0.04,
-        "num_leaves": 15,
-        "min_child_samples": 2,
-        "is_unbalance": True,
-        "subsample": 0.9,
-        "colsample_bytree": 0.9,
-    }
-
-
-def action_label(row: dict[str, Any]) -> int:
-    action = str(row.get("action_type") or "")
-    if "policy_prior_label" in row:
-        return int(max(0, min(31, round(_float(row.get("policy_prior_label"))))))
-    current = _recovery_score(row.get("current_recovery"))
-    label = 8
-    if row.get("is_best_action"):
-        label = 28
-    if action == "stop":
-        label = 28 if current >= 0.95 else 6
-    elif action == "undo":
-        label = max(label, 14)
-    elif action == "module":
-        if _is_recovery_candidate(row):
-            label = max(label, 18)
-        if _is_salvage_or_rebuild_candidate(row):
-            label = max(label, 20)
-    return int(max(0, min(31, label)))
-
-
-def _recovery_score(value: Any) -> float:
-    if isinstance(value, dict):
-        return _float(value.get("score"))
-    return _float(value)
-
-
-def _state_value_score(*values: Any, default: float = 0.0) -> float:
-    for value in values:
-        if isinstance(value, dict):
-            for key in ("reachable_recovery_value", "score", "value"):
-                if key in value:
-                    return max(0.0, min(1.0, _float(value.get(key))))
-        elif value not in (None, ""):
-            return max(0.0, min(1.0, _float(value)))
-    return max(0.0, min(1.0, _float(default)))
-
-
-def _is_recovery_candidate(row: dict[str, Any]) -> bool:
-    snapshot = row.get("candidate_snapshot") if isinstance(row.get("candidate_snapshot"), dict) else {}
-    validation = snapshot.get("validation_summary") if isinstance(snapshot.get("validation_summary"), dict) else {}
-    return bool(validation.get("accepted")) or _is_salvage_or_rebuild_candidate(row)
-
-
-def _is_salvage_or_rebuild_candidate(row: dict[str, Any]) -> bool:
-    snapshot = row.get("candidate_snapshot") if isinstance(row.get("candidate_snapshot"), dict) else {}
-    metadata = snapshot.get("metadata") if isinstance(snapshot.get("metadata"), dict) else {}
-    tokens = " ".join(
-        str(value or "")
-        for value in (
-            snapshot.get("module_name"),
-            snapshot.get("module"),
-            snapshot.get("module_family"),
-            snapshot.get("last_patch_module"),
-            metadata.get("last_patch_module"),
-            metadata.get("module_name"),
-            row.get("candidate_id"),
-        )
-    ).lower()
-    return any(token in tokens for token in ("salvage", "rebuild", "carrier_crop", "deep_recovery"))
 
 
 def damage_eval_profile_plan(samples: int, seed: int) -> list[str]:
@@ -549,18 +362,6 @@ def zip_module_family(module_name: str) -> str:
     return "zip_other"
 
 
-def postprocess_damage_prediction(raw_scores: dict[str, Any]) -> dict[str, Any]:
-    scores = _score_map(raw_scores)
-    adapter = get_damage_analysis_adapter("zip")
-    threshold = raw_scores.get("threshold") if isinstance(raw_scores, dict) else None
-    result = adapter.postprocess_scores(  # type: ignore[union-attr]
-        scores,
-        raw_scores.get("thresholds") if isinstance(raw_scores, dict) else None,
-        threshold_override=_float(threshold) if threshold is not None else None,
-    )
-    return result.to_dict()
-
-
 def collection_record_context(record: dict[str, Any]) -> dict[str, Any]:
     structure = dict(record.get("zip_structure_features") or {})
     tags = [str(item) for item in record.get("zip_container_tags") or [] if str(item)]
@@ -583,18 +384,6 @@ def collection_record_context(record: dict[str, Any]) -> dict[str, Any]:
         },
         "flags": {"format.zip.route_evidence": route_flags},
     }
-
-
-def _score_map(raw_scores: dict[str, Any]) -> dict[str, float]:
-    if not isinstance(raw_scores, dict):
-        return {}
-    raw = raw_scores.get("scores") if isinstance(raw_scores.get("scores"), dict) else raw_scores
-    schema = damage_label_schema()
-    output: dict[str, float] = {}
-    for label in schema.labels:
-        if raw.get(label) is not None:
-            output[label] = _float(raw.get(label))
-    return output
 
 
 def _dedupe(values: list[str]) -> list[str]:

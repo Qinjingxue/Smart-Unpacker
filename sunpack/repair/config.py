@@ -49,10 +49,10 @@ DEFAULT_REPAIR_CONFIG = {
     },
     "policy": {
         "enabled": True,
-        "fallback_to_selector": True,
-        "disable_beam_when_model_active": True,
         "strict_provider_errors": False,
         "provider_package": "sunpack_repair_models",
+        "graph_stop_stale_patience": 3,
+        "min_best_recovery_improvement": 0.01,
     },
     "telemetry": {
         "enabled": False,
@@ -308,16 +308,20 @@ def _normalize_telemetry(value: Any) -> dict[str, bool]:
 def _normalize_policy(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError("repair.policy must be an object")
+    removed = sorted({"fallback_to_selector", "disable_beam_when_model_active", "step_mode"} & set(value))
+    if removed:
+        joined = ", ".join(f"repair.policy.{name}" for name in removed)
+        raise ValueError(f"{joined} was removed; repair policy now always uses graph step mode without selector/beam fallback")
     provider_package = str(value.get("provider_package") or "sunpack_repair_models").strip()
     if not provider_package:
         raise ValueError("repair.policy.provider_package must not be empty")
     return {
         **value,
         "enabled": _bool_value(value.get("enabled", True), "repair.policy.enabled"),
-        "fallback_to_selector": _bool_value(value.get("fallback_to_selector", True), "repair.policy.fallback_to_selector"),
-        "disable_beam_when_model_active": _bool_value(value.get("disable_beam_when_model_active", True), "repair.policy.disable_beam_when_model_active"),
         "strict_provider_errors": _bool_value(value.get("strict_provider_errors", False), "repair.policy.strict_provider_errors"),
         "provider_package": provider_package,
+        "graph_stop_stale_patience": _int_at_least(value, "graph_stop_stale_patience", 0) if "graph_stop_stale_patience" in value else 3,
+        "min_best_recovery_improvement": _float_at_least(value, "min_best_recovery_improvement", 0.0) if "min_best_recovery_improvement" in value else 0.01,
     }
 
 

@@ -1,7 +1,6 @@
 from dataclasses import replace
 from contextlib import nullcontext
 import json
-import os
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -36,7 +35,8 @@ from sunpack.repair.policy.graph import (
     policy_graph_node_id,
     remove_frontier as graph_remove_frontier,
 )
-from sunpack.repair.policy.types import PolicyExplorationGraph, PolicyStepDecision, PolicyGraphEdge, PolicyGraphNode
+from sunpack.repair.policy.types import PolicyExplorationGraph, PolicyGraphEdge, PolicyGraphNode
+from sunpack.repair.policy.formats import get_repair_format_plugin
 from sunpack.repair.result import RepairResult
 from sunpack.repair.runtime_cache import RepairRuntimeCache
 from sunpack.contracts.archive_knowledge import ArchiveKnowledge
@@ -63,150 +63,19 @@ class RepairScheduler:
     def repair(self, job: RepairJob) -> RepairResult:
         if self.policy_manager.dual_model_active_for_job(job):
             return self.repair_policy_step(job)
-        batch = self.generate_repair_candidates(job)
-        terminal_policy_noop = (
-            batch.terminal_result is not None
-            and False
-            and _terminal_result_allows_policy_noop(batch.terminal_result)
+        status = self.policy_manager.status_for_job(job)
+        return RepairResult(
+            status="unsupported",
+            confidence=float(job.confidence or 0.0),
+            format=job.format,
+            repaired_input=dict(job.source_input or {}),
+            actions=["policy_unavailable"],
+            damage_flags=list(job.damage_flags),
+            warnings=[str(status.get("fallback_reason") or "policy_unavailable")],
+            module_name="policy_unavailable",
+            diagnosis={"policy": status},
+            message="repair policy graph runtime is unavailable",
         )
-        if batch.terminal_result is not None and not terminal_policy_noop:
-            self._write_telemetry(job, batch, batch.terminal_result, {})
-            repair_trace.write_event("repair_terminal_result", {
-                "job": repair_trace.job_payload(job),
-                "result": repair_trace.result_payload(batch.terminal_result),
-                "diagnosis": batch.diagnosis,
-                "warnings": list(batch.warnings),
-            })
-            return batch.terminal_result
-        selector = CandidateSelector(self.config)
-        warnings = list(batch.warnings)
-        selection: dict[str, Any] = {}
-        if batch.candidates or terminal_policy_noop:
-            selected = None
-            if False:
-                policy_candidates = _with_job_password_candidates(with_accept_current_state_candidate(batch.candidates, job), job)
-                validated = self._validated_policy_candidates(selector, policy_candidates)
-                selectable = [candidate for candidate in validated if selector._accepted(candidate)]
-                policy_payloads = [
-                    _policy_candidate_snapshot(job, candidate, index=index)
-                    for index, candidate in enumerate(selectable)
-                ]
-                probe_query = _policy_probe_query(job)
-                probe_payloads = [repair_trace.public_policy_payload(payload) for payload in policy_payloads]
-                repair_trace.write_probe_event("policy_probe_request", {
-                    **probe_query,
-                    "job": repair_trace.job_payload(job),
-                    "diagnosis": batch.diagnosis,
-                    "route_evidence_flags": _probe_context_flags(probe_payloads, "route_evidence_flags"),
-                    "repair_history_flags": _probe_context_flags(probe_payloads, "repair_history_flags"),
-                    "residual_damage_flags": _probe_context_flags(probe_payloads, "residual_damage_flags"),
-                    "candidate_count": len(validated),
-                    "accepted_count": len(selectable),
-                    "candidate_id_collision_count": _candidate_id_collision_count(probe_payloads),
-                    "candidate_payloads": probe_payloads,
-                    "runtime_context_hash": _runtime_context_hash(probe_payloads),
-                    "candidate_payload_hashes": [repair_trace.canonical_hash(payload) for payload in probe_payloads],
-                    "candidate_set_hash": repair_trace.canonical_hash(_candidate_set_hash_input(probe_payloads)),
-                    "beam_disabled_by_policy": _policy_disables_beam(self.config),
-                })
-                selected, policy_selection = self.policy_manager.choose(
-                    job=job,
-                    candidates=selectable,
-                    candidate_payloads=policy_payloads,
-                    diagnosis=batch.diagnosis,
-                )
-                selection = {"policy": _policy_selection_public(policy_selection)}
-                repair_trace.write_probe_event("policy_probe_decision", {
-                    **probe_query,
-                    "policy": _policy_selection_public(policy_selection),
-                    "selected_candidate": _selected_policy_payload(probe_payloads, policy_selection),
-                    "candidate_set_hash": repair_trace.canonical_hash(_candidate_set_hash_input(probe_payloads)),
-                    "beam_disabled_by_policy": _policy_disables_beam(self.config),
-                })
-                if selected is not None:
-                    selection.update({
-                        "candidate_count": len(validated),
-                        "accepted_count": len(selectable),
-                        "selected_module": selected.module_name,
-                        "selected_format": selected.format,
-                        "candidates": policy_payloads,
-                    })
-                elif self.policy_manager.fallback_to_selector:
-                    fallback_validated = [
-                        candidate for candidate in validated
-                        if not is_accept_current_state_candidate(candidate)
-                    ]
-                    fallback_selected, fallback_selection = selector.select_validated(fallback_validated)
-                    selected = fallback_selected
-                    fallback_candidate_payload = (
-                        candidate_feature_payload(fallback_selected)
-                        if fallback_selected is not None
-                        else {}
-                    )
-                    selection = {
-                        **fallback_selection,
-                        "policy": _policy_selection_public(policy_selection),
-                        "policy_fallback": True,
-                        "fallback_selected_candidate_id": str(fallback_candidate_payload.get("candidate_id") or ""),
-                        "fallback_selected_candidate": fallback_candidate_payload,
-                        "fallback_candidate_in_request": _candidate_id_in_payloads(
-                            str(fallback_candidate_payload.get("candidate_id") or ""),
-                            policy_payloads,
-                        ),
-                    }
-                else:
-                    warnings.append("model repair policy did not select a candidate")
-            else:
-                selected, selection = selector.select(_with_job_password_candidates(batch.candidates, job))
-                policy_status = self.policy_manager.status_for_job(job)
-                if policy_status.get("decision_status") in {"unavailable", "disabled"}:
-                    selection = {**selection, "policy": _policy_selection_public(policy_status), "policy_fallback": True}
-            if selected is not None:
-                result = selected.to_result(selection=selection)
-                if warnings:
-                    result = replace(result, warnings=_dedupe([*result.warnings, *warnings]))
-                self._write_telemetry(job, batch, result, selection)
-                selected_rank = _candidate_index(selectable if "selectable" in locals() else [], selected)
-                trace_candidate = (
-                    _policy_candidate_snapshot(job, selected, index=selected_rank)
-                    if isinstance(selection.get("policy"), dict)
-                    else candidate_feature_payload(selected)
-                )
-                repair_trace.write_event("repair_selected_result", {
-                    "job": repair_trace.job_payload(job),
-                    "result": repair_trace.result_payload(result),
-                    "selection": selection,
-                    "candidate": trace_candidate,
-                    "candidate_count": len(batch.candidates),
-                })
-                repair_trace.write_probe_event("policy_probe_selected_result", {
-                    **_policy_probe_query(job),
-                    "job": repair_trace.job_payload(job),
-                    "result": repair_trace.result_payload(result),
-                    "selection": repair_trace.public_policy_payload(selection),
-                    "candidate": repair_trace.public_policy_payload(trace_candidate if isinstance(trace_candidate, dict) else {}),
-                    "candidate_count": len(batch.candidates),
-                })
-                return result
-            warnings.extend(selection.get("warnings") or [])
-            warnings.append("repair candidates were produced but none passed selection")
-        diagnosis = _diagnosis_with_candidate_selection(batch.diagnosis, selection)
-        result = RepairResult(
-            status="unrepairable",
-            confidence=float(diagnosis.get("confidence", 0.0) or 0.0),
-            format=str(diagnosis.get("format") or job.format),
-            warnings=_dedupe(warnings),
-            diagnosis=diagnosis,
-            message=batch.message or "registered repair modules did not produce a candidate",
-        )
-        self._write_telemetry(job, batch, result, selection)
-        repair_trace.write_event("repair_unrepairable_result", {
-            "job": repair_trace.job_payload(job),
-            "result": repair_trace.result_payload(result),
-            "selection": selection,
-            "candidate_count": len(batch.candidates),
-        })
-        return result
 
     def repair_policy_step(self, job: RepairJob) -> RepairResult:
         current_state = _job_archive_state(job)
@@ -218,15 +87,7 @@ class RepairScheduler:
         )
         recovery_evaluator = RecoveryEvaluator(self.config)
         current_recovery = recovery_evaluator.evaluate_state(current_job, current_state, mode="policy_light")
-        best_recovery = _evaluate_policy_best_state_recovery(
-            recovery_evaluator,
-            current_job,
-            current_state,
-            current_recovery,
-            self.config,
-            {},
-        )
-        repair_graph = _policy_repair_graph_from_job(current_job, current_state, best_recovery)
+        repair_graph = _policy_repair_graph_from_job(current_job, current_state, current_recovery)
         graph = repair_graph.graph
         current_node = graph.current_node()
         if current_node is None:
@@ -236,7 +97,7 @@ class RepairScheduler:
                 node_id=root_id,
                 patch_digest=root_digest,
                 archive_state=current_state,
-                recovery=best_recovery.to_dict(),
+                recovery=current_recovery.to_dict(),
             )
             graph.nodes[root_id] = current_node
             graph.current_node_id = root_id
@@ -244,116 +105,127 @@ class RepairScheduler:
         current_node.archive_state = current_state
         current_node.patch_digest = current_state.effective_patch_digest() if current_state is not None else current_node.patch_digest
         policy_config = self.config.get("policy") if isinstance(self.config.get("policy"), dict) else {}
-        stop_readiness = repair_graph.observe_current_recovery(
-            best_recovery,
-            min_improvement=float(policy_config.get("min_best_recovery_improvement", self.config.get("min_recovery_improvement", 0.0)) or 0.0),
-        )
+        plugin = get_repair_format_plugin(current_job.format)
+        if plugin is None:
+            return RepairResult(
+                status="unsupported",
+                confidence=float(current_job.confidence or 0.0),
+                format=current_job.format,
+                repaired_input=dict(current_job.source_input or {}),
+                actions=["unsupported_policy_format"],
+                damage_flags=list(current_job.damage_flags),
+                warnings=["unsupported_policy_format"],
+                module_name="unsupported_policy_format",
+                diagnosis={"policy_loop": {"policy_step": True, "error": "unsupported_policy_format", "format": current_job.format, "graph": graph.to_dict()}},
+                message=f"repair policy format plugin is unavailable for {current_job.format}",
+            )
 
+        round_index = max(1, int(job.attempts or 0) + 1)
         diagnosis_payload: dict[str, Any] = {"format": current_job.format, "confidence": current_job.confidence}
         warnings: list[str] = []
-        runtime_context = runtime_context_from_job(current_job)
-        damage_analysis, analysis_selection = self.policy_manager.analyze_damage(
+        diagnosis_hgt, diagnosis_selection = self.policy_manager.diagnose_state(
             job=current_job,
             archive_state=current_state,
-            runtime_context=runtime_context,
-            diagnosis=diagnosis_payload,
-            round_index=max(1, int(job.attempts or 0) + 1),
-        )
-        analysis_route_flags = _route_flags_from_damage_analysis(damage_analysis)
-        if analysis_route_flags:
-            current_job = _job_with_policy_route_flags(current_job, analysis_route_flags)
-        try:
-            batch = self.generate_policy_repair_candidates(current_job, phase_prefix="policy_step")
-        except TypeError:
-            batch = self.generate_policy_repair_candidates(current_job)
-        diagnosis_payload = dict(batch.diagnosis or diagnosis_payload)
-        selectable = [candidate for candidate in batch.candidates if _policy_candidate_available(candidate)]
-        candidate_payloads = [
-            _policy_candidate_snapshot_with_damage(current_job, candidate, damage_analysis, index=index)
-            for index, candidate in enumerate(selectable)
-        ]
-        repair_graph.register_proposals(candidate_payloads, step=max(1, int(job.attempts or 0) + 1))
-        proposal_cache = {
-            _policy_graph_edge_id(current_node.node_id, str(payload.get("candidate_id") or "")): candidate
-            for candidate, payload in zip(selectable, candidate_payloads)
-            if str(payload.get("candidate_id") or "")
-        }
-        parent_recovery = PolicyRecoverySnapshot()
-        parent_node = graph.nodes.get(current_node.parent_id)
-        if parent_node is not None and parent_node.recovery:
-            parent_recovery = PolicyRecoverySnapshot.from_dict(parent_node.recovery)
-        state_value, state_value_selection = self.policy_manager.estimate_state_value(
-            job=current_job,
-            archive_state=current_state,
-            damage_analysis=damage_analysis,
-            current_recovery=current_recovery.to_dict(),
-            best_seen_recovery=PolicyRecoverySnapshot.from_dict((graph.best_node() or current_node).recovery).to_dict() if (graph.best_node() or current_node).recovery else best_recovery.to_dict(),
-            parent_recovery=parent_recovery.to_dict(),
-            candidate_payloads=candidate_payloads,
-            graph_summary=graph.summary(),
-            frontier_summary=_policy_graph_frontier_summary(graph),
-            branch_status=current_node.status,
-            diagnosis=diagnosis_payload,
-            round_index=max(1, int(job.attempts or 0) + 1),
-        )
-        current_node.state_value = dict(state_value)
-        step_action_scores, step_action_selection = self.policy_manager.score_step_actions(
-            job=current_job,
-            archive_state=current_state,
-            candidate_payloads=candidate_payloads,
             graph=graph,
-            damage_analysis=damage_analysis,
-            current_recovery=current_recovery.to_dict(),
-            best_seen_recovery=best_recovery.to_dict(),
-            parent_recovery=parent_recovery.to_dict(),
-            state_value=state_value,
-            parent_state_value={},
-            diagnosis=diagnosis_payload,
-            round_index=max(1, int(job.attempts or 0) + 1),
+            recovery=current_recovery.to_dict(),
+            round_index=round_index,
         )
-        _merge_step_value_scores(step_action_scores, state_value)
-        _policy_graph_update_edge_scores(graph, step_action_selection)
+        if not diagnosis_hgt:
+            return RepairResult(
+                status="unsupported",
+                confidence=float(current_job.confidence or 0.0),
+                format=current_job.format,
+                repaired_input=dict(current_job.source_input or {}),
+                actions=["diagnosis_hgt_unavailable"],
+                damage_flags=list(current_job.damage_flags),
+                warnings=[str(diagnosis_selection.get("fallback_reason") or "diagnosis_hgt_unavailable")],
+                module_name="diagnosis_hgt_unavailable",
+                diagnosis={"policy_loop": {"policy_step": True, "error": "diagnosis_hgt_unavailable", "graph": graph.to_dict(), "diagnosis_selection": diagnosis_selection}},
+                message="diagnosis HGT runtime is unavailable",
+            )
+        repair_graph.observe_current_state(
+            recovery=current_recovery,
+            diagnosis_hgt=diagnosis_hgt,
+            verification=_verification_from_job(current_job),
+            min_improvement=float(policy_config.get("min_best_recovery_improvement", self.config.get("min_recovery_improvement", 0.0)) or 0.0),
+        )
         stop_readiness = repair_graph.stop_readiness(
-            stale_patience=max(0, int(policy_config.get("graph_stop_stale_patience", policy_config.get("stop_plateau_min_rounds", 3)) or 0)),
+            stale_patience=int(policy_config.get("graph_stop_stale_patience", 0) or 0),
         )
-        step_action = _policy_step_decide_action(
-            graph,
-            step_action_scores,
-            stop_readiness=stop_readiness,
-            state_value=state_value,
-            policy_config=policy_config,
+
+        proposals = plugin.available_modules(scheduler=self, job=current_job, diagnosis_hgt=diagnosis_hgt, graph=graph)
+        proposal_by_action_id = {proposal.action_id: proposal for proposal in proposals}
+        action_payloads = [proposal.to_action_payload() for proposal in proposals]
+        action_payloads.extend([
+            {"action_type": "undo", "action_id": "undo", "module_name": ""},
+            {"action_type": "stop", "action_id": "stop", "module_name": ""},
+        ])
+        repair_graph.register_proposals(action_payloads, step=round_index)
+        best_node = graph.best_node() or current_node
+        if stop_readiness.get("should_force_stop"):
+            action_scores = []
+            action_selection = {"decision_status": "forced_stop", "reason": stop_readiness.get("force_stop_reason")}
+            selected_action = None
+        else:
+            action_scores, action_selection = self.policy_manager.score_graph_actions(
+                job=current_job,
+                archive_state=current_state,
+                graph=graph,
+                available_actions=action_payloads,
+                diagnosis_hgt=diagnosis_hgt,
+                current_recovery=current_recovery.to_dict(),
+                best_seen_recovery=dict((best_node.recovery if best_node is not None else {}) or {}),
+                round_index=round_index,
+            )
+            selected_action = max(action_scores, key=lambda item: float(item.score or 0.0), default=None)
+            if selected_action is None:
+                return RepairResult(
+                    status="unsupported",
+                    confidence=float(current_job.confidence or 0.0),
+                    format=current_job.format,
+                    repaired_input=dict(current_job.source_input or {}),
+                    actions=["policy_graph_scorer_unavailable"],
+                    damage_flags=list(current_job.damage_flags),
+                    warnings=[str(action_selection.get("fallback_reason") or "policy_graph_scorer_unavailable")],
+                    module_name="policy_graph_scorer_unavailable",
+                    diagnosis={"policy_loop": {"policy_step": True, "error": "policy_graph_scorer_unavailable", "graph": graph.to_dict(), "diagnosis_hgt": diagnosis_hgt, "action_selection": action_selection}},
+                    message="policy graph scorer runtime is unavailable",
+                )
+        if selected_action is not None:
+            _policy_graph_update_action_scores(graph, [score.to_dict() for score in action_scores])
+        graph_action = (
+            {"action_type": "stop", "reason": stop_readiness.get("force_stop_reason") or "graph_stale_best"}
+            if stop_readiness.get("should_force_stop")
+            else selected_action.to_dict() if selected_action is not None else {"action_type": "stop", "reason": "no_action"}
         )
         selection = {
             "policy_step": True,
-            "analysis": analysis_selection,
-            "state_value": state_value_selection,
-            "step_action_model": step_action_selection,
-            "step_action": step_action.to_dict(),
-            "damage_analysis": damage_analysis,
-            "candidate_count": len(selectable),
-            "proposal_count": len(selectable),
-            "candidates": candidate_payloads,
+            "diagnosis_hgt_model": diagnosis_selection,
+            "policy_graph_scorer": action_selection,
+            "graph_action": graph_action,
+            "diagnosis_hgt": diagnosis_hgt,
+            "candidate_count": len(proposals),
+            "proposal_count": len(proposals),
+            "actions": action_payloads,
             "graph_summary": graph.summary(),
             "stop_readiness": stop_readiness,
         }
         history = [{
-            "round": max(1, int(job.attempts or 0) + 1),
+            "round": round_index,
             "node_id": current_node.node_id,
             "patch_digest": current_state.effective_patch_digest() if current_state is not None else "",
             "patch_depth": current_state.patch_depth() if current_state is not None else 0,
-            "damage_analysis": damage_analysis,
-            "analysis_route_flags": list(analysis_route_flags),
+            "diagnosis_hgt": diagnosis_hgt,
             "current_recovery": current_recovery.to_dict(),
-            "best_seen_recovery": best_recovery.to_dict(),
-            "state_value": state_value,
-            "candidates": candidate_payloads,
-            "step_action": step_action.to_dict(),
+            "best_seen_recovery": dict((best_node.recovery if best_node is not None else {}) or {}),
+            "actions": action_payloads,
+            "graph_action": graph_action,
             "graph_summary": graph.summary(),
-            "frontier_top": _policy_graph_frontier_top(graph),
-            "step_action_model": step_action_selection,
+            "policy_graph_scorer": action_selection,
             "stop_readiness": stop_readiness,
         }]
-        if step_action.action == "finish":
+        action_type = str(graph_action.get("action_type") or "")
+        if action_type == "stop":
             repair_graph.stop_best()
             return _loop_graph_finish_result(
                 current_job,
@@ -362,43 +234,38 @@ class RepairScheduler:
                 selection,
                 history,
                 warnings,
-                reason=step_action.reason or "policy_step_stop",
+                reason=str(graph_action.get("reason") or "policy_step_stop"),
                 terminal_action="stop",
-                batch=batch,
-                recovery=PolicyRecoverySnapshot.from_dict((graph.best_node() or current_node).recovery) if (graph.best_node() or current_node).recovery else best_recovery,
+                batch=None,
+                recovery=PolicyRecoverySnapshot.from_dict((graph.best_node() or current_node).recovery) if (graph.best_node() or current_node).recovery else current_recovery,
                 current_state=current_state,
                 current_recovery=current_recovery,
             )
-        if step_action.action == "checkout":
-            op = repair_graph.undo(step=max(1, int(job.attempts or 0) + 1))
+        if action_type == "undo":
+            op = repair_graph.undo(step=round_index)
             if op.archive_state is None:
                 return _policy_step_no_patch_result(current_job, graph, diagnosis_payload, selection, history, "checkout_target_missing", warnings)
             return _policy_step_state_result(current_job, graph, op.archive_state, diagnosis_payload, selection, history, "policy_undo", warnings, operation=op)
-        if step_action.action != "expand":
+        if action_type != "module":
             return _policy_step_no_patch_result(current_job, graph, diagnosis_payload, selection, history, "policy_step_no_action", warnings)
-
-        edge_id = str(step_action.metadata.get("edge_id") or _policy_graph_edge_id(current_node.node_id, step_action.candidate_id))
-        edge = graph.edges.get(edge_id)
-        selected = proposal_cache.get(edge_id) or _candidate_by_id(selectable, candidate_payloads, step_action.candidate_id)
-        if edge is None or selected is None:
+        action_id = str(graph_action.get("action_id") or "")
+        proposal = proposal_by_action_id.get(action_id)
+        if proposal is None:
+            module_name = str(graph_action.get("module_name") or "")
+            proposal = next((item for item in proposals if item.module_name == module_name), None)
+            if proposal is not None:
+                action_id = proposal.action_id
+        if proposal is None:
             return _policy_step_no_patch_result(current_job, graph, diagnosis_payload, selection, history, "selected_proposal_missing", warnings)
-        materialized = materialize_candidate(selected)
-        materialized_candidates = [candidate for candidate in materialized if candidate.repaired_state is not None]
-        selected_materialized = _policy_select_materialized_candidate(materialized_candidates)
-        failure = {}
-        if selected_materialized is None:
-            failure = {
-                "failure_reason": "proposal_materialization_failed",
-                "materialization_errors": _policy_materialization_errors(materialized),
-                "materialized_candidate_count": len(materialized),
-                "patch_state_candidate_count": 0,
-            }
+        edge_id = policy_graph_edge_id(current_node.node_id, action_id)
+        module_job = plugin.build_module_job(job=current_job, module_name=proposal.module_name, graph=graph)
+        materialized = plugin.materialize_module(scheduler=self, proposal=proposal, job=module_job)
         op = repair_graph.forward(
-            candidate_id=edge.candidate_id,
-            module_name=edge.module_name or selected.module_name,
-            materialized_candidate=selected_materialized,
-            failure=failure,
-            step=max(1, int(job.attempts or 0) + 1),
+            candidate_id=action_id,
+            module_name=proposal.module_name,
+            materialized_candidate=materialized.candidate,
+            failure=materialized.failure,
+            step=round_index,
         )
         if op.archive_state is None:
             return _policy_step_no_patch_result(current_job, graph, diagnosis_payload, selection, history, "proposal_missing_repaired_state", warnings)
@@ -409,9 +276,9 @@ class RepairScheduler:
             diagnosis_payload,
             selection,
             history,
-            op.module_name or (selected_materialized.module_name if selected_materialized is not None else selected.module_name) or "policy_module",
+            op.module_name or proposal.module_name or "policy_module",
             warnings,
-            candidate=selected_materialized,
+            candidate=materialized.candidate,
             operation=op,
         )
 
@@ -1248,128 +1115,6 @@ def _route_flags(knowledge: ArchiveKnowledge) -> set[str]:
     return {str(flag) for flag in flags if str(flag)}
 
 
-def _candidate_index(candidates: list[RepairCandidate], selected: RepairCandidate) -> int:
-    for index, candidate in enumerate(candidates):
-        if candidate is selected:
-            return index
-    return 0
-
-
-def _policy_selection_public(selection: dict[str, Any]) -> dict[str, Any]:
-    return {
-        key: selection.get(key)
-        for key in (
-            "enabled",
-            "provider_package",
-            "fallback_to_selector",
-            "decision_status",
-            "action",
-            "fallback_reason",
-            "provider_id",
-            "confidence",
-            "reason",
-            "selected_candidate_id",
-            "selected_candidate_id_valid",
-            "selected_module",
-            "selected_format",
-            "candidate_count",
-            "duplicate_candidate_id_count",
-            "duplicate_candidate_ids",
-            "invalid_candidate_id_reason",
-            "load_error",
-            "provider_errors",
-            "fallback_selected_candidate_id",
-            "fallback_candidate_in_request",
-            "metadata",
-        )
-        if key in selection
-    }
-
-
-def _policy_probe_query(job: RepairJob) -> dict[str, Any]:
-    run_id = str(os.environ.get("SUNPACK_REPAIR_POLICY_PROBE_RUN_ID") or "")
-    archive_key = str(getattr(job, "archive_key", "") or "")
-    round_index = int(getattr(job, "attempts", 0) or 0)
-    if not run_id:
-        run_id = archive_key or repair_trace.canonical_hash(repair_trace.job_payload(job))[:16]
-    return {
-        "run_id": run_id,
-        "query_id": f"{archive_key or run_id}:{round_index}",
-        "archive_key": archive_key,
-        "round": round_index,
-        "format": str(getattr(job, "format", "") or ""),
-    }
-
-
-def _policy_disables_beam(config: dict[str, Any]) -> bool:
-    policy = config.get("policy") if isinstance(config.get("policy"), dict) else {}
-    return bool(policy.get("enabled", True)) and bool(policy.get("disable_beam_when_model_active", True))
-
-
-def _runtime_context_hash(payloads: list[dict[str, Any]]) -> str:
-    for payload in payloads:
-        context = payload.get("runtime_context") if isinstance(payload, dict) else None
-        if isinstance(context, dict):
-            return repair_trace.canonical_hash(context)
-    return ""
-
-
-def _probe_context_flags(payloads: list[dict[str, Any]], key: str) -> list[str]:
-    for payload in payloads:
-        context = payload.get("runtime_context") if isinstance(payload, dict) else None
-        summary = context.get("job_summary") if isinstance(context, dict) and isinstance(context.get("job_summary"), dict) else {}
-        values = summary.get(key)
-        if isinstance(values, list):
-            return [str(item) for item in values if str(item)]
-    return []
-
-
-def _candidate_set_hash_input(payloads: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    output: list[dict[str, Any]] = []
-    for payload in payloads:
-        if not isinstance(payload, dict):
-            continue
-        proposal = payload.get("candidate_proposal") if isinstance(payload.get("candidate_proposal"), dict) else {}
-        output.append({
-            "candidate_id": payload.get("candidate_id"),
-            "module_name": payload.get("module_name") or payload.get("module"),
-            "repair_name": payload.get("repair_name"),
-            "native_key": payload.get("native_key"),
-            "native_target": payload.get("native_target"),
-            "candidate_status": payload.get("candidate_status"),
-            "patch_facts": proposal.get("patch_facts") or payload.get("patch_facts"),
-            "validation_details": proposal.get("validation_details") or payload.get("validation_details"),
-        })
-    return output
-
-
-def _selected_policy_payload(payloads: list[dict[str, Any]], selection: dict[str, Any]) -> dict[str, Any]:
-    selected_id = str(selection.get("selected_candidate_id") or "")
-    for payload in payloads:
-        if str(payload.get("candidate_id") or "") == selected_id:
-            return payload
-    return {}
-
-
-def _candidate_id_in_payloads(candidate_id: str, payloads: list[dict[str, Any]]) -> bool:
-    if not candidate_id:
-        return False
-    return any(str(payload.get("candidate_id") or "") == candidate_id for payload in payloads if isinstance(payload, dict))
-
-
-def _candidate_id_collision_count(payloads: list[dict[str, Any]]) -> int:
-    seen: set[str] = set()
-    duplicates: set[str] = set()
-    for payload in payloads:
-        candidate_id = str(payload.get("candidate_id") or "") if isinstance(payload, dict) else ""
-        if not candidate_id:
-            continue
-        if candidate_id in seen:
-            duplicates.add(candidate_id)
-        seen.add(candidate_id)
-    return len(duplicates)
-
-
 def _float_equal(left: Any, right: Any) -> bool:
     try:
         return abs(float(left) - float(right)) <= 1e-12
@@ -1769,10 +1514,21 @@ def _policy_repair_graph_from_job(job: RepairJob, current_state: ArchiveState | 
             node.patch_digest = current_digest
             node.recovery = current_recovery.to_dict()
         elif graph.current_node_id in graph.nodes:
-            node = graph.nodes[graph.current_node_id]
-            node.archive_state = current_state
-            node.patch_digest = current_digest or node.patch_digest
-            node.recovery = current_recovery.to_dict()
+            parent_id = graph.current_node_id
+            node_id = _policy_graph_node_id(current_digest, len(graph.nodes))
+            graph.nodes[node_id] = PolicyGraphNode(
+                node_id=node_id,
+                parent_id=parent_id,
+                patch_digest=current_digest,
+                archive_state=current_state,
+                recovery=current_recovery.to_dict(),
+                status="active",
+                created_round=0,
+                created_step=0,
+                module_name="external_policy_state",
+                patch_status="applied",
+            )
+            graph.current_node_id = node_id
         graph.best_node_id = graph_best_node_id(graph) or graph.current_node_id
         return repair_graph
     return PolicyRepairGraph.initialize(job, current_recovery)
@@ -1840,7 +1596,7 @@ def _policy_graph_from_payload(payload: dict[str, Any]) -> PolicyExplorationGrap
             to_node_id=str(raw.get("to_node_id") or ""),
             candidate_id=str(raw.get("candidate_id") or ""),
             module_name=str(raw.get("module_name") or ""),
-            step_action_score=dict(raw.get("step_action_score") or {}),
+            action_score=dict(raw.get("action_score") or {}),
             status=str(raw.get("status") or "frontier"),
             created_round=int(raw.get("created_round") or 0),
         )
@@ -1866,136 +1622,6 @@ def _policy_graph_best_node_id(graph: PolicyExplorationGraph, *, fallback: str =
     return best_id or fallback
 
 
-def _policy_step_decide_action(
-    graph: PolicyExplorationGraph,
-    step_action_scores: list[Any],
-    *,
-    stop_readiness: dict[str, Any] | None = None,
-    state_value: dict[str, Any] | None = None,
-    policy_config: dict[str, Any] | None = None,
-) -> PolicyStepDecision:
-    readiness = dict(stop_readiness or {})
-    if bool(readiness.get("should_force_stop")):
-        reason = str(readiness.get("force_stop_reason") or "graph_stop_readiness")
-        return PolicyStepDecision(action="finish", reason=reason, terminal_action="stop", final_node_id=graph.best_node_id, metadata={"stop_readiness": readiness})
-    dominance = _policy_step_stop_dominance(step_action_scores, state_value=state_value or {}, best_seen_recovery=(graph.best_node().recovery if graph.best_node() is not None else {}), policy_config=policy_config or {})
-    if dominance.get("stop_dominates"):
-        stop_score = dominance.get("stop_action_score") if isinstance(dominance.get("stop_action_score"), dict) else {}
-        return PolicyStepDecision(action="finish", reason=str(stop_score.get("reason") or "model_stop_absolute_advantage"), terminal_action="stop", final_node_id=graph.best_node_id, metadata={"stop_dominance": dominance})
-    selected_score = None
-    for score in sorted(step_action_scores, key=lambda item: _combined_step_score(item), reverse=True):
-        if getattr(score, "action_type", "") in {"module", "undo"}:
-            selected_score = score
-            break
-    if selected_score is not None and selected_score.action_type == "undo":
-        return PolicyStepDecision(action="checkout", node_id="", reason=selected_score.reason or "policy_step_undo", metadata={"step_action_score": selected_score.to_dict(), "checkout_semantics": "undo_parent", "stop_dominance": dominance})
-    if selected_score is not None and selected_score.action_type == "module":
-        edge = _policy_graph_edge_for_step_score(graph, selected_score)
-        if edge is not None:
-            if edge.from_node_id != graph.current_node_id:
-                return PolicyStepDecision(action="checkout", node_id="", reason="policy_step_undo_toward_frontier_source", metadata={"edge_id": edge.edge_id, "candidate_id": edge.candidate_id, "step_action_score": selected_score.to_dict(), "checkout_semantics": "undo_parent", "stop_dominance": dominance})
-            return PolicyStepDecision(action="expand", candidate_id=edge.candidate_id, reason=selected_score.reason or "policy_step_expand", metadata={"edge_id": edge.edge_id, "step_action_score": selected_score.to_dict(), "stop_dominance": dominance})
-    edge = _policy_graph_best_frontier_edge(graph)
-    if edge is not None:
-        if edge.from_node_id != graph.current_node_id:
-            return PolicyStepDecision(action="checkout", node_id="", reason="policy_step_undo_toward_best_frontier", metadata={"edge_id": edge.edge_id, "candidate_id": edge.candidate_id, "checkout_semantics": "undo_parent", "stop_dominance": dominance})
-        return PolicyStepDecision(action="expand", candidate_id=edge.candidate_id, reason="policy_step_best_frontier", metadata={"edge_id": edge.edge_id, "stop_dominance": dominance})
-    return PolicyStepDecision(action="checkout", node_id="", reason="policy_step_no_executable_action", metadata={"checkout_semantics": "undo_parent", "stop_dominance": dominance})
-
-
-def _policy_step_stop_dominance(
-    step_action_scores: list[Any],
-    *,
-    state_value: dict[str, Any],
-    best_seen_recovery: dict[str, Any],
-    policy_config: dict[str, Any],
-) -> dict[str, Any]:
-    stop_scores = [score for score in step_action_scores if getattr(score, "action_type", "") == "stop"]
-    if not stop_scores:
-        return {"stop_dominates": False, "reason": "no_stop_score"}
-    stop_action_score = max(stop_scores, key=_combined_step_score)
-    other_scores = [score for score in step_action_scores if getattr(score, "action_type", "") in {"module", "undo"}]
-    best_other_score = max((_combined_step_score(score) for score in other_scores), default=float("-inf"))
-    stop_score = _combined_step_score(stop_action_score)
-    stop_confidence = getattr(stop_action_score, "confidence", None)
-    confidence = 1.0 if stop_confidence is None else float(stop_confidence or 0.0)
-    action_margin = float(policy_config.get("stop_absolute_action_margin", 0.25) or 0.25)
-    min_stop_score = float(policy_config.get("stop_absolute_min_score", 0.75) or 0.75)
-    min_confidence = float(policy_config.get("stop_absolute_min_confidence", 0.65) or 0.65)
-    value_margin = float(policy_config.get("stop_absolute_value_margin", 0.01) or 0.01)
-    best_score = _safe_float((best_seen_recovery or {}).get("score"), default=0.0)
-    reachable_value = _safe_float((state_value or {}).get("reachable_recovery_value", (state_value or {}).get("value")), default=best_score)
-    action_dominates = stop_score >= min_stop_score and confidence >= min_confidence and (not other_scores or stop_score >= best_other_score + action_margin)
-    value_allows_stop = reachable_value <= best_score + value_margin
-    return {
-        "stop_dominates": bool(action_dominates and value_allows_stop),
-        "action_dominates": bool(action_dominates),
-        "value_allows_stop": bool(value_allows_stop),
-        "stop_score": stop_score,
-        "best_non_stop_score": None if best_other_score == float("-inf") else best_other_score,
-        "action_margin": action_margin,
-        "min_stop_score": min_stop_score,
-        "confidence": confidence,
-        "min_confidence": min_confidence,
-        "best_recovery": best_score,
-        "reachable_recovery_value": reachable_value,
-        "value_margin": value_margin,
-        "stop_action_score": stop_action_score.to_dict() if hasattr(stop_action_score, "to_dict") else {},
-    }
-
-
-def _merge_step_value_scores(step_action_scores: list[Any], state_value: dict[str, Any]) -> None:
-    raw_values = state_value.get("action_values") if isinstance(state_value, dict) else None
-    if not isinstance(raw_values, list):
-        return
-    values_by_key: dict[tuple[str, str], float] = {}
-    for item in raw_values:
-        if not isinstance(item, dict):
-            continue
-        operation = str(item.get("action_type") or item.get("operation") or "")
-        candidate_id = str(item.get("candidate_id") or "")
-        q_value = _safe_float(item.get("q_value", item.get("logic_score", item.get("score"))), default=-1.0)
-        if operation and q_value >= 0.0:
-            values_by_key[(operation, candidate_id)] = q_value
-    for score in step_action_scores:
-        key = (str(getattr(score, "action_type", "") or ""), str(getattr(score, "candidate_id", "") or ""))
-        if key not in values_by_key:
-            continue
-        metadata = dict(getattr(score, "metadata", {}) or {})
-        metadata["q_value"] = values_by_key[key]
-        try:
-            object.__setattr__(score, "metadata", metadata)
-        except Exception:
-            score.metadata = metadata
-
-
-def _combined_step_score(score: Any) -> float:
-    logic = _safe_float(getattr(score, "logic_score", 0.0), default=0.0)
-    value = _safe_float((getattr(score, "metadata", {}) or {}).get("q_value"), default=logic)
-    return 0.5 * logic + 0.5 * value
-
-
-def _safe_float(value: Any, *, default: float = 0.0) -> float:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return default
-
-
-def _policy_graph_edge_for_step_score(graph: PolicyExplorationGraph, score: Any) -> PolicyGraphEdge | None:
-    edge_id = str(getattr(score, "edge_id", "") or "")
-    if edge_id and edge_id in graph.edges:
-        edge = graph.edges[edge_id]
-        return edge if edge.status == "frontier" else None
-    candidate_id = str(getattr(score, "candidate_id", "") or "")
-    if not candidate_id:
-        return None
-    for edge in graph.active_frontier_edges():
-        if edge.candidate_id == candidate_id:
-            return edge
-    return None
-
-
 def _policy_step_state_result(
     job: RepairJob,
     graph: PolicyExplorationGraph,
@@ -2011,7 +1637,7 @@ def _policy_step_state_result(
 ) -> RepairResult:
     payload = _diagnosis_with_candidate_selection(diagnosis, selection)
     payload["policy_loop"] = {
-        "step_mode": True,
+        "policy_step": True,
         "terminal_action": "",
         "stop_reason": "",
         "rounds": list(history),
@@ -2066,7 +1692,7 @@ def _policy_step_no_patch_result(
 ) -> RepairResult:
     payload = _diagnosis_with_candidate_selection(diagnosis, selection)
     payload["policy_loop"] = {
-        "step_mode": True,
+        "policy_step": True,
         "terminal_action": "",
         "stop_reason": reason,
         "rounds": list(history),
@@ -2092,7 +1718,7 @@ def _policy_step_no_patch_result(
 
 def _policy_graph_node_id(patch_digest: str, index: int) -> str:
     digest = str(patch_digest or "root")
-    return f"node_{int(index):04d}_{digest[:16]}"
+    return f"node_{digest[:32]}"
 
 
 def _policy_graph_edge_id(node_id: str, candidate_id: str) -> str:
@@ -2142,16 +1768,48 @@ def _policy_graph_register_frontier(
 
 def _policy_graph_update_edge_scores(graph: PolicyExplorationGraph, step_action_selection: dict[str, Any]) -> None:
     scores: list[dict[str, Any]] = []
-    if isinstance(step_action_selection.get("step_action_scores"), list):
-        scores.extend(item for item in step_action_selection.get("step_action_scores", []) if isinstance(item, dict))
-    if isinstance(step_action_selection.get("raw_step_action_scores"), list):
-        scores.extend(item for item in step_action_selection.get("raw_step_action_scores", []) if isinstance(item, dict))
+    if isinstance(step_action_selection.get("action_scores"), list):
+        scores.extend(item for item in step_action_selection.get("action_scores", []) if isinstance(item, dict))
+    if isinstance(step_action_selection.get("raw_action_scores"), list):
+        scores.extend(item for item in step_action_selection.get("raw_action_scores", []) if isinstance(item, dict))
     for score in scores:
         for edge in graph.edges.values():
             if (str(score.get("edge_id") or "") == edge.edge_id or str(score.get("candidate_id") or "") == edge.candidate_id) and edge.status == "frontier":
-                merged = dict(edge.step_action_score or {})
+                merged = dict(edge.action_score or {})
                 merged.update({key: value for key, value in score.items() if value is not None})
-                edge.step_action_score = merged
+                edge.action_score = merged
+
+
+def _policy_graph_update_action_scores(graph: PolicyExplorationGraph, scores: list[dict[str, Any]]) -> None:
+    for score in scores:
+        action_id = str(score.get("action_id") or score.get("candidate_id") or "")
+        module_name = str(score.get("module_name") or score.get("module") or "")
+        if not action_id and not module_name:
+            continue
+        for edge in graph.edges.values():
+            if edge.status != "frontier":
+                continue
+            if action_id and edge.candidate_id != action_id:
+                continue
+            if not action_id and module_name and edge.module_name != module_name:
+                continue
+            merged = dict(edge.action_score or {})
+            merged.update({key: value for key, value in score.items() if value is not None})
+            if "score" in merged and "logic_score" not in merged:
+                merged["logic_score"] = merged["score"]
+            edge.action_score = merged
+
+
+def _verification_from_job(job: RepairJob) -> dict[str, Any]:
+    knowledge = ArchiveKnowledge.from_any(getattr(job, "knowledge", {}))
+    payload = knowledge.to_dict()
+    verification = payload.get("verification") if isinstance(payload.get("verification"), dict) else {}
+    summary = verification.get("summary") if isinstance(verification.get("summary"), dict) else {}
+    coverage = verification.get("coverage_breakdown") if isinstance(verification.get("coverage_breakdown"), dict) else {}
+    return {
+        "summary": dict(summary),
+        "coverage_breakdown": dict(coverage),
+    }
 
 
 def _policy_graph_frontier_top(graph: PolicyExplorationGraph, *, limit: int = 5) -> list[dict[str, Any]]:
@@ -2160,10 +1818,10 @@ def _policy_graph_frontier_top(graph: PolicyExplorationGraph, *, limit: int = 5)
 
 
 def _policy_graph_edge_score(edge: PolicyGraphEdge) -> float:
-    step_action_score = edge.step_action_score or {}
+    action_score = edge.action_score or {}
     for key in ("final_score", "arbiter_score", "logic_score"):
         try:
-            value = step_action_score.get(key)
+            value = action_score.get(key)
             if value is not None:
                 return float(value)
         except (TypeError, ValueError):
@@ -2326,7 +1984,7 @@ def _loop_graph_finish_result(
     module_name = "policy_finish"
     payload = _diagnosis_with_candidate_selection(diagnosis, selection)
     payload["policy_loop"] = {
-        "step_mode": bool(selection.get("policy_step")),
+        "policy_step": bool(selection.get("policy_step")),
         "terminal_action": terminal,
         "stop_reason": reason,
         "rounds": list(history),

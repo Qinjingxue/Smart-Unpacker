@@ -5,20 +5,16 @@ from typing import Any
 from sunpack.contracts.archive_knowledge import ArchiveKnowledge
 from sunpack.contracts.archive_state import ArchiveState
 from sunpack.repair.candidate import (
-    CandidateSelector,
     RepairCandidate,
     candidate_feature_payload,
-    materialize_candidates,
 )
 from sunpack.repair.job import RepairJob
-from sunpack.repair.policy.types import DamageAnalysisRequest, StepActionRequest, StepValueRequest
 from sunpack.repair.policy.recovery_evaluator import RecoveryEvaluator
 from sunpack.support import archive_knowledge_projection as knowledge_view
 
 
 POLICY_TRAINING_RUNTIME_SCHEMA_VERSION = 1
 DAMAGE_ANALYSIS_FEATURE_SCHEMA_VERSION = 1
-STEP_ACTION_FEATURE_SCHEMA_VERSION = 1
 
 
 def archive_state_for_job(job: RepairJob) -> ArchiveState | None:
@@ -63,7 +59,6 @@ def runtime_context_from_job(job: RepairJob) -> dict[str, Any]:
     return {
         "schema_version": POLICY_TRAINING_RUNTIME_SCHEMA_VERSION,
         "damage_analysis_feature_schema_version": DAMAGE_ANALYSIS_FEATURE_SCHEMA_VERSION,
-        "step_action_feature_schema_version": STEP_ACTION_FEATURE_SCHEMA_VERSION,
         "knowledge_projection": {
             "source_count": 1 if knowledge.to_dict() else 0,
             "has_archive_knowledge": bool(knowledge.to_dict()),
@@ -138,127 +133,9 @@ def build_damage_analysis_request(
     *,
     diagnosis: dict[str, Any] | None = None,
     round_index: int = 0,
-) -> DamageAnalysisRequest:
+) -> dict[str, Any]:
     knowledge_payload = ArchiveKnowledge.from_any(getattr(job, "knowledge", {})).to_dict()
-    return DamageAnalysisRequest(
-        job=job,
-        format=_normalize_format(job.format),
-        archive_state=state,
-        runtime_context=knowledge_payload,
-        diagnosis=dict(diagnosis or {}),
-        knowledge_projection=knowledge_payload,
-        repair_history=dict(getattr(job, "repair_history", {}) or {}),
-        config={},
-        round_index=int(round_index or 0),
-    )
-
-
-def build_step_action_request(
-    job: RepairJob,
-    state: ArchiveState | None,
-    graph: dict[str, Any],
-    damage_analysis: dict[str, Any],
-    *,
-    candidate_payloads: list[dict[str, Any]] | None = None,
-    frontier: list[dict[str, Any]] | None = None,
-    diagnosis: dict[str, Any] | None = None,
-    current_recovery: dict[str, Any] | None = None,
-    best_seen_recovery: dict[str, Any] | None = None,
-    parent_recovery: dict[str, Any] | None = None,
-    round_index: int = 0,
-) -> StepActionRequest:
-    graph_payload = dict(graph or {})
-    return StepActionRequest(
-        job=job,
-        format=_normalize_format(job.format),
-        graph=graph_payload,
-        graph_summary=dict(graph_payload.get("summary") or {}),
-        current_node_id=str(graph_payload.get("current_node_id") or ""),
-        best_node_id=str(graph_payload.get("best_node_id") or ""),
-        archive_state=state,
-        frontier=[dict(item) for item in frontier or [] if isinstance(item, dict)],
-        candidate_payloads=[dict(item) for item in candidate_payloads or [] if isinstance(item, dict)],
-        damage_analysis=dict(damage_analysis or {}),
-        current_recovery=dict(current_recovery or {}),
-        best_seen_recovery=dict(best_seen_recovery or {}),
-        parent_recovery=dict(parent_recovery or {}),
-        diagnosis=dict(diagnosis or {}),
-        repair_history=dict(getattr(job, "repair_history", {}) or {}),
-        config={},
-        round_index=int(round_index or 0),
-    )
-
-
-def build_state_value_request(
-    job: RepairJob,
-    state: ArchiveState | None,
-    damage_analysis: dict[str, Any],
-    *,
-    candidate_payloads: list[dict[str, Any]] | None = None,
-    diagnosis: dict[str, Any] | None = None,
-    current_recovery: dict[str, Any] | None = None,
-    best_seen_recovery: dict[str, Any] | None = None,
-    parent_recovery: dict[str, Any] | None = None,
-    round_index: int = 0,
-) -> StepValueRequest:
-    return StepValueRequest(
-        job=job,
-        format=_normalize_format(job.format),
-        archive_state=state,
-        damage_analysis=dict(damage_analysis or {}),
-        current_recovery=dict(current_recovery or {}),
-        best_seen_recovery=dict(best_seen_recovery or {}),
-        parent_recovery=dict(parent_recovery or {}),
-        repair_history=dict(getattr(job, "repair_history", {}) or {}),
-        diagnosis=dict(diagnosis or {}),
-        config={},
-        round_index=int(round_index or 0),
-    )
-
-
-def candidate_summaries_for_state(candidate_payloads: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return [
-        candidate_summary_for_state(payload)
-        for payload in candidate_payloads
-        if isinstance(payload, dict)
-    ]
-
-
-def candidate_summary_for_state(candidate_payload: dict[str, Any]) -> dict[str, Any]:
-    validation = candidate_payload.get("validation_summary") if isinstance(candidate_payload.get("validation_summary"), dict) else {}
-    summary = {
-        "candidate_id": str(candidate_payload.get("candidate_id") or ""),
-        "module_name": str(candidate_payload.get("module_name") or candidate_payload.get("module") or ""),
-        "module_family": str(candidate_payload.get("module_family") or candidate_payload.get("last_patch_module") or ""),
-        "action_type": str(candidate_payload.get("action_type") or "module"),
-        "patch_operation_count": _int(candidate_payload.get("patch_operation_count")),
-        "patch_depth": _int(candidate_payload.get("patch_depth")),
-        "confidence": _float(candidate_payload.get("confidence")),
-        "accepted": bool(validation.get("accepted", False)),
-        "validation_score": _float(validation.get("score")),
-        "status": str(candidate_payload.get("status") or ""),
-    }
-    return summary
-
-
-def state_value_feature_payload(request: StepValueRequest) -> dict[str, Any]:
-    return {
-        "episode_id": "",
-        "format": request.format,
-        "state_digest": request.archive_state.effective_patch_digest() if request.archive_state is not None else "",
-        "round_index": int(request.round_index or 0),
-        "patch_depth": request.archive_state.patch_depth() if request.archive_state is not None else 0,
-        "damage_analysis": dict(request.damage_analysis or {}),
-        "current_recovery": dict(request.current_recovery or {}),
-        "best_seen_recovery": dict(request.best_seen_recovery or {}),
-        "parent_recovery": dict(request.parent_recovery or {}),
-        "repair_history": dict(request.repair_history or {}),
-        "candidate_summary": {},
-        "graph_summary": dict(getattr(request, "graph_summary", {}) or {}),
-        "frontier_summary": dict(getattr(request, "frontier_summary", {}) or {}),
-        "branch_status": str(getattr(request, "branch_status", "") or ""),
-        "reachable_recovery_value": _float((request.current_recovery or {}).get("score")),
-    }
+    return knowledge_payload
 
 
 def candidate_snapshot(
@@ -283,7 +160,7 @@ def candidate_snapshot(
         for validation in candidate.validations
     ]
     snapshot = {
-        "schema_version": STEP_ACTION_FEATURE_SCHEMA_VERSION,
+        "schema_version": POLICY_TRAINING_RUNTIME_SCHEMA_VERSION,
         "candidate_id": _unique_candidate_id(payload.get("candidate_id"), index),
         "module_name": payload.get("module_name") or payload.get("module") or candidate.module_name,
         "module": payload.get("module") or candidate.module_name,
@@ -342,62 +219,14 @@ def candidate_snapshots(
     ]
 
 
-def validate_policy_candidates(config: dict[str, Any] | None, candidates: list[RepairCandidate]) -> list[RepairCandidate]:
-    selector = CandidateSelector(config or {})
-    materialized = materialize_candidates(candidates)
-    return [selector._with_native_validation(candidate) for candidate in materialized]
-
-
 def recovery_score_from_job(job: RepairJob) -> float:
     return float(RecoveryEvaluator().evaluate_state(job, archive_state_for_job(job), mode="policy_light").score or 0.0)
 
 
-def request_to_dict(request: DamageAnalysisRequest | StepActionRequest | StepValueRequest) -> dict[str, Any]:
-    if isinstance(request, DamageAnalysisRequest):
-        return ArchiveKnowledge.from_any(getattr(request, "knowledge_projection", {}) or {}).to_dict()
-    state = request.archive_state
-    payload: dict[str, Any] = {
-        "format": request.format,
-        "archive_state": _state_summary(state) if state is not None else None,
-        "runtime_context": dict(getattr(request, "runtime_context", {}) or {}),
-        "diagnosis": dict(getattr(request, "diagnosis", {}) or {}),
-        "knowledge_projection": dict(getattr(request, "knowledge_projection", {}) or {}),
-        "repair_history": dict(getattr(request, "repair_history", {}) or {}),
-        "config": dict(getattr(request, "config", {}) or {}),
-        "round_index": int(getattr(request, "round_index", 0) or 0),
-    }
-    payload["job"] = {
-        "format": request.job.format,
-        "confidence": request.job.confidence,
-        "archive_key": request.job.archive_key,
-        "attempts": request.job.attempts,
-        "source_input": dict(request.job.source_input or {}),
-        "damage_flags": list(request.job.damage_flags),
-    }
-    if isinstance(request, StepActionRequest):
-        payload.update({
-            "graph": dict(request.graph or {}),
-            "graph_summary": dict(request.graph_summary or {}),
-            "current_node_id": request.current_node_id,
-            "best_node_id": request.best_node_id,
-            "frontier": [dict(item) for item in request.frontier],
-            "candidate_payloads": [dict(item) for item in request.candidate_payloads],
-            "damage_analysis": dict(request.damage_analysis or {}),
-            "current_recovery": dict(request.current_recovery or {}),
-            "best_seen_recovery": dict(request.best_seen_recovery or {}),
-            "parent_recovery": dict(request.parent_recovery or {}),
-        })
-    if isinstance(request, StepValueRequest):
-        payload.update({
-            "damage_analysis": dict(request.damage_analysis or {}),
-            "current_recovery": dict(request.current_recovery or {}),
-            "best_seen_recovery": dict(request.best_seen_recovery or {}),
-            "parent_recovery": dict(request.parent_recovery or {}),
-            "graph_summary": dict(request.graph_summary or {}),
-            "frontier_summary": dict(request.frontier_summary or {}),
-            "branch_status": request.branch_status,
-        })
-    return payload
+def request_to_dict(request: dict[str, Any]) -> dict[str, Any]:
+    if isinstance(request, dict):
+        return ArchiveKnowledge.from_any(request).to_dict()
+    raise TypeError(f"unsupported request type: {type(request).__name__}")
 
 
 def _analysis_native_probe(job: RepairJob, knowledge: ArchiveKnowledge, route_evidence_flags: list[str]) -> dict[str, Any]:
@@ -439,20 +268,6 @@ def _analysis_native_probe(job: RepairJob, knowledge: ArchiveKnowledge, route_ev
         if str(flag):
             probe[f"route_evidence_{flag}"] = 1
     return probe
-
-
-def _state_summary(state: ArchiveState) -> dict[str, Any]:
-    source = state.source.to_archive_input_descriptor().to_source_input()
-    return {
-        "schema_version": getattr(state, "schema_version", 0),
-        "format": state.format_hint,
-        "patch_depth": state.patch_depth(),
-        "patch_count": state.patch_depth(),
-        "patch_digest": state.effective_patch_digest(),
-        "source_kind": source.get("kind") or source.get("open_mode") or "",
-        "source_format_hint": source.get("format_hint") or source.get("format") or "",
-        "source_part_count": len(source.get("parts") or []) if isinstance(source.get("parts"), list) else 1,
-    }
 
 
 def _patch_operation_count(patch_plan: Any) -> int:
@@ -515,9 +330,6 @@ def _safe_feature_value(value: Any) -> Any:
     return str(value)
 
 
-def _normalize_format(value: Any) -> str:
-    text = str(value or "").lower().lstrip(".")
-    return {"gz": "gzip", "bz2": "bzip2", "seven_zip": "7z"}.get(text, text)
 
 
 def _int(value: Any) -> int:

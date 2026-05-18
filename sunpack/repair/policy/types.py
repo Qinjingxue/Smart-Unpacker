@@ -1,100 +1,93 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Literal, Protocol, runtime_checkable
+from typing import Any, Literal
 
 from sunpack.contracts.archive_state import ArchiveState
-from sunpack.repair.candidate import RepairCandidate
 from sunpack.repair.job import RepairJob
 
 
-PolicyCandidatePayload = dict[str, Any]
-StepOperationKind = Literal["module", "undo", "stop"]
-PolicyStepDecisionKind = Literal["expand", "checkout", "finish"]
+PolicyGraphActionKind = Literal["module", "undo", "stop"]
 
 
 @dataclass(frozen=True)
-class DamageAnalysisRequest:
+class DiagnosisHGTRequest:
     job: RepairJob
     format: str
     archive_state: ArchiveState | None = None
-    runtime_context: dict[str, Any] = field(default_factory=dict)
-    diagnosis: dict[str, Any] = field(default_factory=dict)
-    knowledge_projection: dict[str, Any] = field(default_factory=dict)
-    repair_history: dict[str, Any] = field(default_factory=dict)
+    knowledge_payload: dict[str, Any] = field(default_factory=dict)
+    graph: dict[str, Any] = field(default_factory=dict)
+    current_node_id: str = ""
+    recovery: dict[str, Any] = field(default_factory=dict)
     config: dict[str, Any] = field(default_factory=dict)
     round_index: int = 0
 
 
 @dataclass(frozen=True)
-class DamageAnalysisResult:
+class DiagnosisHGTResult:
     format: str = ""
-    damage_labels: list[str] = field(default_factory=list)
-    damage_zones: list[dict[str, Any]] = field(default_factory=list)
+    root_case_scores: dict[str, float] = field(default_factory=dict)
+    selected_root_cases: list[str] = field(default_factory=list)
+    ranked_root_cases: list[dict[str, Any]] = field(default_factory=list)
     confidence: float = 0.0
-    route_hints: list[str] = field(default_factory=list)
-    blocking_reasons: list[str] = field(default_factory=list)
-    metadata: dict[str, Any] = field(default_factory=dict)
+    diagnostics: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
+        ranked = list(self.ranked_root_cases)
+        if not ranked and self.root_case_scores:
+            ranked = [
+                {"root_case": key, "score": value}
+                for key, value in sorted(self.root_case_scores.items(), key=lambda item: float(item[1] or 0.0), reverse=True)
+            ]
         return {
             "format": self.format,
-            "damage_labels": list(self.damage_labels),
-            "damage_zones": [dict(item) for item in self.damage_zones],
+            "root_case": {
+                "scores": dict(self.root_case_scores),
+                "ranked": ranked,
+                "selected": list(self.selected_root_cases),
+            },
             "confidence": float(self.confidence or 0.0),
-            "route_hints": list(self.route_hints),
-            "blocking_reasons": list(self.blocking_reasons),
-            "metadata": dict(self.metadata),
+            "diagnostics": dict(self.diagnostics or {}),
         }
 
 
 @dataclass(frozen=True)
-class StepActionRequest:
-    job: RepairJob
-    format: str
-    graph: dict[str, Any]
-    current_node_id: str
-    best_node_id: str
-    archive_state: ArchiveState | None
-    frontier: list[dict[str, Any]] = field(default_factory=list)
-    candidate_payloads: list[PolicyCandidatePayload] = field(default_factory=list)
-    damage_analysis: dict[str, Any] = field(default_factory=dict)
-    current_recovery: dict[str, Any] = field(default_factory=dict)
-    best_seen_recovery: dict[str, Any] = field(default_factory=dict)
-    parent_recovery: dict[str, Any] = field(default_factory=dict)
-    state_value: dict[str, Any] = field(default_factory=dict)
-    parent_state_value: dict[str, Any] = field(default_factory=dict)
-    graph_summary: dict[str, Any] = field(default_factory=dict)
-    diagnosis: dict[str, Any] = field(default_factory=dict)
-    repair_history: dict[str, Any] = field(default_factory=dict)
-    config: dict[str, Any] = field(default_factory=dict)
-    round_index: int = 0
-
-
-@dataclass(frozen=True)
-class StepActionScore:
-    action_type: StepOperationKind = "stop"
-    edge_id: str = ""
-    candidate_id: str = ""
-    node_id: str = ""
-    logic_score: float = 0.0
+class PolicyGraphAction:
+    action_type: PolicyGraphActionKind = "stop"
+    module_name: str = ""
+    action_id: str = ""
+    score: float = 0.0
     confidence: float | None = None
-    provider_id: str = ""
     reason: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "action_type": self.action_type,
-            "edge_id": self.edge_id,
-            "candidate_id": self.candidate_id,
-            "node_id": self.node_id,
-            "logic_score": float(self.logic_score or 0.0),
+            "module_name": self.module_name,
+            "action_id": self.action_id,
+            "score": float(self.score or 0.0),
             "confidence": self.confidence,
-            "provider_id": self.provider_id,
             "reason": self.reason,
-            "metadata": dict(self.metadata),
+            "metadata": dict(self.metadata or {}),
         }
+
+
+@dataclass(frozen=True)
+class PolicyGraphActionRequest:
+    job: RepairJob
+    format: str
+    graph: dict[str, Any]
+    current_node_id: str
+    best_node_id: str
+    archive_state: ArchiveState | None
+    available_actions: list[dict[str, Any]] = field(default_factory=list)
+    diagnosis_hgt: dict[str, Any] = field(default_factory=dict)
+    current_recovery: dict[str, Any] = field(default_factory=dict)
+    best_seen_recovery: dict[str, Any] = field(default_factory=dict)
+    graph_summary: dict[str, Any] = field(default_factory=dict)
+    config: dict[str, Any] = field(default_factory=dict)
+    round_index: int = 0
 
 
 @dataclass
@@ -112,6 +105,8 @@ class PolicyGraphNode:
     patch_status: str = "root"
     failure_reason: str = ""
     created_step: int = 0
+    diagnosis_hgt: dict[str, Any] = field(default_factory=dict)
+    verification: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -129,6 +124,8 @@ class PolicyGraphNode:
             "patch_status": self.patch_status,
             "failure_reason": self.failure_reason,
             "created_step": int(self.created_step or self.created_round or 0),
+            "diagnosis_hgt": dict(self.diagnosis_hgt or {}),
+            "verification": dict(self.verification or {}),
         }
 
 
@@ -139,7 +136,7 @@ class PolicyGraphEdge:
     to_node_id: str = ""
     candidate_id: str = ""
     module_name: str = ""
-    step_action_score: dict[str, Any] = field(default_factory=dict)
+    action_score: dict[str, Any] = field(default_factory=dict)
     status: str = "frontier"
     created_round: int = 0
 
@@ -150,7 +147,7 @@ class PolicyGraphEdge:
             "to_node_id": self.to_node_id,
             "candidate_id": self.candidate_id,
             "module_name": self.module_name,
-            "step_action_score": dict(self.step_action_score or {}),
+            "action_score": dict(self.action_score or {}),
             "status": self.status,
             "created_round": int(self.created_round or 0),
         }
@@ -204,104 +201,9 @@ class PolicyExplorationGraph:
         }
 
 
-@dataclass(frozen=True)
-class PolicyStepDecision:
-    action: PolicyStepDecisionKind = "finish"
-    candidate_id: str = ""
-    node_id: str = ""
-    reason: str = ""
-    terminal_action: str = ""
-    final_node_id: str = ""
-    metadata: dict[str, Any] = field(default_factory=dict)
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "action": self.action,
-            "candidate_id": self.candidate_id,
-            "node_id": self.node_id,
-            "reason": self.reason,
-            "terminal_action": self.terminal_action,
-            "final_node_id": self.final_node_id,
-            "metadata": dict(self.metadata or {}),
-        }
-
-
 def _count_statuses(values) -> dict[str, int]:
     counts: dict[str, int] = {}
     for value in values:
         key = str(value or "")
         counts[key] = counts.get(key, 0) + 1
     return counts
-
-
-@dataclass(frozen=True)
-class StepValueRequest:
-    job: RepairJob
-    format: str
-    archive_state: ArchiveState | None = None
-    damage_analysis: dict[str, Any] = field(default_factory=dict)
-    current_recovery: dict[str, Any] = field(default_factory=dict)
-    best_seen_recovery: dict[str, Any] = field(default_factory=dict)
-    parent_recovery: dict[str, Any] = field(default_factory=dict)
-    candidate_summaries: list[PolicyCandidatePayload] = field(default_factory=list)
-    repair_history: dict[str, Any] = field(default_factory=dict)
-    diagnosis: dict[str, Any] = field(default_factory=dict)
-    graph_summary: dict[str, Any] = field(default_factory=dict)
-    frontier_summary: dict[str, Any] = field(default_factory=dict)
-    branch_status: str = ""
-    config: dict[str, Any] = field(default_factory=dict)
-    round_index: int = 0
-
-
-@dataclass(frozen=True)
-class StepValueResult:
-    reachable_recovery_value: float = 0.0
-    action_values: list[StepActionScore] = field(default_factory=list)
-    confidence: float | None = None
-    provider_id: str = ""
-    metadata: dict[str, Any] = field(default_factory=dict)
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "reachable_recovery_value": float(self.reachable_recovery_value or 0.0),
-            "action_values": [item.to_dict() for item in self.action_values],
-            "confidence": self.confidence,
-            "provider_id": self.provider_id,
-            "metadata": dict(self.metadata),
-        }
-
-
-@runtime_checkable
-class DamageAnalysisModel(Protocol):
-    provider_id: str
-    supported_formats: tuple[str, ...] | list[str]
-
-    def available(self) -> bool:
-        ...
-
-    def analyze(self, request: DamageAnalysisRequest) -> DamageAnalysisResult | dict[str, Any] | None:
-        ...
-
-
-@runtime_checkable
-class StepActionModel(Protocol):
-    provider_id: str
-    supported_formats: tuple[str, ...] | list[str]
-
-    def available(self) -> bool:
-        ...
-
-    def score_step_actions(self, request: StepActionRequest) -> dict[str, Any] | list[dict[str, Any]] | None:
-        ...
-
-
-@runtime_checkable
-class StepValueModel(Protocol):
-    provider_id: str
-    supported_formats: tuple[str, ...] | list[str]
-
-    def available(self) -> bool:
-        ...
-
-    def estimate(self, request: StepValueRequest) -> StepValueResult | dict[str, Any] | float | None:
-        ...

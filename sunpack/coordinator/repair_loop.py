@@ -143,6 +143,7 @@ class RepairLoopState:
                     },
                 )
             return True
+        policy_step = is_policy_step_result(result)
 
         if result.status in TERMINAL_REPAIR_STATUSES:
             with _phase(phase_timer, f"{phase_prefix}_terminal_add_generated_paths"):
@@ -189,6 +190,22 @@ class RepairLoopState:
             seen_action_signatures = self.seen_action_signatures
             repeated_action = signature in seen_action_signatures
         generated_update = {"generated_file_count": generated_file_count, "generated_bytes": generated_bytes}
+        if policy_step:
+            loop_update: dict[str, Any] = {
+                "generated_file_count": generated_file_count,
+                "generated_bytes": generated_bytes,
+                "seen_action_signatures": _dedupe([*seen_action_signatures, signature]),
+                "seen_input_digests": _dedupe([*self.seen_input_digests, next_digest]),
+                "current_digest": next_digest,
+            }
+            rounds = _loop_value(self.task, "rounds", [])
+            items = list(rounds) if isinstance(rounds, list) else []
+            items.append(dict(round_payload))
+            loop_update["rounds"] = items
+            with _phase(phase_timer, f"{phase_prefix}_commit_policy_step_loop_update"):
+                write_repair_loop_state(self.task, loop_update)
+            LOGGER.info("archive policy repair step completed: %s", round_payload)
+            return True
         if repeated_action:
             round_payload["exit_reason"] = "repeated_repair_action"
             with _phase(phase_timer, f"{phase_prefix}_batched_terminal_commit"):
@@ -583,6 +600,14 @@ def is_policy_stop_result(result: RepairResult | None) -> bool:
         return True
     loop = diagnosis.get("policy_loop") if isinstance(diagnosis.get("policy_loop"), dict) else {}
     return bool(loop.get("policy_stop_requested")) or str(loop.get("terminal_action") or "") == "stop"
+
+
+def is_policy_step_result(result: RepairResult | None) -> bool:
+    if result is None or is_policy_stop_result(result):
+        return False
+    diagnosis = result.diagnosis if isinstance(result.diagnosis, dict) else {}
+    loop = diagnosis.get("policy_loop") if isinstance(diagnosis.get("policy_loop"), dict) else {}
+    return bool(loop.get("policy_step"))
 
 
 def _looks_like_split_name(path: str) -> bool:
