@@ -46,6 +46,16 @@ def main(argv: list[str] | None = None) -> int:
                 "asym_gamma_neg": args.asym_gamma_neg,
                 "rank_loss_weight": args.rank_loss_weight,
                 "rank_loss_top_negatives": args.rank_loss_top_negatives,
+                "root_softmax_loss_weight": args.root_softmax_loss_weight,
+                "root_evidence_loss_weight": args.root_evidence_loss_weight,
+                "root_transition_gain_loss_weight": args.root_transition_gain_loss_weight,
+                "root_probe_viability_loss_weight": args.root_probe_viability_loss_weight,
+                "probe_pairwise_loss_weight": args.probe_pairwise_loss_weight,
+                "probe_viability_pairwise_loss_weight": args.probe_viability_pairwise_loss_weight,
+                "priority_direct_weight": args.priority_direct_weight,
+                "priority_evidence_weight": args.priority_evidence_weight,
+                "priority_transition_gain_weight": args.priority_transition_gain_weight,
+                "priority_viability_weight": args.priority_viability_weight,
                 "pos_weight_max": args.pos_weight_max,
                 "sample_weighting": args.sample_weighting,
                 "score_normalization": args.score_normalization,
@@ -141,6 +151,16 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--asym-gamma-pos", type=float, default=None)
     parser.add_argument("--asym-gamma-neg", type=float, default=None)
     parser.add_argument("--rank-loss-weight", type=float, default=None)
+    parser.add_argument("--root-softmax-loss-weight", type=float, default=None)
+    parser.add_argument("--root-evidence-loss-weight", type=float, default=None)
+    parser.add_argument("--root-transition-gain-loss-weight", type=float, default=None)
+    parser.add_argument("--root-probe-viability-loss-weight", type=float, default=None)
+    parser.add_argument("--probe-pairwise-loss-weight", type=float, default=None)
+    parser.add_argument("--probe-viability-pairwise-loss-weight", type=float, default=None)
+    parser.add_argument("--priority-direct-weight", type=float, default=None)
+    parser.add_argument("--priority-evidence-weight", type=float, default=None)
+    parser.add_argument("--priority-transition-gain-weight", type=float, default=None)
+    parser.add_argument("--priority-viability-weight", type=float, default=None)
     parser.add_argument("--softmax-loss-weight", type=float, default=None)
     parser.add_argument("--q-regression-weight", type=float, default=None)
     parser.add_argument("--q-temperature", type=float, default=None)

@@ -83,6 +83,24 @@ class _DiagnosisBase(_BASE_MODULE):
             nn.Dropout(float(dropout)),
             Linear(hidden_dim, len(ROOT_CASES)),
         )
+        self.root_evidence_head = nn.Sequential(
+            Linear(hidden_dim * 3, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(float(dropout)),
+            Linear(hidden_dim, len(ROOT_CASES)),
+        )
+        self.root_transition_gain_head = nn.Sequential(
+            Linear(hidden_dim * 3, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(float(dropout)),
+            Linear(hidden_dim, len(ROOT_CASES)),
+        )
+        self.root_probe_viability_head = nn.Sequential(
+            Linear(hidden_dim * 3, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(float(dropout)),
+            Linear(hidden_dim, len(ROOT_CASES)),
+        )
         self.cause_head = Linear(hidden_dim, 1)
         self.theory_head = Linear(hidden_dim, 1)
         self.theory_edge_head = nn.Sequential(
@@ -103,7 +121,7 @@ class _DiagnosisBase(_BASE_MODULE):
         target = x_dict["theory"][edge_index[1]]
         return self.theory_edge_head(torch.cat([source, target], dim=-1)).view(-1)
 
-    def _score_root_cases(self, x_dict, batch_dict=None):
+    def _pooled_graph_embedding(self, x_dict, batch_dict=None):
         import torch
 
         pooled = []
@@ -124,7 +142,19 @@ class _DiagnosisBase(_BASE_MODULE):
                 pooled.append(output / counts.clamp(min=1.0))
             else:
                 pooled.append(x.mean(dim=0, keepdim=True))
-        return self.root_case_head(torch.cat(pooled, dim=-1))
+        return torch.cat(pooled, dim=-1)
+
+    def _score_root_cases(self, x_dict, batch_dict=None):
+        return self.root_case_head(self._pooled_graph_embedding(x_dict, batch_dict))
+
+    def _score_root_evidence(self, x_dict, batch_dict=None):
+        return self.root_evidence_head(self._pooled_graph_embedding(x_dict, batch_dict))
+
+    def _score_root_transition_gain(self, x_dict, batch_dict=None):
+        return self.root_transition_gain_head(self._pooled_graph_embedding(x_dict, batch_dict))
+
+    def _score_root_probe_viability(self, x_dict, batch_dict=None):
+        return self.root_probe_viability_head(self._pooled_graph_embedding(x_dict, batch_dict))
 
 
 class DiagnosisHeteroGraphSAGE(_DiagnosisBase):
@@ -174,7 +204,15 @@ class DiagnosisHeteroGraphSAGE(_DiagnosisBase):
         cause_logits = self.cause_head(x_dict["cause"]).view(-1)
         theory_logits = self.theory_head(x_dict["theory"]).view(-1)
         theory_edge_logits = self._score_theory_edges(x_dict, edge_index_dict)
-        return {"root_case": root_case_logits, "cause": cause_logits, "theory": theory_logits, "theory_edge": theory_edge_logits}
+        return {
+            "root_case": root_case_logits,
+            "root_evidence": self._score_root_evidence(x_dict, batch_dict),
+            "root_transition_gain": self._score_root_transition_gain(x_dict, batch_dict),
+            "root_probe_viability": self._score_root_probe_viability(x_dict, batch_dict),
+            "cause": cause_logits,
+            "theory": theory_logits,
+            "theory_edge": theory_edge_logits,
+        }
 
 
 class DiagnosisRGCN(_DiagnosisBase):
@@ -260,7 +298,15 @@ class DiagnosisRGCN(_DiagnosisBase):
         cause_logits = self.cause_head(out_dict["cause"]).view(-1)
         theory_logits = self.theory_head(out_dict["theory"]).view(-1)
         theory_edge_logits = self._score_theory_edges(out_dict, edge_index_dict)
-        return {"root_case": root_case_logits, "cause": cause_logits, "theory": theory_logits, "theory_edge": theory_edge_logits}
+        return {
+            "root_case": root_case_logits,
+            "root_evidence": self._score_root_evidence(out_dict, batch_dict),
+            "root_transition_gain": self._score_root_transition_gain(out_dict, batch_dict),
+            "root_probe_viability": self._score_root_probe_viability(out_dict, batch_dict),
+            "cause": cause_logits,
+            "theory": theory_logits,
+            "theory_edge": theory_edge_logits,
+        }
 
 
 class DiagnosisHGT(_DiagnosisBase):
@@ -327,4 +373,12 @@ class DiagnosisHGT(_DiagnosisBase):
         cause_logits = self.cause_head(x_dict["cause"]).view(-1)
         theory_logits = self.theory_head(x_dict["theory"]).view(-1)
         theory_edge_logits = self._score_theory_edges(x_dict, edge_index_dict)
-        return {"root_case": root_case_logits, "cause": cause_logits, "theory": theory_logits, "theory_edge": theory_edge_logits}
+        return {
+            "root_case": root_case_logits,
+            "root_evidence": self._score_root_evidence(x_dict, batch_dict),
+            "root_transition_gain": self._score_root_transition_gain(x_dict, batch_dict),
+            "root_probe_viability": self._score_root_probe_viability(x_dict, batch_dict),
+            "cause": cause_logits,
+            "theory": theory_logits,
+            "theory_edge": theory_edge_logits,
+        }

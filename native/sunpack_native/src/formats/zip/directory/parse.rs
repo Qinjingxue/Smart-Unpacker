@@ -157,6 +157,9 @@ fn parse_tolerant_central_directory_entries(
             continue;
         }
         let next_start = pos + 46;
+        if next_start >= end || next_start > data.len() {
+            break;
+        }
         let Some(next) = memmem::find(&data[next_start..end], CD_SIG) else {
             break;
         };

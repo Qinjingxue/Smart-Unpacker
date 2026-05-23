@@ -378,11 +378,12 @@ def _generate_zip_records(
 def _job_from_record(record: dict[str, Any], fmt: str) -> RepairJob:
     source_input = dict(record.get("damaged_input") or {})
     attach_split_volumes(source_input, record)
+    source_input = _absolute_source_input(source_input)
     descriptor = ArchiveInputDescriptor.from_any(
         source_input,
-        archive_path=str(source_input.get("path") or record.get("damaged_path") or ""),
+        archive_path=_absolute_path_str(source_input.get("path") or record.get("damaged_path") or ""),
         format_hint=fmt,
-    )
+    ).with_path_mapping(_absolute_path_str)
     state = ArchiveState.from_archive_input(descriptor)
     source_payload = descriptor.to_dict()
     for key in ("parts", "ranges", "split_sidecars_available"):
@@ -401,6 +402,48 @@ def _job_from_record(record: dict[str, Any], fmt: str) -> RepairJob:
         archive_state=state,
         knowledge=knowledge,
     )
+
+
+def _absolute_source_input(source_input: dict[str, Any]) -> dict[str, Any]:
+    output = dict(source_input)
+    if output.get("path"):
+        output["path"] = _absolute_path_str(output.get("path"))
+    if isinstance(output.get("parts"), list):
+        parts = []
+        for item in output.get("parts") or []:
+            if isinstance(item, dict):
+                part = dict(item)
+                if part.get("path"):
+                    part["path"] = _absolute_path_str(part.get("path"))
+                if isinstance(part.get("range"), dict):
+                    item_range = dict(part["range"])
+                    if item_range.get("path"):
+                        item_range["path"] = _absolute_path_str(item_range.get("path"))
+                    part["range"] = item_range
+                parts.append(part)
+            else:
+                parts.append(item)
+        output["parts"] = parts
+    if isinstance(output.get("ranges"), list):
+        ranges = []
+        for item in output.get("ranges") or []:
+            if isinstance(item, dict):
+                item_range = dict(item)
+                if item_range.get("path"):
+                    item_range["path"] = _absolute_path_str(item_range.get("path"))
+                ranges.append(item_range)
+            else:
+                ranges.append(item)
+        output["ranges"] = ranges
+    return output
+
+
+def _absolute_path_str(value: Any) -> str:
+    text = str(value or "")
+    if not text:
+        return ""
+    path = Path(text)
+    return str(path if path.is_absolute() else path.resolve())
 
 
 def _task_for_job(job: RepairJob, state: ArchiveState) -> ArchiveTask:

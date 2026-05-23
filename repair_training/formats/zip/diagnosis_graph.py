@@ -389,7 +389,8 @@ class ZipDiagnosisGraphPlugin:
     def build_labels(self, row: dict[str, Any]) -> DiagnosisLabels:
         root_source_labels = oracle_damage_labels_for_row(row)
         observed_source_labels = damage_labels_for_row(row)
-        root_case_labels = _canonical_root_case_labels(root_source_labels)
+        actionable_root_labels = _actionable_root_labels_for_row(row)
+        root_case_labels = actionable_root_labels or _canonical_root_case_labels(root_source_labels)
         field_labels = [f"field:{label}" for label in root_case_labels]
         zone_labels: list[str] = []
         observed_field_labels = sorted(label for label in observed_source_labels if label.startswith("field:"))
@@ -436,11 +437,13 @@ class ZipDiagnosisGraphPlugin:
                 "has_observed_symptoms": bool(symptom_field_labels or symptom_zone_labels),
                 "damage_profile": str(metadata.get("damage_profile") or ""),
                 "root_label_source": "injection_or_clean_layout",
+                "actionable_label_source": "actionable_root_labels" if actionable_root_labels else "injection_or_clean_layout",
+                "actionable_root_labels": sorted(set(actionable_root_labels)),
                 "symptom_label_source": "observed_archive_knowledge",
                 "uncertain_labels": sorted(set(uncertain)),
                 "observed_field_labels": observed_field_labels,
                 "observed_zone_labels": observed_zone_labels,
-                "injected_cause": sorted(set(root_case_labels)),
+                "injected_cause": sorted(set(_canonical_root_case_labels(root_source_labels))),
             },
         )
 
@@ -669,6 +672,21 @@ def _canonical_root_case_labels(labels: list[str]) -> list[str]:
             continue
         field = field_from_label(label)
         root = _repair_root_for_field(field)
+        if root:
+            roots.add(root)
+    return sorted(roots)
+
+
+def _actionable_root_labels_for_row(row: dict[str, Any]) -> list[str]:
+    roots: set[str] = set()
+    for value in row.get("actionable_root_labels") or row.get("actionable_roots") or []:
+        root = canonical_root_case(str(value or ""))
+        if root:
+            roots.add(root)
+    labels = row.get("labels") if isinstance(row.get("labels"), dict) else {}
+    actionable = labels.get("actionable_root") if isinstance(labels.get("actionable_root"), dict) else {}
+    for value in actionable.get("labels") or []:
+        root = canonical_root_case(str(value or ""))
         if root:
             roots.add(root)
     return sorted(roots)

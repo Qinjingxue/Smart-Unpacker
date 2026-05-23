@@ -14,7 +14,7 @@ from repair_training.core.diagnosis_gnn.metrics import (
     clean_false_positive_rate,
     multilabel_set_metrics,
 )
-from repair_training.core.diagnosis_gnn.tensorize import metadata_for_sample
+from repair_training.core.diagnosis_gnn.root_cases import ROOT_CASES
 from repair_training.core.diagnosis_gnn.training import train_diagnosis_gnn_model
 
 
@@ -33,7 +33,7 @@ def main(argv: list[str] | None = None) -> int:
         "heldout": str(args.heldout or ""),
         "stage1": [],
         "stage2": [],
-        "selection_metric": "valid set_exact_topN, then set_recall_topN, then cause_micro_f1",
+        "selection_metric": "valid set_exact_topN, then set_recall_topN, then root_case_micro_f1",
     }
     for index, config in enumerate(stage1_configs, start=1):
         name = _config_name("stage1", index, config)
@@ -162,7 +162,7 @@ def _selection_key(item: dict[str, Any]) -> tuple[float, float, float, float, fl
         float(valid.get("set_exact_topN", 0.0)),
         float(valid.get("set_recall_topN", 0.0)),
         float(valid.get("set_exact_top5", 0.0)),
-        float(valid.get("cause_micro_f1", 0.0)),
+        float(valid.get("root_case_micro_f1", 0.0)),
         -float(valid.get("clean_false_positive_rate", 1.0)),
     )
 
@@ -172,7 +172,7 @@ def _stage2_key(item: dict[str, Any]) -> tuple[float, float, float, float]:
     return (
         float(valid.get("set_exact_topN", 0.0)),
         float(valid.get("set_recall_topN", 0.0)),
-        float(valid.get("cause_micro_f1", 0.0)),
+        float(valid.get("root_case_micro_f1", 0.0)),
         -float(valid.get("clean_false_positive_rate", 1.0)),
     )
 
@@ -196,26 +196,26 @@ def _evaluate_model(*, model_dir: str | Path, input_path: str | Path, device: st
     if not samples:
         return {"rows": 0}
     model = DiagnosisGNNModel(model_dir=model_dir, device=device)
-    threshold = _cause_threshold(model)
+    threshold = _root_threshold(model)
     score_rows = []
     label_rows = []
     for sample, pred in zip(samples, model.predict_samples(samples)):
-        metadata = metadata_for_sample(sample)
-        scores_by_node = dict((pred.get("root_cause") or {}).get("cause_scores") or {})
-        label_set = set(sample.labels.cause_node_ids)
-        score_rows.append([float(scores_by_node.get(node_id, 0.0)) for node_id in metadata.cause_node_ids])
-        label_rows.append([1.0 if node_id in label_set else 0.0 for node_id in metadata.cause_node_ids])
+        root = pred.get("root_case") if isinstance(pred.get("root_case"), dict) else {}
+        scores = root.get("scores") if isinstance(root.get("scores"), dict) else {}
+        label_set = set(sample.labels.root_case_labels)
+        score_rows.append([float(scores.get(label, 0.0)) for label in ROOT_CASES])
+        label_rows.append([1.0 if label in label_set else 0.0 for label in ROOT_CASES])
     set_metrics = multilabel_set_metrics(score_rows, label_rows)
     binary = binary_multilabel_metrics(score_rows, label_rows, threshold=threshold)
     return {
         "rows": len(samples),
-        "cause_threshold": threshold,
-        "cause_micro_f1": binary["micro_f1"],
-        "cause_micro_precision": binary["micro_precision"],
-        "cause_micro_recall": binary["micro_recall"],
-        "cause_top1_hit": binary["top1_hit"],
-        "cause_top3_hit": binary["top3_hit"],
-        "cause_top5_hit": binary["top5_hit"],
+        "root_case_threshold": threshold,
+        "root_case_micro_f1": binary["micro_f1"],
+        "root_case_micro_precision": binary["micro_precision"],
+        "root_case_micro_recall": binary["micro_recall"],
+        "root_case_top1_hit": binary["top1_hit"],
+        "root_case_top3_hit": binary["top3_hit"],
+        "root_case_top5_hit": binary["top5_hit"],
         "set_recall_top5": set_metrics["recall_top5"],
         "set_recall_topN": set_metrics["recall_topN"],
         "set_exact_top5": set_metrics["exact_top5"],
@@ -225,10 +225,10 @@ def _evaluate_model(*, model_dir: str | Path, input_path: str | Path, device: st
     }
 
 
-def _cause_threshold(model: DiagnosisGNNModel) -> float:
+def _root_threshold(model: DiagnosisGNNModel) -> float:
     raw = model.thresholds if isinstance(model.thresholds, dict) else {}
-    cause = raw.get("cause") if isinstance(raw.get("cause"), dict) else {}
-    return float(cause.get("threshold", raw.get("default_threshold", 0.5)))
+    root = raw.get("root_case") if isinstance(raw.get("root_case"), dict) else {}
+    return float(root.get("threshold", raw.get("root_case_threshold", raw.get("default_threshold", 0.5))))
 
 
 def _parser() -> argparse.ArgumentParser:

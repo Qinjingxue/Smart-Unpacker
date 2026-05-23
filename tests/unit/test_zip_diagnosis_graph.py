@@ -81,6 +81,33 @@ def test_zip_diagnosis_graph_maps_damage_labels_to_cause_and_theory():
     assert sample.labels.auxiliary["damage_profile"] == "unit_profile"
 
 
+def test_zip_diagnosis_graph_prefers_actionable_root_labels_over_injected_roots():
+    sample = build_diagnosis_graph_sample({
+        "sample_id": "actionable",
+        "format": "zip",
+        "knowledge_payload": _zip_payload(),
+        "actionable_root_labels": ["eocd.cd_size"],
+        "damage_analysis_target": {
+            "damage_labels": [
+                "field:eocd.cd_size",
+                "field:local_header.signature",
+                "field:local_header.method",
+                "field:sfx_prefix.bytes",
+            ]
+        },
+    })
+
+    assert sample.labels.root_case_labels == ["eocd.cd_size"]
+    assert sample.labels.field_labels == ["field:eocd.cd_size"]
+    assert sample.labels.auxiliary["actionable_label_source"] == "actionable_root_labels"
+    assert set(sample.labels.auxiliary["injected_cause"]) == {
+        "eocd.cd_size",
+        "local_header.signature",
+        "compression_method",
+        "sfx_prefix.bytes",
+    }
+
+
 def test_zip_diagnosis_graph_maps_relation_violation_direction_separately_from_context():
     payload = _zip_payload()
     payload["format"]["zip"]["structure"]["graph"]["violations"] = [

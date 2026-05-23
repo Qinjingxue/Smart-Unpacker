@@ -7,7 +7,8 @@ from typing import Any
 
 from repair_training.core.datasets import sha256_file, write_json
 from repair_training.core.diagnosis_graph.schema import DIAGNOSIS_GRAPH_SCHEMA_VERSION, DiagnosisGraphSample
-from repair_training.core.diagnosis_gnn import DIAGNOSIS_GNN_ALGORITHM, DIAGNOSIS_GNN_SEMANTICS
+from repair_training.core.diagnosis_gnn import DIAGNOSIS_GNN_ALGORITHM, DIAGNOSIS_GNN_SCORE_SEMANTICS, DIAGNOSIS_GNN_SEMANTICS
+from repair_training.core.diagnosis_gnn.actionable_roots import ACTIONABLE_LABEL_SOURCE, ROOT_HYPOTHESIS_TRAINING_OBJECTIVE
 from repair_training.core.diagnosis_gnn.dataset import read_diagnosis_graph_samples, split_diagnosis_graph_samples
 from repair_training.core.diagnosis_gnn.metrics import (
     binary_multilabel_metrics,
@@ -48,12 +49,22 @@ DEFAULT_CONFIG = {
     "asym_gamma_neg": 3.0,
     "rank_loss_weight": 0.0,
     "rank_loss_top_negatives": 8,
+    "root_softmax_loss_weight": 0.0,
+    "root_evidence_loss_weight": 0.15,
+    "root_transition_gain_loss_weight": 0.20,
+    "root_probe_viability_loss_weight": 0.35,
+    "probe_pairwise_loss_weight": 0.35,
+    "probe_viability_pairwise_loss_weight": 0.35,
+    "priority_direct_weight": 0.45,
+    "priority_evidence_weight": 0.10,
+    "priority_transition_gain_weight": 0.25,
+    "priority_viability_weight": 0.20,
     "pos_weight_max": 8.0,
     "sample_weighting": "multi_field_root_count",
     "score_normalization": "raw",
 }
 
-TENSOR_CACHE_VERSION = "diagnosis_gnn_tensor_cache_root_case_v1"
+TENSOR_CACHE_VERSION = "diagnosis_gnn_tensor_cache_actionable_root_v2"
 
 
 def train_diagnosis_gnn_model(
@@ -131,13 +142,25 @@ def train_diagnosis_gnn_model(
                 out = model(batch.x_dict, batch.edge_index_dict, _batch_dict(batch))
                 cause_loss = _root_case_loss(out, batch, F, config=config, pos_weight=cause_pos_weight)
                 rank_loss = _set_rank_loss(out, batch, config=config)
+                softmax_loss = _root_softmax_loss(out, batch)
                 theory_loss = _theory_loss(out, batch, F)
                 edge_loss = _theory_edge_loss(out, batch, F)
+                evidence_loss = _root_evidence_loss(out, batch, F)
+                transition_loss = _root_transition_gain_loss(out, batch, F)
+                viability_loss = _root_probe_viability_loss(out, batch, F)
+                probe_rank_loss = _probe_pairwise_rank_loss(out, batch)
+                viability_rank_loss = _probe_viability_pairwise_rank_loss(out, batch)
                 loss = (
                     cause_loss
                     + float(config.get("rank_loss_weight", 0.0) or 0.0) * rank_loss
+                    + float(config.get("root_softmax_loss_weight", 0.0) or 0.0) * softmax_loss
                     + float(config["aux_loss_weight"]) * theory_loss
                     + float(config["edge_loss_weight"]) * edge_loss
+                    + float(config.get("root_evidence_loss_weight", 0.0) or 0.0) * evidence_loss
+                    + float(config.get("root_transition_gain_loss_weight", 0.0) or 0.0) * transition_loss
+                    + float(config.get("root_probe_viability_loss_weight", 0.0) or 0.0) * viability_loss
+                    + float(config.get("probe_pairwise_loss_weight", 0.0) or 0.0) * probe_rank_loss
+                    + float(config.get("probe_viability_pairwise_loss_weight", 0.0) or 0.0) * viability_rank_loss
                 )
             scaler.scale(loss).backward()
             scaler.step(optimizer)
@@ -203,6 +226,9 @@ def train_diagnosis_gnn_model(
         "model_type": "diagnosis_gnn",
         "algorithm": config["arch"],
         "diagnosis_semantics": DIAGNOSIS_GNN_SEMANTICS,
+        "score_semantics": DIAGNOSIS_GNN_SCORE_SEMANTICS,
+        "label_source": ACTIONABLE_LABEL_SOURCE,
+        "training_objective": ROOT_HYPOTHESIS_TRAINING_OBJECTIVE,
         "graph_schema": DIAGNOSIS_GRAPH_SCHEMA_VERSION,
         "format": format_name,
         "run_id": run_id,
@@ -231,13 +257,25 @@ def _eval_loss(model, loader, device, F, *, aux_weight: float, edge_weight: floa
                 out = model(batch.x_dict, batch.edge_index_dict, _batch_dict(batch))
                 cause_loss = _root_case_loss(out, batch, F, config=config, pos_weight=cause_pos_weight)
                 rank_loss = _set_rank_loss(out, batch, config=config)
+                softmax_loss = _root_softmax_loss(out, batch)
                 theory_loss = _theory_loss(out, batch, F)
                 edge_loss = _theory_edge_loss(out, batch, F)
+                evidence_loss = _root_evidence_loss(out, batch, F)
+                transition_loss = _root_transition_gain_loss(out, batch, F)
+                viability_loss = _root_probe_viability_loss(out, batch, F)
+                probe_rank_loss = _probe_pairwise_rank_loss(out, batch)
+                viability_rank_loss = _probe_viability_pairwise_rank_loss(out, batch)
             total += float((
                 cause_loss
                 + float(config.get("rank_loss_weight", 0.0) or 0.0) * rank_loss
+                + float(config.get("root_softmax_loss_weight", 0.0) or 0.0) * softmax_loss
                 + aux_weight * theory_loss
                 + edge_weight * edge_loss
+                + float(config.get("root_evidence_loss_weight", 0.0) or 0.0) * evidence_loss
+                + float(config.get("root_transition_gain_loss_weight", 0.0) or 0.0) * transition_loss
+                + float(config.get("root_probe_viability_loss_weight", 0.0) or 0.0) * viability_loss
+                + float(config.get("probe_pairwise_loss_weight", 0.0) or 0.0) * probe_rank_loss
+                + float(config.get("probe_viability_pairwise_loss_weight", 0.0) or 0.0) * viability_rank_loss
             ).detach().cpu())
             batches += 1
     return total / max(1, batches)
@@ -290,6 +328,94 @@ def _theory_edge_loss(out: dict[str, Any], batch, F):
     return element.mean()
 
 
+def _root_evidence_loss(out: dict[str, Any], batch, F):
+    if "root_evidence" not in out or not hasattr(batch, "root_evidence_y"):
+        return out["root_case"].sum() * 0.0
+    labels = batch.root_evidence_y.float().view_as(out["root_evidence"])
+    mask = batch.root_evidence_mask.float().view_as(labels) if hasattr(batch, "root_evidence_mask") else (labels >= 0.0).float()
+    if float(mask.sum().detach().cpu()) <= 0.0:
+        return out["root_case"].sum() * 0.0
+    element = F.binary_cross_entropy_with_logits(out["root_evidence"], labels.clamp(0.0, 1.0), reduction="none")
+    return (element * mask).sum() / mask.sum().clamp(min=1.0)
+
+
+def _root_transition_gain_loss(out: dict[str, Any], batch, F):
+    if "root_transition_gain" not in out or not hasattr(batch, "root_transition_gain_y"):
+        return out["root_case"].sum() * 0.0
+    labels = batch.root_transition_gain_y.float().view_as(out["root_transition_gain"])
+    mask = batch.root_transition_gain_mask.float().view_as(labels) if hasattr(batch, "root_transition_gain_mask") else (labels >= 0.0).float()
+    if float(mask.sum().detach().cpu()) <= 0.0:
+        return out["root_case"].sum() * 0.0
+    prediction = out["root_transition_gain"].sigmoid()
+    element = F.smooth_l1_loss(prediction, labels.clamp(0.0, 1.0), reduction="none")
+    return (element * mask).sum() / mask.sum().clamp(min=1.0)
+
+
+def _root_probe_viability_loss(out: dict[str, Any], batch, F):
+    if "root_probe_viability" not in out or not hasattr(batch, "root_probe_viability_y"):
+        return out["root_case"].sum() * 0.0
+    labels = batch.root_probe_viability_y.float().view_as(out["root_probe_viability"])
+    mask = batch.root_probe_viability_mask.float().view_as(labels) if hasattr(batch, "root_probe_viability_mask") else (labels >= 0.0).float()
+    if float(mask.sum().detach().cpu()) <= 0.0:
+        return out["root_case"].sum() * 0.0
+    element = F.binary_cross_entropy_with_logits(out["root_probe_viability"], labels.clamp(0.0, 1.0), reduction="none")
+    return (element * mask).sum() / mask.sum().clamp(min=1.0)
+
+
+def _probe_pairwise_rank_loss(out: dict[str, Any], batch):
+    import torch
+    import torch.nn.functional as F
+
+    if not hasattr(batch, "root_transition_gain_y"):
+        return out["root_case"].sum() * 0.0
+    labels = batch.root_transition_gain_y.float().view_as(out["root_case"])
+    mask = batch.root_transition_gain_mask.float().view_as(labels) if hasattr(batch, "root_transition_gain_mask") else (labels >= 0.0).float()
+    logits = out["root_case"]
+    losses = []
+    for index in range(labels.shape[0]):
+        valid = mask[index] > 0.0
+        if int(valid.sum().item()) < 2:
+            continue
+        values = labels[index][valid]
+        scores = logits[index][valid]
+        gap = values.view(-1, 1) - values.view(1, -1)
+        comparable = gap > 0.03
+        if int(comparable.sum().item()) <= 0:
+            continue
+        score_gap = scores.view(-1, 1) - scores.view(1, -1)
+        losses.append(F.softplus(0.05 - score_gap[comparable]).mean())
+    if not losses:
+        return logits.sum() * 0.0
+    return torch.stack(losses).mean()
+
+
+def _probe_viability_pairwise_rank_loss(out: dict[str, Any], batch):
+    import torch
+    import torch.nn.functional as F
+
+    if "root_probe_viability" not in out or not hasattr(batch, "root_probe_viability_y"):
+        return out["root_case"].sum() * 0.0
+    labels = batch.root_probe_viability_y.float().view_as(out["root_probe_viability"])
+    mask = batch.root_probe_viability_mask.float().view_as(labels) if hasattr(batch, "root_probe_viability_mask") else (labels >= 0.0).float()
+    logits = out["root_case"] + 0.5 * out["root_probe_viability"]
+    losses = []
+    for index in range(labels.shape[0]):
+        valid = mask[index] > 0.0
+        if int(valid.sum().item()) < 2:
+            continue
+        values = labels[index][valid]
+        scores = logits[index][valid]
+        gap = values.view(-1, 1) - values.view(1, -1)
+        comparable = gap > 0.30
+        if int(comparable.sum().item()) <= 0:
+            continue
+        score_gap = scores.view(-1, 1) - scores.view(1, -1)
+        losses.append(F.softplus(0.10 - score_gap[comparable]).mean())
+    if not losses:
+        return logits.sum() * 0.0
+    return torch.stack(losses).mean()
+
+
 def _focal_bce_with_logits(logits, labels, *, gamma: float, pos_weight):
     import torch
     import torch.nn.functional as F
@@ -332,6 +458,28 @@ def _set_rank_loss(out: dict[str, Any], batch, *, config: dict[str, Any]):
     if not losses:
         return logits.sum() * 0.0
     return torch.stack(losses).mean()
+
+
+def _root_softmax_loss(out: dict[str, Any], batch):
+    import torch
+    import torch.nn.functional as F
+
+    logits = out["root_case"]
+    labels = batch.root_case_y.float().view_as(logits)
+    positive_counts = labels.sum(dim=-1, keepdim=True)
+    valid = positive_counts.squeeze(-1) > 0.0
+    if int(valid.sum().item()) <= 0:
+        return logits.sum() * 0.0
+    targets = labels[valid] / positive_counts[valid].clamp(min=1.0)
+    log_probs = F.log_softmax(logits[valid], dim=-1)
+    losses = -(targets * log_probs).sum(dim=-1)
+    try:
+        graph_weight = batch.graph_weight.float().to(logits.device)[valid]
+        if graph_weight.numel() == losses.numel():
+            losses = losses * graph_weight
+    except Exception:
+        pass
+    return losses.mean()
 
 
 def _expanded_pos_weight(pos_weight, labels):
@@ -476,38 +624,59 @@ def _tensor_cache_key(input_path: Path, split: str) -> str:
 def _predict_score_rows(model, dataset, device) -> dict[str, Any]:
     if not dataset:
         return {
-            "cause_scores": [],
-            "cause_labels": [],
+            "root_scores": [],
+            "root_labels": [],
             "theory_scores": [],
             "theory_labels": [],
             "theory_edge_scores": [],
             "theory_edge_labels": [],
+        "root_evidence_scores": [],
+        "root_evidence_labels": [],
+        "transition_gain_scores": [],
+        "transition_gain_labels": [],
+        "probe_viability_scores": [],
+        "probe_viability_labels": [],
         }
     try:
         import torch
         from torch_geometric.loader import DataLoader
     except Exception:
-        return {"cause_scores": [], "cause_labels": [], "theory_scores": [], "theory_labels": []}
+        return {"root_scores": [], "root_labels": [], "theory_scores": [], "theory_labels": []}
     scores = []
     labels = []
     theory_scores = []
     theory_labels = []
     edge_scores = []
     edge_labels = []
+    root_evidence_scores = []
+    root_evidence_labels = []
+    transition_gain_scores = []
+    transition_gain_labels = []
+    probe_viability_scores = []
+    probe_viability_labels = []
     model.eval()
     with torch.no_grad():
         loader = DataLoader(dataset, batch_size=32)
         for batch in loader:
             batch = batch.to(device)
             out = model(batch.x_dict, batch.edge_index_dict, _batch_dict(batch))
-            cause_values = torch.sigmoid(out["root_case"]).detach().cpu()
+            root_values = torch.sigmoid(out["root_case"]).detach().cpu()
             theory_values = torch.sigmoid(out["theory"]).detach().cpu()
             theory_batch = batch["theory"].batch.detach().cpu()
             edge_values = torch.sigmoid(out["theory_edge"]).detach().cpu()
+            root_evidence_values = torch.sigmoid(out.get("root_evidence", out["root_case"])).detach().cpu()
+            transition_gain_values = torch.sigmoid(out.get("root_transition_gain", out["root_case"])).detach().cpu()
+            probe_viability_values = torch.sigmoid(out.get("root_probe_viability", out["root_case"])).detach().cpu()
             edge_batch = _edge_batch_for_predictions(batch)
             for index in range(int(getattr(batch, "num_graphs", 1) or 1)):
-                scores.append(cause_values[index].tolist())
-                labels.append(batch.root_case_y.detach().cpu().view(cause_values.shape)[index].tolist())
+                scores.append(root_values[index].tolist())
+                labels.append(batch.root_case_y.detach().cpu().view(root_values.shape)[index].tolist())
+                root_evidence_scores.append(root_evidence_values[index].tolist())
+                root_evidence_labels.append(_masked_label_row(batch, "root_evidence_y", "root_evidence_mask", index, root_evidence_values.shape))
+                transition_gain_scores.append(transition_gain_values[index].tolist())
+                transition_gain_labels.append(_masked_label_row(batch, "root_transition_gain_y", "root_transition_gain_mask", index, transition_gain_values.shape))
+                probe_viability_scores.append(probe_viability_values[index].tolist())
+                probe_viability_labels.append(_masked_label_row(batch, "root_probe_viability_y", "root_probe_viability_mask", index, probe_viability_values.shape))
                 theory_scores.append(theory_values[theory_batch == index].tolist())
                 theory_labels.append(batch["theory"].y_alignment.detach().cpu()[theory_batch == index].tolist())
                 if edge_batch is not None:
@@ -521,13 +690,32 @@ def _predict_score_rows(model, dataset, device) -> dict[str, Any]:
                     edge_scores.append([])
                     edge_labels.append([])
     return {
-        "cause_scores": scores,
-        "cause_labels": labels,
+        "root_scores": scores,
+        "root_labels": labels,
         "theory_scores": theory_scores,
         "theory_labels": theory_labels,
         "theory_edge_scores": edge_scores,
         "theory_edge_labels": edge_labels,
+        "root_evidence_scores": root_evidence_scores,
+        "root_evidence_labels": root_evidence_labels,
+        "transition_gain_scores": transition_gain_scores,
+        "transition_gain_labels": transition_gain_labels,
+        "probe_viability_scores": probe_viability_scores,
+        "probe_viability_labels": probe_viability_labels,
     }
+
+
+def _masked_label_row(batch, label_name: str, mask_name: str, index: int, shape) -> list[float]:
+    if not hasattr(batch, label_name):
+        return [-1.0] * int(shape[-1])
+    labels = getattr(batch, label_name).detach().cpu().view(shape)
+    if not hasattr(batch, mask_name):
+        return labels[index].tolist()
+    mask = getattr(batch, mask_name).detach().cpu().view(shape)
+    return [
+        float(value) if float(mask_value) > 0.0 else -1.0
+        for value, mask_value in zip(labels[index].tolist(), mask[index].tolist())
+    ]
 
 
 def _edge_batch_for_predictions(batch):
@@ -542,21 +730,21 @@ def _edge_batch_for_predictions(batch):
 
 
 def _calibrate_thresholds(predictions: dict[str, Any], *, label_names: list[str]) -> dict[str, Any]:
-    cause = calibrate_global_threshold(predictions["cause_scores"], predictions["cause_labels"])
+    root = calibrate_global_threshold(predictions["root_scores"], predictions["root_labels"])
     theory = calibrate_global_threshold(predictions["theory_scores"], predictions["theory_labels"], max_clean_false_positive_rate=None)
     theory_edge = calibrate_global_threshold(
         predictions.get("theory_edge_scores", []),
         predictions.get("theory_edge_labels", []),
         max_clean_false_positive_rate=None,
     )
-    label_thresholds = _calibrate_label_thresholds(predictions["cause_scores"], predictions["cause_labels"], label_names)
+    label_thresholds = _calibrate_label_thresholds(predictions["root_scores"], predictions["root_labels"], label_names)
     return {
         "selection_split": "valid",
-        "root_case": cause,
+        "root_case": root,
         "theory_alignment": theory,
         "theory_edge_alignment": theory_edge,
-        "default_threshold": float(cause.get("threshold", 0.5)),
-        "root_case_threshold": float(cause.get("threshold", 0.5)),
+        "default_threshold": float(root.get("threshold", 0.5)),
+        "root_case_threshold": float(root.get("threshold", 0.5)),
         "root_case_label_thresholds": label_thresholds,
     }
 
@@ -579,11 +767,11 @@ def _calibrate_label_thresholds(scores: list[list[float]], labels: list[list[flo
 
 
 def _metrics_from_predictions(predictions: dict[str, Any], *, thresholds: dict[str, Any]) -> dict[str, Any]:
-    cause_threshold = float((thresholds.get("root_case") or {}).get("threshold", thresholds.get("default_threshold", 0.5)))
+    root_threshold = float((thresholds.get("root_case") or {}).get("threshold", thresholds.get("default_threshold", 0.5)))
     theory_threshold = float((thresholds.get("theory_alignment") or {}).get("threshold", 0.5))
     theory_edge_threshold = float((thresholds.get("theory_edge_alignment") or {}).get("threshold", theory_threshold))
-    cause = binary_multilabel_metrics(predictions["cause_scores"], predictions["cause_labels"], threshold=cause_threshold)
-    cause_set = multilabel_set_metrics(predictions["cause_scores"], predictions["cause_labels"])
+    root = binary_multilabel_metrics(predictions["root_scores"], predictions["root_labels"], threshold=root_threshold)
+    root_set = multilabel_set_metrics(predictions["root_scores"], predictions["root_labels"])
     theory = binary_multilabel_metrics(predictions["theory_scores"], predictions["theory_labels"], threshold=theory_threshold)
     theory_edge = binary_multilabel_metrics(
         predictions.get("theory_edge_scores", []),
@@ -591,25 +779,90 @@ def _metrics_from_predictions(predictions: dict[str, Any], *, thresholds: dict[s
         threshold=theory_edge_threshold,
     )
     return {
-        "rows": len(predictions["cause_scores"]),
-        "root_case_threshold": cause_threshold,
-        "root_case_micro_f1": cause["micro_f1"],
-        "root_case_micro_precision": cause["micro_precision"],
-        "root_case_micro_recall": cause["micro_recall"],
-        "root_case_top1_hit": cause["top1_hit"],
-        "root_case_top3_hit": cause["top3_hit"],
-        "root_case_top5_hit": cause["top5_hit"],
-        "set_recall_top5": cause_set["recall_top5"],
-        "set_recall_topN": cause_set["recall_topN"],
-        "set_exact_top5": cause_set["exact_top5"],
-        "set_exact_topN": cause_set["exact_topN"],
-        "set_by_root_count": cause_set["by_root_count"],
+        "rows": len(predictions["root_scores"]),
+        "root_case_threshold": root_threshold,
+        "root_case_micro_f1": root["micro_f1"],
+        "root_case_micro_precision": root["micro_precision"],
+        "root_case_micro_recall": root["micro_recall"],
+        "root_case_top1_hit": root["top1_hit"],
+        "root_case_top3_hit": root["top3_hit"],
+        "root_case_top5_hit": root["top5_hit"],
+        "set_recall_top5": root_set["recall_top5"],
+        "set_recall_topN": root_set["recall_topN"],
+        "set_exact_top5": root_set["exact_top5"],
+        "set_exact_topN": root_set["exact_topN"],
+        "set_by_root_count": root_set["by_root_count"],
         "theory_alignment_threshold": theory_threshold,
         "theory_alignment_f1": theory["micro_f1"],
         "theory_edge_alignment_threshold": theory_edge_threshold,
         "theory_edge_alignment_f1": theory_edge["micro_f1"],
-        "clean_false_positive_rate": clean_false_positive_rate(predictions["cause_scores"], predictions["cause_labels"], threshold=cause_threshold),
+        "root_transition_gain_mae": _masked_mae(
+            predictions.get("transition_gain_scores", []),
+            predictions.get("transition_gain_labels", []),
+        ),
+        "root_probe_viability_mae": _masked_mae(
+            predictions.get("probe_viability_scores", []),
+            predictions.get("probe_viability_labels", []),
+        ),
+        "probe_viability_f1": _masked_binary_f1(
+            predictions.get("probe_viability_scores", []),
+            predictions.get("probe_viability_labels", []),
+        ),
+        "evidence_explanation_f1": _masked_binary_f1(
+            predictions.get("root_evidence_scores", []),
+            predictions.get("root_evidence_labels", []),
+        ),
+        "probe_pairwise_accuracy": _probe_pairwise_accuracy(
+            predictions.get("root_scores", []),
+            predictions.get("transition_gain_labels", []),
+        ),
+        "probe_viability_pairwise_accuracy": _probe_pairwise_accuracy(
+            predictions.get("root_scores", []),
+            predictions.get("probe_viability_labels", []),
+        ),
+        "clean_false_positive_rate": clean_false_positive_rate(predictions["root_scores"], predictions["root_labels"], threshold=root_threshold),
     }
+
+
+def _masked_mae(scores: list[list[float]], labels: list[list[float]]) -> float:
+    errors = []
+    for score_row, label_row in zip(scores, labels):
+        for score, label in zip(score_row, label_row):
+            if float(label) >= 0.0:
+                errors.append(abs(float(score) - float(label)))
+    return sum(errors) / max(1, len(errors))
+
+
+def _masked_binary_f1(scores: list[list[float]], labels: list[list[float]], *, threshold: float = 0.5) -> float:
+    tp = fp = fn = 0
+    for score_row, label_row in zip(scores, labels):
+        for score, label in zip(score_row, label_row):
+            if float(label) < 0.0:
+                continue
+            pred = float(score) >= threshold
+            truth = float(label) >= threshold
+            tp += int(pred and truth)
+            fp += int(pred and not truth)
+            fn += int((not pred) and truth)
+    precision = tp / max(1, tp + fp)
+    recall = tp / max(1, tp + fn)
+    return 0.0 if precision + recall <= 0.0 else 2 * precision * recall / (precision + recall)
+
+
+def _probe_pairwise_accuracy(scores: list[list[float]], gain_labels: list[list[float]]) -> float:
+    correct = total = 0
+    for score_row, label_row in zip(scores, gain_labels):
+        for left in range(len(label_row)):
+            if float(label_row[left]) < 0.0:
+                continue
+            for right in range(len(label_row)):
+                if left == right or float(label_row[right]) < 0.0:
+                    continue
+                if float(label_row[left]) <= float(label_row[right]) + 0.03:
+                    continue
+                total += 1
+                correct += int(float(score_row[left]) > float(score_row[right]))
+    return correct / max(1, total)
 
 
 def _label_schema(samples: list[DiagnosisGraphSample]) -> dict[str, Any]:
@@ -618,6 +871,9 @@ def _label_schema(samples: list[DiagnosisGraphSample]) -> dict[str, Any]:
         "metadata": {
             "kind": "diagnosis_gnn_root_case",
             "diagnosis_semantics": DIAGNOSIS_GNN_SEMANTICS,
+            "score_semantics": DIAGNOSIS_GNN_SCORE_SEMANTICS,
+            "label_source": ACTIONABLE_LABEL_SOURCE,
+            "training_objective": ROOT_HYPOTHESIS_TRAINING_OBJECTIVE,
         },
     }
 

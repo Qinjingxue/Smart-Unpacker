@@ -40,6 +40,11 @@ def main(argv: list[str] | None = None) -> int:
     write_jsonl(output, [sample.to_dict() for sample in samples])
     summary_path = Path(args.summary_output) if args.summary_output else output.parent.parent / "reports" / "diagnosis_graph_summary.json"
     summary = diagnosis_graph_summary(samples, unsupported_count=len(unsupported))
+    summary["actionable_label_rows"] = sum(
+        1 for sample in samples
+        if (sample.labels.auxiliary or {}).get("actionable_root_labels")
+    )
+    summary["actionable_label_coverage"] = summary["actionable_label_rows"] / max(1, len(samples))
     if unsupported:
         summary["unsupported"] = unsupported[:100]
     write_json(summary_path, summary)

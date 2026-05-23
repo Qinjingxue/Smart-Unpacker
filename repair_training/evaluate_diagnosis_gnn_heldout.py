@@ -10,7 +10,7 @@ from repair_training.core.datasets import write_json, write_jsonl
 from repair_training.core.diagnosis_gnn.dataset import read_diagnosis_graph_samples
 from repair_training.core.diagnosis_gnn.inference import DiagnosisGNNModel
 from repair_training.core.diagnosis_gnn.metrics import binary_multilabel_metrics, clean_false_positive_rate
-from repair_training.core.diagnosis_gnn.tensorize import metadata_for_sample
+from repair_training.core.diagnosis_gnn.root_cases import ROOT_CASES
 from repair_training.core.diagnosis_gnn.training import train_diagnosis_gnn_model
 from repair_training.core.plugin import normalize_format_name
 
@@ -95,37 +95,25 @@ def _is_synthetic(sample) -> bool:
 
 def _evaluate_samples(model: DiagnosisGNNModel, samples) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     predictions = []
-    cause_score_rows = []
-    cause_label_rows = []
-    field_scores = []
-    field_labels = []
-    zone_scores = []
-    zone_labels = []
+    root_score_rows = []
+    root_label_rows = []
     thresholds = _thresholds_for_model(model)
     for sample in samples:
         pred = model.predict_sample(sample)
-        metadata = metadata_for_sample(sample)
-        scores_by_node = dict((pred.get("root_cause") or {}).get("cause_scores") or {})
-        cause_score_rows.append([float(scores_by_node.get(node_id, 0.0)) for node_id in metadata.cause_node_ids])
-        label_set = set(sample.labels.cause_node_ids)
-        cause_label_rows.append([1.0 if node_id in label_set else 0.0 for node_id in metadata.cause_node_ids])
-        root = pred.get("root_cause") if isinstance(pred.get("root_cause"), dict) else {}
-        field_scores.append(dict(root.get("field_scores") or {}))
-        field_labels.append(list(sample.labels.field_labels))
-        zone_scores.append(dict(root.get("zone_scores") or {}))
-        zone_labels.append([label.split(":", 1)[1] for label in sample.labels.zone_labels if ":" in label])
+        root = pred.get("root_case") if isinstance(pred.get("root_case"), dict) else {}
+        scores = root.get("scores") if isinstance(root.get("scores"), dict) else {}
+        truth = set(sample.labels.root_case_labels)
+        root_score_rows.append([float(scores.get(label, 0.0)) for label in ROOT_CASES])
+        root_label_rows.append([1.0 if label in truth else 0.0 for label in ROOT_CASES])
         predictions.append({
             "sample_id": sample.sample_id,
-            "true_field_labels": list(sample.labels.field_labels),
-            "true_zone_labels": list(sample.labels.zone_labels),
+            "true_root_case_labels": list(sample.labels.root_case_labels),
             **pred,
         })
     metrics = {
         "thresholds": thresholds,
-        "cause": binary_multilabel_metrics(cause_score_rows, cause_label_rows, threshold=thresholds["cause_threshold"]),
-        "clean_false_positive_rate": clean_false_positive_rate(cause_score_rows, cause_label_rows, threshold=thresholds["cause_threshold"]),
-        "field": _label_score_metrics(field_scores, field_labels, threshold=thresholds["field_threshold"]),
-        "zone": _label_score_metrics(zone_scores, zone_labels, threshold=thresholds["zone_threshold"]),
+        "root_case": binary_multilabel_metrics(root_score_rows, root_label_rows, threshold=thresholds["root_threshold"]),
+        "clean_false_positive_rate": clean_false_positive_rate(root_score_rows, root_label_rows, threshold=thresholds["root_threshold"]),
     }
     return predictions, metrics
 
@@ -134,25 +122,7 @@ def _thresholds_for_model(model: DiagnosisGNNModel) -> dict[str, float]:
     raw = model.thresholds if isinstance(model.thresholds, dict) else {}
     cause = raw.get("cause") if isinstance(raw.get("cause"), dict) else {}
     return {
-        "cause_threshold": float(cause.get("threshold", raw.get("default_threshold", 0.5))),
-        "field_threshold": float(raw.get("field_threshold", cause.get("threshold", 0.5))),
-        "zone_threshold": float(raw.get("zone_threshold", cause.get("threshold", 0.5))),
-    }
-
-
-def _label_score_metrics(score_rows: list[dict[str, float]], label_rows: list[list[str]], *, threshold: float) -> dict[str, Any]:
-    labels = sorted({label for row in label_rows for label in row} | {label for scores in score_rows for label in scores})
-    if not labels:
-        return {"micro_f1": 0.0, "top1_hit": 0.0, "top3_hit": 0.0, "top5_hit": 0.0, "threshold": threshold}
-    score_matrix = [[float(scores.get(label, 0.0)) for label in labels] for scores in score_rows]
-    label_matrix = [[1.0 if label in set(row) else 0.0 for label in labels] for row in label_rows]
-    base = binary_multilabel_metrics(score_matrix, label_matrix, threshold=threshold)
-    return {
-        "threshold": threshold,
-        "micro_f1": base["micro_f1"],
-        "top1_hit": base["top1_hit"],
-        "top3_hit": base["top3_hit"],
-        "top5_hit": base["top5_hit"],
+        "root_threshold": float(cause.get("threshold", raw.get("default_threshold", 0.5))),
     }
 
 
@@ -160,16 +130,10 @@ def _macro_summary(rows: list[dict[str, Any]]) -> dict[str, float]:
     if not rows:
         return {}
     keys = (
-        ("cause_top1_hit", "cause", "top1_hit"),
-        ("cause_top3_hit", "cause", "top3_hit"),
-        ("cause_top5_hit", "cause", "top5_hit"),
-        ("cause_micro_f1", "cause", "micro_f1"),
-        ("field_top1_hit", "field", "top1_hit"),
-        ("field_top3_hit", "field", "top3_hit"),
-        ("field_top5_hit", "field", "top5_hit"),
-        ("zone_top1_hit", "zone", "top1_hit"),
-        ("zone_top3_hit", "zone", "top3_hit"),
-        ("zone_top5_hit", "zone", "top5_hit"),
+        ("root_top1_hit", "root_case", "top1_hit"),
+        ("root_top3_hit", "root_case", "top3_hit"),
+        ("root_top5_hit", "root_case", "top5_hit"),
+        ("root_micro_f1", "root_case", "micro_f1"),
     )
     output = {}
     for name, group, key in keys:

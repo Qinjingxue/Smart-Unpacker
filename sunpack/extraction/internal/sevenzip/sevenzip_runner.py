@@ -5,6 +5,7 @@ import subprocess
 import threading
 import time
 from contextlib import nullcontext
+from pathlib import Path
 from typing import Any
 
 import psutil
@@ -13,6 +14,7 @@ from sunpack.contracts.archive_input import ArchiveInputDescriptor
 from sunpack.contracts.tasks import ArchiveTask
 from sunpack.extraction.internal.sevenzip.worker_diagnostics import attach_worker_diagnostics
 from sunpack.support import archive_knowledge_projection as knowledge_view
+from sunpack.support.archive_state_view import ArchiveStateByteView
 from sunpack.support.resources import get_7z_dll_path, get_sevenzip_worker_path
 
 
@@ -242,6 +244,16 @@ class SevenZipRunner:
 
         with _phase(phase_timer, f"{phase_prefix}_archive_state"):
             archive_state = self._archive_state(task)
+        with _phase(phase_timer, f"{phase_prefix}_materialize_patched_state"):
+            materialized_path = self._materialized_patched_archive(task, out_dir)
+        if materialized_path:
+            job["archive_path"] = materialized_path
+            job["part_paths"] = [materialized_path]
+            if archive_state:
+                source = archive_state.get("source") if isinstance(archive_state.get("source"), dict) else {}
+                if archive_state.get("format_hint") or source.get("format_hint"):
+                    job["format_hint"] = archive_state.get("format_hint") or source.get("format_hint")
+            return job
         if archive_state:
             job["archive_state"] = archive_state
             source = archive_state.get("source") if isinstance(archive_state.get("source"), dict) else {}
@@ -256,6 +268,23 @@ class SevenZipRunner:
                 if descriptor_payload.get("format_hint"):
                     job["format_hint"] = descriptor_payload.get("format_hint")
         return job
+
+    def _materialized_patched_archive(self, task: ArchiveTask, out_dir: str) -> str:
+        try:
+            state = task.archive_state()
+        except Exception:
+            return ""
+        if not getattr(state, "patches", None):
+            return ""
+        target = Path(out_dir) / ".sunpack" / "patched_input"
+        suffix = Path(str(state.source.entry_path or "")).suffix or ".bin"
+        target = target.with_suffix(suffix)
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            ArchiveStateByteView(state).materialize(target)
+            return str(target)
+        except Exception:
+            return ""
 
     def _archive_state(self, task: ArchiveTask) -> dict | None:
         raw = getattr(getattr(task, "fact_bag", None), "get", lambda *_: None)("archive.state")

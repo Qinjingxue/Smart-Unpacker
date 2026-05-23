@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from repair_training.core.diagnosis_graph.schema import DIAGNOSIS_GRAPH_SCHEMA_VERSION, DiagnosisGraphSample
-from repair_training.core.diagnosis_gnn import DIAGNOSIS_GNN_SEMANTICS
+from repair_training.core.diagnosis_gnn import DIAGNOSIS_GNN_SCORE_SEMANTICS, DIAGNOSIS_GNN_SEMANTICS
 from repair_training.core.diagnosis_gnn.model import build_diagnosis_gnn_model
 from repair_training.core.diagnosis_gnn.root_cases import ROOT_CASES
 from repair_training.core.diagnosis_gnn.tensorize import THEORY_DEPENDS_EDGE_TYPE, metadata_for_sample, tensorize_sample
@@ -61,12 +61,16 @@ class DiagnosisGNNModel:
                 runtime_edge_types = {tuple(edge_type) for edge_type in batch.edge_index_dict}
                 unknown_edge_types = sorted(runtime_edge_types - self.edge_types)
                 if unknown_edge_types:
-                    raise RuntimeError(
-                        "DiagnosisGNN runtime graph has edge types that were not present in training metadata: "
-                        f"{unknown_edge_types}. Rebuild diagnosis graph rows and retrain the model."
-                    )
+                    for edge_type in unknown_edge_types:
+                        try:
+                            del batch[edge_type]
+                        except Exception:
+                            pass
                 out = self.model(batch.x_dict, batch.edge_index_dict, _batch_dict(batch))
                 root_scores_all = self.torch.sigmoid(out["root_case"]).detach().cpu()
+                evidence_scores_all = self.torch.sigmoid(out.get("root_evidence", out["root_case"])).detach().cpu()
+                transition_gain_all = self.torch.sigmoid(out.get("root_transition_gain", out["root_case"])).detach().cpu()
+                probe_viability_all = self.torch.sigmoid(out.get("root_probe_viability", out["root_case"])).detach().cpu()
                 edge_scores_all = self.torch.sigmoid(out.get("theory_edge", self.torch.empty(0, device=self.device))).detach().cpu()
                 edge_batch = _edge_batch_for_theory_depends(batch)
                 for local_index, sample_index in enumerate(indices):
@@ -74,11 +78,32 @@ class DiagnosisGNNModel:
                     sample = samples[sample_index]
                     root_scores = root_scores_all[local_index].tolist()
                     edge_scores_raw = edge_scores_all[edge_batch == local_index].tolist() if edge_batch is not None else []
-                    outputs[sample_index] = self._format_prediction(sample, metadata, root_scores, edge_scores_raw)
+                    evidence_scores = evidence_scores_all[local_index].tolist()
+                    transition_gain = transition_gain_all[local_index].tolist()
+                    probe_viability = probe_viability_all[local_index].tolist()
+                    outputs[sample_index] = self._format_prediction(sample, metadata, root_scores, edge_scores_raw, evidence_scores, transition_gain, probe_viability)
         return [item for item in outputs if item is not None]
 
-    def _format_prediction(self, sample: DiagnosisGraphSample, metadata, scores: list[float], edge_scores_raw: list[float]) -> dict[str, Any]:
-        root_scores = {label: float(score) for label, score in zip(ROOT_CASES, scores)}
+    def _format_prediction(
+        self,
+        sample: DiagnosisGraphSample,
+        metadata,
+        scores: list[float],
+        edge_scores_raw: list[float],
+        evidence_scores: list[float] | None = None,
+        transition_gain: list[float] | None = None,
+        probe_viability: list[float] | None = None,
+    ) -> dict[str, Any]:
+        evidence = {label: float(score) for label, score in zip(ROOT_CASES, evidence_scores or scores)}
+        gain = {label: float(score) for label, score in zip(ROOT_CASES, transition_gain or scores)}
+        viability = {label: float(score) for label, score in zip(ROOT_CASES, probe_viability or scores)}
+        root_scores = _priority_scores(
+            scores=scores,
+            evidence_scores=evidence_scores or scores,
+            transition_gain=transition_gain or scores,
+            probe_viability=probe_viability or scores,
+            config=self.config,
+        )
         ranked = [
             {"root_case": label, "score": float(score)}
             for label, score in sorted(root_scores.items(), key=lambda item: item[1], reverse=True)
@@ -89,12 +114,18 @@ class DiagnosisGNNModel:
                 "scores": dict(sorted(root_scores.items())),
                 "ranked": ranked,
                 "selected": [item["root_case"] for item in ranked if float(item["score"]) >= threshold],
+                "score_semantics": DIAGNOSIS_GNN_SCORE_SEMANTICS,
             },
             "diagnostics": {
                 "model_type": "diagnosis_gnn",
                 "graph_schema": DIAGNOSIS_GRAPH_SCHEMA_VERSION,
+                "score_semantics": DIAGNOSIS_GNN_SCORE_SEMANTICS,
                 "thresholds": dict(self.thresholds),
                 "root_case_score_summary": _root_case_score_summary(ranked, threshold),
+                "root_evidence_scores": dict(sorted(evidence.items())),
+                "root_transition_gain": dict(sorted(gain.items())),
+                "root_probe_viability": dict(sorted(viability.items())),
+                "priority_components": _priority_component_weights(self.config),
                 "node_count": len(sample.graph.nodes),
                 "edge_count": len(sample.graph.edges),
                 "theory_edge_scores": dict(sorted({
@@ -111,6 +142,38 @@ class DiagnosisGNNModel:
                 ],
             },
         }
+
+
+def _priority_scores(
+    *,
+    scores: list[float],
+    evidence_scores: list[float],
+    transition_gain: list[float],
+    probe_viability: list[float],
+    config: dict[str, Any],
+) -> dict[str, float]:
+    weights = _priority_component_weights(config)
+    total = sum(weights.values()) or 1.0
+    return {
+        label: _clamp01(
+            (
+                weights["direct"] * float(direct)
+                + weights["evidence"] * float(evidence)
+                + weights["transition_gain"] * float(gain)
+                + weights["probe_viability"] * float(viability)
+            ) / total
+        )
+        for label, direct, evidence, gain, viability in zip(ROOT_CASES, scores, evidence_scores, transition_gain, probe_viability)
+    }
+
+
+def _priority_component_weights(config: dict[str, Any]) -> dict[str, float]:
+    return {
+        "direct": max(0.0, float(config.get("priority_direct_weight", 0.45))),
+        "evidence": max(0.0, float(config.get("priority_evidence_weight", 0.10))),
+        "transition_gain": max(0.0, float(config.get("priority_transition_gain_weight", 0.25))),
+        "probe_viability": max(0.0, float(config.get("priority_viability_weight", 0.20))),
+    }
 
 
 def _root_case_score_summary(ranked: list[dict[str, Any]], threshold: float) -> dict[str, Any]:

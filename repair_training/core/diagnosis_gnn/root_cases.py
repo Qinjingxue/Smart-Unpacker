@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-ROOT_CASE_SEMANTICS = "root_case_direct_v1"
+ROOT_CASE_SEMANTICS = "repair_actionable_root_v2"
 
 ROOT_CASES: tuple[str, ...] = (
     "eocd.cd_offset",
@@ -72,6 +72,10 @@ def canonical_root_case(value: str) -> str:
     text = str(value or "")
     if text.startswith("field:"):
         text = text.split(":", 1)[1]
+    if text.startswith("cause:root_case:"):
+        text = text.rsplit(":", 1)[-1]
+    if text in ROOT_CASE_SET:
+        return text
     if text in IGNORED_ROOT_FIELDS:
         return ""
     return FIELD_TO_ROOT_CASE.get(text, "")

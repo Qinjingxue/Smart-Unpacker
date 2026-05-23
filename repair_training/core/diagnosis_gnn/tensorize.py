@@ -69,6 +69,15 @@ def tensorize_sample(sample: DiagnosisGraphSample):
         if index is not None:
             root_y[index] = 1.0
     data.root_case_y = torch.tensor(root_y, dtype=torch.float32)
+    evidence_y, evidence_mask = _root_target_vector(sample, "root_evidence_targets")
+    transition_y, transition_mask = _root_target_vector(sample, "root_transition_gain_targets")
+    viability_y, viability_mask = _root_target_vector(sample, "root_probe_viability_targets")
+    data.root_evidence_y = torch.tensor(evidence_y, dtype=torch.float32)
+    data.root_evidence_mask = torch.tensor(evidence_mask, dtype=torch.float32)
+    data.root_transition_gain_y = torch.tensor(transition_y, dtype=torch.float32)
+    data.root_transition_gain_mask = torch.tensor(transition_mask, dtype=torch.float32)
+    data.root_probe_viability_y = torch.tensor(viability_y, dtype=torch.float32)
+    data.root_probe_viability_mask = torch.tensor(viability_mask, dtype=torch.float32)
 
     edge_groups: dict[tuple[str, str, str], list[tuple[int, int]]] = {}
     edge_ids_by_type: dict[tuple[str, str, str], list[str]] = {}
@@ -161,3 +170,17 @@ def _float(value: Any) -> float:
 
 def _clamp(value: float) -> float:
     return max(-1.0, min(1.0, float(value or 0.0)))
+
+
+def _root_target_vector(sample: DiagnosisGraphSample, key: str) -> tuple[list[float], list[float]]:
+    auxiliary = sample.labels.auxiliary if isinstance(sample.labels.auxiliary, dict) else {}
+    raw = auxiliary.get(key) if isinstance(auxiliary.get(key), dict) else {}
+    values = [0.0] * len(ROOT_CASES)
+    mask = [0.0] * len(ROOT_CASES)
+    for label, value in raw.items():
+        index = ROOT_CASE_INDEX.get(str(label))
+        if index is None:
+            continue
+        values[index] = max(0.0, min(1.0, _float(value)))
+        mask[index] = 1.0
+    return values, mask

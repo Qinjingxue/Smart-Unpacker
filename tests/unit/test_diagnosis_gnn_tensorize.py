@@ -42,3 +42,17 @@ def test_diagnosis_gnn_tensorize_preserves_node_types_and_labels():
     assert data[THEORY_DEPENDS_EDGE_TYPE].edge_label.sum().item() >= 1
     assert len(metadata.theory_edge_ids) == data[THEORY_DEPENDS_EDGE_TYPE].edge_label.shape[0]
     assert any(edge_type[1] == "observes_theory" for edge_type in data.edge_types)
+
+
+def test_diagnosis_gnn_tensorize_reads_root_hypothesis_targets():
+    row = _sample().to_dict()
+    row["labels"]["auxiliary"]["root_transition_gain_targets"] = {"eocd.cd_offset": 0.75}
+    row["labels"]["auxiliary"]["root_evidence_targets"] = {"eocd.cd_offset": 1.0}
+    from repair_training.core.diagnosis_graph.schema import DiagnosisGraphSample
+
+    data = tensorize_sample(DiagnosisGraphSample.from_dict(row))
+
+    assert data.root_transition_gain_y.sum().item() == pytest.approx(0.75)
+    assert data.root_transition_gain_mask.sum().item() == 1
+    assert data.root_evidence_y.sum().item() == pytest.approx(1.0)
+    assert data.root_evidence_mask.sum().item() == 1

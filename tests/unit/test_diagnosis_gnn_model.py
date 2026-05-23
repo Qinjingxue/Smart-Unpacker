@@ -31,6 +31,9 @@ def test_diagnosis_gnn_forward_outputs_cause_and_theory_logits(arch):
 
     assert out["cause"].shape[0] == data["cause"].x.shape[0]
     assert out["theory"].shape[0] == data["theory"].x.shape[0]
+    assert out["root_case"].shape[-1] == 26
+    assert out["root_evidence"].shape == out["root_case"].shape
+    assert out["root_transition_gain"].shape == out["root_case"].shape
     assert "theory_edge" in out
     assert out["theory_edge"].ndim == 1
 

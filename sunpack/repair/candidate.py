@@ -995,7 +995,9 @@ def materialize_candidate(candidate: RepairCandidate) -> list[RepairCandidate]:
         return [candidate]
     try:
         produced = candidate.materializer() if candidate.materializer is not None else None
-    except Exception as exc:
+    except BaseException as exc:
+        if isinstance(exc, (KeyboardInterrupt, SystemExit, GeneratorExit)):
+            raise
         return [_materialization_failed(candidate, str(exc))]
     items = produced if isinstance(produced, list) else [produced]
     materialized: list[RepairCandidate] = []
