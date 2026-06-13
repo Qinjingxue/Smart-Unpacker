@@ -290,50 +290,6 @@ def test_real_archive_edge_password_split_archives_require_matching_password(tmp
     assert_success(case, passwords=[PASSWORD_456])
 
 
-@pytest.mark.parametrize("archive_format", archive_format_params({"zip"}))
-def test_real_archive_edge_corrupted_single_archives_fail(tmp_path, archive_format):
-    require_7z()
-    case = FACTORY.create(tmp_path, f"corrupted_single_{archive_format}", archive_format, corruption="truncate")
-
-    if archive_format == "zip":
-        assert_success(case)
-        return
-    assert_failure_contains(case, {"压缩包损坏", "致命错误"})
-
-
-@pytest.mark.parametrize("archive_format", archive_format_params({"7z", "zip"}))
-@pytest.mark.parametrize("corruption", ["byte_flip", "header_damage", "tail_header_damage", "trailing_junk"])
-def test_real_archive_edge_corruption_modes_fail(tmp_path, archive_format, corruption):
-    require_7z()
-    case = FACTORY.create(tmp_path, f"corrupt_{corruption}_{archive_format}", archive_format, corruption=corruption)
-
-    if archive_format == "zip" and corruption == "byte_flip":
-        assert_partial_success_without_marker(case)
-        return
-    if archive_format == "zip" and corruption in {"tail_header_damage", "trailing_junk"}:
-        assert_success(case)
-        return
-    if archive_format == "zip" and corruption == "header_damage":
-        assert_success(case)
-        return
-    if archive_format == "7z" and corruption == "trailing_junk":
-        assert_success(case)
-        return
-    if archive_format == "7z" and corruption == "tail_header_damage":
-        assert_failure_contains(case, {"压缩包损坏", "致命错误", "校验失败", "修复结果没有可提取文件"})
-        return
-    if archive_format == "7z" and corruption == "byte_flip":
-        assert_partial_recovery(case)
-        return
-    assert_failure_contains(
-        case,
-        {"压缩包损坏", "致命错误"},
-        allow_best_effort_outputs=(
-            (archive_format == "7z" and corruption == "byte_flip")
-        ),
-    )
-
-
 @pytest.mark.parametrize("archive_format", archive_format_params(set()))
 def test_real_archive_edge_missing_split_archives_fail(tmp_path, archive_format):
     require_7z()

@@ -17,9 +17,9 @@ def require_torch():
         import torch  # noqa: F401
         import torch.nn as nn  # noqa: F401
     except Exception as exc:  # pragma: no cover
-        raise SystemExit(
+        raise RuntimeError(
             "DiagnosisGNN requires torch and torch-geometric. "
-            "Install repair_training/requirements-training.txt."
+            f"Install requirements-model-runtime.txt. Import error: {exc}"
         ) from exc
 
 

@@ -333,6 +333,33 @@ class NativePasswordTester:
         part_paths: list[str] | None = None,
         archive_input: dict | None = None,
     ) -> NativePasswordAttempt:
+        if archive_input is None:
+            library = self._load()
+            normalized_parts, part_array = self._part_array(archive_path, part_paths)
+            normalized_passwords = list(passwords or [""])
+            password_array_type = ctypes.c_wchar_p * len(normalized_passwords)
+            password_array = password_array_type(*normalized_passwords)
+            matched_index = ctypes.c_int(-1)
+            attempts = ctypes.c_int(0)
+            message = ctypes.create_unicode_buffer(512)
+            status = library.sup7z_try_passwords_with_parts(
+                ctypes.c_wchar_p(str(self.seven_zip_dll_path)),
+                ctypes.c_wchar_p(str(archive_path)),
+                part_array,
+                ctypes.c_int(len(normalized_parts)),
+                password_array,
+                ctypes.c_int(len(normalized_passwords)),
+                ctypes.byref(matched_index),
+                ctypes.byref(attempts),
+                message,
+                ctypes.c_int(len(message)),
+            )
+            return NativePasswordAttempt(
+                status=int(status),
+                matched_index=int(matched_index.value),
+                attempts=int(attempts.value),
+                message=message.value,
+            )
         result = self._run_operation(
             SUP7Z_OPERATION_TRY_PASSWORDS,
             archive_path,
@@ -354,6 +381,36 @@ class NativePasswordTester:
         part_paths: list[str] | None = None,
         archive_input: dict | None = None,
     ) -> NativeArchiveTest:
+        if archive_input is None:
+            library = self._load()
+            normalized_parts, part_array = self._part_array(archive_path, part_paths)
+            command_ok = ctypes.c_int(0)
+            encrypted = ctypes.c_int(0)
+            checksum_error = ctypes.c_int(0)
+            archive_type = ctypes.create_unicode_buffer(64)
+            message = ctypes.create_unicode_buffer(512)
+            status = library.sup7z_test_archive_with_parts(
+                ctypes.c_wchar_p(str(self.seven_zip_dll_path)),
+                ctypes.c_wchar_p(str(archive_path)),
+                part_array,
+                ctypes.c_int(len(normalized_parts)),
+                ctypes.c_wchar_p(str(password or "")),
+                ctypes.byref(command_ok),
+                ctypes.byref(encrypted),
+                ctypes.byref(checksum_error),
+                archive_type,
+                ctypes.c_int(len(archive_type)),
+                message,
+                ctypes.c_int(len(message)),
+            )
+            return NativeArchiveTest(
+                status=int(status),
+                command_ok=bool(command_ok.value),
+                encrypted=bool(encrypted.value),
+                checksum_error=bool(checksum_error.value),
+                archive_type=archive_type.value,
+                message=message.value,
+            )
         result = self._run_operation(
             SUP7Z_OPERATION_TEST,
             archive_path,

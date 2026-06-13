@@ -1,4 +1,5 @@
 import argparse
+import contextlib
 import os
 import sys
 
@@ -114,8 +115,23 @@ def main(argv=None):
 
     reporter = CliReporter(json_mode=args.json, quiet=args.quiet, verbose=args.verbose, color=args.color)
     ctx.reporter = reporter
+    if args.json and getattr(args, "prompt_passwords", False):
+        result = CliCommandResult(
+            command=getattr(args, "command", ""),
+            inputs={"argv": argv},
+            summary={},
+            errors=["interactive password input is unavailable in JSON mode"],
+        )
+        reporter.emit_result(result)
+        return EXIT_USAGE
+    if args.json:
+        args.pause_on_exit = False
     try:
-        exit_code, result = dispatch_command(args, ctx)
+        if args.json:
+            with contextlib.redirect_stdout(sys.stderr):
+                exit_code, result = dispatch_command(args, ctx)
+        else:
+            exit_code, result = dispatch_command(args, ctx)
     except Exception as exc:
         reporter.error(ctx.core_text("runtime_failure").format(error=exc))
         result = CliCommandResult(

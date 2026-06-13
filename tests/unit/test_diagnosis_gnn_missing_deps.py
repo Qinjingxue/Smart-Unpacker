@@ -19,5 +19,5 @@ def test_diagnosis_gnn_missing_deps_error_is_clear():
         },
     })
 
-    with pytest.raises(SystemExit, match="torch and torch-geometric"):
+    with pytest.raises(RuntimeError, match="torch and torch-geometric"):
         tensorize_sample(sample)

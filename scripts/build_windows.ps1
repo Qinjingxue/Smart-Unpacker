@@ -234,6 +234,20 @@ function Get-MaturinCommand {
     throw "maturin executable not found. Install requirements-build.txt or make maturin available in PATH."
 }
 
+function Assert-FileHashEqual {
+    param(
+        [Parameter(Mandatory = $true)][string]$Source,
+        [Parameter(Mandatory = $true)][string]$Destination
+    )
+    Assert-PathExists -LiteralPath $Source -Description "Model source file"
+    Assert-PathExists -LiteralPath $Destination -Description "Packaged model file"
+    $sourceHash = (Get-FileHash -LiteralPath $Source -Algorithm SHA256).Hash
+    $destinationHash = (Get-FileHash -LiteralPath $Destination -Algorithm SHA256).Hash
+    if ($sourceHash -ne $destinationHash) {
+        throw "SHA-256 mismatch after copying model asset: $Destination"
+    }
+}
+
 function Test-CommandRuns {
     param(
         [Parameter(Mandatory = $true)]
@@ -552,6 +566,7 @@ $venvScripts = Join-Path $venvPath "Scripts"
 $specPath = Join-Path $repoRoot "SunPack.spec"
 $requirementsPath = Join-Path $repoRoot "requirements.txt"
 $buildRequirementsPath = Join-Path $repoRoot "requirements-build.txt"
+$modelRuntimeRequirementsPath = Join-Path $repoRoot "requirements-model-runtime.txt"
 $iconPath = Join-Path $repoRoot "sunpack.ico"
 $nativeCrateRoot = Join-Path $repoRoot "native\sunpack_native"
 $nativeCargoToml = Join-Path $nativeCrateRoot "Cargo.toml"
@@ -585,6 +600,7 @@ if ($promptForAcceptanceTests) {
 
 Assert-PathExists -LiteralPath $requirementsPath -Description "requirements.txt"
 Assert-PathExists -LiteralPath $buildRequirementsPath -Description "requirements-build.txt"
+Assert-PathExists -LiteralPath $modelRuntimeRequirementsPath -Description "requirements-model-runtime.txt"
 Assert-PathExists -LiteralPath $specPath -Description "PyInstaller spec"
 Assert-PathExists -LiteralPath $iconPath -Description "SunPack icon"
 Assert-PathExists -LiteralPath $nativeCargoToml -Description "sunpack_native Cargo manifest"
@@ -602,13 +618,26 @@ if ($Clean) {
 }
 
 Write-Step "Preparing build virtual environment"
+if (Test-Path -LiteralPath (Join-Path $venvPath "pyvenv.cfg")) {
+    $venvConfig = Get-Content -LiteralPath (Join-Path $venvPath "pyvenv.cfg") -Raw
+    if ($venvConfig -match "include-system-site-packages\\s*=\\s*true") {
+        Write-Host "Recreating build environment without global site-packages." -ForegroundColor Yellow
+        Remove-IfExists -LiteralPath $venvPath
+    }
+}
 if (-not (Test-Path -LiteralPath $venvPython)) {
-    Invoke-Native -FilePath $pythonCommand -Arguments @("-m", "venv", "--system-site-packages", $venvPath)
+    Invoke-Native -FilePath $pythonCommand -Arguments @("-m", "venv", $venvPath)
 }
 
 Invoke-Native -FilePath $venvPython -Arguments @("-m", "pip", "install", "--upgrade", "pip")
 Install-RequirementsOrValidate -PythonPath $venvPython -RequirementsFile $requirementsPath -RequiredModules @("psutil", "send2trash", "watchdog", "zstandard") -Label "Runtime dependency"
 Install-RequirementsOrValidate -PythonPath $venvPython -RequirementsFile $buildRequirementsPath -RequiredModules @("PyInstaller", "maturin", "cmake") -Label "Build dependency"
+Install-RequirementsOrValidate -PythonPath $venvPython -RequirementsFile $modelRuntimeRequirementsPath -RequiredModules @("torch", "torch_geometric") -Label "Model runtime dependency"
+Invoke-Native -FilePath $venvPython -Arguments @("-m", "pip", "check")
+Invoke-Native -FilePath $venvPython -Arguments @(
+    "-c",
+    "import importlib.metadata as m; required=('torch','torch-geometric'); missing=[name for name in required if not list(m.files(name) or []) or not m.metadata(name).get('Name')]; assert not missing, f'missing distribution metadata: {missing}'"
+)
 $maturinCommand = Get-MaturinCommand -VenvScripts $venvScripts
 $cmakeCommand = Get-CMakeCommand -VenvScripts $venvScripts
 $ctestCommand = Get-CTestCommand -VenvScripts $venvScripts
@@ -676,7 +705,28 @@ Copy-Item -LiteralPath (Join-Path $repoRoot "builtin_passwords.txt") -Destinatio
 Copy-Item -LiteralPath (Join-Path $repoRoot "sunpack_config.json") -Destination $distConfigPath -Force
 Copy-Item -LiteralPath $iconPath -Destination $distIconPath -Force
 Copy-IfExists -Source (Join-Path $repoRoot "sunpack_advanced_config.json") -Destination $distAdvancedConfigPath
+Copy-Item -LiteralPath (Join-Path $repoRoot "sunpack_model_manifest.json") -Destination (Join-Path $distAppRoot "sunpack_model_manifest.json") -Force
 Copy-Item -LiteralPath $toolsRoot -Destination $distToolsRoot -Recurse -Force
+
+$diagnosisModelSource = Join-Path $repoRoot "repair_training\runs\zip\20260523_hgt_repair_guidance_eval\models\diagnosis_hgt_ranked_gain_mild_v1_train200"
+$policyModelSource = Join-Path $repoRoot "repair_training\runs\zip\20260524_policy_hgt_v2_strategy\models\repair_policy_transformer_hgt_v2_module_feedback_v7_no_undo_loss"
+$diagnosisModelDestination = Join-Path $distAppRoot "models\zip\diagnosis_hgt"
+$policyModelDestination = Join-Path $distAppRoot "models\zip\repair_policy_transformer"
+Assert-PathExists -LiteralPath (Join-Path $diagnosisModelSource "model.pt") -Description "Diagnosis HGT model"
+Assert-PathExists -LiteralPath (Join-Path $policyModelSource "model.pt") -Description "Repair policy transformer model"
+New-Item -ItemType Directory -Path (Split-Path -Parent $diagnosisModelDestination) -Force | Out-Null
+Copy-Item -LiteralPath $diagnosisModelSource -Destination $diagnosisModelDestination -Recurse -Force
+Copy-Item -LiteralPath $policyModelSource -Destination $policyModelDestination -Recurse -Force
+foreach ($relativeModelFile in @("model.pt", "model_card.json", "graph_schema.json", "label_schema.json", "train_metrics.json")) {
+    $diagnosisSourceFile = Join-Path $diagnosisModelSource $relativeModelFile
+    if (Test-Path -LiteralPath $diagnosisSourceFile) {
+        Assert-FileHashEqual -Source $diagnosisSourceFile -Destination (Join-Path $diagnosisModelDestination $relativeModelFile)
+    }
+    $policySourceFile = Join-Path $policyModelSource $relativeModelFile
+    if (Test-Path -LiteralPath $policySourceFile) {
+        Assert-FileHashEqual -Source $policySourceFile -Destination (Join-Path $policyModelDestination $relativeModelFile)
+    }
+}
 
 New-Item -ItemType Directory -Path $distLicensesRoot -Force | Out-Null
 Copy-Item -LiteralPath $sevenZipLicensePath -Destination (Join-Path $distLicensesRoot "7zip-license.txt") -Force
@@ -718,6 +768,7 @@ if ($processArch -eq $buildArch) {
     Invoke-Native -FilePath $distExePath -Arguments @("passwords", "--json")
     Invoke-Native -FilePath $distExePath -Arguments @("inspect", (Join-Path $repoRoot "tests"), "--json")
     Invoke-Native -FilePath $distExePath -Arguments @("config", "validate", "--json")
+    Invoke-Native -FilePath $distExePath -Arguments @("models", "status", "--load", "--json")
 } else {
     Write-Step "Skipping packaged smoke tests"
     Write-Host "Packaged executable is $buildArch and cannot run under the current $processArch process." -ForegroundColor Yellow

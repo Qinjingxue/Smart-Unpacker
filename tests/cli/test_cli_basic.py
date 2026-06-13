@@ -29,6 +29,7 @@ class CliBasicTests(unittest.TestCase):
         self.assertIn("inspect", result.stdout)
         self.assertIn("passwords", result.stdout)
         self.assertIn("config", result.stdout)
+        self.assertIn("models", result.stdout)
 
     def test_scan_json_shape(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -104,6 +105,13 @@ class CliBasicTests(unittest.TestCase):
         self.assertEqual(payload["summary"]["user_password_count"], 1)
         self.assertEqual(payload["items"][0]["combined_passwords"], ["secret"])
 
+    def test_json_mode_rejects_interactive_password_prompt_as_json(self):
+        result = run_cli("passwords", "--json", "--ask-pw")
+
+        self.assertNotEqual(result.returncode, 0)
+        payload = json.loads(result.stdout)
+        self.assertIn("interactive password input is unavailable", payload["errors"][0])
+
     def test_config_show_json_shape(self):
         result = run_cli("config", "--json", "show")
 
@@ -161,9 +169,19 @@ class CliBasicTests(unittest.TestCase):
             )
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        payload = json.loads(result.stdout[result.stdout.find("{"):])
+        payload = json.loads(result.stdout)
         self.assertTrue(payload["inputs"]["direct_file"])
         self.assertEqual(payload["summary"]["success_count"], 1)
+
+    def test_models_status_loads_bundled_model_contract(self):
+        result = run_cli("models", "status", "--load", "--json")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertTrue(payload["summary"]["ok"])
+        models = payload["items"][0]["models"]
+        self.assertEqual({item["role"] for item in models}, {"diagnosis", "policy"})
+        self.assertTrue(all(item["loaded"] for item in models))
 
     def test_inspect_help_documents_analyze_option(self):
         result = run_cli("inspect", "-h")

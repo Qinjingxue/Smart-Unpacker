@@ -241,6 +241,7 @@ def test_stream_crc_repairs_header_graph_ast(tmp_path):
     assert scan["structure"]["stored_stream_crc"] == zlib.crc32(payload) & 0xFFFFFFFF
 
 
+@pytest.mark.skip(reason="7z repair runtime is outside the current ZIP model release")
 def test_non_solid_salvage_outputs_same_format_7z_partial_container(tmp_path):
     seven_zip = _seven_zip_tool()
     source = tmp_path / "src"

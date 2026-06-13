@@ -174,9 +174,7 @@ class PasswordResolver:
 
     @staticmethod
     def _facts_confirm_unencrypted(fact_bag: FactBag | None) -> bool:
-        if fact_bag is None:
-            return False
-        health = ArchiveKnowledge.from_any(fact_bag.get("archive.knowledge")).get("resource.health") or {}
+        health = PasswordResolver._resource_health(fact_bag)
         if isinstance(health, dict):
             if health.get("is_archive") and not health.get("is_encrypted") and not health.get("is_wrong_password"):
                 return True
@@ -184,18 +182,28 @@ class PasswordResolver:
 
     @staticmethod
     def _facts_require_password(fact_bag: FactBag | None) -> bool:
-        if fact_bag is None:
-            return False
-        health = ArchiveKnowledge.from_any(fact_bag.get("archive.knowledge")).get("resource.health") or {}
+        health = PasswordResolver._resource_health(fact_bag)
         if isinstance(health, dict) and (health.get("is_encrypted") or health.get("is_wrong_password")):
             return True
         return False
 
     @staticmethod
     def _should_recheck_failed_encrypted_search(error_text: str) -> bool:
+        if has_definite_wrong_password(error_text):
+            return False
         if has_archive_damage_signals(error_text):
             return True
-        return not has_definite_wrong_password(error_text)
+        return True
+
+    @staticmethod
+    def _resource_health(fact_bag: FactBag | None) -> dict:
+        if fact_bag is None:
+            return {}
+        direct = fact_bag.get("resource.health")
+        if isinstance(direct, dict):
+            return direct
+        health = ArchiveKnowledge.from_any(fact_bag.get("archive.knowledge")).get("resource.health")
+        return health if isinstance(health, dict) else {}
 
     @staticmethod
     def _archive_key_from_fact_bag(fact_bag: FactBag | None) -> str:

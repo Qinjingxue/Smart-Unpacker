@@ -16,9 +16,9 @@ class DiagnosisGNNModel:
         try:
             import torch
         except Exception as exc:  # pragma: no cover
-            raise SystemExit(
+            raise RuntimeError(
                 "DiagnosisGNN inference requires torch and torch-geometric. "
-                "Install repair_training/requirements-training.txt."
+                f"Install requirements-model-runtime.txt. Import error: {exc}"
             ) from exc
         self.torch = torch
         self.model_dir = Path(model_dir)

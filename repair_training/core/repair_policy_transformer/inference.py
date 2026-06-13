@@ -15,7 +15,9 @@ class RepairPolicyTransformerModel:
         try:
             import torch
         except Exception as exc:  # pragma: no cover
-            raise SystemExit("RepairPolicyTransformer inference requires torch.") from exc
+            raise RuntimeError(
+                f"RepairPolicyTransformer inference requires torch. Install requirements-model-runtime.txt. Import error: {exc}"
+            ) from exc
         self.torch = torch
         self.model_dir = Path(model_dir)
         self.model_card = _read_json(self.model_dir / "model_card.json")

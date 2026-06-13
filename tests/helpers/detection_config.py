@@ -27,6 +27,7 @@ def with_detection_pipeline(
     confirmation: list[dict] | None = None,
 ) -> dict:
     result = dict(config or {})
+    result.setdefault("verification", {})
     scan_filters = []
     remaining_precheck = []
     uses_scene = False

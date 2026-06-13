@@ -22,7 +22,9 @@ def require_torch():
     try:
         import torch  # noqa: F401
     except Exception as exc:  # pragma: no cover
-        raise SystemExit("RepairPolicyTransformer requires torch. Install repair_training/requirements-training.txt.") from exc
+        raise RuntimeError(
+            f"RepairPolicyTransformer requires torch. Install requirements-model-runtime.txt. Import error: {exc}"
+        ) from exc
 
 
 def tensorize_sample(sample: PolicyGraphTrainingSample) -> dict[str, Any]:

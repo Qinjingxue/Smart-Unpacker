@@ -27,7 +27,7 @@ def test_postprocess_flatten_output_uses_chinese_language(case_workspace, capsys
     child.mkdir(parents=True)
     (child / "payload.txt").write_text("ok", encoding="utf-8")
 
-    PostProcessActions(normalize_config({}), language="zh").apply(
+    PostProcessActions(normalize_config({"verification": {}}), language="zh").apply(
         cleanup_archives=False,
         flatten_outputs=True,
         flatten_targets=[str(target)],
@@ -45,7 +45,7 @@ def run_postprocess_action(act: dict, workspace: Path):
             [str(workspace / part) for part in archive_parts]
             for archive_parts in act.get("archives", [])
         ]
-        config = normalize_config({"post_extract": {"archive_cleanup_mode": act.get("mode", "d")}})
+        config = normalize_config({"verification": {}, "post_extract": {"archive_cleanup_mode": act.get("mode", "d")}})
         PostProcessActions(config).apply(
             cleanup_archives=True,
             flatten_outputs=False,
@@ -53,7 +53,7 @@ def run_postprocess_action(act: dict, workspace: Path):
         )
         return
     if action_type == "flatten":
-        PostProcessActions(normalize_config({})).apply(
+        PostProcessActions(normalize_config({"verification": {}})).apply(
             cleanup_archives=False,
             flatten_outputs=True,
             flatten_targets=[str(workspace / act["target"])],

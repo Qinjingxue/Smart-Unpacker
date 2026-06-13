@@ -150,6 +150,12 @@ class PatchOperation:
             payload["details"] = dict(self.details)
         return payload
 
+    def digest_payload(self) -> dict[str, Any]:
+        payload = self.to_dict()
+        if self.details:
+            payload["details"] = _stable_patch_value(self.details)
+        return payload
+
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "PatchOperation":
         return cls(
@@ -243,6 +249,7 @@ class PatchPlan:
     confidence: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
+        module = self.effective_module()
         payload: dict[str, Any] = {
             "kind": "patch_plan",
             "schema_version": int(self.schema_version or PATCH_SCHEMA_VERSION),
@@ -251,8 +258,8 @@ class PatchPlan:
             "operations": [operation.to_dict() for operation in self.operations],
             "confidence": float(self.confidence),
         }
-        if self.module:
-            payload["module"] = self.module
+        if module:
+            payload["module"] = module
         if self.format:
             payload["format"] = self.format
         if self.provenance:
@@ -260,15 +267,20 @@ class PatchPlan:
         return payload
 
     def digest(self) -> str:
-        return _stable_digest({
+        return _stable_digest(self.digest_payload())
+
+    def effective_module(self) -> str:
+        return str(self.module or self.provenance.get("module") or "")
+
+    def digest_payload(self) -> dict[str, Any]:
+        return {
             "schema_version": self.schema_version,
-            "module": self.module,
+            "module": self.effective_module(),
             "format": self.format,
             "action_type": self.action_type,
-            "operations": [operation.to_dict() for operation in self.operations],
-            "provenance": self.provenance,
-            "confidence": self.confidence,
-        })
+            "operations": [operation.digest_payload() for operation in self.operations],
+            "provenance": _stable_patch_provenance(self.provenance),
+        }
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "PatchPlan":
@@ -321,9 +333,9 @@ class ArchiveState:
         return payload
 
     def effective_patch_digest(self) -> str:
-        return self.patch_digest or _stable_digest({
-            "source": self.source.to_dict(),
-            "patches": [patch.to_dict() for patch in self.patches],
+        return _stable_digest({
+            "schema_version": PATCH_SCHEMA_VERSION,
+            "patches": [patch.digest_payload() for patch in self.patches],
         })
 
     def with_patches(self, patches: list[PatchPlan]) -> "ArchiveState":
@@ -372,7 +384,7 @@ class ArchiveState:
         return ArchiveState(
             source=self.source.with_path_mapping(mapper),
             patches=list(self.patches),
-            patch_digest=self.patch_digest,
+            patch_digest=self.effective_patch_digest(),
             logical_name=self.logical_name,
             format_hint=self.format_hint,
             analysis=dict(self.analysis),
@@ -440,12 +452,11 @@ class ArchiveState:
             verification=dict(raw.get("verification") or {}) if isinstance(raw.get("verification"), dict) else {},
             knowledge=_knowledge_from_raw(raw),
         )
-        if state.patch_digest:
-            return state
+        computed_digest = state.effective_patch_digest()
         return cls(
             source=state.source,
             patches=state.patches,
-            patch_digest=state.effective_patch_digest(),
+            patch_digest=computed_digest,
             logical_name=state.logical_name,
             format_hint=state.format_hint,
             analysis=state.analysis,
@@ -514,3 +525,34 @@ def _knowledge_from_raw(raw: dict[str, Any]) -> dict[str, Any]:
 def _stable_digest(payload: Any) -> str:
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _stable_patch_provenance(value: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    ignored = {
+        "confidence",
+        "diagnostics",
+        "runtime",
+        "runtime_diagnostics",
+        "created_at",
+        "created_step",
+        "timestamp",
+    }
+    return {
+        str(key): _stable_patch_value(item)
+        for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+        if str(key) not in ignored
+    }
+
+
+def _stable_patch_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            str(key): _stable_patch_value(item)
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+            if str(key) not in {"confidence", "diagnostics", "runtime", "timestamp"}
+        }
+    if isinstance(value, (list, tuple)):
+        return [_stable_patch_value(item) for item in value]
+    return value

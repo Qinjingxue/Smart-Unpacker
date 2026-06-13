@@ -3,13 +3,17 @@ from __future__ import annotations
 import os
 from typing import Any
 
+from sunpack.model_runtime import get_model_asset_registry
+
 
 class DiagnosisHGTProvider:
-    supported_formats = ["zip"]
     provider_id = "diagnosis_hgt"
 
-    def __init__(self, model_dir: str = ""):
-        self.model_dir = model_dir or os.environ.get("SUNPACK_DIAGNOSIS_GNN_MODEL_DIR", "")
+    def __init__(self, format_name: str, model_dir: str = ""):
+        self.format_name = str(format_name or "").lower()
+        self.supported_formats = [self.format_name]
+        asset = get_model_asset_registry().asset(self.format_name, "diagnosis")
+        self.model_dir = model_dir or (str(asset.model_dir) if asset is not None else "")
         self._model = None
 
     def available(self) -> bool:
@@ -31,11 +35,13 @@ class DiagnosisHGTProvider:
 
 
 class RepairPolicyTransformerProvider:
-    supported_formats = ["zip"]
     provider_id = "repair_policy_transformer"
 
-    def __init__(self, model_dir: str = ""):
-        self.model_dir = model_dir or os.environ.get("SUNPACK_POLICY_TRANSFORMER_MODEL_DIR", "")
+    def __init__(self, format_name: str, model_dir: str = ""):
+        self.format_name = str(format_name or "").lower()
+        self.supported_formats = [self.format_name]
+        asset = get_model_asset_registry().asset(self.format_name, "policy")
+        self.model_dir = model_dir or (str(asset.model_dir) if asset is not None else "")
         self._model = None
 
     def available(self) -> bool:
@@ -73,9 +79,18 @@ class RepairPolicyTransformerProvider:
 
 
 def get_diagnosis_hgt_models() -> list[Any]:
-    return [DiagnosisHGTProvider()]
+    registry = get_model_asset_registry()
+    return [
+        DiagnosisHGTProvider(format_name)
+        for format_name in registry.supported_formats()
+        if registry.asset(format_name, "diagnosis") is not None
+    ]
 
 
 def get_policy_graph_scorers() -> list[Any]:
-    return [RepairPolicyTransformerProvider()]
-
+    registry = get_model_asset_registry()
+    return [
+        RepairPolicyTransformerProvider(format_name)
+        for format_name in registry.supported_formats()
+        if registry.asset(format_name, "policy") is not None
+    ]

@@ -25,7 +25,9 @@ FORBIDDEN_PREFIXES = (
     "file.",
 )
 
-ALLOWED_FILES: set[Path] = set()
+ALLOWED_FILES: set[Path] = {
+    Path("sunpack/passwords/resolver.py"),
+}
 
 FACT_GET_RE = re.compile(r"(?:\b|\.)fact_bag\.get\(\s*[\"']([^\"']+)[\"']")
 

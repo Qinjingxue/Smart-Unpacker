@@ -208,7 +208,7 @@ PasswordTestResult test_one_password(
 
                 result.message = "wrong password";
 
-                return result;
+                break;
 
             }
 
@@ -220,7 +220,7 @@ PasswordTestResult test_one_password(
 
                 result.message = "archive appears damaged";
 
-                return result;
+                break;
 
             }
 
@@ -268,14 +268,14 @@ PasswordTestResult test_one_password(
 
 
 
-        fallback = result;
-
-        has_fallback = true;
-
-        if (plan.uses_ranges() && result.status != PasswordTestStatus::Unsupported) {
-
-            return result;
-
+        if (
+            !has_fallback ||
+            fallback.status == PasswordTestStatus::Unsupported ||
+            fallback.status == PasswordTestStatus::Error ||
+            result.status == PasswordTestStatus::WrongPassword
+        ) {
+            fallback = result;
+            has_fallback = true;
         }
 
     }

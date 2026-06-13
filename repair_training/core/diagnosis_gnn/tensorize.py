@@ -27,9 +27,9 @@ def require_pyg():
         import torch  # noqa: F401
         from torch_geometric.data import HeteroData  # noqa: F401
     except Exception as exc:  # pragma: no cover - depends on optional training environment
-        raise SystemExit(
+        raise RuntimeError(
             "DiagnosisGNN requires torch and torch-geometric. "
-            "Install repair_training/requirements-training.txt."
+            f"Install requirements-model-runtime.txt. Import error: {exc}"
         ) from exc
 
 

@@ -2,7 +2,7 @@ import os
 from pathlib import Path
 
 from PyInstaller.building.build_main import Analysis, COLLECT, EXE, PYZ
-from PyInstaller.utils.hooks import collect_data_files, collect_submodules
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules, copy_metadata
 
 
 project_root = Path(SPECPATH)
@@ -10,7 +10,7 @@ icon_path = project_root / "sunpack.ico"
 dist_name = os.environ.get("SUNPACK_DIST_NAME", "sunpack")
 exe_name = os.environ.get("SUNPACK_EXE_NAME", "sunpack")
 
-hiddenimports = ["sunpack_native"]
+hiddenimports = ["sunpack_native", "sunpack_repair_models", "torch", "torch_geometric"]
 datas = []
 for package in (
     "watchdog",
@@ -37,12 +37,17 @@ for package in (
     "sunpack.relations.internal",
     "sunpack.postprocess.internal",
     "sunpack.verification.methods",
+    "sunpack.model_runtime",
+    "repair_training.core.diagnosis_graph",
+    "repair_training.core.diagnosis_gnn",
+    "repair_training.core.repair_policy_transformer",
+    "repair_training.formats.zip",
 ):
     hiddenimports.extend(collect_submodules(package))
 
-if os.environ.get("SUNPACK_INCLUDE_REPAIR_MODELS", "").strip().lower() in {"1", "true", "yes", "on"}:
-    hiddenimports.extend(collect_submodules("sunpack_repair_models"))
-    datas.extend(collect_data_files("sunpack_repair_models"))
+hiddenimports.extend(collect_submodules("torch_geometric"))
+for distribution in ("torch", "torch-geometric"):
+    datas.extend(copy_metadata(distribution))
 
 a = Analysis(
     ["sunpack.py"],
@@ -56,6 +61,7 @@ a = Analysis(
     excludes=[],
     noarchive=False,
     optimize=0,
+    module_collection_mode={"torch_geometric": "py"},
 )
 
 pyz = PYZ(a.pure)

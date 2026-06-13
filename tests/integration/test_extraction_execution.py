@@ -16,6 +16,29 @@ def runner_config():
     return normalize_config(with_detection_pipeline({
         "thresholds": {"archive_score_threshold": 5, "maybe_archive_threshold": 3},
         "recursive_extract": "1",
+        "filesystem": {
+            "scan_filters": [
+                {
+                    "name": "scene_semantics",
+                    "enabled": True,
+                    "protect_runtime_resources": True,
+                    "scene_rules": [
+                        {
+                            "scene_type": "rpg_maker_game",
+                            "top_level_dir_markers": {"www": "www_dir"},
+                            "top_level_file_markers": {"game.exe": "game_exe"},
+                            "nested_path_markers": {"www/data": "data_dir"},
+                            "match_variants": [
+                                {
+                                    "all_of": ["www_dir"],
+                                    "any_of": ["game_exe", "data_dir"],
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ]
+        },
         "post_extract": {
             "archive_cleanup_mode": "k",
             "flatten_single_directory": False,
