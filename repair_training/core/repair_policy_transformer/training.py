@@ -25,6 +25,14 @@ DEFAULT_CONFIG = {
     "premature_stop_loss_weight": 1.0,
     "undo_loss_weight": 0.5,
     "promising_loss_weight": 0.35,
+    "continuation_loss_weight": 0.8,
+    "action_continuation_loss_weight": 1.0,
+    "continuation_rank_loss_weight": 0.0,
+    "continuation_rank_margin": 0.08,
+    "post_undo_switch_loss_weight": 0.0,
+    "post_module_deepen_loss_weight": 0.0,
+    "branch_context_margin": 0.12,
+    "continuation_score_fusion_weight": 0.0,
     "stop_margin": 0.02,
     "q_margin": 0.01,
     "q_temperature": 0.05,
@@ -94,6 +102,7 @@ def train_repair_policy_transformer(
                 q = item["q"].to(resolved_device).view_as(logits)
                 prior = item["prior"].to(resolved_device).view_as(logits)
                 promising_logit = model.promising_logit(item["node_x"].to(resolved_device), item["memory_x"].to(resolved_device), item["edge_x"].to(resolved_device))
+                continuation_logit = model.continuation_logit(item["node_x"].to(resolved_device), item["memory_x"].to(resolved_device), item["edge_x"].to(resolved_device))
                 promising = item["has_promising_future"].to(resolved_device).view_as(promising_logit)
                 loss_parts = _policy_loss_parts(
                     logits=logits,
@@ -102,6 +111,11 @@ def train_repair_policy_transformer(
                     actions=item["actions"],
                     promising_logit=promising_logit,
                     promising=promising,
+                    continuation_logit=continuation_logit,
+                    continue_branch=item["continue_branch"].to(resolved_device).view_as(continuation_logit),
+                    action_continue_logits=None,
+                    action_continue_target=item["action_continue_target"].to(resolved_device).view_as(logits),
+                    action_continue_mask=item["action_continue_mask"].to(resolved_device).view_as(logits),
                     action_uncertainty=item["action_uncertainty"].to(resolved_device).view_as(logits),
                     config=config,
                     F=F,
@@ -228,6 +242,11 @@ def _world_loss(item: dict[str, Any], outputs: dict[str, Any], *, config: dict[s
             actions=item["actions"],
             promising_logit=outputs["promising"],
             promising=promising,
+            continuation_logit=outputs["continue_branch"],
+            continue_branch=item["continue_branch"].to(device).view_as(outputs["continue_branch"]),
+            action_continue_logits=outputs["action_continue"],
+            action_continue_target=item["action_continue_target"].to(device).view_as(outputs["action_logits"]),
+            action_continue_mask=item["action_continue_mask"].to(device).view_as(outputs["action_logits"]),
             action_uncertainty=item["action_uncertainty"].to(device).view_as(outputs["action_logits"]),
             config=config,
             F=F,
@@ -290,7 +309,7 @@ def _batches(items: list[Any], batch_size: int):
         yield items[start:start + size]
 
 
-def _policy_loss_parts(*, logits, q, prior, actions: list[dict[str, Any]], promising_logit, promising, action_uncertainty=None, config: dict[str, Any], F) -> dict[str, Any]:
+def _policy_loss_parts(*, logits, q, prior, actions: list[dict[str, Any]], promising_logit, promising, continuation_logit=None, continue_branch=None, action_continue_logits=None, action_continue_target=None, action_continue_mask=None, action_uncertainty=None, config: dict[str, Any], F) -> dict[str, Any]:
     q = q.clamp(0.0, 1.0)
     q_loss = F.mse_loss(logits.sigmoid(), q)
     softmax_loss = _softmax_teacher_loss(
@@ -331,6 +350,38 @@ def _policy_loss_parts(*, logits, q, prior, actions: list[dict[str, Any]], promi
         F=F,
     )
     promising_loss = F.binary_cross_entropy_with_logits(promising_logit, promising)
+    continuation_loss = logits.sum() * 0.0
+    if continuation_logit is not None and continue_branch is not None:
+        continuation_loss = F.binary_cross_entropy_with_logits(continuation_logit, continue_branch)
+    action_continuation_loss = logits.sum() * 0.0
+    if action_continue_logits is None:
+        action_continue_logits = logits
+    if action_continue_target is not None and action_continue_mask is not None and float(action_continue_mask.detach().sum().cpu()) > 0.0:
+        per_action = F.binary_cross_entropy_with_logits(action_continue_logits, action_continue_target.clamp(0.0, 1.0), reduction="none")
+        action_continuation_loss = (per_action * action_continue_mask).sum() / action_continue_mask.sum().clamp_min(1.0)
+    continuation_rank_loss = _continuation_rank_loss(
+        logits,
+        actions,
+        continue_branch=continue_branch,
+        margin=float(config.get("continuation_rank_margin", 0.08) or 0.08),
+        F=F,
+    )
+    post_undo_switch_loss = _flagged_module_over_undo_loss(
+        logits,
+        actions,
+        module_flag="post_undo_continue_module_bonus",
+        undo_flag="post_undo_repeat_undo_penalty",
+        margin=float(config.get("branch_context_margin", 0.12) or 0.12),
+        F=F,
+    )
+    post_module_deepen_loss = _flagged_module_over_undo_loss(
+        logits,
+        actions,
+        module_flag="post_module_deepen_bonus",
+        undo_flag="post_module_immediate_undo_penalty",
+        margin=float(config.get("branch_context_margin", 0.12) or 0.12),
+        F=F,
+    )
     total = (
         float(config.get("softmax_loss_weight", 1.0) or 0.0) * softmax_loss
         + float(config.get("q_regression_weight", 0.10) or 0.0) * q_loss
@@ -341,6 +392,11 @@ def _policy_loss_parts(*, logits, q, prior, actions: list[dict[str, Any]], promi
         + float(config.get("repeat_action_loss_weight", 1.2) or 0.0) * repeat_loss
         + float(config.get("uncertainty_tiebreak_loss_weight", 0.15) or 0.0) * uncertainty_tiebreak_loss
         + float(config.get("promising_loss_weight", 0.35) or 0.0) * promising_loss
+        + float(config.get("continuation_loss_weight", 0.8) or 0.0) * continuation_loss
+        + float(config.get("action_continuation_loss_weight", 1.0) or 0.0) * action_continuation_loss
+        + float(config.get("continuation_rank_loss_weight", 0.0) or 0.0) * continuation_rank_loss
+        + float(config.get("post_undo_switch_loss_weight", 0.0) or 0.0) * post_undo_switch_loss
+        + float(config.get("post_module_deepen_loss_weight", 0.0) or 0.0) * post_module_deepen_loss
     )
     return {
         "total": total,
@@ -352,6 +408,11 @@ def _policy_loss_parts(*, logits, q, prior, actions: list[dict[str, Any]], promi
         "repeat_action_loss": repeat_loss,
         "uncertainty_tiebreak_loss": uncertainty_tiebreak_loss,
         "promising_loss": promising_loss,
+        "continuation_loss": continuation_loss,
+        "action_continuation_loss": action_continuation_loss,
+        "continuation_rank_loss": continuation_rank_loss,
+        "post_undo_switch_loss": post_undo_switch_loss,
+        "post_module_deepen_loss": post_module_deepen_loss,
     }
 
 
@@ -435,6 +496,40 @@ def _repeat_action_loss(logits, q, actions: list[dict[str, Any]], *, margin: flo
     if not losses:
         return logits.sum() * 0.0
     return sum(losses) / len(losses)
+
+
+def _continuation_rank_loss(logits, actions: list[dict[str, Any]], *, continue_branch, margin: float, F):
+    if continue_branch is None:
+        return logits.sum() * 0.0
+    try:
+        should_continue = float(continue_branch.detach().cpu().view(-1)[0]) >= 0.5
+    except Exception:
+        should_continue = False
+    if not should_continue:
+        return logits.sum() * 0.0
+    undo_indices = [index for index, action in enumerate(actions) if action.get("action_type") == "undo"]
+    module_indices = [index for index, action in enumerate(actions) if action.get("action_type") == "module"]
+    if not undo_indices or not module_indices:
+        return logits.sum() * 0.0
+    undo_index = undo_indices[0]
+    best_module = max(module_indices, key=lambda index: float(logits[index].detach().cpu()))
+    return F.relu((logits[undo_index] - logits[best_module]) + margin)
+
+
+def _flagged_module_over_undo_loss(logits, actions: list[dict[str, Any]], *, module_flag: str, undo_flag: str, margin: float, F):
+    module_indices = []
+    undo_indices = []
+    for index, action in enumerate(actions):
+        features = action.get("features") if isinstance(action.get("features"), dict) else {}
+        if action.get("action_type") == "module" and float(features.get(module_flag) or 0.0) > 0.0:
+            module_indices.append(index)
+        if action.get("action_type") == "undo" and float(features.get(undo_flag) or 0.0) > 0.0:
+            undo_indices.append(index)
+    if not module_indices or not undo_indices:
+        return logits.sum() * 0.0
+    best_module = max(module_indices, key=lambda index: float(logits[index].detach().cpu()))
+    undo_index = undo_indices[0]
+    return F.relu((logits[undo_index] - logits[best_module]) + margin)
 
 
 def _uncertainty_tiebreak_loss(logits, q, action_uncertainty, *, tie_margin: float, F):

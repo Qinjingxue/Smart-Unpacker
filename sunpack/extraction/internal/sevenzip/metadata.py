@@ -28,6 +28,10 @@ class ArchiveMetadataScanner:
     )
     SIMPLIFIED_COMMON_CHARS = set("的一是在不了有和人这中大为上个国我以要他中文说明资料第一章压缩文件测试")
     TRADITIONAL_COMMON_CHARS = set("的一是在不了有和人這中大為上個國我以要他繁體中文說明資料檔案測試")
+    JAPANESE_COMMON_KANJI = set(
+        "日本語説明書第一章画像映像音声写真漫画小説資料設定保存読込名前新旧上下左右"
+        "大小年月日時分秒人子女男学校会社仕事場所東京大阪京都北海道"
+    )
 
     def __init__(self):
         self.cache = {}
@@ -252,6 +256,7 @@ class ArchiveMetadataScanner:
         score += min(ascii_chars, 16) // 4
         if encoding == "cp932":
             score += kana_chars * 5 + halfwidth_kana_chars + cjk_chars
+            score += sum(1 for ch in decoded if ch in self.JAPANESE_COMMON_KANJI) * 4
             if halfwidth_kana_chars and not kana_chars:
                 score -= halfwidth_kana_chars * 3
         elif encoding == "cp936":
@@ -259,6 +264,7 @@ class ArchiveMetadataScanner:
             score -= (kana_chars + halfwidth_kana_chars) * 2
             score += sum(1 for ch in decoded if ch in self.SIMPLIFIED_COMMON_CHARS) * 2
             score -= sum(1 for ch in decoded if ch in self.TRADITIONAL_COMMON_CHARS - self.SIMPLIFIED_COMMON_CHARS)
+            score -= sum(1 for ch in decoded if ch in self.JAPANESE_COMMON_KANJI - self.SIMPLIFIED_COMMON_CHARS)
         elif encoding == "cp950":
             score += cjk_chars * 3
             score -= (kana_chars + halfwidth_kana_chars) * 2

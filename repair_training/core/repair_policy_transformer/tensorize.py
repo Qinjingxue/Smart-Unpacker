@@ -7,9 +7,9 @@ from repair_training.core.diagnosis_gnn.root_cases import ROOT_CASES
 from repair_training.core.repair_policy_transformer.schema import PolicyAction, PolicyGraphTrainingSample, PolicyWorldTrainingSample
 
 
-NODE_FEATURE_DIM = 40
+NODE_FEATURE_DIM = 55
 EDGE_FEATURE_DIM = 19
-ACTION_FEATURE_DIM = 36
+ACTION_FEATURE_DIM = 54
 MEMORY_FEATURE_DIM = 17
 WORLD_BASE_TARGET_DIM = 6
 WORLD_RECOVERY_TARGET_DIM = 11
@@ -47,6 +47,7 @@ def tensorize_sample(sample: PolicyGraphTrainingSample) -> dict[str, Any]:
         memory_features = [[0.0] * MEMORY_FEATURE_DIM]
     q_values = [action.action_q_value for action in actions] or [0.0]
     priors = [action.action_prior for action in actions] or [0.0]
+    continue_branch = _sample_branch_continuation_score(sample) > 0.08
     return {
         "node_x": torch.tensor(node_features, dtype=torch.float32),
         "edge_x": torch.tensor(edge_features, dtype=torch.float32),
@@ -55,11 +56,14 @@ def tensorize_sample(sample: PolicyGraphTrainingSample) -> dict[str, Any]:
         "q": torch.tensor(q_values, dtype=torch.float32),
         "prior": torch.tensor(priors, dtype=torch.float32),
         "has_promising_future": torch.tensor([1.0 if sample.has_promising_future else 0.0], dtype=torch.float32),
+        "continue_branch": torch.tensor([1.0 if continue_branch else 0.0], dtype=torch.float32),
         "stop_regret": torch.tensor([_float(sample.stop_regret)], dtype=torch.float32),
         "action_regret": torch.tensor([_float(action.action_regret) for action in actions] or [0.0], dtype=torch.float32),
         "teacher_evaluated": torch.tensor([1.0 if action.is_teacher_evaluated else 0.0 for action in actions] or [0.0], dtype=torch.float32),
         "best_action_set": torch.tensor([1.0 if action.best_action_set_member else 0.0 for action in actions] or [0.0], dtype=torch.float32),
         "action_uncertainty": torch.tensor([_action_uncertainty(action, action_context) for action in actions] or [0.0], dtype=torch.float32),
+        "action_continue_target": torch.tensor([_action_continue_target(action, continue_branch) for action in actions] or [0.0], dtype=torch.float32),
+        "action_continue_mask": torch.tensor([_action_continue_mask(action, continue_branch) for action in actions] or [0.0], dtype=torch.float32),
         "actions": [action.to_dict() for action in actions],
         "sample_id": sample.sample_id,
     }
@@ -297,6 +301,18 @@ def _node_features(node_id: str, node: dict[str, Any], sample: PolicyGraphTraini
         diagnosis_stats["mean_top3"],
         diagnosis_stats["selected_count"],
         _hash_unit(diagnosis_stats["top_root"]),
+        diagnosis_stats["evidence_max_score"],
+        diagnosis_stats["evidence_mean_top3"],
+        _hash_unit(diagnosis_stats["evidence_top_root"]),
+        diagnosis_stats["gain_max_score"],
+        diagnosis_stats["gain_mean_top3"],
+        _hash_unit(diagnosis_stats["gain_top_root"]),
+        diagnosis_stats["viability_max_score"],
+        diagnosis_stats["viability_mean_top3"],
+        _hash_unit(diagnosis_stats["viability_top_root"]),
+        diagnosis_stats["direct_gain_top_match"],
+        diagnosis_stats["direct_viability_top_match"],
+        diagnosis_stats["gain_viability_top_match"],
         1.0 if node_id in (graph_context.get("best_updated_nodes") or set()) else 0.0,
         score - _float(parent_recovery.get("score")),
         _float((graph_context.get("subtree_best") or {}).get(node_id)),
@@ -313,6 +329,9 @@ def _node_features(node_id: str, node: dict[str, Any], sample: PolicyGraphTraini
         _float(uncertainty.get("verification_ambiguity")),
         _float(uncertainty.get("prediction_uncertainty")),
         _float(uncertainty.get("exploration_uncertainty")),
+        _branch_continuation_score(node, parent_node if isinstance(parent_node, dict) else {}),
+        max(0.0, score - _float(parent_recovery.get("score"))),
+        1.0 if str(node.get("patch_status") or "") == "applied" and _float(exploration.get("fresh_action_count")) > 0 else 0.0,
     ]
 
 
@@ -362,6 +381,9 @@ def _action_context(sample: PolicyGraphTrainingSample) -> dict[str, Any]:
     family_best_delta: dict[str, float] = {}
     family_prediction_error: dict[str, list[float]] = {}
     family_uncertainty: dict[str, list[float]] = {}
+    tried_module_counts: dict[str, int] = {}
+    tried_family_counts: dict[str, int] = {}
+    module_history = _module_history_stats(sample.graph)
     for item in sample.memory[-32:]:
         action = item.get("graph_action") if isinstance(item.get("graph_action"), dict) else item
         family = str(action.get("module_family") or action.get("route_family") or action.get("module_name") or "")
@@ -378,6 +400,16 @@ def _action_context(sample: PolicyGraphTrainingSample) -> dict[str, Any]:
         if uncertainty:
             family_uncertainty.setdefault(family, []).append(_float(uncertainty.get("overall_uncertainty")))
     for _edge_id, edge in _edges(sample.graph):
+        if str(edge.get("from_node_id") or "") == sample.current_node_id:
+            exploration = edge.get("exploration") if isinstance(edge.get("exploration"), dict) else {}
+            attempted = _float(exploration.get("attempt_count")) > 0.0 or str(edge.get("status") or "") in {"expanded", "expanded_failed", "repeated"}
+            if attempted:
+                module = str(edge.get("module_name") or "")
+                family = str(edge.get("module_family") or edge.get("route_family") or module)
+                if module:
+                    tried_module_counts[module] = tried_module_counts.get(module, 0) + 1
+                if family:
+                    tried_family_counts[family] = tried_family_counts.get(family, 0) + 1
         family = str(edge.get("module_family") or edge.get("route_family") or edge.get("module_name") or "")
         err = edge.get("prediction_error") if isinstance(edge.get("prediction_error"), dict) else {}
         if family and err:
@@ -396,6 +428,10 @@ def _action_context(sample: PolicyGraphTrainingSample) -> dict[str, Any]:
         "family_uncertainty": {key: sum(values) / max(1, len(values)) for key, values in family_uncertainty.items()},
         "incoming_module": incoming_module,
         "incoming_family": incoming_family,
+        "branch_continuation_score": _branch_continuation_score(current if isinstance(current, dict) else {}, parent if isinstance(parent, dict) else {}),
+        "tried_module_counts": tried_module_counts,
+        "tried_family_counts": tried_family_counts,
+        "module_history": module_history,
     }
 
 
@@ -414,6 +450,14 @@ def _action_features(action: Any, index: int, action_context: dict[str, Any]) ->
     incoming_family = str(action_context.get("incoming_family") or "")
     same_incoming_module = action.action_type == "module" and incoming_module and action.module_name == incoming_module
     same_incoming_family = action.action_type == "module" and incoming_family and family == incoming_family
+    branch_continuation = _float(action_context.get("branch_continuation_score"))
+    if branch_continuation <= 0.0:
+        branch_continuation = _float(action.features.get("branch_continuation_score"))
+    tried_module_count = _float((action_context.get("tried_module_counts") or {}).get(action.module_name))
+    tried_family_count = _float((action_context.get("tried_family_counts") or {}).get(family))
+    module_history = action_context.get("module_history") if isinstance(action_context.get("module_history"), dict) else {}
+    exact_history = module_history.get("module", {}).get(action.module_name, {}) if isinstance(module_history.get("module"), dict) else {}
+    family_history = module_history.get("family", {}).get(family, {}) if isinstance(module_history.get("family"), dict) else {}
     return [
         1.0 if action.action_type == "stop" else 0.0,
         1.0 if action.action_type == "undo" else 0.0,
@@ -451,7 +495,50 @@ def _action_features(action: Any, index: int, action_context: dict[str, Any]) ->
         1.0 if same_incoming_family else 0.0,
         _hash_unit(incoming_module),
         _hash_unit(incoming_family),
+        branch_continuation,
+        1.0 if action.action_type == "module" and branch_continuation > 0.08 else 0.0,
+        1.0 if action.action_type == "undo" and branch_continuation > 0.08 else 0.0,
+        _float(action.features.get("post_undo_continue_module_bonus")),
+        _float(action.features.get("post_undo_repeat_undo_penalty")),
+        _float(action.features.get("post_module_deepen_bonus")),
+        _float(action.features.get("post_module_immediate_undo_penalty")),
+        min(tried_module_count, 16.0) / 16.0,
+        min(tried_family_count, 16.0) / 16.0,
+        _float(action.features.get("current_node_retried_module_penalty")),
+        _float(action.features.get("current_node_retried_family_penalty")),
+        min(_float(exact_history.get("attempts")), 64.0) / 64.0,
+        _float(exact_history.get("mean_delta")),
+        _float(exact_history.get("failure_rate")),
+        _float(exact_history.get("undo_rate")),
+        min(_float(family_history.get("attempts")), 64.0) / 64.0,
+        _float(family_history.get("mean_delta")),
+        _float(action.features.get("module_history_no_gain_penalty")),
     ]
+
+
+def _sample_branch_continuation_score(sample: PolicyGraphTrainingSample) -> float:
+    nodes = sample.graph.get("nodes") if isinstance(sample.graph.get("nodes"), dict) else {}
+    current = nodes.get(sample.current_node_id) if isinstance(nodes.get(sample.current_node_id), dict) else {}
+    parent = nodes.get(str(current.get("parent_id") or "")) if isinstance(current, dict) and isinstance(nodes, dict) else {}
+    score = _branch_continuation_score(current if isinstance(current, dict) else {}, parent if isinstance(parent, dict) else {})
+    action_score = max((_float(action.features.get("branch_continuation_score")) for action in sample.actions), default=0.0)
+    return max(score, action_score)
+
+
+def _action_continue_target(action: Any, continue_branch: bool) -> float:
+    if not continue_branch:
+        return 0.0
+    if action.action_type == "module":
+        return 1.0
+    if action.action_type == "undo":
+        return 0.0
+    return 0.0
+
+
+def _action_continue_mask(action: Any, continue_branch: bool) -> float:
+    if not continue_branch:
+        return 0.0
+    return 1.0 if action.action_type in {"module", "undo"} else 0.0
 
 
 def _incoming_module_family(graph: dict[str, Any], current_node_id: str) -> tuple[str, str]:
@@ -466,6 +553,46 @@ def _incoming_module_family(graph: dict[str, Any], current_node_id: str) -> tupl
             return module, str(edge.get("module_family") or module)
     module = str(current.get("module_name") or "") if isinstance(current, dict) else ""
     return module, module
+
+
+def _module_history_stats(graph: dict[str, Any]) -> dict[str, dict[str, dict[str, float]]]:
+    module_raw: dict[str, dict[str, float]] = {}
+    family_raw: dict[str, dict[str, float]] = {}
+    for _edge_id, edge in _edges(graph):
+        exploration = edge.get("exploration") if isinstance(edge.get("exploration"), dict) else {}
+        attempted = _float(exploration.get("attempt_count")) > 0.0 or str(edge.get("status") or "") in {"expanded", "expanded_failed", "repeated"}
+        if not attempted:
+            continue
+        module = str(edge.get("module_name") or "")
+        family = str(edge.get("module_family") or edge.get("route_family") or module)
+        delta = _float(exploration.get("result_recovery_delta", edge.get("recovery_delta")))
+        failed = 1.0 if str(exploration.get("result_patch_status") or edge.get("patch_status") or edge.get("status") or "") in {"empty_failed", "empty_noop", "expanded_failed", "repeated"} else 0.0
+        undo = min(1.0, _float(exploration.get("undo_count_after_attempt")))
+        if module:
+            _accumulate_history(module_raw.setdefault(module, {}), delta=delta, failed=failed, undo=undo)
+        if family:
+            _accumulate_history(family_raw.setdefault(family, {}), delta=delta, failed=failed, undo=undo)
+    return {
+        "module": {key: _finalize_history(value) for key, value in module_raw.items()},
+        "family": {key: _finalize_history(value) for key, value in family_raw.items()},
+    }
+
+
+def _accumulate_history(payload: dict[str, float], *, delta: float, failed: float, undo: float) -> None:
+    payload["attempts"] = _float(payload.get("attempts")) + 1.0
+    payload["sum_delta"] = _float(payload.get("sum_delta")) + delta
+    payload["failures"] = _float(payload.get("failures")) + failed
+    payload["undos"] = _float(payload.get("undos")) + undo
+
+
+def _finalize_history(payload: dict[str, float]) -> dict[str, float]:
+    attempts = max(1.0, _float(payload.get("attempts")))
+    return {
+        "attempts": attempts,
+        "mean_delta": _float(payload.get("sum_delta")) / attempts,
+        "failure_rate": _float(payload.get("failures")) / attempts,
+        "undo_rate": _float(payload.get("undos")) / attempts,
+    }
 
 
 def _action_uncertainty(action: Any, action_context: dict[str, Any]) -> float:
@@ -506,19 +633,68 @@ def _memory_features(item: dict[str, Any], index: int) -> list[float]:
     ]
 
 
+def _branch_continuation_score(node: dict[str, Any], parent: dict[str, Any]) -> float:
+    recovery = node.get("recovery") if isinstance(node.get("recovery"), dict) else {}
+    parent_recovery = parent.get("recovery") if isinstance(parent.get("recovery"), dict) else {}
+    exploration = node.get("exploration") if isinstance(node.get("exploration"), dict) else {}
+    uncertainty = node.get("uncertainty") if isinstance(node.get("uncertainty"), dict) else {}
+    error = node.get("prediction_error_from_parent") if isinstance(node.get("prediction_error_from_parent"), dict) else {}
+    diagnosis = node.get("diagnosis_hgt") if isinstance(node.get("diagnosis_hgt"), dict) else {}
+    parent_diagnosis = parent.get("diagnosis_hgt") if isinstance(parent.get("diagnosis_hgt"), dict) else {}
+    recovery_delta = _float(recovery.get("score")) - _float(parent_recovery.get("score"))
+    diagnosis_gain = _diagnosis_root_stats(diagnosis)["max_score"] - _diagnosis_root_stats(parent_diagnosis)["max_score"]
+    prediction_error = _float(error.get("overall_prediction_error"))
+    patch_status = str(node.get("patch_status") or "")
+    score = 0.0
+    score += max(0.0, recovery_delta) * 1.2
+    score += max(0.0, diagnosis_gain) * 0.35
+    score += 0.08 if patch_status == "applied" else 0.0
+    score += min(0.10, _float(exploration.get("fresh_action_count")) / 64.0)
+    score -= min(0.20, prediction_error * 0.45)
+    score -= min(0.12, _float(uncertainty.get("overall_uncertainty")) * 0.10)
+    if patch_status in {"empty_failed", "empty_noop", "repeated"}:
+        score -= 0.20
+    return _clamp01(score)
+
+
 def _diagnosis_root_stats(diagnosis: dict[str, Any]) -> dict[str, Any]:
     root = diagnosis.get("root_case") if isinstance(diagnosis.get("root_case"), dict) else {}
     scores = root.get("scores") if isinstance(root.get("scores"), dict) else diagnosis.get("root_case_scores")
-    parsed = [(str(key), _float(value)) for key, value in (scores or {}).items()] if isinstance(scores, dict) else []
-    parsed.sort(key=lambda item: item[1], reverse=True)
+    primary = _score_stats(scores if isinstance(scores, dict) else {})
     selected = root.get("selected") if isinstance(root.get("selected"), list) else diagnosis.get("selected_root_cases")
+    diagnostics = diagnosis.get("diagnostics") if isinstance(diagnosis.get("diagnostics"), dict) else {}
+    evidence = _score_stats(diagnostics.get("root_evidence_scores") if isinstance(diagnostics.get("root_evidence_scores"), dict) else {})
+    gain = _score_stats(diagnostics.get("root_transition_gain") if isinstance(diagnostics.get("root_transition_gain"), dict) else {})
+    viability = _score_stats(diagnostics.get("root_probe_viability") if isinstance(diagnostics.get("root_probe_viability"), dict) else {})
+    return {
+        "max_score": primary["max_score"],
+        "mean_top3": primary["mean_top3"],
+        "selected_count": len(selected or []) / 16.0,
+        "top_root": primary["top_root"],
+        "selected_roots": [str(item) for item in selected or [] if str(item)],
+        "evidence_max_score": evidence["max_score"],
+        "evidence_mean_top3": evidence["mean_top3"],
+        "evidence_top_root": evidence["top_root"],
+        "gain_max_score": gain["max_score"],
+        "gain_mean_top3": gain["mean_top3"],
+        "gain_top_root": gain["top_root"],
+        "viability_max_score": viability["max_score"],
+        "viability_mean_top3": viability["mean_top3"],
+        "viability_top_root": viability["top_root"],
+        "direct_gain_top_match": 1.0 if primary["top_root"] and primary["top_root"] == gain["top_root"] else 0.0,
+        "direct_viability_top_match": 1.0 if primary["top_root"] and primary["top_root"] == viability["top_root"] else 0.0,
+        "gain_viability_top_match": 1.0 if gain["top_root"] and gain["top_root"] == viability["top_root"] else 0.0,
+    }
+
+
+def _score_stats(scores: dict[str, Any]) -> dict[str, Any]:
+    parsed = [(str(key), _float(value)) for key, value in scores.items() if str(key) in ROOT_CASES]
+    parsed.sort(key=lambda item: item[1], reverse=True)
     top = parsed[:3]
     return {
         "max_score": top[0][1] if top else 0.0,
         "mean_top3": sum(value for _key, value in top) / max(1, len(top)),
-        "selected_count": len(selected or []) / 16.0,
         "top_root": top[0][0] if top else "",
-        "selected_roots": [str(item) for item in selected or [] if str(item)],
     }
 
 

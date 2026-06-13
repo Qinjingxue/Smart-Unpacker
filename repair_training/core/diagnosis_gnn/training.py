@@ -55,6 +55,8 @@ DEFAULT_CONFIG = {
     "root_probe_viability_loss_weight": 0.35,
     "probe_pairwise_loss_weight": 0.35,
     "probe_viability_pairwise_loss_weight": 0.35,
+    "same_state_gain_rank_loss_weight": 0.80,
+    "hard_negative_suppression_loss_weight": 0.80,
     "priority_direct_weight": 0.45,
     "priority_evidence_weight": 0.10,
     "priority_transition_gain_weight": 0.25,
@@ -150,6 +152,8 @@ def train_diagnosis_gnn_model(
                 viability_loss = _root_probe_viability_loss(out, batch, F)
                 probe_rank_loss = _probe_pairwise_rank_loss(out, batch)
                 viability_rank_loss = _probe_viability_pairwise_rank_loss(out, batch)
+                same_state_rank_loss = _same_state_gain_rank_loss(out, batch)
+                hard_negative_loss = _hard_negative_suppression_loss(out, batch)
                 loss = (
                     cause_loss
                     + float(config.get("rank_loss_weight", 0.0) or 0.0) * rank_loss
@@ -161,6 +165,8 @@ def train_diagnosis_gnn_model(
                     + float(config.get("root_probe_viability_loss_weight", 0.0) or 0.0) * viability_loss
                     + float(config.get("probe_pairwise_loss_weight", 0.0) or 0.0) * probe_rank_loss
                     + float(config.get("probe_viability_pairwise_loss_weight", 0.0) or 0.0) * viability_rank_loss
+                    + float(config.get("same_state_gain_rank_loss_weight", 0.0) or 0.0) * same_state_rank_loss
+                    + float(config.get("hard_negative_suppression_loss_weight", 0.0) or 0.0) * hard_negative_loss
                 )
             scaler.scale(loss).backward()
             scaler.step(optimizer)
@@ -265,6 +271,8 @@ def _eval_loss(model, loader, device, F, *, aux_weight: float, edge_weight: floa
                 viability_loss = _root_probe_viability_loss(out, batch, F)
                 probe_rank_loss = _probe_pairwise_rank_loss(out, batch)
                 viability_rank_loss = _probe_viability_pairwise_rank_loss(out, batch)
+                same_state_rank_loss = _same_state_gain_rank_loss(out, batch)
+                hard_negative_loss = _hard_negative_suppression_loss(out, batch)
             total += float((
                 cause_loss
                 + float(config.get("rank_loss_weight", 0.0) or 0.0) * rank_loss
@@ -276,6 +284,8 @@ def _eval_loss(model, loader, device, F, *, aux_weight: float, edge_weight: floa
                 + float(config.get("root_probe_viability_loss_weight", 0.0) or 0.0) * viability_loss
                 + float(config.get("probe_pairwise_loss_weight", 0.0) or 0.0) * probe_rank_loss
                 + float(config.get("probe_viability_pairwise_loss_weight", 0.0) or 0.0) * viability_rank_loss
+                + float(config.get("same_state_gain_rank_loss_weight", 0.0) or 0.0) * same_state_rank_loss
+                + float(config.get("hard_negative_suppression_loss_weight", 0.0) or 0.0) * hard_negative_loss
             ).detach().cpu())
             batches += 1
     return total / max(1, batches)
@@ -414,6 +424,47 @@ def _probe_viability_pairwise_rank_loss(out: dict[str, Any], batch):
     if not losses:
         return logits.sum() * 0.0
     return torch.stack(losses).mean()
+
+
+def _same_state_gain_rank_loss(out: dict[str, Any], batch):
+    import torch
+    import torch.nn.functional as F
+
+    if not hasattr(batch, "root_positive_probe_y") or not hasattr(batch, "root_hard_negative_y"):
+        return out["root_case"].sum() * 0.0
+    positives = batch.root_positive_probe_y.float().view_as(out["root_case"])
+    positive_mask = batch.root_positive_probe_mask.float().view_as(positives) if hasattr(batch, "root_positive_probe_mask") else (positives > 0.0).float()
+    hard_negatives = batch.root_hard_negative_y.float().view_as(out["root_case"])
+    hard_negative_mask = batch.root_hard_negative_mask.float().view_as(hard_negatives) if hasattr(batch, "root_hard_negative_mask") else (hard_negatives > 0.0).float()
+    logits = out["root_case"]
+    losses = []
+    for index in range(logits.shape[0]):
+        pos = (positive_mask[index] > 0.0) & (positives[index] > 0.0)
+        neg = (hard_negative_mask[index] > 0.0) & (hard_negatives[index] > 0.0)
+        if int(pos.sum().item()) <= 0 or int(neg.sum().item()) <= 0:
+            continue
+        pos_scores = logits[index][pos]
+        neg_scores = logits[index][neg]
+        pos_values = positives[index][pos].clamp(min=0.05)
+        margin = (0.08 + 0.12 * pos_values).view(-1, 1)
+        losses.append(F.softplus(margin - (pos_scores.view(-1, 1) - neg_scores.view(1, -1))).mean())
+    if not losses:
+        return logits.sum() * 0.0
+    return torch.stack(losses).mean()
+
+
+def _hard_negative_suppression_loss(out: dict[str, Any], batch):
+    import torch
+    import torch.nn.functional as F
+
+    if not hasattr(batch, "root_hard_negative_y"):
+        return out["root_case"].sum() * 0.0
+    hard_negatives = batch.root_hard_negative_y.float().view_as(out["root_case"])
+    mask = batch.root_hard_negative_mask.float().view_as(hard_negatives) if hasattr(batch, "root_hard_negative_mask") else (hard_negatives > 0.0).float()
+    active = (mask > 0.0) & (hard_negatives > 0.0)
+    if int(active.sum().item()) <= 0:
+        return out["root_case"].sum() * 0.0
+    return F.softplus(out["root_case"][active] - 0.15).mean()
 
 
 def _focal_bce_with_logits(logits, labels, *, gamma: float, pos_weight):
@@ -636,6 +687,8 @@ def _predict_score_rows(model, dataset, device) -> dict[str, Any]:
         "transition_gain_labels": [],
         "probe_viability_scores": [],
         "probe_viability_labels": [],
+        "positive_probe_labels": [],
+        "hard_negative_labels": [],
         }
     try:
         import torch
@@ -654,6 +707,8 @@ def _predict_score_rows(model, dataset, device) -> dict[str, Any]:
     transition_gain_labels = []
     probe_viability_scores = []
     probe_viability_labels = []
+    positive_probe_labels = []
+    hard_negative_labels = []
     model.eval()
     with torch.no_grad():
         loader = DataLoader(dataset, batch_size=32)
@@ -677,6 +732,8 @@ def _predict_score_rows(model, dataset, device) -> dict[str, Any]:
                 transition_gain_labels.append(_masked_label_row(batch, "root_transition_gain_y", "root_transition_gain_mask", index, transition_gain_values.shape))
                 probe_viability_scores.append(probe_viability_values[index].tolist())
                 probe_viability_labels.append(_masked_label_row(batch, "root_probe_viability_y", "root_probe_viability_mask", index, probe_viability_values.shape))
+                positive_probe_labels.append(_masked_label_row(batch, "root_positive_probe_y", "root_positive_probe_mask", index, root_values.shape))
+                hard_negative_labels.append(_masked_label_row(batch, "root_hard_negative_y", "root_hard_negative_mask", index, root_values.shape))
                 theory_scores.append(theory_values[theory_batch == index].tolist())
                 theory_labels.append(batch["theory"].y_alignment.detach().cpu()[theory_batch == index].tolist())
                 if edge_batch is not None:
@@ -702,6 +759,8 @@ def _predict_score_rows(model, dataset, device) -> dict[str, Any]:
         "transition_gain_labels": transition_gain_labels,
         "probe_viability_scores": probe_viability_scores,
         "probe_viability_labels": probe_viability_labels,
+        "positive_probe_labels": positive_probe_labels,
+        "hard_negative_labels": hard_negative_labels,
     }
 
 
@@ -820,6 +879,11 @@ def _metrics_from_predictions(predictions: dict[str, Any], *, thresholds: dict[s
             predictions.get("root_scores", []),
             predictions.get("probe_viability_labels", []),
         ),
+        "same_state_gain_pairwise_accuracy": _positive_vs_hard_negative_accuracy(
+            predictions.get("root_scores", []),
+            predictions.get("positive_probe_labels", []),
+            predictions.get("hard_negative_labels", []),
+        ),
         "clean_false_positive_rate": clean_false_positive_rate(predictions["root_scores"], predictions["root_labels"], threshold=root_threshold),
     }
 
@@ -862,6 +926,28 @@ def _probe_pairwise_accuracy(scores: list[list[float]], gain_labels: list[list[f
                     continue
                 total += 1
                 correct += int(float(score_row[left]) > float(score_row[right]))
+    return correct / max(1, total)
+
+
+def _positive_vs_hard_negative_accuracy(
+    scores: list[list[float]],
+    positive_labels: list[list[float]],
+    hard_negative_labels: list[list[float]],
+) -> float:
+    correct = total = 0
+    for score_row, positive_row, hard_row in zip(scores, positive_labels, hard_negative_labels):
+        positives = [
+            index for index, value in enumerate(positive_row)
+            if float(value) > 0.0 and index < len(score_row)
+        ]
+        negatives = [
+            index for index, value in enumerate(hard_row)
+            if float(value) > 0.0 and index < len(score_row)
+        ]
+        for pos in positives:
+            for neg in negatives:
+                total += 1
+                correct += int(float(score_row[pos]) > float(score_row[neg]))
     return correct / max(1, total)
 
 

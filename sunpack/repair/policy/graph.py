@@ -226,7 +226,25 @@ class PolicyRepairGraph:
             self.graph.edges[edge_id] = edge
             visible_edges.append(edge)
         attempted = [edge for edge in visible_edges if _edge_attempt_count(edge) > 0 or edge.candidate_id in current.expanded_candidate_ids]
+        attempted_modules = {
+            edge.module_name
+            for edge in self.graph.edges.values()
+            if edge.from_node_id == current.node_id
+            and edge.module_name
+            and (_edge_attempt_count(edge) > 0 or edge.candidate_id in current.expanded_candidate_ids or edge.status in {"expanded", "expanded_failed", "repeated"})
+        }
+        branch_attempted_modules = _branch_attempted_modules(self.graph, current.node_id)
         fresh = [edge for edge in visible_edges if edge not in attempted]
+        module_fresh = [
+            edge
+            for edge in fresh
+            if not edge.module_name
+            or (edge.module_name not in attempted_modules and edge.module_name not in branch_attempted_modules)
+        ]
+        if not module_fresh and branch_attempted_modules:
+            module_fresh = [edge for edge in fresh if not edge.module_name or edge.module_name not in attempted_modules]
+        if module_fresh:
+            fresh = module_fresh
         exposed = fresh if fresh else attempted
         for edge in fresh:
             edge.status = "frontier"
@@ -604,6 +622,22 @@ def _incoming_edge(graph: PolicyExplorationGraph, node_id: str) -> PolicyGraphEd
         if edge.to_node_id == node_id:
             return edge
     return None
+
+
+def _branch_attempted_modules(graph: PolicyExplorationGraph, node_id: str) -> set[str]:
+    modules: set[str] = set()
+    current_id = str(node_id or "")
+    visited: set[str] = set()
+    while current_id and current_id not in visited:
+        visited.add(current_id)
+        incoming = _incoming_edge(graph, current_id)
+        if incoming is not None and incoming.module_name:
+            modules.add(incoming.module_name)
+        node = graph.nodes.get(current_id)
+        if node is None:
+            break
+        current_id = node.parent_id
+    return modules
 
 
 def _verification_summary(payload: dict[str, Any]) -> dict[str, Any]:

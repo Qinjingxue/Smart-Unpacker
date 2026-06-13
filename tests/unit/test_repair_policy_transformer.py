@@ -79,9 +79,26 @@ def test_policy_transformer_tensorize_and_forward_shapes():
 
     logits = model(item["node_x"], item["memory_x"], item["action_x"])
     promising = model.promising_logit(item["node_x"], item["memory_x"])
+    outputs = model.forward_all(item["node_x"], item["memory_x"], item["action_x"], item["edge_x"])
 
     assert logits.shape[0] == len(sample.actions)
     assert promising.shape == (1,)
+    assert outputs["continue_branch"].shape == (1,)
+    assert outputs["action_continue"].shape[0] == len(sample.actions)
+
+
+def test_policy_transformer_fuses_continuation_head_into_action_logits():
+    sample = build_policy_graph_rows([_runtime_log_row()])[0]
+    item = tensorize_sample(sample)
+    base = build_repair_policy_transformer({"hidden_dim": 32, "heads": 4, "layers": 1, "continuation_score_fusion_weight": 0.0})
+    fused = build_repair_policy_transformer({"hidden_dim": 32, "heads": 4, "layers": 1, "continuation_score_fusion_weight": 0.5})
+
+    base_outputs = base.forward_all(item["node_x"], item["memory_x"], item["action_x"], item["edge_x"])
+    fused_outputs = fused.forward_all(item["node_x"], item["memory_x"], item["action_x"], item["edge_x"])
+
+    assert base_outputs["action_logits"].shape == fused_outputs["action_logits"].shape
+    assert "base_action_logits" in fused_outputs
+    assert (fused_outputs["action_logits"] - fused_outputs["base_action_logits"]).abs().sum().item() > 0.0
 
 
 def test_policy_transformer_tensorize_exposes_exploration_signals():
@@ -220,6 +237,67 @@ def test_teacher_consecutive_undo_rows_keep_undo_best():
     for sample in (first, second):
         best = max(sample.actions, key=lambda action: action.action_q_value)
         assert best.action_type == "undo"
+
+
+def test_transition_labels_cap_undo_without_promising_frontier():
+    row = _undo_transition_row(parent_fresh=0, current_visit_count=1)
+    transition = transition_sample_from_dict(row)
+
+    labelled = annotate_episode_future_best_q([transition])[0]
+    actions = {action.action_type if action.action_type != "module" else action.module_name: action for action in labelled.available_actions}
+
+    assert actions["undo"].action_q_value <= 0.220001
+    assert actions["undo"].features["undo_without_frontier_cap"] == pytest.approx(0.22)
+    assert actions["zip_alt"].action_q_value > actions["undo"].action_q_value
+
+
+def test_transition_labels_prefer_module_after_undo_reopen():
+    row = _undo_transition_row(parent_fresh=0, current_visit_count=2)
+    row["graph_before"]["nodes"]["node_parent"]["exploration"]["fresh_action_count"] = 0
+    row["graph_before"]["nodes"]["node_current"]["exploration"]["fresh_action_count"] = 3
+    transition = transition_sample_from_dict(row)
+
+    labelled = annotate_episode_future_best_q([transition])[0]
+    actions = {action.action_type if action.action_type != "module" else action.module_name: action for action in labelled.available_actions}
+
+    assert actions["zip_alt"].features["post_undo_continue_module_bonus"] == pytest.approx(0.12)
+    assert actions["undo"].features["post_undo_repeat_undo_penalty"] == pytest.approx(0.30)
+    assert actions["zip_alt"].action_q_value > actions["undo"].action_q_value
+
+
+def test_transition_labels_continue_promising_branch_before_undo():
+    row = _undo_transition_row(parent_fresh=4, current_visit_count=1)
+    row["graph_before"]["nodes"]["node_current"]["recovery"] = {"score": 0.35}
+    row["graph_before"]["nodes"]["node_current"]["patch_status"] = "applied"
+    row["graph_before"]["nodes"]["node_current"]["exploration"]["fresh_action_count"] = 4
+    row["graph_before"]["nodes"]["node_current"]["diagnosis_hgt"] = {"root_case": {"scores": {"eocd.cd_size": 0.95}}}
+    row["graph_before"]["nodes"]["node_parent"]["diagnosis_hgt"] = {"root_case": {"scores": {"eocd.cd_size": 0.4}}}
+    transition = transition_sample_from_dict(row)
+
+    labelled = annotate_episode_future_best_q([transition])[0]
+    actions = {action.action_type if action.action_type != "module" else action.module_name: action for action in labelled.available_actions}
+
+    assert actions["zip_alt"].features["branch_continuation_bonus"] > 0.0
+    assert actions["undo"].features["premature_undo_on_promising_branch_penalty"] > 0.0
+    assert actions["zip_alt"].action_q_value > actions["undo"].action_q_value
+
+
+def test_tensorize_exposes_continuation_targets():
+    row = _undo_transition_row(parent_fresh=4, current_visit_count=1)
+    row["graph_before"]["nodes"]["node_current"]["recovery"] = {"score": 0.35}
+    row["graph_before"]["nodes"]["node_current"]["patch_status"] = "applied"
+    row["graph_before"]["nodes"]["node_current"]["exploration"]["fresh_action_count"] = 4
+    sample = build_policy_world_samples([transition_sample_from_dict(row)])[-1].ranking_sample
+
+    item = tensorize_sample(sample)
+
+    assert item["continue_branch"].item() == pytest.approx(1.0)
+    actions = item["actions"]
+    module_index = next(index for index, action in enumerate(actions) if action["action_type"] == "module")
+    undo_index = next(index for index, action in enumerate(actions) if action["action_type"] == "undo")
+    assert item["action_continue_target"][module_index].item() == pytest.approx(1.0)
+    assert item["action_continue_target"][undo_index].item() == pytest.approx(0.0)
+    assert item["action_continue_mask"][undo_index].item() == pytest.approx(1.0)
 
 
 def test_build_policy_teacher_rows_cli_writes_q_labels(tmp_path: Path):
@@ -481,6 +559,72 @@ def _transition_row() -> dict:
         },
         "episode_id": "episode",
         "step_index": 1,
+    }
+
+
+def _undo_transition_row(*, parent_fresh: int, current_visit_count: int) -> dict:
+    graph_before = {
+        "current_node_id": "node_current",
+        "best_node_id": "node_parent",
+        "nodes": {
+            "node_parent": {
+                "node_id": "node_parent",
+                "patch_digest": "parent",
+                "patch_depth": 0,
+                "recovery": {"score": 0.2},
+                "patch_status": "root",
+                "exploration": {
+                    "visit_count": 1,
+                    "fresh_action_count": parent_fresh,
+                    "outgoing_action_count": parent_fresh + 1,
+                    "expanded_action_count": 1,
+                    "exhaustion_ratio": 0.0 if parent_fresh else 1.0,
+                },
+            },
+            "node_current": {
+                "node_id": "node_current",
+                "parent_id": "node_parent",
+                "patch_digest": "current",
+                "patch_depth": 1,
+                "recovery": {"score": 0.1},
+                "patch_status": "empty_failed",
+                "exploration": {
+                    "visit_count": current_visit_count,
+                    "fresh_action_count": 0,
+                    "outgoing_action_count": 2,
+                    "expanded_action_count": 2,
+                    "exhaustion_ratio": 1.0,
+                },
+            },
+        },
+        "edges": {},
+    }
+    graph_after = json.loads(json.dumps(graph_before))
+    graph_after["current_node_id"] = "node_parent"
+    return {
+        "sample_id": "undo_transition_case",
+        "format": "zip",
+        "graph_before": graph_before,
+        "current_node_id": "node_current",
+        "best_node_id": "node_parent",
+        "available_actions": [
+            {"action_type": "module", "action_id": "alt", "module_name": "zip_alt"},
+            {"action_type": "undo", "action_id": "undo"},
+            {"action_type": "stop", "action_id": "stop"},
+        ],
+        "chosen_action": {"action_type": "undo", "action_id": "undo"},
+        "graph_after": graph_after,
+        "action_q_values": {"module:zip_alt": 0.35, "undo:undo": 0.9, "stop:stop": 0.2},
+        "observed_delta": {
+            "next_recovery_score": 0.2,
+            "recovery_delta": 0.1,
+            "patch_status": "root",
+            "best_updated": False,
+            "branch_stale_delta": 0,
+            "diagnosis_root_case_delta": 0.0,
+        },
+        "episode_id": "episode_undo",
+        "step_index": 2,
     }
 
 

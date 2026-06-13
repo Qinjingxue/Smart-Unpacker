@@ -64,7 +64,7 @@ def classify_extract_error(
             return "分卷缺失或不完整"
         if is_split_archive and _worker_reports_payload_damage(worker_result):
             return "压缩包损坏"
-        if worker_result.get("wrong_password") or worker_result.get("native_status") == "wrong_password":
+        if _worker_reports_wrong_password(worker_result):
             return "密码错误"
         if worker_result.get("checksum_error"):
             return "压缩包损坏"
@@ -138,3 +138,26 @@ def _worker_reports_payload_damage(worker_result: dict) -> bool:
         if nested_kind in {"corrupted_data", "data_error", "checksum_error", "crc_error"}:
             return True
     return False
+
+
+def _worker_reports_wrong_password(worker_result: dict) -> bool:
+    if worker_result.get("wrong_password") or worker_result.get("native_status") == "wrong_password":
+        return True
+    if str(worker_result.get("failure_kind") or "").lower() in {
+        "wrong_password",
+        "encrypted_or_wrong_password",
+    }:
+        return True
+    if str(worker_result.get("operation_result_name") or "").lower() == "wrong_password":
+        return True
+    if has_definite_wrong_password(str(worker_result.get("message") or "")):
+        return True
+    diagnostics = worker_result.get("diagnostics")
+    if not isinstance(diagnostics, dict):
+        return False
+    return (
+        str(diagnostics.get("failure_kind") or "").lower()
+        in {"wrong_password", "encrypted_or_wrong_password"}
+        or str(diagnostics.get("operation_result_name") or "").lower() == "wrong_password"
+        or has_definite_wrong_password(str(diagnostics.get("message") or ""))
+    )

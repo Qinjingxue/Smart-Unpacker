@@ -72,12 +72,18 @@ def tensorize_sample(sample: DiagnosisGraphSample):
     evidence_y, evidence_mask = _root_target_vector(sample, "root_evidence_targets")
     transition_y, transition_mask = _root_target_vector(sample, "root_transition_gain_targets")
     viability_y, viability_mask = _root_target_vector(sample, "root_probe_viability_targets")
+    positive_y, positive_mask = _root_target_vector(sample, "root_positive_probe_targets")
+    hard_negative_y, hard_negative_mask = _root_target_vector(sample, "root_hard_negative_targets")
     data.root_evidence_y = torch.tensor(evidence_y, dtype=torch.float32)
     data.root_evidence_mask = torch.tensor(evidence_mask, dtype=torch.float32)
     data.root_transition_gain_y = torch.tensor(transition_y, dtype=torch.float32)
     data.root_transition_gain_mask = torch.tensor(transition_mask, dtype=torch.float32)
     data.root_probe_viability_y = torch.tensor(viability_y, dtype=torch.float32)
     data.root_probe_viability_mask = torch.tensor(viability_mask, dtype=torch.float32)
+    data.root_positive_probe_y = torch.tensor(positive_y, dtype=torch.float32)
+    data.root_positive_probe_mask = torch.tensor(positive_mask, dtype=torch.float32)
+    data.root_hard_negative_y = torch.tensor(hard_negative_y, dtype=torch.float32)
+    data.root_hard_negative_mask = torch.tensor(hard_negative_mask, dtype=torch.float32)
 
     edge_groups: dict[tuple[str, str, str], list[tuple[int, int]]] = {}
     edge_ids_by_type: dict[tuple[str, str, str], list[str]] = {}

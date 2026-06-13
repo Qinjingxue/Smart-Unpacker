@@ -13,6 +13,7 @@ def build_repair_policy_transformer(config: dict[str, Any] | None = None):
         heads=int(config.get("heads", 4)),
         layers=int(config.get("layers", 2)),
         dropout=float(config.get("dropout", 0.15)),
+        continuation_score_fusion_weight=float(config.get("continuation_score_fusion_weight", 0.0) or 0.0),
     )
 
 
@@ -21,9 +22,16 @@ class RepairGraphMemoryPolicyTransformer:
         import torch.nn as nn
 
         class _Model(nn.Module):
-            def __init__(self, hidden_dim: int, heads: int, layers: int, dropout: float):
+            def __init__(self, hidden_dim: int, heads: int, layers: int, dropout: float, continuation_score_fusion_weight: float = 0.0):
                 super().__init__()
-                self.config = {"hidden_dim": hidden_dim, "heads": heads, "layers": layers, "dropout": dropout}
+                self.config = {
+                    "hidden_dim": hidden_dim,
+                    "heads": heads,
+                    "layers": layers,
+                    "dropout": dropout,
+                    "continuation_score_fusion_weight": continuation_score_fusion_weight,
+                }
+                self.continuation_score_fusion_weight = float(continuation_score_fusion_weight or 0.0)
                 self.node_in = nn.Linear(NODE_FEATURE_DIM, hidden_dim)
                 self.edge_in = nn.Linear(EDGE_FEATURE_DIM, hidden_dim)
                 self.memory_in = nn.Linear(MEMORY_FEATURE_DIM, hidden_dim)
@@ -55,6 +63,20 @@ class RepairGraphMemoryPolicyTransformer:
                 self.promising_head = nn.Sequential(
                     nn.LayerNorm(hidden_dim),
                     nn.Linear(hidden_dim, hidden_dim),
+                    nn.GELU(),
+                    nn.Dropout(dropout),
+                    nn.Linear(hidden_dim, 1),
+                )
+                self.continuation_head = nn.Sequential(
+                    nn.LayerNorm(hidden_dim),
+                    nn.Linear(hidden_dim, hidden_dim),
+                    nn.GELU(),
+                    nn.Dropout(dropout),
+                    nn.Linear(hidden_dim, 1),
+                )
+                self.action_continuation_head = nn.Sequential(
+                    nn.LayerNorm(hidden_dim * 2),
+                    nn.Linear(hidden_dim * 2, hidden_dim),
                     nn.GELU(),
                     nn.Dropout(dropout),
                     nn.Linear(hidden_dim, 1),
@@ -101,7 +123,11 @@ class RepairGraphMemoryPolicyTransformer:
                 action_h = self.action_in(action_x).unsqueeze(0)
                 attended, _ = self.query_attention(action_h, context.unsqueeze(0), context.unsqueeze(0))
                 combined = __import__("torch").cat([action_h.squeeze(0), attended.squeeze(0)], dim=-1)
-                return self.scorer(combined).view(-1)
+                pooled = context.mean(dim=0)
+                base_logits = self.scorer(combined).view(-1)
+                continue_branch = self.continuation_head(pooled).view(1)
+                action_continue = self.action_continuation_head(combined).view(-1)
+                return self._fuse_action_logits(base_logits, continue_branch, action_continue)
 
             def forward_all(self, node_x, memory_x, action_x, edge_x=None):
                 import torch
@@ -110,19 +136,41 @@ class RepairGraphMemoryPolicyTransformer:
                 action_h = self.action_in(action_x).unsqueeze(0)
                 attended, _ = self.query_attention(action_h, context.unsqueeze(0), context.unsqueeze(0))
                 combined = torch.cat([action_h.squeeze(0), attended.squeeze(0)], dim=-1)
-                logits = self.scorer(combined).view(-1)
+                base_logits = self.scorer(combined).view(-1)
                 pooled = context.mean(dim=0)
+                continue_branch = self.continuation_head(pooled).view(1)
+                action_continue = self.action_continuation_head(combined).view(-1)
+                logits = self._fuse_action_logits(base_logits, continue_branch, action_continue)
                 return {
                     "action_logits": logits,
+                    "base_action_logits": base_logits,
                     "transition": self.transition_head(combined) if combined.numel() > 0 else self.transition_head(torch.cat([pooled, pooled], dim=-1).view(1, -1)),
                     "uncertainty": self.uncertainty_head(combined) if combined.numel() > 0 else self.uncertainty_head(torch.cat([pooled, pooled], dim=-1).view(1, -1)),
                     "masked": self.masked_graph_head(pooled).view(-1),
                     "promising": self.promising_head(pooled).view(1),
+                    "continue_branch": continue_branch,
+                    "action_continue": action_continue,
                 }
+
+            def _fuse_action_logits(self, base_logits, continue_branch, action_continue):
+                import torch
+
+                weight = float(getattr(self, "continuation_score_fusion_weight", 0.0) or 0.0)
+                if weight <= 0.0:
+                    return base_logits
+                if action_continue.numel() != base_logits.numel():
+                    return base_logits
+                branch_gate = torch.sigmoid(continue_branch).view(1)
+                return base_logits + weight * branch_gate * action_continue
 
             def promising_logit(self, node_x, memory_x, edge_x=None):
                 context = self.encode_context(node_x, memory_x, edge_x)
                 pooled = context.mean(dim=0)
                 return self.promising_head(pooled).view(1)
+
+            def continuation_logit(self, node_x, memory_x, edge_x=None):
+                context = self.encode_context(node_x, memory_x, edge_x)
+                pooled = context.mean(dim=0)
+                return self.continuation_head(pooled).view(1)
 
         return _Model(*args, **kwargs)

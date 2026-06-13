@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from repair_training.core.datasets import read_jsonl, write_json, write_jsonl
+from repair_training.core.diagnosis_gnn.root_cases import ROOT_CASES
 from repair_training.core.repair_policy_transformer.schema import PolicyAction, PolicyGraphTrainingSample
 
 
@@ -382,7 +383,37 @@ def _sanitize_diagnosis_hgt(payload: dict[str, Any]) -> dict[str, Any]:
     output: dict[str, Any] = {}
     if cleaned_root:
         output["root_case"] = cleaned_root
+    diagnostics = payload.get("diagnostics") if isinstance(payload.get("diagnostics"), dict) else {}
+    cleaned_diagnostics: dict[str, Any] = {}
+    for key in (
+        "root_evidence_scores",
+        "root_transition_gain",
+        "root_probe_viability",
+        "priority_components",
+    ):
+        values = diagnostics.get(key) if isinstance(diagnostics.get(key), dict) else payload.get(key)
+        cleaned = _sanitize_root_score_map(values if isinstance(values, dict) else {})
+        if cleaned:
+            cleaned_diagnostics[key] = cleaned
+    summary = diagnostics.get("root_case_score_summary") if isinstance(diagnostics.get("root_case_score_summary"), dict) else {}
+    if summary:
+        cleaned_diagnostics["root_case_score_summary"] = {
+            str(key): _float(value)
+            for key, value in summary.items()
+            if key in {"max_score", "mean_top3", "selected_count", "entropy", "top_margin"}
+        }
+    if cleaned_diagnostics:
+        output["diagnostics"] = cleaned_diagnostics
     return output
+
+
+def _sanitize_root_score_map(values: dict[str, Any]) -> dict[str, float]:
+    roots = set(ROOT_CASES)
+    return {
+        str(key): _float(value)
+        for key, value in sorted(values.items())
+        if str(key) in roots
+    }
 
 
 def _float(value: Any) -> float:

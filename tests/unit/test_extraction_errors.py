@@ -65,6 +65,31 @@ def test_plain_wrong_password_stays_terminal_for_split_archive():
     assert terminal_failure_reason(result) == "wrong_password"
 
 
+def test_worker_failure_kind_classifies_wrong_password_without_boolean_flag():
+    completed = _worker_completed({
+        "wrong_password": False,
+        "native_status": "error",
+        "failure_kind": "encrypted_or_wrong_password",
+        "operation_result_name": "data_error",
+        "message": "archive could not be extracted",
+    })
+
+    assert classify_extract_error(completed, "") == "密码错误"
+
+
+def test_nested_worker_operation_result_classifies_wrong_password():
+    completed = _worker_completed({
+        "wrong_password": False,
+        "native_status": "error",
+        "diagnostics": {
+            "failure_kind": "unknown",
+            "operation_result_name": "wrong_password",
+        },
+    })
+
+    assert classify_extract_error(completed, "") == "密码错误"
+
+
 def _worker_completed(payload: dict) -> subprocess.CompletedProcess:
     event = {"type": "result", **payload}
     return subprocess.CompletedProcess(

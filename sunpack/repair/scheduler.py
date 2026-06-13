@@ -160,10 +160,10 @@ class RepairScheduler:
         proposals = [proposal for proposal in proposals if proposal.action_id in exposed_candidate_ids]
         proposal_by_action_id = {proposal.action_id: proposal for proposal in proposals}
         action_payloads = [proposal.to_action_payload() for proposal in proposals]
-        action_payloads.extend([
-            {"action_type": "undo", "action_id": "undo", "module_name": ""},
-            {"action_type": "stop", "action_id": "stop", "module_name": ""},
-        ])
+        suppress_repeat_undo = _latest_policy_action_type(current_job) == "undo" and bool(action_payloads)
+        if current_node.parent_id and not suppress_repeat_undo:
+            action_payloads.append({"action_type": "undo", "action_id": "undo", "module_name": ""})
+        action_payloads.append({"action_type": "stop", "action_id": "stop", "module_name": ""})
         best_node = graph.best_node() or current_node
         if stop_readiness.get("should_force_stop"):
             action_scores = []
@@ -1442,6 +1442,36 @@ def _latest_policy_graph_payload(job: RepairJob) -> dict[str, Any]:
             if graph:
                 return graph
     return {}
+
+
+def _latest_policy_action_type(job: RepairJob) -> str:
+    sources = []
+    if isinstance(job.repair_history, dict):
+        sources.append(job.repair_history)
+    if isinstance(job.knowledge, dict):
+        repair = job.knowledge.get("repair")
+        if isinstance(repair, dict):
+            history = repair.get("history")
+            if isinstance(history, dict):
+                sources.append(history)
+    for source in sources:
+        items = source.get("items") if isinstance(source.get("items"), list) else []
+        for item in reversed(items):
+            diagnosis = item.get("diagnosis") if isinstance(item, dict) and isinstance(item.get("diagnosis"), dict) else {}
+            loop = diagnosis.get("policy_loop") if isinstance(diagnosis.get("policy_loop"), dict) else {}
+            rounds = loop.get("rounds") if isinstance(loop.get("rounds"), list) else []
+            for round_payload in reversed(rounds):
+                if not isinstance(round_payload, dict):
+                    continue
+                action = round_payload.get("graph_action") if isinstance(round_payload.get("graph_action"), dict) else {}
+                action_type = str(action.get("action_type") or "")
+                if action_type:
+                    return action_type
+            action = loop.get("graph_action") if isinstance(loop.get("graph_action"), dict) else {}
+            action_type = str(action.get("action_type") or "")
+            if action_type:
+                return action_type
+    return ""
 
 
 def _policy_graph_from_payload(payload: dict[str, Any]) -> PolicyExplorationGraph:

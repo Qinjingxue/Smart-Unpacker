@@ -22,7 +22,7 @@ from repair_training.core.repair_policy_transformer.world_rows import _observed_
 from sunpack.repair.policy.graph import PolicyRepairGraph
 
 
-EXPLORATION_POLICIES = ("prior_biased", "family_coverage", "bad_branch", "undo_heavy", "teacher_guided")
+EXPLORATION_POLICIES = ("prior_biased", "deepening", "bad_branch", "undo_heavy", "family_coverage", "stop_probe", "teacher_guided")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -46,6 +46,9 @@ def main(argv: list[str] | None = None) -> int:
         "rollout_depth": args.rollout_depth,
         "max_expansions": args.max_expansions,
         "seed": args.seed,
+        "repeat_module_q_penalty": args.repeat_module_q_penalty,
+        "near_tie_q_spread": args.near_tie_q_spread,
+        "poor_action_q_penalty": args.poor_action_q_penalty,
     }
     started = time.monotonic()
     transitions = _collect_parallel(
@@ -283,6 +286,9 @@ def annotate_episode_future_best_q(transitions: list[PolicyGraphTransitionSample
             )
             for action in transition.available_actions
         ]
+        actions = _shape_action_q_labels(actions, transition, max_known_q=max_known_q)
+        max_known_q = max([stop_q, *[float(action.action_q_value or 0.0) for action in actions]] or [stop_q])
+        actions = [_refresh_action_regret(action, max_known_q=max_known_q) for action in actions]
         chosen = _annotate_action_q(
             transition.chosen_action,
             chosen=transition.chosen_action,
@@ -356,6 +362,230 @@ def _annotate_action_q(
     )
 
 
+def _shape_action_q_labels(
+    actions: list[PolicyAction],
+    transition: PolicyGraphTransitionSample,
+    *,
+    max_known_q: float,
+) -> list[PolicyAction]:
+    before_best = _graph_best_score(transition.graph_before)
+    after_best = _graph_best_score(transition.graph_after)
+    immediate_gain = max(0.0, after_best - before_best)
+    continuation = _branch_continuation_score(transition.graph_before)
+    incoming_module, incoming_family = _incoming_module_family(transition.graph_before)
+    tried_modules, tried_families = _current_node_tried_modules(transition.graph_before)
+    module_history, family_history = _module_history_stats(transition.graph_before)
+    chosen_key = _action_key(transition.chosen_action)
+    best_module_q = max([float(action.action_q_value or 0.0) for action in actions if action.action_type == "module"] or [0.0])
+    output: list[PolicyAction] = []
+    for action in actions:
+        q = float(action.action_q_value or 0.0)
+        features = dict(action.features or {})
+        if action.action_type == "module":
+            family = str(features.get("module_family") or features.get("route_family") or action.module_name or "")
+            same_module = bool(incoming_module and action.module_name == incoming_module)
+            same_family = bool(incoming_family and family == incoming_family)
+            tried_module_count = int(tried_modules.get(action.module_name, 0))
+            tried_family_count = int(tried_families.get(family, 0))
+            history_penalty = _history_penalty(module_history.get(action.module_name, {}), exact=True)
+            if history_penalty <= 0.0:
+                history_penalty = _history_penalty(family_history.get(family, {}), exact=False)
+            if history_penalty > 0.0:
+                q -= history_penalty
+                features["module_history_no_gain_penalty"] = history_penalty
+                exact = module_history.get(action.module_name, {})
+                features["module_history_attempt_count"] = int(exact.get("attempts") or 0)
+                features["module_history_mean_delta"] = float(exact.get("mean_delta") or 0.0)
+                features["module_history_failure_rate"] = float(exact.get("failure_rate") or 0.0)
+                features["module_history_undo_rate"] = float(exact.get("undo_rate") or 0.0)
+            if same_module:
+                q -= 0.35
+                features["repeat_module_q_penalty"] = 0.35
+            elif same_family:
+                q -= 0.15
+                features["repeat_family_q_penalty"] = 0.15
+            if tried_module_count > 0:
+                penalty = min(0.30, 0.12 + 0.06 * max(0, tried_module_count - 1))
+                q -= penalty
+                features["current_node_retried_module_count"] = tried_module_count
+                features["current_node_retried_module_penalty"] = penalty
+            elif tried_family_count > 0:
+                penalty = min(0.16, 0.05 + 0.03 * max(0, tried_family_count - 1))
+                q -= penalty
+                features["current_node_retried_family_count"] = tried_family_count
+                features["current_node_retried_family_penalty"] = penalty
+            if _same_action(action, transition.chosen_action):
+                features["chosen_immediate_gain"] = immediate_gain
+                if immediate_gain <= 0.001 and transition.chosen_action.action_type == "module":
+                    q -= 0.12
+                    features["poor_chosen_action_q_penalty"] = 0.12
+            elif max_known_q - q <= 0.02:
+                q -= 0.04
+                features["near_tie_unexecuted_q_penalty"] = 0.04
+        if action.action_type == "undo":
+            current = _current_node(transition.graph_before)
+            exploration = current.get("exploration") if isinstance(current.get("exploration"), dict) else {}
+            undo_opportunity = _undo_has_promising_frontier(transition.graph_before)
+            if _float(exploration.get("exhaustion_ratio")) >= 0.75 and undo_opportunity:
+                q = max(q, min(1.0, before_best + 0.08))
+                features["undo_promising_frontier_bonus"] = 0.08
+            elif not undo_opportunity:
+                q = min(q - 0.18, before_best + 0.02)
+                features["undo_without_frontier_penalty"] = 0.18
+                features["undo_without_frontier_cap"] = before_best + 0.02
+        if _post_module_deepen_context(transition.graph_before):
+            if action.action_type == "module":
+                q += 0.10
+                features["post_module_deepen_bonus"] = 0.10
+            elif action.action_type == "undo":
+                q -= 0.24
+                features["post_module_immediate_undo_penalty"] = 0.24
+        if action.action_type == "module" and _post_undo_continue_context(transition.graph_before):
+            q += 0.12
+            features["post_undo_continue_module_bonus"] = 0.12
+        if action.action_type == "module" and continuation > 0.08:
+            bonus = min(0.14, 0.05 + continuation * 0.35)
+            q += bonus
+            features["branch_continuation_bonus"] = bonus
+            features["branch_continuation_score"] = continuation
+        if action.action_type == "undo" and _post_undo_continue_context(transition.graph_before):
+            repeat_undo_penalty = 0.30 if not _undo_has_promising_frontier(transition.graph_before) else 0.16
+            q -= repeat_undo_penalty
+            features["post_undo_repeat_undo_penalty"] = repeat_undo_penalty
+        if action.action_type == "undo" and continuation > 0.08:
+            penalty = min(0.24, 0.08 + continuation * 0.35)
+            q = min(q - penalty, max(before_best + 0.02, best_module_q - 0.04))
+            features["premature_undo_on_promising_branch_penalty"] = penalty
+            features["branch_continuation_score"] = continuation
+        if action.action_type == "stop" and max_known_q > before_best + 0.02:
+            q = min(q, before_best)
+            features["premature_stop_penalty_active"] = True
+        output.append(replace(
+            action,
+            action_q_value=_clamp01(q),
+            features=features,
+            q_source=action.q_source or "shaped_episode_future_best",
+        ))
+    return _spread_near_tie_modules(output)
+
+
+def _undo_has_promising_frontier(graph: dict[str, Any]) -> bool:
+    current = _current_node(graph)
+    parent_id = str(current.get("parent_id") or "")
+    if not parent_id:
+        return False
+    nodes = graph.get("nodes") if isinstance(graph.get("nodes"), dict) else {}
+    parent = nodes.get(parent_id) if isinstance(nodes, dict) and isinstance(nodes.get(parent_id), dict) else {}
+    current_score = _score(current.get("recovery") if isinstance(current.get("recovery"), dict) else {})
+    parent_score = _score(parent.get("recovery") if isinstance(parent, dict) and isinstance(parent.get("recovery"), dict) else {})
+    parent_exploration = parent.get("exploration") if isinstance(parent, dict) and isinstance(parent.get("exploration"), dict) else {}
+    current_exploration = current.get("exploration") if isinstance(current.get("exploration"), dict) else {}
+    if _float(parent_exploration.get("fresh_action_count")) > 0:
+        return True
+    if _float(parent_exploration.get("exhaustion_ratio")) < 0.95 and _float(parent_exploration.get("outgoing_action_count")) > _float(parent_exploration.get("expanded_action_count")):
+        return True
+    if _float(parent_exploration.get("subtree_best_recovery")) > max(current_score, parent_score) + 0.02:
+        return True
+    summary = graph.get("graph_summary") if isinstance(graph.get("graph_summary"), dict) else graph.get("summary") if isinstance(graph.get("summary"), dict) else {}
+    if _float(current_exploration.get("fresh_action_count")) <= 0 and _float(summary.get("untried_action_count")) > 0:
+        return True
+    return False
+
+
+def _post_undo_continue_context(graph: dict[str, Any]) -> bool:
+    current = _current_node(graph)
+    exploration = current.get("exploration") if isinstance(current.get("exploration"), dict) else {}
+    if _float(exploration.get("visit_count")) < 2:
+        return False
+    return _float(exploration.get("fresh_action_count")) > 0 or _float(exploration.get("exhaustion_ratio")) < 0.95
+
+
+def _post_module_deepen_context(graph: dict[str, Any]) -> bool:
+    current = _current_node(graph)
+    parent_id = str(current.get("parent_id") or "")
+    if not parent_id:
+        return False
+    if str(current.get("patch_status") or "") != "applied":
+        return False
+    exploration = current.get("exploration") if isinstance(current.get("exploration"), dict) else {}
+    recovery = current.get("recovery") if isinstance(current.get("recovery"), dict) else {}
+    nodes = graph.get("nodes") if isinstance(graph.get("nodes"), dict) else {}
+    parent = nodes.get(parent_id) if isinstance(nodes, dict) and isinstance(nodes.get(parent_id), dict) else {}
+    parent_recovery = parent.get("recovery") if isinstance(parent, dict) and isinstance(parent.get("recovery"), dict) else {}
+    if _score(recovery) + 0.02 < _score(parent_recovery):
+        return False
+    return _float(exploration.get("fresh_action_count")) > 0 or _float(exploration.get("exhaustion_ratio")) < 0.85
+
+
+def _branch_continuation_score(graph: dict[str, Any]) -> float:
+    current = _current_node(graph)
+    parent_id = str(current.get("parent_id") or "")
+    if not parent_id:
+        return 0.0
+    nodes = graph.get("nodes") if isinstance(graph.get("nodes"), dict) else {}
+    parent = nodes.get(parent_id) if isinstance(nodes, dict) and isinstance(nodes.get(parent_id), dict) else {}
+    recovery = current.get("recovery") if isinstance(current.get("recovery"), dict) else {}
+    parent_recovery = parent.get("recovery") if isinstance(parent, dict) and isinstance(parent.get("recovery"), dict) else {}
+    exploration = current.get("exploration") if isinstance(current.get("exploration"), dict) else {}
+    uncertainty = current.get("uncertainty") if isinstance(current.get("uncertainty"), dict) else {}
+    error = current.get("prediction_error_from_parent") if isinstance(current.get("prediction_error_from_parent"), dict) else {}
+    diagnosis = current.get("diagnosis_hgt") if isinstance(current.get("diagnosis_hgt"), dict) else {}
+    parent_diagnosis = parent.get("diagnosis_hgt") if isinstance(parent, dict) and isinstance(parent.get("diagnosis_hgt"), dict) else {}
+    recovery_delta = _score(recovery) - _score(parent_recovery)
+    diagnosis_gain = _diagnosis_max_score(diagnosis) - _diagnosis_max_score(parent_diagnosis)
+    prediction_error = _float(error.get("overall_prediction_error"))
+    patch_status = str(current.get("patch_status") or "")
+    score = 0.0
+    score += max(0.0, recovery_delta) * 1.2
+    score += max(0.0, diagnosis_gain) * 0.35
+    score += 0.08 if patch_status == "applied" else 0.0
+    score += min(0.10, _float(exploration.get("fresh_action_count")) / 64.0)
+    score -= min(0.20, prediction_error * 0.45)
+    score -= min(0.12, _float(uncertainty.get("overall_uncertainty")) * 0.10)
+    if patch_status in {"empty_failed", "empty_noop", "repeated"}:
+        score -= 0.20
+    return _clamp01(score)
+
+
+def _spread_near_tie_modules(actions: list[PolicyAction]) -> list[PolicyAction]:
+    modules = [action for action in actions if action.action_type == "module"]
+    if len(modules) < 3:
+        return actions
+    max_q = max(float(action.action_q_value or 0.0) for action in modules)
+    near = [action for action in modules if max_q - float(action.action_q_value or 0.0) <= 0.02]
+    if len(near) < 3:
+        return actions
+    ordered = sorted(
+        near,
+        key=lambda action: (
+            -float(action.action_q_value or 0.0),
+            str(action.module_name or action.action_id or ""),
+        ),
+    )
+    rank_by_id = {id(action): rank for rank, action in enumerate(ordered)}
+    output: list[PolicyAction] = []
+    for action in actions:
+        rank = rank_by_id.get(id(action))
+        if rank is None:
+            output.append(action)
+            continue
+        penalty = min(0.08, 0.008 * rank)
+        features = {**dict(action.features or {}), "near_tie_rank_spread_penalty": penalty}
+        output.append(replace(action, action_q_value=max(0.0, float(action.action_q_value or 0.0) - penalty), features=features))
+    return output
+
+
+def _refresh_action_regret(action: PolicyAction, *, max_known_q: float) -> PolicyAction:
+    q = _clamp01(float(action.action_q_value or 0.0))
+    tie_margin = 0.006 if action.action_type == "module" else 0.02
+    return replace(
+        action,
+        action_regret=max(0.0, max_known_q - q),
+        best_action_set_member=max_known_q - q <= tie_margin,
+        q_bucket=_q_bucket(q),
+    )
+
+
 def _same_action(left: PolicyAction, right: PolicyAction) -> bool:
     if left.action_id and right.action_id and left.action_id == right.action_id:
         return True
@@ -379,9 +609,33 @@ def _graph_best_score(graph: dict[str, Any]) -> float:
     return best
 
 
+def _current_node(graph: dict[str, Any]) -> dict[str, Any]:
+    nodes = graph.get("nodes") if isinstance(graph.get("nodes"), dict) else {}
+    current_id = str(graph.get("current_node_id") or "")
+    node = nodes.get(current_id) if isinstance(nodes, dict) else {}
+    return dict(node) if isinstance(node, dict) else {}
+
+
 def _score(recovery: dict[str, Any]) -> float:
     try:
         return _clamp01(float(recovery.get("score", recovery.get("completeness", 0.0)) or 0.0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _diagnosis_max_score(diagnosis: dict[str, Any]) -> float:
+    root = diagnosis.get("root_case") if isinstance(diagnosis.get("root_case"), dict) else {}
+    scores = root.get("scores") if isinstance(root.get("scores"), dict) else diagnosis.get("root_case_scores")
+    values: list[float] = []
+    if isinstance(scores, dict):
+        for value in scores.values():
+            values.append(_float(value))
+    return max(values or [0.0])
+
+
+def _float(value: Any) -> float:
+    try:
+        return float(value)
     except (TypeError, ValueError):
         return 0.0
 
@@ -425,6 +679,10 @@ def _choose_action(actions: list[PolicyAction], policy: str, step: int, *, graph
     stop = next((action for action in actions if action.action_type == "stop"), None)
     if policy == "undo_heavy" and undo is not None and step > 1 and step % 2 == 0:
         return undo
+    if policy == "deepening" and modules:
+        return modules[0]
+    if policy == "stop_probe" and stop is not None and step >= 2:
+        return stop
     if policy == "bad_branch" and modules:
         return modules[-1]
     if policy == "family_coverage" and modules:
@@ -452,6 +710,89 @@ def _incoming_module_family(graph: dict[str, Any]) -> tuple[str, str]:
     return str(current.get("module_name") or ""), str(current.get("module_name") or "")
 
 
+def _current_node_tried_modules(graph: dict[str, Any]) -> tuple[dict[str, int], dict[str, int]]:
+    current_id = str(graph.get("current_node_id") or "")
+    edges = graph.get("edges") if isinstance(graph.get("edges"), dict) else {}
+    modules: dict[str, int] = {}
+    families: dict[str, int] = {}
+    for edge in edges.values() if isinstance(edges, dict) else []:
+        if not isinstance(edge, dict) or str(edge.get("from_node_id") or "") != current_id:
+            continue
+        exploration = edge.get("exploration") if isinstance(edge.get("exploration"), dict) else {}
+        attempted = _float(exploration.get("attempt_count")) > 0.0 or str(edge.get("status") or "") in {"expanded", "expanded_failed", "repeated"}
+        if not attempted:
+            continue
+        module = str(edge.get("module_name") or "")
+        family = str(edge.get("module_family") or edge.get("route_family") or module)
+        if module:
+            modules[module] = modules.get(module, 0) + 1
+        if family:
+            families[family] = families.get(family, 0) + 1
+    return modules, families
+
+
+def _module_history_stats(graph: dict[str, Any]) -> tuple[dict[str, dict[str, float]], dict[str, dict[str, float]]]:
+    module_raw: dict[str, dict[str, float]] = {}
+    family_raw: dict[str, dict[str, float]] = {}
+    edges = graph.get("edges") if isinstance(graph.get("edges"), dict) else {}
+    for edge in edges.values() if isinstance(edges, dict) else []:
+        if not isinstance(edge, dict):
+            continue
+        exploration = edge.get("exploration") if isinstance(edge.get("exploration"), dict) else {}
+        attempted = _float(exploration.get("attempt_count")) > 0.0 or str(edge.get("status") or "") in {"expanded", "expanded_failed", "repeated"}
+        if not attempted:
+            continue
+        module = str(edge.get("module_name") or "")
+        family = str(edge.get("module_family") or edge.get("route_family") or module)
+        delta = _float(exploration.get("result_recovery_delta", edge.get("recovery_delta")))
+        failed = 1.0 if str(exploration.get("result_patch_status") or edge.get("patch_status") or edge.get("status") or "") in {"empty_failed", "empty_noop", "expanded_failed", "repeated"} else 0.0
+        undo = min(1.0, _float(exploration.get("undo_count_after_attempt")))
+        if module:
+            _accumulate_history(module_raw.setdefault(module, {}), delta=delta, failed=failed, undo=undo)
+        if family:
+            _accumulate_history(family_raw.setdefault(family, {}), delta=delta, failed=failed, undo=undo)
+    return (
+        {key: _finalize_history(value) for key, value in module_raw.items()},
+        {key: _finalize_history(value) for key, value in family_raw.items()},
+    )
+
+
+def _accumulate_history(payload: dict[str, float], *, delta: float, failed: float, undo: float) -> None:
+    payload["attempts"] = _float(payload.get("attempts")) + 1.0
+    payload["sum_delta"] = _float(payload.get("sum_delta")) + delta
+    payload["failures"] = _float(payload.get("failures")) + failed
+    payload["undos"] = _float(payload.get("undos")) + undo
+
+
+def _finalize_history(payload: dict[str, float]) -> dict[str, float]:
+    attempts = max(1.0, _float(payload.get("attempts")))
+    return {
+        "attempts": attempts,
+        "mean_delta": _float(payload.get("sum_delta")) / attempts,
+        "failure_rate": _float(payload.get("failures")) / attempts,
+        "undo_rate": _float(payload.get("undos")) / attempts,
+    }
+
+
+def _history_penalty(stats: dict[str, float], *, exact: bool) -> float:
+    attempts = _float(stats.get("attempts"))
+    if attempts < (2.0 if exact else 3.0):
+        return 0.0
+    mean_delta = _float(stats.get("mean_delta"))
+    failure_rate = _float(stats.get("failure_rate"))
+    undo_rate = _float(stats.get("undo_rate"))
+    if mean_delta > 0.01 and failure_rate < 0.6:
+        return 0.0
+    pressure = 0.0
+    pressure += 0.10 if mean_delta <= 0.001 else 0.04
+    pressure += min(0.10, failure_rate * 0.12)
+    pressure += min(0.08, undo_rate * 0.10)
+    pressure += min(0.06, (attempts - 1.0) * 0.015)
+    if not exact:
+        pressure *= 0.55
+    return min(0.28 if exact else 0.14, pressure)
+
+
 def _counts(values) -> dict[str, int]:
     counts: dict[str, int] = {}
     for value in values:
@@ -475,6 +816,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--teacher-deep-eval-top-n", type=int, default=5)
     parser.add_argument("--teacher-shallow-eval-top-n", type=int, default=16)
     parser.add_argument("--rollout-depth", type=int, default=2)
+    parser.add_argument("--repeat-module-q-penalty", type=float, default=0.35)
+    parser.add_argument("--near-tie-q-spread", type=float, default=0.04)
+    parser.add_argument("--poor-action-q-penalty", type=float, default=0.12)
     parser.add_argument("--seed", type=int, default=13)
     parser.add_argument("--recovery-mode", choices=["policy_light", "policy_full", "training_oracle"], default="policy_full")
     parser.add_argument("--max-seconds", type=float, default=0.0)

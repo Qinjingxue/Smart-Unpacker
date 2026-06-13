@@ -52,6 +52,8 @@ def main(argv: list[str] | None = None) -> int:
                 "root_probe_viability_loss_weight": args.root_probe_viability_loss_weight,
                 "probe_pairwise_loss_weight": args.probe_pairwise_loss_weight,
                 "probe_viability_pairwise_loss_weight": args.probe_viability_pairwise_loss_weight,
+                "same_state_gain_rank_loss_weight": args.same_state_gain_rank_loss_weight,
+                "hard_negative_suppression_loss_weight": args.hard_negative_suppression_loss_weight,
                 "priority_direct_weight": args.priority_direct_weight,
                 "priority_evidence_weight": args.priority_evidence_weight,
                 "priority_transition_gain_weight": args.priority_transition_gain_weight,
@@ -99,6 +101,14 @@ def main(argv: list[str] | None = None) -> int:
                 "undo_loss_weight": args.undo_loss_weight,
                 "undo_margin": args.undo_margin,
                 "promising_loss_weight": args.promising_loss_weight,
+                "continuation_loss_weight": args.continuation_loss_weight,
+                "action_continuation_loss_weight": args.action_continuation_loss_weight,
+                "continuation_rank_loss_weight": args.continuation_rank_loss_weight,
+                "continuation_rank_margin": args.continuation_rank_margin,
+                "post_undo_switch_loss_weight": args.post_undo_switch_loss_weight,
+                "post_module_deepen_loss_weight": args.post_module_deepen_loss_weight,
+                "branch_context_margin": args.branch_context_margin,
+                "continuation_score_fusion_weight": args.continuation_score_fusion_weight,
                 "stop_margin": args.stop_margin,
                 "transition_loss_weight": args.transition_loss_weight,
                 "masked_graph_loss_weight": args.masked_graph_loss_weight,
@@ -157,6 +167,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--root-probe-viability-loss-weight", type=float, default=None)
     parser.add_argument("--probe-pairwise-loss-weight", type=float, default=None)
     parser.add_argument("--probe-viability-pairwise-loss-weight", type=float, default=None)
+    parser.add_argument("--same-state-gain-rank-loss-weight", type=float, default=None)
+    parser.add_argument("--hard-negative-suppression-loss-weight", type=float, default=None)
     parser.add_argument("--priority-direct-weight", type=float, default=None)
     parser.add_argument("--priority-evidence-weight", type=float, default=None)
     parser.add_argument("--priority-transition-gain-weight", type=float, default=None)
@@ -170,6 +182,14 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--undo-loss-weight", type=float, default=None)
     parser.add_argument("--undo-margin", type=float, default=None)
     parser.add_argument("--promising-loss-weight", type=float, default=None)
+    parser.add_argument("--continuation-loss-weight", type=float, default=None)
+    parser.add_argument("--action-continuation-loss-weight", type=float, default=None)
+    parser.add_argument("--continuation-rank-loss-weight", type=float, default=None)
+    parser.add_argument("--continuation-rank-margin", type=float, default=None)
+    parser.add_argument("--post-undo-switch-loss-weight", type=float, default=None)
+    parser.add_argument("--post-module-deepen-loss-weight", type=float, default=None)
+    parser.add_argument("--branch-context-margin", type=float, default=None)
+    parser.add_argument("--continuation-score-fusion-weight", type=float, default=None)
     parser.add_argument("--stop-margin", type=float, default=None)
     parser.add_argument("--transition-loss-weight", type=float, default=None)
     parser.add_argument("--masked-graph-loss-weight", type=float, default=None)

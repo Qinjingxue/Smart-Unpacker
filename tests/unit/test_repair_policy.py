@@ -113,6 +113,8 @@ def test_policy_step_executes_one_selected_module_and_exits(tmp_path, monkeypatc
     edge = next(iter(result.diagnosis["policy_loop"]["graph"]["edges"].values()))
     assert edge["predicted_next_state"]["predicted_recovery"]["score"] == pytest.approx(0.3)
     assert len(provider.score_requests) == 1
+    assert {action.get("action_type") for action in provider.score_requests[0].available_actions} == {"module", "stop"}
+    assert all(action.get("action_type") != "undo" for action in provider.score_requests[0].available_actions)
 
 
 def test_policy_step_failed_module_creates_empty_patch_node(tmp_path, monkeypatch):

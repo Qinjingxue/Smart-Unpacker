@@ -118,6 +118,36 @@ def test_policy_graph_fresh_first_after_undo_uses_exploration_stats(tmp_path: Pa
     assert next(iter(graph.graph.edges.values())).exploration["undo_count_after_attempt"] == 1
 
 
+def test_policy_graph_fresh_first_hides_same_module_retry_until_exhausted(tmp_path: Path):
+    job = _job(tmp_path)
+    graph = PolicyRepairGraph.initialize(job, PolicyRecoverySnapshot(score=0.1, status="partial"))
+    graph.register_proposals([{"candidate_id": "c1", "module_name": "zip_fix_cd", "route_family": "cd"}], step=1)
+    graph.forward(candidate_id="c1", module_name="zip_fix_cd", materialized_candidate=None, failure={"failure_reason": "failed"}, step=1)
+    graph.undo(step=2)
+
+    proposals = graph.register_proposals([
+        {"candidate_id": "c2", "module_name": "zip_fix_cd", "route_family": "cd"},
+        {"candidate_id": "c3", "module_name": "zip_fix_other", "route_family": "other"},
+    ], step=2)
+
+    assert [edge.candidate_id for edge in proposals] == ["c3"]
+
+
+def test_policy_graph_fresh_first_hides_branch_module_retry_until_exhausted(tmp_path: Path):
+    job = _job(tmp_path)
+    graph = PolicyRepairGraph.initialize(job, PolicyRecoverySnapshot(score=0.1, status="partial"))
+    graph.register_proposals([{"candidate_id": "c1", "module_name": "zip_fix_cd", "route_family": "cd"}], step=1)
+    first = graph.forward(candidate_id="c1", module_name="zip_fix_cd", materialized_candidate=_patch_candidate("zip_fix_cd", job.archive_state, b"one"), step=1)
+    assert first.archive_state is not None
+
+    proposals = graph.register_proposals([
+        {"candidate_id": "c2", "module_name": "zip_fix_cd", "route_family": "cd"},
+        {"candidate_id": "c3", "module_name": "zip_fix_other", "route_family": "other"},
+    ], step=2)
+
+    assert [edge.candidate_id for edge in proposals] == ["c3"]
+
+
 def test_policy_graph_reopens_attempted_candidate_after_exhaustion(tmp_path: Path):
     job = _job(tmp_path)
     graph = PolicyRepairGraph.initialize(job, PolicyRecoverySnapshot(score=0.1, status="partial"))

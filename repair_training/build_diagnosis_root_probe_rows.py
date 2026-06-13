@@ -45,14 +45,29 @@ def build_probe_training_rows(graph_rows: list[dict[str, Any]], probe_rows: list
         transition_targets: dict[str, float] = {}
         evidence_targets: dict[str, float] = {}
         viability_targets: dict[str, float] = {}
+        positive_targets: dict[str, float] = {}
+        hard_negative_targets: dict[str, float] = {}
+        max_gain = max((_probe_gain_score(probe) for probe in probes), default=0.0)
         for probe in probes:
             root = canonical_root_case(str(probe.get("candidate_root") or probe.get("root_case") or ""))
             if not root:
                 continue
-            transition_targets[root] = max(transition_targets.get(root, 0.0), _probe_gain_score(probe))
+            gain = _probe_gain_score(probe)
+            transition_targets[root] = max(transition_targets.get(root, 0.0), gain)
             evidence_targets[root] = max(evidence_targets.get(root, 0.0), _clamp01(_float(probe.get("evidence_delta", probe.get("ak_consistency_delta")))))
             viability_targets[root] = max(viability_targets.get(root, 0.0), _probe_viability_score(probe))
-        updated = _with_auxiliary_targets(row, transition_targets, evidence_targets, viability_targets)
+            if gain > 0.01:
+                positive_targets[root] = max(positive_targets.get(root, 0.0), _normalized_gain(gain, max_gain))
+            if _is_hard_negative_probe(probe):
+                hard_negative_targets[root] = 1.0
+        updated = _with_auxiliary_targets(
+            row,
+            transition_targets,
+            evidence_targets,
+            viability_targets,
+            positive_targets,
+            hard_negative_targets,
+        )
         best_roots = _hard_labels_from_targets(transition_targets, margin=hard_label_margin)
         if best_roots:
             labels = dict(updated.get("labels") or {})
@@ -78,6 +93,8 @@ def _with_auxiliary_targets(
     transition_targets: dict[str, float],
     evidence_targets: dict[str, float],
     viability_targets: dict[str, float],
+    positive_targets: dict[str, float],
+    hard_negative_targets: dict[str, float],
 ) -> dict[str, Any]:
     updated = dict(row)
     labels = dict(updated.get("labels") or {})
@@ -88,6 +105,10 @@ def _with_auxiliary_targets(
         auxiliary["root_evidence_targets"] = dict(sorted(_closed_world_targets(evidence_targets).items()))
     if viability_targets:
         auxiliary["root_probe_viability_targets"] = dict(sorted(_closed_world_targets(viability_targets).items()))
+    if positive_targets:
+        auxiliary["root_positive_probe_targets"] = dict(sorted(_closed_world_targets(positive_targets).items()))
+    if hard_negative_targets:
+        auxiliary["root_hard_negative_targets"] = dict(sorted(_closed_world_targets(hard_negative_targets).items()))
     auxiliary["diagnosis_semantics"] = ACTIONABLE_ROOT_SEMANTICS
     auxiliary["training_objective"] = ROOT_HYPOTHESIS_TRAINING_OBJECTIVE
     labels["auxiliary"] = auxiliary
@@ -127,6 +148,22 @@ def _probe_viability_score(row: dict[str, Any]) -> float:
     if failed_count > 0:
         return 0.0
     return 0.0
+
+
+def _normalized_gain(gain: float, max_gain: float) -> float:
+    if max_gain <= 0.0:
+        return 0.0
+    return _clamp01(gain / max_gain)
+
+
+def _is_hard_negative_probe(row: dict[str, Any]) -> bool:
+    if bool(row.get("hard_negative")):
+        return True
+    if _probe_gain_score(row) > 0.01:
+        return False
+    if int(_float(row.get("patch_state_count"))) > 0:
+        return False
+    return _float(row.get("materialization_failed_count")) > 0.0
 
 
 def _graph_key(row: dict[str, Any]) -> str:
