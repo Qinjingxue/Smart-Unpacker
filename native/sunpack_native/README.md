@@ -114,7 +114,7 @@ Return value:
 {
     "status": "ok",
     "raw_names": [b"name.txt"],
-    "utf8_marked": 1,
+    "utf8_flags": [true],
     "truncated": False,
 }
 ```

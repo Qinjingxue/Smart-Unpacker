@@ -669,11 +669,24 @@ int run_request(const std::string& request) {
     const std::wstring output_dir = utf8_to_wide(json_string_field(request, "output_dir", ""));
     const std::wstring password = utf8_to_wide(json_string_field(request, "password", ""));
     const std::wstring format_hint = utf8_to_wide(json_string_field(request, "format_hint", ""));
+    const std::wstring codepage = utf8_to_wide(json_string_field(request, "codepage", ""));
     const bool dry_run = json_bool_field(request, "dry_run", false);
 
     std::vector<std::wstring> part_paths;
     for (const auto& part : json_string_array_field(request, "part_paths")) {
         part_paths.push_back(utf8_to_wide(part));
+    }
+    std::vector<std::wstring> decoded_names;
+    for (const auto& name : json_string_array_field(request, "decoded_names")) {
+        decoded_names.push_back(utf8_to_wide(name));
+    }
+    if (!codepage.empty() && decoded_names.empty()) {
+        print_json_line(
+            "{\"type\":\"result\",\"job_id\":\"" + json_escape(job_id) +
+            "\",\"status\":\"error\",\"category\":\"invalid_request\","
+            "\"failure_stage\":\"filename_encoding\",\"failure_kind\":\"decoded_names_required\","
+            "\"message\":\"decoded_names is required when codepage is set\"}");
+        return 2;
     }
 
     if (archive_path.empty() || (!dry_run && output_dir.empty())) {
@@ -695,10 +708,10 @@ int run_request(const std::string& request) {
 
     const auto archive_input = parse_archive_input_descriptor(request, archive_path, format_hint, part_paths);
     ExtractArchiveResult result = !archive_input.patches.empty()
-        ? extract_archive_with_patches(dll_path, archive_input.archive_path, archive_input.part_paths, archive_input.ranges, archive_input.patches, archive_input.format_hint, password, output_dir, progress, dry_run)
+        ? extract_archive_with_patches(dll_path, archive_input.archive_path, archive_input.part_paths, archive_input.ranges, archive_input.patches, archive_input.format_hint, password, output_dir, codepage, decoded_names, progress, dry_run)
         : archive_input.ranges.empty()
-        ? extract_archive_with_parts(dll_path, archive_input.archive_path, archive_input.part_paths, archive_input.format_hint, password, output_dir, progress, dry_run)
-        : extract_archive_with_ranges(dll_path, archive_input.archive_path, archive_input.ranges, archive_input.format_hint, password, output_dir, progress, dry_run);
+        ? extract_archive_with_parts(dll_path, archive_input.archive_path, archive_input.part_paths, archive_input.format_hint, password, output_dir, codepage, decoded_names, progress, dry_run)
+        : extract_archive_with_ranges(dll_path, archive_input.archive_path, archive_input.ranges, archive_input.format_hint, password, output_dir, codepage, decoded_names, progress, dry_run);
 
     const bool ok = result.status == PasswordTestStatus::Ok && result.command_ok;
     const std::string failure_fields = ok ? "" :
@@ -728,6 +741,9 @@ int run_request(const std::string& request) {
         ",\"dry_run\":" + std::string(dry_run ? "true" : "false") +
         ",\"open_mode\":\"" + json_escape(wide_to_utf8(archive_input.open_mode)) +
         "\",\"archive_type\":\"" + json_escape(wide_to_utf8(result.archive_type)) +
+        "\",\"requested_codepage\":\"" + json_escape(wide_to_utf8(result.requested_codepage)) +
+        "\",\"applied_codepage\":\"" + json_escape(wide_to_utf8(result.applied_codepage)) +
+        "\",\"filename_decoder\":\"" + json_escape(wide_to_utf8(result.filename_decoder)) +
         "\",\"failed_item\":\"" + json_escape(wide_to_utf8(result.failed_item)) +
         "\",\"message\":\"" + json_escape(result.message) + "\"" +
         failure_fields + diagnostic_fields + "}");

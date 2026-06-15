@@ -11,12 +11,14 @@ class ArchiveMetadataScanResult:
         self.warnings: List[str] = []
         self.reasons: List[str] = reasons or []
         self.selected_codepage: Optional[str] = None
+        self.decoded_names: List[str] = []
+        self.error: Optional[str] = None
         self.confidence: float = 0.0
         self.sample_count: int = 0
 
 class ArchiveMetadataScanner:
-    MAX_ZIP_SAMPLES = 2000
-    MAX_FILENAME_BYTES = 1024 * 1024
+    MAX_ZIP_SAMPLES = 200000
+    MAX_FILENAME_BYTES = 64 * 1024 * 1024
     LIST_TIMEOUT_SECONDS = 5
 
     CODEPAGE_CANDIDATES = (
@@ -83,40 +85,49 @@ class ArchiveMetadataScanner:
     def _scan_zip_central_directory(self, archive_path: str) -> ArchiveMetadataScanResult:
         result = ArchiveMetadataScanResult(archive_path=archive_path, archive_type="zip")
         try:
-            raw_names, utf8_marked, truncated, warning = self._scan_zip_name_samples(archive_path)
+            raw_names, utf8_flags, truncated, warning = self._scan_zip_name_samples(archive_path)
             if warning:
                 result.warnings.append(warning)
                 return result
             result.sample_count = len(raw_names)
             if truncated:
-                result.warnings.append("ZIP 文件名样本达到性能上限，已截断分析")
+                result.error = "ZIP 文件名数量或总长度超过编码识别上限"
+                result.warnings.append(result.error)
+                return result
             if not raw_names:
                 result.reasons.append("ZIP 中央目录没有可分析的文件名")
                 return result
-            if utf8_marked == len(raw_names):
+            if all(utf8_flags):
                 result.reasons.append("ZIP 条目均带 UTF-8 标记，保持默认解压参数")
                 return result
             if all(self._is_ascii_name(raw_name) for raw_name in raw_names):
                 result.reasons.append("ZIP 文件名均为 ASCII，保持默认解压参数")
                 return result
 
-            selected = self._select_codepage(raw_names)
+            unmarked_names = [raw_name for raw_name, utf8 in zip(raw_names, utf8_flags) if not utf8]
+            selected = self._select_codepage(unmarked_names)
             result.confidence = selected["confidence"]
             result.reasons.extend(selected["reasons"])
             if selected["codepage"]:
                 result.selected_codepage = selected["codepage"]
-                result.reasons.append(f"高置信选择 {selected['label']}，解压时追加 -mcp={selected['codepage']}")
+                result.decoded_names = self._decode_names(
+                    raw_names,
+                    utf8_flags,
+                    selected["encoding"],
+                )
+                result.reasons.append(f"高置信选择 {selected['label']}，解压时按 CP{selected['codepage']} 覆盖 ZIP 条目路径")
             else:
-                result.reasons.append("编码置信度不足，保持默认解压参数")
+                result.error = "ZIP 文件名编码置信度不足"
+                result.reasons.append(result.error)
             return result
         except Exception as exc:
             result.warnings.append(f"ZIP 元数据扫描失败: {exc}")
             return result
 
-    def _scan_zip_name_samples(self, archive_path: str) -> Tuple[List[bytes], int, bool, str]:
+    def _scan_zip_name_samples(self, archive_path: str) -> Tuple[List[bytes], List[bool], bool, str]:
         return self._scan_zip_name_samples_native(archive_path)
 
-    def _scan_zip_name_samples_native(self, archive_path: str) -> Tuple[List[bytes], int, bool, str]:
+    def _scan_zip_name_samples_native(self, archive_path: str) -> Tuple[List[bytes], List[bool], bool, str]:
         result = _NATIVE_SCAN_ZIP_NAMES(
             archive_path,
             self.MAX_ZIP_SAMPLES,
@@ -128,23 +139,35 @@ class ArchiveMetadataScanner:
         status = result.get("status")
         warning = self._zip_native_status_warning(status)
         if warning:
-            return [], 0, False, warning
+            return [], [], False, warning
         if status != "ok":
             raise RuntimeError(f"Native ZIP name scanner returned unsupported status: {status}")
 
         raw_names = result.get("raw_names")
-        utf8_marked = result.get("utf8_marked")
+        utf8_flags = result.get("utf8_flags")
         truncated = result.get("truncated")
         if not isinstance(raw_names, list) or not isinstance(truncated, bool):
             raise TypeError("Native ZIP name scanner returned invalid raw_names/truncated")
-        if not isinstance(utf8_marked, int):
-            raise TypeError("Native ZIP name scanner returned invalid utf8_marked")
+        if not isinstance(utf8_flags, list) or len(utf8_flags) != len(raw_names):
+            raise TypeError("Native ZIP name scanner returned invalid utf8_flags")
         normalized_names = []
-        for raw_name in raw_names:
+        normalized_flags = []
+        for raw_name, utf8_flag in zip(raw_names, utf8_flags):
             if not isinstance(raw_name, bytes):
                 raise TypeError("Native ZIP name scanner returned a non-bytes name")
+            if not isinstance(utf8_flag, bool):
+                raise TypeError("Native ZIP name scanner returned a non-bool UTF-8 flag")
             normalized_names.append(raw_name)
-        return normalized_names, utf8_marked, truncated, ""
+            normalized_flags.append(utf8_flag)
+        return normalized_names, normalized_flags, truncated, ""
+
+    @staticmethod
+    def _decode_names(raw_names: List[bytes], utf8_flags: List[bool], encoding: str) -> List[str]:
+        decoded = []
+        for raw_name, utf8_flag in zip(raw_names, utf8_flags):
+            codec = "utf-8" if utf8_flag else encoding
+            decoded.append(raw_name.decode(codec, errors="strict").replace("\\", "/"))
+        return decoded
 
     def _zip_native_status_warning(self, status) -> str:
         warnings = {
@@ -183,12 +206,14 @@ class ArchiveMetadataScanner:
 
         if best["codepage"] and best["score"] >= 12 and lead >= 6 and best["decoded_count"] > 0:
             return {
+                "encoding": best["encoding"],
                 "codepage": best["codepage"],
                 "confidence": round(confidence, 3),
                 "label": best["label"],
                 "reasons": reasons,
             }
         return {
+            "encoding": best["encoding"],
             "codepage": None,
             "confidence": round(confidence, 3),
             "label": best["label"],

@@ -104,6 +104,9 @@ struct ExtractArchiveResult {
     int hresult = 0;
     std::wstring archive_type;
     std::wstring failed_item;
+    std::wstring requested_codepage;
+    std::wstring applied_codepage;
+    std::wstring filename_decoder;
     std::string failure_stage;
     std::string failure_kind;
     std::string message;
@@ -176,6 +179,8 @@ ExtractArchiveResult extract_archive_with_parts(
     const std::wstring& format_hint,
     const std::wstring& password,
     const std::wstring& output_dir,
+    const std::wstring& codepage,
+    const std::vector<std::wstring>& decoded_names,
     ExtractProgressCallback progress = nullptr,
     bool dry_run = false
 );
@@ -187,6 +192,8 @@ ExtractArchiveResult extract_archive_with_ranges(
     const std::wstring& format_hint,
     const std::wstring& password,
     const std::wstring& output_dir,
+    const std::wstring& codepage,
+    const std::vector<std::wstring>& decoded_names,
     ExtractProgressCallback progress = {},
     bool dry_run = false
 );
@@ -200,6 +207,8 @@ ExtractArchiveResult extract_archive_with_patches(
     const std::wstring& format_hint,
     const std::wstring& password,
     const std::wstring& output_dir,
+    const std::wstring& codepage,
+    const std::vector<std::wstring>& decoded_names,
     ExtractProgressCallback progress = {},
     bool dry_run = false
 );

@@ -737,6 +737,8 @@ public:
 
         std::wstring output_dir,
 
+        std::vector<std::wstring> decoded_names,
+
         ExtractProgressCallback progress,
 
         bool dry_run = false,
@@ -748,6 +750,8 @@ public:
         password_(std::move(password)),
 
         output_dir_(std::move(output_dir)),
+
+        decoded_names_(std::move(decoded_names)),
 
         progress_(std::move(progress)),
 
@@ -890,22 +894,18 @@ public:
 
 
         std::wstring name;
-
-        if (get_item_property(archive_, index, kpidPath, value)) {
-
-            name = prop_text(value);
-
+        if (!decoded_names_.empty()) {
+            name = decoded_names_[index];
+        } else {
+            if (get_item_property(archive_, index, kpidPath, value)) {
+                name = prop_text(value);
+            }
+            clear_prop(value);
+            if (name.empty() && get_item_property(archive_, index, kpidName, value)) {
+                name = prop_text(value);
+            }
+            clear_prop(value);
         }
-
-        clear_prop(value);
-
-        if (name.empty() && get_item_property(archive_, index, kpidName, value)) {
-
-            name = prop_text(value);
-
-        }
-
-        clear_prop(value);
 
         if (name.empty()) {
 
@@ -1195,6 +1195,8 @@ private:
     std::wstring password_;
 
     std::wstring output_dir_;
+
+    std::vector<std::wstring> decoded_names_;
 
     ExtractProgressCallback progress_;
 

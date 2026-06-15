@@ -173,10 +173,6 @@ def repair_candidate_log_path(task: Any) -> str:
     return str(get(task, "repair.candidate_log_path", "") or "")
 
 
-def archive_metadata(task: Any) -> dict[str, Any]:
-    return _dict(get(task, "archive.metadata", {}))
-
-
 def archive_repaired(task: Any) -> bool:
     return bool(get(task, "archive.repaired", False))
 

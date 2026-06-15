@@ -1,3 +1,4 @@
+import binascii
 import json
 import subprocess
 import struct
@@ -82,6 +83,31 @@ def _create_zip_with_bad_eocd_count(tmp_path):
     struct.pack_into("<H", data, eocd + 10, 99)
     archive.write_bytes(bytes(data))
     return archive, eocd
+
+
+def _create_shift_jis_zip(tmp_path):
+    archive = tmp_path / "shift-jis.zip"
+    expected_name = "日本語/説明.txt"
+    raw_name = expected_name.encode("cp932")
+    payload = b"shift-jis payload"
+    crc = binascii.crc32(payload) & 0xFFFFFFFF
+    local = struct.pack(
+        "<IHHHHHIIIHH",
+        0x04034B50, 20, 0, 0, 0, 0, crc,
+        len(payload), len(payload), len(raw_name), 0,
+    ) + raw_name + payload
+    central = struct.pack(
+        "<IHHHHHHIIIHHHHHII",
+        0x02014B50, 20, 20, 0, 0, 0, 0, crc,
+        len(payload), len(payload), len(raw_name),
+        0, 0, 0, 0, 0, 0,
+    ) + raw_name
+    eocd = struct.pack(
+        "<IHHHHIIH",
+        0x06054B50, 0, 0, 1, 1, len(central), len(local), 0,
+    )
+    archive.write_bytes(local + central + eocd)
+    return archive, expected_name, payload
 
 
 def test_worker_failed_result_includes_diagnostics(tmp_path):
@@ -294,6 +320,37 @@ def test_worker_dry_run_reports_success_diagnostics_without_writing(tmp_path):
     assert output_trace["items"]
     assert output_trace["items"][0]["path"].endswith(filename)
     assert not dry_output.exists()
+
+
+def test_worker_applies_explicit_shift_jis_item_paths(tmp_path):
+    worker = _require_worker_or_skip()
+    seven_zip_dll = _require_7z_dll_or_skip()
+    archive, expected_name, payload_bytes = _create_shift_jis_zip(tmp_path)
+    out_dir = tmp_path / "out"
+    payload = {
+        "job_id": "shift-jis",
+        "seven_zip_dll_path": seven_zip_dll,
+        "archive_path": str(archive),
+        "output_dir": str(out_dir),
+        "format_hint": "zip",
+        "codepage": "932",
+        "decoded_names": [expected_name],
+    }
+
+    result = subprocess.run(
+        [worker],
+        input=json.dumps(payload, ensure_ascii=False),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    worker_result = _worker_result(result.stdout)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert worker_result["requested_codepage"] == "932"
+    assert worker_result["applied_codepage"] == "932"
+    assert worker_result["filename_decoder"] == "sunpack_zip_raw_names"
+    assert (out_dir / "日本語" / "説明.txt").read_bytes() == payload_bytes
 
 
 def test_extraction_scheduler_saves_process_failure_diagnostics(tmp_path):

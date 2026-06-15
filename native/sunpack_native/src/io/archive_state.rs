@@ -1,4 +1,5 @@
 use base64::Engine;
+use encoding_rs::{BIG5, GBK, SHIFT_JIS};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList};
 use sha2::{Digest, Sha256};
@@ -55,16 +56,17 @@ pub(crate) fn archive_state_write_to_file_native(
 }
 
 #[pyfunction]
-#[pyo3(signature = (source, patches, max_items=200000, password=None))]
+#[pyo3(signature = (source, patches, max_items=200000, password=None, codepage=None))]
 pub(crate) fn archive_state_zip_manifest_native(
     py: Python<'_>,
     source: &Bound<'_, PyDict>,
     patches: &Bound<'_, PyList>,
     max_items: usize,
     password: Option<&str>,
+    codepage: Option<&str>,
 ) -> PyResult<Py<PyDict>> {
     let data = materialize_archive_state(source, patches)?;
-    zip_manifest_from_bytes(py, &data, max_items, password).map(|value| value.unbind())
+    zip_manifest_from_bytes(py, &data, max_items, password, codepage).map(|value| value.unbind())
 }
 
 pub(crate) fn materialize_archive_state(
@@ -466,6 +468,7 @@ fn zip_manifest_from_bytes<'py>(
     data: &[u8],
     max_items: usize,
     password: Option<&str>,
+    codepage: Option<&str>,
 ) -> PyResult<Bound<'py, PyDict>> {
     let result = PyDict::new(py);
     result.set_item("source", "archive_state_native_zip_central_directory")?;
@@ -518,7 +521,7 @@ fn zip_manifest_from_bytes<'py>(
             break;
         }
         item_count += 1;
-        let name = decode_zip_filename(&data[name_start..name_end], flags);
+        let name = decode_zip_filename(&data[name_start..name_end], flags, codepage)?;
         if !name.ends_with('/') && file_count < max_items {
             let item = PyDict::new(py);
             item.set_item("path", &name)?;
@@ -562,15 +565,36 @@ fn zip_manifest_from_bytes<'py>(
     Ok(result)
 }
 
-fn decode_zip_filename(raw: &[u8], flags: u16) -> String {
+fn decode_zip_filename(raw: &[u8], flags: u16, codepage: Option<&str>) -> PyResult<String> {
     const ZIP_UTF8_FLAG: u16 = 1 << 11;
     if flags & ZIP_UTF8_FLAG != 0 {
-        return String::from_utf8_lossy(raw).replace('\\', "/");
+        return String::from_utf8(raw.to_vec())
+            .map(|value| value.replace('\\', "/"))
+            .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()));
     }
-    raw.iter()
+    if let Some(codepage) = codepage.filter(|value| !value.is_empty()) {
+        let encoding = match codepage {
+            "932" => SHIFT_JIS,
+            "936" => GBK,
+            "950" => BIG5,
+            other => {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "unsupported ZIP filename codepage: {other}"
+                )))
+            }
+        };
+        let (decoded, _, had_errors) = encoding.decode(raw);
+        if had_errors {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "ZIP filename is invalid for codepage {codepage}"
+            )));
+        }
+        return Ok(decoded.replace('\\', "/"));
+    }
+    Ok(raw.iter()
         .map(|byte| cp437_char(*byte))
         .collect::<String>()
-        .replace('\\', "/")
+        .replace('\\', "/"))
 }
 
 fn cp437_char(byte: u8) -> char {
@@ -607,15 +631,23 @@ mod tests {
 
     #[test]
     fn zip_filename_decoder_uses_cp437_when_utf8_flag_is_absent() {
-        assert_eq!(decode_zip_filename(b"caf\x82.txt", 0), "café.txt");
-        assert_eq!(decode_zip_filename(b"dir\\file.txt", 0), "dir/file.txt");
+        assert_eq!(decode_zip_filename(b"caf\x82.txt", 0, None).unwrap(), "café.txt");
+        assert_eq!(decode_zip_filename(b"dir\\file.txt", 0, None).unwrap(), "dir/file.txt");
     }
 
     #[test]
     fn zip_filename_decoder_uses_utf8_when_flag_is_set() {
         assert_eq!(
-            decode_zip_filename("目录/文件.txt".as_bytes(), 1 << 11),
+            decode_zip_filename("目录/文件.txt".as_bytes(), 1 << 11, None).unwrap(),
             "目录/文件.txt"
+        );
+    }
+
+    #[test]
+    fn zip_filename_decoder_uses_selected_shift_jis_codepage() {
+        assert_eq!(
+            decode_zip_filename(b"\x93\xfa\x96{\x8c\xea.txt", 0, Some("932")).unwrap(),
+            "日本語.txt"
         );
     }
 }

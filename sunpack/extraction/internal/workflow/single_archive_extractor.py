@@ -170,8 +170,28 @@ class SingleArchiveExtractor:
                                 diagnostics=self._diagnostics_from(test_result),
                             )
 
-                with _phase(phase_timer, f"{phase_prefix}_codepage_from_facts"):
-                    selected_codepage = self._codepage_from_facts(task)
+                with _phase(phase_timer, f"{phase_prefix}_scan_filename_encoding"):
+                    filename_encoding = self.metadata_scanner.scan(
+                        run_archive,
+                        password=correct_pwd,
+                        part_paths=run_parts,
+                    )
+                    selected_codepage = filename_encoding.selected_codepage
+                    if filename_encoding.error:
+                        return self._failed(
+                            archive,
+                            out_dir,
+                            run_parts,
+                            filename_encoding.error,
+                            password_used=correct_pwd,
+                            diagnostics={
+                                "failure_stage": "filename_encoding",
+                                "failure_kind": "filename_encoding_detection",
+                                "message": filename_encoding.error,
+                                "warnings": list(filename_encoding.warnings),
+                                "reasons": list(filename_encoding.reasons),
+                            },
+                        )
 
                 if correct_pwd is None:
                     err = test_err
@@ -183,6 +203,7 @@ class SingleArchiveExtractor:
                             out_dir=out_dir,
                             password=correct_pwd,
                             selected_codepage=selected_codepage,
+                            decoded_names=filename_encoding.decoded_names,
                             startupinfo=startupinfo,
                             runtime_scheduler=runtime_scheduler,
                             task=task,
@@ -338,13 +359,6 @@ class SingleArchiveExtractor:
             part_paths=part_paths,
             archive_key=task.key,
         )
-
-    @staticmethod
-    def _codepage_from_facts(task: ArchiveTask) -> str | None:
-        metadata = knowledge_view.get(task, "archive.metadata", {})
-        if isinstance(metadata, dict) and metadata.get("selected_codepage"):
-            return str(metadata.get("selected_codepage"))
-        return None
 
     @staticmethod
     def _task_requires_password(task: ArchiveTask) -> bool:

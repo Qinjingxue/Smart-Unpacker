@@ -17,7 +17,7 @@ const MAX_ZIP_COMMENT_BYTES: u64 = 65_535;
 struct ZipNameScan {
     status: &'static str,
     raw_names: Vec<Vec<u8>>,
-    utf8_marked: usize,
+    utf8_flags: Vec<bool>,
     truncated: bool,
 }
 
@@ -26,7 +26,7 @@ impl ZipNameScan {
         Self {
             status,
             raw_names: Vec::new(),
-            utf8_marked: 0,
+            utf8_flags: Vec::new(),
             truncated: false,
         }
     }
@@ -39,7 +39,7 @@ impl ZipNameScan {
         }
         dict.set_item("status", self.status)?;
         dict.set_item("raw_names", names)?;
-        dict.set_item("utf8_marked", self.utf8_marked)?;
+        dict.set_item("utf8_flags", self.utf8_flags)?;
         dict.set_item("truncated", self.truncated)?;
         Ok(dict.unbind())
     }
@@ -112,7 +112,7 @@ fn collect_zip_names(
     max_filename_bytes: usize,
 ) -> ZipNameScan {
     let mut raw_names: Vec<Vec<u8>> = Vec::new();
-    let mut utf8_marked = 0;
+    let mut utf8_flags = Vec::new();
     let mut filename_bytes = 0;
     let mut offset = 0;
     let expected_entries = if total_entries == 0 {
@@ -143,10 +143,8 @@ fn collect_zip_names(
         let raw_name = &central[name_start..name_end];
         if !raw_name.is_empty() {
             raw_names.push(raw_name.to_vec());
+            utf8_flags.push(flags & ZIP_UTF8_FLAG != 0);
             filename_bytes += raw_name.len();
-            if flags & ZIP_UTF8_FLAG != 0 {
-                utf8_marked += 1;
-            }
         }
         offset = next_offset;
         if filename_bytes >= max_filename_bytes {
@@ -158,7 +156,7 @@ fn collect_zip_names(
     ZipNameScan {
         status: "ok",
         raw_names,
-        utf8_marked,
+        utf8_flags,
         truncated,
     }
 }
@@ -210,7 +208,7 @@ mod tests {
 
         assert_eq!(scan.status, "ok");
         assert_eq!(scan.raw_names, vec![raw_name.to_vec()]);
-        assert_eq!(scan.utf8_marked, 1);
+        assert_eq!(scan.utf8_flags, vec![true]);
         assert!(!scan.truncated);
         let _ = fs::remove_file(path);
     }

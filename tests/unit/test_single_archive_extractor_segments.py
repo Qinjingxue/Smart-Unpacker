@@ -4,6 +4,7 @@ from sunpack.analysis.knowledge import write_extractable_segments
 from sunpack.contracts.detection import FactBag
 from sunpack.contracts.tasks import ArchiveTask, SplitArchiveInfo
 from sunpack.extraction.internal.workflow.single_archive_extractor import SingleArchiveExtractor
+from sunpack.extraction.internal.sevenzip.metadata import ArchiveMetadataScanner
 
 
 class _FakePasswordStore:
@@ -119,7 +120,7 @@ def test_extractor_runs_analysis_segments_inside_same_task_and_restores_source(t
         seven_z_path="7z",
         password_store=_FakePasswordStore(),
         password_resolver=_FakePasswordResolver(),
-        metadata_scanner=None,
+        metadata_scanner=ArchiveMetadataScanner(),
         rename_scheduler=_FakeRenameScheduler(),
         ensure_space=lambda _gb: True,
         retry_policy=_FakeRetryPolicy(),
@@ -148,7 +149,7 @@ def test_extractor_fills_success_output_counts_when_worker_omits_them(tmp_path):
         seven_z_path="7z",
         password_store=_FakePasswordStore(),
         password_resolver=_FakePasswordResolver(),
-        metadata_scanner=None,
+        metadata_scanner=ArchiveMetadataScanner(),
         rename_scheduler=_FakeRenameScheduler(),
         ensure_space=lambda _gb: True,
         retry_policy=_FakeRetryPolicy(),

@@ -158,6 +158,10 @@ ExtractArchiveResult extract_archive_internal(
 
     const std::wstring& output_dir,
 
+    const std::wstring& codepage,
+
+    const std::vector<std::wstring>& decoded_names,
+
     ExtractProgressCallback progress,
 
     bool dry_run = false
@@ -167,6 +171,7 @@ ExtractArchiveResult extract_archive_internal(
     ExtractArchiveResult result;
 
     result.backend_available = true;
+    result.requested_codepage = codepage;
 
     bool any_format_created = false;
 
@@ -328,11 +333,30 @@ ExtractArchiveResult extract_archive_internal(
 
         }
 
+        if (!codepage.empty()) {
+            if (decoded_names.size() != num_items) {
+                archive->Close();
+                result.status = PasswordTestStatus::Error;
+                set_failure(result, "filename_encoding", "decoded_name_count_mismatch");
+                result.message = "decoded ZIP filename count does not match archive item count";
+                return result;
+            }
+            result.applied_codepage = codepage;
+            result.filename_decoder = L"sunpack_zip_raw_names";
+        }
+
 
 
         result.archive_type = !format_hint.empty() ? format_hint : archive_type_for_path(archive_path);
 
-        auto* raw_extract_callback = new ExtractToDiskCallback(archive.get(), password, output_dir, std::move(progress), dry_run, &result.output_trace);
+        auto* raw_extract_callback = new ExtractToDiskCallback(
+            archive.get(),
+            password,
+            output_dir,
+            decoded_names,
+            std::move(progress),
+            dry_run,
+            &result.output_trace);
 
         ComPtr<IArchiveExtractCallback> extract_callback(raw_extract_callback);
 
@@ -628,6 +652,10 @@ ExtractArchiveResult extract_archive_with_parts(
 
     const std::wstring& output_dir,
 
+    const std::wstring& codepage,
+
+    const std::vector<std::wstring>& decoded_names,
+
     ExtractProgressCallback progress,
 
     bool dry_run
@@ -676,6 +704,10 @@ ExtractArchiveResult extract_archive_with_parts(
 
         output_dir,
 
+        codepage,
+
+        decoded_names,
+
         std::move(progress),
 
         dry_run);
@@ -693,6 +725,10 @@ ExtractArchiveResult extract_archive_with_parts(
     (void)password;
 
     (void)output_dir;
+
+    (void)codepage;
+
+    (void)decoded_names;
 
     (void)progress;
 
@@ -729,6 +765,10 @@ ExtractArchiveResult extract_archive_with_ranges(
     const std::wstring& password,
 
     const std::wstring& output_dir,
+
+    const std::wstring& codepage,
+
+    const std::vector<std::wstring>& decoded_names,
 
     ExtractProgressCallback progress,
 
@@ -774,6 +814,10 @@ ExtractArchiveResult extract_archive_with_ranges(
 
         output_dir,
 
+        codepage,
+
+        decoded_names,
+
         std::move(progress),
 
         dry_run);
@@ -791,6 +835,10 @@ ExtractArchiveResult extract_archive_with_ranges(
     (void)password;
 
     (void)output_dir;
+
+    (void)codepage;
+
+    (void)decoded_names;
 
     (void)progress;
 
@@ -831,6 +879,10 @@ ExtractArchiveResult extract_archive_with_patches(
     const std::wstring& password,
 
     const std::wstring& output_dir,
+
+    const std::wstring& codepage,
+
+    const std::vector<std::wstring>& decoded_names,
 
     ExtractProgressCallback progress,
 
@@ -880,6 +932,10 @@ ExtractArchiveResult extract_archive_with_patches(
 
         output_dir,
 
+        codepage,
+
+        decoded_names,
+
         std::move(progress),
 
         dry_run);
@@ -901,6 +957,10 @@ ExtractArchiveResult extract_archive_with_patches(
     (void)password;
 
     (void)output_dir;
+
+    (void)codepage;
+
+    (void)decoded_names;
 
     (void)progress;
 

@@ -155,6 +155,7 @@ class SevenZipRunner:
         out_dir: str,
         password: str | None,
         selected_codepage: str | None,
+        decoded_names: list[str],
         startupinfo,
         runtime_scheduler: Any,
         task: ArchiveTask,
@@ -169,6 +170,7 @@ class SevenZipRunner:
                     out_dir=out_dir,
                     password=password,
                     selected_codepage=selected_codepage,
+                    decoded_names=decoded_names,
                     task=task,
                     phase_timer=phase_timer,
                     phase_prefix=f"{phase_prefix}_build_job",
@@ -227,6 +229,7 @@ class SevenZipRunner:
         out_dir: str,
         password: str | None,
         selected_codepage: str | None,
+        decoded_names: list[str],
         task: ArchiveTask,
         phase_timer: Any | None = None,
         phase_prefix: str = "sevenzip_build_job",
@@ -241,6 +244,7 @@ class SevenZipRunner:
         }
         if selected_codepage:
             job["codepage"] = selected_codepage
+            job["decoded_names"] = list(decoded_names)
 
         with _phase(phase_timer, f"{phase_prefix}_archive_state"):
             archive_state = self._archive_state(task)

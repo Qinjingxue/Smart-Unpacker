@@ -39,16 +39,28 @@ class ArchiveStateManifest:
 
 
 def archive_state_manifest_for_evidence(evidence, *, max_items: int = 200000) -> ArchiveStateManifest:
-    cache_key = f"_archive_state_manifest_cache_{max(0, int(max_items or 0))}"
+    codepage = str(evidence.selected_codepage or "")
+    cache_key = f"_archive_state_manifest_cache_{max(0, int(max_items or 0))}_{codepage}"
     cached = getattr(evidence, cache_key, None)
     if isinstance(cached, ArchiveStateManifest):
         return cached
-    manifest = archive_state_manifest(evidence.archive_state, max_items=max_items, password=evidence.password)
+    manifest = archive_state_manifest(
+        evidence.archive_state,
+        max_items=max_items,
+        password=evidence.password,
+        codepage=codepage or None,
+    )
     object.__setattr__(evidence, cache_key, manifest)
     return manifest
 
 
-def archive_state_manifest(state: ArchiveState, *, max_items: int = 200000, password: str | None = None) -> ArchiveStateManifest:
+def archive_state_manifest(
+    state: ArchiveState,
+    *,
+    max_items: int = 200000,
+    password: str | None = None,
+    codepage: str | None = None,
+) -> ArchiveStateManifest:
     patch_digest = state.effective_patch_digest()
     hint = _format_hint(state)
     if hint and hint != "zip" and not Path(state.source.entry_path).suffix.lower() == ".zip":
@@ -70,6 +82,7 @@ def archive_state_manifest(state: ArchiveState, *, max_items: int = 200000, pass
             [patch.to_dict() for patch in state.patches],
             max_items,
             password,
+            codepage,
         ))
     except (OSError, ValueError, UnsupportedArchivePatch) as exc:
         return ArchiveStateManifest(

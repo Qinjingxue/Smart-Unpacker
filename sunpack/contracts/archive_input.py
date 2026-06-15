@@ -428,7 +428,6 @@ class ArchiveRepairState:
 @dataclass(frozen=True)
 class ArchiveRuntimeState:
     output_dir: str = ""
-    codepage: str = ""
     diagnostics: dict[str, Any] = field(default_factory=dict)
 
 

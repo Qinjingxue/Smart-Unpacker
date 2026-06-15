@@ -1,5 +1,6 @@
 import struct
 import zipfile
+import zlib
 import gzip
 import io
 import tarfile
@@ -418,3 +419,34 @@ def test_archive_state_manifest_verifies_chunyu_embedded_zip_range():
     assert manifest.damaged is False
     assert manifest.checksum_error is False
     assert manifest.file_count == 447
+
+
+def test_archive_state_manifest_uses_selected_shift_jis_codepage(tmp_path):
+    archive = tmp_path / "shift-jis.zip"
+    raw_name = "日本語/説明.txt".encode("cp932")
+    payload = b"payload"
+    crc = zlib.crc32(payload) & 0xFFFFFFFF
+    local = struct.pack(
+        "<IHHHHHIIIHH",
+        0x04034B50, 20, 0, 0, 0, 0, crc,
+        len(payload), len(payload), len(raw_name), 0,
+    ) + raw_name + payload
+    central = struct.pack(
+        "<IHHHHHHIIIHHHHHII",
+        0x02014B50, 20, 20, 0, 0, 0, 0, crc,
+        len(payload), len(payload), len(raw_name),
+        0, 0, 0, 0, 0, 0,
+    ) + raw_name
+    eocd = struct.pack(
+        "<IHHHHIIH",
+        0x06054B50, 0, 0, 1, 1, len(central), len(local), 0,
+    )
+    archive.write_bytes(local + central + eocd)
+    state = ArchiveState.from_archive_input(
+        ArchiveInputDescriptor.from_parts(archive_path=str(archive), format_hint="zip")
+    )
+
+    manifest = archive_state_manifest(state, codepage="932")
+
+    assert manifest.ok
+    assert manifest.expected_names == ["日本語/説明.txt"]
