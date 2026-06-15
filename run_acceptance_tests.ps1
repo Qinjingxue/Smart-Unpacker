@@ -156,7 +156,7 @@ function Test-PythonImports {
     )
 
     $importList = ($Modules | ForEach-Object { "'$_'" }) -join ", "
-    & $PythonPath -c "import importlib.util, sys; modules = [$importList]; missing = [name for name in modules if importlib.util.find_spec(name) is None]; sys.exit(0 if not missing else 1)" *> $null
+    & $PythonPath -c "import importlib; modules = [$importList]; [importlib.import_module(name) for name in modules]" *> $null
     return ($LASTEXITCODE -eq 0)
 }
 
@@ -221,8 +221,18 @@ function Get-EnvironmentRefreshReasons {
         return $reasons
     }
 
-    if (-not (Test-PythonImports -PythonPath $VenvPython -Modules @("pytest", "psutil", "send2trash", "watchdog", "zstandard"))) {
-        $reasons.Add(".venv is missing runtime/test modules")
+    $requiredPythonModules = @(
+        "pytest",
+        "psutil",
+        "send2trash",
+        "watchdog",
+        "zstandard",
+        "torch",
+        "torch_geometric",
+        "numpy"
+    )
+    if (-not (Test-PythonImports -PythonPath $VenvPython -Modules $requiredPythonModules)) {
+        $reasons.Add(".venv is missing or cannot import runtime, test, or model modules")
     }
 
     & $VenvPython -c (Get-NativeSmokeCode) *> $null
@@ -328,9 +338,10 @@ $env:PYTHONPATH = $repoRoot
 
 Invoke-TestStep -Label "Unit tests" -Command @($python, "-m", "pytest", "-q", "tests/unit")
 Invoke-TestStep -Label "Functional tests" -Command @($python, "-m", "pytest", "-q", "tests/functional")
+Invoke-TestStep -Label "Integration tests" -Command @($python, "-m", "pytest", "-q", "tests/integration")
 Invoke-TestStep -Label "CLI contract tests" -Command @($python, "-m", "pytest", "-q", "tests/cli")
 Invoke-TestStep -Label "Data case runners" -Command @($python, "-m", "pytest", "-q", "tests/runners")
-Invoke-TestStep -Label "Split archive repair regressions" -Command @($python, "tests\performance_split_archives\split_archive_pressure.py", "--profile", "acceptance-batch", "--formats", "7z,rar", "--strict", "--no-json")
+Invoke-TestStep -Label "Training boundary tests" -Command @($python, "-m", "pytest", "-q", "tests/training")
 Invoke-TestStep -Label "Archive mixed-batch acceptance" -Command @($python, "tests\performance_split_archives\split_archive_pressure.py", "--profile", "acceptance-batch", "--strict", "--no-json")
 Invoke-TestStep -Label "CLI help smoke test" -Command @($python, "sunpack.py", "--help")
 Invoke-TestStep -Label "CLI passwords smoke test" -Command @($python, "sunpack.py", "passwords", "--json")
@@ -345,5 +356,5 @@ foreach ($result in $script:StepResults) {
 }
 
 Write-Host ""
-Write-Host "All V2 acceptance tests passed." -ForegroundColor Green
+Write-Host "All acceptance tests passed." -ForegroundColor Green
 Wait-BeforeExit

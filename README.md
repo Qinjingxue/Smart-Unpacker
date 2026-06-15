@@ -240,5 +240,3 @@ Windows 打包：
 构建脚本会准备 `.venv-build`，从 `pyproject.toml` 安装 `build` extra，构建 Rust wheel 和 C++ bridge/worker，用 PyInstaller 生成 `sunpack.exe`，复制配置、模型资产、工具和 license，并执行 packaged smoke 与模型加载检查。发行包输出到 `release\sunpack-windows-<arch>-<version>.zip`。
 
 构建脚本支持 `-Arch x64|arm64`。`x64` 是默认值；ARM64 最终可执行文件需要在 ARM64 Windows + ARM64 Python 环境中构建，脚本会静态校验包内所有关键 PE 文件的 machine 架构。已有包可用 `.\scripts\verify_windows_package_arch.ps1 -PackageRoot <dist目录> -Arch arm64` 在任意 Windows 机器上做静态检查。
-
-项目不再维护公有/私有两个版本。源码、模型运行时、训练与评估工具、原生组件和 Windows 构建链路统一保存在本仓库中。

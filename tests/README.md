@@ -55,7 +55,7 @@ pytest tests/runners -q
 .\scripts\run_ci_tests.ps1
 ```
 
-`run_acceptance_tests.ps1` 会分步运行 unit、functional、integration、CLI、runner 和 CLI smoke checks。`scripts/run_ci_tests.ps1` 会运行 unit、functional、CLI、runner、混合分卷 acceptance 和 CLI smoke checks。
+`run_acceptance_tests.ps1` 会分步运行 unit、functional、integration、CLI、runner、training、混合分卷 acceptance 和 CLI smoke checks。`scripts/run_ci_tests.ps1` 会运行 unit、functional、CLI、runner、混合分卷 acceptance 和 CLI smoke checks。
 
 ## 大文件性能压测
 

@@ -22,13 +22,17 @@ on:
       - "v*"
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}-${{ inputs.release_tag || 'artifact' }}
+  cancel-in-progress: false
 
 jobs:
   build:
     name: Build ${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 90
+    timeout-minutes: 150
     strategy:
       fail-fast: false
       matrix:
@@ -37,19 +41,21 @@ jobs:
             runner: windows-2022
             rust_target: x86_64-pc-windows-msvc
             python_arch: x64
+            run_acceptance: true
           - arch: arm64
             runner: windows-11-arm
             rust_target: aarch64-pc-windows-msvc
             python_arch: arm64
+            run_acceptance: false
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.11"
           architecture: ${{ matrix.python_arch }}
@@ -78,22 +84,45 @@ jobs:
 
       - name: Build Windows package
         shell: pwsh
+        env:
+          RELEASE_TAG_INPUT: ${{ inputs.release_tag }}
+          GIT_EVENT_NAME: ${{ github.event_name }}
+          GIT_REF_NAME: ${{ github.ref_name }}
+          IS_TAG_REF: ${{ startsWith(github.ref, 'refs/tags/') }}
         run: |
           $version = ""
-          if ("${{ github.event_name }}" -eq "workflow_dispatch" -and "${{ inputs.release_tag }}" -ne "") {
-            $version = "${{ inputs.release_tag }}"
-          } elseif ("${{ startsWith(github.ref, 'refs/tags/') }}" -eq "true") {
-            $version = "${{ github.ref_name }}"
+          if ($env:GIT_EVENT_NAME -eq "workflow_dispatch" -and $env:RELEASE_TAG_INPUT) {
+            $version = $env:RELEASE_TAG_INPUT.Trim()
+          } elseif ($env:IS_TAG_REF -eq "true") {
+            $version = $env:GIT_REF_NAME
+          }
+          if ($version -match '[\\/:*?"<>|]') {
+            throw "Release version contains characters that are invalid in a Windows package filename: $version"
           }
 
           $buildArgs = @{
-            SkipTests = $true
             Arch = "${{ matrix.arch }}"
+          }
+          if ("${{ matrix.run_acceptance }}" -ne "true") {
+            $buildArgs.SkipTests = $true
           }
           if ($version -ne "") {
             $buildArgs.Version = $version
           }
           .\scripts\build_windows.ps1 @buildArgs
+
+      - name: Validate release package
+        shell: pwsh
+        run: |
+          $packages = @(
+            Get-ChildItem -LiteralPath "release" `
+              -Filter "sunpack-windows-${{ matrix.arch }}-*.zip" `
+              -File
+          )
+          if ($packages.Count -ne 1) {
+            throw "Expected exactly one ${{ matrix.arch }} release package, found $($packages.Count)."
+          }
+          Write-Host "Release package: $($packages[0].FullName)"
 
       - name: Verify package architecture
         shell: pwsh
@@ -102,11 +131,13 @@ jobs:
           .\scripts\verify_windows_package_arch.ps1 -PackageRoot $packageRoot -Arch ${{ matrix.arch }}
 
       - name: Upload package artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: sunpack-windows-${{ matrix.arch }}
           path: release/sunpack-windows-${{ matrix.arch }}-*.zip
           if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
 
   release:
     name: Publish GitHub Release
@@ -114,15 +145,12 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    permissions:
+      contents: write
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
       - name: Download package artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: artifacts
           merge-multiple: true
@@ -138,10 +166,16 @@ jobs:
         run: |
           set -euo pipefail
           mapfile -t packages < <(find artifacts -type f -name 'sunpack-windows-*.zip' | sort)
-          if [ "${#packages[@]}" -eq 0 ]; then
-            echo "No release packages found." >&2
+          if [ "${#packages[@]}" -ne 2 ]; then
+            echo "Expected two release packages, found ${#packages[@]}." >&2
             exit 1
           fi
+          for arch in x64 arm64; do
+            if ! printf '%s\n' "${packages[@]}" | grep -q "/sunpack-windows-${arch}-"; then
+              echo "Missing ${arch} release package." >&2
+              exit 1
+            fi
+          done
 
           notes="Automated SunPack Windows build for ${TAG_NAME}."
           if gh release view "${TAG_NAME}" >/dev/null 2>&1; then
