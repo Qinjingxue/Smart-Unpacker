@@ -9,17 +9,17 @@ from sunpack.contracts.archive_state import ArchiveState, PatchOperation, PatchP
 from sunpack.repair.candidate import RepairCandidate
 from sunpack.repair.search.proposals import ModuleMaterializationResult, PolicyModuleProposal
 from sunpack.repair.search.recovery import PolicyRecoverySnapshot
-from repair_training.build_policy_graph_rows import build_policy_graph_rows
-from repair_training.build_policy_transition_rows import annotate_episode_future_best_q
-from repair_training.core.repair_policy_transformer import teacher as teacher_module
+from repair_training.policy.graph_rows import build_policy_graph_rows
+from repair_training.policy.q_labels import annotate_episode_future_best_q
+from repair_training.policy import teacher as teacher_module
 from sunpack.repair.model.policy.inference import RepairPolicyTransformerModel
 from sunpack.repair.model.policy.model import build_repair_policy_transformer
 from sunpack.repair.model.policy.schema import PolicyAction, PolicyGraphTrainingSample, transition_sample_from_dict, world_sample_from_dict, sample_from_dict
-from repair_training.core.repair_policy_transformer.teacher import build_policy_teacher_samples, label_teacher_sample
+from repair_training.policy.teacher import build_policy_teacher_samples, label_teacher_sample
 from sunpack.repair.model.policy.tensorize import tensorize_sample, tensorize_world_sample
 from sunpack.repair.model.policy.tensorize import WORLD_TARGET_DIM
-from repair_training.core.repair_policy_transformer.world_rows import build_policy_world_samples
-from repair_training.train import main as train_main
+from repair_training.policy.world_rows import build_policy_world_samples
+from repair_training.__main__ import train_main
 
 
 pytest.importorskip("torch")
@@ -343,7 +343,7 @@ def test_runtime_teacher_rollout_materializes_real_patch_and_writes_clean_graph(
             verification={"summary": {"completeness": 0.2 + 0.5 * min(1, depth)}},
         )
 
-    monkeypatch.setattr("repair_training.core.repair_policy_transformer.teacher.RecoveryEvaluator.evaluate_state", fake_recovery)
+    monkeypatch.setattr("repair_training.policy.teacher.RecoveryEvaluator.evaluate_state", fake_recovery)
     rows = [
         sample.to_dict()
         for sample in build_policy_teacher_samples([{

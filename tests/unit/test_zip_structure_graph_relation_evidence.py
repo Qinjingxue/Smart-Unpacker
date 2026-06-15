@@ -4,7 +4,7 @@ import struct
 import zipfile
 from pathlib import Path
 
-from repair_training.derive_archives import _write_zip_data_descriptor
+from repair_training.data.source_archives import write_zip_data_descriptor
 from sunpack.detection.pipeline.processors.modules.format_structure.zip_structure_graph import inspect_zip_structure_graph
 from sunpack.repair.pipeline.modules.zip._directory import find_eocd, parse_central_directory_entries
 
@@ -127,7 +127,7 @@ def test_zip_structure_graph_descriptor_crc_relation_evidence(tmp_path: Path):
     source.mkdir()
     (source / "a.txt").write_text("hello descriptor crc\n", encoding="utf-8")
     archive = tmp_path / "descriptor.zip"
-    _write_zip_data_descriptor(source, archive, 6)
+    write_zip_data_descriptor(source, archive, 6)
     _mutate_descriptor_crc(archive)
 
     graph = inspect_zip_structure_graph(str(archive), identity=("descriptor", archive.stat().st_size, archive.stat().st_mtime_ns))
@@ -258,7 +258,7 @@ def _descriptor_zip(tmp_path: Path) -> Path:
     source.mkdir(exist_ok=True)
     (source / "a.txt").write_text("hello descriptor evidence\n", encoding="utf-8")
     archive = tmp_path / "descriptor.zip"
-    _write_zip_data_descriptor(source, archive, 6)
+    write_zip_data_descriptor(source, archive, 6)
     return archive
 
 

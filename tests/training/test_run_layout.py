@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from repair_training.core import run_layout
+from repair_training.run_store import layout as run_layout
 
 
 def test_latest_training_dataset_only_checks_canonical_run_datasets(tmp_path, monkeypatch):

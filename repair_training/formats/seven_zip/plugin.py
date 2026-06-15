@@ -4,8 +4,8 @@ import json
 from pathlib import Path
 from typing import Any
 
-from repair_training.core.plugin import TrainingFeatureSpec, TrainingFormatPlugin, TrainingLabelSchema
-from repair_training.taxonomy import SEVEN_ZIP_DAMAGE_FAMILIES
+from repair_training.formats.base import TrainingFeatureSpec, TrainingFormatPlugin, TrainingLabelSchema
+from repair_training.data.taxonomy import SEVEN_ZIP_DAMAGE_FAMILIES
 
 
 FORMAT_NAME = "seven_zip"

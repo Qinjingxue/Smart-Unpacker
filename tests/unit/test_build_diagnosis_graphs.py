@@ -1,8 +1,8 @@
 import json
 from pathlib import Path
 
-from repair_training.build_diagnosis_graphs import main as build_diagnosis_graphs_main
-from repair_training.core.datasets import read_jsonl
+from repair_training.diagnosis.graph_rows import main as build_diagnosis_graphs_main
+from repair_training.data.io import read_jsonl
 
 
 def test_build_diagnosis_graphs_cli_smoke(tmp_path: Path):

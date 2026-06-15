@@ -17,8 +17,8 @@ from sunpack.repair.pipeline.modules.seven_zip._scan import password_fingerprint
 from sunpack.repair.pipeline.modules.seven_zip.atomic import SevenZipFixStartHeaderCrc
 from sunpack.repair.runtime_cache import RepairRuntimeCache
 
-from repair_training.core.plugin import load_training_format_plugin
-from repair_training.formats.seven_zip.corruption_impl import main as build_seven_zip_material
+from repair_training.formats.base import load_training_format_plugin
+from repair_training.formats.seven_zip.source_material import main as build_seven_zip_material
 
 
 def test_seven_zip_training_plugin_defaults():

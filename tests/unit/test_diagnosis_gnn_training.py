@@ -3,8 +3,8 @@ from pathlib import Path
 
 import pytest
 
-from repair_training.build_diagnosis_graphs import main as build_graphs_main
-from repair_training.train import main as train_main
+from repair_training.diagnosis.graph_rows import main as build_graphs_main
+from repair_training.__main__ import train_main
 
 
 pytest.importorskip("torch")

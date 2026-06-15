@@ -5,8 +5,8 @@ from pathlib import Path
 from typing import Any
 import random
 
-from repair_training.core.plugin import TrainingFeatureSpec, TrainingFormatPlugin, TrainingLabelSchema
-from repair_training.formats.zip.build_material_impl import (
+from repair_training.formats.base import TrainingFeatureSpec, TrainingFormatPlugin, TrainingLabelSchema
+from repair_training.formats.zip.source_material import (
     _apply_profile_metadata,
     _choose_source_for_profile,
     _distributed_zip_sources,
