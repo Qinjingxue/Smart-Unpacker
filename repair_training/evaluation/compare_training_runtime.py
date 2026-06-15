@@ -24,7 +24,6 @@ from repair_training.core.run_layout import create_evaluation_run_dir, latest_tr
 
 
 AB_SCRIPT = ROOT / "repair_training" / "evaluation" / "runtime_policy_ab.py"
-DEFAULT_DATASET = latest_training_dataset()
 
 
 def _load_ab_module():
@@ -42,7 +41,7 @@ ab = _load_ab_module()
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Compare production-aligned training rows against real runtime ZIP model policy probe rows.")
-    parser.add_argument("--dataset", default=str(DEFAULT_DATASET))
+    parser.add_argument("--dataset", default="", help="Training dataset. Defaults to the latest canonical ZIP training run.")
     parser.add_argument("--sample-count", type=int, default=12)
     parser.add_argument("--profiles", default="")
     parser.add_argument("--seed", type=int, default=37)
@@ -64,6 +63,8 @@ def main() -> int:
     parser.add_argument("--collector-materialize-top-k", type=int, default=0)
     parser.add_argument("--progress", action="store_true")
     args = parser.parse_args()
+    if not args.dataset:
+        args.dataset = str(latest_training_dataset())
 
     started = time.perf_counter()
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")

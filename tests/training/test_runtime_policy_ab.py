@@ -29,6 +29,18 @@ def _load_compare_module():
     return module
 
 
+def test_evaluation_modules_do_not_resolve_default_dataset_during_import(monkeypatch):
+    import repair_training.core.run_layout as run_layout
+
+    def forbidden_lookup(*_args, **_kwargs):
+        raise AssertionError("dataset lookup must be deferred until CLI execution")
+
+    monkeypatch.setattr(run_layout, "latest_training_dataset", forbidden_lookup)
+
+    _load_module()
+    _load_compare_module()
+
+
 def test_compare_pairs_reports_runtime_and_recovery_deltas():
     mod = _load_module()
     rows = [
@@ -137,7 +149,7 @@ def test_runtime_config_modes_lock_policy_and_beam(tmp_path):
     assert baseline["repair"]["policy"]["enabled"] is False
     assert baseline["repair"]["beam"]["enabled"] is True
     assert model["repair"]["policy"]["enabled"] is True
-    assert model["repair"]["policy"]["disable_beam_when_model_active"] is True
+    assert "disable_beam_when_model_active" not in model["repair"]["policy"]
     assert model["repair"]["runtime_cache"]["enabled"] is False
 
 

@@ -51,19 +51,33 @@ def create_evaluation_run_dir(run_dir: str | Path | None = None, *, run_name: st
     return root
 
 
-def latest_training_dataset() -> Path:
-    latest = latest_run_for_format("zip")
+def latest_training_dataset(format_name: str = "zip") -> Path:
+    format_name = safe_name(format_name, fallback="zip")
+    latest = latest_run_for_format(format_name)
     if latest is not None:
         dataset = latest / "datasets" / "runtime_graph_success.jsonl"
         if dataset.is_file():
             return dataset
-    candidates = sorted(
-        RUNS_ROOT.glob("*/**/datasets/runtime_graph_success.jsonl"),
-        key=lambda item: item.stat().st_mtime,
-        reverse=True,
-    )
-    if candidates:
-        return candidates[0]
+
+    newest: tuple[int, Path] | None = None
+    format_root = RUNS_ROOT / format_name
+    try:
+        run_dirs = list(format_root.iterdir())
+    except OSError:
+        run_dirs = []
+    for run_dir in run_dirs:
+        try:
+            if not run_dir.is_dir():
+                continue
+            dataset = run_dir / "datasets" / "runtime_graph_success.jsonl"
+            stat = dataset.stat()
+        except OSError:
+            continue
+        candidate = (stat.st_mtime_ns, dataset)
+        if newest is None or candidate[0] > newest[0]:
+            newest = candidate
+    if newest is not None:
+        return newest[1]
     return TRAINING_ROOT / "datasets" / "runtime_graph_success.jsonl"
 
 

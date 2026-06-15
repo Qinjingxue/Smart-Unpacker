@@ -183,7 +183,6 @@ def _label_status(label: int, status: str, completeness: float) -> dict[str, Any
     return {"label": int(label), "status": status, "completeness": float(completeness)}
 
 
-DEFAULT_DATASET = latest_training_dataset()
 PRIORITY_PROFILES = (
     "zip_duplicate_entry_crc_conflict",
     "zip_data_descriptor_cd_conflict",
@@ -250,7 +249,6 @@ V3_PROFILE_GROUPS = {
 class RunMode:
     name: str
     policy_enabled: bool
-    disable_beam_when_model_active: bool
 
 
 @dataclass
@@ -261,14 +259,14 @@ class _WorkerSlot:
 
 
 RUN_MODES = (
-    RunMode("selector_baseline", policy_enabled=False, disable_beam_when_model_active=False),
-    RunMode("zip_model_policy", policy_enabled=True, disable_beam_when_model_active=True),
+    RunMode("selector_baseline", policy_enabled=False),
+    RunMode("zip_model_policy", policy_enabled=True),
 )
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Runtime A/B test for selector/beam fallback versus the ZIP model policy.")
-    parser.add_argument("--dataset", default=str(DEFAULT_DATASET), help="Runtime graph JSONL used to choose samples. Defaults to repair_training/latest_run.txt.")
+    parser.add_argument("--dataset", default="", help="Runtime graph JSONL used to choose samples. Defaults to the latest canonical ZIP training run.")
     parser.add_argument("--sample-count", type=int, default=12)
     parser.add_argument("--split", choices=("dev", "holdout", "custom"), default="custom", help="Evaluation split. dev defaults to seed 36; holdout defaults to seed 137 and can exclude dev sample IDs.")
     parser.add_argument("--profiles", default="", help="Comma-separated profile filters. Substring matches are accepted.")
@@ -292,6 +290,8 @@ def main() -> int:
     parser.add_argument("--enable-policy-probe", action="store_true", help="Write SUNPACK_REPAIR_POLICY_PROBE_JSONL for each real runtime run.")
     parser.add_argument("--skip-analysis-report", action="store_true", help="Do not write the A/B Markdown/JSON analysis report.")
     args = parser.parse_args()
+    if not args.dataset:
+        args.dataset = str(latest_training_dataset())
     if args.seed is None:
         args.seed = 137 if args.split == "holdout" else 36
 
