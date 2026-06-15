@@ -15,7 +15,8 @@ SunPack 只维护一套公开源码、一套依赖声明和一条 Windows 构建
 
 ```text
 sunpack/                  产品运行时代码
-sunpack/model_runtime/    正式模型运行时
+sunpack/repair/model/     正式修复模型运行时
+sunpack/repair/search/    修复搜索图与提案
 repair_training/          数据、训练与评估工具
 models/                   正式发布模型资产
 native/sunpack_native/    Rust/PyO3 扩展
@@ -130,7 +131,7 @@ bridge 运行时还需要同一工具目录中的 `7z.dll`。
 python sunpack.py models status --load --json
 ```
 
-产品代码只能从 `sunpack.model_runtime` 加载模型，不能从 `repair_training/runs` 或外部 provider 包加载。
+产品代码只能从 `sunpack.repair.model` 加载模型，不能从 `repair_training/runs` 或外部包加载。
 
 ## 测试
 

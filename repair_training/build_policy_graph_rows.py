@@ -5,8 +5,8 @@ from pathlib import Path
 from typing import Any
 
 from repair_training.core.datasets import read_jsonl, write_json, write_jsonl
-from sunpack.model_runtime.diagnosis.root_cases import ROOT_CASES
-from sunpack.model_runtime.policy.schema import PolicyAction, PolicyGraphTrainingSample
+from sunpack.repair.model.diagnosis.root_cases import ROOT_CASES
+from sunpack.repair.model.policy.schema import PolicyAction, PolicyGraphTrainingSample
 
 
 def main(argv: list[str] | None = None) -> int:

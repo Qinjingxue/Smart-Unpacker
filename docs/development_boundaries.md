@@ -70,11 +70,13 @@ passwords
   -> support.sevenzip_bridge
   -> native/Rust fast verifiers
 
-repair
-  -> model_runtime providers
+repair.scheduler
+  -> repair.model
+  -> repair.search
 
 repair_training
-  -> sunpack.model_runtime
+  -> sunpack.repair.model
+  -> sunpack.repair.search
 
 config
   -> support
@@ -101,7 +103,8 @@ contracts
 | 修复 | `repair.RepairScheduler` | 根据 verification repair 决策生成修复候选。 |
 | 后处理 | `postprocess.actions.PostProcessActions` | 成功后清理和扁平化。 |
 | 文件系统监控 | `filesystem.watcher.WatchScheduler` | watchdog 事件、稳定文件队列和自动处理。 |
-| 模型运行时 | `model_runtime.ModelAssetRegistry` / `model_runtime.providers` | 模型资产校验、图构建、推理和内置 provider。 |
+| 修复模型 | `repair.model.RepairModelRuntime` / `repair.model.ModelAssetRegistry` | 模型资产校验、图构建和双模型推理。 |
+| 修复搜索 | `repair.search.PolicyRepairGraph` | 搜索图、恢复度评估、运行特征和模块提案。 |
 | Native ABI | `support.sevenzip_bridge` | C++ 7z.dll bridge 绑定和缓存。 |
 
 ## 领域边界
@@ -160,17 +163,21 @@ contracts
 
 ### repair
 
-`repair` 是损坏结构修复候选生成层。它响应 verification 的 `repair` 决策，并通过内置模型 provider 获取 diagnosis 和 module/undo/stop 动作评分。每个格式一个模块目录，修复模块通过 registry 注册，返回候选文件、虚拟输入或 patch plan。模型建议不能绕过 extraction 与 verification。读写二进制必须走 native repair I/O，避免 Python 大文件读写 fallback。
+`repair` 是损坏结构修复层。它响应 verification 的 `repair` 决策，使用 `repair.model` 取得 diagnosis 和 module/undo/stop 动作评分，再由 `repair.search` 管理搜索图、恢复度和模块提案。格式修复模块通过 pipeline registry 注册，返回候选文件、虚拟输入或 patch plan。模型建议不能绕过 extraction 与 verification。
 
-### model_runtime
+### repair.model
 
-`model_runtime` 是发布运行时的一部分，包含模型结构、张量化、图 schema、格式图构建、推理、provider 和资产 registry。它只能依赖 `sunpack` 的稳定契约与通用运行时代码，禁止导入 `repair_training`。
+`repair.model` 包含模型结构、张量化、诊断图 schema、推理、资产 registry 和唯一的 `RepairModelRuntime`。它直接加载 diagnosis 与 policy 模型，不提供 provider 注册或外部扩展链路，禁止导入 `repair_training`。
 
-模型资产统一放在仓库根目录 `models/`，由 `models/manifest.json` 声明。运行时按 manifest 定位资产并校验 `model.pt` SHA-256，不从训练 run 目录回退，也不动态加载外部 provider 包。
+### repair.search
+
+`repair.search` 包含策略搜索图、恢复度评估、运行特征和模块提案。它可以依赖 repair 的稳定契约和 pipeline registry，但不加载模型资产，也不包含格式插件注册表。
+
+模型资产统一放在仓库根目录 `models/`，由 `models/manifest.json` 声明。运行时按 manifest 定位资产并校验 `model.pt` SHA-256，不从训练 run 目录回退。
 
 ### repair_training
 
-`repair_training` 包含数据生成、dataset、训练、评估和实验 run 布局。它可以复用 `sunpack.model_runtime` 中与生产一致的 schema、model 和 tensorize 实现，但生产运行时不能反向依赖训练代码。训练产物只有显式发布到 `models/` 并更新 manifest 后才成为运行时资产。
+`repair_training` 包含数据生成、dataset、训练、评估和实验 run 布局。它可以复用 `sunpack.repair.model` 中与生产一致的 schema、model 和 tensorize 实现，以及 `sunpack.repair.search` 的图与提案逻辑；生产运行时不能反向依赖训练代码。
 
 ### verification
 
@@ -259,8 +266,7 @@ sunpack/
   postprocess/  解压成功后的清理和扁平化
   relations/    文件关系、分卷和候选组
   rename/       输出命名和临时分卷 staging
-  repair/       损坏容器修复流水线
-  model_runtime/模型资产、图构建、推理和内置 provider
+  repair/       损坏容器修复流水线、搜索与模型运行时
   support/      资源、JSON、缓存、7z.dll ABI 绑定等基础设施
   verification/ 解压结果校验流水线
 ```

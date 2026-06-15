@@ -1,7 +1,6 @@
-from types import SimpleNamespace
-
-from sunpack.model_runtime import ModelAssetRegistry
-from sunpack.model_runtime.providers import DiagnosisHGTProvider, RepairPolicyTransformerProvider
+from sunpack.repair.job import RepairJob
+from sunpack.repair.model import ModelAssetRegistry, RepairModelRuntime
+from sunpack.repair.search.types import PolicyExplorationGraph, PolicyGraphNode
 
 
 def test_model_registry_resolves_zip_assets():
@@ -24,64 +23,53 @@ def test_model_registry_loads_current_zip_models_on_cpu():
     assert all(model["loaded"] for model in status["models"])
 
 
-def test_current_zip_models_run_real_inference():
-    registry = ModelAssetRegistry()
-    diagnosis_asset = registry.asset("zip", "diagnosis")
-    policy_asset = registry.asset("zip", "policy")
-    assert diagnosis_asset is not None
-    assert policy_asset is not None
-
-    diagnosis_request = SimpleNamespace(
+def test_repair_model_runtime_runs_current_zip_model_pair():
+    runtime = RepairModelRuntime(assets=ModelAssetRegistry())
+    job = RepairJob(
+        source_input={"kind": "memory", "format_hint": "zip"},
         format="zip",
-        job=SimpleNamespace(archive_key="model-smoke"),
-        round_index=0,
-        knowledge_payload={"analysis": {"summary": {"format": "zip"}}},
+        archive_key="model-smoke",
+        knowledge={"analysis": {"summary": {"format": "zip"}}},
     )
-    diagnosis = DiagnosisHGTProvider(diagnosis_asset).diagnose_state(diagnosis_request)
-
-    assert len(diagnosis["root_case"]["scores"]) == 26
-    assert diagnosis["root_case"]["ranked"]
-
-    graph = {
-        "nodes": [
-            {
-                "node_id": "root",
-                "parent_id": "",
-                "patch_digest": "root-digest",
-                "patch_depth": 0,
-                "module_name": "",
-                "patch_status": "root",
-                "recovery": {"score": 0.0},
-                "diagnosis_hgt": diagnosis,
-                "verification": {"summary": {"completeness": 0.0}},
-            }
-        ],
-        "edges": [],
-        "current_node_id": "root",
-        "best_node_id": "root",
-    }
-    actions = [
-        {"action_type": "stop", "action_id": "stop"},
-        {
-            "action_type": "module",
-            "action_id": "module:zip_fix_eocd_record",
-            "module_name": "zip_fix_eocd_record",
+    graph = PolicyExplorationGraph(
+        nodes={
+            "root": PolicyGraphNode(
+                node_id="root",
+                patch_digest="root-digest",
+                recovery={"score": 0.0},
+            )
         },
-    ]
-    policy_request = SimpleNamespace(
-        format="zip",
-        job=SimpleNamespace(archive_key="model-smoke"),
-        round_index=0,
-        graph=graph,
         current_node_id="root",
         best_node_id="root",
-        available_actions=actions,
+    )
+
+    diagnosis, diagnosis_status = runtime.diagnose_state(
+        job=job,
+        archive_state=None,
+        graph=graph,
+        round_index=0,
+    )
+    actions, policy_status = runtime.score_graph_actions(
+        job=job,
+        archive_state=None,
+        graph=graph,
+        available_actions=[
+            {"action_type": "stop", "action_id": "stop"},
+            {
+                "action_type": "module",
+                "action_id": "module:zip_fix_eocd_record",
+                "module_name": "zip_fix_eocd_record",
+            },
+        ],
         diagnosis_hgt=diagnosis,
         current_recovery={"score": 0.0},
         best_seen_recovery={"score": 0.0},
+        round_index=0,
     )
-    policy = RepairPolicyTransformerProvider(policy_asset).score_actions(policy_request)
 
-    assert len(policy["action_scores"]) == 2
-    assert policy["action_predictions"]
-    assert all("predicted_next_state" in row["metadata"] for row in policy["action_scores"])
+    assert diagnosis_status["decision_status"] == "diagnosed"
+    assert len(diagnosis["root_case"]["scores"]) == 26
+    assert diagnosis["root_case"]["ranked"]
+    assert policy_status["decision_status"] == "scored"
+    assert len(actions) == 2
+    assert all("predicted_next_state" in action.metadata for action in actions)

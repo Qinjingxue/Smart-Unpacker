@@ -233,7 +233,7 @@ class CorruptionCase:
     def regression_snippet(self, root_expr: str = "tmp_path / \"case\"") -> str:
         builder = self.builder_call or f"{self.case_id}(root)"
         return "\n".join([
-            "from repair_training.formats.zip.corruption import BinaryCorruptor, apply_mutations",
+            "from repair_training.formats.zip.corruption_impl import BinaryCorruptor, apply_mutations",
             "",
             f"root = {root_expr}",
             f"case = BinaryCorruptor({self.seed}).{builder}",

@@ -7,18 +7,17 @@ import pytest
 from sunpack.contracts.archive_input import ArchiveInputDescriptor
 from sunpack.contracts.archive_state import ArchiveState, PatchOperation, PatchPlan
 from sunpack.repair.candidate import RepairCandidate
-from sunpack.repair.policy.formats.registry import ModuleMaterializationResult, PolicyModuleProposal
-from sunpack.repair.policy.recovery_evaluator import PolicyRecoverySnapshot
+from sunpack.repair.search.proposals import ModuleMaterializationResult, PolicyModuleProposal
+from sunpack.repair.search.recovery import PolicyRecoverySnapshot
 from repair_training.build_policy_graph_rows import build_policy_graph_rows
-from repair_training.build_policy_teacher_rows import main as teacher_rows_main
 from repair_training.build_policy_transition_rows import annotate_episode_future_best_q
 from repair_training.core.repair_policy_transformer import teacher as teacher_module
-from sunpack.model_runtime.policy.inference import RepairPolicyTransformerModel
-from sunpack.model_runtime.policy.model import build_repair_policy_transformer
-from sunpack.model_runtime.policy.schema import PolicyAction, PolicyGraphTrainingSample, transition_sample_from_dict, world_sample_from_dict, sample_from_dict
-from repair_training.core.repair_policy_transformer.teacher import label_teacher_sample
-from sunpack.model_runtime.policy.tensorize import tensorize_sample, tensorize_world_sample
-from sunpack.model_runtime.policy.tensorize import WORLD_TARGET_DIM
+from sunpack.repair.model.policy.inference import RepairPolicyTransformerModel
+from sunpack.repair.model.policy.model import build_repair_policy_transformer
+from sunpack.repair.model.policy.schema import PolicyAction, PolicyGraphTrainingSample, transition_sample_from_dict, world_sample_from_dict, sample_from_dict
+from repair_training.core.repair_policy_transformer.teacher import build_policy_teacher_samples, label_teacher_sample
+from sunpack.repair.model.policy.tensorize import tensorize_sample, tensorize_world_sample
+from sunpack.repair.model.policy.tensorize import WORLD_TARGET_DIM
 from repair_training.core.repair_policy_transformer.world_rows import build_policy_world_samples
 from repair_training.train import main as train_main
 
@@ -300,9 +299,7 @@ def test_tensorize_exposes_continuation_targets():
     assert item["action_continue_mask"][undo_index].item() == pytest.approx(1.0)
 
 
-def test_build_policy_teacher_rows_cli_writes_q_labels(tmp_path: Path):
-    input_path = tmp_path / "teacher_input.jsonl"
-    output_path = tmp_path / "policy_teacher_rows.jsonl"
+def test_build_policy_teacher_samples_writes_q_labels():
     row = {
         "sample_id": "teacher_case",
         "format": "zip",
@@ -319,10 +316,10 @@ def test_build_policy_teacher_rows_cli_writes_q_labels(tmp_path: Path):
             "action_outcomes": {"module:zip_fix": 0.75, "undo:undo": 0.4},
         }],
     }
-    input_path.write_text(json.dumps(row) + "\n", encoding="utf-8")
-
-    assert teacher_rows_main(["--input", str(input_path), "--output", str(output_path)]) == 0
-    built = [json.loads(line) for line in output_path.read_text(encoding="utf-8").splitlines()]
+    built = [
+        sample.to_dict()
+        for sample in build_policy_teacher_samples([row], runtime_rollout=False)
+    ]
 
     assert built[0]["has_promising_future"] is True
     assert any(action["action_type"] == "stop" and action["action_q_value"] == 0.2 for action in built[0]["actions"])
@@ -332,8 +329,9 @@ def test_runtime_teacher_rollout_materializes_real_patch_and_writes_clean_graph(
     damaged = tmp_path / "damaged.zip"
     damaged.write_bytes(b"broken")
     plugin = _RuntimeTeacherPlugin()
-    monkeypatch.setattr(teacher_module, "get_repair_format_plugin", lambda fmt: plugin)
-    monkeypatch.setattr(teacher_module, "RepairPolicyManager", _FakeTeacherPolicyManager)
+    monkeypatch.setattr(teacher_module, "available_module_proposals", plugin.available_modules)
+    monkeypatch.setattr(teacher_module, "materialize_module_proposal", plugin.materialize_module)
+    monkeypatch.setattr(teacher_module, "RepairModelRuntime", _FakeTeacherModelRuntime)
 
     def fake_recovery(self, job, state, **kwargs):
         depth = state.patch_depth() if state is not None else 0
@@ -346,24 +344,18 @@ def test_runtime_teacher_rollout_materializes_real_patch_and_writes_clean_graph(
         )
 
     monkeypatch.setattr("repair_training.core.repair_policy_transformer.teacher.RecoveryEvaluator.evaluate_state", fake_recovery)
-    input_path = tmp_path / "damaged_rows.jsonl"
-    output_path = tmp_path / "policy_teacher_rows.jsonl"
-    input_path.write_text(json.dumps({
+    rows = [
+        sample.to_dict()
+        for sample in build_policy_teacher_samples([{
         "sample_id": "damaged",
         "format": "zip",
         "damaged_input": {"kind": "file", "path": str(damaged), "format_hint": "zip"},
-    }) + "\n", encoding="utf-8")
-
-    assert teacher_rows_main([
-        "--input", str(input_path),
-        "--output", str(output_path),
-        "--workspace", str(tmp_path / "teacher"),
-        "--recovery-mode", "policy_light",
-        "--max-depth", "2",
-        "--rollout-depth", "1",
-        "--module-branch-k", "1",
-    ]) == 0
-    rows = [json.loads(line) for line in output_path.read_text(encoding="utf-8").splitlines()]
+    }],
+            workspace=tmp_path / "teacher",
+            recovery_mode="policy_light",
+            budget={"max_depth": 2, "rollout_depth": 1, "module_branch_k": 1},
+        )
+    ]
     serialized = json.dumps(rows, sort_keys=True)
 
     assert rows
@@ -410,9 +402,20 @@ def test_policy_transformer_train_and_infer_smoke(tmp_path: Path):
     run_dir = tmp_path / "run"
     datasets = run_dir / "datasets"
     datasets.mkdir(parents=True)
-    rows = [build_policy_graph_rows([_runtime_log_row(sample_id=f"s{i}")])[0].to_dict() for i in range(4)]
-    input_path = datasets / "policy_graph_rows.jsonl"
-    input_path.write_text("\n".join(json.dumps(row) for row in rows), encoding="utf-8")
+    ranking_rows = [build_policy_graph_rows([_runtime_log_row(sample_id=f"s{i}")])[0].to_dict() for i in range(4)]
+    transitions = [
+        transition_sample_from_dict({
+            **_undo_transition_row(parent_fresh=1, current_visit_count=1),
+            "sample_id": f"s{i}",
+        })
+        for i in range(4)
+    ]
+    world_rows = [
+        sample.to_dict()
+        for sample in build_policy_world_samples(transitions)
+    ]
+    input_path = datasets / "policy_world_rows.jsonl"
+    input_path.write_text("\n".join(json.dumps(row) for row in world_rows), encoding="utf-8")
 
     assert train_main([
         "--format", "zip",
@@ -428,7 +431,7 @@ def test_policy_transformer_train_and_infer_smoke(tmp_path: Path):
     assert (model_dir / "model.pt").is_file()
     assert (model_dir / "model_card.json").is_file()
     model = RepairPolicyTransformerModel(model_dir=model_dir, device="cpu")
-    prediction = model.predict_sample(sample_from_dict(rows[0]))
+    prediction = model.predict_sample(sample_from_dict(ranking_rows[0]))
 
     assert prediction["action_scores"]
     assert prediction["action_predictions"]
@@ -730,7 +733,7 @@ class _RuntimeTeacherPlugin:
         return ModuleMaterializationResult(candidate=proposal.candidate)
 
 
-class _FakeTeacherPolicyManager:
+class _FakeTeacherModelRuntime:
     def __init__(self, config=None):
         self.config = config or {}
 
@@ -741,8 +744,8 @@ class _FakeTeacherPolicyManager:
                 "ranked": [{"root_case": "teacher_hgt", "score": 0.97}],
                 "selected": ["teacher_hgt"],
             },
-            "diagnostics": {"provider_id": "fake_teacher_hgt", "round_index": round_index},
-        }, {"decision_status": "diagnosed", "provider_id": "fake_teacher_hgt"}
+            "diagnostics": {"model_id": "fake_teacher_hgt", "round_index": round_index},
+        }, {"decision_status": "diagnosed", "model_id": "fake_teacher_hgt"}
 
 
 def _runtime_patch_candidate(base: ArchiveState) -> RepairCandidate:

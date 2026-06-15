@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from sunpack.app.cli_parsers import CliHelpFormatter, build_common_parser, localize_help_action
 from sunpack.app.cli_types import CliCommandResult
-from sunpack.model_runtime import get_model_asset_registry
+from sunpack.repair.model import get_model_asset_registry
 
 
 COMMAND = "models"

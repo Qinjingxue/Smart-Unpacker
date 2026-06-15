@@ -1,16 +1,15 @@
 import pytest
 
-from sunpack.model_runtime.diagnosis.graph_dispatcher import build_diagnosis_graph_sample
-from sunpack.model_runtime.diagnosis.model import build_diagnosis_gnn_model
-from sunpack.model_runtime.diagnosis.tensorize import metadata_from_samples, tensorize_sample
+from sunpack.repair.model.diagnosis.graph_dispatcher import build_diagnosis_graph_sample
+from sunpack.repair.model.diagnosis.model import build_diagnosis_gnn_model
+from sunpack.repair.model.diagnosis.tensorize import metadata_from_samples, tensorize_sample
 
 
 pytest.importorskip("torch")
 pytest.importorskip("torch_geometric")
 
 
-@pytest.mark.parametrize("arch", ["hetero_graphsage", "rgcn", "hgt"])
-def test_diagnosis_gnn_forward_outputs_cause_and_theory_logits(arch):
+def test_diagnosis_hgt_forward_outputs_cause_and_theory_logits():
     sample = build_diagnosis_graph_sample({
         "sample_id": "forward",
         "format": "zip",
@@ -24,7 +23,7 @@ def test_diagnosis_gnn_forward_outputs_cause_and_theory_logits(arch):
     data = tensorize_sample(sample)
     model = build_diagnosis_gnn_model(
         metadata=metadata_from_samples([sample]),
-        config={"arch": arch, "hidden_dim": 16, "layers": 1, "heads": 2, "num_bases": 4},
+        config={"arch": "hgt", "hidden_dim": 16, "layers": 1, "heads": 2},
     )
 
     out = model(data.x_dict, data.edge_index_dict)

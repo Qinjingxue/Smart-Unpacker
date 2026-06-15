@@ -37,9 +37,10 @@ for package in (
     "sunpack.relations.internal",
     "sunpack.postprocess.internal",
     "sunpack.verification.methods",
-    "sunpack.model_runtime",
-    "sunpack.model_runtime.diagnosis",
-    "sunpack.model_runtime.policy",
+    "sunpack.repair.model",
+    "sunpack.repair.model.diagnosis",
+    "sunpack.repair.model.policy",
+    "sunpack.repair.search",
 ):
     hiddenimports.extend(collect_submodules(package))
 

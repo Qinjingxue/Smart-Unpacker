@@ -49,7 +49,7 @@ DEFAULT_REPAIR_CONFIG = {
     },
     "policy": {
         "enabled": True,
-        "strict_provider_errors": False,
+        "strict_model_errors": False,
         "graph_stop_stale_patience": 100,
         "min_best_recovery_improvement": 0.01,
     },
@@ -312,10 +312,10 @@ def _normalize_policy(value: Any) -> dict[str, Any]:
         joined = ", ".join(f"repair.policy.{name}" for name in removed)
         raise ValueError(f"{joined} was removed; repair policy now always uses graph step mode without selector/beam fallback")
     if "provider_package" in value:
-        raise ValueError("repair.policy.provider_package was removed; model providers are built into SunPack")
+        raise ValueError("repair.policy.provider_package was removed; RepairModelRuntime loads bundled models directly")
     return {
         "enabled": _bool_value(value.get("enabled", True), "repair.policy.enabled"),
-        "strict_provider_errors": _bool_value(value.get("strict_provider_errors", False), "repair.policy.strict_provider_errors"),
+        "strict_model_errors": _bool_value(value.get("strict_model_errors", False), "repair.policy.strict_model_errors"),
         "graph_stop_stale_patience": _int_at_least(value, "graph_stop_stale_patience", 0) if "graph_stop_stale_patience" in value else 100,
         "min_best_recovery_improvement": _float_at_least(value, "min_best_recovery_improvement", 0.0) if "min_best_recovery_improvement" in value else 0.01,
     }

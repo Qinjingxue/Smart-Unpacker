@@ -5,7 +5,7 @@ from pathlib import Path
 
 import repair_training.collect_damage_rows as collect_damage_rows_module
 from repair_training.core.material_records import attach_split_volumes
-from sunpack.model_runtime.diagnosis.features import damage_labels_for_row, damage_location_labels_from_target, uncertain_labels_for_row
+from sunpack.repair.model.diagnosis.features import damage_labels_for_row, damage_location_labels_from_target, uncertain_labels_for_row
 from repair_training.collect_damage_rows import collect_damage_row
 from repair_training.formats.zip.corruption_impl import build_corpus_corruption_case
 from repair_training.formats.zip.observability import apply_zip_observability
@@ -19,7 +19,7 @@ from sunpack.contracts.tasks import ArchiveTask
 from sunpack.detection.pipeline.processors.modules.format_structure.zip_directory_consistency import inspect_zip_directory_consistency
 from sunpack.detection.pipeline.processors.modules.format_structure.zip_eocd import inspect_zip_eocd_structure
 from sunpack.detection.pipeline.processors.modules.format_structure.zip_structure_graph import inspect_zip_structure_graph
-from sunpack.repair.policy.training_runtime import build_damage_analysis_request
+from sunpack.repair.search.features import build_damage_analysis_request
 from sunpack.repair.job import RepairJob
 from sunpack.repair.scheduler import RepairScheduler
 

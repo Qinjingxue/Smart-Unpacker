@@ -30,7 +30,7 @@ def test_seven_zip_training_plugin_defaults():
 
 
 def test_seven_zip_distribution_total_is_2800():
-    path = Path("repair_training/formats/seven_zip/distributions/damage_distribution_seven_zip_root_transition_v1.json")
+    path = Path("repair_training/formats/seven_zip/distributions/damage_distribution_seven_zip_root_transition_v2.json")
     payload = json.loads(path.read_text(encoding="utf-8"))
     total = sum(int(value if not isinstance(value, dict) else value.get("count", 0)) for group in ("profiles", "compound_profiles", "physical_profiles") for value in payload[group].values())
 

@@ -7,10 +7,10 @@ from typing import Any
 
 from repair_training.core.datasets import write_json, write_jsonl
 from repair_training.core.diagnosis_gnn.dataset import read_diagnosis_graph_samples
-from sunpack.model_runtime.diagnosis.inference import DiagnosisGNNModel
+from sunpack.repair.model.diagnosis.inference import DiagnosisGNNModel
 from repair_training.core.diagnosis_gnn.metrics import binary_multilabel_metrics, clean_false_positive_rate, multilabel_set_metrics
-from sunpack.model_runtime.diagnosis.root_cases import ROOT_CASES, ROOT_CASE_INDEX
-from sunpack.model_runtime.diagnosis.tensorize import metadata_for_sample
+from sunpack.repair.model.diagnosis.root_cases import ROOT_CASES, ROOT_CASE_INDEX
+from sunpack.repair.model.diagnosis.tensorize import metadata_for_sample
 from repair_training.core.plugin import normalize_format_name
 
 

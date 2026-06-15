@@ -6,8 +6,8 @@ from typing import Any
 from repair_training.core.datasets import write_json
 from repair_training.core.repair_policy_transformer import POLICY_TRANSFORMER_ALGORITHM, POLICY_TRANSFORMER_SEMANTICS
 from repair_training.core.repair_policy_transformer.dataset import read_policy_graph_samples, read_policy_world_samples, split_policy_graph_samples, split_policy_world_samples
-from sunpack.model_runtime.policy.model import build_repair_policy_transformer
-from sunpack.model_runtime.policy.tensorize import EDGE_FEATURE_DIM, NODE_FEATURE_DIM, tensorize_sample, tensorize_world_sample
+from sunpack.repair.model.policy.model import build_repair_policy_transformer
+from sunpack.repair.model.policy.tensorize import EDGE_FEATURE_DIM, NODE_FEATURE_DIM, tensorize_sample, tensorize_world_sample
 
 
 DEFAULT_CONFIG = {
@@ -43,7 +43,6 @@ DEFAULT_CONFIG = {
     "uncertainty_loss_weight": 0.20,
     "uncertainty_tiebreak_loss_weight": 0.15,
     "masked_graph_loss_weight": 0.25,
-    "training_task": "joint",
 }
 
 
@@ -169,8 +168,6 @@ def _train_world_policy_transformer(
     splits = split_policy_world_samples(samples)
     resolved_device = _resolve_device(device, torch)
     model = build_repair_policy_transformer(config).to(resolved_device)
-    task_filter = str(config.get("training_task") or "joint")
-    _load_existing_policy_checkpoint_if_requested(model, model_dir=model_dir, training_task=task_filter, torch=torch)
     optimizer = torch.optim.AdamW(model.parameters(), lr=float(config["lr"]), weight_decay=float(config["weight_decay"]))
     train_data = [tensorize_world_sample(sample) for sample in splits["train"]]
     history = []
@@ -178,11 +175,7 @@ def _train_world_policy_transformer(
         model.train()
         total = 0.0
         used = 0
-        filtered_data = [
-            item for item in train_data
-            if task_filter == "joint" or _task_enabled(item["task"], task_filter)
-        ]
-        train_batches = list(_batches(filtered_data, int(config.get("batch_size", 8) or 8)))
+        train_batches = list(_batches(train_data, int(config.get("batch_size", 8) or 8)))
         for batch in train_batches:
             optimizer.zero_grad()
             batch_loss = None
@@ -210,7 +203,6 @@ def _train_world_policy_transformer(
         "task_counts": _task_counts(samples),
         "history": history,
         "device": str(resolved_device),
-        "training_task": task_filter,
     }
     model_dir = Path(model_dir)
     model_dir.mkdir(parents=True, exist_ok=True)
@@ -272,28 +264,6 @@ def _chosen_transition_prediction(prediction, chosen_index: int):
     if index < 0 or index >= int(prediction.shape[0]):
         index = 0
     return prediction[index]
-
-
-def _load_existing_policy_checkpoint_if_requested(model, *, model_dir: str | Path, training_task: str, torch) -> None:
-    task = str(training_task or "")
-    if task == "world_pretrain":
-        return
-    checkpoint_path = Path(model_dir) / "model.pt"
-    if not checkpoint_path.is_file():
-        return
-    checkpoint = torch.load(checkpoint_path, map_location="cpu")
-    state = checkpoint.get("state_dict") if isinstance(checkpoint, dict) else None
-    if not isinstance(state, dict):
-        return
-    model.load_state_dict(state, strict=False)
-
-
-def _task_enabled(task: str, training_task: str) -> bool:
-    if training_task == "world_pretrain":
-        return task in {"transition", "masked_graph"}
-    if training_task == "policy_finetune":
-        return task in {"ranking", "transition"}
-    return True
 
 
 def _task_counts(samples) -> dict[str, int]:

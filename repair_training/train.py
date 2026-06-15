@@ -16,12 +16,8 @@ def main(argv: list[str] | None = None) -> int:
     model_type = str(args.model)
     run_dir = Path(args.run_dir).resolve()
     if model_type == "diagnosis_gnn":
-        input_path = Path(args.input) if args.input else run_dir / "datasets" / "diagnosis_graph_train_single_field_rows.jsonl"
-        if not input_path.is_file() and not args.input:
-            input_path = run_dir / "datasets" / "diagnosis_graph_train_rows.jsonl"
-        if not input_path.is_file() and not args.input:
-            input_path = run_dir / "datasets" / "diagnosis_graph_rows.jsonl"
-        model_dir = Path(args.model_dir) if args.model_dir else run_dir / "models" / ("diagnosis_gnn_single_field_v1" if "single_field" in input_path.name else "diagnosis_gnn")
+        input_path = Path(args.input) if args.input else run_dir / "datasets" / "diagnosis_graph_rows.jsonl"
+        model_dir = Path(args.model_dir) if args.model_dir else run_dir / "models" / "diagnosis_gnn"
         gnn_config = {
             key: value
             for key, value in {
@@ -34,9 +30,7 @@ def main(argv: list[str] | None = None) -> int:
                 "weight_decay": args.weight_decay,
                 "early_stopping_patience": args.early_stopping_patience,
                 "edge_loss_weight": args.edge_loss_weight,
-                "arch": args.arch,
                 "heads": args.heads,
-                "num_bases": args.num_bases,
                 "residual": args.residual,
                 "layernorm": args.layernorm,
                 "amp": args.amp,
@@ -75,10 +69,6 @@ def main(argv: list[str] | None = None) -> int:
         )
     elif model_type == "repair_policy_transformer":
         input_path = Path(args.input) if args.input else run_dir / "datasets" / "policy_world_rows.jsonl"
-        if not input_path.is_file() and not args.input:
-            input_path = run_dir / "datasets" / "policy_teacher_rows.jsonl"
-        if not input_path.is_file() and not args.input:
-            input_path = run_dir / "datasets" / "policy_graph_rows.jsonl"
         model_dir = Path(args.model_dir) if args.model_dir else run_dir / "models" / "repair_policy_transformer"
         policy_config = {
             key: value
@@ -114,7 +104,6 @@ def main(argv: list[str] | None = None) -> int:
                 "masked_graph_loss_weight": args.masked_graph_loss_weight,
                 "repeat_action_loss_weight": args.repeat_action_loss_weight,
                 "repeat_action_margin": args.repeat_action_margin,
-                "training_task": args.training_task,
             }.items()
             if value is not None
         }
@@ -150,9 +139,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--weight-decay", type=float, default=None)
     parser.add_argument("--early-stopping-patience", type=int, default=None)
     parser.add_argument("--edge-loss-weight", type=float, default=None)
-    parser.add_argument("--arch", choices=["hetero_graphsage", "rgcn", "hgt"], default=None)
     parser.add_argument("--heads", type=int, default=None)
-    parser.add_argument("--num-bases", type=int, default=None)
     parser.add_argument("--residual", type=_bool_arg, default=None)
     parser.add_argument("--layernorm", type=_bool_arg, default=None)
     parser.add_argument("--amp", action="store_true")
@@ -195,7 +182,6 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--masked-graph-loss-weight", type=float, default=None)
     parser.add_argument("--repeat-action-loss-weight", type=float, default=None)
     parser.add_argument("--repeat-action-margin", type=float, default=None)
-    parser.add_argument("--training-task", choices=["world_pretrain", "policy_finetune", "joint"], default=None)
     parser.add_argument("--rank-loss-top-negatives", type=int, default=None)
     parser.add_argument("--pos-weight-max", type=float, default=None)
     parser.add_argument("--sample-weighting", choices=["multi_field_root_count", "none"], default=None)

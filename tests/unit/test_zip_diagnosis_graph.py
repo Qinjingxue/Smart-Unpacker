@@ -1,4 +1,4 @@
-from sunpack.model_runtime.diagnosis.graph_dispatcher import build_diagnosis_graph_sample
+from sunpack.repair.model.diagnosis.graph_dispatcher import build_diagnosis_graph_sample
 
 
 def _zip_payload() -> dict:

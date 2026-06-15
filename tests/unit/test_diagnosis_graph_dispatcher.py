@@ -1,6 +1,6 @@
 import pytest
 
-from sunpack.model_runtime.diagnosis.graph_dispatcher import (
+from sunpack.repair.model.diagnosis.graph_dispatcher import (
     UnsupportedDiagnosisGraphFormat,
     detect_graph_format,
 )

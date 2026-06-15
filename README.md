@@ -117,7 +117,7 @@ app/config
      filesystem->relations-> detection -> analysis -> extraction -> verification
                         ^                            |
                         |                            v
-                        +------ repair + model_runtime <-+
+                        +----------- repair ------------+
      -> postprocess
 ```
 
@@ -127,19 +127,20 @@ app/config
 - `analysis` 只描述结构、边界、损坏标志和可用输入视图。
 - `extraction` 只执行 worker 解压。
 - `verification` 只评价结果质量和下一步建议。
-- `repair` 只生成候选或 patch plan，不直接宣称成功。
-- `model_runtime` 只负责模型资产校验、图构建、推理和 provider，不依赖训练代码。
+- `repair` 统一拥有候选生成、搜索图、模型资产和推理，不直接宣称成功。
+- `repair.model` 不依赖训练代码；`repair.search` 不依赖具体模型实现。
 - `coordinator` 负责循环、比较、资源限制、summary 和最终归档处理。
 
-详细约束见 [开发边界说明](docs/development_boundaries.md) 和 [模型运行时与训练边界](docs/model_runtime.md)。
+详细约束见 [开发边界说明](docs/development_boundaries.md) 和 [修复模型与训练边界](docs/repair_models.md)。
 
 ## 原生组件
 
 项目是 Python + Rust + C++ 三层协作：
 
 - `sunpack/`：配置、CLI、调度、规则、verification/repair 决策编排。
-- `sunpack/model_runtime/`：发布时使用的模型结构、张量化、推理、资产清单和内置 provider。
-- `repair_training/`：数据构建、训练和评估工具；允许依赖 `sunpack.model_runtime`，运行时禁止反向依赖训练目录。
+- `sunpack/repair/model/`：发布时使用的模型结构、张量化、推理、资产清单和统一运行时。
+- `sunpack/repair/search/`：修复搜索图、恢复度评估、运行特征和模块提案。
+- `repair_training/`：数据构建、训练和评估工具；允许依赖 `sunpack.repair.model`，运行时禁止反向依赖训练目录。
 - `models/`：随源码和发行包分发的模型资产，入口为 `models/manifest.json`。
 - `native/sunpack_native/`：Rust/PyO3 热路径，包括目录扫描、二进制结构分析、repair I/O、CRC/readability、candidate matching、deep repair native 实现等。
 - `native/sevenzip_bridge/`：C++/CMake 7z.dll bridge，提供 probe/test、密码数组尝试、manifest 和 worker 解压。

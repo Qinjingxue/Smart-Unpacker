@@ -4,8 +4,8 @@ from sunpack.contracts.archive_input import ArchiveInputDescriptor
 from sunpack.contracts.archive_state import ArchiveState, PatchOperation, PatchPlan
 from sunpack.repair.candidate import RepairCandidate
 from sunpack.repair.job import RepairJob
-from sunpack.repair.policy.graph import PolicyRepairGraph
-from sunpack.repair.policy.recovery_evaluator import PolicyRecoverySnapshot
+from sunpack.repair.search.graph import PolicyRepairGraph
+from sunpack.repair.search.recovery import PolicyRecoverySnapshot
 
 
 def test_policy_graph_initialize_creates_root_node(tmp_path: Path):

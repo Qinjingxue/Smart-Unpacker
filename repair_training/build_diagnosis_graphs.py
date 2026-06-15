@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 
 from repair_training.core.datasets import read_jsonl, write_json, write_jsonl
-from sunpack.model_runtime.diagnosis.graph_dispatcher import (
+from sunpack.repair.model.diagnosis.graph_dispatcher import (
     UnsupportedDiagnosisGraphFormat,
     build_diagnosis_graph_sample,
     build_diagnosis_graph_sample_for_format,
@@ -40,11 +40,6 @@ def main(argv: list[str] | None = None) -> int:
     write_jsonl(output, [sample.to_dict() for sample in samples])
     summary_path = Path(args.summary_output) if args.summary_output else output.parent.parent / "reports" / "diagnosis_graph_summary.json"
     summary = diagnosis_graph_summary(samples, unsupported_count=len(unsupported))
-    summary["actionable_label_rows"] = sum(
-        1 for sample in samples
-        if (sample.labels.auxiliary or {}).get("actionable_root_labels")
-    )
-    summary["actionable_label_coverage"] = summary["actionable_label_rows"] / max(1, len(samples))
     if unsupported:
         summary["unsupported"] = unsupported[:100]
     write_json(summary_path, summary)

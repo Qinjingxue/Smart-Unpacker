@@ -13,16 +13,16 @@ from repair_training.build_policy_graph_rows import (
     _sanitize_training_graph,
     build_policy_graph_rows,
 )
-from sunpack.model_runtime.policy.schema import PolicyAction, PolicyGraphTrainingSample, sample_from_dict
+from sunpack.repair.model.policy.schema import PolicyAction, PolicyGraphTrainingSample, sample_from_dict
 from sunpack.analysis.knowledge import write_zip_runtime_evidence_facts
 from sunpack.coordinator.analysis_stage import ArchiveAnalysisStage
 from sunpack.contracts.archive_input import ArchiveInputDescriptor
 from sunpack.contracts.archive_state import ArchiveState
 from sunpack.repair.job import RepairJob
-from sunpack.repair.policy.manager import RepairPolicyManager
-from sunpack.repair.policy.formats import get_repair_format_plugin
-from sunpack.repair.policy.graph import PolicyRepairGraph
-from sunpack.repair.policy.recovery_evaluator import PolicyRecoverySnapshot, RecoveryEvaluator
+from sunpack.repair.model import RepairModelRuntime
+from sunpack.repair.search.graph import PolicyRepairGraph
+from sunpack.repair.search.proposals import available_module_proposals, materialize_module_proposal
+from sunpack.repair.search.recovery import PolicyRecoverySnapshot, RecoveryEvaluator
 from sunpack.repair.runtime_cache import RepairRuntimeCache
 from sunpack.repair.scheduler import RepairScheduler
 from sunpack.config.loader import load_config
@@ -101,7 +101,7 @@ class _RuntimeTeacherContext:
         self.workspace_root = workspace or Path(tempfile.mkdtemp(prefix="sunpack_policy_teacher_"))
         self.full_config, self.repair_config = _teacher_configs(config, self.workspace_root)
         self.scheduler = RepairScheduler({"repair": self.repair_config})
-        self.policy_manager = RepairPolicyManager(self.repair_config)
+        self.model_runtime = RepairModelRuntime(self.repair_config)
         self.analysis_stage = ArchiveAnalysisStage(self.full_config)
         self.evaluator = RecoveryEvaluator(self.full_config)
         self.recovery_mode = recovery_mode
@@ -115,9 +115,6 @@ class _RuntimeTeacherContext:
     def rollout_row(self, row: dict[str, Any], *, row_index: int, format_name: str) -> list[PolicyGraphTrainingSample]:
         job = _job_from_row(row, row_index=row_index, format_name=format_name, workspace=self.workspace_root)
         if job is None:
-            return []
-        plugin = get_repair_format_plugin(job.format)
-        if plugin is None:
             return []
         recovery = self.evaluator.evaluate_state(job, job.archive_state, mode=self.recovery_mode, cache=self.cache)
         repair_graph = PolicyRepairGraph.initialize(job, recovery)
@@ -135,7 +132,7 @@ class _RuntimeTeacherContext:
         for step in range(1, max_depth + 1):
             if repair_graph.graph.expansion_count >= max_expansions:
                 break
-            decision = self._decision_sample(row=row, job=job, plugin=plugin, repair_graph=repair_graph, diagnosis=diagnosis, memory=memory, step=step)
+            decision = self._decision_sample(row=row, job=job, repair_graph=repair_graph, diagnosis=diagnosis, memory=memory, step=step)
             if decision is None:
                 break
             labelled, proposal_by_id = decision
@@ -153,7 +150,7 @@ class _RuntimeTeacherContext:
                     bad_branch_budget -= 1
             elif bad_branch_budget > 0:
                 bad_branch_budget -= 1
-            applied = self._apply_action(job=job, plugin=plugin, repair_graph=repair_graph, action=chosen, step=step, proposal_by_id=proposal_by_id)
+            applied = self._apply_action(job=job, repair_graph=repair_graph, action=chosen, step=step, proposal_by_id=proposal_by_id)
             if applied is None or applied.archive_state is None:
                 break
             recovery = self.evaluator.evaluate_state(job, applied.archive_state, mode=self.recovery_mode, cache=self.cache)
@@ -180,7 +177,7 @@ class _RuntimeTeacherContext:
             refresh_dir = self.workspace_root / "teacher_analysis"
             refresh_dir.mkdir(parents=True, exist_ok=True)
             materialized = ArchiveStateByteView(state).materialize(refresh_dir / f"{job.archive_key or 'state'}_{step}.zip")
-            from sunpack.repair.policy.recovery_evaluator import _task_for_materialized_state
+            from sunpack.repair.search.recovery import _task_for_materialized_state
 
             task = _task_for_materialized_state(job, state, materialized)
             self.analysis_stage.refresh_task_analysis(task)
@@ -209,7 +206,7 @@ class _RuntimeTeacherContext:
         recovery: PolicyRecoverySnapshot,
         round_index: int,
     ) -> dict[str, Any]:
-        diagnosis, selection = self.policy_manager.diagnose_state(
+        diagnosis, selection = self.model_runtime.diagnose_state(
             job=job,
             archive_state=job.archive_state,
             graph=repair_graph.graph,
@@ -231,13 +228,12 @@ class _RuntimeTeacherContext:
         *,
         row: dict[str, Any],
         job: RepairJob,
-        plugin: Any,
         repair_graph: PolicyRepairGraph,
         diagnosis: dict[str, Any],
         memory: list[dict[str, Any]],
         step: int,
     ) -> tuple[PolicyGraphTrainingSample, dict[str, Any]] | None:
-        runtime_proposals = plugin.available_modules(scheduler=self.scheduler, job=job, diagnosis_hgt=diagnosis, graph=repair_graph.graph)
+        runtime_proposals = available_module_proposals(scheduler=self.scheduler, job=job, diagnosis_hgt=diagnosis, graph=repair_graph.graph)
         exposed_edges = repair_graph.register_proposals([proposal.to_action_payload() for proposal in runtime_proposals], step=step)
         exposed_ids = {edge.candidate_id for edge in exposed_edges}
         proposals = _select_runtime_action_proposals([proposal for proposal in runtime_proposals if proposal.action_id in exposed_ids], repair_graph, self.budget)
@@ -272,12 +268,12 @@ class _RuntimeTeacherContext:
             source={"archive_key": job.archive_key, "sample_id": row.get("sample_id") or "", "damage_profile": row.get("damage_profile") or ""},
         )
         proposal_by_id = {proposal.action_id: proposal for proposal in proposals}
-        outcomes = self._evaluate_actions(job=job, plugin=plugin, repair_graph=repair_graph, actions=actions, proposal_by_id=proposal_by_id, step=step)
+        outcomes = self._evaluate_actions(job=job, repair_graph=repair_graph, actions=actions, proposal_by_id=proposal_by_id, step=step)
         labelled = label_teacher_sample(sample, action_outcomes=outcomes, budget=self.budget)
         labelled = _with_branch_annotations(labelled, repair_graph)
         return labelled, proposal_by_id
 
-    def _evaluate_actions(self, *, job: RepairJob, plugin: Any, repair_graph: PolicyRepairGraph, actions: list[PolicyAction], proposal_by_id: dict[str, Any], step: int) -> dict[str, float]:
+    def _evaluate_actions(self, *, job: RepairJob, repair_graph: PolicyRepairGraph, actions: list[PolicyAction], proposal_by_id: dict[str, Any], step: int) -> dict[str, float]:
         outcomes: dict[str, float] = {}
         current_best = _best_score(repair_graph)
         module_seen = 0
@@ -301,7 +297,7 @@ class _RuntimeTeacherContext:
                     outcomes[action.action_id] = current_best
                     continue
             cloned = PolicyRepairGraph.from_payload(repair_graph.graph.to_dict())
-            applied = self._apply_action(job=job, plugin=plugin, repair_graph=cloned, action=action, step=step, proposal_by_id=proposal_by_id)
+            applied = self._apply_action(job=job, repair_graph=cloned, action=action, step=step, proposal_by_id=proposal_by_id)
             if applied is None or applied.archive_state is None:
                 outcomes[_action_key(action)] = current_best
                 outcomes[action.action_id] = current_best
@@ -316,17 +312,17 @@ class _RuntimeTeacherContext:
             else:
                 value = max(
                     _best_score(cloned),
-                    self._rollout_value(job=job, plugin=plugin, repair_graph=cloned, depth=int(self.budget.get("rollout_depth", 4) or 4) - 1, step=step + 1),
+                    self._rollout_value(job=job, repair_graph=cloned, depth=int(self.budget.get("rollout_depth", 4) or 4) - 1, step=step + 1),
                 )
             outcomes[_action_key(action)] = value
             outcomes[action.action_id] = value
         return outcomes
 
-    def _rollout_value(self, *, job: RepairJob, plugin: Any, repair_graph: PolicyRepairGraph, depth: int, step: int) -> float:
+    def _rollout_value(self, *, job: RepairJob, repair_graph: PolicyRepairGraph, depth: int, step: int) -> float:
         if depth <= 0:
             return _best_score(repair_graph)
         diagnosis = repair_graph.graph.current_node().diagnosis_hgt if repair_graph.graph.current_node() is not None else {}
-        proposals = plugin.available_modules(scheduler=self.scheduler, job=job, diagnosis_hgt=diagnosis, graph=repair_graph.graph)
+        proposals = available_module_proposals(scheduler=self.scheduler, job=job, diagnosis_hgt=diagnosis, graph=repair_graph.graph)
         exposed_edges = repair_graph.register_proposals([proposal.to_action_payload() for proposal in proposals], step=step)
         exposed_ids = {edge.candidate_id for edge in exposed_edges}
         proposals = _select_teacher_proposals([proposal for proposal in proposals if proposal.action_id in exposed_ids], repair_graph, {**self.budget, "module_branch_k": int(self.budget.get("rollout_branch_k", 3) or 3)}, self.rng)
@@ -338,7 +334,7 @@ class _RuntimeTeacherContext:
         proposal_by_id = {proposal.action_id: proposal for proposal in proposals}
         for action in actions:
             cloned = PolicyRepairGraph.from_payload(repair_graph.graph.to_dict())
-            applied = self._apply_action(job=job, plugin=plugin, repair_graph=cloned, action=action, step=step, proposal_by_id=proposal_by_id)
+            applied = self._apply_action(job=job, repair_graph=cloned, action=action, step=step, proposal_by_id=proposal_by_id)
             if applied is None or applied.archive_state is None:
                 continue
             recovery = self.evaluator.evaluate_state(job, applied.archive_state, mode=self.recovery_mode, cache=self.cache)
@@ -346,10 +342,10 @@ class _RuntimeTeacherContext:
             if node is not None:
                 node.recovery = recovery.to_dict()
                 node.diagnosis_hgt = self._diagnose_state(row={}, job=replace(job, archive_state=applied.archive_state), repair_graph=cloned, recovery=recovery, round_index=step)
-            best = max(best, _best_score(cloned), self._rollout_value(job=job, plugin=plugin, repair_graph=cloned, depth=depth - 1, step=step + 1))
+            best = max(best, _best_score(cloned), self._rollout_value(job=job, repair_graph=cloned, depth=depth - 1, step=step + 1))
         return best
 
-    def _apply_action(self, *, job: RepairJob, plugin: Any, repair_graph: PolicyRepairGraph, action: PolicyAction, step: int, proposal_by_id: dict[str, Any]):
+    def _apply_action(self, *, job: RepairJob, repair_graph: PolicyRepairGraph, action: PolicyAction, step: int, proposal_by_id: dict[str, Any]):
         if action.action_type == "undo":
             return repair_graph.undo(step=step)
         if action.action_type != "module":
@@ -359,8 +355,7 @@ class _RuntimeTeacherContext:
             proposal = next((item for item in proposal_by_id.values() if item.module_name == action.module_name), None)
         if proposal is None:
             return None
-        module_job = plugin.build_module_job(job=job, module_name=proposal.module_name, graph=repair_graph.graph)
-        materialized = plugin.materialize_module(scheduler=self.scheduler, proposal=proposal, job=module_job)
+        materialized = materialize_module_proposal(scheduler=self.scheduler, proposal=proposal, job=job)
         return repair_graph.forward(candidate_id=proposal.action_id, module_name=proposal.module_name, materialized_candidate=materialized.candidate, failure=materialized.failure, step=step)
 
 

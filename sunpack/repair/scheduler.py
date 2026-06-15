@@ -18,16 +18,16 @@ from sunpack.repair.job import RepairJob
 from sunpack.repair.pipeline.module import RepairRoute
 from sunpack.repair.pipeline.modules._common import job_source_size, repair_operation_cache_key
 from sunpack.repair.pipeline.registry import discover_repair_modules, get_repair_module_registry
-from sunpack.repair.policy import RepairPolicyManager
-from sunpack.repair.policy.training_runtime import (
+from sunpack.repair.model import RepairModelRuntime
+from sunpack.repair.search.features import (
     archive_state_for_job,
     candidate_snapshot,
     recovery_score_from_job,
     runtime_context_from_job,
     state_source_input,
 )
-from sunpack.repair.policy.recovery_evaluator import PolicyRecoverySnapshot, RecoveryEvaluator
-from sunpack.repair.policy.graph import (
+from sunpack.repair.search.recovery import PolicyRecoverySnapshot, RecoveryEvaluator
+from sunpack.repair.search.graph import (
     PolicyRepairGraph,
     best_node_id as graph_best_node_id,
     find_node_by_digest as graph_find_node_by_digest,
@@ -35,8 +35,8 @@ from sunpack.repair.policy.graph import (
     policy_graph_node_id,
     remove_frontier as graph_remove_frontier,
 )
-from sunpack.repair.policy.types import PolicyExplorationGraph, PolicyGraphEdge, PolicyGraphNode
-from sunpack.repair.policy.formats import get_repair_format_plugin
+from sunpack.repair.search.types import PolicyExplorationGraph, PolicyGraphEdge, PolicyGraphNode
+from sunpack.repair.search.proposals import available_module_proposals, materialize_module_proposal
 from sunpack.repair.result import RepairResult
 from sunpack.repair.runtime_cache import RepairRuntimeCache
 from sunpack.contracts.archive_knowledge import ArchiveKnowledge
@@ -54,16 +54,16 @@ class RepairScheduler:
             enabled=bool(cache_config.get("enabled", True)),
             max_entries=int(cache_config.get("max_entries", 512) or 512),
         )
-        self.policy_manager = RepairPolicyManager(self.config)
+        self.model_runtime = RepairModelRuntime(self.config)
         discover_repair_modules()
 
     def diagnose(self, job: RepairJob, *, knowledge: ArchiveKnowledge | None = None) -> RepairDiagnosis:
         return diagnose_repair_job(job, knowledge=knowledge)
 
     def repair(self, job: RepairJob) -> RepairResult:
-        if self.policy_manager.dual_model_active_for_job(job):
+        if self.model_runtime.active_for_job(job):
             return self.repair_policy_step(job)
-        status = self.policy_manager.status_for_job(job)
+        status = self.model_runtime.status_for_job(job)
         return RepairResult(
             status="unsupported",
             confidence=float(job.confidence or 0.0),
@@ -105,25 +105,10 @@ class RepairScheduler:
         current_node.archive_state = current_state
         current_node.patch_digest = current_state.effective_patch_digest() if current_state is not None else current_node.patch_digest
         policy_config = self.config.get("policy") if isinstance(self.config.get("policy"), dict) else {}
-        plugin = get_repair_format_plugin(current_job.format)
-        if plugin is None:
-            return RepairResult(
-                status="unsupported",
-                confidence=float(current_job.confidence or 0.0),
-                format=current_job.format,
-                repaired_input=dict(current_job.source_input or {}),
-                actions=["unsupported_policy_format"],
-                damage_flags=list(current_job.damage_flags),
-                warnings=["unsupported_policy_format"],
-                module_name="unsupported_policy_format",
-                diagnosis={"policy_loop": {"policy_step": True, "error": "unsupported_policy_format", "format": current_job.format, "graph": graph.to_dict()}},
-                message=f"repair policy format plugin is unavailable for {current_job.format}",
-            )
-
         round_index = max(1, int(job.attempts or 0) + 1)
         diagnosis_payload: dict[str, Any] = {"format": current_job.format, "confidence": current_job.confidence}
         warnings: list[str] = []
-        diagnosis_hgt, diagnosis_selection = self.policy_manager.diagnose_state(
+        diagnosis_hgt, diagnosis_selection = self.model_runtime.diagnose_state(
             job=current_job,
             archive_state=current_state,
             graph=graph,
@@ -153,7 +138,12 @@ class RepairScheduler:
             stale_patience=int(policy_config.get("graph_stop_stale_patience", 0) or 0),
         )
 
-        proposals = plugin.available_modules(scheduler=self, job=current_job, diagnosis_hgt=diagnosis_hgt, graph=graph)
+        proposals = available_module_proposals(
+            scheduler=self,
+            job=current_job,
+            diagnosis_hgt=diagnosis_hgt,
+            graph=graph,
+        )
         module_action_payloads = [proposal.to_action_payload() for proposal in proposals]
         exposed_edges = repair_graph.register_proposals(module_action_payloads, step=round_index)
         exposed_candidate_ids = {edge.candidate_id for edge in exposed_edges}
@@ -170,7 +160,7 @@ class RepairScheduler:
             action_selection = {"decision_status": "forced_stop", "reason": stop_readiness.get("force_stop_reason")}
             selected_action = None
         else:
-            action_scores, action_selection = self.policy_manager.score_graph_actions(
+            action_scores, action_selection = self.model_runtime.score_graph_actions(
                 job=current_job,
                 archive_state=current_state,
                 graph=graph,
@@ -279,8 +269,11 @@ class RepairScheduler:
         if proposal is None:
             return _policy_step_no_patch_result(current_job, graph, diagnosis_payload, selection, history, "selected_proposal_missing", warnings)
         edge_id = policy_graph_edge_id(current_node.node_id, action_id)
-        module_job = plugin.build_module_job(job=current_job, module_name=proposal.module_name, graph=graph)
-        materialized = plugin.materialize_module(scheduler=self, proposal=proposal, job=module_job)
+        materialized = materialize_module_proposal(
+            scheduler=self,
+            proposal=proposal,
+            job=current_job,
+        )
         op = repair_graph.forward(
             candidate_id=action_id,
             module_name=proposal.module_name,
@@ -305,7 +298,7 @@ class RepairScheduler:
         )
 
     def policy_active_for_job(self, job: RepairJob) -> bool:
-        return self.policy_manager.active_for_job(job)
+        return self.model_runtime.active_for_job(job)
 
     def _validated_policy_candidates(
         self,
@@ -1722,7 +1715,7 @@ def _policy_graph_update_action_scores(graph: PolicyExplorationGraph, scores: li
             prediction = metadata.get("predicted_next_state") if isinstance(metadata.get("predicted_next_state"), dict) else {}
             if prediction:
                 edge.predicted_next_state = dict(prediction)
-                edge.prediction_model_version = str(metadata.get("provider_id") or "repair_policy_transformer")
+                edge.prediction_model_version = str(metadata.get("model_id") or "repair_policy_transformer")
             uncertainty = metadata.get("predicted_uncertainty") if isinstance(metadata.get("predicted_uncertainty"), dict) else {}
             if uncertainty:
                 merged_uncertainty = dict(edge.uncertainty or {})
@@ -1739,7 +1732,7 @@ def _attach_selected_prediction(graph: PolicyExplorationGraph, edge_id: str, act
     if not prediction:
         return
     edge.predicted_next_state = dict(prediction)
-    edge.prediction_model_version = str(metadata.get("provider_id") or "repair_policy_transformer")
+    edge.prediction_model_version = str(metadata.get("model_id") or "repair_policy_transformer")
     edge.predicted_at_step = int(round_index or 0)
     uncertainty = metadata.get("predicted_uncertainty") if isinstance(metadata.get("predicted_uncertainty"), dict) else {}
     if uncertainty:

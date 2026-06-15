@@ -13,7 +13,7 @@ from typing import Any
 
 from repair_training.core.cleanup import remove_tree_fast
 from repair_training.core.datasets import read_jsonl, sha256_file, write_json
-from sunpack.model_runtime.diagnosis.features import damage_labels_for_row, damage_location_labels_from_target
+from sunpack.repair.model.diagnosis.features import damage_labels_for_row, damage_location_labels_from_target
 from repair_training.core.material_records import attach_split_volumes
 from repair_training.core.plugin import load_training_format_plugin, normalize_format_name
 from repair_training.core.run_layout import ensure_run_layout
@@ -44,7 +44,7 @@ from sunpack.detection.pipeline.processors.modules.format_structure.zip_structur
 from sunpack.extraction.knowledge import write_extraction_result
 from sunpack.extraction.scheduler import ExtractionScheduler
 from sunpack.repair.job import RepairJob
-from sunpack.repair.policy.training_runtime import build_damage_analysis_request, request_to_dict
+from sunpack.repair.search.features import build_damage_analysis_request, request_to_dict
 from sunpack.verification.knowledge import write_verification_result
 from sunpack.verification.scheduler import VerificationScheduler
 

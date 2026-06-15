@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Any
 
-from sunpack.model_runtime.policy.schema import (
+from sunpack.repair.model.policy.schema import (
     PolicyAction,
     PolicyGraphTransitionSample,
     PolicyGraphTrainingSample,

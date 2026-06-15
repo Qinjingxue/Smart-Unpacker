@@ -10,7 +10,7 @@ from typing import Any
 
 from repair_training.build_policy_graph_rows import _sanitize_action_features, _sanitize_diagnosis_hgt, _sanitize_training_graph
 from repair_training.core.datasets import read_jsonl, write_json, write_jsonl
-from sunpack.model_runtime.policy.schema import PolicyAction, PolicyGraphTransitionSample
+from sunpack.repair.model.policy.schema import PolicyAction, PolicyGraphTransitionSample
 from repair_training.core.repair_policy_transformer.teacher import (
     DEFAULT_TEACHER_BUDGET,
     _RuntimeTeacherContext,
@@ -19,7 +19,7 @@ from repair_training.core.repair_policy_transformer.teacher import (
     _select_runtime_action_proposals,
 )
 from repair_training.core.repair_policy_transformer.world_rows import _observed_delta
-from sunpack.repair.policy.graph import PolicyRepairGraph
+from sunpack.repair.search.graph import PolicyRepairGraph
 
 
 EXPLORATION_POLICIES = ("prior_biased", "deepening", "bad_branch", "undo_heavy", "family_coverage", "stop_probe", "teacher_guided")
@@ -144,7 +144,7 @@ def _collect_parallel(
         if pending and max_seconds and time.monotonic() - started >= max_seconds:
             _terminate_pool_workers(pool)
         pool.shutdown(wait=False, cancel_futures=True)
-    from sunpack.model_runtime.policy.schema import transition_sample_from_dict
+    from sunpack.repair.model.policy.schema import transition_sample_from_dict
 
     output = []
     for index in sorted(completed):
@@ -199,9 +199,6 @@ def _run_episode(ctx: _RuntimeTeacherContext, row: dict[str, Any], *, row_index:
     job = _job_from_row(row, row_index=row_index, format_name=format_name, workspace=ctx.workspace_root)
     if job is None:
         return []
-    plugin = __import__("sunpack.repair.policy.formats", fromlist=["get_repair_format_plugin"]).get_repair_format_plugin(job.format)
-    if plugin is None:
-        return []
     recovery = ctx.evaluator.evaluate_state(job, job.archive_state, mode=ctx.recovery_mode, cache=ctx.cache)
     repair_graph = PolicyRepairGraph.initialize(job, recovery)
     job = ctx._job_with_refreshed_knowledge(job, job.archive_state, recovery=recovery, step=0)
@@ -209,7 +206,9 @@ def _run_episode(ctx: _RuntimeTeacherContext, row: dict[str, Any], *, row_index:
     repair_graph.observe_current_state(recovery=recovery, diagnosis_hgt=diagnosis, verification=dict(recovery.verification or {}))
     transitions: list[PolicyGraphTransitionSample] = []
     for step in range(1, max_steps + 1):
-        runtime_proposals = plugin.available_modules(scheduler=ctx.scheduler, job=job, diagnosis_hgt=diagnosis, graph=repair_graph.graph)
+        from sunpack.repair.search.proposals import available_module_proposals
+
+        runtime_proposals = available_module_proposals(scheduler=ctx.scheduler, job=job, diagnosis_hgt=diagnosis, graph=repair_graph.graph)
         exposed_edges = repair_graph.register_proposals([proposal.to_action_payload() for proposal in runtime_proposals], step=step)
         exposed_ids = {edge.candidate_id for edge in exposed_edges}
         proposals = _select_runtime_action_proposals([proposal for proposal in runtime_proposals if proposal.action_id in exposed_ids], repair_graph, ctx.budget)
@@ -223,8 +222,8 @@ def _run_episode(ctx: _RuntimeTeacherContext, row: dict[str, Any], *, row_index:
         chosen = _choose_action(actions, exploration_policy, step, graph=repair_graph.graph.to_dict())
         graph_before = _sanitize_training_graph(repair_graph.graph.to_dict())
         proposal_by_id = {proposal.action_id: proposal for proposal in proposals}
-        action_q_values = ctx._evaluate_actions(job=job, plugin=plugin, repair_graph=repair_graph, actions=actions, proposal_by_id=proposal_by_id, step=step)
-        applied = ctx._apply_action(job=job, plugin=plugin, repair_graph=repair_graph, action=chosen, step=step, proposal_by_id=proposal_by_id)
+        action_q_values = ctx._evaluate_actions(job=job, repair_graph=repair_graph, actions=actions, proposal_by_id=proposal_by_id, step=step)
+        applied = ctx._apply_action(job=job, repair_graph=repair_graph, action=chosen, step=step, proposal_by_id=proposal_by_id)
         if applied is None or applied.archive_state is None:
             graph_after = _sanitize_training_graph(repair_graph.graph.to_dict())
         else:

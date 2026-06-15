@@ -6,9 +6,8 @@ from pathlib import Path
 from typing import Any
 
 from repair_training.core.datasets import sha256_file, write_json
-from sunpack.model_runtime.diagnosis.graph_schema import DIAGNOSIS_GRAPH_SCHEMA_VERSION, DiagnosisGraphSample
+from sunpack.repair.model.diagnosis.graph_schema import DIAGNOSIS_GRAPH_SCHEMA_VERSION, DiagnosisGraphSample
 from repair_training.core.diagnosis_gnn import DIAGNOSIS_GNN_ALGORITHM, DIAGNOSIS_GNN_SCORE_SEMANTICS, DIAGNOSIS_GNN_SEMANTICS
-from repair_training.core.diagnosis_gnn.actionable_roots import ACTIONABLE_LABEL_SOURCE, ROOT_HYPOTHESIS_TRAINING_OBJECTIVE
 from repair_training.core.diagnosis_gnn.dataset import read_diagnosis_graph_samples, split_diagnosis_graph_samples
 from repair_training.core.diagnosis_gnn.metrics import (
     binary_multilabel_metrics,
@@ -16,14 +15,18 @@ from repair_training.core.diagnosis_gnn.metrics import (
     clean_false_positive_rate,
     multilabel_set_metrics,
 )
-from sunpack.model_runtime.diagnosis.model import build_diagnosis_gnn_model, normalize_diagnosis_gnn_arch
-from sunpack.model_runtime.diagnosis.root_cases import ROOT_CASES
-from sunpack.model_runtime.diagnosis.tensorize import (
+from sunpack.repair.model.diagnosis.model import build_diagnosis_gnn_model
+from sunpack.repair.model.diagnosis.root_cases import ROOT_CASES
+from sunpack.repair.model.diagnosis.tensorize import (
     THEORY_DEPENDS_EDGE_TYPE,
     metadata_for_sample,
     metadata_from_samples,
     tensorize_sample,
 )
+
+
+DIAGNOSIS_LABEL_SOURCE = "damage_root_labels"
+DIAGNOSIS_TRAINING_OBJECTIVE = "repair_root_priority_v1"
 
 
 DEFAULT_CONFIG = {
@@ -39,7 +42,6 @@ DEFAULT_CONFIG = {
     "edge_loss_weight": 0.35,
     "arch": DIAGNOSIS_GNN_ALGORITHM,
     "heads": 4,
-    "num_bases": 8,
     "residual": True,
     "layernorm": True,
     "amp": False,
@@ -66,7 +68,7 @@ DEFAULT_CONFIG = {
     "score_normalization": "raw",
 }
 
-TENSOR_CACHE_VERSION = "diagnosis_gnn_tensor_cache_actionable_root_v2"
+TENSOR_CACHE_VERSION = "diagnosis_hgt_tensor_cache_v1"
 
 
 def train_diagnosis_gnn_model(
@@ -89,7 +91,7 @@ def train_diagnosis_gnn_model(
         ) from exc
 
     config = {**DEFAULT_CONFIG, **dict(config or {})}
-    config["arch"] = normalize_diagnosis_gnn_arch(config.get("arch"))
+    config["arch"] = DIAGNOSIS_GNN_ALGORITHM
     samples = read_diagnosis_graph_samples(input_path)
     if not samples:
         raise SystemExit(f"no diagnosis graph samples found: {input_path}")
@@ -233,8 +235,8 @@ def train_diagnosis_gnn_model(
         "algorithm": config["arch"],
         "diagnosis_semantics": DIAGNOSIS_GNN_SEMANTICS,
         "score_semantics": DIAGNOSIS_GNN_SCORE_SEMANTICS,
-        "label_source": ACTIONABLE_LABEL_SOURCE,
-        "training_objective": ROOT_HYPOTHESIS_TRAINING_OBJECTIVE,
+        "label_source": DIAGNOSIS_LABEL_SOURCE,
+        "training_objective": DIAGNOSIS_TRAINING_OBJECTIVE,
         "graph_schema": DIAGNOSIS_GRAPH_SCHEMA_VERSION,
         "format": format_name,
         "run_id": run_id,
@@ -958,8 +960,8 @@ def _label_schema(samples: list[DiagnosisGraphSample]) -> dict[str, Any]:
             "kind": "diagnosis_gnn_root_case",
             "diagnosis_semantics": DIAGNOSIS_GNN_SEMANTICS,
             "score_semantics": DIAGNOSIS_GNN_SCORE_SEMANTICS,
-            "label_source": ACTIONABLE_LABEL_SOURCE,
-            "training_objective": ROOT_HYPOTHESIS_TRAINING_OBJECTIVE,
+            "label_source": DIAGNOSIS_LABEL_SOURCE,
+            "training_objective": DIAGNOSIS_TRAINING_OBJECTIVE,
         },
     }
 

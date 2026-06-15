@@ -4,7 +4,6 @@ from pathlib import Path
 import pytest
 
 from repair_training.build_diagnosis_graphs import main as build_graphs_main
-from repair_training.evaluate_actionable_diagnosis_gnn import main as evaluate_actionable_main
 from repair_training.evaluate_diagnosis_gnn import main as evaluate_main
 from repair_training.train import main as train_main
 
@@ -60,12 +59,3 @@ def test_evaluate_diagnosis_gnn_outputs_metrics_and_predictions(tmp_path: Path):
 
     assert (output / "diagnosis_gnn_metrics.json").is_file()
     assert (output / "diagnosis_gnn_predictions.jsonl").is_file()
-
-    actionable_output = run_dir / "reports" / "actionable_diagnosis_gnn_eval"
-    assert evaluate_actionable_main([
-        "--input", str(datasets / "diagnosis_graph_rows.jsonl"),
-        "--model-dir", str(run_dir / "models" / "diagnosis_gnn"),
-        "--output", str(actionable_output),
-        "--device", "cpu",
-    ]) == 0
-    assert (actionable_output / "actionable_diagnosis_metrics.json").is_file()
