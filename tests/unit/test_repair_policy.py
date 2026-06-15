@@ -1,5 +1,3 @@
-import sys
-import types
 from pathlib import Path
 
 import pytest
@@ -27,44 +25,21 @@ def test_policy_config_rejects_removed_compatibility_flags():
 
     assert config["policy"]["enabled"] is True
     assert config["policy"]["strict_provider_errors"] is False
-    assert config["policy"]["provider_package"] == "sunpack_repair_models"
+    assert "provider_package" not in config["policy"]
     assert "fallback_to_selector" not in config["policy"]
     assert "disable_beam_when_model_active" not in config["policy"]
     assert "step_mode" not in config["policy"]
 
     with pytest.raises(ValueError, match="was removed"):
         normalize_repair_config({"policy": {"step_mode": True}})
-
-
-def test_missing_policy_package_returns_unsupported_without_selector_fallback(tmp_path):
-    scheduler = RepairScheduler({
-        "repair": {
-            "workspace": str(tmp_path / "repair"),
-            "policy": {"provider_package": "sunpack_policy_test_missing_package"},
-        }
-    })
-
-    def forbidden_selector_path(job):
-        raise AssertionError("selector fallback must not run in graph policy runtime")
-
-    scheduler.generate_repair_candidates = forbidden_selector_path  # type: ignore[method-assign]
-
-    result = scheduler.repair(_job(tmp_path))
-
-    assert result.status == "unsupported"
-    assert result.module_name == "policy_unavailable"
-    assert result.diagnosis["policy"]["fallback_reason"] == "policy_unavailable"
+    with pytest.raises(ValueError, match="was removed"):
+        normalize_repair_config({"policy": {"provider_package": "legacy_provider"}})
 
 
 def test_policy_manager_uses_new_diagnosis_and_graph_scorer_interfaces(tmp_path, monkeypatch):
     provider = _GraphProvider([PolicyGraphAction(action_type="stop", action_id="stop", score=0.8)])
-    _install_policy_package(monkeypatch, "sunpack_policy_test_graph_provider", provider)
-    scheduler = RepairScheduler({
-        "repair": {
-            "workspace": str(tmp_path / "repair"),
-            "policy": {"provider_package": "sunpack_policy_test_graph_provider"},
-        }
-    })
+    scheduler = _scheduler(tmp_path)
+    _install_provider(scheduler, provider)
     job = _job(tmp_path)
     graph = _root_graph(job)
 
@@ -94,11 +69,11 @@ def test_policy_manager_uses_new_diagnosis_and_graph_scorer_interfaces(tmp_path,
 
 def test_policy_step_executes_one_selected_module_and_exits(tmp_path, monkeypatch):
     provider = _GraphProvider([PolicyGraphAction(action_type="module", module_name="patch_one", score=0.9)])
-    _install_policy_package(monkeypatch, "sunpack_policy_test_module_step", provider)
     source = tmp_path / "source.zip"
     source.write_bytes(b"broken")
     candidate = _patch_candidate("patch_one", source, b"fixed")
-    scheduler = _scheduler(tmp_path, "sunpack_policy_test_module_step")
+    scheduler = _scheduler(tmp_path)
+    _install_provider(scheduler, provider)
     _install_policy_plugin(monkeypatch, [candidate])
     _patch_recovery(monkeypatch, root_score=0.0, patched_score=0.4)
 
@@ -119,7 +94,6 @@ def test_policy_step_executes_one_selected_module_and_exits(tmp_path, monkeypatc
 
 def test_policy_step_failed_module_creates_empty_patch_node(tmp_path, monkeypatch):
     provider = _GraphProvider([PolicyGraphAction(action_type="module", module_name="bad_lazy", score=0.9)])
-    _install_policy_package(monkeypatch, "sunpack_policy_test_empty_patch", provider)
     bad = RepairCandidate(
         module_name="bad_lazy",
         format="zip",
@@ -128,7 +102,8 @@ def test_policy_step_failed_module_creates_empty_patch_node(tmp_path, monkeypatc
         materializer=lambda: [],
         materialized=False,
     )
-    scheduler = _scheduler(tmp_path, "sunpack_policy_test_empty_patch")
+    scheduler = _scheduler(tmp_path)
+    _install_provider(scheduler, provider)
     _install_policy_plugin(monkeypatch, [bad])
     _patch_recovery(monkeypatch, root_score=0.0, patched_score=0.0)
 
@@ -143,17 +118,17 @@ def test_policy_step_failed_module_creates_empty_patch_node(tmp_path, monkeypatc
 
 def test_policy_step_undo_moves_to_parent_without_deleting_child(tmp_path, monkeypatch):
     module_provider = _GraphProvider([PolicyGraphAction(action_type="module", module_name="patch_one", score=0.9)])
-    _install_policy_package(monkeypatch, "sunpack_policy_test_undo_module", module_provider)
     source = tmp_path / "source.zip"
     source.write_bytes(b"broken")
-    scheduler = _scheduler(tmp_path, "sunpack_policy_test_undo_module")
+    scheduler = _scheduler(tmp_path)
+    _install_provider(scheduler, module_provider)
     _install_policy_plugin(monkeypatch, [_patch_candidate("patch_one", source, b"fixed")])
     _patch_recovery(monkeypatch, root_score=0.0, patched_score=0.5)
     first = scheduler.repair(_job(tmp_path, source=source))
 
     undo_provider = _GraphProvider([PolicyGraphAction(action_type="undo", action_id="undo", score=1.0)])
-    _install_policy_package(monkeypatch, "sunpack_policy_test_undo_parent", undo_provider)
-    scheduler = _scheduler(tmp_path, "sunpack_policy_test_undo_parent")
+    scheduler = _scheduler(tmp_path)
+    _install_provider(scheduler, undo_provider)
     _install_policy_plugin(monkeypatch, [])
     job = _job(tmp_path, source=source, archive_state=first.repaired_state, repair_history={"items": [{"diagnosis": first.diagnosis}]})
 
@@ -170,8 +145,8 @@ def test_policy_step_undo_moves_to_parent_without_deleting_child(tmp_path, monke
 
 def test_policy_step_stop_returns_best_state_and_sets_stop_signal(tmp_path, monkeypatch):
     provider = _GraphProvider([PolicyGraphAction(action_type="stop", action_id="stop", score=1.0, reason="model_stop")])
-    _install_policy_package(monkeypatch, "sunpack_policy_test_stop", provider)
-    scheduler = _scheduler(tmp_path, "sunpack_policy_test_stop")
+    scheduler = _scheduler(tmp_path)
+    _install_provider(scheduler, provider)
     _install_policy_plugin(monkeypatch, [])
     _patch_recovery(monkeypatch, root_score=0.25, patched_score=0.25)
 
@@ -186,7 +161,6 @@ def test_policy_step_stop_returns_best_state_and_sets_stop_signal(tmp_path, monk
 
 def test_stale_best_forces_stop_before_policy_scorer(tmp_path, monkeypatch):
     provider = _GraphProvider([PolicyGraphAction(action_type="module", action_id="patch_one", module_name="patch_one", score=1.0)], raise_on_score=True)
-    _install_policy_package(monkeypatch, "sunpack_policy_test_stale_stop", provider)
     job = _job(tmp_path)
     graph = _root_graph(job)
     graph.stale_expansion_count = 5
@@ -195,9 +169,10 @@ def test_stale_best_forces_stop_before_policy_scorer(tmp_path, monkeypatch):
     scheduler = RepairScheduler({
         "repair": {
             "workspace": str(tmp_path / "repair"),
-            "policy": {"provider_package": "sunpack_policy_test_stale_stop", "graph_stop_stale_patience": 3},
+            "policy": {"graph_stop_stale_patience": 3},
         }
     })
+    _install_provider(scheduler, provider)
     _install_policy_plugin(monkeypatch, [])
     _patch_recovery(monkeypatch, root_score=0.1, patched_score=0.1)
 
@@ -212,7 +187,7 @@ def test_zip_policy_plugin_enumerates_registry_without_rule_context(tmp_path, mo
     module = _FakeZipModule()
     monkeypatch.setattr(zip_policy_plugin, "get_repair_module_registry", lambda: _FakeRegistry({"zip_fake_fix": module}))
     monkeypatch.setattr(zip_policy_plugin, "enabled_module_configs", lambda config: {})
-    scheduler = _scheduler(tmp_path, "sunpack_policy_test_graph_provider")
+    scheduler = _scheduler(tmp_path)
     scheduler.generate_policy_repair_candidates = lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("old policy candidate path must not run"))  # type: ignore[attr-defined]
     scheduler.diagnose = lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("rule diagnosis must not run"))  # type: ignore[method-assign]
 
@@ -273,11 +248,8 @@ class _GraphProvider:
         }
 
 
-def _install_policy_package(monkeypatch, name: str, provider) -> None:
-    module = types.ModuleType(name)
-    module.get_diagnosis_hgt_models = lambda: [provider]
-    module.get_policy_graph_scorers = lambda: [provider]
-    monkeypatch.setitem(sys.modules, name, module)
+def _install_provider(scheduler: RepairScheduler, provider) -> None:
+    scheduler.policy_manager._providers = [provider]
 
 
 def _test_prediction() -> dict:
@@ -345,11 +317,10 @@ class _FakeZipModule:
         raise AssertionError("proposal enumeration must not materialize the module")
 
 
-def _scheduler(tmp_path: Path, provider_package: str) -> RepairScheduler:
+def _scheduler(tmp_path: Path) -> RepairScheduler:
     return RepairScheduler({
         "repair": {
             "workspace": str(tmp_path / "repair"),
-            "policy": {"provider_package": provider_package},
             "max_repair_rounds_per_task": 5,
         }
     })

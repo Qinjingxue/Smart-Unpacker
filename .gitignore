@@ -61,14 +61,13 @@ test_extract_folder/
 test_targz/
 AGENTS.md
 native/sunpack_native/target/
-native/sevenzip_password_tester/build-x64/
-native/sevenzip_password_tester/build-pkrc/
+native/sevenzip_bridge/build-*/
 tests/cases/archive_scan/r3961_jpg_carrier_encrypted_rar
 .sunpack/
-models/
 datasets/
 bug.txt
 .deepseek/
-.private/
 repair_training/tmp/
 repair_training/runs/
+repair_training/latest_run.txt
+repair_training/latest_runs.json

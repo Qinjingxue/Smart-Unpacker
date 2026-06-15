@@ -1,13 +1,13 @@
 import pytest
 
-from repair_training.core.diagnosis_graph.schema import (
+from sunpack.model_runtime.diagnosis.graph_schema import (
     DiagnosisEdge,
     DiagnosisGraph,
     DiagnosisGraphSample,
     DiagnosisLabels,
     DiagnosisNode,
 )
-from repair_training.core.diagnosis_graph.validate import (
+from sunpack.model_runtime.diagnosis.graph_validate import (
     DiagnosisGraphValidationError,
     validate_diagnosis_graph_sample,
 )

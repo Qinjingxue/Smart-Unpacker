@@ -1,0 +1,54 @@
+{
+  "default_threshold": 0.6033325791358948,
+  "root_case": {
+    "clean_false_positive_rate": 0.0,
+    "micro_f1": 0.4401186503522433,
+    "micro_precision": 0.35538922155688624,
+    "micro_recall": 0.5778967867575463,
+    "threshold": 0.6033325791358948
+  },
+  "root_case_label_thresholds": {
+    "central_directory.compressed_size": 0.6414441929588318,
+    "central_directory.crc": 0.6243008242378235,
+    "central_directory.flags": 0.6192016468772888,
+    "central_directory.local_header_offset": 0.6096425519714356,
+    "compression_method": 0.5139358772506714,
+    "data_descriptor.crc": 0.8631692395935059,
+    "data_descriptor.record": 0.7027521596679688,
+    "data_descriptor.size": 0.6643831001052857,
+    "entry_name": 0.70733742578125,
+    "eocd.cd_offset": 0.6033325791358948,
+    "eocd.cd_size": 0.6613383160362244,
+    "eocd.comment_length": 0.711201475692749,
+    "eocd.entry_count": 0.5918627248535157,
+    "generic_extra_field": 0.6417620049247742,
+    "local_header.compressed_size": 0.46260544657707214,
+    "local_header.crc": 0.5863070355186463,
+    "local_header.flags": 0.4154667556285858,
+    "local_header.signature": 0.5942318306694031,
+    "payload.compressed_data": 0.5889243350753784,
+    "sfx_prefix.bytes": 0.5237759218940735,
+    "split_volume.missing_range": 0.7565477953681946,
+    "tail.trailing_bytes": 0.5950410233268738,
+    "zip64.eocd": 0.5990500317344666,
+    "zip64.extra_length": 0.7760134802589417,
+    "zip64.locator": 0.6276573405990601,
+    "zip64.uncompressed_size": 0.5015168653259278
+  },
+  "root_case_threshold": 0.6033325791358948,
+  "selection_split": "valid",
+  "theory_alignment": {
+    "clean_false_positive_rate": 0.022988505747126436,
+    "micro_f1": 0.8530289005450993,
+    "micro_precision": 0.8615054359116404,
+    "micro_recall": 0.8447175448126019,
+    "threshold": 0.5250589118728638
+  },
+  "theory_edge_alignment": {
+    "clean_false_positive_rate": 0.0,
+    "micro_f1": 0.8202900926001804,
+    "micro_precision": 0.9289161098737936,
+    "micro_recall": 0.7344093910491563,
+    "threshold": 0.46704477071762085
+  }
+}

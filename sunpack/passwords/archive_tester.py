@@ -1,8 +1,8 @@
 import subprocess
 from typing import List, Tuple
 
-from sunpack.support.sevenzip_native import cached_test_archive, get_native_password_tester
-from sunpack.support.sevenzip_native import STATUS_DAMAGED, STATUS_WRONG_PASSWORD
+from sunpack.support.sevenzip_bridge import cached_test_archive, get_native_password_tester
+from sunpack.support.sevenzip_bridge import STATUS_DAMAGED, STATUS_WRONG_PASSWORD
 from sunpack.passwords.internal.store import PasswordStore
 from sunpack.passwords.scheduler import PasswordScheduler
 

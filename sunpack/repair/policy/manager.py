@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import importlib
 from typing import Any
 
 from sunpack.contracts.archive_state import ArchiveState
+from sunpack.model_runtime.providers import create_model_providers
 from sunpack.repair.job import RepairJob
 from sunpack.repair.policy.types import (
     DiagnosisHGTRequest,
@@ -20,7 +20,6 @@ class RepairPolicyManager:
         self.policy_config = self.config.get("policy") if isinstance(self.config.get("policy"), dict) else {}
         self.enabled = bool(self.policy_config.get("enabled", True))
         self.strict_provider_errors = bool(self.policy_config.get("strict_provider_errors", False))
-        self.provider_package = str(self.policy_config.get("provider_package") or "sunpack_repair_models")
         self._providers: list[Any] | None = None
         self.last_load_error: str = ""
 
@@ -34,7 +33,7 @@ class RepairPolicyManager:
         return self.dual_model_active_for_job(job)
 
     def status_for_job(self, job: RepairJob) -> dict[str, Any]:
-        base = {"enabled": self.enabled, "provider_package": self.provider_package}
+        base = {"enabled": self.enabled}
         if not self.enabled:
             return {**base, "decision_status": "disabled", "fallback_reason": "policy_disabled"}
         fmt = _normalize_format(job.format)
@@ -58,7 +57,7 @@ class RepairPolicyManager:
         recovery: dict[str, Any] | None = None,
         round_index: int = 0,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
-        base = {"enabled": self.enabled, "provider_package": self.provider_package}
+        base = {"enabled": self.enabled}
         fmt = _normalize_format(job.format)
         request = DiagnosisHGTRequest(
             job=job,
@@ -96,7 +95,7 @@ class RepairPolicyManager:
         best_seen_recovery: dict[str, Any] | None = None,
         round_index: int = 0,
     ) -> tuple[list[PolicyGraphAction], dict[str, Any]]:
-        base = {"enabled": self.enabled, "provider_package": self.provider_package}
+        base = {"enabled": self.enabled}
         fmt = _normalize_format(job.format)
         request = PolicyGraphActionRequest(
             job=job,
@@ -147,14 +146,9 @@ class RepairPolicyManager:
         if not self.enabled:
             return self._providers
         try:
-            package = importlib.import_module(self.provider_package)
+            self._providers.extend(create_model_providers())
         except Exception as exc:
             self.last_load_error = str(exc)
-            return self._providers
-        for getter in ("get_diagnosis_hgt_models", "get_policy_graph_scorers"):
-            func = getattr(package, getter, None)
-            if callable(func):
-                self._providers.extend([provider for provider in list(func() or []) if provider is not None])
         return self._providers
 
     def register(self, provider: Any) -> None:

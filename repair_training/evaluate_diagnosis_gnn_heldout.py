@@ -8,9 +8,9 @@ from typing import Any
 
 from repair_training.core.datasets import write_json, write_jsonl
 from repair_training.core.diagnosis_gnn.dataset import read_diagnosis_graph_samples
-from repair_training.core.diagnosis_gnn.inference import DiagnosisGNNModel
+from sunpack.model_runtime.diagnosis.inference import DiagnosisGNNModel
 from repair_training.core.diagnosis_gnn.metrics import binary_multilabel_metrics, clean_false_positive_rate
-from repair_training.core.diagnosis_gnn.root_cases import ROOT_CASES
+from sunpack.model_runtime.diagnosis.root_cases import ROOT_CASES
 from repair_training.core.diagnosis_gnn.training import train_diagnosis_gnn_model
 from repair_training.core.plugin import normalize_format_name
 

@@ -10,7 +10,7 @@ from typing import Any
 
 from repair_training.build_policy_graph_rows import _sanitize_action_features, _sanitize_diagnosis_hgt, _sanitize_training_graph
 from repair_training.core.datasets import read_jsonl, write_json, write_jsonl
-from repair_training.core.repair_policy_transformer.schema import PolicyAction, PolicyGraphTransitionSample
+from sunpack.model_runtime.policy.schema import PolicyAction, PolicyGraphTransitionSample
 from repair_training.core.repair_policy_transformer.teacher import (
     DEFAULT_TEACHER_BUDGET,
     _RuntimeTeacherContext,
@@ -144,7 +144,7 @@ def _collect_parallel(
         if pending and max_seconds and time.monotonic() - started >= max_seconds:
             _terminate_pool_workers(pool)
         pool.shutdown(wait=False, cancel_futures=True)
-    from repair_training.core.repair_policy_transformer.schema import transition_sample_from_dict
+    from sunpack.model_runtime.policy.schema import transition_sample_from_dict
 
     output = []
     for index in sorted(completed):

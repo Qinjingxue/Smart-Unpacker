@@ -7,8 +7,8 @@ from pathlib import Path
 from typing import Any
 
 from repair_training.core.datasets import read_jsonl, write_json, write_jsonl
-from repair_training.core.repair_policy_transformer.inference import RepairPolicyTransformerModel
-from repair_training.core.repair_policy_transformer.schema import (
+from sunpack.model_runtime.policy.inference import RepairPolicyTransformerModel
+from sunpack.model_runtime.policy.schema import (
     PolicyAction,
     PolicyGraphTrainingSample,
     PolicyGraphTransitionSample,

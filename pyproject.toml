@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sunpack"
+version = "0.8.0"
+description = "Archive detection, extraction, verification, and repair pipeline."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+dependencies = [
+    "psutil>=5.9.0",
+    "send2trash>=1.8.0",
+    "watchdog>=4.0.0",
+    "zstandard>=0.22.0",
+    "torch==2.12.0",
+    "torch-geometric==2.8.0",
+]
+
+[project.optional-dependencies]
+build = [
+    "pyinstaller>=6",
+    "maturin>=1.8,<2",
+    "cmake>=3.25",
+]
+test = ["pytest>=9"]
+training = ["numpy>=2"]
+dev = [
+    "pyinstaller>=6",
+    "maturin>=1.8,<2",
+    "cmake>=3.25",
+    "pytest>=9",
+    "numpy>=2",
+]
+
+[project.scripts]
+sunpack = "sunpack.app.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["sunpack*", "repair_training*"]
+

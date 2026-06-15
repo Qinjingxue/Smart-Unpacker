@@ -275,7 +275,18 @@ watch 不再按扩展名判断“是否归档”。稳定文件先经过 `filesy
 | `deep` | `dict` | deep 模块候选数、输入/输出大小、条目数和验证预算。 |
 | `auto_deep` | `dict` | targeted/safe 无改进时自动放行少量 deep 候选。 |
 | `beam` | `dict` | patch plan beam 搜索和候选评估上限。 |
+| `policy` | `dict` | 内置 diagnosis HGT 与 repair policy transformer 的运行控制。 |
 | `modules` | `list[dict]` | 显式 repair 模块开关。 |
+
+### policy
+
+| 字段 | 类型 | 默认 | 说明 |
+| --- | --- | --- | --- |
+| `enabled` | `bool` | `true` | 是否启用内置双模型 repair policy。 |
+| `strict_provider_errors` | `bool` | `false` | 模型推理异常时是否直接抛出；关闭时记录 provider error 并返回 unavailable。 |
+| `graph_stop_stale_patience` | `int` | `100` | repair 图连续多少次没有最佳状态提升后强制 stop。 |
+
+模型 provider 已内置于 `sunpack.model_runtime`。`provider_package`、`step_mode`、`fallback_to_selector` 和 `disable_beam_when_model_active` 均已删除，配置中出现会直接报错。模型资产由根目录 `models/manifest.json` 管理，可用 `python sunpack.py models status --load` 检查。
 
 ### repair stages
 

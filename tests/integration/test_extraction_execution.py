@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from sunpack.detection.nested_scan_policy import NestedOutputScanPolicy as OutputScanPolicy
 from sunpack.config.schema import normalize_config
 from sunpack.extraction.scheduler import ExtractionScheduler
+from sunpack.extraction.internal.sevenzip.metadata import ArchiveMetadataScanResult
 from sunpack.contracts.detection import FactBag
 from sunpack.contracts.tasks import ArchiveTask
 from tests.helpers.detection_config import with_detection_pipeline
@@ -55,7 +56,11 @@ class FakePasswordResolver:
 
 class FakeMetadataScanner:
     def scan(self, archive, password=None, part_paths=None):
-        return None
+        return ArchiveMetadataScanResult(
+            archive_path=str(archive),
+            archive_type=Path(str(archive)).suffix.lower().lstrip(".") or "unknown",
+            reasons=["test fixture keeps the default filename encoding"],
+        )
 
 
 class FakeStager:

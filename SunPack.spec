@@ -10,7 +10,7 @@ icon_path = project_root / "sunpack.ico"
 dist_name = os.environ.get("SUNPACK_DIST_NAME", "sunpack")
 exe_name = os.environ.get("SUNPACK_EXE_NAME", "sunpack")
 
-hiddenimports = ["sunpack_native", "sunpack_repair_models", "torch", "torch_geometric"]
+hiddenimports = ["sunpack_native", "torch", "torch_geometric"]
 datas = []
 for package in (
     "watchdog",
@@ -38,10 +38,8 @@ for package in (
     "sunpack.postprocess.internal",
     "sunpack.verification.methods",
     "sunpack.model_runtime",
-    "repair_training.core.diagnosis_graph",
-    "repair_training.core.diagnosis_gnn",
-    "repair_training.core.repair_policy_transformer",
-    "repair_training.formats.zip",
+    "sunpack.model_runtime.diagnosis",
+    "sunpack.model_runtime.policy",
 ):
     hiddenimports.extend(collect_submodules(package))
 

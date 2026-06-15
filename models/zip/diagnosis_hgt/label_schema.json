@@ -1,0 +1,37 @@
+{
+  "labels": [
+    "eocd.cd_offset",
+    "eocd.cd_size",
+    "eocd.entry_count",
+    "eocd.comment_length",
+    "central_directory.local_header_offset",
+    "central_directory.flags",
+    "central_directory.crc",
+    "central_directory.compressed_size",
+    "local_header.signature",
+    "local_header.flags",
+    "local_header.crc",
+    "local_header.compressed_size",
+    "compression_method",
+    "entry_name",
+    "generic_extra_field",
+    "data_descriptor.record",
+    "data_descriptor.crc",
+    "data_descriptor.size",
+    "payload.compressed_data",
+    "zip64.eocd",
+    "zip64.locator",
+    "zip64.extra_length",
+    "zip64.uncompressed_size",
+    "tail.trailing_bytes",
+    "sfx_prefix.bytes",
+    "split_volume.missing_range"
+  ],
+  "metadata": {
+    "diagnosis_semantics": "repair_actionable_root_v2",
+    "kind": "diagnosis_gnn_root_case",
+    "label_source": "oracle_best_path_first_action",
+    "score_semantics": "repair_priority",
+    "training_objective": "root_hypothesis_probe_world_v1"
+  }
+}

@@ -1,5 +1,4 @@
-from __future__ import annotations
-
-
-POLICY_TRANSFORMER_ALGORITHM = "repair_graph_world_policy_transformer"
-POLICY_TRANSFORMER_SEMANTICS = "repair_graph_world_policy_uncertainty_v1"
+from sunpack.model_runtime.policy import (
+    POLICY_TRANSFORMER_ALGORITHM,
+    POLICY_TRANSFORMER_SEMANTICS,
+)

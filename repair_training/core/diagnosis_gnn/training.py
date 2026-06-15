@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from repair_training.core.datasets import sha256_file, write_json
-from repair_training.core.diagnosis_graph.schema import DIAGNOSIS_GRAPH_SCHEMA_VERSION, DiagnosisGraphSample
+from sunpack.model_runtime.diagnosis.graph_schema import DIAGNOSIS_GRAPH_SCHEMA_VERSION, DiagnosisGraphSample
 from repair_training.core.diagnosis_gnn import DIAGNOSIS_GNN_ALGORITHM, DIAGNOSIS_GNN_SCORE_SEMANTICS, DIAGNOSIS_GNN_SEMANTICS
 from repair_training.core.diagnosis_gnn.actionable_roots import ACTIONABLE_LABEL_SOURCE, ROOT_HYPOTHESIS_TRAINING_OBJECTIVE
 from repair_training.core.diagnosis_gnn.dataset import read_diagnosis_graph_samples, split_diagnosis_graph_samples
@@ -16,9 +16,9 @@ from repair_training.core.diagnosis_gnn.metrics import (
     clean_false_positive_rate,
     multilabel_set_metrics,
 )
-from repair_training.core.diagnosis_gnn.model import build_diagnosis_gnn_model, normalize_diagnosis_gnn_arch
-from repair_training.core.diagnosis_gnn.root_cases import ROOT_CASES
-from repair_training.core.diagnosis_gnn.tensorize import (
+from sunpack.model_runtime.diagnosis.model import build_diagnosis_gnn_model, normalize_diagnosis_gnn_arch
+from sunpack.model_runtime.diagnosis.root_cases import ROOT_CASES
+from sunpack.model_runtime.diagnosis.tensorize import (
     THEORY_DEPENDS_EDGE_TYPE,
     metadata_for_sample,
     metadata_from_samples,
@@ -85,7 +85,7 @@ def train_diagnosis_gnn_model(
     except Exception as exc:  # pragma: no cover
         raise SystemExit(
             "DiagnosisGNN training requires torch and torch-geometric. "
-            "Install repair_training/requirements-training.txt."
+            "Install the project training extra."
         ) from exc
 
     config = {**DEFAULT_CONFIG, **dict(config or {})}

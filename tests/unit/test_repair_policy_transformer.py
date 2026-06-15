@@ -13,12 +13,12 @@ from repair_training.build_policy_graph_rows import build_policy_graph_rows
 from repair_training.build_policy_teacher_rows import main as teacher_rows_main
 from repair_training.build_policy_transition_rows import annotate_episode_future_best_q
 from repair_training.core.repair_policy_transformer import teacher as teacher_module
-from repair_training.core.repair_policy_transformer.inference import RepairPolicyTransformerModel
-from repair_training.core.repair_policy_transformer.model import build_repair_policy_transformer
-from repair_training.core.repair_policy_transformer.schema import PolicyAction, PolicyGraphTrainingSample, transition_sample_from_dict, world_sample_from_dict, sample_from_dict
+from sunpack.model_runtime.policy.inference import RepairPolicyTransformerModel
+from sunpack.model_runtime.policy.model import build_repair_policy_transformer
+from sunpack.model_runtime.policy.schema import PolicyAction, PolicyGraphTrainingSample, transition_sample_from_dict, world_sample_from_dict, sample_from_dict
 from repair_training.core.repair_policy_transformer.teacher import label_teacher_sample
-from repair_training.core.repair_policy_transformer.tensorize import tensorize_sample, tensorize_world_sample
-from repair_training.core.repair_policy_transformer.tensorize import WORLD_TARGET_DIM
+from sunpack.model_runtime.policy.tensorize import tensorize_sample, tensorize_world_sample
+from sunpack.model_runtime.policy.tensorize import WORLD_TARGET_DIM
 from repair_training.core.repair_policy_transformer.world_rows import build_policy_world_samples
 from repair_training.train import main as train_main
 

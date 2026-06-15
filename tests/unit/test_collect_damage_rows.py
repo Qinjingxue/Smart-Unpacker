@@ -5,7 +5,7 @@ from pathlib import Path
 
 import repair_training.collect_damage_rows as collect_damage_rows_module
 from repair_training.core.material_records import attach_split_volumes
-from repair_training.core.features import damage_labels_for_row, damage_location_labels_from_target, uncertain_labels_for_row
+from sunpack.model_runtime.diagnosis.features import damage_labels_for_row, damage_location_labels_from_target, uncertain_labels_for_row
 from repair_training.collect_damage_rows import collect_damage_row
 from repair_training.formats.zip.corruption_impl import build_corpus_corruption_case
 from repair_training.formats.zip.observability import apply_zip_observability

@@ -1,4 +1,4 @@
-from sunpack.support import sevenzip_native as native
+from sunpack.support import sevenzip_bridge as native
 from sunpack.support.global_cache_manager import clear_cache_namespace
 
 
@@ -226,7 +226,7 @@ def test_archive_crc_manifest_cache_is_password_and_limit_specific(tmp_path, mon
     assert second.files[0]["path"] == "inside.txt"
     assert fake.crc_manifest_calls == 1
     _clear_native_7z_caches()
-from sunpack.support.sevenzip_native import NativePasswordAttempt, NativePasswordTester, STATUS_OK
+from sunpack.support.sevenzip_bridge import NativePasswordAttempt, NativePasswordTester, STATUS_OK
 
 
 class _ArchiveInputAwareTester(NativePasswordTester):

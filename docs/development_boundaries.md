@@ -67,8 +67,14 @@ filesystem / relations / rename
   -> sunpack_native narrow helpers
 
 passwords
-  -> support.sevenzip_native
+  -> support.sevenzip_bridge
   -> native/Rust fast verifiers
+
+repair
+  -> model_runtime providers
+
+repair_training
+  -> sunpack.model_runtime
 
 config
   -> support
@@ -95,7 +101,8 @@ contracts
 | 修复 | `repair.RepairScheduler` | 根据 verification repair 决策生成修复候选。 |
 | 后处理 | `postprocess.actions.PostProcessActions` | 成功后清理和扁平化。 |
 | 文件系统监控 | `filesystem.watcher.WatchScheduler` | watchdog 事件、稳定文件队列和自动处理。 |
-| Native ABI | `support.sevenzip_native` | C++ 7z.dll wrapper 绑定和缓存。 |
+| 模型运行时 | `model_runtime.ModelAssetRegistry` / `model_runtime.providers` | 模型资产校验、图构建、推理和内置 provider。 |
+| Native ABI | `support.sevenzip_bridge` | C++ 7z.dll bridge 绑定和缓存。 |
 
 ## 领域边界
 
@@ -149,11 +156,21 @@ contracts
 
 ### extraction
 
-`extraction` 是单归档解压执行层。它消费 `ArchiveTask`、relation 分卷信息、analysis 标注输入和 password resolution，调用 `sevenzip_worker.exe` 通过 `7z.dll` 解压普通文件、`file_range` 或 `concat_ranges` 虚拟输入。它不负责扫描候选、不做批量并发、不做成功后清理。
+`extraction` 是单归档解压执行层。它消费 `ArchiveTask`、relation 分卷信息、analysis 标注输入和 password resolution，调用 `sunpack_sevenzip_worker.exe` 通过 `7z.dll` 解压普通文件、`file_range` 或 `concat_ranges` 虚拟输入。它不负责扫描候选、不做批量并发、不做成功后清理。
 
 ### repair
 
-`repair` 是损坏结构修复候选生成层。它不再由 analysis 中等置信度直接触发，而是响应 verification 的 `repair` 决策。每个格式一个模块目录，修复模块通过 registry 注册，返回候选文件、虚拟输入或 patch plan。读写二进制必须走 native repair I/O，避免 Python 大文件读写 fallback。
+`repair` 是损坏结构修复候选生成层。它响应 verification 的 `repair` 决策，并通过内置模型 provider 获取 diagnosis 和 module/undo/stop 动作评分。每个格式一个模块目录，修复模块通过 registry 注册，返回候选文件、虚拟输入或 patch plan。模型建议不能绕过 extraction 与 verification。读写二进制必须走 native repair I/O，避免 Python 大文件读写 fallback。
+
+### model_runtime
+
+`model_runtime` 是发布运行时的一部分，包含模型结构、张量化、图 schema、格式图构建、推理、provider 和资产 registry。它只能依赖 `sunpack` 的稳定契约与通用运行时代码，禁止导入 `repair_training`。
+
+模型资产统一放在仓库根目录 `models/`，由 `models/manifest.json` 声明。运行时按 manifest 定位资产并校验 `model.pt` SHA-256，不从训练 run 目录回退，也不动态加载外部 provider 包。
+
+### repair_training
+
+`repair_training` 包含数据生成、dataset、训练、评估和实验 run 布局。它可以复用 `sunpack.model_runtime` 中与生产一致的 schema、model 和 tensorize 实现，但生产运行时不能反向依赖训练代码。训练产物只有显式发布到 `models/` 并更新 manifest 后才成为运行时资产。
 
 ### verification
 
@@ -175,7 +192,7 @@ contracts
 
 `native/sunpack_native` 承接跨平台热点：目录扫描、二进制视图、signature prepass、格式 probe、carrier scan、repair I/O、输出 CRC/readability、输出文件索引匹配、deep repair native 实现、密码 fast verifier 等。
 
-`native/sevenzip_password_tester` 承接 Windows 7z.dll ABI：archive probe/test、密码数组尝试、archive state manifest 和 `sevenzip_worker.exe` 解压。
+`native/sevenzip_bridge` 承接 Windows 7z.dll ABI：archive probe/test、密码数组尝试、archive state manifest 和 `sunpack_sevenzip_worker.exe` 解压。
 
 ## 禁止清单
 
@@ -243,6 +260,16 @@ sunpack/
   relations/    文件关系、分卷和候选组
   rename/       输出命名和临时分卷 staging
   repair/       损坏容器修复流水线
+  model_runtime/模型资产、图构建、推理和内置 provider
   support/      资源、JSON、缓存、7z.dll ABI 绑定等基础设施
   verification/ 解压结果校验流水线
+```
+
+仓库级目录：
+
+```text
+models/                 正式发布模型与 manifest
+repair_training/        数据生成、训练和评估
+native/sunpack_native/  Rust/PyO3 热路径
+native/sevenzip_bridge/ Windows 7z.dll bridge 与 worker
 ```

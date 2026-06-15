@@ -8,7 +8,7 @@ from typing import Any
 from repair_training.core.datasets import read_jsonl, write_json, write_jsonl
 from repair_training.core.diagnosis_gnn.actionable_roots import ACTIONABLE_ROOT_SEMANTICS
 from repair_training.core.diagnosis_gnn.dataset import read_diagnosis_graph_samples
-from repair_training.core.diagnosis_gnn.inference import DiagnosisGNNModel
+from sunpack.model_runtime.diagnosis.inference import DiagnosisGNNModel
 
 
 def main(argv: list[str] | None = None) -> int:

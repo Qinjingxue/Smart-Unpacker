@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from sunpack.repair.pipeline.modules._common import module_limits
-from sunpack.support.sevenzip_native import get_native_password_tester
+from sunpack.support.sevenzip_bridge import get_native_password_tester
 
 
 def validate_with_native_probe(path: str, expected_format: str, config: dict[str, Any]) -> tuple[bool, list[str], dict[str, Any]]:

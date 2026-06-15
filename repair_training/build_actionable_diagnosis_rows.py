@@ -7,7 +7,7 @@ from typing import Any
 
 from repair_training.core.datasets import read_jsonl, write_json, write_jsonl
 from repair_training.core.diagnosis_gnn.actionable_roots import actionable_roots_from_actions, roots_for_module
-from repair_training.core.diagnosis_gnn.root_cases import canonical_root_case
+from sunpack.model_runtime.diagnosis.root_cases import canonical_root_case
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -4,7 +4,7 @@ import tempfile
 from dataclasses import dataclass
 from typing import List, Optional
 
-from sunpack.support.sevenzip_native import get_native_password_tester
+from sunpack.support.sevenzip_bridge import get_native_password_tester
 from sunpack.relations import RelationsScheduler
 from sunpack.support.path_keys import case_key, normalized_path
 

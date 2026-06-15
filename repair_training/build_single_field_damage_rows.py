@@ -10,9 +10,9 @@ from typing import Any
 
 from repair_training.collect_damage_rows import collect_damage_rows
 from repair_training.core.datasets import write_json, write_jsonl
-from repair_training.core.diagnosis_graph.dispatcher import build_diagnosis_graph_sample
+from sunpack.model_runtime.diagnosis.graph_dispatcher import build_diagnosis_graph_sample
 from repair_training.core.diagnosis_graph.serialize import diagnosis_graph_summary
-from repair_training.core.features import damage_labels_for_row
+from sunpack.model_runtime.diagnosis.features import damage_labels_for_row
 from repair_training.formats.zip.build_material_impl import (
     _apply_profile_metadata,
     _distributed_zip_sources,

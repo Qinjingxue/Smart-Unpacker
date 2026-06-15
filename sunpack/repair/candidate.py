@@ -9,8 +9,8 @@ from typing import Any, Callable
 from sunpack.contracts.archive_state import ArchiveState, PatchPlan
 from sunpack.repair.pipeline.modules._common import module_limits
 from sunpack.repair.result import RepairResult, RepairStatus
-from sunpack.support.sevenzip_native import get_native_password_tester
-from sunpack.support.sevenzip_worker import dry_run_archive
+from sunpack.support.sevenzip_bridge import get_native_password_tester
+from sunpack.support.sevenzip_bridge_worker import dry_run_archive
 
 
 @dataclass(frozen=True)

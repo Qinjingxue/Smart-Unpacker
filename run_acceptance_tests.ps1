@@ -246,8 +246,8 @@ function Get-EnvironmentRefreshReasons {
     $requiredTools = @(
         (Join-Path $toolsRoot "7z.exe"),
         (Join-Path $toolsRoot "7z.dll"),
-        (Join-Path $toolsRoot "sevenzip_password_tester_capi.dll"),
-        (Join-Path $toolsRoot "sevenzip_worker.exe")
+        (Join-Path $toolsRoot "sunpack_sevenzip.dll"),
+        (Join-Path $toolsRoot "sunpack_sevenzip_worker.exe")
     )
     foreach ($toolPath in $requiredTools) {
         if (-not (Test-Path -LiteralPath $toolPath)) {
@@ -258,11 +258,11 @@ function Get-EnvironmentRefreshReasons {
         return $reasons
     }
 
-    $wrapperRoot = Join-Path $RepoRoot "native\sevenzip_password_tester"
+    $wrapperRoot = Join-Path $RepoRoot "native\sevenzip_bridge"
     $wrapperSourceNewest = Get-NewestSourceWriteTime -Root $wrapperRoot -Include @("*.cpp", "*.h", "*.hpp", "CMakeLists.txt")
     $wrapperOldest = Get-OldestExistingWriteTime -Paths @(
-        (Join-Path $toolsRoot "sevenzip_password_tester_capi.dll"),
-        (Join-Path $toolsRoot "sevenzip_worker.exe")
+        (Join-Path $toolsRoot "sunpack_sevenzip.dll"),
+        (Join-Path $toolsRoot "sunpack_sevenzip_worker.exe")
     )
     if ($wrapperOldest -lt $wrapperSourceNewest) {
         $reasons.Add("7z wrapper tools are older than C++ sources")

@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from repair_training.core.datasets import read_jsonl, write_json, write_jsonl
-from repair_training.core.diagnosis_gnn.root_cases import ROOT_CASES, canonical_root_case
+from sunpack.model_runtime.diagnosis.root_cases import ROOT_CASES, canonical_root_case
 
 
 def main(argv: list[str] | None = None) -> int:

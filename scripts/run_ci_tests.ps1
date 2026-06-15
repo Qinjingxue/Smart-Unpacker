@@ -62,7 +62,7 @@ $env:PYTHONPATH = $repoRoot
 Invoke-TestStep -Label "Native extension smoke test" -Command @(
     $python,
     "-c",
-    "import sunpack_native as n; assert n.native_available(); assert callable(n.inspect_pe_overlay_structure); from sunpack.support.sevenzip_native import NativePasswordTester; assert NativePasswordTester().available()"
+    "import sunpack_native as n; assert n.native_available(); assert callable(n.inspect_pe_overlay_structure); from sunpack.support.sevenzip_bridge import NativePasswordTester; assert NativePasswordTester().available()"
 )
 Invoke-TestStep -Label "Unit tests" -Command @($python, "-m", "pytest", "-q", "tests/unit")
 Invoke-TestStep -Label "Functional tests" -Command @($python, "-m", "pytest", "-q", "tests/functional")

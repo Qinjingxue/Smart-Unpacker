@@ -4,7 +4,7 @@ import argparse
 from pathlib import Path
 
 from repair_training.core.datasets import read_jsonl, write_json, write_jsonl
-from repair_training.core.repair_policy_transformer.schema import transition_sample_from_dict
+from sunpack.model_runtime.policy.schema import transition_sample_from_dict
 from repair_training.core.repair_policy_transformer.world_rows import build_policy_world_samples
 
 

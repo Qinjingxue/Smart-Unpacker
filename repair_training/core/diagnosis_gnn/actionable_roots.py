@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import Any
 
-from repair_training.core.diagnosis_gnn.root_cases import ROOT_CASES, ROOT_CASE_SET, canonical_root_case
+from sunpack.model_runtime.diagnosis.root_cases import ROOT_CASES, ROOT_CASE_SET, canonical_root_case
 
 
 ACTIONABLE_ROOT_SEMANTICS = "repair_actionable_root_v2"

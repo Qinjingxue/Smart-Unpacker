@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 
 from repair_training.core.datasets import read_jsonl, write_json, write_jsonl
-from repair_training.core.diagnosis_graph.dispatcher import (
+from sunpack.model_runtime.diagnosis.graph_dispatcher import (
     UnsupportedDiagnosisGraphFormat,
     build_diagnosis_graph_sample,
     build_diagnosis_graph_sample_for_format,

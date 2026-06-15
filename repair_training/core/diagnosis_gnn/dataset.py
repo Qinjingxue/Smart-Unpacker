@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from repair_training.core.datasets import read_jsonl, split_rows
-from repair_training.core.diagnosis_graph.schema import DiagnosisGraphSample
+from sunpack.model_runtime.diagnosis.graph_schema import DiagnosisGraphSample
 
 
 def read_diagnosis_graph_samples(path: str | Path) -> list[DiagnosisGraphSample]:

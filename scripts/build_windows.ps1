@@ -231,7 +231,7 @@ function Get-MaturinCommand {
         return $globalMaturin.Source
     }
 
-    throw "maturin executable not found. Install requirements-build.txt or make maturin available in PATH."
+    throw "maturin executable not found. Install the project build extra or make maturin available in PATH."
 }
 
 function Assert-FileHashEqual {
@@ -282,7 +282,7 @@ function Get-CMakeCommand {
         }
     }
 
-    throw "cmake executable not found. Install requirements-build.txt or make CMake available in PATH."
+    throw "cmake executable not found. Install the project build extra or make CMake available in PATH."
 }
 
 function Get-CTestCommand {
@@ -346,7 +346,7 @@ function Test-SevenZipWrapper {
 
     Invoke-Native -FilePath $PythonPath -Arguments @(
         "-c",
-        "from sunpack.support.sevenzip_native import NativePasswordTester; tester = NativePasswordTester(); assert tester.available(), (tester.wrapper_path, tester.seven_zip_dll_path)"
+        "from sunpack.support.sevenzip_bridge import NativePasswordTester; tester = NativePasswordTester(); assert tester.available(), (tester.wrapper_path, tester.seven_zip_dll_path)"
     )
 }
 
@@ -355,7 +355,7 @@ function Test-SevenZipWorker {
 
     Invoke-Native -FilePath $PythonPath -Arguments @(
         "-c",
-        "from sunpack.support.resources import get_7z_dll_path, get_sevenzip_worker_path; import os; assert os.path.exists(get_sevenzip_worker_path()); assert os.path.exists(get_7z_dll_path())"
+        "from sunpack.support.resources import get_7z_dll_path, get_sevenzip_bridge_worker_path; import os; assert os.path.exists(get_sevenzip_bridge_worker_path()); assert os.path.exists(get_7z_dll_path())"
     )
 }
 
@@ -390,14 +390,14 @@ function Build-SevenZipWrapper {
         Write-Host "Skipping C++ smoke test because $BuildArch binaries cannot run in the current process architecture." -ForegroundColor Yellow
     }
 
-    $wrapperDll = Join-Path $BuildDir "Release\sevenzip_password_tester_capi.dll"
-    $workerExe = Join-Path $BuildDir "Release\sevenzip_worker.exe"
+    $wrapperDll = Join-Path $BuildDir "Release\sunpack_sevenzip.dll"
+    $workerExe = Join-Path $BuildDir "Release\sunpack_sevenzip_worker.exe"
     Assert-PathExists -LiteralPath $wrapperDll -Description "Built 7z wrapper DLL"
     Assert-PathExists -LiteralPath $workerExe -Description "Built 7z worker executable"
     Assert-PeMachine -LiteralPath $wrapperDll -BuildArch $BuildArch -Description "Built 7z wrapper DLL"
     Assert-PeMachine -LiteralPath $workerExe -BuildArch $BuildArch -Description "Built 7z worker executable"
-    Copy-Item -LiteralPath $wrapperDll -Destination (Join-Path $ToolsRoot "sevenzip_password_tester_capi.dll") -Force
-    Copy-Item -LiteralPath $workerExe -Destination (Join-Path $ToolsRoot "sevenzip_worker.exe") -Force
+    Copy-Item -LiteralPath $wrapperDll -Destination (Join-Path $ToolsRoot "sunpack_sevenzip.dll") -Force
+    Copy-Item -LiteralPath $workerExe -Destination (Join-Path $ToolsRoot "sunpack_sevenzip_worker.exe") -Force
 }
 
 function Assert-PackagedNativeExtension {
@@ -432,31 +432,6 @@ function Test-PythonImports {
     $importList = ($Modules | ForEach-Object { "'$_'" }) -join ", "
     & $PythonPath -c "import importlib.util, sys; modules = [$importList]; missing = [name for name in modules if importlib.util.find_spec(name) is None]; sys.exit(0 if not missing else 1)"
     return ($LASTEXITCODE -eq 0)
-}
-
-function Install-RequirementsOrValidate {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$PythonPath,
-        [Parameter(Mandatory = $true)]
-        [string]$RequirementsFile,
-        [Parameter(Mandatory = $true)]
-        [string[]]$RequiredModules,
-        [Parameter(Mandatory = $true)]
-        [string]$Label
-    )
-
-    try {
-        Invoke-Native -FilePath $PythonPath -Arguments @("-m", "pip", "install", "-r", $RequirementsFile)
-        return
-    } catch {
-        Write-Warning "$Label install failed from $RequirementsFile. Falling back to already-available modules."
-        if (Test-PythonImports -PythonPath $PythonPath -Modules $RequiredModules) {
-            Write-Host "$Label modules are already importable in the build environment." -ForegroundColor Yellow
-            return
-        }
-        throw
-    }
 }
 
 function Invoke-WithRetry {
@@ -564,19 +539,19 @@ $venvPath = Join-Path $repoRoot ".venv-build"
 $venvPython = Join-Path $venvPath "Scripts\python.exe"
 $venvScripts = Join-Path $venvPath "Scripts"
 $specPath = Join-Path $repoRoot "SunPack.spec"
-$requirementsPath = Join-Path $repoRoot "requirements.txt"
-$buildRequirementsPath = Join-Path $repoRoot "requirements-build.txt"
-$modelRuntimeRequirementsPath = Join-Path $repoRoot "requirements-model-runtime.txt"
+$projectPath = Join-Path $repoRoot "pyproject.toml"
+$modelsRoot = Join-Path $repoRoot "models"
+$modelManifestPath = Join-Path $modelsRoot "manifest.json"
 $iconPath = Join-Path $repoRoot "sunpack.ico"
 $nativeCrateRoot = Join-Path $repoRoot "native\sunpack_native"
 $nativeCargoToml = Join-Path $nativeCrateRoot "Cargo.toml"
-$sevenZipWrapperRoot = Join-Path $repoRoot "native\sevenzip_password_tester"
+$sevenZipWrapperRoot = Join-Path $repoRoot "native\sevenzip_bridge"
 $sevenZipWrapperBuildDir = Join-Path $sevenZipWrapperRoot ("build-" + $buildArch)
 $toolsRoot = if ($buildArch -eq "x64") { Join-Path $repoRoot "tools" } else { Join-Path $repoRoot ("tools-" + $buildArch) }
 $sevenZipPath = Join-Path $toolsRoot "7z.exe"
 $sevenZipDllPath = Join-Path $toolsRoot "7z.dll"
-$sevenZipWrapperDllPath = Join-Path $toolsRoot "sevenzip_password_tester_capi.dll"
-$sevenZipWorkerPath = Join-Path $toolsRoot "sevenzip_worker.exe"
+$sevenZipWrapperDllPath = Join-Path $toolsRoot "sunpack_sevenzip.dll"
+$sevenZipWorkerPath = Join-Path $toolsRoot "sunpack_sevenzip_worker.exe"
 $sevenZipLicensePath = Join-Path $repoRoot "licenses\7zip-license.txt"
 $distRoot = Join-Path $repoRoot "dist"
 $buildRoot = Join-Path $repoRoot "build"
@@ -598,9 +573,8 @@ if ($promptForAcceptanceTests) {
     $runAcceptanceTests = Confirm-AcceptanceTests
 }
 
-Assert-PathExists -LiteralPath $requirementsPath -Description "requirements.txt"
-Assert-PathExists -LiteralPath $buildRequirementsPath -Description "requirements-build.txt"
-Assert-PathExists -LiteralPath $modelRuntimeRequirementsPath -Description "requirements-model-runtime.txt"
+Assert-PathExists -LiteralPath $projectPath -Description "pyproject.toml"
+Assert-PathExists -LiteralPath $modelManifestPath -Description "models/manifest.json"
 Assert-PathExists -LiteralPath $specPath -Description "PyInstaller spec"
 Assert-PathExists -LiteralPath $iconPath -Description "SunPack icon"
 Assert-PathExists -LiteralPath $nativeCargoToml -Description "sunpack_native Cargo manifest"
@@ -630,9 +604,7 @@ if (-not (Test-Path -LiteralPath $venvPython)) {
 }
 
 Invoke-Native -FilePath $venvPython -Arguments @("-m", "pip", "install", "--upgrade", "pip")
-Install-RequirementsOrValidate -PythonPath $venvPython -RequirementsFile $requirementsPath -RequiredModules @("psutil", "send2trash", "watchdog", "zstandard") -Label "Runtime dependency"
-Install-RequirementsOrValidate -PythonPath $venvPython -RequirementsFile $buildRequirementsPath -RequiredModules @("PyInstaller", "maturin", "cmake") -Label "Build dependency"
-Install-RequirementsOrValidate -PythonPath $venvPython -RequirementsFile $modelRuntimeRequirementsPath -RequiredModules @("torch", "torch_geometric") -Label "Model runtime dependency"
+Invoke-Native -FilePath $venvPython -Arguments @("-m", "pip", "install", "$repoRoot[build]")
 Invoke-Native -FilePath $venvPython -Arguments @("-m", "pip", "check")
 Invoke-Native -FilePath $venvPython -Arguments @(
     "-c",
@@ -705,28 +677,11 @@ Copy-Item -LiteralPath (Join-Path $repoRoot "builtin_passwords.txt") -Destinatio
 Copy-Item -LiteralPath (Join-Path $repoRoot "sunpack_config.json") -Destination $distConfigPath -Force
 Copy-Item -LiteralPath $iconPath -Destination $distIconPath -Force
 Copy-IfExists -Source (Join-Path $repoRoot "sunpack_advanced_config.json") -Destination $distAdvancedConfigPath
-Copy-Item -LiteralPath (Join-Path $repoRoot "sunpack_model_manifest.json") -Destination (Join-Path $distAppRoot "sunpack_model_manifest.json") -Force
 Copy-Item -LiteralPath $toolsRoot -Destination $distToolsRoot -Recurse -Force
 
-$diagnosisModelSource = Join-Path $repoRoot "repair_training\runs\zip\20260523_hgt_repair_guidance_eval\models\diagnosis_hgt_ranked_gain_mild_v1_train200"
-$policyModelSource = Join-Path $repoRoot "repair_training\runs\zip\20260524_policy_hgt_v2_strategy\models\repair_policy_transformer_hgt_v2_module_feedback_v7_no_undo_loss"
-$diagnosisModelDestination = Join-Path $distAppRoot "models\zip\diagnosis_hgt"
-$policyModelDestination = Join-Path $distAppRoot "models\zip\repair_policy_transformer"
-Assert-PathExists -LiteralPath (Join-Path $diagnosisModelSource "model.pt") -Description "Diagnosis HGT model"
-Assert-PathExists -LiteralPath (Join-Path $policyModelSource "model.pt") -Description "Repair policy transformer model"
-New-Item -ItemType Directory -Path (Split-Path -Parent $diagnosisModelDestination) -Force | Out-Null
-Copy-Item -LiteralPath $diagnosisModelSource -Destination $diagnosisModelDestination -Recurse -Force
-Copy-Item -LiteralPath $policyModelSource -Destination $policyModelDestination -Recurse -Force
-foreach ($relativeModelFile in @("model.pt", "model_card.json", "graph_schema.json", "label_schema.json", "train_metrics.json")) {
-    $diagnosisSourceFile = Join-Path $diagnosisModelSource $relativeModelFile
-    if (Test-Path -LiteralPath $diagnosisSourceFile) {
-        Assert-FileHashEqual -Source $diagnosisSourceFile -Destination (Join-Path $diagnosisModelDestination $relativeModelFile)
-    }
-    $policySourceFile = Join-Path $policyModelSource $relativeModelFile
-    if (Test-Path -LiteralPath $policySourceFile) {
-        Assert-FileHashEqual -Source $policySourceFile -Destination (Join-Path $policyModelDestination $relativeModelFile)
-    }
-}
+$distModelsRoot = Join-Path $distAppRoot "models"
+Copy-Item -LiteralPath $modelsRoot -Destination $distModelsRoot -Recurse -Force
+Assert-FileHashEqual -Source $modelManifestPath -Destination (Join-Path $distModelsRoot "manifest.json")
 
 New-Item -ItemType Directory -Path $distLicensesRoot -Force | Out-Null
 Copy-Item -LiteralPath $sevenZipLicensePath -Destination (Join-Path $distLicensesRoot "7zip-license.txt") -Force
@@ -741,13 +696,13 @@ Assert-PathExists -LiteralPath $distConfigPath -Description "External config fil
 Assert-PathExists -LiteralPath $distIconPath -Description "External icon file"
 Assert-PathExists -LiteralPath (Join-Path $distToolsRoot "7z.exe") -Description "External tools/7z.exe"
 Assert-PathExists -LiteralPath (Join-Path $distToolsRoot "7z.dll") -Description "External tools/7z.dll"
-Assert-PathExists -LiteralPath (Join-Path $distToolsRoot "sevenzip_password_tester_capi.dll") -Description "External tools/sevenzip_password_tester_capi.dll"
-Assert-PathExists -LiteralPath (Join-Path $distToolsRoot "sevenzip_worker.exe") -Description "External tools/sevenzip_worker.exe"
+Assert-PathExists -LiteralPath (Join-Path $distToolsRoot "sunpack_sevenzip.dll") -Description "External tools/sunpack_sevenzip.dll"
+Assert-PathExists -LiteralPath (Join-Path $distToolsRoot "sunpack_sevenzip_worker.exe") -Description "External tools/sunpack_sevenzip_worker.exe"
 Assert-PathExists -LiteralPath (Join-Path $distLicensesRoot "7zip-license.txt") -Description "External 7-Zip license file"
 Assert-PeMachine -LiteralPath (Join-Path $distToolsRoot "7z.exe") -BuildArch $buildArch -Description "Packaged tools/7z.exe"
 Assert-PeMachine -LiteralPath (Join-Path $distToolsRoot "7z.dll") -BuildArch $buildArch -Description "Packaged tools/7z.dll"
-Assert-PeMachine -LiteralPath (Join-Path $distToolsRoot "sevenzip_password_tester_capi.dll") -BuildArch $buildArch -Description "Packaged tools/sevenzip_password_tester_capi.dll"
-Assert-PeMachine -LiteralPath (Join-Path $distToolsRoot "sevenzip_worker.exe") -BuildArch $buildArch -Description "Packaged tools/sevenzip_worker.exe"
+Assert-PeMachine -LiteralPath (Join-Path $distToolsRoot "sunpack_sevenzip.dll") -BuildArch $buildArch -Description "Packaged tools/sunpack_sevenzip.dll"
+Assert-PeMachine -LiteralPath (Join-Path $distToolsRoot "sunpack_sevenzip_worker.exe") -BuildArch $buildArch -Description "Packaged tools/sunpack_sevenzip_worker.exe"
 
 $versionFilePath = Join-Path $distAppRoot "VERSION.txt"
 $gitCommit = Get-GitCommit -RepoRoot $repoRoot
@@ -778,9 +733,8 @@ Write-Step "Creating distributable zip archive"
 if (Test-Path -LiteralPath $releaseZipPath) {
     Remove-Item -LiteralPath $releaseZipPath -Force
 }
-Invoke-WithRetry -Description "Compress-Archive release packaging" -ScriptBlock {
-    Compress-Archive -Path $distAppRoot -DestinationPath $releaseZipPath -Force
-}
+Invoke-Native -FilePath $sevenZipPath -Arguments @("a", "-tzip", "-mx=5", $releaseZipPath, $distAppRoot)
+Invoke-Native -FilePath $sevenZipPath -Arguments @("t", $releaseZipPath)
 Assert-PathExists -LiteralPath $releaseZipPath -Description "Release zip archive"
 
 Write-Host ""

@@ -418,12 +418,12 @@ function Build-SevenZipWrapper {
         Write-Host "Skipping C++ smoke test because $BuildArch binaries cannot run in the current process architecture." -ForegroundColor Yellow
     }
 
-    $wrapperDll = Join-Path $BuildDir "Release\sevenzip_password_tester_capi.dll"
-    $workerExe = Join-Path $BuildDir "Release\sevenzip_worker.exe"
+    $wrapperDll = Join-Path $BuildDir "Release\sunpack_sevenzip.dll"
+    $workerExe = Join-Path $BuildDir "Release\sunpack_sevenzip_worker.exe"
     Assert-PathExists -LiteralPath $wrapperDll -Description "Built 7z wrapper DLL"
     Assert-PathExists -LiteralPath $workerExe -Description "Built 7z worker executable"
-    Copy-Item -LiteralPath $wrapperDll -Destination (Join-Path $ToolsRoot "sevenzip_password_tester_capi.dll") -Force
-    Copy-Item -LiteralPath $workerExe -Destination (Join-Path $ToolsRoot "sevenzip_worker.exe") -Force
+    Copy-Item -LiteralPath $wrapperDll -Destination (Join-Path $ToolsRoot "sunpack_sevenzip.dll") -Force
+    Copy-Item -LiteralPath $workerExe -Destination (Join-Path $ToolsRoot "sunpack_sevenzip_worker.exe") -Force
 }
 
 function Test-NativeImport {
@@ -468,7 +468,7 @@ function Test-SevenZipWrapper {
 
     Invoke-Native -FilePath $PythonPath -Arguments @(
         "-c",
-        "from sunpack.support.sevenzip_native import NativePasswordTester; tester = NativePasswordTester(); assert tester.available(), (tester.wrapper_path, tester.seven_zip_dll_path)"
+        "from sunpack.support.sevenzip_bridge import NativePasswordTester; tester = NativePasswordTester(); assert tester.available(), (tester.wrapper_path, tester.seven_zip_dll_path)"
     )
 }
 
@@ -477,7 +477,7 @@ function Test-SevenZipWorker {
 
     Invoke-Native -FilePath $PythonPath -Arguments @(
         "-c",
-        "from sunpack.support.resources import get_7z_dll_path, get_sevenzip_worker_path; import os; assert os.path.exists(get_sevenzip_worker_path()); assert os.path.exists(get_7z_dll_path())"
+        "from sunpack.support.resources import get_7z_dll_path, get_sevenzip_bridge_worker_path; import os; assert os.path.exists(get_sevenzip_bridge_worker_path()); assert os.path.exists(get_7z_dll_path())"
     )
 }
 
@@ -492,31 +492,6 @@ function Test-PythonImports {
     $importList = ($Modules | ForEach-Object { "'$_'" }) -join ", "
     & $PythonPath -c "import importlib.util, sys; modules = [$importList]; missing = [name for name in modules if importlib.util.find_spec(name) is None]; sys.exit(0 if not missing else 1)"
     return ($LASTEXITCODE -eq 0)
-}
-
-function Install-RequirementsOrValidate {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$PythonPath,
-        [Parameter(Mandatory = $true)]
-        [string]$RequirementsFile,
-        [Parameter(Mandatory = $true)]
-        [string[]]$RequiredModules,
-        [Parameter(Mandatory = $true)]
-        [string]$Label
-    )
-
-    try {
-        Invoke-Native -FilePath $PythonPath -Arguments @("-m", "pip", "install", "-r", $RequirementsFile)
-        return
-    } catch {
-        Write-Warning "$Label install failed from $RequirementsFile. Falling back to already-available modules."
-        if (Test-PythonImports -PythonPath $PythonPath -Modules $RequiredModules) {
-            Write-Host "$Label modules are already importable in the local environment." -ForegroundColor Yellow
-            return
-        }
-        throw
-    }
 }
 
 function Install-PackageOrValidate {
@@ -564,11 +539,10 @@ $pythonCommand = Get-PythonCommand
 $venvPath = Join-Path $repoRoot ".venv"
 $venvPython = Join-Path $venvPath "Scripts\python.exe"
 $venvScripts = Join-Path $venvPath "Scripts"
-$requirementsPath = Join-Path $repoRoot "requirements.txt"
-$buildRequirementsPath = Join-Path $repoRoot "requirements-build.txt"
+$projectPath = Join-Path $repoRoot "pyproject.toml"
 $nativeCrateRoot = Join-Path $repoRoot "native\sunpack_native"
 $nativeCargoToml = Join-Path $nativeCrateRoot "Cargo.toml"
-$sevenZipWrapperRoot = Join-Path $repoRoot "native\sevenzip_password_tester"
+$sevenZipWrapperRoot = Join-Path $repoRoot "native\sevenzip_bridge"
 $sevenZipWrapperBuildDir = Join-Path $sevenZipWrapperRoot ("build-" + $buildArch)
 $buildRoot = Join-Path $repoRoot "build"
 $nativeWheelRoot = Join-Path $buildRoot ("native-wheels-dev-" + $buildArch)
@@ -576,13 +550,9 @@ $toolsRoot = if ($buildArch -eq "x64") { Join-Path $repoRoot "tools" } else { Jo
 $sevenZipDllPath = Join-Path $toolsRoot "7z.dll"
 $sevenZipLicensePath = Join-Path $repoRoot "licenses\7zip-license.txt"
 
-Assert-PathExists -LiteralPath $requirementsPath -Description "requirements.txt"
+Assert-PathExists -LiteralPath $projectPath -Description "pyproject.toml"
 Assert-PathExists -LiteralPath $nativeCargoToml -Description "sunpack_native Cargo manifest"
 Assert-CommandExists -Command "cargo" -Description "Rust toolchain"
-if ($IncludeBuildDeps) {
-    Assert-PathExists -LiteralPath $buildRequirementsPath -Description "requirements-build.txt"
-}
-
 if ($Clean) {
     Write-Step "Cleaning local virtual environment"
     Remove-IfExists -LiteralPath $venvPath
@@ -594,11 +564,8 @@ if (-not (Test-Path -LiteralPath $venvPython)) {
 }
 
 Invoke-Native -FilePath $venvPython -Arguments @("-m", "pip", "install", "--upgrade", "pip")
-Install-RequirementsOrValidate -PythonPath $venvPython -RequirementsFile $requirementsPath -RequiredModules @("psutil", "send2trash", "watchdog", "zstandard") -Label "Runtime dependency"
-Install-PackageOrValidate -PythonPath $venvPython -PackageName "pytest" -ModuleName "pytest" -Label "Test dependency"
-if ($IncludeBuildDeps) {
-    Install-RequirementsOrValidate -PythonPath $venvPython -RequirementsFile $buildRequirementsPath -RequiredModules @("PyInstaller", "maturin", "cmake") -Label "Build dependency"
-}
+$projectExtra = if ($IncludeBuildDeps) { "dev" } else { "test" }
+Invoke-Native -FilePath $venvPython -Arguments @("-m", "pip", "install", "$repoRoot[$projectExtra]")
 
 $env:Path = "$venvScripts;$env:Path"
 $env:PYTHONPATH = $repoRoot

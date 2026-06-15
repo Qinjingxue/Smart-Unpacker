@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from repair_training.core.datasets import read_jsonl, split_rows
-from repair_training.core.repair_policy_transformer.schema import (
+from sunpack.model_runtime.policy.schema import (
     PolicyGraphTrainingSample,
     PolicyGraphTransitionSample,
     PolicyWorldTrainingSample,

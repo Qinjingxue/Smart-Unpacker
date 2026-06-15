@@ -7,7 +7,7 @@ from sunpack.passwords import PasswordSession
 from sunpack.rename.scheduler import RenameScheduler
 from sunpack.support.archive_knowledge_writer import commit_task_knowledge, ensure_knowledge, write_payload
 from sunpack.support import archive_knowledge_projection as knowledge_view
-from sunpack.support.sevenzip_native import cached_analyze_archive_resources, cached_check_archive_health
+from sunpack.support.sevenzip_bridge import cached_analyze_archive_resources, cached_check_archive_health
 
 
 class ResourcePreflightInspector:

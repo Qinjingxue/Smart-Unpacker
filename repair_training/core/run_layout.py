@@ -9,6 +9,8 @@ from typing import Any
 
 TRAINING_ROOT = Path("repair_training")
 RUNS_ROOT = TRAINING_ROOT / "runs"
+EVALUATION_RUNS_ROOT = RUNS_ROOT / "evaluation"
+TMP_ROOT = TRAINING_ROOT / "tmp"
 LATEST_RUNS = TRAINING_ROOT / "latest_runs.json"
 LEGACY_LATEST_RUN = TRAINING_ROOT / "latest_run.txt"
 
@@ -37,6 +39,32 @@ def ensure_run_layout(run_dir: Path) -> dict[str, Path]:
     for path in paths.values():
         path.mkdir(parents=True, exist_ok=True)
     return paths
+
+
+def create_evaluation_run_dir(run_dir: str | Path | None = None, *, run_name: str = "evaluation") -> Path:
+    if run_dir:
+        root = Path(run_dir).resolve()
+    else:
+        stamp = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+        root = (EVALUATION_RUNS_ROOT / f"{stamp}_{safe_name(run_name)}").resolve()
+    ensure_run_layout(root)
+    return root
+
+
+def latest_training_dataset() -> Path:
+    latest = latest_run_for_format("zip")
+    if latest is not None:
+        dataset = latest / "datasets" / "runtime_graph_success.jsonl"
+        if dataset.is_file():
+            return dataset
+    candidates = sorted(
+        RUNS_ROOT.glob("*/**/datasets/runtime_graph_success.jsonl"),
+        key=lambda item: item.stat().st_mtime,
+        reverse=True,
+    )
+    if candidates:
+        return candidates[0]
+    return TRAINING_ROOT / "datasets" / "runtime_graph_success.jsonl"
 
 
 def read_latest_runs() -> dict[str, str]:

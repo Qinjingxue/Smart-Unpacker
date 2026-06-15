@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -9,7 +10,7 @@ from typing import Any
 from sunpack.support.resources import candidate_resource_roots, find_resource_path
 
 
-MODEL_MANIFEST_NAME = "sunpack_model_manifest.json"
+MODEL_MANIFEST_NAME = "models/manifest.json"
 
 
 @dataclass(frozen=True)
@@ -22,6 +23,7 @@ class ModelAsset:
     algorithm: str
     expected_model_type: str = ""
     expected_semantics: str = ""
+    expected_sha256: str = ""
 
     @property
     def available(self) -> bool:
@@ -38,6 +40,10 @@ class ModelAsset:
             errors.append(f"model_type mismatch: expected {self.expected_model_type}, got {self.model_type or '<missing>'}")
         if self.expected_semantics and self.semantics != self.expected_semantics:
             errors.append(f"semantics mismatch: expected {self.expected_semantics}, got {self.semantics or '<missing>'}")
+        if self.expected_sha256 and (self.model_dir / "model.pt").is_file():
+            actual = _sha256(self.model_dir / "model.pt")
+            if actual != self.expected_sha256:
+                errors.append(f"model sha256 mismatch: expected {self.expected_sha256}, got {actual}")
         return errors
 
     def to_dict(self) -> dict[str, Any]:
@@ -85,6 +91,7 @@ class ModelAssetRegistry:
             algorithm=str(card.get("algorithm") or (entry or {}).get("algorithm") or ""),
             expected_model_type=str((entry or {}).get("model_type") or ""),
             expected_semantics=str((entry or {}).get("semantics") or ""),
+            expected_sha256=str((entry or {}).get("sha256") or "").lower(),
         )
 
     def status(self, *, load: bool = False, device: str = "cpu") -> dict[str, Any]:
@@ -126,10 +133,7 @@ class ModelAssetRegistry:
                 candidate = root / packaged
                 if candidate.is_dir():
                     return candidate.resolve()
-        source = str(entry.get("source_path") or "")
-        if source and self.manifest_path:
-            return (self.manifest_path.parent / source).resolve()
-        return Path(packaged or source or ".").resolve()
+        return Path(packaged or ".").resolve()
 
 
 _REGISTRY: ModelAssetRegistry | None = None
@@ -160,11 +164,11 @@ def _environment_override(role: str) -> str:
 
 def _load_asset(asset: ModelAsset, *, device: str) -> Any:
     if asset.role == "diagnosis":
-        from repair_training.core.diagnosis_gnn.inference import DiagnosisGNNModel
+        from sunpack.model_runtime.diagnosis.inference import DiagnosisGNNModel
 
         return DiagnosisGNNModel(model_dir=asset.model_dir, device=device)
     if asset.role == "policy":
-        from repair_training.core.repair_policy_transformer.inference import RepairPolicyTransformerModel
+        from sunpack.model_runtime.policy.inference import RepairPolicyTransformerModel
 
         return RepairPolicyTransformerModel(model_dir=asset.model_dir, device=device)
     raise RuntimeError(f"unsupported model role: {asset.role}")
@@ -174,6 +178,14 @@ def _read_json(path: Path | None) -> dict[str, Any]:
     if path is None or not path.is_file():
         return {}
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _normalize_format(value: str) -> str:

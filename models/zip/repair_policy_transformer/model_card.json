@@ -1,0 +1,7 @@
+{
+  "algorithm": "repair_graph_world_policy_transformer",
+  "format": "zip",
+  "model_type": "repair_policy_transformer",
+  "policy_semantics": "repair_graph_world_policy_uncertainty_v1",
+  "run_id": "20260524_policy_hgt_v2_strategy"
+}

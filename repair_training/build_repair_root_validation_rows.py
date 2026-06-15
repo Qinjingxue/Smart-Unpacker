@@ -13,9 +13,9 @@ from repair_training.build_multi_field_damage_rows import _enforce_multi_field_t
 from repair_training.build_single_field_damage_rows import build_single_field_records
 from repair_training.collect_damage_rows import collect_damage_rows
 from repair_training.core.datasets import read_jsonl, write_json, write_jsonl
-from repair_training.core.diagnosis_graph.dispatcher import build_diagnosis_graph_sample
+from sunpack.model_runtime.diagnosis.graph_dispatcher import build_diagnosis_graph_sample
 from repair_training.core.diagnosis_graph.serialize import diagnosis_graph_summary
-from repair_training.core.diagnosis_gnn.root_cases import ROOT_CASES, canonical_root_case
+from sunpack.model_runtime.diagnosis.root_cases import ROOT_CASES, canonical_root_case
 from repair_training.formats.zip.corruption_impl import single_field_fields
 
 

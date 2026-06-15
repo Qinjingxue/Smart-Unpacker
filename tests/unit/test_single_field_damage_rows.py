@@ -4,7 +4,7 @@ from pathlib import Path
 
 from repair_training.build_single_field_damage_rows import build_single_field_records
 from repair_training.formats.zip.corruption_impl import build_corpus_corruption_case, single_field_profile_for_field
-from repair_training.core.features import damage_location_labels_from_target
+from sunpack.model_runtime.diagnosis.features import damage_location_labels_from_target
 from repair_training.taxonomy import normalize_damage_record
 
 

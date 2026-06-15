@@ -12,6 +12,7 @@
 - `integration/`：pipeline、解压和真实执行路径测试。
 - `cli/`：CLI parser、命令契约和命令行为测试。
 - `performance/`：轻量压力和并发行为测试。
+- `training/`：训练产物与正式模型运行时之间的评估和一致性测试。
 - `performance_split_archives/`：分卷归档压力脚本，偏手动或专项验证，不属于默认 pytest 主路径。
 
 ## 数据驱动用例
@@ -32,7 +33,8 @@
 运行默认 pytest 套件：
 
 ```powershell
-pytest
+python -m pip install -e ".[test]"
+python -m pytest
 ```
 
 只运行数据驱动用例：
@@ -53,7 +55,7 @@ pytest tests/runners -q
 .\scripts\run_ci_tests.ps1
 ```
 
-`run_acceptance_tests.ps1` 会分步运行 unit、functional、integration、CLI、runner 和 CLI smoke checks。`scripts/run_ci_tests.ps1` 会运行完整 pytest 套件，再执行两个 CLI smoke checks。
+`run_acceptance_tests.ps1` 会分步运行 unit、functional、integration、CLI、runner 和 CLI smoke checks。`scripts/run_ci_tests.ps1` 会运行 unit、functional、CLI、runner、混合分卷 acceptance 和 CLI smoke checks。
 
 ## 大文件性能压测
 

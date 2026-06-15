@@ -4,7 +4,7 @@ import subprocess
 from typing import Any
 
 from sunpack.passwords.verifier.base import PasswordBatchVerification
-from sunpack.support.sevenzip_native import get_native_password_tester
+from sunpack.support.sevenzip_bridge import get_native_password_tester
 
 
 class SevenZipDllVerifier:

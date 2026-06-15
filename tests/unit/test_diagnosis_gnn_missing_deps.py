@@ -2,8 +2,8 @@ import importlib.util
 
 import pytest
 
-from repair_training.core.diagnosis_graph.dispatcher import build_diagnosis_graph_sample
-from repair_training.core.diagnosis_gnn.tensorize import tensorize_sample
+from sunpack.model_runtime.diagnosis.graph_dispatcher import build_diagnosis_graph_sample
+from sunpack.model_runtime.diagnosis.tensorize import tensorize_sample
 
 
 def test_diagnosis_gnn_missing_deps_error_is_clear():

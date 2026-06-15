@@ -5,9 +5,9 @@ from pathlib import Path
 
 from repair_training.core.datasets import read_jsonl, write_json, write_jsonl
 from repair_training.core.repair_policy_transformer.dataset import read_policy_graph_samples, read_policy_world_samples
-from repair_training.core.repair_policy_transformer.inference import RepairPolicyTransformerModel
+from sunpack.model_runtime.policy.inference import RepairPolicyTransformerModel
 from repair_training.core.repair_policy_transformer.metrics import policy_teacher_metrics
-from repair_training.core.repair_policy_transformer.tensorize import tensorize_world_sample
+from sunpack.model_runtime.policy.tensorize import tensorize_world_sample
 
 
 def main(argv: list[str] | None = None) -> int:

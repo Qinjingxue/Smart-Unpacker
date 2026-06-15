@@ -1,0 +1,7 @@
+from __future__ import annotations
+
+
+POLICY_TRANSFORMER_ALGORITHM = "repair_graph_world_policy_transformer"
+POLICY_TRANSFORMER_SEMANTICS = "repair_graph_world_policy_uncertainty_v1"
+
+__all__ = ["POLICY_TRANSFORMER_ALGORITHM", "POLICY_TRANSFORMER_SEMANTICS"]

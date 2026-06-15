@@ -101,8 +101,8 @@ Assert-PeMachine -LiteralPath (Join-Path $root "sunpack.exe") -BuildArch $Arch -
 Assert-PeMachine -LiteralPath $nativeExtension.FullName -BuildArch $Arch -Description "sunpack_native extension"
 Assert-PeMachine -LiteralPath (Join-Path $root "tools\7z.exe") -BuildArch $Arch -Description "tools\7z.exe"
 Assert-PeMachine -LiteralPath (Join-Path $root "tools\7z.dll") -BuildArch $Arch -Description "tools\7z.dll"
-Assert-PeMachine -LiteralPath (Join-Path $root "tools\sevenzip_password_tester_capi.dll") -BuildArch $Arch -Description "tools\sevenzip_password_tester_capi.dll"
-Assert-PeMachine -LiteralPath (Join-Path $root "tools\sevenzip_worker.exe") -BuildArch $Arch -Description "tools\sevenzip_worker.exe"
+Assert-PeMachine -LiteralPath (Join-Path $root "tools\sunpack_sevenzip.dll") -BuildArch $Arch -Description "tools\sunpack_sevenzip.dll"
+Assert-PeMachine -LiteralPath (Join-Path $root "tools\sunpack_sevenzip_worker.exe") -BuildArch $Arch -Description "tools\sunpack_sevenzip_worker.exe"
 
 Write-Host ""
 Write-Host "Package architecture validation passed: $Arch" -ForegroundColor Green

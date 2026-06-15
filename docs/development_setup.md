@@ -1,32 +1,47 @@
 # 开发环境和构建说明
 
-本文档说明从源码开发、运行测试和构建 Windows 发行包需要的依赖与脚本。
+SunPack 只维护一套公开源码、一套依赖声明和一条 Windows 构建链路。Python 依赖统一声明在根目录 `pyproject.toml`，不再使用多个 requirements 文件或私有构建脚本。
 
-## 开发依赖
+## 环境要求
 
-必需工具：
+- Windows 10/11
+- PowerShell 5.1 或更新版本
+- Python 3.10 或更新版本，架构必须与目标发行包一致
+- Rust MSVC toolchain，提供 `cargo`
+- Visual Studio Build Tools 2022，包含 C++17 编译器
+- 网络连接，用于首次安装 Python 依赖和准备 7-Zip 文件
 
-- Windows
-- PowerShell 5 或更新版本
-- Python 3.10 或更新版本
-- Rust toolchain，提供 `cargo`
-- Visual Studio Build Tools 2022 或等价 C++17 编译器
-- CMake 3.25 或更新版本
+项目使用的主要目录：
 
-Python 依赖：
+```text
+sunpack/                  产品运行时代码
+sunpack/model_runtime/    正式模型运行时
+repair_training/          数据、训练与评估工具
+models/                   正式发布模型资产
+native/sunpack_native/    Rust/PyO3 扩展
+native/sevenzip_bridge/   Windows 7z.dll bridge 与 worker
+tools/                    x64 外部工具和原生构建产物
+```
 
-- `requirements.txt`：运行依赖，目前包括 `psutil`、`send2trash`、`watchdog`、`zstandard`
-- `requirements-build.txt`：构建依赖，目前包括 `pyinstaller`、`maturin`、`cmake`
-- `pytest`：开发和测试依赖，由开发环境脚本安装
+## Python 依赖
 
-第三方二进制依赖：
+可安装的 extra：
 
-- `tools\7z.exe`：开发 fixture、手工诊断和 7-Zip 文件来源
-- `tools\7z.dll`：C++ wrapper 运行时使用
-- `tools\sevenzip_password_tester_capi.dll`：项目本地构建的 7z.dll wrapper
-- `tools\sevenzip_worker.exe`：项目解压后端 worker
+| Extra | 用途 |
+| --- | --- |
+| 默认 | SunPack 运行依赖、PyTorch 和 PyG 模型运行时 |
+| `test` | pytest |
+| `build` | PyInstaller、maturin、CMake |
+| `training` | 训练工具的附加依赖 |
+| `dev` | build、test、training 的并集 |
 
-`setup_windows_dev.ps1` 可以自动下载/准备 7-Zip 文件和 license，但不会安装 Rust 或 Visual Studio C++ 编译器。
+常用安装方式：
+
+```powershell
+python -m pip install -e .
+python -m pip install -e ".[test]"
+python -m pip install -e ".[dev]"
+```
 
 ## 一键准备开发环境
 
@@ -34,143 +49,163 @@ Python 依赖：
 .\scripts\setup_windows_dev.ps1
 ```
 
-脚本会执行：
+脚本会：
 
-1. 创建 `.venv`
-2. 安装运行依赖和 pytest
-3. 安装/查找 `maturin`
-4. 构建并安装 Rust/PyO3 扩展 `sunpack_native`
-5. 准备 `tools\7z.exe`、`tools\7z.dll` 和 7-Zip license
-6. 安装/查找 CMake
-7. 构建 C++ wrapper `sevenzip_password_tester_capi.dll` 和 `sevenzip_worker.exe`
-8. 将 wrapper DLL 和 worker 复制到 `tools\`
-9. 运行 CLI 和 native smoke checks
+1. 创建或复用 `.venv`
+2. 从 `pyproject.toml` 安装 `test` extra
+3. 构建并安装 `sunpack_native`
+4. 准备对应架构的 `7z.exe`、`7z.dll` 和 license
+5. 构建 `sunpack_sevenzip.dll` 和 `sunpack_sevenzip_worker.exe`
+6. 把 C++ 产物复制到工具目录
+7. 运行 Python、Rust、C++ 和 CLI smoke checks
 
-需要同时安装 PyInstaller 等打包依赖：
+包含发行构建依赖：
 
 ```powershell
 .\scripts\setup_windows_dev.ps1 -IncludeBuildDeps
 ```
 
-清理并重建开发环境：
+清理后重建：
 
 ```powershell
 .\scripts\setup_windows_dev.ps1 -Clean -IncludeBuildDeps
 ```
 
-## 手动构建原生组件
-
-Rust native：
+ARM64 开发环境：
 
 ```powershell
-python -m pip install -r requirements-build.txt
+.\scripts\setup_windows_dev.ps1 -Arch arm64
+```
+
+目标架构必须与当前 Python 进程架构一致。
+
+## 手动构建原生组件
+
+### Rust/PyO3
+
+```powershell
+python -m pip install -e ".[build]"
 python -m maturin build --manifest-path native\sunpack_native\Cargo.toml --release --out build\native-wheels-dev
-$wheel = Get-ChildItem build\native-wheels-dev\sunpack_native-*.whl | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1 -ExpandProperty FullName
+$wheel = Get-ChildItem build\native-wheels-dev\sunpack_native-*.whl |
+    Sort-Object LastWriteTimeUtc -Descending |
+    Select-Object -First 1 -ExpandProperty FullName
 python -m pip install --force-reinstall $wheel
 ```
 
-C++ 7z.dll wrapper：
+### C++ 7-Zip bridge
 
 ```powershell
-cmake -S native\sevenzip_password_tester -B native\sevenzip_password_tester\build
-cmake --build native\sevenzip_password_tester\build --config Release
-ctest --test-dir native\sevenzip_password_tester\build -C Release --output-on-failure
-Copy-Item native\sevenzip_password_tester\build\Release\sevenzip_password_tester_capi.dll tools\sevenzip_password_tester_capi.dll -Force
-Copy-Item native\sevenzip_password_tester\build\Release\sevenzip_worker.exe tools\sevenzip_worker.exe -Force
+cmake -S native\sevenzip_bridge -B native\sevenzip_bridge\build-x64 -A x64
+cmake --build native\sevenzip_bridge\build-x64 --config Release
+ctest --test-dir native\sevenzip_bridge\build-x64 -C Release --output-on-failure
+Copy-Item native\sevenzip_bridge\build-x64\Release\sunpack_sevenzip.dll tools\sunpack_sevenzip.dll -Force
+Copy-Item native\sevenzip_bridge\build-x64\Release\sunpack_sevenzip_worker.exe tools\sunpack_sevenzip_worker.exe -Force
 ```
+
+bridge 运行时还需要同一工具目录中的 `7z.dll`。
 
 ## Smoke Checks
 
 ```powershell
 .\.venv\Scripts\python.exe -c "import sunpack_native as n; print(n.native_available(), n.scanner_version())"
-.\.venv\Scripts\python.exe -c "from sunpack.support.sevenzip_native import NativePasswordTester; print(NativePasswordTester().available())"
+.\.venv\Scripts\python.exe -c "from sunpack.support.sevenzip_bridge import NativePasswordTester; print(NativePasswordTester().available())"
+.\.venv\Scripts\python.exe sunpack.py models status --load
 ```
 
-第一个命令确认 Rust native 可导入。第二个命令确认 `tools\sevenzip_password_tester_capi.dll` 和 `tools\7z.dll` 都可被找到。
+三个命令分别验证 Rust 扩展、C++ bridge 和正式模型资产。
+
+## 模型资产
+
+正式模型位于 `models/`，入口是 `models/manifest.json`。manifest 中每个模型包含：
+
+- `model_type`
+- `semantics`
+- `algorithm`
+- `packaged_path`
+- `sha256`
+
+`sha256` 是对应目录中 `model.pt` 的哈希。训练结果不会自动成为运行时模型；发布新模型时必须把完整资产复制到 `models/<format>/<role>`，更新 manifest，并运行：
+
+```powershell
+python sunpack.py models status --load --json
+```
+
+产品代码只能从 `sunpack.model_runtime` 加载模型，不能从 `repair_training/runs` 或外部 provider 包加载。
 
 ## 测试
+
+完整 pytest：
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -q
 ```
 
-本地 CI 风格检查：
+项目 CI 风格测试：
 
 ```powershell
 .\scripts\run_ci_tests.ps1
 ```
 
-验收脚本：
+完整验收：
 
 ```powershell
-.\run_acceptance_tests.ps1
+.\run_acceptance_tests.ps1 -NoWait
 ```
 
+慢速真实归档和大文件性能测试需要显式开关，详见 `tests/README.md`。
+
 ## Windows 发行构建
+
+唯一正式构建入口：
 
 ```powershell
 .\scripts\build_windows.ps1
 ```
 
-构建脚本会：
-
-1. 创建 `.venv-build`
-2. 安装运行和构建依赖
-3. 构建/安装 `sunpack_native`
-4. 构建 `sevenzip_password_tester_capi.dll` 并复制到 `tools\`
-5. 可选运行验收测试
-6. 使用 PyInstaller 构建 `sunpack.exe`
-7. 将 `tools\7z.exe`、`tools\7z.dll`、`tools\sevenzip_password_tester_capi.dll`、`tools\sevenzip_worker.exe` 和 license 复制到发行目录
-8. 运行 packaged smoke tests
-9. 生成 `release\sunpack-windows-<arch>-<version>.zip`
-
 常用参数：
 
 ```powershell
-.\scripts\build_windows.ps1 -SkipTests
+.\scripts\build_windows.ps1 -Arch x64
 .\scripts\build_windows.ps1 -Clean
+.\scripts\build_windows.ps1 -SkipTests
 .\scripts\build_windows.ps1 -Version 1.2.3
 ```
 
-架构参数：
+构建过程：
 
-```powershell
-.\scripts\build_windows.ps1 -Arch x64
-.\scripts\build_windows.ps1 -Arch arm64
+1. 创建或清理 `.venv-build`
+2. 安装项目 `build` extra
+3. 构建并安装 Rust wheel
+4. 构建和测试 C++ bridge/worker
+5. 可选运行 acceptance tests
+6. 用 `SunPack.spec` 生成 PyInstaller onedir 包
+7. 复制配置、密码表、工具、license 和整个 `models/`
+8. 校验关键 PE 文件架构
+9. 运行 packaged CLI、bridge 和模型加载 smoke checks
+10. 用随附 7-Zip 创建并测试发布 ZIP
+
+输出：
+
+```text
+dist\sunpack\
+release\sunpack-windows-<arch>-<version>.zip
 ```
 
-`x64` 是默认值。Windows ARM64 最终可执行文件必须在 ARM64 Windows + ARM64 Python 环境中构建；脚本会拒绝在 x64 Python 下生成“伪 ARM64”包。构建过程会静态校验 `sunpack.exe`、`sunpack_native`、`7z.exe`、`7z.dll`、`sevenzip_password_tester_capi.dll` 和 `sevenzip_worker.exe` 的 PE machine 架构。
-
-已有发行目录也可以独立做静态架构校验：
+ARM64 必须在 ARM64 Windows 和 ARM64 Python 环境中构建。已有目录可独立校验：
 
 ```powershell
 .\scripts\verify_windows_package_arch.ps1 -PackageRoot dist\sunpack -Arch x64
-.\scripts\verify_windows_package_arch.ps1 -PackageRoot dist\sunpack-arm64 -Arch arm64
 ```
 
-## 原生组件职责
+## 运行时原生文件
 
-`sunpack_native` 负责跨平台热点：
+x64 开发环境默认使用：
 
-- 目录扫描
-- 单目录普通文件枚举
-- magic 搜索
-- carrier archive 扫描
-- ZIP central directory 文件名采样
-- 轻量格式结构解析
-- PE overlay 解析
-- analysis binary view、signature prepass 和 fuzzy binary profile
-- repair 层二进制 I/O、range copy/concat/patch 写入
-- ZIP/TAR/压缩流/7z/RAR 部分深度修复的 native 实现
-- verification 输出目录 CRC/readability 扫描和 path/basename 索引匹配
-- ZIP/RAR/7z/password fast verifier 热路径
+```text
+tools\7z.exe
+tools\7z.dll
+tools\sunpack_sevenzip.dll
+tools\sunpack_sevenzip_worker.exe
+```
 
-`sevenzip_password_tester_capi.dll` 负责 Windows 7z.dll 热点：
-
-- archive probe，替代检测路径中的 `7z l`
-- archive test，替代检测路径中的 `7z t`
-- 密码数组尝试，避免为每个密码启动 `7z.exe`
-- archive state manifest，供 verification 比较归档条目和输出文件
-- worker 解压，接收 JSON job，调用 7z.dll 处理普通文件、file range、concat range、native/staged volumes 和 patch-plan 虚拟输入
-
-最终解压由 `sevenzip_worker.exe` 通过 `7z.dll` 执行。`7z.exe` 仍保留在工具目录中，主要用于开发 fixture、手工诊断和 7-Zip 文件来源。
+`sunpack_sevenzip.dll` 提供 probe、test、密码尝试、健康检查、资源分析和 manifest C ABI。`sunpack_sevenzip_worker.exe` 读取 JSON job，通过 `7z.dll` 解压文件、分卷和虚拟输入。`7z.exe` 仅用于开发 fixture、手工诊断、文件来源和发布 ZIP 创建。

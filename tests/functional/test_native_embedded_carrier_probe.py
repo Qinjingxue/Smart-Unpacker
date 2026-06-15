@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from sunpack.support.sevenzip_native import NativePasswordTester
+from sunpack.support.sevenzip_bridge import NativePasswordTester
 from tests.helpers.fs_builder import make_zip
 
 

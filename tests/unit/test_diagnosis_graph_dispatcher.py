@@ -1,6 +1,6 @@
 import pytest
 
-from repair_training.core.diagnosis_graph.dispatcher import (
+from sunpack.model_runtime.diagnosis.graph_dispatcher import (
     UnsupportedDiagnosisGraphFormat,
     detect_graph_format,
 )
@@ -21,7 +21,7 @@ def test_diagnosis_graph_dispatcher_detects_format_priority():
 
 
 def test_diagnosis_graph_dispatcher_rejects_unknown_and_unsupported():
-    assert detect_graph_format({"format": "7z"}) == "seven_zip"
+    assert detect_graph_format({"format": "7z"}) == "7z"
 
     with pytest.raises(UnsupportedDiagnosisGraphFormat):
         detect_graph_format({"knowledge_payload": {"source": {"input": {"entry_path": "a.bin"}}}})

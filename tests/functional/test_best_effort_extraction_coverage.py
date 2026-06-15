@@ -25,7 +25,7 @@ from sunpack.extraction.result import ExtractionResult
 from sunpack.repair.candidate import RepairCandidate, RepairCandidateBatch
 from sunpack.repair.result import RepairResult
 from sunpack.support import archive_knowledge_projection as knowledge_view
-from sunpack.support.resources import get_7z_dll_path, get_sevenzip_worker_path
+from sunpack.support.resources import get_7z_dll_path, get_sevenzip_bridge_worker_path
 from sunpack.verification import VerificationResult, VerificationScheduler
 from sunpack.verification.evidence import VerificationEvidence
 from sunpack.verification.pipeline import VerificationPipeline
@@ -1475,9 +1475,9 @@ def _tar_gz_recursive_pipeline_config(tmp_path: Path) -> dict:
 
 def _require_worker_or_skip() -> str:
     try:
-        return get_sevenzip_worker_path()
+        return get_sevenzip_bridge_worker_path()
     except Exception as exc:
-        pytest.skip(f"sevenzip_worker.exe is required: {exc}")
+        pytest.skip(f"sunpack_sevenzip_worker.exe is required: {exc}")
 
 
 def _require_7z_dll_or_skip() -> str:

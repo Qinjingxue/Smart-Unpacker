@@ -1,7 +1,7 @@
 from types import SimpleNamespace
 
 from sunpack.model_runtime import ModelAssetRegistry
-from sunpack_repair_models import DiagnosisHGTProvider, RepairPolicyTransformerProvider
+from sunpack.model_runtime.providers import DiagnosisHGTProvider, RepairPolicyTransformerProvider
 
 
 def test_model_registry_resolves_zip_assets():
@@ -25,13 +25,19 @@ def test_model_registry_loads_current_zip_models_on_cpu():
 
 
 def test_current_zip_models_run_real_inference():
+    registry = ModelAssetRegistry()
+    diagnosis_asset = registry.asset("zip", "diagnosis")
+    policy_asset = registry.asset("zip", "policy")
+    assert diagnosis_asset is not None
+    assert policy_asset is not None
+
     diagnosis_request = SimpleNamespace(
         format="zip",
         job=SimpleNamespace(archive_key="model-smoke"),
         round_index=0,
         knowledge_payload={"analysis": {"summary": {"format": "zip"}}},
     )
-    diagnosis = DiagnosisHGTProvider("zip").diagnose_state(diagnosis_request)
+    diagnosis = DiagnosisHGTProvider(diagnosis_asset).diagnose_state(diagnosis_request)
 
     assert len(diagnosis["root_case"]["scores"]) == 26
     assert diagnosis["root_case"]["ranked"]
@@ -74,7 +80,7 @@ def test_current_zip_models_run_real_inference():
         current_recovery={"score": 0.0},
         best_seen_recovery={"score": 0.0},
     )
-    policy = RepairPolicyTransformerProvider("zip").score_actions(policy_request)
+    policy = RepairPolicyTransformerProvider(policy_asset).score_actions(policy_request)
 
     assert len(policy["action_scores"]) == 2
     assert policy["action_predictions"]

@@ -9,9 +9,9 @@ from typing import Any
 
 from repair_training.collect_damage_rows import _job_from_record, observe_damage_runtime
 from repair_training.core.datasets import read_jsonl, write_json, write_jsonl
-from repair_training.core.diagnosis_graph.dispatcher import build_diagnosis_graph_sample
+from sunpack.model_runtime.diagnosis.graph_dispatcher import build_diagnosis_graph_sample
 from repair_training.core.diagnosis_gnn.actionable_roots import modules_for_root
-from repair_training.core.diagnosis_gnn.inference import DiagnosisGNNModel
+from sunpack.model_runtime.diagnosis.inference import DiagnosisGNNModel
 from sunpack.repair.scheduler import RepairScheduler, _route_flags_from_damage_analysis
 from sunpack.repair.policy.formats import get_repair_format_plugin
 

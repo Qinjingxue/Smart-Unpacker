@@ -1,7 +1,7 @@
 import pytest
 
-from repair_training.core.diagnosis_graph.dispatcher import build_diagnosis_graph_sample
-from repair_training.core.diagnosis_gnn.tensorize import THEORY_DEPENDS_EDGE_TYPE, metadata_for_sample, tensorize_sample
+from sunpack.model_runtime.diagnosis.graph_dispatcher import build_diagnosis_graph_sample
+from sunpack.model_runtime.diagnosis.tensorize import THEORY_DEPENDS_EDGE_TYPE, metadata_for_sample, tensorize_sample
 
 
 pytest.importorskip("torch")
@@ -48,7 +48,7 @@ def test_diagnosis_gnn_tensorize_reads_root_hypothesis_targets():
     row = _sample().to_dict()
     row["labels"]["auxiliary"]["root_transition_gain_targets"] = {"eocd.cd_offset": 0.75}
     row["labels"]["auxiliary"]["root_evidence_targets"] = {"eocd.cd_offset": 1.0}
-    from repair_training.core.diagnosis_graph.schema import DiagnosisGraphSample
+    from sunpack.model_runtime.diagnosis.graph_schema import DiagnosisGraphSample
 
     data = tensorize_sample(DiagnosisGraphSample.from_dict(row))
 

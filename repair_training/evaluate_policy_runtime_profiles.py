@@ -213,7 +213,6 @@ def _scheduler_config(args: argparse.Namespace) -> dict[str, Any]:
     return {
         "policy": {
             "enabled": True,
-            "provider_package": "sunpack_repair_models",
             "strict_provider_errors": False,
             "graph_stop_stale_patience": int(args.stale_patience),
             "min_best_recovery_improvement": 0.0,

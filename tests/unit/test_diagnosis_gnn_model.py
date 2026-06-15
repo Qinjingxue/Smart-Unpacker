@@ -1,8 +1,8 @@
 import pytest
 
-from repair_training.core.diagnosis_graph.dispatcher import build_diagnosis_graph_sample
-from repair_training.core.diagnosis_gnn.model import build_diagnosis_gnn_model
-from repair_training.core.diagnosis_gnn.tensorize import metadata_from_samples, tensorize_sample
+from sunpack.model_runtime.diagnosis.graph_dispatcher import build_diagnosis_graph_sample
+from sunpack.model_runtime.diagnosis.model import build_diagnosis_gnn_model
+from sunpack.model_runtime.diagnosis.tensorize import metadata_from_samples, tensorize_sample
 
 
 pytest.importorskip("torch")

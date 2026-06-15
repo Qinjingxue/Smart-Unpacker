@@ -7,8 +7,8 @@ from typing import Any
 
 from repair_training.core.datasets import write_json, write_jsonl
 from repair_training.core.diagnosis_gnn.dataset import read_diagnosis_graph_samples
-from repair_training.core.diagnosis_graph.labels import safe_node_token
-from repair_training.core.diagnosis_graph.schema import (
+from sunpack.model_runtime.diagnosis.graph_labels import safe_node_token
+from sunpack.model_runtime.diagnosis.graph_schema import (
     DiagnosisEdge,
     DiagnosisGraph,
     DiagnosisGraphSample,
@@ -16,9 +16,9 @@ from repair_training.core.diagnosis_graph.schema import (
     DiagnosisNode,
 )
 from repair_training.core.diagnosis_graph.serialize import diagnosis_graph_summary
-from repair_training.core.diagnosis_graph.validate import validate_diagnosis_graph_sample
+from sunpack.model_runtime.diagnosis.graph_validate import validate_diagnosis_graph_sample
 from repair_training.core.plugin import normalize_format_name
-from repair_training.formats.zip.diagnosis_graph import (
+from sunpack.model_runtime.diagnosis.zip_graph import (
     zip_cause_id,
     zip_theory_dependency_edge_id,
     zip_theory_edges_for_field,

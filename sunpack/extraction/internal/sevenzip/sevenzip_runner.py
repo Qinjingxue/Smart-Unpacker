@@ -15,7 +15,7 @@ from sunpack.contracts.tasks import ArchiveTask
 from sunpack.extraction.internal.sevenzip.worker_diagnostics import attach_worker_diagnostics
 from sunpack.support import archive_knowledge_projection as knowledge_view
 from sunpack.support.archive_state_view import ArchiveStateByteView
-from sunpack.support.resources import get_7z_dll_path, get_sevenzip_worker_path
+from sunpack.support.resources import get_7z_dll_path, get_sevenzip_bridge_worker_path
 
 
 class _PersistentWorker:
@@ -177,7 +177,7 @@ class SevenZipRunner:
                 )
         except (OSError, FileNotFoundError) as exc:
             return self._completed_process(
-                ["sevenzip_worker.exe"],
+                ["sunpack_sevenzip_worker.exe"],
                 -100,
                 "",
                 f"sevenzip_worker setup failed: {exc}",
@@ -378,7 +378,7 @@ class SevenZipRunner:
                 return attach_worker_diagnostics(completed, request_payload=job)
             except (OSError, FileNotFoundError) as exc:
                 return self._completed_process(
-                    [self.worker_path or "sevenzip_worker.exe"],
+                    [self.worker_path or "sunpack_sevenzip_worker.exe"],
                     -100,
                     "",
                     f"sevenzip_worker failed to start: {exc}",
@@ -403,7 +403,7 @@ class SevenZipRunner:
             )
         except (OSError, FileNotFoundError) as exc:
             return self._completed_process(
-                [self.worker_path or "sevenzip_worker.exe"],
+                [self.worker_path or "sunpack_sevenzip_worker.exe"],
                 -100,
                 "",
                 f"sevenzip_worker failed to start: {exc}",
@@ -417,7 +417,7 @@ class SevenZipRunner:
 
         stdout, stderr = self._communicate_observed_worker(process, payload, runtime_scheduler, task)
         return self._completed_process(
-            [self.worker_path or "sevenzip_worker.exe"],
+            [self.worker_path or "sunpack_sevenzip_worker.exe"],
             process.returncode,
             stdout,
             stderr,
@@ -449,7 +449,7 @@ class SevenZipRunner:
                 worker = self._pool().acquire(startupinfo)
         except (OSError, FileNotFoundError, RuntimeError) as exc:
             return self._completed_process(
-                [self.worker_path or "sevenzip_worker.exe"],
+                [self.worker_path or "sunpack_sevenzip_worker.exe"],
                 -100,
                 "",
                 f"sevenzip_worker failed to start: {exc}",
@@ -477,7 +477,7 @@ class SevenZipRunner:
         except Exception as exc:
             worker.close()
             return self._completed_process(
-                [self.worker_path or "sevenzip_worker.exe"],
+                [self.worker_path or "sunpack_sevenzip_worker.exe"],
                 -100,
                 "",
                 f"sevenzip_worker communication failed: {exc}",
@@ -673,7 +673,7 @@ class SevenZipRunner:
 
     def _worker_path(self) -> str:
         if self.worker_path is None:
-            self.worker_path = get_sevenzip_worker_path()
+            self.worker_path = get_sevenzip_bridge_worker_path()
         return self.worker_path
 
     def close(self) -> None:

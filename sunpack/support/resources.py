@@ -70,23 +70,23 @@ def get_7z_path() -> str:
     raise FileNotFoundError("Required bundled 7z.exe was not found under tools\\ or the application root.")
 
 
-def get_sevenzip_worker_path() -> str:
+def get_sevenzip_bridge_worker_path() -> str:
     if sys.platform != "win32":
-        raise RuntimeError("sevenzip_worker.exe is only supported on Windows in this test build.")
+        raise RuntimeError("sunpack_sevenzip_worker.exe is only supported on Windows in this test build.")
     relatives = (
-        *tuple(tool_dir / "sevenzip_worker.exe" for tool_dir in tool_dir_candidates()),
-        Path("sevenzip_worker.exe"),
-        Path("native") / "sevenzip_password_tester" / "build-x64" / "Release" / "sevenzip_worker.exe",
-        Path("native") / "sevenzip_password_tester" / "build-arm64" / "Release" / "sevenzip_worker.exe",
-        Path("native") / "sevenzip_password_tester" / "build" / "Release" / "sevenzip_worker.exe",
-        Path("native") / "sevenzip_password_tester" / "build" / "Debug" / "sevenzip_worker.exe",
+        *tuple(tool_dir / "sunpack_sevenzip_worker.exe" for tool_dir in tool_dir_candidates()),
+        Path("sunpack_sevenzip_worker.exe"),
+        Path("native") / "sevenzip_bridge" / "build-x64" / "Release" / "sunpack_sevenzip_worker.exe",
+        Path("native") / "sevenzip_bridge" / "build-arm64" / "Release" / "sunpack_sevenzip_worker.exe",
+        Path("native") / "sevenzip_bridge" / "build" / "Release" / "sunpack_sevenzip_worker.exe",
+        Path("native") / "sevenzip_bridge" / "build" / "Debug" / "sunpack_sevenzip_worker.exe",
     )
     for root in candidate_resource_roots():
         for relative in relatives:
             worker = root / relative
             if worker.exists():
                 return str(worker)
-    raise FileNotFoundError("Required sevenzip_worker.exe was not found under tools\\ or native\\sevenzip_password_tester\\build.")
+    raise FileNotFoundError("Required sunpack_sevenzip_worker.exe was not found under tools\\ or native\\sevenzip_bridge\\build.")
 
 
 def get_7z_dll_path() -> str:

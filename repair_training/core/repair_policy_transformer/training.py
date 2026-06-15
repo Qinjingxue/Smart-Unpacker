@@ -6,8 +6,8 @@ from typing import Any
 from repair_training.core.datasets import write_json
 from repair_training.core.repair_policy_transformer import POLICY_TRANSFORMER_ALGORITHM, POLICY_TRANSFORMER_SEMANTICS
 from repair_training.core.repair_policy_transformer.dataset import read_policy_graph_samples, read_policy_world_samples, split_policy_graph_samples, split_policy_world_samples
-from repair_training.core.repair_policy_transformer.model import build_repair_policy_transformer
-from repair_training.core.repair_policy_transformer.tensorize import EDGE_FEATURE_DIM, NODE_FEATURE_DIM, tensorize_sample, tensorize_world_sample
+from sunpack.model_runtime.policy.model import build_repair_policy_transformer
+from sunpack.model_runtime.policy.tensorize import EDGE_FEATURE_DIM, NODE_FEATURE_DIM, tensorize_sample, tensorize_world_sample
 
 
 DEFAULT_CONFIG = {

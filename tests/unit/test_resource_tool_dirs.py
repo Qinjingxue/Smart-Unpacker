@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from sunpack.support import resources
-from sunpack.support import sevenzip_native
+from sunpack.support import sevenzip_bridge
 
 
 def test_arm64_tool_dir_candidates_prefer_arm64(monkeypatch):
@@ -11,13 +11,13 @@ def test_arm64_tool_dir_candidates_prefer_arm64(monkeypatch):
 
 
 def test_native_wrapper_path_uses_arch_specific_tool_dir(tmp_path, monkeypatch):
-    wrapper = tmp_path / "tools-arm64" / "sevenzip_password_tester_capi.dll"
+    wrapper = tmp_path / "tools-arm64" / "sunpack_sevenzip.dll"
     wrapper.parent.mkdir()
     wrapper.write_bytes(b"placeholder")
 
     monkeypatch.setattr(resources.platform, "machine", lambda: "ARM64")
-    monkeypatch.setattr(sevenzip_native, "candidate_resource_roots", lambda: [tmp_path])
+    monkeypatch.setattr(sevenzip_bridge, "candidate_resource_roots", lambda: [tmp_path])
 
-    tester = sevenzip_native.NativePasswordTester.__new__(sevenzip_native.NativePasswordTester)
+    tester = sevenzip_bridge.NativePasswordTester.__new__(sevenzip_bridge.NativePasswordTester)
 
     assert tester._default_wrapper_path() == str(wrapper)

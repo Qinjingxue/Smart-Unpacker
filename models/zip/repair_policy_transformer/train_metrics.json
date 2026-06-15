@@ -1,0 +1,46 @@
+{
+  "device": "cuda",
+  "history": [
+    {
+      "batch_size": 8,
+      "epoch": 1,
+      "train_items": 2295,
+      "train_loss": 0.45724577760447194
+    },
+    {
+      "batch_size": 8,
+      "epoch": 2,
+      "train_items": 2295,
+      "train_loss": 0.37212379958208014
+    },
+    {
+      "batch_size": 8,
+      "epoch": 3,
+      "train_items": 2295,
+      "train_loss": 0.34520091045037793
+    },
+    {
+      "batch_size": 8,
+      "epoch": 4,
+      "train_items": 2295,
+      "train_loss": 0.3356470284198219
+    },
+    {
+      "batch_size": 8,
+      "epoch": 5,
+      "train_items": 2295,
+      "train_loss": 0.33976898718794046
+    }
+  ],
+  "samples": {
+    "test": 300,
+    "train": 2295,
+    "valid": 405
+  },
+  "task_counts": {
+    "masked_graph": 1000,
+    "ranking": 1000,
+    "transition": 1000
+  },
+  "training_task": "joint"
+}

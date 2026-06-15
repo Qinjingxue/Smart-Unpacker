@@ -1,0 +1,21 @@
+{
+  "schema_version": "sunpack_model_manifest_v1",
+  "formats": {
+    "zip": {
+      "diagnosis": {
+        "model_type": "diagnosis_gnn",
+        "semantics": "repair_actionable_root_v2",
+        "algorithm": "hgt",
+        "packaged_path": "models/zip/diagnosis_hgt",
+        "sha256": "1b00946cbb597af53426dc271f73ba8d92c7226863b6f15dfadaf92a5774544b"
+      },
+      "policy": {
+        "model_type": "repair_policy_transformer",
+        "semantics": "repair_graph_world_policy_uncertainty_v1",
+        "algorithm": "repair_graph_world_policy_transformer",
+        "packaged_path": "models/zip/repair_policy_transformer",
+        "sha256": "d42449f2b343c64c655ad67525f6251c901a10cfaea5e8a4b862b31e3ffe0a84"
+      }
+    }
+  }
+}

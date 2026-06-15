@@ -1,4 +1,4 @@
-from sunpack.support.sevenzip_native import STATUS_DAMAGED, STATUS_OK
+from sunpack.support.sevenzip_bridge import STATUS_DAMAGED, STATUS_OK
 from sunpack.verification.archive_state_manifest import ArchiveStateManifest, archive_state_manifest_for_evidence
 from sunpack.verification.evidence import VerificationEvidence
 from sunpack.verification.methods._archive_output_match import (

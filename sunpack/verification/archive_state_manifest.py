@@ -6,7 +6,7 @@ from typing import Any
 
 from sunpack.contracts.archive_state import ArchiveState
 from sunpack.support.archive_state_view import UnsupportedArchivePatch
-from sunpack.support.sevenzip_native import STATUS_DAMAGED, STATUS_OK, STATUS_UNSUPPORTED
+from sunpack.support.sevenzip_bridge import STATUS_DAMAGED, STATUS_OK, STATUS_UNSUPPORTED
 from sunpack_native import archive_state_zip_manifest_native as _native_archive_state_zip_manifest
 
 

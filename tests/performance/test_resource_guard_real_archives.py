@@ -5,7 +5,7 @@ import pytest
 
 from sunpack.config.schema import normalize_config
 from sunpack.coordinator.runner import PipelineRunner
-from sunpack.support.resources import get_7z_dll_path, get_sevenzip_worker_path
+from sunpack.support.resources import get_7z_dll_path, get_sevenzip_bridge_worker_path
 from tests.helpers.detection_config import with_detection_pipeline
 
 
@@ -106,6 +106,6 @@ def _write_many_small_files_zip(path: Path, *, count: int) -> None:
 def _require_native_tools_or_skip() -> None:
     try:
         get_7z_dll_path()
-        get_sevenzip_worker_path()
+        get_sevenzip_bridge_worker_path()
     except Exception as exc:
         pytest.skip(f"native extraction tools are required: {exc}")

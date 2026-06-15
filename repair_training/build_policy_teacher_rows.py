@@ -101,7 +101,7 @@ def _build_rows_parallel(
             for future in done:
                 index = pending.pop(future)
                 completed[index] = future.result()
-    from repair_training.core.repair_policy_transformer.schema import sample_from_dict
+    from sunpack.model_runtime.policy.schema import sample_from_dict
 
     output = []
     for index in sorted(completed):

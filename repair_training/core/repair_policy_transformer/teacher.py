@@ -13,7 +13,7 @@ from repair_training.build_policy_graph_rows import (
     _sanitize_training_graph,
     build_policy_graph_rows,
 )
-from repair_training.core.repair_policy_transformer.schema import PolicyAction, PolicyGraphTrainingSample, sample_from_dict
+from sunpack.model_runtime.policy.schema import PolicyAction, PolicyGraphTrainingSample, sample_from_dict
 from sunpack.analysis.knowledge import write_zip_runtime_evidence_facts
 from sunpack.coordinator.analysis_stage import ArchiveAnalysisStage
 from sunpack.contracts.archive_input import ArchiveInputDescriptor

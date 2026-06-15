@@ -1,7 +1,7 @@
 from typing import Dict, Any
 from sunpack.detection.pipeline.processors.context import FactProcessorContext
 from sunpack.detection.pipeline.processors.registry import register_processor
-from sunpack.support.sevenzip_native import cached_probe_archive
+from sunpack.support.sevenzip_bridge import cached_probe_archive
 from sunpack.rename.scheduler import RenameScheduler
 
 EXECUTABLE_PROBE_TYPES = {"pe", "elf", "macho", "te"}

@@ -12,7 +12,7 @@ from repair_training.core.diagnosis_gnn.actionable_roots import (
     ROOT_HYPOTHESIS_TRAINING_OBJECTIVE,
     modules_for_root,
 )
-from repair_training.core.diagnosis_gnn.root_cases import ROOT_CASES, canonical_root_case
+from sunpack.model_runtime.diagnosis.root_cases import ROOT_CASES, canonical_root_case
 
 
 SCHEMA = "hgt_guidance_hard_negative_v1"

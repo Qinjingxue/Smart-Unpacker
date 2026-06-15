@@ -1,6 +1,6 @@
 from typing import Any
 
-from sunpack.support.sevenzip_native import (
+from sunpack.support.sevenzip_bridge import (
     STATUS_BACKEND_UNAVAILABLE,
     STATUS_DAMAGED,
     STATUS_OK,

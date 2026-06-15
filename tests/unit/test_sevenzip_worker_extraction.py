@@ -12,15 +12,15 @@ from sunpack.contracts.detection import FactBag
 from sunpack.contracts.tasks import ArchiveTask
 from sunpack.extraction.internal.sevenzip.sevenzip_runner import _PersistentWorker
 from sunpack.extraction.scheduler import ExtractionScheduler
-from sunpack.support.resources import get_7z_dll_path, get_sevenzip_worker_path
+from sunpack.support.resources import get_7z_dll_path, get_sevenzip_bridge_worker_path
 from tests.helpers.tool_config import get_test_tools
 
 
 def _require_worker_or_skip():
     try:
-        return get_sevenzip_worker_path()
+        return get_sevenzip_bridge_worker_path()
     except Exception as exc:
-        pytest.skip(f"sevenzip_worker.exe is required: {exc}")
+        pytest.skip(f"sunpack_sevenzip_worker.exe is required: {exc}")
 
 
 def _require_7z_or_skip():

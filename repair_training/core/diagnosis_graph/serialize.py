@@ -4,7 +4,7 @@ from collections import Counter
 from typing import Any
 
 from repair_training.core.datasets import write_json, write_jsonl
-from repair_training.core.diagnosis_graph.schema import DiagnosisGraphSample
+from sunpack.model_runtime.diagnosis.graph_schema import DiagnosisGraphSample
 
 
 def sample_to_row(sample: DiagnosisGraphSample) -> dict[str, Any]:
