@@ -55,7 +55,7 @@ pytest tests/runners -q
 .\scripts\run_ci_tests.ps1
 ```
 
-`run_acceptance_tests.ps1` 会分步运行 unit、functional、integration、CLI、runner、training、混合分卷 acceptance 和 CLI smoke checks。`scripts/run_ci_tests.ps1` 会运行 unit、functional、CLI、runner、混合分卷 acceptance 和 CLI smoke checks。
+`run_acceptance_tests.ps1` 只保留外部功能验收：CLI contract、数据驱动 case runner 和 CLI smoke checks。压缩包修复、损坏归档恢复、真实归档边界、训练边界、模型张量化和模块契约测试留在 pytest/CI 专项路径中运行。`scripts/run_ci_tests.ps1` 会运行 unit、functional、CLI、runner、混合分卷 acceptance 和 CLI smoke checks。
 
 ## 大文件性能压测
 
