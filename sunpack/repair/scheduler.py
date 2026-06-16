@@ -14,6 +14,7 @@ from sunpack.repair.config import enabled_module_configs, repair_config
 from sunpack.repair.context import RepairContext, build_repair_context
 from sunpack.repair.control_candidates import is_accept_current_state_candidate, with_accept_current_state_candidate
 from sunpack.repair.diagnosis import RepairDiagnosis, diagnose_repair_job
+from sunpack.repair.formats import canonical_format as _normalize_format
 from sunpack.repair.job import RepairJob
 from sunpack.repair.pipeline.module import RepairRoute
 from sunpack.repair.pipeline.modules._common import job_source_size, repair_operation_cache_key
@@ -58,11 +59,22 @@ class RepairScheduler:
         )
         self.model_runtime = self._build_model_runtime()
         discover_repair_modules()
+        self._validate_configured_modules()
 
     def _build_model_runtime(self) -> "RepairModelRuntime":
         from sunpack.repair.model.runtime import RepairModelRuntime
 
         return RepairModelRuntime(self.config)
+
+    def _validate_configured_modules(self) -> None:
+        registry_names = set(get_repair_module_registry().all())
+        if not registry_names:
+            return
+        configured = set(enabled_module_configs(self.config))
+        unknown = sorted(configured - registry_names)
+        if unknown:
+            joined = ", ".join(unknown)
+            raise ValueError(f"Unknown repair module configured: {joined}")
 
     def diagnose(self, job: RepairJob, *, knowledge: ArchiveKnowledge | None = None) -> RepairDiagnosis:
         return diagnose_repair_job(job, knowledge=knowledge)
@@ -2094,21 +2106,6 @@ def _format_matches(fmt: str, expected) -> bool:
     normalized = _normalize_format(fmt)
     formats = {_normalize_format(item) for item in expected}
     return normalized in formats or "archive" in formats
-
-
-def _normalize_format(value: Any) -> str:
-    text = str(value or "").lower().lstrip(".")
-    aliases = {
-        "seven_zip": "7z",
-        "sevenzip": "7z",
-        "gz": "gzip",
-        "bz2": "bzip2",
-        "zst": "zstd",
-        "tgz": "tar.gz",
-        "tbz2": "tar.bz2",
-        "txz": "tar.xz",
-    }
-    return aliases.get(text, text or "unknown")
 
 
 def _lazy_module_candidate(

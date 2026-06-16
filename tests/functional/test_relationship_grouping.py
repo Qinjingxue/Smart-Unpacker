@@ -13,7 +13,7 @@ from tests.helpers.detection_config import with_detection_pipeline
 SCAN_CONFIG = with_detection_pipeline({
     "thresholds": {"archive_score_threshold": 1, "maybe_archive_threshold": 1},
 }, precheck=[
-    {"name": "size_minimum", "enabled": True, "min_inspection_size_bytes": 0},
+    {"name": "size_range", "enabled": True, "gte": 0},
 ], scoring=[
     {"name": "extension", "enabled": True, "extension_score_groups": [{"score": 1, "extensions": [".zip", ".7z", ".rar", ".001"]}]},
     {"name": "embedded_payload_identity", "enabled": True},

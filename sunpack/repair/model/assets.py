@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from sunpack.repair.config import repair_system_mode
+from sunpack.repair.formats import canonical_format as _normalize_format
 from sunpack.support.resources import candidate_resource_roots, find_resource_path
 
 
@@ -196,8 +197,3 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
-
-
-def _normalize_format(value: str) -> str:
-    text = str(value or "").strip().lower().lstrip(".")
-    return {"7zip": "7z", "seven_zip": "7z"}.get(text, text)

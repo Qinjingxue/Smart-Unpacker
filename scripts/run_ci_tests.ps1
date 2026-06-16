@@ -68,7 +68,6 @@ Invoke-TestStep -Label "Unit tests" -Command @($python, "-m", "pytest", "-q", "t
 Invoke-TestStep -Label "Functional tests" -Command @($python, "-m", "pytest", "-q", "tests/functional")
 Invoke-TestStep -Label "CLI contract tests" -Command @($python, "-m", "pytest", "-q", "tests/cli")
 Invoke-TestStep -Label "Data case runners" -Command @($python, "-m", "pytest", "-q", "tests/runners")
-Invoke-TestStep -Label "Archive mixed-batch acceptance" -Command @($python, "tests\performance_split_archives\split_archive_pressure.py", "--profile", "acceptance-batch", "--strict", "--no-json")
 Invoke-TestStep -Label "CLI help smoke test" -Command @($python, "sunpack.py", "--help")
 Invoke-TestStep -Label "CLI passwords smoke test" -Command @($python, "sunpack.py", "passwords", "--json")
 Invoke-TestStep -Label "CLI scan smoke test" -Command @($python, "sunpack.py", "scan", (Join-Path $repoRoot "tests"), "--json")

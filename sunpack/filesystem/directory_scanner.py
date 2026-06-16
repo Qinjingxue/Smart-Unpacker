@@ -87,10 +87,10 @@ class DirectoryScanner:
                 if not seen_scene_semantics:
                     blocked_extensions.extend(getattr(scan_filter, "blocked_extensions", []) or [])
                 continue
-            if name in {"size_minimum", "size_range"} and stage == "size":
+            if name == "size_range" and stage == "size":
                 if seen_scene_semantics:
                     break
-                value = getattr(scan_filter, "min_inspection_size_bytes", None)
+                value = getattr(scan_filter, "native_min_size_bytes", None)
                 if value is not None:
                     try:
                         min_size = max(int(value), int(min_size or 0))

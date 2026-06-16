@@ -32,7 +32,7 @@ tools-arm64/              ARM64 外部工具和原生构建产物
 | Extra | 用途 |
 | --- | --- |
 | 默认 | SunPack 运行依赖，不包含模型运行时 |
-| `model-runtime` | x64 模型运行时依赖，包含 PyTorch 和 PyG |
+| `model-runtime` | x64 模型运行时依赖，包含 PyTorch 2.7 CPU 和 PyG |
 | `test` | pytest |
 | `build` | PyInstaller、maturin、CMake |
 | `training` | 训练工具的附加依赖 |
@@ -212,7 +212,7 @@ release\sunpack-windows-<arch>-<repair_system>-<version>.zip
 ARM64 必须在 ARM64 Windows 和 ARM64 Python 环境中构建。已有目录可独立校验：
 
 ```powershell
-.\scripts\verify_windows_package_arch.ps1 -PackageRoot dist\sunpack-x64-full -Arch x64
+.\scripts\verify_windows_package_arch.ps1 -PackageRoot dist\sunpack-x64-lite -Arch x64
 ```
 
 ## 运行时原生文件

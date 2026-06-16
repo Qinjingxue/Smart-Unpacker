@@ -141,42 +141,8 @@ DEFAULT_REPAIR_CONFIG = {
         {"name": "rar_end_block_repair", "enabled": True},
         {"name": "rar_file_quarantine_rebuild", "enabled": True},
         {"name": "rar4_file_quarantine_rebuild", "enabled": True},
-        {"name": "zip_boundary", "enabled": True},
-        {"name": "zip_directory", "enabled": True},
-        {"name": "rar_boundary", "enabled": True},
-        {"name": "tar_boundary", "enabled": True},
-        {"name": "gzip_boundary", "enabled": True},
-        {"name": "bzip2_boundary", "enabled": True},
-        {"name": "xz_boundary", "enabled": True},
-        {"name": "zstd_boundary", "enabled": True},
     ],
 }
-
-REMOVED_ZIP_COARSE_MODULES = {
-    "zip_fix_boundary": "zip_trim_trailing_junk / zip_fix_eocd_comment_length",
-    "zip_fix_pointers": "zip_fix_eocd_record / zip_fix_cd_offset / zip_fix_cd_entry_count / zip_fix_local_header_fields",
-    "zip_fix_zip64": "zip_fix_zip64_locator / zip_fix_zip64_eocd / zip_fix_zip64_extra_size",
-    "zip_rebuild": "zip_rebuild_cd_from_local_headers / zip_rebuild_cd_from_data_descriptors",
-    "zip_salvage": "zip_reconcile_cd_local_headers / zip_quarantine_failed_entries / zip_salvage_verified_entries / zip_partial_salvage_missing_volume / zip_local_header_partial_scan",
-    "zip_resolve_conflicts": "zip_resolve_duplicate_entries / zip_resolve_overlapping_entries / zip_reconcile_cd_data_descriptor_conflict",
-    "zip_central_directory_rebuild": "zip_rebuild_cd_from_local_headers",
-    "zip_data_descriptor_recovery": "zip_rebuild_cd_from_data_descriptors",
-    "zip_partial_recovery": "zip_local_header_partial_scan",
-    "zip_eocd_repair": "zip_fix_eocd_record",
-    "zip_central_directory_offset_fix": "zip_fix_cd_offset",
-    "zip_central_directory_count_fix": "zip_fix_cd_entry_count",
-    "zip_trailing_junk_trim": "zip_trim_trailing_junk",
-    "zip_comment_length_fix": "zip_fix_eocd_comment_length",
-    "zip_deep_partial_recovery": "zip_local_header_partial_scan",
-    "zip_conflict_resolver_rebuild": "zip_resolve_duplicate_entries / zip_resolve_overlapping_entries",
-    "zip_entry_quarantine_rebuild": "zip_quarantine_failed_entries",
-    "zip_missing_volume_partial_salvage": "zip_partial_salvage_missing_volume",
-    "zip64_field_repair": "zip_fix_zip64_locator / zip_fix_zip64_eocd / zip_fix_zip64_extra_size",
-    "zip_local_header_field_repair": "zip_fix_local_header_fields",
-}
-
-MODULE_NAME_ALIASES = {}
-
 
 def repair_config(config: dict[str, Any] | None) -> dict[str, Any]:
     payload = dict((config or {}).get("repair") or {})
@@ -346,13 +312,8 @@ def _normalize_modules(value: Any) -> list[dict[str, Any]]:
         name = str(item.get("name") or "").strip()
         if not name:
             raise ValueError(f"repair.modules[{index}].name must not be empty")
-        if name in REMOVED_ZIP_COARSE_MODULES:
-            raise ValueError(
-                f"repair.modules[{index}].name={name!r} was removed; use atomic ZIP repair modules: "
-                f"{REMOVED_ZIP_COARSE_MODULES[name]}"
-            )
         normalized = dict(item)
-        normalized["name"] = MODULE_NAME_ALIASES.get(name, name)
+        normalized["name"] = name
         normalized["enabled"] = _bool_value(item.get("enabled", False), f"repair.modules[{index}].enabled")
         result.append(normalized)
     return result

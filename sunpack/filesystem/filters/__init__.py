@@ -47,6 +47,6 @@ def build_filters(config: dict[str, Any] | None = None) -> list[ScanFilter]:
         name = item.get("name")
         filter_cls = _FILTER_CLASSES.get(name)
         if filter_cls is None:
-            continue
+            raise ValueError(f"Unknown filesystem scan filter: {name}")
         filters.append(filter_cls.from_config(item))
     return filters

@@ -11,10 +11,8 @@ class WhitelistScanFilter:
 
     def __init__(
         self,
-        patterns=None,
         allowed_extensions=None,
         allowed_files=None,
-        prune_dirs=None,
         path_globs=None,
         prune_dir_globs=None,
     ):
@@ -29,7 +27,6 @@ class WhitelistScanFilter:
             if isinstance(pattern, str) and pattern.strip()
         ]
         self.path_patterns = [
-            *[str(pattern) for pattern in (patterns or []) if isinstance(pattern, str)],
             *[_path_glob_to_regex(pattern) for pattern in self.path_globs],
         ]
         self.file_patterns = [
@@ -37,7 +34,6 @@ class WhitelistScanFilter:
         ]
         self.patterns = [*self.path_patterns, *self.file_patterns]
         self.prune_dirs = [
-            *[str(pattern) for pattern in (prune_dirs or []) if isinstance(pattern, str)],
             *[_dir_glob_to_regex(pattern) for pattern in self.prune_dir_globs],
         ]
         self.allowed_extensions = {
@@ -49,10 +45,8 @@ class WhitelistScanFilter:
     @classmethod
     def from_config(cls, config: dict[str, Any]):
         return cls(
-            patterns=config.get("patterns") or [],
-            allowed_extensions=config.get("allowed_extensions") or config.get("blocked_extensions") or [],
-            allowed_files=config.get("allowed_files") or config.get("blocked_files") or [],
-            prune_dirs=config.get("prune_dirs") or [],
+            allowed_extensions=config.get("allowed_extensions") or [],
+            allowed_files=config.get("allowed_files") or [],
             path_globs=config.get("path_globs") or [],
             prune_dir_globs=config.get("prune_dir_globs") or [],
         )

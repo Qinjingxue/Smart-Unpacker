@@ -28,7 +28,7 @@ def edge_config(passwords: list[str] | None = None) -> dict:
         "user_passwords": passwords or [],
         "builtin_passwords": [],
     }, precheck=[
-        {"name": "size_minimum", "enabled": True, "min_inspection_size_bytes": 0},
+        {"name": "size_range", "enabled": True, "gte": 0},
     ], scoring=[
         {"name": "extension", "enabled": True, "extension_score_groups": [{"score": 5, "extensions": [".zip", ".7z", ".rar", ".tar", ".gz", ".bz2", ".xz", ".zst", ".001"]}]},
         {"name": "embedded_payload_identity", "enabled": True},

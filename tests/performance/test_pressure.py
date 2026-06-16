@@ -14,7 +14,7 @@ def pressure_scan_config() -> dict:
             "maybe_archive_threshold": 3,
         },
     }, precheck=[
-        {"name": "size_minimum", "enabled": True, "min_inspection_size_bytes": 0},
+        {"name": "size_range", "enabled": True, "gte": 0},
         {
             "name": "blacklist",
             "enabled": True,

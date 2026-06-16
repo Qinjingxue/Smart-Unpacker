@@ -15,7 +15,7 @@ def _rule_pipeline_config():
         "thresholds": {"archive_score_threshold": 5, "maybe_archive_threshold": 3},
     }, precheck=[
         {"name": "blacklist", "enabled": True, "blocked_files": []},
-        {"name": "size_minimum", "enabled": True, "min_inspection_size_bytes": 0},
+        {"name": "size_range", "enabled": True, "gte": 0},
         {
             "name": "scene_protect",
             "enabled": True,

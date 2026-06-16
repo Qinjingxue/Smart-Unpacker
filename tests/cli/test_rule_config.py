@@ -56,7 +56,6 @@ def test_config_validate_checks_verification_methods_are_registered():
 def test_scheduler_profile_override_expands_scheduler_config():
     class Args:
         scheduler_profile = "aggressive"
-        min_inspection_size_bytes = None
         recursive_extract = None
         archive_cleanup_mode = None
         flatten_single_directory = None
@@ -89,7 +88,7 @@ def test_effective_config_includes_thresholds_scheduler_and_rule_pipeline():
     config["filesystem"] = {
         "directory_scan_mode": "-",
         "scan_filters": [
-            {"name": "size_minimum", "enabled": True, "min_inspection_size_bytes": 1048576}
+            {"name": "size_range", "enabled": True, "gte": 1048576}
         ]
     }
     config["thresholds"] = {"archive_score_threshold": 6, "maybe_archive_threshold": 3}
@@ -98,7 +97,7 @@ def test_effective_config_includes_thresholds_scheduler_and_rule_pipeline():
     effective = build_effective_config(config)
 
     assert effective["thresholds"]["archive_score_threshold"] == 6
-    assert effective["min_inspection_size_bytes"] == 1048576
+    assert effective["size_range_min_bytes"] == 1048576
     assert effective["filesystem"]["directory_scan_mode"] == "current_dir_only"
     assert effective["scheduler"]["scheduler_profile"] == "auto"
     assert effective["scheduler"]["resolved_scheduler_profile"] in {"conservative", "aggressive"}

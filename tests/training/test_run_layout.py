@@ -30,7 +30,6 @@ def test_latest_training_dataset_only_checks_canonical_run_datasets(tmp_path, mo
     monkeypatch.setattr(run_layout, "TRAINING_ROOT", training_root)
     monkeypatch.setattr(run_layout, "RUNS_ROOT", runs_root)
     monkeypatch.setattr(run_layout, "LATEST_RUNS", training_root / "latest_runs.json")
-    monkeypatch.setattr(run_layout, "LEGACY_LATEST_RUN", training_root / "latest_run.txt")
 
     assert run_layout.latest_training_dataset() == newer
 
@@ -51,7 +50,6 @@ def test_latest_training_dataset_prefers_explicit_latest_run(tmp_path, monkeypat
     monkeypatch.setattr(run_layout, "TRAINING_ROOT", training_root)
     monkeypatch.setattr(run_layout, "RUNS_ROOT", runs_root)
     monkeypatch.setattr(run_layout, "LATEST_RUNS", training_root / "latest_runs.json")
-    monkeypatch.setattr(run_layout, "LEGACY_LATEST_RUN", training_root / "latest_run.txt")
     run_layout.write_latest_run("zip", latest_run)
 
     assert run_layout.latest_training_dataset() == selected
@@ -62,6 +60,5 @@ def test_latest_training_dataset_returns_stable_fallback_when_runs_are_missing(t
     monkeypatch.setattr(run_layout, "TRAINING_ROOT", training_root)
     monkeypatch.setattr(run_layout, "RUNS_ROOT", training_root / "runs")
     monkeypatch.setattr(run_layout, "LATEST_RUNS", training_root / "latest_runs.json")
-    monkeypatch.setattr(run_layout, "LEGACY_LATEST_RUN", training_root / "latest_run.txt")
 
     assert run_layout.latest_training_dataset() == training_root / "datasets" / "runtime_graph_success.jsonl"

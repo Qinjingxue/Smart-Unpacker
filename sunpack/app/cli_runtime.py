@@ -13,21 +13,19 @@ from sunpack.passwords import dedupe_passwords, get_builtin_passwords, PasswordS
 def build_effective_config(config: dict) -> dict[str, Any]:
     thresholds = config.get("thresholds", {}) if isinstance(config.get("thresholds"), dict) else {}
     pipeline_config = rule_pipeline_config(config)
-    size_rule = scan_filter_config(config, "size_range") or scan_filter_config(config, "size_minimum")
-    size_minimum = None
+    size_rule = scan_filter_config(config, "size_range")
+    size_range_min_bytes = None
     if isinstance(size_rule, dict):
         if "gte" in size_rule:
-            size_minimum = size_rule["gte"]
+            size_range_min_bytes = size_rule["gte"]
         elif "greater_than_or_equal" in size_rule:
-            size_minimum = size_rule["greater_than_or_equal"]
-        elif "min_inspection_size_bytes" in size_rule:
-            size_minimum = size_rule["min_inspection_size_bytes"]
+            size_range_min_bytes = size_rule["greater_than_or_equal"]
     return {
         "thresholds": {
             "archive_score_threshold": thresholds.get("archive_score_threshold", 6),
             "maybe_archive_threshold": thresholds.get("maybe_archive_threshold", 3),
         },
-        "min_inspection_size_bytes": size_minimum,
+        "size_range_min_bytes": size_range_min_bytes,
         "scheduler_profile": config.get("performance", {}).get("scheduler_profile"),
         "scheduler": build_scheduler_profile_config(
             config.get("performance", {}).get("scheduler_profile", "auto")

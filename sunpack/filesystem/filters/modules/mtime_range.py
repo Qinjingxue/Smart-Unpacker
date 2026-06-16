@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Any
 
 from sunpack.filesystem.filters.base import ScanCandidate, ScanDecision, keep, reject
-from sunpack.filesystem.filters.modules.size_minimum import NumericRange, parse_range_expression
+from sunpack.filesystem.filters.modules.size_range import NumericRange, parse_range_expression
 
 
 class MtimeRangeScanFilter:

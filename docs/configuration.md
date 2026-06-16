@@ -112,8 +112,6 @@ CLI 可用 `--recur` 临时覆盖。
 | `blocked_files` | `list[str]` | 完整文件名精确匹配，例如 `Thumbs.db`、`desktop.ini`。 |
 | `blocked_extensions` | `list[str]` | 阻止扫描的文件扩展名。 |
 
-高级兼容字段 `patterns` 和 `prune_dirs` 仍按正则读取，但默认配置不再使用它们。
-
 `size_range` 用文件大小限制 filesystem 输出。只有落在配置范围内的文件才会进入 relation、detection 或 analysis；目录不受该过滤器影响。推荐写数学不等式，`r` 表示文件大小：
 
 ```json
@@ -129,8 +127,6 @@ CLI 可用 `--recur` 临时覆盖。
 | `lt` / `less_than` | `int` | 文件大小必须小于该值。 |
 | `lte` / `less_than_or_equal` | `int` | 文件大小必须小于等于该值。 |
 | `eq` / `equal` | `int` | 文件大小必须等于该值。 |
-
-旧的 `size_minimum` 仍兼容，等价于 `size_range` 的 `gte`。
 
 `mtime_range` 用文件修改时间限制 filesystem 输出，推荐写数学不等式，`d` 表示文件修改时间：
 

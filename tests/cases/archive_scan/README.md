@@ -102,7 +102,7 @@ tests/cases/archive_scan/
 | `seven_zip_probe` | 7-Zip 轻量探测确认或拒绝。 |
 | `seven_zip_validation` | 7-Zip 测试确认或拒绝。 |
 | `scene_protect` | 场景保护 hard stop 命中。 |
-| `size_minimum` | 文件大小低于检查阈值。 |
+| `size_range` | 文件大小不在允许范围内。 |
 
 ## 示例
 

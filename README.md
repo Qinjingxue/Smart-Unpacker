@@ -74,7 +74,7 @@ python sunpack.py config validate
 打包后的程序使用同一套命令：
 
 ```powershell
-.\dist\sunpack-x64-full\sunpack.exe extract D:\Downloads
+.\dist\sunpack-x64-lite\sunpack.exe extract D:\Downloads
 ```
 
 ## 命令速览
@@ -146,7 +146,7 @@ app/config
 - `sunpack/`：配置、CLI、调度、规则、verification/repair 决策编排。
 - `sunpack/repair/model/`：发布时使用的模型结构、张量化、推理、资产清单和统一运行时。
 - `sunpack/repair/search/`：修复搜索图、恢复度评估、运行特征和模块提案。
-- `repair_training/`：数据构建、训练和评估工具；允许依赖 `sunpack.repair.model`，运行时禁止反向依赖训练目录。
+- `repair_training/`：源码树内的数据构建、训练和评估工具；不随默认 Python 包发行，允许依赖 `sunpack.repair.model`，运行时禁止反向依赖训练目录。
 - `models/`：随源码和发行包分发的模型资产，入口为 `models/manifest.json`。
 - `native/sunpack_native/`：Rust/PyO3 热路径，包括目录扫描、二进制结构分析、repair I/O、CRC/readability、candidate matching、deep repair native 实现等。
 - `native/sevenzip_bridge/`：C++/CMake 7z.dll bridge，提供 probe/test、密码数组尝试、manifest 和 worker 解压。
@@ -249,4 +249,4 @@ Windows 打包：
 
 构建脚本会准备 `.venv-build`，从 `pyproject.toml` 安装 `build` extra，构建 Rust wheel 和 C++ bridge/worker，用 PyInstaller 生成 `sunpack.exe`，复制配置、工具和 license，并执行 packaged smoke。`-RepairSystem full` 会额外安装模型运行时、复制 `models/` 并执行模型加载检查；`-RepairSystem lite` 不包含模型资产和模型依赖。发行包输出到 `release\sunpack-windows-<arch>-<repair_system>-<version>.zip`，目录输出到 `dist\sunpack-<arch>-<repair_system>\`。
 
-构建脚本支持 `-Arch x64|arm64` 和 `-RepairSystem full|lite`。`x64` 和 `full` 是默认值；ARM64 最终可执行文件需要在 ARM64 Windows + ARM64 Python 环境中构建，脚本会静态校验包内所有关键 PE 文件的 machine 架构。已有包可用 `.\scripts\verify_windows_package_arch.ps1 -PackageRoot <dist目录> -Arch arm64` 在任意 Windows 机器上做静态检查。GitHub release workflow 会同时产出 `x64-full`、`x64-lite`、`arm64-full`、`arm64-lite` 四个 Windows 包。
+构建脚本支持 `-Arch x64|arm64` 和 `-RepairSystem full|lite`。`x64` 和 `full` 是默认值；ARM64 最终可执行文件需要在 ARM64 Windows + ARM64 Python 环境中构建，脚本会静态校验包内所有关键 PE 文件的 machine 架构。已有包可用 `.\scripts\verify_windows_package_arch.ps1 -PackageRoot <dist目录> -Arch arm64` 在任意 Windows 机器上做静态检查。GitHub release workflow 目前只产出 `x64-lite` 和 `arm64-lite` 两个 Windows 包。

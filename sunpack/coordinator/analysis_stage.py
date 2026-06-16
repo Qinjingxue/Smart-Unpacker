@@ -321,10 +321,26 @@ class ArchiveAnalysisStage:
                 index += 1
         candidates.sort(key=lambda item: (int(item[1].start_offset), item[0].format, item[2]))
         candidates = self._prefer_specific_segments(candidates)
+        candidates = self._suppress_segments_covered_by_whole_composite(report, candidates)
         return [
             (evidence, segment, position)
             for position, (evidence, segment, _) in enumerate(candidates, start=1)
         ]
+
+    def _suppress_segments_covered_by_whole_composite(
+        self,
+        report: ArchiveAnalysisReport,
+        candidates: list[tuple[ArchiveFormatEvidence, ArchiveSegment, int]],
+    ) -> list[tuple[ArchiveFormatEvidence, ArchiveSegment, int]]:
+        whole_composites = _whole_file_composite_segments(report)
+        if not whole_composites:
+            return candidates
+        filtered = []
+        for evidence, segment, index in candidates:
+            if any(_segment_is_shadowed_by_composite(evidence, segment, composite) for composite in whole_composites):
+                continue
+            filtered.append((evidence, segment, index))
+        return filtered
 
     def _write_extractable_segments(
         self,
@@ -551,3 +567,47 @@ def _best_selected(report: ArchiveAnalysisReport) -> ArchiveFormatEvidence | Non
     if not report.selected:
         return None
     return max(report.selected, key=lambda item: float(getattr(item, "confidence", 0.0) or 0.0))
+
+
+_COMPOSITE_INNER_FORMATS = {
+    "tar.gz": {"tar", "gzip"},
+    "tar.bz2": {"tar", "bzip2"},
+    "tar.xz": {"tar", "xz"},
+    "tar.zst": {"tar", "zstd"},
+}
+
+
+def _whole_file_composite_segments(report: ArchiveAnalysisReport) -> list[tuple[ArchiveFormatEvidence, ArchiveSegment]]:
+    result = []
+    for evidence in report.selected:
+        if evidence.format not in _COMPOSITE_INNER_FORMATS:
+            continue
+        for segment in evidence.segments:
+            if segment.end_offset is None:
+                continue
+            if int(segment.start_offset) != 0:
+                continue
+            if int(segment.end_offset) < int(report.size):
+                continue
+            result.append((evidence, segment))
+    return result
+
+
+def _segment_is_shadowed_by_composite(
+    evidence: ArchiveFormatEvidence,
+    segment: ArchiveSegment,
+    composite: tuple[ArchiveFormatEvidence, ArchiveSegment],
+) -> bool:
+    composite_evidence, composite_segment = composite
+    inner_formats = _COMPOSITE_INNER_FORMATS.get(composite_evidence.format, set())
+    if evidence.format not in inner_formats:
+        return False
+    if float(evidence.confidence or 0.0) >= float(composite_evidence.confidence or 0.0):
+        return False
+    if int(segment.start_offset) < int(composite_segment.start_offset):
+        return False
+    if segment.end_offset is None or composite_segment.end_offset is None:
+        return False
+    if int(segment.end_offset) > int(composite_segment.end_offset):
+        return False
+    return True

@@ -18,6 +18,7 @@ from sunpack.contracts.tasks import ArchiveTask
 from sunpack.extraction.result import ExtractionResult
 from sunpack.repair.config import repair_config
 from sunpack.repair.context import normalize_runtime_route_evidence
+from sunpack.repair.formats import canonical_format
 from sunpack.repair.job import RepairJob
 from sunpack.repair.knowledge import (
     write_repair_archive_status,
@@ -790,9 +791,7 @@ class ArchiveRepairStage:
         return self._normalize_format(str(detected).lstrip("."))
 
     def _normalize_format(self, fmt: str) -> str:
-        text = str(fmt or "").lower().lstrip(".")
-        aliases = {"gz": "gzip", "bz2": "bzip2", "seven_zip": "7z"}
-        return aliases.get(text, text or "unknown")
+        return canonical_format(fmt)
 
     def _result_payload(self, result: RepairResult) -> dict[str, Any]:
         payload = asdict(result)

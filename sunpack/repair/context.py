@@ -5,6 +5,7 @@ from typing import Any
 
 from sunpack.repair.coverage import ArchiveCoverageView, coverage_view_from_payload
 from sunpack.repair.diagnosis import RepairDiagnosis
+from sunpack.repair.formats import canonical_format as _normalize_format
 from sunpack.repair.job import RepairJob
 from sunpack.contracts.archive_knowledge import ArchiveKnowledge
 from sunpack.support import archive_knowledge_projection as knowledge_view
@@ -986,12 +987,6 @@ def _first_text(values: list[Any]) -> str:
         if text:
             return text
     return ""
-
-
-def _normalize_format(value: str) -> str:
-    text = str(value or "").lower().lstrip(".")
-    aliases = {"seven_zip": "7z", "sevenzip": "7z", "gz": "gzip", "bz2": "bzip2", "zst": "zstd"}
-    return aliases.get(text, text or "unknown")
 
 
 def _dedupe(values: list[str]) -> list[str]:

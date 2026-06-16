@@ -244,6 +244,41 @@ def test_analysis_stage_prefers_compressed_tar_over_stream_for_same_range(tmp_pa
     assert task.fact_bag.get("analysis.selected_format") == "tar.gz"
 
 
+def test_analysis_stage_suppresses_inner_tar_shadowed_by_whole_compressed_tar(tmp_path):
+    archive = tmp_path / "payload.tar.zst"
+    archive.write_bytes(b"zstd compressed tar bytes")
+    tar_zst = ArchiveFormatEvidence(
+        format="tar.zst",
+        confidence=0.93,
+        status="extractable",
+        segments=[ArchiveSegment(start_offset=0, end_offset=200, confidence=0.93)],
+    )
+    false_inner_tar = ArchiveFormatEvidence(
+        format="tar",
+        confidence=0.86,
+        status="extractable",
+        segments=[
+            ArchiveSegment(
+                start_offset=12,
+                end_offset=180,
+                confidence=0.86,
+                damage_flags=["carrier_prefix"],
+                evidence=["tar:block_walk_prefix", "fuzzy:carrier_prefix"],
+            )
+        ],
+    )
+    task = _task(archive)
+    stage = ArchiveAnalysisStage({"analysis": {"enabled": False}})
+    stage.enabled = True
+    stage.scheduler = _FakeAnalysisScheduler(_multi_report(archive, [false_inner_tar, tar_zst]))
+
+    tasks = stage.analyze_tasks([task])
+
+    assert tasks == [task]
+    assert task.fact_bag.get("analysis.selected_format") == "tar.zst"
+    assert knowledge_view.analysis_extractable_segments(task) == []
+
+
 def test_analysis_stage_uses_range_input_for_embedded_password_required_archive(tmp_path):
     carrier = tmp_path / "payload.exe"
     carrier.write_bytes(b"MZ" + b"x" * 198)

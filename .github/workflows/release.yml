@@ -30,7 +30,7 @@ concurrency:
 
 jobs:
   build:
-    name: Build ${{ matrix.arch }} ${{ matrix.repair_system }}
+    name: Build ${{ matrix.arch }} lite
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 150
     strategy:
@@ -38,23 +38,11 @@ jobs:
       matrix:
         include:
           - arch: x64
-            repair_system: full
-            runner: windows-2022
-            rust_target: x86_64-pc-windows-msvc
-            python_arch: x64
-            python_version: "3.11"
-          - arch: x64
             repair_system: lite
             runner: windows-2022
             rust_target: x86_64-pc-windows-msvc
             python_arch: x64
             python_version: "3.11"
-          - arch: arm64
-            repair_system: full
-            runner: windows-11-arm
-            rust_target: aarch64-pc-windows-msvc
-            python_arch: arm64
-            python_version: "3.12"
           - arch: arm64
             repair_system: lite
             runner: windows-11-arm
@@ -183,7 +171,7 @@ jobs:
       - name: Prepare acceptance environment
         shell: pwsh
         run: |
-          .\scripts\setup_windows_dev.ps1 -IncludeBuildDeps -Arch x64 -RepairSystem full
+          .\scripts\setup_windows_dev.ps1 -IncludeBuildDeps -Arch x64 -RepairSystem lite
 
       - name: Run acceptance tests
         shell: pwsh
@@ -219,11 +207,11 @@ jobs:
         run: |
           set -euo pipefail
           mapfile -t packages < <(find artifacts -type f -name 'sunpack-windows-*.zip' | sort)
-          if [ "${#packages[@]}" -ne 4 ]; then
-            echo "Expected four release packages, found ${#packages[@]}." >&2
+          if [ "${#packages[@]}" -ne 2 ]; then
+            echo "Expected two lite release packages, found ${#packages[@]}." >&2
             exit 1
           fi
-          for package in x64-full x64-lite arm64-full arm64-lite; do
+          for package in x64-lite arm64-lite; do
             if ! printf '%s\n' "${packages[@]}" | grep -q "/sunpack-windows-${package}-"; then
               echo "Missing ${package} release package." >&2
               exit 1

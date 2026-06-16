@@ -24,7 +24,7 @@ def minimal_config():
         },
     }, precheck=[
         {"name": "blacklist", "enabled": True, "blocked_files": []},
-        {"name": "size_minimum", "enabled": True, "min_inspection_size_bytes": 0},
+        {"name": "size_range", "enabled": True, "gte": 0},
     ], scoring=[
         {
             "name": "extension",

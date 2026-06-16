@@ -9,12 +9,12 @@ CONFIGS: dict[str, dict[str, Any]] = {
     "minimal": with_detection_pipeline({
         "thresholds": {"archive_score_threshold": 5, "maybe_archive_threshold": 3},
     }, precheck=[
-        {"name": "size_minimum", "enabled": True, "min_inspection_size_bytes": 0},
+        {"name": "size_range", "enabled": True, "gte": 0},
     ]),
     "embedded_archive_loose": with_detection_pipeline({
         "thresholds": {"archive_score_threshold": 5, "maybe_archive_threshold": 3},
     }, precheck=[
-        {"name": "size_minimum", "enabled": True, "min_inspection_size_bytes": 0},
+        {"name": "size_range", "enabled": True, "gte": 0},
     ], scoring=[
         {
             "name": "embedded_payload_identity",
@@ -28,7 +28,7 @@ CONFIGS: dict[str, dict[str, Any]] = {
     "embedded_archive_carrier_tail": with_detection_pipeline({
         "thresholds": {"archive_score_threshold": 5, "maybe_archive_threshold": 3},
     }, precheck=[
-        {"name": "size_minimum", "enabled": True, "min_inspection_size_bytes": 0},
+        {"name": "size_range", "enabled": True, "gte": 0},
     ], scoring=[
         {"name": "embedded_payload_identity", "enabled": True, "carrier_tail_score": 5},
     ]),
@@ -55,7 +55,7 @@ CONFIGS: dict[str, dict[str, Any]] = {
     "archive_scan_full": with_detection_pipeline({
         "thresholds": {"archive_score_threshold": 6, "maybe_archive_threshold": 3},
     }, precheck=[
-        {"name": "size_minimum", "enabled": True, "min_inspection_size_bytes": 0},
+        {"name": "size_range", "enabled": True, "gte": 0},
         {"name": "scene_protect", "enabled": True},
     ], scoring=[
         {"name": "extension", "enabled": True, "extension_score_groups": [{"score": 5, "extensions": [".zip", ".7z", ".rar", ".gz", ".bz2", ".xz", ".001"]}]},
@@ -70,7 +70,7 @@ CONFIGS: dict[str, dict[str, Any]] = {
     "archive_scan_deep_embedded": with_detection_pipeline({
         "thresholds": {"archive_score_threshold": 6, "maybe_archive_threshold": 3},
     }, precheck=[
-        {"name": "size_minimum", "enabled": True, "min_inspection_size_bytes": 0},
+        {"name": "size_range", "enabled": True, "gte": 0},
         {"name": "scene_protect", "enabled": True},
     ], scoring=[
         {"name": "extension", "enabled": True, "extension_score_groups": [{"score": 5, "extensions": [".zip", ".7z", ".rar", ".gz", ".bz2", ".xz", ".001"]}]},

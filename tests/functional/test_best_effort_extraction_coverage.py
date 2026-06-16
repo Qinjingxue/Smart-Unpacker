@@ -1355,7 +1355,7 @@ def _best_effort_pipeline_config(
             "partial_accept_threshold": 0.2,
         },
     }, precheck=[
-        {"name": "size_minimum", "enabled": True, "min_inspection_size_bytes": 0},
+        {"name": "size_range", "enabled": True, "gte": 0},
     ], scoring=[
         {"name": "extension", "enabled": True, "extension_score_groups": [{"score": 5, "extensions": [".zip"]}]},
     ]))
@@ -1386,7 +1386,7 @@ def _zip_tar_gz_recursive_pipeline_config(tmp_path: Path) -> dict:
             "partial_accept_threshold": 0.2,
         },
     }, precheck=[
-        {"name": "size_minimum", "enabled": True, "min_inspection_size_bytes": 0},
+        {"name": "size_range", "enabled": True, "gte": 0},
     ], scoring=[
         {
             "name": "extension",
@@ -1424,7 +1424,7 @@ def _zip_7z_recursive_pipeline_config(tmp_path: Path) -> dict:
             "partial_accept_threshold": 0.2,
         },
     }, precheck=[
-        {"name": "size_minimum", "enabled": True, "min_inspection_size_bytes": 0},
+        {"name": "size_range", "enabled": True, "gte": 0},
     ], scoring=[
         {
             "name": "extension",
@@ -1461,7 +1461,7 @@ def _tar_gz_recursive_pipeline_config(tmp_path: Path) -> dict:
             "partial_accept_threshold": 0.2,
         },
     }, precheck=[
-        {"name": "size_minimum", "enabled": True, "min_inspection_size_bytes": 0},
+        {"name": "size_range", "enabled": True, "gte": 0},
     ], scoring=[
         {
             "name": "extension",

@@ -177,7 +177,7 @@ def process_my_archive_structure(context):
 | `seven_zip_probe` | `confirmation` | 用 7-Zip 轻量探测可疑候选。 |
 | `seven_zip_validation` | `confirmation` | 用 7-Zip 测试候选是否可读、是否加密。 |
 
-`blacklist`、`size_range`、`mtime_range` 和兼容的 `size_minimum` 已移到 `filesystem.scan_filters`，会在候选进入 detection 规则流水线前执行。默认流水线使用 `extension`、结构类 identity 规则、`embedded_payload_identity` 和 `scene_penalty`。魔数弱证据归属各格式结构规则；普通载体与 PE overlay 载荷统一由 `embedded_payload_identity` 处理。
+`blacklist`、`size_range` 和 `mtime_range` 已移到 `filesystem.scan_filters`，会在候选进入 detection 规则流水线前执行。默认流水线使用 `extension`、结构类 identity 规则、`embedded_payload_identity` 和 `scene_penalty`。魔数弱证据归属各格式结构规则；普通载体与 PE overlay 载荷统一由 `embedded_payload_identity` 处理。
 
 ## 常用事实名
 

@@ -6,6 +6,7 @@ from typing import Any
 from sunpack.repair.candidate import CandidateValidation, RepairCandidate, materialize_candidate
 from sunpack.repair.config import enabled_module_configs
 from sunpack.repair.diagnosis import RepairDiagnosis
+from sunpack.repair.formats import canonical_format as _normalize_format
 from sunpack.repair.job import RepairJob
 from sunpack.repair.pipeline.modules._common import repair_operation_cache_key
 from sunpack.repair.pipeline.registry import get_repair_module_registry
@@ -269,7 +270,3 @@ def _with_password(payload: dict[str, Any], password: str) -> dict[str, Any]:
     output = dict(payload)
     output["password"] = password
     return output
-
-
-def _normalize_format(value: Any) -> str:
-    return str(value or "").lower().lstrip(".")

@@ -10,7 +10,7 @@ def scan_config(blocked_files=None, blocked_extensions=None):
     return with_detection_pipeline({
         "thresholds": {"archive_score_threshold": 5, "maybe_archive_threshold": 3},
     }, precheck=[
-        {"name": "size_minimum", "enabled": True, "min_inspection_size_bytes": 0},
+        {"name": "size_range", "enabled": True, "gte": 0},
         {
             "name": "blacklist",
             "enabled": True,

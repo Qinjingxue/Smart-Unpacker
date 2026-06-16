@@ -4,6 +4,7 @@ import os
 from typing import Any
 
 from sunpack.contracts.archive_state import ArchiveState
+from sunpack.repair.formats import canonical_format as _normalize_format
 from sunpack.repair.job import RepairJob
 from sunpack.repair.model.assets import ModelAssetRegistry, get_model_asset_registry
 from sunpack.repair.model.diagnosis.graph_dispatcher import build_diagnosis_graph_sample
@@ -253,8 +254,3 @@ def _optional_float(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
-
-
-def _normalize_format(value: Any) -> str:
-    text = str(value or "").lower().lstrip(".")
-    return {"gz": "gzip", "bz2": "bzip2", "seven_zip": "7z"}.get(text, text)

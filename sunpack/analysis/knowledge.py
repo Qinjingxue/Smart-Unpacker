@@ -294,29 +294,6 @@ def _merge_zip_structure_facts(structure: dict[str, Any], task: ArchiveTask) -> 
         summary = graph_payload.get("summary") if isinstance(graph_payload.get("summary"), dict) else {}
         output["graph"] = graph_payload
         output["summary"] = dict(summary or {})
-        return output
-    eocd = get("zip.eocd_structure")
-    if isinstance(eocd, dict) and eocd:
-        output.setdefault("summary", {})
-        output["summary"].update(_legacy_zip_summary_from_eocd(eocd))
-    local = get("zip.local_header")
-    if isinstance(local, dict) and local:
-        output.setdefault("summary", {})
-        output["summary"].update(_legacy_zip_summary_from_local(local))
-    directory = get("zip.directory_consistency")
-    if isinstance(directory, dict) and directory:
-        enriched_directory = _enrich_zip_directory_consistency(dict(directory))
-        output.setdefault("summary", {})
-        output["summary"].update(_legacy_zip_summary_from_directory(enriched_directory))
-    for fact_key, output_key in (
-        ("zip.local_header_plausible", "local_header.plausible"),
-        ("zip.local_header_offset", "local_header.offset"),
-        ("zip.local_header_error", "local_header.error"),
-    ):
-        value = get(fact_key)
-        if value not in (None, "", [], {}):
-            output.setdefault("summary", {})
-            output["summary"].setdefault(output_key.replace(".", "_"), value)
     return output
 
 
@@ -327,59 +304,6 @@ def _dedup_zip_structure(structure: dict[str, Any]) -> dict[str, Any]:
         if isinstance(value, dict) and value:
             output[key] = dict(value)
     return output
-
-
-def _legacy_zip_summary_from_eocd(eocd: dict[str, Any]) -> dict[str, Any]:
-    keys = (
-        "schema_version",
-        "error",
-        "magic_matched",
-        "plausible",
-        "eocd_offset",
-        "declared_central_directory_offset",
-        "declared_central_directory_size",
-        "declared_total_entries",
-        "physical_central_directory_offset",
-        "central_directory_offset_delta",
-        "central_directory_size_delta",
-        "entry_count_delta",
-        "trailing_bytes_after_eocd",
-        "archive_offset",
-        "central_directory_present",
-        "central_directory_walk_ok",
-        "local_header_links_ok",
-    )
-    return {key: eocd.get(key) for key in keys if key in eocd}
-
-
-def _legacy_zip_summary_from_local(local: dict[str, Any]) -> dict[str, Any]:
-    return {
-        f"local_header_{key}": local.get(key)
-        for key in ("offset", "magic_matched", "plausible", "error", "compression_method", "filename_len", "extra_len")
-        if key in local
-    }
-
-
-def _legacy_zip_summary_from_directory(directory: dict[str, Any]) -> dict[str, Any]:
-    keys = (
-        "error",
-        "file_size",
-        "cd_parseable",
-        "cd_entries_checked",
-        "cd_entries_parseable",
-        "cd_entries_truncated_by_limit",
-        "entry_count_delta",
-        "local_header_missing_count",
-        "local_header_bad_signature_count",
-        "field_mismatch_entry_count",
-        "mismatch_entry_ratio",
-    )
-    summary = {key: directory.get(key) for key in keys if key in directory}
-    descriptor = directory.get("descriptor") if isinstance(directory.get("descriptor"), dict) else {}
-    for key in ("cd_entry_span_conflict_count", "wrong_local_header_target_count", "descriptor_span_conflicts_with_cd_size_count"):
-        if key in descriptor:
-            summary[f"descriptor_{key}"] = descriptor.get(key)
-    return summary
 
 
 def _enrich_zip_directory_consistency(directory: dict[str, Any]) -> dict[str, Any]:

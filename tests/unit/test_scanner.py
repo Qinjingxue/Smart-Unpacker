@@ -73,7 +73,7 @@ def test_directory_scanner_size_range_accepts_human_expression(tmp_path):
     assert "large.zip" not in names
 
 
-def test_directory_scanner_size_minimum_legacy_config_still_filters(tmp_path):
+def test_directory_scanner_size_range_gte_filters(tmp_path):
     small = tmp_path / "small.zip"
     keep = tmp_path / "keep.zip"
     small.write_bytes(b"a" * 8)
@@ -82,7 +82,7 @@ def test_directory_scanner_size_minimum_legacy_config_still_filters(tmp_path):
     snapshot = DirectoryScanner(str(tmp_path), config={
         "filesystem": {
             "scan_filters": [
-                {"name": "size_minimum", "enabled": True, "min_inspection_size_bytes": 10},
+                {"name": "size_range", "enabled": True, "gte": 10},
             ]
         }
     }).scan()
@@ -276,7 +276,7 @@ def test_directory_scanner_applies_filters_in_config_order(tmp_path, monkeypatch
 
     from sunpack.filesystem.filters.modules.blacklist import BlacklistScanFilter
     from sunpack.filesystem.filters.modules.mtime_range import MtimeRangeScanFilter
-    from sunpack.filesystem.filters.modules.size_minimum import SizeRangeScanFilter
+    from sunpack.filesystem.filters.modules.size_range import SizeRangeScanFilter
     from sunpack.filesystem.filters.modules.whitelist import WhitelistScanFilter
 
     originals = {
@@ -619,7 +619,7 @@ def test_scene_context_does_not_scan_above_selected_root(tmp_path, monkeypatch):
     config = with_detection_pipeline(
         {"thresholds": {"archive_score_threshold": 5, "maybe_archive_threshold": 3}},
         precheck=[
-            {"name": "size_minimum", "enabled": True, "min_inspection_size_bytes": 0},
+            {"name": "size_range", "enabled": True, "gte": 0},
             {
                 "name": "scene_protect",
                 "enabled": True,

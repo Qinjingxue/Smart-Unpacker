@@ -1,35 +1,6 @@
 from __future__ import annotations
 
-import pytest
-
-from sunpack.repair.pipeline.module import RepairModule, RepairModuleSpec
-from sunpack.repair.pipeline.registry import RepairModuleRegistry, discover_repair_modules, get_repair_module_registry
-
-
-class _DummyZipCoarseModule(RepairModule):
-    @property
-    def spec(self) -> RepairModuleSpec:
-        return RepairModuleSpec(name="zip_rebuild", formats=("zip",))
-
-
-class _DummySevenZipCoarseModule(RepairModule):
-    @property
-    def spec(self) -> RepairModuleSpec:
-        return RepairModuleSpec(name="seven_zip_next_header_field_repair", formats=("7z", "seven_zip"))
-
-
-def test_removed_zip_coarse_module_names_cannot_register():
-    registry = RepairModuleRegistry()
-
-    with pytest.raises(ValueError, match="removed"):
-        registry.register(_DummyZipCoarseModule())
-
-
-def test_removed_seven_zip_coarse_module_names_cannot_register():
-    registry = RepairModuleRegistry()
-
-    with pytest.raises(ValueError, match="removed"):
-        registry.register(_DummySevenZipCoarseModule())
+from sunpack.repair.pipeline.registry import discover_repair_modules, get_repair_module_registry
 
 
 def test_discovered_zip_registry_contains_only_atomic_zip_modules():

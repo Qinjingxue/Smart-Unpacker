@@ -42,7 +42,7 @@ def with_detection_pipeline(
             if isinstance(rule.get("scene_rules"), list):
                 scene_filter_config["scene_rules"] = rule["scene_rules"]
             continue
-        if isinstance(rule, dict) and rule.get("name") in {"blacklist", "size_minimum"}:
+        if isinstance(rule, dict) and rule.get("name") in {"blacklist", "size_range"}:
             scan_filters.append(dict(rule))
         else:
             remaining_precheck.append(rule)

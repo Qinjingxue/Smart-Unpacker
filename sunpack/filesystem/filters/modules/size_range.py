@@ -81,11 +81,11 @@ class SizeRangeScanFilter:
 
     def __init__(self, value_range: NumericRange | None = None):
         self.value_range = value_range or NumericRange()
-        self.min_inspection_size_bytes = self.value_range.native_minimum
+        self.native_min_size_bytes = self.value_range.native_minimum
 
     @classmethod
     def from_config(cls, config: dict[str, Any]):
-        return cls(NumericRange.from_config(config, legacy_min_key="min_inspection_size_bytes"))
+        return cls(NumericRange.from_config(config))
 
     def evaluate(self, candidate: ScanCandidate) -> ScanDecision:
         if candidate.kind != "file":
@@ -95,10 +95,6 @@ class SizeRangeScanFilter:
         if not self.value_range.allows(candidate.size):
             return reject(f"File size outside configured range: {candidate.size}")
         return keep()
-
-
-class SizeMinimumScanFilter(SizeRangeScanFilter):
-    name = "size_minimum"
 
 
 def _first(config: dict[str, Any], *keys: str | None):

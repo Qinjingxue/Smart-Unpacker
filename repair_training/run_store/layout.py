@@ -12,7 +12,6 @@ RUNS_ROOT = TRAINING_ROOT / "runs"
 EVALUATION_RUNS_ROOT = RUNS_ROOT / "evaluation"
 TMP_ROOT = TRAINING_ROOT / "tmp"
 LATEST_RUNS = TRAINING_ROOT / "latest_runs.json"
-LEGACY_LATEST_RUN = TRAINING_ROOT / "latest_run.txt"
 
 
 def safe_name(value: str, fallback: str = "run") -> str:
@@ -98,12 +97,6 @@ def latest_run_for_format(format_name: str) -> Path | None:
         path = Path(value).resolve()
         if path.is_dir():
             return path
-    if format_name == "zip" and LEGACY_LATEST_RUN.is_file():
-        legacy = LEGACY_LATEST_RUN.read_text(encoding="utf-8").strip()
-        if legacy:
-            path = Path(legacy).resolve()
-            if path.is_dir():
-                return path
     return None
 
 
@@ -112,8 +105,6 @@ def write_latest_run(format_name: str, run_dir: Path) -> None:
     runs[format_name] = str(run_dir.resolve())
     LATEST_RUNS.parent.mkdir(parents=True, exist_ok=True)
     LATEST_RUNS.write_text(json.dumps(runs, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
-    if format_name == "zip":
-        LEGACY_LATEST_RUN.write_text(str(run_dir.resolve()), encoding="utf-8")
 
 
 def update_run_manifest(run_dir: Path, **updates: Any) -> None:

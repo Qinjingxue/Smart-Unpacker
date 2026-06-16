@@ -262,7 +262,7 @@ def pressure_config(passwords: list[str] | None = None, scheduler_profile: str =
         "max_retries": 1,
         "performance": {"scheduler_profile": scheduler_profile},
     }, precheck=[
-        {"name": "size_minimum", "enabled": True, "min_inspection_size_bytes": 0},
+        {"name": "size_range", "enabled": True, "gte": 0},
     ], scoring=[
         {
             "name": "extension",
