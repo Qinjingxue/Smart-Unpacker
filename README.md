@@ -46,6 +46,12 @@ SunPack 更像一个“归档恢复协调器”而不是普通解压器：
 .\scripts\setup_windows_dev.ps1 -IncludeBuildDeps
 ```
 
+准备不包含模型修复系统的轻量环境：
+
+```powershell
+.\scripts\setup_windows_dev.ps1 -RepairSystem lite
+```
+
 确认 native 组件可用：
 
 ```powershell
@@ -68,7 +74,7 @@ python sunpack.py config validate
 打包后的程序使用同一套命令：
 
 ```powershell
-.\dist\\sunpack\sunpack.exe extract D:\Downloads
+.\dist\sunpack-x64-full\sunpack.exe extract D:\Downloads
 ```
 
 ## 命令速览
@@ -82,7 +88,7 @@ python sunpack.py config validate
 | `passwords`       | 查看本次会参与尝试的密码列表。                            |
 | `config show`     | 打印当前配置。                                            |
 | `config validate` | 校验 JSON、规则、verification method 和 fact schema。     |
-| `models status`   | 校验内置模型清单、文件哈希，并可尝试加载模型。            |
+| `models status`   | 校验内置模型清单、文件哈希，并可尝试加载模型；lite 构建会明确返回修复系统未包含。 |
 
 详细参数见 [CLI 参数说明](docs/cli_parameters.md)。
 
@@ -160,10 +166,12 @@ tools\sunpack_sevenzip_worker.exe
 
 模型运行时是正式产品代码，不是训练脚本的兼容层：
 
+- 模型运行时依赖不属于默认依赖；x64 可安装 `.[model-runtime]`，构建脚本会按架构处理 full/lite 模式。
 - `models/manifest.json` 声明格式、角色、语义、算法、资产目录和 `model.pt` SHA-256。
 - `ModelAssetRegistry` 在源码目录和打包目录中定位同一份清单，并在加载前验证哈希。
 - `DiagnosisHGTProvider` 和 `RepairPolicyTransformerProvider` 由程序内置创建，不支持外部 `provider_package`。
 - 当前内置模型支持 ZIP diagnosis 与 repair policy；不支持的格式会明确返回 unavailable。
+- lite 构建不包含模型资产和模型运行时依赖；verification 失败时会直接提示压缩包可能损坏，不进入 repair 循环。
 
 检查模型：
 
@@ -235,8 +243,10 @@ Windows 打包：
 .\scripts\build_windows.ps1 -SkipTests
 .\scripts\build_windows.ps1 -Clean
 .\scripts\build_windows.ps1 -Version 1.2.3
+.\scripts\build_windows.ps1 -Arch x64 -RepairSystem full
+.\scripts\build_windows.ps1 -Arch x64 -RepairSystem lite
 ```
 
-构建脚本会准备 `.venv-build`，从 `pyproject.toml` 安装 `build` extra，构建 Rust wheel 和 C++ bridge/worker，用 PyInstaller 生成 `sunpack.exe`，复制配置、模型资产、工具和 license，并执行 packaged smoke 与模型加载检查。发行包输出到 `release\sunpack-windows-<arch>-<version>.zip`。
+构建脚本会准备 `.venv-build`，从 `pyproject.toml` 安装 `build` extra，构建 Rust wheel 和 C++ bridge/worker，用 PyInstaller 生成 `sunpack.exe`，复制配置、工具和 license，并执行 packaged smoke。`-RepairSystem full` 会额外安装模型运行时、复制 `models/` 并执行模型加载检查；`-RepairSystem lite` 不包含模型资产和模型依赖。发行包输出到 `release\sunpack-windows-<arch>-<repair_system>-<version>.zip`，目录输出到 `dist\sunpack-<arch>-<repair_system>\`。
 
-构建脚本支持 `-Arch x64|arm64`。`x64` 是默认值；ARM64 最终可执行文件需要在 ARM64 Windows + ARM64 Python 环境中构建，脚本会静态校验包内所有关键 PE 文件的 machine 架构。已有包可用 `.\scripts\verify_windows_package_arch.ps1 -PackageRoot <dist目录> -Arch arm64` 在任意 Windows 机器上做静态检查。
+构建脚本支持 `-Arch x64|arm64` 和 `-RepairSystem full|lite`。`x64` 和 `full` 是默认值；ARM64 最终可执行文件需要在 ARM64 Windows + ARM64 Python 环境中构建，脚本会静态校验包内所有关键 PE 文件的 machine 架构。已有包可用 `.\scripts\verify_windows_package_arch.ps1 -PackageRoot <dist目录> -Arch arm64` 在任意 Windows 机器上做静态检查。GitHub release workflow 会同时产出 `x64-full`、`x64-lite`、`arm64-full`、`arm64-lite` 四个 Windows 包。

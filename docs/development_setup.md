@@ -22,6 +22,7 @@ models/                   正式发布模型资产
 native/sunpack_native/    Rust/PyO3 扩展
 native/sevenzip_bridge/   Windows 7z.dll bridge 与 worker
 tools/                    x64 外部工具和原生构建产物
+tools-arm64/              ARM64 外部工具和原生构建产物
 ```
 
 ## Python 依赖
@@ -30,11 +31,12 @@ tools/                    x64 外部工具和原生构建产物
 
 | Extra | 用途 |
 | --- | --- |
-| 默认 | SunPack 运行依赖、PyTorch 和 PyG 模型运行时 |
+| 默认 | SunPack 运行依赖，不包含模型运行时 |
+| `model-runtime` | x64 模型运行时依赖，包含 PyTorch 和 PyG |
 | `test` | pytest |
 | `build` | PyInstaller、maturin、CMake |
 | `training` | 训练工具的附加依赖 |
-| `dev` | build、test、training 的并集 |
+| `dev` | build、test、training 的并集，不包含 `model-runtime` |
 
 常用安装方式：
 
@@ -42,7 +44,12 @@ tools/                    x64 外部工具和原生构建产物
 python -m pip install -e .
 python -m pip install -e ".[test]"
 python -m pip install -e ".[dev]"
+python -m pip install -e ".[model-runtime]"
 ```
+
+ARM64 的模型运行时由脚本使用 PyTorch CPU wheel 源单独安装；不要直接依赖 `model-runtime` extra 解析 ARM64 PyTorch。
+
+开发环境脚本创建普通 venv，不启用 `--system-site-packages`。如果检测到旧 `.venv` 曾启用全局 site-packages，脚本会自动删除并重建，避免本机全局包影响依赖解析。
 
 ## 一键准备开发环境
 
@@ -52,18 +59,26 @@ python -m pip install -e ".[dev]"
 
 脚本会：
 
-1. 创建或复用 `.venv`
+1. 创建或复用隔离的 `.venv`
 2. 从 `pyproject.toml` 安装 `test` extra
-3. 构建并安装 `sunpack_native`
-4. 准备对应架构的 `7z.exe`、`7z.dll` 和 license
-5. 构建 `sunpack_sevenzip.dll` 和 `sunpack_sevenzip_worker.exe`
-6. 把 C++ 产物复制到工具目录
-7. 运行 Python、Rust、C++ 和 CLI smoke checks
+3. 默认安装模型运行时依赖；`-RepairSystem lite` 会跳过这一步
+4. 构建并安装 `sunpack_native`
+5. 准备对应架构的 `7z.exe`、`7z.dll` 和 license
+6. 构建 `sunpack_sevenzip.dll` 和 `sunpack_sevenzip_worker.exe`
+7. 把 C++ 产物复制到工具目录
+8. 运行 Python、Rust、C++ 和 CLI smoke checks
 
 包含发行构建依赖：
 
 ```powershell
 .\scripts\setup_windows_dev.ps1 -IncludeBuildDeps
+```
+
+准备不包含模型修复系统的开发/构建环境：
+
+```powershell
+.\scripts\setup_windows_dev.ps1 -RepairSystem lite
+.\scripts\setup_windows_dev.ps1 -IncludeBuildDeps -RepairSystem lite
 ```
 
 清理后重建：
@@ -113,7 +128,7 @@ bridge 运行时还需要同一工具目录中的 `7z.dll`。
 .\.venv\Scripts\python.exe sunpack.py models status --load
 ```
 
-三个命令分别验证 Rust 扩展、C++ bridge 和正式模型资产。
+三个命令分别验证 Rust 扩展、C++ bridge 和正式模型资产。`-RepairSystem lite` 环境下，`models status` 会返回“修复系统未包含”的正常状态，不会尝试加载模型。
 
 ## 模型资产
 
@@ -167,6 +182,8 @@ python sunpack.py models status --load --json
 
 ```powershell
 .\scripts\build_windows.ps1 -Arch x64
+.\scripts\build_windows.ps1 -Arch x64 -RepairSystem full
+.\scripts\build_windows.ps1 -Arch x64 -RepairSystem lite
 .\scripts\build_windows.ps1 -Clean
 .\scripts\build_windows.ps1 -SkipTests
 .\scripts\build_windows.ps1 -Version 1.2.3
@@ -180,22 +197,22 @@ python sunpack.py models status --load --json
 4. 构建和测试 C++ bridge/worker
 5. 可选运行 acceptance tests
 6. 用 `SunPack.spec` 生成 PyInstaller onedir 包
-7. 复制配置、密码表、工具、license 和整个 `models/`
+7. 复制配置、密码表、工具和 license；full 构建额外复制整个 `models/`
 8. 校验关键 PE 文件架构
-9. 运行 packaged CLI、bridge 和模型加载 smoke checks
+9. 运行 packaged CLI、bridge smoke checks；full 构建额外运行模型加载 smoke check
 10. 用随附 7-Zip 创建并测试发布 ZIP
 
 输出：
 
 ```text
-dist\sunpack\
-release\sunpack-windows-<arch>-<version>.zip
+dist\sunpack-<arch>-<repair_system>\
+release\sunpack-windows-<arch>-<repair_system>-<version>.zip
 ```
 
 ARM64 必须在 ARM64 Windows 和 ARM64 Python 环境中构建。已有目录可独立校验：
 
 ```powershell
-.\scripts\verify_windows_package_arch.ps1 -PackageRoot dist\sunpack -Arch x64
+.\scripts\verify_windows_package_arch.ps1 -PackageRoot dist\sunpack-x64-full -Arch x64
 ```
 
 ## 运行时原生文件

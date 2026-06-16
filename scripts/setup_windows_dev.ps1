@@ -483,44 +483,6 @@ function Test-SevenZipWorker {
     )
 }
 
-function Test-PythonImports {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$PythonPath,
-        [Parameter(Mandatory = $true)]
-        [string[]]$Modules
-    )
-
-    $importList = ($Modules | ForEach-Object { "'$_'" }) -join ", "
-    & $PythonPath -c "import importlib.util, sys; modules = [$importList]; missing = [name for name in modules if importlib.util.find_spec(name) is None]; sys.exit(0 if not missing else 1)"
-    return ($LASTEXITCODE -eq 0)
-}
-
-function Install-PackageOrValidate {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$PythonPath,
-        [Parameter(Mandatory = $true)]
-        [string]$PackageName,
-        [Parameter(Mandatory = $true)]
-        [string]$ModuleName,
-        [Parameter(Mandatory = $true)]
-        [string]$Label
-    )
-
-    try {
-        Invoke-Native -FilePath $PythonPath -Arguments @("-m", "pip", "install", $PackageName)
-        return
-    } catch {
-        Write-Warning "$Label install failed. Falling back to already-available module."
-        if (Test-PythonImports -PythonPath $PythonPath -Modules @($ModuleName)) {
-            Write-Host "$Label module is already importable in the local environment." -ForegroundColor Yellow
-            return
-        }
-        throw
-    }
-}
-
 function Install-ModelRuntimeDependencies {
     param(
         [Parameter(Mandatory = $true)]
@@ -590,8 +552,16 @@ if ($Clean) {
 }
 
 Write-Step "Preparing local virtual environment"
+$venvConfigPath = Join-Path $venvPath "pyvenv.cfg"
+if (Test-Path -LiteralPath $venvConfigPath) {
+    $venvConfig = Get-Content -LiteralPath $venvConfigPath -Raw
+    if ($venvConfig -match "include-system-site-packages\s*=\s*true") {
+        Write-Host "Recreating local virtual environment without global site-packages." -ForegroundColor Yellow
+        Remove-IfExists -LiteralPath $venvPath
+    }
+}
 if (-not (Test-Path -LiteralPath $venvPython)) {
-    Invoke-Native -FilePath $pythonCommand -Arguments @("-m", "venv", "--system-site-packages", $venvPath)
+    Invoke-Native -FilePath $pythonCommand -Arguments @("-m", "venv", $venvPath)
 }
 
 Invoke-Native -FilePath $venvPython -Arguments @("-m", "pip", "install", "--upgrade", "pip")
