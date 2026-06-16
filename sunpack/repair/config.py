@@ -1,3 +1,4 @@
+import os
 from copy import deepcopy
 from typing import Any
 
@@ -182,6 +183,13 @@ def repair_config(config: dict[str, Any] | None) -> dict[str, Any]:
     return normalize_repair_config(payload)
 
 
+def repair_system_mode() -> str:
+    value = os.environ.get("SUNPACK_REPAIR_SYSTEM", "full").strip().lower()
+    if value in {"lite", "disabled", "off", "none"}:
+        return "lite"
+    return "full"
+
+
 def normalize_repair_config(value: Any) -> dict[str, Any]:
     if value is None:
         value = {}
@@ -215,6 +223,11 @@ def normalize_repair_config(value: Any) -> dict[str, Any]:
     config["policy"] = _normalize_policy(config.get("policy"))
     config["telemetry"] = _normalize_telemetry(config.get("telemetry"))
     config["modules"] = _normalize_modules(config.get("modules"))
+    if repair_system_mode() == "lite":
+        config["enabled"] = False
+        config["max_attempts_per_task"] = 0
+        config["max_repair_rounds_per_task"] = 0
+        config["policy"]["enabled"] = False
     return config
 
 

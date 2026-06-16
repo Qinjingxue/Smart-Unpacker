@@ -30,7 +30,7 @@ concurrency:
 
 jobs:
   build:
-    name: Build ${{ matrix.arch }}
+    name: Build ${{ matrix.arch }} ${{ matrix.repair_system }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 150
     strategy:
@@ -38,11 +38,25 @@ jobs:
       matrix:
         include:
           - arch: x64
+            repair_system: full
+            runner: windows-2022
+            rust_target: x86_64-pc-windows-msvc
+            python_arch: x64
+            python_version: "3.11"
+          - arch: x64
+            repair_system: lite
             runner: windows-2022
             rust_target: x86_64-pc-windows-msvc
             python_arch: x64
             python_version: "3.11"
           - arch: arm64
+            repair_system: full
+            runner: windows-11-arm
+            rust_target: aarch64-pc-windows-msvc
+            python_arch: arm64
+            python_version: "3.12"
+          - arch: arm64
+            repair_system: lite
             runner: windows-11-arm
             rust_target: aarch64-pc-windows-msvc
             python_arch: arm64
@@ -80,7 +94,7 @@ jobs:
       - name: Prepare native/tool environment
         shell: pwsh
         run: |
-          .\scripts\setup_windows_dev.ps1 -IncludeBuildDeps -Arch ${{ matrix.arch }}
+          .\scripts\setup_windows_dev.ps1 -IncludeBuildDeps -Arch ${{ matrix.arch }} -RepairSystem ${{ matrix.repair_system }}
 
       - name: Build Windows package
         shell: pwsh
@@ -103,6 +117,7 @@ jobs:
           $buildArgs = @{
             SkipTests = $true
             Arch = "${{ matrix.arch }}"
+            RepairSystem = "${{ matrix.repair_system }}"
           }
           if ($version -ne "") {
             $buildArgs.Version = $version
@@ -114,25 +129,25 @@ jobs:
         run: |
           $packages = @(
             Get-ChildItem -LiteralPath "release" `
-              -Filter "sunpack-windows-${{ matrix.arch }}-*.zip" `
+              -Filter "sunpack-windows-${{ matrix.arch }}-${{ matrix.repair_system }}-*.zip" `
               -File
           )
           if ($packages.Count -ne 1) {
-            throw "Expected exactly one ${{ matrix.arch }} release package, found $($packages.Count)."
+            throw "Expected exactly one ${{ matrix.arch }} ${{ matrix.repair_system }} release package, found $($packages.Count)."
           }
           Write-Host "Release package: $($packages[0].FullName)"
 
       - name: Verify package architecture
         shell: pwsh
         run: |
-          $packageRoot = if ("${{ matrix.arch }}" -eq "x64") { "dist\sunpack" } else { "dist\sunpack-${{ matrix.arch }}" }
+          $packageRoot = "dist\sunpack-${{ matrix.arch }}-${{ matrix.repair_system }}"
           .\scripts\verify_windows_package_arch.ps1 -PackageRoot $packageRoot -Arch ${{ matrix.arch }}
 
       - name: Upload package artifact
         uses: actions/upload-artifact@v7
         with:
-          name: sunpack-windows-${{ matrix.arch }}
-          path: release/sunpack-windows-${{ matrix.arch }}-*.zip
+          name: sunpack-windows-${{ matrix.arch }}-${{ matrix.repair_system }}
+          path: release/sunpack-windows-${{ matrix.arch }}-${{ matrix.repair_system }}-*.zip
           if-no-files-found: error
           compression-level: 0
           retention-days: 14
@@ -168,7 +183,7 @@ jobs:
       - name: Prepare acceptance environment
         shell: pwsh
         run: |
-          .\scripts\setup_windows_dev.ps1 -IncludeBuildDeps -Arch x64
+          .\scripts\setup_windows_dev.ps1 -IncludeBuildDeps -Arch x64 -RepairSystem full
 
       - name: Run acceptance tests
         shell: pwsh
@@ -204,13 +219,13 @@ jobs:
         run: |
           set -euo pipefail
           mapfile -t packages < <(find artifacts -type f -name 'sunpack-windows-*.zip' | sort)
-          if [ "${#packages[@]}" -ne 2 ]; then
-            echo "Expected two release packages, found ${#packages[@]}." >&2
+          if [ "${#packages[@]}" -ne 4 ]; then
+            echo "Expected four release packages, found ${#packages[@]}." >&2
             exit 1
           fi
-          for arch in x64 arm64; do
-            if ! printf '%s\n' "${packages[@]}" | grep -q "/sunpack-windows-${arch}-"; then
-              echo "Missing ${arch} release package." >&2
+          for package in x64-full x64-lite arm64-full arm64-lite; do
+            if ! printf '%s\n' "${packages[@]}" | grep -q "/sunpack-windows-${package}-"; then
+              echo "Missing ${package} release package." >&2
               exit 1
             fi
           done

@@ -3,7 +3,7 @@ from contextlib import nullcontext
 import json
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from sunpack.contracts.archive_state import ArchiveState
 from sunpack.contracts.detection import FactBag
@@ -18,7 +18,6 @@ from sunpack.repair.job import RepairJob
 from sunpack.repair.pipeline.module import RepairRoute
 from sunpack.repair.pipeline.modules._common import job_source_size, repair_operation_cache_key
 from sunpack.repair.pipeline.registry import discover_repair_modules, get_repair_module_registry
-from sunpack.repair.model import RepairModelRuntime
 from sunpack.repair.search.features import (
     archive_state_for_job,
     candidate_snapshot,
@@ -44,6 +43,9 @@ from sunpack.support import archive_knowledge_projection as knowledge_view
 from sunpack.support.archive_state_view import ArchiveStateByteView
 from sunpack.support import repair_trace
 
+if TYPE_CHECKING:
+    from sunpack.repair.model.runtime import RepairModelRuntime
+
 
 class RepairScheduler:
     def __init__(self, config: dict[str, Any] | None = None):
@@ -54,8 +56,13 @@ class RepairScheduler:
             enabled=bool(cache_config.get("enabled", True)),
             max_entries=int(cache_config.get("max_entries", 512) or 512),
         )
-        self.model_runtime = RepairModelRuntime(self.config)
+        self.model_runtime = self._build_model_runtime()
         discover_repair_modules()
+
+    def _build_model_runtime(self) -> "RepairModelRuntime":
+        from sunpack.repair.model.runtime import RepairModelRuntime
+
+        return RepairModelRuntime(self.config)
 
     def diagnose(self, job: RepairJob, *, knowledge: ArchiveKnowledge | None = None) -> RepairDiagnosis:
         return diagnose_repair_job(job, knowledge=knowledge)

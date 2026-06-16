@@ -4,7 +4,9 @@ param(
     [switch]$Clean,
     [string]$Version,
     [ValidateSet("x64", "arm64")]
-    [string]$Arch = "x64"
+    [string]$Arch = "x64",
+    [ValidateSet("full", "lite")]
+    [string]$RepairSystem = "full"
 )
 
 Set-StrictMode -Version Latest
@@ -548,6 +550,7 @@ function Copy-IfExists {
 $repoRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 Set-Location $repoRoot
 $buildArch = $Arch.ToLowerInvariant()
+$repairSystemMode = $RepairSystem.ToLowerInvariant()
 $processArch = Get-ProcessBuildArch
 $rustTarget = Get-RustTarget -BuildArch $buildArch
 
@@ -556,6 +559,7 @@ if ($env:OS -ne "Windows_NT") {
     throw "This build script only supports Windows."
 }
 Write-Host "Requested architecture: $buildArch"
+Write-Host "Repair system: $repairSystemMode"
 Write-Host "Build Python/process architecture: $processArch"
 if ($processArch -ne $buildArch) {
     throw "Windows PyInstaller/PyO3 final executable builds must run under a target-architecture Python. This machine/process is '$processArch', so it cannot produce a real '$buildArch' sunpack.exe. Use an ARM64 Windows Python environment for -Arch arm64; use static PE validation on the resulting package."
@@ -584,7 +588,7 @@ $distRoot = Join-Path $repoRoot "dist"
 $buildRoot = Join-Path $repoRoot "build"
 $nativeWheelRoot = Join-Path $buildRoot ("native-wheels-" + $buildArch)
 $releaseRoot = Join-Path $repoRoot "release"
-$distFolderName = if ($env:SUNPACK_DIST_NAME) { $env:SUNPACK_DIST_NAME } elseif ($buildArch -eq "x64") { "sunpack" } else { "sunpack-" + $buildArch }
+$distFolderName = if ($env:SUNPACK_DIST_NAME) { $env:SUNPACK_DIST_NAME } else { "sunpack-" + $buildArch + "-" + $repairSystemMode }
 $appExeName = if ($env:SUNPACK_EXE_NAME) { $env:SUNPACK_EXE_NAME + ".exe" } else { "sunpack.exe" }
 $distAppRoot = Join-Path $distRoot $distFolderName
 $distExePath = Join-Path $distAppRoot $appExeName
@@ -592,7 +596,7 @@ $distInternalRoot = Join-Path $distAppRoot "_internal"
 $distToolsRoot = Join-Path $distAppRoot "tools"
 $distLicensesRoot = Join-Path $distAppRoot "licenses"
 $versionValue = Get-ReleaseVersion -ExplicitVersion $Version -RepoRoot $repoRoot
-$releaseZipName = "sunpack-windows-{0}-{1}.zip" -f $buildArch, $versionValue
+$releaseZipName = "sunpack-windows-{0}-{1}-{2}.zip" -f $buildArch, $repairSystemMode, $versionValue
 $releaseZipPath = Join-Path $releaseRoot $releaseZipName
 $runAcceptanceTests = -not $SkipTests
 
@@ -601,7 +605,9 @@ if ($promptForAcceptanceTests) {
 }
 
 Assert-PathExists -LiteralPath $projectPath -Description "pyproject.toml"
-Assert-PathExists -LiteralPath $modelManifestPath -Description "models/manifest.json"
+if ($repairSystemMode -eq "full") {
+    Assert-PathExists -LiteralPath $modelManifestPath -Description "models/manifest.json"
+}
 Assert-PathExists -LiteralPath $specPath -Description "PyInstaller spec"
 Assert-PathExists -LiteralPath $iconPath -Description "SunPack icon"
 Assert-PathExists -LiteralPath $nativeCargoToml -Description "sunpack_native Cargo manifest"
@@ -632,18 +638,25 @@ if (-not (Test-Path -LiteralPath $venvPython)) {
 
 Invoke-Native -FilePath $venvPython -Arguments @("-m", "pip", "install", "--upgrade", "pip")
 Invoke-Native -FilePath $venvPython -Arguments @("-m", "pip", "install", "$repoRoot[build]")
-Install-ModelRuntimeDependencies -PythonPath $venvPython -RepoRoot $repoRoot -BuildArch $buildArch
+if ($repairSystemMode -eq "full") {
+    Install-ModelRuntimeDependencies -PythonPath $venvPython -RepoRoot $repoRoot -BuildArch $buildArch
+} else {
+    Write-Host "Skipping model runtime dependencies for lite repair system." -ForegroundColor Yellow
+}
 Invoke-Native -FilePath $venvPython -Arguments @("-m", "pip", "check")
-Invoke-Native -FilePath $venvPython -Arguments @(
-    "-c",
-    "import importlib.metadata as m; required=('torch','torch-geometric'); missing=[name for name in required if not list(m.files(name) or []) or not m.metadata(name).get('Name')]; assert not missing, f'missing distribution metadata: {missing}'"
-)
+if ($repairSystemMode -eq "full") {
+    Invoke-Native -FilePath $venvPython -Arguments @(
+        "-c",
+        "import importlib.metadata as m; required=('torch','torch-geometric'); missing=[name for name in required if not list(m.files(name) or []) or not m.metadata(name).get('Name')]; assert not missing, f'missing distribution metadata: {missing}'"
+    )
+}
 $maturinCommand = Get-MaturinCommand -VenvScripts $venvScripts
 $cmakeCommand = Get-CMakeCommand -VenvScripts $venvScripts
 $ctestCommand = Get-CTestCommand -VenvScripts $venvScripts
 
 $env:Path = "$venvScripts;$env:Path"
 $env:PYTHONPATH = if ($env:PYTHONPATH) { "$repoRoot;$env:PYTHONPATH" } else { $repoRoot }
+$env:SUNPACK_REPAIR_SYSTEM = $repairSystemMode
 
 Write-Step "Cleaning previous build outputs"
 Remove-IfExists -LiteralPath $buildRoot
@@ -685,6 +698,7 @@ if ($runAcceptanceTests) {
 Write-Step "Building Windows release with PyInstaller"
 $env:SUNPACK_DIST_NAME = $distFolderName
 $env:SUNPACK_EXE_NAME = [System.IO.Path]::GetFileNameWithoutExtension($appExeName)
+$env:SUNPACK_REPAIR_SYSTEM = $repairSystemMode
 Invoke-Native -FilePath $venvPython -Arguments @("-m", "PyInstaller", "--noconfirm", $specPath)
 
 Write-Step "Validating packaged outputs"
@@ -708,8 +722,12 @@ Copy-IfExists -Source (Join-Path $repoRoot "sunpack_advanced_config.json") -Dest
 Copy-Item -LiteralPath $toolsRoot -Destination $distToolsRoot -Recurse -Force
 
 $distModelsRoot = Join-Path $distAppRoot "models"
-Copy-Item -LiteralPath $modelsRoot -Destination $distModelsRoot -Recurse -Force
-Assert-FileHashEqual -Source $modelManifestPath -Destination (Join-Path $distModelsRoot "manifest.json")
+if ($repairSystemMode -eq "full") {
+    Copy-Item -LiteralPath $modelsRoot -Destination $distModelsRoot -Recurse -Force
+    Assert-FileHashEqual -Source $modelManifestPath -Destination (Join-Path $distModelsRoot "manifest.json")
+} else {
+    Assert-PathMissing -LiteralPath $distModelsRoot -Description "Packaged models directory"
+}
 
 New-Item -ItemType Directory -Path $distLicensesRoot -Force | Out-Null
 Copy-Item -LiteralPath $sevenZipLicensePath -Destination (Join-Path $distLicensesRoot "7zip-license.txt") -Force
@@ -739,6 +757,7 @@ $metadata = @(
     "product=SunPack"
     "version=$versionValue"
     "arch=$buildArch"
+    "repair_system=$repairSystemMode"
     "git_commit=$gitCommit"
     "python=$pythonVersion"
     "built_at_utc=$([DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ'))"
@@ -751,7 +770,9 @@ if ($processArch -eq $buildArch) {
     Invoke-Native -FilePath $distExePath -Arguments @("passwords", "--json")
     Invoke-Native -FilePath $distExePath -Arguments @("inspect", (Join-Path $repoRoot "tests"), "--json")
     Invoke-Native -FilePath $distExePath -Arguments @("config", "validate", "--json")
-    Invoke-Native -FilePath $distExePath -Arguments @("models", "status", "--load", "--json")
+    if ($repairSystemMode -eq "full") {
+        Invoke-Native -FilePath $distExePath -Arguments @("models", "status", "--load", "--json")
+    }
 } else {
     Write-Step "Skipping packaged smoke tests"
     Write-Host "Packaged executable is $buildArch and cannot run under the current $processArch process." -ForegroundColor Yellow

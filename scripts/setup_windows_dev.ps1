@@ -3,7 +3,9 @@ param(
     [switch]$Clean,
     [switch]$IncludeBuildDeps,
     [ValidateSet("x64", "arm64")]
-    [string]$Arch = "x64"
+    [string]$Arch = "x64",
+    [ValidateSet("full", "lite")]
+    [string]$RepairSystem = "full"
 )
 
 Set-StrictMode -Version Latest
@@ -549,6 +551,7 @@ function Install-ModelRuntimeDependencies {
 $repoRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 Set-Location $repoRoot
 $buildArch = $Arch.ToLowerInvariant()
+$repairSystemMode = $RepairSystem.ToLowerInvariant()
 $processArch = Get-ProcessBuildArch
 $rustTarget = Get-RustTarget -BuildArch $buildArch
 
@@ -557,6 +560,7 @@ if ($env:OS -ne "Windows_NT") {
     throw "This setup script only supports Windows."
 }
 Write-Host "Requested architecture: $buildArch"
+Write-Host "Repair system: $repairSystemMode"
 Write-Host "Python/process architecture: $processArch"
 if ($processArch -ne $buildArch) {
     throw "Development setup for native Python extensions must run under a target-architecture Python. This process is '$processArch', so it cannot prepare a real '$buildArch' environment."
@@ -593,11 +597,16 @@ if (-not (Test-Path -LiteralPath $venvPython)) {
 Invoke-Native -FilePath $venvPython -Arguments @("-m", "pip", "install", "--upgrade", "pip")
 $projectExtra = if ($IncludeBuildDeps) { "dev" } else { "test" }
 Invoke-Native -FilePath $venvPython -Arguments @("-m", "pip", "install", "$repoRoot[$projectExtra]")
-Install-ModelRuntimeDependencies -PythonPath $venvPython -RepoRoot $repoRoot -BuildArch $buildArch
+if ($repairSystemMode -eq "full") {
+    Install-ModelRuntimeDependencies -PythonPath $venvPython -RepoRoot $repoRoot -BuildArch $buildArch
+} else {
+    Write-Host "Skipping model runtime dependencies for lite repair system." -ForegroundColor Yellow
+}
 
 $env:Path = "$venvScripts;$env:Path"
 $env:PYTHONPATH = $repoRoot
 $env:VIRTUAL_ENV = $venvPath
+$env:SUNPACK_REPAIR_SYSTEM = $repairSystemMode
 
 Write-Step "Building and installing Rust native extension"
 $maturinCommand = Ensure-Maturin -PythonPath $venvPython -VenvScripts $venvScripts

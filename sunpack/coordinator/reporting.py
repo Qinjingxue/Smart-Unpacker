@@ -2,6 +2,8 @@ import os
 import time
 from typing import List
 
+from sunpack.repair.config import repair_system_mode
+
 
 class RunReporter:
     def __init__(self, language: str = "en"):
@@ -42,6 +44,11 @@ class RunReporter:
 
         if failed_tasks:
             print(self.text(f"Failed tasks: {len(failed_tasks)}", f"失败任务：{len(failed_tasks)}"))
+            if repair_system_mode() == "lite":
+                print(self.text(
+                    "Repair system is not included in this build. Verification failures may indicate damaged archives; check the source file or obtain a clean copy.",
+                    "当前版本未包含模型修复系统。校验失败可能表示压缩包已损坏；请检查源文件或重新获取完整文件。",
+                ))
             log_path = os.path.join(root_dir, "failed_log.txt")
             try:
                 with open(log_path, "w", encoding="utf-8") as handle:

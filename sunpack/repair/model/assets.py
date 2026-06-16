@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from sunpack.repair.config import repair_system_mode
 from sunpack.support.resources import candidate_resource_roots, find_resource_path
 
 
@@ -95,6 +96,15 @@ class ModelAssetRegistry:
         )
 
     def status(self, *, load: bool = False, device: str = "cpu") -> dict[str, Any]:
+        if repair_system_mode() == "lite":
+            return {
+                "manifest": str(self.manifest_path or ""),
+                "supported_formats": [],
+                "models": [],
+                "ok": True,
+                "repair_system": "lite",
+                "disabled_reason": "repair system is not included in this build",
+            }
         rows: list[dict[str, Any]] = []
         for fmt in self.supported_formats():
             for role in ("diagnosis", "policy"):
