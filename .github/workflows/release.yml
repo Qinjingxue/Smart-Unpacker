@@ -41,12 +41,12 @@ jobs:
             runner: windows-2022
             rust_target: x86_64-pc-windows-msvc
             python_arch: x64
-            run_acceptance: true
+            python_version: "3.11"
           - arch: arm64
             runner: windows-11-arm
             rust_target: aarch64-pc-windows-msvc
             python_arch: arm64
-            run_acceptance: false
+            python_version: "3.12"
 
     steps:
       - name: Checkout
@@ -57,7 +57,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python_version }}
           architecture: ${{ matrix.python_arch }}
           cache: pip
           cache-dependency-path: |
@@ -101,10 +101,8 @@ jobs:
           }
 
           $buildArgs = @{
+            SkipTests = $true
             Arch = "${{ matrix.arch }}"
-          }
-          if ("${{ matrix.run_acceptance }}" -ne "true") {
-            $buildArgs.SkipTests = $true
           }
           if ($version -ne "") {
             $buildArgs.Version = $version
@@ -139,10 +137,50 @@ jobs:
           compression-level: 0
           retention-days: 14
 
+  acceptance:
+    name: Acceptance Tests
+    runs-on: windows-2022
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          architecture: x64
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+
+      - name: Set up Rust
+        shell: pwsh
+        run: |
+          rustup default stable
+          rustup target add x86_64-pc-windows-msvc
+          cargo --version
+          rustc -Vv
+
+      - name: Prepare acceptance environment
+        shell: pwsh
+        run: |
+          .\scripts\setup_windows_dev.ps1 -IncludeBuildDeps -Arch x64
+
+      - name: Run acceptance tests
+        shell: pwsh
+        run: |
+          .\run_acceptance_tests.ps1 -NoWait -SkipEnvironmentRefresh -StepTimeoutSeconds 900
+
   release:
     name: Publish GitHub Release
     if: ${{ startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.publish_release && inputs.release_tag != '') }}
-    needs: build
+    needs:
+      - build
+      - acceptance
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:

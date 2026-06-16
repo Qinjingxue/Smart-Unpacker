@@ -2,7 +2,8 @@
 param(
     [switch]$VerboseOutput,
     [switch]$NoWait,
-    [switch]$SkipEnvironmentRefresh
+    [switch]$SkipEnvironmentRefresh,
+    [int]$StepTimeoutSeconds = 900
 )
 
 $ErrorActionPreference = "Stop"
@@ -17,7 +18,8 @@ function Invoke-TestStep {
         [Parameter(Mandatory = $true)]
         [string]$Label,
         [Parameter(Mandatory = $true)]
-        [string[]]$Command
+        [string[]]$Command,
+        [int]$TimeoutSeconds = $StepTimeoutSeconds
     )
 
     Write-Host ""
@@ -33,33 +35,33 @@ function Invoke-TestStep {
 
     if ($VerboseOutput) {
         Write-Host ("    " + $joinedCommand) -ForegroundColor DarkGray
-        & $Command[0] $argsList
-        $exitCode = $LASTEXITCODE
-        $duration = ((Get-Date) - $startTime).TotalSeconds
-        $script:StepResults += [pscustomobject]@{
-            Label = $Label
-            ExitCode = $exitCode
-            DurationSeconds = [math]::Round($duration, 2)
-        }
-        if ($exitCode -ne 0) {
-            throw "Test step failed: $Label (exit code $exitCode)"
-        }
-        Write-Host ("    PASS ({0:N2}s)" -f $duration) -ForegroundColor Green
-        return
     }
+    Write-Host ("    " + $joinedCommand) -ForegroundColor DarkGray
 
-    $stdoutPath = [System.IO.Path]::GetTempFileName()
-    $stderrPath = [System.IO.Path]::GetTempFileName()
+    $process = $null
     try {
         $process = Start-Process -FilePath $Command[0] `
             -ArgumentList $argsList `
             -NoNewWindow `
-            -Wait `
-            -PassThru `
-            -RedirectStandardOutput $stdoutPath `
-            -RedirectStandardError $stderrPath
+            -PassThru
 
-        $exitCode = $process.ExitCode
+        $timeoutMs = [Math]::Max(1, $TimeoutSeconds) * 1000
+        if (-not $process.WaitForExit($timeoutMs)) {
+            try {
+                $process.Kill($true)
+            } catch {
+                $process.Kill()
+            }
+            $duration = ((Get-Date) - $startTime).TotalSeconds
+            $script:StepResults += [pscustomobject]@{
+                Label = $Label
+                ExitCode = -1
+                DurationSeconds = [math]::Round($duration, 2)
+            }
+            throw "Test step timed out after $TimeoutSeconds seconds: $Label"
+        }
+
+        $exitCode = [int]$process.ExitCode
         $duration = ((Get-Date) - $startTime).TotalSeconds
         $script:StepResults += [pscustomobject]@{
             Label = $Label
@@ -74,18 +76,11 @@ function Invoke-TestStep {
 
         Write-Host ("    FAIL ({0:N2}s)" -f $duration) -ForegroundColor Red
         Write-Host ("    Command: " + $joinedCommand) -ForegroundColor DarkGray
-        Write-Host "    Detailed output:" -ForegroundColor Yellow
-
-        foreach ($path in @($stdoutPath, $stderrPath)) {
-            if (Test-Path $path) {
-                Get-Content $path | ForEach-Object {
-                    Write-Host ("      " + $_)
-                }
-            }
-        }
         throw "Test step failed: $Label (exit code $exitCode)"
     } finally {
-        Remove-Item -LiteralPath $stdoutPath, $stderrPath -ErrorAction SilentlyContinue
+        if ($process) {
+            $process.Dispose()
+        }
     }
 }
 
@@ -336,12 +331,12 @@ Ensure-AcceptanceEnvironment -RepoRoot $repoRoot -VenvPython $venvPython
 $python = if (Test-Path -LiteralPath $venvPython) { $venvPython } else { Get-PythonCommand }
 $env:PYTHONPATH = $repoRoot
 
-Invoke-TestStep -Label "Unit tests" -Command @($python, "-m", "pytest", "-q", "tests/unit")
-Invoke-TestStep -Label "Functional tests" -Command @($python, "-m", "pytest", "-q", "tests/functional")
-Invoke-TestStep -Label "Integration tests" -Command @($python, "-m", "pytest", "-q", "tests/integration")
-Invoke-TestStep -Label "CLI contract tests" -Command @($python, "-m", "pytest", "-q", "tests/cli")
-Invoke-TestStep -Label "Data case runners" -Command @($python, "-m", "pytest", "-q", "tests/runners")
-Invoke-TestStep -Label "Training boundary tests" -Command @($python, "-m", "pytest", "-q", "tests/training")
+Invoke-TestStep -Label "Unit tests" -Command @($python, "-m", "pytest", "-q", "tests/unit", "--durations=20")
+Invoke-TestStep -Label "Functional tests" -Command @($python, "-m", "pytest", "-q", "tests/functional", "--durations=20")
+Invoke-TestStep -Label "Integration tests" -Command @($python, "-m", "pytest", "-q", "tests/integration", "--durations=20")
+Invoke-TestStep -Label "CLI contract tests" -Command @($python, "-m", "pytest", "-q", "tests/cli", "--durations=20")
+Invoke-TestStep -Label "Data case runners" -Command @($python, "-m", "pytest", "-q", "tests/runners", "--durations=20")
+Invoke-TestStep -Label "Training boundary tests" -Command @($python, "-m", "pytest", "-q", "tests/training", "--durations=20")
 Invoke-TestStep -Label "Archive mixed-batch acceptance" -Command @($python, "tests\performance_split_archives\split_archive_pressure.py", "--profile", "acceptance-batch", "--strict", "--no-json")
 Invoke-TestStep -Label "CLI help smoke test" -Command @($python, "sunpack.py", "--help")
 Invoke-TestStep -Label "CLI passwords smoke test" -Command @($python, "sunpack.py", "passwords", "--json")

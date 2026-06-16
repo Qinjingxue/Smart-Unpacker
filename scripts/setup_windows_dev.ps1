@@ -519,6 +519,33 @@ function Install-PackageOrValidate {
     }
 }
 
+function Install-ModelRuntimeDependencies {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$PythonPath,
+        [Parameter(Mandatory = $true)]
+        [string]$RepoRoot,
+        [Parameter(Mandatory = $true)]
+        [string]$BuildArch
+    )
+
+    Write-Step "Installing model runtime dependencies"
+    if ($BuildArch -eq "arm64") {
+        Invoke-Native -FilePath $PythonPath -Arguments @(
+            "-m", "pip", "install",
+            "torch==2.7.0",
+            "--index-url", "https://download.pytorch.org/whl/cpu"
+        )
+        Invoke-Native -FilePath $PythonPath -Arguments @("-m", "pip", "install", "torch-geometric==2.8.0")
+    } else {
+        Invoke-Native -FilePath $PythonPath -Arguments @("-m", "pip", "install", "$RepoRoot[model-runtime]")
+    }
+    Invoke-Native -FilePath $PythonPath -Arguments @(
+        "-c",
+        "import torch, torch_geometric; print('torch', torch.__version__); print('torch_geometric', torch_geometric.__version__)"
+    )
+}
+
 $repoRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 Set-Location $repoRoot
 $buildArch = $Arch.ToLowerInvariant()
@@ -566,6 +593,7 @@ if (-not (Test-Path -LiteralPath $venvPython)) {
 Invoke-Native -FilePath $venvPython -Arguments @("-m", "pip", "install", "--upgrade", "pip")
 $projectExtra = if ($IncludeBuildDeps) { "dev" } else { "test" }
 Invoke-Native -FilePath $venvPython -Arguments @("-m", "pip", "install", "$repoRoot[$projectExtra]")
+Install-ModelRuntimeDependencies -PythonPath $venvPython -RepoRoot $repoRoot -BuildArch $buildArch
 
 $env:Path = "$venvScripts;$env:Path"
 $env:PYTHONPATH = $repoRoot

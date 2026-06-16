@@ -14,11 +14,13 @@ dependencies = [
     "send2trash>=1.8.0",
     "watchdog>=4.0.0",
     "zstandard>=0.22.0",
-    "torch==2.12.0",
-    "torch-geometric==2.8.0",
 ]
 
 [project.optional-dependencies]
+model-runtime = [
+    "torch==2.12.0",
+    "torch-geometric==2.8.0",
+]
 build = [
     "pyinstaller>=6",
     "maturin>=1.8,<2",
@@ -39,4 +41,3 @@ sunpack = "sunpack.app.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["sunpack*", "repair_training*"]
-
