@@ -2,7 +2,8 @@ param(
     [string]$AppPath,
     [string]$PythonPath,
     [string]$MenuText,
-    [string]$IconPath
+    [string]$IconPath,
+    [switch]$DryRun
 )
 
 Set-StrictMode -Version Latest
@@ -128,6 +129,17 @@ function New-CommandString {
     return ('"{0}" "{1}" extract "{2}" --out-dir "{3}"{4} --pause' -f $Launcher.AppPath, $Launcher.ScriptPath, $TargetToken, $OutDirToken, $passwordArg)
 }
 
+function ConvertTo-RootSafeDirectoryToken {
+    param([Parameter(Mandatory = $true)][string]$Token)
+
+    # Explorer expands a drive root to a value ending in "\".  Quoting that
+    # value directly ("D:\") makes the trailing slash escape the closing
+    # quote under Windows argv rules.  Appending "\." preserves the directory
+    # identity while ensuring the quoted argument never ends in a slash.  It
+    # also works for normal directories and UNC share roots.
+    return "$Token\."
+}
+
 function Set-ContextMenuParent {
     param(
         [string]$KeyPath,
@@ -230,10 +242,22 @@ $folderSubCommandsKey = "HKCU:\Software\Classes\$folderSubCommandsName"
 $backgroundSubCommandsKey = "HKCU:\Software\Classes\$backgroundSubCommandsName"
 $subMenuTexts = Get-SubMenuTexts -MenuText $resolvedMenuText
 
-$folderPromptCommand = New-CommandString -Launcher $launcher -TargetToken "%1" -OutDirToken "%1" -PromptPasswords $true
-$folderDirectCommand = New-CommandString -Launcher $launcher -TargetToken "%1" -OutDirToken "%1" -PromptPasswords $false
-$backgroundPromptCommand = New-CommandString -Launcher $launcher -TargetToken "%V" -OutDirToken "%V" -PromptPasswords $true
-$backgroundDirectCommand = New-CommandString -Launcher $launcher -TargetToken "%V" -OutDirToken "%V" -PromptPasswords $false
+$folderToken = ConvertTo-RootSafeDirectoryToken -Token "%1"
+$backgroundToken = ConvertTo-RootSafeDirectoryToken -Token "%V"
+$folderPromptCommand = New-CommandString -Launcher $launcher -TargetToken $folderToken -OutDirToken $folderToken -PromptPasswords $true
+$folderDirectCommand = New-CommandString -Launcher $launcher -TargetToken $folderToken -OutDirToken $folderToken -PromptPasswords $false
+$backgroundPromptCommand = New-CommandString -Launcher $launcher -TargetToken $backgroundToken -OutDirToken $backgroundToken -PromptPasswords $true
+$backgroundDirectCommand = New-CommandString -Launcher $launcher -TargetToken $backgroundToken -OutDirToken $backgroundToken -PromptPasswords $false
+
+if ($DryRun) {
+    [pscustomobject]@{
+        folder_prompt = $folderPromptCommand
+        folder_direct = $folderDirectCommand
+        background_prompt = $backgroundPromptCommand
+        background_direct = $backgroundDirectCommand
+    } | ConvertTo-Json -Compress
+    return
+}
 
 Set-ContextMenuParent -KeyPath $folderKey -MenuLabel $resolvedMenuText -IconValue $resolvedIconPath -SubCommandsKey $folderSubCommandsName
 Set-ContextMenuCommand -ParentKeyPath $folderSubCommandsKey -CommandName "PromptPassword" -MenuLabel $subMenuTexts.Prompt -CommandLine $folderPromptCommand -IconValue $resolvedIconPath
