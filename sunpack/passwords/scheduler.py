@@ -9,7 +9,7 @@ from sunpack.passwords.cache import PasswordAttemptCache
 from sunpack.passwords.candidates import PasswordCandidate
 from sunpack.passwords.fingerprint import build_archive_fingerprint
 from sunpack.passwords.job import PasswordJob
-from sunpack.passwords.verifier import PasswordVerifier, PasswordVerifierRegistry, SevenZipDllVerifier
+from sunpack.passwords.verifier import PasswordBatchVerification, PasswordVerifier, PasswordVerifierRegistry, SevenZipDllVerifier
 from sunpack.passwords.verifier.rar_fast import RarFastVerifier
 from sunpack.passwords.verifier.seven_zip_fast import SevenZipFastVerifier
 from sunpack.passwords.verifier.zip_fast import ZipFastVerifier
@@ -34,6 +34,7 @@ class PasswordSearchResult:
     attempts: int = 0
     exhausted: bool = False
     stopped_reason: str = ""
+    extraction_candidates: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -65,7 +66,7 @@ class PasswordScheduler:
     def from_archive_password_tester(cls, password_tester: object) -> "PasswordScheduler":
         final_verifier = SevenZipDllVerifier.from_archive_password_tester(password_tester)
         registry = PasswordVerifierRegistry(
-            fast_verifiers=[ZipFastVerifier(), RarFastVerifier(), SevenZipFastVerifier()],
+            fast_verifiers=[ZipFastVerifier(), RarFastVerifier(), SevenZipFastVerifier(), final_verifier],
             final_verifier=final_verifier,
         )
         return cls(registry.build())
@@ -143,6 +144,126 @@ class PasswordScheduler:
         )
         self._emit_finished(job, result, started_at, candidates_seen, skipped)
         return result
+
+    def plan_for_extraction(self, job: PasswordJob) -> PasswordSearchResult:
+        """Resolve cheap proofs and return inconclusive candidates for real extraction.
+
+        This path never invokes the full-payload final verifier.  A candidate that
+        cannot be proven from bounded archive metadata is confirmed by the actual
+        extraction transaction, avoiding test-then-extract double I/O.
+        """
+        started_at = time.monotonic()
+        self._emit_progress(job, PasswordProgressEvent(stage="started"))
+        fingerprint = job.fingerprint or build_archive_fingerprint(job.archive_path, job.part_paths)
+        cached_success = self.cache.get_success(fingerprint.key)
+        if cached_success is not None:
+            result = PasswordSearchResult(
+                password=cached_success,
+                status=PasswordSearchStatus.FOUND,
+                attempts=0,
+                stopped_reason="cache_hit",
+            )
+            self._emit_finished(job, result, started_at, candidates_seen=0, skipped=0)
+            return result
+
+        candidates: list[str] = []
+        seen: set[str] = set()
+        skipped = 0
+        for candidate in job.candidate_pipeline():
+            password = _candidate_value(candidate)
+            if password in seen:
+                continue
+            seen.add(password)
+            if self.cache.has_negative(fingerprint.key, password):
+                skipped += 1
+                continue
+            candidates.append(password)
+
+        if not candidates:
+            result = PasswordSearchResult(
+                password=None,
+                status=PasswordSearchStatus.EXHAUSTED,
+                attempts=0,
+                exhausted=True,
+            )
+            self._emit_finished(job, result, started_at, candidates_seen=0, skipped=skipped)
+            return result
+
+        batch_size = max(1, int(job.batch_size or self.default_batch_size))
+        inconclusive: list[str] = []
+        attempts = 0
+        for offset in range(0, len(candidates), batch_size):
+            batch = candidates[offset:offset + batch_size]
+            verification = _call_fast_verifier(
+                self.verifier,
+                job.archive_path,
+                batch,
+                part_paths=job.part_paths,
+                archive_input=job.archive_input,
+            )
+            attempts += max(0, min(int(verification.attempts or 0), len(batch)))
+            if verification.status == "match" and verification.matched_index >= 0:
+                matched = batch[verification.matched_index]
+                if not verification.final_confirmation_required:
+                    self.cache.remember_success(fingerprint.key, matched)
+                    result = PasswordSearchResult(
+                        password=matched,
+                        status=PasswordSearchStatus.FOUND,
+                        test_result=verification.test_result,
+                        attempts=attempts,
+                        stopped_reason="fast_proof",
+                    )
+                    self._emit_finished(job, result, started_at, len(candidates), skipped)
+                    return result
+                inconclusive.append(matched)
+                inconclusive.extend(password for index, password in enumerate(batch) if index != verification.matched_index)
+                continue
+            if verification.status == "no_match":
+                self.cache.remember_negative_batch(fingerprint.key, batch)
+                continue
+            if verification.status == "damaged":
+                result = PasswordSearchResult(
+                    password=None,
+                    status=PasswordSearchStatus.DAMAGED,
+                    test_result=verification.test_result,
+                    error_text=verification.error_text,
+                    attempts=attempts,
+                    stopped_reason="terminal",
+                )
+                self._emit_finished(job, result, started_at, len(candidates), skipped)
+                return result
+            if verification.status == "backend_unavailable":
+                # Extraction may still have a usable worker/backend. Preserve the
+                # candidates instead of misclassifying an infrastructure failure.
+                inconclusive.extend(batch)
+                continue
+            inconclusive.extend(batch)
+
+        if inconclusive:
+            result = PasswordSearchResult(
+                password=None,
+                status=PasswordSearchStatus.INCONCLUSIVE,
+                attempts=attempts,
+                stopped_reason="extraction_confirmation_required",
+                extraction_candidates=tuple(dict.fromkeys(inconclusive)),
+            )
+        else:
+            result = PasswordSearchResult(
+                password=None,
+                status=PasswordSearchStatus.EXHAUSTED,
+                attempts=attempts,
+                exhausted=True,
+            )
+        self._emit_finished(job, result, started_at, len(candidates), skipped)
+        return result
+
+    def remember_extraction_success(self, fingerprint_key: str, password: str) -> None:
+        if fingerprint_key:
+            self.cache.remember_success(fingerprint_key, password)
+
+    def remember_extraction_rejection(self, fingerprint_key: str, password: str) -> None:
+        if fingerprint_key:
+            self.cache.remember_negative(fingerprint_key, password)
 
     def _verify_batch(
         self,
@@ -287,3 +408,32 @@ def _call_verifier(
         if "archive_input" not in str(error):
             raise
         return verifier.verify_batch(archive_path, passwords, part_paths=part_paths)
+
+
+def _call_fast_verifier(
+    verifier: PasswordVerifier,
+    archive_path: str,
+    passwords: list[str],
+    *,
+    part_paths: list[str] | None = None,
+    archive_input: dict | None = None,
+):
+    fast = getattr(verifier, "verify_fast_batch", None)
+    if not callable(fast):
+        return PasswordBatchVerification(
+            ok=False,
+            status="unknown_needs_final_verifier",
+            attempts=0,
+            error_text="bounded password verifier is unavailable",
+        )
+    try:
+        return fast(
+            archive_path,
+            passwords,
+            part_paths=part_paths,
+            archive_input=archive_input,
+        )
+    except TypeError as error:
+        if "archive_input" not in str(error):
+            raise
+        return fast(archive_path, passwords, part_paths=part_paths)

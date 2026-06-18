@@ -112,6 +112,7 @@ class SingleArchiveExtractor:
         with _phase(phase_timer, f"{phase_prefix}_startupinfo"):
             startupinfo = self._startupinfo()
         retry_count = 0
+        password_candidate_rejections = 0
         while retry_count < self.retry_policy.max_retries:
             with _phase(phase_timer, f"{phase_prefix}_ensure_space_retry"):
                 has_space = self.ensure_space(5)
@@ -211,8 +212,13 @@ class SingleArchiveExtractor:
                         )
 
                     if run_result.returncode == 0:
+                        if resolution.requires_extraction_confirmation:
+                            self.password_resolver.confirm_extraction(resolution)
                         with _phase(phase_timer, f"{phase_prefix}_diagnostics_success"):
                             diagnostics = self._diagnostics_from(run_result)
+                            if resolution.requires_extraction_confirmation:
+                                diagnostics["password_verification"] = "extraction_transaction"
+                                diagnostics["password_candidates_rejected"] = password_candidate_rejections
                         with _phase(phase_timer, f"{phase_prefix}_output_stats_success"):
                             worker_result = diagnostics.get("result") if isinstance(diagnostics.get("result"), dict) else {}
                             output_inventory = collect_output_inventory(out_dir, worker_result)
@@ -270,6 +276,19 @@ class SingleArchiveExtractor:
             finally:
                 with _phase(phase_timer, f"{phase_prefix}_cleanup_normalized_paths"):
                     self.rename_scheduler.cleanup_normalized_split_group(staged)
+
+            if resolution.requires_extraction_confirmation and run_result is not None:
+                candidate_failure = classify_extract_failure(run_result, err, archive=archive, is_split_archive=is_split)
+                if candidate_failure.is_password_failure:
+                    self.password_resolver.reject_extraction_candidate(resolution)
+                    password_candidate_rejections += 1
+                    if self.password_resolver.has_pending_candidates(resolution.archive_key):
+                        shutil.rmtree(out_dir, ignore_errors=True)
+                        if password_candidate_rejections == 1 or password_candidate_rejections % 50 == 0:
+                            self._log(
+                                f"[EXTRACT] 已拒绝 {password_candidate_rejections} 个密码候选，继续尝试: {archive}"
+                            )
+                        continue
 
             if self.retry_policy.can_retry(run_result, err, retry_count, archive, is_split):
                 retry_count += 1

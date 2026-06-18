@@ -337,9 +337,9 @@ class ArchiveTask:
     def _format_hint(self) -> str:
         knowledge = self.knowledge()
         return str(
-            knowledge.get("archive.format_hint", "")
-            or knowledge.get("analysis.selected_format", "")
+            knowledge.get("analysis.selected_format", "")
             or knowledge.get("analysis.summary.format", "")
+            or knowledge.get("archive.format_hint", "")
             or self.detected_ext
             or ""
         ).lstrip(".")

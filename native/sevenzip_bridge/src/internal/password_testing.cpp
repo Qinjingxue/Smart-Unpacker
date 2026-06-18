@@ -1,5 +1,7 @@
 #include "sevenzip_bridge/bridge.hpp"
 
+#include <algorithm>
+
 
 
 #include "archive_open_plan.hpp"
@@ -9,6 +11,8 @@
 #include "sevenzip_formats.hpp"
 
 #include "sevenzip_paths.hpp"
+
+#include "sevenzip_properties.hpp"
 
 #include "sevenzip_status.hpp"
 
@@ -28,6 +32,64 @@ bool encrypted_header_range_probe_candidate(const std::wstring& archive_type) {
     return archive_type == L"7z" || archive_type == L"rar" || archive_type == L"rar4" || archive_type == L"rar5";
 }
 
+std::vector<UInt32> bounded_password_probe_indices(IInArchive* archive) {
+    if (!archive) {
+        return {};
+    }
+    UInt32 item_count = 0;
+    if (archive->GetNumberOfItems(&item_count) != S_OK) {
+        return {};
+    }
+    PROPVARIANT archive_value;
+    PropVariantInit(&archive_value);
+    const bool solid = archive->GetArchiveProperty(kpidSolid, &archive_value) == S_OK && prop_bool(archive_value);
+    clear_prop(archive_value);
+
+    struct Candidate {
+        UInt32 index;
+        UInt64 size;
+        bool encrypted;
+    };
+    std::vector<Candidate> regular;
+    bool has_encrypted = false;
+    for (UInt32 index = 0; index < item_count; ++index) {
+        PROPVARIANT value;
+        PropVariantInit(&value);
+        const bool is_dir = get_item_property(archive, index, kpidIsDir, value) && prop_bool(value);
+        clear_prop(value);
+        if (is_dir) {
+            continue;
+        }
+        const bool encrypted = get_item_property(archive, index, kpidEncrypted, value) && prop_bool(value);
+        clear_prop(value);
+        UInt64 size = 0;
+        if (get_item_property(archive, index, kpidSize, value)) {
+            size = prop_u64(value);
+        }
+        clear_prop(value);
+        regular.push_back({index, size, encrypted});
+        has_encrypted = has_encrypted || encrypted;
+    }
+    if (regular.empty()) {
+        return {};
+    }
+    auto eligible = [has_encrypted](const Candidate& item) {
+        return !has_encrypted || item.encrypted;
+    };
+    auto selected = std::find_if(regular.begin(), regular.end(), eligible);
+    if (selected == regular.end()) {
+        return {};
+    }
+    if (!solid) {
+        for (auto it = selected; it != regular.end(); ++it) {
+            if (eligible(*it) && it->size < selected->size) {
+                selected = it;
+            }
+        }
+    }
+    return {selected->index};
+}
+
 }  // namespace
 
 
@@ -44,7 +106,9 @@ PasswordTestResult test_one_password(
 
     const std::vector<GUID>& formats,
 
-    const std::vector<ExtractInputRange>& input_ranges = {}
+    const std::vector<ExtractInputRange>& input_ranges = {},
+
+    bool bounded_password_probe = false
 
 );
 
@@ -74,7 +138,9 @@ PasswordTestResult test_one_password(
 
         candidate_formats(archive_path, part_paths),
 
-        {});
+        {},
+
+        false);
 
 }
 
@@ -92,7 +158,9 @@ PasswordTestResult test_one_password(
 
     const std::vector<GUID>& formats,
 
-    const std::vector<ExtractInputRange>& input_ranges
+    const std::vector<ExtractInputRange>& input_ranges,
+
+    bool bounded_password_probe
 
 ) {
 
@@ -180,11 +248,31 @@ PasswordTestResult test_one_password(
 
             ComPtr<IArchiveExtractCallback> extract_callback(raw_extract_callback);
 
-            hr = archive->Extract(nullptr, static_cast<UInt32>(kAllItems), kTestMode, extract_callback.get());
+            const auto probe_indices = bounded_password_probe_indices(archive.get());
+
+            if (bounded_password_probe && probe_indices.empty()) {
+
+                hr = S_OK;
+
+                last_op_res = kOpOk;
+
+            } else {
+
+                hr = archive->Extract(
+
+                    bounded_password_probe ? probe_indices.data() : nullptr,
+
+                    bounded_password_probe ? static_cast<UInt32>(probe_indices.size()) : static_cast<UInt32>(kAllItems),
+
+                    kTestMode,
+
+                    extract_callback.get());
+
+                last_op_res = raw_extract_callback->operation_result();
+
+            }
 
             last_hr = hr;
-
-            last_op_res = raw_extract_callback->operation_result();
 
             archive->Close();
 
@@ -688,7 +776,11 @@ PasswordTestResult test_passwords_with_parts(
 
             effective_part_paths,
 
-            formats);
+            formats,
+
+            {},
+
+            true);
 
         current.attempts = i + 1;
 
@@ -830,7 +922,9 @@ PasswordTestResult test_passwords_with_ranges(
 
             formats,
 
-            ranges);
+            ranges,
+
+            true);
 
         current.attempts = i + 1;
 

@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+from threading import RLock
 from typing import List
 
 from sunpack.passwords.internal.lists import dedupe_passwords, read_password_file
@@ -9,6 +10,7 @@ class PasswordStore:
     user_passwords: List[str] = field(default_factory=list)
     builtin_passwords: List[str] = field(default_factory=list)
     recent_passwords: List[str] = field(default_factory=list)
+    _lock: RLock = field(default_factory=RLock, repr=False)
 
     @classmethod
     def from_sources(
@@ -31,17 +33,20 @@ class PasswordStore:
         )
 
     def candidates(self) -> List[str]:
-        return dedupe_passwords(
-            list(self.recent_passwords)
-            + list(self.user_passwords)
-            + list(self.builtin_passwords)
-        )
+        with self._lock:
+            return dedupe_passwords(
+                list(self.recent_passwords)
+                + list(self.user_passwords)
+                + list(self.builtin_passwords)
+            )
 
     def has_candidates(self) -> bool:
-        return bool(self.recent_passwords or self.user_passwords or self.builtin_passwords)
+        with self._lock:
+            return bool(self.recent_passwords or self.user_passwords or self.builtin_passwords)
 
     def remember_success(self, password: str) -> None:
         if not password:
             return
-        self.recent_passwords = [item for item in self.recent_passwords if item != password]
-        self.recent_passwords.insert(0, password)
+        with self._lock:
+            self.recent_passwords = [item for item in self.recent_passwords if item != password]
+            self.recent_passwords.insert(0, password)

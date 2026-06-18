@@ -94,8 +94,10 @@ def test_analysis_stage_writes_extractable_segment_without_switching_task_source
         "analysis": {"status": "extractable", "confidence": 0.99, "damage_flags": []},
     }
     assert task.archive_input().open_mode == "file"
+    assert task.archive_input().format_hint == "zip"
     state = task.fact_bag.get("archive.state")
     assert state["source"]["open_mode"] == "file"
+    assert state["source"]["format_hint"] == "zip"
     assert state["patches"] == []
 
 

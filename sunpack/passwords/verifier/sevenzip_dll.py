@@ -59,6 +59,7 @@ class SevenZipDllVerifier:
                 test_result=native_result,
                 error_text="",
                 terminal=True,
+                final_confirmation_required=False,
             )
         status_by_native = {
             STATUS_WRONG_PASSWORD: "no_match",

@@ -114,6 +114,22 @@ class PasswordVerifierChain:
             terminal=False,
         )
 
+    def verify_fast_batch(
+        self,
+        archive_path: str,
+        passwords: list[str],
+        *,
+        part_paths: list[str] | None = None,
+        archive_input: dict | None = None,
+    ) -> PasswordBatchVerification:
+        """Run bounded verifiers only; never invoke the full-payload fallback."""
+        return self._run_fast_verifiers(
+            archive_path,
+            passwords,
+            part_paths=part_paths,
+            archive_input=archive_input,
+        )
+
     def _run_fast_verifiers(
         self,
         archive_path: str,
@@ -149,8 +165,17 @@ class PasswordVerifierChain:
             for verifier in self.fast_verifiers
             if _normalize_archive_format(str(getattr(verifier, "format_hint", ""))) == preferred
         ]
+        generic = [
+            verifier
+            for verifier in self.fast_verifiers
+            if not _normalize_archive_format(str(getattr(verifier, "format_hint", "")))
+        ]
         if not matching:
             return list(self.fast_verifiers)
+        if _explicit_archive_format(archive_input):
+            # Analysis-derived format is content evidence, unlike a filename
+            # suffix. Avoid probing unrelated parsers for renamed large files.
+            return matching + [verifier for verifier in generic if verifier not in matching]
         return matching + [
             verifier
             for verifier in self.fast_verifiers
@@ -227,6 +252,12 @@ def _preferred_archive_format(archive_path: str, archive_input: dict | None = No
         if hinted:
             return hinted
     return _format_from_path(archive_path)
+
+
+def _explicit_archive_format(archive_input: dict | None = None) -> str:
+    if not isinstance(archive_input, dict):
+        return ""
+    return _normalize_archive_format(str(archive_input.get("format_hint") or archive_input.get("format") or ""))
 
 
 def _format_from_path(archive_path: str) -> str:

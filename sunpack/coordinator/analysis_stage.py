@@ -291,12 +291,14 @@ class ArchiveAnalysisStage:
                     "selected_format": selected.format,
                     "confidence": float(selected.confidence),
                 })
+            selected_format = str(getattr(selected, "format", "") or "")
+            source = replace(state.source, format_hint=selected_format) if selected_format else state.source
             new_state = ArchiveState(
-                source=state.source,
+                source=source,
                 patches=list(state.patches),
                 patch_digest=state.effective_patch_digest(),
                 logical_name=state.logical_name,
-                format_hint=state.format_hint,
+                format_hint=selected_format or state.format_hint,
                 analysis=analysis,
                 verification=dict(state.verification),
             )

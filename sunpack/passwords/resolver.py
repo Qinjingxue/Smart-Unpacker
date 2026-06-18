@@ -1,13 +1,32 @@
-from sunpack.contracts.detection import FactBag
+from __future__ import annotations
+
+from dataclasses import dataclass
+from threading import RLock
+
 from sunpack.contracts.archive_knowledge import ArchiveKnowledge
+from sunpack.contracts.detection import FactBag
 from sunpack.passwords.candidates import PasswordCandidatePipeline
+from sunpack.passwords.fingerprint import build_archive_fingerprint
 from sunpack.passwords.job import PasswordJob
-from sunpack.passwords.result import PasswordProbeResult, PasswordResolution, PasswordResolutionStatus
+from sunpack.passwords.result import PasswordResolution, PasswordResolutionStatus
 from sunpack.passwords.scheduler import PasswordScheduler, PasswordSearchResult, PasswordSearchStatus
 from sunpack.passwords.session import PasswordSession
 
 
+@dataclass
+class _PendingPasswordPlan:
+    candidates: list[str]
+    fingerprint_key: str
+
+
 class PasswordResolver:
+    """Plan bounded password checks and defer ambiguous proof to extraction.
+
+    Candidate origin never changes verification semantics.  Every password goes
+    through the same fast-verifier plan; candidates lacking a bounded proof are
+    queued for confirmation by the real extraction transaction.
+    """
+
     def __init__(
         self,
         password_tester,
@@ -17,6 +36,8 @@ class PasswordResolver:
         self.password_tester = password_tester
         self.password_session = password_session or PasswordSession()
         self.password_scheduler = password_scheduler or password_tester.password_scheduler
+        self._pending_confirmation: dict[str, _PendingPasswordPlan] = {}
+        self._lock = RLock()
 
     def resolve(
         self,
@@ -50,107 +71,131 @@ class PasswordResolver:
                 encrypted=True,
             )
 
-        if not self.password_tester.passwords and self._facts_require_password(fact_bag):
-            return PasswordResolution(
-                password=None,
-                status=PasswordResolutionStatus.PASSWORD_REQUIRED,
-                error_text="archive requires a password but no candidates were provided",
-                archive_key=archive_key,
-                encrypted=True,
-            )
+        pending = self._take_pending(archive_key)
+        if pending is not None:
+            password, fingerprint_key = pending
+            return self._confirmation_resolution(archive_key, password, fingerprint_key, fact_bag)
 
-        if self._facts_require_password(fact_bag):
-            search = self._run_password_search(archive_path, fact_bag=fact_bag, part_paths=part_paths)
-            if search.status == PasswordSearchStatus.FOUND:
-                return self._remember_search(archive_key, search, encrypted=True)
-            if search.status in {PasswordSearchStatus.DAMAGED, PasswordSearchStatus.INCONCLUSIVE}:
-                probe = self._test_without_password(
-                    archive_path,
-                    fact_bag=fact_bag,
-                    part_paths=part_paths,
-                )
-                if probe.status == "damaged":
-                    return self._resolution_from_probe(archive_key, probe)
-            return self._remember_search(archive_key, search, encrypted=True)
+        fingerprint = build_archive_fingerprint(archive_path, part_paths)
 
-        probe = self._test_without_password(
-            archive_path,
-            fact_bag=fact_bag,
-            part_paths=part_paths,
-        )
-        if probe.status == "match":
-            return self._remember(
-                archive_key,
-                "",
-                status=PasswordResolutionStatus.UNENCRYPTED,
-                test_result=probe,
-                encrypted=False,
-            )
-
-        if probe.status == "no_match":
-            if not self.password_tester.passwords:
+        candidates = self.password_tester.password_store.candidates()
+        if not candidates:
+            if self._facts_require_password(fact_bag):
                 return PasswordResolution(
                     password=None,
                     status=PasswordResolutionStatus.PASSWORD_REQUIRED,
-                    test_result=probe,
-                    error_text=probe.message,
+                    error_text="archive requires a password but no candidates were provided",
                     archive_key=archive_key,
                     encrypted=True,
                 )
-            search = self._run_password_search(archive_path, fact_bag=fact_bag, part_paths=part_paths)
-            return self._remember_search(archive_key, search, encrypted=True)
+            # Unknown encryption state: let the real extraction prove the empty
+            # password instead of performing a complete preflight test pass.
+            return self._confirmation_resolution(archive_key, "", fingerprint.key, fact_bag)
 
-        return PasswordResolution(
-            password="",
-            status=PasswordResolutionStatus.INCONCLUSIVE,
-            test_result=probe,
-            error_text=probe.message,
-            archive_key=archive_key,
-            encrypted=None,
+        search = self._plan_password_search(
+            archive_path,
+            fact_bag=fact_bag,
+            part_paths=part_paths,
+            fingerprint=fingerprint,
+        )
+        if search.status == PasswordSearchStatus.FOUND:
+            resolution = self._remember_search(archive_key, search, encrypted=True)
+            if resolution.password is not None:
+                self._promote_success(resolution.password)
+            return resolution
+        if search.extraction_candidates:
+            first, *remaining = search.extraction_candidates
+            with self._lock:
+                self._pending_confirmation[archive_key] = _PendingPasswordPlan(list(remaining), fingerprint.key)
+            return self._confirmation_resolution(archive_key, first, fingerprint.key, fact_bag)
+        return self._remember_search(
+            archive_key,
+            search,
+            encrypted=True if self._facts_require_password(fact_bag) else None,
         )
 
-    def _run_password_search(self, archive_path: str, fact_bag: FactBag | None = None, part_paths: list[str] | None = None):
-        archive_input = self._archive_input_for_password_probe(archive_path, fact_bag, part_paths)
-        candidates = PasswordCandidatePipeline.from_password_store(self.password_tester.password_store)
-        return self.password_scheduler.run(PasswordJob(
-            archive_path=archive_path,
-            part_paths=part_paths,
-            archive_input=archive_input,
-            candidates=candidates,
-        ))
+    def confirm_extraction(self, resolution: PasswordResolution) -> None:
+        if not resolution.requires_extraction_confirmation or resolution.password is None:
+            return
+        self.password_session.set_resolved(resolution.archive_key, resolution.password)
+        self.password_scheduler.remember_extraction_success(resolution.fingerprint_key, resolution.password)
+        self._promote_success(resolution.password)
+        with self._lock:
+            self._pending_confirmation.pop(resolution.archive_key, None)
 
-    def _test_without_password(
+    def reject_extraction_candidate(self, resolution: PasswordResolution) -> None:
+        if not resolution.requires_extraction_confirmation or resolution.password is None:
+            return
+        self.password_scheduler.remember_extraction_rejection(resolution.fingerprint_key, resolution.password)
+
+    def has_pending_candidates(self, archive_key: str) -> bool:
+        with self._lock:
+            plan = self._pending_confirmation.get(archive_key)
+            return bool(plan and plan.candidates)
+
+    def _plan_password_search(
         self,
         archive_path: str,
         *,
-        fact_bag: FactBag | None = None,
-        part_paths: list[str] | None = None,
-    ):
-        archive_input = self._archive_input_for_password_probe(archive_path, fact_bag, part_paths)
-        if isinstance(archive_input, dict):
-            try:
-                return self.password_tester.test_without_password(
-                    archive_path,
-                    part_paths=part_paths,
-                    archive_input=archive_input,
-                )
-            except TypeError as error:
-                if "archive_input" not in str(error):
-                    raise
-        return self.password_tester.test_without_password(archive_path, part_paths=part_paths)
-
-    @staticmethod
-    def _archive_input_for_password_probe(
-        archive_path: str,
         fact_bag: FactBag | None,
         part_paths: list[str] | None,
-    ) -> dict | None:
+        fingerprint,
+    ) -> PasswordSearchResult:
+        archive_input = self._archive_input_for_password_probe(fact_bag)
+        candidates = PasswordCandidatePipeline.from_password_store(self.password_tester.password_store)
+        return self.password_scheduler.plan_for_extraction(PasswordJob(
+            archive_path=archive_path,
+            part_paths=part_paths,
+            archive_input=archive_input,
+            fingerprint=fingerprint,
+            candidates=candidates,
+        ))
+
+    def _take_pending(self, archive_key: str) -> tuple[str, str] | None:
+        with self._lock:
+            plan = self._pending_confirmation.get(archive_key)
+            if not plan or not plan.candidates:
+                return None
+            return plan.candidates.pop(0), plan.fingerprint_key
+
+    def _promote_success(self, password: str) -> None:
+        self.password_tester.add_recent_password(password)
+        with self._lock:
+            for plan in self._pending_confirmation.values():
+                if password not in plan.candidates:
+                    continue
+                plan.candidates = [
+                    password,
+                    *(candidate for candidate in plan.candidates if candidate != password),
+                ]
+
+    @staticmethod
+    def _confirmation_resolution(
+        archive_key: str,
+        password: str,
+        fingerprint_key: str,
+        fact_bag: FactBag | None,
+    ) -> PasswordResolution:
+        return PasswordResolution(
+            password=password,
+            status=PasswordResolutionStatus.RESOLVED,
+            archive_key=archive_key,
+            encrypted=True if PasswordResolver._facts_require_password(fact_bag) else None,
+            requires_extraction_confirmation=True,
+            fingerprint_key=fingerprint_key,
+        )
+
+    @staticmethod
+    def _archive_input_for_password_probe(fact_bag: FactBag | None) -> dict | None:
         if fact_bag is None:
             return None
         knowledge_input = ArchiveKnowledge.from_any(fact_bag.get("archive.knowledge")).get("source.input")
-        if isinstance(knowledge_input, dict):
-            return knowledge_input
-        return None
+        if not isinstance(knowledge_input, dict):
+            return None
+        selected_format = str(fact_bag.get("analysis.selected_format") or "").strip().lower().lstrip(".")
+        if selected_format in {"zip", "rar", "7z"}:
+            return {**knowledge_input, "format_hint": selected_format}
+        return knowledge_input
 
     def _remember(
         self,
@@ -173,22 +218,13 @@ class PasswordResolver:
             encrypted=encrypted,
         )
 
-    @staticmethod
-    def _facts_confirm_unencrypted(fact_bag: FactBag | None) -> bool:
-        health = PasswordResolver._resource_health(fact_bag)
-        if isinstance(health, dict):
-            if health.get("is_archive") and not health.get("is_encrypted") and not health.get("is_wrong_password"):
-                return True
-        return False
-
-    @staticmethod
-    def _facts_require_password(fact_bag: FactBag | None) -> bool:
-        health = PasswordResolver._resource_health(fact_bag)
-        if isinstance(health, dict) and (health.get("is_encrypted") or health.get("is_wrong_password")):
-            return True
-        return False
-
-    def _remember_search(self, archive_key: str, search: PasswordSearchResult, *, encrypted: bool | None) -> PasswordResolution:
+    def _remember_search(
+        self,
+        archive_key: str,
+        search: PasswordSearchResult,
+        *,
+        encrypted: bool | None,
+    ) -> PasswordResolution:
         status = {
             PasswordSearchStatus.FOUND: PasswordResolutionStatus.RESOLVED,
             PasswordSearchStatus.EXHAUSTED: PasswordResolutionStatus.CANDIDATES_EXHAUSTED,
@@ -209,19 +245,19 @@ class PasswordResolver:
         )
 
     @staticmethod
-    def _resolution_from_probe(archive_key: str, probe: PasswordProbeResult) -> PasswordResolution:
-        status = {
-            "damaged": PasswordResolutionStatus.DAMAGED,
-            "unsupported_method": PasswordResolutionStatus.UNSUPPORTED,
-            "backend_unavailable": PasswordResolutionStatus.BACKEND_ERROR,
-        }.get(probe.status, PasswordResolutionStatus.INCONCLUSIVE)
-        return PasswordResolution(
-            password=None,
-            status=status,
-            test_result=probe,
-            error_text=probe.message,
-            archive_key=archive_key,
+    def _facts_confirm_unencrypted(fact_bag: FactBag | None) -> bool:
+        health = PasswordResolver._resource_health(fact_bag)
+        return bool(
+            isinstance(health, dict)
+            and health.get("is_archive")
+            and not health.get("is_encrypted")
+            and not health.get("is_wrong_password")
         )
+
+    @staticmethod
+    def _facts_require_password(fact_bag: FactBag | None) -> bool:
+        health = PasswordResolver._resource_health(fact_bag)
+        return bool(isinstance(health, dict) and (health.get("is_encrypted") or health.get("is_wrong_password")))
 
     @staticmethod
     def _resource_health(fact_bag: FactBag | None) -> dict:
@@ -250,6 +286,5 @@ class PasswordResolver:
             return False
         state_payload = ArchiveKnowledge.from_any(fact_bag.get("archive.knowledge")).get("archive.state") or {}
         if isinstance(state_payload, dict):
-            patches = state_payload.get("patches") or state_payload.get("patch_stack") or []
-            return bool(patches)
+            return bool(state_payload.get("patches") or state_payload.get("patch_stack") or [])
         return False

@@ -36,8 +36,11 @@ class FakePasswordTester:
     def __init__(self):
         self.test_without_password_calls = 0
         self.search_calls = 0
-        self.password_store = PasswordStore.from_sources(cli_passwords=["secret"], builtin_passwords=[])
+        self.password_store = PasswordStore.from_sources(cli_passwords=["secret", "fallback"], builtin_passwords=[])
         self.password_scheduler = FakePasswordScheduler(self)
+
+    def add_recent_password(self, password):
+        self.password_store.remember_success(password)
 
     def test_without_password(self, archive_path, part_paths=None):
         self.test_without_password_calls += 1
@@ -70,6 +73,15 @@ class FakePasswordScheduler:
 
     def run(self, job: PasswordJob):
         return self.tester.search_passwords(job)
+
+    def plan_for_extraction(self, job: PasswordJob):
+        return self.tester.search_passwords(job)
+
+    def remember_extraction_success(self, fingerprint_key, password):
+        pass
+
+    def remember_extraction_rejection(self, fingerprint_key, password):
+        pass
 
 
 def test_password_resolver_records_archive_password_in_session():
@@ -141,7 +153,7 @@ def test_password_resolver_does_not_recheck_clear_wrong_password_after_encrypted
     assert tester.test_without_password_calls == 0
 
 
-def test_password_resolver_rechecks_failed_encrypted_resolution_for_damage():
+def test_password_resolver_preserves_fast_damage_result_without_full_retest():
     bag = FactBag()
     bag.set("resource.health", {
         "is_archive": True,
@@ -158,7 +170,7 @@ def test_password_resolver_rechecks_failed_encrypted_resolution_for_damage():
     assert result.status == PasswordResolutionStatus.DAMAGED
     assert result.error_text == "headers error"
     assert tester.search_calls == 1
-    assert tester.test_without_password_calls == 1
+    assert tester.test_without_password_calls == 0
 
 
 def test_password_resolver_reuses_session_password_without_retesting():
@@ -170,3 +182,126 @@ def test_password_resolver_reuses_session_password_without_retesting():
     result = resolver.resolve("sample.zip", archive_key="archive-key")
 
     assert result.password == "secret"
+
+
+def test_password_resolver_queues_all_inconclusive_sources_for_extraction_confirmation():
+    tester = FakePasswordTester()
+    tester.password_store = PasswordStore.from_sources(
+        cli_passwords=["user-password"],
+        builtin_passwords=["builtin-password"],
+    )
+    tester.passwords = tester.password_store.candidates()
+    planned = []
+
+    class QueueScheduler:
+        def plan_for_extraction(self, job):
+            candidates = tuple(candidate.value for candidate in job.candidate_pipeline())
+            planned.extend(candidates)
+            return PasswordSearchResult(
+                password=None,
+                status=PasswordSearchStatus.INCONCLUSIVE,
+                extraction_candidates=candidates,
+            )
+
+        def remember_extraction_success(self, fingerprint_key, password):
+            pass
+
+        def remember_extraction_rejection(self, fingerprint_key, password):
+            pass
+
+    session = PasswordSession()
+    resolver = PasswordResolver(tester, session, QueueScheduler())
+
+    first = resolver.resolve("large.rar", archive_key="archive-key")
+    resolver.reject_extraction_candidate(first)
+    second = resolver.resolve("large.rar", archive_key="archive-key")
+
+    assert planned == ["user-password", "builtin-password"]
+    assert first.password == "user-password"
+    assert second.password == "builtin-password"
+    assert first.requires_extraction_confirmation is True
+    assert second.requires_extraction_confirmation is True
+    assert tester.test_without_password_calls == 0
+    assert session.has_resolved("archive-key") is False
+
+    resolver.confirm_extraction(second)
+
+    assert session.get_resolved("archive-key") == "builtin-password"
+    assert tester.password_store.recent_passwords == ["builtin-password"]
+
+
+def test_confirmed_password_is_promoted_across_already_planned_archives():
+    tester = FakePasswordTester()
+    tester.password_store = PasswordStore.from_sources(
+        cli_passwords=["wrong-a", "wrong-b", "shared-secret"],
+        builtin_passwords=[],
+    )
+
+    class QueueScheduler:
+        def plan_for_extraction(self, job):
+            candidates = tuple(candidate.value for candidate in job.candidate_pipeline())
+            return PasswordSearchResult(
+                password=None,
+                status=PasswordSearchStatus.INCONCLUSIVE,
+                extraction_candidates=candidates,
+            )
+
+        def remember_extraction_success(self, fingerprint_key, password):
+            pass
+
+        def remember_extraction_rejection(self, fingerprint_key, password):
+            pass
+
+    resolver = PasswordResolver(tester, PasswordSession(), QueueScheduler())
+    archive_a = resolver.resolve("first.unknown", archive_key="first")
+    archive_b = resolver.resolve("second.unknown", archive_key="second")
+    resolver.reject_extraction_candidate(archive_a)
+    archive_a = resolver.resolve("first.unknown", archive_key="first")
+    resolver.reject_extraction_candidate(archive_a)
+    archive_a = resolver.resolve("first.unknown", archive_key="first")
+
+    resolver.confirm_extraction(archive_a)
+    resolver.reject_extraction_candidate(archive_b)
+    promoted_b = resolver.resolve("second.unknown", archive_key="second")
+
+    assert archive_a.password == "shared-secret"
+    assert promoted_b.password == "shared-secret"
+
+
+def test_hundreds_of_archives_reuse_batch_success_instead_of_rewalking_password_matrix():
+    passwords = [f"wrong-{index}" for index in range(499)] + ["shared-secret"]
+    tester = FakePasswordTester()
+    tester.password_store = PasswordStore.from_sources(cli_passwords=passwords, builtin_passwords=[])
+
+    class QueueScheduler:
+        def plan_for_extraction(self, job):
+            candidates = tuple(candidate.value for candidate in job.candidate_pipeline())
+            return PasswordSearchResult(
+                password=None,
+                status=PasswordSearchStatus.INCONCLUSIVE,
+                extraction_candidates=candidates,
+            )
+
+        def remember_extraction_success(self, fingerprint_key, password):
+            pass
+
+        def remember_extraction_rejection(self, fingerprint_key, password):
+            pass
+
+    resolver = PasswordResolver(tester, PasswordSession(), QueueScheduler())
+    attempts = 0
+    resolution = resolver.resolve("archive-0.mixed", archive_key="archive-0")
+    while resolution.password != "shared-secret":
+        attempts += 1
+        resolver.reject_extraction_candidate(resolution)
+        resolution = resolver.resolve("archive-0.mixed", archive_key="archive-0")
+    attempts += 1
+    resolver.confirm_extraction(resolution)
+
+    for index in range(1, 100):
+        resolution = resolver.resolve(f"archive-{index}.mixed", archive_key=f"archive-{index}")
+        attempts += 1
+        assert resolution.password == "shared-secret"
+        resolver.confirm_extraction(resolution)
+
+    assert attempts == 599

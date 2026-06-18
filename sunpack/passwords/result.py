@@ -39,4 +39,6 @@ class PasswordResolution:
     error_text: str = ""
     archive_key: str = ""
     encrypted: bool | None = None
+    requires_extraction_confirmation: bool = False
+    fingerprint_key: str = ""
 

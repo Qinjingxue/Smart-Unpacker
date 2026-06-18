@@ -193,6 +193,61 @@ def test_verifier_chain_falls_back_when_fast_verifier_is_unknown():
     assert final.batches == [["bad1", "bad2", "secret"]]
 
 
+def test_extraction_plan_never_invokes_full_payload_final_verifier(tmp_path):
+    archive = tmp_path / "renamed.bin"
+    archive.write_bytes(b"archive")
+    fast = StaticVerifier(PasswordBatchVerification(
+        ok=False,
+        status="unknown_needs_final_verifier",
+        attempts=0,
+    ))
+    final = StaticVerifier(PasswordBatchVerification(
+        ok=True,
+        status="match",
+        matched_index=2,
+        attempts=3,
+    ))
+    scheduler = PasswordScheduler(PasswordVerifierChain([fast], final), default_batch_size=2)
+
+    result = scheduler.plan_for_extraction(PasswordJob(
+        archive_path=str(archive),
+        archive_input={"format_hint": "rar"},
+        candidates=PasswordCandidatePipeline.from_values(["one", "two", "three"]),
+    ))
+
+    assert result.password is None
+    assert result.extraction_candidates == ("one", "two", "three")
+    assert fast.batches == [["one", "two"], ["three"]]
+    assert final.batches == []
+
+
+def test_extraction_plan_accepts_strong_fast_proof_and_caches_it(tmp_path):
+    archive = tmp_path / "confused.extension"
+    archive.write_bytes(b"archive")
+    fast = StaticVerifier(PasswordBatchVerification(
+        ok=True,
+        status="match",
+        matched_index=1,
+        attempts=2,
+        final_confirmation_required=False,
+    ))
+    scheduler = PasswordScheduler(PasswordVerifierChain([fast], None))
+    job = PasswordJob(
+        archive_path=str(archive),
+        archive_input={"format_hint": "7z"},
+        candidates=PasswordCandidatePipeline.from_values(["bad", "secret"]),
+    )
+
+    first = scheduler.plan_for_extraction(job)
+    second = scheduler.plan_for_extraction(job)
+
+    assert first.password == "secret"
+    assert first.stopped_reason == "fast_proof"
+    assert second.password == "secret"
+    assert second.stopped_reason == "cache_hit"
+    assert fast.batches == [["bad", "secret"]]
+
+
 def test_verifier_chain_prioritizes_fast_verifier_from_extension():
     zip_fast = FormatVerifier("zip", PasswordBatchVerification(ok=False, status="unsupported_method"))
     rar_fast = FormatVerifier("rar", PasswordBatchVerification(ok=False, status="unsupported_method"))
