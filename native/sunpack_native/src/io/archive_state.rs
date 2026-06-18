@@ -11,6 +11,7 @@ const COPY_CHUNK_SIZE: usize = 1024 * 1024;
 const EOCD_SIG: &[u8] = b"PK\x05\x06";
 const CD_SIG: &[u8] = b"PK\x01\x02";
 const LFH_SIG: &[u8] = b"PK\x03\x04";
+const ZIP_UNICODE_PATH_EXTRA_FIELD: u16 = 0x7075;
 
 #[pyfunction]
 pub(crate) fn archive_state_to_bytes_native(
@@ -514,6 +515,7 @@ fn zip_manifest_from_bytes<'py>(
         let local_offset = u32_le(data, cursor + 42) as usize;
         let name_start = cursor + 46;
         let name_end = name_start + name_len;
+        let extra_end = name_end + extra_len;
         let record_end = name_end + extra_len + comment_len;
         if record_end > data.len() || record_end > expected_end {
             damaged = true;
@@ -521,7 +523,12 @@ fn zip_manifest_from_bytes<'py>(
             break;
         }
         item_count += 1;
-        let name = decode_zip_filename(&data[name_start..name_end], flags, codepage)?;
+        let name = decode_zip_filename(
+            &data[name_start..name_end],
+            &data[name_end..extra_end],
+            flags,
+            codepage,
+        )?;
         if !name.ends_with('/') && file_count < max_items {
             let item = PyDict::new(py);
             item.set_item("path", &name)?;
@@ -565,12 +572,20 @@ fn zip_manifest_from_bytes<'py>(
     Ok(result)
 }
 
-fn decode_zip_filename(raw: &[u8], flags: u16, codepage: Option<&str>) -> PyResult<String> {
+fn decode_zip_filename(
+    raw: &[u8],
+    extra: &[u8],
+    flags: u16,
+    codepage: Option<&str>,
+) -> PyResult<String> {
     const ZIP_UTF8_FLAG: u16 = 1 << 11;
     if flags & ZIP_UTF8_FLAG != 0 {
         return String::from_utf8(raw.to_vec())
             .map(|value| value.replace('\\', "/"))
             .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()));
+    }
+    if let Some(unicode_name) = valid_unicode_path_name(raw, extra) {
+        return Ok(unicode_name.replace('\\', "/"));
     }
     if let Some(codepage) = codepage.filter(|value| !value.is_empty()) {
         let encoding = match codepage {
@@ -595,6 +610,37 @@ fn decode_zip_filename(raw: &[u8], flags: u16, codepage: Option<&str>) -> PyResu
         .map(|byte| cp437_char(*byte))
         .collect::<String>()
         .replace('\\', "/"))
+}
+
+/// Return the Info-ZIP Unicode Path Extra Field only when its version, raw-name
+/// CRC32, and UTF-8 payload are all valid. Invalid fields are ignored so the
+/// explicit codepage / CP437 fallback remains available.
+fn valid_unicode_path_name<'a>(raw: &[u8], extra: &'a [u8]) -> Option<&'a str> {
+    let mut offset = 0usize;
+    while offset + 4 <= extra.len() {
+        let field_id = u16_le(extra, offset);
+        let field_len = u16_le(extra, offset + 2) as usize;
+        let data_start = offset + 4;
+        let data_end = data_start.checked_add(field_len)?;
+        if data_end > extra.len() {
+            return None;
+        }
+        if field_id == ZIP_UNICODE_PATH_EXTRA_FIELD {
+            let field = &extra[data_start..data_end];
+            if field.len() >= 6
+                && field[0] == 1
+                && u32_le(field, 1) == crc32fast::hash(raw)
+            {
+                if let Ok(name) = std::str::from_utf8(&field[5..]) {
+                    if !name.is_empty() {
+                        return Some(name);
+                    }
+                }
+            }
+        }
+        offset = data_end;
+    }
+    None
 }
 
 fn cp437_char(byte: u8) -> char {
@@ -631,14 +677,14 @@ mod tests {
 
     #[test]
     fn zip_filename_decoder_uses_cp437_when_utf8_flag_is_absent() {
-        assert_eq!(decode_zip_filename(b"caf\x82.txt", 0, None).unwrap(), "café.txt");
-        assert_eq!(decode_zip_filename(b"dir\\file.txt", 0, None).unwrap(), "dir/file.txt");
+        assert_eq!(decode_zip_filename(b"caf\x82.txt", b"", 0, None).unwrap(), "café.txt");
+        assert_eq!(decode_zip_filename(b"dir\\file.txt", b"", 0, None).unwrap(), "dir/file.txt");
     }
 
     #[test]
     fn zip_filename_decoder_uses_utf8_when_flag_is_set() {
         assert_eq!(
-            decode_zip_filename("目录/文件.txt".as_bytes(), 1 << 11, None).unwrap(),
+            decode_zip_filename("目录/文件.txt".as_bytes(), b"", 1 << 11, None).unwrap(),
             "目录/文件.txt"
         );
     }
@@ -646,7 +692,29 @@ mod tests {
     #[test]
     fn zip_filename_decoder_uses_selected_shift_jis_codepage() {
         assert_eq!(
-            decode_zip_filename(b"\x93\xfa\x96{\x8c\xea.txt", 0, Some("932")).unwrap(),
+            decode_zip_filename(b"\x93\xfa\x96{\x8c\xea.txt", b"", 0, Some("932")).unwrap(),
+            "日本語.txt"
+        );
+    }
+
+    #[test]
+    fn zip_filename_decoder_prefers_valid_unicode_path_extra_field() {
+        let raw = b"\x93\xfa\x96{\x8c\xea.txt";
+        let unicode = "日本語.txt".as_bytes();
+        let mut extra = Vec::new();
+        extra.extend_from_slice(&0x7075u16.to_le_bytes());
+        extra.extend_from_slice(&((5 + unicode.len()) as u16).to_le_bytes());
+        extra.push(1);
+        extra.extend_from_slice(&crc32fast::hash(raw).to_le_bytes());
+        extra.extend_from_slice(unicode);
+
+        assert_eq!(
+            decode_zip_filename(raw, &extra, 0, None).unwrap(),
+            "日本語.txt"
+        );
+        extra[5] ^= 1;
+        assert_ne!(
+            decode_zip_filename(raw, &extra, 0, None).unwrap(),
             "日本語.txt"
         );
     }

@@ -85,7 +85,7 @@ class ArchiveMetadataScanner:
     def _scan_zip_central_directory(self, archive_path: str) -> ArchiveMetadataScanResult:
         result = ArchiveMetadataScanResult(archive_path=archive_path, archive_type="zip")
         try:
-            raw_names, utf8_flags, truncated, warning = self._scan_zip_name_samples(archive_path)
+            raw_names, utf8_flags, unicode_names, truncated, warning = self._scan_zip_name_samples(archive_path)
             if warning:
                 result.warnings.append(warning)
                 return result
@@ -97,15 +97,30 @@ class ArchiveMetadataScanner:
             if not raw_names:
                 result.reasons.append("ZIP 中央目录没有可分析的文件名")
                 return result
-            if all(utf8_flags):
-                result.reasons.append("ZIP 条目均带 UTF-8 标记，保持默认解压参数")
+            authoritative_names = [
+                self._authoritative_zip_name(raw_name, utf8, unicode_name)
+                for raw_name, utf8, unicode_name in zip(raw_names, utf8_flags, unicode_names)
+            ]
+            if all(name is not None for name in authoritative_names):
+                result.decoded_names = list(authoritative_names)
+                unicode_count = sum(name is not None for name in unicode_names)
+                result.confidence = 1.0
+                if unicode_count:
+                    result.reasons.append(
+                        f"已校验并采用 {unicode_count} 个 ZIP Unicode Path Extra Field (0x7075) 文件名"
+                    )
+                else:
+                    result.reasons.append("ZIP 条目均带有效 UTF-8 标记，保持默认解压参数")
                 return result
             if all(self._is_ascii_name(raw_name) for raw_name in raw_names):
                 result.reasons.append("ZIP 文件名均为 ASCII，保持默认解压参数")
                 return result
 
-            unmarked_names = [raw_name for raw_name, utf8 in zip(raw_names, utf8_flags) if not utf8]
-            selected = self._select_codepage(unmarked_names)
+            unresolved_names = [
+                raw_name for raw_name, authoritative in zip(raw_names, authoritative_names)
+                if authoritative is None
+            ]
+            selected = self._select_codepage(unresolved_names)
             result.confidence = selected["confidence"]
             result.reasons.extend(selected["reasons"])
             if selected["codepage"]:
@@ -113,21 +128,22 @@ class ArchiveMetadataScanner:
                 result.decoded_names = self._decode_names(
                     raw_names,
                     utf8_flags,
+                    unicode_names,
                     selected["encoding"],
                 )
                 result.reasons.append(f"高置信选择 {selected['label']}，解压时按 CP{selected['codepage']} 覆盖 ZIP 条目路径")
             else:
-                result.error = "ZIP 文件名编码置信度不足"
-                result.reasons.append(result.error)
+                result.warnings.append("ZIP 文件名编码置信度不足，交由解压器按 ZIP 元数据处理")
+                result.reasons.append("未强制覆盖 ZIP 文件名编码；继续使用解压器原生解析")
             return result
         except Exception as exc:
             result.warnings.append(f"ZIP 元数据扫描失败: {exc}")
             return result
 
-    def _scan_zip_name_samples(self, archive_path: str) -> Tuple[List[bytes], List[bool], bool, str]:
+    def _scan_zip_name_samples(self, archive_path: str) -> Tuple[List[bytes], List[bool], List[Optional[bytes]], bool, str]:
         return self._scan_zip_name_samples_native(archive_path)
 
-    def _scan_zip_name_samples_native(self, archive_path: str) -> Tuple[List[bytes], List[bool], bool, str]:
+    def _scan_zip_name_samples_native(self, archive_path: str) -> Tuple[List[bytes], List[bool], List[Optional[bytes]], bool, str]:
         result = _NATIVE_SCAN_ZIP_NAMES(
             archive_path,
             self.MAX_ZIP_SAMPLES,
@@ -139,35 +155,58 @@ class ArchiveMetadataScanner:
         status = result.get("status")
         warning = self._zip_native_status_warning(status)
         if warning:
-            return [], [], False, warning
+            return [], [], [], False, warning
         if status != "ok":
             raise RuntimeError(f"Native ZIP name scanner returned unsupported status: {status}")
 
         raw_names = result.get("raw_names")
         utf8_flags = result.get("utf8_flags")
+        unicode_path_names = result.get("unicode_path_names", [None] * len(raw_names or []))
         truncated = result.get("truncated")
         if not isinstance(raw_names, list) or not isinstance(truncated, bool):
             raise TypeError("Native ZIP name scanner returned invalid raw_names/truncated")
         if not isinstance(utf8_flags, list) or len(utf8_flags) != len(raw_names):
             raise TypeError("Native ZIP name scanner returned invalid utf8_flags")
+        if not isinstance(unicode_path_names, list) or len(unicode_path_names) != len(raw_names):
+            raise TypeError("Native ZIP name scanner returned invalid unicode_path_names")
         normalized_names = []
         normalized_flags = []
-        for raw_name, utf8_flag in zip(raw_names, utf8_flags):
+        normalized_unicode_names = []
+        for raw_name, utf8_flag, unicode_name in zip(raw_names, utf8_flags, unicode_path_names):
             if not isinstance(raw_name, bytes):
                 raise TypeError("Native ZIP name scanner returned a non-bytes name")
             if not isinstance(utf8_flag, bool):
                 raise TypeError("Native ZIP name scanner returned a non-bool UTF-8 flag")
+            if unicode_name is not None and not isinstance(unicode_name, bytes):
+                raise TypeError("Native ZIP name scanner returned an invalid Unicode path name")
+            if unicode_name is not None:
+                unicode_name.decode("utf-8", errors="strict")
             normalized_names.append(raw_name)
             normalized_flags.append(utf8_flag)
-        return normalized_names, normalized_flags, truncated, ""
+            normalized_unicode_names.append(unicode_name)
+        return normalized_names, normalized_flags, normalized_unicode_names, truncated, ""
 
     @staticmethod
-    def _decode_names(raw_names: List[bytes], utf8_flags: List[bool], encoding: str) -> List[str]:
+    def _decode_names(raw_names: List[bytes], utf8_flags: List[bool], unicode_names: List[Optional[bytes]], encoding: str) -> List[str]:
         decoded = []
-        for raw_name, utf8_flag in zip(raw_names, utf8_flags):
-            codec = "utf-8" if utf8_flag else encoding
-            decoded.append(raw_name.decode(codec, errors="strict").replace("\\", "/"))
+        for raw_name, utf8_flag, unicode_name in zip(raw_names, utf8_flags, unicode_names):
+            authoritative = ArchiveMetadataScanner._authoritative_zip_name(raw_name, utf8_flag, unicode_name)
+            if authoritative is not None:
+                decoded.append(authoritative)
+            else:
+                decoded.append(raw_name.decode(encoding, errors="strict").replace("\\", "/"))
         return decoded
+
+    @staticmethod
+    def _authoritative_zip_name(raw_name: bytes, utf8_flag: bool, unicode_name: Optional[bytes]) -> Optional[str]:
+        if utf8_flag:
+            try:
+                return raw_name.decode("utf-8", errors="strict").replace("\\", "/")
+            except UnicodeDecodeError:
+                return None
+        if unicode_name is not None:
+            return unicode_name.decode("utf-8", errors="strict").replace("\\", "/")
+        return None
 
     def _zip_native_status_warning(self, status) -> str:
         warnings = {
@@ -198,7 +237,11 @@ class ArchiveMetadataScanner:
         best = scores[0]
         second = scores[1] if len(scores) > 1 else {"score": 0, "label": "-"}
         lead = best["score"] - second["score"]
-        confidence = max(0.0, min(1.0, (lead + max(best["score"], 0)) / 60.0))
+        # Confidence mirrors the admission rule: a high absolute score cannot
+        # conceal an ambiguous margin over the runner-up.
+        score_confidence = max(0.0, min(1.0, best["score"] / 24.0))
+        lead_confidence = max(0.0, min(1.0, lead / 12.0))
+        confidence = min(score_confidence, lead_confidence)
         reasons = [
             f"编码候选最高分: {best['label']}={best['score']}，次高: {second['label']}={second['score']}，领先={lead}",
         ]

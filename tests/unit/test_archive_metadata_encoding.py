@@ -40,19 +40,55 @@ def test_shift_jis_zip_scan_returns_decoded_item_paths(tmp_path):
     assert result.confidence > 0.5
 
 
-def _write_stored_zip(path, raw_name: bytes, payload: bytes) -> None:
+def test_unicode_path_extra_field_takes_precedence_over_codepage_guess(tmp_path):
+    archive = tmp_path / "unicode-extra.zip"
+    raw_name = "【びよびよ研究室】ケイ.psd".encode("cp932")
+    expected_name = "【びよびよ研究室】ケイ.psd"
+    _write_stored_zip(archive, raw_name, b"payload", unicode_name=expected_name)
+
+    result = ArchiveMetadataScanner().scan(str(archive))
+
+    assert result.error is None
+    assert result.selected_codepage is None
+    assert result.decoded_names == [expected_name]
+    assert result.confidence == 1.0
+    assert any("0x7075" in reason for reason in result.reasons)
+
+
+def test_ambiguous_codepage_does_not_block_extraction():
+    scanner = ArchiveMetadataScanner()
+    scanner._select_codepage = lambda _names: {
+        "encoding": "cp932", "codepage": None, "confidence": 0.167,
+        "label": "Shift-JIS/CP932", "reasons": ["ambiguous"],
+    }
+    scanner._scan_zip_name_samples = lambda _path: ([b"\x82\xa0.txt"], [False], [None], False, "")
+
+    result = scanner._scan_zip_central_directory("unused.zip")
+
+    assert result.error is None
+    assert result.selected_codepage is None
+    assert result.confidence == 0.167
+    assert result.warnings
+
+
+def _write_stored_zip(path, raw_name: bytes, payload: bytes, unicode_name: str | None = None) -> None:
     crc = binascii.crc32(payload) & 0xFFFFFFFF
+    extra = b""
+    if unicode_name is not None:
+        encoded_unicode_name = unicode_name.encode("utf-8")
+        extra_payload = b"\x01" + struct.pack("<I", binascii.crc32(raw_name) & 0xFFFFFFFF) + encoded_unicode_name
+        extra = struct.pack("<HH", 0x7075, len(extra_payload)) + extra_payload
     local = struct.pack(
         "<IHHHHHIIIHH",
         0x04034B50, 20, 0, 0, 0, 0, crc,
-        len(payload), len(payload), len(raw_name), 0,
-    ) + raw_name + payload
+        len(payload), len(payload), len(raw_name), len(extra),
+    ) + raw_name + extra + payload
     central = struct.pack(
         "<IHHHHHHIIIHHHHHII",
         0x02014B50, 20, 20, 0, 0, 0, 0, crc,
         len(payload), len(payload), len(raw_name),
-        0, 0, 0, 0, 0, 0,
-    ) + raw_name
+        len(extra), 0, 0, 0, 0, 0,
+    ) + raw_name + extra
     eocd = struct.pack(
         "<IHHHHIIH",
         0x06054B50, 0, 0, 1, 1, len(central), len(local), 0,

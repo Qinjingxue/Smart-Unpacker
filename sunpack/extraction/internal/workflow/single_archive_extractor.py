@@ -178,20 +178,15 @@ class SingleArchiveExtractor:
                     )
                     selected_codepage = filename_encoding.selected_codepage
                     if filename_encoding.error:
-                        return self._failed(
-                            archive,
-                            out_dir,
-                            run_parts,
-                            filename_encoding.error,
-                            password_used=correct_pwd,
-                            diagnostics={
-                                "failure_stage": "filename_encoding",
-                                "failure_kind": "filename_encoding_detection",
-                                "message": filename_encoding.error,
-                                "warnings": list(filename_encoding.warnings),
-                                "reasons": list(filename_encoding.reasons),
-                            },
+                        # Filename detection is an optional override.  Failure or
+                        # ambiguity must not prevent the archive backend from
+                        # using UTF-8 flags / Unicode extra fields itself.
+                        self._log(
+                            f"[EXTRACT] 文件名编码扫描未采用覆盖参数，继续使用解压器默认解析: "
+                            f"{filename_encoding.error}"
                         )
+                        selected_codepage = None
+                        filename_encoding.decoded_names = []
 
                 if correct_pwd is None:
                     err = test_err

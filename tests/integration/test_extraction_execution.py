@@ -63,6 +63,19 @@ class FakeMetadataScanner:
         )
 
 
+class FakeFailingMetadataScanner:
+    def scan(self, archive, password=None, part_paths=None):
+        result = ArchiveMetadataScanResult(
+            archive_path=str(archive),
+            archive_type="zip",
+            reasons=["ambiguous filename encoding"],
+        )
+        result.error = "ZIP 文件名编码置信度不足"
+        result.selected_codepage = "932"
+        result.decoded_names = ["incorrect override.txt"]
+        return result
+
+
 class FakeStager:
     def normalize_archive_paths(self, archive, all_parts, startupinfo=None, volume_entries=None):
         parts = list(all_parts)
@@ -73,6 +86,29 @@ class FakeStager:
 
 
 class ExtractionExecutionTests(unittest.TestCase):
+    def test_metadata_detection_failure_falls_back_to_archive_backend(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            archive_path = Path(tmp) / "ambiguous.zip"
+            archive_path.write_bytes(b"zip")
+            out_dir = Path(tmp) / "out"
+            extractor = ExtractionScheduler(max_retries=1)
+            extractor.password_resolver = FakePasswordResolver()
+            extractor.metadata_scanner = FakeFailingMetadataScanner()
+            extractor.rename_scheduler = FakeStager()
+            calls = []
+            extractor.sevenzip_runner.run_extract = lambda **kwargs: (
+                calls.append(kwargs) or SimpleNamespace(returncode=0, stdout="", stderr="")
+            )
+            task = ArchiveTask(
+                fact_bag=FactBag(), score=10, main_path=str(archive_path), all_parts=[str(archive_path)]
+            )
+
+            result = extractor.extract(task, str(out_dir))
+
+            self.assertTrue(result.success)
+            self.assertEqual(calls[0]["selected_codepage"], None)
+            self.assertEqual(calls[0]["decoded_names"], [])
+
     def test_extractor_success_reports_cleanup_parts_not_candidate_run_parts(self):
         with tempfile.TemporaryDirectory() as tmp:
             archive_path = Path(tmp) / "sample.7z.001"

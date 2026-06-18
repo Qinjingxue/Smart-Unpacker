@@ -8,6 +8,7 @@ use std::io::{Seek, SeekFrom};
 const ZIP_EOCD_SIGNATURE: &[u8] = b"PK\x05\x06";
 const ZIP_CENTRAL_DIRECTORY_SIGNATURE: &[u8] = b"PK\x01\x02";
 const ZIP_UTF8_FLAG: u16 = 0x800;
+const ZIP_UNICODE_PATH_EXTRA_FIELD: u16 = 0x7075;
 const ZIP64_MARKER: u32 = 0xFFFF_FFFF;
 const ZIP_EOCD_LENGTH: usize = 22;
 const ZIP_CENTRAL_HEADER_LENGTH: usize = 46;
@@ -18,6 +19,7 @@ struct ZipNameScan {
     status: &'static str,
     raw_names: Vec<Vec<u8>>,
     utf8_flags: Vec<bool>,
+    unicode_path_names: Vec<Option<Vec<u8>>>,
     truncated: bool,
 }
 
@@ -27,6 +29,7 @@ impl ZipNameScan {
             status,
             raw_names: Vec::new(),
             utf8_flags: Vec::new(),
+            unicode_path_names: Vec::new(),
             truncated: false,
         }
     }
@@ -40,6 +43,14 @@ impl ZipNameScan {
         dict.set_item("status", self.status)?;
         dict.set_item("raw_names", names)?;
         dict.set_item("utf8_flags", self.utf8_flags)?;
+        let unicode_names = PyList::empty(py);
+        for name in self.unicode_path_names {
+            match name {
+                Some(name) => unicode_names.append(PyBytes::new(py, &name))?,
+                None => unicode_names.append(py.None())?,
+            }
+        }
+        dict.set_item("unicode_path_names", unicode_names)?;
         dict.set_item("truncated", self.truncated)?;
         Ok(dict.unbind())
     }
@@ -113,6 +124,7 @@ fn collect_zip_names(
 ) -> ZipNameScan {
     let mut raw_names: Vec<Vec<u8>> = Vec::new();
     let mut utf8_flags = Vec::new();
+    let mut unicode_path_names = Vec::new();
     let mut filename_bytes = 0;
     let mut offset = 0;
     let expected_entries = if total_entries == 0 {
@@ -135,7 +147,8 @@ fn collect_zip_names(
         let name_start = offset + ZIP_CENTRAL_HEADER_LENGTH;
         let name_end = name_start + name_len;
         let next_offset = name_end + extra_len + comment_len;
-        if name_end > central.len() {
+        let extra_end = name_end.saturating_add(extra_len);
+        if name_end > central.len() || extra_end > central.len() || next_offset > central.len() {
             truncated = true;
             break;
         }
@@ -144,6 +157,10 @@ fn collect_zip_names(
         if !raw_name.is_empty() {
             raw_names.push(raw_name.to_vec());
             utf8_flags.push(flags & ZIP_UTF8_FLAG != 0);
+            unicode_path_names.push(valid_unicode_path_name(
+                raw_name,
+                &central[name_end..extra_end],
+            ));
             filename_bytes += raw_name.len();
         }
         offset = next_offset;
@@ -157,8 +174,39 @@ fn collect_zip_names(
         status: "ok",
         raw_names,
         utf8_flags,
+        unicode_path_names,
         truncated,
     }
+}
+
+/// Info-ZIP Unicode Path Extra Field (0x7075): version 1, CRC32 of the
+/// central-directory raw name, followed by the authoritative UTF-8 name.
+fn valid_unicode_path_name(raw_name: &[u8], extra: &[u8]) -> Option<Vec<u8>> {
+    let mut offset = 0usize;
+    while offset + 4 <= extra.len() {
+        let field_id = read_u16_le(extra, offset);
+        let field_len = read_u16_le(extra, offset + 2) as usize;
+        let data_start = offset + 4;
+        let Some(data_end) = data_start.checked_add(field_len) else {
+            return None;
+        };
+        if data_end > extra.len() {
+            return None;
+        }
+        if field_id == ZIP_UNICODE_PATH_EXTRA_FIELD {
+            let data = &extra[data_start..data_end];
+            if data.len() >= 6
+                && data[0] == 1
+                && read_u32_le(data, 1) == crc32fast::hash(raw_name)
+                && std::str::from_utf8(&data[5..]).is_ok()
+                && !data[5..].is_empty()
+            {
+                return Some(data[5..].to_vec());
+            }
+        }
+        offset = data_end;
+    }
+    None
 }
 
 fn read_u16_le(bytes: &[u8], offset: usize) -> u16 {
@@ -209,7 +257,24 @@ mod tests {
         assert_eq!(scan.status, "ok");
         assert_eq!(scan.raw_names, vec![raw_name.to_vec()]);
         assert_eq!(scan.utf8_flags, vec![true]);
+        assert_eq!(scan.unicode_path_names, vec![None]);
         assert!(!scan.truncated);
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn zip_scan_validates_unicode_path_extra_field() {
+        let raw_name = "日本語.txt".as_bytes().to_vec();
+        let unicode_name = "正しい名前.txt".as_bytes();
+        let mut extra = Vec::new();
+        extra.extend_from_slice(&ZIP_UNICODE_PATH_EXTRA_FIELD.to_le_bytes());
+        extra.extend_from_slice(&((5 + unicode_name.len()) as u16).to_le_bytes());
+        extra.push(1);
+        extra.extend_from_slice(&crc32fast::hash(&raw_name).to_le_bytes());
+        extra.extend_from_slice(unicode_name);
+
+        assert_eq!(valid_unicode_path_name(&raw_name, &extra), Some(unicode_name.to_vec()));
+        extra[5] ^= 1;
+        assert_eq!(valid_unicode_path_name(&raw_name, &extra), None);
     }
 }

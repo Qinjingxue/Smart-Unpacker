@@ -450,3 +450,38 @@ def test_archive_state_manifest_uses_selected_shift_jis_codepage(tmp_path):
 
     assert manifest.ok
     assert manifest.expected_names == ["日本語/説明.txt"]
+
+
+def test_archive_state_manifest_uses_valid_unicode_path_extra_without_codepage(tmp_path):
+    archive = tmp_path / "unicode-path-extra.zip"
+    expected_name = "【びよびよ研究室】臨戦アリス.psd"
+    raw_name = expected_name.encode("cp932")
+    payload = b"payload"
+    payload_crc = zlib.crc32(payload) & 0xFFFFFFFF
+    unicode_name = expected_name.encode("utf-8")
+    unicode_payload = b"\x01" + struct.pack("<I", zlib.crc32(raw_name) & 0xFFFFFFFF) + unicode_name
+    extra = struct.pack("<HH", 0x7075, len(unicode_payload)) + unicode_payload
+    local = struct.pack(
+        "<IHHHHHIIIHH",
+        0x04034B50, 20, 0, 0, 0, 0, payload_crc,
+        len(payload), len(payload), len(raw_name), 0,
+    ) + raw_name + payload
+    central = struct.pack(
+        "<IHHHHHHIIIHHHHHII",
+        0x02014B50, 20, 20, 0, 0, 0, 0, payload_crc,
+        len(payload), len(payload), len(raw_name),
+        len(extra), 0, 0, 0, 0, 0,
+    ) + raw_name + extra
+    eocd = struct.pack(
+        "<IHHHHIIH",
+        0x06054B50, 0, 0, 1, 1, len(central), len(local), 0,
+    )
+    archive.write_bytes(local + central + eocd)
+    state = ArchiveState.from_archive_input(
+        ArchiveInputDescriptor.from_parts(archive_path=str(archive), format_hint="zip")
+    )
+
+    manifest = archive_state_manifest(state)
+
+    assert manifest.ok
+    assert manifest.expected_names == [expected_name]

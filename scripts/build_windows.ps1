@@ -6,7 +6,7 @@ param(
     [ValidateSet("x64", "arm64")]
     [string]$Arch = "x64",
     [ValidateSet("full", "lite")]
-    [string]$RepairSystem = "full"
+    [string]$RepairSystem
 )
 
 Set-StrictMode -Version Latest
@@ -537,6 +537,20 @@ function Confirm-AcceptanceTests {
     }
 }
 
+function Read-RepairSystemMode {
+    while ($true) {
+        $rawAnswer = Read-Host "Select build edition: [F]ull or [L]ite"
+        $answer = if ($null -eq $rawAnswer) { "" } else { $rawAnswer.Trim() }
+        if ($answer -match "^(?i:f|full)$") {
+            return "full"
+        }
+        if ($answer -match "^(?i:l|lite)$") {
+            return "lite"
+        }
+        Write-Host "Please enter F/full or L/lite." -ForegroundColor Yellow
+    }
+}
+
 function Copy-IfExists {
     param(
         [string]$Source,
@@ -550,6 +564,9 @@ function Copy-IfExists {
 $repoRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 Set-Location $repoRoot
 $buildArch = $Arch.ToLowerInvariant()
+if (-not $PSBoundParameters.ContainsKey("RepairSystem")) {
+    $RepairSystem = Read-RepairSystemMode
+}
 $repairSystemMode = $RepairSystem.ToLowerInvariant()
 $processArch = Get-ProcessBuildArch
 $rustTarget = Get-RustTarget -BuildArch $buildArch
