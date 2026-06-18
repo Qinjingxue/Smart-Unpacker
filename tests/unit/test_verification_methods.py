@@ -6,6 +6,7 @@ from sunpack.contracts.detection import FactBag
 from sunpack.contracts.tasks import ArchiveTask
 from sunpack.extraction.result import ExtractionResult
 from sunpack.verification import VerificationScheduler
+from sunpack.verification import archive_state_manifest as archive_state_manifest_module
 
 
 def test_extraction_exit_signal_reports_unusable_failed_extraction(tmp_path):
@@ -228,6 +229,39 @@ def test_archive_test_crc_compares_archive_state_manifest_to_output_files(tmp_pa
     assert verification.archive_coverage.failed_files == 1
     assert verification.archive_coverage.missing_files == 1
     assert verification.archive_coverage.sources[0]["code"] == "info.archive_output_coverage"
+
+
+def test_zip_verification_methods_share_one_full_archive_manifest(tmp_path, monkeypatch):
+    archive = tmp_path / "shared-manifest.zip"
+    expected = {"one.txt": b"one", "two.txt": b"two", "three.txt": b"three"}
+    with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_STORED) as zf:
+        for name, payload in expected.items():
+            zf.writestr(name, payload)
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    for name, payload in expected.items():
+        (out_dir / name).write_bytes(payload)
+    task = ArchiveTask(
+        fact_bag=FactBag(), score=10, key="shared", main_path=str(archive),
+        all_parts=[str(archive)], detected_ext="zip",
+    )
+    result = ExtractionResult(success=True, archive=str(archive), out_dir=str(out_dir), all_parts=[str(archive)])
+    calls = []
+    native_manifest = archive_state_manifest_module._native_archive_state_zip_manifest
+
+    def counted_manifest(source, patches, max_items, password, codepage):
+        calls.append(max_items)
+        return native_manifest(source, patches, max_items, password, codepage)
+
+    monkeypatch.setattr(archive_state_manifest_module, "_native_archive_state_zip_manifest", counted_manifest)
+    verification = _scheduler([
+        {"name": "expected_name_presence", "max_expected_names": 1},
+        {"name": "manifest_size_match", "max_expected_names": 2},
+        {"name": "archive_test_crc", "max_items": 3},
+    ]).verify(task, result)
+
+    assert verification.decision_hint == "accept"
+    assert calls == [3]
 
 
 def test_archive_test_crc_unsupported_empty_failed_extraction_is_not_complete(tmp_path):

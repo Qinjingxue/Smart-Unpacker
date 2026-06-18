@@ -64,10 +64,17 @@ struct ExtractInputTrace {
 struct ExtractOutputItemTrace {
     unsigned int index = 0;
     unsigned long long bytes_written = 0;
+    unsigned long long expected_size = 0;
+    unsigned int source_crc32 = 0;
+    unsigned int output_crc32 = 0;
     int operation_result = 0;
     int hresult = 0;
     int win32_error = 0;
     bool is_dir = false;
+    bool has_expected_size = false;
+    bool has_source_crc32 = false;
+    bool has_output_crc32 = false;
+    bool crc_verified = false;
     bool done = false;
     bool failed = false;
     std::wstring path;

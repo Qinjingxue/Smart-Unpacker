@@ -4,8 +4,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from sunpack_native import scan_output_tree as _native_scan_output_tree
-
 from sunpack.support.path_names import clean_relative_archive_path, normalize_match_path
 from sunpack.verification.result import FileVerificationObservation, VerificationIssue
 
@@ -186,14 +184,9 @@ def coverage_from_archive_and_output(
 
 
 def output_files_from_directory(output_dir: str) -> list[dict[str, Any]]:
-    scan = dict(_native_scan_output_tree(output_dir))
-    if not scan.get("is_dir"):
-        return []
-    return [
-        {"path": str(item.get("path") or ""), "size": int(item.get("size", 0) or 0)}
-        for item in scan.get("files") or []
-        if isinstance(item, dict)
-    ]
+    from sunpack.verification.methods._output_stats import collect_output_inventory
+
+    return [dict(item) for item in collect_output_inventory(output_dir).files]
 
 
 def archive_files_from_names(names: list[str]) -> list[dict[str, Any]]:

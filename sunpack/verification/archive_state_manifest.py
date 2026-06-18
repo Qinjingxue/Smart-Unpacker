@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -38,20 +39,99 @@ class ArchiveStateManifest:
         return sum(max(0, int(item.get("size", 0) or 0)) for item in self.files)
 
 
+_EVIDENCE_CACHE_ATTRIBUTE = "_archive_state_manifest_full_cache"
+_EVIDENCE_LIMIT_ATTRIBUTE = "_archive_state_manifest_full_max_items"
+
+
+def configure_archive_state_manifest_cache(evidence, *, max_items: int) -> None:
+    """Declare the largest manifest view needed during this verification run."""
+    requested = max(0, int(max_items or 0))
+    current = max(0, int(getattr(evidence, _EVIDENCE_LIMIT_ATTRIBUTE, 0) or 0))
+    object.__setattr__(evidence, _EVIDENCE_LIMIT_ATTRIBUTE, max(current, requested))
+
+
 def archive_state_manifest_for_evidence(evidence, *, max_items: int = 200000) -> ArchiveStateManifest:
+    requested = max(0, int(max_items or 0))
     codepage = str(evidence.selected_codepage or "")
-    cache_key = f"_archive_state_manifest_cache_{max(0, int(max_items or 0))}_{codepage}"
-    cached = getattr(evidence, cache_key, None)
-    if isinstance(cached, ArchiveStateManifest):
-        return cached
-    manifest = archive_state_manifest(
-        evidence.archive_state,
-        max_items=max_items,
-        password=evidence.password,
-        codepage=codepage or None,
+    identity = _evidence_manifest_identity(evidence, codepage)
+    configured_limit = max(0, int(getattr(evidence, _EVIDENCE_LIMIT_ATTRIBUTE, 0) or 0))
+    full_limit = max(requested, configured_limit)
+    cached = getattr(evidence, _EVIDENCE_CACHE_ATTRIBUTE, None)
+    if not (
+        isinstance(cached, dict)
+        and cached.get("identity") == identity
+        and isinstance(cached.get("manifest"), ArchiveStateManifest)
+        and int(cached.get("max_items", -1)) >= full_limit
+    ):
+        full_manifest = _worker_verified_manifest(evidence)
+        if full_manifest is None:
+            full_manifest = archive_state_manifest(
+                evidence.archive_state,
+                max_items=full_limit,
+                password=evidence.password,
+                codepage=codepage or None,
+            )
+        cached = {
+            "identity": identity,
+            "max_items": full_limit,
+            "manifest": full_manifest,
+        }
+        object.__setattr__(evidence, _EVIDENCE_CACHE_ATTRIBUTE, cached)
+    return _manifest_view(cached["manifest"], requested)
+
+
+def _worker_verified_manifest(evidence) -> ArchiveStateManifest | None:
+    result = evidence.worker_result if isinstance(evidence.worker_result, dict) else {}
+    payload = result.get("verified_manifest") if isinstance(result.get("verified_manifest"), dict) else {}
+    files = [dict(item) for item in payload.get("files") or [] if isinstance(item, dict)]
+    if (
+        result.get("status") != "ok"
+        or not payload.get("validated")
+        or int(payload.get("file_count", -1) or 0) != len(files)
+        or any(str(item.get("status") or "") != "complete" for item in files)
+    ):
+        return None
+    normalized_files = []
+    for item in files:
+        normalized_files.append({
+            "path": str(item.get("path") or ""),
+            "size": int(item.get("size", item.get("bytes_written", 0)) or 0),
+            "has_crc": bool(item.get("has_crc")),
+            "crc32": (int(item.get("crc32", 0) or 0) & 0xFFFFFFFF) if item.get("has_crc") else None,
+        })
+    return ArchiveStateManifest(
+        status=STATUS_OK,
+        is_archive=True,
+        damaged=False,
+        checksum_error=False,
+        item_count=int(payload.get("item_count", len(files)) or 0),
+        file_count=len(files),
+        files=normalized_files,
+        message="Archive payload was verified during extraction",
+        archive_type=str(result.get("archive_type") or ""),
+        source=str(payload.get("source") or "sevenzip_worker_extract"),
+        state_aware=True,
+        patch_digest=evidence.patch_digest,
     )
-    object.__setattr__(evidence, cache_key, manifest)
-    return manifest
+
+
+def _evidence_manifest_identity(evidence, codepage: str) -> tuple:
+    state = evidence.archive_state
+    source = state.source
+    return (
+        repr(source.to_dict()),
+        state.effective_patch_digest(),
+        str(evidence.password or ""),
+        codepage,
+    )
+
+
+def _manifest_view(manifest: ArchiveStateManifest, max_items: int) -> ArchiveStateManifest:
+    limit = max(0, int(max_items or 0))
+    if len(manifest.files) <= limit:
+        return manifest
+    files = manifest.files[:limit]
+    return replace(manifest, file_count=len(files), files=files)
 
 
 def archive_state_manifest(

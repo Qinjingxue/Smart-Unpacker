@@ -579,6 +579,13 @@ std::string output_item_traces_json(const std::vector<sunpack::sevenzip::Extract
             ",\"path\":\"" + json_escape(wide_to_utf8(item.path)) +
             "\",\"is_dir\":" + std::string(item.is_dir ? "true" : "false") +
             ",\"bytes_written\":" + std::to_string(item.bytes_written) +
+            ",\"expected_size\":" + std::to_string(item.expected_size) +
+            ",\"has_expected_size\":" + std::string(item.has_expected_size ? "true" : "false") +
+            ",\"source_crc32\":" + std::to_string(item.source_crc32) +
+            ",\"has_source_crc32\":" + std::string(item.has_source_crc32 ? "true" : "false") +
+            ",\"output_crc32\":" + std::to_string(item.output_crc32) +
+            ",\"has_output_crc32\":" + std::string(item.has_output_crc32 ? "true" : "false") +
+            ",\"crc_verified\":" + std::string(item.crc_verified ? "true" : "false") +
             ",\"operation_result\":" + std::to_string(item.operation_result) +
             ",\"operation_result_name\":\"" + json_escape(sunpack::sevenzip::operation_result_name(item.operation_result)) +
             "\",\"hresult\":" + std::to_string(item.hresult) +
@@ -604,6 +611,39 @@ std::string output_trace_json(const sunpack::sevenzip::ExtractOutputTrace& trace
         "\",\"last_win32_error\":" + std::to_string(trace.last_win32_error) +
         ",\"items\":" + output_item_traces_json(trace.items) +
         "}";
+}
+
+std::string verified_manifest_json(const sunpack::sevenzip::ExtractArchiveResult& result, bool validated) {
+    std::string files = "[";
+    bool first = true;
+    unsigned int file_count = 0;
+    for (const auto& item : result.output_trace.items) {
+        if (item.is_dir) {
+            continue;
+        }
+        if (!first) {
+            files += ",";
+        }
+        first = false;
+        ++file_count;
+        files += "{\"index\":" + std::to_string(item.index) +
+            ",\"path\":\"" + json_escape(wide_to_utf8(item.path)) +
+            "\",\"size\":" + std::to_string(item.has_expected_size ? item.expected_size : item.bytes_written) +
+            ",\"bytes_written\":" + std::to_string(item.bytes_written) +
+            ",\"has_crc\":" + std::string(item.has_source_crc32 ? "true" : "false") +
+            ",\"crc32\":" + std::to_string(item.source_crc32) +
+            ",\"has_output_crc\":" + std::string(item.has_output_crc32 ? "true" : "false") +
+            ",\"output_crc32\":" + std::to_string(item.output_crc32) +
+            ",\"crc_ok\":" + std::string(item.crc_verified ? "true" : "false") +
+            ",\"status\":\"" + std::string(item.done ? "complete" : item.failed ? "failed" : "unverified") + "\"}";
+    }
+    files += "]";
+    return std::string("{") +
+        "\"version\":1,\"source\":\"sevenzip_worker_extract\"" +
+        ",\"validated\":" + std::string(validated ? "true" : "false") +
+        ",\"item_count\":" + std::to_string(result.item_count) +
+        ",\"file_count\":" + std::to_string(file_count) +
+        ",\"files\":" + files + "}";
 }
 
 std::string handler_attempts_json(const std::vector<sunpack::sevenzip::ExtractHandlerAttempt>& attempts) {
@@ -744,7 +784,8 @@ int run_request(const std::string& request) {
         "\",\"requested_codepage\":\"" + json_escape(wide_to_utf8(result.requested_codepage)) +
         "\",\"applied_codepage\":\"" + json_escape(wide_to_utf8(result.applied_codepage)) +
         "\",\"filename_decoder\":\"" + json_escape(wide_to_utf8(result.filename_decoder)) +
-        "\",\"failed_item\":\"" + json_escape(wide_to_utf8(result.failed_item)) +
+        "\",\"verified_manifest\":" + verified_manifest_json(result, ok && !dry_run) +
+        ",\"failed_item\":\"" + json_escape(wide_to_utf8(result.failed_item)) +
         "\",\"message\":\"" + json_escape(result.message) + "\"" +
         failure_fields + diagnostic_fields + "}");
     return ok ? 0 : 1;

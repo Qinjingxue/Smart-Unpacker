@@ -9,6 +9,8 @@ from sunpack.support.sevenzip_bridge import (
 )
 from sunpack.verification.archive_state_manifest import archive_state_manifest_for_evidence
 from sunpack.verification.evidence import VerificationEvidence
+from sunpack.verification.methods._archive_output_match import coverage_details, coverage_from_archive_and_output
+from sunpack.verification.methods._output_stats import output_inventory_for_evidence
 from sunpack.verification.registry import register_verification_method
 from sunpack.verification.result import (
     DECISION_REPAIR,
@@ -38,7 +40,11 @@ class ArchiveTestCrcMethod:
         archive_files = [item for item in archive_manifest.files if isinstance(item, dict) and item.get("path")]
         if not archive_files:
             return VerificationStepResult(method=self.name, status="skipped")
-        match_result = dict(_match_archive_output_crc_coverage(archive_files, evidence.output_dir, max_items))
+        inventory = output_inventory_for_evidence(evidence)
+        if _can_use_worker_output_crc(archive_files, inventory.files, inventory.worker_crc_available):
+            match_result = _worker_crc_match_result(archive_files, [dict(item) for item in inventory.files])
+        else:
+            match_result = dict(_match_archive_output_crc_coverage(archive_files, evidence.output_dir, max_items))
 
         status = str(match_result.get("status") or "")
         if status != "ok":
@@ -263,3 +269,68 @@ def _optional_crc(value: Any) -> int | None:
         return int(value or 0) & 0xFFFFFFFF
     except (TypeError, ValueError):
         return None
+
+
+def _can_use_worker_output_crc(
+    archive_files: list[dict[str, Any]],
+    output_files: tuple[dict[str, Any], ...],
+    worker_crc_available: bool,
+) -> bool:
+    if not worker_crc_available:
+        return False
+    from sunpack.support.path_names import normalize_match_path
+
+    outputs = {normalize_match_path(str(item.get("path") or "")): item for item in output_files}
+    for item in archive_files:
+        if not item.get("has_crc", item.get("crc32") is not None):
+            continue
+        output = outputs.get(normalize_match_path(str(item.get("path") or "")))
+        if output is not None and output.get("crc32") is None:
+            return False
+    return True
+
+
+def _worker_crc_match_result(
+    archive_files: list[dict[str, Any]],
+    output_files: list[dict[str, Any]],
+) -> dict[str, Any]:
+    coverage = coverage_from_archive_and_output(
+        archive_files,
+        output_files,
+        method="archive_test_crc",
+    )
+    mismatches = [
+        {
+            "path": observation.archive_path,
+            "expected_crc32": observation.crc_expected,
+            "actual_crc32": observation.crc_actual,
+        }
+        for observation in coverage.observations
+        if observation.crc_expected is not None
+        and observation.crc_actual is not None
+        and observation.crc_expected != observation.crc_actual
+    ]
+    missing = [
+        observation.archive_path
+        for observation in coverage.observations
+        if observation.state == "missing"
+    ]
+    observations = [{
+        "path": observation.path,
+        "archive_path": observation.archive_path,
+        "state": observation.state,
+        "bytes_written": observation.bytes_written,
+        "expected_size": observation.expected_size,
+        "progress": observation.progress,
+        "crc_expected": observation.crc_expected,
+        "crc_actual": observation.crc_actual,
+        "details": dict(observation.details),
+    } for observation in coverage.observations]
+    return {
+        "status": "ok",
+        "mismatches": mismatches,
+        "missing": missing,
+        "coverage": coverage_details(coverage),
+        "observations": observations,
+        "source": "sevenzip_worker_write",
+    }

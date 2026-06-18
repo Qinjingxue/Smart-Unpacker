@@ -2,6 +2,7 @@ from contextlib import nullcontext
 from typing import Any, Callable
 
 from sunpack.verification.evidence import VerificationEvidence
+from sunpack.verification.archive_state_manifest import configure_archive_state_manifest_cache
 from sunpack.verification.output_quality import compute_output_quality
 from sunpack.verification.registry import get_verification_method
 from sunpack.verification.result import (
@@ -51,6 +52,10 @@ class VerificationPipeline:
         upper_bound_hints: list[float] = []
         source_hints: list[str] = []
         decision_hints: list[str] = []
+
+        manifest_limit = _configured_archive_manifest_limit(self.methods)
+        if manifest_limit is not None:
+            configure_archive_state_manifest_cache(evidence, max_items=manifest_limit)
 
         if not self.methods:
             return VerificationResult(
@@ -113,7 +118,6 @@ class VerificationPipeline:
                 repair_hints=evidence.repair_hints,
                 evidence=evidence,
             )
-
     def _build_result(
         self,
         *,
@@ -198,6 +202,21 @@ class VerificationPipeline:
             file_observations=file_observations,
             repair_hints=dict(repair_hints or {}),
         )
+
+
+def _configured_archive_manifest_limit(methods: list[Any]) -> int | None:
+    limits = []
+    for config in methods:
+        if not isinstance(config, dict) or not config.get("enabled", True):
+            continue
+        name = str(config.get("name") or "").strip()
+        if name == "expected_name_presence":
+            limits.append(max(1, int(config.get("max_expected_names", 50) or 50)))
+        elif name == "manifest_size_match":
+            limits.append(max(1, int(config.get("max_expected_names", 2000) or 2000)))
+        elif name == "archive_test_crc":
+            limits.append(max(0, int(config.get("max_items", 200000) or 0)))
+    return max(limits) if limits else None
 
 
 def _aggregate_completeness(file_observations: list[FileVerificationObservation], hints: list[float]) -> float:

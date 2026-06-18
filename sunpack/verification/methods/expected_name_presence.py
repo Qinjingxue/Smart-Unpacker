@@ -8,9 +8,8 @@ from sunpack.verification.methods._archive_output_match import (
     archive_files_from_names,
     coverage_details,
     coverage_from_archive_and_output,
-    output_files_from_directory,
 )
-from sunpack.verification.methods._output_stats import output_stats_for_evidence
+from sunpack.verification.methods._output_stats import output_files_for_evidence, output_stats_for_evidence
 from sunpack.verification.registry import register_verification_method
 from sunpack.verification.result import (
     DECISION_NONE,
@@ -158,22 +157,7 @@ class ExpectedNamePresenceMethod:
         return names
 
 def _output_files_for_coverage(evidence: VerificationEvidence) -> list[dict[str, Any]]:
-    manifest = evidence.progress_manifest or {}
-    manifest_files = []
-    for item in manifest.get("files") or []:
-        if not isinstance(item, dict):
-            continue
-        path = item.get("archive_path") or item.get("path")
-        if not path:
-            continue
-        manifest_files.append({
-            "path": path,
-            "archive_path": item.get("archive_path"),
-            "size": item.get("bytes_written"),
-            "bytes_written": item.get("bytes_written"),
-            "status": item.get("status"),
-        })
-    return manifest_files or output_files_from_directory(evidence.output_dir)
+    return output_files_for_evidence(evidence)
 
 
 def _iter_name_values(value: Any):

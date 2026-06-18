@@ -12,6 +12,8 @@
 
 #include <algorithm>
 
+#include <array>
+
 #include <cstddef>
 
 #include <filesystem>
@@ -35,6 +37,25 @@ namespace sunpack::sevenzip {
 
 
 #ifdef _WIN32
+
+inline UInt32 update_crc32(UInt32 crc, const void* data, std::size_t size) {
+    static const std::array<UInt32, 256> table = [] {
+        std::array<UInt32, 256> values{};
+        for (UInt32 index = 0; index < values.size(); ++index) {
+            UInt32 value = index;
+            for (int bit = 0; bit < 8; ++bit) {
+                value = (value >> 1) ^ ((value & 1) ? 0xEDB88320U : 0U);
+            }
+            values[index] = value;
+        }
+        return values;
+    }();
+    const auto* bytes = static_cast<const unsigned char*>(data);
+    for (std::size_t index = 0; index < size; ++index) {
+        crc = table[(crc ^ bytes[index]) & 0xFFU] ^ (crc >> 8);
+    }
+    return crc;
+}
 
 
 
@@ -496,6 +517,7 @@ public:
         }
 
         bytes_written_ += written;
+        crc32_ = update_crc32(crc32_, data, written);
 
         if (trace_) {
 
@@ -512,6 +534,8 @@ public:
             if (item_trace_index_ < trace_->items.size()) {
 
                 trace_->items[item_trace_index_].bytes_written += written;
+                trace_->items[item_trace_index_].output_crc32 = crc32_ ^ 0xFFFFFFFFU;
+                trace_->items[item_trace_index_].has_output_crc32 = true;
 
                 trace_->items[item_trace_index_].hresult = S_OK;
 
@@ -562,6 +586,8 @@ private:
     HANDLE handle_ = INVALID_HANDLE_VALUE;
 
     UInt64 bytes_written_ = 0;
+
+    UInt32 crc32_ = 0xFFFFFFFFU;
 
 };
 
@@ -621,9 +647,10 @@ public:
 
     }
 
-    HRESULT STDMETHODCALLTYPE Write(const void*, UInt32 size, UInt32* processedSize) override {
+    HRESULT STDMETHODCALLTYPE Write(const void* data, UInt32 size, UInt32* processedSize) override {
 
         bytes_written_ += size;
+        crc32_ = update_crc32(crc32_, data, size);
 
         if (trace_) {
 
@@ -640,6 +667,8 @@ public:
             if (item_trace_index_ < trace_->items.size()) {
 
                 trace_->items[item_trace_index_].bytes_written += size;
+                trace_->items[item_trace_index_].output_crc32 = crc32_ ^ 0xFFFFFFFFU;
+                trace_->items[item_trace_index_].has_output_crc32 = true;
 
                 trace_->items[item_trace_index_].hresult = S_OK;
 
@@ -670,6 +699,8 @@ private:
     std::size_t item_trace_index_ = 0;
 
     UInt64 bytes_written_ = 0;
+
+    UInt32 crc32_ = 0xFFFFFFFFU;
 
 };
 
@@ -891,6 +922,22 @@ public:
 
         clear_prop(value);
 
+        UInt64 expected_size = 0;
+        bool has_expected_size = false;
+        if (!is_dir && get_item_property(archive_, index, kpidSize, value)) {
+            expected_size = prop_u64(value);
+            has_expected_size = true;
+        }
+        clear_prop(value);
+
+        UInt32 source_crc32 = 0;
+        bool has_source_crc32 = false;
+        if (!is_dir && get_item_property(archive_, index, kpidCRC, value)) {
+            source_crc32 = prop_u32(value);
+            has_source_crc32 = true;
+        }
+        clear_prop(value);
+
 
 
         std::wstring name;
@@ -925,7 +972,7 @@ public:
 
             output_trace_->current_item_bytes_written = 0;
 
-            begin_item_trace(index, name, is_dir);
+            begin_item_trace(index, name, is_dir, expected_size, has_expected_size, source_crc32, has_source_crc32);
 
         }
 
@@ -1088,7 +1135,15 @@ public:
 
 private:
 
-    void begin_item_trace(UInt32 index, const std::wstring& item_path, bool is_dir) {
+    void begin_item_trace(
+        UInt32 index,
+        const std::wstring& item_path,
+        bool is_dir,
+        UInt64 expected_size,
+        bool has_expected_size,
+        UInt32 source_crc32,
+        bool has_source_crc32
+    ) {
 
         if (!output_trace_) {
 
@@ -1103,6 +1158,22 @@ private:
         item.path = item_path;
 
         item.is_dir = is_dir;
+
+        item.expected_size = expected_size;
+
+        item.has_expected_size = has_expected_size;
+
+        item.source_crc32 = source_crc32;
+
+        item.has_source_crc32 = has_source_crc32;
+
+        if (!is_dir) {
+
+            item.output_crc32 = 0;
+
+            item.has_output_crc32 = true;
+
+        }
 
         item.operation_result = kOpOk;
 
@@ -1131,6 +1202,9 @@ private:
         item.done = opRes == kOpOk && !item.failed;
 
         item.failed = item.failed || opRes != kOpOk;
+
+        item.crc_verified = item.done && (!item.has_source_crc32 ||
+            (item.has_output_crc32 && item.source_crc32 == item.output_crc32));
 
         item.hresult = output_trace_->last_hresult;
 

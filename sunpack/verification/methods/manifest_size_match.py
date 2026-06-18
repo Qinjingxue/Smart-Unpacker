@@ -5,9 +5,8 @@ from sunpack.verification.methods._archive_output_match import (
     archive_files_from_names,
     coverage_details,
     coverage_from_archive_and_output,
-    output_files_from_directory,
 )
-from sunpack.verification.methods._output_stats import output_stats_for_evidence
+from sunpack.verification.methods._output_stats import output_files_for_evidence, output_stats_for_evidence
 from sunpack.verification.registry import register_verification_method
 from sunpack.verification.result import (
     DECISION_REPAIR,
@@ -43,7 +42,7 @@ class ManifestSizeMatchMethod:
         if expected_names:
             name_coverage = coverage_from_archive_and_output(
                 archive_files_from_names(expected_names),
-                output_files_from_directory(evidence.output_dir),
+                output_files_for_evidence(evidence),
                 method=self.name,
             )
             if name_coverage.missing_files:
