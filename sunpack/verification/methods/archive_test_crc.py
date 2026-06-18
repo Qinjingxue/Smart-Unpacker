@@ -10,7 +10,7 @@ from sunpack.support.sevenzip_bridge import (
 from sunpack.verification.archive_state_manifest import archive_state_manifest_for_evidence
 from sunpack.verification.evidence import VerificationEvidence
 from sunpack.verification.methods._archive_output_match import coverage_details, coverage_from_archive_and_output
-from sunpack.verification.methods._output_stats import output_inventory_for_evidence
+from sunpack.verification.methods._output_stats import output_inventory_for_evidence, should_emit_file_observations
 from sunpack.verification.registry import register_verification_method
 from sunpack.verification.result import (
     DECISION_REPAIR,
@@ -42,7 +42,11 @@ class ArchiveTestCrcMethod:
             return VerificationStepResult(method=self.name, status="skipped")
         inventory = output_inventory_for_evidence(evidence)
         if _can_use_worker_output_crc(archive_files, inventory.files, inventory.worker_crc_available):
-            match_result = _worker_crc_match_result(archive_files, [dict(item) for item in inventory.files])
+            match_result = _worker_crc_match_result(
+                archive_files,
+                list(inventory.files),
+                include_observations=should_emit_file_observations(evidence, self.name),
+            )
         else:
             match_result = dict(_match_archive_output_crc_coverage(archive_files, evidence.output_dir, max_items))
 
@@ -293,11 +297,14 @@ def _can_use_worker_output_crc(
 def _worker_crc_match_result(
     archive_files: list[dict[str, Any]],
     output_files: list[dict[str, Any]],
+    *,
+    include_observations: bool = True,
 ) -> dict[str, Any]:
     coverage = coverage_from_archive_and_output(
         archive_files,
         output_files,
         method="archive_test_crc",
+        include_observations=include_observations,
     )
     mismatches = [
         {

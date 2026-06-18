@@ -10,6 +10,7 @@ from sunpack.verification import VerificationScheduler
 from sunpack.verification import archive_state_manifest as manifest_module
 from sunpack.verification.methods import _output_stats
 from sunpack.verification.methods import archive_test_crc as archive_test_crc_module
+from sunpack.support import output_inventory as output_inventory_module
 from sunpack.verification.methods.archive_test_crc import _can_use_worker_output_crc, _worker_crc_match_result
 
 
@@ -94,7 +95,7 @@ def test_output_inventory_scans_once_and_merges_worker_crc(monkeypatch):
             "files": [{"path": "a.txt", "size": 5}],
         }
 
-    monkeypatch.setattr(_output_stats, "_native_scan_output_tree", fake_scan)
+    monkeypatch.setattr(output_inventory_module, "_native_scan_output_tree", fake_scan)
     evidence = SimpleNamespace(output_dir="out", worker_result=_worker_result())
 
     inventory = _output_stats.output_inventory_for_evidence(evidence)

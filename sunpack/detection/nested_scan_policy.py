@@ -1,15 +1,17 @@
 import os
 from copy import deepcopy
+from pathlib import Path
 from typing import Any, Iterable
 
 from sunpack.config.detection_view import module_config, rule_pipeline_config
-from sunpack.contracts.filesystem import FileEntry
+from sunpack.contracts.filesystem import DirectorySnapshot, FileEntry
 from sunpack.filesystem.filters.modules.scene_semantics import (
     detect_scene_context_for_directory,
     is_strong_scene_context,
 )
 from sunpack.filesystem.directory_scanner import DirectoryScanner
 from sunpack.support.extensions import normalize_extension_score_groups, normalize_exts
+from sunpack.support.output_inventory import OutputInventory
 
 
 class NestedOutputScanPolicy:
@@ -29,12 +31,18 @@ class NestedOutputScanPolicy:
     def should_scan_output_dir(self, target_dir: str) -> bool:
         return bool(self._candidate_parent_roots(target_dir))
 
-    def _candidate_parent_roots(self, target_dir: str) -> list[str]:
+    def _candidate_parent_roots(
+        self,
+        target_dir: str,
+        inventory: OutputInventory | None = None,
+    ) -> list[str]:
         # Output discovery is inherently recursive and must not inherit the
         # user's initial directory-scan depth. Embedded segment extraction adds
         # a child directory (for example embedded_00_rar), while the next round
         # may intentionally remain current-directory-only.
-        snapshot = DirectoryScanner(target_dir, config=self._recursive_output_scan_config()).scan()
+        snapshot = self._snapshot_from_inventory(target_dir, inventory)
+        if snapshot is None:
+            snapshot = DirectoryScanner(target_dir, config=self._recursive_output_scan_config()).scan()
         ctx = detect_scene_context_for_directory(target_dir, entries=snapshot.entries)
         if is_strong_scene_context(ctx):
             print(
@@ -54,19 +62,47 @@ class NestedOutputScanPolicy:
                     roots.append(parent)
         return roots
 
-    def scan_roots_from_outputs(self, output_dirs: Iterable[str]) -> list[str]:
+    def scan_roots_from_outputs(
+        self,
+        output_dirs: Iterable[str],
+        inventories: dict[str, dict[str, Any]] | None = None,
+    ) -> list[str]:
         roots = []
         seen = set()
+        inventories = inventories or {}
         for output_dir in output_dirs:
             if not output_dir or not os.path.isdir(output_dir):
                 continue
-            for root in self._candidate_parent_roots(output_dir):
+            inventory = OutputInventory.from_dict(
+                inventories.get(os.path.normcase(os.path.abspath(output_dir))),
+                expected_root=output_dir,
+            )
+            for root in self._candidate_parent_roots(output_dir, inventory):
                 key = os.path.normcase(os.path.abspath(root))
                 if key in seen:
                     continue
                 seen.add(key)
                 roots.append(root)
         return roots
+
+    @staticmethod
+    def _snapshot_from_inventory(
+        target_dir: str,
+        inventory: OutputInventory | None,
+    ) -> DirectorySnapshot | None:
+        if inventory is None or not inventory.stats.exists or not inventory.stats.is_dir:
+            return None
+        root = os.path.abspath(target_dir)
+        entries = [
+            FileEntry(
+                path=Path(root) / str(item.get("path") or ""),
+                is_dir=False,
+                size=int(item.get("size", 0) or 0),
+            )
+            for item in inventory.files
+            if item.get("path")
+        ]
+        return DirectorySnapshot(root_path=Path(root), entries=entries)
 
     def _recursive_output_scan_config(self) -> dict[str, Any]:
         config = deepcopy(self.config)

@@ -1,4 +1,5 @@
 from contextlib import nullcontext
+from dataclasses import replace
 from typing import Any, Callable
 
 from sunpack.verification.evidence import VerificationEvidence
@@ -52,6 +53,10 @@ class VerificationPipeline:
         upper_bound_hints: list[float] = []
         source_hints: list[str] = []
         decision_hints: list[str] = []
+
+        observation_owner = _configured_observation_owner(self.methods, evidence)
+        if observation_owner:
+            object.__setattr__(evidence, "_file_observation_owner", observation_owner)
 
         manifest_limit = _configured_archive_manifest_limit(self.methods)
         if manifest_limit is not None:
@@ -219,6 +224,28 @@ def _configured_archive_manifest_limit(methods: list[Any]) -> int | None:
     return max(limits) if limits else None
 
 
+def _configured_observation_owner(methods: list[Any], evidence: VerificationEvidence) -> str:
+    worker = evidence.worker_result if isinstance(evidence.worker_result, dict) else {}
+    manifest = worker.get("verified_manifest") if isinstance(worker.get("verified_manifest"), dict) else {}
+    if worker.get("status") != "ok" or not manifest.get("validated"):
+        return ""
+    enabled = {
+        str(item.get("name") or "")
+        for item in methods
+        if isinstance(item, dict) and item.get("enabled", True)
+    }
+    for name in (
+        "archive_test_crc",
+        "manifest_size_match",
+        "expected_name_presence",
+        "output_presence",
+        "extraction_exit_signal",
+    ):
+        if name in enabled:
+            return name
+    return ""
+
+
 def _aggregate_completeness(file_observations: list[FileVerificationObservation], hints: list[float]) -> float:
     file_completeness = _file_completeness(file_observations)
     if hints and file_completeness is not None:
@@ -337,12 +364,24 @@ def _merge_coverage_sources(sources: list[dict]) -> ArchiveCoverageSummary:
     partial_files = _as_int(strongest.get("partial_files"))
     failed_files = _as_int(strongest.get("failed_files"))
     missing_files = _as_int(strongest.get("missing_files"))
+    strongest_expected_files = _as_int(strongest.get("expected_files"))
+    if expected_files > strongest_expected_files:
+        missing_files = max(
+            missing_files,
+            max(
+                (_as_int(item.get("missing_files")) for item in sources if _as_int(item.get("expected_files")) > strongest_expected_files),
+                default=0,
+            ),
+        )
     matched_bytes = _as_int(strongest.get("matched_bytes"))
     complete_bytes = _as_int(strongest.get("complete_bytes"))
     completeness = _as_float(strongest.get("completeness"), None)
     if completeness is None:
         completeness = _coverage_value(strongest, "file_coverage", matched_files, expected_files)
     file_coverage = _coverage_value(strongest, "file_coverage", matched_files, expected_files)
+    if expected_files > strongest_expected_files:
+        file_coverage = _clamp01(matched_files / max(1, expected_files))
+        completeness = min(completeness, file_coverage)
     byte_coverage = _coverage_value(strongest, "byte_coverage", matched_bytes, expected_bytes)
     confidence = _coverage_confidence(strongest)
     return ArchiveCoverageSummary(
@@ -366,9 +405,9 @@ def _merge_coverage_sources(sources: list[dict]) -> ArchiveCoverageSummary:
 
 def _strongest_coverage_source(sources: list[dict]) -> dict:
     return max(sources, key=lambda item: (
+        _coverage_confidence(item),
         _as_int(item.get("expected_files")),
         _as_int(item.get("expected_bytes")),
-        _as_float(item.get("confidence"), 0.0),
     ))
 
 
@@ -426,12 +465,36 @@ def _coverage_from_observations(file_observations: list[FileVerificationObservat
 def _dedupe_observations(file_observations: list[FileVerificationObservation]) -> list[FileVerificationObservation]:
     by_path: dict[str, FileVerificationObservation] = {}
     for item in file_observations:
-        key = item.archive_path or item.path
+        key = (item.archive_path or item.path).replace("\\", "/")
         if not key:
             key = f"{item.method}:{len(by_path)}"
         existing = by_path.get(key)
-        if existing is None or _state_rank(item.state) < _state_rank(existing.state):
+        if existing is None:
             by_path[key] = item
+            continue
+        chosen, other = (item, existing) if _state_rank(item.state) < _state_rank(existing.state) else (existing, item)
+        methods = list(chosen.details.get("verification_methods") or [])
+        for method in (existing.method, item.method):
+            if method and method not in methods:
+                methods.append(method)
+        issues = list(chosen.issues)
+        issue_keys = {(issue.method, issue.code, issue.path) for issue in issues}
+        for issue in other.issues:
+            issue_key = (issue.method, issue.code, issue.path)
+            if issue_key not in issue_keys:
+                issue_keys.add(issue_key)
+                issues.append(issue)
+        by_path[key] = replace(
+            chosen,
+            archive_path=chosen.archive_path or other.archive_path,
+            bytes_written=max(chosen.bytes_written, other.bytes_written),
+            expected_size=chosen.expected_size if chosen.expected_size is not None else other.expected_size,
+            progress=chosen.progress if chosen.progress is not None else other.progress,
+            crc_expected=chosen.crc_expected if chosen.crc_expected is not None else other.crc_expected,
+            crc_actual=chosen.crc_actual if chosen.crc_actual is not None else other.crc_actual,
+            issues=issues,
+            details={**other.details, **chosen.details, "verification_methods": methods},
+        )
     return list(by_path.values())
 
 
@@ -454,9 +517,14 @@ def _coverage_value(source: dict, key: str, numerator: int, denominator: int) ->
 
 
 def _coverage_confidence(source: dict) -> float:
+    if source.get("confidence") is not None:
+        return _clamp01(_as_float(source.get("confidence"), 0.5))
     if source.get("code") == "info.archive_output_coverage":
         return 0.95
     if source.get("code") == "info.expected_name_coverage":
+        manifest_source = str(source.get("manifest_source") or source.get("expected_names_source") or "")
+        if manifest_source in {"analysis_or_config", "damaged_scan"}:
+            return 0.6
         return 0.8
     if source.get("code") == "info.output_progress_coverage":
         return 0.7

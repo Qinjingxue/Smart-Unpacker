@@ -9,7 +9,11 @@ from sunpack.verification.methods._archive_output_match import (
     coverage_details,
     coverage_from_archive_and_output,
 )
-from sunpack.verification.methods._output_stats import output_files_for_evidence, output_stats_for_evidence
+from sunpack.verification.methods._output_stats import (
+    output_files_for_evidence,
+    output_stats_for_evidence,
+    should_emit_file_observations,
+)
 from sunpack.verification.registry import register_verification_method
 from sunpack.verification.result import (
     DECISION_NONE,
@@ -57,6 +61,7 @@ class ExpectedNamePresenceMethod:
             archive_files_from_names(expected_names),
             output_files,
             method=self.name,
+            include_observations=should_emit_file_observations(evidence, self.name),
         )
         missing = []
         for expected in expected_names:

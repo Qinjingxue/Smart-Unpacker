@@ -5,6 +5,7 @@
 #endif
 
 #include <algorithm>
+#include <chrono>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
@@ -736,14 +737,29 @@ int run_request(const std::string& request) {
         return 2;
     }
 
-    auto progress = [job_id](const ExtractProgressEvent& event) {
+    auto last_progress_emit = std::chrono::steady_clock::now() - std::chrono::seconds(1);
+    unsigned int coalesced_progress_events = 0;
+    auto progress = [job_id, last_progress_emit, coalesced_progress_events](const ExtractProgressEvent& event) mutable {
+            const auto now = std::chrono::steady_clock::now();
+            const bool failure = event.event == "item_failed";
+            const bool boundary = event.event == "total" ||
+                (event.event == "item_start" && event.item_index == 0) ||
+                (event.event == "item_done" && event.item_index % 128 == 0);
+            const bool interval_elapsed = now - last_progress_emit >= std::chrono::milliseconds(100);
+            if (!failure && !boundary && !interval_elapsed) {
+                ++coalesced_progress_events;
+                return;
+            }
             print_json_line(
                 "{\"type\":\"progress\",\"job_id\":\"" + json_escape(job_id) +
                 "\",\"event\":\"" + json_escape(event.event) +
                 "\",\"completed_bytes\":" + std::to_string(event.completed_bytes) +
                 ",\"total_bytes\":" + std::to_string(event.total_bytes) +
                 ",\"item_index\":" + std::to_string(event.item_index) +
-                ",\"item_path\":\"" + json_escape(wide_to_utf8(event.item_path)) + "\"}");
+                ",\"item_path\":\"" + json_escape(wide_to_utf8(event.item_path)) +
+                "\",\"coalesced_events\":" + std::to_string(coalesced_progress_events) + "}");
+            last_progress_emit = now;
+            coalesced_progress_events = 0;
     };
 
     const auto archive_input = parse_archive_input_descriptor(request, archive_path, format_hint, part_paths);

@@ -1,5 +1,5 @@
 from sunpack.verification.evidence import VerificationEvidence
-from sunpack.verification.methods._output_stats import output_stats_for_evidence
+from sunpack.verification.methods._output_stats import output_stats_for_evidence, should_emit_file_observations
 from sunpack.verification.registry import register_verification_method
 from sunpack.verification.result import FileVerificationObservation, VerificationIssue, VerificationStepResult
 
@@ -59,7 +59,7 @@ class OutputPresenceMethod:
                 actual=stats.transient_file_count,
             ))
 
-        observations = _manifest_observations(evidence)
+        observations = _manifest_observations(evidence) if should_emit_file_observations(evidence, self.name) else []
         manifest_completeness = _manifest_completeness(evidence)
         if evidence.progress_manifest:
             coverage = _manifest_coverage(evidence)

@@ -31,6 +31,7 @@ def coverage_from_archive_and_output(
     *,
     method: str,
     issues_by_path: dict[str, list[VerificationIssue]] | None = None,
+    include_observations: bool = True,
 ) -> ArchiveOutputCoverage:
     expected = [_archive_item(item) for item in archive_files if isinstance(item, dict)]
     expected = [item for item in expected if item["path"]]
@@ -59,7 +60,8 @@ def coverage_from_archive_and_output(
         item_issues = list(issues_by_path.get(expected_path) or [])
         if unsafe_path:
             failed_files += 1
-            observations.append(FileVerificationObservation(
+            if include_observations:
+                observations.append(FileVerificationObservation(
                 path=expected_path,
                 archive_path=expected_path,
                 state="failed",
@@ -74,14 +76,15 @@ def coverage_from_archive_and_output(
                     "raw_archive_path": item.get("raw_path") or expected_path,
                     "failure_kind": "output_filesystem",
                 },
-            ))
+                ))
             continue
 
         output_item = output_by_path.get(normalize_match_path(expected_path))
         if output_item is None:
             state = "missing"
             missing_files += 1
-            observations.append(FileVerificationObservation(
+            if include_observations:
+                observations.append(FileVerificationObservation(
                 path=expected_path,
                 archive_path=expected_path,
                 state=state,
@@ -96,7 +99,7 @@ def coverage_from_archive_and_output(
                     "raw_archive_path": item.get("raw_path") or expected_path,
                     "failure_kind": "",
                 },
-            ))
+                ))
             continue
 
         matched_files += 1
@@ -138,7 +141,8 @@ def coverage_from_archive_and_output(
             elif actual_size is not None:
                 complete_bytes += actual_size
 
-        observations.append(FileVerificationObservation(
+        if include_observations:
+            observations.append(FileVerificationObservation(
             path=str(output_item.get("path") or expected_path),
             archive_path=expected_path,
             state=state,
@@ -154,7 +158,7 @@ def coverage_from_archive_and_output(
                 "crc_ok": crc_ok if expected_has_crc and actual_crc is not None else None,
                 "matched_by": str(output_item.get("_matched_by") or ""),
             },
-        ))
+            ))
 
     expected_count = len(expected)
     file_coverage = matched_files / max(1, expected_count)

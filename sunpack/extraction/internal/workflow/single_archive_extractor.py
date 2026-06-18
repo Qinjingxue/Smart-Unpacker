@@ -15,6 +15,7 @@ from sunpack.extraction.progress import has_recoverable_partial_outputs, write_e
 from sunpack.extraction.result import ExtractionResult
 from sunpack.passwords.result import PasswordResolution
 from sunpack.support import archive_knowledge_projection as knowledge_view
+from sunpack.support.output_inventory import OutputInventory, collect_output_inventory
 
 
 class SingleArchiveExtractor:
@@ -210,7 +211,12 @@ class SingleArchiveExtractor:
                         with _phase(phase_timer, f"{phase_prefix}_diagnostics_success"):
                             diagnostics = self._diagnostics_from(run_result)
                         with _phase(phase_timer, f"{phase_prefix}_output_stats_success"):
-                            output_stats = self._directory_stats(out_dir)
+                            worker_result = diagnostics.get("result") if isinstance(diagnostics.get("result"), dict) else {}
+                            output_inventory = collect_output_inventory(out_dir, worker_result)
+                            output_stats = {
+                                "file_count": output_inventory.stats.file_count,
+                                "total_bytes": output_inventory.stats.total_size,
+                            }
                             self._fill_success_output_counts(diagnostics, output_stats)
                         with _phase(phase_timer, f"{phase_prefix}_empty_repaired_success_check"):
                             empty_repaired_success = self._empty_repaired_success(diagnostics, task)
@@ -252,6 +258,7 @@ class SingleArchiveExtractor:
                             diagnostics=diagnostics,
                             progress_manifest=manifest_path,
                             progress_manifest_payload=manifest_payload,
+                            output_inventory_payload=output_inventory.to_dict(),
                             files_written=output_stats["file_count"],
                             bytes_written=output_stats["total_bytes"],
                         )
@@ -501,7 +508,14 @@ class SingleArchiveExtractor:
             if result.selected_codepage is not None and selected_codepage is None:
                 selected_codepage = result.selected_codepage
             with _phase(phase_timer, f"{phase_prefix}_segment_directory_stats"):
-                stats = self._directory_stats(segment_dir)
+                segment_inventory = OutputInventory.from_dict(
+                    result.output_inventory_payload,
+                    expected_root=segment_dir,
+                )
+                stats = {
+                    "file_count": segment_inventory.stats.file_count,
+                    "total_bytes": segment_inventory.stats.total_size,
+                } if segment_inventory is not None else self._directory_stats(segment_dir)
             segment_success = bool(result.success)
             segment_partial = bool(result.partial_outputs or stats["file_count"] > 0)
             any_success = any_success or segment_success
@@ -526,7 +540,11 @@ class SingleArchiveExtractor:
             })
 
         with _phase(phase_timer, f"{phase_prefix}_directory_stats_total"):
-            totals = self._directory_stats(out_dir)
+            output_inventory = collect_output_inventory(out_dir)
+            totals = {
+                "file_count": output_inventory.stats.file_count,
+                "total_bytes": output_inventory.stats.total_size,
+            }
         diagnostics = {
             "result": {
                 "status": "ok" if any_success else ("partial" if any_partial else "failed"),
@@ -564,6 +582,7 @@ class SingleArchiveExtractor:
                 partial_outputs=any_partial and not all(item.get("success") for item in segment_results),
                 progress_manifest=manifest_path,
                 progress_manifest_payload=manifest_payload,
+                output_inventory_payload=output_inventory.to_dict(),
                 files_written=totals["file_count"],
                 bytes_written=totals["total_bytes"],
             )

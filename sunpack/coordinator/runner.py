@@ -147,9 +147,34 @@ class PipelineRunner:
         self.space_guard.bind_root(monitor_root)
         self.disk_monitor = self.space_guard.disk_monitor
 
-        print(self.text("\n[PIPELINE] Starting direct file extraction", "\n[PIPELINE] 开始直接文件解压"))
-        self._execute_tasks(self._direct_file_tasks(file_paths))
-        self._apply_postprocess_actions()
+        round_index = 1
+        current_tasks = self._direct_file_tasks(file_paths)
+        prompt_mode = self.recursion.mode == "prompt"
+        postprocess_applied = False
+        while current_tasks:
+            if round_index == 1:
+                print(self.text("\n[PIPELINE] Starting direct file extraction", "\n[PIPELINE] 开始直接文件解压"))
+            else:
+                print(self.text(
+                    f"\n[PIPELINE] Starting nested round {round_index}",
+                    f"\n[PIPELINE] 开始嵌套第 {round_index} 轮",
+                ))
+            new_roots = self._execute_tasks(current_tasks)
+
+            if prompt_mode:
+                self._apply_postprocess_actions()
+                postprocess_applied = True
+
+            if not self.recursion.should_continue(round_index, bool(new_roots)):
+                break
+            if prompt_mode and not self.recursion.prompt_continue(round_index):
+                break
+
+            current_tasks = self._scan_targets(new_roots)
+            round_index += 1
+
+        if not postprocess_applied:
+            self._apply_postprocess_actions()
 
         self.logger.log_final_summary(
             monitor_root,

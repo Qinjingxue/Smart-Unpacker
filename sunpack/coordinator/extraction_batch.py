@@ -147,10 +147,19 @@ class ExtractionBatchRunner:
         results = self._execute_ready_tasks(tasks, output_dir_resolver)
 
         output_dirs = []
+        output_inventories: dict[str, dict[str, Any]] = {}
         for task, outcome in results:
             output_dir = self.collect_result(task, outcome)
             if output_dir:
                 output_dirs.append(output_dir)
+                payload = outcome.result.output_inventory_payload
+                if isinstance(payload, dict):
+                    output_inventories[os.path.normcase(os.path.abspath(output_dir))] = payload
+        if isinstance(self.output_scan_policy, NestedOutputScanPolicy):
+            return self.output_scan_policy.scan_roots_from_outputs(
+                output_dirs,
+                inventories=output_inventories,
+            )
         return self.output_scan_policy.scan_roots_from_outputs(output_dirs)
 
     def _execute_ready_tasks(self, tasks: List[ArchiveTask], output_dir_resolver) -> list[tuple[ArchiveTask, BatchExtractionOutcome]]:
@@ -1220,6 +1229,11 @@ class ExtractionBatchRunner:
             if os.path.exists(temp_dir):
                 shutil.move(temp_dir, out_dir)
         result.out_dir = out_dir
+        if isinstance(result.output_inventory_payload, dict):
+            result.output_inventory_payload = {
+                **result.output_inventory_payload,
+                "root": os.path.abspath(out_dir),
+            }
         manifest = Path(out_dir) / ".sunpack" / "extraction_manifest.json"
         result.progress_manifest = str(manifest) if manifest.exists() else ""
         return result

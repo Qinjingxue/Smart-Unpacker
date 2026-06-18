@@ -406,7 +406,7 @@ ExtractArchiveResult extract_archive_internal(
 
             }
 
-            if (password.empty() && input_ranges.empty() && input_patches.empty() && lower_extension(archive_path) == L".zip" && !strict_zip_stored_entries_ok(archive_path)) {
+            if (password.empty() && input_ranges.empty() && input_patches.empty() && lower_extension(archive_path) == L".zip" && !strict_zip_stored_entries_ok(archive_path, result.output_trace)) {
 
                 result.status = PasswordTestStatus::Damaged;
 
