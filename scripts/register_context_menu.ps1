@@ -42,6 +42,29 @@ function Resolve-Launcher {
         }
     }
 
+    $distRoot = Join-Path $RepoRoot "dist"
+    $packagedCandidates = @()
+    if (Test-Path -LiteralPath $distRoot) {
+        $packagedCandidates = @(
+            Get-ChildItem -LiteralPath $distRoot -Directory -Filter "sunpack-*" -ErrorAction SilentlyContinue |
+                ForEach-Object { Join-Path $_.FullName "sunpack.exe" } |
+                Where-Object { Test-Path -LiteralPath $_ }
+        )
+    }
+    if ($packagedCandidates.Count -gt 1) {
+        $listed = $packagedCandidates -join "`n  "
+        throw "Multiple packaged SunPack executables were found. Pass -AppPath explicitly:`n  $listed"
+    }
+    if ($packagedCandidates.Count -eq 1) {
+        $resolvedExe = (Resolve-Path -LiteralPath $packagedCandidates[0]).Path
+        $appIcon = Resolve-SunPackIcon -RepoRoot $RepoRoot -FallbackPath $resolvedExe
+        return @{
+            Mode = "app"
+            AppPath = $resolvedExe
+            IconPath = $appIcon
+        }
+    }
+
     $defaultScript = Join-Path $RepoRoot "sunpack.py"
     if (-not (Test-Path -LiteralPath $defaultScript)) {
         throw "No usable script entry was found. Expected sunpack.py at the repository root."

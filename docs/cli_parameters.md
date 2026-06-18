@@ -241,4 +241,4 @@ python sunpack.py models status --load --json
 .\scripts\unregister_context_menu.ps1
 ```
 
-注册脚本会优先寻找 `sunpack.exe`，找不到时使用 `python sunpack.py`。默认菜单项对文件夹或目录空白处执行 `extract <目标> --ask-pw --pause`，适合给非终端使用场景保留暂停窗口。
+发行包内的注册脚本会使用脚本父目录中的 `sunpack.exe`，因此不依赖 `sunpack-x64-lite` 等外层目录名。从源码树运行时，脚本也会识别唯一的 `dist/sunpack-*/sunpack.exe`；若存在多个构建产物，必须用 `-AppPath` 明确选择。找不到打包程序时才使用 `python sunpack.py`。卸载脚本只删除固定注册表键，不依赖安装目录。默认菜单项对文件夹或目录空白处执行 `extract <目标> --ask-pw --pause`，适合给非终端使用场景保留暂停窗口。

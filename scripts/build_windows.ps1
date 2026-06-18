@@ -727,6 +727,8 @@ if ($repairSystemMode -eq "full") {
     Assert-FileHashEqual -Source $modelManifestPath -Destination (Join-Path $distModelsRoot "manifest.json")
 } else {
     Assert-PathMissing -LiteralPath $distModelsRoot -Description "Packaged models directory"
+    Assert-PathMissing -LiteralPath (Join-Path $distInternalRoot "torch") -Description "Packaged torch runtime"
+    Assert-PathMissing -LiteralPath (Join-Path $distInternalRoot "torch_geometric") -Description "Packaged torch-geometric runtime"
 }
 
 New-Item -ItemType Directory -Path $distLicensesRoot -Force | Out-Null
@@ -770,9 +772,7 @@ if ($processArch -eq $buildArch) {
     Invoke-Native -FilePath $distExePath -Arguments @("passwords", "--json")
     Invoke-Native -FilePath $distExePath -Arguments @("inspect", (Join-Path $repoRoot "tests"), "--json")
     Invoke-Native -FilePath $distExePath -Arguments @("config", "validate", "--json")
-    if ($repairSystemMode -eq "full") {
-        Invoke-Native -FilePath $distExePath -Arguments @("models", "status", "--load", "--json")
-    }
+    Invoke-Native -FilePath $distExePath -Arguments @("models", "status", "--load", "--json")
 } else {
     Write-Step "Skipping packaged smoke tests"
     Write-Host "Packaged executable is $buildArch and cannot run under the current $processArch process." -ForegroundColor Yellow
