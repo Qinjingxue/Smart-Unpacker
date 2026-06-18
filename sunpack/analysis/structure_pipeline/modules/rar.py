@@ -12,9 +12,11 @@ class RarAnalysisModule:
         hits = [hit for hit in prepass.get("hits", []) if str(hit.get("name", "")).startswith("rar")]
         if not hits:
             return ArchiveFormatEvidence(format="rar", confidence=0.0, status="not_found")
-        start = min(hit["offset"] for hit in hits)
-        native = view.probe_rar(start_offset=start, max_blocks_to_walk=int(config.get("max_blocks_to_walk", 4096) or 4096))
-        return self._from_native(dict(native), start, next_archive_boundary(prepass, start, view.size), prepass, view.size)
+        candidates = []
+        for start in sorted({int(hit["offset"]) for hit in hits}):
+            native = view.probe_rar(start_offset=start, max_blocks_to_walk=int(config.get("max_blocks_to_walk", 4096) or 4096))
+            candidates.append(self._from_native(dict(native), start, next_archive_boundary(prepass, start, view.size), prepass, view.size))
+        return max(candidates, key=lambda item: (item.status == "extractable", item.confidence))
 
     def _from_native(self, native: dict, start: int, boundary: int, prepass: dict, file_size: int) -> ArchiveFormatEvidence:
         if not native.get("magic_matched"):

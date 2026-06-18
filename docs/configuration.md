@@ -383,6 +383,16 @@ print(sorted(get_repair_module_registry().all()))
 
 ## detection.rule_pipeline
 
+检测器在规则评分未接受候选时，还会调用结构分析器进行一次与扩展名无关的救援。分卷会先组合成逻辑字节流；普通情况只读取头尾，小文件可在固定预算内扫描完整逻辑流，并对每个签名候选继续验证 CRC、目录或块链。以下字段位于 `detection`：
+
+| 字段 | 说明 |
+| --- | --- |
+| `content_structure_rescue_enabled` | 启用规则拒绝后的结构救援。 |
+| `content_structure_rescue_full_scan_max_bytes` | 对不超过该大小且头尾未确认的候选扫描完整逻辑流；默认 64 MiB。 |
+| `content_structure_rescue_deep_scan` | 对任意大小候选执行完整逻辑流扫描。会产生与文件总大小等量的最低 I/O，应仅在必须发现任意中间位置 embedding 时开启。 |
+
+完整流扫描是发现“任意位置 embedding”的物理必要条件；默认预算避免对大量数 GiB 普通文件逐字节重读。超过预算的文件仍会进行头尾结构分析、ZIP 尾目录回链和分卷逻辑视图验证。
+
 检测规则分三层：
 
 - `precheck`：强场景保护、高置信结构快速接受。

@@ -336,7 +336,11 @@
     "prepass": {
       "enabled": true,
       "head_bytes": 1048576,
-      "tail_bytes": 1048576
+      "tail_bytes": 1048576,
+      "full_scan_max_bytes": 0,
+      "deep_scan": false,
+      "full_scan_chunk_bytes": 4194304,
+      "full_scan_max_hits": 256
     },
     "fuzzy": {
       "enabled": true,
@@ -762,6 +766,9 @@
   },
   "detection": {
     "enabled": true,
+    "content_structure_rescue_enabled": true,
+    "content_structure_rescue_full_scan_max_bytes": 67108864,
+    "content_structure_rescue_deep_scan": false,
     "fact_collectors": [
       {
         "name": "file_facts",

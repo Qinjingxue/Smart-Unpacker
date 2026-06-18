@@ -3,7 +3,7 @@ from typing import Any
 
 from sunpack.analysis.config import analysis_config, enabled_fuzzy_module_configs, enabled_module_configs
 from sunpack.analysis.fuzzy_pipeline.registry import discover_fuzzy_analysis_modules, get_fuzzy_analysis_module_registry
-from sunpack.analysis.structure_pipeline.prepass import run_signature_prepass
+from sunpack.analysis.structure_pipeline.prepass import extend_signature_prepass_full, run_signature_prepass
 from sunpack.analysis.structure_pipeline.registry import discover_analysis_modules, get_analysis_module_registry
 from sunpack.analysis.result import ArchiveAnalysisReport, ArchiveFormatEvidence
 from sunpack.analysis.view import MultiVolumeBinaryView, PatchedBinaryView, SharedBinaryView
@@ -136,6 +136,14 @@ class ArchiveAnalysisScheduler:
         modules = self._selected_structure_modules(structure_context)
         evidences = self._run_structure_modules(view, structure_context, modules)
         selected = self._selected_evidences(evidences)
+        if not selected and prepass_config.get("enabled", True):
+            extended_prepass = extend_signature_prepass_full(view, prepass, prepass_config)
+            if extended_prepass is not prepass:
+                prepass = extended_prepass
+                structure_context = {**prepass, "fuzzy": fuzzy}
+                modules = self._selected_structure_modules(structure_context)
+                evidences = self._run_structure_modules(view, structure_context, modules)
+                selected = self._selected_evidences(evidences)
         stats = view.stats()
         return ArchiveAnalysisReport(
             path=report_path or view.path,

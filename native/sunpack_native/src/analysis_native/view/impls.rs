@@ -300,6 +300,24 @@ impl AnalysisBinaryView {
                 result.set_item("error", "rar5_block_payload_out_of_range")?;
                 return Ok(());
             }
+            // With RAR5 header encryption enabled the archive starts with a
+            // plaintext encryption header (type 4); the main/file headers
+            // that follow are encrypted and cannot be walked without the
+            // password.  The encryption header itself is still protected by
+            // the normal RAR5 header CRC, which we validated above, so it is
+            // strong structural evidence rather than a missing-main-header
+            // failure.
+            if index == 0 && header_type == 4 && next_cursor + 16 <= size {
+                evidence.append("rar5:encryption_header")?;
+                result.set_item("plausible", true)?;
+                result.set_item("strong_accept", true)?;
+                result.set_item("header_encrypted", true)?;
+                result.set_item("password_required", true)?;
+                result.set_item("blocks_checked", 1usize)?;
+                result.set_item("segment_end", 0u64)?;
+                result.set_item("evidence", evidence)?;
+                return Ok(());
+            }
             if index == 0 && header_type != 1 {
                 result.set_item("blocks_checked", 1usize)?;
                 result.set_item("error", "rar5_main_header_missing")?;

@@ -12,6 +12,13 @@ DEFAULT_ANALYSIS_CONFIG = {
         "enabled": True,
         "head_bytes": 1024 * 1024,
         "tail_bytes": 1024 * 1024,
+        # Full-file signature discovery is a second-stage fallback only.  It
+        # is enabled explicitly by callers (notably detection rescue), so the
+        # normal archive path remains bounded to head/tail reads.
+        "full_scan_max_bytes": 0,
+        "deep_scan": False,
+        "full_scan_chunk_bytes": 4 * 1024 * 1024,
+        "full_scan_max_hits": 256,
     },
     "fuzzy": {
         "enabled": True,

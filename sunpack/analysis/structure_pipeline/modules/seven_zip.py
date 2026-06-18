@@ -12,12 +12,14 @@ class SevenZipAnalysisModule:
         hits = [hit for hit in prepass.get("hits", []) if hit.get("name") == "7z"]
         if not hits:
             return ArchiveFormatEvidence(format="7z", confidence=0.0, status="not_found")
-        start = min(hit["offset"] for hit in hits)
-        native = view.probe_seven_zip(
-            start_offset=start,
-            max_next_header_check_bytes=int(config.get("max_next_header_check_bytes", 1024 * 1024) or 1024 * 1024),
-        )
-        return self._from_native(dict(native), start, next_archive_boundary(prepass, start, view.size), prepass, view.size)
+        candidates = []
+        for start in sorted({int(hit["offset"]) for hit in hits}):
+            native = view.probe_seven_zip(
+                start_offset=start,
+                max_next_header_check_bytes=int(config.get("max_next_header_check_bytes", 1024 * 1024) or 1024 * 1024),
+            )
+            candidates.append(self._from_native(dict(native), start, next_archive_boundary(prepass, start, view.size), prepass, view.size))
+        return max(candidates, key=lambda item: (item.status == "extractable", item.confidence))
 
     def _from_native(self, native: dict, start: int, boundary: int, prepass: dict, file_size: int) -> ArchiveFormatEvidence:
         if not native.get("magic_matched"):
