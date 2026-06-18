@@ -55,3 +55,17 @@ def test_output_scan_policy_uses_file_entry_size_without_stat(tmp_path, monkeypa
     entry = FileEntry(path=candidate, is_dir=False, size=1024 * 1024)
 
     assert OutputScanPolicy(_config()).should_consider_entry_for_nested_scan(entry)
+
+
+def test_output_scan_policy_finds_nested_archive_when_initial_scan_is_current_dir_only(tmp_path):
+    segment_dir = tmp_path / "embedded_00_rar"
+    segment_dir.mkdir()
+    nested = segment_dir / "payload.zip"
+    nested.write_bytes(b"7z" + b"x" * (1024 * 1024))
+    config = _config()
+    config.setdefault("filesystem", {})["directory_scan_mode"] = "current_dir_only"
+
+    policy = OutputScanPolicy(config)
+
+    assert policy.should_scan_output_dir(str(tmp_path))
+    assert policy.scan_roots_from_outputs([str(tmp_path)]) == [str(segment_dir.resolve())]

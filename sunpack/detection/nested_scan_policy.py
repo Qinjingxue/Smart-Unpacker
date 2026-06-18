@@ -1,4 +1,5 @@
 import os
+from copy import deepcopy
 from typing import Any, Iterable
 
 from sunpack.config.detection_view import module_config, rule_pipeline_config
@@ -26,26 +27,55 @@ class NestedOutputScanPolicy:
         return self._should_consider_candidate(str(entry.path), size=entry.size)
 
     def should_scan_output_dir(self, target_dir: str) -> bool:
-        snapshot = DirectoryScanner(target_dir, config=self.config).scan()
+        return bool(self._candidate_parent_roots(target_dir))
+
+    def _candidate_parent_roots(self, target_dir: str) -> list[str]:
+        # Output discovery is inherently recursive and must not inherit the
+        # user's initial directory-scan depth. Embedded segment extraction adds
+        # a child directory (for example embedded_00_rar), while the next round
+        # may intentionally remain current-directory-only.
+        snapshot = DirectoryScanner(target_dir, config=self._recursive_output_scan_config()).scan()
         ctx = detect_scene_context_for_directory(target_dir, entries=snapshot.entries)
         if is_strong_scene_context(ctx):
             print(
                 "[SCAN] Skipping strong scene output directory: "
                 f"{ctx.get('scene_type')} @ {os.path.basename(target_dir) or target_dir}"
             )
-            return False
+            return []
 
+        roots = []
+        seen = set()
         for entry in snapshot.entries:
             if self.should_consider_entry_for_nested_scan(entry):
-                return True
-        return False
+                parent = os.path.abspath(os.path.dirname(str(entry.path)))
+                key = os.path.normcase(parent)
+                if key not in seen:
+                    seen.add(key)
+                    roots.append(parent)
+        return roots
 
     def scan_roots_from_outputs(self, output_dirs: Iterable[str]) -> list[str]:
-        return [
-            output_dir
-            for output_dir in output_dirs
-            if output_dir and os.path.isdir(output_dir) and self.should_scan_output_dir(output_dir)
-        ]
+        roots = []
+        seen = set()
+        for output_dir in output_dirs:
+            if not output_dir or not os.path.isdir(output_dir):
+                continue
+            for root in self._candidate_parent_roots(output_dir):
+                key = os.path.normcase(os.path.abspath(root))
+                if key in seen:
+                    continue
+                seen.add(key)
+                roots.append(root)
+        return roots
+
+    def _recursive_output_scan_config(self) -> dict[str, Any]:
+        config = deepcopy(self.config)
+        filesystem = config.get("filesystem")
+        if not isinstance(filesystem, dict):
+            filesystem = {}
+            config["filesystem"] = filesystem
+        filesystem["directory_scan_mode"] = "recursive"
+        return config
 
     def _should_consider_candidate(self, path: str, size: int | None) -> bool:
         filename = os.path.basename(path).lower()
