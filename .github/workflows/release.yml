@@ -175,6 +175,8 @@ jobs:
 
       - name: Run acceptance tests
         shell: pwsh
+        env:
+          SUNPACK_REPAIR_SYSTEM: lite
         run: |
           .\run_acceptance_tests.ps1 -NoWait -SkipEnvironmentRefresh -StepTimeoutSeconds 900
 

@@ -179,7 +179,13 @@ class CliBasicTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         payload = json.loads(result.stdout)
         self.assertTrue(payload["summary"]["ok"])
-        models = payload["items"][0]["models"]
+        item = payload["items"][0]
+        if item.get("repair_system") == "lite":
+            self.assertEqual(item["models"], [])
+            self.assertEqual(item["supported_formats"], [])
+            self.assertIn("not included", item["disabled_reason"])
+            return
+        models = item["models"]
         self.assertEqual({item["role"] for item in models}, {"diagnosis", "policy"})
         self.assertTrue(all(item["loaded"] for item in models))
 
