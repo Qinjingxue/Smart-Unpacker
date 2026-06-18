@@ -5,19 +5,6 @@ def normalize_error_text(err_text: str) -> str:
     return (err_text or "").lower()
 
 
-def has_definite_wrong_password(err_text: str) -> bool:
-    err_lower = normalize_error_text(err_text)
-    return (
-        "cannot open encrypted archive. wrong password?" in err_lower
-        or "error: wrong password :" in err_lower
-        or "wrong password?" in err_lower
-        or "wrong password" in err_lower
-        or "enter password" in err_lower
-        or "password is incorrect" in err_lower
-        or "incorrect password" in err_lower
-    )
-
-
 def has_archive_damage_signals(err_text: str) -> bool:
     err_lower = normalize_error_text(err_text)
     return any(

@@ -1,9 +1,14 @@
-import subprocess
-from typing import List, Tuple
+from typing import List
 
 from sunpack.support.sevenzip_bridge import cached_test_archive, get_native_password_tester
-from sunpack.support.sevenzip_bridge import STATUS_DAMAGED, STATUS_WRONG_PASSWORD
+from sunpack.support.sevenzip_bridge import (
+    STATUS_BACKEND_UNAVAILABLE,
+    STATUS_DAMAGED,
+    STATUS_UNSUPPORTED,
+    STATUS_WRONG_PASSWORD,
+)
 from sunpack.passwords.internal.store import PasswordStore
+from sunpack.passwords.result import PasswordProbeResult
 from sunpack.passwords.scheduler import PasswordScheduler
 
 
@@ -43,7 +48,7 @@ class ArchivePasswordTester:
         password: str = "",
         part_paths: list[str] | None = None,
         archive_input: dict | None = None,
-    ) -> Tuple[subprocess.CompletedProcess, str]:
+    ) -> PasswordProbeResult:
         if archive_input:
             native_attempt = self.native_password_tester.try_passwords(
                 archive_path,
@@ -51,36 +56,40 @@ class ArchivePasswordTester:
                 part_paths=part_paths,
                 archive_input=archive_input,
             )
-            ok = native_attempt.ok
             message = native_attempt.message
-            encrypted = not ok and native_attempt.status == STATUS_WRONG_PASSWORD
-            checksum_error = native_attempt.status == STATUS_DAMAGED
+            status = _native_probe_status(native_attempt.status, native_attempt.ok)
+            backend_result = native_attempt
         else:
             native_test = cached_test_archive(archive_path, password=password, part_paths=part_paths)
-            ok = native_test.ok
             message = native_test.message
-            encrypted = native_test.encrypted
-            checksum_error = native_test.checksum_error
-
-        result = subprocess.CompletedProcess(
-            args=["7z.dll", "test-archive", archive_path],
-            returncode=0 if ok else 2,
-            stdout="" if ok else message,
-            stderr="" if ok else message,
-        )
-        error_text = message.lower()
-        if encrypted and "wrong password" not in error_text:
-            error_text = f"{error_text}\nwrong password".strip()
-        if checksum_error and "checksum error" not in error_text:
-            error_text = f"{error_text}\nchecksum error".strip()
-        return result, error_text
+            if native_test.ok:
+                status = "match"
+            elif native_test.encrypted:
+                status = "no_match"
+            elif native_test.checksum_error or native_test.status == STATUS_DAMAGED:
+                status = "damaged"
+            else:
+                status = _native_probe_status(native_test.status, False)
+            backend_result = native_test
+        return PasswordProbeResult(status=status, message=str(message or ""), backend_result=backend_result)
 
     def test_without_password(
         self,
         archive_path: str,
         part_paths: list[str] | None = None,
         archive_input: dict | None = None,
-    ) -> Tuple[subprocess.CompletedProcess, str]:
+    ) -> PasswordProbeResult:
         return self.test_password(archive_path, "", part_paths=part_paths, archive_input=archive_input)
+
+
+def _native_probe_status(status: int, ok: bool):
+    if ok:
+        return "match"
+    return {
+        STATUS_WRONG_PASSWORD: "no_match",
+        STATUS_DAMAGED: "damaged",
+        STATUS_UNSUPPORTED: "unsupported_method",
+        STATUS_BACKEND_UNAVAILABLE: "backend_unavailable",
+    }.get(status, "unknown_needs_final_verifier")
 
 PasswordManager = ArchivePasswordTester

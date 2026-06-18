@@ -17,6 +17,7 @@ from sunpack.verification.result import (
     DECISION_FAIL,
     DECISION_NONE,
     DECISION_REPAIR,
+    DECISION_REQUEST_PASSWORD,
     DECISION_RETRY_EXTRACT,
     SOURCE_INTEGRITY_COMPLETE,
     SOURCE_INTEGRITY_DAMAGED,
@@ -593,6 +594,8 @@ def _decision_hint(
     output_confidence: float = 0.0,
     evidence_sufficient: bool = True,
 ) -> str:
+    if DECISION_REQUEST_PASSWORD in decision_hints:
+        return DECISION_REQUEST_PASSWORD
     if DECISION_FAIL in decision_hints:
         return DECISION_FAIL
     if not evidence_sufficient:

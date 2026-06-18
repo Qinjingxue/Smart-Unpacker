@@ -5,12 +5,14 @@ from types import SimpleNamespace
 from sunpack.app.cli_context import CliContext
 from sunpack.app.cli_reporter import CliReporter
 from sunpack.app.commands import extract
+from sunpack.contracts.failures import FailureInfo, FailureKind
 
 
 def test_wrong_password_failure_detection():
-    assert extract.has_wrong_password_failure(["secret.zip [wrong password]"]) is True
-    assert extract.has_wrong_password_failure(["secret.zip [密码错误]"]) is True
-    assert extract.has_wrong_password_failure(["broken.zip [headers error]"]) is False
+    wrong = FailureInfo(FailureKind.WRONG_PASSWORD, "password_resolution", "rejected")
+    damaged = FailureInfo(FailureKind.DAMAGED, "extraction", "damaged", repairable=True)
+    assert extract.has_password_failure([wrong]) is True
+    assert extract.has_password_failure([damaged]) is False
 
 
 def test_extract_prompts_for_password_retry_after_wrong_password(tmp_path, monkeypatch):
@@ -25,9 +27,14 @@ def test_extract_prompts_for_password_retry_after_wrong_password(tmp_path, monke
 
         def run_targets(self, _target_paths):
             if len(attempts) == 1:
-                return SimpleNamespace(success_count=0, failed_tasks=["secret.zip [wrong password]"], processed_keys=["secret"])
+                return SimpleNamespace(
+                    success_count=0,
+                    failed_tasks=["secret.zip [密码错误]"],
+                    processed_keys=["secret"],
+                    failures=[FailureInfo(FailureKind.WRONG_PASSWORD, "password_resolution", "密码错误")],
+                )
             self.recent_passwords = ["secret"]
-            return SimpleNamespace(success_count=1, failed_tasks=[], processed_keys=["secret"])
+            return SimpleNamespace(success_count=1, failed_tasks=[], processed_keys=["secret"], failures=[])
 
     answers = iter(["y", "secret", ""])
     monkeypatch.setattr(extract, "PipelineRunner", FakeRunner)
@@ -83,6 +90,7 @@ def test_extract_verbose_prints_partial_recovery_file_details(tmp_path, monkeypa
                 success_count=1,
                 failed_tasks=[],
                 processed_keys=["broken"],
+                failures=[],
                 partial_success_count=1,
                 recovered_outputs=[{"archive": "broken.zip", "recovery_report": str(report)}],
             )
@@ -140,6 +148,7 @@ def test_extract_normal_mode_keeps_partial_file_details_out_of_console(tmp_path,
                 success_count=1,
                 failed_tasks=[],
                 processed_keys=["broken"],
+                failures=[],
                 partial_success_count=1,
                 recovered_outputs=[{
                     "archive": "broken.zip",
@@ -210,6 +219,7 @@ def test_extract_json_schema_includes_partial_recovery_contract(tmp_path, monkey
                 success_count=1,
                 failed_tasks=[],
                 processed_keys=["broken"],
+                failures=[],
                 partial_success_count=1,
                 recovered_outputs=[{
                     "archive": "broken.zip",

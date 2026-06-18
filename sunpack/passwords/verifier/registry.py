@@ -87,7 +87,7 @@ class PasswordVerifierChain:
                     matched_index=-1,
                     attempts=len(passwords),
                     test_result=fast_outcome.test_result,
-                    error_text=fast_outcome.error_text or "wrong password",
+                    error_text=fast_outcome.error_text,
                     terminal=False,
                 )
 
@@ -110,7 +110,7 @@ class PasswordVerifierChain:
             status="no_match",
             matched_index=-1,
             attempts=len(passwords),
-            error_text=last_error or "wrong password",
+            error_text=last_error,
             terminal=False,
         )
 

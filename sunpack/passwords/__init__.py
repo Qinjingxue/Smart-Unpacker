@@ -7,8 +7,8 @@ from sunpack.passwords.internal.lists import dedupe_passwords, parse_password_li
 from sunpack.passwords.internal.store import PasswordStore
 from sunpack.passwords.job import PasswordJob
 from sunpack.passwords.resolver import PasswordResolver
-from sunpack.passwords.result import PasswordResolution
-from sunpack.passwords.scheduler import PasswordProgressEvent, PasswordScheduler, PasswordSearchResult
+from sunpack.passwords.result import PasswordResolution, PasswordResolutionStatus
+from sunpack.passwords.scheduler import PasswordProgressEvent, PasswordScheduler, PasswordSearchResult, PasswordSearchStatus
 from sunpack.passwords.session import PasswordSession
 from sunpack.passwords.verifier import (
     PasswordBatchVerification,
@@ -39,9 +39,11 @@ __all__ = [
     "PasswordManager",
     "PasswordProgressEvent",
     "PasswordResolution",
+    "PasswordResolutionStatus",
     "PasswordResolver",
     "PasswordScheduler",
     "PasswordSearchResult",
+    "PasswordSearchStatus",
     "PasswordSession",
     "PasswordStore",
     "PasswordVerifier",

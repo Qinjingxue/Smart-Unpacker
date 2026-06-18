@@ -11,6 +11,7 @@ from sunpack.verification.result import (
     ASSESSMENT_DISABLED,
     DECISION_ACCEPT,
     DECISION_REPAIR,
+    DECISION_REQUEST_PASSWORD,
     SOURCE_INTEGRITY_DAMAGED,
     SOURCE_INTEGRITY_UNKNOWN,
     VerificationResult,
@@ -33,12 +34,13 @@ class VerificationScheduler:
             )
         if not self.config.get("enabled", False):
             if not extraction_result.success:
+                password_failure = extraction_result.failure is not None and extraction_result.failure.is_password_failure
                 result = VerificationResult(
                     completeness=0.0,
                     recoverable_upper_bound=1.0,
                     assessment_status=ASSESSMENT_DISABLED,
-                    source_integrity=SOURCE_INTEGRITY_DAMAGED,
-                    decision_hint=DECISION_REPAIR,
+                    source_integrity=SOURCE_INTEGRITY_UNKNOWN if password_failure else SOURCE_INTEGRITY_DAMAGED,
+                    decision_hint=DECISION_REQUEST_PASSWORD if password_failure else DECISION_REPAIR,
                     repair_hints=dict(evidence.repair_hints),
                 )
                 with _phase(phase_timer, f"{phase_prefix}_write_knowledge"):

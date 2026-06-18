@@ -2,10 +2,10 @@ import os
 import subprocess
 from typing import Optional
 
+from sunpack.contracts.failures import FailureInfo, FailureKind
 from sunpack.extraction.internal.sevenzip.worker_diagnostics import worker_result_payload
 from sunpack.support.archive_error_signals import (
     has_archive_damage_signals,
-    has_definite_wrong_password,
     has_transient_system_signals,
     looks_like_split_archive_name,
     normalize_error_text,
@@ -28,8 +28,6 @@ def should_retry_extract_failure(
         if worker_result.get("native_status") in {"wrong_password", "damaged", "unsupported"}:
             return False
 
-    if has_definite_wrong_password(err_lower):
-        return False
     if has_archive_damage_signals(err_lower):
         return False
 
@@ -54,74 +52,102 @@ def classify_extract_error(
     archive: str = None,
     is_split_archive: bool = False,
 ) -> str:
-    error_msg = "未知原因"
+    failure = classify_extract_failure(
+        run_result,
+        err_text,
+        archive=archive,
+        is_split_archive=is_split_archive,
+    )
+    return failure.message
+
+
+def classify_extract_failure(
+    run_result: Optional[subprocess.CompletedProcess],
+    err_text: str,
+    archive: str = None,
+    is_split_archive: bool = False,
+) -> FailureInfo:
     archive_name = os.path.basename(archive or "").lower()
     is_split_archive = is_split_archive or looks_like_split_archive_name(archive_name)
     err_lower = _norm(err_text)
     worker_result = worker_result_payload(run_result) or worker_result_payload(err_text)
     if worker_result:
         if worker_result.get("missing_volume"):
-            return "分卷缺失或不完整"
+            return _failure(FailureKind.MISSING_VOLUME, "分卷缺失或不完整")
         if is_split_archive and _worker_reports_payload_damage(worker_result):
-            return "压缩包损坏"
+            return _failure(FailureKind.DAMAGED, "压缩包损坏", repairable=True)
         if _worker_reports_wrong_password(worker_result):
-            return "密码错误"
+            return _failure(FailureKind.WRONG_PASSWORD, "密码错误", user_action="request_password")
         if worker_result.get("checksum_error"):
-            return "压缩包损坏"
+            return _failure(FailureKind.DAMAGED, "压缩包损坏", repairable=True)
         if worker_result.get("damaged") or worker_result.get("native_status") == "damaged":
-            return "压缩包损坏"
+            return _failure(FailureKind.DAMAGED, "压缩包损坏", repairable=True)
         if worker_result.get("unsupported_method"):
-            return "致命错误 (文件损坏或格式不支持)"
+            return _failure(FailureKind.UNSUPPORTED, "致命错误 (文件损坏或格式不支持)")
         if worker_result.get("native_status") == "backend_unavailable":
-            return "7z后端不可用"
+            return _failure(FailureKind.BACKEND_UNAVAILABLE, "7z后端不可用")
         if worker_result.get("native_status") == "unsupported":
-            return "致命错误 (文件损坏或格式不支持)"
+            return _failure(FailureKind.UNSUPPORTED, "致命错误 (文件损坏或格式不支持)")
 
     if "missing volume" in err_lower:
-        return "分卷缺失或不完整"
+        return _failure(FailureKind.MISSING_VOLUME, "分卷缺失或不完整")
     if "unexpected end of archive" in err_lower or "unexpected end of data" in err_lower:
-        return "分卷缺失或不完整" if is_split_archive else "压缩包损坏"
+        return _failure(
+            FailureKind.MISSING_VOLUME if is_split_archive else FailureKind.DAMAGED,
+            "分卷缺失或不完整" if is_split_archive else "压缩包损坏",
+            repairable=not is_split_archive,
+        )
     if "crc failed" in err_lower or "data error in encrypted file" in err_lower:
         if is_split_archive:
-            return "压缩包损坏"
-        if has_definite_wrong_password(err_lower):
-            return "密码错误"
-        return "压缩包损坏"
+            return _failure(FailureKind.DAMAGED, "压缩包损坏", repairable=True)
+        return _failure(FailureKind.DAMAGED, "压缩包损坏", repairable=True)
     if "headers error" in err_lower or "data error" in err_lower:
-        return "压缩包损坏"
+        return _failure(FailureKind.DAMAGED, "压缩包损坏", repairable=True)
     if "cannot open the file as" in err_lower or "can not open the file as archive" in err_lower:
-        return "分卷缺失或不完整" if is_split_archive else "压缩包损坏"
+        return _failure(
+            FailureKind.MISSING_VOLUME if is_split_archive else FailureKind.DAMAGED,
+            "分卷缺失或不完整" if is_split_archive else "压缩包损坏",
+            repairable=not is_split_archive,
+        )
     if "is not archive" in err_lower or "archive is corrupted" in err_lower or "checksum error" in err_lower:
-        return "压缩包损坏"
+        return _failure(FailureKind.DAMAGED, "压缩包损坏", repairable=True)
     if "unsupported compression method" in err_lower or "unsupported method" in err_lower:
-        return "致命错误 (文件损坏或格式不支持)"
-    if has_definite_wrong_password(err_lower) or "cannot open encrypted archive" in err_lower:
-        return "密码错误"
+        return _failure(FailureKind.UNSUPPORTED, "致命错误 (文件损坏或格式不支持)")
 
     if run_result:
         code = run_result.returncode
         if code == -100:
-            return "7z进程启动失败"
+            return _failure(FailureKind.PROCESS_ERROR, "7z进程启动失败")
         if code == -101:
-            return "7z进程超时"
+            return _failure(FailureKind.PROCESS_ERROR, "7z进程超时")
         if code == -102:
-            return "7z进程无进展"
+            return _failure(FailureKind.PROCESS_ERROR, "7z进程无进展")
         if code is not None and code < 0:
-            return "7z进程异常退出或被终止"
+            return _failure(FailureKind.PROCESS_ERROR, "7z进程异常退出或被终止")
         if code == 1:
-            error_msg = "警告 (文件被占用或部分失败)"
+            return _failure(FailureKind.UNKNOWN, "警告 (文件被占用或部分失败)")
         elif code == 2:
-            error_msg = "致命错误 (文件损坏或格式不支持)"
+            return _failure(FailureKind.UNKNOWN, "致命错误 (文件损坏或格式不支持)")
         elif code == 7:
-            error_msg = "命令行参数错误"
+            return _failure(FailureKind.PROCESS_ERROR, "命令行参数错误")
         elif code == 8:
-            error_msg = "内存/磁盘空间不足"
+            return _failure(FailureKind.PROCESS_ERROR, "内存/磁盘空间不足")
         elif code == 255:
-            error_msg = "用户中断"
+            return _failure(FailureKind.PROCESS_ERROR, "用户中断")
         elif code not in (None, 0):
-            error_msg = f"7z进程异常退出 (退出码 {code})"
+            return _failure(FailureKind.PROCESS_ERROR, f"7z进程异常退出 (退出码 {code})")
 
-    return error_msg
+    return _failure(FailureKind.UNKNOWN, "未知原因")
+
+
+def _failure(kind: FailureKind, message: str, *, user_action: str = "", repairable: bool = False) -> FailureInfo:
+    return FailureInfo(
+        kind=kind,
+        stage="extraction",
+        message=message,
+        user_action=user_action,
+        repairable=repairable,
+    )
 
 
 def _worker_reports_payload_damage(worker_result: dict) -> bool:
@@ -150,8 +176,6 @@ def _worker_reports_wrong_password(worker_result: dict) -> bool:
         return True
     if str(worker_result.get("operation_result_name") or "").lower() == "wrong_password":
         return True
-    if has_definite_wrong_password(str(worker_result.get("message") or "")):
-        return True
     diagnostics = worker_result.get("diagnostics")
     if not isinstance(diagnostics, dict):
         return False
@@ -159,5 +183,4 @@ def _worker_reports_wrong_password(worker_result: dict) -> bool:
         str(diagnostics.get("failure_kind") or "").lower()
         in {"wrong_password", "encrypted_or_wrong_password"}
         or str(diagnostics.get("operation_result_name") or "").lower() == "wrong_password"
-        or has_definite_wrong_password(str(diagnostics.get("message") or ""))
     )

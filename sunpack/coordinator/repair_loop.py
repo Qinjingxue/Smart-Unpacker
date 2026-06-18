@@ -584,6 +584,11 @@ class RepairLoopState:
                 write_repair_loop_state(self.task, {"current_digest": prev_digest})
 
 def terminal_failure_reason(result: ExtractionResult) -> str:
+    if result.failure is not None:
+        if result.failure.is_password_failure:
+            return "wrong_password"
+        if not result.failure.repairable:
+            return result.failure.kind.value
     diagnostics = result.diagnostics if isinstance(result.diagnostics, dict) else {}
     worker_result = diagnostics.get("result") if isinstance(diagnostics.get("result"), dict) else {}
     native = worker_result.get("diagnostics") if isinstance(worker_result.get("diagnostics"), dict) else {}
@@ -615,8 +620,6 @@ def terminal_failure_reason(result: ExtractionResult) -> str:
     text = str(result.error or "").lower()
     is_split = len(result.all_parts or []) > 1 or _looks_like_split_name(result.archive)
     if password_signals and not (is_split and damage_signals):
-        flags.add("wrong_password")
-    if ("password" in text or "密码" in text) and not (is_split and damage_signals):
         flags.add("wrong_password")
     if "volume" in text or "分卷" in text:
         flags.add("missing_volume")

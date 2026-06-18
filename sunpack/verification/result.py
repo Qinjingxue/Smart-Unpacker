@@ -13,6 +13,7 @@ DECISION_ACCEPT = "accept"
 DECISION_ACCEPT_PARTIAL = "accept_partial"
 DECISION_RETRY_EXTRACT = "retry_extract"
 DECISION_REPAIR = "repair"
+DECISION_REQUEST_PASSWORD = "request_password"
 DECISION_FAIL = "fail"
 
 ASSESSMENT_DISABLED = "disabled"

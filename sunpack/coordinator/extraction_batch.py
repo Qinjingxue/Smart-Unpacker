@@ -1324,6 +1324,8 @@ class ExtractionBatchRunner:
                 self.context.flatten_candidates.add(out_dir)
                 return out_dir
             self.context.failed_tasks.append(self._failure_message(task, outcome))
+            if outcome.result.failure is not None:
+                self.context.failures.append(outcome.result.failure)
             return None
 
     def _failure_message(self, task: ArchiveTask, outcome: BatchExtractionOutcome) -> str:

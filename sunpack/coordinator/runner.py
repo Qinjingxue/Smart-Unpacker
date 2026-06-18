@@ -129,6 +129,7 @@ class PipelineRunner:
             self.context.success_count,
             self.context.failed_tasks,
             recovered_outputs=self.context.recovered_outputs,
+            failures=self.context.failures,
         )
         self.extractor.close()
         
@@ -138,6 +139,7 @@ class PipelineRunner:
             processed_keys=list(self.context.processed_keys),
             partial_success_count=self.context.partial_success_count,
             recovered_outputs=list(self.context.recovered_outputs),
+            failures=list(self.context.failures),
         )
 
     def run_direct_files(self, file_paths: List[str]) -> RunSummary:
@@ -182,6 +184,7 @@ class PipelineRunner:
             self.context.success_count,
             self.context.failed_tasks,
             recovered_outputs=self.context.recovered_outputs,
+            failures=self.context.failures,
         )
         self.extractor.close()
 
@@ -191,4 +194,5 @@ class PipelineRunner:
             processed_keys=list(self.context.processed_keys),
             partial_success_count=self.context.partial_success_count,
             recovered_outputs=list(self.context.recovered_outputs),
+            failures=list(self.context.failures),
         )

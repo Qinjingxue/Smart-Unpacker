@@ -3,6 +3,7 @@ from sunpack.verification.registry import register_verification_method
 from sunpack.verification.result import (
     DECISION_ACCEPT_PARTIAL,
     DECISION_REPAIR,
+    DECISION_REQUEST_PASSWORD,
     SOURCE_INTEGRITY_DAMAGED,
     SOURCE_INTEGRITY_PAYLOAD_DAMAGED,
     SOURCE_INTEGRITY_TRUNCATED,
@@ -19,6 +20,23 @@ class ExtractionExitSignalMethod:
     def verify(self, evidence: VerificationEvidence, config: dict) -> VerificationStepResult:
         result = evidence.extraction_result
         if not result.success:
+            if result.failure is not None and result.failure.is_password_failure:
+                return VerificationStepResult(
+                    method=self.name,
+                    status="failed",
+                    completeness_hint=0.0,
+                    source_integrity_hint="unknown",
+                    decision_hint=DECISION_REQUEST_PASSWORD,
+                    issues=[
+                        VerificationIssue(
+                            method=self.name,
+                            code="fail.password_required",
+                            message=result.failure.message,
+                            path=result.archive or evidence.archive_path,
+                            actual=result.failure.to_dict(),
+                        )
+                    ],
+                )
             observations = _observations_from_manifest(evidence)
             partial_outputs = bool(result.partial_outputs or observations)
             source_integrity = _source_integrity_hint(result.diagnostics, evidence.progress_manifest)

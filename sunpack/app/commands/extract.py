@@ -21,6 +21,7 @@ from sunpack.app.cli_runtime import (
 from sunpack.app.cli_types import CliCommandResult
 from sunpack.config.loader import load_config
 from sunpack.coordinator.runner import PipelineRunner
+from sunpack.contracts.failures import FailureInfo
 
 COMMAND = "extract"
 ORDER = 10
@@ -95,6 +96,7 @@ def handle(args, ctx):
             direct_file=bool(getattr(args, "direct_file", False)),
         )
         failed_tasks = list(summary.failed_tasks)
+        failures = list(summary.failures)
         processed_keys = list(summary.processed_keys)
         attempts.append({
             "success_count": summary.success_count,
@@ -102,10 +104,11 @@ def handle(args, ctx):
             "processed_count": len(set(processed_keys)),
             "partial_success_count": getattr(summary, "partial_success_count", 0),
             "recovered_outputs": list(getattr(summary, "recovered_outputs", []) or []),
-            "wrong_password_failure": has_wrong_password_failure(failed_tasks),
+            "wrong_password_failure": has_password_failure(failures),
+            "failures": [failure.to_dict() for failure in failures],
         })
         _emit_verbose_recovery_details(reporter, summary)
-        if not _should_retry_password_failure(args, failed_tasks):
+        if not _should_retry_password_failure(args, failures):
             break
         if not _confirm_password_retry(ctx):
             break
@@ -171,15 +174,8 @@ def _run_extract_attempt(config: dict, passwords: list[str], *, use_builtin_pass
     return runner, summary, password_summary
 
 
-def has_wrong_password_failure(failed_tasks: list[str]) -> bool:
-    markers = (
-        "wrong password",
-        "wrong_password",
-        "password error",
-        "密码错误",
-        "密码不正确",
-    )
-    return any(any(marker in str(item).lower() for marker in markers) for item in failed_tasks)
+def has_password_failure(failures: list[FailureInfo]) -> bool:
+    return any(failure.is_password_failure for failure in failures)
 
 
 def _emit_verbose_recovery_details(reporter, summary) -> None:
@@ -269,10 +265,9 @@ def _file_size_label(file: dict) -> str:
     return f" {written}/{expected_int} B"
 
 
-def _should_retry_password_failure(args, failed_tasks: list[str]) -> bool:
+def _should_retry_password_failure(args, failures: list[FailureInfo]) -> bool:
     return (
-        bool(failed_tasks)
-        and has_wrong_password_failure(failed_tasks)
+        has_password_failure(failures)
         and not getattr(args, "json", False)
         and not getattr(args, "quiet", False)
     )

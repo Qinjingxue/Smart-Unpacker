@@ -12,6 +12,7 @@ def test_direct_file_mode_feeds_nested_roots_back_into_recursion(tmp_path):
         processed_keys={"outer", "inner"},
         partial_success_count=0,
         recovered_outputs=[],
+        failures=[],
     )
     runner.space_guard = SimpleNamespace(bind_root=lambda _root: None, disk_monitor=None)
     runner.disk_monitor = None

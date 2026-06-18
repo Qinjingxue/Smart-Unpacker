@@ -14,6 +14,30 @@ VerifierStatus = Literal[
 ]
 
 
+VERIFIER_STATUSES = {
+    "match",
+    "no_match",
+    "unknown_needs_final_verifier",
+    "damaged",
+    "unsupported_method",
+    "backend_unavailable",
+}
+
+
+def normalize_verifier_status(value: object) -> VerifierStatus:
+    normalized = str(value or "").strip().lower()
+    aliases = {
+        "unknown_need_fallback": "unknown_needs_final_verifier",
+        "unknown_needs_fallback": "unknown_needs_final_verifier",
+        "inconclusive": "unknown_needs_final_verifier",
+        "unsupported": "unsupported_method",
+    }
+    normalized = aliases.get(normalized, normalized)
+    if normalized not in VERIFIER_STATUSES:
+        return "unknown_needs_final_verifier"
+    return normalized  # type: ignore[return-value]
+
+
 @dataclass(frozen=True)
 class PasswordBatchVerification:
     ok: bool

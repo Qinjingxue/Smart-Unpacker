@@ -1,6 +1,8 @@
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
+from sunpack.contracts.failures import FailureInfo
+
 
 @dataclass
 class ExtractionResult:
@@ -9,6 +11,7 @@ class ExtractionResult:
     out_dir: str
     all_parts: list[str]
     error: str = ""
+    failure: FailureInfo | None = None
     password_used: Optional[str] = None
     selected_codepage: Optional[str] = None
     diagnostics: dict[str, Any] = field(default_factory=dict)

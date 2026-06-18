@@ -2,10 +2,9 @@ from sunpack.contracts.detection import FactBag
 from sunpack.contracts.archive_knowledge import ArchiveKnowledge
 from sunpack.passwords.candidates import PasswordCandidatePipeline
 from sunpack.passwords.job import PasswordJob
-from sunpack.passwords.result import PasswordResolution
-from sunpack.passwords.scheduler import PasswordScheduler
+from sunpack.passwords.result import PasswordProbeResult, PasswordResolution, PasswordResolutionStatus
+from sunpack.passwords.scheduler import PasswordScheduler, PasswordSearchResult, PasswordSearchStatus
 from sunpack.passwords.session import PasswordSession
-from sunpack.support.archive_error_signals import has_archive_damage_signals, has_definite_wrong_password
 
 
 class PasswordResolver:
@@ -30,84 +29,84 @@ class PasswordResolver:
         if self.password_session.has_resolved(archive_key):
             return PasswordResolution(
                 password=self.password_session.get_resolved(archive_key),
+                status=PasswordResolutionStatus.RESOLVED,
                 archive_key=archive_key,
             )
 
         if self._facts_confirm_unencrypted(fact_bag):
-            return self._remember(archive_key, "", encrypted=False)
+            return self._remember(
+                archive_key,
+                "",
+                status=PasswordResolutionStatus.UNENCRYPTED,
+                encrypted=False,
+            )
 
         if self._facts_have_patches(fact_bag) and self._facts_require_password(fact_bag):
             return PasswordResolution(
                 password=None,
+                status=PasswordResolutionStatus.PASSWORD_REQUIRED,
                 error_text="password verification is unsupported for patched archive state without a resolved password",
                 archive_key=archive_key,
                 encrypted=True,
             )
 
-        if not self.password_tester.passwords:
-            return self._remember(archive_key, "", encrypted=False)
+        if not self.password_tester.passwords and self._facts_require_password(fact_bag):
+            return PasswordResolution(
+                password=None,
+                status=PasswordResolutionStatus.PASSWORD_REQUIRED,
+                error_text="archive requires a password but no candidates were provided",
+                archive_key=archive_key,
+                encrypted=True,
+            )
 
         if self._facts_require_password(fact_bag):
             search = self._run_password_search(archive_path, fact_bag=fact_bag, part_paths=part_paths)
-            password, result, error = search.password, search.test_result, search.error_text
-            if password is None and self._should_recheck_failed_encrypted_search(error):
-                test_result, error_text = self._test_without_password(
+            if search.status == PasswordSearchStatus.FOUND:
+                return self._remember_search(archive_key, search, encrypted=True)
+            if search.status in {PasswordSearchStatus.DAMAGED, PasswordSearchStatus.INCONCLUSIVE}:
+                probe = self._test_without_password(
                     archive_path,
                     fact_bag=fact_bag,
                     part_paths=part_paths,
                 )
-                if has_archive_damage_signals(error_text) and not has_definite_wrong_password(error_text):
-                    return PasswordResolution(
-                        password=None,
-                        test_result=test_result,
-                        error_text=error_text,
-                        archive_key=archive_key,
-                    )
-            return self._remember(
-                archive_key,
-                password,
-                test_result=result,
-                error_text=error,
-                encrypted=True,
-                remember_only_on_success=True,
-            )
+                if probe.status == "damaged":
+                    return self._resolution_from_probe(archive_key, probe)
+            return self._remember_search(archive_key, search, encrypted=True)
 
-        test_result, error_text = self._test_without_password(
+        probe = self._test_without_password(
             archive_path,
             fact_bag=fact_bag,
             part_paths=part_paths,
         )
-        if test_result.returncode == 0:
-            return self._remember(archive_key, "", test_result=test_result, encrypted=False)
-
-        if has_definite_wrong_password(error_text) or "cannot open encrypted archive" in error_text:
-            search = self._run_password_search(archive_path, fact_bag=fact_bag, part_paths=part_paths)
-            password, result, error = search.password, search.test_result, search.error_text
+        if probe.status == "match":
             return self._remember(
                 archive_key,
-                password,
-                test_result=result,
-                error_text=error,
-                encrypted=True,
-                remember_only_on_success=True,
+                "",
+                status=PasswordResolutionStatus.UNENCRYPTED,
+                test_result=probe,
+                encrypted=False,
             )
 
-        search = self._run_password_search(archive_path, fact_bag=fact_bag, part_paths=part_paths)
-        password, result, error = search.password, search.test_result, search.error_text
-        if password is None and has_archive_damage_signals(error_text):
-            return PasswordResolution(
-                password=None,
-                test_result=test_result,
-                error_text=error_text,
-                archive_key=archive_key,
-            )
-        return self._remember(
-            archive_key,
-            password,
-            test_result=result,
-            error_text=error or error_text,
-            encrypted=True if password else None,
-            remember_only_on_success=True,
+        if probe.status == "no_match":
+            if not self.password_tester.passwords:
+                return PasswordResolution(
+                    password=None,
+                    status=PasswordResolutionStatus.PASSWORD_REQUIRED,
+                    test_result=probe,
+                    error_text=probe.message,
+                    archive_key=archive_key,
+                    encrypted=True,
+                )
+            search = self._run_password_search(archive_path, fact_bag=fact_bag, part_paths=part_paths)
+            return self._remember_search(archive_key, search, encrypted=True)
+
+        return PasswordResolution(
+            password="",
+            status=PasswordResolutionStatus.INCONCLUSIVE,
+            test_result=probe,
+            error_text=probe.message,
+            archive_key=archive_key,
+            encrypted=None,
         )
 
     def _run_password_search(self, archive_path: str, fact_bag: FactBag | None = None, part_paths: list[str] | None = None):
@@ -157,6 +156,7 @@ class PasswordResolver:
         self,
         archive_key: str,
         password: str | None,
+        status: PasswordResolutionStatus,
         test_result: object = None,
         error_text: str = "",
         encrypted: bool | None = None,
@@ -166,6 +166,7 @@ class PasswordResolver:
             self.password_session.set_resolved(archive_key, password)
         return PasswordResolution(
             password=password,
+            status=status,
             test_result=test_result,
             error_text=error_text,
             archive_key=archive_key,
@@ -187,13 +188,40 @@ class PasswordResolver:
             return True
         return False
 
+    def _remember_search(self, archive_key: str, search: PasswordSearchResult, *, encrypted: bool | None) -> PasswordResolution:
+        status = {
+            PasswordSearchStatus.FOUND: PasswordResolutionStatus.RESOLVED,
+            PasswordSearchStatus.EXHAUSTED: PasswordResolutionStatus.CANDIDATES_EXHAUSTED,
+            PasswordSearchStatus.DAMAGED: PasswordResolutionStatus.DAMAGED,
+            PasswordSearchStatus.UNSUPPORTED: PasswordResolutionStatus.UNSUPPORTED,
+            PasswordSearchStatus.BACKEND_UNAVAILABLE: PasswordResolutionStatus.BACKEND_ERROR,
+            PasswordSearchStatus.INCONCLUSIVE: PasswordResolutionStatus.INCONCLUSIVE,
+            PasswordSearchStatus.STOPPED: PasswordResolutionStatus.INCONCLUSIVE,
+        }[search.status]
+        return self._remember(
+            archive_key,
+            search.password,
+            status=status,
+            test_result=search.test_result,
+            error_text=search.error_text,
+            encrypted=encrypted,
+            remember_only_on_success=True,
+        )
+
     @staticmethod
-    def _should_recheck_failed_encrypted_search(error_text: str) -> bool:
-        if has_definite_wrong_password(error_text):
-            return False
-        if has_archive_damage_signals(error_text):
-            return True
-        return True
+    def _resolution_from_probe(archive_key: str, probe: PasswordProbeResult) -> PasswordResolution:
+        status = {
+            "damaged": PasswordResolutionStatus.DAMAGED,
+            "unsupported_method": PasswordResolutionStatus.UNSUPPORTED,
+            "backend_unavailable": PasswordResolutionStatus.BACKEND_ERROR,
+        }.get(probe.status, PasswordResolutionStatus.INCONCLUSIVE)
+        return PasswordResolution(
+            password=None,
+            status=status,
+            test_result=probe,
+            error_text=probe.message,
+            archive_key=archive_key,
+        )
 
     @staticmethod
     def _resource_health(fact_bag: FactBag | None) -> dict:

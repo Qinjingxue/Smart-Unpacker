@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from sunpack.passwords.verifier.base import PasswordBatchVerification
+from sunpack.passwords.verifier.base import PasswordBatchVerification, normalize_verifier_status
 from sunpack.passwords.verifier.input import verifier_input
 from sunpack_native import zip_fast_verify_passwords, zip_fast_verify_passwords_from_ranges
 
@@ -38,7 +38,7 @@ class ZipFastVerifier:
             else zip_fast_verify_passwords(verifier_path, normalized_passwords)
         )
 
-        status = str(outcome.get("status") or "unknown_needs_final_verifier")
+        status = normalize_verifier_status(outcome.get("status"))
         matched_index = int(outcome.get("matched_index", -1))
         attempts = int(outcome.get("attempts", 0))
         message = str(outcome.get("message") or "")

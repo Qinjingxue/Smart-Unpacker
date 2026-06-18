@@ -15,6 +15,7 @@ from sunpack.verification.result import (
     DECISION_ACCEPT_PARTIAL,
     DECISION_FAIL,
     DECISION_REPAIR,
+    DECISION_REQUEST_PASSWORD,
     DECISION_RETRY_EXTRACT,
     VerificationResult,
 )
@@ -376,6 +377,7 @@ def _decision_rank(decision: str) -> int:
         DECISION_ACCEPT_PARTIAL: 4,
         DECISION_REPAIR: 2,
         DECISION_RETRY_EXTRACT: 1,
+        DECISION_REQUEST_PASSWORD: 0,
         DECISION_FAIL: 0,
     }.get(decision, 1)
 

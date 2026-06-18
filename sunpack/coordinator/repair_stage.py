@@ -16,6 +16,7 @@ from sunpack.contracts.archive_input import (
 from sunpack.contracts.archive_state import ArchiveState
 from sunpack.contracts.tasks import ArchiveTask
 from sunpack.extraction.result import ExtractionResult
+from sunpack.contracts.failures import FailureKind
 from sunpack.repair.config import repair_config
 from sunpack.repair.context import normalize_runtime_route_evidence
 from sunpack.repair.formats import canonical_format
@@ -272,7 +273,7 @@ class ArchiveRepairStage:
         source_input = dict(route_payload.get("source_input") or source_input)
         with _phase(phase_timer, f"{phase_prefix}_damage_flags"):
             damage_flags = _dedupe([
-                *self._flags_from_failure_text(result.error),
+                *self._flags_from_failure(result),
                 *self._flags_from_verification(verification),
                 *_flags_from_repair_hints(repair_hints),
                 *route_flags,
@@ -589,7 +590,7 @@ class ArchiveRepairStage:
         return None
 
     def _failure_payload(self, task: ArchiveTask, result: ExtractionResult, *, format_hint: str = "") -> dict[str, Any]:
-        flags = self._flags_from_failure_text(result.error)
+        flags = self._flags_from_failure(result)
         diagnostics = dict(result.diagnostics or {})
         worker_result = diagnostics.get("result") if isinstance(diagnostics.get("result"), dict) else {}
         native_diagnostics = worker_result.get("diagnostics") if isinstance(worker_result.get("diagnostics"), dict) else {}
@@ -677,17 +678,19 @@ class ArchiveRepairStage:
                 return True
         return False
 
-    def _flags_from_failure_text(self, error: str) -> list[str]:
-        text = str(error or "").lower()
-        flags = []
-        if "密码" in text or "password" in text:
+    def _flags_from_failure(self, result: ExtractionResult) -> list[str]:
+        failure = result.failure
+        if failure is None:
+            return []
+        flags: list[str] = []
+        if failure.is_password_failure:
             flags.append("wrong_password")
-        if "分卷" in text or "volume" in text:
+        if failure.contains(FailureKind.MISSING_VOLUME):
             flags.append("missing_volume")
-        if "crc" in text or "校验" in text or "checksum" in text:
-            flags.append("checksum_error")
-        if "损坏" in text or "damage" in text or "corrupt" in text or "fatal error" in text:
-            flags.append("damaged")
+        if failure.contains(FailureKind.DAMAGED):
+            flags.extend(["damaged", "checksum_error"])
+        if failure.contains(FailureKind.UNSUPPORTED):
+            flags.append("unsupported_method")
         return flags
 
     def _flags_from_verification(self, verification: VerificationResult) -> list[str]:

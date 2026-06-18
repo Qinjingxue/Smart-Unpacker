@@ -63,6 +63,15 @@ def _result_payload(result: ExtractionResult) -> dict[str, Any]:
 def _failure_payload(result: ExtractionResult, worker: dict[str, Any]) -> dict[str, Any]:
     if result.success:
         return {}
+    if result.failure is not None:
+        payload = result.failure.to_dict()
+        payload.update({
+            "status": str(worker.get("status") or "failed"),
+            "error": result.error,
+            "partial_outputs": bool(result.partial_outputs),
+            "failed_item": worker.get("failed_item"),
+        })
+        return payload
     return {
         "status": str(worker.get("status") or "failed"),
         "failure_stage": str(worker.get("failure_stage") or ""),
@@ -87,6 +96,7 @@ def _compact_diagnostics(diagnostics: dict[str, Any]) -> dict[str, Any]:
         "error",
         "message",
         "partial_outputs",
+        "failure",
     ):
         if key in diagnostics:
             output[key] = diagnostics.get(key)

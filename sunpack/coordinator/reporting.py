@@ -2,6 +2,7 @@ import os
 import time
 from typing import List
 
+from sunpack.contracts.failures import FailureInfo
 from sunpack.repair.config import repair_system_mode
 
 
@@ -19,6 +20,7 @@ class RunReporter:
         success_count: int,
         failed_tasks: List[str],
         recovered_outputs: List[dict] | None = None,
+        failures: List[FailureInfo] | None = None,
     ):
         title = self.text(" Processing Summary ", " 处理汇总 ")
         print("\n" + "=" * 20 + title + "=" * 20)
@@ -44,7 +46,13 @@ class RunReporter:
 
         if failed_tasks:
             print(self.text(f"Failed tasks: {len(failed_tasks)}", f"失败任务：{len(failed_tasks)}"))
-            if repair_system_mode() == "lite":
+            structured_failures = list(failures or [])
+            if structured_failures and all(failure.is_password_failure for failure in structured_failures):
+                print(self.text(
+                    "A password is required or the supplied passwords were rejected. Enter the correct password and retry.",
+                    "压缩包需要密码或已有密码均不正确；请输入正确密码后重试。",
+                ))
+            elif repair_system_mode() == "lite":
                 print(self.text(
                     "Repair system is not included in this build. Verification failures may indicate damaged archives; check the source file or obtain a clean copy.",
                     "当前版本未包含模型修复系统。校验失败可能表示压缩包已损坏；请检查源文件或重新获取完整文件。",
@@ -55,6 +63,8 @@ class RunReporter:
                     for failed_task in failed_tasks:
                         print(f" [x] {failed_task}")
                         handle.write(f"{failed_task}\n")
+                    for failure in structured_failures:
+                        handle.write(f"failure={failure.to_dict()}\n")
                 print(self.text(f"Detailed failure list saved to: {log_path}", f"失败详情已保存到：{log_path}"))
             except Exception:
                 print(self.text("[ERROR] Failed to save failure log file.", "[ERROR] 保存失败日志文件失败。"))

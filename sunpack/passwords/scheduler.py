@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from enum import Enum
 from typing import Literal
 
 from sunpack.passwords.cache import PasswordAttemptCache
@@ -14,9 +15,20 @@ from sunpack.passwords.verifier.seven_zip_fast import SevenZipFastVerifier
 from sunpack.passwords.verifier.zip_fast import ZipFastVerifier
 
 
+class PasswordSearchStatus(str, Enum):
+    FOUND = "found"
+    EXHAUSTED = "exhausted"
+    INCONCLUSIVE = "inconclusive"
+    DAMAGED = "damaged"
+    UNSUPPORTED = "unsupported"
+    BACKEND_UNAVAILABLE = "backend_unavailable"
+    STOPPED = "stopped"
+
+
 @dataclass(frozen=True)
 class PasswordSearchResult:
     password: str | None
+    status: PasswordSearchStatus
     test_result: object = None
     error_text: str = ""
     attempts: int = 0
@@ -64,7 +76,7 @@ class PasswordScheduler:
         fingerprint = job.fingerprint or build_archive_fingerprint(job.archive_path, job.part_paths)
         cached_success = self.cache.get_success(fingerprint.key)
         if cached_success is not None:
-            result = PasswordSearchResult(password=cached_success, attempts=0, stopped_reason="cache_hit")
+            result = PasswordSearchResult(password=cached_success, status=PasswordSearchStatus.FOUND, attempts=0, stopped_reason="cache_hit")
             self._emit_finished(job, result, started_at, candidates_seen=0, skipped=0)
             return result
 
@@ -81,6 +93,7 @@ class PasswordScheduler:
             if stop_reason:
                 result = PasswordSearchResult(
                     password=None,
+                    status=PasswordSearchStatus.STOPPED,
                     test_result=last_result,
                     error_text=last_error or "password search stopped",
                     attempts=attempts,
@@ -122,8 +135,9 @@ class PasswordScheduler:
 
         result = PasswordSearchResult(
             password=None,
+            status=PasswordSearchStatus.EXHAUSTED,
             test_result=last_result,
-            error_text=last_error or "wrong password",
+            error_text=last_error,
             attempts=attempts,
             exhausted=True,
         )
@@ -144,6 +158,7 @@ class PasswordScheduler:
         if not batch:
             return PasswordSearchResult(
                 password=None,
+                status=PasswordSearchStatus.STOPPED,
                 attempts=previous_attempts,
                 error_text="password attempt limit reached",
                 stopped_reason="max_attempts",
@@ -182,14 +197,24 @@ class PasswordScheduler:
             self.cache.remember_success(fingerprint_key, password)
             return PasswordSearchResult(
                 password=password,
+                status=PasswordSearchStatus.FOUND,
                 test_result=verification.test_result,
                 error_text="",
                 attempts=total_attempts,
                 stopped_reason="found",
             )
-        self.cache.remember_negative_batch(fingerprint_key, batch[:attempted_in_batch])
+        status_by_verification = {
+            "no_match": PasswordSearchStatus.EXHAUSTED,
+            "damaged": PasswordSearchStatus.DAMAGED,
+            "unsupported_method": PasswordSearchStatus.UNSUPPORTED,
+            "backend_unavailable": PasswordSearchStatus.BACKEND_UNAVAILABLE,
+        }
+        search_status = status_by_verification.get(verification.status, PasswordSearchStatus.INCONCLUSIVE)
+        if search_status == PasswordSearchStatus.EXHAUSTED:
+            self.cache.remember_negative_batch(fingerprint_key, batch[:attempted_in_batch])
         return PasswordSearchResult(
             password=None,
+            status=search_status,
             test_result=verification.test_result,
             error_text=verification.error_text,
             attempts=total_attempts,

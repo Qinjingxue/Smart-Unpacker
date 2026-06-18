@@ -4,7 +4,13 @@ import subprocess
 from typing import Any
 
 from sunpack.passwords.verifier.base import PasswordBatchVerification
-from sunpack.support.sevenzip_bridge import get_native_password_tester
+from sunpack.support.sevenzip_bridge import (
+    STATUS_BACKEND_UNAVAILABLE,
+    STATUS_DAMAGED,
+    STATUS_UNSUPPORTED,
+    STATUS_WRONG_PASSWORD,
+    get_native_password_tester,
+)
 
 
 class SevenZipDllVerifier:
@@ -54,12 +60,19 @@ class SevenZipDllVerifier:
                 error_text="",
                 terminal=True,
             )
+        status_by_native = {
+            STATUS_WRONG_PASSWORD: "no_match",
+            STATUS_DAMAGED: "damaged",
+            STATUS_UNSUPPORTED: "unsupported_method",
+            STATUS_BACKEND_UNAVAILABLE: "backend_unavailable",
+        }
+        status = status_by_native.get(native_attempt.status, "unknown_needs_final_verifier")
         return PasswordBatchVerification(
             ok=False,
-            status="no_match",
+            status=status,
             matched_index=-1,
             attempts=native_attempt.attempts,
             test_result=native_result,
-            error_text=error_text or "wrong password",
-            terminal=False,
+            error_text=error_text,
+            terminal=status in {"damaged", "unsupported_method", "backend_unavailable"},
         )

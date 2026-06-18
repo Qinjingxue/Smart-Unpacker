@@ -2,7 +2,8 @@ from types import SimpleNamespace
 
 from sunpack.contracts.detection import FactBag
 from sunpack.passwords.job import PasswordJob
-from sunpack.passwords.scheduler import PasswordSearchResult
+from sunpack.passwords.result import PasswordProbeResult, PasswordResolutionStatus
+from sunpack.passwords.scheduler import PasswordSearchResult, PasswordSearchStatus
 from sunpack.passwords import PasswordResolver, PasswordSession, PasswordStore
 
 
@@ -40,27 +41,27 @@ class FakePasswordTester:
 
     def test_without_password(self, archive_path, part_paths=None):
         self.test_without_password_calls += 1
-        return SimpleNamespace(returncode=2), "wrong password"
+        return PasswordProbeResult(status="no_match", message="encrypted")
 
     def search_passwords(self, job: PasswordJob):
         self.search_calls += 1
-        return PasswordSearchResult(password="secret", test_result=SimpleNamespace(returncode=0), error_text="")
+        return PasswordSearchResult(password="secret", status=PasswordSearchStatus.FOUND, test_result=SimpleNamespace(returncode=0), error_text="")
 
 
 class FakeFailingPasswordTester(FakePasswordTester):
     def test_without_password(self, archive_path, part_paths=None):
         self.test_without_password_calls += 1
-        return SimpleNamespace(returncode=2), "headers error"
+        return PasswordProbeResult(status="damaged", message="headers error")
 
     def search_passwords(self, job: PasswordJob):
         self.search_calls += 1
-        return PasswordSearchResult(password=None, test_result=SimpleNamespace(returncode=2), error_text="wrong password")
+        return PasswordSearchResult(password=None, status=PasswordSearchStatus.EXHAUSTED, test_result=SimpleNamespace(returncode=2), error_text="password rejected")
 
 
 class FakeDamagedPasswordTester(FakeFailingPasswordTester):
     def search_passwords(self, job: PasswordJob):
         self.search_calls += 1
-        return PasswordSearchResult(password=None, test_result=SimpleNamespace(returncode=2), error_text="headers error")
+        return PasswordSearchResult(password=None, status=PasswordSearchStatus.DAMAGED, test_result=SimpleNamespace(returncode=2), error_text="headers error")
 
 
 class FakePasswordScheduler:
@@ -135,7 +136,7 @@ def test_password_resolver_does_not_recheck_clear_wrong_password_after_encrypted
     result = resolver.resolve("sample.zip", fact_bag=bag, archive_key="archive-key")
 
     assert result.password is None
-    assert result.error_text == "wrong password"
+    assert result.status == PasswordResolutionStatus.CANDIDATES_EXHAUSTED
     assert tester.search_calls == 1
     assert tester.test_without_password_calls == 0
 
@@ -154,6 +155,7 @@ def test_password_resolver_rechecks_failed_encrypted_resolution_for_damage():
     result = resolver.resolve("sample.zip", fact_bag=bag, archive_key="archive-key")
 
     assert result.password is None
+    assert result.status == PasswordResolutionStatus.DAMAGED
     assert result.error_text == "headers error"
     assert tester.search_calls == 1
     assert tester.test_without_password_calls == 1

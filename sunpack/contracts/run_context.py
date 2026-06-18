@@ -1,6 +1,8 @@
 import threading
 from typing import List, Set
 
+from sunpack.contracts.failures import FailureInfo
+
 
 class RunContext:
     def __init__(self):
@@ -8,6 +10,7 @@ class RunContext:
         self.success_count: int = 0
         self.partial_success_count: int = 0
         self.failed_tasks: List[str] = []
+        self.failures: List[FailureInfo] = []
         self.recovered_outputs: List[dict] = []
         self.processed_keys: Set[str] = set()
         self.unpacked_archives: List[List[str]] = []

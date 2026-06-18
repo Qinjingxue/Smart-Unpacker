@@ -4,16 +4,17 @@ import subprocess
 from contextlib import nullcontext
 from typing import Any, Callable, Optional
 
+from sunpack.contracts.failures import FailureInfo, FailureKind
 from sunpack.contracts.archive_input import ArchiveInputDescriptor
 from sunpack.contracts.archive_state import ArchiveState
 from sunpack.contracts.tasks import ArchiveTask, SplitArchiveInfo
-from sunpack.extraction.internal.workflow.errors import classify_extract_error
+from sunpack.extraction.internal.workflow.errors import classify_extract_failure
 from sunpack.extraction.internal.workflow.retry_policy import ExtractRetryPolicy
 from sunpack.extraction.internal.sevenzip.sevenzip_runner import SevenZipRunner
 from sunpack.extraction.internal.workflow.split_entry import SplitEntryResolver
 from sunpack.extraction.progress import has_recoverable_partial_outputs, write_extraction_progress_manifest_payload
 from sunpack.extraction.result import ExtractionResult
-from sunpack.passwords.result import PasswordResolution
+from sunpack.passwords.result import PasswordResolution, PasswordResolutionStatus
 from sunpack.support import archive_knowledge_projection as knowledge_view
 from sunpack.support.output_inventory import OutputInventory, collect_output_inventory
 
@@ -154,23 +155,25 @@ class SingleArchiveExtractor:
             try:
                 with _phase(phase_timer, f"{phase_prefix}_resolve_password"):
                     resolution = self._resolve_password(task, run_archive, run_parts)
+                resolution_failure = self._password_resolution_failure(resolution)
+                if resolution_failure is not None:
+                    shutil.rmtree(out_dir, ignore_errors=True)
+                    self._log(f"[EXTRACT] 失败: {archive} (错误: {resolution_failure.message})")
+                    return self._failed(
+                        archive,
+                        out_dir,
+                        run_parts,
+                        resolution_failure.message,
+                        failure=resolution_failure,
+                        diagnostics={
+                            "failure_stage": resolution_failure.stage,
+                            "failure_kind": resolution_failure.kind.value,
+                            "message": resolution.error_text,
+                        },
+                    )
                 correct_pwd = resolution.password
                 test_result = resolution.test_result
                 test_err = resolution.error_text
-                if self.password_store.has_candidates():
-                    if correct_pwd is None and "wrong password" in test_err:
-                        if is_split:
-                            correct_pwd = ""
-                        else:
-                            shutil.rmtree(out_dir, ignore_errors=True)
-                            return self._failed(
-                                archive,
-                                out_dir,
-                                run_parts,
-                                "密码错误或未知密码",
-                                diagnostics=self._diagnostics_from(test_result),
-                            )
-
                 with _phase(phase_timer, f"{phase_prefix}_scan_filename_encoding"):
                     filename_encoding = self.metadata_scanner.scan(
                         run_archive,
@@ -285,8 +288,8 @@ class SingleArchiveExtractor:
                 continue
 
             with _phase(phase_timer, f"{phase_prefix}_classify_error"):
-                error_msg = classify_extract_error(run_result or test_result, err, archive=archive, is_split_archive=is_split)
-                error_msg = self.retry_policy.append_retry_count(error_msg, retry_count)
+                failure = classify_extract_failure(run_result or test_result, err, archive=archive, is_split_archive=is_split)
+                error_msg = self.retry_policy.append_retry_count(failure.message, retry_count)
             self._log(f"[EXTRACT] 失败: {archive} (错误: {error_msg})")
             with _phase(phase_timer, f"{phase_prefix}_diagnostics_failure"):
                 diagnostics = self._diagnostics_from(run_result or test_result)
@@ -309,6 +312,7 @@ class SingleArchiveExtractor:
                     out_dir,
                     run_parts,
                     error_msg,
+                    failure=failure,
                     password_used=correct_pwd,
                     selected_codepage=selected_codepage,
                     diagnostics=diagnostics,
@@ -322,6 +326,7 @@ class SingleArchiveExtractor:
                 out_dir,
                 run_parts,
                 error_msg,
+                failure=failure,
                 password_used=correct_pwd,
                 selected_codepage=selected_codepage,
                 diagnostics=diagnostics,
@@ -339,22 +344,34 @@ class SingleArchiveExtractor:
     def _resolve_password(self, task: ArchiveTask, archive_path: str, part_paths: list[str]):
         known_password = knowledge_view.archive_password(task)
         if known_password is not None:
-            return PasswordResolution(password=str(known_password), archive_key=task.key)
+            return PasswordResolution(
+                password=str(known_password),
+                status=PasswordResolutionStatus.RESOLVED,
+                archive_key=task.key,
+            )
         archive_state = task.archive_state() if hasattr(task, "archive_state") else None
         if archive_state is not None and archive_state.patches:
             if not self._task_requires_password(task):
-                return PasswordResolution(password="", archive_key=task.key, encrypted=False)
+                return PasswordResolution(
+                    password="",
+                    status=PasswordResolutionStatus.UNENCRYPTED,
+                    archive_key=task.key,
+                    encrypted=False,
+                )
             return PasswordResolution(
                 password=None,
+                status=PasswordResolutionStatus.PASSWORD_REQUIRED,
                 archive_key=task.key,
                 encrypted=True,
                 error_text="password verification is unsupported for patched archive state without a resolved password",
             )
         if not self.password_store.has_candidates() and not self._task_requires_password(task):
-            return PasswordResolution(password="", archive_key=task.key, encrypted=False)
-        password_tester = self.password_resolver.password_tester
-        if not password_tester.passwords:
-            return PasswordResolution(password="", archive_key=task.key, encrypted=False)
+            return PasswordResolution(
+                password="",
+                status=PasswordResolutionStatus.UNENCRYPTED,
+                archive_key=task.key,
+                encrypted=False,
+            )
         return self.password_resolver.resolve(
             archive_path,
             task.fact_bag,
@@ -385,6 +402,7 @@ class SingleArchiveExtractor:
         all_parts: list[str],
         error: str,
         *,
+        failure: FailureInfo | None = None,
         password_used: str | None = None,
         selected_codepage: str | None = None,
         diagnostics: dict | None = None,
@@ -392,15 +410,21 @@ class SingleArchiveExtractor:
         progress_manifest: str = "",
         progress_manifest_payload: dict | None = None,
     ) -> ExtractionResult:
+        diagnostic_payload = dict(diagnostics or {})
+        if failure is not None:
+            diagnostic_payload.setdefault("failure_stage", failure.stage)
+            diagnostic_payload.setdefault("failure_kind", failure.kind.value)
+            diagnostic_payload["failure"] = failure.to_dict()
         return ExtractionResult(
             success=False,
             archive=archive,
             out_dir=out_dir,
             all_parts=list(all_parts or []),
             error=error,
+            failure=failure,
             password_used=password_used,
             selected_codepage=selected_codepage,
-            diagnostics=dict(diagnostics or {}),
+            diagnostics=diagnostic_payload,
             partial_outputs=partial_outputs,
             progress_manifest=progress_manifest,
             progress_manifest_payload=progress_manifest_payload,
@@ -410,6 +434,61 @@ class SingleArchiveExtractor:
     def _diagnostics_from(result: object) -> dict:
         diagnostics = getattr(result, "worker_diagnostics", None)
         return dict(diagnostics) if isinstance(diagnostics, dict) else {}
+
+    @staticmethod
+    def _password_resolution_failure(resolution: PasswordResolution) -> FailureInfo | None:
+        if resolution.password is not None:
+            return None
+        mapping = {
+            PasswordResolutionStatus.PASSWORD_REQUIRED: (
+                FailureKind.PASSWORD_REQUIRED,
+                "压缩包需要密码",
+                "request_password",
+                False,
+            ),
+            PasswordResolutionStatus.CANDIDATES_EXHAUSTED: (
+                FailureKind.WRONG_PASSWORD,
+                "密码错误或未知密码",
+                "request_password",
+                False,
+            ),
+            PasswordResolutionStatus.INCONCLUSIVE: (
+                FailureKind.PASSWORD_INCONCLUSIVE,
+                "无法确认压缩包密码状态",
+                "",
+                False,
+            ),
+            PasswordResolutionStatus.DAMAGED: (
+                FailureKind.DAMAGED,
+                "压缩包损坏",
+                "",
+                True,
+            ),
+            PasswordResolutionStatus.UNSUPPORTED: (
+                FailureKind.UNSUPPORTED,
+                "压缩格式或加密方法不支持",
+                "",
+                False,
+            ),
+            PasswordResolutionStatus.BACKEND_ERROR: (
+                FailureKind.BACKEND_UNAVAILABLE,
+                "密码验证后端不可用",
+                "",
+                False,
+            ),
+        }
+        spec = mapping.get(resolution.status)
+        if spec is None:
+            return None
+        kind, message, user_action, repairable = spec
+        return FailureInfo(
+            kind=kind,
+            stage="password_resolution",
+            message=message,
+            user_action=user_action,
+            repairable=repairable,
+            details={"diagnostic": resolution.error_text},
+        )
 
     @staticmethod
     def _empty_repaired_success(diagnostics: dict, task: ArchiveTask) -> bool:
@@ -474,6 +553,7 @@ class SingleArchiveExtractor:
         selected_codepage = None
         any_success = False
         any_partial = False
+        segment_failures: list[FailureInfo] = []
 
         for position, segment in enumerate(segments, start=1):
             fmt = str(segment.get("format") or "archive").replace("/", "_") or "archive"
@@ -520,6 +600,8 @@ class SingleArchiveExtractor:
             segment_partial = bool(result.partial_outputs or stats["file_count"] > 0)
             any_success = any_success or segment_success
             any_partial = any_partial or segment_partial
+            if result.failure is not None:
+                segment_failures.append(result.failure)
             segment_results.append({
                 "segment_id": segment_id,
                 "index": int(segment.get("index") or position),
@@ -533,6 +615,7 @@ class SingleArchiveExtractor:
                 "success": segment_success,
                 "partial_outputs": segment_partial,
                 "error": result.error,
+                "failure": result.failure.to_dict() if result.failure is not None else None,
                 "diagnostics": dict(result.diagnostics or {}),
                 "progress_manifest": result.progress_manifest,
                 "files_written": stats["file_count"],
@@ -587,11 +670,22 @@ class SingleArchiveExtractor:
                 bytes_written=totals["total_bytes"],
             )
         self._log(f"[EXTRACT] embedded segments 失败: {archive}")
+        password_failure = any(failure.is_password_failure for failure in segment_failures)
+        aggregate_failure = FailureInfo(
+            kind=FailureKind.EMBEDDED_SEGMENTS_FAILED,
+            stage="embedded_segments",
+            message="嵌入压缩段密码错误" if password_failure else "嵌入压缩段解压失败",
+            user_action="request_password" if password_failure else "",
+            repairable=bool(segment_failures) and all(failure.repairable for failure in segment_failures),
+            causes=tuple(segment_failures),
+            details={"segment_count": len(segment_results)},
+        )
         return self._failed(
             archive,
             out_dir,
             all_parts,
-            "embedded segment extraction failed",
+            aggregate_failure.message,
+            failure=aggregate_failure,
             password_used=password_used,
             selected_codepage=selected_codepage,
             diagnostics={
