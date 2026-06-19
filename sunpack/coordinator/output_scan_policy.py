@@ -1,5 +1,6 @@
 import os
 from copy import deepcopy
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -19,6 +20,16 @@ class NestedOutputScanPolicy:
 
     def __init__(self, config: dict[str, Any]):
         self.config = config
+        embedded_config = module_config(config, "processors", "embedded_archive")
+        if not embedded_config:
+            embedded_config = self._rule_config("scoring", "embedded_payload_identity")
+        extension_config = self._rule_config("scoring", "extension")
+        self._standard_exts, self._carrier_exts, self._ambiguous_exts = _compile_extension_rules(
+            _freeze_extension_score_groups(extension_config.get("extension_score_groups", [])),
+            _freeze_strings(embedded_config.get("carrier_exts")),
+            _freeze_strings(embedded_config.get("ambiguous_resource_exts")),
+        )
+        self._output_scan_config = self._build_recursive_output_scan_config()
 
     def should_consider_file_for_nested_scan(self, path: str) -> bool:
         return self._should_consider_candidate(path, size=None)
@@ -42,7 +53,7 @@ class NestedOutputScanPolicy:
         # may intentionally remain current-directory-only.
         snapshot = self._snapshot_from_inventory(target_dir, inventory)
         if snapshot is None:
-            snapshot = DirectoryScanner(target_dir, config=self._recursive_output_scan_config()).scan()
+            snapshot = DirectoryScanner(target_dir, config=self._output_scan_config).scan()
         ctx = detect_scene_context_for_directory(target_dir, entries=snapshot.entries)
         if is_strong_scene_context(ctx):
             print(
@@ -104,7 +115,7 @@ class NestedOutputScanPolicy:
         ]
         return DirectorySnapshot(root_path=Path(root), entries=entries)
 
-    def _recursive_output_scan_config(self) -> dict[str, Any]:
+    def _build_recursive_output_scan_config(self) -> dict[str, Any]:
         config = deepcopy(self.config)
         filesystem = config.get("filesystem")
         if not isinstance(filesystem, dict):
@@ -116,22 +127,11 @@ class NestedOutputScanPolicy:
     def _should_consider_candidate(self, path: str, size: int | None) -> bool:
         filename = os.path.basename(path).lower()
         _, ext = os.path.splitext(filename)
-        embedded_config = module_config(self.config, "processors", "embedded_archive")
-        if not embedded_config:
-            embedded_config = self._rule_config("scoring", "embedded_payload_identity")
-
-        extension_config = self._rule_config("scoring", "extension")
-        standard_exts = set(normalize_extension_score_groups(extension_config.get("extension_score_groups", [])))
-        standard_exts.add(".exe")
-
-        carrier_exts = normalize_exts(embedded_config.get("carrier_exts"))
-        ambiguous_exts = normalize_exts(embedded_config.get("ambiguous_resource_exts"))
-
-        if ext in standard_exts:
+        if ext in self._standard_exts:
             return True
-        if ext in carrier_exts:
+        if ext in self._carrier_exts:
             return self._size_at_least(path, size, 1024 * 1024)
-        if ext in ambiguous_exts and any(token in filename for token in ("archive", "zip", "rar", "7z", "part")):
+        if ext in self._ambiguous_exts and any(token in filename for token in ("archive", "zip", "rar", "7z", "part")):
             return True
         if filename == "#0" and self._parent_suggests_tar_stream(path):
             return True
@@ -181,3 +181,40 @@ class NestedOutputScanPolicy:
             "_tar.zst",
             "_tzst",
         ))
+
+
+def _freeze_strings(values: Any) -> tuple[str, ...]:
+    if not isinstance(values, (list, tuple, set)):
+        return ()
+    return tuple(str(value) for value in values if isinstance(value, str) and value.strip())
+
+
+def _freeze_extension_score_groups(values: Any) -> tuple[tuple[int, tuple[str, ...]], ...]:
+    if not isinstance(values, list):
+        return ()
+    groups: list[tuple[int, tuple[str, ...]]] = []
+    for group in values:
+        if not isinstance(group, dict):
+            continue
+        try:
+            score = int(group.get("score"))
+        except (TypeError, ValueError):
+            continue
+        groups.append((score, _freeze_strings(group.get("extensions"))))
+    return tuple(groups)
+
+
+@lru_cache(maxsize=64)
+def _compile_extension_rules(
+    score_groups: tuple[tuple[int, tuple[str, ...]], ...],
+    carrier_exts: tuple[str, ...],
+    ambiguous_exts: tuple[str, ...],
+) -> tuple[frozenset[str], frozenset[str], frozenset[str]]:
+    groups = [{"score": score, "extensions": list(extensions)} for score, extensions in score_groups]
+    standard = set(normalize_extension_score_groups(groups))
+    standard.add(".exe")
+    return (
+        frozenset(standard),
+        frozenset(normalize_exts(carrier_exts)),
+        frozenset(normalize_exts(ambiguous_exts)),
+    )

@@ -9,6 +9,10 @@ from typing import Any
 @dataclass
 class ArchiveKnowledge:
     data: dict[str, Any] = field(default_factory=dict)
+    _dirty_roots: set[str] = field(default_factory=set, init=False, repr=False)
+    _mutation_version: int = field(default=0, init=False, repr=False)
+    _snapshot_cache: dict[str, Any] | None = field(default=None, init=False, repr=False)
+    _snapshot_cache_version: int = field(default=-1, init=False, repr=False)
 
     @classmethod
     def from_any(cls, raw: Any | None) -> "ArchiveKnowledge":
@@ -19,7 +23,26 @@ class ArchiveKnowledge:
         return cls()
 
     def to_dict(self) -> dict[str, Any]:
-        return _jsonable(self.data)
+        if self._snapshot_cache is None or self._snapshot_cache_version != self._mutation_version:
+            self._snapshot_cache = _jsonable(self.data)
+            self._snapshot_cache_version = self._mutation_version
+        return deepcopy(self._snapshot_cache)
+
+    def incremental_snapshot(self, previous: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Build a JSON-safe snapshot by copying only top-level branches changed since commit."""
+        if not isinstance(previous, dict):
+            snapshot = _jsonable(self.data)
+        else:
+            snapshot = dict(previous)
+            for root in self._dirty_roots:
+                if root in self.data:
+                    snapshot[root] = _jsonable(self.data[root])
+                else:
+                    snapshot.pop(root, None)
+        self._snapshot_cache = snapshot
+        self._snapshot_cache_version = self._mutation_version
+        self._dirty_roots.clear()
+        return snapshot
 
     def revision(self) -> int:
         meta = self.data.get("_meta")
@@ -78,7 +101,9 @@ class ArchiveKnowledge:
             current = current.setdefault(part, {})
             if not isinstance(current, dict):
                 return self
-        current[parts[-1]] = _jsonable(value)
+        normalized = _jsonable(value)
+        current[parts[-1]] = normalized
+        self._mark_dirty(parts[0])
         provenance = _provenance(
             source_layer=source_layer,
             source_module=source_module,
@@ -97,6 +122,8 @@ class ArchiveKnowledge:
             raw = payload.to_dict() if isinstance(payload, ArchiveKnowledge) else payload
             if isinstance(raw, dict):
                 _deep_merge(self.data, _jsonable(raw))
+                for root in raw:
+                    self._mark_dirty(str(root))
         if source_layer or source_module:
             self.add_evidence("knowledge.merge", True, provenance=_provenance(source_layer=source_layer, source_module=source_module))
         return self
@@ -125,6 +152,7 @@ class ArchiveKnowledge:
             item["provenance"] = _jsonable(provenance)
         evidence.append(item)
         self.data["_evidence"] = evidence[-500:]
+        self._mark_dirty("_evidence")
         return self
 
     def history(self, namespace: str = "") -> list[dict[str, Any]]:
@@ -145,6 +173,12 @@ class ArchiveKnowledge:
                     output.extend(str(flag) for flag in item if str(flag))
                 else:
                     self._collect_flags(item, output)
+
+    def _mark_dirty(self, root: str) -> None:
+        self._dirty_roots.add(str(root))
+        self._mutation_version += 1
+        self._snapshot_cache = None
+        self._snapshot_cache_version = -1
 
 
 def merge_knowledge(*payloads: Any) -> dict[str, Any]:

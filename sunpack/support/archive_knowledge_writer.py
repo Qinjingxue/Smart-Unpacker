@@ -34,11 +34,12 @@ def commit_task_knowledge(
     except (TypeError, ValueError):
         revision = 1
     meta = payload.get("_meta") if isinstance(payload.get("_meta"), dict) else {}
-    payload.data["_meta"] = {**meta, "revision": revision}
+    payload.set("_meta", {**meta, "revision": revision})
     with _phase(phase_timer, f"{phase_prefix}_set_knowledge"):
-        payload_dict = payload.to_dict()
+        previous_payload = task.fact_bag.get("archive.knowledge") if hasattr(task, "fact_bag") else None
+        payload_dict = payload.incremental_snapshot(previous_payload if isinstance(previous_payload, dict) else None)
         if hasattr(task, "_replace_knowledge_payload") and callable(task._replace_knowledge_payload):
-            task._replace_knowledge_payload(payload_dict, knowledge_cache=ArchiveKnowledge(payload_dict))
+            task._replace_knowledge_payload(payload_dict, knowledge_cache=payload)
         elif hasattr(task, "fact_bag") and hasattr(task.fact_bag, "set"):
             task.fact_bag.set("archive.knowledge", payload_dict)
         elif hasattr(task, "set_knowledge") and callable(task.set_knowledge):

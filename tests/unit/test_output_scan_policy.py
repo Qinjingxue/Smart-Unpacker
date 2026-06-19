@@ -2,6 +2,7 @@ from sunpack.coordinator.output_scan_policy import NestedOutputScanPolicy as Out
 from sunpack.contracts.filesystem import FileEntry
 from sunpack.support.output_inventory import OutputInventory, OutputStats
 from tests.helpers.detection_config import with_detection_pipeline
+import sunpack.coordinator.output_scan_policy as policy_module
 
 
 def _config():
@@ -101,3 +102,31 @@ def test_output_scan_policy_reuses_extraction_inventory(tmp_path, monkeypatch):
     )
 
     assert roots == [str(segment_dir.resolve())]
+
+
+def test_output_scan_policy_compiles_extension_rules_once_per_config(monkeypatch, tmp_path):
+    policy_module._compile_extension_rules.cache_clear()
+    calls = {"groups": 0, "exts": 0}
+    original_groups = policy_module.normalize_extension_score_groups
+    original_exts = policy_module.normalize_exts
+
+    def count_groups(values):
+        calls["groups"] += 1
+        return original_groups(values)
+
+    def count_exts(values):
+        calls["exts"] += 1
+        return original_exts(values)
+
+    monkeypatch.setattr(policy_module, "normalize_extension_score_groups", count_groups)
+    monkeypatch.setattr(policy_module, "normalize_exts", count_exts)
+    config = _config()
+    first = OutputScanPolicy(config)
+    second = OutputScanPolicy(config)
+
+    for index in range(100):
+        entry = FileEntry(path=tmp_path / f"nested_{index}.zip", is_dir=False, size=2)
+        assert first.should_consider_entry_for_nested_scan(entry)
+        assert second.should_consider_entry_for_nested_scan(entry)
+
+    assert calls == {"groups": 1, "exts": 2}
