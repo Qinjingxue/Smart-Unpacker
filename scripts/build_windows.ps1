@@ -1,8 +1,10 @@
 [CmdletBinding()]
 param(
     [switch]$SkipTests,
+    [switch]$SkipInstaller,
     [switch]$Clean,
     [string]$Version,
+    [string]$InnoCompilerPath,
     [ValidateSet("x64", "arm64")]
     [string]$Arch = "x64",
     [ValidateSet("full", "lite")]
@@ -343,6 +345,31 @@ assert not missing, missing
     )
 }
 
+function Get-InnoSetupCompiler {
+    param([string]$PreferredPath)
+
+    $candidates = @()
+    if ($PreferredPath) {
+        $candidates += $PreferredPath
+    }
+    $command = Get-Command "ISCC.exe" -ErrorAction SilentlyContinue
+    if ($command) {
+        $candidates += $command.Source
+    }
+    foreach ($root in @(${env:ProgramFiles(x86)}, $env:ProgramFiles, $env:LOCALAPPDATA)) {
+        if ($root) {
+            $candidates += (Join-Path $root "Inno Setup 6\ISCC.exe")
+            $candidates += (Join-Path $root "Programs\Inno Setup 6\ISCC.exe")
+        }
+    }
+    foreach ($candidate in ($candidates | Select-Object -Unique)) {
+        if ($candidate -and (Test-Path -LiteralPath $candidate)) {
+            return (Resolve-Path -LiteralPath $candidate).Path
+        }
+    }
+    throw "Inno Setup 6 compiler (ISCC.exe) was not found. Install JRSoftware.InnoSetup, pass -InnoCompilerPath, or use -SkipInstaller."
+}
+
 function Install-ModelRuntimeDependencies {
     param(
         [Parameter(Mandatory = $true)]
@@ -587,6 +614,7 @@ $venvPath = Join-Path $repoRoot ".venv-build"
 $venvPython = Join-Path $venvPath "Scripts\python.exe"
 $venvScripts = Join-Path $venvPath "Scripts"
 $specPath = Join-Path $repoRoot "SunPack.spec"
+$installerScriptPath = Join-Path $repoRoot "installer\SunPack.iss"
 $projectPath = Join-Path $repoRoot "pyproject.toml"
 $modelsRoot = Join-Path $repoRoot "models"
 $modelManifestPath = Join-Path $modelsRoot "manifest.json"
@@ -615,6 +643,8 @@ $distLicensesRoot = Join-Path $distAppRoot "licenses"
 $versionValue = Get-ReleaseVersion -ExplicitVersion $Version -RepoRoot $repoRoot
 $releaseZipName = "sunpack-windows-{0}-{1}-{2}.zip" -f $buildArch, $repairSystemMode, $versionValue
 $releaseZipPath = Join-Path $releaseRoot $releaseZipName
+$releaseInstallerName = "sunpack-windows-{0}-{1}-{2}-setup.exe" -f $buildArch, $repairSystemMode, $versionValue
+$releaseInstallerPath = Join-Path $releaseRoot $releaseInstallerName
 $runAcceptanceTests = -not $SkipTests
 
 if ($promptForAcceptanceTests) {
@@ -626,6 +656,9 @@ if ($repairSystemMode -eq "full") {
     Assert-PathExists -LiteralPath $modelManifestPath -Description "models/manifest.json"
 }
 Assert-PathExists -LiteralPath $specPath -Description "PyInstaller spec"
+if (-not $SkipInstaller) {
+    Assert-PathExists -LiteralPath $installerScriptPath -Description "Inno Setup installer script"
+}
 Assert-PathExists -LiteralPath $iconPath -Description "SunPack icon"
 Assert-PathExists -LiteralPath $nativeCargoToml -Description "sunpack_native Cargo manifest"
 Assert-PathExists -LiteralPath (Join-Path $sevenZipWrapperRoot "CMakeLists.txt") -Description "7z wrapper CMake project"
@@ -803,8 +836,30 @@ Invoke-Native -FilePath $sevenZipPath -Arguments @("a", "-tzip", "-mx=5", $relea
 Invoke-Native -FilePath $sevenZipPath -Arguments @("t", $releaseZipPath)
 Assert-PathExists -LiteralPath $releaseZipPath -Description "Release zip archive"
 
+if (-not $SkipInstaller) {
+    Write-Step "Creating Windows installer"
+    $innoCompiler = Get-InnoSetupCompiler -PreferredPath $InnoCompilerPath
+    $installerBaseName = [System.IO.Path]::GetFileNameWithoutExtension($releaseInstallerName)
+    Invoke-Native -FilePath $innoCompiler -Arguments @(
+        "/Qp",
+        "/DAppVersion=$versionValue",
+        "/DSourceDir=$distAppRoot",
+        "/DOutputDir=$releaseRoot",
+        "/DOutputBaseFilename=$installerBaseName",
+        "/DTargetArch=$buildArch",
+        "/DRepairSystem=$repairSystemMode",
+        $installerScriptPath
+    )
+    Assert-PathExists -LiteralPath $releaseInstallerPath -Description "Windows installer"
+} else {
+    Write-Host "Skipping Windows installer by request." -ForegroundColor Yellow
+}
+
 Write-Host ""
 Write-Host "Build completed successfully." -ForegroundColor Green
 Write-Host "Version: $versionValue"
 Write-Host "App directory: $distAppRoot"
 Write-Host "Release zip: $releaseZipPath"
+if (-not $SkipInstaller) {
+    Write-Host "Windows installer: $releaseInstallerPath"
+}

@@ -245,8 +245,21 @@ Windows 打包：
 .\scripts\build_windows.ps1 -Version 1.2.3
 .\scripts\build_windows.ps1 -Arch x64 -RepairSystem full
 .\scripts\build_windows.ps1 -Arch x64 -RepairSystem lite
+.\scripts\build_windows.ps1 -SkipInstaller
 ```
 
-构建脚本会准备 `.venv-build`，从 `pyproject.toml` 安装 `build` extra，构建 Rust wheel 和 C++ bridge/worker，用 PyInstaller 生成 `sunpack.exe`，复制配置、工具和 license，并执行 packaged smoke。`-RepairSystem full` 会额外安装模型运行时、复制 `models/` 并执行模型加载检查；`-RepairSystem lite` 不包含模型资产和模型依赖。发行包输出到 `release\sunpack-windows-<arch>-<repair_system>-<version>.zip`，目录输出到 `dist\sunpack-<arch>-<repair_system>\`。
+构建脚本会准备 `.venv-build`，从 `pyproject.toml` 安装 `build` extra，构建 Rust wheel 和 C++ bridge/worker，用 PyInstaller 生成 `sunpack.exe`，复制配置、工具和 license，并执行 packaged smoke。`-RepairSystem full` 会额外安装模型运行时、复制 `models/` 并执行模型加载检查；`-RepairSystem lite` 不包含模型资产和模型依赖。
 
-构建脚本支持 `-Arch x64|arm64` 和 `-RepairSystem full|lite`。`x64` 和 `full` 是默认值；ARM64 最终可执行文件需要在 ARM64 Windows + ARM64 Python 环境中构建，脚本会静态校验包内所有关键 PE 文件的 machine 架构。已有包可用 `.\scripts\verify_windows_package_arch.ps1 -PackageRoot <dist目录> -Arch arm64` 在任意 Windows 机器上做静态检查。GitHub release workflow 目前只产出 `x64-lite` 和 `arm64-lite` 两个 Windows 包。
+默认还会调用 Inno Setup 6 生成 Windows 安装包。可通过 `winget install JRSoftware.InnoSetup` 安装编译器，或用 `-InnoCompilerPath <ISCC.exe>` 指定路径；只需要便携包时使用 `-SkipInstaller`。构建产物包括：
+
+- `release\sunpack-windows-<arch>-<repair_system>-<version>.zip`：便携版。
+- `release\sunpack-windows-<arch>-<repair_system>-<version>-setup.exe`：安装版。
+- `dist\sunpack-<arch>-<repair_system>\`：未压缩程序目录。
+
+安装版默认按当前用户安装到 `%LOCALAPPDATA%\Programs\SunPack`，无需管理员权限。安装选项默认将 SunPack 加入当前用户 PATH 并注册文件夹右键菜单；卸载器会删除对应 PATH 项、右键菜单和程序文件。安装器的完整安装/卸载烟雾测试可运行：
+
+```powershell
+.\scripts\test_windows_installer.ps1 -InstallerPath .\release\sunpack-windows-x64-lite-<version>-setup.exe
+```
+
+构建脚本支持 `-Arch x64|arm64` 和 `-RepairSystem full|lite`。`x64` 和 `full` 是默认值；ARM64 最终可执行文件需要在 ARM64 Windows + ARM64 Python 环境中构建，脚本会静态校验包内所有关键 PE 文件的 machine 架构。已有包可用 `.\scripts\verify_windows_package_arch.ps1 -PackageRoot <dist目录> -Arch arm64` 在任意 Windows 机器上做静态检查。GitHub release workflow 会为 `x64-lite` 和 `arm64-lite` 各产出便携 ZIP 与安装版 EXE，并在发布前真实验证安装、PATH、右键菜单和卸载清理。

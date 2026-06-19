@@ -84,6 +84,30 @@ jobs:
         run: |
           .\scripts\setup_windows_dev.ps1 -IncludeBuildDeps -Arch ${{ matrix.arch }} -RepairSystem ${{ matrix.repair_system }}
 
+      - name: Ensure Inno Setup compiler
+        shell: pwsh
+        run: |
+          $candidates = @(
+            "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+            "$env:ProgramFiles\Inno Setup 6\ISCC.exe",
+            "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe"
+          )
+          $iscc = $candidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+          if (-not $iscc) {
+            if (Get-Command choco -ErrorAction SilentlyContinue) {
+              choco install innosetup --yes --no-progress
+            } elseif (Get-Command winget -ErrorAction SilentlyContinue) {
+              winget install --id JRSoftware.InnoSetup --exact --silent --accept-package-agreements --accept-source-agreements
+            } else {
+              throw "Neither Chocolatey nor winget is available to install Inno Setup."
+            }
+            $iscc = $candidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+          }
+          if (-not $iscc) {
+            throw "Inno Setup installation completed but ISCC.exe was not found."
+          }
+          Write-Host "Inno Setup compiler: $iscc"
+
       - name: Build Windows package
         shell: pwsh
         env:
@@ -115,15 +139,21 @@ jobs:
       - name: Validate release package
         shell: pwsh
         run: |
-          $packages = @(
+          $archives = @(
             Get-ChildItem -LiteralPath "release" `
               -Filter "sunpack-windows-${{ matrix.arch }}-${{ matrix.repair_system }}-*.zip" `
               -File
           )
-          if ($packages.Count -ne 1) {
-            throw "Expected exactly one ${{ matrix.arch }} ${{ matrix.repair_system }} release package, found $($packages.Count)."
+          $installers = @(
+            Get-ChildItem -LiteralPath "release" `
+              -Filter "sunpack-windows-${{ matrix.arch }}-${{ matrix.repair_system }}-*-setup.exe" `
+              -File
+          )
+          if ($archives.Count -ne 1 -or $installers.Count -ne 1) {
+            throw "Expected one portable archive and one installer; found $($archives.Count) archive(s) and $($installers.Count) installer(s)."
           }
-          Write-Host "Release package: $($packages[0].FullName)"
+          Write-Host "Portable archive: $($archives[0].FullName)"
+          Write-Host "Windows installer: $($installers[0].FullName)"
 
       - name: Verify package architecture
         shell: pwsh
@@ -131,11 +161,22 @@ jobs:
           $packageRoot = "dist\sunpack-${{ matrix.arch }}-${{ matrix.repair_system }}"
           .\scripts\verify_windows_package_arch.ps1 -PackageRoot $packageRoot -Arch ${{ matrix.arch }}
 
+      - name: Smoke test Windows installer
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem -LiteralPath "release" `
+            -Filter "sunpack-windows-${{ matrix.arch }}-${{ matrix.repair_system }}-*-setup.exe" `
+            -File |
+            Select-Object -First 1
+          .\scripts\test_windows_installer.ps1 -InstallerPath $installer.FullName
+
       - name: Upload package artifact
         uses: actions/upload-artifact@v7
         with:
           name: sunpack-windows-${{ matrix.arch }}-${{ matrix.repair_system }}
-          path: release/sunpack-windows-${{ matrix.arch }}-${{ matrix.repair_system }}-*.zip
+          path: |
+            release/sunpack-windows-${{ matrix.arch }}-${{ matrix.repair_system }}-*.zip
+            release/sunpack-windows-${{ matrix.arch }}-${{ matrix.repair_system }}-*-setup.exe
           if-no-files-found: error
           compression-level: 0
           retention-days: 14
@@ -208,14 +249,18 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mapfile -t packages < <(find artifacts -type f -name 'sunpack-windows-*.zip' | sort)
-          if [ "${#packages[@]}" -ne 2 ]; then
-            echo "Expected two lite release packages, found ${#packages[@]}." >&2
+          mapfile -t packages < <(find artifacts -type f \( -name 'sunpack-windows-*.zip' -o -name 'sunpack-windows-*-setup.exe' \) | sort)
+          if [ "${#packages[@]}" -ne 4 ]; then
+            echo "Expected four lite release files (two portable archives and two installers), found ${#packages[@]}." >&2
             exit 1
           fi
           for package in x64-lite arm64-lite; do
-            if ! printf '%s\n' "${packages[@]}" | grep -q "/sunpack-windows-${package}-"; then
-              echo "Missing ${package} release package." >&2
+            if ! printf '%s\n' "${packages[@]}" | grep -Eq "/sunpack-windows-${package}-.*\.zip$"; then
+              echo "Missing ${package} portable archive." >&2
+              exit 1
+            fi
+            if ! printf '%s\n' "${packages[@]}" | grep -Eq "/sunpack-windows-${package}-.*-setup\.exe$"; then
+              echo "Missing ${package} Windows installer." >&2
               exit 1
             fi
           done
