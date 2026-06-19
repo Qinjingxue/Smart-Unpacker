@@ -110,6 +110,7 @@ class ExtractionBatchRunner:
         rename_scheduler: RenameScheduler | None = None,
         config: dict | None = None,
         analysis_stage: ArchiveAnalysisStage | None = None,
+        progress_reporter: Any | None = None,
     ):
         self.context = context
         self.extractor = extractor
@@ -119,6 +120,9 @@ class ExtractionBatchRunner:
         self.scheduler_config = self._build_scheduler_config(self.config)
         self.max_workers = resolve_max_workers()
         self.analysis_stage = analysis_stage or ArchiveAnalysisStage(self.config)
+        self.progress_reporter = progress_reporter
+        self.progress_round_index = 1
+        self.progress_direct_mode = False
         self.relation_stage = ArchiveRelationStage()
         self.repair_stage = ArchiveRepairStage(self.config)
         self.repair_loop_limits = RepairLoopLimits.from_config(self.repair_stage.config)
@@ -130,6 +134,10 @@ class ExtractionBatchRunner:
             precise_resource_min_size_mb=performance.get("precise_resource_min_size_mb", 256),
         )
 
+    def set_progress_round(self, round_index: int, *, direct: bool = False) -> None:
+        self.progress_round_index = max(1, int(round_index or 1))
+        self.progress_direct_mode = bool(direct)
+
     def prepare_tasks(self, tasks: List[ArchiveTask]):
         self.relation_stage.resolve_tasks(tasks)
         path_map = self.rename_scheduler.apply_renames(tasks)
@@ -139,6 +147,8 @@ class ExtractionBatchRunner:
 
     def execute(self, tasks: List[ArchiveTask]) -> List[str]:
         if not tasks:
+            if self.progress_reporter is not None:
+                self.progress_reporter.begin_round(self.progress_round_index, [], direct=self.progress_direct_mode)
             return []
 
         self.prepare_tasks(tasks)
@@ -149,6 +159,8 @@ class ExtractionBatchRunner:
         )
         output_dir_resolver = self._cached_output_dir_resolver(output_dir_resolver)
         tasks = self._skip_tasks_inside_batch_outputs(tasks, output_dir_resolver)
+        if self.progress_reporter is not None:
+            self.progress_reporter.begin_round(self.progress_round_index, tasks, direct=self.progress_direct_mode)
         results = self._execute_ready_tasks(tasks, output_dir_resolver)
 
         output_dirs = []
@@ -172,7 +184,9 @@ class ExtractionBatchRunner:
         skipped_results: list[tuple[ArchiveTask, BatchExtractionOutcome]] = []
         for _index, task, _out_dir, preflight in self._inspect_tasks_before_extract(tasks, output_dir_resolver):
             if preflight.skip_result is not None:
-                skipped_results.append((task, BatchExtractionOutcome(preflight.skip_result)))
+                outcome = BatchExtractionOutcome(preflight.skip_result)
+                skipped_results.append((task, outcome))
+                self._report_task_finished(task, outcome)
                 continue
             ready_tasks.append(task)
 
@@ -191,6 +205,8 @@ class ExtractionBatchRunner:
             guarded = {id(task) for task, _outcome in guarded_results}
             ready_tasks = [task for task in ready_tasks if id(task) not in guarded]
             skipped_results.extend(guarded_results)
+            for task, outcome in guarded_results:
+                self._report_task_finished(task, outcome)
         if not ready_tasks:
             return skipped_results
 
@@ -201,13 +217,20 @@ class ExtractionBatchRunner:
             max_workers=self.max_workers,
         )
         executor = TaskExecutor(scheduler, max_workers=self.max_workers)
-        return skipped_results + executor.execute_all(
-            ready_tasks,
-            lambda task, runtime_scheduler: (
-                task,
-                self._extract_verify_with_retries(task, output_dir_resolver(task), runtime_scheduler),
-            ),
-        )
+        def execute_one(task, runtime_scheduler):
+            outcome = self._extract_verify_with_retries(task, output_dir_resolver(task), runtime_scheduler)
+            self._report_task_finished(task, outcome)
+            return task, outcome
+
+        return skipped_results + executor.execute_all(ready_tasks, execute_one)
+
+    def _report_task_started(self, task: ArchiveTask) -> None:
+        if self.progress_reporter is not None:
+            self.progress_reporter.task_started(task, self.progress_round_index)
+
+    def _report_task_finished(self, task: ArchiveTask, outcome: BatchExtractionOutcome) -> None:
+        if self.progress_reporter is not None:
+            self.progress_reporter.task_finished(task, outcome, self.progress_round_index)
 
     @staticmethod
     def _cached_output_dir_resolver(output_dir_resolver):
@@ -290,6 +313,7 @@ class ExtractionBatchRunner:
         if max_workers <= 1:
             results = []
             for index, task in enumerate(tasks):
+                self._report_task_started(task)
                 out_dir = output_dir_resolver(task)
                 results.append((index, task, out_dir, self.extractor.inspect(task, out_dir)))
             return results
@@ -297,6 +321,7 @@ class ExtractionBatchRunner:
         indexed = [_IndexedStageTask(index, task) for index, task in enumerate(tasks)]
 
         def inspect_one(item: _IndexedStageTask):
+            self._report_task_started(item.task)
             out_dir = output_dir_resolver(item.task)
             return item.index, item.task, out_dir, self.extractor.inspect(item.task, out_dir)
 

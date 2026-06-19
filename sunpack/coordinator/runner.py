@@ -25,12 +25,14 @@ class PipelineRunner:
         self.config = config
         cli_config = config.get("cli") if isinstance(config.get("cli"), dict) else {}
         self.language = "zh" if str(cli_config.get("language") or "").strip().lower() == "zh" else "en"
+        self.quiet = bool(cli_config.get("quiet", False))
+        self.verbose = bool(cli_config.get("verbose", False))
         self.context = RunContext()
         self.analysis_stage = ArchiveAnalysisStage(config)
         self.task_scanner = ArchiveTaskScanner(config, self.context, analysis_stage=self.analysis_stage)
         self.detector = self.task_scanner.detector
         self.rename_scheduler = RenameScheduler()
-        self.logger = RunReporter(language=self.language)
+        self.logger = RunReporter(language=self.language, quiet=self.quiet, verbose=self.verbose)
         self.postprocess_actions = PostProcessActions(config, self.context, language=self.language)
         self.space_guard = ExtractionSpaceGuard(self.context, self.postprocess_actions)
         self.disk_monitor = None
@@ -61,6 +63,7 @@ class PipelineRunner:
             self.rename_scheduler,
             config,
             analysis_stage=self.analysis_stage,
+            progress_reporter=self.logger,
         )
 
     def text(self, en: str, zh: str) -> str:
@@ -106,8 +109,12 @@ class PipelineRunner:
         postprocess_applied = False
         
         while current_roots:
-            print(self.text(f"\n[PIPELINE] Starting Round {round_index}", f"\n[PIPELINE] 开始第 {round_index} 轮"))
-            new_roots = self._execute_tasks(self._scan_targets(current_roots))
+            if hasattr(self.logger, "scan_started"):
+                self.logger.scan_started(round_index)
+            tasks = self._scan_targets(current_roots)
+            if hasattr(getattr(self, "batch_runner", None), "set_progress_round"):
+                self.batch_runner.set_progress_round(round_index)
+            new_roots = self._execute_tasks(tasks)
 
             if prompt_mode:
                 self._apply_postprocess_actions()
@@ -157,13 +164,8 @@ class PipelineRunner:
         prompt_mode = self.recursion.mode == "prompt"
         postprocess_applied = False
         while current_tasks:
-            if round_index == 1:
-                print(self.text("\n[PIPELINE] Starting direct file extraction", "\n[PIPELINE] 开始直接文件解压"))
-            else:
-                print(self.text(
-                    f"\n[PIPELINE] Starting nested round {round_index}",
-                    f"\n[PIPELINE] 开始嵌套第 {round_index} 轮",
-                ))
+            if hasattr(getattr(self, "batch_runner", None), "set_progress_round"):
+                self.batch_runner.set_progress_round(round_index, direct=round_index == 1)
             new_roots = self._execute_tasks(current_tasks)
 
             if prompt_mode:
@@ -175,6 +177,8 @@ class PipelineRunner:
             if prompt_mode and not self.recursion.prompt_continue(round_index):
                 break
 
+            if hasattr(self.logger, "scan_started"):
+                self.logger.scan_started(round_index + 1)
             current_tasks = self._scan_targets(new_roots)
             round_index += 1
 

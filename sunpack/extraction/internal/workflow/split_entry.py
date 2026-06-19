@@ -1,7 +1,11 @@
+import logging
 from typing import Optional
 
 from sunpack.contracts.tasks import SplitArchiveInfo
 from sunpack.support.path_keys import path_key
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 class SplitEntryResolver:
@@ -19,7 +23,7 @@ class SplitEntryResolver:
             entry = archive
 
         if entry and path_key(entry) != path_key(archive):
-            print(f"[SPLIT] 使用分卷入口: {entry}")
+            LOGGER.info("using split archive entry: %s", entry)
             split_info = SplitArchiveInfo(
                 is_split=True,
                 is_sfx_stub=split_info.is_sfx_stub,

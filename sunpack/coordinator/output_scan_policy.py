@@ -1,4 +1,5 @@
 import os
+import logging
 from copy import deepcopy
 from functools import lru_cache
 from pathlib import Path
@@ -13,6 +14,9 @@ from sunpack.filesystem.filters.modules.scene_semantics import (
 from sunpack.filesystem.directory_scanner import DirectoryScanner
 from sunpack.support.extensions import normalize_extension_score_groups, normalize_exts
 from sunpack.support.output_inventory import OutputInventory
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 class NestedOutputScanPolicy:
@@ -57,9 +61,10 @@ class NestedOutputScanPolicy:
             snapshot = DirectoryScanner(target_dir, config=self._output_scan_config).scan()
         ctx = detect_scene_context_for_directory(target_dir, entries=snapshot.entries if snapshot is not None else None)
         if is_strong_scene_context(ctx):
-            print(
-                "[SCAN] Skipping strong scene output directory: "
-                f"{ctx.get('scene_type')} @ {os.path.basename(target_dir) or target_dir}"
+            LOGGER.info(
+                "skipping strong scene output directory: %s @ %s",
+                ctx.get("scene_type"),
+                os.path.basename(target_dir) or target_dir,
             )
             return []
 
