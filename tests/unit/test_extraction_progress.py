@@ -1,6 +1,32 @@
 import json
 
-from sunpack.extraction.progress import filter_extraction_manifest_payload, filter_extraction_outputs
+from sunpack.extraction.progress import build_extraction_progress_manifest, filter_extraction_manifest_payload, filter_extraction_outputs
+
+
+def test_progress_manifest_preserves_archive_path_and_numbered_output_path(tmp_path):
+    manifest = build_extraction_progress_manifest(
+        archive=str(tmp_path / "source.zip"),
+        out_dir=str(tmp_path / "out"),
+        diagnostics={
+            "result": {
+                "status": "ok",
+                "diagnostics": {
+                    "output_trace": {
+                        "items": [{
+                            "path": "report.txt",
+                            "output_path": "report(1).txt",
+                            "bytes_written": 6,
+                            "expected_size": 6,
+                        }],
+                    },
+                },
+            },
+        },
+    )
+
+    item = manifest["files"][0]
+    assert item["archive_path"] == "report.txt"
+    assert item["path"] == str(tmp_path / "out" / "report(1).txt")
 
 
 def test_filter_extraction_outputs_discards_incomplete_when_complete_exists(tmp_path):

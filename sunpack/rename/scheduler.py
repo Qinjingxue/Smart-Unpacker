@@ -1,11 +1,11 @@
 import os
 import re
-from collections import defaultdict
 from typing import Callable, Dict, List, Set
 
 from sunpack.contracts.tasks import ArchiveTask, RenameInstruction
 from sunpack.rename.internal.volume_normalizer import SplitVolumeNormalizer, StagedSplit
-from sunpack.support.path_keys import absolute_path_key, normalized_path
+from sunpack.rename.conflicts import next_available_path
+from sunpack.support.path_keys import normalized_path
 
 
 class RenameScheduler:
@@ -45,27 +45,11 @@ class RenameScheduler:
         tasks: List[ArchiveTask],
         default_output_dir_for_task: Callable[[ArchiveTask], str],
     ) -> Callable[[ArchiveTask], str]:
-        default_dirs = {id(task): default_output_dir_for_task(task) for task in tasks}
-        by_output = defaultdict(list)
+        resolved_dirs = {}
+        reserved: set[str] = set()
         for task in tasks:
-            output_dir = default_dirs[id(task)]
-            by_output[absolute_path_key(output_dir)].append(task)
-
-        resolved_dirs = dict(default_dirs)
-        reserved = {
-            absolute_path_key(output_dir)
-            for output_dir in default_dirs.values()
-            if output_dir
-        }
-        for duplicate_tasks in by_output.values():
-            if len(duplicate_tasks) <= 1:
-                continue
-            for task in duplicate_tasks:
-                resolved_dirs[id(task)] = self._disambiguated_output_dir(
-                    default_dirs[id(task)],
-                    task,
-                    reserved,
-                )
+            default_dir = default_output_dir_for_task(task)
+            resolved_dirs[id(task)] = next_available_path(default_dir, reserved)
 
         return lambda task: resolved_dirs[id(task)]
 
@@ -207,7 +191,9 @@ class RenameScheduler:
                     new_name = normalized_name if not new_ext_suffix else normalized_name + new_ext_suffix
 
                 new_path = normalized_path(os.path.join(root, new_name))
-                if not os.path.exists(new_path) or old_path.lower() == new_path.lower():
+                if old_path.lower() != new_path.lower():
+                    new_path = normalized_path(next_available_path(new_path))
+                    new_name = os.path.basename(new_path)
                     if old_path.lower() != new_path.lower():
                         print(f"[RENAME] Fixing series: {filename} -> {new_name}")
                         try:
@@ -216,8 +202,8 @@ class RenameScheduler:
                             processed_set.add(new_path)
                         except Exception as exc:
                             print(f"[ERROR] Failed to rename series file: {filename} ({exc})")
-                    else:
-                        processed_set.add(old_path)
+                else:
+                    processed_set.add(old_path)
 
     def _rename_single(self, instruction: RenameInstruction, processed_set: Set[str], path_map: Dict[str, str]):
         root = instruction.root
@@ -229,7 +215,9 @@ class RenameScheduler:
             return
 
         new_path = normalized_path(os.path.join(root, target_name))
-        if not os.path.exists(new_path) or old_path.lower() == new_path.lower():
+        if old_path.lower() != new_path.lower():
+            new_path = normalized_path(next_available_path(new_path))
+            target_name = os.path.basename(new_path)
             if old_path.lower() != new_path.lower():
                 print(f"[RENAME] Fixing extension: {source_name} -> {target_name}")
                 try:
@@ -238,17 +226,5 @@ class RenameScheduler:
                     processed_set.add(new_path)
                 except Exception as exc:
                     print(f"[ERROR] Failed to rename file: {source_name} ({exc})")
-            else:
-                processed_set.add(old_path)
-
-    def _disambiguated_output_dir(self, default_dir: str, task: ArchiveTask, reserved: set[str]) -> str:
-        archive_ext = os.path.splitext(task.main_path)[1].lstrip(".").lower() or "archive"
-        parent = os.path.dirname(default_dir)
-        base = os.path.basename(default_dir)
-        candidate = os.path.join(parent, f"{base}_{archive_ext}")
-        index = 2
-        while absolute_path_key(candidate) in reserved or os.path.isfile(candidate):
-            candidate = os.path.join(parent, f"{base}_{archive_ext}_{index}")
-            index += 1
-        reserved.add(absolute_path_key(candidate))
-        return candidate
+        else:
+            processed_set.add(old_path)

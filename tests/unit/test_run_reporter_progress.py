@@ -1,5 +1,7 @@
+import io
 from types import SimpleNamespace
 
+import sunpack.coordinator.reporting as reporting
 from sunpack.coordinator.reporting import RunReporter
 
 
@@ -70,3 +72,25 @@ def test_quiet_progress_writes_failure_log_without_terminal_output(tmp_path, cap
 
     assert capsys.readouterr().out == ""
     assert (tmp_path / "failed_log.txt").read_text(encoding="utf-8") == "bad.zip [broken]\n"
+
+
+def test_interactive_panel_updates_fixed_row_with_progress_and_colors(tmp_path, monkeypatch):
+    stream = io.StringIO()
+    monkeypatch.setattr(reporting, "_terminal_supports_updates", lambda _stream: True)
+    monkeypatch.setattr(reporting.sys, "stdout", stream)
+    reporter = RunReporter("zh")
+    task = _task(tmp_path / "large.7z")
+
+    reporter.begin_round(1, [task])
+    reporter.task_started(task, 1)
+    reporter._last_render_at = 0.0
+    reporter.task_progress(task, {"completed_bytes": 50, "total_bytes": 100})
+    reporter.task_status(task, "repairing")
+    reporter.task_finished(task, _outcome(tmp_path / "large"), 1)
+
+    output = stream.getvalue()
+    assert "等待队列" in output
+    assert "50%" in output
+    assert "正在修复" in output
+    assert "\033[32m" in output and "完成" in output
+    assert "\033[1A" in output

@@ -211,7 +211,7 @@ def _manifest_item(item: dict[str, Any], *, out_dir: str, round_index: int) -> d
 
 
 def _output_path_from_trace(item: dict[str, Any], out_dir: str) -> str:
-    path = str(item.get("path") or item.get("output_path") or "")
+    path = str(item.get("output_path") or item.get("path") or "")
     if not path:
         return ""
     item_path = Path(path)

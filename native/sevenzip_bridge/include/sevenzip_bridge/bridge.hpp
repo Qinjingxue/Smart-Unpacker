@@ -78,6 +78,7 @@ struct ExtractOutputItemTrace {
     bool done = false;
     bool failed = false;
     std::wstring path;
+    std::wstring output_path;
 };
 
 struct ExtractOutputTrace {

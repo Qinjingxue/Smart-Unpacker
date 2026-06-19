@@ -398,7 +398,7 @@ public:
         : trace_(trace),
           item_trace_index_(item_trace_index),
 
-          handle_(CreateFileW(win32_extended_path(path).c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr)) {
+          handle_(CreateFileW(win32_extended_path(path).c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr)) {
 
         if (trace_ && handle_ == INVALID_HANDLE_VALUE) {
 
@@ -705,6 +705,24 @@ private:
 };
 
 
+inline std::filesystem::path browser_style_available_path(const std::filesystem::path& requested) {
+    std::error_code error;
+    if (!std::filesystem::exists(requested, error)) {
+        return requested;
+    }
+    const auto parent = requested.parent_path();
+    const auto stem = requested.stem().wstring();
+    const auto extension = requested.extension().wstring();
+    for (unsigned int index = 1; ; ++index) {
+        const auto candidate = parent / (stem + L"(" + std::to_wstring(index) + L")" + extension);
+        error.clear();
+        if (!std::filesystem::exists(candidate, error)) {
+            return candidate;
+        }
+    }
+}
+
+
 
 inline std::optional<std::filesystem::path> safe_relative_item_path(const std::wstring& raw_name) {
 
@@ -998,13 +1016,16 @@ public:
 
         emit("item_start", index, name);
 
+        std::filesystem::path target;
         try {
+
+            const auto output_root = std::filesystem::path(win32_extended_path(output_dir_));
 
             if (is_dir) {
 
                 if (!dry_run_) {
 
-                    const auto target = std::filesystem::path(win32_extended_path(output_dir_)) / safe_path.value();
+                    target = output_root / safe_path.value();
 
                     std::filesystem::create_directories(target);
 
@@ -1018,9 +1039,15 @@ public:
 
             if (!dry_run_) {
 
-                const auto target = std::filesystem::path(win32_extended_path(output_dir_)) / safe_path.value();
+                target = browser_style_available_path(output_root / safe_path.value());
 
                 std::filesystem::create_directories(target.parent_path());
+
+                if (output_trace_ && current_trace_index_ < output_trace_->items.size()) {
+
+                    output_trace_->items[current_trace_index_].output_path = target.lexically_relative(output_root).generic_wstring();
+
+                }
 
             }
 
@@ -1047,10 +1074,6 @@ public:
             return S_OK;
 
         }
-
-        const auto target = std::filesystem::path(win32_extended_path(output_dir_)) / safe_path.value();
-
-
 
         auto* stream = new FileOutStream(target.wstring(), output_trace_, current_trace_index_);
 

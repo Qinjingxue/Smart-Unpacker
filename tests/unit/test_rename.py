@@ -1,6 +1,7 @@
 from sunpack.contracts.detection import FactBag
 from sunpack.contracts.tasks import ArchiveTask
 from sunpack.rename.scheduler import RenameScheduler
+from sunpack.rename.conflicts import next_available_path
 
 
 def test_rename_planner_and_executor_apply_disguised_archive_extensions(tmp_path):
@@ -68,6 +69,27 @@ def test_output_dir_resolver_disambiguates_duplicate_task_outputs(tmp_path):
 
     resolver = RenameScheduler().build_output_dir_resolver([first, second], default_output_dir)
 
-    assert resolver(first) == str(tmp_path / "collision_7z_2")
-    assert resolver(second) == str(tmp_path / "collision_zip")
+    assert resolver(first) == str(tmp_path / "collision")
+    assert resolver(second) == str(tmp_path / "collision(1)")
+
+
+def test_next_available_path_uses_browser_style_numbering(tmp_path):
+    original = tmp_path / "report.txt"
+    first = tmp_path / "report(1).txt"
+    original.touch()
+    first.touch()
+
+    assert next_available_path(str(original)) == str(tmp_path / "report(2).txt")
+
+
+def test_output_dir_resolver_avoids_existing_output_directory(tmp_path):
+    archive = tmp_path / "photos.zip"
+    archive.touch()
+    (tmp_path / "photos").mkdir()
+    (tmp_path / "photos(1)").mkdir()
+    task = ArchiveTask(fact_bag=FactBag(), score=10, main_path=str(archive), logical_name="photos")
+
+    resolver = RenameScheduler().build_output_dir_resolver([task], lambda item: str(tmp_path / item.logical_name))
+
+    assert resolver(task) == str(tmp_path / "photos(2)")
 

@@ -1,4 +1,6 @@
 import os
+import shutil
+import sys
 import threading
 import time
 from typing import Any, List
@@ -22,6 +24,11 @@ class RunReporter:
         self._task_lineages: dict[int, tuple[str, ...]] = {}
         self._output_lineages: dict[str, tuple[str, ...]] = {}
         self._top_level_outputs: list[str] = []
+        self._interactive = not self.quiet and _terminal_supports_updates(sys.stdout)
+        self._use_color = self._interactive and os.environ.get("NO_COLOR") is None
+        self._panel_tasks: list[int] = []
+        self._task_rows: dict[int, dict[str, Any]] = {}
+        self._last_render_at = 0.0
 
     def text(self, en: str, zh: str) -> str:
         return zh if self.language == "zh" else en
@@ -42,6 +49,16 @@ class RunReporter:
             for task in tasks:
                 parent_lineage = self._lineage_for_path(str(getattr(task, "main_path", "") or ""))
                 self._task_lineages[id(task)] = parent_lineage
+                self._task_rows[id(task)] = {
+                    "task": task,
+                    "depth": depth,
+                    "lineage": parent_lineage,
+                    "state": "waiting",
+                    "progress": 0.0,
+                    "completed_bytes": 0,
+                    "total_bytes": 0,
+                    "detail": "",
+                }
             self._total_tasks += len(tasks)
             if depth > 1:
                 self._nested_tasks += len(tasks)
@@ -65,11 +82,18 @@ class RunReporter:
                     f"[递归扫描] 第 {depth} 层发现 {len(tasks)} 个嵌套压缩包",
                 )
             print(message, flush=True)
+            if self._interactive:
+                self._panel_tasks = [id(task) for task in tasks]
+                for task_id in self._panel_tasks:
+                    print(self._format_task_row(self._task_rows[task_id]), flush=True)
 
     def task_started(self, task: Any, round_index: int) -> None:
         if self.quiet:
             return
         with self._lock:
+            if self._interactive:
+                self._update_task_locked(task, state="preparing", force=True)
+                return
             depth = max(1, int(round_index or 1))
             name = _task_name(task)
             prefix = self._tree_prefix(depth)
@@ -78,6 +102,43 @@ class RunReporter:
                 f"{prefix}[Processing {progress}] {name}",
                 f"{prefix}[处理中 {progress}] {name}",
             ), flush=True)
+
+    def task_status(self, task: Any, state: str, detail: str = "") -> None:
+        if self.quiet:
+            return
+        with self._lock:
+            if self._interactive:
+                self._update_task_locked(task, state=state, detail=detail, force=True)
+                return
+            if state == "repairing":
+                print(self.text(
+                    f"[Repairing] {_task_name(task)}",
+                    f"[正在修复] {_task_name(task)}",
+                ), flush=True)
+
+    def task_progress(self, task: Any, event: dict[str, Any]) -> None:
+        if self.quiet or not self._interactive:
+            return
+        try:
+            completed = max(0, int(event.get("completed_bytes", 0) or 0))
+            total = max(0, int(event.get("total_bytes", 0) or 0))
+        except (TypeError, ValueError):
+            return
+        progress = min(1.0, completed / total) if total > 0 else 0.0
+        with self._lock:
+            row = self._task_rows.get(id(task))
+            if row is None:
+                return
+            old_percent = int(float(row.get("progress", 0.0)) * 100)
+            new_percent = int(progress * 100)
+            row.update({
+                "state": "extracting",
+                "progress": progress,
+                "completed_bytes": completed,
+                "total_bytes": total,
+            })
+            if new_percent != old_percent:
+                self._render_panel_locked(force=False)
 
     def task_finished(self, task: Any, outcome: Any, round_index: int) -> None:
         with self._lock:
@@ -96,6 +157,17 @@ class RunReporter:
                     self._top_level_outputs.append(out_dir)
 
             if self.quiet:
+                return
+            if self._interactive:
+                state = "partial" if partial else "complete" if success else "error"
+                error = str(getattr(result, "error", "") or "") if not success else ""
+                self._update_task_locked(
+                    task,
+                    state=state,
+                    progress=1.0 if success else None,
+                    detail=error,
+                    force=True,
+                )
                 return
             prefix = self._tree_prefix(depth)
             progress = f"{self._completed_tasks}/{self._total_tasks}"
@@ -215,6 +287,84 @@ class RunReporter:
                 best_lineage = lineage
         return best_lineage
 
+    def _update_task_locked(
+        self,
+        task: Any,
+        *,
+        state: str | None = None,
+        progress: float | None = None,
+        detail: str | None = None,
+        force: bool = False,
+    ) -> None:
+        row = self._task_rows.get(id(task))
+        if row is None:
+            return
+        if state is not None:
+            row["state"] = state
+        if progress is not None:
+            row["progress"] = min(1.0, max(0.0, float(progress)))
+        if detail is not None:
+            row["detail"] = detail
+        self._render_panel_locked(force=force)
+
+    def _render_panel_locked(self, *, force: bool) -> None:
+        if not self._interactive or not self._panel_tasks:
+            return
+        now = time.monotonic()
+        if not force and now - self._last_render_at < 0.08:
+            return
+        self._last_render_at = now
+        sys.stdout.write(f"\033[{len(self._panel_tasks)}A")
+        for task_id in self._panel_tasks:
+            row = self._task_rows.get(task_id)
+            text = self._format_task_row(row) if row is not None else ""
+            sys.stdout.write(f"\r\033[2K{text}\n")
+        sys.stdout.flush()
+
+    def _format_task_row(self, row: dict[str, Any]) -> str:
+        depth = int(row.get("depth", 1) or 1)
+        task = row.get("task")
+        state = str(row.get("state") or "waiting")
+        progress = float(row.get("progress", 0.0) or 0.0)
+        percent = max(0, min(100, int(progress * 100)))
+        filled = max(0, min(20, int(progress * 20)))
+        bar = "#" * filled + "-" * (20 - filled)
+        labels = {
+            "waiting": ("Waiting", "等待队列"),
+            "preparing": ("Preparing", "准备中"),
+            "extracting": ("Extracting", "正在解压"),
+            "repairing": ("Repairing", "正在修复"),
+            "error": ("Error", "出现错误"),
+            "partial": ("Partial", "部分恢复"),
+            "complete": ("Complete", "完成"),
+        }
+        label = self.text(*labels.get(state, labels["waiting"]))
+        colors = {
+            "waiting": "\033[90m",
+            "preparing": "\033[36m",
+            "extracting": "\033[36m",
+            "repairing": "\033[33m",
+            "error": "\033[31m",
+            "partial": "\033[33m",
+            "complete": "\033[32m",
+        }
+        label = f"{label:^8}"
+        if self._use_color:
+            label = f"{colors.get(state, '')}{label}\033[0m"
+        prefix = self._tree_prefix(depth)
+        lineage = tuple(row.get("lineage") or ())
+        parent = " > ".join(lineage)
+        relation = self.text(f" (from {parent})", f"（来自 {parent}）") if parent else ""
+        detail = str(row.get("detail") or "")
+        if detail and (self.verbose or state == "error"):
+            detail = f"：{detail}"
+        else:
+            detail = ""
+        fixed_width = len(prefix) + 8 + len(bar) + 12
+        available = max(12, shutil.get_terminal_size(fallback=(120, 30)).columns - fixed_width)
+        suffix = _truncate_display(f"{_task_name(task)}{relation}{detail}", available)
+        return f"{prefix}[{label}] [{bar}] {percent:3d}%  {suffix}"
+
     @staticmethod
     def _tree_prefix(depth: int) -> str:
         return "" if depth <= 1 else "  " * (depth - 1) + "└─ "
@@ -238,6 +388,42 @@ def _task_name(task: Any) -> str:
 
 def _absolute_key(path: str) -> str:
     return os.path.normcase(os.path.abspath(os.path.normpath(path)))
+
+
+def _terminal_supports_updates(stream: Any) -> bool:
+    isatty = getattr(stream, "isatty", None)
+    if not callable(isatty) or not isatty():
+        return False
+    if os.name != "nt":
+        return True
+    try:
+        import ctypes
+
+        handle = ctypes.windll.kernel32.GetStdHandle(-11)
+        mode = ctypes.c_uint32()
+        if not ctypes.windll.kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+            return False
+        return bool(ctypes.windll.kernel32.SetConsoleMode(handle, mode.value | 0x0004))
+    except Exception:
+        return False
+
+
+def _truncate_display(text: str, max_width: int) -> str:
+    if max_width <= 1:
+        return "…"[:max_width]
+    width = 0
+    chars = []
+    for char in text:
+        char_width = 2 if ord(char) > 0xFF else 1
+        if width + char_width > max_width:
+            if chars:
+                while chars and width + 1 > max_width:
+                    removed = chars.pop()
+                    width -= 2 if ord(removed) > 0xFF else 1
+            return "".join(chars) + "…"
+        chars.append(char)
+        width += char_width
+    return text
 
 
 def _duration(seconds: float, language: str) -> str:

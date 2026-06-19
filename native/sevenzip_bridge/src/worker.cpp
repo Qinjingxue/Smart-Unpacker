@@ -578,6 +578,7 @@ std::string output_item_traces_json(const std::vector<sunpack::sevenzip::Extract
         }
         out += "{\"index\":" + std::to_string(item.index) +
             ",\"path\":\"" + json_escape(wide_to_utf8(item.path)) +
+            "\",\"output_path\":\"" + json_escape(wide_to_utf8(item.output_path)) +
             "\",\"is_dir\":" + std::string(item.is_dir ? "true" : "false") +
             ",\"bytes_written\":" + std::to_string(item.bytes_written) +
             ",\"expected_size\":" + std::to_string(item.expected_size) +
@@ -629,6 +630,7 @@ std::string verified_manifest_json(const sunpack::sevenzip::ExtractArchiveResult
         ++file_count;
         files += "{\"index\":" + std::to_string(item.index) +
             ",\"path\":\"" + json_escape(wide_to_utf8(item.path)) +
+            "\",\"output_path\":\"" + json_escape(wide_to_utf8(item.output_path)) +
             "\",\"size\":" + std::to_string(item.has_expected_size ? item.expected_size : item.bytes_written) +
             ",\"bytes_written\":" + std::to_string(item.bytes_written) +
             ",\"has_crc\":" + std::string(item.has_source_crc32 ? "true" : "false") +

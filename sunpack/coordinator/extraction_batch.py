@@ -232,6 +232,10 @@ class ExtractionBatchRunner:
         if self.progress_reporter is not None:
             self.progress_reporter.task_finished(task, outcome, self.progress_round_index)
 
+    def _report_task_status(self, task: ArchiveTask, state: str, detail: str = "") -> None:
+        if self.progress_reporter is not None:
+            self.progress_reporter.task_status(task, state, detail)
+
     @staticmethod
     def _cached_output_dir_resolver(output_dir_resolver):
         cache: dict[int, str] = {}
@@ -398,11 +402,13 @@ class ExtractionBatchRunner:
         attempt_index = 0
         attempt_sequence = 0
         while attempt_index < attempts:
+            self._report_task_status(task, "extracting")
             result = self.extractor.extract(task, out_dir, runtime_scheduler=runtime_scheduler)
             write_extraction_result(task, result)
             current_sequence = attempt_sequence
             attempt_sequence += 1
             if not result.success:
+                self._report_task_status(task, "error", str(result.error or ""))
                 verification = verify_and_project(self.verifier, task, result)
                 current_outcome = BatchExtractionOutcome(
                     result=result,
@@ -428,6 +434,7 @@ class ExtractionBatchRunner:
                         selected = self._selected_acceptable_outcome(incumbent_outcome, current_outcome, out_dir, final=True)
                         return selected or current_outcome
                     if state.can_attempt(trigger="verification", failure=result):
+                        self._report_task_status(task, "repairing")
                         handled = self._repair_after_verification_decision_with_beam(
                             task,
                             result,
@@ -469,6 +476,7 @@ class ExtractionBatchRunner:
                     selected = self._selected_acceptable_outcome(incumbent_outcome, outcome, out_dir, final=True)
                     return selected or outcome
                 if state.can_attempt(trigger="verification"):
+                    self._report_task_status(task, "repairing")
                     if self._repair_policy_disables_beam(task, result, verification):
                         handled = self._repair_after_verification_with_scheduler(
                             task,

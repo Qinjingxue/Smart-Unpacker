@@ -142,6 +142,7 @@ class _PersistentWorkerPool:
 class SevenZipRunner:
     def __init__(self, process_config: dict):
         self.process_config = process_config
+        self.progress_callback = None
         self.worker_path = None
         self.seven_zip_dll_path = None
         self._worker_pool: _PersistentWorkerPool | None = None
@@ -550,6 +551,8 @@ class SevenZipRunner:
             stdout_lines.append(line)
             last_progress_at = time.monotonic()
             payload = self._json_line(line)
+            if payload and payload.get("type") == "progress":
+                self._emit_progress(task, payload)
             if payload and payload.get("type") == "result":
                 returncode = 0 if payload.get("status") == "ok" else 1
                 self._drain_stderr(worker, stderr_lines)
@@ -781,6 +784,15 @@ class SevenZipRunner:
         if profile_key:
             return profile_key
         return "unknown"
+
+    def _emit_progress(self, task: ArchiveTask, event: dict[str, Any]) -> None:
+        callback = self.progress_callback
+        if callback is None:
+            return
+        try:
+            callback(task, event)
+        except Exception:
+            pass
 
 
 def _phase(timer: Any | None, name: str):

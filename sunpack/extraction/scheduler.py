@@ -47,6 +47,9 @@ class ExtractionScheduler:
         self.retry_policy = ExtractRetryPolicy(self.max_retries)
         self.sevenzip_runner = SevenZipRunner(self.process_config)
 
+    def set_progress_callback(self, callback: Callable[[ArchiveTask, dict], None] | None) -> None:
+        self.sevenzip_runner.progress_callback = callback
+
     @property
     def recent_passwords(self) -> list[str]:
         return self.password_store.recent_passwords

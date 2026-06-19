@@ -46,6 +46,7 @@ class PipelineRunner:
             output_config=config.get("output", {}),
             extraction_config=config.get("extraction", {}),
         )
+        self.extractor.set_progress_callback(self.logger.task_progress)
         self.output_scan_policy = NestedOutputScanPolicy(config)
         
         recur_cfg = config.get("recursive_extract", {"mode": "fixed", "max_rounds": 1})
