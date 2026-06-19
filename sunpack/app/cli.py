@@ -83,8 +83,13 @@ def dispatch_command(args, ctx: CliContext) -> tuple[int, CliCommandResult]:
     return module.handle(args, ctx)
 
 
-def maybe_pause(args, ctx: CliContext):
-    if getattr(args, "pause_on_exit", False):
+def maybe_pause(args, ctx: CliContext, exit_code: int, result: CliCommandResult):
+    successful_extract = (
+        getattr(args, "command", "") == "extract"
+        and exit_code == EXIT_OK
+        and not result.errors
+    )
+    if getattr(args, "pause_on_exit", False) and not successful_extract:
         print(ctx.core_text("pause_prompt"), flush=True)
         os.system("pause >nul" if os.name == "nt" else "read -n 1 -s")
 
@@ -111,9 +116,7 @@ def main(argv=None):
     args.quiet = bool(getattr(args, "quiet", False) or "-q" in argv or "--quiet" in argv)
     args.verbose = bool(getattr(args, "verbose", False) or "-v" in argv or "--verbose" in argv)
     args.pause_on_exit = bool(getattr(args, "pause_on_exit", False) or "--pause" in argv)
-    args.color = getattr(args, "color", "auto")
-
-    reporter = CliReporter(json_mode=args.json, quiet=args.quiet, verbose=args.verbose, color=args.color)
+    reporter = CliReporter(json_mode=args.json, quiet=args.quiet, verbose=args.verbose)
     ctx.reporter = reporter
     if args.json and getattr(args, "prompt_passwords", False):
         result = CliCommandResult(
@@ -141,11 +144,11 @@ def main(argv=None):
             errors=[str(exc)],
         )
         reporter.emit_result(result)
-        maybe_pause(args, ctx)
+        maybe_pause(args, ctx, EXIT_RUNTIME, result)
         return EXIT_RUNTIME
 
     reporter.emit_result(result)
-    maybe_pause(args, ctx)
+    maybe_pause(args, ctx, exit_code, result)
     return exit_code
 
 
