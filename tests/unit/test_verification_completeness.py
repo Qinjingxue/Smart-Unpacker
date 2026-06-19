@@ -5,7 +5,7 @@ from sunpack.contracts.detection import FactBag
 from sunpack.contracts.run_context import RunContext
 from sunpack.contracts.tasks import ArchiveTask
 from sunpack.coordinator.extraction_batch import ExtractionBatchRunner
-from sunpack.extraction.result import ExtractionResult
+from sunpack.contracts.extraction import ExtractionResult
 from sunpack.repair.result import RepairResult
 from sunpack.verification import VerificationScheduler
 

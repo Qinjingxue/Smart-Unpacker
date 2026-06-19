@@ -7,10 +7,9 @@ from sunpack.extraction.internal.workflow.retry_policy import ExtractRetryPolicy
 from sunpack.extraction.internal.sevenzip.sevenzip_runner import SevenZipRunner
 from sunpack.extraction.internal.workflow.single_archive_extractor import SingleArchiveExtractor
 from sunpack.extraction.internal.workflow.split_entry import SplitEntryResolver
-from sunpack.extraction.result import ExtractionResult
+from sunpack.contracts.extraction import ExtractionResult
 from sunpack.contracts.tasks import ArchiveTask, SplitArchiveInfo
 from sunpack.rename.scheduler import RenameScheduler
-from sunpack.relations import RelationsScheduler
 from sunpack.passwords import ArchivePasswordTester, PasswordResolver, PasswordSession, PasswordStore
 
 
@@ -35,8 +34,7 @@ class ExtractionScheduler:
         self.metadata_scanner = ArchiveMetadataScanner()
         self.seven_z_path = ""
         self.rename_scheduler = RenameScheduler()
-        self._relations = RelationsScheduler()
-        self.split_entry_resolver = SplitEntryResolver(self._relations)
+        self.split_entry_resolver = SplitEntryResolver()
         self.ensure_space = ensure_space or (lambda _required_gb: True)
         self.max_retries = max(1, max_retries)
         self.output_config = output_config if isinstance(output_config, dict) else None

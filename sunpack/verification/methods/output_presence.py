@@ -1,7 +1,7 @@
 from sunpack.verification.evidence import VerificationEvidence
 from sunpack.verification.methods._output_stats import output_stats_for_evidence, should_emit_file_observations
 from sunpack.verification.registry import register_verification_method
-from sunpack.verification.result import FileVerificationObservation, VerificationIssue, VerificationStepResult
+from sunpack.contracts.verification import FileVerificationObservation, VerificationIssue, VerificationStepResult
 
 
 @register_verification_method("output_presence")

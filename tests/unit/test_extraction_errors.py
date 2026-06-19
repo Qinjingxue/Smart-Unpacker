@@ -3,7 +3,7 @@ import subprocess
 
 from sunpack.coordinator.repair_loop import terminal_failure_reason
 from sunpack.extraction.internal.workflow.errors import classify_extract_error
-from sunpack.extraction.result import ExtractionResult
+from sunpack.contracts.extraction import ExtractionResult
 
 
 def test_split_worker_damage_takes_precedence_over_wrong_password_signal():

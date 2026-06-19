@@ -17,7 +17,7 @@ from sunpack.repair.candidate import (
 )
 from sunpack.repair.job import RepairJob
 from sunpack.repair.scheduler import RepairScheduler
-from sunpack.verification.result import (
+from sunpack.contracts.verification import (
     ASSESSMENT_COMPLETE,
     ASSESSMENT_INCONSISTENT,
     ASSESSMENT_PARTIAL,

@@ -1,5 +1,5 @@
 from sunpack.verification.comparison import RecoveryAttempt, compare_attempts, rank_attempts
-from sunpack.verification.result import (
+from sunpack.contracts.verification import (
     ASSESSMENT_COMPLETE,
     ASSESSMENT_PARTIAL,
     ArchiveCoverageSummary,

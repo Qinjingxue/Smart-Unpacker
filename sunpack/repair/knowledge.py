@@ -5,8 +5,8 @@ from dataclasses import asdict
 from typing import Any, Callable
 
 from sunpack.contracts.tasks import ArchiveTask
-from sunpack.extraction.result import ExtractionResult
-from sunpack.repair.context import normalize_runtime_route_evidence
+from sunpack.contracts.extraction import ExtractionResult
+from sunpack.support.runtime_route_evidence import normalize_runtime_route_evidence
 from sunpack.repair.result import RepairResult
 from sunpack.support.archive_knowledge_writer import (
     append_history,
@@ -16,7 +16,7 @@ from sunpack.support.archive_knowledge_writer import (
     write_payload,
     write_value,
 )
-from sunpack.verification.result import VerificationResult
+from sunpack.contracts.verification import VerificationResult
 
 
 def write_repair_job_context(

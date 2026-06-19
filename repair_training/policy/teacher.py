@@ -7,6 +7,7 @@ import tempfile
 from typing import Any
 
 from repair_training.policy.graph_rows import build_policy_graph_rows
+from repair_training.policy.recovery_execution import TrainingRecoveryExecutor
 from repair_training.policy.sanitize import (
     sanitize_action_features,
     sanitize_diagnosis_hgt,
@@ -103,7 +104,8 @@ class _RuntimeTeacherContext:
         self.scheduler = RepairScheduler({"repair": self.repair_config})
         self.model_runtime = RepairModelRuntime(self.repair_config)
         self.analysis_stage = ArchiveAnalysisStage(self.full_config)
-        self.evaluator = RecoveryEvaluator(self.full_config)
+        self.recovery_executor = TrainingRecoveryExecutor(self.full_config)
+        self.evaluator = RecoveryEvaluator(self.full_config, full_evaluator=self.recovery_executor)
         self.recovery_mode = recovery_mode
         self.budget = dict(budget)
         self.cache: dict[str, PolicyRecoverySnapshot] = {}
@@ -177,9 +179,9 @@ class _RuntimeTeacherContext:
             refresh_dir = self.workspace_root / "teacher_analysis"
             refresh_dir.mkdir(parents=True, exist_ok=True)
             materialized = ArchiveStateByteView(state).materialize(refresh_dir / f"{job.archive_key or 'state'}_{step}.zip")
-            from sunpack.repair.search.recovery import _task_for_materialized_state
+            from sunpack.repair.search.recovery import task_for_materialized_recovery_state
 
-            task = _task_for_materialized_state(job, state, materialized)
+            task = task_for_materialized_recovery_state(job, state, materialized)
             self.analysis_stage.refresh_task_analysis(task)
             try:
                 write_zip_runtime_evidence_facts(task)

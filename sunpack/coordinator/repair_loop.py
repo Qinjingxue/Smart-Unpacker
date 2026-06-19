@@ -14,7 +14,7 @@ from typing import Any, Callable
 from sunpack.contracts.archive_state import ArchiveState
 from sunpack.contracts.archive_input import ArchiveInputDescriptor
 from sunpack.contracts.tasks import ArchiveTask
-from sunpack.extraction.result import ExtractionResult
+from sunpack.contracts.extraction import ExtractionResult
 from sunpack.repair.result import RepairResult
 from sunpack.repair.knowledge import write_repair_loop_state, write_repair_loop_update, write_repair_stop
 from sunpack.support import archive_knowledge_projection as knowledge_view

@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from sunpack.detection.nested_scan_policy import NestedOutputScanPolicy as OutputScanPolicy
+from sunpack.coordinator.output_scan_policy import NestedOutputScanPolicy as OutputScanPolicy
 from sunpack.config.schema import normalize_config
 from sunpack.extraction.scheduler import ExtractionScheduler
 from sunpack.extraction.internal.sevenzip.metadata import ArchiveMetadataScanResult

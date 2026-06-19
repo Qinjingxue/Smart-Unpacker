@@ -1,22 +1,16 @@
 from __future__ import annotations
 
-from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-import tempfile
-import time
 from typing import Any, Literal
 
 from sunpack.contracts.detection import FactBag
 from sunpack.contracts.tasks import ArchiveTask
 from sunpack.contracts.archive_state import ArchiveState
-from sunpack.extraction.scheduler import ExtractionScheduler
-from sunpack.extraction.result import ExtractionResult
+from sunpack.contracts.extraction import ExtractionResult
 from sunpack.repair.candidate import RepairCandidate
 from sunpack.repair.job import RepairJob
-from sunpack.support.archive_state_view import ArchiveStateByteView
-from sunpack.verification.scheduler import VerificationScheduler
-from sunpack.verification.result import VerificationResult
+from sunpack.contracts.verification import VerificationResult
 
 
 PolicyRecoveryMode = Literal["policy_light", "policy_full", "training_oracle"]
@@ -94,15 +88,14 @@ class PolicyRecoverySnapshot:
 
 
 class RecoveryEvaluator:
-    def __init__(self, config: dict[str, Any] | None = None):
+    def __init__(self, config: dict[str, Any] | None = None, *, full_evaluator=None):
         self.config = config or {}
-        self._extractor: ExtractionScheduler | None = None
+        self.full_evaluator = full_evaluator
 
     def close(self) -> None:
-        extractor = self._extractor
-        self._extractor = None
-        if extractor is not None:
-            extractor.close()
+        target = getattr(self.full_evaluator, "close", None)
+        if callable(target):
+            target()
 
     def __enter__(self) -> "RecoveryEvaluator":
         return self
@@ -115,15 +108,6 @@ class RecoveryEvaluator:
             self.close()
         except Exception:
             pass
-
-    def _extractor_scheduler(self) -> ExtractionScheduler:
-        if self._extractor is None:
-            self._extractor = ExtractionScheduler(
-                process_config=dict(self.config.get("process") or {}),
-                output_config=dict(self.config.get("output") or {}),
-                extraction_config=dict(self.config.get("extraction") or {}),
-            )
-        return self._extractor
 
     def evaluate_state(
         self,
@@ -218,8 +202,8 @@ class RecoveryEvaluator:
         mode: PolicyRecoveryMode,
         oracle: dict[str, Any] | None,
     ) -> PolicyRecoverySnapshot:
-        if mode in {"policy_full", "training_oracle"} and state is not None:
-            full = self._full_evaluate_state(job, state, mode=mode, oracle=oracle)
+        if mode in {"policy_full", "training_oracle"} and state is not None and callable(self.full_evaluator):
+            full = self.full_evaluator(job, state, mode=mode, oracle=oracle)
             if full is not None:
                 return full
         verification = _verification_from_job(job)
@@ -233,89 +217,6 @@ class RecoveryEvaluator:
             extraction=_extraction_from_job(job),
             metadata={"source": "job_summary", "mode": mode},
         )
-
-    def _full_evaluate_state(
-        self,
-        job: RepairJob,
-        state: ArchiveState,
-        *,
-        mode: PolicyRecoveryMode,
-        oracle: dict[str, Any] | None,
-    ) -> PolicyRecoverySnapshot | None:
-        timings: dict[str, float] = {}
-        state_size = 0
-        try:
-            state_size = int(ArchiveStateByteView(state).size)
-        except Exception:
-            state_size = 0
-        extract_output_bytes = 0
-        extract_file_count = 0
-        with tempfile.TemporaryDirectory(prefix="sunpack_recovery_eval_") as tmp:
-            extract_phases: dict[str, float] = {}
-            started = time.perf_counter()
-            task = self._task_for_extraction(job, state, tmp, timings=timings)
-            timings["task_for_state"] = time.perf_counter() - started
-            started = time.perf_counter()
-            extracted = self._extractor_scheduler().extract(task, tmp, phase_timer=_phase_timer(extract_phases), phase_prefix="extract")
-            timings["extract"] = time.perf_counter() - started
-            for key, value in extract_phases.items():
-                timings[f"extract.{key}"] = value
-            extract_output_bytes, extract_file_count = _dir_size(tmp)
-            started = time.perf_counter()
-            verification = VerificationScheduler(self._config_for_mode(mode)).verify(task, extracted)
-            timings["verify"] = time.perf_counter() - started
-        started = time.perf_counter()
-        snapshot = snapshot_from_verification(
-            state,
-            extracted,
-            verification,
-            oracle=oracle,
-            mode=mode,
-        )
-        timings["snapshot"] = time.perf_counter() - started
-        metadata = dict(snapshot.metadata)
-        metadata["timing"] = {key: round(float(value), 6) for key, value in sorted(timings.items())}
-        metadata["state_size_bytes"] = int(state_size)
-        metadata["extract_output_bytes"] = int(extract_output_bytes)
-        metadata["extract_file_count"] = int(extract_file_count)
-        return PolicyRecoverySnapshot.from_dict({**snapshot.to_dict(), "metadata": metadata})
-
-    def _task_for_extraction(self, job: RepairJob, state: ArchiveState, tmp: str | Path, *, timings: dict[str, float]) -> ArchiveTask:
-        if state.patches and bool(self.config.get("repair", {}).get("materialize_patched_recovery_input", True)):
-            suffix = _archive_suffix(state.format_hint or job.format or state.source.format_hint)
-            path = Path(tmp) / f"patched_recovery_input{suffix}"
-            started = time.perf_counter()
-            _materialized, materialize_timing = ArchiveStateByteView(state).materialize_with_timing(path)
-            timings["materialize_patched_input"] = timings.get("materialize_patched_input", 0.0) + (time.perf_counter() - started)
-            for key, value in materialize_timing.items():
-                timings[f"materialize_patched_input.{key}"] = (
-                    timings.get(f"materialize_patched_input.{key}", 0.0) + float(value)
-                )
-            started = time.perf_counter()
-            task = _task_for_materialized_state(job, state, path)
-            timings["task_for_materialized_state"] = timings.get("task_for_materialized_state", 0.0) + (time.perf_counter() - started)
-            return task
-        return _task_for_state(job, state)
-
-    def _config_for_mode(self, mode: PolicyRecoveryMode) -> dict[str, Any]:
-        if mode != "training_oracle":
-            return self.config
-        verification = dict(self.config.get("verification") or {})
-        methods = list(verification.get("methods") or [])
-        method_names = {str(item.get("name") or "") for item in methods if isinstance(item, dict)}
-        if "oracle_expected_output_match" not in method_names:
-            methods.insert(0, {"name": "oracle_expected_output_match", "enabled": True})
-        for name in ("extraction_exit_signal", "output_presence"):
-            if name not in method_names:
-                methods.append({"name": name, "enabled": True})
-        return {
-            **self.config,
-            "verification": {
-                **verification,
-                "enabled": True,
-                "methods": methods,
-            },
-        }
 
 
 def snapshot_from_verification(
@@ -463,31 +364,8 @@ def _oracle_payload(raw: dict[str, Any] | None) -> dict[str, Any]:
     return {**raw, "available": bool(has_signal), "score": _clamp01(score)}
 
 
-def _dir_size(path: str | Path) -> tuple[int, int]:
-    total = 0
-    count = 0
-    try:
-        for item in Path(path).rglob("*"):
-            try:
-                if item.is_file():
-                    total += int(item.stat().st_size)
-                    count += 1
-            except OSError:
-                continue
-    except OSError:
-        return 0, 0
-    return total, count
 
 
-def _phase_timer(output: dict[str, float]):
-    @contextmanager
-    def timer(name: str):
-        started = time.perf_counter()
-        try:
-            yield
-        finally:
-            output[str(name)] = output.get(str(name), 0.0) + (time.perf_counter() - started)
-    return timer
 
 
 def _verification_from_job(job: RepairJob) -> dict[str, Any]:
@@ -502,7 +380,7 @@ def _verification_from_job(job: RepairJob) -> dict[str, Any]:
     return payload
 
 
-def _task_for_state(job: RepairJob, state: ArchiveState) -> ArchiveTask:
+def task_for_recovery_state(job: RepairJob, state: ArchiveState) -> ArchiveTask:
     source = state.source.to_archive_input_descriptor()
     main_path = source.entry_path or str(job.source_input.get("path") or job.source_input.get("archive_path") or "")
     parts = source.part_paths() or [main_path]
@@ -525,7 +403,7 @@ def _task_for_state(job: RepairJob, state: ArchiveState) -> ArchiveTask:
     return task
 
 
-def _task_for_materialized_state(job: RepairJob, state: ArchiveState, path: str | Path) -> ArchiveTask:
+def task_for_materialized_recovery_state(job: RepairJob, state: ArchiveState, path: str | Path) -> ArchiveTask:
     path = Path(path)
     fmt = state.format_hint or job.format or state.source.format_hint
     source = {
@@ -576,13 +454,6 @@ def _knowledge_for_materialized_state(job: RepairJob, source: dict[str, Any]) ->
     return knowledge
 
 
-def _archive_suffix(fmt: str) -> str:
-    fmt = str(fmt or "").lower().lstrip(".")
-    if fmt in {"zip", "7z", "rar", "tar", "gz", "bz2", "xz"}:
-        return f".{fmt}"
-    if fmt in {"seven_zip", "7zip"}:
-        return ".7z"
-    return ".bin"
 
 
 def _extraction_from_job(job: RepairJob) -> dict[str, Any]:

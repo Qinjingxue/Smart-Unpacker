@@ -13,13 +13,14 @@ from sunpack.contracts.archive_state import ArchiveState
 from sunpack.contracts.detection import FactBag
 from sunpack.contracts.tasks import ArchiveTask
 from sunpack.coordinator.analysis_stage import ArchiveAnalysisStage
-from sunpack.extraction.result import ExtractionResult
+from sunpack.coordinator.verification_stage import verify_and_project
+from sunpack.contracts.extraction import ExtractionResult
 from sunpack.extraction.knowledge import write_extraction_result
 from sunpack.extraction.scheduler import ExtractionScheduler
 from sunpack.repair.candidate import RepairCandidate
 from sunpack.repair.knowledge import write_repair_result
 from sunpack.verification import VerificationResult, VerificationScheduler
-from sunpack.verification.result import DECISION_ACCEPT, DECISION_ACCEPT_PARTIAL, DECISION_REPAIR, SOURCE_INTEGRITY_DAMAGED
+from sunpack.contracts.verification import DECISION_ACCEPT, DECISION_ACCEPT_PARTIAL, DECISION_REPAIR, SOURCE_INTEGRITY_DAMAGED
 
 
 @dataclass
@@ -304,11 +305,11 @@ def _refresh_analysis_with_optional_timer(
 
 def _verify_with_optional_timer(verifier: Any, task: ArchiveTask, extracted: ExtractionResult, *, phase_timer: Callable[..., Any] | None, phase_prefix: str) -> VerificationResult:
     try:
-        return verifier.verify(task, extracted, phase_timer=phase_timer, phase_prefix=phase_prefix)
+        return verify_and_project(verifier, task, extracted, phase_timer=phase_timer, phase_prefix=phase_prefix)
     except TypeError as exc:
         if "phase_timer" not in str(exc) and "phase_prefix" not in str(exc):
             raise
-        return verifier.verify(task, extracted)
+        return verify_and_project(verifier, task, extracted)
 
 
 def clone_archive_task(task: ArchiveTask, *, key_suffix: str = "") -> ArchiveTask:

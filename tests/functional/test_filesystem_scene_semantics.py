@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from sunpack.detection import ArchiveTaskProvider
+from sunpack.coordinator.task_provider import ArchiveTaskProvider
 from sunpack.filesystem.directory_scanner import DirectoryScanner
 
 

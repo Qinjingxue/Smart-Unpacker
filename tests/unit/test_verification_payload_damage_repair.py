@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from sunpack.verification.pipeline import _decision_hint
-from sunpack.verification.result import (
+from sunpack.contracts.verification import (
     ASSESSMENT_COMPLETE,
     DECISION_REPAIR,
     SOURCE_INTEGRITY_PAYLOAD_DAMAGED,

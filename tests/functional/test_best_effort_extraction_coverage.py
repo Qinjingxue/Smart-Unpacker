@@ -21,7 +21,7 @@ from sunpack.coordinator.runner import PipelineRunner
 from sunpack.coordinator.analysis_stage import ArchiveAnalysisStage
 from sunpack.contracts.archive_input import ArchiveInputDescriptor, ArchiveInputRange
 from sunpack.extraction.progress import write_extraction_progress_manifest
-from sunpack.extraction.result import ExtractionResult
+from sunpack.contracts.extraction import ExtractionResult
 from sunpack.repair.candidate import RepairCandidate, RepairCandidateBatch
 from sunpack.repair.result import RepairResult
 from sunpack.support import archive_knowledge_projection as knowledge_view
@@ -30,7 +30,7 @@ from sunpack.verification import VerificationResult, VerificationScheduler
 from sunpack.verification.evidence import VerificationEvidence
 from sunpack.verification.pipeline import VerificationPipeline
 from sunpack.verification.registry import register_verification_method
-from sunpack.verification.result import (
+from sunpack.contracts.verification import (
     FileVerificationObservation,
     VerificationIssue,
     VerificationStepResult,

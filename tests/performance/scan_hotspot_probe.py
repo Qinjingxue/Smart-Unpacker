@@ -260,9 +260,10 @@ def load_runtime_config() -> dict:
 
 def install_wrappers(recorder: HotspotRecorder) -> None:
     import sunpack.filesystem.directory_scanner as directory_scanner
-    import sunpack.detection.internal.scan_session as scan_session
+    import sunpack.coordinator.scan_session as scan_session
+    import sunpack.coordinator.target_scan as target_scan
     import sunpack.detection.scheduler as detection_scheduler
-    import sunpack.detection.task_provider as task_provider
+    import sunpack.coordinator.task_provider as task_provider
     import sunpack.coordinator.task_scan as task_scan
     import sunpack.relations.scheduler as relations_scheduler
     import sunpack.relations.internal.group_builder as group_builder
@@ -288,7 +289,7 @@ def install_wrappers(recorder: HotspotRecorder) -> None:
     recorder.wrap(scan_session.DetectionScanSession, "file_head_facts_for_paths", "session.file_head_facts_for_paths")
     recorder.wrap(scan_session.DetectionScanSession, "directory_identity_for_path", "session.directory_identity_for_path")
 
-    recorder.wrap(detection_scheduler.DetectionScheduler, "build_candidate_fact_bags_with_session", "detection.build_candidate_fact_bags")
+    recorder.wrap(target_scan, "build_fact_bags_for_targets", "coordinator.build_candidate_fact_bags")
     recorder.wrap(detection_scheduler.DetectionScheduler, "evaluate_pool", "detection.evaluate_pool")
     recorder.wrap(detection_scheduler.DetectionScheduler, "evaluate_bags", "detection.evaluate_bags")
     recorder.wrap(detection_scheduler.DetectionScheduler, "_ensure_pool_facts", "detection.ensure_pool_facts")
@@ -337,9 +338,12 @@ def run_mode(mode: str, target: str, max_depth: int | None, config: dict) -> tup
 
     if mode in {"candidates", "evaluate"}:
         from sunpack.detection.scheduler import DetectionScheduler
+        from sunpack.coordinator.scan_session import DetectionScanSession
+        from sunpack.coordinator.target_scan import build_fact_bags_for_targets
 
         scheduler = DetectionScheduler(config)
-        bags, session = scheduler.build_candidate_fact_bags_with_session([target_path])
+        session = DetectionScanSession(config=config)
+        bags = build_fact_bags_for_targets([target_path], session=session, config=config)
         extra["candidate_bags"] = len(bags)
         if mode == "candidates":
             extra["scan_session"] = summarize_scan_session(session)

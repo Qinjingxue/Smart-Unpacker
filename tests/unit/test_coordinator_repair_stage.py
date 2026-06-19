@@ -3,9 +3,9 @@ from pathlib import Path
 from sunpack.contracts.detection import FactBag
 from sunpack.contracts.tasks import ArchiveTask
 from sunpack.coordinator.repair_stage import ArchiveRepairStage
-from sunpack.extraction.result import ExtractionResult
+from sunpack.contracts.extraction import ExtractionResult
 from sunpack.repair.result import RepairResult
-from sunpack.verification.result import ArchiveCoverageSummary, VerificationResult
+from sunpack.contracts.verification import ArchiveCoverageSummary, VerificationResult
 
 
 def test_repair_stage_builds_job_from_verification_decision(tmp_path):

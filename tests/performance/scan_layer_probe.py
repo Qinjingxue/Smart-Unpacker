@@ -124,7 +124,7 @@ def cmd_relations(target: str, depth: int | None) -> None:
 
 
 def cmd_fact_bags(target: str) -> None:
-    from sunpack.detection.internal.scan_session import DetectionScanSession
+    from sunpack.coordinator.scan_session import DetectionScanSession
 
     session = DetectionScanSession(config=load_runtime_config())
     bags = run_measured(
@@ -174,8 +174,10 @@ def cmd_evaluate_watch(target: str, rss_stop_mib: float | None) -> None:
     started = time.perf_counter()
     before = rss()
     try:
-        scheduler = DetectionScheduler(load_runtime_config())
-        bags = scheduler.build_candidate_fact_bags([str(Path(target).resolve())])
+        config = load_runtime_config()
+        scheduler = DetectionScheduler(config)
+        from sunpack.coordinator.target_scan import build_fact_bags_for_targets
+        bags = build_fact_bags_for_targets([str(Path(target).resolve())], config=config)
         print({"bags": len(bags), "rss_after_bags_mib": round(mib(rss()), 1)}, flush=True)
         result = scheduler.evaluate_bags(bags)
         print({"detections": len(result)}, flush=True)

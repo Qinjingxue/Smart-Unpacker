@@ -12,7 +12,7 @@ from sunpack.verification.evidence import VerificationEvidence
 from sunpack.verification.methods._archive_output_match import coverage_details, coverage_from_archive_and_output
 from sunpack.verification.methods._output_stats import output_inventory_for_evidence, should_emit_file_observations
 from sunpack.verification.registry import register_verification_method
-from sunpack.verification.result import (
+from sunpack.contracts.verification import (
     DECISION_REPAIR,
     FileVerificationObservation,
     SOURCE_INTEGRITY_COMPLETE,

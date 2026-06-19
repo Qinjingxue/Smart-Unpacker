@@ -6,7 +6,7 @@ from typing import Any
 from sunpack.repair.candidate import CandidateValidation, RepairCandidate, materialize_candidate
 from sunpack.repair.config import enabled_module_configs
 from sunpack.repair.diagnosis import RepairDiagnosis
-from sunpack.repair.formats import canonical_format as _normalize_format
+from sunpack.support.archive_formats import canonical_format as _normalize_format
 from sunpack.repair.job import RepairJob
 from sunpack.repair.pipeline.modules._common import repair_operation_cache_key
 from sunpack.repair.pipeline.registry import get_repair_module_registry

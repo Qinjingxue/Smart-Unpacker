@@ -2,12 +2,12 @@ from contextlib import nullcontext
 from typing import Any, Callable
 
 from sunpack.contracts.tasks import ArchiveTask
-from sunpack.extraction.result import ExtractionResult
+from sunpack.contracts.extraction import ExtractionResult
 from sunpack.passwords import PasswordSession
 from sunpack.verification.evidence import build_verification_evidence
 from sunpack.verification.knowledge import write_verification_result
 from sunpack.verification.pipeline import VerificationPipeline
-from sunpack.verification.result import (
+from sunpack.contracts.verification import (
     ASSESSMENT_DISABLED,
     DECISION_ACCEPT,
     DECISION_REPAIR,

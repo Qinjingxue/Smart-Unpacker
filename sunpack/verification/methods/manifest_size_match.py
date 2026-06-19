@@ -12,7 +12,7 @@ from sunpack.verification.methods._output_stats import (
     should_emit_file_observations,
 )
 from sunpack.verification.registry import register_verification_method
-from sunpack.verification.result import (
+from sunpack.contracts.verification import (
     DECISION_REPAIR,
     SOURCE_INTEGRITY_COMPLETE,
     SOURCE_INTEGRITY_DAMAGED,

@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from sunpack.repair.config import repair_system_mode
-from sunpack.repair.formats import canonical_format as _normalize_format
+from sunpack.support.archive_formats import canonical_format as _normalize_format
 from sunpack.support.resources import candidate_resource_roots, find_resource_path
 
 

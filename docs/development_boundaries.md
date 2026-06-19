@@ -22,6 +22,8 @@ app
   -> filesystem.watcher
 
 coordinator
+  -> filesystem
+  -> relations
   -> detection
   -> analysis
   -> extraction
@@ -33,8 +35,6 @@ coordinator
 
 detection
   -> contracts
-  -> filesystem
-  -> relations public API
   -> support/native helpers
 
 analysis
@@ -44,18 +44,16 @@ analysis
 extraction
   -> contracts
   -> passwords
-  -> relations public API
   -> rename public API
   -> sevenzip worker
 
 repair
+  -> contracts
   -> native binary I/O
-  -> analysis evidence
   -> repair modules
 
 verification
   -> contracts
-  -> extraction result
   -> passwords session
 
 postprocess
@@ -94,8 +92,9 @@ contracts
 | 契约 | `contracts.*` | 跨模块共享数据结构，包括 `RunContext`。 |
 | 文件系统 | `filesystem.directory_scanner.DirectoryScanner` | 目录扫描和过滤。 |
 | 关系 | `relations.RelationsScheduler` | 分卷、候选组、逻辑名和分卷成员查询。 |
-| 检测 | `detection.DetectionScheduler` / `ArchiveTaskProvider` | 候选 facts、规则判断、任务生成。 |
-| 递归策略 | `detection.NestedOutputScanPolicy` | 判断输出目录是否进入下一轮扫描。 |
+| 检测 | `detection.DetectionScheduler` | 对 Coordinator 提供的候选 facts 做规则判断。 |
+| 候选编排 | `coordinator.task_provider.ArchiveTaskProvider` | 串联 filesystem、relations、detection 和结构救援。 |
+| 递归策略 | `coordinator.output_scan_policy.NestedOutputScanPolicy` | 判断输出目录是否进入下一轮扫描。 |
 | 结构分析 | `analysis.ArchiveAnalysisScheduler` | 对已确认候选做结构分析和边界标注。 |
 | 密码 | `sunpack.passwords` | 密码候选、调度、fast verifier、7z.dll 最终确认。 |
 | 解压 | `extraction.scheduler.ExtractionScheduler` | 单归档输出目录、密码解析、worker 解压。 |
@@ -119,7 +118,7 @@ contracts
 
 ### contracts
 
-`contracts` 是共享数据契约层。`FactBag`、`ArchiveTask`、`ExtractionResult` 相关跨模块数据和 `RunContext` 应放这里。不要跨模块读取私有字段，例如 `FactBag._facts`。
+`contracts` 是共享数据契约层。`FactBag`、`ArchiveTask`、`ExtractionResult`、`VerificationResult` 和 `RunContext` 应放这里。不要跨模块读取私有字段，例如 `FactBag._facts`。
 
 ### filesystem
 
@@ -143,6 +142,8 @@ contracts
 
 `detection` 只回答“候选是否应进入解压任务”。它分三层：
 
+目录扫描、关系分组和 Analysis 结构救援均由 Coordinator 驱动；Detection 只接收 `FactBag`，必要时通过 `refine_with_structure` 消费中立结构证据。
+
 - `facts`：采集初等事实，例如路径、大小、magic bytes、scene marker。
 - `processors`：从初等 facts 推导高等 facts，例如结构事实、embedded payload、scene context、7z probe/test。
 - `rules`：只读 facts 和配置，输出 accept/reject/score/confirm。
@@ -159,7 +160,7 @@ contracts
 
 ### extraction
 
-`extraction` 是单归档解压执行层。它消费 `ArchiveTask`、relation 分卷信息、analysis 标注输入和 password resolution，调用 `sunpack_sevenzip_worker.exe` 通过 `7z.dll` 解压普通文件、`file_range` 或 `concat_ranges` 虚拟输入。它不负责扫描候选、不做批量并发、不做成功后清理。
+`extraction` 是单归档解压执行层。它消费已经由 Coordinator 完整解析的 `ArchiveTask`、分卷描述、analysis 标注输入和 password resolution，调用 `sunpack_sevenzip_worker.exe` 通过 `7z.dll` 解压普通文件、`file_range` 或 `concat_ranges` 虚拟输入。它不查询 Relations、不负责扫描候选、不做批量并发、不做成功后清理。
 
 ### repair
 
@@ -189,7 +190,9 @@ contracts
 
 ### coordinator
 
-`coordinator` 负责流程顺序、递归轮次、批量调度、资源 token、verification retry、repair beam、候选比较和 summary。它不自己识别候选、不执行 7z、不直接实现修复算法。归档清理通过 postprocess 公开动作完成。
+`coordinator` 是唯一流程依赖拥有者，负责 filesystem→relations→detection→analysis→extraction→verification→postprocess 主流程，以及 analysis→extraction→verification→repair→analysis 循环。它还负责递归轮次、批量调度、资源 token、结构救援、verification retry、repair beam、候选比较和 summary。它不实现领域算法；所有领域能力均通过公开入口调用。归档清理通过 postprocess 公开动作完成。
+
+八个流程领域包禁止互相导入，也禁止反向导入 `coordinator`。跨阶段数据只能通过 `contracts` 传递。
 
 ### support
 

@@ -13,7 +13,7 @@ from sunpack.extraction.internal.workflow.retry_policy import ExtractRetryPolicy
 from sunpack.extraction.internal.sevenzip.sevenzip_runner import SevenZipRunner
 from sunpack.extraction.internal.workflow.split_entry import SplitEntryResolver
 from sunpack.extraction.progress import has_recoverable_partial_outputs, write_extraction_progress_manifest_payload
-from sunpack.extraction.result import ExtractionResult
+from sunpack.contracts.extraction import ExtractionResult
 from sunpack.passwords.result import PasswordResolution, PasswordResolutionStatus
 from sunpack.support import archive_knowledge_projection as knowledge_view
 from sunpack.support.output_inventory import OutputInventory, collect_output_inventory

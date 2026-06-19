@@ -1,4 +1,4 @@
-from sunpack.detection.nested_scan_policy import NestedOutputScanPolicy as OutputScanPolicy
+from sunpack.coordinator.output_scan_policy import NestedOutputScanPolicy as OutputScanPolicy
 from sunpack.contracts.filesystem import FileEntry
 from sunpack.support.output_inventory import OutputInventory, OutputStats
 from tests.helpers.detection_config import with_detection_pipeline
@@ -51,7 +51,7 @@ def test_output_scan_policy_uses_file_entry_size_without_stat(tmp_path, monkeypa
     def fail_getsize(_path):
         raise AssertionError("getsize should not be called when entry size is available")
 
-    monkeypatch.setattr("sunpack.detection.nested_scan_policy.os.path.getsize", fail_getsize)
+    monkeypatch.setattr("sunpack.coordinator.output_scan_policy.os.path.getsize", fail_getsize)
 
     entry = FileEntry(path=candidate, is_dir=False, size=1024 * 1024)
 
@@ -91,7 +91,7 @@ def test_output_scan_policy_reuses_extraction_inventory(tmp_path, monkeypatch):
     )
 
     monkeypatch.setattr(
-        "sunpack.detection.nested_scan_policy.DirectoryScanner.scan",
+        "sunpack.coordinator.output_scan_policy.DirectoryScanner.scan",
         lambda _self: (_ for _ in ()).throw(AssertionError("directory must not be rescanned")),
     )
 

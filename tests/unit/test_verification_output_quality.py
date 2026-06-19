@@ -4,7 +4,7 @@ import pytest
 
 from sunpack.verification.output_quality import compute_output_quality
 from sunpack.verification.pipeline import _decision_hint
-from sunpack.verification.result import (
+from sunpack.contracts.verification import (
     ASSESSMENT_COMPLETE,
     DECISION_ACCEPT_PARTIAL,
     DECISION_REPAIR,

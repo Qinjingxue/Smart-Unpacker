@@ -4,7 +4,7 @@ import zipfile
 
 from sunpack.contracts.detection import FactBag
 from sunpack.contracts.tasks import ArchiveTask
-from sunpack.extraction.result import ExtractionResult
+from sunpack.contracts.extraction import ExtractionResult
 from sunpack.verification import VerificationScheduler
 from sunpack.verification import archive_state_manifest as archive_state_manifest_module
 

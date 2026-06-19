@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 
 from sunpack.contracts.tasks import ArchiveTask
-from sunpack.extraction.result import ExtractionResult
+from sunpack.contracts.extraction import ExtractionResult
 
 
 @dataclass(frozen=True)

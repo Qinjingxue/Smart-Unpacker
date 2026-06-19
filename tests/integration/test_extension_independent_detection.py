@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from sunpack.detection.scheduler import DetectionScheduler
+from sunpack.coordinator.task_provider import ArchiveTaskProvider
 from tests.helpers.real_archives import ArchiveFixtureFactory
 from tests.helpers.tool_config import get_optional_rar
 
@@ -23,7 +23,7 @@ ARCHIVE_FORMATS = [
 
 
 def _detected(path: Path):
-    results = DetectionScheduler({}).detect_targets([str(path)])
+    results = ArchiveTaskProvider({}).detect_targets([str(path)])
     return [item for item in results if item.decision.should_extract]
 
 

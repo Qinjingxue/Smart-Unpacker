@@ -1,7 +1,7 @@
 from sunpack.config.schema import normalize_config
 from sunpack.contracts.detection import FactBag
 from sunpack.contracts.tasks import ArchiveTask
-from sunpack.extraction.result import ExtractionResult
+from sunpack.contracts.extraction import ExtractionResult
 from sunpack.passwords import PasswordSession
 from sunpack.verification import (
     FileVerificationObservation,
@@ -9,7 +9,7 @@ from sunpack.verification import (
     VerificationStepResult,
     register_verification_method,
 )
-from sunpack.verification.result import VerificationIssue
+from sunpack.contracts.verification import VerificationIssue
 
 
 CALLS = []

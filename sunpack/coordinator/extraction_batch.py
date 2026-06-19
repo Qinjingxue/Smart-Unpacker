@@ -15,14 +15,16 @@ from sunpack.coordinator.repair_loop import RepairLoopLimits, RepairLoopState, t
 from sunpack.coordinator.repair_runtime_transition import RepairRuntimeTransitionEvaluator
 from sunpack.coordinator.repair_stage import ArchiveRepairStage
 from sunpack.coordinator.resource_preflight import ResourcePreflightInspector
+from sunpack.coordinator.relation_stage import ArchiveRelationStage
+from sunpack.coordinator.verification_stage import verify_and_project
 from sunpack.coordinator.scheduling import (
     ConcurrencyScheduler,
     TaskExecutor,
     build_scheduler_profile_config,
     resolve_max_workers,
 )
-from sunpack.detection import NestedOutputScanPolicy
-from sunpack.extraction.result import ExtractionResult
+from sunpack.coordinator.output_scan_policy import NestedOutputScanPolicy
+from sunpack.contracts.extraction import ExtractionResult
 from sunpack.extraction.knowledge import write_extraction_result
 from sunpack.extraction.scheduler import ExtractionScheduler
 from sunpack.extraction.progress import filter_extraction_manifest_payload, filter_extraction_outputs
@@ -34,7 +36,7 @@ from sunpack.repair.knowledge import (
     write_repair_result,
 )
 from sunpack.verification import RecoveryAttempt, VerificationResult, VerificationScheduler, compare_attempts, rank_attempt
-from sunpack.verification.result import DECISION_ACCEPT, DECISION_ACCEPT_PARTIAL, DECISION_REPAIR, DECISION_RETRY_EXTRACT
+from sunpack.contracts.verification import DECISION_ACCEPT, DECISION_ACCEPT_PARTIAL, DECISION_REPAIR, DECISION_RETRY_EXTRACT
 from sunpack.support.path_keys import absolute_path_key
 from sunpack.support import repair_trace
 from sunpack.support import archive_knowledge_projection as knowledge_view
@@ -107,6 +109,7 @@ class ExtractionBatchRunner:
         output_scan_policy: NestedOutputScanPolicy,
         rename_scheduler: RenameScheduler | None = None,
         config: dict | None = None,
+        analysis_stage: ArchiveAnalysisStage | None = None,
     ):
         self.context = context
         self.extractor = extractor
@@ -115,7 +118,8 @@ class ExtractionBatchRunner:
         self.config = config or {}
         self.scheduler_config = self._build_scheduler_config(self.config)
         self.max_workers = resolve_max_workers()
-        self.analysis_stage = ArchiveAnalysisStage(self.config)
+        self.analysis_stage = analysis_stage or ArchiveAnalysisStage(self.config)
+        self.relation_stage = ArchiveRelationStage()
         self.repair_stage = ArchiveRepairStage(self.config)
         self.repair_loop_limits = RepairLoopLimits.from_config(self.repair_stage.config)
         self.verifier = VerificationScheduler(self.config, password_session=self.extractor.password_session)
@@ -127,6 +131,7 @@ class ExtractionBatchRunner:
         )
 
     def prepare_tasks(self, tasks: List[ArchiveTask]):
+        self.relation_stage.resolve_tasks(tasks)
         path_map = self.rename_scheduler.apply_renames(tasks)
         if path_map:
             for task in tasks:
@@ -373,7 +378,7 @@ class ExtractionBatchRunner:
             current_sequence = attempt_sequence
             attempt_sequence += 1
             if not result.success:
-                verification = self.verifier.verify(task, result)
+                verification = verify_and_project(self.verifier, task, result)
                 current_outcome = BatchExtractionOutcome(
                     result=result,
                     verification=verification,
@@ -419,7 +424,7 @@ class ExtractionBatchRunner:
                     return selected
                 return current_outcome
 
-            verification = self.verifier.verify(task, result)
+            verification = verify_and_project(self.verifier, task, result)
             outcome = BatchExtractionOutcome(result=result, verification=verification, attempts=attempt_index + 1)
             self._annotate_recovery_outcome(task, outcome, source="original", round_index=current_sequence)
             if _verification_accepts_complete(verification):
@@ -1129,10 +1134,10 @@ class ExtractionBatchRunner:
             }
         ]
         if not verification_config["methods"]:
-            return self.verifier.verify(task, result)
+            return verify_and_project(self.verifier, task, result)
         light_config = dict(self.config)
         light_config["verification"] = verification_config
-        return VerificationScheduler(light_config, password_session=self.extractor.password_session).verify(task, result)
+        return verify_and_project(VerificationScheduler(light_config, password_session=self.extractor.password_session), task, result)
 
     def _beam_candidate_needs_full_verification(
         self,

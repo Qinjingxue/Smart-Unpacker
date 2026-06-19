@@ -1,14 +1,14 @@
 from pathlib import Path
 
 from sunpack.coordinator.scheduling import ConcurrencyScheduler
-from sunpack.detection import DetectionScheduler
+from sunpack.coordinator.target_scan import build_fact_bags_for_targets
 
 
 def test_selected_directory_and_file_inside_it_are_deduped(tmp_path):
     archive = tmp_path / "sample.zip"
     archive.write_bytes(b"PK\x05\x06" + b"\0" * 18)
 
-    bags = DetectionScheduler({}).build_candidate_fact_bags([str(tmp_path), str(archive)])
+    bags = build_fact_bags_for_targets([str(tmp_path), str(archive)])
 
     matching = [bag for bag in bags if bag.get("file.path") == str(archive)]
     assert len(matching) == 1
@@ -20,7 +20,7 @@ def test_selected_split_member_scans_parent_and_returns_group(tmp_path):
     first.write_bytes(b"7z\xbc\xaf\x27\x1c")
     second.write_bytes(b"part")
 
-    bags = DetectionScheduler({}).build_candidate_fact_bags([str(second)])
+    bags = build_fact_bags_for_targets([str(second)])
 
     assert len(bags) == 1
     assert bags[0].get("file.path") == str(first)

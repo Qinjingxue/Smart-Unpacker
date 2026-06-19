@@ -1,4 +1,5 @@
 import os
+from copy import deepcopy
 from typing import Any
 
 from sunpack.config.detection_view import detection_config, rule_pipeline_config
@@ -6,6 +7,9 @@ from sunpack.contracts.detection import FactBag
 from sunpack.contracts.tasks import ArchiveTask
 from sunpack.detection.knowledge import write_detection_task
 from sunpack.detection.scheduler import DetectionScheduler
+from sunpack.coordinator.analysis_stage import ArchiveAnalysisStage
+from sunpack.coordinator.scan_session import DetectionScanSession
+from sunpack.coordinator.target_scan import build_fact_bags_for_targets
 from sunpack.filesystem.knowledge import write_filesystem_task
 from sunpack.relations.knowledge import write_relation_task
 from sunpack.relations.scheduler import RelationsScheduler
@@ -17,10 +21,17 @@ STANDARD_ARCHIVE_EXTS = {".7z", ".zip", ".rar", ".tar", ".gz", ".bz2", ".xz", ".
 class ArchiveTaskProvider:
     """Public detection facade that turns detection decisions into archive tasks."""
 
-    def __init__(self, config: dict[str, Any]):
+    def __init__(self, config: dict[str, Any], analysis_stage: ArchiveAnalysisStage | None = None):
         self.config = config
         self.detector = DetectionScheduler(config)
         self._relations = RelationsScheduler()
+        self.analysis_stage = analysis_stage or ArchiveAnalysisStage(config)
+        rescue_config = deepcopy(config)
+        detector_config = detection_config(config)
+        rescue_prepass = rescue_config.setdefault("analysis", {}).setdefault("prepass", {})
+        rescue_prepass.setdefault("full_scan_max_bytes", int(detector_config.get("content_structure_rescue_full_scan_max_bytes", 64 * 1024 * 1024) or 0))
+        rescue_prepass.setdefault("deep_scan", bool(detector_config.get("content_structure_rescue_deep_scan", False)))
+        self.rescue_analysis_stage = ArchiveAnalysisStage(rescue_config)
         self.failed_candidates: list[str] = []
 
     def scan_targets(self, scan_roots: list[str], processed_keys: set[str] | None = None) -> list[ArchiveTask]:
@@ -30,9 +41,7 @@ class ArchiveTaskProvider:
             return self._scan_standard_archive_targets(scan_roots, processed_keys)
 
         tasks: list[ArchiveTask] = []
-        candidate_bags, scan_session = self.detector.build_candidate_fact_bags_with_session(scan_roots)
-        fact_bags = self._filter_incomplete_split_groups(candidate_bags)
-        for detection in self.detector.evaluate_bags(fact_bags, scan_session=scan_session):
+        for detection in self.detect_targets(scan_roots):
             bag = detection.fact_bag
             if not bag.get("candidate.entry_path"):
                 continue
@@ -52,7 +61,9 @@ class ArchiveTaskProvider:
         processed_keys: set[str],
     ) -> list[ArchiveTask]:
         tasks: list[ArchiveTask] = []
-        for bag in self._filter_incomplete_split_groups(self.detector.build_candidate_fact_bags(scan_roots)):
+        scan_session = DetectionScanSession(config=self.config)
+        candidate_bags = build_fact_bags_for_targets(scan_roots, session=scan_session, config=self.config)
+        for bag in self._filter_incomplete_split_groups(candidate_bags):
             main_path = bag.get("candidate.entry_path")
             if not main_path or not self._is_standard_archive_candidate(main_path, bag):
                 continue
@@ -62,6 +73,53 @@ class ArchiveTaskProvider:
                 continue
             tasks.append(task)
         return tasks
+
+    def detect_targets(self, scan_roots: list[str]):
+        scan_session = DetectionScanSession(config=self.config)
+        candidate_bags = build_fact_bags_for_targets(scan_roots, session=scan_session, config=self.config)
+        fact_bags = self._filter_incomplete_split_groups(candidate_bags)
+        detections = self.detector.evaluate_bags(fact_bags, scan_session=scan_session)
+        return [
+            type(detection)(
+                fact_bag=detection.fact_bag,
+                decision=self._refine_with_structure_rescue(detection.fact_bag, detection.decision),
+            )
+            for detection in detections
+        ]
+
+    def _refine_with_structure_rescue(self, bag: FactBag, decision):
+        if decision.should_extract or decision.decision == "rejected":
+            return decision
+        path = str(bag.get("candidate.entry_path") or bag.get("file.path") or "")
+        if not path:
+            return decision
+        task = ArchiveTask.from_fact_bag(bag, score=decision.total_score, decision=decision)
+        try:
+            report = self.rescue_analysis_stage.analyze_task(task)
+        except Exception as exc:
+            bag.mark_error("content.structure_rescue", str(exc))
+            return decision
+        if report is None:
+            return decision
+        self.analysis_stage.remember_report(task, report)
+        candidates = list(report.selected)
+        if not candidates:
+            candidates = [item for item in report.evidences if item.segments and bool(item.details.get("password_required"))]
+        if not candidates:
+            return decision
+        selected = max(candidates, key=lambda item: float(item.confidence or 0.0))
+        first_segment = selected.segments[0] if selected.segments else None
+        evidence = {
+            "has_extractable": bool(report.has_extractable or selected.details.get("password_required")),
+            "prepass": dict(report.prepass or {}),
+            "read_bytes": int(report.read_bytes or 0),
+            "selected": {
+                "format": selected.format,
+                "confidence": float(selected.confidence or 0.0),
+                "start_offset": int(first_segment.start_offset or 0) if first_segment is not None else 0,
+            },
+        }
+        return self.detector.refine_with_structure(bag, decision, evidence)
 
     def _detection_pipeline_disabled(self) -> bool:
         detector_config = detection_config(self.config)

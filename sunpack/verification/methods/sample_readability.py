@@ -1,6 +1,6 @@
 from sunpack.verification.evidence import VerificationEvidence
 from sunpack.verification.registry import register_verification_method
-from sunpack.verification.result import FileVerificationObservation, VerificationIssue, VerificationStepResult
+from sunpack.contracts.verification import FileVerificationObservation, VerificationIssue, VerificationStepResult
 
 from sunpack_native import sample_directory_readability as _sample_directory_readability
 

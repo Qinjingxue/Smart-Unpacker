@@ -1,6 +1,6 @@
 from sunpack.verification.evidence import VerificationEvidence
 from sunpack.verification.registry import register_verification_method
-from sunpack.verification.result import (
+from sunpack.contracts.verification import (
     DECISION_ACCEPT_PARTIAL,
     DECISION_REPAIR,
     DECISION_REQUEST_PASSWORD,

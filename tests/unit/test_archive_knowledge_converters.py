@@ -1,18 +1,18 @@
 from pathlib import Path
 
-from sunpack.analysis.knowledge import write_analysis_report
+from sunpack.analysis.knowledge import write_analysis_report, write_zip_runtime_evidence_facts
 from sunpack.analysis.result import ArchiveAnalysisReport, ArchiveFormatEvidence
 from sunpack.contracts.detection import FactBag
 from sunpack.contracts.tasks import ArchiveTask
 from sunpack.detection.knowledge import write_detection_task
 from sunpack.extraction.knowledge import write_extraction_result
-from sunpack.extraction.result import ExtractionResult
+from sunpack.contracts.extraction import ExtractionResult
 from sunpack.filesystem.knowledge import write_filesystem_task
 from sunpack.relations.knowledge import write_relation_task
 from sunpack.repair.knowledge import write_repair_result
 from sunpack.repair.result import RepairResult
 from sunpack.verification.knowledge import write_verification_result
-from sunpack.verification.result import ArchiveCoverageSummary, FileVerificationObservation, VerificationIssue, VerificationResult
+from sunpack.contracts.verification import ArchiveCoverageSummary, FileVerificationObservation, VerificationIssue, VerificationResult
 
 
 def test_layer_converters_write_archive_knowledge_namespaces(tmp_path):
@@ -96,6 +96,7 @@ def test_extraction_verification_and_zip_runtime_evidence_facts(tmp_path):
             ],
         ),
     )
+    write_zip_runtime_evidence_facts(task)
 
     payload = task.knowledge().to_dict()
     outcomes = payload["extraction"]["entry_outcomes"]
@@ -181,6 +182,7 @@ def test_zip_runtime_evidence_separates_structural_checksum_and_sfx_offset(tmp_p
             file_observations=[FileVerificationObservation(path="a.txt", archive_path="a.txt", state="complete")],
         ),
     )
+    write_zip_runtime_evidence_facts(task)
 
     structure = task.knowledge().to_dict()["format"]["zip"]["structure"]
     evidence = structure["runtime"]
@@ -264,6 +266,7 @@ def test_zip_runtime_evidence_attributes_partial_payload_to_missing_range(tmp_pa
             archive_coverage=ArchiveCoverageSummary(completeness=1.0),
         ),
     )
+    write_zip_runtime_evidence_facts(task)
 
     structure = task.knowledge().to_dict()["format"]["zip"]["structure"]
     evidence = structure["runtime"]

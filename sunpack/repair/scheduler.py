@@ -14,7 +14,7 @@ from sunpack.repair.config import enabled_module_configs, repair_config
 from sunpack.repair.context import RepairContext, build_repair_context
 from sunpack.repair.control_candidates import is_accept_current_state_candidate, with_accept_current_state_candidate
 from sunpack.repair.diagnosis import RepairDiagnosis, diagnose_repair_job
-from sunpack.repair.formats import canonical_format as _normalize_format
+from sunpack.support.archive_formats import canonical_format as _normalize_format
 from sunpack.repair.job import RepairJob
 from sunpack.repair.pipeline.module import RepairRoute
 from sunpack.repair.pipeline.modules._common import job_source_size, repair_operation_cache_key
@@ -1099,121 +1099,10 @@ def _state_source_input(state: ArchiveState | None, job: RepairJob) -> dict[str,
     return state_source_input(state, job)
 
 
-def _refresh_policy_loop_observation(
-    job: RepairJob,
-    state: ArchiveState | None,
-    config: dict[str, Any],
-) -> tuple[RepairJob, ArchiveState | None, str]:
-    policy = config.get("policy") if isinstance(config.get("policy"), dict) else {}
-    if not bool(policy.get("refresh_runtime_observation", True)):
-        return job, state, ""
-    if state is None:
-        return job, state, ""
-    try:
-        from sunpack.coordinator.analysis_stage import ArchiveAnalysisStage
-        from sunpack.extraction.knowledge import write_extraction_result
-        from sunpack.extraction.scheduler import ExtractionScheduler
-        from sunpack.verification.knowledge import write_verification_result
-        from sunpack.verification.scheduler import VerificationScheduler
-
-        task = _task_for_policy_observation(job, state)
-        fmt = _normalize_format(state.format_hint or job.format or task.detected_ext)
-        with tempfile.TemporaryDirectory(prefix="sunpack_policy_loop_obs_") as tmp:
-            ArchiveAnalysisStage(config).refresh_task_analysis(task)
-            if fmt == "zip":
-                _ensure_zip_structure_facts_for_state(task, state, Path(tmp))
-            extractor = ExtractionScheduler(
-                process_config=dict(config.get("process") or {}),
-                output_config=dict(config.get("output") or {}),
-                extraction_config={**dict(config.get("extraction") or {}), "quiet": True},
-            )
-            try:
-                extracted = extractor.extract(task, str(Path(tmp) / "extract"))
-                write_extraction_result(task, extracted)
-                verification = VerificationScheduler(config).verify(task, extracted)
-                write_verification_result(task, verification)
-            finally:
-                extractor.close()
-        observed_state = task.archive_state()
-        knowledge = task.knowledge().to_dict()
-        observed_job = replace(
-            job,
-            archive_state=observed_state,
-            source_input=dict(job.source_input or {}),
-            knowledge=knowledge,
-            extraction_failure=_nested(knowledge, "extraction", "failure") or {},
-            extraction_diagnostics=_nested(knowledge, "extraction", "diagnostics") or {},
-        )
-        return observed_job, observed_state, ""
-    except Exception as exc:
-        return job, state, f"policy loop observation refresh failed: {exc}"
 
 
-def _task_for_policy_observation(job: RepairJob, state: ArchiveState) -> ArchiveTask:
-    descriptor = state.to_archive_input_descriptor()
-    main_path = descriptor.entry_path or str(job.source_input.get("path") or job.source_input.get("archive_path") or "")
-    parts = descriptor.part_paths() or [main_path]
-    bag = FactBag()
-    fmt = state.format_hint or job.format or descriptor.format_hint
-    source_payload = descriptor.to_dict()
-    knowledge = ArchiveKnowledge.from_any(job.knowledge)
-    if not knowledge.to_dict():
-        knowledge.set("source.input", source_payload, source_layer="repair", source_module="policy_loop_observation")
-    knowledge.set("repair.damage.flags", [], source_layer="repair", source_module="policy_loop_observation")
-    if _normalize_format(fmt) == "zip":
-        knowledge.set("format.zip.route_evidence_flags", [], source_layer="repair", source_module="policy_loop_observation")
-    bag.set("analysis.selected_format", fmt)
-    bag.set("archive.input", source_payload)
-    bag.set("archive.knowledge", knowledge.to_dict())
-    task = ArchiveTask(
-        fact_bag=bag,
-        score=10,
-        key=job.archive_key or main_path,
-        main_path=main_path,
-        all_parts=parts,
-        logical_name=state.logical_name or descriptor.logical_name or job.archive_key,
-        detected_ext=fmt,
-    )
-    task.set_archive_state(state)
-    return task
 
 
-def _ensure_zip_structure_facts_for_state(task: ArchiveTask, state: ArchiveState, tmp_dir: Path) -> None:
-    from sunpack.analysis.knowledge import write_zip_structure_facts
-    from sunpack.detection.pipeline.processors.modules.format_structure.zip_directory_consistency import inspect_zip_directory_consistency
-    from sunpack.detection.pipeline.processors.modules.format_structure.zip_eocd import inspect_zip_eocd_structure
-    from sunpack.detection.pipeline.processors.modules.format_structure.zip_local_header import inspect_zip_local_header
-    from sunpack.detection.pipeline.processors.modules.format_structure.zip_structure_graph import inspect_zip_structure_graph
-
-    probe_path = str(task.main_path or "")
-    if state.patch_depth() > 0:
-        probe_path = str(ArchiveStateByteView(state).materialize(tmp_dir / "policy_loop_patched.zip"))
-    if not probe_path:
-        return
-    fact_bag = task.fact_bag
-    fact_bag.set("file.path", probe_path)
-    try:
-        fact_bag.set("zip.eocd_structure", inspect_zip_eocd_structure(probe_path))
-    except Exception as exc:
-        fact_bag.set("zip.eocd_structure", {"error": str(exc) or type(exc).__name__})
-    try:
-        fact_bag.set("zip.directory_consistency", inspect_zip_directory_consistency(probe_path))
-    except Exception as exc:
-        fact_bag.set("zip.directory_consistency", {"error": str(exc) or type(exc).__name__})
-    try:
-        fact_bag.set("zip.structure_graph", inspect_zip_structure_graph(probe_path))
-    except Exception as exc:
-        fact_bag.set("zip.structure_graph", {"error": str(exc) or type(exc).__name__})
-    try:
-        local = inspect_zip_local_header(probe_path, 0)
-    except Exception as exc:
-        local = {"error": str(exc) or type(exc).__name__}
-    fact_bag.set("zip.local_header", local)
-    if isinstance(local, dict):
-        fact_bag.set("zip.local_header_plausible", bool(local.get("plausible")))
-        fact_bag.set("zip.local_header_offset", int(local.get("offset") or 0))
-        fact_bag.set("zip.local_header_error", str(local.get("error") or ""))
-    write_zip_structure_facts(task)
 
 
 def _nested(payload: dict[str, Any], *path: str) -> Any:
@@ -1896,27 +1785,6 @@ def _policy_loop_stop_plateau_satisfied(
     return max(0, int(round_index) - int(best_round_index)) >= window
 
 
-def _evaluate_policy_best_state_recovery(
-    evaluator: RecoveryEvaluator,
-    job: RepairJob,
-    state: ArchiveState | None,
-    fallback: PolicyRecoverySnapshot,
-    config: dict[str, Any],
-    cache: dict[str, PolicyRecoverySnapshot],
-) -> PolicyRecoverySnapshot:
-    if state is None:
-        return fallback
-    policy = config.get("policy") if isinstance(config.get("policy"), dict) else {}
-    mode = str(policy.get("best_state_recovery_mode") or "policy_full")
-    if mode not in {"policy_light", "policy_full", "training_oracle"}:
-        mode = "policy_full"
-    if mode == "policy_light":
-        return fallback
-    evaluated = evaluator.evaluate_state(job, state, mode=mode, cache=cache)
-    source = str((evaluated.metadata or {}).get("score_source") or "")
-    if float(evaluated.score or 0.0) <= 0.0 and source in {"", "none", "error"} and float(fallback.score or 0.0) > 0.0:
-        return fallback
-    return evaluated
 
 
 def _policy_recovery_tie_breaks_best(

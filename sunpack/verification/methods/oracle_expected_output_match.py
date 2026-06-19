@@ -11,7 +11,7 @@ from sunpack.verification.methods._archive_output_match import (
     coverage_from_archive_and_output,
 )
 from sunpack.verification.registry import register_verification_method
-from sunpack.verification.result import (
+from sunpack.contracts.verification import (
     DECISION_ACCEPT,
     DECISION_ACCEPT_PARTIAL,
     DECISION_REPAIR,

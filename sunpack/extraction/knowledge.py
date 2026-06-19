@@ -4,7 +4,7 @@ from contextlib import nullcontext
 from typing import Any, Callable
 
 from sunpack.contracts.tasks import ArchiveTask
-from sunpack.extraction.result import ExtractionResult
+from sunpack.contracts.extraction import ExtractionResult
 from sunpack.support.archive_knowledge_writer import commit_task_knowledge, ensure_knowledge, write_payload
 
 

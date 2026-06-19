@@ -5,7 +5,7 @@ from sunpack_native import batch_file_head_facts as _native_batch_file_head_fact
 
 from sunpack.contracts.detection import FactBag
 from sunpack.contracts.filesystem import DirectorySnapshot
-from sunpack.detection.internal.target_groups import relation_group_to_fact_bag
+from sunpack.coordinator.target_groups import relation_group_to_fact_bag
 from sunpack.filesystem.directory_scanner import DirectoryScanner
 from sunpack.relations import CandidateGroup, RelationsScheduler
 from sunpack.support.path_keys import normalized_path, path_key, safe_relative_path

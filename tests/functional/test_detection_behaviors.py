@@ -8,6 +8,7 @@ from pathlib import Path
 from sunpack.contracts.detection import FactBag
 from sunpack.coordinator.inspector import InspectOrchestrator
 from sunpack.detection import DetectionScheduler
+from sunpack.coordinator.target_scan import build_fact_bags_for_targets
 from tests.helpers.detection_config import with_detection_pipeline
 
 
@@ -32,7 +33,7 @@ class DetectionBehaviorTests(unittest.TestCase):
             second.write_bytes(b"two")
             (root / "orphan.002").write_bytes(b"alone")
 
-            groups = DetectionScheduler(config_with_rules([])).build_candidate_fact_bags([str(root)])
+            groups = build_fact_bags_for_targets([str(root)], config=config_with_rules([]))
 
             split_group = next(group for group in groups if group.get("file.logical_name") == "game")
             orphan = next(group for group in groups if group.get("file.path", "").endswith("orphan.002"))

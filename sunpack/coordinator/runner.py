@@ -15,9 +15,10 @@ from sunpack.coordinator.extraction_batch import ExtractionBatchRunner
 from sunpack.postprocess.actions import PostProcessActions
 from sunpack.coordinator.reporting import RunReporter
 
-from sunpack.detection import NestedOutputScanPolicy
+from sunpack.coordinator.output_scan_policy import NestedOutputScanPolicy
 from sunpack.coordinator.recursion import RecursionController
 from sunpack.coordinator.task_scan import ArchiveTaskScanner
+from sunpack.coordinator.analysis_stage import ArchiveAnalysisStage
 
 class PipelineRunner:
     def __init__(self, config: Dict[str, Any]):
@@ -25,7 +26,8 @@ class PipelineRunner:
         cli_config = config.get("cli") if isinstance(config.get("cli"), dict) else {}
         self.language = "zh" if str(cli_config.get("language") or "").strip().lower() == "zh" else "en"
         self.context = RunContext()
-        self.task_scanner = ArchiveTaskScanner(config, self.context)
+        self.analysis_stage = ArchiveAnalysisStage(config)
+        self.task_scanner = ArchiveTaskScanner(config, self.context, analysis_stage=self.analysis_stage)
         self.detector = self.task_scanner.detector
         self.rename_scheduler = RenameScheduler()
         self.logger = RunReporter(language=self.language)
@@ -58,6 +60,7 @@ class PipelineRunner:
             self.output_scan_policy,
             self.rename_scheduler,
             config,
+            analysis_stage=self.analysis_stage,
         )
 
     def text(self, en: str, zh: str) -> str:

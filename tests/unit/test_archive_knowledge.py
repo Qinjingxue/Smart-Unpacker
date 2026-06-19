@@ -6,7 +6,7 @@ from sunpack.contracts.archive_state import ArchiveState, PatchOperation, PatchP
 from sunpack.contracts.detection import FactBag
 from sunpack.contracts.tasks import ArchiveTask
 from sunpack.repair.job import RepairJob
-from sunpack.repair.context import normalize_zip_runtime_route_evidence
+from sunpack.support.runtime_route_evidence import normalize_zip_runtime_route_evidence
 from sunpack.repair.search.features import runtime_context_from_job
 from sunpack.support import archive_knowledge_projection as knowledge_view
 from sunpack.support.archive_knowledge_writer import commit_task_knowledge

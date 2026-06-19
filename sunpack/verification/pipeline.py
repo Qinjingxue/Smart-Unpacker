@@ -6,7 +6,7 @@ from sunpack.verification.evidence import VerificationEvidence
 from sunpack.verification.archive_state_manifest import configure_archive_state_manifest_cache
 from sunpack.verification.output_quality import compute_output_quality
 from sunpack.verification.registry import get_verification_method
-from sunpack.verification.result import (
+from sunpack.contracts.verification import (
     ASSESSMENT_COMPLETE,
     ASSESSMENT_INCONSISTENT,
     ASSESSMENT_PARTIAL,

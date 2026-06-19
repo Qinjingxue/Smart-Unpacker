@@ -6,7 +6,7 @@ from typing import Any, Callable
 
 from sunpack.contracts.archive_state import ArchiveState
 from sunpack.contracts.tasks import ArchiveTask
-from sunpack.extraction.result import ExtractionResult
+from sunpack.contracts.extraction import ExtractionResult
 from sunpack.passwords import PasswordSession
 from sunpack.support import archive_knowledge_projection as knowledge_view
 

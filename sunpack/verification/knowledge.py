@@ -5,7 +5,7 @@ from contextlib import nullcontext
 from typing import Any
 
 from sunpack.contracts.tasks import ArchiveTask
-from sunpack.verification.result import VerificationResult
+from sunpack.contracts.verification import VerificationResult
 from sunpack.support.archive_knowledge_writer import commit_task_knowledge, ensure_knowledge, write_flags, write_payload
 
 
@@ -74,13 +74,6 @@ def write_verification_result(
             write_flags(knowledge, "repair.residual", residual, source_layer="verification", source_module="scheduler")
     with _phase(phase_timer, f"{phase_prefix}_commit"):
         commit_task_knowledge(task, knowledge, phase_timer=phase_timer, phase_prefix=f"{phase_prefix}_commit")
-    with _phase(phase_timer, f"{phase_prefix}_zip_runtime_evidence"):
-        try:
-            from sunpack.analysis.knowledge import write_zip_runtime_evidence_facts
-
-            write_zip_runtime_evidence_facts(task)
-        except Exception:
-            pass
 
 
 def _residual_flags(result: VerificationResult) -> list[str]:

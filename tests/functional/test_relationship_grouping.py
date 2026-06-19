@@ -6,6 +6,7 @@ import pytest
 
 from sunpack.coordinator.scanner import ScanOrchestrator
 from sunpack.coordinator.runner import PipelineRunner
+from sunpack.coordinator.target_scan import build_fact_bags_for_targets
 from sunpack.detection.scheduler import DetectionScheduler
 from tests.helpers.detection_config import with_detection_pipeline
 
@@ -145,7 +146,7 @@ def test_missing_middle_split_volume_is_failed_before_detection(tmp_path):
     root = tmp_path / "missing_middle"
     _write_files(root, ["gap.7z.001", "gap.7z.002", "gap.7z.004"])
 
-    bags = DetectionScheduler(SCAN_CONFIG).build_candidate_fact_bags([str(root)])
+    bags = build_fact_bags_for_targets([str(root)], config=SCAN_CONFIG)
     gap = next(bag for bag in bags if bag.get("candidate.logical_name") == "gap")
 
     assert gap.get("relation.split_group_complete") is False
@@ -162,7 +163,7 @@ def test_missing_head_split_volume_is_failed_before_detection(tmp_path):
     root = tmp_path / "missing_head"
     _write_files(root, ["lost.7z.002", "lost.7z.003"])
 
-    bags = DetectionScheduler(SCAN_CONFIG).build_candidate_fact_bags([str(root)])
+    bags = build_fact_bags_for_targets([str(root)], config=SCAN_CONFIG)
     lost = next(bag for bag in bags if bag.get("candidate.logical_name") == "lost")
 
     assert lost.get("relation.split_group_complete") is False

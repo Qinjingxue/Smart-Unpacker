@@ -23,7 +23,8 @@ def test_archive_scan_case(case, case_workspace):
     config = get_config(config_name, config_overrides)
 
     detector = DetectionScheduler(config)
-    results = detector.evaluate_bags(detector.build_candidate_fact_bags([str(workspace)]))
+    from sunpack.coordinator.target_scan import build_fact_bags_for_targets
+    results = detector.evaluate_bags(build_fact_bags_for_targets([str(workspace)]))
     by_relative_path = {
         Path(result.fact_bag.get("file.path")).relative_to(workspace).as_posix(): result
         for result in results

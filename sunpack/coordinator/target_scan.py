@@ -2,7 +2,7 @@ import os
 from typing import List
 
 from sunpack.contracts.detection import FactBag
-from sunpack.detection.internal.scan_session import DetectionScanSession
+from sunpack.coordinator.scan_session import DetectionScanSession
 from sunpack.relations.scheduler import RelationsScheduler
 from sunpack.support.path_keys import normalized_path, path_key, safe_relative_path
 

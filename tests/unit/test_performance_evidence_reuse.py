@@ -5,7 +5,7 @@ from sunpack.contracts.detection import FactBag
 from sunpack.contracts.archive_state import ArchiveSource, ArchiveState
 from sunpack.contracts.tasks import ArchiveTask
 from sunpack.coordinator.scheduling import machine_probe
-from sunpack.extraction.result import ExtractionResult
+from sunpack.contracts.extraction import ExtractionResult
 from sunpack.verification import VerificationScheduler
 from sunpack.verification import archive_state_manifest as manifest_module
 from sunpack.verification.methods import _output_stats

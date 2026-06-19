@@ -5,7 +5,7 @@ import pytest
 from sunpack.contracts.detection import FactBag
 from sunpack.contracts.failures import FailureInfo, FailureKind
 from sunpack.contracts.tasks import ArchiveTask
-from sunpack.extraction.result import ExtractionResult
+from sunpack.contracts.extraction import ExtractionResult
 from sunpack.passwords.candidates import PasswordCandidatePipeline
 from sunpack.passwords.job import PasswordJob
 from sunpack.passwords.scheduler import PasswordScheduler, PasswordSearchStatus
@@ -19,7 +19,7 @@ from sunpack.support.sevenzip_bridge import (
     STATUS_WRONG_PASSWORD,
 )
 from sunpack.verification import VerificationScheduler
-from sunpack.verification.result import DECISION_REQUEST_PASSWORD, SOURCE_INTEGRITY_UNKNOWN
+from sunpack.contracts.verification import DECISION_REQUEST_PASSWORD, SOURCE_INTEGRITY_UNKNOWN
 
 
 @pytest.mark.parametrize(

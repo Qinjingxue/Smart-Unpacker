@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from sunpack.detection.nested_scan_policy import NestedOutputScanPolicy as OutputScanPolicy
+from sunpack.coordinator.output_scan_policy import NestedOutputScanPolicy as OutputScanPolicy
 from sunpack.coordinator.scanner import ScanOrchestrator
 from sunpack.detection import DetectionScheduler
 from tests.helpers.detection_config import with_detection_pipeline
@@ -25,7 +25,8 @@ def scan_config(blocked_files=None, blocked_extensions=None):
 
 def decisions_for(root: Path, config: dict):
     detector = DetectionScheduler(config)
-    bags = detector.build_candidate_fact_bags([str(root)])
+    from sunpack.coordinator.target_scan import build_fact_bags_for_targets
+    bags = build_fact_bags_for_targets([str(root)], config=config)
     decisions = detector.evaluate_pool(bags)
     return {Path(bag.get("file.path")).relative_to(root).as_posix(): decisions[bag] for bag in bags}
 

@@ -82,6 +82,10 @@ class ArchiveAnalysisStage:
                 self._report_cache.pop(next(iter(self._report_cache)))
             self._report_cache[cache_key] = report
 
+    def remember_report(self, task: ArchiveTask, report: ArchiveAnalysisReport) -> None:
+        """Seed the shared cache with a coordinator-produced analysis report."""
+        self._remember_report(self._analysis_cache_key(task), report)
+
     def _analysis_cache_key(self, task: ArchiveTask) -> tuple:
         return ("source", json.dumps(knowledge_view.source_fingerprint(task), ensure_ascii=False, sort_keys=True, default=str))
 

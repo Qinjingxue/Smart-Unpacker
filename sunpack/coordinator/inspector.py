@@ -1,7 +1,7 @@
 from typing import List, Dict, Any
 from dataclasses import dataclass
 
-from sunpack.detection import DetectionScheduler
+from sunpack.coordinator.task_provider import ArchiveTaskProvider
 
 @dataclass
 class InspectResult:
@@ -23,7 +23,7 @@ class InspectResult:
 
 class InspectOrchestrator:
     def __init__(self, config: Dict[str, Any]):
-        self.detector = DetectionScheduler(config)
+        self.detector = ArchiveTaskProvider(config)
 
     def inspect(self, paths: List[str]) -> List[InspectResult]:
         results = []

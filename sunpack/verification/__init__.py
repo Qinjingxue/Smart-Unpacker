@@ -1,6 +1,6 @@
 from sunpack.verification.evidence import VerificationEvidence
 from sunpack.verification.registry import register_verification_method
-from sunpack.verification.result import (
+from sunpack.contracts.verification import (
     ArchiveCoverageSummary,
     FileVerificationObservation,
     VerificationIssue,

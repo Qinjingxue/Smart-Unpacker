@@ -5,7 +5,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Any
 
-from sunpack.verification.result import (
+from sunpack.contracts.verification import (
     ASSESSMENT_COMPLETE,
     ASSESSMENT_INCONSISTENT,
     ASSESSMENT_PARTIAL,
@@ -217,7 +217,7 @@ def score_verification_payload(payload: dict[str, Any]) -> float:
 
 
 def _verification_from_payload(payload: dict[str, Any]) -> VerificationResult:
-    from sunpack.verification.result import ArchiveCoverageSummary
+    from sunpack.contracts.verification import ArchiveCoverageSummary
 
     coverage_payload = payload.get("archive_coverage") if isinstance(payload.get("archive_coverage"), dict) else {}
     output_quality = payload.get("output_quality") if isinstance(payload.get("output_quality"), dict) else {}

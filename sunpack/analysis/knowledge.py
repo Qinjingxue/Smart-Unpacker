@@ -7,7 +7,7 @@ from typing import Any
 from sunpack.analysis import ArchiveAnalysisReport
 from sunpack.analysis.result import ArchiveFormatEvidence, ArchiveSegment
 from sunpack.contracts.tasks import ArchiveTask
-from sunpack.repair.context import normalize_runtime_route_evidence
+from sunpack.support.runtime_route_evidence import normalize_runtime_route_evidence
 from sunpack.support.archive_knowledge_writer import commit_task_knowledge, ensure_knowledge, write_flags, write_payload, write_value
 
 

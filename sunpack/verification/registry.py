@@ -3,7 +3,7 @@ from pkgutil import iter_modules
 from typing import Callable, Protocol
 
 from sunpack.verification.evidence import VerificationEvidence
-from sunpack.verification.result import VerificationStepResult
+from sunpack.contracts.verification import VerificationStepResult
 
 
 class VerificationMethod(Protocol):

@@ -2,7 +2,7 @@ from pathlib import Path
 
 from sunpack.coordinator.runner import PipelineRunner
 from sunpack.config.schema import normalize_config
-from sunpack.extraction.result import ExtractionResult
+from sunpack.contracts.extraction import ExtractionResult
 from sunpack.contracts.detection import FactBag
 from sunpack.contracts.tasks import ArchiveTask
 from tests.helpers.detection_config import with_detection_pipeline

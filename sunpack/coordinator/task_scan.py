@@ -5,13 +5,14 @@ from typing import Any
 from sunpack.contracts.detection import FactBag
 from sunpack.contracts.run_context import RunContext
 from sunpack.contracts.tasks import ArchiveTask
-from sunpack.detection import ArchiveTaskProvider
+from sunpack.coordinator.task_provider import ArchiveTaskProvider
+from sunpack.coordinator.analysis_stage import ArchiveAnalysisStage
 
 
 class ArchiveTaskScanner:
-    def __init__(self, config: dict[str, Any], context: RunContext):
+    def __init__(self, config: dict[str, Any], context: RunContext, analysis_stage: ArchiveAnalysisStage | None = None):
         self.context = context
-        self.provider = ArchiveTaskProvider(config)
+        self.provider = ArchiveTaskProvider(config, analysis_stage=analysis_stage)
         self.detector = self.provider.detector
 
     def scan_root(self, scan_root: str) -> list[ArchiveTask]:

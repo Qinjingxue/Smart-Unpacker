@@ -13,7 +13,7 @@ from repair_training.formats.zip.source_material import (
     _profile_layer_name,
     build_corpus_corruption_case,
 )
-from sunpack.repair.context import zip_route_evidence_flags
+from sunpack.support.runtime_route_evidence import zip_route_evidence_flags
 
 
 FORMAT_NAME = "zip"

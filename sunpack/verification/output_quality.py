@@ -4,7 +4,7 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 from sunpack.verification.methods._output_stats import output_stats_for_evidence
-from sunpack.verification.result import ArchiveCoverageSummary, FileVerificationObservation
+from sunpack.contracts.verification import ArchiveCoverageSummary, FileVerificationObservation
 
 
 @dataclass(frozen=True)

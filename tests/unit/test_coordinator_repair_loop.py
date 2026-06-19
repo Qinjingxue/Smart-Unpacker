@@ -7,9 +7,9 @@ from sunpack.contracts.run_context import RunContext
 from sunpack.contracts.tasks import ArchiveTask
 from sunpack.coordinator.extraction_batch import ExtractionBatchRunner
 from sunpack.coordinator.repair_loop import RepairLoopLimits, RepairLoopState
-from sunpack.extraction.result import ExtractionResult
+from sunpack.contracts.extraction import ExtractionResult
 from sunpack.repair.result import RepairResult
-from sunpack.verification.result import ArchiveCoverageSummary, VerificationResult
+from sunpack.contracts.verification import ArchiveCoverageSummary, VerificationResult
 
 
 def test_analysis_scheduler_reanalyzes_repaired_archive_input_file(tmp_path):

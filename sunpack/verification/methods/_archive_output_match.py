@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from sunpack.support.path_names import clean_relative_archive_path, normalize_match_path
-from sunpack.verification.result import FileVerificationObservation, VerificationIssue
+from sunpack.contracts.verification import FileVerificationObservation, VerificationIssue
 
 
 @dataclass(frozen=True)

@@ -1,10 +1,7 @@
 from dataclasses import dataclass
-from copy import deepcopy
 from typing import Any
 
 from sunpack.config.detection_view import detection_config
-from sunpack.analysis.scheduler import ArchiveAnalysisScheduler
-from sunpack.contracts.tasks import ArchiveTask
 from sunpack.detection.pipeline.facts.batch_provider import BatchFactProvider
 from sunpack.detection.pipeline.facts.provider import FactProvider
 from sunpack.detection.pipeline.facts.registry import discover_collectors, get_registry
@@ -12,8 +9,6 @@ from sunpack.detection.pipeline.processors.registry import discover_processors
 from sunpack.detection.pipeline.processors.registry import get_processor_registry
 from sunpack.detection.pipeline.processors.runner import ProcessingCoordinator
 from sunpack.detection.pipeline.rules.manager import RuleManager
-from sunpack.detection.internal.scan_session import DetectionScanSession
-from sunpack.detection.internal.target_scan import build_fact_bags_for_targets
 from sunpack.contracts.detection import FactBag
 from sunpack.contracts.rules import RuleDecision
 
@@ -43,40 +38,9 @@ class DetectionScheduler:
             ensure_pool_facts=self._ensure_pool_facts,
             fact_config_defaults=self.fact_config_defaults,
         )
-        rescue_config = deepcopy(config)
-        rescue_analysis = rescue_config.setdefault("analysis", {})
-        rescue_prepass = rescue_analysis.setdefault("prepass", {})
-        rescue_prepass.setdefault(
-            "full_scan_max_bytes",
-            int(detector_config.get("content_structure_rescue_full_scan_max_bytes", 64 * 1024 * 1024) or 0),
-        )
-        rescue_prepass.setdefault(
-            "deep_scan",
-            bool(detector_config.get("content_structure_rescue_deep_scan", False)),
-        )
-        self.content_rescue_analyzer = ArchiveAnalysisScheduler(rescue_config)
 
     def validate_config(self) -> list[str]:
         return self.rule_manager.validate_config()
-
-    def detect_path(self, root_dir: str) -> list[DetectionResult]:
-        return self.detect_targets([root_dir])
-
-    def detect_targets(self, target_paths: list[str]) -> list[DetectionResult]:
-        scan_session = DetectionScanSession(config=self.config)
-        return self.evaluate_bags(
-            build_fact_bags_for_targets(target_paths, session=scan_session, config=self.config),
-            scan_session=scan_session,
-        )
-
-    def build_candidate_fact_bags(self, target_paths: list[str]) -> list[FactBag]:
-        fact_bags, _scan_session = self.build_candidate_fact_bags_with_session(target_paths)
-        return fact_bags
-
-    def build_candidate_fact_bags_with_session(self, target_paths: list[str]) -> tuple[list[FactBag], DetectionScanSession]:
-        scan_session = DetectionScanSession(config=self.config)
-        fact_bags = build_fact_bags_for_targets(target_paths, session=scan_session, config=self.config)
-        return fact_bags, scan_session
 
     def evaluate_bag(
         self,
@@ -97,90 +61,58 @@ class DetectionScheduler:
     def evaluate_pool(
         self,
         fact_bags: list[FactBag],
-        scan_session: DetectionScanSession | None = None,
+        scan_session: Any = None,
     ) -> dict[FactBag, RuleDecision]:
         self._active_scan_session = scan_session
         self.rule_manager.ensure_pool_facts = self._ensure_pool_facts
         try:
-            decisions = self.rule_manager.evaluate_pool(fact_bags)
-            return self._apply_content_structure_rescue(fact_bags, decisions)
+            return self.rule_manager.evaluate_pool(fact_bags)
         finally:
             self._active_scan_session = None
 
-    def _apply_content_structure_rescue(
+    def refine_with_structure(
         self,
-        fact_bags: list[FactBag],
-        decisions: dict[FactBag, RuleDecision],
-    ) -> dict[FactBag, RuleDecision]:
+        bag: FactBag,
+        decision: RuleDecision,
+        structure: dict[str, Any],
+    ) -> RuleDecision:
+        """Refine a decision from structure evidence supplied by the coordinator."""
         detector_config = detection_config(self.config)
         if detector_config.get("content_structure_rescue_enabled", True) is False:
-            return decisions
-        for bag in fact_bags:
-            decision = decisions.get(bag)
-            if decision is None or decision.should_extract or decision.decision == "rejected":
-                continue
-            path = str(bag.get("candidate.entry_path") or bag.get("file.path") or "")
-            if not path:
-                continue
-            try:
-                task = ArchiveTask.from_fact_bag(bag, score=decision.total_score, decision=decision)
-                report = self.content_rescue_analyzer.analyze_task(task)
-            except Exception as exc:
-                bag.mark_error("content.structure_rescue", str(exc))
-                continue
-            if not report.has_extractable:
-                continue
-            selected = max(report.selected, key=lambda item: float(item.confidence or 0.0))
-            bag.set("analysis.status", "extractable")
-            bag.set("analysis.selected_format", selected.format)
-            bag.set("analysis.confidence", float(selected.confidence or 0.0))
-            bag.set("analysis.prepass", dict(report.prepass or {}))
-            bag.set("analysis.read_bytes", int(report.read_bytes or 0))
-            bag.set("file.detected_ext", _format_extension(selected.format))
-            bag.set("file.probe_detected_archive", True)
-            first_segment = selected.segments[0] if selected.segments else None
-            if first_segment is not None:
-                offset = int(first_segment.start_offset or 0)
-                bag.set("file.probe_offset", offset)
-                bag.set("file.embedded_archive_found", offset > 0)
-            archive_threshold = int(
-                detector_config.get(
-                    "archive_score_threshold",
-                    (self.config.get("thresholds") or {}).get("archive_score_threshold", 6),
-                )
-                or 6
-            )
-            rescue_score = max(0, archive_threshold - int(decision.total_score or 0))
-            decisions[bag] = RuleDecision(
-                should_extract=True,
-                total_score=int(decision.total_score or 0) + rescue_score,
-                matched_rules=[*decision.matched_rules, "content_structure_rescue"],
-                stop_reason="content_structure_proven",
-                decision="archive",
-                decision_stage="content_structure_rescue",
-                deciding_rule="content_structure_rescue",
-                score_breakdown=[
-                    *decision.score_breakdown,
-                    {
-                        "rule": "content_structure_rescue",
-                        "score": rescue_score,
-                        "reason": f"Content analysis proved {selected.format} structure",
-                    },
-                ],
-                confirmation={
-                    "entered": True,
-                    "decision": "confirmed",
-                    "reason": "content_structure_proven",
-                    "format": selected.format,
-                    "confidence": float(selected.confidence or 0.0),
-                },
-            )
-        return decisions
+            return decision
+        selected = structure.get("selected") if isinstance(structure, dict) else None
+        if not structure.get("has_extractable") or not isinstance(selected, dict):
+            return decision
+        format_name = str(selected.get("format") or "")
+        confidence = float(selected.get("confidence") or 0.0)
+        offset = int(selected.get("start_offset") or 0)
+        bag.set("analysis.status", "extractable")
+        bag.set("analysis.selected_format", format_name)
+        bag.set("analysis.confidence", confidence)
+        bag.set("analysis.prepass", dict(structure.get("prepass") or {}))
+        bag.set("analysis.read_bytes", int(structure.get("read_bytes") or 0))
+        bag.set("file.detected_ext", _format_extension(format_name))
+        bag.set("file.probe_detected_archive", True)
+        bag.set("file.probe_offset", offset)
+        bag.set("file.embedded_archive_found", offset > 0)
+        archive_threshold = int(detector_config.get("archive_score_threshold", (self.config.get("thresholds") or {}).get("archive_score_threshold", 6)) or 6)
+        rescue_score = max(0, archive_threshold - int(decision.total_score or 0))
+        return RuleDecision(
+            should_extract=True,
+            total_score=int(decision.total_score or 0) + rescue_score,
+            matched_rules=[*decision.matched_rules, "content_structure_rescue"],
+            stop_reason="content_structure_proven",
+            decision="archive",
+            decision_stage="content_structure_rescue",
+            deciding_rule="content_structure_rescue",
+            score_breakdown=[*decision.score_breakdown, {"rule": "content_structure_rescue", "score": rescue_score, "reason": f"Content analysis proved {format_name} structure"}],
+            confirmation={"entered": True, "decision": "confirmed", "reason": "content_structure_proven", "format": format_name, "confidence": confidence},
+        )
 
     def evaluate_bags(
         self,
         fact_bags: list[FactBag],
-        scan_session: DetectionScanSession | None = None,
+        scan_session: Any = None,
     ) -> list[DetectionResult]:
         decisions = self.evaluate_pool(fact_bags, scan_session=scan_session)
         return [

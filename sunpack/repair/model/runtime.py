@@ -4,7 +4,7 @@ import os
 from typing import Any
 
 from sunpack.contracts.archive_state import ArchiveState
-from sunpack.repair.formats import canonical_format as _normalize_format
+from sunpack.support.archive_formats import canonical_format as _normalize_format
 from sunpack.repair.job import RepairJob
 from sunpack.repair.model.assets import ModelAssetRegistry, get_model_asset_registry
 from sunpack.repair.model.diagnosis.graph_dispatcher import build_diagnosis_graph_sample

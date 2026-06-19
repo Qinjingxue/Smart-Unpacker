@@ -15,11 +15,11 @@ from sunpack.contracts.archive_input import (
 )
 from sunpack.contracts.archive_state import ArchiveState
 from sunpack.contracts.tasks import ArchiveTask
-from sunpack.extraction.result import ExtractionResult
+from sunpack.contracts.extraction import ExtractionResult
 from sunpack.contracts.failures import FailureKind
 from sunpack.repair.config import repair_config
-from sunpack.repair.context import normalize_runtime_route_evidence
-from sunpack.repair.formats import canonical_format
+from sunpack.support.runtime_route_evidence import normalize_runtime_route_evidence
+from sunpack.support.archive_formats import canonical_format
 from sunpack.repair.job import RepairJob
 from sunpack.repair.knowledge import (
     write_repair_archive_status,
@@ -32,7 +32,7 @@ from sunpack.repair.result import RepairResult
 from sunpack.repair.scheduler import RepairScheduler
 from sunpack.support import repair_trace
 from sunpack.support import archive_knowledge_projection as knowledge_view
-from sunpack.verification.result import VerificationResult
+from sunpack.contracts.verification import VerificationResult
 from sunpack.coordinator.repair_loop import is_policy_stop_result
 
 
