@@ -103,6 +103,41 @@ def write_payload(
     return knowledge
 
 
+def write_prepared_payload(
+    target: Any,
+    namespace: str,
+    payload: dict[str, Any],
+    *,
+    source_layer: str,
+    source_module: str = "",
+    round: int | None = None,
+    source_digest: str = "",
+    patch_digest: str = "",
+    confidence: float | None = None,
+) -> ArchiveKnowledge:
+    """Write a newly built JSON-safe payload without recursively normalizing it again."""
+    knowledge = ensure_knowledge(target)
+    for key, value in payload.items():
+        if value in (None, "", [], {}):
+            continue
+        knowledge.set_prepared(
+            f"{namespace}.{key}" if namespace else str(key),
+            value,
+            source_layer=source_layer,
+            source_module=source_module,
+            round=round,
+            source_digest=source_digest,
+            patch_digest=patch_digest,
+            confidence=confidence,
+        )
+    return knowledge
+
+
+def prepare_knowledge_value(value: Any) -> Any:
+    """Normalize a value once before one or more prepared Knowledge writes."""
+    return _jsonable(value)
+
+
 def write_flags(
     target: Any,
     namespace: str,

@@ -8,6 +8,7 @@ from sunpack.verification.methods._archive_output_match import (
 )
 from sunpack.verification.methods._output_stats import (
     output_files_for_evidence,
+    output_file_index_for_evidence,
     output_stats_for_evidence,
     should_emit_file_observations,
 )
@@ -49,6 +50,7 @@ class ManifestSizeMatchMethod:
                 output_files_for_evidence(evidence),
                 method=self.name,
                 include_observations=should_emit_file_observations(evidence, self.name),
+                output_index=output_file_index_for_evidence(evidence),
             )
             if name_coverage.missing_files:
                 issues.append(VerificationIssue(

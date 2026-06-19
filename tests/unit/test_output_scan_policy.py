@@ -95,6 +95,10 @@ def test_output_scan_policy_reuses_extraction_inventory(tmp_path, monkeypatch):
         "sunpack.coordinator.output_scan_policy.DirectoryScanner.scan",
         lambda _self: (_ for _ in ()).throw(AssertionError("directory must not be rescanned")),
     )
+    monkeypatch.setattr(
+        "sunpack.coordinator.output_scan_policy.NestedOutputScanPolicy._snapshot_from_inventory",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("inventory must stay lightweight")),
+    )
 
     roots = OutputScanPolicy(_config()).scan_roots_from_outputs(
         [str(tmp_path)],

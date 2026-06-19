@@ -6,6 +6,7 @@ from typing import Any
 
 from sunpack.support.path_names import clean_relative_archive_path, normalize_match_path
 from sunpack.contracts.verification import FileVerificationObservation, VerificationIssue
+from sunpack.verification.methods._output_stats import OutputFileIndex
 
 
 @dataclass(frozen=True)
@@ -32,10 +33,11 @@ def coverage_from_archive_and_output(
     method: str,
     issues_by_path: dict[str, list[VerificationIssue]] | None = None,
     include_observations: bool = True,
+    output_index: OutputFileIndex | None = None,
 ) -> ArchiveOutputCoverage:
     expected = [_archive_item(item) for item in archive_files if isinstance(item, dict)]
     expected = [item for item in expected if item["path"]]
-    output_by_path = _index_output_files(output_files)
+    output_by_path = output_index.by_path if output_index is not None else _index_output_files(output_files)
     issues_by_path = issues_by_path or {}
 
     observations: list[FileVerificationObservation] = []

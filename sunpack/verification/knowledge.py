@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import asdict
 from contextlib import nullcontext
 from typing import Any
 
 from sunpack.contracts.tasks import ArchiveTask
 from sunpack.contracts.verification import VerificationResult
-from sunpack.support.archive_knowledge_writer import commit_task_knowledge, ensure_knowledge, write_flags, write_payload
+from sunpack.support.archive_knowledge_writer import commit_task_knowledge, ensure_knowledge, prepare_knowledge_value, write_flags, write_payload, write_prepared_payload
 
 
 def write_verification_result(
@@ -48,21 +47,22 @@ def write_verification_result(
             "output_empty": output_quality["empty"],
             "output_confidence": output_quality["confidence"],
             "output_quality": output_quality,
-            "archive_coverage": asdict(result.archive_coverage),
+            "archive_coverage": _archive_coverage_payload(result.archive_coverage),
             "coverage_breakdown": _coverage_breakdown(result),
             "repair_hints": dict(result.repair_hints or {}),
         }
     with _phase(phase_timer, f"{phase_prefix}_write_summary"):
-        write_payload(knowledge, "verification.summary", summary, source_layer="verification", source_module="scheduler")
-        write_payload(knowledge, "verification", {"coverage_breakdown": summary["coverage_breakdown"]}, source_layer="verification", source_module="scheduler")
+        prepared_summary = prepare_knowledge_value(summary)
+        write_prepared_payload(knowledge, "verification.summary", prepared_summary, source_layer="verification", source_module="scheduler")
+        write_prepared_payload(knowledge, "verification", {"coverage_breakdown": prepared_summary["coverage_breakdown"]}, source_layer="verification", source_module="scheduler")
     with _phase(phase_timer, f"{phase_prefix}_write_observations"):
-        write_payload(
+        write_prepared_payload(
             knowledge,
             "verification",
-            {
-                "issues": [asdict(item) for item in result.issues],
-                "file_observations": [asdict(item) for item in result.file_observations],
-            },
+            prepare_knowledge_value({
+                "issues": [_issue_payload(item) for item in result.issues],
+                "file_observations": [_observation_payload(item) for item in result.file_observations],
+            }),
             source_layer="verification",
             source_module="scheduler",
         )
@@ -89,6 +89,53 @@ def _residual_flags(result: VerificationResult) -> list[str]:
         if "crc" in text or "checksum" in text:
             flags.extend(["checksum_error", "crc_error", "payload_hash_mismatch"])
     return _dedupe(flags)
+
+
+def _issue_payload(issue: Any) -> dict[str, Any]:
+    return {
+        "method": issue.method,
+        "code": issue.code,
+        "message": issue.message,
+        "path": issue.path,
+        "expected": prepare_knowledge_value(issue.expected),
+        "actual": prepare_knowledge_value(issue.actual),
+    }
+
+
+def _observation_payload(observation: Any) -> dict[str, Any]:
+    return {
+        "path": observation.path,
+        "state": observation.state,
+        "method": observation.method,
+        "archive_path": observation.archive_path,
+        "bytes_written": observation.bytes_written,
+        "expected_size": observation.expected_size,
+        "progress": observation.progress,
+        "crc_expected": observation.crc_expected,
+        "crc_actual": observation.crc_actual,
+        "issues": [_issue_payload(issue) for issue in observation.issues],
+        "details": prepare_knowledge_value(observation.details),
+    }
+
+
+def _archive_coverage_payload(coverage: Any) -> dict[str, Any]:
+    return {
+        "completeness": coverage.completeness,
+        "file_coverage": coverage.file_coverage,
+        "byte_coverage": coverage.byte_coverage,
+        "expected_files": coverage.expected_files,
+        "matched_files": coverage.matched_files,
+        "complete_files": coverage.complete_files,
+        "partial_files": coverage.partial_files,
+        "failed_files": coverage.failed_files,
+        "missing_files": coverage.missing_files,
+        "unverified_files": coverage.unverified_files,
+        "expected_bytes": coverage.expected_bytes,
+        "matched_bytes": coverage.matched_bytes,
+        "complete_bytes": coverage.complete_bytes,
+        "confidence": coverage.confidence,
+        "sources": prepare_knowledge_value(coverage.sources),
+    }
 
 
 def _coverage_breakdown(result: VerificationResult) -> dict[str, Any]:

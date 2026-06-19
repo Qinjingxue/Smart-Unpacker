@@ -105,6 +105,31 @@ def test_output_inventory_scans_once_and_merges_worker_crc(monkeypatch):
     assert calls == ["out"]
 
 
+def test_output_file_index_normalizes_each_path_only_once(monkeypatch):
+    files = [{"path": f"dir/file_{index}.txt", "size": index} for index in range(100)]
+    inventory = output_inventory_module.OutputInventory(
+        root="out",
+        stats=output_inventory_module.OutputStats(exists=True, is_dir=True, file_count=100),
+        files=tuple(files),
+    )
+    evidence = SimpleNamespace(output_dir="out", extraction_result=SimpleNamespace(output_inventory_payload=inventory.to_dict()))
+    calls = 0
+    original = _output_stats.normalize_match_path
+
+    def counted(path):
+        nonlocal calls
+        calls += 1
+        return original(path)
+
+    monkeypatch.setattr(_output_stats, "normalize_match_path", counted)
+    first = _output_stats.output_file_index_for_evidence(evidence)
+    second = _output_stats.output_file_index_for_evidence(evidence)
+
+    assert first is second
+    assert len(first.by_path) == 100
+    assert calls == 100
+
+
 def test_worker_output_crc_replaces_output_file_reread():
     archive_files = [{"path": "a.txt", "size": 5, "has_crc": True, "crc32": 0x3610A686}]
     output_files = ({"path": "a.txt", "size": 5, "crc32": 0x3610A686},)

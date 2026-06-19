@@ -10,6 +10,7 @@ from typing import Any
 class ArchiveKnowledge:
     data: dict[str, Any] = field(default_factory=dict)
     _dirty_roots: set[str] = field(default_factory=set, init=False, repr=False)
+    _dirty_paths: dict[str, bool] = field(default_factory=dict, init=False, repr=False)
     _mutation_version: int = field(default=0, init=False, repr=False)
     _snapshot_cache: dict[str, Any] | None = field(default=None, init=False, repr=False)
     _snapshot_cache_version: int = field(default=-1, init=False, repr=False)
@@ -34,14 +35,13 @@ class ArchiveKnowledge:
             snapshot = _jsonable(self.data)
         else:
             snapshot = dict(previous)
-            for root in self._dirty_roots:
-                if root in self.data:
-                    snapshot[root] = _jsonable(self.data[root])
-                else:
-                    snapshot.pop(root, None)
+            for path, prepared in sorted(self._dirty_paths.items(), key=lambda item: item[0].count(".")):
+                value = self.get(path, _MISSING)
+                _set_snapshot_path(snapshot, path, value, prepared=prepared)
         self._snapshot_cache = snapshot
         self._snapshot_cache_version = self._mutation_version
         self._dirty_roots.clear()
+        self._dirty_paths.clear()
         return snapshot
 
     def revision(self) -> int:
@@ -103,7 +103,44 @@ class ArchiveKnowledge:
                 return self
         normalized = _jsonable(value)
         current[parts[-1]] = normalized
-        self._mark_dirty(parts[0])
+        self._mark_dirty(parts[0], path)
+        provenance = _provenance(
+            source_layer=source_layer,
+            source_module=source_module,
+            round=round,
+            source_digest=source_digest,
+            patch_digest=patch_digest,
+            confidence=confidence,
+            timestamp=timestamp,
+        )
+        if provenance:
+            self.add_evidence(path, value, provenance=provenance)
+        return self
+
+    def set_prepared(
+        self,
+        path: str,
+        value: Any,
+        *,
+        source_layer: str = "",
+        source_module: str = "",
+        round: int | None = None,
+        source_digest: str = "",
+        patch_digest: str = "",
+        confidence: float | None = None,
+        timestamp: str | None = None,
+    ) -> "ArchiveKnowledge":
+        """Transfer an already JSON-safe value into Knowledge without normalizing it again."""
+        if not path:
+            return self
+        current = self.data
+        parts = _parts(path)
+        for part in parts[:-1]:
+            current = current.setdefault(part, {})
+            if not isinstance(current, dict):
+                return self
+        current[parts[-1]] = value
+        self._mark_dirty(parts[0], path, prepared=True)
         provenance = _provenance(
             source_layer=source_layer,
             source_module=source_module,
@@ -123,7 +160,7 @@ class ArchiveKnowledge:
             if isinstance(raw, dict):
                 _deep_merge(self.data, _jsonable(raw))
                 for root in raw:
-                    self._mark_dirty(str(root))
+                    self._mark_dirty(str(root), str(root))
         if source_layer or source_module:
             self.add_evidence("knowledge.merge", True, provenance=_provenance(source_layer=source_layer, source_module=source_module))
         return self
@@ -152,7 +189,7 @@ class ArchiveKnowledge:
             item["provenance"] = _jsonable(provenance)
         evidence.append(item)
         self.data["_evidence"] = evidence[-500:]
-        self._mark_dirty("_evidence")
+        self._mark_dirty("_evidence", "_evidence", prepared=True)
         return self
 
     def history(self, namespace: str = "") -> list[dict[str, Any]]:
@@ -174,8 +211,10 @@ class ArchiveKnowledge:
                 else:
                     self._collect_flags(item, output)
 
-    def _mark_dirty(self, root: str) -> None:
+    def _mark_dirty(self, root: str, path: str | None = None, *, prepared: bool = False) -> None:
         self._dirty_roots.add(str(root))
+        dirty_path = str(path or root)
+        self._dirty_paths[dirty_path] = bool(prepared and self._dirty_paths.get(dirty_path, True))
         self._mutation_version += 1
         self._snapshot_cache = None
         self._snapshot_cache_version = -1
@@ -206,6 +245,26 @@ def project_knowledge_sources(knowledge: Any) -> list[dict[str, Any]]:
 
 def _parts(path: str) -> list[str]:
     return [part for part in str(path or "").split(".") if part]
+
+
+_MISSING = object()
+
+
+def _set_snapshot_path(snapshot: dict[str, Any], path: str, value: Any, *, prepared: bool) -> None:
+    parts = _parts(path)
+    if not parts:
+        return
+    current = snapshot
+    for part in parts[:-1]:
+        child = current.get(part)
+        cloned = dict(child) if isinstance(child, dict) else {}
+        current[part] = cloned
+        current = cloned
+    leaf = parts[-1]
+    if value is _MISSING:
+        current.pop(leaf, None)
+    else:
+        current[leaf] = value if prepared else _jsonable(value)
 
 
 def _provenance(

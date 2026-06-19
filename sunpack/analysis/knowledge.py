@@ -8,16 +8,16 @@ from sunpack.analysis import ArchiveAnalysisReport
 from sunpack.analysis.result import ArchiveFormatEvidence, ArchiveSegment
 from sunpack.contracts.tasks import ArchiveTask
 from sunpack.support.runtime_route_evidence import normalize_runtime_route_evidence
-from sunpack.support.archive_knowledge_writer import commit_task_knowledge, ensure_knowledge, write_flags, write_payload, write_value
+from sunpack.support.archive_knowledge_writer import commit_task_knowledge, ensure_knowledge, prepare_knowledge_value, write_flags, write_payload, write_prepared_payload, write_value
 
 
 def write_analysis_report(task: ArchiveTask, report: ArchiveAnalysisReport) -> None:
     knowledge = ensure_knowledge(task)
     selected = _best_selected(report)
-    write_payload(
+    write_prepared_payload(
         knowledge,
         "analysis",
-        {
+        prepare_knowledge_value({
             "status": "extractable" if report.has_extractable else "not_extractable",
             "report_path": report.path,
             "read_bytes": report.read_bytes,
@@ -27,7 +27,7 @@ def write_analysis_report(task: ArchiveTask, report: ArchiveAnalysisReport) -> N
             "selected_format": getattr(selected, "format", "") if selected is not None else "",
             "confidence": float(getattr(selected, "confidence", 0.0) or 0.0) if selected is not None else 0.0,
             "evidences": [_evidence_payload(item) for item in report.evidences],
-        },
+        }),
         source_layer="analysis",
         source_module="analysis_stage",
     )
@@ -56,10 +56,10 @@ def write_analysis_refresh(
 ) -> None:
     knowledge = ensure_knowledge(task)
     selected = _best_selected(report)
-    write_payload(
+    write_prepared_payload(
         knowledge,
         "analysis",
-        {
+        prepare_knowledge_value({
             "status": "extractable" if report.has_extractable else "not_extractable",
             "report_path": report.path,
             "read_bytes": report.read_bytes,
@@ -69,7 +69,7 @@ def write_analysis_refresh(
             "selected_format": getattr(selected, "format", "") if selected is not None else "",
             "confidence": float(getattr(selected, "confidence", 0.0) or 0.0) if selected is not None else 0.0,
             "evidences": [_evidence_payload(item) for item in report.evidences],
-        },
+        }),
         source_layer="analysis",
         source_module="analysis_stage",
     )
