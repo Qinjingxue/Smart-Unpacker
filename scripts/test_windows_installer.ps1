@@ -12,9 +12,14 @@ function Invoke-Checked {
         [Parameter(Mandatory = $true)][string]$FilePath,
         [string[]]$Arguments = @()
     )
-    & $FilePath @Arguments
-    if ($LASTEXITCODE -ne 0) {
-        throw "Command failed with exit code ${LASTEXITCODE}: $FilePath $($Arguments -join ' ')"
+    $process = Start-Process `
+        -FilePath $FilePath `
+        -ArgumentList $Arguments `
+        -Wait `
+        -PassThru `
+        -NoNewWindow
+    if ($process.ExitCode -ne 0) {
+        throw "Command failed with exit code $($process.ExitCode): $FilePath $($Arguments -join ' ')"
     }
 }
 

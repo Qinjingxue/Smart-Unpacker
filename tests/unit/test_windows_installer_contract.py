@@ -41,3 +41,12 @@ def test_build_and_release_workflow_publish_portable_and_setup_packages():
     assert "test_windows_installer.ps1" in workflow
     assert "Expected four lite release files" in workflow
     assert "*-setup.exe" in workflow
+
+
+def test_installer_smoke_uses_process_exit_code_not_last_exit_code():
+    script = (ROOT / "scripts" / "test_windows_installer.ps1").read_text(encoding="utf-8")
+
+    assert "Start-Process" in script
+    assert "-PassThru" in script
+    assert "$process.ExitCode" in script
+    assert "$LASTEXITCODE" not in script
