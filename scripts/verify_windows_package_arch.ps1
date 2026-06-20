@@ -19,6 +19,17 @@ function Assert-PathExists {
     }
 }
 
+function Assert-PathMissing {
+    param(
+        [string]$LiteralPath,
+        [string]$Description
+    )
+    if (Test-Path -LiteralPath $LiteralPath) {
+        throw "$Description should not exist: $LiteralPath"
+    }
+    Write-Host ("PASS  {0,-42} absent" -f $Description) -ForegroundColor Green
+}
+
 function Get-ExpectedPeMachine {
     param([string]$BuildArch)
     switch ($BuildArch) {
@@ -99,7 +110,7 @@ if ($null -eq $nativeExtension) {
 
 Assert-PeMachine -LiteralPath (Join-Path $root "sunpack.exe") -BuildArch $Arch -Description "sunpack.exe"
 Assert-PeMachine -LiteralPath $nativeExtension.FullName -BuildArch $Arch -Description "sunpack_native extension"
-Assert-PeMachine -LiteralPath (Join-Path $root "tools\7z.exe") -BuildArch $Arch -Description "tools\7z.exe"
+Assert-PathMissing -LiteralPath (Join-Path $root "tools\7z.exe") -Description "build-only tools\7z.exe"
 Assert-PeMachine -LiteralPath (Join-Path $root "tools\7z.dll") -BuildArch $Arch -Description "tools\7z.dll"
 Assert-PeMachine -LiteralPath (Join-Path $root "tools\sunpack_sevenzip.dll") -BuildArch $Arch -Description "tools\sunpack_sevenzip.dll"
 Assert-PeMachine -LiteralPath (Join-Path $root "tools\sunpack_sevenzip_worker.exe") -BuildArch $Arch -Description "tools\sunpack_sevenzip_worker.exe"

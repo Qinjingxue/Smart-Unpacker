@@ -770,6 +770,10 @@ Copy-Item -LiteralPath (Join-Path $repoRoot "sunpack_config.json") -Destination 
 Copy-Item -LiteralPath $iconPath -Destination $distIconPath -Force
 Copy-IfExists -Source (Join-Path $repoRoot "sunpack_advanced_config.json") -Destination $distAdvancedConfigPath
 Copy-Item -LiteralPath $toolsRoot -Destination $distToolsRoot -Recurse -Force
+$packagedSevenZipExe = Join-Path $distToolsRoot "7z.exe"
+if (Test-Path -LiteralPath $packagedSevenZipExe) {
+    Remove-Item -LiteralPath $packagedSevenZipExe -Force
+}
 
 $distModelsRoot = Join-Path $distAppRoot "models"
 if ($repairSystemMode -eq "full") {
@@ -792,12 +796,11 @@ Copy-Item -LiteralPath (Join-Path $repoRoot "scripts\unregister_context_menu.ps1
 Assert-PathExists -LiteralPath $distPasswordPath -Description "External password file"
 Assert-PathExists -LiteralPath $distConfigPath -Description "External config file"
 Assert-PathExists -LiteralPath $distIconPath -Description "External icon file"
-Assert-PathExists -LiteralPath (Join-Path $distToolsRoot "7z.exe") -Description "External tools/7z.exe"
+Assert-PathMissing -LiteralPath (Join-Path $distToolsRoot "7z.exe") -Description "Build-only tools/7z.exe"
 Assert-PathExists -LiteralPath (Join-Path $distToolsRoot "7z.dll") -Description "External tools/7z.dll"
 Assert-PathExists -LiteralPath (Join-Path $distToolsRoot "sunpack_sevenzip.dll") -Description "External tools/sunpack_sevenzip.dll"
 Assert-PathExists -LiteralPath (Join-Path $distToolsRoot "sunpack_sevenzip_worker.exe") -Description "External tools/sunpack_sevenzip_worker.exe"
 Assert-PathExists -LiteralPath (Join-Path $distLicensesRoot "7zip-license.txt") -Description "External 7-Zip license file"
-Assert-PeMachine -LiteralPath (Join-Path $distToolsRoot "7z.exe") -BuildArch $buildArch -Description "Packaged tools/7z.exe"
 Assert-PeMachine -LiteralPath (Join-Path $distToolsRoot "7z.dll") -BuildArch $buildArch -Description "Packaged tools/7z.dll"
 Assert-PeMachine -LiteralPath (Join-Path $distToolsRoot "sunpack_sevenzip.dll") -BuildArch $buildArch -Description "Packaged tools/sunpack_sevenzip.dll"
 Assert-PeMachine -LiteralPath (Join-Path $distToolsRoot "sunpack_sevenzip_worker.exe") -BuildArch $buildArch -Description "Packaged tools/sunpack_sevenzip_worker.exe"

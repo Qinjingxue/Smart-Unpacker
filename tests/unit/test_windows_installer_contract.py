@@ -50,3 +50,13 @@ def test_installer_smoke_uses_process_exit_code_not_last_exit_code():
     assert "-PassThru" in script
     assert "$process.ExitCode" in script
     assert "$LASTEXITCODE" not in script
+
+
+def test_release_packages_exclude_build_only_7z_executable():
+    build_script = (ROOT / "scripts" / "build_windows.ps1").read_text(encoding="utf-8")
+    verifier = (ROOT / "scripts" / "verify_windows_package_arch.ps1").read_text(encoding="utf-8")
+
+    assert '$packagedSevenZipExe = Join-Path $distToolsRoot "7z.exe"' in build_script
+    assert "Remove-Item -LiteralPath $packagedSevenZipExe" in build_script
+    assert 'Assert-PathMissing -LiteralPath (Join-Path $distToolsRoot "7z.exe")' in build_script
+    assert 'Assert-PathMissing -LiteralPath (Join-Path $root "tools\\7z.exe")' in verifier

@@ -151,7 +151,7 @@ app/config
 - `native/sunpack_native/`：Rust/PyO3 热路径，包括目录扫描、二进制结构分析、repair I/O、CRC/readability、candidate matching、deep repair native 实现等。
 - `native/sevenzip_bridge/`：C++/CMake 7z.dll bridge，提供 probe/test、密码数组尝试、manifest 和 worker 解压。
 
-运行时必须有：
+源码开发和构建环境使用：
 
 ```text
 tools\7z.exe
@@ -160,7 +160,7 @@ tools\sunpack_sevenzip.dll
 tools\sunpack_sevenzip_worker.exe
 ```
 
-`7z.exe` 主要保留给开发 fixture、手工诊断和 7-Zip 文件来源；正式解压后端是 `sunpack_sevenzip_worker.exe` + `7z.dll`。
+其中 `7z.exe` 只用于生成测试 fixture、手工诊断以及创建发布 ZIP；最终安装包和便携包不包含它。发布版运行时只包含并依赖 `7z.dll`、`sunpack_sevenzip.dll` 和 `sunpack_sevenzip_worker.exe`。
 
 ## 模型运行时
 
