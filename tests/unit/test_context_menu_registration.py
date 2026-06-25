@@ -45,16 +45,25 @@ def test_context_menu_commands_are_safe_for_drive_roots_and_keep_password_flag()
         assert ntpath.normpath(argv[2]) == "D:\\"
         assert ntpath.normpath(argv[argv.index("--out-dir") + 1]) == "D:\\"
         assert "--ask-pw" in argv
+        assert "--clipboard-pw" in argv
+        assert "--pause" in argv
+
+    for key in ("folder_direct", "background_direct"):
+        expanded = commands[key].replace("%1", "D:\\").replace("%V", "D:\\")
+        argv = _windows_argv(expanded)
+        assert argv[1] == "extract"
+        assert "--ask-pw" not in argv
+        assert "--clipboard-pw" in argv
         assert "--pause" in argv
 
 
 def test_context_menu_directory_token_is_stable_for_normal_paths():
-    command = 'sunpack.exe extract "%V\\." --out-dir "%V\\." --ask-pw --pause'
+    command = 'sunpack.exe extract "%V\\." --out-dir "%V\\." --ask-pw --clipboard-pw --pause'
     argv = _windows_argv(command.replace("%V", r"D:\Archives"))
 
     assert ntpath.normpath(argv[2]) == r"D:\Archives"
     assert ntpath.normpath(argv[4]) == r"D:\Archives"
-    assert argv[5:] == ["--ask-pw", "--pause"]
+    assert argv[5:] == ["--ask-pw", "--clipboard-pw", "--pause"]
 
 
 def _windows_argv(command: str) -> list[str]:
