@@ -49,7 +49,13 @@ $installLog = Join-Path $testRoot "install.log"
 $uninstallLog = Join-Path $testRoot "uninstall.log"
 $folderMenuKey = "HKCU:\Software\Classes\Directory\shell\SunPack"
 $backgroundMenuKey = "HKCU:\Software\Classes\Directory\Background\shell\SunPack"
+$startupRunKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+$startupValueName = "SunPackWatchService"
 $uninstaller = $null
+
+if (Get-ItemProperty -LiteralPath $startupRunKey -Name $startupValueName -ErrorAction SilentlyContinue) {
+    throw "Installer smoke test requires a clean startup state and will not overwrite an existing Run value: $startupValueName"
+}
 
 foreach ($key in @(
     $folderMenuKey,
@@ -69,7 +75,7 @@ try {
         "/SUPPRESSMSGBOXES",
         "/NORESTART",
         "/SP-",
-        "/TASKS=addtopath,contextmenu",
+        "/TASKS=addtopath,contextmenu,autostart",
         "/DIR=$installRoot",
         "/LOG=$installLog"
     )
@@ -94,6 +100,10 @@ try {
     if ($directCommand -notlike "*$appPath*") {
         throw "Context menu command does not reference the installed executable: $directCommand"
     }
+    $startupCommand = [string](Get-ItemProperty -LiteralPath $startupRunKey -Name $startupValueName).$startupValueName
+    if ($startupCommand -ne ('"{0}" watch start' -f $appPath)) {
+        throw "Startup Run value is incorrect: $startupCommand"
+    }
 
     $uninstaller = Get-ChildItem -LiteralPath $installRoot -Filter "unins*.exe" -File | Select-Object -First 1
     if ($null -eq $uninstaller) {
@@ -115,6 +125,9 @@ try {
         if (Test-Path -LiteralPath $key) {
             throw "Uninstaller left a context menu key behind: $key"
         }
+    }
+    if (Get-ItemProperty -LiteralPath $startupRunKey -Name $startupValueName -ErrorAction SilentlyContinue) {
+        throw "Uninstaller left the startup Run value behind: $startupValueName"
     }
     if (Test-Path -LiteralPath $installRoot) {
         throw "Uninstaller left the application directory behind: $installRoot"

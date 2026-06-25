@@ -56,9 +56,13 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 [Tasks]
 Name: "addtopath"; Description: "Add SunPack to the current user's PATH"; GroupDescription: "Shell integration:"
 Name: "contextmenu"; Description: "Register the SunPack folder context menu"; GroupDescription: "Shell integration:"
+Name: "autostart"; Description: "Start SunPack Watch when Windows starts"; GroupDescription: "Background watch:"
 
 [Files]
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+
+[Registry]
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "SunPackWatchService"; ValueData: """{app}\sunpack.exe"" watch start"; Tasks: autostart; Flags: uninsdeletevalue
 
 [Icons]
 Name: "{group}\SunPack Command Prompt"; Filename: "{cmd}"; Parameters: "/K cd /D ""{app}"""; WorkingDir: "{app}"; IconFilename: "{app}\sunpack.ico"

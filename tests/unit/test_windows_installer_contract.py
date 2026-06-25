@@ -24,6 +24,18 @@ def test_installer_registers_and_unregisters_context_menu():
     assert "CurUninstallStepChanged" in script
 
 
+def test_installer_optionally_registers_watch_autostart():
+    script = (ROOT / "installer" / "SunPack.iss").read_text(encoding="utf-8")
+
+    assert 'Name: "autostart"' in script
+    assert "Start SunPack Watch when Windows starts" in script
+    assert "Software\\Microsoft\\Windows\\CurrentVersion\\Run" in script
+    assert 'ValueName: "SunPackWatchService"' in script
+    assert 'ValueData: """{app}\\sunpack.exe"" watch start"' in script
+    assert "Tasks: autostart" in script
+    assert "uninsdeletevalue" in script
+
+
 def test_installer_declares_x64_and_arm64_modes():
     script = (ROOT / "installer" / "SunPack.iss").read_text(encoding="utf-8")
 
