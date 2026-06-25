@@ -10,6 +10,16 @@ DEFAULT_WATCH_CONFIG = {
     "initial_scan": True,
     "max_folders": 16,
     "observer_stop_timeout_seconds": 5.0,
+    "password_retry_debounce_seconds": 1.0,
+    "password_retry_include_subtree": True,
+    "clipboard_monitor_enabled": True,
+    "clipboard_builtin_max_entries": 30,
+    "enabled": False,
+    "roots": [],
+    "out_dir": ".",
+    "tray_enabled": True,
+    "state_dir": "",
+    "reload_poll_seconds": 1.0,
 }
 
 
@@ -26,6 +36,21 @@ def normalize_watch_config(value: Any) -> dict[str, Any]:
     config["initial_scan"] = bool(config.get("initial_scan", True))
     config["max_folders"] = max(1, _int_field(config, "max_folders"))
     config["observer_stop_timeout_seconds"] = max(0.0, _float_field(config, "observer_stop_timeout_seconds"))
+    config["password_retry_debounce_seconds"] = max(0.0, _float_field(config, "password_retry_debounce_seconds"))
+    config["password_retry_include_subtree"] = bool(config.get("password_retry_include_subtree", True))
+    config["clipboard_monitor_enabled"] = bool(config.get("clipboard_monitor_enabled", True))
+    config["clipboard_builtin_max_entries"] = max(1, _int_field(config, "clipboard_builtin_max_entries"))
+    roots = config.get("roots", [])
+    if roots is None:
+        roots = []
+    if not isinstance(roots, list):
+        raise ValueError("watch.roots must be a list")
+    config["roots"] = [str(item) for item in roots if str(item or "").strip()]
+    config["enabled"] = bool(config.get("enabled", False))
+    config["out_dir"] = str(config.get("out_dir") or ".")
+    config["tray_enabled"] = bool(config.get("tray_enabled", True))
+    config["state_dir"] = str(config.get("state_dir") or "")
+    config["reload_poll_seconds"] = max(0.2, _float_field(config, "reload_poll_seconds"))
     return config
 
 

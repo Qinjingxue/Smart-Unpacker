@@ -60,6 +60,23 @@ def discover_directory_passwords_for_archive(archive_path: str, config: dict | N
     return dedupe_passwords(passwords)
 
 
+def is_directory_password_file(path: str, config: dict | None = None) -> bool:
+    if not path:
+        return False
+    password_config = _password_config(config)
+    if password_config.get("directory_passwords_enabled") is False:
+        return False
+    candidate = Path(path)
+    name = candidate.name
+    if not name:
+        return False
+    names = _configured_names(password_config)
+    if name in names:
+        return True
+    include_txt = bool(password_config.get("directory_passwords_include_txt", True))
+    return include_txt and candidate.suffix.lower() == ".txt"
+
+
 def directory_password_context_from_task(task: Any) -> list[str]:
     fact_bag = getattr(task, "fact_bag", None)
     if fact_bag is None:

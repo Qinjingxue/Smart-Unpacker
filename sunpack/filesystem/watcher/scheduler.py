@@ -11,9 +11,13 @@ from sunpack.config.fields.watch import DEFAULT_WATCH_CONFIG
 from sunpack.contracts.filesystem import FileEntry
 from sunpack.filesystem.directory_scanner import apply_ordered_filters_to_entries
 from sunpack.filesystem.filters import build_filters
+from sunpack.filesystem.watcher.log import WatchLogStore
 from sunpack.filesystem.watcher.scanner import WatchCandidate, scan_watch_candidates
 from sunpack.filesystem.watcher.scanner import _candidate_for as _watch_candidate_for_path
 from sunpack.filesystem.watcher.state import WatchStateStore
+from sunpack.passwords.internal.builtin import get_builtin_passwords
+from sunpack.passwords.internal.clipboard_monitor import ClipboardPasswordMonitor
+from sunpack.passwords.internal.local_files import is_directory_password_file
 
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
@@ -60,12 +64,29 @@ class WatchScheduler:
         )
         self.filters = build_filters(config)
         self.state = WatchStateStore(state_path)
+        log_path = Path(state_path).with_name("events.jsonl")
+        self.log = WatchLogStore(str(log_path))
+        state_parent = Path(state_path).parent
+        self.metadata_dir = os.path.abspath(str(state_parent)) if state_parent.name == ".sunpack_watch" else ""
+        self.metadata_files = {
+            os.path.abspath(str(Path(state_path))),
+            os.path.abspath(str(log_path)),
+        }
         self._lock = threading.Lock()
         self._pending: dict[str, WatchCandidate] = {}
         self._stable_since: dict[str, float] = {}
+        self._password_dirty_dirs: dict[str, float] = {}
         self._observer = Observer()
         self._started = False
         self.runner_factory = runner_factory
+        watch_config = config.get("watch") if isinstance(config.get("watch"), dict) else {}
+        self.password_retry_debounce_seconds = max(0.0, float(watch_config.get("password_retry_debounce_seconds", 1.0)))
+        self.password_retry_include_subtree = bool(watch_config.get("password_retry_include_subtree", True))
+        self._clipboard_monitor = ClipboardPasswordMonitor(
+            on_passwords_changed=self.notify_password_source_changed,
+            enabled=bool(watch_config.get("clipboard_monitor_enabled", False)),
+            max_entries=int(watch_config.get("clipboard_builtin_max_entries", 30)),
+        )
 
     def start(self):
         if self._started:
@@ -75,6 +96,7 @@ class WatchScheduler:
             watch_path = root if os.path.isdir(root) else os.path.dirname(root)
             self._observer.schedule(handler, watch_path, recursive=self.recursive and os.path.isdir(root))
         self._observer.start()
+        self._clipboard_monitor.start()
         self._started = True
         if self.initial_scan:
             for candidate in scan_watch_candidates(self.watch_roots, recursive=self.recursive):
@@ -85,6 +107,7 @@ class WatchScheduler:
             return
         self._observer.stop()
         self._observer.join(timeout=self.observer_stop_timeout_seconds)
+        self._clipboard_monitor.stop()
         self._started = False
 
     def run_forever(self):
@@ -98,6 +121,7 @@ class WatchScheduler:
 
     def run_once(self) -> WatchRunResult:
         now = time.time()
+        self._process_password_dirty_dirs(now)
         ready = self._pop_ready(now)
         result = WatchRunResult(pending=self.pending_count)
         for candidate in ready:
@@ -114,7 +138,7 @@ class WatchScheduler:
         with self._lock:
             return len(self._pending)
 
-    def enqueue(self, path: str):
+    def enqueue(self, path: str, *, force: bool = False):
         candidate = _candidate_for_event_path(path)
         if candidate is None:
             return
@@ -122,9 +146,11 @@ class WatchScheduler:
             return
         if self._is_under_output_root(candidate.path):
             return
+        if self._is_under_metadata_dir(candidate.path):
+            return
         if not self._passes_filesystem_filters(candidate):
             return
-        if self.state.is_done(candidate.path, candidate.size, candidate.mtime):
+        if self.state.should_skip(candidate.path, candidate.size, candidate.mtime, force=force):
             return
         now = time.time()
         with self._lock:
@@ -136,6 +162,26 @@ class WatchScheduler:
     def enqueue_many(self, paths: Iterable[str]):
         for path in paths:
             self.enqueue(path)
+
+    def notify_password_source_changed(self, reason: str, path: str = "") -> None:
+        self._reload_builtin_passwords()
+        generation = self.state.mark_password_source_changed()
+        self.log.write("password_source_changed", reason=reason, path=path, password_generation=generation)
+        if path:
+            self.notify_password_table_changed(path, bump_generation=False)
+            return
+        with self._lock:
+            for entry in self.state.entries.values():
+                if entry.status == "failed_password":
+                    self._password_dirty_dirs[os.path.dirname(entry.path)] = time.time()
+
+    def notify_password_table_changed(self, path: str, *, bump_generation: bool = True) -> None:
+        if bump_generation:
+            self.notify_password_source_changed("directory_password_file", path)
+            return
+        directory = os.path.dirname(os.path.abspath(path))
+        with self._lock:
+            self._password_dirty_dirs[directory] = time.time()
 
     def _pop_ready(self, now: float) -> list[WatchCandidate]:
         ready: list[WatchCandidate] = []
@@ -161,6 +207,23 @@ class WatchScheduler:
                     self._stable_since.pop(path, None)
         return ready
 
+    def _process_password_dirty_dirs(self, now: float) -> None:
+        ready_dirs: list[str] = []
+        with self._lock:
+            for directory, changed_at in list(self._password_dirty_dirs.items()):
+                if now - changed_at >= self.password_retry_debounce_seconds:
+                    ready_dirs.append(directory)
+                    self._password_dirty_dirs.pop(directory, None)
+        for directory in ready_dirs:
+            entries = self.state.failed_password_entries_under(
+                directory,
+                include_subtree=self.password_retry_include_subtree,
+            )
+            for entry in entries:
+                if os.path.exists(entry.path):
+                    self.log.write("retry_password_failure", path=entry.path, directory=directory)
+                    self.enqueue(entry.path, force=True)
+
     def _process_candidate(self, candidate: WatchCandidate) -> WatchRunResult:
         if self.runner_factory is None:
             raise RuntimeError("WatchScheduler requires a runner_factory.")
@@ -174,9 +237,24 @@ class WatchScheduler:
         failed = list(summary.failed_tasks)
         if failed:
             error = failed[0] if failed else "watch extraction failed"
-            self.state.mark(candidate.path, candidate.size, candidate.mtime, status="failed", output_dir=self.out_dir, error=error)
+            failures = list(getattr(summary, "failures", []) or [])
+            failure_payloads = [_failure_to_dict(failure) for failure in failures]
+            is_password_failure = any(getattr(failure, "is_password_failure", False) for failure in failures)
+            status = "failed_password" if is_password_failure else "failed_terminal"
+            payload = failure_payloads[0] if failure_payloads else {}
+            self.state.mark(
+                candidate.path,
+                candidate.size,
+                candidate.mtime,
+                status=status,
+                output_dir=self.out_dir,
+                error=error,
+                failure_payload=payload,
+            )
+            self.log.write(status, path=candidate.path, error=error, failures=failure_payloads)
             return WatchRunResult(processed=1, failed=1, errors=failed)
         self.state.mark(candidate.path, candidate.size, candidate.mtime, status="done", output_dir=self.out_dir)
+        self.log.write("done", path=candidate.path, success_count=summary.success_count)
         return WatchRunResult(processed=1, succeeded=summary.success_count)
 
     def _common_root_for(self, path: str) -> str:
@@ -194,11 +272,21 @@ class WatchScheduler:
     def _is_under_output_root(self, path: str) -> bool:
         return _is_relative_to(os.path.abspath(path), self.out_dir)
 
+    def _is_under_metadata_dir(self, path: str) -> bool:
+        normalized = os.path.abspath(path)
+        if normalized in self.metadata_files:
+            return True
+        return bool(self.metadata_dir and _is_relative_to(normalized, self.metadata_dir))
+
     def _passes_filesystem_filters(self, candidate: WatchCandidate) -> bool:
         if not self.filters:
             return True
         entry = _file_entry_from_watch_candidate(candidate)
         return bool(apply_ordered_filters_to_entries([entry], self.filters))
+
+    def _reload_builtin_passwords(self) -> None:
+        if "builtin_passwords" in self.config:
+            self.config["builtin_passwords"] = get_builtin_passwords()
 
 
 class _WatchEventHandler(FileSystemEventHandler):
@@ -214,14 +302,20 @@ class _WatchEventHandler(FileSystemEventHandler):
     def on_moved(self, event: FileSystemEvent):
         dest_path = getattr(event, "dest_path", "")
         if dest_path:
-            self.scheduler.enqueue(dest_path)
+            self._handle_path(dest_path)
 
     def _handle(self, event: FileSystemEvent):
         if getattr(event, "is_directory", False):
             return
         src_path = getattr(event, "src_path", "")
         if src_path:
-            self.scheduler.enqueue(src_path)
+            self._handle_path(src_path)
+
+    def _handle_path(self, path: str):
+        if is_directory_password_file(path, self.scheduler.config):
+            self.scheduler.notify_password_table_changed(path)
+            return
+        self.scheduler.enqueue(path)
 
 
 def _candidate_for_event_path(path: str) -> WatchCandidate | None:
@@ -252,3 +346,12 @@ def _is_relative_to(path: str, root: str) -> bool:
         return True
     except ValueError:
         return False
+
+
+def _failure_to_dict(failure) -> dict:
+    if hasattr(failure, "to_dict"):
+        try:
+            return failure.to_dict()
+        except Exception:
+            return {}
+    return {}

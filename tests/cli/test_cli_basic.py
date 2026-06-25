@@ -199,10 +199,10 @@ class CliBasicTests(unittest.TestCase):
         result = run_cli("watch", "-h")
 
         self.assertEqual(result.returncode, 0)
-        self.assertIn("--stable", result.stdout)
-        self.assertIn("--interval", result.stdout)
-        self.assertIn("--no-initial-scan", result.stdout)
-        self.assertIn("--out-dir", result.stdout)
+        self.assertIn("add", result.stdout)
+        self.assertIn("start", result.stdout)
+        self.assertIn("list", result.stdout)
+        self.assertIn("startup", result.stdout)
 
     def test_passwords_help_only_shows_password_relevant_options(self):
         result = run_cli("passwords", "-h")

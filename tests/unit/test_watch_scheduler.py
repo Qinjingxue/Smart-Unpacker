@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import sunpack.filesystem.watcher.scheduler as scheduler_module
+from sunpack.contracts.failures import FailureInfo, FailureKind
 from sunpack.filesystem.watcher.scheduler import WatchScheduler
 
 
@@ -36,6 +38,7 @@ class FakeObserver:
 class FakeSummary:
     success_count = 1
     failed_tasks = []
+    failures = []
 
 
 def _write_zip(path: Path):
@@ -268,3 +271,183 @@ def test_watch_scheduler_ignores_output_root_events(tmp_path, monkeypatch):
     watcher.enqueue(str(archive_path))
 
     assert watcher.pending_count == 0
+
+
+def test_watch_scheduler_marks_terminal_failure_and_skips_retry(tmp_path, monkeypatch):
+    monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
+
+    class FailingRunner:
+        def __init__(self, config):
+            pass
+
+        def run_targets(self, paths):
+            return SimpleNamespace(
+                success_count=0,
+                failed_tasks=["damaged"],
+                failures=[FailureInfo(FailureKind.DAMAGED, "extraction", "damaged")],
+            )
+
+    watch_root = tmp_path / "in"
+    watch_root.mkdir()
+    archive_path = watch_root / "sample.zip"
+    archive_path.write_bytes(b"PK\x03\x04payload")
+
+    watcher = WatchScheduler(
+        {"watch": {"clipboard_monitor_enabled": False}},
+        [str(watch_root)],
+        out_dir=str(tmp_path / "out"),
+        state_path=str(tmp_path / "state.json"),
+        stable_seconds=0,
+        initial_scan=False,
+        runner_factory=FailingRunner,
+    )
+    watcher.enqueue(str(archive_path))
+
+    result = watcher.run_once()
+    watcher.enqueue(str(archive_path))
+
+    assert result.failed == 1
+    assert watcher.pending_count == 0
+    entry = next(iter(watcher.state.entries.values()))
+    assert entry.status == "failed_terminal"
+    assert entry.failure_kind == "damaged"
+
+
+def test_watch_scheduler_retries_password_failure_after_password_source_change(tmp_path, monkeypatch):
+    monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
+    attempts = {"count": 0}
+
+    class PasswordThenSuccessRunner:
+        def __init__(self, config):
+            pass
+
+        def run_targets(self, paths):
+            attempts["count"] += 1
+            if attempts["count"] == 1:
+                return SimpleNamespace(
+                    success_count=0,
+                    failed_tasks=["wrong password"],
+                    failures=[FailureInfo(FailureKind.WRONG_PASSWORD, "password_resolution", "wrong password")],
+                )
+            return SimpleNamespace(success_count=1, failed_tasks=[], failures=[])
+
+    watch_root = tmp_path / "in"
+    watch_root.mkdir()
+    archive_path = watch_root / "sample.zip"
+    archive_path.write_bytes(b"PK\x03\x04payload")
+
+    watcher = WatchScheduler(
+        {
+            "watch": {
+                "clipboard_monitor_enabled": False,
+                "password_retry_debounce_seconds": 0,
+            }
+        },
+        [str(watch_root)],
+        out_dir=str(tmp_path / "out"),
+        state_path=str(tmp_path / "state.json"),
+        stable_seconds=0,
+        initial_scan=False,
+        runner_factory=PasswordThenSuccessRunner,
+    )
+    watcher.enqueue(str(archive_path))
+    first = watcher.run_once()
+    watcher.enqueue(str(archive_path))
+    assert watcher.pending_count == 0
+
+    watcher.notify_password_source_changed("test")
+    second = watcher.run_once()
+
+    assert first.failed == 1
+    assert second.succeeded == 1
+    assert attempts["count"] == 2
+    entry = next(iter(watcher.state.entries.values()))
+    assert entry.status == "done"
+
+
+def test_watch_scheduler_password_table_event_retries_password_failure(tmp_path, monkeypatch):
+    monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
+    attempts = {"count": 0}
+
+    class PasswordThenSuccessRunner:
+        def __init__(self, config):
+            pass
+
+        def run_targets(self, paths):
+            attempts["count"] += 1
+            if attempts["count"] == 1:
+                return SimpleNamespace(
+                    success_count=0,
+                    failed_tasks=["password required"],
+                    failures=[FailureInfo(FailureKind.PASSWORD_REQUIRED, "password_resolution", "password required")],
+                )
+            return SimpleNamespace(success_count=1, failed_tasks=[], failures=[])
+
+    watch_root = tmp_path / "in"
+    watch_root.mkdir()
+    archive_path = watch_root / "sample.zip"
+    password_table = watch_root / "passwords.txt"
+    archive_path.write_bytes(b"PK\x03\x04payload")
+    password_table.write_text("secret\n", encoding="utf-8")
+
+    watcher = WatchScheduler(
+        {
+            "watch": {
+                "clipboard_monitor_enabled": False,
+                "password_retry_debounce_seconds": 0,
+            }
+        },
+        [str(watch_root)],
+        out_dir=str(tmp_path / "out"),
+        state_path=str(tmp_path / "state.json"),
+        stable_seconds=0,
+        initial_scan=False,
+        runner_factory=PasswordThenSuccessRunner,
+    )
+    watcher.enqueue(str(archive_path))
+    watcher.run_once()
+
+    handler = scheduler_module._WatchEventHandler(watcher)
+    handler._handle_path(str(password_table))
+    result = watcher.run_once()
+
+    assert result.succeeded == 1
+    assert attempts["count"] == 2
+    assert not any(path.endswith("passwords.txt") for path in watcher._pending)
+
+
+def test_watch_scheduler_writes_jsonl_log_for_failures(tmp_path, monkeypatch):
+    monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
+
+    class FailingRunner:
+        def __init__(self, config):
+            pass
+
+        def run_targets(self, paths):
+            return SimpleNamespace(
+                success_count=0,
+                failed_tasks=["wrong password"],
+                failures=[FailureInfo(FailureKind.WRONG_PASSWORD, "password_resolution", "wrong password")],
+            )
+
+    watch_root = tmp_path / "in"
+    watch_root.mkdir()
+    archive_path = watch_root / "sample.zip"
+    archive_path.write_bytes(b"PK\x03\x04payload")
+
+    watcher = WatchScheduler(
+        {"watch": {"clipboard_monitor_enabled": False}},
+        [str(watch_root)],
+        out_dir=str(tmp_path / "out"),
+        state_path=str(tmp_path / ".sunpack_watch" / "state.json"),
+        stable_seconds=0,
+        initial_scan=False,
+        runner_factory=FailingRunner,
+    )
+    watcher.enqueue(str(archive_path))
+    watcher.run_once()
+
+    log_path = tmp_path / ".sunpack_watch" / "events.jsonl"
+    text = log_path.read_text(encoding="utf-8")
+    assert '"event":"failed_password"' in text
+    assert "wrong password" in text

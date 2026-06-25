@@ -1,21 +1,18 @@
-from sunpack.passwords.internal.lists import read_password_file
+from pathlib import Path
+
+from sunpack.passwords.internal.lists import dedupe_passwords, read_password_file
 from sunpack.support.resources import find_resource_path, get_resource_path
 
 
 DEFAULT_BUILTIN_PASSWORDS = ["123456", "123", "0000", "789"]
+WATCH_CLIPBOARD_BLOCK_BEGIN = "# BEGIN SUNPACK WATCH CLIPBOARD PASSWORDS"
+WATCH_CLIPBOARD_BLOCK_END = "# END SUNPACK WATCH CLIPBOARD PASSWORDS"
 
 
 def get_builtin_passwords() -> list[str]:
-    builtin_path = find_resource_path("builtin_passwords.txt") or get_resource_path("builtin_passwords.txt")
+    builtin_path = builtin_password_path()
     if not builtin_path.exists():
-        try:
-            builtin_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(builtin_path, "w", encoding="utf-8") as handle:
-                handle.write("# 此文件为内置高频密码配置表，用户可自行编辑，每行一个密码。\n")
-                for password in DEFAULT_BUILTIN_PASSWORDS:
-                    handle.write(password + "\n")
-        except Exception:
-            pass
+        _ensure_builtin_password_file(builtin_path)
         return list(DEFAULT_BUILTIN_PASSWORDS)
 
     try:
@@ -23,3 +20,69 @@ def get_builtin_passwords() -> list[str]:
     except Exception:
         return list(DEFAULT_BUILTIN_PASSWORDS)
     return passwords or list(DEFAULT_BUILTIN_PASSWORDS)
+
+
+def builtin_password_path() -> Path:
+    return find_resource_path("builtin_passwords.txt") or get_resource_path("builtin_passwords.txt")
+
+
+def merge_watch_clipboard_passwords(passwords: list[str], *, max_entries: int = 30) -> bool:
+    """Persist recent watch clipboard passwords in a managed builtin-password block."""
+    if max_entries <= 0:
+        return False
+    builtin_path = builtin_password_path()
+    if not builtin_path.exists():
+        _ensure_builtin_password_file(builtin_path)
+    try:
+        original = builtin_path.read_text(encoding="utf-8")
+    except Exception:
+        original = ""
+    existing = _read_watch_clipboard_block(original)
+    merged = dedupe_passwords([*existing, *passwords])
+    managed = merged[-max_entries:]
+    updated = _replace_watch_clipboard_block(original, managed)
+    if updated == original:
+        return False
+    try:
+        builtin_path.parent.mkdir(parents=True, exist_ok=True)
+        temp = builtin_path.with_name(f".{builtin_path.name}.tmp")
+        temp.write_text(updated, encoding="utf-8")
+        temp.replace(builtin_path)
+        return True
+    except Exception:
+        return False
+
+
+def _ensure_builtin_password_file(path: Path) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write("# 此文件为内置高频密码配置表，用户可自行编辑，每行一个密码。\n")
+            for password in DEFAULT_BUILTIN_PASSWORDS:
+                handle.write(password + "\n")
+    except Exception:
+        pass
+
+
+def _read_watch_clipboard_block(text: str) -> list[str]:
+    lines = text.splitlines()
+    try:
+        begin = lines.index(WATCH_CLIPBOARD_BLOCK_BEGIN)
+        end = lines.index(WATCH_CLIPBOARD_BLOCK_END, begin + 1)
+    except ValueError:
+        return []
+    return [line for line in lines[begin + 1:end] if line and not line.lstrip().startswith("#")]
+
+
+def _replace_watch_clipboard_block(text: str, passwords: list[str]) -> str:
+    lines = text.splitlines()
+    block = [WATCH_CLIPBOARD_BLOCK_BEGIN, *passwords, WATCH_CLIPBOARD_BLOCK_END]
+    try:
+        begin = lines.index(WATCH_CLIPBOARD_BLOCK_BEGIN)
+        end = lines.index(WATCH_CLIPBOARD_BLOCK_END, begin + 1)
+        lines[begin:end + 1] = block
+    except ValueError:
+        if lines and lines[-1] != "":
+            lines.append("")
+        lines.extend(block)
+    return "\n".join(lines).rstrip("\n") + "\n"

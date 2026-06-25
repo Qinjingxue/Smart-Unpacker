@@ -2,10 +2,10 @@ from sunpack.passwords.archive_tester import ArchivePasswordTester, PasswordMana
 from sunpack.passwords.cache import PasswordAttemptCache
 from sunpack.passwords.candidates import PasswordCandidate, PasswordCandidatePipeline
 from sunpack.passwords.fingerprint import ArchiveFingerprint, build_archive_fingerprint
-from sunpack.passwords.internal.builtin import DEFAULT_BUILTIN_PASSWORDS, get_builtin_passwords
+from sunpack.passwords.internal.builtin import DEFAULT_BUILTIN_PASSWORDS, get_builtin_passwords, merge_watch_clipboard_passwords
 from sunpack.passwords.internal.clipboard import read_clipboard_passwords
 from sunpack.passwords.internal.lists import dedupe_passwords, parse_password_lines, read_password_file
-from sunpack.passwords.internal.local_files import discover_directory_passwords_for_archive
+from sunpack.passwords.internal.local_files import discover_directory_passwords_for_archive, is_directory_password_file
 from sunpack.passwords.internal.store import PasswordStore
 from sunpack.passwords.job import PasswordJob
 from sunpack.passwords.resolver import PasswordResolver
@@ -32,6 +32,7 @@ __all__ = [
     "DEFAULT_BUILTIN_PASSWORDS",
     "dedupe_passwords",
     "get_builtin_passwords",
+    "merge_watch_clipboard_passwords",
     "parse_password_lines",
     "PasswordAttemptCache",
     "PasswordBatchVerification",
@@ -55,6 +56,7 @@ __all__ = [
     "read_password_file",
     "read_clipboard_passwords",
     "discover_directory_passwords_for_archive",
+    "is_directory_password_file",
     "SevenZipFastVerifier",
     "SevenZipDllVerifier",
     "VerifierStatus",

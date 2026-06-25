@@ -130,6 +130,19 @@ function New-CommandString {
     return ('"{0}" "{1}" extract "{2}" --out-dir "{3}"{4}{5} --pause' -f $Launcher.AppPath, $Launcher.ScriptPath, $TargetToken, $OutDirToken, $passwordArg, $clipboardArg)
 }
 
+function New-WatchCommandString {
+    param(
+        [hashtable]$Launcher,
+        [string]$TargetToken
+    )
+
+    if ($Launcher.Mode -eq "app") {
+        return ('"{0}" watch add "{1}" --start --pause' -f $Launcher.AppPath, $TargetToken)
+    }
+
+    return ('"{0}" "{1}" watch add "{2}" --start --pause' -f $Launcher.AppPath, $Launcher.ScriptPath, $TargetToken)
+}
+
 function ConvertTo-RootSafeDirectoryToken {
     param([Parameter(Mandatory = $true)][string]$Token)
 
@@ -221,11 +234,13 @@ function Get-SubMenuTexts {
         return @{
             Prompt = New-ChineseText @(0x4EA4, 0x4E92, 0x8F93, 0x5165, 0x5BC6, 0x7801, 0x89E3, 0x538B)
             Direct = New-ChineseText @(0x76F4, 0x63A5, 0x89E3, 0x538B)
+            Watch = New-ChineseText @(0x76D1, 0x63A7, 0x6B64, 0x76EE, 0x5F55)
         }
     }
     return @{
         Prompt = "Extract with password prompt"
         Direct = "Extract directly"
+        Watch = "Watch this folder"
     }
 }
 
@@ -247,15 +262,19 @@ $folderToken = ConvertTo-RootSafeDirectoryToken -Token "%1"
 $backgroundToken = ConvertTo-RootSafeDirectoryToken -Token "%V"
 $folderPromptCommand = New-CommandString -Launcher $launcher -TargetToken $folderToken -OutDirToken $folderToken -PromptPasswords $true
 $folderDirectCommand = New-CommandString -Launcher $launcher -TargetToken $folderToken -OutDirToken $folderToken -PromptPasswords $false
+$folderWatchCommand = New-WatchCommandString -Launcher $launcher -TargetToken $folderToken
 $backgroundPromptCommand = New-CommandString -Launcher $launcher -TargetToken $backgroundToken -OutDirToken $backgroundToken -PromptPasswords $true
 $backgroundDirectCommand = New-CommandString -Launcher $launcher -TargetToken $backgroundToken -OutDirToken $backgroundToken -PromptPasswords $false
+$backgroundWatchCommand = New-WatchCommandString -Launcher $launcher -TargetToken $backgroundToken
 
 if ($DryRun) {
     [pscustomobject]@{
         folder_prompt = $folderPromptCommand
         folder_direct = $folderDirectCommand
+        folder_watch = $folderWatchCommand
         background_prompt = $backgroundPromptCommand
         background_direct = $backgroundDirectCommand
+        background_watch = $backgroundWatchCommand
     } | ConvertTo-Json -Compress
     return
 }
@@ -263,9 +282,11 @@ if ($DryRun) {
 Set-ContextMenuParent -KeyPath $folderKey -MenuLabel $resolvedMenuText -IconValue $resolvedIconPath -SubCommandsKey $folderSubCommandsName
 Set-ContextMenuCommand -ParentKeyPath $folderSubCommandsKey -CommandName "PromptPassword" -MenuLabel $subMenuTexts.Prompt -CommandLine $folderPromptCommand -IconValue $resolvedIconPath
 Set-ContextMenuCommand -ParentKeyPath $folderSubCommandsKey -CommandName "DirectExtract" -MenuLabel $subMenuTexts.Direct -CommandLine $folderDirectCommand -IconValue $resolvedIconPath
+Set-ContextMenuCommand -ParentKeyPath $folderSubCommandsKey -CommandName "WatchFolder" -MenuLabel $subMenuTexts.Watch -CommandLine $folderWatchCommand -IconValue $resolvedIconPath
 Set-ContextMenuParent -KeyPath $backgroundKey -MenuLabel $resolvedMenuText -IconValue $resolvedIconPath -SubCommandsKey $backgroundSubCommandsName
 Set-ContextMenuCommand -ParentKeyPath $backgroundSubCommandsKey -CommandName "PromptPassword" -MenuLabel $subMenuTexts.Prompt -CommandLine $backgroundPromptCommand -IconValue $resolvedIconPath
 Set-ContextMenuCommand -ParentKeyPath $backgroundSubCommandsKey -CommandName "DirectExtract" -MenuLabel $subMenuTexts.Direct -CommandLine $backgroundDirectCommand -IconValue $resolvedIconPath
+Set-ContextMenuCommand -ParentKeyPath $backgroundSubCommandsKey -CommandName "WatchFolder" -MenuLabel $subMenuTexts.Watch -CommandLine $backgroundWatchCommand -IconValue $resolvedIconPath
 
 Write-Host "Context menu registration completed." -ForegroundColor Green
 Write-Host "Folder menu key:" $folderKey

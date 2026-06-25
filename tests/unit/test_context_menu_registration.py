@@ -56,6 +56,14 @@ def test_context_menu_commands_are_safe_for_drive_roots_and_keep_password_flag()
         assert "--clipboard-pw" in argv
         assert "--pause" in argv
 
+    for key in ("folder_watch", "background_watch"):
+        expanded = commands[key].replace("%1", "D:\\").replace("%V", "D:\\")
+        argv = _windows_argv(expanded)
+        assert argv[1:3] == ["watch", "add"]
+        assert ntpath.normpath(argv[3]) == "D:\\"
+        assert "--start" in argv
+        assert "--pause" in argv
+
 
 def test_context_menu_directory_token_is_stable_for_normal_paths():
     command = 'sunpack.exe extract "%V\\." --out-dir "%V\\." --ask-pw --clipboard-pw --pause'
@@ -64,6 +72,11 @@ def test_context_menu_directory_token_is_stable_for_normal_paths():
     assert ntpath.normpath(argv[2]) == r"D:\Archives"
     assert ntpath.normpath(argv[4]) == r"D:\Archives"
     assert argv[5:] == ["--ask-pw", "--clipboard-pw", "--pause"]
+
+    watch_command = 'sunpack.exe watch add "%V\\." --start --pause'
+    watch_argv = _windows_argv(watch_command.replace("%V", r"D:\Archives"))
+    assert ntpath.normpath(watch_argv[3]) == r"D:\Archives"
+    assert watch_argv[4:] == ["--start", "--pause"]
 
 
 def _windows_argv(command: str) -> list[str]:

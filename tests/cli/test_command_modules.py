@@ -23,7 +23,7 @@ def test_cli_parser_registers_discovered_commands():
 
     command_args = {
         "extract": ["extract", "."],
-        "watch": ["watch", "--once", "--stable", "0", "."],
+        "watch": ["watch", "list"],
         "scan": ["scan", "."],
         "inspect": ["inspect", "."],
         "passwords": ["passwords"],

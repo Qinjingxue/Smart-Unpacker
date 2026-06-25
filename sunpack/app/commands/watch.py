@@ -1,197 +1,235 @@
 from __future__ import annotations
 
 import os
-import time
+import subprocess
+import sys
+from pathlib import Path
 
 from sunpack.app.cli_constants import EXIT_TASK_FAILED, EXIT_USAGE
-from sunpack.app.cli_parsers import (
-    CliHelpFormatter,
-    build_common_parser,
-    build_extract_config_override_parser,
-    build_password_parser,
-    localize_help_action,
-)
-from sunpack.app.cli_runtime import (
-    apply_runtime_config_overrides,
-    build_password_summary,
-    collect_clipboard_passwords,
-    collect_cli_passwords,
-    password_summary_item,
-    resolve_target_paths,
-    result_for_missing,
-)
+from sunpack.app.cli_parsers import CliHelpFormatter, build_common_parser, localize_help_action
 from sunpack.app.cli_types import CliCommandResult
 from sunpack.config.loader import load_config
 from sunpack.coordinator.runner import PipelineRunner
+from sunpack.filesystem.watcher.service import (
+    SERVICE_LOCK,
+    WatchService,
+    add_watch_roots,
+    list_watch_roots,
+    remove_watch_roots,
+    service_state_dir,
+    signal_reload,
+    signal_stop,
+)
+
 
 COMMAND = "watch"
 ORDER = 15
 TEXTS = {
     "en": {
-        "help": "Watch folders and send stable files through the extraction pipeline.",
-        "paths": "Folders or files to watch.",
-        "started": "[WATCH] Watching {count} path(s). Output root: {out_dir}",
-        "tick": "[WATCH] processed={processed} success={succeeded} failed={failed} pending={pending}",
-        "stopped": "[WATCH] Stopped.",
-        "interval": "Wake interval in seconds for stable-file checks.",
-        "stable": "Seconds a file must stay unchanged before extraction.",
-        "state": "Path to watcher state JSON file.",
-        "once": "Run one polling pass and exit.",
-        "no_recursive": "Only watch direct children of each folder.",
-        "no_initial_scan": "Do not enqueue existing files when the watcher starts.",
-        "max_folders": "Maximum number of folders/files accepted by one watcher.",
-        "too_many_folders": "watch accepts at most {max_count} path(s).",
+        "help": "Manage persistent watched folders and the background watcher.",
+        "start": "Start the background watcher.",
+        "add": "Add watched folders.",
+        "remove": "Remove watched folders.",
+        "list": "List watched folders.",
+        "reload": "Reload the running watcher.",
+        "stop": "Stop the running watcher.",
+        "status": "Show watcher status.",
+        "startup": "Manage Windows startup registration.",
+        "paths": "Folders to add or remove.",
+        "start_after_add": "Start the watcher after adding folders.",
+        "once": "Run one watcher pass and exit.",
+        "no_tray": "Run without a Windows tray icon.",
     },
     "zh": {
-        "help": "监控文件夹，发现稳定文件后送入解压主流程。",
-        "paths": "要监控的文件夹或文件。",
-        "started": "[WATCH] 正在监控 {count} 个路径。输出根目录：{out_dir}",
-        "tick": "[WATCH] processed={processed} success={succeeded} failed={failed} pending={pending}",
-        "stopped": "[WATCH] 已停止。",
-        "interval": "稳定文件检查唤醒间隔秒数。",
-        "stable": "文件保持不变多少秒后才开始解压。",
-        "state": "watcher 状态 JSON 文件路径。",
-        "once": "只处理一轮事件队列后退出。",
-        "no_recursive": "只监控每个文件夹的直接子项。",
-        "no_initial_scan": "启动时不把已有文件加入队列。",
-        "max_folders": "单个 watcher 最多接受的监控路径数量。",
-        "too_many_folders": "watch 最多接受 {max_count} 个路径。",
+        "help": "管理持久监控目录和后台 watch。",
+        "start": "启动后台 watch。",
+        "add": "添加监控目录。",
+        "remove": "移除监控目录。",
+        "list": "列出监控目录。",
+        "reload": "重新加载运行中的 watch。",
+        "stop": "停止运行中的 watch。",
+        "status": "查看 watch 状态。",
+        "startup": "管理 Windows 开机自启动。",
+        "paths": "要添加或移除的目录。",
+        "start_after_add": "添加目录后启动 watch。",
+        "once": "只运行一轮 watch 后退出。",
+        "no_tray": "运行时不显示 Windows 托盘图标。",
     },
 }
 
 
 def register(subparsers, ctx):
+    common = build_common_parser(ctx)
     parser = subparsers.add_parser(
         COMMAND,
-        parents=[build_common_parser(ctx), build_password_parser(ctx), build_extract_config_override_parser(ctx)],
+        parents=[common],
         help=ctx.t(TEXTS, "help"),
-        usage="sunpack watch [options] <paths...>",
+        usage="sunpack watch <add|remove|list|start|stop|reload|status|startup> [options]",
         formatter_class=CliHelpFormatter,
     )
     localize_help_action(parser, ctx)
-    parser.add_argument("paths", nargs="+", help=ctx.t(TEXTS, "paths"))
-    parser.add_argument("--interval", type=float, default=None, help=ctx.t(TEXTS, "interval"))
-    parser.add_argument("--stable", type=float, default=None, help=ctx.t(TEXTS, "stable"))
-    parser.add_argument("--state", dest="state_path", help=ctx.t(TEXTS, "state"))
-    parser.add_argument("--once", action="store_true", help=ctx.t(TEXTS, "once"))
-    parser.add_argument("--no-recursive", dest="recursive", action="store_false", default=None, help=ctx.t(TEXTS, "no_recursive"))
-    parser.add_argument("--no-initial-scan", dest="initial_scan", action="store_false", default=None, help=ctx.t(TEXTS, "no_initial_scan"))
-    parser.add_argument("--max-folders", type=int, default=None, help=ctx.t(TEXTS, "max_folders"))
+    actions = parser.add_subparsers(dest="watch_action", required=True)
+
+    start_parser = actions.add_parser("start", parents=[common], help=ctx.t(TEXTS, "start"), formatter_class=CliHelpFormatter)
+    start_parser.add_argument("--once", action="store_true", help=ctx.t(TEXTS, "once"))
+    start_parser.add_argument("--no-tray", action="store_true", help=ctx.t(TEXTS, "no_tray"))
+
+    add_parser = actions.add_parser("add", parents=[common], help=ctx.t(TEXTS, "add"), formatter_class=CliHelpFormatter)
+    add_parser.add_argument("paths", nargs="+", help=ctx.t(TEXTS, "paths"))
+    add_parser.add_argument("--start", action="store_true", help=ctx.t(TEXTS, "start_after_add"))
+
+    remove_parser = actions.add_parser("remove", parents=[common], help=ctx.t(TEXTS, "remove"), formatter_class=CliHelpFormatter)
+    remove_parser.add_argument("paths", nargs="+", help=ctx.t(TEXTS, "paths"))
+
+    actions.add_parser("list", parents=[common], help=ctx.t(TEXTS, "list"), formatter_class=CliHelpFormatter)
+    actions.add_parser("reload", parents=[common], help=ctx.t(TEXTS, "reload"), formatter_class=CliHelpFormatter)
+    actions.add_parser("stop", parents=[common], help=ctx.t(TEXTS, "stop"), formatter_class=CliHelpFormatter)
+    actions.add_parser("status", parents=[common], help=ctx.t(TEXTS, "status"), formatter_class=CliHelpFormatter)
+
+    startup_parser = actions.add_parser("startup", parents=[common], help=ctx.t(TEXTS, "startup"), formatter_class=CliHelpFormatter)
+    startup_parser.add_argument("startup_action", choices=["enable", "disable", "status"])
 
 
 def handle(args, ctx):
-    reporter = ctx.reporter
-    config = load_config()
-    watch_config = config.get("watch") if isinstance(config.get("watch"), dict) else {}
-    interval_seconds = args.interval if args.interval is not None else float(watch_config.get("interval_seconds", 5.0))
-    stable_seconds = args.stable if args.stable is not None else float(watch_config.get("stable_seconds", 10.0))
-    recursive = args.recursive if args.recursive is not None else bool(watch_config.get("recursive", True))
-    initial_scan = args.initial_scan if args.initial_scan is not None else bool(watch_config.get("initial_scan", True))
-    max_folders = args.max_folders if args.max_folders is not None else int(watch_config.get("max_folders", 16))
-
-    target_paths, missing_paths = resolve_target_paths(args.paths)
-    if missing_paths:
-        return result_for_missing(COMMAND, args, missing_paths)
-    if len(target_paths) > max(1, int(max_folders)):
-        return EXIT_USAGE, CliCommandResult(
-            command=COMMAND,
-            inputs={"paths": list(args.paths)},
-            summary={},
-            errors=[ctx.t(TEXTS, "too_many_folders").format(max_count=max_folders)],
-        )
-
     try:
-        passwords = collect_cli_passwords(
-            args,
-            prompt_text=ctx.core_text("password_prompt"),
-            input_prompt=ctx.core_text("password_input_prompt"),
-        )
-        clipboard_passwords = collect_clipboard_passwords(args)
+        action = args.watch_action
+        if action == "start":
+            return _handle_start(args)
+        if action == "add":
+            return _handle_add(args)
+        if action == "remove":
+            return _handle_remove(args)
+        if action == "list":
+            return _handle_list()
+        if action == "reload":
+            return _handle_reload()
+        if action == "stop":
+            return _handle_stop()
+        if action == "status":
+            return _handle_status()
+        if action == "startup":
+            return _handle_startup(args)
     except Exception as exc:
-        return EXIT_USAGE, CliCommandResult(command=COMMAND, inputs={"paths": list(args.paths)}, summary={}, errors=[str(exc)])
+        return EXIT_TASK_FAILED, CliCommandResult(command=COMMAND, inputs={}, summary={}, errors=[str(exc)])
+    return EXIT_USAGE, CliCommandResult(command=COMMAND, inputs={}, summary={}, errors=[f"Unknown watch action: {action}"])
 
-    config_overrides = apply_runtime_config_overrides(config, args)
-    password_summary = build_password_summary(
-        passwords,
-        use_builtin_passwords=not args.no_builtin_passwords,
-        clipboard_passwords=clipboard_passwords,
-    )
-    config["user_passwords"] = password_summary.user_passwords
-    config["builtin_passwords"] = password_summary.builtin_passwords
-    out_dir = config["output"]["root"]
-    state_path = args.state_path or os.path.join(out_dir, ".sunpack_watch", "state.json")
-    try:
-        from sunpack.filesystem.watcher import WatchScheduler
 
-        watcher = WatchScheduler(
-            config,
-            target_paths,
-            out_dir=out_dir,
-            state_path=state_path,
-            interval_seconds=interval_seconds,
-            stable_seconds=stable_seconds,
-            recursive=recursive,
-            initial_scan=initial_scan,
-            observer_stop_timeout_seconds=float(watch_config.get("observer_stop_timeout_seconds", 5.0)),
-            runner_factory=PipelineRunner,
-        )
-    except Exception as exc:
+def _handle_start(args):
+    tray_factory = None
+    if not getattr(args, "no_tray", False) and not getattr(args, "once", False) and os.name == "nt":
+        from sunpack.platform.windows.tray import WindowsTrayIcon
+
+        tray_factory = WindowsTrayIcon
+    service = WatchService(runner_factory=PipelineRunner, tray_factory=tray_factory)
+    code = service.run(once=bool(getattr(args, "once", False)))
+    if code == 2:
         return EXIT_TASK_FAILED, CliCommandResult(
             command=COMMAND,
-            inputs={"paths": target_paths, "out_dir": out_dir, "state_path": state_path},
-            summary={},
-            errors=[str(exc)],
-            items=[password_summary_item(password_summary)],
+            inputs={"action": "start"},
+            summary={"running": True},
+            errors=["Watch is already running."],
         )
-    reporter.info(ctx.t(TEXTS, "started").format(count=len(target_paths), out_dir=out_dir))
+    return code, CliCommandResult(command=COMMAND, inputs={"action": "start"}, summary={"exit_code": code})
 
-    results = []
-    exit_code = 0
-    try:
-        watcher.start()
-        if args.once:
-            result = watcher.run_once()
-            results.append(result)
-            reporter.info(ctx.t(TEXTS, "tick").format(**result.__dict__))
-        else:
-            while True:
-                result = watcher.run_once()
-                results.append(result)
-                reporter.info(ctx.t(TEXTS, "tick").format(**result.__dict__))
-                time.sleep(watcher.interval_seconds)
-    except KeyboardInterrupt:
-        reporter.info(ctx.t(TEXTS, "stopped"))
-    except Exception as exc:
-        exit_code = EXIT_TASK_FAILED
-        results.append(type("_Result", (), {"processed": 0, "succeeded": 0, "failed": 1, "pending": 0, "errors": [str(exc)]})())
-    finally:
-        watcher.stop()
 
-    processed = sum(item.processed for item in results)
-    succeeded = sum(item.succeeded for item in results)
-    failed = sum(item.failed for item in results)
-    pending = results[-1].pending if results else 0
-    errors = [error for item in results for error in item.errors]
-    return exit_code, CliCommandResult(
+def _handle_add(args):
+    config_path, added = add_watch_roots(list(args.paths or []))
+    config = load_config()
+    reload_path = signal_reload(config)
+    started = False
+    if getattr(args, "start", False) and not _watch_running(config):
+        started = _start_watch_background()
+    return 0, CliCommandResult(
         command=COMMAND,
-        inputs={
-            "paths": target_paths,
-            "out_dir": out_dir,
-            "state_path": state_path,
-            "interval": interval_seconds,
-            "stable": stable_seconds,
-            "recursive": recursive,
-            "once": args.once,
-            "initial_scan": initial_scan,
-            "max_folders": max_folders,
-            "config_overrides": config_overrides,
-        },
-        summary={
-            "processed_count": processed,
-            "success_count": succeeded,
-            "failed_count": failed,
-            "pending_count": pending,
-        },
-        errors=errors,
-        items=[password_summary_item(password_summary)],
+        inputs={"action": "add", "paths": list(args.paths or [])},
+        summary={"config_path": str(config_path), "added": added, "reload_signal": reload_path, "started": started},
+        items=added,
     )
+
+
+def _handle_remove(args):
+    config_path, removed = remove_watch_roots(list(args.paths or []))
+    reload_path = signal_reload(load_config())
+    return 0, CliCommandResult(
+        command=COMMAND,
+        inputs={"action": "remove", "paths": list(args.paths or [])},
+        summary={"config_path": str(config_path), "removed": removed, "reload_signal": reload_path},
+        items=removed,
+    )
+
+
+def _handle_list():
+    config_path, roots = list_watch_roots()
+    return 0, CliCommandResult(
+        command=COMMAND,
+        inputs={"action": "list"},
+        summary={"config_path": str(config_path), "count": len(roots)},
+        items=roots,
+    )
+
+
+def _handle_reload():
+    path = signal_reload(load_config())
+    return 0, CliCommandResult(command=COMMAND, inputs={"action": "reload"}, summary={"reload_signal": path})
+
+
+def _handle_stop():
+    path = signal_stop(load_config())
+    return 0, CliCommandResult(command=COMMAND, inputs={"action": "stop"}, summary={"stop_signal": path})
+
+
+def _handle_status():
+    config = load_config()
+    _, roots = list_watch_roots()
+    running = _watch_running(config)
+    return 0, CliCommandResult(
+        command=COMMAND,
+        inputs={"action": "status"},
+        summary={"running": running, "count": len(roots), "state_dir": service_state_dir(config)},
+        items=roots,
+    )
+
+
+def _handle_startup(args):
+    if os.name != "nt":
+        return EXIT_USAGE, CliCommandResult(command=COMMAND, inputs={"action": "startup"}, summary={}, errors=["Startup integration is only available on Windows."])
+    from sunpack.platform.windows.startup import disable_startup, enable_startup, startup_status
+
+    if args.startup_action == "enable":
+        command = enable_startup()
+        return 0, CliCommandResult(command=COMMAND, inputs={"action": "startup", "startup_action": "enable"}, summary={"enabled": True, "command": command})
+    if args.startup_action == "disable":
+        changed = disable_startup()
+        return 0, CliCommandResult(command=COMMAND, inputs={"action": "startup", "startup_action": "disable"}, summary={"enabled": False, "changed": changed})
+    enabled, command = startup_status()
+    return 0, CliCommandResult(command=COMMAND, inputs={"action": "startup", "startup_action": "status"}, summary={"enabled": enabled, "command": command})
+
+
+def _watch_running(config: dict) -> bool:
+    return os.path.exists(os.path.join(service_state_dir(config), SERVICE_LOCK))
+
+
+def _start_watch_background() -> bool:
+    creationflags = 0
+    startupinfo = None
+    if os.name == "nt":
+        creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "DETACHED_PROCESS", 0)
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    subprocess.Popen(
+        _watch_start_argv(),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        creationflags=creationflags,
+        startupinfo=startupinfo,
+        close_fds=True,
+    )
+    return True
+
+
+def _watch_start_argv() -> list[str]:
+    repo_script = Path(__file__).resolve().parents[3] / "sunpack.py"
+    if repo_script.exists():
+        return [sys.executable, str(repo_script), COMMAND, "start"]
+    return [sys.executable, COMMAND, "start"]
