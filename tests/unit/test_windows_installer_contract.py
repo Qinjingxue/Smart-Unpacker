@@ -36,6 +36,21 @@ def test_installer_optionally_registers_watch_autostart():
     assert "uninsdeletevalue" in script
 
 
+def test_installer_stops_existing_watch_before_upgrade_and_cleans_owned_files():
+    script = (ROOT / "installer" / "SunPack.iss").read_text(encoding="utf-8")
+
+    assert "procedure StopExistingWatch" in script
+    assert "watch stop" in script
+    assert "function PrepareToInstall" in script
+    assert "StopExistingWatch;" in script
+    assert "[InstallDelete]" in script
+    assert 'Type: files; Name: "{app}\\*.exe"' in script
+    assert 'Type: filesandordirs; Name: "{app}\\sunpack"' in script
+    assert 'Type: filesandordirs; Name: "{app}\\tools"' in script
+    assert 'Type: files; Name: "{app}\\*.json"' not in script
+    assert 'Type: files; Name: "{app}\\*.txt"' not in script
+
+
 def test_installer_declares_x64_and_arm64_modes():
     script = (ROOT / "installer" / "SunPack.iss").read_text(encoding="utf-8")
 

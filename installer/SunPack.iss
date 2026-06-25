@@ -61,6 +61,23 @@ Name: "autostart"; Description: "Start SunPack Watch when Windows starts"; Group
 [Files]
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
+[InstallDelete]
+Type: files; Name: "{app}\*.pyd"
+Type: files; Name: "{app}\*.dll"
+Type: files; Name: "{app}\*.exe"
+Type: files; Name: "{app}\*.manifest"
+Type: files; Name: "{app}\*.ico"
+Type: files; Name: "{app}\*.py"
+Type: filesandordirs; Name: "{app}\_internal"
+Type: filesandordirs; Name: "{app}\analysis"
+Type: filesandordirs; Name: "{app}\config"
+Type: filesandordirs; Name: "{app}\licenses"
+Type: filesandordirs; Name: "{app}\models"
+Type: filesandordirs; Name: "{app}\native"
+Type: filesandordirs; Name: "{app}\scripts"
+Type: filesandordirs; Name: "{app}\sunpack"
+Type: filesandordirs; Name: "{app}\tools"
+
 [Registry]
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "SunPackWatchService"; ValueData: """{app}\sunpack.exe"" watch start"; Tasks: autostart; Flags: uninsdeletevalue
 
@@ -200,6 +217,26 @@ begin
     Log('Failed to start context menu script: ' + ScriptPath)
   else if ResultCode <> 0 then
     Log(Format('Context menu script exited with code %d: %s', [ResultCode, ScriptPath]));
+end;
+
+procedure StopExistingWatch;
+var
+  ExistingApp: string;
+  ResultCode: Integer;
+begin
+  ExistingApp := ExpandConstant('{app}\sunpack.exe');
+  if not FileExists(ExistingApp) then
+    Exit;
+  if not Exec(ExistingApp, 'watch stop', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+    Log('Failed to start existing SunPack watch stop command: ' + ExistingApp)
+  else if ResultCode <> 0 then
+    Log(Format('Existing SunPack watch stop command exited with code %d', [ResultCode]));
+end;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+begin
+  StopExistingWatch;
+  Result := '';
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
