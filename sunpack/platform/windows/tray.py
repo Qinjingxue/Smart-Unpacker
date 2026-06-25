@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ctypes
 import os
+import sys
 import threading
 from ctypes import wintypes
 from pathlib import Path
@@ -150,12 +151,12 @@ class WindowsTrayIcon:
         self.shell32.Shell_NotifyIconW(NIM_DELETE, ctypes.byref(data))
 
     def _load_icon(self):
-        repo_icon = Path(__file__).resolve().parents[3] / "sunpack.ico"
-        if repo_icon.exists():
-            icon = self.user32.LoadImageW(None, str(repo_icon), IMAGE_ICON, 0, 0, LR_LOADFROMFILE)
-            if icon:
-                self._icon = icon
-                return icon
+        for icon_path in _candidate_icon_paths():
+            if icon_path.exists():
+                icon = self.user32.LoadImageW(None, str(icon_path), IMAGE_ICON, 0, 0, LR_LOADFROMFILE)
+                if icon:
+                    self._icon = icon
+                    return icon
         return self.user32.LoadIconW(None, ctypes.c_wchar_p(IDI_APPLICATION))
 
     def _wndproc(self, hwnd, msg, wparam, lparam):
@@ -256,4 +257,12 @@ class NOTIFYICONDATA(ctypes.Structure):
         ("dwInfoFlags", wintypes.DWORD),
         ("guidItem", ctypes.c_byte * 16),
         ("hBalloonIcon", wintypes.HANDLE),
+    ]
+
+
+def _candidate_icon_paths() -> list[Path]:
+    executable_dir = Path(sys.executable).resolve().parent
+    return [
+        executable_dir / "sunpack.ico",
+        Path(__file__).resolve().parents[3] / "sunpack.ico",
     ]
