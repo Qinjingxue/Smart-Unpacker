@@ -8,6 +8,7 @@ from sunpack.passwords.internal.lists import dedupe_passwords, read_password_fil
 @dataclass
 class PasswordStore:
     user_passwords: List[str] = field(default_factory=list)
+    clipboard_passwords: List[str] = field(default_factory=list)
     builtin_passwords: List[str] = field(default_factory=list)
     recent_passwords: List[str] = field(default_factory=list)
     _lock: RLock = field(default_factory=RLock, repr=False)
@@ -17,6 +18,7 @@ class PasswordStore:
         cls,
         *,
         cli_passwords: List[str] | None = None,
+        clipboard_passwords: List[str] | None = None,
         builtin_passwords: List[str] | None = None,
         builtin_passwords_file: str | None = None,
         recent_passwords: List[str] | None = None,
@@ -28,21 +30,30 @@ class PasswordStore:
                 builtin_passwords = []
         return cls(
             user_passwords=dedupe_passwords(cli_passwords or []),
+            clipboard_passwords=dedupe_passwords(clipboard_passwords or []),
             builtin_passwords=dedupe_passwords(builtin_passwords or []),
             recent_passwords=dedupe_passwords(recent_passwords or []),
         )
 
-    def candidates(self) -> List[str]:
+    def candidates(self, directory_passwords: List[str] | None = None) -> List[str]:
         with self._lock:
             return dedupe_passwords(
                 list(self.recent_passwords)
+                + list(directory_passwords or [])
                 + list(self.user_passwords)
+                + list(self.clipboard_passwords)
                 + list(self.builtin_passwords)
             )
 
-    def has_candidates(self) -> bool:
+    def has_candidates(self, directory_passwords: List[str] | None = None) -> bool:
         with self._lock:
-            return bool(self.recent_passwords or self.user_passwords or self.builtin_passwords)
+            return bool(
+                self.recent_passwords
+                or directory_passwords
+                or self.user_passwords
+                or self.clipboard_passwords
+                or self.builtin_passwords
+            )
 
     def remember_success(self, password: str) -> None:
         if not password:

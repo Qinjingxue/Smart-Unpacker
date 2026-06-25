@@ -16,6 +16,7 @@ class CliCommandResult:
 @dataclass
 class CliPasswordSummary:
     user_passwords: list[str]
+    clipboard_passwords: list[str]
     recent_passwords: list[str]
     builtin_passwords: list[str]
     combined_passwords: list[str]

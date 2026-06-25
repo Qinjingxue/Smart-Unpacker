@@ -14,6 +14,7 @@ from sunpack.app.cli_parsers import (
 from sunpack.app.cli_runtime import (
     apply_runtime_config_overrides,
     build_password_summary,
+    collect_clipboard_passwords,
     collect_cli_passwords,
     password_summary_item,
     resolve_target_paths,
@@ -105,11 +106,16 @@ def handle(args, ctx):
             prompt_text=ctx.core_text("password_prompt"),
             input_prompt=ctx.core_text("password_input_prompt"),
         )
+        clipboard_passwords = collect_clipboard_passwords(args)
     except Exception as exc:
         return EXIT_USAGE, CliCommandResult(command=COMMAND, inputs={"paths": list(args.paths)}, summary={}, errors=[str(exc)])
 
     config_overrides = apply_runtime_config_overrides(config, args)
-    password_summary = build_password_summary(passwords, use_builtin_passwords=not args.no_builtin_passwords)
+    password_summary = build_password_summary(
+        passwords,
+        use_builtin_passwords=not args.no_builtin_passwords,
+        clipboard_passwords=clipboard_passwords,
+    )
     config["user_passwords"] = password_summary.user_passwords
     config["builtin_passwords"] = password_summary.builtin_passwords
     out_dir = config["output"]["root"]

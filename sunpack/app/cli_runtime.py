@@ -8,6 +8,7 @@ from sunpack.config.schema import normalize_config_value
 from sunpack.config.detection_view import directory_scan_mode, rule_pipeline_config, scan_filter_config, scan_filters_enabled
 from sunpack.coordinator.scheduling import build_scheduler_profile_config
 from sunpack.passwords import dedupe_passwords, get_builtin_passwords, PasswordStore, read_password_file
+from sunpack.passwords.internal.clipboard import read_clipboard_passwords
 
 
 def build_effective_config(config: dict) -> dict[str, Any]:
@@ -91,6 +92,12 @@ def collect_cli_passwords(
     return dedupe_passwords(passwords)
 
 
+def collect_clipboard_passwords(args) -> list[str]:
+    if not getattr(args, "clipboard_passwords", False):
+        return []
+    return read_clipboard_passwords()
+
+
 def prompt_for_passwords(
     prompt_text: str = "[CLI] Enter passwords, one per line. Submit an empty line to finish.",
     input_prompt: str = "password> ",
@@ -109,16 +116,20 @@ def build_password_summary(
     user_passwords: list[str],
     use_builtin_passwords: bool,
     recent_passwords: list[str] | None = None,
+    clipboard_passwords: list[str] | None = None,
 ) -> CliPasswordSummary:
     recent = dedupe_passwords(recent_passwords or [])
+    clipboard = dedupe_passwords(clipboard_passwords or [])
     builtin = get_builtin_passwords() if use_builtin_passwords else []
     store = PasswordStore.from_sources(
         cli_passwords=user_passwords,
+        clipboard_passwords=clipboard,
         recent_passwords=recent,
         builtin_passwords=builtin,
     )
     return CliPasswordSummary(
         user_passwords=store.user_passwords,
+        clipboard_passwords=store.clipboard_passwords,
         recent_passwords=store.recent_passwords,
         builtin_passwords=store.builtin_passwords,
         combined_passwords=store.candidates(),
@@ -154,6 +165,13 @@ def apply_runtime_config_overrides(config: dict, args) -> dict:
     if getattr(args, "write_progress_manifest", False):
         overrides["write_progress_manifest"] = True
         config.setdefault("extraction", {})["write_progress_manifest"] = True
+    if getattr(args, "directory_passwords", None) is not None:
+        overrides["directory_passwords"] = bool(args.directory_passwords)
+        config.setdefault("passwords", {})["directory_passwords_enabled"] = bool(args.directory_passwords)
+    directory_password_files = list(getattr(args, "directory_password_files", []) or [])
+    if directory_password_files:
+        overrides["directory_password_files"] = directory_password_files
+        config.setdefault("passwords", {})["directory_password_file_names"] = directory_password_files
     return overrides
 
 

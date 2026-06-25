@@ -1,6 +1,6 @@
 from sunpack.app.cli_constants import EXIT_USAGE
 from sunpack.app.cli_parsers import CliHelpFormatter, build_json_parser, build_password_parser, localize_help_action
-from sunpack.app.cli_runtime import build_password_summary, collect_cli_passwords, password_summary_item
+from sunpack.app.cli_runtime import build_password_summary, collect_clipboard_passwords, collect_cli_passwords, password_summary_item
 from sunpack.app.cli_types import CliCommandResult
 
 COMMAND = "passwords"
@@ -11,6 +11,7 @@ TEXTS = {
         "summary": "[CLI] Password source summary:",
         "user_input": "  User input: {value}",
         "recent": "  Recent: {value}",
+        "clipboard": "  Clipboard: {value}",
         "builtin": "  Built-in: {value}",
         "final_order": "  Final order: {value}",
     },
@@ -19,6 +20,7 @@ TEXTS = {
         "summary": "[CLI] 密码来源汇总：",
         "user_input": "  用户输入：{value}",
         "recent": "  最近成功：{value}",
+        "clipboard": "  剪贴板：{value}",
         "builtin": "  内置密码：{value}",
         "final_order": "  最终顺序：{value}",
     },
@@ -44,7 +46,12 @@ def handle(args, ctx):
             prompt_text=ctx.core_text("password_prompt"),
             input_prompt=ctx.core_text("password_input_prompt"),
         )
-        password_summary = build_password_summary(passwords, use_builtin_passwords=not args.no_builtin_passwords)
+        clipboard_passwords = collect_clipboard_passwords(args)
+        password_summary = build_password_summary(
+            passwords,
+            use_builtin_passwords=not args.no_builtin_passwords,
+            clipboard_passwords=clipboard_passwords,
+        )
     except Exception as exc:
         return EXIT_USAGE, CliCommandResult(command=COMMAND, inputs={}, summary={}, errors=[str(exc)])
 
@@ -52,6 +59,7 @@ def handle(args, ctx):
         reporter.info(ctx.t(TEXTS, "summary"))
         reporter.info(ctx.t(TEXTS, "user_input").format(value=password_summary.user_passwords or []))
         reporter.info(ctx.t(TEXTS, "recent").format(value=password_summary.recent_passwords or []))
+        reporter.info(ctx.t(TEXTS, "clipboard").format(value=password_summary.clipboard_passwords or []))
         reporter.info(ctx.t(TEXTS, "builtin").format(value=password_summary.builtin_passwords or []))
         reporter.info(ctx.t(TEXTS, "final_order").format(value=password_summary.combined_passwords or []))
 
@@ -64,6 +72,7 @@ def handle(args, ctx):
         summary={
             "user_password_count": len(password_summary.user_passwords),
             "recent_password_count": len(password_summary.recent_passwords),
+            "clipboard_password_count": len(password_summary.clipboard_passwords),
             "builtin_password_count": len(password_summary.builtin_passwords),
             "combined_password_count": len(password_summary.combined_passwords),
         },

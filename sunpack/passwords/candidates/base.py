@@ -19,9 +19,14 @@ class PasswordCandidatePipeline:
         self._sources = list(sources or [])
 
     @classmethod
-    def from_password_store(cls, store: PasswordStore) -> "PasswordCandidatePipeline":
+    def from_password_store(
+        cls,
+        store: PasswordStore,
+        *,
+        directory_passwords: Iterable[str] | None = None,
+    ) -> "PasswordCandidatePipeline":
         return cls([
-            _store_candidates(store),
+            _store_candidates(store, directory_passwords=directory_passwords),
         ])
 
     @classmethod
@@ -40,10 +45,18 @@ class PasswordCandidatePipeline:
                 yield candidate
 
 
-def _store_candidates(store: PasswordStore) -> Iterator[PasswordCandidate]:
+def _store_candidates(
+    store: PasswordStore,
+    *,
+    directory_passwords: Iterable[str] | None = None,
+) -> Iterator[PasswordCandidate]:
     for password in store.recent_passwords:
         yield PasswordCandidate(password, source="recent", priority=10)
+    for password in directory_passwords or []:
+        yield PasswordCandidate(password, source="directory", priority=15)
     for password in store.user_passwords:
         yield PasswordCandidate(password, source="user", priority=20)
+    for password in store.clipboard_passwords:
+        yield PasswordCandidate(password, source="clipboard", priority=30)
     for password in store.builtin_passwords:
         yield PasswordCandidate(password, source="builtin", priority=50)

@@ -10,11 +10,12 @@ from sunpack.passwords import PasswordResolver, PasswordSession, PasswordStore
 def test_password_store_orders_user_recent_builtin_and_dedupes():
     store = PasswordStore.from_sources(
         cli_passwords=["cli", "shared"],
-        recent_passwords=["recent", "cli"],
+        clipboard_passwords=["clip", "builtin"],
+        recent_passwords=["recent"],
         builtin_passwords=["builtin", "shared"],
     )
 
-    assert store.candidates() == ["recent", "cli", "shared", "builtin"]
+    assert store.candidates(directory_passwords=["dir", "clip"]) == ["recent", "dir", "clip", "cli", "shared", "builtin"]
 
 
 def test_password_store_remembers_success_at_front():
@@ -228,6 +229,43 @@ def test_password_resolver_queues_all_inconclusive_sources_for_extraction_confir
 
     assert session.get_resolved("archive-key") == "builtin-password"
     assert tester.password_store.recent_passwords == ["builtin-password"]
+
+
+def test_password_resolver_uses_directory_passwords_before_user_and_builtin():
+    tester = FakePasswordTester()
+    tester.password_store = PasswordStore.from_sources(
+        cli_passwords=["user-password"],
+        clipboard_passwords=["clipboard-password"],
+        builtin_passwords=["builtin-password"],
+    )
+    planned = []
+
+    class QueueScheduler:
+        def plan_for_extraction(self, job):
+            candidates = tuple(candidate.value for candidate in job.candidate_pipeline())
+            planned.extend(candidates)
+            return PasswordSearchResult(
+                password=None,
+                status=PasswordSearchStatus.INCONCLUSIVE,
+                extraction_candidates=candidates,
+            )
+
+        def remember_extraction_success(self, fingerprint_key, password):
+            pass
+
+        def remember_extraction_rejection(self, fingerprint_key, password):
+            pass
+
+    resolver = PasswordResolver(tester, PasswordSession(), QueueScheduler())
+
+    first = resolver.resolve(
+        "large.rar",
+        archive_key="archive-key",
+        directory_passwords=["directory-password", "user-password"],
+    )
+
+    assert planned == ["directory-password", "user-password", "clipboard-password", "builtin-password"]
+    assert first.password == "directory-password"
 
 
 def test_confirmed_password_is_promoted_across_already_planned_archives():

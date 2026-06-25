@@ -11,6 +11,7 @@ from sunpack.app.cli_parsers import (
 from sunpack.app.cli_runtime import (
     apply_runtime_config_overrides,
     build_password_summary,
+    collect_clipboard_passwords,
     collect_cli_passwords,
     password_summary_item,
     prompt_for_passwords,
@@ -74,6 +75,7 @@ def handle(args, ctx):
             prompt_text=ctx.core_text("password_prompt"),
             input_prompt=ctx.core_text("password_input_prompt"),
         )
+        clipboard_passwords = collect_clipboard_passwords(args)
     except Exception as exc:
         return EXIT_USAGE, CliCommandResult(command=COMMAND, inputs={"paths": list(args.paths)}, summary={}, errors=[str(exc)])
 
@@ -96,6 +98,7 @@ def handle(args, ctx):
         runner, summary, password_summary = _run_extract_attempt(
             config,
             passwords,
+            clipboard_passwords=clipboard_passwords,
             use_builtin_passwords=not args.no_builtin_passwords,
             target_paths=target_paths,
             direct_file=bool(getattr(args, "direct_file", False)),
@@ -137,6 +140,7 @@ def handle(args, ctx):
         passwords,
         use_builtin_passwords=not args.no_builtin_passwords,
         recent_passwords=runner.recent_passwords,
+        clipboard_passwords=clipboard_passwords,
     )
 
     result = CliCommandResult(
@@ -170,13 +174,18 @@ def _run_extract_attempt(
     config: dict,
     passwords: list[str],
     *,
+    clipboard_passwords: list[str] | None = None,
     use_builtin_passwords: bool,
     target_paths: list[str],
     direct_file: bool = False,
     quiet: bool = False,
     verbose: bool = False,
 ):
-    password_summary = build_password_summary(passwords, use_builtin_passwords=use_builtin_passwords)
+    password_summary = build_password_summary(
+        passwords,
+        use_builtin_passwords=use_builtin_passwords,
+        clipboard_passwords=clipboard_passwords,
+    )
     run_config = dict(config)
     run_config["cli"] = {
         **(config.get("cli", {}) if isinstance(config.get("cli"), dict) else {}),
@@ -195,6 +204,7 @@ def _run_extract_attempt(
         passwords,
         use_builtin_passwords=use_builtin_passwords,
         recent_passwords=runner.recent_passwords,
+        clipboard_passwords=clipboard_passwords,
     )
     return runner, summary, password_summary
 

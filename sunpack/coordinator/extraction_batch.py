@@ -28,6 +28,11 @@ from sunpack.contracts.extraction import ExtractionResult
 from sunpack.extraction.knowledge import write_extraction_result
 from sunpack.extraction.scheduler import ExtractionScheduler
 from sunpack.extraction.progress import filter_extraction_manifest_payload, filter_extraction_outputs
+from sunpack.passwords.internal.lists import dedupe_passwords
+from sunpack.passwords.internal.local_files import (
+    DIRECTORY_PASSWORD_CONTEXT_FACT,
+    discover_directory_passwords_for_archive,
+)
 from sunpack.rename.scheduler import RenameScheduler
 from sunpack.repair.candidate import RepairCandidate, candidate_feature_payload
 from sunpack.repair.knowledge import (
@@ -127,6 +132,7 @@ class ExtractionBatchRunner:
         self.repair_stage = ArchiveRepairStage(self.config)
         self.repair_loop_limits = RepairLoopLimits.from_config(self.repair_stage.config)
         self.verifier = VerificationScheduler(self.config, password_session=self.extractor.password_session)
+        self._directory_password_contexts: dict[str, list[str]] = {}
         performance = self.config.get("performance", {}) if isinstance(self.config.get("performance"), dict) else {}
         self.resource_inspector = ResourcePreflightInspector(
             password_session=self.extractor.password_session,
@@ -145,6 +151,36 @@ class ExtractionBatchRunner:
             for task in tasks:
                 task.apply_path_mapping(path_map)
 
+    def _annotate_directory_password_contexts(self, tasks: list[ArchiveTask]) -> None:
+        for task in tasks:
+            inherited = self._inherited_directory_passwords(task.main_path)
+            local = discover_directory_passwords_for_archive(task.main_path, self.config)
+            context = dedupe_passwords([*inherited, *local])
+            task.fact_bag.set(DIRECTORY_PASSWORD_CONTEXT_FACT, context)
+
+    def _remember_directory_password_context(self, output_dir: str, task: ArchiveTask) -> None:
+        if not output_dir:
+            return
+        values = task.fact_bag.get(DIRECTORY_PASSWORD_CONTEXT_FACT)
+        if not isinstance(values, list):
+            return
+        context = dedupe_passwords([str(value) for value in values if isinstance(value, str)])
+        key = os.path.normcase(os.path.abspath(output_dir))
+        self._directory_password_contexts[key] = context
+
+    def _inherited_directory_passwords(self, archive_path: str) -> list[str]:
+        if not archive_path:
+            return []
+        archive_key = os.path.normcase(os.path.abspath(archive_path))
+        best_root = ""
+        best_context: list[str] = []
+        for root_key, context in self._directory_password_contexts.items():
+            if archive_key == root_key or archive_key.startswith(root_key + os.sep):
+                if len(root_key) > len(best_root):
+                    best_root = root_key
+                    best_context = context
+        return list(best_context)
+
     def execute(self, tasks: List[ArchiveTask]) -> List[str]:
         if not tasks:
             if self.progress_reporter is not None:
@@ -153,6 +189,7 @@ class ExtractionBatchRunner:
 
         self.prepare_tasks(tasks)
         tasks = self.analysis_stage.analyze_tasks(tasks)
+        self._annotate_directory_password_contexts(tasks)
         output_dir_resolver = self.rename_scheduler.build_output_dir_resolver(
             tasks,
             self.extractor.default_output_dir_for_task,
@@ -169,6 +206,7 @@ class ExtractionBatchRunner:
             output_dir = self.collect_result(task, outcome)
             if output_dir:
                 output_dirs.append(output_dir)
+                self._remember_directory_password_context(output_dir, task)
                 payload = outcome.result.output_inventory_payload
                 if isinstance(payload, dict):
                     output_inventories[os.path.normcase(os.path.abspath(output_dir))] = payload

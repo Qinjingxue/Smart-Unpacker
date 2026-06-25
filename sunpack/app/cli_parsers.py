@@ -61,7 +61,10 @@ def build_password_parser(ctx: CliContext) -> argparse.ArgumentParser:
     parser.add_argument("-p", "--password", action="append", default=[], help=ctx.core_text("password"))
     parser.add_argument("--pw-file", dest="password_file", help=ctx.core_text("password_file"))
     parser.add_argument("--ask-pw", dest="prompt_passwords", action="store_true", help=ctx.core_text("prompt_passwords"))
+    parser.add_argument("--clipboard-pw", dest="clipboard_passwords", action="store_true", help=ctx.core_text("clipboard_passwords"))
     parser.add_argument("--no-builtin-pw", dest="no_builtin_passwords", action="store_true", help=ctx.core_text("no_builtin_passwords"))
+    parser.add_argument("--no-dir-pw", dest="directory_passwords", action="store_false", default=None, help=ctx.core_text("no_directory_passwords"))
+    parser.add_argument("--dir-pw-file", dest="directory_password_files", action="append", default=[], help=ctx.core_text("directory_password_file"))
     return parser
 
 

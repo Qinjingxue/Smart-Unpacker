@@ -45,6 +45,7 @@ class PasswordResolver:
         fact_bag: FactBag | None = None,
         part_paths: list[str] | None = None,
         archive_key: str = "",
+        directory_passwords: list[str] | None = None,
     ) -> PasswordResolution:
         archive_key = archive_key or self._archive_key_from_fact_bag(fact_bag) or archive_path
         if self.password_session.has_resolved(archive_key):
@@ -78,7 +79,8 @@ class PasswordResolver:
 
         fingerprint = build_archive_fingerprint(archive_path, part_paths)
 
-        candidates = self.password_tester.password_store.candidates()
+        directory_passwords = list(directory_passwords or [])
+        candidates = self.password_tester.password_store.candidates(directory_passwords=directory_passwords)
         if not candidates:
             if self._facts_require_password(fact_bag):
                 return PasswordResolution(
@@ -97,6 +99,7 @@ class PasswordResolver:
             fact_bag=fact_bag,
             part_paths=part_paths,
             fingerprint=fingerprint,
+            directory_passwords=directory_passwords,
         )
         if search.status == PasswordSearchStatus.FOUND:
             resolution = self._remember_search(archive_key, search, encrypted=True)
@@ -140,9 +143,13 @@ class PasswordResolver:
         fact_bag: FactBag | None,
         part_paths: list[str] | None,
         fingerprint,
+        directory_passwords: list[str] | None,
     ) -> PasswordSearchResult:
         archive_input = self._archive_input_for_password_probe(fact_bag)
-        candidates = PasswordCandidatePipeline.from_password_store(self.password_tester.password_store)
+        candidates = PasswordCandidatePipeline.from_password_store(
+            self.password_tester.password_store,
+            directory_passwords=directory_passwords,
+        )
         return self.password_scheduler.plan_for_extraction(PasswordJob(
             archive_path=archive_path,
             part_paths=part_paths,

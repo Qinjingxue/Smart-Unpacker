@@ -15,6 +15,7 @@ from sunpack.extraction.internal.workflow.split_entry import SplitEntryResolver
 from sunpack.extraction.progress import has_recoverable_partial_outputs, write_extraction_progress_manifest_payload
 from sunpack.contracts.extraction import ExtractionResult
 from sunpack.passwords.result import PasswordResolution, PasswordResolutionStatus
+from sunpack.passwords.internal.local_files import directory_password_context_from_task
 from sunpack.support import archive_knowledge_projection as knowledge_view
 from sunpack.support.output_inventory import OutputInventory, collect_output_inventory
 
@@ -361,6 +362,7 @@ class SingleArchiveExtractor:
         )
 
     def _resolve_password(self, task: ArchiveTask, archive_path: str, part_paths: list[str]):
+        directory_passwords = directory_password_context_from_task(task)
         known_password = knowledge_view.archive_password(task)
         if known_password is not None:
             return PasswordResolution(
@@ -384,7 +386,7 @@ class SingleArchiveExtractor:
                 encrypted=True,
                 error_text="password verification is unsupported for patched archive state without a resolved password",
             )
-        if not self.password_store.has_candidates() and not self._task_requires_password(task):
+        if not self._password_store_has_candidates(directory_passwords) and not self._task_requires_password(task):
             return PasswordResolution(
                 password="",
                 status=PasswordResolutionStatus.UNENCRYPTED,
@@ -396,6 +398,7 @@ class SingleArchiveExtractor:
             task.fact_bag,
             part_paths=part_paths,
             archive_key=task.key,
+            directory_passwords=directory_passwords,
         )
 
     @staticmethod
@@ -404,6 +407,12 @@ class SingleArchiveExtractor:
         if isinstance(health, dict) and (health.get("is_encrypted") or health.get("is_wrong_password")):
             return True
         return False
+
+    def _password_store_has_candidates(self, directory_passwords: list[str]) -> bool:
+        try:
+            return bool(self.password_store.has_candidates(directory_passwords=directory_passwords))
+        except TypeError:
+            return bool(directory_passwords or self.password_store.has_candidates())
 
     def _startupinfo(self):
         import sys
