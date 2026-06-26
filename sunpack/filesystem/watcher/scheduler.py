@@ -191,6 +191,13 @@ class WatchScheduler:
         now = time.time()
         with self._lock:
             previous = self._pending.get(candidate.path)
+            if (
+                previous is not None
+                and previous.size == candidate.size
+                and previous.mtime == candidate.mtime
+                and not force
+            ):
+                return
             self._pending[candidate.path] = candidate
             if previous is None or previous.size != candidate.size or previous.mtime != candidate.mtime:
                 self._stable_since[candidate.path] = now
@@ -312,6 +319,15 @@ class WatchScheduler:
             )
             self.log.write(status, path=candidate.path, error=error, failures=failure_payloads)
             return WatchRunResult(processed=1, failed=1, errors=failed)
+        if _summary_processed_no_tasks(summary):
+            self.state.mark(
+                candidate.path,
+                candidate.size,
+                candidate.mtime,
+                status="ignored_no_tasks",
+            )
+            self.log.write("no_tasks_found", path=candidate.path)
+            return WatchRunResult(processed=1)
         self._remember_known_output_roots(generated_output_dirs)
         self.state.mark(
             candidate.path,
@@ -528,3 +544,12 @@ def _failure_to_dict(failure) -> dict:
         except Exception:
             return {}
     return {}
+
+
+def _summary_processed_no_tasks(summary) -> bool:
+    return (
+        int(getattr(summary, "success_count", 0) or 0) <= 0
+        and not list(getattr(summary, "failed_tasks", []) or [])
+        and not list(getattr(summary, "processed_keys", []) or [])
+        and not list(getattr(summary, "recovered_outputs", []) or [])
+    )

@@ -80,7 +80,7 @@ class WatchStateStore:
         entry = self.entries.get(self.key_for(path, size, mtime))
         if entry is None:
             return False
-        if entry.status in {"done", "failed_terminal"}:
+        if entry.status in {"done", "failed_terminal", "ignored_no_tasks"}:
             return True
         if entry.status == "failed_password":
             if force:

@@ -270,3 +270,67 @@ def test_watch_service_waits_on_control_event_until_scheduler_is_due(tmp_path, m
     assert service.run() == 0
     assert len(scheduler_runs) == 2
     assert waits == [5.0, 5.0]
+
+
+def test_watch_service_deduplicates_unchanged_pending_ticks(tmp_path, monkeypatch):
+    state_dir = tmp_path / ".sunpack_watch"
+    state_dir.mkdir()
+    monkeypatch.setattr(
+        service_module,
+        "load_config",
+        lambda: {"watch": {"state_dir": str(state_dir), "roots": [], "tray_enabled": False}},
+    )
+    service = WatchService(runner_factory=FakeRunner)
+    written = []
+
+    class FakeLog:
+        def write(self, event, **payload):
+            written.append((event, payload))
+
+    class FakeScheduler:
+        interval_seconds = 5.0
+
+        def __init__(self):
+            self.results = iter([
+                SimpleNamespace(processed=0, succeeded=0, failed=0, pending=1, errors=[]),
+                SimpleNamespace(processed=0, succeeded=0, failed=0, pending=1, errors=[]),
+                SimpleNamespace(processed=1, succeeded=1, failed=0, pending=0, errors=[]),
+                SimpleNamespace(processed=0, succeeded=0, failed=0, pending=1, errors=[]),
+            ])
+
+        def run_once(self):
+            return next(self.results)
+
+    class FakeControlEvents:
+        def __init__(self):
+            self.count = 0
+
+        def start(self):
+            pass
+
+        def wait(self, timeout_seconds):
+            self.count += 1
+            return CONTROL_STOP if self.count == 4 else None
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(service, "_acquire_lock", lambda: True)
+    monkeypatch.setattr(service, "_release_lock", lambda: None)
+    monkeypatch.setattr(service, "_start_scheduler", lambda: setattr(service, "scheduler", FakeScheduler()))
+    monkeypatch.setattr(service, "_stop_scheduler", lambda: setattr(service, "scheduler", None))
+    monkeypatch.setattr(service, "_start_tray", lambda: None)
+    monkeypatch.setattr(service, "_stop_tray", lambda: None)
+    service.control_events = FakeControlEvents()
+    service.log = FakeLog()
+    times = iter([0.0, 5.0, 10.0, 15.0])
+    monkeypatch.setattr(service_module.time, "monotonic", lambda: next(times))
+
+    assert service.run() == 0
+
+    tick_payloads = [payload for event, payload in written if event == "scheduler_tick"]
+    assert tick_payloads == [
+        {"processed": 0, "succeeded": 0, "failed": 0, "pending": 1, "errors": []},
+        {"processed": 1, "succeeded": 1, "failed": 0, "pending": 0, "errors": []},
+        {"processed": 0, "succeeded": 0, "failed": 0, "pending": 1, "errors": []},
+    ]

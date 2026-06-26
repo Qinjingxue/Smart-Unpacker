@@ -197,6 +197,7 @@ class WatchService:
         self.tray = None
         self._stop_requested = False
         self._lock_handle = None
+        self._last_idle_tick_signature = None
         self.log = WatchLogStore(os.path.join(self.state_dir, "events.jsonl"))
 
     @property
@@ -226,10 +227,11 @@ class WatchService:
                     if self.scheduler is not active_scheduler:
                         active_scheduler = self.scheduler
                         next_scheduler_run = 0.0
+                        self._last_idle_tick_signature = None
                     if now >= next_scheduler_run:
                         try:
                             result = self.scheduler.run_once()
-                            if result.processed or result.failed or result.pending or result.errors:
+                            if self._should_log_scheduler_tick(result):
                                 self.log.write(
                                     "scheduler_tick",
                                     processed=result.processed,
@@ -292,6 +294,7 @@ class WatchService:
         if self.scheduler is not None:
             self.scheduler.stop()
         self.scheduler = None
+        self._last_idle_tick_signature = None
 
     def _start_tray(self) -> None:
         if not self.service_config.get("tray_enabled", True) or self.tray_factory is None:
@@ -316,6 +319,20 @@ class WatchService:
             return
         if event == CONTROL_RELOAD:
             self._reload_config()
+
+    def _should_log_scheduler_tick(self, result) -> bool:
+        if result.processed or result.failed or result.errors:
+            self._last_idle_tick_signature = None
+            return True
+        pending = int(getattr(result, "pending", 0) or 0)
+        if pending <= 0:
+            self._last_idle_tick_signature = None
+            return False
+        signature = ("pending", pending)
+        if signature == self._last_idle_tick_signature:
+            return False
+        self._last_idle_tick_signature = signature
+        return True
 
     def _reload_config(self) -> None:
         self.config = load_config()

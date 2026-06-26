@@ -302,6 +302,69 @@ def test_watch_scheduler_sends_stable_nonstandard_extension_to_main_pipeline(tmp
     assert captured["paths"] == [str(target.resolve())]
 
 
+def test_watch_scheduler_does_not_log_duplicate_pending_candidate(tmp_path, monkeypatch):
+    monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
+
+    watch_root = tmp_path / "in"
+    watch_root.mkdir()
+    archive_path = watch_root / "sample.zip"
+    _write_zip(archive_path)
+
+    watcher = WatchScheduler(
+        {"watch": {"clipboard_monitor_enabled": False}},
+        [str(watch_root)],
+        out_dir=str(tmp_path / "out"),
+        state_path=str(tmp_path / ".sunpack_watch" / "state.json"),
+        stable_seconds=0,
+        initial_scan=False,
+    )
+    watcher.enqueue(str(archive_path))
+    watcher.enqueue(str(archive_path))
+
+    assert watcher.pending_count == 1
+    log_text = (tmp_path / ".sunpack_watch" / "events.jsonl").read_text(encoding="utf-8")
+    assert log_text.count('"event":"candidate_queued"') == 1
+
+
+def test_watch_scheduler_logs_no_tasks_found_without_done_for_empty_summary(tmp_path, monkeypatch):
+    monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
+
+    class NoTasksRunner:
+        def __init__(self, config):
+            self.context = SimpleNamespace(flatten_candidates=set(), recovered_outputs=[])
+
+        def run_targets(self, paths):
+            return SimpleNamespace(success_count=0, failed_tasks=[], processed_keys=[], recovered_outputs=[], failures=[])
+
+    watch_root = tmp_path / "in"
+    watch_root.mkdir()
+    target = watch_root / "paper.pdf"
+    target.write_bytes(b"%PDF-" + b"x" * 1024)
+
+    watcher = WatchScheduler(
+        {"watch": {"clipboard_monitor_enabled": False, "output_suppression_seconds": 0}},
+        [str(watch_root)],
+        out_dir=str(tmp_path / "out"),
+        state_path=str(tmp_path / ".sunpack_watch" / "state.json"),
+        stable_seconds=0,
+        initial_scan=False,
+        runner_factory=NoTasksRunner,
+    )
+    watcher.enqueue(str(target))
+
+    result = watcher.run_once()
+    watcher.enqueue(str(target))
+
+    assert result.processed == 1
+    assert result.succeeded == 0
+    assert watcher.pending_count == 0
+    entry = next(iter(watcher.state.entries.values()))
+    assert entry.status == "ignored_no_tasks"
+    log_text = (tmp_path / ".sunpack_watch" / "events.jsonl").read_text(encoding="utf-8")
+    assert '"event":"no_tasks_found"' in log_text
+    assert '"event":"done"' not in log_text
+
+
 def test_watch_scheduler_ignores_output_root_events(tmp_path, monkeypatch):
     monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
 
