@@ -1,4 +1,5 @@
 import ctypes
+from ctypes import wintypes
 
 from sunpack.passwords.internal.lists import dedupe_passwords, parse_password_lines
 
@@ -24,8 +25,22 @@ def _read_windows_unicode_clipboard(*, max_chars: int) -> str:
     try:
         user32 = ctypes.windll.user32
         kernel32 = ctypes.windll.kernel32
+
+        user32.IsClipboardFormatAvailable.argtypes = [wintypes.UINT]
+        user32.IsClipboardFormatAvailable.restype = wintypes.BOOL
+        user32.OpenClipboard.argtypes = [wintypes.HWND]
+        user32.OpenClipboard.restype = wintypes.BOOL
+        user32.GetClipboardData.argtypes = [wintypes.UINT]
+        user32.GetClipboardData.restype = wintypes.HANDLE
+        user32.CloseClipboard.argtypes = []
+        user32.CloseClipboard.restype = wintypes.BOOL
+
+        kernel32.GlobalSize.argtypes = [wintypes.HANDLE]
         kernel32.GlobalSize.restype = ctypes.c_size_t
+        kernel32.GlobalLock.argtypes = [wintypes.HANDLE]
         kernel32.GlobalLock.restype = ctypes.c_void_p
+        kernel32.GlobalUnlock.argtypes = [wintypes.HANDLE]
+        kernel32.GlobalUnlock.restype = wintypes.BOOL
     except Exception:
         return ""
 
@@ -40,13 +55,17 @@ def _read_windows_unicode_clipboard(*, max_chars: int) -> str:
         if not handle:
             return ""
         size_bytes = int(kernel32.GlobalSize(handle) or 0)
-        if size_bytes <= 0 or size_bytes > max_chars * 2 + 2:
+        wchar_size = ctypes.sizeof(ctypes.c_wchar)
+        if size_bytes <= 0 or size_bytes > (max_chars + 1) * wchar_size:
+            return ""
+        char_count = min(max_chars + 1, size_bytes // wchar_size)
+        if char_count <= 0:
             return ""
         pointer = kernel32.GlobalLock(handle)
         if not pointer:
             return ""
         try:
-            return ctypes.wstring_at(pointer, max_chars)
+            return ctypes.wstring_at(pointer, char_count).split("\0", 1)[0][:max_chars]
         finally:
             kernel32.GlobalUnlock(handle)
     except Exception:
