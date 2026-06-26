@@ -63,6 +63,21 @@ def test_installer_stops_existing_watch_before_upgrade_and_cleans_owned_files():
     assert 'Type: files; Name: "{app}\\*.txt"' not in script
 
 
+def test_uninstaller_stops_running_watch_before_removing_files():
+    script = (ROOT / "installer" / "SunPack.iss").read_text(encoding="utf-8")
+
+    assert "function InitializeUninstall(): Boolean" in script
+    assert "function WaitForExistingWatchToExit: Boolean" in script
+    assert "function StopExistingWatchAndWait: Boolean" in script
+    assert "RemoveStartupRunValue;" in script
+    assert "Result := StopExistingWatchAndWait;" in script
+    assert "Please stop it and run the uninstaller again." in script
+    assert "Get-Process -ErrorAction SilentlyContinue" in script
+    assert "[System.IO.Path]::GetFullPath($_.Path).Equals([System.IO.Path]::GetFullPath($target)" in script
+    assert "$deadline = (Get-Date).AddSeconds(20)" in script
+    assert "Start-Sleep -Milliseconds 250" in script
+
+
 def test_uninstaller_removes_generated_watch_and_cache_state():
     script = (ROOT / "installer" / "SunPack.iss").read_text(encoding="utf-8")
 

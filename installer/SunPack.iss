@@ -203,6 +203,12 @@ begin
   RegDeleteValue(HKCU, StartupRegistryKey, StartupValueName);
 end;
 
+function PowerShellSingleQuotedString(Value: string): string;
+begin
+  StringChangeEx(Value, '''', '''''', True);
+  Result := '''' + Value + '''';
+end;
+
 procedure RunContextMenuScript(RegisterMenu: Boolean);
 var
   PowerShellPath: string;
@@ -248,10 +254,61 @@ begin
     Log(Format('Existing SunPack watch stop command exited with code %d', [ResultCode]));
 end;
 
-function PrepareToInstall(var NeedsRestart: Boolean): String;
+function WaitForExistingWatchToExit: Boolean;
+var
+  PowerShellPath: string;
+  AppPath: string;
+  Command: string;
+  Parameters: string;
+  ResultCode: Integer;
+begin
+  Result := True;
+  AppPath := ExpandConstant('{app}\sunpack.exe');
+  if not FileExists(AppPath) then
+    Exit;
+  PowerShellPath := ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe');
+  Command :=
+    '$target = ' + PowerShellSingleQuotedString(AppPath) + '; ' +
+    '$deadline = (Get-Date).AddSeconds(20); ' +
+    'do { ' +
+    '  $running = @(Get-Process -ErrorAction SilentlyContinue | Where-Object { ' +
+    '    try { $_.Path -and ([System.IO.Path]::GetFullPath($_.Path).Equals([System.IO.Path]::GetFullPath($target), [System.StringComparison]::OrdinalIgnoreCase)) } catch { $false } ' +
+    '  }); ' +
+    '  if ($running.Count -eq 0) { exit 0 }; ' +
+    '  Start-Sleep -Milliseconds 250; ' +
+    '} while ((Get-Date) -lt $deadline); ' +
+    'exit 1';
+  Parameters := '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command ' + AddQuotes(Command);
+  if not Exec(PowerShellPath, Parameters, '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+  begin
+    Log('Failed to wait for existing SunPack watch process to exit.');
+    Result := False;
+  end
+  else if ResultCode <> 0 then
+  begin
+    Log(Format('Timed out waiting for existing SunPack watch process to exit: %d', [ResultCode]));
+    Result := False;
+  end;
+end;
+
+function StopExistingWatchAndWait: Boolean;
 begin
   StopExistingWatch;
+  Result := WaitForExistingWatchToExit;
+end;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+begin
+  StopExistingWatchAndWait;
   Result := '';
+end;
+
+function InitializeUninstall(): Boolean;
+begin
+  RemoveStartupRunValue;
+  Result := StopExistingWatchAndWait;
+  if not Result then
+    MsgBox('SunPack Watch is still running. Please stop it and run the uninstaller again.', mbError, MB_OK);
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
