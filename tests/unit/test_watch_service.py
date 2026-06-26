@@ -174,6 +174,52 @@ def test_watch_service_reads_roots_from_txt_not_config(tmp_path, monkeypatch):
     assert service.roots == [str(txt_root.resolve())]
 
 
+def test_watch_service_scheduler_uses_directory_scan_mode_not_watch_recursive(tmp_path, monkeypatch):
+    roots_path = tmp_path / "sunpack_watch_roots.txt"
+    watch_root = tmp_path / "watch-root"
+    watch_root.mkdir()
+    roots_path.write_text(str(watch_root), encoding="utf-8")
+    state_dir = tmp_path / ".sunpack_watch"
+    captured = {}
+    original_scheduler = service_module.WatchScheduler
+
+    class FakeScheduler:
+        def __init__(self, config, roots, **kwargs):
+            captured["config"] = config
+            captured["roots"] = roots
+            captured["kwargs"] = kwargs
+            self.recursive = original_scheduler(config, roots, **kwargs).recursive
+
+        def start(self):
+            captured["started"] = True
+
+        def stop(self):
+            pass
+
+    monkeypatch.setattr(service_module, "watch_roots_path", lambda: roots_path)
+    monkeypatch.setattr(service_module, "WatchScheduler", FakeScheduler)
+    monkeypatch.setattr(
+        service_module,
+        "load_config",
+        lambda: {
+            "filesystem": {"directory_scan_mode": "current_dir_only", "scan_filters": []},
+            "watch": {
+                "state_dir": str(state_dir),
+                "recursive": True,
+                "tray_enabled": False,
+            },
+        },
+    )
+
+    service = WatchService(runner_factory=FakeRunner)
+    service._start_scheduler()
+
+    assert captured["roots"] == [str(watch_root.resolve())]
+    assert "recursive" not in captured["kwargs"]
+    assert service.scheduler.recursive is False
+    assert captured["started"] is True
+
+
 def test_watch_service_waits_on_control_event_until_scheduler_is_due(tmp_path, monkeypatch):
     state_dir = tmp_path / ".sunpack_watch"
     state_dir.mkdir()

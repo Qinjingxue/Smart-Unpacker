@@ -75,6 +75,57 @@ def test_watch_scheduler_uses_watchdog_observer_and_initial_scan(tmp_path, monke
     assert FakeObserver.stopped_count == 1
 
 
+def test_watch_scheduler_uses_directory_scan_mode_for_non_recursive_watch(tmp_path, monkeypatch):
+    FakeObserver.started_count = 0
+    monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
+
+    watch_root = tmp_path / "in"
+    nested = watch_root / "nested"
+    nested.mkdir(parents=True)
+    _write_zip(watch_root / "root.zip")
+    _write_zip(nested / "nested.zip")
+
+    watcher = WatchScheduler(
+        {"filesystem": {"directory_scan_mode": "-", "scan_filters": []}},
+        [str(watch_root)],
+        out_dir=str(tmp_path / "out"),
+        state_path=str(tmp_path / "state.json"),
+        stable_seconds=0,
+        initial_scan=True,
+    )
+
+    watcher.start()
+
+    assert watcher._observer.scheduled[0][1:] == (str(watch_root.resolve()), False)
+    pending_names = {Path(path).name for path in watcher._pending}
+    assert pending_names == {"root.zip"}
+
+
+def test_watch_scheduler_uses_directory_scan_mode_for_recursive_watch(tmp_path, monkeypatch):
+    monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
+
+    watch_root = tmp_path / "in"
+    nested = watch_root / "nested"
+    nested.mkdir(parents=True)
+    _write_zip(watch_root / "root.zip")
+    _write_zip(nested / "nested.zip")
+
+    watcher = WatchScheduler(
+        {"filesystem": {"directory_scan_mode": "*", "scan_filters": []}},
+        [str(watch_root)],
+        out_dir=str(tmp_path / "out"),
+        state_path=str(tmp_path / "state.json"),
+        stable_seconds=0,
+        initial_scan=True,
+    )
+
+    watcher.start()
+
+    assert watcher._observer.scheduled[0][1:] == (str(watch_root.resolve()), True)
+    pending_names = {Path(path).name for path in watcher._pending}
+    assert pending_names == {"root.zip", "nested.zip"}
+
+
 def test_watch_scheduler_uses_stop_timeout_without_suffix_prefilter(tmp_path, monkeypatch):
     FakeObserver.started_count = 0
     FakeObserver.stopped_count = 0
@@ -451,3 +502,29 @@ def test_watch_scheduler_writes_jsonl_log_for_failures(tmp_path, monkeypatch):
     text = log_path.read_text(encoding="utf-8")
     assert '"event":"failed_password"' in text
     assert "wrong password" in text
+
+
+def test_watch_scheduler_silently_ignores_metadata_events(tmp_path, monkeypatch):
+    monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
+
+    watch_root = tmp_path
+    metadata_dir = tmp_path / ".sunpack_watch"
+    metadata_dir.mkdir()
+    log_path = metadata_dir / "events.jsonl"
+    log_path.write_text("", encoding="utf-8")
+
+    watcher = WatchScheduler(
+        {},
+        [str(watch_root)],
+        out_dir=str(tmp_path / "out"),
+        state_path=str(metadata_dir / "state.json"),
+        stable_seconds=0,
+        initial_scan=False,
+    )
+
+    handler = scheduler_module._WatchEventHandler(watcher)
+    handler._handle_path(str(log_path))
+    watcher.enqueue(str(log_path))
+
+    assert watcher.pending_count == 0
+    assert log_path.read_text(encoding="utf-8") == ""

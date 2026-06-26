@@ -4,7 +4,7 @@ import re
 from sunpack_native import scan_directory_entries as _NATIVE_SCAN_DIRECTORY_ENTRIES
 
 from sunpack.contracts.filesystem import DirectorySnapshot, FileEntry
-from sunpack.config.detection_view import DIRECTORY_SCAN_CURRENT_DIR_ONLY, directory_scan_mode
+from sunpack.config.detection_view import directory_scan_is_recursive
 from sunpack.filesystem.filters import build_filters
 from sunpack.filesystem.filters.base import ScanCandidate, ScanFilter
 from sunpack.filesystem.filters.modules.scene_semantics import (
@@ -25,8 +25,7 @@ class DirectoryScanner:
     def _effective_max_depth(self, max_depth: int | None, config: dict | None) -> int | None:
         if max_depth is not None:
             return max_depth
-        mode = directory_scan_mode(config or {})
-        if mode == DIRECTORY_SCAN_CURRENT_DIR_ONLY:
+        if not directory_scan_is_recursive(config or {}):
             return 0
         return None
 

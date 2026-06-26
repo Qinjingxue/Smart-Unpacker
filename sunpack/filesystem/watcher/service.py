@@ -281,7 +281,6 @@ class WatchService:
             state_path=state_path,
             interval_seconds=float(watch_config.get("interval_seconds", 5.0)),
             stable_seconds=float(watch_config.get("stable_seconds", 10.0)),
-            recursive=bool(watch_config.get("recursive", True)),
             initial_scan=bool(watch_config.get("initial_scan", True)),
             observer_stop_timeout_seconds=float(watch_config.get("observer_stop_timeout_seconds", 5.0)),
             runner_factory=self.runner_factory,

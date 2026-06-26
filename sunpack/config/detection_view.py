@@ -44,6 +44,10 @@ def directory_scan_mode(config: dict[str, Any]) -> str:
     return normalize_config_value(DIRECTORY_SCAN_MODE_PATH, value)
 
 
+def directory_scan_is_recursive(config: dict[str, Any]) -> bool:
+    return directory_scan_mode(config) != DIRECTORY_SCAN_CURRENT_DIR_ONLY
+
+
 def scan_filters_config(config: dict[str, Any]) -> list[dict[str, Any]]:
     if not scan_filters_enabled(config):
         return []

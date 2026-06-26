@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
 
+from sunpack.config.detection_view import directory_scan_is_recursive
 from sunpack.config.fields.watch import DEFAULT_WATCH_CONFIG
 from sunpack.contracts.filesystem import FileEntry
 from sunpack.filesystem.directory_scanner import apply_ordered_filters_to_entries
@@ -52,7 +53,7 @@ class WatchScheduler:
         self.out_dir = os.path.abspath(out_dir)
         self.interval_seconds = max(0.1, float(DEFAULT_WATCH_CONFIG["interval_seconds"] if interval_seconds is None else interval_seconds))
         self.stable_seconds = max(0.0, float(DEFAULT_WATCH_CONFIG["stable_seconds"] if stable_seconds is None else stable_seconds))
-        self.recursive = bool(DEFAULT_WATCH_CONFIG["recursive"] if recursive is None else recursive)
+        self.recursive = directory_scan_is_recursive(config) if recursive is None else bool(recursive)
         self.initial_scan = bool(DEFAULT_WATCH_CONFIG["initial_scan"] if initial_scan is None else initial_scan)
         self.observer_stop_timeout_seconds = max(
             0.0,
@@ -149,6 +150,8 @@ class WatchScheduler:
             return len(self._pending)
 
     def enqueue(self, path: str, *, force: bool = False):
+        if self.should_ignore_event_path(path):
+            return
         candidate = _candidate_for_event_path(path)
         if candidate is None:
             self.log.write("candidate_ignored", path=path, reason="not_a_file_or_unreadable")
@@ -188,6 +191,11 @@ class WatchScheduler:
             mtime=candidate.mtime,
             pending=self.pending_count,
         )
+
+    def should_ignore_event_path(self, path: str) -> bool:
+        if not path:
+            return True
+        return self._is_under_metadata_dir(path)
 
     def enqueue_many(self, paths: Iterable[str]):
         for path in paths:
@@ -343,6 +351,8 @@ class _WatchEventHandler(FileSystemEventHandler):
             self._handle_path(src_path)
 
     def _handle_path(self, path: str):
+        if self.scheduler.should_ignore_event_path(path):
+            return
         if is_directory_password_file(path, self.scheduler.config):
             self.scheduler.notify_password_table_changed(path)
             return

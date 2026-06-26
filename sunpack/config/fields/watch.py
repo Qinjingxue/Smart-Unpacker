@@ -6,7 +6,6 @@ from sunpack.config.schema import ConfigField
 DEFAULT_WATCH_CONFIG = {
     "interval_seconds": 5.0,
     "stable_seconds": 10.0,
-    "recursive": True,
     "initial_scan": True,
     "max_folders": 16,
     "observer_stop_timeout_seconds": 5.0,
@@ -30,9 +29,9 @@ def normalize_watch_config(value: Any) -> dict[str, Any]:
         raise ValueError("watch must be an object")
     config = dict(DEFAULT_WATCH_CONFIG)
     config.update(value)
+    config.pop("recursive", None)
     config["interval_seconds"] = max(0.1, _float_field(config, "interval_seconds"))
     config["stable_seconds"] = max(0.0, _float_field(config, "stable_seconds"))
-    config["recursive"] = bool(config.get("recursive", True))
     config["initial_scan"] = bool(config.get("initial_scan", True))
     config["max_folders"] = max(1, _int_field(config, "max_folders"))
     config["observer_stop_timeout_seconds"] = max(0.0, _float_field(config, "observer_stop_timeout_seconds"))
