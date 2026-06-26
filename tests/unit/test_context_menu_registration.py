@@ -45,7 +45,6 @@ def test_context_menu_commands_are_safe_for_drive_roots_and_keep_password_flag()
         assert ntpath.normpath(argv[2]) == "D:\\"
         assert ntpath.normpath(argv[argv.index("--out-dir") + 1]) == "D:\\"
         assert "--ask-pw" in argv
-        assert "--clipboard-pw" in argv
         assert "--pause" in argv
 
     for key in ("folder_direct", "background_direct"):
@@ -53,30 +52,39 @@ def test_context_menu_commands_are_safe_for_drive_roots_and_keep_password_flag()
         argv = _windows_argv(expanded)
         assert argv[1] == "extract"
         assert "--ask-pw" not in argv
-        assert "--clipboard-pw" in argv
         assert "--pause" in argv
 
     for key in ("folder_watch", "background_watch"):
         expanded = commands[key].replace("%1", "D:\\").replace("%V", "D:\\")
         argv = _windows_argv(expanded)
-        assert argv[1:3] == ["watch", "add"]
-        assert ntpath.normpath(argv[3]) == "D:\\"
-        assert "--start" in argv
-        assert "--pause" in argv
+        assert ntpath.basename(argv[0]).lower() == "powershell.exe"
+        assert "-WindowStyle" in argv
+        assert "Hidden" in argv
+        command_text = argv[argv.index("-Command") + 1]
+        assert "Start-Process" in command_text
+        assert "-WindowStyle Hidden" in command_text
+        assert "'watch','add'," in command_text
+        assert "D:" in command_text
+        assert "\\." in command_text
+        assert "'--start'" in command_text
+        assert "--pause" not in command_text
 
 
 def test_context_menu_directory_token_is_stable_for_normal_paths():
-    command = 'sunpack.exe extract "%V\\." --out-dir "%V\\." --ask-pw --clipboard-pw --pause'
+    command = 'sunpack.exe extract "%V\\." --out-dir "%V\\." --ask-pw --pause'
     argv = _windows_argv(command.replace("%V", r"D:\Archives"))
 
     assert ntpath.normpath(argv[2]) == r"D:\Archives"
     assert ntpath.normpath(argv[4]) == r"D:\Archives"
-    assert argv[5:] == ["--ask-pw", "--clipboard-pw", "--pause"]
+    assert argv[5:] == ["--ask-pw", "--pause"]
 
-    watch_command = 'sunpack.exe watch add "%V\\." --start --pause'
+    watch_command = '"powershell.exe" -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command "Start-Process -WindowStyle Hidden -FilePath ''sunpack.exe'' -ArgumentList @(''watch'',''add'',''%V\\.'',''--start'')"'
     watch_argv = _windows_argv(watch_command.replace("%V", r"D:\Archives"))
-    assert ntpath.normpath(watch_argv[3]) == r"D:\Archives"
-    assert watch_argv[4:] == ["--start", "--pause"]
+    command_text = watch_argv[watch_argv.index("-Command") + 1]
+    assert "watch" in command_text
+    assert "add" in command_text
+    assert r"D:\Archives\." in command_text
+    assert "--start" in command_text
 
 
 def _windows_argv(command: str) -> list[str]:

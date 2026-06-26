@@ -31,8 +31,7 @@ manifest 是唯一入口。`packaged_path` 必须位于 `models/` 内，`sha256`
 检查资产与加载能力：
 
 ```powershell
-python sunpack.py models status --json
-python sunpack.py models status --load --json
+python -m pytest tests\unit\test_model_runtime.py
 ```
 
 ## 推理链路
@@ -82,7 +81,7 @@ sunpack.repair -> repair_training
 2. 将选定模型的完整运行时资产复制到 `models/<format>/<role>/`。
 3. 计算 `model.pt` SHA-256。
 4. 更新 `models/manifest.json` 的语义、算法、路径和哈希。
-5. 运行 `python sunpack.py models status --load --json`。
+5. 运行 `python -m pytest tests\unit\test_model_runtime.py`。
 6. 执行模型运行时测试和 Windows 完整构建。
 
 不要在构建脚本中写死训练 run 路径，也不要为实验模型增加动态加载兼容层。

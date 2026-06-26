@@ -125,10 +125,10 @@ bridge 运行时还需要同一工具目录中的 `7z.dll`。
 ```powershell
 .\.venv\Scripts\python.exe -c "import sunpack_native as n; print(n.native_available(), n.scanner_version())"
 .\.venv\Scripts\python.exe -c "from sunpack.support.sevenzip_bridge import NativePasswordTester; print(NativePasswordTester().available())"
-.\.venv\Scripts\python.exe sunpack.py models status --load
+.\.venv\Scripts\python.exe -m pytest tests\unit\test_model_runtime.py
 ```
 
-三个命令分别验证 Rust 扩展、C++ bridge 和正式模型资产。`-RepairSystem lite` 环境下，`models status` 会返回“修复系统未包含”的正常状态，不会尝试加载模型。
+三个命令分别验证 Rust 扩展、C++ bridge 和正式模型资产。`-RepairSystem lite` 环境下，模型运行时测试会验证“修复系统未包含”的正常状态，不会尝试加载模型。
 
 ## 模型资产
 
@@ -143,7 +143,7 @@ bridge 运行时还需要同一工具目录中的 `7z.dll`。
 `sha256` 是对应目录中 `model.pt` 的哈希。训练结果不会自动成为运行时模型；发布新模型时必须把完整资产复制到 `models/<format>/<role>`，更新 manifest，并运行：
 
 ```powershell
-python sunpack.py models status --load --json
+python -m pytest tests\unit\test_model_runtime.py
 ```
 
 产品代码只能从 `sunpack.repair.model` 加载模型，不能从 `repair_training/runs` 或外部包加载。

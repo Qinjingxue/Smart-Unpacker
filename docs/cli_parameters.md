@@ -20,7 +20,6 @@ sunpack.exe <command> [options] [paths...]
 - `inspect`：输出每个文件的检测细节，不修改文件。
 - `passwords`：查看实际会参与尝试的密码列表。
 - `config`：查看或校验简化配置与高级配置合并后的有效配置。
-- `models`：检查正式模型资产、manifest 哈希和模型加载能力。
 
 ## 通用输出参数
 
@@ -170,9 +169,9 @@ python sunpack.py passwords [options]
 | `--ask-pw` | 在终端交互输入密码。 |
 | `--no-builtin-pw` | 不使用内置高频密码表。 |
 
-密码合并顺序为：命令行密码、最近成功密码、内置密码。重复项会去重。
+密码合并顺序为：最近成功密码、同目录密码、命令行密码、剪贴板密码、内置密码。重复项会去重。
 
-`passwords` 命令只展示本次命令参数和内置密码合并后的列表；最近成功密码是在一次 `extract` 运行过程中由 `passwords` 层维护的运行态列表。
+`passwords` 命令展示本次命令参数、配置开启时启动时读取的当前剪贴板文本，以及内置密码合并后的列表；最近成功密码是在一次 `extract` 运行过程中由 `passwords` 层维护的运行态列表。
 
 示例：
 
@@ -212,25 +211,6 @@ python sunpack.py config validate
 python sunpack.py config validate --json
 ```
 
-## models
-
-用法：
-
-```powershell
-python sunpack.py models status [--load] [--json]
-```
-
-`status` 读取 `models/manifest.json`，检查每个格式的 diagnosis/policy 资产、model card、语义和 `model.pt` SHA-256。加上 `--load` 后会在 CPU 上实际加载模型，验证 PyTorch/PyG 运行时和模型结构是否兼容。
-
-示例：
-
-```powershell
-python sunpack.py models status
-python sunpack.py models status --load
-python sunpack.py models status --load --json
-```
-
-命令在所有声明的模型都可用且成功加载时返回 `0`；资产缺失、哈希不符或加载异常时返回 `1`。
 
 ## Windows 右键菜单
 

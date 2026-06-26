@@ -101,6 +101,16 @@ class WatchScheduler:
         if self.initial_scan:
             for candidate in scan_watch_candidates(self.watch_roots, recursive=self.recursive):
                 self.enqueue(candidate.path)
+        self.log.write(
+            "scheduler_started",
+            roots=self.watch_roots,
+            out_dir=self.out_dir,
+            recursive=self.recursive,
+            initial_scan=self.initial_scan,
+            pending=self.pending_count,
+            stable_seconds=self.stable_seconds,
+            interval_seconds=self.interval_seconds,
+        )
 
     def stop(self):
         if not self._started:
@@ -141,16 +151,28 @@ class WatchScheduler:
     def enqueue(self, path: str, *, force: bool = False):
         candidate = _candidate_for_event_path(path)
         if candidate is None:
+            self.log.write("candidate_ignored", path=path, reason="not_a_file_or_unreadable")
             return
         if not self._is_under_watched_root(candidate.path):
+            self.log.write("candidate_ignored", path=candidate.path, reason="outside_watched_roots")
             return
         if self._is_under_output_root(candidate.path):
+            self.log.write("candidate_ignored", path=candidate.path, reason="under_output_root")
             return
         if self._is_under_metadata_dir(candidate.path):
+            self.log.write("candidate_ignored", path=candidate.path, reason="under_metadata_dir")
             return
         if not self._passes_filesystem_filters(candidate):
+            self.log.write("candidate_ignored", path=candidate.path, reason="filtered_out")
             return
         if self.state.should_skip(candidate.path, candidate.size, candidate.mtime, force=force):
+            self.log.write(
+                "candidate_ignored",
+                path=candidate.path,
+                reason="already_processed",
+                size=candidate.size,
+                mtime=candidate.mtime,
+            )
             return
         now = time.time()
         with self._lock:
@@ -158,6 +180,14 @@ class WatchScheduler:
             self._pending[candidate.path] = candidate
             if previous is None or previous.size != candidate.size or previous.mtime != candidate.mtime:
                 self._stable_since[candidate.path] = now
+        self.log.write(
+            "candidate_queued",
+            path=candidate.path,
+            force=force,
+            size=candidate.size,
+            mtime=candidate.mtime,
+            pending=self.pending_count,
+        )
 
     def enqueue_many(self, paths: Iterable[str]):
         for path in paths:
@@ -227,6 +257,7 @@ class WatchScheduler:
     def _process_candidate(self, candidate: WatchCandidate) -> WatchRunResult:
         if self.runner_factory is None:
             raise RuntimeError("WatchScheduler requires a runner_factory.")
+        self.log.write("processing_started", path=candidate.path, size=candidate.size, mtime=candidate.mtime)
         run_config = dict(self.config)
         run_config["output"] = {
             **(run_config.get("output", {}) if isinstance(run_config.get("output"), dict) else {}),

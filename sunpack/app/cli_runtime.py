@@ -92,8 +92,9 @@ def collect_cli_passwords(
     return dedupe_passwords(passwords)
 
 
-def collect_clipboard_passwords(args) -> list[str]:
-    if not getattr(args, "clipboard_passwords", False):
+def collect_clipboard_passwords(config: dict | None) -> list[str]:
+    password_config = config.get("passwords") if isinstance(config, dict) else {}
+    if not isinstance(password_config, dict) or not bool(password_config.get("clipboard_passwords_enabled", False)):
         return []
     return read_clipboard_passwords()
 

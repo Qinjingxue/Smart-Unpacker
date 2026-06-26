@@ -282,7 +282,7 @@ watch 不再按扩展名判断“是否归档”。稳定文件先经过 `filesy
 | `strict_model_errors` | `bool` | `false` | 模型推理异常时是否直接抛出；关闭时记录模型错误并返回 unavailable。 |
 | `graph_stop_stale_patience` | `int` | `100` | repair 图连续多少次没有最佳状态提升后强制 stop。 |
 
-双模型由 `sunpack.repair.model.RepairModelRuntime` 直接管理。`provider_package`、`step_mode`、`fallback_to_selector` 和 `disable_beam_when_model_active` 均已删除，配置中出现会直接报错。模型资产由根目录 `models/manifest.json` 管理，可用 `python sunpack.py models status --load` 检查。
+双模型由 `sunpack.repair.model.RepairModelRuntime` 直接管理。`provider_package`、`step_mode`、`fallback_to_selector` 和 `disable_beam_when_model_active` 均已删除，配置中出现会直接报错。模型资产由根目录 `models/manifest.json` 管理，可用 `python -m pytest tests\unit\test_model_runtime.py` 检查。
 
 ### repair stages
 
@@ -471,6 +471,8 @@ print(sorted(get_repair_module_registry().all()))
 ## 密码文件
 
 `builtin_passwords.txt` 是内置高频密码表，按每行一个密码读取。不存在时程序会尝试创建默认文件。
+
+`passwords.clipboard_passwords_enabled` 控制普通 CLI 启动时是否读取当前剪贴板文本作为本次运行的密码来源。该开关不影响 watch 服务的剪贴板监控；watch 监控仍由 `watch.clipboard_monitor_enabled` 控制，并会把最近剪贴板密码合并进内置密码文件的托管区。
 
 密码来源顺序：
 

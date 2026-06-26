@@ -8,7 +8,7 @@ from ctypes import wintypes
 from pathlib import Path
 
 from sunpack.config.payload_io import read_config_payload
-from sunpack.passwords.internal.clipboard import read_clipboard_passwords
+from sunpack.filesystem.watcher.service import watch_roots_path
 from sunpack.platform.windows.startup import disable_startup, enable_startup, startup_status
 
 
@@ -36,15 +36,39 @@ LPARAM = getattr(wintypes, "LPARAM", ctypes.c_void_p)
 
 ID_OPEN_CONFIG = 1001
 ID_OPEN_LOG_DIR = 1002
-ID_ADD_CLIPBOARD = 1003
+ID_OPEN_WATCH_ROOTS = 1003
 ID_RELOAD = 1004
 ID_EXIT = 1005
 ID_TOGGLE_STARTUP = 1006
+
+TRAY_TEXTS = {
+    "en": {
+        "tip": "SunPack Watch",
+        "open_config": "Open config",
+        "open_log_dir": "Open log directory",
+        "open_watch_roots": "Open watch folders file",
+        "disable_startup": "Disable startup",
+        "enable_startup": "Enable startup",
+        "reload": "Reload",
+        "exit": "Exit",
+    },
+    "zh": {
+        "tip": "智能解压监控",
+        "open_config": "打开配置文件",
+        "open_log_dir": "打开日志目录",
+        "open_watch_roots": "打开监控目录列表",
+        "disable_startup": "关闭开机自启",
+        "enable_startup": "启用开机自启",
+        "reload": "重新加载",
+        "exit": "退出",
+    },
+}
 
 
 class WindowsTrayIcon:
     def __init__(self, service):
         self.service = service
+        self.language = _tray_language_from_service(service)
         self.user32 = ctypes.windll.user32
         self.shell32 = ctypes.windll.shell32
         self.kernel32 = ctypes.windll.kernel32
@@ -140,7 +164,7 @@ class WindowsTrayIcon:
         data.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP
         data.uCallbackMessage = WM_TRAYICON
         data.hIcon = self._load_icon()
-        data.szTip = "SunPack Watch"
+        data.szTip = self._text("tip")
         self.shell32.Shell_NotifyIconW(NIM_ADD, ctypes.byref(data))
 
     def _delete_icon(self, hwnd) -> None:
@@ -175,12 +199,12 @@ class WindowsTrayIcon:
 
     def _show_menu(self, hwnd) -> None:
         menu = self.user32.CreatePopupMenu()
-        self.user32.AppendMenuW(menu, MF_STRING, ID_OPEN_CONFIG, "Open config")
-        self.user32.AppendMenuW(menu, MF_STRING, ID_OPEN_LOG_DIR, "Open log directory")
-        self.user32.AppendMenuW(menu, MF_STRING, ID_ADD_CLIPBOARD, "Add clipboard path")
+        self.user32.AppendMenuW(menu, MF_STRING, ID_OPEN_CONFIG, self._text("open_config"))
+        self.user32.AppendMenuW(menu, MF_STRING, ID_OPEN_LOG_DIR, self._text("open_log_dir"))
+        self.user32.AppendMenuW(menu, MF_STRING, ID_OPEN_WATCH_ROOTS, self._text("open_watch_roots"))
         self.user32.AppendMenuW(menu, MF_STRING, ID_TOGGLE_STARTUP, self._startup_menu_label())
-        self.user32.AppendMenuW(menu, MF_STRING, ID_RELOAD, "Reload")
-        self.user32.AppendMenuW(menu, MF_STRING, ID_EXIT, "Exit")
+        self.user32.AppendMenuW(menu, MF_STRING, ID_RELOAD, self._text("reload"))
+        self.user32.AppendMenuW(menu, MF_STRING, ID_EXIT, self._text("exit"))
         point = wintypes.POINT()
         self.user32.GetCursorPos(ctypes.byref(point))
         self.user32.SetForegroundWindow(hwnd)
@@ -193,8 +217,8 @@ class WindowsTrayIcon:
             self._open_path(str(config_path))
         elif command_id == ID_OPEN_LOG_DIR:
             self._open_path(self.service.state_dir)
-        elif command_id == ID_ADD_CLIPBOARD:
-            self.service.add_clipboard_path(read_clipboard_passwords)
+        elif command_id == ID_OPEN_WATCH_ROOTS:
+            self._open_watch_roots_file()
         elif command_id == ID_TOGGLE_STARTUP:
             self._toggle_startup()
         elif command_id == ID_RELOAD:
@@ -207,12 +231,25 @@ class WindowsTrayIcon:
     def _open_path(self, path: str) -> None:
         self.shell32.ShellExecuteW(None, "open", path, None, None, SW_SHOWNORMAL)
 
+    def _open_watch_roots_file(self) -> None:
+        roots_path = watch_roots_path()
+        try:
+            roots_path.parent.mkdir(parents=True, exist_ok=True)
+            roots_path.touch(exist_ok=True)
+        except OSError:
+            return
+        self._open_path(str(roots_path))
+
     def _startup_menu_label(self) -> str:
         try:
             enabled, _ = startup_status()
         except Exception:
             enabled = False
-        return "Disable startup" if enabled else "Enable startup"
+        return self._text("disable_startup" if enabled else "enable_startup")
+
+    def _text(self, key: str) -> str:
+        lang_texts = TRAY_TEXTS.get(self.language) or TRAY_TEXTS["en"]
+        return lang_texts.get(key, TRAY_TEXTS["en"].get(key, key))
 
     def _toggle_startup(self) -> None:
         try:
@@ -266,3 +303,9 @@ def _candidate_icon_paths() -> list[Path]:
         executable_dir / "sunpack.ico",
         Path(__file__).resolve().parents[3] / "sunpack.ico",
     ]
+
+
+def _tray_language_from_service(service) -> str:
+    config = getattr(service, "config", {}) if service is not None else {}
+    cli_config = config.get("cli") if isinstance(config, dict) and isinstance(config.get("cli"), dict) else {}
+    return "zh" if str(cli_config.get("language") or "").strip().lower() == "zh" else "en"

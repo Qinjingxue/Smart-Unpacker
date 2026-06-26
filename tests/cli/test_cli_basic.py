@@ -29,7 +29,7 @@ class CliBasicTests(unittest.TestCase):
         self.assertIn("inspect", result.stdout)
         self.assertIn("passwords", result.stdout)
         self.assertIn("config", result.stdout)
-        self.assertIn("models", result.stdout)
+        self.assertNotIn("models", result.stdout)
 
     def test_scan_json_shape(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -103,7 +103,8 @@ class CliBasicTests(unittest.TestCase):
         payload = json.loads(result.stdout)
         self.assertEqual(payload["command"], "passwords")
         self.assertEqual(payload["summary"]["user_password_count"], 1)
-        self.assertEqual(payload["items"][0]["combined_passwords"], ["secret"])
+        self.assertEqual(payload["items"][0]["user_passwords"], ["secret"])
+        self.assertEqual(payload["items"][0]["combined_passwords"][0], "secret")
 
     def test_json_mode_rejects_interactive_password_prompt_as_json(self):
         result = run_cli("passwords", "--json", "--ask-pw")
@@ -173,22 +174,6 @@ class CliBasicTests(unittest.TestCase):
         self.assertTrue(payload["inputs"]["direct_file"])
         self.assertEqual(payload["summary"]["success_count"], 1)
 
-    def test_models_status_loads_bundled_model_contract(self):
-        result = run_cli("models", "status", "--load", "--json")
-
-        self.assertEqual(result.returncode, 0, result.stderr)
-        payload = json.loads(result.stdout)
-        self.assertTrue(payload["summary"]["ok"])
-        item = payload["items"][0]
-        if item.get("repair_system") == "lite":
-            self.assertEqual(item["models"], [])
-            self.assertEqual(item["supported_formats"], [])
-            self.assertIn("not included", item["disabled_reason"])
-            return
-        models = item["models"]
-        self.assertEqual({item["role"] for item in models}, {"diagnosis", "policy"})
-        self.assertTrue(all(item["loaded"] for item in models))
-
     def test_inspect_help_documents_analyze_option(self):
         result = run_cli("inspect", "-h")
 
@@ -210,6 +195,7 @@ class CliBasicTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertIn("--json", result.stdout)
         self.assertIn("--password", result.stdout)
+        self.assertNotIn("--clipboard-pw", result.stdout)
         self.assertNotIn("--quiet", result.stdout)
         self.assertNotIn("--verbose", result.stdout)
         self.assertNotIn("--pause", result.stdout)

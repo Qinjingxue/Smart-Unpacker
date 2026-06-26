@@ -44,6 +44,8 @@ def test_installer_stops_existing_watch_before_upgrade_and_cleans_owned_files():
     assert "function PrepareToInstall" in script
     assert "StopExistingWatch;" in script
     assert "[InstallDelete]" in script
+    assert 'Excludes: "sunpack_watch_roots.txt"' in script
+    assert 'Source: "{#SourceDir}\\sunpack_watch_roots.txt"; DestDir: "{app}"; Flags: onlyifdoesntexist skipifsourcedoesntexist' in script
     assert 'Type: files; Name: "{app}\\*.exe"' in script
     assert 'Type: filesandordirs; Name: "{app}\\sunpack"' in script
     assert 'Type: filesandordirs; Name: "{app}\\tools"' in script

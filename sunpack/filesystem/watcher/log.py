@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,7 @@ class WatchLogStore:
     def write(self, event: str, **payload: Any) -> None:
         record = {
             "ts": time.time(),
+            "time": datetime.now(timezone.utc).isoformat(),
             "event": event,
             **payload,
         }

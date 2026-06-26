@@ -11,9 +11,9 @@ from sunpack.app.cli_types import CliCommandResult
 from sunpack.config.loader import load_config
 from sunpack.coordinator.runner import PipelineRunner
 from sunpack.filesystem.watcher.service import (
-    SERVICE_LOCK,
     WatchService,
     add_watch_roots,
+    is_watch_lock_active,
     list_watch_roots,
     remove_watch_roots,
     service_state_dir,
@@ -133,49 +133,49 @@ def _handle_start(args):
 
 
 def _handle_add(args):
-    config_path, added = add_watch_roots(list(args.paths or []))
+    roots_path, added = add_watch_roots(list(args.paths or []))
     config = load_config()
-    reload_path = signal_reload(config)
+    reload_event = signal_reload(config)
     started = False
     if getattr(args, "start", False) and not _watch_running(config):
         started = _start_watch_background()
     return 0, CliCommandResult(
         command=COMMAND,
         inputs={"action": "add", "paths": list(args.paths or [])},
-        summary={"config_path": str(config_path), "added": added, "reload_signal": reload_path, "started": started},
+        summary={"roots_path": str(roots_path), "added": added, "reload_event": reload_event, "started": started},
         items=added,
     )
 
 
 def _handle_remove(args):
-    config_path, removed = remove_watch_roots(list(args.paths or []))
-    reload_path = signal_reload(load_config())
+    roots_path, removed = remove_watch_roots(list(args.paths or []))
+    reload_event = signal_reload(load_config())
     return 0, CliCommandResult(
         command=COMMAND,
         inputs={"action": "remove", "paths": list(args.paths or [])},
-        summary={"config_path": str(config_path), "removed": removed, "reload_signal": reload_path},
+        summary={"roots_path": str(roots_path), "removed": removed, "reload_event": reload_event},
         items=removed,
     )
 
 
 def _handle_list():
-    config_path, roots = list_watch_roots()
+    roots_path, roots = list_watch_roots()
     return 0, CliCommandResult(
         command=COMMAND,
         inputs={"action": "list"},
-        summary={"config_path": str(config_path), "count": len(roots)},
+        summary={"roots_path": str(roots_path), "count": len(roots)},
         items=roots,
     )
 
 
 def _handle_reload():
     path = signal_reload(load_config())
-    return 0, CliCommandResult(command=COMMAND, inputs={"action": "reload"}, summary={"reload_signal": path})
+    return 0, CliCommandResult(command=COMMAND, inputs={"action": "reload"}, summary={"reload_event": path})
 
 
 def _handle_stop():
     path = signal_stop(load_config())
-    return 0, CliCommandResult(command=COMMAND, inputs={"action": "stop"}, summary={"stop_signal": path})
+    return 0, CliCommandResult(command=COMMAND, inputs={"action": "stop"}, summary={"stop_event": path})
 
 
 def _handle_status():
@@ -206,7 +206,7 @@ def _handle_startup(args):
 
 
 def _watch_running(config: dict) -> bool:
-    return os.path.exists(os.path.join(service_state_dir(config), SERVICE_LOCK))
+    return is_watch_lock_active(config)
 
 
 def _start_watch_background() -> bool:

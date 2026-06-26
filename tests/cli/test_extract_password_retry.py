@@ -38,6 +38,7 @@ def test_extract_prompts_for_password_retry_after_wrong_password(tmp_path, monke
 
     answers = iter(["y", "secret", ""])
     monkeypatch.setattr(extract, "PipelineRunner", FakeRunner)
+    monkeypatch.setattr(extract, "collect_clipboard_passwords", lambda _config: [])
     monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
 
     args = SimpleNamespace(
@@ -96,6 +97,7 @@ def test_extract_verbose_prints_partial_recovery_file_details(tmp_path, monkeypa
             )
 
     monkeypatch.setattr(extract, "PipelineRunner", FakeRunner)
+    monkeypatch.setattr(extract, "collect_clipboard_passwords", lambda _config: [])
     args = SimpleNamespace(
         paths=[str(target)],
         password=[],
@@ -158,6 +160,7 @@ def test_extract_normal_mode_keeps_partial_file_details_out_of_console(tmp_path,
             )
 
     monkeypatch.setattr(extract, "PipelineRunner", FakeRunner)
+    monkeypatch.setattr(extract, "collect_clipboard_passwords", lambda _config: [])
     args = SimpleNamespace(
         paths=[str(target)],
         password=[],
@@ -237,6 +240,7 @@ def test_extract_json_schema_includes_partial_recovery_contract(tmp_path, monkey
             )
 
     monkeypatch.setattr(extract, "PipelineRunner", FakeRunner)
+    monkeypatch.setattr(extract, "collect_clipboard_passwords", lambda _config: [])
     args = SimpleNamespace(
         paths=[str(target)],
         password=["secret"],

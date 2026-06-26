@@ -69,18 +69,18 @@ def handle(args, ctx):
     if missing_paths:
         return result_for_missing(COMMAND, args, missing_paths)
 
+    config = load_config()
+    config_overrides = apply_runtime_config_overrides(config, args)
     try:
         passwords = collect_cli_passwords(
             args,
             prompt_text=ctx.core_text("password_prompt"),
             input_prompt=ctx.core_text("password_input_prompt"),
         )
-        clipboard_passwords = collect_clipboard_passwords(args)
+        clipboard_passwords = collect_clipboard_passwords(config)
     except Exception as exc:
         return EXIT_USAGE, CliCommandResult(command=COMMAND, inputs={"paths": list(args.paths)}, summary={}, errors=[str(exc)])
 
-    config = load_config()
-    config_overrides = apply_runtime_config_overrides(config, args)
     common_root = resolve_common_root(target_paths)
     config.setdefault("output", {})["common_root"] = common_root
 

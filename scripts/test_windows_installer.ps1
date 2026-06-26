@@ -105,6 +105,24 @@ try {
         throw "Startup Run value is incorrect: $startupCommand"
     }
 
+    $watchRootsPath = Join-Path $installRoot "sunpack_watch_roots.txt"
+    $watchRootsContent = "D:\Archives`nE:\Incoming`n"
+    Set-Content -LiteralPath $watchRootsPath -Value $watchRootsContent -Encoding UTF8 -NoNewline
+    Invoke-Checked -FilePath $resolvedInstaller -Arguments @(
+        "/VERYSILENT",
+        "/SUPPRESSMSGBOXES",
+        "/NORESTART",
+        "/SP-",
+        "/TASKS=addtopath,contextmenu,autostart",
+        "/DIR=$installRoot",
+        "/LOG=$installLog"
+    )
+    $watchRootsAfterUpgrade = Get-Content -LiteralPath $watchRootsPath -Raw -Encoding UTF8
+    if ($watchRootsAfterUpgrade -ne $watchRootsContent) {
+        throw "Upgrade install overwrote the existing watch roots file: $watchRootsPath"
+    }
+    Remove-Item -LiteralPath $watchRootsPath -Force
+
     $uninstaller = Get-ChildItem -LiteralPath $installRoot -Filter "unins*.exe" -File | Select-Object -First 1
     if ($null -eq $uninstaller) {
         throw "Inno Setup uninstaller was not created under: $installRoot"

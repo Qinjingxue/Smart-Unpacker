@@ -122,12 +122,11 @@ function New-CommandString {
     )
 
     $passwordArg = if ($PromptPasswords) { " --ask-pw" } else { "" }
-    $clipboardArg = " --clipboard-pw"
     if ($Launcher.Mode -eq "app") {
-        return ('"{0}" extract "{1}" --out-dir "{2}"{3}{4} --pause' -f $Launcher.AppPath, $TargetToken, $OutDirToken, $passwordArg, $clipboardArg)
+        return ('"{0}" extract "{1}" --out-dir "{2}"{3} --pause' -f $Launcher.AppPath, $TargetToken, $OutDirToken, $passwordArg)
     }
 
-    return ('"{0}" "{1}" extract "{2}" --out-dir "{3}"{4}{5} --pause' -f $Launcher.AppPath, $Launcher.ScriptPath, $TargetToken, $OutDirToken, $passwordArg, $clipboardArg)
+    return ('"{0}" "{1}" extract "{2}" --out-dir "{3}"{4} --pause' -f $Launcher.AppPath, $Launcher.ScriptPath, $TargetToken, $OutDirToken, $passwordArg)
 }
 
 function New-WatchCommandString {
@@ -137,10 +136,28 @@ function New-WatchCommandString {
     )
 
     if ($Launcher.Mode -eq "app") {
-        return ('"{0}" watch add "{1}" --start --pause' -f $Launcher.AppPath, $TargetToken)
+        return New-HiddenStartProcessCommand -FilePath $Launcher.AppPath -ArgumentList @("watch", "add", $TargetToken, "--start")
     }
 
-    return ('"{0}" "{1}" watch add "{2}" --start --pause' -f $Launcher.AppPath, $Launcher.ScriptPath, $TargetToken)
+    return New-HiddenStartProcessCommand -FilePath $Launcher.AppPath -ArgumentList @($Launcher.ScriptPath, "watch", "add", $TargetToken, "--start")
+}
+
+function New-HiddenStartProcessCommand {
+    param(
+        [string]$FilePath,
+        [string[]]$ArgumentList
+    )
+
+    $quotedFilePath = ConvertTo-PowerShellSingleQuotedString -Value $FilePath
+    $quotedArgs = ($ArgumentList | ForEach-Object { ConvertTo-PowerShellSingleQuotedString -Value $_ }) -join ","
+    $command = "Start-Process -WindowStyle Hidden -FilePath $quotedFilePath -ArgumentList @($quotedArgs)"
+    return ('"powershell.exe" -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command "{0}"' -f $command)
+}
+
+function ConvertTo-PowerShellSingleQuotedString {
+    param([string]$Value)
+
+    return "'" + ($Value -replace "'", "''") + "'"
 }
 
 function ConvertTo-RootSafeDirectoryToken {

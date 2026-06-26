@@ -59,7 +59,8 @@ Name: "contextmenu"; Description: "Register the SunPack folder context menu"; Gr
 Name: "autostart"; Description: "Start SunPack Watch when Windows starts"; GroupDescription: "Background watch:"
 
 [Files]
-Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#SourceDir}\*"; DestDir: "{app}"; Excludes: "sunpack_watch_roots.txt"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#SourceDir}\sunpack_watch_roots.txt"; DestDir: "{app}"; Flags: onlyifdoesntexist skipifsourcedoesntexist
 
 [InstallDelete]
 Type: files; Name: "{app}\*.pyd"
