@@ -34,6 +34,7 @@ class WatchStateStore:
         self.path = Path(path)
         self.entries: dict[str, WatchStateEntry] = {}
         self.password_generation = 0
+        self.password_source_signature = ""
         self.load()
 
     def load(self):
@@ -48,6 +49,7 @@ class WatchStateStore:
             self.password_generation = max(0, int(payload.get("password_generation", 0))) if isinstance(payload, dict) else 0
         except (TypeError, ValueError):
             self.password_generation = 0
+        self.password_source_signature = str(payload.get("password_source_signature") or "") if isinstance(payload, dict) else ""
         if not isinstance(entries, dict):
             return
         for key, value in entries.items():
@@ -61,8 +63,9 @@ class WatchStateStore:
     def save(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
         payload: dict[str, Any] = {
-            "version": 2,
+            "version": 3,
             "password_generation": self.password_generation,
+            "password_source_signature": self.password_source_signature,
             "entries": {key: asdict(value) for key, value in self.entries.items()},
         }
         temp = self.path.with_name(f".{self.path.name}.tmp")
@@ -88,10 +91,25 @@ class WatchStateStore:
             return entry.password_generation >= self.password_generation
         return False
 
-    def mark_password_source_changed(self) -> int:
+    def mark_password_source_changed(self, signature: str | None = None) -> int:
+        if signature is not None:
+            self.password_source_signature = signature
         self.password_generation += 1
         self.save()
         return self.password_generation
+
+    def record_password_source_signature(self, signature: str) -> bool:
+        signature = str(signature or "")
+        previous = self.password_source_signature
+        changed = bool(previous and previous != signature)
+        if not previous and any(entry.status == "failed_password" for entry in self.entries.values()):
+            changed = True
+        self.password_source_signature = signature
+        if changed:
+            self.password_generation += 1
+        if previous != signature or changed:
+            self.save()
+        return changed
 
     def failed_password_entries_under(self, directory: str, *, include_subtree: bool = True) -> list[WatchStateEntry]:
         root = Path(directory).resolve()

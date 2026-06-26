@@ -5,6 +5,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import sunpack.filesystem.watcher.scheduler as scheduler_module
+import sunpack.passwords.internal.builtin as builtin_module
+import sunpack.passwords.internal.clipboard_monitor as clipboard_monitor_module
 from sunpack.contracts.failures import FailureInfo, FailureKind
 from sunpack.filesystem.watcher.scheduler import WatchScheduler
 
@@ -74,6 +76,27 @@ def test_watch_scheduler_uses_watchdog_observer_and_initial_scan(tmp_path, monke
 
     watcher.stop()
     assert FakeObserver.stopped_count == 1
+
+
+def test_watch_scheduler_observes_builtin_password_file_directory(tmp_path, monkeypatch):
+    monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
+    builtin_path = tmp_path / "resources" / "builtin_passwords.txt"
+    monkeypatch.setattr(builtin_module, "builtin_password_path", lambda: builtin_path)
+    watch_root = tmp_path / "in"
+    watch_root.mkdir()
+    watcher = WatchScheduler(
+        {"watch": {"clipboard_monitor_enabled": False}},
+        [str(watch_root)],
+        out_dir=str(tmp_path / "out"),
+        state_path=str(tmp_path / "state.json"),
+        initial_scan=False,
+    )
+
+    watcher.start()
+
+    scheduled = {(Path(path), recursive) for _handler, path, recursive in watcher._observer.scheduled}
+    assert (watch_root.resolve(), True) in scheduled
+    assert (builtin_path.parent.resolve(), False) in scheduled
 
 
 def test_watch_scheduler_preserves_existing_directory_password_file(tmp_path, monkeypatch):
@@ -740,6 +763,264 @@ def test_watch_scheduler_retries_password_failure_after_password_source_change(t
     assert attempts["count"] == 2
     entry = next(iter(watcher.state.entries.values()))
     assert entry.status == "done"
+
+
+def test_watch_scheduler_defaults_to_user_and_builtin_password_sources(tmp_path, monkeypatch):
+    monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
+    monkeypatch.setattr(scheduler_module, "get_builtin_passwords", lambda: ["builtin-secret"])
+    captured = []
+
+    class CapturingRunner:
+        recent_passwords = []
+
+        def __init__(self, config):
+            captured.append(config)
+
+        def run_targets(self, paths):
+            return SimpleNamespace(success_count=1, failed_tasks=[], failures=[])
+
+    watch_root = tmp_path / "in"
+    watch_root.mkdir()
+    archive_path = watch_root / "sample.zip"
+    archive_path.write_bytes(b"PK\x03\x04payload")
+    state_path = tmp_path / "state.json"
+    watcher = WatchScheduler(
+        {"user_passwords": ["user-secret"], "watch": {"clipboard_monitor_enabled": False}},
+        [str(watch_root)],
+        out_dir=str(tmp_path / "out"),
+        state_path=str(state_path),
+        stable_seconds=0,
+        initial_scan=False,
+        runner_factory=CapturingRunner,
+    )
+
+    watcher.enqueue(str(archive_path))
+    watcher.run_once()
+
+    assert captured[0]["user_passwords"] == ["user-secret"]
+    assert captured[0]["builtin_passwords"] == ["builtin-secret"]
+    state_text = state_path.read_text(encoding="utf-8")
+    assert "user-secret" not in state_text
+    assert "builtin-secret" not in state_text
+
+
+def test_watch_scheduler_clipboard_persistence_refreshes_candidates_and_retries(tmp_path, monkeypatch):
+    monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
+    builtin_path = tmp_path / "builtin_passwords.txt"
+    monkeypatch.setattr(builtin_module, "builtin_password_path", lambda: builtin_path)
+    monkeypatch.setattr(clipboard_monitor_module, "read_clipboard_passwords", lambda: ["clipboard-secret"])
+    attempts = []
+
+    class ConfigAwareRunner:
+        recent_passwords = []
+
+        def __init__(self, config):
+            self.config = config
+
+        def run_targets(self, paths):
+            candidates = list(self.config.get("builtin_passwords") or [])
+            attempts.append(candidates)
+            if "clipboard-secret" in candidates:
+                return SimpleNamespace(success_count=1, failed_tasks=[], failures=[])
+            return SimpleNamespace(
+                success_count=0,
+                failed_tasks=["wrong password"],
+                failures=[FailureInfo(FailureKind.WRONG_PASSWORD, "password_resolution", "wrong password")],
+            )
+
+    watch_root = tmp_path / "in"
+    watch_root.mkdir()
+    archive_path = watch_root / "sample.zip"
+    archive_path.write_bytes(b"PK\x03\x04payload")
+    watcher = WatchScheduler(
+        {"watch": {"clipboard_monitor_enabled": True, "password_retry_debounce_seconds": 0}},
+        [str(watch_root)],
+        out_dir=str(tmp_path / "out"),
+        state_path=str(tmp_path / "state.json"),
+        stable_seconds=0,
+        initial_scan=False,
+        runner_factory=ConfigAwareRunner,
+    )
+    watcher.enqueue(str(archive_path))
+    first = watcher.run_once()
+
+    watcher._clipboard_monitor._handle_clipboard_update()
+    generation = watcher.state.password_generation
+    scheduler_module._WatchEventHandler(watcher)._handle_path(str(builtin_path), event_type="modified")
+    second = watcher.run_once()
+
+    assert first.failed == 1
+    assert second.succeeded == 1
+    assert "clipboard-secret" not in attempts[0]
+    assert "clipboard-secret" in attempts[1]
+    assert "clipboard-secret" in builtin_path.read_text(encoding="utf-8")
+    assert watcher.state.password_generation == generation
+
+
+def test_watch_scheduler_retries_on_builtin_password_file_watchdog_event(tmp_path, monkeypatch):
+    monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
+    builtin_path = tmp_path / "resources" / "builtin_passwords.txt"
+    builtin_path.parent.mkdir()
+    builtin_path.write_text("wrong\n", encoding="utf-8")
+    monkeypatch.setattr(builtin_module, "builtin_password_path", lambda: builtin_path)
+    builtin_passwords = ["wrong"]
+    monkeypatch.setattr(scheduler_module, "get_builtin_passwords", lambda: list(builtin_passwords))
+    attempts = []
+
+    class ConfigAwareRunner:
+        recent_passwords = []
+
+        def __init__(self, config):
+            self.config = config
+
+        def run_targets(self, paths):
+            attempts.append(list(self.config.get("builtin_passwords") or []))
+            if "new-secret" in self.config.get("builtin_passwords", []):
+                return SimpleNamespace(success_count=1, failed_tasks=[], failures=[])
+            return SimpleNamespace(
+                success_count=0,
+                failed_tasks=["wrong password"],
+                failures=[FailureInfo(FailureKind.WRONG_PASSWORD, "password_resolution", "wrong password")],
+            )
+
+    watch_root = tmp_path / "in"
+    watch_root.mkdir()
+    archive_path = watch_root / "sample.zip"
+    archive_path.write_bytes(b"PK\x03\x04payload")
+    watcher = WatchScheduler(
+        {"watch": {"clipboard_monitor_enabled": False, "password_retry_debounce_seconds": 0}},
+        [str(watch_root)],
+        out_dir=str(tmp_path / "out"),
+        state_path=str(tmp_path / "state.json"),
+        stable_seconds=0,
+        initial_scan=False,
+        runner_factory=ConfigAwareRunner,
+    )
+    watcher.enqueue(str(archive_path))
+    watcher.run_once()
+
+    builtin_passwords.append("new-secret")
+    assert watcher.run_once().processed == 0
+    handler = scheduler_module._WatchEventHandler(watcher)
+    handler.on_moved(
+        SimpleNamespace(
+            src_path=str(builtin_path.with_name(".builtin_passwords.txt.tmp")),
+            dest_path=str(builtin_path),
+            is_directory=False,
+        )
+    )
+    result = watcher.run_once()
+
+    assert result.succeeded == 1
+    assert attempts == [["wrong"], ["wrong", "new-secret"]]
+
+
+def test_watch_scheduler_retries_persisted_password_failure_when_config_passwords_change(tmp_path, monkeypatch):
+    monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
+    monkeypatch.setattr(scheduler_module, "get_builtin_passwords", lambda: [])
+    attempts = []
+
+    class ConfigAwareRunner:
+        recent_passwords = []
+
+        def __init__(self, config):
+            self.config = config
+
+        def run_targets(self, paths):
+            attempts.append(list(self.config.get("user_passwords") or []))
+            if "new-secret" in self.config.get("user_passwords", []):
+                return SimpleNamespace(success_count=1, failed_tasks=[], failures=[])
+            return SimpleNamespace(
+                success_count=0,
+                failed_tasks=["wrong password"],
+                failures=[FailureInfo(FailureKind.WRONG_PASSWORD, "password_resolution", "wrong password")],
+            )
+
+    watch_root = tmp_path / "in"
+    watch_root.mkdir()
+    archive_path = watch_root / "sample.zip"
+    archive_path.write_bytes(b"PK\x03\x04payload")
+    state_path = tmp_path / "state.json"
+    first_watcher = WatchScheduler(
+        {"user_passwords": ["wrong"], "watch": {"clipboard_monitor_enabled": False, "password_retry_debounce_seconds": 0}},
+        [str(watch_root)],
+        out_dir=str(tmp_path / "out"),
+        state_path=str(state_path),
+        stable_seconds=0,
+        initial_scan=False,
+        runner_factory=ConfigAwareRunner,
+    )
+    first_watcher.enqueue(str(archive_path))
+    first_watcher.run_once()
+
+    second_watcher = WatchScheduler(
+        {"user_passwords": ["new-secret"], "watch": {"clipboard_monitor_enabled": False, "password_retry_debounce_seconds": 0}},
+        [str(watch_root)],
+        out_dir=str(tmp_path / "out"),
+        state_path=str(state_path),
+        stable_seconds=0,
+        initial_scan=False,
+        runner_factory=ConfigAwareRunner,
+    )
+    result = second_watcher.run_once()
+
+    assert result.succeeded == 1
+    assert attempts == [["wrong"], ["new-secret"]]
+
+
+def test_watch_scheduler_promotes_recent_success_password_and_retries_other_failures(tmp_path, monkeypatch):
+    monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
+    monkeypatch.setattr(scheduler_module, "get_builtin_passwords", lambda: [])
+    attempts = []
+
+    class LearningRunner:
+        def __init__(self, config):
+            self.config = config
+            self.recent_passwords = []
+
+        def run_targets(self, paths):
+            archive_name = Path(paths[0]).name
+            candidates = list(self.config.get("user_passwords") or [])
+            attempts.append((archive_name, candidates))
+            if archive_name == "teacher.zip":
+                self.recent_passwords = ["learned-secret"]
+                return SimpleNamespace(success_count=1, failed_tasks=[], failures=[])
+            if "learned-secret" in candidates:
+                return SimpleNamespace(success_count=1, failed_tasks=[], failures=[])
+            return SimpleNamespace(
+                success_count=0,
+                failed_tasks=["wrong password"],
+                failures=[FailureInfo(FailureKind.WRONG_PASSWORD, "password_resolution", "wrong password")],
+            )
+
+    watch_root = tmp_path / "in"
+    watch_root.mkdir()
+    failed_archive = watch_root / "failed.zip"
+    teacher_archive = watch_root / "teacher.zip"
+    failed_archive.write_bytes(b"PK\x03\x04failed")
+    teacher_archive.write_bytes(b"PK\x03\x04teacher")
+    watcher = WatchScheduler(
+        {"watch": {"clipboard_monitor_enabled": False, "password_retry_debounce_seconds": 0}},
+        [str(watch_root)],
+        out_dir=str(tmp_path / "out"),
+        state_path=str(tmp_path / "state.json"),
+        stable_seconds=0,
+        initial_scan=False,
+        runner_factory=LearningRunner,
+    )
+    watcher.enqueue(str(failed_archive))
+    watcher.run_once()
+    watcher.enqueue(str(teacher_archive))
+    learned = watcher.run_once()
+    retried = watcher.run_once()
+
+    assert learned.succeeded == 1
+    assert retried.succeeded == 1
+    assert attempts == [
+        ("failed.zip", []),
+        ("teacher.zip", []),
+        ("failed.zip", ["learned-secret"]),
+    ]
 
 
 def test_watch_scheduler_password_table_event_retries_password_failure(tmp_path, monkeypatch):

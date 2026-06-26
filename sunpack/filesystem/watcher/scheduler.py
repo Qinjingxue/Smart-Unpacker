@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import threading
 import time
@@ -18,8 +20,10 @@ from sunpack.filesystem.watcher.log import WatchLogStore
 from sunpack.filesystem.watcher.scanner import WatchCandidate, scan_watch_candidates
 from sunpack.filesystem.watcher.scanner import _candidate_for as _watch_candidate_for_path
 from sunpack.filesystem.watcher.state import WatchStateStore
+from sunpack.passwords.internal import builtin as builtin_passwords_module
 from sunpack.passwords.internal.builtin import get_builtin_passwords
 from sunpack.passwords.internal.clipboard_monitor import ClipboardPasswordMonitor
+from sunpack.passwords.internal.lists import dedupe_passwords
 from sunpack.passwords.internal.local_files import DIRECTORY_PASSWORD_FILE_NAME, is_directory_password_file
 from sunpack.support.output_paths import default_output_dir_for_task
 
@@ -90,6 +94,7 @@ class WatchScheduler:
             os.path.abspath(str(log_path)),
         }
         self._lock = threading.Lock()
+        self._password_source_lock = threading.Lock()
         self._pending: dict[str, WatchCandidate] = {}
         self._stable_since: dict[str, float] = {}
         self._pending_states: dict[str, _PendingCandidateState] = {}
@@ -108,6 +113,13 @@ class WatchScheduler:
         self.output_suppression_seconds = max(0.0, float(watch_config.get("output_suppression_seconds", 120.0)))
         self.password_retry_debounce_seconds = max(0.0, float(watch_config.get("password_retry_debounce_seconds", 1.0)))
         self.password_retry_include_subtree = bool(watch_config.get("password_retry_include_subtree", True))
+        self._configured_user_passwords = dedupe_passwords(list(config.get("user_passwords") or []))
+        self._configured_builtin_passwords = dedupe_passwords(list(config.get("builtin_passwords") or []))
+        self.builtin_password_file = os.path.abspath(str(builtin_passwords_module.builtin_password_path()))
+        self._recent_passwords: list[str] = []
+        self._password_source_signature = self._refresh_password_sources()
+        if self.state.record_password_source_signature(self._password_source_signature):
+            self._mark_all_password_failures_dirty()
         self._clipboard_monitor = ClipboardPasswordMonitor(
             on_passwords_changed=self.notify_password_source_changed,
             enabled=bool(watch_config.get("clipboard_monitor_enabled", False)),
@@ -119,9 +131,15 @@ class WatchScheduler:
             return
         self._ensure_directory_password_files()
         handler = _WatchEventHandler(self)
+        scheduled_paths: set[str] = set()
         for root in self.watch_roots:
             watch_path = root if os.path.isdir(root) else os.path.dirname(root)
             self._observer.schedule(handler, watch_path, recursive=self.recursive and os.path.isdir(root))
+            scheduled_paths.add(os.path.normcase(os.path.abspath(watch_path)))
+        builtin_password_dir = os.path.dirname(self.builtin_password_file)
+        builtin_password_dir_key = os.path.normcase(os.path.abspath(builtin_password_dir))
+        if os.path.isdir(builtin_password_dir) and builtin_password_dir_key not in scheduled_paths:
+            self._observer.schedule(handler, builtin_password_dir, recursive=False)
         self._observer.start()
         self._clipboard_monitor.start()
         self._started = True
@@ -292,21 +310,27 @@ class WatchScheduler:
             return True
         return self._is_under_metadata_dir(path) or bool(self._output_suppression_reason(path))
 
+    def is_builtin_password_file(self, path: str) -> bool:
+        if not path:
+            return False
+        return os.path.normcase(os.path.abspath(path)) == os.path.normcase(self.builtin_password_file)
+
     def enqueue_many(self, paths: Iterable[str]):
         for path in paths:
             self.enqueue(path)
 
     def notify_password_source_changed(self, reason: str, path: str = "") -> None:
-        self._reload_builtin_passwords()
-        generation = self.state.mark_password_source_changed()
+        previous_signature = self._password_source_signature
+        signature = self._refresh_password_sources()
+        if reason in {"builtin_password_file", "clipboard"} and signature == previous_signature:
+            return
+        self._password_source_signature = signature
+        generation = self.state.mark_password_source_changed(signature)
         self.log.write("password_source_changed", reason=reason, path=path, password_generation=generation)
         if path:
             self.notify_password_table_changed(path, bump_generation=False)
             return
-        with self._lock:
-            for entry in self.state.entries.values():
-                if entry.status == "failed_password":
-                    self._password_dirty_dirs[os.path.dirname(entry.path)] = time.time()
+        self._mark_all_password_failures_dirty()
 
     def notify_password_table_changed(self, path: str, *, bump_generation: bool = True) -> None:
         if bump_generation:
@@ -372,7 +396,8 @@ class WatchScheduler:
         if self.runner_factory is None:
             raise RuntimeError("WatchScheduler requires a runner_factory.")
         self.log.write("processing_started", path=candidate.path, size=candidate.size, mtime=candidate.mtime)
-        run_config = dict(self.config)
+        with self._password_source_lock:
+            run_config = dict(self.config)
         run_config["output"] = {
             **(run_config.get("output", {}) if isinstance(run_config.get("output"), dict) else {}),
             "root": self.out_dir,
@@ -385,6 +410,7 @@ class WatchScheduler:
             summary = runner.run_targets([candidate.path])
         finally:
             self._release_output_roots(predicted_output_dirs)
+        self._remember_recent_passwords(getattr(runner, "recent_passwords", []))
         generated_output_dirs = self._generated_output_dirs(runner, predicted_output_dirs)
         self._remember_recent_output_roots(generated_output_dirs)
         failed = list(summary.failed_tasks)
@@ -550,9 +576,32 @@ class WatchScheduler:
                 if expires_at <= now:
                     self._recent_output_roots.pop(root, None)
 
-    def _reload_builtin_passwords(self) -> None:
-        if "builtin_passwords" in self.config:
-            self.config["builtin_passwords"] = get_builtin_passwords()
+    def _refresh_password_sources(self) -> str:
+        builtin_passwords = dedupe_passwords([*self._configured_builtin_passwords, *get_builtin_passwords()])
+        user_passwords = dedupe_passwords([*self._recent_passwords, *self._configured_user_passwords])
+        signature = _password_source_signature(
+            self._configured_user_passwords,
+            builtin_passwords,
+        )
+        with self._password_source_lock:
+            self.config["user_passwords"] = user_passwords
+            self.config["builtin_passwords"] = builtin_passwords
+        return signature
+
+    def _remember_recent_passwords(self, passwords: Iterable[str] | None) -> None:
+        incoming = dedupe_passwords([str(value) for value in list(passwords or []) if str(value)])
+        updated = dedupe_passwords([*incoming, *self._recent_passwords])
+        if updated == self._recent_passwords:
+            return
+        self._recent_passwords = updated
+        self.notify_password_source_changed("recent_password")
+
+    def _mark_all_password_failures_dirty(self) -> None:
+        now = time.time()
+        with self._lock:
+            for entry in self.state.entries.values():
+                if entry.status == "failed_password":
+                    self._password_dirty_dirs[os.path.dirname(entry.path)] = now
 
 
 class _WatchEventHandler(FileSystemEventHandler):
@@ -565,10 +614,19 @@ class _WatchEventHandler(FileSystemEventHandler):
     def on_modified(self, event: FileSystemEvent):
         self._handle(event, "modified")
 
+    def on_deleted(self, event: FileSystemEvent):
+        self._handle(event, "deleted")
+
     def on_moved(self, event: FileSystemEvent):
+        src_path = getattr(event, "src_path", "")
+        if src_path and (
+            self.scheduler.is_builtin_password_file(src_path)
+            or is_directory_password_file(src_path, self.scheduler.config)
+        ):
+            self._handle_path(src_path, event_type="moved")
         dest_path = getattr(event, "dest_path", "")
         if dest_path:
-            self._handle_path(dest_path, event_type="moved", src_path=getattr(event, "src_path", ""))
+            self._handle_path(dest_path, event_type="moved", src_path=src_path)
 
     def _handle(self, event: FileSystemEvent, event_type: str):
         if getattr(event, "is_directory", False):
@@ -578,6 +636,9 @@ class _WatchEventHandler(FileSystemEventHandler):
             self._handle_path(src_path, event_type=event_type)
 
     def _handle_path(self, path: str, *, event_type: str = "unknown", src_path: str = ""):
+        if self.scheduler.is_builtin_password_file(path):
+            self.scheduler.notify_password_source_changed("builtin_password_file", path="")
+            return
         if self.scheduler.should_ignore_event_path(path):
             return
         if is_directory_password_file(path, self.scheduler.config):
@@ -663,6 +724,18 @@ def _dedupe_paths(paths: Iterable[str]) -> list[str]:
         seen.add(key)
         output.append(normalized)
     return output
+
+
+def _password_source_signature(
+    user_passwords: list[str],
+    builtin_passwords: list[str],
+) -> str:
+    payload = json.dumps(
+        [user_passwords, builtin_passwords],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 def _failure_to_dict(failure) -> dict:
