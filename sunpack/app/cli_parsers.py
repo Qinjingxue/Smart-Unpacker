@@ -65,7 +65,6 @@ def build_password_parser(ctx: CliContext) -> argparse.ArgumentParser:
     parser.add_argument("--ask-pw", dest="prompt_passwords", action="store_true", help=ctx.t("cli.prompt_passwords"))
     parser.add_argument("--no-builtin-pw", dest="no_builtin_passwords", action="store_true", help=ctx.t("cli.no_builtin_passwords"))
     parser.add_argument("--no-dir-pw", dest="directory_passwords", action="store_false", default=None, help=ctx.t("cli.no_directory_passwords"))
-    parser.add_argument("--dir-pw-file", dest="directory_password_files", action="append", default=[], help=ctx.t("cli.directory_password_file"))
     return parser
 
 

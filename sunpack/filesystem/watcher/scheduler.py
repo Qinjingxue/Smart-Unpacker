@@ -20,7 +20,7 @@ from sunpack.filesystem.watcher.scanner import _candidate_for as _watch_candidat
 from sunpack.filesystem.watcher.state import WatchStateStore
 from sunpack.passwords.internal.builtin import get_builtin_passwords
 from sunpack.passwords.internal.clipboard_monitor import ClipboardPasswordMonitor
-from sunpack.passwords.internal.local_files import is_directory_password_file
+from sunpack.passwords.internal.local_files import DIRECTORY_PASSWORD_FILE_NAME, is_directory_password_file
 from sunpack.support.output_paths import default_output_dir_for_task
 
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
@@ -117,6 +117,7 @@ class WatchScheduler:
     def start(self):
         if self._started:
             return
+        self._ensure_directory_password_files()
         handler = _WatchEventHandler(self)
         for root in self.watch_roots:
             watch_path = root if os.path.isdir(root) else os.path.dirname(root)
@@ -137,6 +138,18 @@ class WatchScheduler:
             stable_seconds=self.stable_seconds,
             interval_seconds=self.interval_seconds,
         )
+
+    def _ensure_directory_password_files(self) -> None:
+        for root in self.watch_roots:
+            if not os.path.isdir(root):
+                continue
+            password_file = Path(root) / DIRECTORY_PASSWORD_FILE_NAME
+            if not is_directory_password_file(str(password_file), self.config):
+                continue
+            try:
+                password_file.open("x", encoding="utf-8").close()
+            except FileExistsError:
+                pass
 
     def stop(self):
         if not self._started:
@@ -189,6 +202,9 @@ class WatchScheduler:
 
     def enqueue(self, path: str, *, force: bool = False, event_type: str = "unknown", src_path: str = ""):
         if self.should_ignore_event_path(path):
+            return
+        if is_directory_password_file(path, self.config):
+            self.log.write("candidate_ignored", path=path, reason="directory_password_file")
             return
         if _is_temporary_download_path(path):
             self.log.write("candidate_ignored", path=path, reason="temporary_download_file")

@@ -169,10 +169,6 @@ def apply_runtime_config_overrides(config: dict, args) -> dict:
     if getattr(args, "directory_passwords", None) is not None:
         overrides["directory_passwords"] = bool(args.directory_passwords)
         config.setdefault("passwords", {})["directory_passwords_enabled"] = bool(args.directory_passwords)
-    directory_password_files = list(getattr(args, "directory_password_files", []) or [])
-    if directory_password_files:
-        overrides["directory_password_files"] = directory_password_files
-        config.setdefault("passwords", {})["directory_password_file_names"] = directory_password_files
     return overrides
 
 
