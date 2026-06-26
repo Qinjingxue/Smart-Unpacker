@@ -6,11 +6,6 @@ import subprocess
 from ctypes import wintypes
 from pathlib import Path
 
-import pytest
-
-
-pytestmark = pytest.mark.skipif(os.name != "nt", reason="Windows context-menu contract")
-
 
 def test_context_menu_commands_are_safe_for_drive_roots_and_keep_password_flag():
     repo = Path(__file__).resolve().parents[2]

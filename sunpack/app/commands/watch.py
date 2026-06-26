@@ -116,7 +116,7 @@ def handle(args, ctx):
 
 def _handle_start(args):
     tray_factory = None
-    if not getattr(args, "no_tray", False) and not getattr(args, "once", False) and os.name == "nt":
+    if not getattr(args, "no_tray", False) and not getattr(args, "once", False):
         from sunpack.platform.windows.tray import WindowsTrayIcon
 
         tray_factory = WindowsTrayIcon
@@ -191,8 +191,6 @@ def _handle_status():
 
 
 def _handle_startup(args):
-    if os.name != "nt":
-        return EXIT_USAGE, CliCommandResult(command=COMMAND, inputs={"action": "startup"}, summary={}, errors=["Startup integration is only available on Windows."])
     from sunpack.platform.windows.startup import disable_startup, enable_startup, startup_status
 
     if args.startup_action == "enable":
@@ -210,12 +208,9 @@ def _watch_running(config: dict) -> bool:
 
 
 def _start_watch_background() -> bool:
-    creationflags = 0
-    startupinfo = None
-    if os.name == "nt":
-        creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "DETACHED_PROCESS", 0)
-        startupinfo = subprocess.STARTUPINFO()
-        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "DETACHED_PROCESS", 0)
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
     subprocess.Popen(
         _watch_start_argv(),
         stdin=subprocess.DEVNULL,

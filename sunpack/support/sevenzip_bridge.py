@@ -574,8 +574,6 @@ class NativePasswordTester:
         with self._load_lock:
             if self._library is not None:
                 return self._library
-            if sys.platform != "win32":
-                raise RuntimeError("7z.dll wrapper is only supported on Windows in this test build.")
             if not self.wrapper_path or not Path(self.wrapper_path).exists():
                 raise FileNotFoundError("Required sunpack_sevenzip.dll was not found.")
             if not self.seven_zip_dll_path or not Path(self.seven_zip_dll_path).exists():

@@ -60,8 +60,6 @@ def get_resource_path(filename: str) -> Path:
 
 
 def get_7z_path() -> str:
-    if sys.platform != "win32":
-        raise RuntimeError("Bundled 7z.exe is only supported on Windows in this test build.")
     for root in candidate_resource_roots():
         for relative in tuple(tool_dir / "7z.exe" for tool_dir in tool_dir_candidates()) + (Path("7z.exe"),):
             seven_z = root / relative
@@ -71,8 +69,6 @@ def get_7z_path() -> str:
 
 
 def get_sevenzip_bridge_worker_path() -> str:
-    if sys.platform != "win32":
-        raise RuntimeError("sunpack_sevenzip_worker.exe is only supported on Windows in this test build.")
     relatives = (
         *tuple(tool_dir / "sunpack_sevenzip_worker.exe" for tool_dir in tool_dir_candidates()),
         Path("sunpack_sevenzip_worker.exe"),
@@ -90,8 +86,6 @@ def get_sevenzip_bridge_worker_path() -> str:
 
 
 def get_7z_dll_path() -> str:
-    if sys.platform != "win32":
-        raise RuntimeError("Bundled 7z.dll is only supported on Windows in this test build.")
     for root in candidate_resource_roots():
         for relative in tuple(tool_dir / "7z.dll" for tool_dir in tool_dir_candidates()) + (Path("7z.dll"),):
             seven_z = root / relative

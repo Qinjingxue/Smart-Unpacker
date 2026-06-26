@@ -91,7 +91,7 @@ def maybe_pause(args, ctx: CliContext, exit_code: int, result: CliCommandResult)
     )
     if getattr(args, "pause_on_exit", False) and not successful_extract:
         print(ctx.core_text("pause_prompt"), flush=True)
-        os.system("pause >nul" if os.name == "nt" else "read -n 1 -s")
+        os.system("pause >nul")
 
 
 def main(argv=None):

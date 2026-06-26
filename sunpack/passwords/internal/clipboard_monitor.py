@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import ctypes
-import sys
 import threading
 from ctypes import wintypes
 from typing import Callable
@@ -31,7 +30,7 @@ class ClipboardPasswordMonitor:
         self._hwnd = None
 
     def start(self) -> None:
-        if not self.enabled or sys.platform != "win32" or self._thread is not None:
+        if not self.enabled or self._thread is not None:
             return
         self._stop_event.clear()
         self._thread = threading.Thread(target=self._run_windows_loop, name="sunpack-clipboard-monitor", daemon=True)

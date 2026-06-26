@@ -17,8 +17,6 @@ _MEMORY_CACHE: dict[str, bool] = {}
 
 def detect_max_workers() -> int:
     cpu_count = os.cpu_count() or 4
-    if os.name != "nt":
-        return 2
     return max(2, cpu_count) if _cached_is_ssd() else 2
 
 

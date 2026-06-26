@@ -100,7 +100,7 @@ class WindowsTrayIcon:
         self._wndproc_ref = None
 
     def start(self) -> None:
-        if os.name != "nt" or self._thread is not None:
+        if self._thread is not None:
             return
         self._thread = threading.Thread(target=self._run, name="sunpack-tray", daemon=True)
         self._thread.start()

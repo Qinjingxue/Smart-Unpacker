@@ -286,7 +286,7 @@ def _find_7z() -> Path:
     for candidate in candidates:
         if candidate.is_file():
             return candidate
-    found = shutil.which("7z") or shutil.which("7z.exe")
+    found = shutil.which("7z.exe")
     if found:
         return Path(found)
     raise SystemExit("7z material generation requires tools/7z.exe or 7z.exe on PATH")
@@ -1129,16 +1129,15 @@ def _dedupe(values: list[str]) -> list[str]:
 def _fast_rmtree(path: Path) -> None:
     if not path.exists():
         return
-    if os.name == "nt":
-        try:
-            subprocess.run(
-                ["powershell", "-NoProfile", "-NonInteractive", "-Command", "Remove-Item -LiteralPath $args[0] -Recurse -Force -ErrorAction Stop", str(path)],
-                check=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=20,
-            )
-            return
-        except Exception:
-            pass
+    try:
+        subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", "Remove-Item -LiteralPath $args[0] -Recurse -Force -ErrorAction Stop", str(path)],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=20,
+        )
+        return
+    except Exception:
+        pass
     shutil.rmtree(path, ignore_errors=True)

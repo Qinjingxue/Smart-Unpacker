@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import shutil
 from pathlib import Path
 
 import pytest
@@ -39,7 +38,7 @@ def test_seven_zip_distribution_total_is_2800():
 
 
 def test_seven_zip_material_smoke_generates_manifest_and_metadata(tmp_path):
-    if not (Path("tools/7z.exe").is_file() or shutil.which("7z") or shutil.which("7z.exe")):
+    if not Path("tools/7z.exe").is_file():
         pytest.skip("7z executable is not available")
     material_root = tmp_path / "seven_zip_material"
 
@@ -69,7 +68,7 @@ def test_seven_zip_material_smoke_generates_manifest_and_metadata(tmp_path):
 
 
 def test_seven_zip_clean_only_writes_variant_coverage_report(tmp_path):
-    if not (Path("tools/7z.exe").is_file() or shutil.which("7z") or shutil.which("7z.exe")):
+    if not Path("tools/7z.exe").is_file():
         pytest.skip("7z executable is not available")
     material_root = tmp_path / "seven_zip_clean_only"
 
@@ -94,7 +93,7 @@ def test_seven_zip_clean_only_writes_variant_coverage_report(tmp_path):
 
 
 def test_seven_zip_split_profile_uses_split_parts(tmp_path):
-    if not (Path("tools/7z.exe").is_file() or shutil.which("7z") or shutil.which("7z.exe")):
+    if not Path("tools/7z.exe").is_file():
         pytest.skip("7z executable is not available")
     material_root = tmp_path / "seven_zip_split"
     distribution = tmp_path / "split_distribution.json"
@@ -136,7 +135,7 @@ def test_seven_zip_split_profile_uses_split_parts(tmp_path):
 
 
 def test_seven_zip_split_trailing_junk_targets_logical_tail(tmp_path):
-    if not (Path("tools/7z.exe").is_file() or shutil.which("7z") or shutil.which("7z.exe")):
+    if not Path("tools/7z.exe").is_file():
         pytest.skip("7z executable is not available")
     material_root = tmp_path / "seven_zip_split_tail"
     distribution = tmp_path / "split_tail_distribution.json"

@@ -394,8 +394,6 @@ def _terminal_supports_updates(stream: Any) -> bool:
     isatty = getattr(stream, "isatty", None)
     if not callable(isatty) or not isatty():
         return False
-    if os.name != "nt":
-        return True
     try:
         import ctypes
 

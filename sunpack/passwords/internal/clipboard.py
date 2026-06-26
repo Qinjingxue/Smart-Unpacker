@@ -1,5 +1,4 @@
 import ctypes
-import sys
 
 from sunpack.passwords.internal.lists import dedupe_passwords, parse_password_lines
 
@@ -22,8 +21,6 @@ def read_clipboard_passwords(
 
 
 def _read_windows_unicode_clipboard(*, max_chars: int) -> str:
-    if sys.platform != "win32":
-        return ""
     try:
         user32 = ctypes.windll.user32
         kernel32 = ctypes.windll.kernel32

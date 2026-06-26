@@ -415,10 +415,6 @@ class SingleArchiveExtractor:
             return bool(directory_passwords or self.password_store.has_candidates())
 
     def _startupinfo(self):
-        import sys
-
-        if sys.platform != "win32":
-            return None
         startupinfo = subprocess.STARTUPINFO()
         startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
         return startupinfo
