@@ -235,7 +235,7 @@ class ExtractionExecutionTests(unittest.TestCase):
             result = extractor.extract(task, str(out_dir))
 
             self.assertFalse(result.success)
-            self.assertEqual(result.error, "压缩包损坏")
+            self.assertEqual(result.error, "Archive is damaged")
             self.assertEqual(calls, 1)
 
     def test_extractor_preserves_best_effort_outputs_for_item_payload_failure(self):
@@ -382,7 +382,7 @@ class ExtractionExecutionTests(unittest.TestCase):
             result = extractor.extract(task, str(out_dir))
 
             self.assertFalse(result.success)
-            self.assertIn("已重试 1 次", result.error)
+            self.assertIn("retried 1 time(s)", result.error)
 
     def test_runner_skips_strong_scene_output_directory_for_recursion(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -16,54 +16,20 @@ from sunpack.support.json_format import to_json_text
 
 COMMAND = "inspect"
 ORDER = 30
-TEXTS = {
-    "en": {
-        "help": "Show file inspection details without changing files.",
-        "paths": "Files or directories to inspect.",
-        "archives_only": "Only output files that are classified as extractable archives.",
-        "analyze": "Run archive analysis and include a compact analysis summary.",
-        "complete": "[CLI] Inspection complete: total={total} archive={archive} maybe={maybe} not_archive={not_archive}.",
-        "analysis": "  Analysis: status={status} selected={selected} confidence={confidence} segment={segment} damage={damage}",
-        "analysis_candidates": "  Analysis Candidates: {candidates}",
-        "effective_config": "[CLI] Effective config:",
-        "matched_rules": "  Matched Rules: {rules}",
-        "decision_trace": "  Stage={stage} DiscardedAt={discarded_at} Rule={rule}",
-        "stop_reason": "  Reason: {reason}",
-        "score_breakdown": "  Score Breakdown: {breakdown}",
-        "confirmation": "  Confirmation: {confirmation}",
-        "fact_errors": "  Fact Errors: {errors}",
-    },
-    "zh": {
-        "help": "输出文件检测详情，不修改文件系统。",
-        "paths": "要检测的文件或目录。",
-        "archives_only": "只输出被判定为可解压压缩包的文件。",
-        "analyze": "运行归档分析层，并输出精简分析摘要。",
-        "complete": "[CLI] 检测完成：总数={total} archive={archive} maybe={maybe} not_archive={not_archive}。",
-        "analysis": "  分析层：状态={status} 选中={selected} 置信度={confidence} 片段={segment} 损坏={damage}",
-        "analysis_candidates": "  分析候选：{candidates}",
-        "effective_config": "[CLI] 生效配置：",
-        "matched_rules": "  命中规则：{rules}",
-        "decision_trace": "  阶段={stage} 丢弃位置={discarded_at} 规则={rule}",
-        "stop_reason": "  原因：{reason}",
-        "score_breakdown": "  打分明细：{breakdown}",
-        "confirmation": "  确认层：{confirmation}",
-        "fact_errors": "  Fact 错误：{errors}",
-    },
-}
 
 
 def register(subparsers, ctx):
     parser = subparsers.add_parser(
         COMMAND,
         parents=[build_common_parser(ctx)],
-        help=ctx.t(TEXTS, "help"),
+        help=ctx.t("cli.inspect.help"),
         usage="sunpack inspect [options] <paths...>",
         formatter_class=CliHelpFormatter,
     )
     localize_help_action(parser, ctx)
-    parser.add_argument("--archives-only", action="store_true", help=ctx.t(TEXTS, "archives_only"))
-    parser.add_argument("--analyze", action="store_true", help=ctx.t(TEXTS, "analyze"))
-    parser.add_argument("paths", nargs="+", help=ctx.t(TEXTS, "paths"))
+    parser.add_argument("--archives-only", action="store_true", help=ctx.t("cli.inspect.archives_only"))
+    parser.add_argument("--analyze", action="store_true", help=ctx.t("cli.inspect.analyze"))
+    parser.add_argument("paths", nargs="+", help=ctx.t("cli.inspect.paths"))
 
 
 def handle(args, ctx):
@@ -97,7 +63,8 @@ def handle(args, ctx):
     }
     if not args.json:
         reporter.info(
-            ctx.t(TEXTS, "complete").format(
+            ctx.t(
+                "cli.inspect.complete",
                 total=summary["total_items"],
                 archive=summary["archive_items"],
                 maybe=summary["maybe_archive_items"],
@@ -105,7 +72,7 @@ def handle(args, ctx):
             )
         )
         if reporter.verbose:
-            reporter.info(ctx.t(TEXTS, "effective_config"))
+            reporter.info(ctx.t("cli.inspect.effective_config"))
             reporter.info(to_json_text(effective_config))
         for item in items:
             reporter.info(f"- {item['path']}")
@@ -113,16 +80,16 @@ def handle(args, ctx):
                 f"  Decision={item['decision']} Extract={'Yes' if item['should_extract'] else 'No'} "
                 f"Score={item['score']} Detected={item['detected_ext'] or '-'}"
             )
-            reporter.info(ctx.t(TEXTS, "decision_trace").format(
+            reporter.info(ctx.t("cli.inspect.decision_trace",
                 stage=item.get("decision_stage") or "-",
                 discarded_at=item.get("discarded_at") or "-",
                 rule=item.get("deciding_rule") or "-",
             ))
             if item.get("stop_reason"):
-                reporter.info(ctx.t(TEXTS, "stop_reason").format(reason=item["stop_reason"]))
+                reporter.info(ctx.t("cli.inspect.stop_reason", reason=item["stop_reason"]))
             if args.analyze and item.get("analysis"):
                 analysis = item["analysis"]
-                reporter.info(ctx.t(TEXTS, "analysis").format(
+                reporter.info(ctx.t("cli.inspect.analysis",
                     status=analysis.get("status") or "-",
                     selected=analysis.get("selected_format") or "-",
                     confidence=_confidence_label(analysis.get("selected_confidence")),
@@ -131,19 +98,19 @@ def handle(args, ctx):
                 ))
                 candidates = _candidate_label(analysis.get("candidates") or [])
                 if candidates:
-                    reporter.info(ctx.t(TEXTS, "analysis_candidates").format(candidates=candidates))
+                    reporter.info(ctx.t("cli.inspect.analysis_candidates", candidates=candidates))
             if reporter.verbose and item["reasons"]:
-                reporter.info(ctx.t(TEXTS, "matched_rules").format(rules=", ".join(item["reasons"])))
+                reporter.info(ctx.t("cli.inspect.matched_rules", rules=", ".join(item["reasons"])))
             if reporter.verbose and item.get("score_breakdown"):
-                reporter.info(ctx.t(TEXTS, "score_breakdown").format(
+                reporter.info(ctx.t("cli.inspect.score_breakdown",
                     breakdown=to_json_text(item["score_breakdown"], pretty=False)
                 ))
             if reporter.verbose and item.get("confirmation"):
-                reporter.info(ctx.t(TEXTS, "confirmation").format(
+                reporter.info(ctx.t("cli.inspect.confirmation",
                     confirmation=to_json_text(item["confirmation"], pretty=False)
                 ))
             if reporter.verbose and item.get("fact_errors"):
-                reporter.info(ctx.t(TEXTS, "fact_errors").format(errors=to_json_text(item["fact_errors"], pretty=False)))
+                reporter.info(ctx.t("cli.inspect.fact_errors", errors=to_json_text(item["fact_errors"], pretty=False)))
 
     return 0, CliCommandResult(
         command=COMMAND,

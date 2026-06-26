@@ -1,6 +1,7 @@
 import time
 
 from sunpack.extraction.internal.workflow.errors import should_retry_extract_failure
+from sunpack.i18n import I18nContext
 
 
 class ExtractRetryPolicy:
@@ -24,7 +25,9 @@ class ExtractRetryPolicy:
     def backoff(self, retry_count: int) -> None:
         time.sleep(min(2.0, 0.5 * (2 ** max(0, retry_count - 1))))
 
-    def append_retry_count(self, error_msg: str, retry_count: int) -> str:
+    def append_retry_count(self, error_msg: str, retry_count: int, i18n: I18nContext | None = None) -> str:
         if retry_count <= 0:
             return error_msg
-        return f"{error_msg}（已重试 {retry_count} 次）"
+        if i18n is None:
+            i18n = I18nContext()
+        return f"{error_msg}{i18n.t('retry.suffix', count=retry_count)}"

@@ -3,6 +3,7 @@ import re
 from typing import List, Optional, Tuple, Dict, Any
 
 from sunpack_native import scan_zip_central_directory_names as _NATIVE_SCAN_ZIP_NAMES
+from sunpack.i18n import I18nContext
 
 class ArchiveMetadataScanResult:
     def __init__(self, archive_path: str, archive_type: str, reasons: List[str] = None):
@@ -35,8 +36,9 @@ class ArchiveMetadataScanner:
         "大小年月日時分秒人子女男学校会社仕事場所東京大阪京都北海道"
     )
 
-    def __init__(self):
+    def __init__(self, language: str = "en"):
         self.cache = {}
+        self.i18n = I18nContext(language)
 
     def clear_caches(self):
         self.cache.clear()
@@ -74,12 +76,12 @@ class ArchiveMetadataScanner:
             return ArchiveMetadataScanResult(
                 archive_path=archive_path,
                 archive_type=ext.lstrip("."),
-                reasons=[f"{ext.lstrip('.').upper()} 解压前元数据扫描不需要编码修正，保持默认解压参数"],
+                reasons=[self.i18n.t("metadata.no_correction_needed", archive_type=ext.lstrip(".").upper())],
             )
         return ArchiveMetadataScanResult(
             archive_path=archive_path,
             archive_type=ext.lstrip(".") or "unknown",
-            reasons=["不支持的元数据编码扫描类型，保持默认解压参数"],
+            reasons=[self.i18n.t("metadata.unsupported_type")],
         )
 
     def _scan_zip_central_directory(self, archive_path: str) -> ArchiveMetadataScanResult:
@@ -91,11 +93,11 @@ class ArchiveMetadataScanner:
                 return result
             result.sample_count = len(raw_names)
             if truncated:
-                result.error = "ZIP 文件名数量或总长度超过编码识别上限"
+                result.error = self.i18n.t("metadata.too_many_names")
                 result.warnings.append(result.error)
                 return result
             if not raw_names:
-                result.reasons.append("ZIP 中央目录没有可分析的文件名")
+                result.reasons.append(self.i18n.t("metadata.no_names"))
                 return result
             authoritative_names = [
                 self._authoritative_zip_name(raw_name, utf8, unicode_name)
@@ -106,14 +108,12 @@ class ArchiveMetadataScanner:
                 unicode_count = sum(name is not None for name in unicode_names)
                 result.confidence = 1.0
                 if unicode_count:
-                    result.reasons.append(
-                        f"已校验并采用 {unicode_count} 个 ZIP Unicode Path Extra Field (0x7075) 文件名"
-                    )
+                    result.reasons.append(self.i18n.t("metadata.valid_unicode_fields", count=unicode_count))
                 else:
-                    result.reasons.append("ZIP 条目均带有效 UTF-8 标记，保持默认解压参数")
+                    result.reasons.append(self.i18n.t("metadata.utf8_flagged"))
                 return result
             if all(self._is_ascii_name(raw_name) for raw_name in raw_names):
-                result.reasons.append("ZIP 文件名均为 ASCII，保持默认解压参数")
+                result.reasons.append(self.i18n.t("metadata.ascii_names"))
                 return result
 
             unresolved_names = [
@@ -131,13 +131,13 @@ class ArchiveMetadataScanner:
                     unicode_names,
                     selected["encoding"],
                 )
-                result.reasons.append(f"高置信选择 {selected['label']}，解压时按 CP{selected['codepage']} 覆盖 ZIP 条目路径")
+                result.reasons.append(self.i18n.t("metadata.high_confidence", label=selected["label"], codepage=selected["codepage"]))
             else:
-                result.warnings.append("ZIP 文件名编码置信度不足，交由解压器按 ZIP 元数据处理")
-                result.reasons.append("未强制覆盖 ZIP 文件名编码；继续使用解压器原生解析")
+                result.warnings.append(self.i18n.t("metadata.low_confidence"))
+                result.reasons.append(self.i18n.t("metadata.no_override"))
             return result
         except Exception as exc:
-            result.warnings.append(f"ZIP 元数据扫描失败: {exc}")
+            result.warnings.append(self.i18n.t("metadata.scan_failed", error=exc))
             return result
 
     def _scan_zip_name_samples(self, archive_path: str) -> Tuple[List[bytes], List[bool], List[Optional[bytes]], bool, str]:
@@ -210,13 +210,14 @@ class ArchiveMetadataScanner:
 
     def _zip_native_status_warning(self, status) -> str:
         warnings = {
-            "file_too_small": "ZIP 文件过小，无法读取 EOCD",
-            "eocd_not_found": "未找到 ZIP EOCD，跳过编码修正",
-            "eocd_incomplete": "ZIP EOCD 不完整，跳过编码修正",
-            "zip64": "ZIP64 中央目录暂不做纯 Python 编码修正",
-            "central_range_invalid": "ZIP 中央目录范围异常，跳过编码修正",
+            "file_too_small": "metadata.file_too_small",
+            "eocd_not_found": "metadata.eocd_not_found",
+            "eocd_incomplete": "metadata.eocd_incomplete",
+            "zip64": "metadata.zip64",
+            "central_range_invalid": "metadata.central_range_invalid",
         }
-        return warnings.get(status, "")
+        key = warnings.get(status)
+        return self.i18n.t(key) if key else ""
 
     def _select_codepage(self, raw_names: List[bytes]) -> Dict[str, Any]:
         scores = []
@@ -243,7 +244,14 @@ class ArchiveMetadataScanner:
         lead_confidence = max(0.0, min(1.0, lead / 12.0))
         confidence = min(score_confidence, lead_confidence)
         reasons = [
-            f"编码候选最高分: {best['label']}={best['score']}，次高: {second['label']}={second['score']}，领先={lead}",
+            self.i18n.t(
+                "metadata.score_summary",
+                best_label=best["label"],
+                best_score=best["score"],
+                second_label=second["label"],
+                second_score=second["score"],
+                lead=lead,
+            ),
         ]
         reasons.extend(best["reasons"][:3])
 
@@ -289,13 +297,13 @@ class ArchiveMetadataScanner:
         if decoded_count == len(raw_names):
             score += 4
         if total_cjk:
-            reasons.append(f"识别到 CJK 字符 {total_cjk} 个")
+            reasons.append(self.i18n.t("metadata.cjk_count", count=total_cjk))
         if total_kana:
-            reasons.append(f"识别到日文假名 {total_kana} 个")
+            reasons.append(self.i18n.t("metadata.kana_count", count=total_kana))
         if total_halfwidth_kana:
-            reasons.append(f"识别到半角假名 {total_halfwidth_kana} 个")
+            reasons.append(self.i18n.t("metadata.halfwidth_kana_count", count=total_halfwidth_kana))
         if total_latin_symbols:
-            reasons.append(f"疑似西文符号噪声 {total_latin_symbols} 个")
+            reasons.append(self.i18n.t("metadata.latin_noise_count", count=total_latin_symbols))
         return score, decoded_count, reasons
 
     def _score_decoded_name(self, decoded: str, encoding: str) -> Tuple[int, Dict[str, int]]:

@@ -18,6 +18,7 @@ from sunpack.passwords.result import PasswordResolution, PasswordResolutionStatu
 from sunpack.passwords.internal.local_files import directory_password_context_from_task
 from sunpack.support import archive_knowledge_projection as knowledge_view
 from sunpack.support.output_inventory import OutputInventory, collect_output_inventory
+from sunpack.i18n import I18nContext
 
 
 class SingleArchiveExtractor:
@@ -35,6 +36,7 @@ class SingleArchiveExtractor:
         best_effort: bool = True,
         write_progress_manifest: bool = False,
         quiet: bool = False,
+        language: str = "en",
     ):
         self.seven_z_path = seven_z_path
         self.password_store = password_store
@@ -48,6 +50,7 @@ class SingleArchiveExtractor:
         self.best_effort = bool(best_effort)
         self.write_progress_manifest = bool(write_progress_manifest)
         self.quiet = bool(quiet)
+        self.i18n = I18nContext(language)
 
     def extract(
         self,
@@ -88,25 +91,29 @@ class SingleArchiveExtractor:
             )
         is_split = split_info.is_split or len(all_parts) > 1
 
-        self._log(f"\n[EXTRACT] 开始: {archive}")
+        self._log(self.i18n.t("extract.log.start", archive=archive))
 
         if not self.ensure_space(5):
+            failure = self._failure_info(FailureKind.PROCESS_ERROR, "preflight", "failure.insufficient_space")
             return self._failed(
                 archive,
                 out_dir,
                 all_parts,
-                "磁盘空间不足",
+                self._localized_failure(failure),
+                failure=failure,
                 diagnostics={"failure_stage": "preflight", "failure_kind": "disk_space"},
             )
 
         try:
             os.makedirs(out_dir, exist_ok=True)
         except Exception as exc:
+            failure = self._failure_info(FailureKind.FILESYSTEM_ERROR, "preflight", "extract.dir_create_failed", error=str(exc))
             return self._failed(
                 archive,
                 out_dir,
                 all_parts,
-                f"目录创建失败: {exc}",
+                self._localized_failure(failure),
+                failure=failure,
                 diagnostics={"failure_stage": "preflight", "failure_kind": "output_filesystem", "message": str(exc)},
             )
 
@@ -119,22 +126,26 @@ class SingleArchiveExtractor:
                 has_space = self.ensure_space(5)
             if not has_space:
                 shutil.rmtree(out_dir, ignore_errors=True)
+                failure = self._failure_info(FailureKind.PROCESS_ERROR, "preflight", "failure.insufficient_space")
                 return self._failed(
                     archive,
                     out_dir,
                     all_parts,
-                    "磁盘空间不足",
+                    self._localized_failure(failure),
+                    failure=failure,
                     diagnostics={"failure_stage": "preflight", "failure_kind": "disk_space"},
                 )
             try:
                 with _phase(phase_timer, f"{phase_prefix}_mkdir_retry"):
                     os.makedirs(out_dir, exist_ok=True)
             except Exception as exc:
+                failure = self._failure_info(FailureKind.FILESYSTEM_ERROR, "preflight", "extract.dir_create_failed", error=str(exc))
                 return self._failed(
                     archive,
                     out_dir,
                     all_parts,
-                    f"目录创建失败: {exc}",
+                    self._localized_failure(failure),
+                    failure=failure,
                     diagnostics={"failure_stage": "preflight", "failure_kind": "output_filesystem", "message": str(exc)},
                 )
 
@@ -160,12 +171,12 @@ class SingleArchiveExtractor:
                 resolution_failure = self._password_resolution_failure(resolution)
                 if resolution_failure is not None:
                     shutil.rmtree(out_dir, ignore_errors=True)
-                    self._log(f"[EXTRACT] 失败: {archive} (错误: {resolution_failure.message})")
+                    self._log(self.i18n.t("extract.log.failed", archive=archive, error=self._localized_failure(resolution_failure)))
                     return self._failed(
                         archive,
                         out_dir,
                         run_parts,
-                        resolution_failure.message,
+                        self._localized_failure(resolution_failure),
                         failure=resolution_failure,
                         diagnostics={
                             "failure_stage": resolution_failure.stage,
@@ -188,8 +199,7 @@ class SingleArchiveExtractor:
                         # ambiguity must not prevent the archive backend from
                         # using UTF-8 flags / Unicode extra fields itself.
                         self._log(
-                            f"[EXTRACT] 文件名编码扫描未采用覆盖参数，继续使用解压器默认解析: "
-                            f"{filename_encoding.error}"
+                            self.i18n.t("extract.log.metadata_override_not_used", error=filename_encoding.error)
                         )
                         selected_codepage = None
                         filename_encoding.decoded_names = []
@@ -231,7 +241,13 @@ class SingleArchiveExtractor:
                         with _phase(phase_timer, f"{phase_prefix}_empty_repaired_success_check"):
                             empty_repaired_success = self._empty_repaired_success(diagnostics, task)
                         if empty_repaired_success:
-                            self._log(f"[EXTRACT] 失败: {archive} (错误: 修复结果没有可提取文件)")
+                            failure = self._failure_info(
+                                FailureKind.DAMAGED,
+                                "verification",
+                                "failure.no_extractable_repair_output",
+                                repairable=True,
+                            )
+                            self._log(self.i18n.t("extract.log.failed", archive=archive, error=self._localized_failure(failure)))
                             shutil.rmtree(out_dir, ignore_errors=True)
                             diagnostics["failure_stage"] = "verification"
                             diagnostics["failure_kind"] = "empty_repair_output"
@@ -239,12 +255,13 @@ class SingleArchiveExtractor:
                                 archive,
                                 out_dir,
                                 run_parts,
-                                "修复结果没有可提取文件",
+                                self._localized_failure(failure),
+                                failure=failure,
                                 password_used=correct_pwd,
                                 selected_codepage=selected_codepage,
                                 diagnostics=diagnostics,
                             )
-                        self._log(f"[EXTRACT] 成功: {archive}")
+                        self._log(self.i18n.t("extract.log.success", archive=archive))
                         manifest_path = ""
                         manifest_payload = None
                         if diagnostics.get("result"):
@@ -287,7 +304,7 @@ class SingleArchiveExtractor:
                         shutil.rmtree(out_dir, ignore_errors=True)
                         if password_candidate_rejections == 1 or password_candidate_rejections % 50 == 0:
                             self._log(
-                                f"[EXTRACT] 已拒绝 {password_candidate_rejections} 个密码候选，继续尝试: {archive}"
+                                self.i18n.t("extract.log.password_rejections", count=password_candidate_rejections, archive=archive)
                             )
                         continue
 
@@ -295,22 +312,24 @@ class SingleArchiveExtractor:
                 retry_count += 1
                 if self.retry_policy.needs_space_recheck(run_result, err) and not self.ensure_space(10):
                     shutil.rmtree(out_dir, ignore_errors=True)
+                    failure = self._failure_info(FailureKind.PROCESS_ERROR, "retry_preflight", "failure.insufficient_space")
                     return self._failed(
                         archive,
                         out_dir,
                         all_parts,
-                        "磁盘空间不足",
+                        self._localized_failure(failure),
+                        failure=failure,
                         diagnostics={"failure_stage": "retry_preflight", "failure_kind": "disk_space"},
                     )
                 shutil.rmtree(out_dir, ignore_errors=True)
-                self._log(f"[EXTRACT] 临时失败，准备第 {retry_count + 1}/{self.retry_policy.max_retries} 次尝试: {archive}")
+                self._log(self.i18n.t("extract.log.temp_retry", attempt=retry_count + 1, max_attempts=self.retry_policy.max_retries, archive=archive))
                 self.retry_policy.backoff(retry_count)
                 continue
 
             with _phase(phase_timer, f"{phase_prefix}_classify_error"):
                 failure = classify_extract_failure(run_result or test_result, err, archive=archive, is_split_archive=is_split)
-                error_msg = self.retry_policy.append_retry_count(failure.message, retry_count)
-            self._log(f"[EXTRACT] 失败: {archive} (错误: {error_msg})")
+                error_msg = self._append_retry_count(self._localized_failure(failure), retry_count)
+            self._log(self.i18n.t("extract.log.failed", archive=archive, error=error_msg))
             with _phase(phase_timer, f"{phase_prefix}_diagnostics_failure"):
                 diagnostics = self._diagnostics_from(run_result or test_result)
             with _phase(phase_timer, f"{phase_prefix}_recoverable_partial_check"):
@@ -353,11 +372,13 @@ class SingleArchiveExtractor:
             )
 
         shutil.rmtree(out_dir, ignore_errors=True)
+        failure = self._failure_info(FailureKind.PROCESS_ERROR, "retry_exhausted", "failure.insufficient_space")
         return self._failed(
             archive,
             out_dir,
             all_parts,
-            "磁盘空间不足",
+            self._localized_failure(failure),
+            failure=failure,
             diagnostics={"failure_stage": "retry_exhausted", "failure_kind": "unknown"},
         )
 
@@ -454,49 +475,79 @@ class SingleArchiveExtractor:
             progress_manifest_payload=progress_manifest_payload,
         )
 
+    def _localized_failure(self, failure: FailureInfo) -> str:
+        if failure.message_key:
+            return self.i18n.t(failure.message_key, **failure.message_params)
+        return failure.message
+
+    def _append_retry_count(self, error: str, retry_count: int) -> str:
+        try:
+            return self.retry_policy.append_retry_count(error, retry_count, self.i18n)
+        except TypeError:
+            return self.retry_policy.append_retry_count(error, retry_count)
+
+    def _failure_info(
+        self,
+        kind: FailureKind,
+        stage: str,
+        message_key: str,
+        *,
+        user_action: str = "",
+        repairable: bool = False,
+        **params,
+    ) -> FailureInfo:
+        return FailureInfo(
+            kind=kind,
+            stage=stage,
+            message=self.i18n.t(message_key, **params),
+            message_key=message_key,
+            message_params=dict(params),
+            user_action=user_action,
+            repairable=repairable,
+        )
+
     @staticmethod
     def _diagnostics_from(result: object) -> dict:
         diagnostics = getattr(result, "worker_diagnostics", None)
         return dict(diagnostics) if isinstance(diagnostics, dict) else {}
 
-    @staticmethod
-    def _password_resolution_failure(resolution: PasswordResolution) -> FailureInfo | None:
+    def _password_resolution_failure(self, resolution: PasswordResolution) -> FailureInfo | None:
         if resolution.password is not None:
             return None
         mapping = {
             PasswordResolutionStatus.PASSWORD_REQUIRED: (
                 FailureKind.PASSWORD_REQUIRED,
-                "压缩包需要密码",
+                "failure.password_required",
                 "request_password",
                 False,
             ),
             PasswordResolutionStatus.CANDIDATES_EXHAUSTED: (
                 FailureKind.WRONG_PASSWORD,
-                "密码错误或未知密码",
+                "failure.password_wrong_or_unknown",
                 "request_password",
                 False,
             ),
             PasswordResolutionStatus.INCONCLUSIVE: (
                 FailureKind.PASSWORD_INCONCLUSIVE,
-                "无法确认压缩包密码状态",
+                "failure.password_state_unknown",
                 "",
                 False,
             ),
             PasswordResolutionStatus.DAMAGED: (
                 FailureKind.DAMAGED,
-                "压缩包损坏",
+                "failure.damaged",
                 "",
                 True,
             ),
             PasswordResolutionStatus.UNSUPPORTED: (
                 FailureKind.UNSUPPORTED,
-                "压缩格式或加密方法不支持",
+                "failure.unsupported",
                 "",
                 False,
             ),
             PasswordResolutionStatus.BACKEND_ERROR: (
                 FailureKind.BACKEND_UNAVAILABLE,
-                "密码验证后端不可用",
+                "failure.password_verifier_unavailable",
                 "",
                 False,
             ),
@@ -504,11 +555,12 @@ class SingleArchiveExtractor:
         spec = mapping.get(resolution.status)
         if spec is None:
             return None
-        kind, message, user_action, repairable = spec
+        kind, message_key, user_action, repairable = spec
         return FailureInfo(
             kind=kind,
             stage="password_resolution",
-            message=message,
+            message=self.i18n.t(message_key),
+            message_key=message_key,
             user_action=user_action,
             repairable=repairable,
             details={"diagnostic": resolution.error_text},
@@ -543,26 +595,30 @@ class SingleArchiveExtractor:
         archive = task.main_path
         split_info = split_info or task.split_info
         all_parts = list(task.all_parts or [archive])
-        self._log(f"\n[EXTRACT] 开始 embedded segments: {archive} ({len(segments)} segments)")
+        self._log(self.i18n.t("extract.log.embedded_start", archive=archive, count=len(segments)))
         with _phase(phase_timer, f"{phase_prefix}_ensure_space_initial"):
             has_space = self.ensure_space(5)
         if not has_space:
+            failure = self._failure_info(FailureKind.PROCESS_ERROR, "preflight", "failure.insufficient_space")
             return self._failed(
                 archive,
                 out_dir,
                 all_parts,
-                "磁盘空间不足",
+                self._localized_failure(failure),
+                failure=failure,
                 diagnostics={"failure_stage": "preflight", "failure_kind": "disk_space"},
             )
         try:
             with _phase(phase_timer, f"{phase_prefix}_mkdir_initial"):
                 os.makedirs(out_dir, exist_ok=True)
         except Exception as exc:
+            failure = self._failure_info(FailureKind.FILESYSTEM_ERROR, "preflight", "extract.dir_create_failed", error=str(exc))
             return self._failed(
                 archive,
                 out_dir,
                 all_parts,
-                f"目录创建失败: {exc}",
+                self._localized_failure(failure),
+                failure=failure,
                 diagnostics={"failure_stage": "preflight", "failure_kind": "output_filesystem", "message": str(exc)},
             )
 
@@ -677,7 +733,7 @@ class SingleArchiveExtractor:
                     )
                 if manifest_path:
                     diagnostics["progress_manifest"] = manifest_path
-            self._log(f"[EXTRACT] embedded segments 成功: {archive}")
+            self._log(self.i18n.t("extract.log.embedded_success", archive=archive))
             return ExtractionResult(
                 success=True,
                 archive=archive,
@@ -693,12 +749,14 @@ class SingleArchiveExtractor:
                 files_written=totals["file_count"],
                 bytes_written=totals["total_bytes"],
             )
-        self._log(f"[EXTRACT] embedded segments 失败: {archive}")
+        self._log(self.i18n.t("extract.log.embedded_failed", archive=archive))
         password_failure = any(failure.is_password_failure for failure in segment_failures)
+        message_key = "failure.embedded_wrong_password" if password_failure else "failure.embedded_extract_failed"
         aggregate_failure = FailureInfo(
             kind=FailureKind.EMBEDDED_SEGMENTS_FAILED,
             stage="embedded_segments",
-            message="嵌入压缩段密码错误" if password_failure else "嵌入压缩段解压失败",
+            message=self.i18n.t(message_key),
+            message_key=message_key,
             user_action="request_password" if password_failure else "",
             repairable=bool(segment_failures) and all(failure.repairable for failure in segment_failures),
             causes=tuple(segment_failures),

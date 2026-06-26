@@ -45,6 +45,7 @@ from sunpack.contracts.verification import DECISION_ACCEPT, DECISION_ACCEPT_PART
 from sunpack.support.path_keys import absolute_path_key
 from sunpack.support import repair_trace
 from sunpack.support import archive_knowledge_projection as knowledge_view
+from sunpack.i18n import I18nContext
 
 
 @dataclass
@@ -122,6 +123,8 @@ class ExtractionBatchRunner:
         self.output_scan_policy = output_scan_policy
         self.rename_scheduler = rename_scheduler or RenameScheduler()
         self.config = config or {}
+        cli_config = self.config.get("cli") if isinstance(self.config.get("cli"), dict) else {}
+        self.i18n = I18nContext(cli_config.get("language"))
         self.scheduler_config = self._build_scheduler_config(self.config)
         self.max_workers = resolve_max_workers()
         self.analysis_stage = analysis_stage or ArchiveAnalysisStage(self.config)
@@ -571,7 +574,7 @@ class ExtractionBatchRunner:
                 archive=task.main_path,
                 out_dir=out_dir,
                 all_parts=task.all_parts,
-                error="校验失败",
+                error=self.i18n.t("failure.verification_failed"),
             ),
             attempts=attempts,
         )
@@ -1413,16 +1416,16 @@ class ExtractionBatchRunner:
     def _verification_failure_summary(self, outcome: BatchExtractionOutcome) -> str:
         verification = outcome.verification
         if verification is None:
-            return "校验失败"
+            return self.i18n.t("failure.verification_failed")
         steps = "; ".join(f"{step.method}:{step.status}" for step in verification.steps) or "none"
-        return (
-            "校验失败: "
-            f"completeness={getattr(verification, 'completeness', '')}, "
-            f"assessment={getattr(verification, 'assessment_status', '')}, "
-            f"decision={getattr(verification, 'decision_hint', '')}, "
-            f"coverage={getattr(getattr(verification, 'archive_coverage', None), 'completeness', '')}, "
-            f"attempts={outcome.attempts}, "
-            f"steps={steps}"
+        return self.i18n.t(
+            "failure.verification_failed_detail",
+            completeness=getattr(verification, "completeness", ""),
+            integrity=getattr(verification, "assessment_status", ""),
+            decision=getattr(verification, "decision_hint", ""),
+        ) + (
+            f", coverage={getattr(getattr(verification, 'archive_coverage', None), 'completeness', '')}, "
+            f"attempts={outcome.attempts}, steps={steps}"
         )
 
 

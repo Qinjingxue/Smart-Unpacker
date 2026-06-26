@@ -2,7 +2,7 @@ import json
 import subprocess
 
 from sunpack.coordinator.repair_loop import terminal_failure_reason
-from sunpack.extraction.internal.workflow.errors import classify_extract_error
+from sunpack.extraction.internal.workflow.errors import classify_extract_failure
 from sunpack.contracts.extraction import ExtractionResult
 
 
@@ -16,14 +16,14 @@ def test_split_worker_damage_takes_precedence_over_wrong_password_signal():
         "failure_kind": "checksum_error",
     })
 
-    error = classify_extract_error(
+    failure = classify_extract_failure(
         completed,
         "",
         archive="payload.7z.001",
         is_split_archive=True,
     )
 
-    assert error == "压缩包损坏"
+    assert failure.message_key == "failure.damaged"
 
 
 def test_split_payload_damage_is_not_terminal_wrong_password():
@@ -74,7 +74,7 @@ def test_worker_failure_kind_classifies_wrong_password_without_boolean_flag():
         "message": "archive could not be extracted",
     })
 
-    assert classify_extract_error(completed, "") == "密码错误"
+    assert classify_extract_failure(completed, "").message_key == "failure.wrong_password"
 
 
 def test_nested_worker_operation_result_classifies_wrong_password():
@@ -87,7 +87,7 @@ def test_nested_worker_operation_result_classifies_wrong_password():
         },
     })
 
-    assert classify_extract_error(completed, "") == "密码错误"
+    assert classify_extract_failure(completed, "").message_key == "failure.wrong_password"
 
 
 def _worker_completed(payload: dict) -> subprocess.CompletedProcess:

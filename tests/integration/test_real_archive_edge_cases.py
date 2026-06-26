@@ -277,7 +277,7 @@ def test_real_archive_edge_password_archives_require_matching_password(tmp_path,
     require_7z()
     case = FACTORY.create(tmp_path, f"pwd_single_{archive_format}", archive_format, password=PASSWORD)
 
-    assert_failure_contains(case, {"压缩包需要密码"})
+    assert_failure_contains(case, {"Archive password is required"})
     assert_success(case, passwords=[PASSWORD])
 
 

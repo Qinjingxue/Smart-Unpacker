@@ -4,6 +4,7 @@ from typing import Optional
 
 from sunpack.contracts.failures import FailureInfo, FailureKind
 from sunpack.extraction.internal.sevenzip.worker_diagnostics import worker_result_payload
+from sunpack.i18n import I18nContext
 from sunpack.support.archive_error_signals import (
     has_archive_damage_signals,
     has_transient_system_signals,
@@ -12,6 +13,7 @@ from sunpack.support.archive_error_signals import (
 )
 
 _norm = normalize_error_text
+_EN = I18nContext("en")
 
 
 def should_retry_extract_failure(
@@ -73,78 +75,80 @@ def classify_extract_failure(
     worker_result = worker_result_payload(run_result) or worker_result_payload(err_text)
     if worker_result:
         if worker_result.get("missing_volume"):
-            return _failure(FailureKind.MISSING_VOLUME, "分卷缺失或不完整")
+            return _failure(FailureKind.MISSING_VOLUME, "failure.missing_volume")
         if is_split_archive and _worker_reports_payload_damage(worker_result):
-            return _failure(FailureKind.DAMAGED, "压缩包损坏", repairable=True)
+            return _failure(FailureKind.DAMAGED, "failure.damaged", repairable=True)
         if _worker_reports_wrong_password(worker_result):
-            return _failure(FailureKind.WRONG_PASSWORD, "密码错误", user_action="request_password")
+            return _failure(FailureKind.WRONG_PASSWORD, "failure.wrong_password", user_action="request_password")
         if worker_result.get("checksum_error"):
-            return _failure(FailureKind.DAMAGED, "压缩包损坏", repairable=True)
+            return _failure(FailureKind.DAMAGED, "failure.damaged", repairable=True)
         if worker_result.get("damaged") or worker_result.get("native_status") == "damaged":
-            return _failure(FailureKind.DAMAGED, "压缩包损坏", repairable=True)
+            return _failure(FailureKind.DAMAGED, "failure.damaged", repairable=True)
         if worker_result.get("unsupported_method"):
-            return _failure(FailureKind.UNSUPPORTED, "致命错误 (文件损坏或格式不支持)")
+            return _failure(FailureKind.UNSUPPORTED, "failure.unsupported")
         if worker_result.get("native_status") == "backend_unavailable":
-            return _failure(FailureKind.BACKEND_UNAVAILABLE, "7z后端不可用")
+            return _failure(FailureKind.BACKEND_UNAVAILABLE, "failure.backend_unavailable")
         if worker_result.get("native_status") == "unsupported":
-            return _failure(FailureKind.UNSUPPORTED, "致命错误 (文件损坏或格式不支持)")
+            return _failure(FailureKind.UNSUPPORTED, "failure.unsupported")
 
     if "missing volume" in err_lower:
-        return _failure(FailureKind.MISSING_VOLUME, "分卷缺失或不完整")
+        return _failure(FailureKind.MISSING_VOLUME, "failure.missing_volume")
     if "unexpected end of archive" in err_lower or "unexpected end of data" in err_lower:
         return _failure(
             FailureKind.MISSING_VOLUME if is_split_archive else FailureKind.DAMAGED,
-            "分卷缺失或不完整" if is_split_archive else "压缩包损坏",
+            "failure.missing_volume" if is_split_archive else "failure.damaged",
             repairable=not is_split_archive,
         )
     if "crc failed" in err_lower or "data error in encrypted file" in err_lower:
         if is_split_archive:
-            return _failure(FailureKind.DAMAGED, "压缩包损坏", repairable=True)
-        return _failure(FailureKind.DAMAGED, "压缩包损坏", repairable=True)
+            return _failure(FailureKind.DAMAGED, "failure.damaged", repairable=True)
+        return _failure(FailureKind.DAMAGED, "failure.damaged", repairable=True)
     if "headers error" in err_lower or "data error" in err_lower:
-        return _failure(FailureKind.DAMAGED, "压缩包损坏", repairable=True)
+        return _failure(FailureKind.DAMAGED, "failure.damaged", repairable=True)
     if "cannot open the file as" in err_lower or "can not open the file as archive" in err_lower:
         return _failure(
             FailureKind.MISSING_VOLUME if is_split_archive else FailureKind.DAMAGED,
-            "分卷缺失或不完整" if is_split_archive else "压缩包损坏",
+            "failure.missing_volume" if is_split_archive else "failure.damaged",
             repairable=not is_split_archive,
         )
     if "is not archive" in err_lower or "archive is corrupted" in err_lower or "checksum error" in err_lower:
-        return _failure(FailureKind.DAMAGED, "压缩包损坏", repairable=True)
+        return _failure(FailureKind.DAMAGED, "failure.damaged", repairable=True)
     if "unsupported compression method" in err_lower or "unsupported method" in err_lower:
-        return _failure(FailureKind.UNSUPPORTED, "致命错误 (文件损坏或格式不支持)")
+        return _failure(FailureKind.UNSUPPORTED, "failure.unsupported")
 
     if run_result:
         code = run_result.returncode
         if code == -100:
-            return _failure(FailureKind.PROCESS_ERROR, "7z进程启动失败")
+            return _failure(FailureKind.PROCESS_ERROR, "failure.process_start_failed")
         if code == -101:
-            return _failure(FailureKind.PROCESS_ERROR, "7z进程超时")
+            return _failure(FailureKind.PROCESS_ERROR, "failure.process_timeout")
         if code == -102:
-            return _failure(FailureKind.PROCESS_ERROR, "7z进程无进展")
+            return _failure(FailureKind.PROCESS_ERROR, "failure.process_no_progress")
         if code is not None and code < 0:
-            return _failure(FailureKind.PROCESS_ERROR, "7z进程异常退出或被终止")
+            return _failure(FailureKind.PROCESS_ERROR, "failure.process_exited")
         if code == 1:
-            return _failure(FailureKind.UNKNOWN, "警告 (文件被占用或部分失败)")
+            return _failure(FailureKind.UNKNOWN, "failure.warning_busy_or_partial")
         elif code == 2:
-            return _failure(FailureKind.UNKNOWN, "致命错误 (文件损坏或格式不支持)")
+            return _failure(FailureKind.UNKNOWN, "failure.unsupported")
         elif code == 7:
-            return _failure(FailureKind.PROCESS_ERROR, "命令行参数错误")
+            return _failure(FailureKind.PROCESS_ERROR, "failure.invalid_arguments")
         elif code == 8:
-            return _failure(FailureKind.PROCESS_ERROR, "内存/磁盘空间不足")
+            return _failure(FailureKind.PROCESS_ERROR, "failure.insufficient_space")
         elif code == 255:
-            return _failure(FailureKind.PROCESS_ERROR, "用户中断")
+            return _failure(FailureKind.PROCESS_ERROR, "failure.user_interrupted")
         elif code not in (None, 0):
-            return _failure(FailureKind.PROCESS_ERROR, f"7z进程异常退出 (退出码 {code})")
+            return _failure(FailureKind.PROCESS_ERROR, "failure.process_exit_code", code=code)
 
-    return _failure(FailureKind.UNKNOWN, "未知原因")
+    return _failure(FailureKind.UNKNOWN, "failure.unknown")
 
 
-def _failure(kind: FailureKind, message: str, *, user_action: str = "", repairable: bool = False) -> FailureInfo:
+def _failure(kind: FailureKind, message_key: str, *, user_action: str = "", repairable: bool = False, **params) -> FailureInfo:
     return FailureInfo(
         kind=kind,
         stage="extraction",
-        message=message,
+        message=_EN.t(message_key, **params),
+        message_key=message_key,
+        message_params=dict(params),
         user_action=user_action,
         repairable=repairable,
     )

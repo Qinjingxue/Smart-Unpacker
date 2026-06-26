@@ -1,6 +1,7 @@
 from sunpack.app.cli import build_cli_parser
 from sunpack.app.cli_commands import discover_command_modules
 from sunpack.app.cli_context import CliContext
+from sunpack.i18n.catalog import CATALOG
 
 
 def test_cli_discovers_builtin_command_modules_in_order():
@@ -12,7 +13,8 @@ def test_cli_discovers_builtin_command_modules_in_order():
 def test_cli_command_modules_declare_required_contract():
     for module in discover_command_modules():
         assert isinstance(module.COMMAND, str) and module.COMMAND
-        assert isinstance(module.TEXTS, dict)
+        assert f"cli.{module.COMMAND}.help" in CATALOG["en"]
+        assert f"cli.{module.COMMAND}.help" in CATALOG["zh"]
         assert callable(module.register)
         assert callable(module.handle)
 

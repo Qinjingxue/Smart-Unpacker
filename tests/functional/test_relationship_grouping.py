@@ -156,7 +156,7 @@ def test_missing_middle_split_volume_is_failed_before_detection(tmp_path):
     summary = PipelineRunner(SCAN_CONFIG).run(str(root))
 
     assert summary.success_count == 0
-    assert any("分卷缺失或不完整" in item for item in summary.failed_tasks)
+    assert any("missing or incomplete split volume" in item for item in summary.failed_tasks)
 
 
 def test_missing_head_split_volume_is_failed_before_detection(tmp_path):
@@ -173,7 +173,7 @@ def test_missing_head_split_volume_is_failed_before_detection(tmp_path):
     summary = PipelineRunner(SCAN_CONFIG).run(str(root))
 
     assert summary.success_count == 0
-    assert any("分卷缺失或不完整" in item for item in summary.failed_tasks)
+    assert any("missing or incomplete split volume" in item for item in summary.failed_tasks)
 
 
 def test_missing_head_split_volume_can_be_recovered_by_fuzzy_candidate(tmp_path):

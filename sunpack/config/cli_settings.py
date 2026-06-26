@@ -2,14 +2,14 @@ from typing import Any
 
 from sunpack.config.fields.cli import DEFAULT_CLI_LANGUAGE
 from sunpack.config.loader import load_effective_config_payload
+from sunpack.i18n import normalize_language
 
 
 DEFAULT_CLI_LANG = DEFAULT_CLI_LANGUAGE
 
 
 def normalize_cli_language(value: Any) -> str:
-    normalized = str(value or "").strip().lower()
-    return "zh" if normalized == "zh" else DEFAULT_CLI_LANG
+    return normalize_language(value)
 
 
 def load_cli_language_from_config() -> str:

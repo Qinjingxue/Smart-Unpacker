@@ -19,12 +19,14 @@ from sunpack.coordinator.output_scan_policy import NestedOutputScanPolicy
 from sunpack.coordinator.recursion import RecursionController
 from sunpack.coordinator.task_scan import ArchiveTaskScanner
 from sunpack.coordinator.analysis_stage import ArchiveAnalysisStage
+from sunpack.i18n import I18nContext
 
 class PipelineRunner:
     def __init__(self, config: Dict[str, Any]):
         self.config = config
         cli_config = config.get("cli") if isinstance(config.get("cli"), dict) else {}
-        self.language = "zh" if str(cli_config.get("language") or "").strip().lower() == "zh" else "en"
+        self.i18n = I18nContext(cli_config.get("language"))
+        self.language = self.i18n.language
         self.quiet = bool(cli_config.get("quiet", False))
         self.verbose = bool(cli_config.get("verbose", False))
         self.context = RunContext()
@@ -44,7 +46,10 @@ class PipelineRunner:
             max_retries=config.get("max_retries", 3),
             process_config=performance_config,
             output_config=config.get("output", {}),
-            extraction_config=config.get("extraction", {}),
+            extraction_config={
+                **(config.get("extraction", {}) if isinstance(config.get("extraction"), dict) else {}),
+                "language": self.language,
+            },
         )
         self.extractor.set_progress_callback(self.logger.task_progress)
         self.output_scan_policy = NestedOutputScanPolicy(config)
@@ -66,9 +71,6 @@ class PipelineRunner:
             analysis_stage=self.analysis_stage,
             progress_reporter=self.logger,
         )
-
-    def text(self, en: str, zh: str) -> str:
-        return zh if self.language == "zh" else en
 
     @property
     def recent_passwords(self) -> list[str]:

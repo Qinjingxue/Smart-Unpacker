@@ -6,33 +6,13 @@ from sunpack.config.loader import load_config
 
 COMMAND = "passwords"
 ORDER = 40
-TEXTS = {
-    "en": {
-        "help": "Show the password list that would be tried.",
-        "summary": "[CLI] Password source summary:",
-        "user_input": "  User input: {value}",
-        "recent": "  Recent: {value}",
-        "clipboard": "  Clipboard: {value}",
-        "builtin": "  Built-in: {value}",
-        "final_order": "  Final order: {value}",
-    },
-    "zh": {
-        "help": "查看当前会参与尝试的密码列表。",
-        "summary": "[CLI] 密码来源汇总：",
-        "user_input": "  用户输入：{value}",
-        "recent": "  最近成功：{value}",
-        "clipboard": "  剪贴板：{value}",
-        "builtin": "  内置密码：{value}",
-        "final_order": "  最终顺序：{value}",
-    },
-}
 
 
 def register(subparsers, ctx):
     parser = subparsers.add_parser(
         COMMAND,
         parents=[build_json_parser(ctx), build_password_parser(ctx)],
-        help=ctx.t(TEXTS, "help"),
+        help=ctx.t("cli.passwords.help"),
         usage="sunpack passwords [options]",
         formatter_class=CliHelpFormatter,
     )
@@ -44,8 +24,8 @@ def handle(args, ctx):
     try:
         passwords = collect_cli_passwords(
             args,
-            prompt_text=ctx.core_text("password_prompt"),
-            input_prompt=ctx.core_text("password_input_prompt"),
+            prompt_text=ctx.t("cli.password_prompt"),
+            input_prompt=ctx.t("cli.password_input_prompt"),
         )
         config = load_config()
         clipboard_passwords = collect_clipboard_passwords(config)
@@ -58,12 +38,12 @@ def handle(args, ctx):
         return EXIT_USAGE, CliCommandResult(command=COMMAND, inputs={}, summary={}, errors=[str(exc)])
 
     if not args.json:
-        reporter.info(ctx.t(TEXTS, "summary"))
-        reporter.info(ctx.t(TEXTS, "user_input").format(value=password_summary.user_passwords or []))
-        reporter.info(ctx.t(TEXTS, "recent").format(value=password_summary.recent_passwords or []))
-        reporter.info(ctx.t(TEXTS, "clipboard").format(value=password_summary.clipboard_passwords or []))
-        reporter.info(ctx.t(TEXTS, "builtin").format(value=password_summary.builtin_passwords or []))
-        reporter.info(ctx.t(TEXTS, "final_order").format(value=password_summary.combined_passwords or []))
+        reporter.info(ctx.t("cli.passwords.summary"))
+        reporter.info(ctx.t("cli.passwords.user_input", value=password_summary.user_passwords or []))
+        reporter.info(ctx.t("cli.passwords.recent", value=password_summary.recent_passwords or []))
+        reporter.info(ctx.t("cli.passwords.clipboard", value=password_summary.clipboard_passwords or []))
+        reporter.info(ctx.t("cli.passwords.builtin", value=password_summary.builtin_passwords or []))
+        reporter.info(ctx.t("cli.passwords.final_order", value=password_summary.combined_passwords or []))
 
     return 0, CliCommandResult(
         command=COMMAND,

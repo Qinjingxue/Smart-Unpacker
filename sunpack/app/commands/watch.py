@@ -24,38 +24,6 @@ from sunpack.filesystem.watcher.service import (
 
 COMMAND = "watch"
 ORDER = 15
-TEXTS = {
-    "en": {
-        "help": "Manage persistent watched folders and the background watcher.",
-        "start": "Start the background watcher.",
-        "add": "Add watched folders.",
-        "remove": "Remove watched folders.",
-        "list": "List watched folders.",
-        "reload": "Reload the running watcher.",
-        "stop": "Stop the running watcher.",
-        "status": "Show watcher status.",
-        "startup": "Manage Windows startup registration.",
-        "paths": "Folders to add or remove.",
-        "start_after_add": "Start the watcher after adding folders.",
-        "once": "Run one watcher pass and exit.",
-        "no_tray": "Run without a Windows tray icon.",
-    },
-    "zh": {
-        "help": "管理持久监控目录和后台 watch。",
-        "start": "启动后台 watch。",
-        "add": "添加监控目录。",
-        "remove": "移除监控目录。",
-        "list": "列出监控目录。",
-        "reload": "重新加载运行中的 watch。",
-        "stop": "停止运行中的 watch。",
-        "status": "查看 watch 状态。",
-        "startup": "管理 Windows 开机自启动。",
-        "paths": "要添加或移除的目录。",
-        "start_after_add": "添加目录后启动 watch。",
-        "once": "只运行一轮 watch 后退出。",
-        "no_tray": "运行时不显示 Windows 托盘图标。",
-    },
-}
 
 
 def register(subparsers, ctx):
@@ -63,30 +31,30 @@ def register(subparsers, ctx):
     parser = subparsers.add_parser(
         COMMAND,
         parents=[common],
-        help=ctx.t(TEXTS, "help"),
+        help=ctx.t("cli.watch.help"),
         usage="sunpack watch <add|remove|list|start|stop|reload|status|startup> [options]",
         formatter_class=CliHelpFormatter,
     )
     localize_help_action(parser, ctx)
     actions = parser.add_subparsers(dest="watch_action", required=True)
 
-    start_parser = actions.add_parser("start", parents=[common], help=ctx.t(TEXTS, "start"), formatter_class=CliHelpFormatter)
-    start_parser.add_argument("--once", action="store_true", help=ctx.t(TEXTS, "once"))
-    start_parser.add_argument("--no-tray", action="store_true", help=ctx.t(TEXTS, "no_tray"))
+    start_parser = actions.add_parser("start", parents=[common], help=ctx.t("cli.watch.start"), formatter_class=CliHelpFormatter)
+    start_parser.add_argument("--once", action="store_true", help=ctx.t("cli.watch.once"))
+    start_parser.add_argument("--no-tray", action="store_true", help=ctx.t("cli.watch.no_tray"))
 
-    add_parser = actions.add_parser("add", parents=[common], help=ctx.t(TEXTS, "add"), formatter_class=CliHelpFormatter)
-    add_parser.add_argument("paths", nargs="+", help=ctx.t(TEXTS, "paths"))
-    add_parser.add_argument("--start", action="store_true", help=ctx.t(TEXTS, "start_after_add"))
+    add_parser = actions.add_parser("add", parents=[common], help=ctx.t("cli.watch.add"), formatter_class=CliHelpFormatter)
+    add_parser.add_argument("paths", nargs="+", help=ctx.t("cli.watch.paths"))
+    add_parser.add_argument("--start", action="store_true", help=ctx.t("cli.watch.start_after_add"))
 
-    remove_parser = actions.add_parser("remove", parents=[common], help=ctx.t(TEXTS, "remove"), formatter_class=CliHelpFormatter)
-    remove_parser.add_argument("paths", nargs="+", help=ctx.t(TEXTS, "paths"))
+    remove_parser = actions.add_parser("remove", parents=[common], help=ctx.t("cli.watch.remove"), formatter_class=CliHelpFormatter)
+    remove_parser.add_argument("paths", nargs="+", help=ctx.t("cli.watch.paths"))
 
-    actions.add_parser("list", parents=[common], help=ctx.t(TEXTS, "list"), formatter_class=CliHelpFormatter)
-    actions.add_parser("reload", parents=[common], help=ctx.t(TEXTS, "reload"), formatter_class=CliHelpFormatter)
-    actions.add_parser("stop", parents=[common], help=ctx.t(TEXTS, "stop"), formatter_class=CliHelpFormatter)
-    actions.add_parser("status", parents=[common], help=ctx.t(TEXTS, "status"), formatter_class=CliHelpFormatter)
+    actions.add_parser("list", parents=[common], help=ctx.t("cli.watch.list"), formatter_class=CliHelpFormatter)
+    actions.add_parser("reload", parents=[common], help=ctx.t("cli.watch.reload"), formatter_class=CliHelpFormatter)
+    actions.add_parser("stop", parents=[common], help=ctx.t("cli.watch.stop"), formatter_class=CliHelpFormatter)
+    actions.add_parser("status", parents=[common], help=ctx.t("cli.watch.status"), formatter_class=CliHelpFormatter)
 
-    startup_parser = actions.add_parser("startup", parents=[common], help=ctx.t(TEXTS, "startup"), formatter_class=CliHelpFormatter)
+    startup_parser = actions.add_parser("startup", parents=[common], help=ctx.t("cli.watch.startup"), formatter_class=CliHelpFormatter)
     startup_parser.add_argument("startup_action", choices=["enable", "disable", "status"])
 
 
@@ -94,7 +62,7 @@ def handle(args, ctx):
     try:
         action = args.watch_action
         if action == "start":
-            return _handle_start(args)
+            return _handle_start(args, ctx)
         if action == "add":
             return _handle_add(args)
         if action == "remove":
@@ -111,10 +79,10 @@ def handle(args, ctx):
             return _handle_startup(args)
     except Exception as exc:
         return EXIT_TASK_FAILED, CliCommandResult(command=COMMAND, inputs={}, summary={}, errors=[str(exc)])
-    return EXIT_USAGE, CliCommandResult(command=COMMAND, inputs={}, summary={}, errors=[f"Unknown watch action: {action}"])
+    return EXIT_USAGE, CliCommandResult(command=COMMAND, inputs={}, summary={}, errors=[ctx.t("cli.watch.unknown_action", action=action)])
 
 
-def _handle_start(args):
+def _handle_start(args, ctx):
     tray_factory = None
     if not getattr(args, "no_tray", False) and not getattr(args, "once", False):
         from sunpack.platform.windows.tray import WindowsTrayIcon
@@ -127,7 +95,7 @@ def _handle_start(args):
             command=COMMAND,
             inputs={"action": "start"},
             summary={"running": True},
-            errors=["Watch is already running."],
+            errors=[ctx.t("cli.watch.already_running")],
         )
     return code, CliCommandResult(command=COMMAND, inputs={"action": "start"}, summary={"exit_code": code})
 

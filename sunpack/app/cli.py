@@ -51,10 +51,10 @@ def build_cli_parser(ctx: CliContext | None = None) -> argparse.ArgumentParser:
     ctx.commands = command_map(modules)
 
     parser = argparse.ArgumentParser(
-        description=ctx.core_text("description"),
-        usage=ctx.core_text("usage"),
+        description=ctx.t("cli.description"),
+        usage=ctx.t("cli.usage"),
         epilog=(
-            "Examples:\n"
+            f"{ctx.t('cli.examples')}\n"
             "  sunpack extract C:\\Archives\n"
             "  sunpack inspect .\\fixtures\n"
             "  sunpack passwords --ask-pw"
@@ -78,7 +78,7 @@ def dispatch_command(args, ctx: CliContext) -> tuple[int, CliCommandResult]:
             command="",
             inputs={},
             summary={},
-            errors=[ctx.core_text("unknown_command").format(command=command)],
+            errors=[ctx.t("cli.unknown_command", command=command)],
         )
     return module.handle(args, ctx)
 
@@ -90,7 +90,7 @@ def maybe_pause(args, ctx: CliContext, exit_code: int, result: CliCommandResult)
         and not result.errors
     )
     if getattr(args, "pause_on_exit", False) and not successful_extract:
-        print(ctx.core_text("pause_prompt"), flush=True)
+        print(ctx.t("cli.pause_prompt"), flush=True)
         os.system("pause >nul")
 
 
@@ -123,7 +123,7 @@ def main(argv=None):
             command=getattr(args, "command", ""),
             inputs={"argv": argv},
             summary={},
-            errors=["interactive password input is unavailable in JSON mode"],
+            errors=[ctx.t("cli.json_password_prompt_unavailable")],
         )
         reporter.emit_result(result)
         return EXIT_USAGE
@@ -136,7 +136,7 @@ def main(argv=None):
         else:
             exit_code, result = dispatch_command(args, ctx)
     except Exception as exc:
-        reporter.error(ctx.core_text("runtime_failure").format(error=exc))
+        reporter.error(ctx.t("cli.runtime_failure", error=exc))
         result = CliCommandResult(
             command=getattr(args, "command", ""),
             inputs={"argv": argv},

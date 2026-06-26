@@ -1,16 +1,11 @@
 from sunpack_native import flatten_single_branch_directories as _native_flatten_single_branch_directories
+from sunpack.i18n import I18nContext
 
 
 class DirectoryFlattener:
     def __init__(self, language: str = "en"):
-        self.language = "zh" if str(language or "").strip().lower() == "zh" else "en"
-
-    def text(self, en: str, zh: str) -> str:
-        return zh if self.language == "zh" else en
+        self.i18n = I18nContext(language)
 
     def flatten_dirs(self, base: str):
-        print(self.text(
-            "\n[CLEAN] Flattening single-branch directories...",
-            "\n[CLEAN] 正在压平单子目录...",
-        ))
+        print(self.i18n.t("cleanup.flatten"))
         _native_flatten_single_branch_directories(str(base))

@@ -26,41 +26,19 @@ from sunpack.contracts.failures import FailureInfo
 
 COMMAND = "extract"
 ORDER = 10
-TEXTS = {
-    "en": {
-        "help": "Run precheck, scan, extraction, and cleanup.",
-        "paths": "Files or directories to process.",
-        "direct_file": "Treat each path as an archive file and skip initial filesystem/detection scanning.",
-        "single_target": "[Ready] Target: {path}",
-        "target_paths": "[Ready] Processing {count} targets",
-        "common_root": "Common root: {root}",
-        "retry_round": "[CLI] Running another extraction round with newly entered passwords.",
-        "retry_no_passwords": "[CLI] No new passwords entered; stopping retry.",
-    },
-    "zh": {
-        "help": "执行预检查、扫描、解压和清理。",
-        "paths": "要处理的文件或目录。",
-        "direct_file": "将每个路径当作压缩文件直接送入分析层，跳过初始文件系统/检测扫描。",
-        "single_target": "[准备] 处理目标：{path}",
-        "target_paths": "[准备] 将处理 {count} 个目标",
-        "common_root": "公共根目录：{root}",
-        "retry_round": "[CLI] 使用新输入的密码再解压一轮。",
-        "retry_no_passwords": "[CLI] 未输入新密码，停止重试。",
-    },
-}
 
 
 def register(subparsers, ctx):
     parser = subparsers.add_parser(
         COMMAND,
         parents=[build_common_parser(ctx), build_password_parser(ctx), build_extract_config_override_parser(ctx)],
-        help=ctx.t(TEXTS, "help"),
+        help=ctx.t("cli.extract.help"),
         usage="sunpack extract [options] <paths...>",
         formatter_class=CliHelpFormatter,
     )
     localize_help_action(parser, ctx)
-    parser.add_argument("--direct-file", dest="direct_file", action="store_true", help=ctx.t(TEXTS, "direct_file"))
-    parser.add_argument("paths", nargs="+", help=ctx.t(TEXTS, "paths"))
+    parser.add_argument("--direct-file", dest="direct_file", action="store_true", help=ctx.t("cli.extract.direct_file"))
+    parser.add_argument("paths", nargs="+", help=ctx.t("cli.extract.paths"))
 
 
 def handle(args, ctx):
@@ -74,8 +52,8 @@ def handle(args, ctx):
     try:
         passwords = collect_cli_passwords(
             args,
-            prompt_text=ctx.core_text("password_prompt"),
-            input_prompt=ctx.core_text("password_input_prompt"),
+            prompt_text=ctx.t("cli.password_prompt"),
+            input_prompt=ctx.t("cli.password_input_prompt"),
         )
         clipboard_passwords = collect_clipboard_passwords(config)
     except Exception as exc:
@@ -85,12 +63,12 @@ def handle(args, ctx):
     config.setdefault("output", {})["common_root"] = common_root
 
     if len(target_paths) == 1:
-        reporter.info(ctx.t(TEXTS, "single_target").format(path=target_paths[0]))
+        reporter.info(ctx.t("cli.extract.single_target", path=target_paths[0]))
     else:
-        reporter.info(ctx.t(TEXTS, "target_paths").format(count=len(target_paths)))
+        reporter.info(ctx.t("cli.extract.target_paths", count=len(target_paths)))
         for path in target_paths:
             reporter.detail(f"  - {path}")
-    reporter.detail(ctx.t(TEXTS, "common_root").format(root=common_root))
+    reporter.detail(ctx.t("cli.extract.common_root", root=common_root))
 
     attempts = []
     retry_count = 0
@@ -124,17 +102,17 @@ def handle(args, ctx):
             break
         try:
             new_passwords = prompt_for_passwords(
-                prompt_text=ctx.core_text("password_prompt"),
-                input_prompt=ctx.core_text("password_input_prompt"),
+                prompt_text=ctx.t("cli.password_prompt"),
+                input_prompt=ctx.t("cli.password_input_prompt"),
             )
         except (EOFError, KeyboardInterrupt):
             break
         if not new_passwords:
-            reporter.info(ctx.t(TEXTS, "retry_no_passwords"))
+            reporter.info(ctx.t("cli.extract.retry_no_passwords"))
             break
         passwords = _dedupe([*passwords, *new_passwords])
         retry_count += 1
-        reporter.info(ctx.t(TEXTS, "retry_round"))
+        reporter.info(ctx.t("cli.extract.retry_round"))
 
     password_summary = build_password_summary(
         passwords,
@@ -311,14 +289,14 @@ def _should_retry_password_failure(args, failures: list[FailureInfo]) -> bool:
 def _confirm_password_retry(ctx) -> bool:
     while True:
         try:
-            answer = input(ctx.core_text("password_retry_prompt")).strip().lower()
+            answer = input(ctx.t("cli.password_retry_prompt")).strip().lower()
         except EOFError:
             return False
         if answer in {"y", "yes"}:
             return True
         if answer in {"n", "no", ""}:
             return False
-        print("Please answer y or n.", flush=True)
+        print(ctx.t("cli.answer_yes_no"), flush=True)
 
 
 def _dedupe(values: list[str]) -> list[str]:

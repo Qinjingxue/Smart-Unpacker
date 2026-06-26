@@ -13,6 +13,7 @@ from sunpack.coordinator.target_scan import build_fact_bags_for_targets
 from sunpack.filesystem.knowledge import write_filesystem_task
 from sunpack.relations.knowledge import write_relation_task
 from sunpack.relations.scheduler import RelationsScheduler
+from sunpack.i18n import I18nContext
 
 
 STANDARD_ARCHIVE_EXTS = {".7z", ".zip", ".rar", ".tar", ".gz", ".bz2", ".xz", ".zst"}
@@ -23,6 +24,8 @@ class ArchiveTaskProvider:
 
     def __init__(self, config: dict[str, Any], analysis_stage: ArchiveAnalysisStage | None = None):
         self.config = config
+        cli_config = config.get("cli") if isinstance(config.get("cli"), dict) else {}
+        self.i18n = I18nContext(cli_config.get("language"))
         self.detector = DetectionScheduler(config)
         self._relations = RelationsScheduler()
         self.analysis_stage = analysis_stage or ArchiveAnalysisStage(config)
@@ -167,7 +170,7 @@ class ArchiveTaskProvider:
     def _incomplete_split_failure_message(self, bag: FactBag) -> str:
         path = bag.get("candidate.entry_path") or bag.get("file.path") or ""
         name = os.path.basename(path) or str(bag.get("candidate.logical_name") or "split archive")
-        return f"{name} [分卷缺失或不完整]"
+        return self.i18n.t("failure.incomplete_split_suffix", name=name)
 
 
 def _write_initial_task_knowledge(task: ArchiveTask) -> None:

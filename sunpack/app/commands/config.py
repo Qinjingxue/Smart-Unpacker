@@ -7,22 +7,6 @@ from sunpack.support.json_format import to_json_text
 
 COMMAND = "config"
 ORDER = 50
-TEXTS = {
-    "en": {
-        "help": "Show or validate the effective SunPack config.",
-        "show_help": "Print the merged effective config.",
-        "validate_help": "Validate JSON, rules, rule config schemas, and fact schemas.",
-        "valid_config": "[CONFIG] Configuration is valid.",
-        "unknown_config_command": "Unknown config command: {action}",
-    },
-    "zh": {
-        "help": "查看或校验 SunPack 有效配置。",
-        "show_help": "打印合并后的有效配置。",
-        "validate_help": "校验 JSON、规则、规则配置 schema 和 fact schema。",
-        "valid_config": "[CONFIG] 配置有效。",
-        "unknown_config_command": "未知配置命令：{action}",
-    },
-}
 
 
 def register(subparsers, ctx):
@@ -30,17 +14,17 @@ def register(subparsers, ctx):
     config_parser = subparsers.add_parser(
         COMMAND,
         parents=[common_parser],
-        help=ctx.t(TEXTS, "help"),
+        help=ctx.t("cli.config.help"),
         usage="sunpack config [options] <show|validate>",
         formatter_class=CliHelpFormatter,
     )
     localize_help_action(config_parser, ctx)
     config_subparsers = config_parser.add_subparsers(dest="config_action", required=True)
-    config_subparsers.add_parser("show", parents=[common_parser], help=ctx.t(TEXTS, "show_help"), formatter_class=CliHelpFormatter)
+    config_subparsers.add_parser("show", parents=[common_parser], help=ctx.t("cli.config.show_help"), formatter_class=CliHelpFormatter)
     config_subparsers.add_parser(
         "validate",
         parents=[common_parser],
-        help=ctx.t(TEXTS, "validate_help"),
+        help=ctx.t("cli.config.validate_help"),
         formatter_class=CliHelpFormatter,
     )
 
@@ -65,13 +49,13 @@ def handle(args, ctx):
                     errors=list(item["errors"]),
                     items=[item],
                 )
-            reporter.info(ctx.t(TEXTS, "valid_config"))
+            reporter.info(ctx.t("cli.config.valid_config"))
         else:
             return EXIT_USAGE, CliCommandResult(
                 command=COMMAND,
                 inputs={},
                 summary={},
-                errors=[ctx.t(TEXTS, "unknown_config_command").format(action=args.config_action)],
+                errors=[ctx.t("cli.config.unknown_config_command", action=args.config_action)],
             )
     except Exception as exc:
         return EXIT_USAGE, CliCommandResult(command=COMMAND, inputs={}, summary={}, errors=[str(exc)])

@@ -30,6 +30,8 @@ class FailureInfo:
     kind: FailureKind
     stage: str
     message: str
+    message_key: str = ""
+    message_params: dict[str, Any] = field(default_factory=dict)
     user_action: str = ""
     repairable: bool = False
     causes: tuple["FailureInfo", ...] = field(default_factory=tuple)
@@ -48,6 +50,8 @@ class FailureInfo:
             "kind": self.kind.value,
             "stage": self.stage,
             "message": self.message,
+            "message_key": self.message_key,
+            "message_params": dict(self.message_params),
             "user_action": self.user_action,
             "repairable": self.repairable,
             "causes": [cause.to_dict() for cause in self.causes],
@@ -71,6 +75,8 @@ class FailureInfo:
             kind=kind,
             stage=str(payload.get("stage") or ""),
             message=str(payload.get("message") or ""),
+            message_key=str(payload.get("message_key") or ""),
+            message_params=dict(payload.get("message_params") or {}),
             user_action=str(payload.get("user_action") or ""),
             repairable=bool(payload.get("repairable", False)),
             causes=causes,

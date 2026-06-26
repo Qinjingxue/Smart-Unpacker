@@ -111,7 +111,7 @@ class CliBasicTests(unittest.TestCase):
 
         self.assertNotEqual(result.returncode, 0)
         payload = json.loads(result.stdout)
-        self.assertIn("interactive password input is unavailable", payload["errors"][0])
+        self.assertIn("JSON 模式不支持交互式密码输入", payload["errors"][0])
 
     def test_config_show_json_shape(self):
         result = run_cli("config", "--json", "show")

@@ -9,6 +9,7 @@ from pathlib import Path
 
 from sunpack.config.payload_io import read_config_payload
 from sunpack.filesystem.watcher.service import watch_roots_path
+from sunpack.i18n import I18nContext
 from sunpack.platform.windows.startup import disable_startup, enable_startup, startup_status
 
 
@@ -41,34 +42,10 @@ ID_RELOAD = 1004
 ID_EXIT = 1005
 ID_TOGGLE_STARTUP = 1006
 
-TRAY_TEXTS = {
-    "en": {
-        "tip": "SunPack Watch",
-        "open_config": "Open config",
-        "open_log_dir": "Open log directory",
-        "open_watch_roots": "Open watch folders file",
-        "disable_startup": "Disable startup",
-        "enable_startup": "Enable startup",
-        "reload": "Reload",
-        "exit": "Exit",
-    },
-    "zh": {
-        "tip": "智能解压监控",
-        "open_config": "打开配置文件",
-        "open_log_dir": "打开日志目录",
-        "open_watch_roots": "打开监控目录列表",
-        "disable_startup": "关闭开机自启",
-        "enable_startup": "启用开机自启",
-        "reload": "重新加载",
-        "exit": "退出",
-    },
-}
-
-
 class WindowsTrayIcon:
     def __init__(self, service):
         self.service = service
-        self.language = _tray_language_from_service(service)
+        self.i18n = I18nContext(_tray_language_from_service(service))
         self.user32 = ctypes.windll.user32
         self.shell32 = ctypes.windll.shell32
         self.kernel32 = ctypes.windll.kernel32
@@ -248,8 +225,8 @@ class WindowsTrayIcon:
         return self._text("disable_startup" if enabled else "enable_startup")
 
     def _text(self, key: str) -> str:
-        lang_texts = TRAY_TEXTS.get(self.language) or TRAY_TEXTS["en"]
-        return lang_texts.get(key, TRAY_TEXTS["en"].get(key, key))
+        i18n = getattr(self, "i18n", None) or I18nContext(getattr(self, "language", "en"))
+        return i18n.t(f"tray.{key}")
 
     def _toggle_startup(self) -> None:
         try:

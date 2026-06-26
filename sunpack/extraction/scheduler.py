@@ -31,14 +31,15 @@ class ExtractionScheduler:
         self.password_session = PasswordSession()
         self.password_tester = ArchivePasswordTester(password_store=self.password_store)
         self.password_resolver = PasswordResolver(self.password_tester, self.password_session)
-        self.metadata_scanner = ArchiveMetadataScanner()
+        extraction_config = extraction_config if isinstance(extraction_config, dict) else {}
+        self.metadata_scanner = ArchiveMetadataScanner(language=str(extraction_config.get("language") or "en"))
         self.seven_z_path = ""
         self.rename_scheduler = RenameScheduler()
         self.split_entry_resolver = SplitEntryResolver()
         self.ensure_space = ensure_space or (lambda _required_gb: True)
         self.max_retries = max(1, max_retries)
         self.output_config = output_config if isinstance(output_config, dict) else None
-        self.extraction_config = extraction_config if isinstance(extraction_config, dict) else {}
+        self.extraction_config = extraction_config
         self.process_config = {
             key: value
             for key, value in (process_config or {}).items()
@@ -104,4 +105,5 @@ class ExtractionScheduler:
             best_effort=True,
             write_progress_manifest=bool(self.extraction_config.get("write_progress_manifest", False)),
             quiet=bool(self.extraction_config.get("quiet", False)),
+            language=str(self.extraction_config.get("language") or "en"),
         )

@@ -6,6 +6,7 @@ import time
 from typing import Any, List
 
 from sunpack.contracts.failures import FailureInfo
+from sunpack.i18n import I18nContext
 from sunpack.repair.config import repair_system_mode
 
 
@@ -13,7 +14,8 @@ class RunReporter:
     """Thread-safe, user-facing progress for one pipeline run."""
 
     def __init__(self, language: str = "en", quiet: bool = False, verbose: bool = False):
-        self.language = "zh" if str(language or "").strip().lower() == "zh" else "en"
+        self.i18n = I18nContext(language)
+        self.language = self.i18n.language
         self.quiet = bool(quiet)
         self.verbose = bool(verbose)
         self._lock = threading.Lock()
@@ -30,18 +32,13 @@ class RunReporter:
         self._task_rows: dict[int, dict[str, Any]] = {}
         self._last_render_at = 0.0
 
-    def text(self, en: str, zh: str) -> str:
-        return zh if self.language == "zh" else en
-
     def scan_started(self, round_index: int) -> None:
         if self.quiet:
             return
         depth = max(1, int(round_index or 1))
         with self._lock:
-            print(self.text(
-                "[Scanning] Looking for archives..." if depth == 1 else f"[Recursive scan] Checking level {depth}...",
-                "[扫描中] 正在查找压缩包…" if depth == 1 else f"[递归扫描] 正在检查第 {depth} 层…",
-            ), flush=True)
+            key = "report.scan_started" if depth == 1 else "report.recursive_scan_checking"
+            print(self.i18n.t(key, depth=depth), flush=True)
 
     def begin_round(self, round_index: int, tasks: list[Any], direct: bool = False) -> None:
         depth = max(1, int(round_index or 1))
@@ -67,20 +64,11 @@ class RunReporter:
             if self.quiet:
                 return
             if direct and depth == 1:
-                message = self.text(
-                    f"[Ready] {len(tasks)} archive(s) to process",
-                    f"[准备完成] 将处理 {len(tasks)} 个压缩包",
-                )
+                message = self.i18n.t("report.ready_archives", count=len(tasks))
             elif depth == 1:
-                message = self.text(
-                    f"[Scan] Found {len(tasks)} archive(s) to process",
-                    f"[扫描完成] 发现 {len(tasks)} 个待处理压缩包",
-                )
+                message = self.i18n.t("report.scan_found", count=len(tasks))
             else:
-                message = self.text(
-                    f"[Recursive scan] Level {depth}: found {len(tasks)} nested archive(s)",
-                    f"[递归扫描] 第 {depth} 层发现 {len(tasks)} 个嵌套压缩包",
-                )
+                message = self.i18n.t("report.recursive_found", depth=depth, count=len(tasks))
             print(message, flush=True)
             if self._interactive:
                 self._panel_tasks = [id(task) for task in tasks]
@@ -98,10 +86,7 @@ class RunReporter:
             name = _task_name(task)
             prefix = self._tree_prefix(depth)
             progress = f"{self._completed_tasks}/{self._total_tasks}"
-            print(self.text(
-                f"{prefix}[Processing {progress}] {name}",
-                f"{prefix}[处理中 {progress}] {name}",
-            ), flush=True)
+            print(self.i18n.t("report.processing", prefix=prefix, progress=progress, name=name), flush=True)
 
     def task_status(self, task: Any, state: str, detail: str = "") -> None:
         if self.quiet:
@@ -111,10 +96,7 @@ class RunReporter:
                 self._update_task_locked(task, state=state, detail=detail, force=True)
                 return
             if state == "repairing":
-                print(self.text(
-                    f"[Repairing] {_task_name(task)}",
-                    f"[正在修复] {_task_name(task)}",
-                ), flush=True)
+                print(self.i18n.t("report.repairing", name=_task_name(task)), flush=True)
 
     def task_progress(self, task: Any, event: dict[str, Any]) -> None:
         if self.quiet or not self._interactive:
@@ -172,23 +154,20 @@ class RunReporter:
             prefix = self._tree_prefix(depth)
             progress = f"{self._completed_tasks}/{self._total_tasks}"
             if partial:
-                status_en, status_zh = "Partially recovered", "部分恢复"
+                status = self.i18n.t("report.status.partial")
             elif success:
-                status_en, status_zh = "Success", "成功"
+                status = self.i18n.t("report.status.success")
             else:
-                status_en, status_zh = "Failed", "失败"
+                status = self.i18n.t("report.status.failed")
             parent = " > ".join(parent_lineage)
-            relation = self.text(f" (from {parent})", f"（来自 {parent}）") if parent else ""
+            relation = self.i18n.t("report.relation.from", parent=parent) if parent else ""
             detail = ""
             if self.verbose and success and out_dir:
-                detail = self.text(f" -> {out_dir}", f" -> {out_dir}")
+                detail = f" -> {out_dir}"
             elif self.verbose and not success:
                 error = str(getattr(result, "error", "") or "")
                 detail = f"：{error}" if error else ""
-            print(self.text(
-                f"{prefix}[{status_en} {progress}] {name}{relation}{detail}",
-                f"{prefix}[{status_zh} {progress}] {name}{relation}{detail}",
-            ), flush=True)
+            print(f"{prefix}[{status} {progress}] {name}{relation}{detail}", flush=True)
 
     def log_final_summary(
         self,
@@ -206,46 +185,31 @@ class RunReporter:
         elapsed = max(0.0, time.time() - start_time)
 
         if not self.quiet:
-            print("\n" + self.text("Processing complete", "处理完成"))
+            print("\n" + self.i18n.t("report.complete_title"))
             print("-" * 54)
-            print(self.text(f"Time: {_duration(elapsed, 'en')}", f"耗时：{_duration(elapsed, 'zh')}"))
-            print(self.text(
-                f"Complete: {complete_count}  Partial: {partial_count}  Failed: {failed_count}",
-                f"完整成功：{complete_count}  部分恢复：{partial_count}  失败：{failed_count}",
-            ))
+            print(self.i18n.t("report.time", duration=self.i18n.format_duration(elapsed)))
+            print(self.i18n.t("report.counts", complete=complete_count, partial=partial_count, failed=failed_count))
             if self._max_depth > 1:
-                print(self.text(
-                    f"Recursion: {self._max_depth} levels, {self._nested_tasks} nested archive(s)",
-                    f"递归层级：{self._max_depth} 层，处理嵌套包：{self._nested_tasks} 个",
-                ))
+                print(self.i18n.t("report.recursion", levels=self._max_depth, count=self._nested_tasks))
             output_location = self._output_location()
             if output_location:
-                print(self.text(f"Output: {output_location}", f"输出位置：{output_location}"))
+                print(self.i18n.t("report.output", output=output_location))
 
             for item in recovered:
                 archive = os.path.basename(str(item.get("archive") or ""))
                 coverage = item.get("archive_coverage") if isinstance(item.get("archive_coverage"), dict) else {}
                 completeness = _percent(coverage.get("completeness", item.get("completeness", 0.0)))
-                print(self.text(
-                    f"[Partial] {archive}: {completeness}{_file_coverage(coverage)}",
-                    f"[部分恢复] {archive}：完整度 {completeness}{_file_coverage(coverage)}",
-                ))
+                print(self.i18n.t("report.partial", archive=archive, completeness=completeness, coverage=_file_coverage(coverage)))
 
         structured_failures = list(failures or [])
         if failed_tasks:
             if not self.quiet:
                 for failed_task in failed_tasks:
-                    print(self.text(f"[Failed] {failed_task}", f"[失败] {failed_task}"))
+                    print(self.i18n.t("report.failed", task=failed_task))
                 if structured_failures and all(failure.is_password_failure for failure in structured_failures):
-                    print(self.text(
-                        "A password is required or the supplied passwords were rejected. Enter the correct password and retry.",
-                        "压缩包需要密码或已有密码均不正确；请输入正确密码后重试。",
-                    ))
+                    print(self.i18n.t("report.password_failure"))
                 elif repair_system_mode() == "lite":
-                    print(self.text(
-                        "Repair is unavailable in this build; verification failures may indicate a damaged archive.",
-                        "当前版本未包含模型修复系统；校验失败可能表示压缩包已损坏。",
-                    ))
+                    print(self.i18n.t("report.lite_repair_unavailable"))
             log_path = os.path.join(root_dir, "failed_log.txt")
             try:
                 with open(log_path, "w", encoding="utf-8") as handle:
@@ -254,10 +218,10 @@ class RunReporter:
                     for failure in structured_failures:
                         handle.write(f"failure={failure.to_dict()}\n")
                 if not self.quiet:
-                    print(self.text(f"Failure details: {log_path}", f"失败详情：{log_path}"))
+                    print(self.i18n.t("report.failure_details", path=log_path))
             except Exception:
                 if not self.quiet:
-                    print(self.text("[Error] Could not save the failure log.", "[错误] 无法保存失败日志。"))
+                    print(self.i18n.t("report.failure_log_save_error"))
         else:
             log_path = os.path.join(root_dir, "failed_log.txt")
             try:
@@ -266,7 +230,7 @@ class RunReporter:
             except OSError:
                 pass
             if not self.quiet:
-                print(self.text("All archives were processed successfully.", "所有压缩包均已处理成功。"))
+                print(self.i18n.t("report.all_success"))
 
         if not self.quiet:
             print("-" * 54)
@@ -330,15 +294,15 @@ class RunReporter:
         filled = max(0, min(20, int(progress * 20)))
         bar = "#" * filled + "-" * (20 - filled)
         labels = {
-            "waiting": ("Waiting", "等待队列"),
-            "preparing": ("Preparing", "准备中"),
-            "extracting": ("Extracting", "正在解压"),
-            "repairing": ("Repairing", "正在修复"),
-            "error": ("Error", "出现错误"),
-            "partial": ("Partial", "部分恢复"),
-            "complete": ("Complete", "完成"),
+            "waiting": "report.status.waiting",
+            "preparing": "report.status.preparing",
+            "extracting": "report.status.extracting",
+            "repairing": "report.status.repairing",
+            "error": "report.status.error",
+            "partial": "report.status.partial",
+            "complete": "report.status.complete",
         }
-        label = self.text(*labels.get(state, labels["waiting"]))
+        label = self.i18n.t(labels.get(state, labels["waiting"]))
         colors = {
             "waiting": "\033[90m",
             "preparing": "\033[36m",
@@ -354,7 +318,7 @@ class RunReporter:
         prefix = self._tree_prefix(depth)
         lineage = tuple(row.get("lineage") or ())
         parent = " > ".join(lineage)
-        relation = self.text(f" (from {parent})", f"（来自 {parent}）") if parent else ""
+        relation = self.i18n.t("report.relation.from", parent=parent) if parent else ""
         detail = str(row.get("detail") or "")
         if detail and (self.verbose or state == "error"):
             detail = f"：{detail}"
@@ -378,7 +342,7 @@ class RunReporter:
         try:
             return os.path.commonpath(outputs)
         except ValueError:
-            return self.text("multiple locations", "多个位置")
+            return self.i18n.t("report.multiple_locations")
 
 
 def _task_name(task: Any) -> str:
@@ -422,14 +386,6 @@ def _truncate_display(text: str, max_width: int) -> str:
         chars.append(char)
         width += char_width
     return text
-
-
-def _duration(seconds: float, language: str) -> str:
-    total = max(0, int(round(seconds)))
-    minutes, secs = divmod(total, 60)
-    if minutes:
-        return f"{minutes}m {secs}s" if language == "en" else f"{minutes} 分 {secs} 秒"
-    return f"{secs}s" if language == "en" else f"{secs} 秒"
 
 
 def _percent(value) -> str:
