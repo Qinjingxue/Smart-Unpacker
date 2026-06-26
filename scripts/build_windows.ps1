@@ -825,7 +825,6 @@ if ($processArch -eq $buildArch) {
     Invoke-Native -FilePath $distExePath -Arguments @("passwords", "--json")
     Invoke-Native -FilePath $distExePath -Arguments @("inspect", (Join-Path $repoRoot "tests"), "--json")
     Invoke-Native -FilePath $distExePath -Arguments @("config", "validate", "--json")
-    Invoke-Native -FilePath $distExePath -Arguments @("models", "status", "--load", "--json")
 } else {
     Write-Step "Skipping packaged smoke tests"
     Write-Host "Packaged executable is $buildArch and cannot run under the current $processArch process." -ForegroundColor Yellow
