@@ -4,20 +4,12 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: "Release tag/version to publish, for example v0.1.0. Leave empty to build artifacts only."
+        description: "Version label to use in build artifact filenames, for example v0.1.0. Leave empty to derive it from git."
         required: false
         type: string
-      publish_release:
-        description: "Create or update a GitHub Release when release_tag is set."
-        required: false
-        default: true
-        type: boolean
-      prerelease:
-        description: "Mark a manually published release as a prerelease."
-        required: false
-        default: false
-        type: boolean
   push:
+    branches:
+      - "**"
     tags:
       - "v*"
 
@@ -25,12 +17,94 @@ permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.ref }}-${{ inputs.release_tag || 'artifact' }}
+  group: release-${{ github.ref }}-${{ github.event.inputs.release_tag || 'artifact' }}
   cancel-in-progress: false
 
 jobs:
+  build-notes:
+    name: Generate build notes
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Generate notes from commits
+        id: notes
+        shell: bash
+        env:
+          IS_TAG_REF: ${{ startsWith(github.ref, 'refs/tags/') }}
+          REF_NAME: ${{ github.ref_name }}
+          RELEASE_TAG_INPUT: ${{ github.event.inputs.release_tag || '' }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          git fetch --force --tags
+
+          target="${SHA}"
+          current_tag=""
+          if [ "${IS_TAG_REF}" = "true" ]; then
+            current_tag="${REF_NAME}"
+            target="$(git rev-list -n 1 "${current_tag}")"
+          elif [ -n "${RELEASE_TAG_INPUT}" ]; then
+            current_tag="${RELEASE_TAG_INPUT}"
+          fi
+
+          previous_tag=""
+          if [ "${IS_TAG_REF}" = "true" ]; then
+            previous_tag="$(git describe --tags --match 'v*' --abbrev=0 "${target}^" 2>/dev/null || true)"
+          else
+            previous_tag="$(git describe --tags --match 'v*' --abbrev=0 "${target}" 2>/dev/null || true)"
+          fi
+
+          if [ -n "${previous_tag}" ]; then
+            range="${previous_tag}..${target}"
+            compare_label="${previous_tag}..${current_tag:-${REF_NAME}}"
+          else
+            range="${target}"
+            compare_label="${current_tag:-${REF_NAME}}"
+          fi
+
+          {
+            echo "# SunPack build notes"
+            echo
+            if [ -n "${current_tag}" ]; then
+              echo "Build version: ${current_tag}"
+            else
+              echo "Build ref: ${REF_NAME}"
+            fi
+            echo "Commit: ${target}"
+            if [ -n "${previous_tag}" ]; then
+              echo "Changes since: ${previous_tag}"
+            else
+              echo "Changes since: initial history"
+            fi
+            echo
+            echo "## Commits"
+          } > build-notes.md
+
+          if git log --format='- %s (%h)' "${range}" | grep -q .; then
+            git log --format='- %s (%h)' "${range}" >> build-notes.md
+          else
+            echo "- No commits found in ${compare_label}." >> build-notes.md
+          fi
+
+          echo "previous_tag=${previous_tag}" >> "${GITHUB_OUTPUT}"
+
+      - name: Upload build notes
+        uses: actions/upload-artifact@v7
+        with:
+          name: sunpack-build-notes
+          path: build-notes.md
+          if-no-files-found: error
+          retention-days: 14
+
   build:
     name: Build ${{ matrix.arch }} lite
+    needs: build-notes
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 150
     strategy:
@@ -111,7 +185,7 @@ jobs:
       - name: Build Windows package
         shell: pwsh
         env:
-          RELEASE_TAG_INPUT: ${{ inputs.release_tag }}
+          RELEASE_TAG_INPUT: ${{ github.event.inputs.release_tag || '' }}
           GIT_EVENT_NAME: ${{ github.event_name }}
           GIT_REF_NAME: ${{ github.ref_name }}
           IS_TAG_REF: ${{ startsWith(github.ref, 'refs/tags/') }}
@@ -223,8 +297,9 @@ jobs:
 
   release:
     name: Publish GitHub Release
-    if: ${{ startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.publish_release && inputs.release_tag != '') }}
+    if: ${{ startsWith(github.ref, 'refs/tags/') }}
     needs:
+      - build-notes
       - build
       - acceptance
     runs-on: ubuntu-latest
@@ -239,13 +314,18 @@ jobs:
           path: artifacts
           merge-multiple: true
 
+      - name: Download build notes
+        uses: actions/download-artifact@v8
+        with:
+          name: sunpack-build-notes
+          path: release-notes
+
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          TAG_NAME: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || inputs.release_tag }}
+          TAG_NAME: ${{ github.ref_name }}
           RELEASE_TARGET: ${{ github.sha }}
-          PRERELEASE: ${{ github.event_name == 'workflow_dispatch' && inputs.prerelease || false }}
         shell: bash
         run: |
           set -euo pipefail
@@ -265,13 +345,10 @@ jobs:
             fi
           done
 
-          notes="Automated SunPack Windows build for ${TAG_NAME}."
           if gh release view "${TAG_NAME}" >/dev/null 2>&1; then
+            gh release edit "${TAG_NAME}" --notes-file release-notes/build-notes.md
             gh release upload "${TAG_NAME}" "${packages[@]}" --clobber
           else
-            release_args=(release create "${TAG_NAME}" "${packages[@]}" --title "${TAG_NAME}" --notes "${notes}" --target "${RELEASE_TARGET}")
-            if [ "${PRERELEASE}" = "true" ]; then
-              release_args+=(--prerelease)
-            fi
+            release_args=(release create "${TAG_NAME}" "${packages[@]}" --title "${TAG_NAME}" --notes-file release-notes/build-notes.md --target "${RELEASE_TARGET}")
             gh "${release_args[@]}"
           fi
