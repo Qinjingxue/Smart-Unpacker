@@ -36,6 +36,16 @@ def test_installer_optionally_registers_watch_autostart():
     assert "uninsdeletevalue" in script
 
 
+def test_uninstaller_unconditionally_removes_watch_autostart():
+    script = (ROOT / "installer" / "SunPack.iss").read_text(encoding="utf-8")
+
+    assert "StartupRegistryKey = 'Software\\Microsoft\\Windows\\CurrentVersion\\Run'" in script
+    assert "StartupValueName = 'SunPackWatchService'" in script
+    assert "procedure RemoveStartupRunValue" in script
+    assert "RegDeleteValue(HKCU, StartupRegistryKey, StartupValueName)" in script
+    assert "RemoveStartupRunValue;" in script
+
+
 def test_installer_stops_existing_watch_before_upgrade_and_cleans_owned_files():
     script = (ROOT / "installer" / "SunPack.iss").read_text(encoding="utf-8")
 
@@ -51,6 +61,17 @@ def test_installer_stops_existing_watch_before_upgrade_and_cleans_owned_files():
     assert 'Type: filesandordirs; Name: "{app}\\tools"' in script
     assert 'Type: files; Name: "{app}\\*.json"' not in script
     assert 'Type: files; Name: "{app}\\*.txt"' not in script
+
+
+def test_uninstaller_removes_generated_watch_and_cache_state():
+    script = (ROOT / "installer" / "SunPack.iss").read_text(encoding="utf-8")
+
+    assert "[UninstallDelete]" in script
+    assert 'Type: filesandordirs; Name: "{app}\\.sunpack_watch"' in script
+    assert 'Type: files; Name: "{app}\\sunpack_watch_roots.txt"' in script
+    assert 'Type: dirifempty; Name: "{app}"' in script
+    assert 'Type: filesandordirs; Name: "{localappdata}\\SunPack\\cache"' in script
+    assert 'Type: dirifempty; Name: "{localappdata}\\SunPack"' in script
 
 
 def test_installer_declares_x64_and_arm64_modes():
@@ -79,6 +100,16 @@ def test_installer_smoke_uses_process_exit_code_not_last_exit_code():
     assert "-PassThru" in script
     assert "$process.ExitCode" in script
     assert "$LASTEXITCODE" not in script
+
+
+def test_installer_smoke_exercises_generated_uninstall_residue_cleanup():
+    script = (ROOT / "scripts" / "test_windows_installer.ps1").read_text(encoding="utf-8")
+
+    assert 'Join-Path $installRoot ".sunpack_watch"' in script
+    assert 'Join-Path $env:LOCALAPPDATA "SunPack\\cache"' in script
+    assert "Set-ItemProperty -LiteralPath $startupRunKey -Name $startupValueName" in script
+    assert "Uninstaller left the watch state directory behind" in script
+    assert "Uninstaller left the local SunPack cache behind" in script
 
 
 def test_release_packages_exclude_build_only_7z_executable():

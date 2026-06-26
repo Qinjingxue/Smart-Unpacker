@@ -79,6 +79,13 @@ Type: filesandordirs; Name: "{app}\scripts"
 Type: filesandordirs; Name: "{app}\sunpack"
 Type: filesandordirs; Name: "{app}\tools"
 
+[UninstallDelete]
+Type: filesandordirs; Name: "{app}\.sunpack_watch"
+Type: files; Name: "{app}\sunpack_watch_roots.txt"
+Type: dirifempty; Name: "{app}"
+Type: filesandordirs; Name: "{localappdata}\SunPack\cache"
+Type: dirifempty; Name: "{localappdata}\SunPack"
+
 [Registry]
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "SunPackWatchService"; ValueData: """{app}\sunpack.exe"" watch start"; Tasks: autostart; Flags: uninsdeletevalue
 
@@ -90,6 +97,8 @@ Name: "{group}\Uninstall SunPack"; Filename: "{uninstallexe}"
 const
   SunPackRegistryKey = 'Software\SunPack';
   EnvironmentRegistryKey = 'Environment';
+  StartupRegistryKey = 'Software\Microsoft\Windows\CurrentVersion\Run';
+  StartupValueName = 'SunPackWatchService';
   PathMarkerName = 'PathAddedByInstaller';
 
 function NormalizePathEntry(Value: string): string;
@@ -189,6 +198,11 @@ begin
   RegDeleteKeyIfEmpty(HKCU, SunPackRegistryKey);
 end;
 
+procedure RemoveStartupRunValue;
+begin
+  RegDeleteValue(HKCU, StartupRegistryKey, StartupValueName);
+end;
+
 procedure RunContextMenuScript(RegisterMenu: Boolean);
 var
   PowerShellPath: string;
@@ -258,6 +272,7 @@ begin
   if CurUninstallStep = usUninstall then
   begin
     RunContextMenuScript(False);
+    RemoveStartupRunValue;
     RemoveUserPath;
   end;
 end;

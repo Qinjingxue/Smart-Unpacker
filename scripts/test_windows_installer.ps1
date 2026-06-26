@@ -122,6 +122,13 @@ try {
         throw "Upgrade install overwrote the existing watch roots file: $watchRootsPath"
     }
     Remove-Item -LiteralPath $watchRootsPath -Force
+    $watchStateDir = Join-Path $installRoot ".sunpack_watch"
+    New-Item -ItemType Directory -Path $watchStateDir -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $watchStateDir "watch.stop") -Value "installer-smoke" -Encoding UTF8
+    $localSunPackCache = Join-Path $env:LOCALAPPDATA "SunPack\cache"
+    New-Item -ItemType Directory -Path $localSunPackCache -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $localSunPackCache "machine_probe.json") -Value "{}" -Encoding UTF8
+    Set-ItemProperty -LiteralPath $startupRunKey -Name $startupValueName -Value ('"{0}" watch start' -f $appPath)
 
     $uninstaller = Get-ChildItem -LiteralPath $installRoot -Filter "unins*.exe" -File | Select-Object -First 1
     if ($null -eq $uninstaller) {
@@ -146,6 +153,12 @@ try {
     }
     if (Get-ItemProperty -LiteralPath $startupRunKey -Name $startupValueName -ErrorAction SilentlyContinue) {
         throw "Uninstaller left the startup Run value behind: $startupValueName"
+    }
+    if (Test-Path -LiteralPath $watchStateDir) {
+        throw "Uninstaller left the watch state directory behind: $watchStateDir"
+    }
+    if (Test-Path -LiteralPath $localSunPackCache) {
+        throw "Uninstaller left the local SunPack cache behind: $localSunPackCache"
     }
     if (Test-Path -LiteralPath $installRoot) {
         throw "Uninstaller left the application directory behind: $installRoot"
