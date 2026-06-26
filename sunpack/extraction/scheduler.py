@@ -1,7 +1,7 @@
 from typing import Any, Callable, Optional
 
 from sunpack.extraction.internal.sevenzip.metadata import ArchiveMetadataScanner
-from sunpack.extraction.internal.workflow.output_paths import default_output_dir_for_task
+from sunpack.support.output_paths import default_output_dir_for_task
 from sunpack.extraction.internal.workflow.preflight import PreExtractInspector
 from sunpack.extraction.internal.workflow.retry_policy import ExtractRetryPolicy
 from sunpack.extraction.internal.sevenzip.sevenzip_runner import SevenZipRunner

@@ -1,6 +1,6 @@
 from sunpack.contracts.detection import FactBag
 from sunpack.contracts.tasks import ArchiveTask
-from sunpack.extraction.internal.workflow.output_paths import default_output_dir_for_task
+from sunpack.support.output_paths import default_output_dir_for_task
 
 
 def _task(path):

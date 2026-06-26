@@ -12,7 +12,6 @@ from sunpack.config.fields.watch import DEFAULT_WATCH_CONFIG
 from sunpack.contracts.detection import FactBag
 from sunpack.contracts.filesystem import FileEntry
 from sunpack.contracts.tasks import ArchiveTask
-from sunpack.extraction.internal.workflow.output_paths import default_output_dir_for_task
 from sunpack.filesystem.directory_scanner import apply_ordered_filters_to_entries
 from sunpack.filesystem.filters import build_filters
 from sunpack.filesystem.watcher.log import WatchLogStore
@@ -22,6 +21,7 @@ from sunpack.filesystem.watcher.state import WatchStateStore
 from sunpack.passwords.internal.builtin import get_builtin_passwords
 from sunpack.passwords.internal.clipboard_monitor import ClipboardPasswordMonitor
 from sunpack.passwords.internal.local_files import is_directory_password_file
+from sunpack.support.output_paths import default_output_dir_for_task
 
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
