@@ -36,11 +36,10 @@ WPARAM = getattr(wintypes, "WPARAM", ctypes.c_size_t)
 LPARAM = getattr(wintypes, "LPARAM", ctypes.c_void_p)
 
 ID_OPEN_CONFIG = 1001
-ID_OPEN_LOG_DIR = 1002
-ID_OPEN_WATCH_ROOTS = 1003
-ID_RELOAD = 1004
-ID_EXIT = 1005
-ID_TOGGLE_STARTUP = 1006
+ID_OPEN_WATCH_ROOTS = 1002
+ID_RELOAD = 1003
+ID_EXIT = 1004
+ID_TOGGLE_STARTUP = 1005
 
 class WindowsTrayIcon:
     def __init__(self, service):
@@ -177,7 +176,6 @@ class WindowsTrayIcon:
     def _show_menu(self, hwnd) -> None:
         menu = self.user32.CreatePopupMenu()
         self.user32.AppendMenuW(menu, MF_STRING, ID_OPEN_CONFIG, self._text("open_config"))
-        self.user32.AppendMenuW(menu, MF_STRING, ID_OPEN_LOG_DIR, self._text("open_log_dir"))
         self.user32.AppendMenuW(menu, MF_STRING, ID_OPEN_WATCH_ROOTS, self._text("open_watch_roots"))
         self.user32.AppendMenuW(menu, MF_STRING, ID_TOGGLE_STARTUP, self._startup_menu_label())
         self.user32.AppendMenuW(menu, MF_STRING, ID_RELOAD, self._text("reload"))
@@ -192,8 +190,6 @@ class WindowsTrayIcon:
         if command_id == ID_OPEN_CONFIG:
             config_path, _ = read_config_payload()
             self._open_path(str(config_path))
-        elif command_id == ID_OPEN_LOG_DIR:
-            self._open_path(self.service.state_dir)
         elif command_id == ID_OPEN_WATCH_ROOTS:
             self._open_watch_roots_file()
         elif command_id == ID_TOGGLE_STARTUP:
