@@ -15,6 +15,31 @@ def test_wrong_password_failure_detection():
     assert extract.has_password_failure([damaged]) is False
 
 
+def test_extract_attempt_passes_clipboard_passwords_to_pipeline(monkeypatch):
+    received_configs = []
+
+    class FakeRunner:
+        recent_passwords = []
+
+        def __init__(self, config):
+            received_configs.append(config)
+
+        def run_targets(self, _target_paths):
+            return SimpleNamespace(success_count=1, failed_tasks=[], processed_keys=[], failures=[])
+
+    monkeypatch.setattr(extract, "PipelineRunner", FakeRunner)
+
+    extract._run_extract_attempt(
+        {},
+        ["cli-secret", "shared-secret"],
+        clipboard_passwords=["clipboard-secret", "shared-secret"],
+        use_builtin_passwords=False,
+        target_paths=["archive.zip"],
+    )
+
+    assert received_configs[0]["user_passwords"] == ["cli-secret", "shared-secret", "clipboard-secret"]
+
+
 def test_extract_prompts_for_password_retry_after_wrong_password(tmp_path, monkeypatch):
     target = tmp_path / "archives"
     target.mkdir()

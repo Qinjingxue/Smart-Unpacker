@@ -23,6 +23,7 @@ from sunpack.app.cli_types import CliCommandResult
 from sunpack.config.loader import load_config
 from sunpack.coordinator.runner import PipelineRunner
 from sunpack.contracts.failures import FailureInfo
+from sunpack.passwords import dedupe_passwords
 
 COMMAND = "extract"
 ORDER = 10
@@ -174,7 +175,9 @@ def _run_extract_attempt(
         **(config.get("extraction", {}) if isinstance(config.get("extraction"), dict) else {}),
         "quiet": not verbose,
     }
-    run_config["user_passwords"] = password_summary.user_passwords
+    run_config["user_passwords"] = dedupe_passwords(
+        password_summary.user_passwords + password_summary.clipboard_passwords
+    )
     run_config["builtin_passwords"] = password_summary.builtin_passwords
     runner = PipelineRunner(run_config)
     summary = runner.run_direct_files(target_paths) if direct_file else runner.run_targets(target_paths)
