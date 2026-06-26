@@ -9,6 +9,7 @@ DEFAULT_WATCH_CONFIG = {
     "initial_scan": True,
     "max_folders": 16,
     "observer_stop_timeout_seconds": 5.0,
+    "output_suppression_seconds": 120.0,
     "password_retry_debounce_seconds": 1.0,
     "password_retry_include_subtree": True,
     "clipboard_monitor_enabled": True,
@@ -35,6 +36,7 @@ def normalize_watch_config(value: Any) -> dict[str, Any]:
     config["initial_scan"] = bool(config.get("initial_scan", True))
     config["max_folders"] = max(1, _int_field(config, "max_folders"))
     config["observer_stop_timeout_seconds"] = max(0.0, _float_field(config, "observer_stop_timeout_seconds"))
+    config["output_suppression_seconds"] = max(0.0, _float_field(config, "output_suppression_seconds"))
     config["password_retry_debounce_seconds"] = max(0.0, _float_field(config, "password_retry_debounce_seconds"))
     config["password_retry_include_subtree"] = bool(config.get("password_retry_include_subtree", True))
     config["clipboard_monitor_enabled"] = bool(config.get("clipboard_monitor_enabled", True))

@@ -15,6 +15,7 @@ class WatchStateEntry:
     mtime: float
     status: str = "pending"
     output_dir: str = ""
+    generated_output_dirs: list[str] = field(default_factory=list)
     last_error: str = ""
     attempt_count: int = 0
     failure_kind: str = ""
@@ -117,6 +118,7 @@ class WatchStateStore:
         *,
         status: str,
         output_dir: str = "",
+        generated_output_dirs: list[str] | None = None,
         error: str = "",
         failure_payload: dict[str, Any] | None = None,
     ):
@@ -129,6 +131,7 @@ class WatchStateStore:
             mtime=mtime,
             status=status,
             output_dir=output_dir,
+            generated_output_dirs=_dedupe_paths(generated_output_dirs or ([output_dir] if output_dir else [])),
             last_error=error,
             attempt_count=(previous.attempt_count + 1) if previous else 1,
             failure_kind=str(payload.get("kind") or ""),
@@ -138,3 +141,27 @@ class WatchStateStore:
             password_generation=self.password_generation,
         )
         self.save()
+
+    def generated_output_roots(self) -> list[str]:
+        roots: list[str] = []
+        for entry in self.entries.values():
+            if entry.status != "done":
+                continue
+            roots.extend(entry.generated_output_dirs or ([entry.output_dir] if entry.output_dir else []))
+        return _dedupe_paths(roots)
+
+
+def _dedupe_paths(paths: list[str]) -> list[str]:
+    output: list[str] = []
+    seen: set[str] = set()
+    for path in paths:
+        value = str(path or "").strip()
+        if not value:
+            continue
+        normalized = os.path.abspath(value)
+        key = os.path.normcase(normalized)
+        if key in seen:
+            continue
+        seen.add(key)
+        output.append(normalized)
+    return output

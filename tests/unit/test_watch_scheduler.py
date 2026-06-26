@@ -324,6 +324,126 @@ def test_watch_scheduler_ignores_output_root_events(tmp_path, monkeypatch):
     assert watcher.pending_count == 0
 
 
+def test_watch_scheduler_processes_archive_when_output_root_matches_watch_root(tmp_path, monkeypatch):
+    monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
+    captured = {}
+
+    class FakePipelineRunner:
+        def __init__(self, config):
+            captured["config"] = config
+            self.context = SimpleNamespace(flatten_candidates={str(tmp_path / "sample")}, recovered_outputs=[])
+
+        def run_targets(self, paths):
+            captured["paths"] = paths
+            return FakeSummary()
+
+    archive_path = tmp_path / "sample.zip"
+    _write_zip(archive_path)
+
+    watcher = WatchScheduler(
+        {"watch": {"clipboard_monitor_enabled": False}},
+        [str(tmp_path)],
+        out_dir=str(tmp_path),
+        state_path=str(tmp_path / ".sunpack_watch" / "state.json"),
+        stable_seconds=0,
+        initial_scan=False,
+        runner_factory=FakePipelineRunner,
+    )
+    watcher.enqueue(str(archive_path))
+
+    result = watcher.run_once()
+
+    assert result.processed == 1
+    assert result.succeeded == 1
+    assert captured["paths"] == [str(archive_path.resolve())]
+    entry = next(iter(watcher.state.entries.values()))
+    assert entry.output_dir == str((tmp_path / "sample").resolve())
+    assert entry.generated_output_dirs == [str((tmp_path / "sample").resolve())]
+
+
+def test_watch_scheduler_suppresses_recursive_output_events_during_same_root_extract(tmp_path, monkeypatch):
+    monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
+    watcher = None
+
+    class FakePipelineRunner:
+        def __init__(self, config):
+            self.context = SimpleNamespace(flatten_candidates={str(tmp_path / "outer")}, recovered_outputs=[])
+
+        def run_targets(self, paths):
+            output_dir = tmp_path / "outer"
+            output_dir.mkdir()
+            nested = output_dir / "inner.zip"
+            _write_zip(nested)
+            watcher.enqueue(str(nested))
+            return FakeSummary()
+
+    archive_path = tmp_path / "outer.zip"
+    _write_zip(archive_path)
+
+    watcher = WatchScheduler(
+        {"watch": {"clipboard_monitor_enabled": False}},
+        [str(tmp_path)],
+        out_dir=str(tmp_path),
+        state_path=str(tmp_path / ".sunpack_watch" / "state.json"),
+        stable_seconds=0,
+        initial_scan=False,
+        runner_factory=FakePipelineRunner,
+    )
+    watcher.enqueue(str(archive_path))
+
+    result = watcher.run_once()
+
+    assert result.processed == 1
+    assert watcher.pending_count == 0
+
+
+def test_watch_scheduler_initial_scan_skips_known_outputs_when_output_root_matches_watch_root(tmp_path, monkeypatch):
+    monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
+
+    old_archive = tmp_path / "old.zip"
+    output_dir = tmp_path / "old"
+    output_dir.mkdir()
+    nested = output_dir / "nested.zip"
+    fresh = tmp_path / "fresh.zip"
+    _write_zip(old_archive)
+    _write_zip(nested)
+    _write_zip(fresh)
+
+    state_path = tmp_path / ".sunpack_watch" / "state.json"
+    first = WatchScheduler(
+        {"watch": {"clipboard_monitor_enabled": False}},
+        [str(tmp_path)],
+        out_dir=str(tmp_path),
+        state_path=str(state_path),
+        stable_seconds=0,
+        initial_scan=False,
+    )
+    stat = old_archive.stat()
+    first.state.mark(
+        str(old_archive),
+        old_archive.stat().st_size,
+        stat.st_mtime,
+        status="done",
+        output_dir=str(output_dir),
+        generated_output_dirs=[str(output_dir)],
+    )
+
+    watcher = WatchScheduler(
+        {"watch": {"clipboard_monitor_enabled": False}},
+        [str(tmp_path)],
+        out_dir=str(tmp_path),
+        state_path=str(state_path),
+        stable_seconds=0,
+        initial_scan=True,
+    )
+    watcher.start()
+
+    pending_names = {Path(path).name for path in watcher._pending}
+    assert pending_names == {"fresh.zip"}
+
+    watcher.stop()
+
+
 def test_watch_scheduler_marks_terminal_failure_and_skips_retry(tmp_path, monkeypatch):
     monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
 

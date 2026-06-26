@@ -9,7 +9,10 @@ from typing import Iterable
 
 from sunpack.config.detection_view import directory_scan_is_recursive
 from sunpack.config.fields.watch import DEFAULT_WATCH_CONFIG
+from sunpack.contracts.detection import FactBag
 from sunpack.contracts.filesystem import FileEntry
+from sunpack.contracts.tasks import ArchiveTask
+from sunpack.extraction.internal.workflow.output_paths import default_output_dir_for_task
 from sunpack.filesystem.directory_scanner import apply_ordered_filters_to_entries
 from sunpack.filesystem.filters import build_filters
 from sunpack.filesystem.watcher.log import WatchLogStore
@@ -77,10 +80,14 @@ class WatchScheduler:
         self._pending: dict[str, WatchCandidate] = {}
         self._stable_since: dict[str, float] = {}
         self._password_dirty_dirs: dict[str, float] = {}
+        self._active_output_roots: dict[str, int] = {}
+        self._recent_output_roots: dict[str, float] = {}
+        self._known_output_roots: list[str] = self.state.generated_output_roots()
         self._observer = Observer()
         self._started = False
         self.runner_factory = runner_factory
         watch_config = config.get("watch") if isinstance(config.get("watch"), dict) else {}
+        self.output_suppression_seconds = max(0.0, float(watch_config.get("output_suppression_seconds", 120.0)))
         self.password_retry_debounce_seconds = max(0.0, float(watch_config.get("password_retry_debounce_seconds", 1.0)))
         self.password_retry_include_subtree = bool(watch_config.get("password_retry_include_subtree", True))
         self._clipboard_monitor = ClipboardPasswordMonitor(
@@ -159,7 +166,11 @@ class WatchScheduler:
         if not self._is_under_watched_root(candidate.path):
             self.log.write("candidate_ignored", path=candidate.path, reason="outside_watched_roots")
             return
-        if self._is_under_output_root(candidate.path):
+        output_reason = self._output_suppression_reason(candidate.path)
+        if output_reason:
+            self.log.write("candidate_ignored", path=candidate.path, reason=output_reason)
+            return
+        if self._is_under_broad_output_root(candidate.path):
             self.log.write("candidate_ignored", path=candidate.path, reason="under_output_root")
             return
         if self._is_under_metadata_dir(candidate.path):
@@ -195,7 +206,7 @@ class WatchScheduler:
     def should_ignore_event_path(self, path: str) -> bool:
         if not path:
             return True
-        return self._is_under_metadata_dir(path)
+        return self._is_under_metadata_dir(path) or bool(self._output_suppression_reason(path))
 
     def enqueue_many(self, paths: Iterable[str]):
         for path in paths:
@@ -272,7 +283,15 @@ class WatchScheduler:
             "root": self.out_dir,
             "common_root": self._common_root_for(candidate.path),
         }
-        summary = self.runner_factory(run_config).run_targets([candidate.path])
+        predicted_output_dirs = self._predicted_output_dirs(candidate.path, run_config)
+        self._activate_output_roots(predicted_output_dirs)
+        runner = self.runner_factory(run_config)
+        try:
+            summary = runner.run_targets([candidate.path])
+        finally:
+            self._release_output_roots(predicted_output_dirs)
+        generated_output_dirs = self._generated_output_dirs(runner, predicted_output_dirs)
+        self._remember_recent_output_roots(generated_output_dirs)
         failed = list(summary.failed_tasks)
         if failed:
             error = failed[0] if failed else "watch extraction failed"
@@ -286,14 +305,23 @@ class WatchScheduler:
                 candidate.size,
                 candidate.mtime,
                 status=status,
-                output_dir=self.out_dir,
+                output_dir=generated_output_dirs[0] if generated_output_dirs else "",
+                generated_output_dirs=[],
                 error=error,
                 failure_payload=payload,
             )
             self.log.write(status, path=candidate.path, error=error, failures=failure_payloads)
             return WatchRunResult(processed=1, failed=1, errors=failed)
-        self.state.mark(candidate.path, candidate.size, candidate.mtime, status="done", output_dir=self.out_dir)
-        self.log.write("done", path=candidate.path, success_count=summary.success_count)
+        self._remember_known_output_roots(generated_output_dirs)
+        self.state.mark(
+            candidate.path,
+            candidate.size,
+            candidate.mtime,
+            status="done",
+            output_dir=generated_output_dirs[0] if generated_output_dirs else "",
+            generated_output_dirs=generated_output_dirs,
+        )
+        self.log.write("done", path=candidate.path, success_count=summary.success_count, output_dirs=generated_output_dirs)
         return WatchRunResult(processed=1, succeeded=summary.success_count)
 
     def _common_root_for(self, path: str) -> str:
@@ -308,7 +336,11 @@ class WatchScheduler:
     def _is_under_watched_root(self, path: str) -> bool:
         return _longest_matching_root(path, self.watch_roots) is not None
 
-    def _is_under_output_root(self, path: str) -> bool:
+    def _is_under_broad_output_root(self, path: str) -> bool:
+        if not self.out_dir:
+            return False
+        if any(_is_relative_to(root, self.out_dir) for root in self.watch_roots):
+            return False
         return _is_relative_to(os.path.abspath(path), self.out_dir)
 
     def _is_under_metadata_dir(self, path: str) -> bool:
@@ -322,6 +354,86 @@ class WatchScheduler:
             return True
         entry = _file_entry_from_watch_candidate(candidate)
         return bool(apply_ordered_filters_to_entries([entry], self.filters))
+
+    def _output_suppression_reason(self, path: str) -> str:
+        normalized = os.path.abspath(path)
+        now = time.time()
+        self._prune_recent_output_roots(now)
+        with self._lock:
+            active_roots = list(self._active_output_roots)
+            recent_roots = [root for root, expires_at in self._recent_output_roots.items() if expires_at > now]
+        if _is_under_any_root(normalized, active_roots):
+            return "under_active_output_root"
+        if _is_under_any_root(normalized, recent_roots):
+            return "under_recent_output_root"
+        if _is_under_any_root(normalized, self._known_output_roots):
+            return "under_known_output_root"
+        return ""
+
+    def _predicted_output_dirs(self, path: str, run_config: dict) -> list[str]:
+        try:
+            task = ArchiveTask(
+                fact_bag=FactBag(),
+                score=0,
+                main_path=os.path.abspath(path),
+                all_parts=[os.path.abspath(path)],
+            )
+            return _dedupe_paths([default_output_dir_for_task(task, run_config.get("output", {}))])
+        except Exception:
+            return []
+
+    def _generated_output_dirs(self, runner, predicted: list[str]) -> list[str]:
+        roots: list[str] = []
+        context = getattr(runner, "context", None)
+        flatten_candidates = getattr(context, "flatten_candidates", None)
+        if flatten_candidates:
+            roots.extend(str(path) for path in flatten_candidates if path)
+        recovered_outputs = getattr(context, "recovered_outputs", None)
+        if recovered_outputs:
+            for item in recovered_outputs:
+                if isinstance(item, dict) and item.get("out_dir"):
+                    roots.append(str(item["out_dir"]))
+        roots.extend(predicted)
+        return _dedupe_paths(roots)
+
+    def _activate_output_roots(self, roots: list[str]) -> None:
+        if not roots:
+            return
+        with self._lock:
+            for root in _dedupe_paths(roots):
+                self._active_output_roots[root] = self._active_output_roots.get(root, 0) + 1
+
+    def _release_output_roots(self, roots: list[str]) -> None:
+        if not roots:
+            return
+        with self._lock:
+            for root in _dedupe_paths(roots):
+                count = self._active_output_roots.get(root, 0)
+                if count <= 1:
+                    self._active_output_roots.pop(root, None)
+                else:
+                    self._active_output_roots[root] = count - 1
+        self._remember_recent_output_roots(roots)
+
+    def _remember_recent_output_roots(self, roots: list[str]) -> None:
+        if not roots or self.output_suppression_seconds <= 0:
+            return
+        expires_at = time.time() + self.output_suppression_seconds
+        with self._lock:
+            for root in _dedupe_paths(roots):
+                self._recent_output_roots[root] = max(expires_at, self._recent_output_roots.get(root, 0.0))
+
+    def _remember_known_output_roots(self, roots: list[str]) -> None:
+        if not roots:
+            return
+        with self._lock:
+            self._known_output_roots = _dedupe_paths([*self._known_output_roots, *roots])
+
+    def _prune_recent_output_roots(self, now: float) -> None:
+        with self._lock:
+            for root, expires_at in list(self._recent_output_roots.items()):
+                if expires_at <= now:
+                    self._recent_output_roots.pop(root, None)
 
     def _reload_builtin_passwords(self) -> None:
         if "builtin_passwords" in self.config:
@@ -387,6 +499,26 @@ def _is_relative_to(path: str, root: str) -> bool:
         return True
     except ValueError:
         return False
+
+
+def _is_under_any_root(path: str, roots: list[str]) -> bool:
+    return any(_is_relative_to(path, root) for root in roots if root)
+
+
+def _dedupe_paths(paths: Iterable[str]) -> list[str]:
+    output: list[str] = []
+    seen: set[str] = set()
+    for path in paths:
+        value = str(path or "").strip()
+        if not value:
+            continue
+        normalized = os.path.abspath(value)
+        key = os.path.normcase(normalized)
+        if key in seen:
+            continue
+        seen.add(key)
+        output.append(normalized)
+    return output
 
 
 def _failure_to_dict(failure) -> dict:
