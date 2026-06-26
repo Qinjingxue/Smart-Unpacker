@@ -21,6 +21,36 @@ def test_tray_open_watch_roots_file_creates_and_opens_txt(tmp_path, monkeypatch)
     assert opened == [str(roots_path)]
 
 
+def test_tray_open_builtin_passwords_file_creates_and_opens_txt(tmp_path, monkeypatch):
+    passwords_path = tmp_path / "builtin_passwords.txt"
+    opened = []
+    tray = object.__new__(WindowsTrayIcon)
+    tray._open_path = opened.append
+
+    monkeypatch.setattr(tray_module, "builtin_password_path", lambda: passwords_path)
+
+    def create_passwords_file():
+        passwords_path.write_text("123456\n", encoding="utf-8")
+        return ["123456"]
+
+    monkeypatch.setattr(tray_module, "get_builtin_passwords", create_passwords_file)
+
+    tray._open_builtin_passwords_file()
+
+    assert passwords_path.exists()
+    assert opened == [str(passwords_path)]
+
+
+def test_tray_builtin_password_command_opens_passwords_file():
+    calls = []
+    tray = object.__new__(WindowsTrayIcon)
+    tray._open_builtin_passwords_file = lambda: calls.append("open")
+
+    tray._handle_command(tray_module.ID_OPEN_BUILTIN_PASSWORDS)
+
+    assert calls == ["open"]
+
+
 def test_tray_uses_chinese_text_when_cli_language_is_zh():
     service = SimpleNamespace(config={"cli": {"language": "zh"}})
 
@@ -31,6 +61,7 @@ def test_tray_uses_chinese_text_when_cli_language_is_zh():
 
     assert tray._text("open_config") == "打开配置文件"
     assert tray._text("open_watch_roots") == "打开监控目录列表"
+    assert tray._text("open_builtin_passwords") == "打开内置密码文件"
     assert tray._text("exit") == "退出"
 
 
@@ -44,4 +75,5 @@ def test_tray_defaults_to_english_text():
 
     assert tray._text("open_config") == "Open config"
     assert tray._text("open_watch_roots") == "Open watch folders file"
+    assert tray._text("open_builtin_passwords") == "Open built-in passwords file"
     assert tray._text("exit") == "Exit"

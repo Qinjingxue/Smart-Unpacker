@@ -10,6 +10,7 @@ from pathlib import Path
 from sunpack.config.payload_io import read_config_payload
 from sunpack.filesystem.watcher.service import watch_roots_path
 from sunpack.i18n import I18nContext
+from sunpack.passwords.internal.builtin import builtin_password_path, get_builtin_passwords
 from sunpack.platform.windows.startup import disable_startup, enable_startup, startup_status
 
 
@@ -40,6 +41,7 @@ ID_OPEN_WATCH_ROOTS = 1002
 ID_RELOAD = 1003
 ID_EXIT = 1004
 ID_TOGGLE_STARTUP = 1005
+ID_OPEN_BUILTIN_PASSWORDS = 1006
 
 class WindowsTrayIcon:
     def __init__(self, service):
@@ -177,6 +179,7 @@ class WindowsTrayIcon:
         menu = self.user32.CreatePopupMenu()
         self.user32.AppendMenuW(menu, MF_STRING, ID_OPEN_CONFIG, self._text("open_config"))
         self.user32.AppendMenuW(menu, MF_STRING, ID_OPEN_WATCH_ROOTS, self._text("open_watch_roots"))
+        self.user32.AppendMenuW(menu, MF_STRING, ID_OPEN_BUILTIN_PASSWORDS, self._text("open_builtin_passwords"))
         self.user32.AppendMenuW(menu, MF_STRING, ID_TOGGLE_STARTUP, self._startup_menu_label())
         self.user32.AppendMenuW(menu, MF_STRING, ID_RELOAD, self._text("reload"))
         self.user32.AppendMenuW(menu, MF_STRING, ID_EXIT, self._text("exit"))
@@ -192,6 +195,8 @@ class WindowsTrayIcon:
             self._open_path(str(config_path))
         elif command_id == ID_OPEN_WATCH_ROOTS:
             self._open_watch_roots_file()
+        elif command_id == ID_OPEN_BUILTIN_PASSWORDS:
+            self._open_builtin_passwords_file()
         elif command_id == ID_TOGGLE_STARTUP:
             self._toggle_startup()
         elif command_id == ID_RELOAD:
@@ -212,6 +217,13 @@ class WindowsTrayIcon:
         except OSError:
             return
         self._open_path(str(roots_path))
+
+    def _open_builtin_passwords_file(self) -> None:
+        passwords_path = builtin_password_path()
+        if not passwords_path.exists():
+            get_builtin_passwords()
+        if passwords_path.exists():
+            self._open_path(str(passwords_path))
 
     def _startup_menu_label(self) -> str:
         try:
