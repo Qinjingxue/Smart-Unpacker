@@ -302,6 +302,127 @@ def test_watch_scheduler_sends_stable_nonstandard_extension_to_main_pipeline(tmp
     assert captured["paths"] == [str(target.resolve())]
 
 
+def test_watch_scheduler_processes_moved_file_after_fast_stable_window(tmp_path, monkeypatch):
+    monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
+    now = [2000000000.0]
+    monkeypatch.setattr(scheduler_module.time, "time", lambda: now[0])
+
+    class FakePipelineRunner:
+        def __init__(self, config):
+            self.context = SimpleNamespace(flatten_candidates=set(), recovered_outputs=[])
+
+        def run_targets(self, paths):
+            return FakeSummary()
+
+    watch_root = tmp_path / "in"
+    watch_root.mkdir()
+    archive_path = watch_root / "sample.zip"
+    _write_zip(archive_path)
+
+    watcher = WatchScheduler(
+        {"watch": {"clipboard_monitor_enabled": False, "fast_stable_seconds": 0.5}},
+        [str(watch_root)],
+        out_dir=str(tmp_path / "out"),
+        state_path=str(tmp_path / ".sunpack_watch" / "state.json"),
+        stable_seconds=10,
+        initial_scan=False,
+        runner_factory=FakePipelineRunner,
+    )
+    watcher.enqueue(str(archive_path), event_type="moved", src_path=str(tmp_path / "sample.zip"))
+
+    now[0] = 2000000000.4
+    assert watcher.run_once().processed == 0
+    now[0] = 2000000000.6
+    assert watcher.run_once().processed == 1
+
+
+def test_watch_scheduler_processes_explorer_copy_after_final_mtime_update(tmp_path, monkeypatch):
+    monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
+    now = [2000001000.0]
+    monkeypatch.setattr(scheduler_module.time, "time", lambda: now[0])
+
+    class FakePipelineRunner:
+        def __init__(self, config):
+            self.context = SimpleNamespace(flatten_candidates=set(), recovered_outputs=[])
+
+        def run_targets(self, paths):
+            return FakeSummary()
+
+    watch_root = tmp_path / "in"
+    watch_root.mkdir()
+    archive_path = watch_root / "sample.zip"
+    archive_path.write_bytes(b"PK\x03\x04" + b"x" * 1024)
+    os_time = 2000001000.0
+    import os
+    os.utime(archive_path, (os_time, os_time))
+
+    watcher = WatchScheduler(
+        {"watch": {"clipboard_monitor_enabled": False, "copy_final_stable_seconds": 0.75}},
+        [str(watch_root)],
+        out_dir=str(tmp_path / "out"),
+        state_path=str(tmp_path / ".sunpack_watch" / "state.json"),
+        stable_seconds=10,
+        initial_scan=False,
+        runner_factory=FakePipelineRunner,
+    )
+    watcher.enqueue(str(archive_path), event_type="created")
+
+    now[0] = 2000001000.1
+    archive_path.write_bytes(b"PK\x03\x04" + b"x" * 4096)
+    os.utime(archive_path, (2000001000.1, 2000001000.1))
+    watcher.enqueue(str(archive_path), event_type="modified")
+
+    now[0] = 2000001000.2
+    os.utime(archive_path, (2000000000.0, 2000000000.0))
+    watcher.enqueue(str(archive_path), event_type="modified")
+
+    now[0] = 2000001000.8
+    assert watcher.run_once().processed == 0
+    now[0] = 2000001001.0
+    assert watcher.run_once().processed == 1
+
+
+def test_watch_scheduler_uses_conservative_delay_for_direct_final_name_growth(tmp_path, monkeypatch):
+    monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
+    now = [2000002000.0]
+    monkeypatch.setattr(scheduler_module.time, "time", lambda: now[0])
+
+    class FakePipelineRunner:
+        def __init__(self, config):
+            self.context = SimpleNamespace(flatten_candidates=set(), recovered_outputs=[])
+
+        def run_targets(self, paths):
+            return FakeSummary()
+
+    watch_root = tmp_path / "in"
+    watch_root.mkdir()
+    archive_path = watch_root / "slow.zip"
+    archive_path.write_bytes(b"PK\x03\x04" + b"x" * 1024)
+    import os
+    os.utime(archive_path, (2000002000.0, 2000002000.0))
+
+    watcher = WatchScheduler(
+        {"watch": {"clipboard_monitor_enabled": False}},
+        [str(watch_root)],
+        out_dir=str(tmp_path / "out"),
+        state_path=str(tmp_path / ".sunpack_watch" / "state.json"),
+        stable_seconds=10,
+        initial_scan=False,
+        runner_factory=FakePipelineRunner,
+    )
+    watcher.enqueue(str(archive_path), event_type="created")
+
+    now[0] = 2000002000.2
+    archive_path.write_bytes(b"PK\x03\x04" + b"x" * 4096)
+    os.utime(archive_path, (2000002000.2, 2000002000.2))
+    watcher.enqueue(str(archive_path), event_type="modified")
+
+    now[0] = 2000002002.0
+    assert watcher.run_once().processed == 0
+    now[0] = 2000002010.3
+    assert watcher.run_once().processed == 1
+
+
 def test_watch_scheduler_does_not_log_duplicate_pending_candidate(tmp_path, monkeypatch):
     monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
 

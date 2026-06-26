@@ -36,6 +36,19 @@ class WatchRunResult:
     errors: list[str] = field(default_factory=list)
 
 
+@dataclass
+class _PendingCandidateState:
+    first_seen: float
+    last_changed: float
+    event_type: str = "unknown"
+    src_path: str = ""
+    force: bool = False
+    change_count: int = 0
+    size_change_count: int = 0
+    saw_copy_final_attributes: bool = False
+    from_temporary_download: bool = False
+
+
 class WatchScheduler:
     def __init__(
         self,
@@ -79,6 +92,7 @@ class WatchScheduler:
         self._lock = threading.Lock()
         self._pending: dict[str, WatchCandidate] = {}
         self._stable_since: dict[str, float] = {}
+        self._pending_states: dict[str, _PendingCandidateState] = {}
         self._password_dirty_dirs: dict[str, float] = {}
         self._active_output_roots: dict[str, int] = {}
         self._recent_output_roots: dict[str, float] = {}
@@ -87,6 +101,10 @@ class WatchScheduler:
         self._started = False
         self.runner_factory = runner_factory
         watch_config = config.get("watch") if isinstance(config.get("watch"), dict) else {}
+        self.fast_stable_seconds = max(0.0, float(watch_config.get("fast_stable_seconds", 0.5)))
+        self.copy_final_stable_seconds = max(0.0, float(watch_config.get("copy_final_stable_seconds", 0.75)))
+        self.new_file_stable_seconds = max(0.0, float(watch_config.get("new_file_stable_seconds", 1.0)))
+        self.pending_check_interval_seconds = max(0.1, float(watch_config.get("pending_check_interval_seconds", 0.5)))
         self.output_suppression_seconds = max(0.0, float(watch_config.get("output_suppression_seconds", 120.0)))
         self.password_retry_debounce_seconds = max(0.0, float(watch_config.get("password_retry_debounce_seconds", 1.0)))
         self.password_retry_include_subtree = bool(watch_config.get("password_retry_include_subtree", True))
@@ -108,7 +126,7 @@ class WatchScheduler:
         self._started = True
         if self.initial_scan:
             for candidate in scan_watch_candidates(self.watch_roots, recursive=self.recursive):
-                self.enqueue(candidate.path)
+                self.enqueue(candidate.path, event_type="initial_scan")
         self.log.write(
             "scheduler_started",
             roots=self.watch_roots,
@@ -156,8 +174,24 @@ class WatchScheduler:
         with self._lock:
             return len(self._pending)
 
-    def enqueue(self, path: str, *, force: bool = False):
+    def next_delay_seconds(self) -> float:
+        now = time.time()
+        with self._lock:
+            if not self._pending:
+                return self.interval_seconds
+            delays = []
+            for path in self._pending:
+                stable_since = self._stable_since.get(path, now)
+                state = self._pending_states.get(path) or _PendingCandidateState(first_seen=stable_since, last_changed=stable_since)
+                delays.append(max(0.0, self._candidate_ready_delay(state) - (now - stable_since)))
+            next_ready = min(delays) if delays else self.pending_check_interval_seconds
+        return max(0.0, min(self.pending_check_interval_seconds, next_ready))
+
+    def enqueue(self, path: str, *, force: bool = False, event_type: str = "unknown", src_path: str = ""):
         if self.should_ignore_event_path(path):
+            return
+        if _is_temporary_download_path(path):
+            self.log.write("candidate_ignored", path=path, reason="temporary_download_file")
             return
         candidate = _candidate_for_event_path(path)
         if candidate is None:
@@ -191,20 +225,47 @@ class WatchScheduler:
         now = time.time()
         with self._lock:
             previous = self._pending.get(candidate.path)
+            previous_state = self._pending_states.get(candidate.path)
             if (
                 previous is not None
                 and previous.size == candidate.size
                 and previous.mtime == candidate.mtime
                 and not force
             ):
+                if previous_state is not None:
+                    previous_state.event_type = _prefer_event_type(previous_state.event_type, event_type)
+                    previous_state.src_path = src_path or previous_state.src_path
+                    previous_state.from_temporary_download = previous_state.from_temporary_download or _is_temporary_download_path(src_path)
                 return
             self._pending[candidate.path] = candidate
             if previous is None or previous.size != candidate.size or previous.mtime != candidate.mtime:
                 self._stable_since[candidate.path] = now
+                if previous_state is None:
+                    self._pending_states[candidate.path] = _PendingCandidateState(
+                        first_seen=now,
+                        last_changed=now,
+                        event_type=event_type,
+                        src_path=src_path,
+                        force=force,
+                        from_temporary_download=_is_temporary_download_path(src_path),
+                    )
+                else:
+                    previous_state.last_changed = now
+                    previous_state.event_type = _prefer_event_type(previous_state.event_type, event_type)
+                    previous_state.src_path = src_path or previous_state.src_path
+                    previous_state.force = previous_state.force or force
+                    previous_state.change_count += 1
+                    previous_state.from_temporary_download = previous_state.from_temporary_download or _is_temporary_download_path(src_path)
+                    if previous is not None and previous.size != candidate.size:
+                        previous_state.size_change_count += 1
+                    if previous is not None and _looks_like_copy_final_mtime(previous.mtime, candidate.mtime, now):
+                        previous_state.saw_copy_final_attributes = True
         self.log.write(
             "candidate_queued",
             path=candidate.path,
             force=force,
+            event_type=event_type,
+            src_path=src_path,
             size=candidate.size,
             mtime=candidate.mtime,
             pending=self.pending_count,
@@ -247,20 +308,31 @@ class WatchScheduler:
                 if refreshed is None:
                     self._pending.pop(path, None)
                     self._stable_since.pop(path, None)
+                    self._pending_states.pop(path, None)
                     continue
                 if not self._passes_filesystem_filters(refreshed):
                     self._pending.pop(path, None)
                     self._stable_since.pop(path, None)
+                    self._pending_states.pop(path, None)
                     continue
                 if refreshed.size != candidate.size or refreshed.mtime != candidate.mtime:
                     self._pending[path] = refreshed
                     self._stable_since[path] = now
+                    state = self._pending_states.setdefault(path, _PendingCandidateState(first_seen=now, last_changed=now))
+                    state.last_changed = now
+                    state.change_count += 1
+                    if refreshed.size != candidate.size:
+                        state.size_change_count += 1
+                    if _looks_like_copy_final_mtime(candidate.mtime, refreshed.mtime, now):
+                        state.saw_copy_final_attributes = True
                     continue
                 stable_since = self._stable_since.setdefault(path, now)
-                if self.stable_seconds <= 0 or now - stable_since >= self.stable_seconds:
+                state = self._pending_states.setdefault(path, _PendingCandidateState(first_seen=stable_since, last_changed=stable_since))
+                if self._candidate_ready_delay(state) <= 0 or now - stable_since >= self._candidate_ready_delay(state):
                     ready.append(refreshed)
                     self._pending.pop(path, None)
                     self._stable_since.pop(path, None)
+                    self._pending_states.pop(path, None)
         return ready
 
     def _process_password_dirty_dirs(self, now: float) -> None:
@@ -371,6 +443,17 @@ class WatchScheduler:
         entry = _file_entry_from_watch_candidate(candidate)
         return bool(apply_ordered_filters_to_entries([entry], self.filters))
 
+    def _candidate_ready_delay(self, state: _PendingCandidateState) -> float:
+        if self.stable_seconds <= 0 or state.force:
+            return 0.0
+        if state.from_temporary_download or state.event_type == "moved":
+            return self.fast_stable_seconds
+        if state.saw_copy_final_attributes:
+            return self.copy_final_stable_seconds
+        if state.size_change_count > 0:
+            return self.stable_seconds
+        return self.new_file_stable_seconds
+
     def _output_suppression_reason(self, path: str) -> str:
         normalized = os.path.abspath(path)
         now = time.time()
@@ -461,30 +544,30 @@ class _WatchEventHandler(FileSystemEventHandler):
         self.scheduler = scheduler
 
     def on_created(self, event: FileSystemEvent):
-        self._handle(event)
+        self._handle(event, "created")
 
     def on_modified(self, event: FileSystemEvent):
-        self._handle(event)
+        self._handle(event, "modified")
 
     def on_moved(self, event: FileSystemEvent):
         dest_path = getattr(event, "dest_path", "")
         if dest_path:
-            self._handle_path(dest_path)
+            self._handle_path(dest_path, event_type="moved", src_path=getattr(event, "src_path", ""))
 
-    def _handle(self, event: FileSystemEvent):
+    def _handle(self, event: FileSystemEvent, event_type: str):
         if getattr(event, "is_directory", False):
             return
         src_path = getattr(event, "src_path", "")
         if src_path:
-            self._handle_path(src_path)
+            self._handle_path(src_path, event_type=event_type)
 
-    def _handle_path(self, path: str):
+    def _handle_path(self, path: str, *, event_type: str = "unknown", src_path: str = ""):
         if self.scheduler.should_ignore_event_path(path):
             return
         if is_directory_password_file(path, self.scheduler.config):
             self.scheduler.notify_password_table_changed(path)
             return
-        self.scheduler.enqueue(path)
+        self.scheduler.enqueue(path, event_type=event_type, src_path=src_path)
 
 
 def _candidate_for_event_path(path: str) -> WatchCandidate | None:
@@ -519,6 +602,35 @@ def _is_relative_to(path: str, root: str) -> bool:
 
 def _is_under_any_root(path: str, roots: list[str]) -> bool:
     return any(_is_relative_to(path, root) for root in roots if root)
+
+
+def _is_temporary_download_path(path: str) -> bool:
+    if not path:
+        return False
+    name = os.path.basename(str(path)).lower()
+    suffixes = (
+        ".crdownload",
+        ".part",
+        ".tmp",
+        ".download",
+        ".partial",
+        ".!qb",
+        ".!ut",
+    )
+    return name.endswith(suffixes)
+
+
+def _prefer_event_type(current: str, incoming: str) -> str:
+    order = {"unknown": 0, "initial_scan": 1, "modified": 2, "created": 3, "moved": 4}
+    return incoming if order.get(incoming, 0) >= order.get(current, 0) else current
+
+
+def _looks_like_copy_final_mtime(previous_mtime: float, current_mtime: float, now: float) -> bool:
+    if current_mtime <= 0:
+        return False
+    if current_mtime < previous_mtime - 1.0:
+        return True
+    return current_mtime < now - 60.0 and previous_mtime > now - 60.0
 
 
 def _dedupe_paths(paths: Iterable[str]) -> list[str]:

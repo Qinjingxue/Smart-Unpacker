@@ -242,7 +242,7 @@ class WatchService:
                                 )
                         except Exception as exc:
                             self.log.write("scheduler_error", error=str(exc), error_type=type(exc).__name__)
-                        next_scheduler_run = now + self.scheduler.interval_seconds
+                        next_scheduler_run = now + self._scheduler_next_delay()
                     sleep_seconds = max(0.0, next_scheduler_run - now)
                 else:
                     sleep_seconds = None
@@ -281,7 +281,7 @@ class WatchService:
             roots,
             out_dir=out_dir,
             state_path=state_path,
-            interval_seconds=float(watch_config.get("interval_seconds", 5.0)),
+            interval_seconds=float(watch_config.get("interval_seconds", 1.0)),
             stable_seconds=float(watch_config.get("stable_seconds", 10.0)),
             initial_scan=bool(watch_config.get("initial_scan", True)),
             observer_stop_timeout_seconds=float(watch_config.get("observer_stop_timeout_seconds", 5.0)),
@@ -333,6 +333,16 @@ class WatchService:
             return False
         self._last_idle_tick_signature = signature
         return True
+
+    def _scheduler_next_delay(self) -> float:
+        if self.scheduler is None:
+            return 0.0
+        if hasattr(self.scheduler, "next_delay_seconds"):
+            try:
+                return max(0.0, float(self.scheduler.next_delay_seconds()))
+            except Exception:
+                pass
+        return max(0.0, float(getattr(self.scheduler, "interval_seconds", 1.0)))
 
     def _reload_config(self) -> None:
         self.config = load_config()
