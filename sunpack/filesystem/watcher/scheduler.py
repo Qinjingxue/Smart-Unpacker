@@ -52,6 +52,7 @@ class _PendingCandidateState:
     saw_copy_final_attributes: bool = False
     from_temporary_download: bool = False
     sample_invalidated: bool = False
+    filter_revision: int = 0
 
 
 class WatchScheduler:
@@ -84,6 +85,8 @@ class WatchScheduler:
                 else observer_stop_timeout_seconds
             ),
         )
+        self._filter_revision = 0
+        self._filters = []
         self.filters = build_filters(config)
         self.state = WatchStateStore(state_path)
         log_path = Path(state_path).with_name("events.jsonl")
@@ -206,6 +209,15 @@ class WatchScheduler:
         with self._lock:
             return len(self._pending)
 
+    @property
+    def filters(self):
+        return self._filters
+
+    @filters.setter
+    def filters(self, value) -> None:
+        self._filters = list(value or [])
+        self._filter_revision += 1
+
     def next_delay_seconds(self) -> float:
         now = time.time()
         with self._lock:
@@ -245,10 +257,31 @@ class WatchScheduler:
         if self._is_under_metadata_dir(candidate.path):
             self._log_candidate_ignored(candidate.path, "under_metadata_dir")
             return
+        filter_revision = self._filter_revision
+        now = time.time()
+        with self._lock:
+            previous = self._pending.get(candidate.path)
+            previous_state = self._pending_states.get(candidate.path)
+            if (
+                previous is not None
+                and previous.size == candidate.size
+                and previous.mtime == candidate.mtime
+                and previous_state is not None
+                and previous_state.filter_revision == filter_revision
+                and not force
+            ):
+                previous_state.event_type = _prefer_event_type(previous_state.event_type, event_type)
+                previous_state.src_path = src_path or previous_state.src_path
+                previous_state.from_temporary_download = previous_state.from_temporary_download or _is_temporary_download_path(src_path)
+                if event_type == "modified":
+                    self._stable_since[candidate.path] = now
+                    previous_state.last_changed = now
+                    previous_state.change_count += 1
+                    previous_state.sample_invalidated = True
+                return
         if not self._passes_filesystem_filters(candidate):
             self._log_candidate_ignored(candidate.path, "filtered_out")
             return
-        now = time.time()
         with self._lock:
             previous = self._pending.get(candidate.path)
             previous_state = self._pending_states.get(candidate.path)
@@ -269,6 +302,7 @@ class WatchScheduler:
                         state.size_change_count += 1
                     if _looks_like_copy_final_mtime(previous.mtime, candidate.mtime, now):
                         state.saw_copy_final_attributes = True
+                    state.filter_revision = filter_revision
                     return
                 if previous_state is not None:
                     previous_state.event_type = _prefer_event_type(previous_state.event_type, event_type)
@@ -311,6 +345,7 @@ class WatchScheduler:
                     previous_state.event_type = _prefer_event_type(previous_state.event_type, event_type)
                     previous_state.src_path = src_path or previous_state.src_path
                     previous_state.from_temporary_download = previous_state.from_temporary_download or _is_temporary_download_path(src_path)
+                    previous_state.filter_revision = filter_revision
                 return
             self._pending[candidate.path] = candidate
             if previous is None or previous.size != candidate.size or previous.mtime != candidate.mtime:
@@ -323,6 +358,7 @@ class WatchScheduler:
                         src_path=src_path,
                         force=force,
                         from_temporary_download=_is_temporary_download_path(src_path),
+                        filter_revision=filter_revision,
                     )
                 else:
                     previous_state.last_changed = now
@@ -335,6 +371,7 @@ class WatchScheduler:
                         previous_state.size_change_count += 1
                     if previous is not None and _looks_like_copy_final_mtime(previous.mtime, candidate.mtime, now):
                         previous_state.saw_copy_final_attributes = True
+                    previous_state.filter_revision = filter_revision
         self.log.write(
             "candidate_queued",
             path=candidate.path,
@@ -402,15 +439,26 @@ class WatchScheduler:
                     self._stable_since.pop(path, None)
                     self._pending_states.pop(path, None)
                     continue
-                if not self._passes_filesystem_filters(refreshed):
-                    self._pending.pop(path, None)
-                    self._stable_since.pop(path, None)
-                    self._pending_states.pop(path, None)
-                    continue
-                if refreshed.size != candidate.size or refreshed.mtime != candidate.mtime:
+                stable_since = self._stable_since.setdefault(path, now)
+                state = self._pending_states.setdefault(
+                    path,
+                    _PendingCandidateState(
+                        first_seen=stable_since,
+                        last_changed=stable_since,
+                    ),
+                )
+                metadata_changed = refreshed.size != candidate.size or refreshed.mtime != candidate.mtime
+                filter_revision = self._filter_revision
+                if metadata_changed or state.filter_revision != filter_revision:
+                    if not self._passes_filesystem_filters(refreshed):
+                        self._pending.pop(path, None)
+                        self._stable_since.pop(path, None)
+                        self._pending_states.pop(path, None)
+                        continue
+                    state.filter_revision = filter_revision
+                if metadata_changed:
                     self._pending[path] = replace(refreshed, sample_digest=candidate.sample_digest)
                     self._stable_since[path] = now
-                    state = self._pending_states.setdefault(path, _PendingCandidateState(first_seen=now, last_changed=now))
                     state.last_changed = now
                     state.change_count += 1
                     state.sample_invalidated = True
@@ -419,8 +467,6 @@ class WatchScheduler:
                     if _looks_like_copy_final_mtime(candidate.mtime, refreshed.mtime, now):
                         state.saw_copy_final_attributes = True
                     continue
-                stable_since = self._stable_since.setdefault(path, now)
-                state = self._pending_states.setdefault(path, _PendingCandidateState(first_seen=stable_since, last_changed=stable_since))
                 if self._candidate_ready_delay(state) <= 0 or now - stable_since >= self._candidate_ready_delay(state):
                     sampled = _candidate_with_sample_digest(refreshed)
                     if sampled is None:

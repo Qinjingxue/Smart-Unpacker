@@ -243,6 +243,53 @@ def test_watch_scheduler_uses_filesystem_filters_for_candidates(tmp_path, monkey
     assert not any(path.endswith("blocked.zip") for path in pending_paths)
 
 
+def test_watch_scheduler_reuses_filter_result_for_unchanged_pending_candidate(tmp_path, monkeypatch):
+    monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
+
+    watch_root = tmp_path / "in"
+    watch_root.mkdir()
+    archive = watch_root / "sample.zip"
+    archive.write_bytes(b"PK\x03\x04payload")
+
+    watcher = WatchScheduler(
+        {
+            "filesystem": {
+                "scan_filters": [
+                    {"name": "size_range", "enabled": True, "range": "r >= 1 B"},
+                ],
+            },
+            "watch": {"new_file_stable_seconds": 30},
+        },
+        [str(watch_root)],
+        out_dir=str(tmp_path / "out"),
+        state_path=str(tmp_path / "state.json"),
+        stable_seconds=30,
+        initial_scan=False,
+    )
+    original_passes = watcher._passes_filesystem_filters
+    filter_calls = []
+
+    def counted_passes(candidate):
+        filter_calls.append((candidate.size, candidate.mtime))
+        return original_passes(candidate)
+
+    monkeypatch.setattr(watcher, "_passes_filesystem_filters", counted_passes)
+
+    watcher.enqueue(str(archive))
+    watcher.enqueue(str(archive), event_type="modified")
+    watcher.run_once()
+    watcher.run_once()
+
+    assert len(filter_calls) == 1
+    assert watcher.pending_count == 1
+
+    archive.write_bytes(b"PK\x03\x04payload-more")
+    watcher.run_once()
+
+    assert len(filter_calls) == 2
+    assert watcher.pending_count == 1
+
+
 def test_watch_scheduler_rechecks_filesystem_filters_before_processing(tmp_path, monkeypatch):
     monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
 
@@ -259,6 +306,14 @@ def test_watch_scheduler_rechecks_filesystem_filters_before_processing(tmp_path,
         stable_seconds=0,
         initial_scan=False,
     )
+    original_passes = watcher._passes_filesystem_filters
+    filter_calls = []
+
+    def counted_passes(candidate):
+        filter_calls.append((candidate.size, candidate.mtime))
+        return original_passes(candidate)
+
+    monkeypatch.setattr(watcher, "_passes_filesystem_filters", counted_passes)
     watcher.enqueue(str(archive))
     assert watcher.pending_count == 1
 
@@ -274,6 +329,7 @@ def test_watch_scheduler_rechecks_filesystem_filters_before_processing(tmp_path,
 
     assert result.processed == 0
     assert watcher.pending_count == 0
+    assert len(filter_calls) == 2
 
 
 def test_watch_scheduler_processes_stable_candidate_with_watch_root_common_root(tmp_path, monkeypatch):
