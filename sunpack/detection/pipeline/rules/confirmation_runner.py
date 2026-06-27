@@ -31,12 +31,16 @@ class ConfirmationRunner:
             "evaluated_rules": [],
             "decision": "not_entered",
         }
-        if not self.decision_policy.should_enter_confirmation(total_score):
+        rules = self.prepare_rules("confirmation")
+        in_confirmation_band = self.decision_policy.should_enter_confirmation(total_score)
+        if not in_confirmation_band and not any(rule.config.get("always_run", False) for rule in rules):
             return None, trace
 
         trace["entered"] = True
         trace["decision"] = "pass"
-        for rule in self.prepare_rules("confirmation"):
+        for rule in rules:
+            if not in_confirmation_band and not rule.config.get("always_run", False):
+                continue
             if not self._rule_applies(rule, total_score):
                 continue
             fact_configs = {fact_name: rule.config for fact_name in rule.instance.required_facts}
@@ -84,6 +88,8 @@ class ConfirmationRunner:
         return None, trace
 
     def _rule_applies(self, rule: PreparedRule, total_score: int) -> bool:
+        if rule.config.get("always_run", False) and "score_min" not in rule.config and "score_max" not in rule.config:
+            return True
         global_min, global_max = self.decision_policy.confirmation_bounds()
         score_min = int(rule.config.get("score_min", global_min))
         score_max = int(rule.config.get("score_max", global_max))

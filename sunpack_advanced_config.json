@@ -823,6 +823,11 @@
         "enabled": true
       },
       {
+        "name": "executable_carrier",
+        "enabled": true,
+        "scan_limit_bytes": 67108864
+      },
+      {
         "name": "seven_zip_structure",
         "enabled": true
       },
@@ -925,6 +930,12 @@
         }
       ],
       "confirmation": [
+        {
+          "name": "executable_carrier_policy",
+          "enabled": true,
+          "always_run": true,
+          "reject_runtime_bundles": true
+        },
         {
           "name": "seven_zip_probe",
           "enabled": true

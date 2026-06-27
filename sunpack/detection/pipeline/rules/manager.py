@@ -38,6 +38,30 @@ class RuleManager:
     def validate_config(self) -> list[str]:
         return self.config_validator.validate_pipeline_config(self.config)
 
+    def finalize_scored_evidence(
+        self,
+        fact_bag: FactBag,
+        total_score: int,
+        matched_rules: List[str],
+        score_breakdown: list[dict[str, Any]] | None = None,
+    ) -> RuleDecision:
+        """Run externally supplied structural score through confirmation policy."""
+        decision, trace = self.confirmation_runner.run(
+            fact_bag,
+            total_score,
+            matched_rules,
+            score_breakdown=score_breakdown,
+        )
+        if decision is not None:
+            return decision
+        return self.decision_policy.finalize_scoring_decision(
+            fact_bag,
+            total_score,
+            matched_rules,
+            score_breakdown=score_breakdown,
+            confirmation=trace,
+        )
+
     def _prepare_rules(self, layer: str) -> List[PreparedRule]:
         return self.rule_preparer.prepare(layer)
 
@@ -239,21 +263,11 @@ class RuleManager:
             total_score = state["total_score"]
             matched_rules: List[str] = list(state["matched_rules"])
             score_breakdown: list[dict[str, Any]] = list(state["score_breakdown"])
-            confirmation_decision, confirmation_trace = self.confirmation_runner.run(
+            decisions[bag] = self.finalize_scored_evidence(
                 bag,
                 total_score,
                 matched_rules,
                 score_breakdown=score_breakdown,
             )
-            if confirmation_decision is not None:
-                decisions[bag] = confirmation_decision
-            else:
-                decisions[bag] = self.decision_policy.finalize_scoring_decision(
-                    bag,
-                    total_score,
-                    matched_rules,
-                    score_breakdown=score_breakdown,
-                    confirmation=confirmation_trace,
-                )
 
         return decisions

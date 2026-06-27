@@ -91,22 +91,28 @@ class DetectionScheduler:
         bag.set("analysis.confidence", confidence)
         bag.set("analysis.prepass", dict(structure.get("prepass") or {}))
         bag.set("analysis.read_bytes", int(structure.get("read_bytes") or 0))
+        bag.set("analysis.structure_rescue", dict(structure))
         bag.set("file.detected_ext", _format_extension(format_name))
         bag.set("file.probe_detected_archive", True)
         bag.set("file.probe_offset", offset)
         bag.set("file.embedded_archive_found", offset > 0)
         archive_threshold = int(detector_config.get("archive_score_threshold", (self.config.get("thresholds") or {}).get("archive_score_threshold", 6)) or 6)
         rescue_score = max(0, archive_threshold - int(decision.total_score or 0))
-        return RuleDecision(
-            should_extract=True,
-            total_score=int(decision.total_score or 0) + rescue_score,
-            matched_rules=[*decision.matched_rules, "content_structure_rescue"],
-            stop_reason="content_structure_proven",
-            decision="archive",
-            decision_stage="content_structure_rescue",
-            deciding_rule="content_structure_rescue",
-            score_breakdown=[*decision.score_breakdown, {"rule": "content_structure_rescue", "score": rescue_score, "reason": f"Content analysis proved {format_name} structure"}],
-            confirmation={"entered": True, "decision": "confirmed", "reason": "content_structure_proven", "format": format_name, "confidence": confidence},
+        total_score = int(decision.total_score or 0) + rescue_score
+        matched_rules = [*decision.matched_rules, "content_structure_rescue"]
+        score_breakdown = [
+            *decision.score_breakdown,
+            {
+                "rule": "content_structure_rescue",
+                "score": rescue_score,
+                "reason": f"Content analysis proved {format_name} structure",
+            },
+        ]
+        return self.rule_manager.finalize_scored_evidence(
+            bag,
+            total_score,
+            matched_rules,
+            score_breakdown=score_breakdown,
         )
 
     def evaluate_bags(

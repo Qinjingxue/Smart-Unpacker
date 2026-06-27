@@ -91,7 +91,7 @@ class ArchiveTaskProvider:
         ]
 
     def _refine_with_structure_rescue(self, bag: FactBag, decision):
-        if decision.should_extract or decision.decision == "rejected":
+        if decision.should_extract or decision.discarded_at in {"precheck", "confirmation"}:
             return decision
         path = str(bag.get("candidate.entry_path") or bag.get("file.path") or "")
         if not path:
@@ -120,6 +120,7 @@ class ArchiveTaskProvider:
                 "format": selected.format,
                 "confidence": float(selected.confidence or 0.0),
                 "start_offset": int(first_segment.start_offset or 0) if first_segment is not None else 0,
+                "details": dict(selected.details or {}),
             },
         }
         return self.detector.refine_with_structure(bag, decision, evidence)

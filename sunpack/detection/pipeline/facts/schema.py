@@ -267,6 +267,16 @@ FACT_SCHEMA: dict[str, dict[str, Any]] = {
         "producer": "processors.pe_overlay_structure",
         "description": "PE header, overlay range, and archive-like overlay evidence derived from the candidate file.",
     },
+    "executable.carrier": {
+        "type": "dict",
+        "producer": "processors.executable_carrier",
+        "description": "Executable carrier classification separating SFX archives from application runtime bundles.",
+    },
+    "analysis.structure_rescue": {
+        "type": "dict",
+        "producer": "coordinator.structure_rescue",
+        "description": "Deep structure evidence projected back into the detection confirmation pipeline.",
+    },
     "7z.structure": {
         "type": "dict",
         "producer": "processors.seven_zip_structure",
