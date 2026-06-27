@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -652,6 +653,7 @@ def test_watch_scheduler_initial_scan_skips_known_outputs_when_output_root_match
         str(old_archive),
         old_archive.stat().st_size,
         stat.st_mtime,
+        sample_digest=scheduler_module._sample_file_digest(str(old_archive), stat.st_size) or "",
         status="done",
         output_dir=str(output_dir),
         generated_output_dirs=[str(output_dir)],
@@ -1135,3 +1137,132 @@ def test_watch_scheduler_silently_ignores_metadata_events(tmp_path, monkeypatch)
 
     assert watcher.pending_count == 0
     assert log_path.read_text(encoding="utf-8") == ""
+
+
+def test_watch_scheduler_ignores_baidu_temporary_download_files(tmp_path, monkeypatch):
+    monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
+    watch_root = tmp_path / "in"
+    watch_root.mkdir()
+    temporary = watch_root / "sample.zip.baiduyun.p.downloading"
+    temporary.write_bytes(b"PK\x03\x04payload")
+
+    watcher = WatchScheduler(
+        {"watch": {"clipboard_monitor_enabled": False}},
+        [str(watch_root)],
+        out_dir=str(tmp_path / "out"),
+        state_path=str(tmp_path / "state.json"),
+        stable_seconds=0,
+        initial_scan=False,
+    )
+    watcher.enqueue(str(temporary), event_type="created")
+
+    assert watcher.pending_count == 0
+
+
+def test_watch_scheduler_same_stat_modified_event_resets_stable_window(tmp_path, monkeypatch):
+    monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
+    now = [2000010000.0]
+    monkeypatch.setattr(scheduler_module.time, "time", lambda: now[0])
+
+    class FakePipelineRunner:
+        def __init__(self, config):
+            self.context = SimpleNamespace(flatten_candidates=set(), recovered_outputs=[])
+
+        def run_targets(self, paths):
+            return FakeSummary()
+
+    watch_root = tmp_path / "in"
+    watch_root.mkdir()
+    archive_path = watch_root / "sample.zip"
+    _write_zip(archive_path)
+    watcher = WatchScheduler(
+        {"watch": {"clipboard_monitor_enabled": False, "new_file_stable_seconds": 1.0}},
+        [str(watch_root)],
+        out_dir=str(tmp_path / "out"),
+        state_path=str(tmp_path / "state.json"),
+        stable_seconds=10,
+        initial_scan=False,
+        runner_factory=FakePipelineRunner,
+    )
+    watcher.enqueue(str(archive_path), event_type="created")
+    now[0] += 0.8
+    watcher.enqueue(str(archive_path), event_type="modified")
+
+    now[0] += 0.3
+    assert watcher.run_once().processed == 0
+    now[0] += 0.8
+    assert watcher.run_once().processed == 1
+
+
+def test_watch_scheduler_sample_digest_detects_same_stat_content_change(tmp_path, monkeypatch):
+    monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
+    now = [2000020000.0]
+    monkeypatch.setattr(scheduler_module.time, "time", lambda: now[0])
+
+    class FakePipelineRunner:
+        def __init__(self, config):
+            self.context = SimpleNamespace(flatten_candidates=set(), recovered_outputs=[])
+
+        def run_targets(self, paths):
+            return FakeSummary()
+
+    watch_root = tmp_path / "in"
+    watch_root.mkdir()
+    archive_path = watch_root / "sample.zip"
+    archive_path.write_bytes(b"A" * (512 * 1024))
+    original_mtime = archive_path.stat().st_mtime
+    watcher = WatchScheduler(
+        {"watch": {"clipboard_monitor_enabled": False, "new_file_stable_seconds": 1.0}},
+        [str(watch_root)],
+        out_dir=str(tmp_path / "out"),
+        state_path=str(tmp_path / "state.json"),
+        stable_seconds=10,
+        initial_scan=False,
+        runner_factory=FakePipelineRunner,
+    )
+    watcher.enqueue(str(archive_path), event_type="created")
+    with archive_path.open("r+b") as handle:
+        handle.seek(0)
+        handle.write(b"B" * 32 * 1024)
+    os.utime(archive_path, (original_mtime, original_mtime))
+
+    now[0] += 1.1
+    assert watcher.run_once().processed == 0
+    now[0] += 1.1
+    assert watcher.run_once().processed == 1
+
+
+def test_watch_scheduler_state_key_distinguishes_same_stat_content(tmp_path, monkeypatch):
+    monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
+    attempts = []
+
+    class FakePipelineRunner:
+        def __init__(self, config):
+            self.context = SimpleNamespace(flatten_candidates=set(), recovered_outputs=[])
+
+        def run_targets(self, paths):
+            attempts.append(list(paths))
+            return FakeSummary()
+
+    watch_root = tmp_path / "in"
+    watch_root.mkdir()
+    archive_path = watch_root / "sample.zip"
+    archive_path.write_bytes(b"A" * (256 * 1024))
+    original_mtime = archive_path.stat().st_mtime
+    watcher = WatchScheduler(
+        {"watch": {"clipboard_monitor_enabled": False}},
+        [str(watch_root)],
+        out_dir=str(tmp_path / "out"),
+        state_path=str(tmp_path / "state.json"),
+        stable_seconds=0,
+        initial_scan=False,
+        runner_factory=FakePipelineRunner,
+    )
+    watcher.enqueue(str(archive_path))
+    assert watcher.run_once().processed == 1
+
+    archive_path.write_bytes(b"B" * (256 * 1024))
+    os.utime(archive_path, (original_mtime, original_mtime))
+    watcher.enqueue(str(archive_path))
+    assert watcher.run_once().processed == 1
+    assert len(attempts) == 2

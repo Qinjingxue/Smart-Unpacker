@@ -13,6 +13,7 @@ class WatchStateEntry:
     path: str
     size: int
     mtime: float
+    sample_digest: str = ""
     status: str = "pending"
     output_dir: str = ""
     generated_output_dirs: list[str] = field(default_factory=list)
@@ -26,7 +27,8 @@ class WatchStateEntry:
 
     @property
     def fingerprint(self) -> str:
-        return f"{self.path}|{self.size}|{self.mtime:.6f}"
+        base = f"{self.path}|{self.size}|{self.mtime:.6f}"
+        return f"{base}|{self.sample_digest}" if self.sample_digest else base
 
 
 class WatchStateStore:
@@ -63,7 +65,7 @@ class WatchStateStore:
     def save(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
         payload: dict[str, Any] = {
-            "version": 3,
+            "version": 4,
             "password_generation": self.password_generation,
             "password_source_signature": self.password_source_signature,
             "entries": {key: asdict(value) for key, value in self.entries.items()},
@@ -72,15 +74,27 @@ class WatchStateStore:
         temp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         os.replace(temp, self.path)
 
-    def key_for(self, path: str, size: int, mtime: float) -> str:
+    def key_for(self, path: str, size: int, mtime: float, sample_digest: str = "") -> str:
+        legacy_key = self._legacy_key_for(path, size, mtime)
+        return f"{legacy_key}|{sample_digest}" if sample_digest else legacy_key
+
+    def _legacy_key_for(self, path: str, size: int, mtime: float) -> str:
         return f"{os.path.abspath(path)}|{size}|{mtime:.6f}"
 
-    def is_done(self, path: str, size: int, mtime: float) -> bool:
-        entry = self.entries.get(self.key_for(path, size, mtime))
+    def is_done(self, path: str, size: int, mtime: float, sample_digest: str = "") -> bool:
+        entry = self.entries.get(self.key_for(path, size, mtime, sample_digest))
         return bool(entry and entry.status == "done")
 
-    def should_skip(self, path: str, size: int, mtime: float, *, force: bool = False) -> bool:
-        entry = self.entries.get(self.key_for(path, size, mtime))
+    def should_skip(
+        self,
+        path: str,
+        size: int,
+        mtime: float,
+        sample_digest: str = "",
+        *,
+        force: bool = False,
+    ) -> bool:
+        entry = self.entries.get(self.key_for(path, size, mtime, sample_digest))
         if entry is None:
             return False
         if entry.status in {"done", "failed_terminal", "ignored_no_tasks"}:
@@ -134,19 +148,21 @@ class WatchStateStore:
         size: int,
         mtime: float,
         *,
+        sample_digest: str = "",
         status: str,
         output_dir: str = "",
         generated_output_dirs: list[str] | None = None,
         error: str = "",
         failure_payload: dict[str, Any] | None = None,
     ):
-        key = self.key_for(path, size, mtime)
+        key = self.key_for(path, size, mtime, sample_digest)
         previous = self.entries.get(key)
         payload = dict(failure_payload or {})
         self.entries[key] = WatchStateEntry(
             path=os.path.abspath(path),
             size=size,
             mtime=mtime,
+            sample_digest=sample_digest,
             status=status,
             output_dir=output_dir,
             generated_output_dirs=_dedupe_paths(generated_output_dirs or ([output_dir] if output_dir else [])),

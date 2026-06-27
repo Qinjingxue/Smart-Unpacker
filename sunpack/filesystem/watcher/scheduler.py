@@ -5,7 +5,7 @@ import json
 import os
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Iterable
 
@@ -51,6 +51,7 @@ class _PendingCandidateState:
     size_change_count: int = 0
     saw_copy_final_attributes: bool = False
     from_temporary_download: bool = False
+    sample_invalidated: bool = False
 
 
 class WatchScheduler:
@@ -247,7 +248,49 @@ class WatchScheduler:
         if not self._passes_filesystem_filters(candidate):
             self.log.write("candidate_ignored", path=candidate.path, reason="filtered_out")
             return
-        if self.state.should_skip(candidate.path, candidate.size, candidate.mtime, force=force):
+        now = time.time()
+        with self._lock:
+            previous = self._pending.get(candidate.path)
+            previous_state = self._pending_states.get(candidate.path)
+            if previous is not None and not force:
+                metadata_changed = previous.size != candidate.size or previous.mtime != candidate.mtime
+                if metadata_changed:
+                    self._pending[candidate.path] = replace(candidate, sample_digest=previous.sample_digest)
+                    self._stable_since[candidate.path] = now
+                    state = previous_state or _PendingCandidateState(first_seen=now, last_changed=now)
+                    self._pending_states[candidate.path] = state
+                    state.last_changed = now
+                    state.event_type = _prefer_event_type(state.event_type, event_type)
+                    state.src_path = src_path or state.src_path
+                    state.change_count += 1
+                    state.sample_invalidated = True
+                    state.from_temporary_download = state.from_temporary_download or _is_temporary_download_path(src_path)
+                    if previous.size != candidate.size:
+                        state.size_change_count += 1
+                    if _looks_like_copy_final_mtime(previous.mtime, candidate.mtime, now):
+                        state.saw_copy_final_attributes = True
+                    return
+                if previous_state is not None:
+                    previous_state.event_type = _prefer_event_type(previous_state.event_type, event_type)
+                    previous_state.src_path = src_path or previous_state.src_path
+                    previous_state.from_temporary_download = previous_state.from_temporary_download or _is_temporary_download_path(src_path)
+                    if event_type == "modified":
+                        self._stable_since[candidate.path] = now
+                        previous_state.last_changed = now
+                        previous_state.change_count += 1
+                        previous_state.sample_invalidated = True
+                return
+        candidate = _candidate_with_sample_digest(candidate)
+        if candidate is None:
+            self.log.write("candidate_ignored", path=path, reason="sample_unreadable")
+            return
+        if self.state.should_skip(
+            candidate.path,
+            candidate.size,
+            candidate.mtime,
+            candidate.sample_digest,
+            force=force,
+        ):
             self.log.write(
                 "candidate_ignored",
                 path=candidate.path,
@@ -256,7 +299,6 @@ class WatchScheduler:
                 mtime=candidate.mtime,
             )
             return
-        now = time.time()
         with self._lock:
             previous = self._pending.get(candidate.path)
             previous_state = self._pending_states.get(candidate.path)
@@ -356,11 +398,12 @@ class WatchScheduler:
                     self._pending_states.pop(path, None)
                     continue
                 if refreshed.size != candidate.size or refreshed.mtime != candidate.mtime:
-                    self._pending[path] = refreshed
+                    self._pending[path] = replace(refreshed, sample_digest=candidate.sample_digest)
                     self._stable_since[path] = now
                     state = self._pending_states.setdefault(path, _PendingCandidateState(first_seen=now, last_changed=now))
                     state.last_changed = now
                     state.change_count += 1
+                    state.sample_invalidated = True
                     if refreshed.size != candidate.size:
                         state.size_change_count += 1
                     if _looks_like_copy_final_mtime(candidate.mtime, refreshed.mtime, now):
@@ -369,7 +412,23 @@ class WatchScheduler:
                 stable_since = self._stable_since.setdefault(path, now)
                 state = self._pending_states.setdefault(path, _PendingCandidateState(first_seen=stable_since, last_changed=stable_since))
                 if self._candidate_ready_delay(state) <= 0 or now - stable_since >= self._candidate_ready_delay(state):
-                    ready.append(refreshed)
+                    sampled = _candidate_with_sample_digest(refreshed)
+                    if sampled is None:
+                        self._stable_since[path] = now
+                        continue
+                    if sampled.sample_digest != candidate.sample_digest:
+                        if state.sample_invalidated:
+                            ready.append(sampled)
+                            self._pending.pop(path, None)
+                            self._stable_since.pop(path, None)
+                            self._pending_states.pop(path, None)
+                            continue
+                        self._pending[path] = sampled
+                        self._stable_since[path] = now
+                        state.last_changed = now
+                        state.change_count += 1
+                        continue
+                    ready.append(sampled)
                     self._pending.pop(path, None)
                     self._stable_since.pop(path, None)
                     self._pending_states.pop(path, None)
@@ -425,6 +484,7 @@ class WatchScheduler:
                 candidate.path,
                 candidate.size,
                 candidate.mtime,
+                sample_digest=candidate.sample_digest,
                 status=status,
                 output_dir=generated_output_dirs[0] if generated_output_dirs else "",
                 generated_output_dirs=[],
@@ -438,6 +498,7 @@ class WatchScheduler:
                 candidate.path,
                 candidate.size,
                 candidate.mtime,
+                sample_digest=candidate.sample_digest,
                 status="ignored_no_tasks",
             )
             self.log.write("no_tasks_found", path=candidate.path)
@@ -447,6 +508,7 @@ class WatchScheduler:
             candidate.path,
             candidate.size,
             candidate.mtime,
+            sample_digest=candidate.sample_digest,
             status="done",
             output_dir=generated_output_dirs[0] if generated_output_dirs else "",
             generated_output_dirs=generated_output_dirs,
@@ -653,6 +715,39 @@ def _candidate_for_event_path(path: str) -> WatchCandidate | None:
     return _watch_candidate_for_path(path)
 
 
+def _candidate_with_sample_digest(candidate: WatchCandidate) -> WatchCandidate | None:
+    digest = _sample_file_digest(candidate.path, candidate.size)
+    if digest is None:
+        return None
+    return replace(candidate, sample_digest=digest)
+
+
+def _sample_file_digest(path: str, size: int) -> str | None:
+    window_size = 32 * 1024
+    sample_count = 8
+    try:
+        with open(path, "rb") as handle:
+            if size <= window_size * sample_count:
+                offsets = [0]
+                read_sizes = [max(0, size)]
+            else:
+                max_offset = size - window_size
+                offsets = sorted({(max_offset * index) // (sample_count - 1) for index in range(sample_count)})
+                read_sizes = [window_size] * len(offsets)
+            digest = hashlib.blake2s(digest_size=16)
+            digest.update(int(size).to_bytes(8, "little", signed=False))
+            for offset, read_size in zip(offsets, read_sizes):
+                handle.seek(offset)
+                data = handle.read(read_size)
+                if len(data) != read_size:
+                    return None
+                digest.update(int(offset).to_bytes(8, "little", signed=False))
+                digest.update(data)
+    except (OSError, OverflowError):
+        return None
+    return digest.hexdigest()
+
+
 def _file_entry_from_watch_candidate(candidate: WatchCandidate) -> FileEntry:
     path = Path(candidate.path)
     return FileEntry(
@@ -686,6 +781,8 @@ def _is_temporary_download_path(path: str) -> bool:
         return False
     name = os.path.basename(str(path)).lower()
     suffixes = (
+        ".baiduyun.p.downloading",
+        ".downloading",
         ".crdownload",
         ".part",
         ".tmp",
