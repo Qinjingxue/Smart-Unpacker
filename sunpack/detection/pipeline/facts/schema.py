@@ -237,6 +237,11 @@ FACT_SCHEMA: dict[str, dict[str, Any]] = {
         "producer": "processors.zip_eocd_structure",
         "description": "ZIP EOCD and central directory structure check derived from the candidate file.",
     },
+    "relation.split_group_status": {
+        "type": "str",
+        "producer": "relations.group_builder",
+        "description": "Tri-state relation result: complete, incomplete, or ambiguous.",
+    },
     "zip.directory_consistency": {
         "type": "dict",
         "producer": "processors.zip_directory_consistency",

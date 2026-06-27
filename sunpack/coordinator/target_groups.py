@@ -48,8 +48,10 @@ def relation_group_to_fact_bag(group: CandidateGroup) -> FactBag:
     bag.set("relation.split_member_count", len(all_paths) if group.is_split_candidate else 0)
     if group.split_group_complete is not None:
         bag.set("relation.split_group_complete", bool(group.split_group_complete))
-    else:
-        bag.set("relation.split_group_complete", True)
+    bag.set(
+        "relation.split_group_status",
+        "complete" if group.split_group_complete is True else "incomplete" if group.split_group_complete is False else "ambiguous",
+    )
     if group.split_missing_reason:
         bag.set("relation.split_missing_reason", group.split_missing_reason)
     if group.split_missing_indices:

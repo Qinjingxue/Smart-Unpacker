@@ -23,6 +23,9 @@ class ArchiveTaskScanner:
         for failure in self.provider.failed_candidates:
             if failure not in self.context.failed_tasks:
                 self.context.failed_tasks.append(failure)
+        for failure in self.provider.failed_candidate_failures:
+            if failure not in self.context.failures:
+                self.context.failures.append(failure)
         return tasks
 
     def direct_file_tasks(self, file_paths: list[str]) -> list[ArchiveTask]:

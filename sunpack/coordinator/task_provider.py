@@ -4,6 +4,7 @@ from typing import Any
 
 from sunpack.config.detection_view import detection_config, rule_pipeline_config
 from sunpack.contracts.detection import FactBag
+from sunpack.contracts.failures import FailureInfo, FailureKind
 from sunpack.contracts.tasks import ArchiveTask
 from sunpack.detection.knowledge import write_detection_task
 from sunpack.detection.scheduler import DetectionScheduler
@@ -36,10 +37,12 @@ class ArchiveTaskProvider:
         rescue_prepass.setdefault("deep_scan", bool(detector_config.get("content_structure_rescue_deep_scan", False)))
         self.rescue_analysis_stage = ArchiveAnalysisStage(rescue_config)
         self.failed_candidates: list[str] = []
+        self.failed_candidate_failures: list[FailureInfo] = []
 
     def scan_targets(self, scan_roots: list[str], processed_keys: set[str] | None = None) -> list[ArchiveTask]:
         processed_keys = processed_keys or set()
         self.failed_candidates = []
+        self.failed_candidate_failures = []
         if self._detection_pipeline_disabled():
             return self._scan_standard_archive_targets(scan_roots, processed_keys)
 
@@ -164,6 +167,19 @@ class ArchiveTaskProvider:
                 if message not in seen_failures:
                     seen_failures.add(message)
                     self.failed_candidates.append(message)
+                    self.failed_candidate_failures.append(FailureInfo(
+                        kind=FailureKind.MISSING_VOLUME,
+                        stage="relation",
+                        message=message,
+                        message_key="failure.incomplete_split_suffix",
+                        user_action="Wait for or provide the missing split archive volumes.",
+                        details={
+                            "path": str(bag.get("candidate.entry_path") or bag.get("file.path") or ""),
+                            "split_family": str(bag.get("relation.split_family") or ""),
+                            "missing_reason": str(bag.get("relation.split_missing_reason") or ""),
+                            "missing_indices": list(bag.get("relation.split_missing_indices") or []),
+                        },
+                    ))
                 continue
             filtered.append(bag)
         return filtered

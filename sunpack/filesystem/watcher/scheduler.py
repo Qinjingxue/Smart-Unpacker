@@ -12,11 +12,18 @@ from typing import Iterable
 from sunpack.config.detection_view import directory_scan_is_recursive
 from sunpack.config.fields.watch import DEFAULT_WATCH_CONFIG
 from sunpack.contracts.detection import FactBag
+from sunpack.contracts.failures import FailureKind
 from sunpack.contracts.filesystem import FileEntry
 from sunpack.contracts.tasks import ArchiveTask
 from sunpack.filesystem.directory_scanner import apply_ordered_filters_to_entries
 from sunpack.filesystem.filters import build_filters
 from sunpack.filesystem.watcher.log import WatchLogStore
+from sunpack.filesystem.watcher.group_dispatch import NullWatchGroupResolver, plan_watch_dispatches
+from sunpack.filesystem.watcher.group_models import (
+    BLOCKER_MISSING_VOLUME,
+    BLOCKER_PASSWORD,
+    WatchGroupSnapshot,
+)
 from sunpack.filesystem.watcher.scanner import WatchCandidate, scan_watch_candidates
 from sunpack.filesystem.watcher.scanner import _candidate_for as _watch_candidate_for_path
 from sunpack.filesystem.watcher.state import WatchStateStore
@@ -69,6 +76,7 @@ class WatchScheduler:
         initial_scan: bool | None = None,
         observer_stop_timeout_seconds: float | None = None,
         runner_factory=None,
+        group_coordinator=None,
     ):
         self.config = config
         self.watch_roots = [os.path.abspath(path) for path in watch_roots]
@@ -89,6 +97,7 @@ class WatchScheduler:
         self._filters = []
         self.filters = build_filters(config)
         self.state = WatchStateStore(state_path)
+        self.group_coordinator = group_coordinator or NullWatchGroupResolver()
         log_path = Path(state_path).with_name("events.jsonl")
         self.log = WatchLogStore(str(log_path))
         state_parent = Path(state_path).parent
@@ -194,9 +203,27 @@ class WatchScheduler:
         now = time.time()
         self._process_password_dirty_dirs(now)
         ready = self._pop_ready(now)
+        with self._lock:
+            unstable_paths = {os.path.normcase(os.path.abspath(path)) for path in self._pending}
+        dispatches, waiting = plan_watch_dispatches(
+            ready,
+            unstable_paths=unstable_paths,
+            coordinator=self.group_coordinator,
+            state=self.state,
+            prepare_candidate=self._prepare_group_head,
+        )
+        for snapshot in waiting:
+            self.log.write(
+                "split_group_suspended",
+                group_id=snapshot.group_id,
+                head_path=snapshot.head_path,
+                member_paths=list(snapshot.member_paths),
+                missing_reason=snapshot.missing_reason,
+                missing_indices=list(snapshot.missing_indices),
+            )
         result = WatchRunResult(pending=self.pending_count)
-        for candidate in ready:
-            single = self._process_candidate(candidate)
+        for dispatch in dispatches:
+            single = self._process_candidate(dispatch.candidate, group=dispatch.group)
             result.processed += single.processed
             result.succeeded += single.succeeded
             result.failed += single.failed
@@ -507,7 +534,18 @@ class WatchScheduler:
                     self.log.write("retry_password_failure", path=entry.path, directory=directory)
                     self.enqueue(entry.path, force=True)
 
-    def _process_candidate(self, candidate: WatchCandidate) -> WatchRunResult:
+    def _prepare_group_head(self, path: str) -> WatchCandidate | None:
+        candidate = _candidate_for_event_path(path)
+        if candidate is None or not self._passes_filesystem_filters(candidate):
+            return None
+        return _candidate_with_sample_digest(candidate)
+
+    def _process_candidate(
+        self,
+        candidate: WatchCandidate,
+        *,
+        group: WatchGroupSnapshot | None = None,
+    ) -> WatchRunResult:
         if self.runner_factory is None:
             raise RuntimeError("WatchScheduler requires a runner_factory.")
         self.log.write("processing_started", path=candidate.path, size=candidate.size, mtime=candidate.mtime)
@@ -534,8 +572,29 @@ class WatchScheduler:
             failures = list(getattr(summary, "failures", []) or [])
             failure_payloads = [_failure_to_dict(failure) for failure in failures]
             is_password_failure = any(getattr(failure, "is_password_failure", False) for failure in failures)
-            status = "failed_password" if is_password_failure else "failed_terminal"
+            is_missing_volume = any(
+                _failure_contains(failure, FailureKind.MISSING_VOLUME)
+                for failure in failures
+            )
+            blockers = []
+            if is_missing_volume:
+                blockers.append(BLOCKER_MISSING_VOLUME)
+            if is_password_failure:
+                blockers.append(BLOCKER_PASSWORD)
+            status = (
+                "failed_password"
+                if is_password_failure
+                else "suspended_missing_volume"
+                if is_missing_volume
+                else "failed_terminal"
+            )
             payload = failure_payloads[0] if failure_payloads else {}
+            payload = {**payload, "blockers": list(blockers)}
+            if group is not None:
+                if blockers:
+                    self.state.record_group_suspended(group, blockers=blockers, failure_payload=payload)
+                else:
+                    self.state.record_group_terminal(group, status="failed_terminal", failure_payload=payload)
             self.state.mark(
                 candidate.path,
                 candidate.size,
@@ -550,6 +609,8 @@ class WatchScheduler:
             self.log.write(status, path=candidate.path, error=error, failures=failure_payloads)
             return WatchRunResult(processed=1, failed=1, errors=failed)
         if _summary_processed_no_tasks(summary):
+            if group is not None:
+                self.state.record_group_terminal(group, status="ignored_no_tasks")
             self.state.mark(
                 candidate.path,
                 candidate.size,
@@ -560,6 +621,8 @@ class WatchScheduler:
             self.log.write("no_tasks_found", path=candidate.path)
             return WatchRunResult(processed=1)
         self._remember_known_output_roots(generated_output_dirs)
+        if group is not None:
+            self.state.record_group_done(group)
         self.state.mark(
             candidate.path,
             candidate.size,
@@ -898,6 +961,16 @@ def _failure_to_dict(failure) -> dict:
         except Exception:
             return {}
     return {}
+
+
+def _failure_contains(failure, kind: FailureKind) -> bool:
+    contains = getattr(failure, "contains", None)
+    if callable(contains):
+        try:
+            return bool(contains(kind))
+        except Exception:
+            pass
+    return getattr(failure, "kind", None) == kind
 
 
 def _summary_processed_no_tasks(summary) -> bool:

@@ -183,10 +183,11 @@ def is_watch_lock_active(config: dict) -> bool:
 
 
 class WatchService:
-    def __init__(self, *, runner_factory=None, tray_factory=None):
+    def __init__(self, *, runner_factory=None, tray_factory=None, group_coordinator_factory=None):
         if runner_factory is None:
             raise ValueError("WatchService requires a runner_factory.")
         self.runner_factory = runner_factory
+        self.group_coordinator_factory = group_coordinator_factory
         self.tray_factory = tray_factory
         self.config = load_config()
         self.service_config = service_config_from(self.config)
@@ -286,6 +287,7 @@ class WatchService:
             initial_scan=bool(watch_config.get("initial_scan", True)),
             observer_stop_timeout_seconds=float(watch_config.get("observer_stop_timeout_seconds", 5.0)),
             runner_factory=self.runner_factory,
+            group_coordinator=(self.group_coordinator_factory(run_config) if self.group_coordinator_factory else None),
         )
         self.scheduler.start()
         self.log.write("scheduler_attached", roots=roots, out_dir=out_dir, state_path=state_path)

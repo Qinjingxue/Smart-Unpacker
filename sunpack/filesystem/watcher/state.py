@@ -7,6 +7,12 @@ import time
 from pathlib import Path
 from typing import Any
 
+from .group_models import (
+    BLOCKER_MISSING_VOLUME,
+    WatchGroupSnapshot,
+    WatchGroupState,
+)
+
 
 @dataclass
 class WatchStateEntry:
@@ -35,6 +41,8 @@ class WatchStateStore:
     def __init__(self, path: str):
         self.path = Path(path)
         self.entries: dict[str, WatchStateEntry] = {}
+        self._latest_entries_by_path: dict[str, WatchStateEntry] = {}
+        self.groups: dict[str, WatchGroupState] = {}
         self.password_generation = 0
         self.password_source_signature = ""
         self.load()
@@ -47,6 +55,7 @@ class WatchStateStore:
         except Exception:
             return
         entries = payload.get("entries") if isinstance(payload, dict) else {}
+        groups = payload.get("groups") if isinstance(payload, dict) else {}
         try:
             self.password_generation = max(0, int(payload.get("password_generation", 0))) if isinstance(payload, dict) else 0
         except (TypeError, ValueError):
@@ -58,17 +67,28 @@ class WatchStateStore:
             if not isinstance(value, dict):
                 continue
             try:
-                self.entries[key] = WatchStateEntry(**value)
+                entry = WatchStateEntry(**value)
+                self.entries[key] = entry
+                self._remember_latest_entry(entry)
             except TypeError:
                 continue
+        if isinstance(groups, dict):
+            for key, value in groups.items():
+                if not isinstance(value, dict):
+                    continue
+                try:
+                    self.groups[key] = WatchGroupState(**value)
+                except TypeError:
+                    continue
 
     def save(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
         payload: dict[str, Any] = {
-            "version": 4,
+            "version": 5,
             "password_generation": self.password_generation,
             "password_source_signature": self.password_source_signature,
             "entries": {key: asdict(value) for key, value in self.entries.items()},
+            "groups": {key: asdict(value) for key, value in self.groups.items()},
         }
         temp = self.path.with_name(f".{self.path.name}.tmp")
         temp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -142,6 +162,125 @@ class WatchStateStore:
             result.append(entry)
         return result
 
+    def group_state(self, group_id: str) -> WatchGroupState | None:
+        return self.groups.get(group_id)
+
+    def latest_entry_for_path(self, path: str) -> WatchStateEntry | None:
+        normalized = os.path.normcase(os.path.abspath(path))
+        return self._latest_entries_by_path.get(normalized)
+
+    def _remember_latest_entry(self, entry: WatchStateEntry) -> None:
+        key = os.path.normcase(os.path.abspath(entry.path))
+        previous = self._latest_entries_by_path.get(key)
+        if previous is None or entry.last_attempt_at >= previous.last_attempt_at:
+            self._latest_entries_by_path[key] = entry
+
+    def record_group_waiting(self, snapshot: WatchGroupSnapshot) -> None:
+        previous = self.groups.get(snapshot.group_id)
+        blockers = set(previous.blockers if previous else [])
+        blockers.add(BLOCKER_MISSING_VOLUME)
+        self.groups[snapshot.group_id] = self._group_record(
+            snapshot,
+            previous=previous,
+            status="suspended",
+            blockers=sorted(blockers),
+            last_attempted_fingerprint=snapshot.fingerprint,
+            password_generation=previous.password_generation if previous else self.password_generation,
+            failure_payload={
+                "kind": BLOCKER_MISSING_VOLUME,
+                "stage": "relation",
+                "message": snapshot.missing_reason or "split archive is missing its first or an intermediate volume",
+                "details": {"missing_indices": list(snapshot.missing_indices)},
+            },
+        )
+        self.save()
+
+    def record_group_attempt(self, snapshot: WatchGroupSnapshot) -> None:
+        previous = self.groups.get(snapshot.group_id)
+        self.groups[snapshot.group_id] = self._group_record(
+            snapshot,
+            previous=previous,
+            status="running",
+            blockers=list(previous.blockers if previous else []),
+            last_attempted_fingerprint=snapshot.fingerprint,
+            password_generation=previous.password_generation if previous else self.password_generation,
+            failure_payload=dict(previous.failure_payload if previous else {}),
+            increment_attempt=True,
+        )
+        self.save()
+
+    def record_group_suspended(
+        self,
+        snapshot: WatchGroupSnapshot,
+        *,
+        blockers: list[str],
+        failure_payload: dict[str, Any] | None = None,
+    ) -> None:
+        previous = self.groups.get(snapshot.group_id)
+        self.groups[snapshot.group_id] = self._group_record(
+            snapshot,
+            previous=previous,
+            status="suspended",
+            blockers=sorted(set(blockers)),
+            last_attempted_fingerprint=snapshot.fingerprint,
+            password_generation=self.password_generation,
+            failure_payload=dict(failure_payload or {}),
+        )
+        self.save()
+
+    def record_group_terminal(
+        self,
+        snapshot: WatchGroupSnapshot,
+        *,
+        status: str,
+        failure_payload: dict[str, Any] | None = None,
+    ) -> None:
+        previous = self.groups.get(snapshot.group_id)
+        self.groups[snapshot.group_id] = self._group_record(
+            snapshot,
+            previous=previous,
+            status=status,
+            blockers=[],
+            last_attempted_fingerprint=snapshot.fingerprint,
+            password_generation=self.password_generation,
+            failure_payload=dict(failure_payload or {}),
+        )
+        self.save()
+
+    def record_group_done(self, snapshot: WatchGroupSnapshot) -> None:
+        self.record_group_terminal(snapshot, status="done")
+
+    def _group_record(
+        self,
+        snapshot: WatchGroupSnapshot,
+        *,
+        previous: WatchGroupState | None,
+        status: str,
+        blockers: list[str],
+        last_attempted_fingerprint: str,
+        password_generation: int,
+        failure_payload: dict[str, Any],
+        increment_attempt: bool = False,
+    ) -> WatchGroupState:
+        return WatchGroupState(
+            group_id=snapshot.group_id,
+            directory=snapshot.directory,
+            logical_name=snapshot.logical_name,
+            split_family=snapshot.split_family,
+            head_path=snapshot.head_path,
+            member_paths=list(snapshot.member_paths),
+            status=status,
+            blockers=list(blockers),
+            relation_fingerprint=snapshot.fingerprint,
+            last_attempted_fingerprint=last_attempted_fingerprint,
+            password_generation=password_generation,
+            missing_reason=snapshot.missing_reason,
+            missing_indices=list(snapshot.missing_indices),
+            failure_payload=dict(failure_payload),
+            attempt_count=(previous.attempt_count if previous else 0) + (1 if increment_attempt else 0),
+            updated_at=time.time(),
+        )
+
     def mark(
         self,
         path: str,
@@ -158,7 +297,7 @@ class WatchStateStore:
         key = self.key_for(path, size, mtime, sample_digest)
         previous = self.entries.get(key)
         payload = dict(failure_payload or {})
-        self.entries[key] = WatchStateEntry(
+        entry = WatchStateEntry(
             path=os.path.abspath(path),
             size=size,
             mtime=mtime,
@@ -174,6 +313,8 @@ class WatchStateStore:
             last_attempt_at=time.time(),
             password_generation=self.password_generation,
         )
+        self.entries[key] = entry
+        self._remember_latest_entry(entry)
         self.save()
 
     def generated_output_roots(self) -> list[str]:

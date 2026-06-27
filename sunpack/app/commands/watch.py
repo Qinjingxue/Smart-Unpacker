@@ -88,7 +88,13 @@ def _handle_start(args, ctx):
         from sunpack.platform.windows.tray import WindowsTrayIcon
 
         tray_factory = WindowsTrayIcon
-    service = WatchService(runner_factory=PipelineRunner, tray_factory=tray_factory)
+    from sunpack.coordinator.watch_group_coordinator import WatchGroupCoordinator
+
+    service = WatchService(
+        runner_factory=PipelineRunner,
+        tray_factory=tray_factory,
+        group_coordinator_factory=WatchGroupCoordinator,
+    )
     code = service.run(once=bool(getattr(args, "once", False)))
     if code == 2:
         return EXIT_TASK_FAILED, CliCommandResult(

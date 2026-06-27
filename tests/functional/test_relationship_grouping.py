@@ -157,6 +157,7 @@ def test_missing_middle_split_volume_is_failed_before_detection(tmp_path):
 
     assert summary.success_count == 0
     assert any("missing or incomplete split volume" in item for item in summary.failed_tasks)
+    assert any(failure.kind.value == "missing_volume" for failure in summary.failures)
 
 
 def test_missing_head_split_volume_is_failed_before_detection(tmp_path):
@@ -174,6 +175,7 @@ def test_missing_head_split_volume_is_failed_before_detection(tmp_path):
 
     assert summary.success_count == 0
     assert any("missing or incomplete split volume" in item for item in summary.failed_tasks)
+    assert any(failure.kind.value == "missing_volume" for failure in summary.failures)
 
 
 def test_missing_head_split_volume_can_be_recovered_by_fuzzy_candidate(tmp_path):
