@@ -328,6 +328,8 @@ public:
 
     }
 
+    ~MultiFileInStream() { close_cached_handle(); }
+
 
 
     bool is_open() const { return valid_; }
@@ -396,7 +398,7 @@ public:
 
         while (total_read < size && position_ < total_size_) {
 
-            std::size_t index = find_part_index(position_);
+            const std::size_t index = find_part_index(position_);
 
             if (index >= paths_.size()) {
 
@@ -434,15 +436,13 @@ public:
 
 
 
-            HANDLE handle = CreateFileW(win32_extended_path(paths_[index]).c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            const HRESULT open_result = ensure_cached_handle(index);
 
-                                        nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-
-            if (handle == INVALID_HANDLE_VALUE) {
+            if (open_result != S_OK) {
 
                 const DWORD error = GetLastError();
 
-                const HRESULT hr = HRESULT_FROM_WIN32(error);
+                const HRESULT hr = open_result;
 
                 if (trace_) {
 
@@ -458,41 +458,47 @@ public:
 
             }
 
-            LARGE_INTEGER distance{};
+            if (cached_handle_position_ != part_offset) {
 
-            distance.QuadPart = static_cast<LONGLONG>(part_offset);
+                LARGE_INTEGER distance{};
 
-            if (!SetFilePointerEx(handle, distance, nullptr, FILE_BEGIN)) {
+                distance.QuadPart = static_cast<LONGLONG>(part_offset);
 
-                const DWORD error = GetLastError();
+                if (!SetFilePointerEx(cached_handle_, distance, nullptr, FILE_BEGIN)) {
 
-                CloseHandle(handle);
+                    const DWORD error = GetLastError();
 
-                const HRESULT hr = HRESULT_FROM_WIN32(error);
+                    const HRESULT hr = HRESULT_FROM_WIN32(error);
 
-                if (trace_) {
+                    close_cached_handle();
 
-                    trace_->read_error = true;
+                    if (trace_) {
 
-                    trace_->last_hresult = hr;
+                        trace_->read_error = true;
 
-                    trace_->last_win32_error = static_cast<int>(error);
+                        trace_->last_hresult = hr;
+
+                        trace_->last_win32_error = static_cast<int>(error);
+
+                    }
+
+                    return hr;
 
                 }
 
-                return hr;
+                cached_handle_position_ = part_offset;
 
             }
 
             DWORD read = 0;
 
-            const BOOL ok = ReadFile(handle, out + total_read, want, &read, nullptr);
+            const BOOL ok = ReadFile(cached_handle_, out + total_read, want, &read, nullptr);
 
             const DWORD error = GetLastError();
 
-            CloseHandle(handle);
-
             if (!ok) {
+
+                close_cached_handle();
 
                 const HRESULT hr = HRESULT_FROM_WIN32(error);
 
@@ -519,6 +525,8 @@ public:
             total_read += read;
 
             position_ += read;
+
+            cached_handle_position_ += read;
 
             if (trace_) {
 
@@ -606,17 +614,61 @@ private:
 
     std::size_t find_part_index(UInt64 position) const {
 
-        for (std::size_t index = 0; index < paths_.size(); ++index) {
+        const auto upper = std::upper_bound(offsets_.begin(), offsets_.end(), position);
 
-            if (position >= offsets_[index] && position < offsets_[index] + sizes_[index]) {
+        if (upper == offsets_.begin()) {
 
-                return index;
-
-            }
+            return paths_.size();
 
         }
 
-        return paths_.size();
+        const std::size_t index = static_cast<std::size_t>(std::distance(offsets_.begin(), upper) - 1);
+
+        return index < sizes_.size() && position - offsets_[index] < sizes_[index] ? index : paths_.size();
+
+    }
+
+    HRESULT ensure_cached_handle(std::size_t index) {
+
+        if (cached_handle_ != INVALID_HANDLE_VALUE && cached_index_ == index) {
+
+            return S_OK;
+
+        }
+
+        close_cached_handle();
+
+        cached_handle_ = CreateFileW(win32_extended_path(paths_[index]).c_str(), GENERIC_READ,
+                                     FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                     nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+
+        if (cached_handle_ == INVALID_HANDLE_VALUE) {
+
+            return HRESULT_FROM_WIN32(GetLastError());
+
+        }
+
+        cached_index_ = index;
+
+        cached_handle_position_ = 0;
+
+        return S_OK;
+
+    }
+
+    void close_cached_handle() {
+
+        if (cached_handle_ != INVALID_HANDLE_VALUE) {
+
+            CloseHandle(cached_handle_);
+
+            cached_handle_ = INVALID_HANDLE_VALUE;
+
+        }
+
+        cached_index_ = static_cast<std::size_t>(-1);
+
+        cached_handle_position_ = 0;
 
     }
 
@@ -635,6 +687,12 @@ private:
     UInt64 position_ = 0;
 
     ExtractInputTrace* trace_ = nullptr;
+
+    HANDLE cached_handle_ = INVALID_HANDLE_VALUE;
+
+    std::size_t cached_index_ = static_cast<std::size_t>(-1);
+
+    UInt64 cached_handle_position_ = 0;
 
     bool valid_ = true;
 
@@ -748,6 +806,8 @@ public:
 
     }
 
+    ~MultiRangeInStream() { close_cached_handle(); }
+
 
 
     bool is_open() const { return valid_; }
@@ -814,13 +874,15 @@ public:
 
         while (total_read < size && position_ < total_size_) {
 
-            const auto* range = find_range(position_);
+            const std::size_t index = find_range_index(position_);
 
-            if (!range) {
+            if (index >= ranges_.size()) {
 
                 break;
 
             }
+
+            const auto* range = &ranges_[index];
 
             const UInt64 offset_in_range = position_ - range->virtual_offset;
 
@@ -840,19 +902,17 @@ public:
 
                 trace_->last_source_path = range->path;
 
-                trace_->last_range_index = range_index(position_);
+                trace_->last_range_index = static_cast<UInt32>(index);
 
             }
 
-            HANDLE handle = CreateFileW(win32_extended_path(range->path).c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            const HRESULT open_result = ensure_cached_handle(index);
 
-                                        nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-
-            if (handle == INVALID_HANDLE_VALUE) {
+            if (open_result != S_OK) {
 
                 const DWORD error = GetLastError();
 
-                const HRESULT hr = HRESULT_FROM_WIN32(error);
+                const HRESULT hr = open_result;
 
                 if (trace_) {
 
@@ -868,41 +928,49 @@ public:
 
             }
 
-            LARGE_INTEGER distance{};
+            const UInt64 source_offset = range->start + offset_in_range;
 
-            distance.QuadPart = static_cast<LONGLONG>(range->start + offset_in_range);
+            if (cached_handle_position_ != source_offset) {
 
-            if (!SetFilePointerEx(handle, distance, nullptr, FILE_BEGIN)) {
+                LARGE_INTEGER distance{};
 
-                const DWORD error = GetLastError();
+                distance.QuadPart = static_cast<LONGLONG>(source_offset);
 
-                CloseHandle(handle);
+                if (!SetFilePointerEx(cached_handle_, distance, nullptr, FILE_BEGIN)) {
 
-                const HRESULT hr = HRESULT_FROM_WIN32(error);
+                    const DWORD error = GetLastError();
 
-                if (trace_) {
+                    const HRESULT hr = HRESULT_FROM_WIN32(error);
 
-                    trace_->read_error = true;
+                    close_cached_handle();
 
-                    trace_->last_hresult = hr;
+                    if (trace_) {
 
-                    trace_->last_win32_error = static_cast<int>(error);
+                        trace_->read_error = true;
+
+                        trace_->last_hresult = hr;
+
+                        trace_->last_win32_error = static_cast<int>(error);
+
+                    }
+
+                    return hr;
 
                 }
 
-                return hr;
+                cached_handle_position_ = source_offset;
 
             }
 
             DWORD read = 0;
 
-            const BOOL ok = ReadFile(handle, out + total_read, want, &read, nullptr);
+            const BOOL ok = ReadFile(cached_handle_, out + total_read, want, &read, nullptr);
 
             const DWORD error = GetLastError();
 
-            CloseHandle(handle);
-
             if (!ok) {
+
+                close_cached_handle();
 
                 const HRESULT hr = HRESULT_FROM_WIN32(error);
 
@@ -929,6 +997,8 @@ public:
             total_read += read;
 
             position_ += read;
+
+            cached_handle_position_ += read;
 
             if (trace_) {
 
@@ -1014,37 +1084,67 @@ public:
 
 private:
 
-    const NormalizedInputRange* find_range(UInt64 position) const {
+    std::size_t find_range_index(UInt64 position) const {
 
-        for (const auto& range : ranges_) {
+        const auto upper = std::upper_bound(
+            ranges_.begin(), ranges_.end(), position,
+            [](UInt64 value, const NormalizedInputRange& range) { return value < range.virtual_offset; });
 
-            if (position >= range.virtual_offset && position < range.virtual_offset + range.length) {
+        if (upper == ranges_.begin()) {
 
-                return &range;
-
-            }
+            return ranges_.size();
 
         }
 
-        return nullptr;
+        const std::size_t index = static_cast<std::size_t>(std::distance(ranges_.begin(), upper) - 1);
+
+        const auto& range = ranges_[index];
+
+        return position - range.virtual_offset < range.length ? index : ranges_.size();
 
     }
 
-    UInt32 range_index(UInt64 position) const {
+    HRESULT ensure_cached_handle(std::size_t index) {
 
-        for (std::size_t index = 0; index < ranges_.size(); ++index) {
+        if (cached_handle_ != INVALID_HANDLE_VALUE && cached_index_ == index) {
 
-            const auto& range = ranges_[index];
-
-            if (position >= range.virtual_offset && position < range.virtual_offset + range.length) {
-
-                return static_cast<UInt32>(index);
-
-            }
+            return S_OK;
 
         }
 
-        return 0;
+        close_cached_handle();
+
+        cached_handle_ = CreateFileW(win32_extended_path(ranges_[index].path).c_str(), GENERIC_READ,
+                                     FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                     nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+
+        if (cached_handle_ == INVALID_HANDLE_VALUE) {
+
+            return HRESULT_FROM_WIN32(GetLastError());
+
+        }
+
+        cached_index_ = index;
+
+        cached_handle_position_ = 0;
+
+        return S_OK;
+
+    }
+
+    void close_cached_handle() {
+
+        if (cached_handle_ != INVALID_HANDLE_VALUE) {
+
+            CloseHandle(cached_handle_);
+
+            cached_handle_ = INVALID_HANDLE_VALUE;
+
+        }
+
+        cached_index_ = static_cast<std::size_t>(-1);
+
+        cached_handle_position_ = 0;
 
     }
 
@@ -1059,6 +1159,12 @@ private:
     UInt64 position_ = 0;
 
     ExtractInputTrace* trace_ = nullptr;
+
+    HANDLE cached_handle_ = INVALID_HANDLE_VALUE;
+
+    std::size_t cached_index_ = static_cast<std::size_t>(-1);
+
+    UInt64 cached_handle_position_ = 0;
 
     bool valid_ = true;
 

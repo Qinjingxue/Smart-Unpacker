@@ -223,6 +223,47 @@ fn parse_entry(data: &[u8], offset: usize, options: &DeepZipOptions, timing: &mu
     )
 }
 
+#[cfg(test)]
+mod descriptor_spec_tests {
+    use super::*;
+    use flate2::{write::DeflateEncoder, Compression};
+
+    #[test]
+    fn deflate_stream_without_required_descriptor_is_not_verified_as_descriptor_entry() {
+        let mut encoder = DeflateEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(b"descriptor required").unwrap();
+        let mut data = encoder.finish().unwrap();
+        data.extend_from_slice(CD_SIG);
+        let options = DeepZipOptions {
+            max_candidates: 8,
+            max_entries: 8,
+            max_input_bytes: None,
+            max_output_bytes: None,
+            max_entry_uncompressed_bytes: Some(1024 * 1024),
+            max_duration: None,
+            verify_candidates: true,
+            allow_unverified_entries: false,
+            password: None,
+        };
+        let mut timing = ScanTiming::default();
+        let outcome = parse_descriptor_entry(
+            &data,
+            0,
+            0,
+            b"a.txt".to_vec(),
+            Vec::new(),
+            20,
+            0x08,
+            8,
+            0,
+            0,
+            &options,
+            &mut timing,
+        );
+        assert!(matches!(outcome, EntryOutcome::Skipped(_)));
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn parse_descriptor_entry(
     data: &[u8],
@@ -250,34 +291,36 @@ fn parse_descriptor_entry(
             Ok(info) => {
                 timing.verify_deflate_seconds += verify_started.elapsed().as_secs_f64();
                 let data_end = data_start + info.consumed;
-                let _descriptor = descriptor_at(
+                let descriptor_present = descriptor_at(
                     data,
                     data_end,
                     info.crc32,
                     info.consumed as u64,
                     info.uncompressed_size,
                 );
-                return EntryOutcome::Recovered(RecoveredEntry {
-                    name,
-                    extra: extra.clone(),
-                    local_header_offset,
-                    version_needed,
-                    flags,
-                    method,
-                    mod_time,
-                    mod_date,
-                    crc32: info.crc32,
-                    compressed_size: info.consumed as u64,
-                    uncompressed_size: info.uncompressed_size,
-                    data_start,
-                    data_end,
-                    payload_override: None,
-                    verified: true,
-                    descriptor: true,
-                    passthrough: false,
-                    boundary_source: BoundarySource::DeflateConsumed,
-                    experimental_deflate_resync: false,
-                });
+                if descriptor_present {
+                    return EntryOutcome::Recovered(RecoveredEntry {
+                        name,
+                        extra: extra.clone(),
+                        local_header_offset,
+                        version_needed,
+                        flags,
+                        method,
+                        mod_time,
+                        mod_date,
+                        crc32: info.crc32,
+                        compressed_size: info.consumed as u64,
+                        uncompressed_size: info.uncompressed_size,
+                        data_start,
+                        data_end,
+                        payload_override: None,
+                        verified: true,
+                        descriptor: true,
+                        passthrough: false,
+                        boundary_source: BoundarySource::DeflateConsumed,
+                        experimental_deflate_resync: false,
+                    });
+                }
             }
             Err(_) => {
                 timing.verify_deflate_seconds += verify_started.elapsed().as_secs_f64();

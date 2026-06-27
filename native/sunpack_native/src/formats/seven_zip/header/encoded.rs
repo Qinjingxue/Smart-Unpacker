@@ -7,6 +7,9 @@ struct SevenZipEncodedHeaderCoder {
 
 struct SevenZipEncodedHeaderFolder {
     coders: Vec<SevenZipEncodedHeaderCoder>,
+    bind_pairs: Vec<(u64, u64)>,
+    packed_streams: Vec<u64>,
+    main_output_stream: u64,
     unpack_size: u64,
     unpack_sizes: Vec<u64>,
 }
@@ -49,18 +52,26 @@ fn decode_seven_zip_encoded_header_payload_from_raw(
     }
     let pack = pack_info.ok_or_else(|| "encoded_header_pack_info_missing".to_string())?;
     let folder = folder.ok_or_else(|| "encoded_header_unpack_info_missing".to_string())?;
-    if pack.num_streams != 1 || pack.sizes.len() != 1 {
-        return Err("encoded_header_pack_stream_not_unique".to_string());
+    if pack.num_streams != pack.sizes.len()
+        || pack.sizes.len() != folder.packed_streams.len()
+    {
+        return Err("encoded_header_pack_stream_count_mismatch".to_string());
     }
     let stream_start = SEVEN_Z_HEADER_SIZE
         .checked_add(usize::try_from(pack.pack_pos.value).unwrap_or(usize::MAX))
         .unwrap_or(usize::MAX);
-    let stream_size = usize::try_from(pack.sizes[0].value).unwrap_or(usize::MAX);
-    let stream_end = stream_start.checked_add(stream_size).unwrap_or(usize::MAX);
-    if stream_start < SEVEN_Z_HEADER_SIZE || stream_end > data.len() || stream_end > header.next_header_start {
-        return Err("encoded_header_stream_range_invalid".to_string());
+    let mut packed_data = Vec::with_capacity(pack.sizes.len());
+    let mut cursor = stream_start;
+    for size in &pack.sizes {
+        let stream_size = usize::try_from(size.value).unwrap_or(usize::MAX);
+        let stream_end = cursor.checked_add(stream_size).unwrap_or(usize::MAX);
+        if cursor < SEVEN_Z_HEADER_SIZE || stream_end > data.len() || stream_end > header.next_header_start {
+            return Err("encoded_header_stream_range_invalid".to_string());
+        }
+        packed_data.push(data[cursor..stream_end].to_vec());
+        cursor = stream_end;
     }
-    let decoded = decode_seven_zip_encoded_folder(&data[stream_start..stream_end], &folder, password)?;
+    let decoded = decode_seven_zip_encoded_folder(&packed_data, &folder, password)?;
     if decoded.first().copied() != Some(SZ_HEADER) {
         return Err("encoded_header_ast_write_failed".to_string());
     }
@@ -78,38 +89,103 @@ fn lzma2_dict_size(prop: u8) -> Option<u32> {
     Some((2 | (bits & 1)) << (bits / 2 + 11))
 }
 
-fn decode_seven_zip_encoded_folder(data: &[u8], folder: &SevenZipEncodedHeaderFolder, password: Option<&str>) -> Result<Vec<u8>, String> {
+fn decode_seven_zip_encoded_folder(
+    packed_data: &[Vec<u8>],
+    folder: &SevenZipEncodedHeaderFolder,
+    password: Option<&str>,
+) -> Result<Vec<u8>, String> {
     if folder.coders.is_empty() {
         return Err("encoded_header_decoder_unsupported_method".to_string());
     }
-    let decode_chain = |coders: Vec<(usize, &SevenZipEncodedHeaderCoder)>| -> Result<Vec<u8>, String> {
-        let mut current = data.to_vec();
-        for (index, coder) in coders {
-            if coder.num_in_streams != 1 || coder.num_out_streams != 1 {
-                return Err("encoded_header_decoder_unsupported_method".to_string());
-            }
-            let unpack_size = folder
-                .unpack_sizes
-                .get(index)
-                .copied()
-                .unwrap_or(folder.unpack_size);
-            current = decode_seven_zip_encoded_coder(&current, coder, password, unpack_size)?;
+    let mut visiting = vec![false; folder.coders.len()];
+    decode_seven_zip_output(
+        folder.main_output_stream,
+        packed_data,
+        folder,
+        password,
+        &mut visiting,
+    )
+}
+
+fn decode_seven_zip_output(
+    output_stream: u64,
+    packed_data: &[Vec<u8>],
+    folder: &SevenZipEncodedHeaderFolder,
+    password: Option<&str>,
+    visiting: &mut [bool],
+) -> Result<Vec<u8>, String> {
+    let mut input_base = 0u64;
+    let mut output_base = 0u64;
+    let mut owner = None;
+    for (index, coder) in folder.coders.iter().enumerate() {
+        if output_stream >= output_base && output_stream < output_base + coder.num_out_streams {
+            owner = Some((index, input_base, output_base));
+            break;
         }
-        Ok(current)
-    };
-    let direct_order: Vec<_> = folder.coders.iter().enumerate().collect();
-    match decode_chain(direct_order) {
-        Ok(decoded) if decoded.first().copied() == Some(SZ_HEADER) => return Ok(decoded),
-        Ok(_) | Err(_) if folder.coders.len() > 1 => {}
-        Ok(decoded) => return Ok(decoded),
-        Err(err) => return Err(err),
+        input_base = input_base
+            .checked_add(coder.num_in_streams)
+            .ok_or_else(|| "encoded_header_stream_count_overflow".to_string())?;
+        output_base = output_base
+            .checked_add(coder.num_out_streams)
+            .ok_or_else(|| "encoded_header_stream_count_overflow".to_string())?;
     }
-    let reverse_order: Vec<_> = folder.coders.iter().enumerate().rev().collect();
-    let decoded = decode_chain(reverse_order)?;
-    if decoded.first().copied() == Some(SZ_HEADER) {
+    let (coder_index, coder_input_base, coder_output_base) =
+        owner.ok_or_else(|| "encoded_header_output_stream_unbound".to_string())?;
+    let coder = &folder.coders[coder_index];
+    if output_stream != coder_output_base || coder.num_out_streams != 1 {
+        return Err("encoded_header_decoder_unsupported_multi_output_coder".to_string());
+    }
+    if visiting[coder_index] {
+        return Err("encoded_header_bind_pair_cycle".to_string());
+    }
+    visiting[coder_index] = true;
+    let mut inputs = Vec::with_capacity(usize::try_from(coder.num_in_streams).unwrap_or(0));
+    for relative in 0..coder.num_in_streams {
+        let input_stream = coder_input_base + relative;
+        if let Some((_, upstream_output)) = folder.bind_pairs.iter().find(|(input, _)| *input == input_stream) {
+            inputs.push(decode_seven_zip_output(
+                *upstream_output,
+                packed_data,
+                folder,
+                password,
+                visiting,
+            )?);
+        } else {
+            let packed_index = folder
+                .packed_streams
+                .iter()
+                .position(|stream| *stream == input_stream)
+                .ok_or_else(|| "encoded_header_input_stream_unbound".to_string())?;
+            inputs.push(
+                packed_data
+                    .get(packed_index)
+                    .cloned()
+                    .ok_or_else(|| "encoded_header_pack_stream_missing".to_string())?,
+            );
+        }
+    }
+    visiting[coder_index] = false;
+    let unpack_size = folder
+        .unpack_sizes
+        .get(usize::try_from(output_stream).unwrap_or(usize::MAX))
+        .copied()
+        .unwrap_or(folder.unpack_size);
+    if coder.method_id.as_slice() == EncoderMethod::ID_BCJ2 {
+        if inputs.len() != 4 {
+            return Err("encoded_header_bcj2_input_count_invalid".to_string());
+        }
+        let cursors = inputs.into_iter().map(Cursor::new).collect::<Vec<_>>();
+        let mut reader = Bcj2Reader::new(cursors, unpack_size);
+        let mut decoded = Vec::with_capacity(usize::try_from(unpack_size).unwrap_or(0).min(16 * 1024 * 1024));
+        reader
+            .read_to_end(&mut decoded)
+            .map_err(|err| format!("encoded_header_payload_crc_bad:{err}"))?;
         return Ok(decoded);
     }
-    Err("encoded_header_ast_write_failed".to_string())
+    if inputs.len() != 1 {
+        return Err("encoded_header_decoder_unsupported_multi_input_coder".to_string());
+    }
+    decode_seven_zip_encoded_coder(&inputs[0], coder, password, unpack_size)
 }
 
 fn decode_seven_zip_encoded_coder(data: &[u8], coder: &SevenZipEncodedHeaderCoder, password: Option<&str>, unpack_size: u64) -> Result<Vec<u8>, String> {
@@ -162,6 +238,47 @@ fn decode_seven_zip_encoded_coder(data: &[u8], coder: &SevenZipEncodedHeaderCode
             return Err("encoded_header_decoder_unsupported_method:dictionary_too_large".to_string());
         }
         let mut reader = Lzma2Reader::new(compressed, dict_size, None);
+        reader
+            .read_to_end(&mut decoded)
+            .map_err(|err| format!("encoded_header_payload_crc_bad:{err}"))?;
+        return Ok(decoded);
+    }
+    macro_rules! decode_bcj {
+        ($constructor:expr) => {{
+            let mut reader = $constructor;
+            reader
+                .read_to_end(&mut decoded)
+                .map_err(|err| format!("encoded_header_payload_crc_bad:{err}"))?;
+            return Ok(decoded);
+        }};
+    }
+    if coder.method_id.as_slice() == EncoderMethod::ID_BCJ_X86 {
+        decode_bcj!(BcjReader::new_x86(compressed, 0));
+    }
+    if coder.method_id.as_slice() == EncoderMethod::ID_BCJ_ARM {
+        decode_bcj!(BcjReader::new_arm(compressed, 0));
+    }
+    if coder.method_id.as_slice() == EncoderMethod::ID_BCJ_ARM64 {
+        decode_bcj!(BcjReader::new_arm64(compressed, 0));
+    }
+    if coder.method_id.as_slice() == EncoderMethod::ID_BCJ_ARM_THUMB {
+        decode_bcj!(BcjReader::new_arm_thumb(compressed, 0));
+    }
+    if coder.method_id.as_slice() == EncoderMethod::ID_BCJ_PPC {
+        decode_bcj!(BcjReader::new_ppc(compressed, 0));
+    }
+    if coder.method_id.as_slice() == EncoderMethod::ID_BCJ_IA64 {
+        decode_bcj!(BcjReader::new_ia64(compressed, 0));
+    }
+    if coder.method_id.as_slice() == EncoderMethod::ID_BCJ_SPARC {
+        decode_bcj!(BcjReader::new_sparc(compressed, 0));
+    }
+    if coder.method_id.as_slice() == EncoderMethod::ID_BCJ_RISCV {
+        decode_bcj!(BcjReader::new_riscv(compressed, 0));
+    }
+    if coder.method_id.as_slice() == EncoderMethod::ID_DELTA {
+        let distance = coder.properties.first().copied().unwrap_or(0).wrapping_add(1) as usize;
+        let mut reader = DeltaReader::new(compressed, distance);
         reader
             .read_to_end(&mut decoded)
             .map_err(|err| format!("encoded_header_payload_crc_bad:{err}"))?;
@@ -239,6 +356,9 @@ fn seven_zip_aes_key_iv(properties: &[u8], password: &[u8]) -> Result<([u8; 32],
 
 fn parse_seven_zip_encoded_header_unpack_info(data: &[u8], pos: &mut usize) -> Result<SevenZipEncodedHeaderFolder, String> {
     let mut coders = None;
+    let mut bind_pairs = Vec::new();
+    let mut packed_streams = Vec::new();
+    let mut main_output_stream = 0u64;
     let mut folder_output_stream_count = 0u64;
     let mut unpack_sizes = Vec::new();
     loop {
@@ -249,9 +369,13 @@ fn parse_seven_zip_encoded_header_unpack_info(data: &[u8], pos: &mut usize) -> R
         match nid {
             SZ_END => break,
             SZ_FOLDER => {
-                let (parsed_coders, output_stream_count) = parse_seven_zip_encoded_header_folder(data, pos)?;
+                let (parsed_coders, output_stream_count, parsed_bind_pairs, parsed_packed_streams, parsed_main_output) =
+                    parse_seven_zip_encoded_header_folder(data, pos)?;
                 folder_output_stream_count = output_stream_count;
                 coders = Some(parsed_coders);
+                bind_pairs = parsed_bind_pairs;
+                packed_streams = parsed_packed_streams;
+                main_output_stream = parsed_main_output;
             }
             SZ_CODERS_UNPACK_SIZE => {
                 let count = usize::try_from(folder_output_stream_count.max(1))
@@ -283,12 +407,18 @@ fn parse_seven_zip_encoded_header_unpack_info(data: &[u8], pos: &mut usize) -> R
         .ok_or_else(|| "encoded_header_unpack_size_missing".to_string())?;
     Ok(SevenZipEncodedHeaderFolder {
         coders: coders.ok_or_else(|| "encoded_header_folder_missing".to_string())?,
+        bind_pairs,
+        packed_streams,
+        main_output_stream,
         unpack_size,
         unpack_sizes,
     })
 }
 
-fn parse_seven_zip_encoded_header_folder(data: &[u8], pos: &mut usize) -> Result<(Vec<SevenZipEncodedHeaderCoder>, u64), String> {
+fn parse_seven_zip_encoded_header_folder(
+    data: &[u8],
+    pos: &mut usize,
+) -> Result<(Vec<SevenZipEncodedHeaderCoder>, u64, Vec<(u64, u64)>, Vec<u64>, u64), String> {
     let num_folders = read_sz_vint(data, pos)
         .ok_or_else(|| "encoded_header_folder_count_truncated".to_string())?
         .value;
@@ -303,7 +433,7 @@ fn parse_seven_zip_encoded_header_folder(data: &[u8], pos: &mut usize) -> Result
     let num_coders = read_sz_vint(data, pos)
         .ok_or_else(|| "encoded_header_coder_count_truncated".to_string())?
         .value;
-    if num_coders == 0 || num_coders > 8 {
+    if num_coders == 0 || num_coders > 64 {
         return Err("encoded_header_decoder_unsupported_method".to_string());
     }
     let mut output = Vec::with_capacity(usize::try_from(num_coders).unwrap_or(0));
@@ -345,7 +475,7 @@ fn parse_seven_zip_encoded_header_folder(data: &[u8], pos: &mut usize) -> Result
             properties.extend_from_slice(&data[*pos..*pos + prop_size]);
             *pos += prop_size;
         }
-        if flags & 0x80 != 0 {
+        if flags & 0xc0 != 0 {
             return Err("encoded_header_decoder_unsupported_method".to_string());
         }
         output.push(SevenZipEncodedHeaderCoder {
@@ -358,19 +488,98 @@ fn parse_seven_zip_encoded_header_folder(data: &[u8], pos: &mut usize) -> Result
     if total_in == 0 || total_out == 0 || total_in < total_out.saturating_sub(1) {
         return Err("encoded_header_decoder_unsupported_method".to_string());
     }
-    let bind_pairs = total_out.saturating_sub(1);
-    for _ in 0..bind_pairs {
-        read_sz_vint(data, pos).ok_or_else(|| "encoded_header_bind_pair_in_truncated".to_string())?;
-        read_sz_vint(data, pos).ok_or_else(|| "encoded_header_bind_pair_out_truncated".to_string())?;
+    let num_bind_pairs = total_out.saturating_sub(1);
+    let mut bind_pairs = Vec::with_capacity(usize::try_from(num_bind_pairs).unwrap_or(0));
+    for _ in 0..num_bind_pairs {
+        let input = read_sz_vint(data, pos)
+            .ok_or_else(|| "encoded_header_bind_pair_in_truncated".to_string())?
+            .value;
+        let output_stream = read_sz_vint(data, pos)
+            .ok_or_else(|| "encoded_header_bind_pair_out_truncated".to_string())?
+            .value;
+        if input >= total_in
+            || output_stream >= total_out
+            || bind_pairs.iter().any(|(existing_input, existing_output)| {
+                *existing_input == input || *existing_output == output_stream
+            })
+        {
+            return Err("encoded_header_bind_pair_invalid".to_string());
+        }
+        bind_pairs.push((input, output_stream));
     }
-    let packed_streams = total_in.saturating_sub(bind_pairs);
-    if packed_streams == 0 || packed_streams > 1 {
-        return Err("encoded_header_decoder_unsupported_method".to_string());
+    let num_packed_streams = total_in.saturating_sub(num_bind_pairs);
+    if num_packed_streams == 0 {
+        return Err("encoded_header_pack_stream_missing".to_string());
     }
-    if packed_streams > 1 {
-        for _ in 0..packed_streams {
-            read_sz_vint(data, pos).ok_or_else(|| "encoded_header_packed_stream_truncated".to_string())?;
+    let mut packed_streams = Vec::with_capacity(usize::try_from(num_packed_streams).unwrap_or(0));
+    if num_packed_streams == 1 {
+        let input = (0..total_in)
+            .find(|candidate| !bind_pairs.iter().any(|(bound, _)| bound == candidate))
+            .ok_or_else(|| "encoded_header_pack_stream_missing".to_string())?;
+        packed_streams.push(input);
+    } else {
+        for _ in 0..num_packed_streams {
+            let input = read_sz_vint(data, pos)
+                .ok_or_else(|| "encoded_header_packed_stream_truncated".to_string())?
+                .value;
+            if input >= total_in
+                || bind_pairs.iter().any(|(bound, _)| *bound == input)
+                || packed_streams.contains(&input)
+            {
+                return Err("encoded_header_pack_stream_invalid".to_string());
+            }
+            packed_streams.push(input);
         }
     }
-    Ok((output, total_out))
+    let main_output_stream = (0..total_out)
+        .find(|candidate| !bind_pairs.iter().any(|(_, bound)| bound == candidate))
+        .ok_or_else(|| "encoded_header_main_output_missing".to_string())?;
+    Ok((output, total_out, bind_pairs, packed_streams, main_output_stream))
+}
+
+#[cfg(test)]
+mod encoded_folder_graph_tests {
+    use super::*;
+
+    #[test]
+    fn decoder_follows_bind_pairs_instead_of_coder_declaration_order() {
+        let copy = || SevenZipEncodedHeaderCoder {
+            method_id: EncoderMethod::ID_COPY.to_vec(),
+            properties: Vec::new(),
+            num_in_streams: 1,
+            num_out_streams: 1,
+        };
+        // Packed input stream 1 -> coder 1/out 1 -> coder 2/in 2 ->
+        // coder 2/out 2 -> coder 0/in 0 -> main output 0.
+        let folder = SevenZipEncodedHeaderFolder {
+            coders: vec![copy(), copy(), copy()],
+            bind_pairs: vec![(2, 1), (0, 2)],
+            packed_streams: vec![1],
+            main_output_stream: 0,
+            unpack_size: 4,
+            unpack_sizes: vec![4, 4, 4],
+        };
+        let decoded = decode_seven_zip_encoded_folder(&[b"test".to_vec()], &folder, None).unwrap();
+        assert_eq!(decoded, b"test");
+    }
+
+    #[test]
+    fn decoder_rejects_bind_pair_cycles() {
+        let copy = SevenZipEncodedHeaderCoder {
+            method_id: EncoderMethod::ID_COPY.to_vec(),
+            properties: Vec::new(),
+            num_in_streams: 1,
+            num_out_streams: 1,
+        };
+        let folder = SevenZipEncodedHeaderFolder {
+            coders: vec![copy],
+            bind_pairs: vec![(0, 0)],
+            packed_streams: Vec::new(),
+            main_output_stream: 0,
+            unpack_size: 1,
+            unpack_sizes: vec![1],
+        };
+        let error = decode_seven_zip_encoded_folder(&[], &folder, None).unwrap_err();
+        assert_eq!(error, "encoded_header_bind_pair_cycle");
+    }
 }

@@ -34,14 +34,23 @@ fn parse_zip64_extra_tolerant(extra: &[u8], absolute_extra_offset: usize) -> Opt
         let value_end = value_start.saturating_add(size).min(extra.len());
         if header_id == 0x0001 {
             let mut values = Vec::new();
+            let mut value_offsets = Vec::new();
             let mut cursor = value_start;
             while cursor + 8 <= value_end {
                 values.push(u64_le(extra, cursor));
+                value_offsets.push(absolute_extra_offset + cursor);
                 cursor += 8;
             }
+            let (disk_start, disk_start_offset) = if cursor + 4 == value_end {
+                (Some(u32_le(extra, cursor)), Some(absolute_extra_offset + cursor))
+            } else {
+                (None, None)
+            };
             return Some(Zip64Extra {
                 values,
-                values_offset: absolute_extra_offset + value_start,
+                value_offsets,
+                disk_start,
+                disk_start_offset,
                 size_offset: absolute_extra_offset + pos + 2,
                 stored_size: size,
             });
@@ -53,6 +62,21 @@ fn parse_zip64_extra_tolerant(extra: &[u8], absolute_extra_offset: usize) -> Opt
         pos = next;
     }
     None
+}
+
+fn central_zip64_local_header_offset(entry: &CentralEntry, zip64: &Zip64Extra) -> Option<u64> {
+    let mut index = 0usize;
+    if entry.uncompressed_size == u32::MAX {
+        index += 1;
+    }
+    if entry.compressed_size == u32::MAX {
+        index += 1;
+    }
+    if entry.local_header_offset == u32::MAX {
+        zip64.values.get(index).copied()
+    } else {
+        None
+    }
 }
 
 fn find_zip64_eocd(data: &[u8], before: usize) -> Option<Zip64Eocd> {
@@ -104,8 +128,10 @@ fn find_local_for_central(data: &[u8], entry: &CentralEntry) -> Option<LocalHead
         candidates.push(entry.local_header_offset as usize);
     }
     if let Some(zip64) = parse_zip64_extra_tolerant(&entry.extra, entry.extra_offset) {
-        if zip64.values.len() >= 3 {
-            candidates.push(zip64.values[2] as usize);
+        if let Some(offset) = central_zip64_local_header_offset(entry, &zip64) {
+            if let Ok(offset) = usize::try_from(offset) {
+                candidates.push(offset);
+            }
         }
     }
     for offset in candidates {
@@ -140,8 +166,8 @@ fn find_local_for_central_offset_only(data: &[u8], entry: &CentralEntry) -> Opti
         }
     }
     if let Some(zip64) = parse_zip64_extra_tolerant(&entry.extra, entry.extra_offset) {
-        if zip64.values.len() >= 3 {
-            return parse_local_header(data, zip64.values[2] as usize);
+        if let Some(offset) = central_zip64_local_header_offset(entry, &zip64) {
+            return parse_local_header(data, usize::try_from(offset).ok()?);
         }
     }
     None
@@ -253,5 +279,43 @@ fn reconcile_score(central: &CentralEntry, local: &RecoveredEntry) -> i64 {
         score += 30;
     }
     score
+}
+
+#[cfg(test)]
+mod zip64_extra_spec_tests {
+    use super::*;
+
+    #[test]
+    fn central_zip64_extra_keeps_four_byte_disk_start() {
+        let local_offset = 0x1_0000_0020u64;
+        let disk_start = 7u32;
+        let mut extra = Vec::new();
+        extra.extend_from_slice(&0x0001u16.to_le_bytes());
+        extra.extend_from_slice(&12u16.to_le_bytes());
+        extra.extend_from_slice(&local_offset.to_le_bytes());
+        extra.extend_from_slice(&disk_start.to_le_bytes());
+        let parsed = parse_zip64_extra_tolerant(&extra, 100).unwrap();
+        assert_eq!(parsed.values, vec![local_offset]);
+        assert_eq!(parsed.disk_start, Some(disk_start));
+        assert_eq!(parsed.disk_start_offset, Some(112));
+
+        let entry = CentralEntry {
+            offset: 0,
+            flags: 0,
+            method: 0,
+            crc32: 0,
+            compressed_size: 1,
+            uncompressed_size: 1,
+            name_len: 0,
+            extra_len: extra.len() as u16,
+            name: Vec::new(),
+            extra,
+            extra_offset: 100,
+            disk_number_start: u16::MAX,
+            local_header_offset: u32::MAX,
+        };
+        assert_eq!(central_zip64_local_header_offset(&entry, &parsed), Some(local_offset));
+        assert_eq!(expected_zip64_central_size(&entry), 12);
+    }
 }
 

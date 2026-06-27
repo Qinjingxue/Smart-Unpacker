@@ -60,6 +60,7 @@ struct RarWalk {
     offset: usize,
     last_complete_end: usize,
     end_block_found: bool,
+    header_encrypted: bool,
     missing_volume: bool,
     last_block_can_precede_end: bool,
     warnings: Vec<String>,

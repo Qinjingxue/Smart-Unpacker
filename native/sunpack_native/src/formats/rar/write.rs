@@ -148,6 +148,11 @@ fn rebuild_rar5_quarantine(data: &[u8], offset: usize) -> Option<(Vec<u8>, usize
             }
             break;
         }
+        if block.block_type == 4 {
+            // The following headers are AES-encrypted and cannot be safely
+            // quarantined or resynchronized without the archive password.
+            return None;
+        }
         if block.block_type == 1 {
             if !saw_main {
                 // Rebuild as a single-volume archive. Copying the original main

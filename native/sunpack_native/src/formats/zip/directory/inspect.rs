@@ -239,13 +239,16 @@ pub(crate) fn inspect_zip_directory_consistency(
             zip64_extra_present += 1;
         }
         if let Some(central) = central_zip64.as_ref() {
-            if central.stored_size != central.values.len() * 8 {
+            if central.stored_size != expected_zip64_central_size(entry)
+                || (entry.disk_number_start == u16::MAX
+                    && (central.disk_start.is_none() || central.disk_start_offset.is_none()))
+            {
                 zip64_extra_size_mismatch += 1;
             }
             if let Some(local_zip64) = local_zip64.as_ref() {
                 let expected = expected_zip64_values(entry, &local, local_zip64)
                     .unwrap_or_else(|| local_zip64.values.clone());
-                if central.values != expected {
+                if central.values.get(..expected.len()) != Some(expected.as_slice()) {
                     zip64_extra_value_mismatch += 1;
                 }
             }

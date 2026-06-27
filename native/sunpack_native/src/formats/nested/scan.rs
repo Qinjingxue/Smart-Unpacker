@@ -78,6 +78,9 @@ fn collect_nested_archive_ranges<'a>(
             return;
         }
         if let Some(walk) = walk_rar5_blocks(data, offset) {
+            if walk.header_encrypted {
+                continue;
+            }
             output.push((
                 offset,
                 walk.last_complete_end,

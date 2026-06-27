@@ -248,6 +248,11 @@ impl AnalysisBinaryView {
                 result.set_item("error", "rar5_header_size_vint_missing")?;
                 return Ok(());
             };
+            if after_size.saturating_sub(4) > 3 {
+                result.set_item("blocks_checked", index)?;
+                result.set_item("error", "rar5_header_size_vint_too_long")?;
+                return Ok(());
+            }
             let header_total_size = 4 + (after_size - 4) as u64 + header_size;
             if header_size == 0 || cursor + header_total_size > size {
                 result.set_item("blocks_checked", index)?;
@@ -265,9 +270,9 @@ impl AnalysisBinaryView {
                 result.set_item("error", "rar5_header_flags_vint_missing")?;
                 return Ok(());
             };
-            if !matches!(header_type, 1..=5) {
+            if !matches!(header_type, 1..=5) && header_flags & 0x0004 == 0 {
                 result.set_item("blocks_checked", index)?;
-                result.set_item("error", "rar5_block_unknown_type")?;
+                result.set_item("error", "rar5_block_unknown_non_skippable_type")?;
                 return Ok(());
             }
             let stored_crc = u32_le(&full, 0);

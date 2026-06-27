@@ -38,6 +38,10 @@ pub(crate) fn rar_block_chain_trim_recovery(
     let mut written = Vec::new();
     let mut write_warnings = Vec::new();
     for walk in walks {
+        if walk.header_encrypted {
+            write_warnings.extend(walk.warnings);
+            continue;
+        }
         if walk.last_complete_end <= walk.offset
             || (walk.offset == 0 && walk.last_complete_end == data.len())
         {
@@ -157,7 +161,11 @@ pub(crate) fn rar_end_block_repair(
     let mut written = Vec::new();
     let mut skipped_warnings = Vec::new();
     for walk in walks {
-        if walk.end_block_found || walk.missing_volume || !walk.last_block_can_precede_end {
+        if walk.header_encrypted
+            || walk.end_block_found
+            || walk.missing_volume
+            || !walk.last_block_can_precede_end
+        {
             skipped_warnings.extend(walk.warnings);
             continue;
         }

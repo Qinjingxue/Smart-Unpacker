@@ -33,24 +33,25 @@ fn expected_zip64_values(
     local: &LocalHeader,
     local_zip64: &Zip64Extra,
 ) -> Option<Vec<u64>> {
-    let mut local_values = local_zip64.values.clone();
     let mut expected = Vec::new();
     if entry.uncompressed_size == 0xFFFF_FFFF {
-        if local_values.is_empty() {
-            return None;
-        }
-        expected.push(local_values.remove(0));
+        expected.push(*local_zip64.values.first()?);
     }
     if entry.compressed_size == 0xFFFF_FFFF {
-        if local_values.is_empty() {
-            return None;
-        }
-        expected.push(local_values.remove(0));
+        // APPNOTE 4.5.3 requires both size values in the local ZIP64 extra.
+        expected.push(*local_zip64.values.get(1)?);
     }
     if entry.local_header_offset == 0xFFFF_FFFF {
         expected.push(local.offset as u64);
     }
     Some(expected)
+}
+
+fn expected_zip64_central_size(entry: &CentralEntry) -> usize {
+    usize::from(entry.uncompressed_size == u32::MAX) * 8
+        + usize::from(entry.compressed_size == u32::MAX) * 8
+        + usize::from(entry.local_header_offset == u32::MAX) * 8
+        + usize::from(entry.disk_number_start == u16::MAX) * 4
 }
 
 fn eocd_tail_for_cd(

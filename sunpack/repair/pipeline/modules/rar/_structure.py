@@ -15,6 +15,7 @@ class RarWalkResult:
     end_block_found: bool
     warnings: list[str]
     last_complete_offset: int | None = None
+    header_encrypted: bool = False
 
 
 def walk_rar_blocks(data: bytes) -> RarWalkResult | None:
@@ -63,6 +64,9 @@ def _walk_rar5(data: bytes) -> RarWalkResult:
         if header_size is None or fields_start is None:
             warnings.append("rar5 header size vint is truncated")
             break
+        if fields_start - header_start > 3:
+            warnings.append("rar5 header size vint exceeds the current three-byte limit")
+            break
         fields_end = fields_start + header_size
         if fields_end > len(data):
             warnings.append("rar5 header is truncated")
@@ -71,6 +75,9 @@ def _walk_rar5(data: bytes) -> RarWalkResult:
         flags, after_flags = _read_vint(data, after_type or fields_start)
         if block_type is None or flags is None or after_flags is None:
             warnings.append("rar5 block type or flags vint is truncated")
+            break
+        if block_type not in {1, 2, 3, 4, 5} and not flags & 0x0004:
+            warnings.append("rar5 unknown non-skippable block type")
             break
         cursor = after_flags
         if flags & 0x0001:
@@ -85,12 +92,25 @@ def _walk_rar5(data: bytes) -> RarWalkResult:
                 warnings.append("rar5 data size vint is truncated")
                 break
             data_size = value
+        if cursor > fields_end:
+            warnings.append("rar5 common header fields exceed declared header size")
+            break
         end = fields_end + data_size
         if end > len(data):
             warnings.append("rar5 block data is truncated")
             break
         if block_type == 5:
             return RarWalkResult(version=5, end_offset=end, end_block_found=True, warnings=warnings, last_complete_offset=end)
+        if block_type == 4:
+            warnings.append("rar5 subsequent headers are encrypted")
+            return RarWalkResult(
+                version=5,
+                end_offset=None,
+                end_block_found=False,
+                warnings=warnings,
+                last_complete_offset=end,
+                header_encrypted=True,
+            )
         last_complete = end
         pos = end
     return RarWalkResult(version=5, end_offset=None, end_block_found=False, warnings=warnings, last_complete_offset=last_complete)
@@ -102,6 +122,8 @@ def _read_vint(data: bytes, offset: int) -> tuple[int | None, int | None]:
     pos = offset
     while pos < len(data) and shift <= 63:
         byte = data[pos]
+        if shift == 63 and byte & 0x7E:
+            return None, None
         value |= (byte & 0x7F) << shift
         pos += 1
         if not byte & 0x80:

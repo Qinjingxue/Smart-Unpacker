@@ -96,6 +96,7 @@ fn walk_rar4_blocks(data: &[u8], offset: usize) -> Option<RarWalk> {
                 offset,
                 last_complete_end,
                 end_block_found: true,
+                header_encrypted: false,
                 missing_volume,
                 last_block_can_precede_end: true,
                 warnings,
@@ -108,6 +109,7 @@ fn walk_rar4_blocks(data: &[u8], offset: usize) -> Option<RarWalk> {
         offset,
         last_complete_end,
         end_block_found: false,
+        header_encrypted: false,
         missing_volume,
         last_block_can_precede_end: matches!(last_type, 0x74 | 0x7a),
         warnings,
@@ -139,6 +141,10 @@ fn walk_rar5_blocks(data: &[u8], offset: usize) -> Option<RarWalk> {
             warnings.push("RAR5 block chain stopped before a header CRC mismatch".to_string());
             break;
         }
+        if !matches!(block.block_type, 1..=5) && block.flags & 0x0004 == 0 {
+            warnings.push("RAR5 block chain stopped before an unknown non-skippable block".to_string());
+            break;
+        }
         if blocks == 0 && block.block_type == 1 && block.archive_flags & 0x0001 != 0 {
             missing_volume = true;
         }
@@ -146,12 +152,26 @@ fn walk_rar5_blocks(data: &[u8], offset: usize) -> Option<RarWalk> {
         last_type = block.block_type;
         last_complete_end = block.end;
         pos = block.end;
+        if block.block_type == 4 {
+            warnings.push("RAR5 archive headers after the encryption header require a password".to_string());
+            return Some(RarWalk {
+                version: RarVersion::Rar5,
+                offset,
+                last_complete_end,
+                end_block_found: false,
+                header_encrypted: true,
+                missing_volume,
+                last_block_can_precede_end: false,
+                warnings,
+            });
+        }
         if block.block_type == 5 {
             return Some(RarWalk {
                 version: RarVersion::Rar5,
                 offset,
                 last_complete_end,
                 end_block_found: true,
+                header_encrypted: false,
                 missing_volume,
                 last_block_can_precede_end: true,
                 warnings,
@@ -164,6 +184,7 @@ fn walk_rar5_blocks(data: &[u8], offset: usize) -> Option<RarWalk> {
         offset,
         last_complete_end,
         end_block_found: false,
+        header_encrypted: false,
         missing_volume,
         last_block_can_precede_end: matches!(last_type, 2 | 3),
         warnings,
@@ -184,14 +205,14 @@ fn parse_rar5_block(data: &[u8], offset: usize) -> Option<Rar5Block> {
     }
     let stored_crc = u32_le(data, offset);
     let (header_size, fields_start) = read_vint(data, offset + 4)?;
+    if fields_start.saturating_sub(offset + 4) > 3 {
+        return None;
+    }
     let fields_end = fields_start.checked_add(usize::try_from(header_size).ok()?)?;
     if header_size == 0 || fields_end > data.len() {
         return None;
     }
     let (block_type, after_type) = read_vint(data, fields_start)?;
-    if !matches!(block_type, 1..=5) {
-        return None;
-    }
     let (flags, after_flags) = read_vint(data, after_type)?;
     let mut cursor = after_flags;
     if flags & 0x0001 != 0 {
@@ -203,6 +224,9 @@ fn parse_rar5_block(data: &[u8], offset: usize) -> Option<Rar5Block> {
         let (value, after_data_size) = read_vint(data, cursor)?;
         data_size = usize::try_from(value).ok()?;
         cursor = after_data_size;
+    }
+    if cursor > fields_end {
+        return None;
     }
     let archive_flags = if block_type == 1 && cursor < fields_end {
         read_vint(data, cursor).map(|item| item.0).unwrap_or(0)
@@ -275,5 +299,38 @@ fn rar5_header_block(block_type: u64, flags: u64, tail_fields: &[u8], data: &[u8
     output.extend_from_slice(&header_data);
     output.extend_from_slice(data);
     output
+}
+
+#[cfg(test)]
+mod rar5_spec_tests {
+    use super::*;
+
+    #[test]
+    fn unknown_skippable_block_is_walked() {
+        let mut data = RAR5_MAGIC.to_vec();
+        data.extend_from_slice(&rar5_header_block(9, 0x0004, &[], &[]));
+        data.extend_from_slice(&rar5_end_block());
+        let walk = walk_rar5_blocks(&data, 0).unwrap();
+        assert!(walk.end_block_found);
+        assert!(!walk.header_encrypted);
+    }
+
+    #[test]
+    fn archive_encryption_header_is_valid_but_not_repairable_without_password() {
+        let mut data = RAR5_MAGIC.to_vec();
+        data.extend_from_slice(&rar5_header_block(4, 0, &[], &[]));
+        data.extend_from_slice(&[0u8; 16]);
+        let walk = walk_rar5_blocks(&data, 0).unwrap();
+        assert!(walk.header_encrypted);
+        assert!(!walk.end_block_found);
+    }
+
+    #[test]
+    fn four_byte_header_size_vint_is_rejected() {
+        let mut data = RAR5_MAGIC.to_vec();
+        data.extend_from_slice(&0u32.to_le_bytes());
+        data.extend_from_slice(&[0x80, 0x80, 0x80, 0x00, 1, 0]);
+        assert!(walk_rar5_blocks(&data, 0).is_none());
+    }
 }
 

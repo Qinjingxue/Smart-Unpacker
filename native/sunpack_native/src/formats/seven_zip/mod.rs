@@ -3,7 +3,10 @@ use aes::{
     Aes256,
 };
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
-use lzma_rust2::{Lzma2Reader, LzmaReader};
+use lzma_rust2::{
+    filter::{bcj::BcjReader, bcj2::Bcj2Reader, delta::DeltaReader},
+    Lzma2Reader, LzmaReader,
+};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList};
 use sevenz_rust2::{

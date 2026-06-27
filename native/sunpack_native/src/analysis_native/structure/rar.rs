@@ -164,6 +164,9 @@ fn inspect_rar5(py: Python<'_>, data: &[u8], file_size: u64) -> PyResult<Py<PyDi
     let Some((header_size, after_size)) = read_vint(data, first_header_offset + 4) else {
         return Ok(rar_empty(py, "rar5_header_size_vint_missing")?.unbind());
     };
+    if after_size.saturating_sub(first_header_offset + 4) > 3 {
+        return Ok(rar_empty(py, "rar5_header_size_vint_too_long")?.unbind());
+    }
     let Some((header_type, _)) = read_vint(data, after_size) else {
         return Ok(rar_empty(py, "rar5_header_type_vint_missing")?.unbind());
     };
@@ -177,6 +180,10 @@ fn inspect_rar5(py: Python<'_>, data: &[u8], file_size: u64) -> PyResult<Py<PyDi
     d.set_item("first_header_type", header_type)?;
     let evidence = PyList::new(py, ["rar5:signature"])?;
     d.set_item("evidence", &evidence)?;
+    if !matches!(header_type, 1 | 4) {
+        d.set_item("error", "rar5_main_or_encryption_header_missing")?;
+        return Ok(d.unbind());
+    }
     let first_header_total_size = 4 + (after_size - (first_header_offset + 4)) as u64 + header_size;
     if header_size == 0 || first_header_offset as u64 + first_header_total_size > file_size {
         d.set_item("error", "rar5_first_header_size_out_of_range")?;
@@ -194,9 +201,17 @@ fn inspect_rar5(py: Python<'_>, data: &[u8], file_size: u64) -> PyResult<Py<PyDi
         d.set_item("header_crc_ok", crc_ok)?;
         if crc_ok {
             evidence.append("rar5:header_crc")?;
-        } else if header_type == 1 {
+        } else {
             d.set_item("error", "rar5_header_crc_mismatch")?;
         }
+    }
+    if header_type == 4 && d.get_item("header_crc_ok")?.unwrap().extract::<bool>()? {
+        d.set_item("header_encrypted", true)?;
+        d.set_item("password_required", true)?;
+        d.set_item("strong_accept", true)?;
+        d.set_item("block_walk_ok", true)?;
+        evidence.append("rar5:archive_encryption_header")?;
+        return Ok(d.unbind());
     }
     let second_offset = first_header_offset + first_header_total_size as usize;
     if header_type == 1
@@ -236,7 +251,10 @@ fn inspect_rar5_block(
     let Some((header_size, after_size)) = read_vint(data, offset + 4) else {
         return (false, 0, 0, "rar5_second_header_size_vint_missing");
     };
-    let Some((header_type, _)) = read_vint(data, after_size) else {
+    if after_size.saturating_sub(offset + 4) > 3 {
+        return (false, 0, header_size, "rar5_second_header_size_vint_too_long");
+    }
+    let Some((header_type, after_type)) = read_vint(data, after_size) else {
         return (
             false,
             0,
@@ -244,7 +262,10 @@ fn inspect_rar5_block(
             "rar5_second_header_type_vint_missing",
         );
     };
-    if !matches!(header_type, 1..=5) {
+    let Some((header_flags, _)) = read_vint(data, after_type) else {
+        return (false, header_type, header_size, "rar5_second_header_flags_vint_missing");
+    };
+    if !matches!(header_type, 1..=5) && header_flags & 0x0004 == 0 {
         return (
             false,
             header_type,

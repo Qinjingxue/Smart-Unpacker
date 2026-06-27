@@ -709,7 +709,7 @@ fn repair_zip64_central_extra(data: &[u8]) -> Result<DirectoryFieldRepair, Strin
         let Some(expected) = expected else {
             continue;
         };
-        let expected_size = expected.len() * 8;
+        let expected_size = expected_zip64_central_size(&entry);
         if central_zip64.stored_size != expected_size {
             add_zip_patch(
                 &mut bytes,
@@ -725,7 +725,7 @@ fn repair_zip64_central_extra(data: &[u8]) -> Result<DirectoryFieldRepair, Strin
             if central_zip64.values[index] == value {
                 continue;
             }
-            let offset = central_zip64.values_offset + index * 8;
+            let offset = central_zip64.value_offsets[index];
             add_zip_patch(&mut bytes, &mut patches, offset, &value.to_le_bytes());
         }
     }

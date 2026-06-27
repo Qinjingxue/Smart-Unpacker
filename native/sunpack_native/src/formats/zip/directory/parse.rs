@@ -104,6 +104,7 @@ fn parse_central_directory_entries(
             name: data[name_start..extra_start].to_vec(),
             extra: data[extra_start..comment_start].to_vec(),
             extra_offset: extra_start,
+            disk_number_start: u16_le(data, pos + 34),
             local_header_offset: u32_le(data, pos + 42),
         });
         pos = record_end;
@@ -150,6 +151,7 @@ fn parse_tolerant_central_directory_entries(
             name: data[name_start..extra_start].to_vec(),
             extra: data[extra_start..extra_end].to_vec(),
             extra_offset: extra_start,
+            disk_number_start: u16_le(data, pos + 34),
             local_header_offset: u32_le(data, pos + 42),
         });
         if record_end + 46 <= data.len() && record_end <= end && &data[record_end..record_end + 4] == CD_SIG {

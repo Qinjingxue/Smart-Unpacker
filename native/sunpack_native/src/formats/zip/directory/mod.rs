@@ -42,6 +42,7 @@ struct CentralEntry {
     name: Vec<u8>,
     extra: Vec<u8>,
     extra_offset: usize,
+    disk_number_start: u16,
     local_header_offset: u32,
 }
 
@@ -62,7 +63,9 @@ struct LocalHeader {
 
 struct Zip64Extra {
     values: Vec<u64>,
-    values_offset: usize,
+    value_offsets: Vec<usize>,
+    disk_start: Option<u32>,
+    disk_start_offset: Option<usize>,
     size_offset: usize,
     stored_size: usize,
 }
