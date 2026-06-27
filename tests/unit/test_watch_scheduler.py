@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import zipfile
 from pathlib import Path
@@ -1155,8 +1156,12 @@ def test_watch_scheduler_ignores_baidu_temporary_download_files(tmp_path, monkey
         initial_scan=False,
     )
     watcher.enqueue(str(temporary), event_type="created")
+    watcher.enqueue(str(temporary), event_type="modified")
 
     assert watcher.pending_count == 0
+    records = [json.loads(line) for line in (tmp_path / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+    ignored = [record for record in records if record.get("reason") == "temporary_download_file"]
+    assert len(ignored) == 1
 
 
 def test_watch_scheduler_same_stat_modified_event_resets_stable_window(tmp_path, monkeypatch):

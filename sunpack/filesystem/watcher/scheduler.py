@@ -223,30 +223,30 @@ class WatchScheduler:
         if self.should_ignore_event_path(path):
             return
         if is_directory_password_file(path, self.config):
-            self.log.write("candidate_ignored", path=path, reason="directory_password_file")
+            self._log_candidate_ignored(path, "directory_password_file")
             return
         if _is_temporary_download_path(path):
-            self.log.write("candidate_ignored", path=path, reason="temporary_download_file")
+            self._log_candidate_ignored(path, "temporary_download_file")
             return
         candidate = _candidate_for_event_path(path)
         if candidate is None:
-            self.log.write("candidate_ignored", path=path, reason="not_a_file_or_unreadable")
+            self._log_candidate_ignored(path, "not_a_file_or_unreadable")
             return
         if not self._is_under_watched_root(candidate.path):
-            self.log.write("candidate_ignored", path=candidate.path, reason="outside_watched_roots")
+            self._log_candidate_ignored(candidate.path, "outside_watched_roots")
             return
         output_reason = self._output_suppression_reason(candidate.path)
         if output_reason:
-            self.log.write("candidate_ignored", path=candidate.path, reason=output_reason)
+            self._log_candidate_ignored(candidate.path, output_reason)
             return
         if self._is_under_broad_output_root(candidate.path):
-            self.log.write("candidate_ignored", path=candidate.path, reason="under_output_root")
+            self._log_candidate_ignored(candidate.path, "under_output_root")
             return
         if self._is_under_metadata_dir(candidate.path):
-            self.log.write("candidate_ignored", path=candidate.path, reason="under_metadata_dir")
+            self._log_candidate_ignored(candidate.path, "under_metadata_dir")
             return
         if not self._passes_filesystem_filters(candidate):
-            self.log.write("candidate_ignored", path=candidate.path, reason="filtered_out")
+            self._log_candidate_ignored(candidate.path, "filtered_out")
             return
         now = time.time()
         with self._lock:
@@ -282,7 +282,7 @@ class WatchScheduler:
                 return
         candidate = _candidate_with_sample_digest(candidate)
         if candidate is None:
-            self.log.write("candidate_ignored", path=path, reason="sample_unreadable")
+            self._log_candidate_ignored(path, "sample_unreadable")
             return
         if self.state.should_skip(
             candidate.path,
@@ -291,10 +291,9 @@ class WatchScheduler:
             candidate.sample_digest,
             force=force,
         ):
-            self.log.write(
-                "candidate_ignored",
-                path=candidate.path,
-                reason="already_processed",
+            self._log_candidate_ignored(
+                candidate.path,
+                "already_processed",
                 size=candidate.size,
                 mtime=candidate.mtime,
             )
@@ -351,6 +350,17 @@ class WatchScheduler:
         if not path:
             return True
         return self._is_under_metadata_dir(path) or bool(self._output_suppression_reason(path))
+
+    def _log_candidate_ignored(self, path: str, reason: str, **payload) -> None:
+        normalized = os.path.normcase(os.path.abspath(str(path))) if path else ""
+        self.log.write_throttled(
+            "candidate_ignored",
+            throttle_key=f"{normalized}|{reason}",
+            interval_seconds=300.0,
+            path=path,
+            reason=reason,
+            **payload,
+        )
 
     def is_builtin_password_file(self, path: str) -> bool:
         if not path:
