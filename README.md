@@ -1,38 +1,13 @@
 # SunPack
 
-SunPack 是一个 Windows-first 的智能归档处理与损坏压缩包尽力恢复工具。它不只是批量调用 7-Zip 解压，而是围绕真实文件状态建立一条可循环的 pipeline：
+本项目仅限Windows
+SunPack 是一个可以处理各种压缩资源，包括伪装归档，混乱后缀，载体嵌套等类型压缩包的自动化工具，主要交互模式是右键菜单调用和CLI命令行交互。
 
-```text
-detection -> analysis -> extraction -> verification -> repair -> extraction -> verification
-```
+注意，该项目由于输入复杂，不保证稳定，目前项目仍在稳定性测试中
 
-项目的目标是：在复杂下载目录、游戏/程序目录、伪装载体、分卷包、嵌套包和损坏包里，尽量找出真正应该处理的归档；解压失败时尽量恢复可用文件；恢复出多个候选时用 verification 比较完整度，保留更好的结果。
+项目还有一个实验性深度学习的压缩包修复系统，但目前因为过于复杂而开发搁置
 
-当前项目的 CLI 已支持中文，默认配置文件是 `sunpack_config.json`。源码入口是 `python sunpack.py`；Windows 打包后入口是 `sunpack.exe`。
-
-## 核心能力
-
-- **智能候选识别**：结合扩展名、magic bytes、ZIP/7z/RAR/TAR 结构事实、embedded payload、PE overlay、目录场景和 7z.dll probe/test 判断文件是否值得解压。
-- **场景保护**：识别游戏、程序、资源目录，降低把 `.dll`、模型权重、Office 容器、资源包等误当普通压缩包处理的概率。
-- **分卷与虚拟输入**：识别标准分卷、编号卷、RAR/7z 分卷和 SFX companion；analysis 可产出 `file_range`、`concat_ranges` 等虚拟输入供 worker 解压。
-- **真实 worker 解压**：最终解压由 `sunpack_sevenzip_worker.exe` 调用 `7z.dll` 完成，不走 `7z.exe x` 文本封装。
-- **verification 驱动结果判断**：不只看 worker 成功/失败，而是检查输出目录、manifest、归档条目、CRC、样本可读性、文件完整度和部分恢复进度。
-- **模型驱动 repair 图搜索**：内置 diagnosis HGT 判断可操作根因，repair policy transformer 对 module/undo/stop 动作评分；每个候选仍必须重新进入 extraction 和 verification，模型不直接宣称修复成功。
-- **损坏包尽力恢复**：ZIP repair 使用原子化模块（boundary/pointer/ZIP64/rebuild/descriptor/quarantine/partial/conflict 分别暴露为独立 action）；TAR checksum/trailing/PAX/GNU longname/sparse 修复；gzip/bzip2/xz/zstd 截断和尾部垃圾处理；7z start/next header/边界/CRC/solid block salvage；RAR block/end/carrier/file quarantine 修复。
-- **嵌套与载体恢复**：可从损坏外壳或 carrier 中扫描内层 ZIP/7z/RAR/TAR/gzip 等载荷，并把内层包送回 pipeline。
-- **Native-first 热路径**：Rust 承接目录扫描、二进制视图、signature prepass、结构 probe、carrier scan、repair I/O、CRC/readability、候选匹配索引和密码 fast verifier；C++ 承接 7z.dll ABI 与 worker。
-- **适合右键菜单和 watch**：提供 Windows 右键菜单脚本，也支持 `watch` 目录监控，文件稳定后自动处理。
-
-## 当前定位
-
-SunPack 更像一个“归档恢复协调器”而不是普通解压器：
-
-- 对干净压缩包：批量、递归、密码、分卷、清理和扁平化。
-- 对可疑文件：通过 detection/analysis 尽量避免误判。
-- 对损坏压缩包：先提取可用部分，再让 repair 生成候选，最后由 verification 比较产物质量。
-- 对大批量任务：通过 scheduler profile、resource guard、analysis cache、worker 复用和 Rust 热路径控制性能。
-
-## 快速开始
+## 开发相关
 
 准备开发环境：
 
@@ -40,80 +15,40 @@ SunPack 更像一个“归档恢复协调器”而不是普通解压器：
 .\scripts\setup_windows_dev.ps1
 ```
 
-包含打包依赖：
+构建项目：
 
 ```powershell
-.\scripts\setup_windows_dev.ps1 -IncludeBuildDeps
+.\scripts\build_windows.ps1
 ```
 
-准备不包含模型修复系统的轻量环境：
-
-```powershell
-.\scripts\setup_windows_dev.ps1 -RepairSystem lite
-```
-
-确认 native 组件可用：
-
-```powershell
-python -c "import sunpack_native as n; print(n.native_available(), n.scanner_version())"
-python -c "from sunpack.support.sevenzip_bridge import NativePasswordTester; print(NativePasswordTester().available())"
-python sunpack.py models status --load
-```
-
-常用命令：
-
-```powershell
-python sunpack.py scan D:\Downloads
-python sunpack.py inspect D:\Downloads -v
-python sunpack.py extract D:\Downloads
-python sunpack.py watch D:\Downloads --out-dir D:\Unpacked
-python sunpack.py extract D:\Archives -p 123456 --pw-file .\passwords.txt
-python sunpack.py config validate
-```
-
-打包后的程序使用同一套命令：
-
-```powershell
-.\dist\sunpack-x64-lite\sunpack.exe extract D:\Downloads
-```
+开发环境和构建说明见 [文档](docs/development_setup.md)。
+开发边界见文档 [文档](docs\development_boundaries.md)。
 
 ## 命令速览
 
-| 命令              | 说明                                                      |
-| ----------------- | --------------------------------------------------------- |
-| `extract`         | 扫描、analysis、解压、verification、repair 循环、后处理。 |
-| `watch`           | 监控目录，发现稳定归档后自动进入 extract pipeline。       |
-| `scan`            | 只生成候选任务，不修改文件。                              |
-| `inspect`         | 输出检测、analysis 和规则判定细节。                       |
-| `passwords`       | 查看本次会参与尝试的密码列表。                            |
-| `config show`     | 打印当前配置。                                            |
-| `config validate` | 校验 JSON、规则、verification method 和 fact schema。     |
-| `models status`   | 校验内置模型清单、文件哈希，并可尝试加载模型；lite 构建会明确返回修复系统未包含。 |
+| 命令        | 说明                                                      |
+| ----------- | --------------------------------------------------------- |
+| `extract`   | 扫描、analysis、解压、verification、repair 循环、后处理。 |
+| `watch`     | 监控目录，发现稳定归档后自动解压                          |
+| `scan`      | 只生成候选任务，不修改文件。                              |
+| `inspect`   | 输出检测、analysis 和规则判定细节。                       |
+| `passwords` | 查看本次会参与尝试的密码列表。                            |
 
 详细参数见 [CLI 参数说明](docs/cli_parameters.md)。
 
-## 配置重点
+## 配置
 
-主配置文件是 `sunpack_config.json`。修改后建议执行：
+主配置文件是 `sunpack_config.json`，另有高级配置`sunpack_advanced_config.json`
+
+主配置文件优先覆盖高级配置相同字段配置，高级配置可手动将字段移至主配置
+
+配置校验命令：
 
 ```powershell
 python sunpack.py config validate
 ```
 
-常用配置：
-
-- `filesystem.scan_filters_enabled` / `filesystem.scan_filters`：过滤器总开关、目录剪枝、黑名单、最小检测大小。
-- `detection.enabled` / `detection.rule_pipeline`：detection 层总开关、候选识别、场景保护、结构打分和确认层。
-- `embedded_payload_identity.embedded_payload_scan_level`：嵌入载荷扫描档位，默认 `balanced`；可改为 `light` 降低成本，或 `deep` 提高伪装压缩包召回。
-- `extract --direct-file <file>`：明确指定文件，跳过初始扫描和 detection，直接进入 analysis 及后续解压/校验/修复/后处理。
-- `analysis`：结构分析、signature prepass、fuzzy binary profile、批量 analysis cache。
-- `verification`：输出存在性、manifest、归档 CRC、可读性抽样、部分恢复阈值。
-- `repair`：统一最大修复模式、安全策略、module limits、beam、模块开关和资源上限。
-- `performance`：scheduler profile、worker 超时、profile calibration、resource guard。
-- `recursive_extract`：递归解压策略，`*` 无限递归，正整数为轮数，`?` 每轮询问。
-- `post_extract.archive_cleanup_mode`：成功后 `d` 删除、`r` 回收站、`k` 保留。
-
-完整说明见 [配置文件说明](docs/configuration.md)。
+完整配置说明见 [配置文件说明](docs/configuration.md)。
 
 ## 架构速览
 
@@ -121,65 +56,13 @@ python sunpack.py config validate
 app/config
   -> coordinator
      filesystem->relations-> detection -> analysis -> extraction -> verification
-                        ^                            |
-                        |                            v
-                        +----------- repair ------------+
+                             ^                            |
+                             |                            v
+                            +---------- repair -----------+
      -> postprocess
 ```
 
-重要边界：
-
-- `detection` 只判断候选是否应处理。
-- `analysis` 只描述结构、边界、损坏标志和可用输入视图。
-- `extraction` 只执行 worker 解压。
-- `verification` 只评价结果质量和下一步建议。
-- `repair` 统一拥有候选生成、搜索图、模型资产和推理，不直接宣称成功。
-- `repair.model` 不依赖训练代码；`repair.search` 不依赖具体模型实现。
-- `coordinator` 负责循环、比较、资源限制、summary 和最终归档处理。
-
-详细约束见 [开发边界说明](docs/development_boundaries.md) 和 [修复模型与训练边界](docs/repair_models.md)。
-
-## 原生组件
-
-项目是 Python + Rust + C++ 三层协作：
-
-- `sunpack/`：配置、CLI、调度、规则、verification/repair 决策编排。
-- `sunpack/repair/model/`：发布时使用的模型结构、张量化、推理、资产清单和统一运行时。
-- `sunpack/repair/search/`：修复搜索图、恢复度评估、运行特征和模块提案。
-- `repair_training/`：源码树内的数据构建、训练和评估工具；不随默认 Python 包发行，允许依赖 `sunpack.repair.model`，运行时禁止反向依赖训练目录。
-- `models/`：随源码和发行包分发的模型资产，入口为 `models/manifest.json`。
-- `native/sunpack_native/`：Rust/PyO3 热路径，包括目录扫描、二进制结构分析、repair I/O、CRC/readability、candidate matching、deep repair native 实现等。
-- `native/sevenzip_bridge/`：C++/CMake 7z.dll bridge，提供 probe/test、密码数组尝试、manifest 和 worker 解压。
-
-源码开发和构建环境使用：
-
-```text
-tools\7z.exe
-tools\7z.dll
-tools\sunpack_sevenzip.dll
-tools\sunpack_sevenzip_worker.exe
-```
-
-其中 `7z.exe` 只用于生成测试 fixture、手工诊断以及创建发布 ZIP；最终安装包和便携包不包含它。发布版运行时只包含并依赖 `7z.dll`、`sunpack_sevenzip.dll` 和 `sunpack_sevenzip_worker.exe`。
-
-## 模型运行时
-
-模型运行时是正式产品代码，不是训练脚本的兼容层：
-
-- 模型运行时依赖不属于默认依赖；x64 可安装 `.[model-runtime]`，构建脚本会按架构处理 full/lite 模式。
-- `models/manifest.json` 声明格式、角色、语义、算法、资产目录和 `model.pt` SHA-256。
-- `ModelAssetRegistry` 在源码目录和打包目录中定位同一份清单，并在加载前验证哈希。
-- `DiagnosisHGTProvider` 和 `RepairPolicyTransformerProvider` 由程序内置创建，不支持外部 `provider_package`。
-- 当前内置模型支持 ZIP diagnosis 与 repair policy；不支持的格式会明确返回 unavailable。
-- lite 构建不包含模型资产和模型运行时依赖；verification 失败时会直接提示压缩包可能损坏，不进入 repair 循环。
-
-检查模型：
-
-```powershell
-python sunpack.py models status --load --json
-```
-
-## 开发与测试
+## 测试
 
 安装测试依赖并运行默认测试：
 
@@ -193,73 +76,3 @@ python -m pytest
 ```powershell
 .\run_acceptance_tests.ps1
 ```
-
-本地 CI 风格检查：
-
-```powershell
-.\scripts\run_ci_tests.ps1
-```
-
-慢速真实归档/性能测试默认不跑，可显式打开：
-
-```powershell
-pytest --run-slow-real-archives
-pytest --run-large-archive-performance -s
-```
-
-开发环境和构建说明见 [development_setup.md](docs/development_setup.md)。
-
-## Windows 右键菜单
-
-注册当前用户右键菜单：
-
-```powershell
-.\scripts\register_context_menu.ps1
-```
-
-默认菜单项会执行：
-
-```powershell
-sunpack extract <目标目录> --ask-pw --pause
-```
-
-取消注册：
-
-```powershell
-.\scripts\unregister_context_menu.ps1
-```
-
-## 构建
-
-Windows 打包：
-
-```powershell
-.\scripts\build_windows.ps1
-```
-
-常用参数：
-
-```powershell
-.\scripts\build_windows.ps1 -SkipTests
-.\scripts\build_windows.ps1 -Clean
-.\scripts\build_windows.ps1 -Version 1.2.3
-.\scripts\build_windows.ps1 -Arch x64 -RepairSystem full
-.\scripts\build_windows.ps1 -Arch x64 -RepairSystem lite
-.\scripts\build_windows.ps1 -SkipInstaller
-```
-
-构建脚本会准备 `.venv-build`，从 `pyproject.toml` 安装 `build` extra，构建 Rust wheel 和 C++ bridge/worker，用 PyInstaller 生成 `sunpack.exe`，复制配置、工具和 license，并执行 packaged smoke。`-RepairSystem full` 会额外安装模型运行时、复制 `models/` 并执行模型加载检查；`-RepairSystem lite` 不包含模型资产和模型依赖。
-
-默认还会调用 Inno Setup 6 生成 Windows 安装包。可通过 `winget install JRSoftware.InnoSetup` 安装编译器，或用 `-InnoCompilerPath <ISCC.exe>` 指定路径；只需要便携包时使用 `-SkipInstaller`。构建产物包括：
-
-- `release\sunpack-windows-<arch>-<repair_system>-<version>.zip`：便携版。
-- `release\sunpack-windows-<arch>-<repair_system>-<version>-setup.exe`：安装版。
-- `dist\sunpack-<arch>-<repair_system>\`：未压缩程序目录。
-
-安装版默认按当前用户安装到 `%LOCALAPPDATA%\Programs\SunPack`，无需管理员权限。安装选项默认将 SunPack 加入当前用户 PATH 并注册文件夹右键菜单；卸载器会删除对应 PATH 项、右键菜单和程序文件。安装器的完整安装/卸载烟雾测试可运行：
-
-```powershell
-.\scripts\test_windows_installer.ps1 -InstallerPath .\release\sunpack-windows-x64-lite-<version>-setup.exe
-```
-
-构建脚本支持 `-Arch x64|arm64` 和 `-RepairSystem full|lite`。`x64` 和 `full` 是默认值；ARM64 最终可执行文件需要在 ARM64 Windows + ARM64 Python 环境中构建，脚本会静态校验包内所有关键 PE 文件的 machine 架构。已有包可用 `.\scripts\verify_windows_package_arch.ps1 -PackageRoot <dist目录> -Arch arm64` 在任意 Windows 机器上做静态检查。GitHub release workflow 会为 `x64-lite` 和 `arm64-lite` 各产出便携 ZIP 与安装版 EXE，并在发布前真实验证安装、PATH、右键菜单和卸载清理。
