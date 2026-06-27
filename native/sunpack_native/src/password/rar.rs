@@ -5,6 +5,7 @@ use cbc::Decryptor;
 use hmac::{Hmac, Mac};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
+use rayon::prelude::*;
 use sha1::{Digest, Sha1};
 use sha2::Sha256;
 use std::fs::File;
@@ -16,6 +17,7 @@ const MAX_RAR_PREFIX_SCAN: usize = 1024 * 1024;
 const RAR3_KDF_ITERATIONS: u32 = 0x40000;
 const RAR4_MIN_HEADER_SIZE: usize = 7;
 const RAR4_HP_DECRYPT_LIMIT: usize = 4096;
+const PARALLEL_PASSWORD_THRESHOLD: usize = 4;
 
 type HmacSha256 = Hmac<Sha256>;
 type Aes128CbcDecryptor = Decryptor<Aes128>;
@@ -30,9 +32,11 @@ pub(crate) fn rar_fast_verify_passwords(
         .iter()
         .map(|item| item.extract::<String>())
         .collect::<PyResult<Vec<_>>>()?;
-    let mut file = File::open(&archive_path)?;
     let mut data = vec![0u8; MAX_RAR_PREFIX_SCAN];
-    let len = file.read(&mut data)?;
+    let len = py.detach(|| -> std::io::Result<usize> {
+        let mut file = File::open(&archive_path)?;
+        file.read(&mut data)
+    })?;
     data.truncate(len);
 
     if data.starts_with(RAR5_SIGNATURE) {
@@ -229,16 +233,15 @@ fn verify_rar5(py: Python<'_>, data: &[u8], candidates: &[String]) -> PyResult<P
             "rar5 encryption header has no password check",
         );
     }
-    for (index, password) in candidates.iter().enumerate() {
-        if rar5_password_check_matches(password, &header) {
-            return status(
-                py,
-                "match",
-                index as i32,
-                (index + 1) as i32,
-                "rar5 password check matched",
-            );
-        }
+    let matched_index = py.detach(|| find_rar5_password_match(candidates, &header));
+    if let Some(index) = matched_index {
+        return status(
+            py,
+            "match",
+            index as i32,
+            (index + 1) as i32,
+            "rar5 password check matched",
+        );
     }
     status(
         py,
@@ -247,6 +250,18 @@ fn verify_rar5(py: Python<'_>, data: &[u8], candidates: &[String]) -> PyResult<P
         candidates.len() as i32,
         "rar5 password check did not match",
     )
+}
+
+fn find_rar5_password_match(candidates: &[String], header: &Rar5EncryptionHeader) -> Option<usize> {
+    if candidates.len() >= PARALLEL_PASSWORD_THRESHOLD {
+        candidates
+            .par_iter()
+            .position_first(|password| rar5_password_check_matches(password, header))
+    } else {
+        candidates
+            .iter()
+            .position(|password| rar5_password_check_matches(password, header))
+    }
 }
 
 struct Rar5EncryptionHeader {
@@ -337,13 +352,18 @@ fn rar5_password_check_matches(password: &str, header: &Rar5EncryptionHeader) ->
         return false;
     }
     let password_bytes = password.as_bytes();
-    let mut salt_extended = header.salt.clone();
-    salt_extended.extend_from_slice(&[0, 0, 0, 1]);
+    let mut salt_extended = [0u8; 20];
+    salt_extended[..16].copy_from_slice(&header.salt);
+    salt_extended[19] = 1;
 
-    let mut mac = match HmacSha256::new_from_slice(password_bytes) {
+    // RAR's PBKDF2 uses the same HMAC key for every round. Clone the
+    // precomputed inner/outer SHA-256 states, as the official UnRAR
+    // implementation does, instead of rebuilding ipad/opad every time.
+    let mac_template = match HmacSha256::new_from_slice(password_bytes) {
         Ok(mac) => mac,
         Err(_) => return false,
     };
+    let mut mac = mac_template.clone();
     mac.update(&salt_extended);
     let mut block: [u8; 32] = mac.finalize().into_bytes().into();
     let mut final_hash = block;
@@ -351,10 +371,7 @@ fn rar5_password_check_matches(password: &str, header: &Rar5EncryptionHeader) ->
     let mut result2 = [0u8; 32];
     for (round_index, count) in round_counts.iter().enumerate() {
         for _ in 1..*count {
-            let mut mac = match HmacSha256::new_from_slice(password_bytes) {
-                Ok(mac) => mac,
-                Err(_) => return false,
-            };
+            let mut mac = mac_template.clone();
             mac.update(&block);
             block = mac.finalize().into_bytes().into();
             for (f, b) in final_hash.iter_mut().zip(block.iter()) {

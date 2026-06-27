@@ -1,10 +1,13 @@
 use crate::password::input::{parse_ranges, VirtualRangeReader};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
+use rayon::prelude::*;
 use sevenz_rust2::{Archive, Error as SevenZipError, Password};
-use std::io::{Cursor, Read, Seek};
+use std::fs::File;
+use std::io::{Read, Seek};
 
 const SEVEN_Z_SIGNATURE: &[u8] = b"7z\xbc\xaf\x27\x1c";
+const PARALLEL_PASSWORD_THRESHOLD: usize = 4;
 
 #[pyfunction]
 pub(crate) fn seven_zip_fast_verify_passwords(
@@ -17,18 +20,20 @@ pub(crate) fn seven_zip_fast_verify_passwords(
         .map(|item| item.extract::<String>())
         .collect::<PyResult<Vec<_>>>()?;
 
-    let file_data = match std::fs::read(&archive_path) {
-        Ok(data) => data,
+    let mut signature_file = match py.detach(|| File::open(&archive_path)) {
+        Ok(file) => file,
         Err(_) => return status(py, "damaged", -1, 0, "7z archive could not be opened"),
     };
-
     let mut signature = [0u8; 6];
-    if Cursor::new(&file_data).read_exact(&mut signature).is_err() || signature != SEVEN_Z_SIGNATURE
+    if py
+        .detach(|| signature_file.read_exact(&mut signature))
+        .is_err()
+        || signature != SEVEN_Z_SIGNATURE
     {
         return status(py, "unsupported_method", -1, 0, "7z signature not found");
     }
 
-    match read_archive_header_from_reader(Cursor::new(&file_data), "") {
+    match py.detach(|| read_archive_header_from_path(&archive_path, "")) {
         HeaderRead::Ok => {
             return status(
                 py,
@@ -47,25 +52,12 @@ pub(crate) fn seven_zip_fast_verify_passwords(
         }
     }
 
-    for (index, password) in candidates.iter().enumerate() {
-        match read_archive_header_from_reader(Cursor::new(&file_data), password) {
-            HeaderRead::Ok => {
-                return status(
-                    py,
-                    "match",
-                    index as i32,
-                    (index + 1) as i32,
-                    "7z encrypted header opened",
-                );
-            }
-            HeaderRead::WrongPasswordOrPasswordRequired => {}
-            HeaderRead::Unsupported(message) => {
-                return status(py, "unknown_need_fallback", -1, index as i32, &message);
-            }
-            HeaderRead::Damaged(message) => {
-                return status(py, "damaged", -1, index as i32, &message);
-            }
-        }
+    if let Some((index, outcome)) = py.detach(|| {
+        find_first_conclusive_header(&candidates, |password| {
+            read_archive_header_from_path(&archive_path, password)
+        })
+    }) {
+        return conclusive_status(py, index, outcome);
     }
 
     status(
@@ -117,25 +109,12 @@ pub(crate) fn seven_zip_fast_verify_passwords_from_ranges(
         }
     }
 
-    for (index, password) in candidates.iter().enumerate() {
-        match read_archive_header_from_reader(VirtualRangeReader::new(parsed.clone()), password) {
-            HeaderRead::Ok => {
-                return status(
-                    py,
-                    "match",
-                    index as i32,
-                    (index + 1) as i32,
-                    "7z encrypted header opened",
-                );
-            }
-            HeaderRead::WrongPasswordOrPasswordRequired => {}
-            HeaderRead::Unsupported(message) => {
-                return status(py, "unknown_need_fallback", -1, index as i32, &message);
-            }
-            HeaderRead::Damaged(message) => {
-                return status(py, "damaged", -1, index as i32, &message);
-            }
-        }
+    if let Some((index, outcome)) = py.detach(|| {
+        find_first_conclusive_header(&candidates, |password| {
+            read_archive_header_from_reader(VirtualRangeReader::new(parsed.clone()), password)
+        })
+    }) {
+        return conclusive_status(py, index, outcome);
     }
 
     status(
@@ -152,6 +131,44 @@ enum HeaderRead {
     WrongPasswordOrPasswordRequired,
     Unsupported(String),
     Damaged(String),
+}
+
+fn find_first_conclusive_header<F>(candidates: &[String], verify: F) -> Option<(usize, HeaderRead)>
+where
+    F: Fn(&str) -> HeaderRead + Sync,
+{
+    if candidates.len() >= PARALLEL_PASSWORD_THRESHOLD {
+        candidates
+            .par_iter()
+            .enumerate()
+            .map(|(index, password)| (index, verify(password)))
+            .find_first(|(_, outcome)| {
+                !matches!(outcome, HeaderRead::WrongPasswordOrPasswordRequired)
+            })
+    } else {
+        candidates.iter().enumerate().find_map(|(index, password)| {
+            let outcome = verify(password);
+            (!matches!(outcome, HeaderRead::WrongPasswordOrPasswordRequired))
+                .then_some((index, outcome))
+        })
+    }
+}
+
+fn conclusive_status(py: Python<'_>, index: usize, outcome: HeaderRead) -> PyResult<Py<PyAny>> {
+    match outcome {
+        HeaderRead::Ok => status(
+            py,
+            "match",
+            index as i32,
+            (index + 1) as i32,
+            "7z encrypted header opened",
+        ),
+        HeaderRead::Unsupported(message) => {
+            status(py, "unknown_need_fallback", -1, index as i32, &message)
+        }
+        HeaderRead::Damaged(message) => status(py, "damaged", -1, index as i32, &message),
+        HeaderRead::WrongPasswordOrPasswordRequired => unreachable!("filtered outcome"),
+    }
 }
 
 fn read_archive_header_from_reader<R: Read + Seek>(mut reader: R, password: &str) -> HeaderRead {
@@ -175,6 +192,13 @@ fn read_archive_header_from_reader<R: Read + Seek>(mut reader: R, password: &str
         Err(error) => HeaderRead::Unsupported(format!(
             "7z header-only verifier could not classify error: {error}"
         )),
+    }
+}
+
+fn read_archive_header_from_path(archive_path: &str, password: &str) -> HeaderRead {
+    match File::open(archive_path) {
+        Ok(file) => read_archive_header_from_reader(file, password),
+        Err(_) => HeaderRead::Damaged("7z archive could not be opened".to_string()),
     }
 }
 

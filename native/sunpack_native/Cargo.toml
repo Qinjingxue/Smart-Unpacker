@@ -22,6 +22,7 @@ memchr = "2.7"
 pbkdf2 = "0.12"
 pyo3 = { version = "0.27", features = ["extension-module"] }
 regex = "1.11"
+rayon = "1.10"
 sevenz-rust2 = { version = "0.21", default-features = false, features = ["aes256", "compress"] }
 sha1 = "0.10"
 sha2 = "0.10"

@@ -90,6 +90,28 @@ def test_rar_fast_verifier_rejects_wrong_rar5_password_check(tmp_path):
     assert outcome.attempts == 2
 
 
+def test_rar_fast_verifier_parallel_batch_preserves_first_match(tmp_path):
+    archive = tmp_path / "sample.rar"
+    archive.write_bytes(_rar5_encryption_header_fixture())
+    passwords = [f"wrong-{index}" for index in range(40)]
+    passwords[23] = "U0b7258526OROQY"
+    passwords[37] = "U0b7258526OROQY"
+
+    outcome = RarFastVerifier().verify_batch(str(archive), passwords)
+
+    assert outcome.ok is True
+    assert outcome.status == "match"
+    assert outcome.matched_index == 23
+    assert outcome.attempts == 24
+
+    rejected = RarFastVerifier().verify_batch(
+        str(archive), [f"definitely-wrong-{index}" for index in range(40)]
+    )
+    assert rejected.ok is False
+    assert rejected.status == "no_match"
+    assert rejected.attempts == 40
+
+
 def _require_7z_or_skip():
     seven_zip = get_test_tools()["seven_zip"]
     if not seven_zip or not seven_zip.is_file():
@@ -142,3 +164,24 @@ def test_seven_zip_fast_verifier_rejects_wrong_encrypted_header_passwords(tmp_pa
     assert outcome.ok is False
     assert outcome.status == "no_match"
     assert outcome.attempts == 2
+
+
+def test_seven_zip_fast_verifier_parallel_batch_preserves_first_match(tmp_path):
+    archive = _create_encrypted_header_7z(tmp_path, "secret")
+    passwords = [f"bad-{index}" for index in range(40)]
+    passwords[19] = "secret"
+    passwords[35] = "secret"
+
+    outcome = SevenZipFastVerifier().verify_batch(str(archive), passwords)
+
+    assert outcome.ok is True
+    assert outcome.status == "match"
+    assert outcome.matched_index == 19
+    assert outcome.attempts == 20
+
+    rejected = SevenZipFastVerifier().verify_batch(
+        str(archive), [f"definitely-bad-{index}" for index in range(40)]
+    )
+    assert rejected.ok is False
+    assert rejected.status == "no_match"
+    assert rejected.attempts == 40
