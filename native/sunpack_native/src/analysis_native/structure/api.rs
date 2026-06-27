@@ -107,8 +107,16 @@ pub(crate) fn inspect_zip_eocd_structure(
         result.set_item("trailing_bytes_after_eocd", trailing_bytes_after_eocd)?;
         return Ok(result.unbind());
     }
-    if disk_number != 0 || central_directory_disk != 0 || disk_entries != total_entries {
-        result.set_item("error", "multi_disk_or_entry_mismatch")?;
+    let is_multi_disk = disk_number != 0 || central_directory_disk != 0;
+    if is_multi_disk || disk_entries != total_entries {
+        result.set_item(
+            "error",
+            if is_multi_disk {
+                "zip_multi_disk"
+            } else {
+                "entry_count_mismatch"
+            },
+        )?;
         result.set_item("eocd_offset", eocd_offset)?;
         result.set_item("central_directory_offset", central_directory_offset)?;
         result.set_item("central_directory_size", central_directory_size)?;
@@ -118,6 +126,11 @@ pub(crate) fn inspect_zip_eocd_structure(
         result.set_item("declared_central_directory_size", central_directory_size)?;
         result.set_item("declared_total_entries", total_entries)?;
         result.set_item("trailing_bytes_after_eocd", trailing_bytes_after_eocd)?;
+        result.set_item("is_multi_disk", is_multi_disk)?;
+        result.set_item("disk_number", disk_number)?;
+        result.set_item("central_directory_disk", central_directory_disk)?;
+        result.set_item("disk_entries", disk_entries)?;
+        result.set_item("declared_total_disks", u32::from(disk_number) + 1)?;
         return Ok(result.unbind());
     }
     let physical_central_offset = eocd_offset.saturating_sub(central_directory_size);
@@ -147,6 +160,11 @@ pub(crate) fn inspect_zip_eocd_structure(
     result.set_item("trailing_bytes_after_eocd", trailing_bytes_after_eocd)?;
     result.set_item("archive_offset", archive_offset)?;
     result.set_item("total_entries", total_entries)?;
+    result.set_item("is_multi_disk", false)?;
+    result.set_item("disk_number", disk_number)?;
+    result.set_item("central_directory_disk", central_directory_disk)?;
+    result.set_item("disk_entries", disk_entries)?;
+    result.set_item("declared_total_disks", 1u32)?;
     result.set_item("comment_length", comment_length)?;
     result.set_item("central_directory_present", false)?;
     result.set_item("central_directory_entries_checked", 0)?;

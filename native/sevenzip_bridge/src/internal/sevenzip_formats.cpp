@@ -19,6 +19,10 @@ std::wstring split_volume_family(const std::vector<std::wstring>& part_paths) {
         if (name.find(L".zip.") != std::wstring::npos) {
             return L"zip";
         }
+        if (name.size() >= 4 && name[name.size() - 4] == L'.' && name[name.size() - 3] == L'z' &&
+            iswdigit(name[name.size() - 2]) && iswdigit(name[name.size() - 1])) {
+            return L"zip";
+        }
         if (name.find(L".7z.") != std::wstring::npos) {
             return L"7z";
         }

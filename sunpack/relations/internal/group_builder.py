@@ -41,6 +41,7 @@ class RelationsGroupBuilder:
             for directory, entries in dir_files.items()
         }
         native_groups = _native_build_candidate_groups(rows)
+        classic_groups, classic_paths = self._build_classic_zip_spanned_groups(dir_files, directory_indexes)
         groups: List[CandidateGroup] = []
         for raw in native_groups:
             if not isinstance(raw, dict):
@@ -48,8 +49,38 @@ class RelationsGroupBuilder:
             group = self._candidate_group_from_native(raw, directory_indexes)
             if group is None:
                 raise ValueError("native relations returned an invalid group")
+            if any(path_key(path) in classic_paths for path in group.all_paths):
+                continue
             groups.append(group)
+        groups.extend(classic_groups)
         return groups
+
+    def _build_classic_zip_spanned_groups(
+        self,
+        dir_files: Dict[str, List[FileEntry]],
+        directory_indexes: Dict[str, DirectoryFileIndex],
+    ) -> tuple[List[CandidateGroup], set[str]]:
+        groups: List[CandidateGroup] = []
+        claimed: set[str] = set()
+        for directory, entries in dir_files.items():
+            by_base: Dict[str, List[FileEntry]] = defaultdict(list)
+            for entry in entries:
+                match = re.match(r"^(?P<base>.+)\.z(?P<number>\d{2})$", entry.path.name, re.IGNORECASE)
+                if match:
+                    by_base[match.group("base").lower()].append(entry)
+            lower_names = {entry.path.name.lower() for entry in entries}
+            for base, members in by_base.items():
+                if f"{base}.z01" not in lower_names:
+                    continue
+                terminal = next((entry for entry in entries if entry.path.name.lower() == f"{base}.zip"), None)
+                group_entries = [*members, *([terminal] if terminal is not None else [])]
+                relations = {
+                    entry.path.name: self._build_file_relation(entry.path.name, lower_names)
+                    for entry in group_entries
+                }
+                groups.append(self._build_group(group_entries, relations, directory_indexes.get(directory)))
+                claimed.update(path_key(entry.path) for entry in group_entries)
+        return groups, claimed
 
     def _candidate_group_from_native(
         self,
@@ -110,9 +141,15 @@ class RelationsGroupBuilder:
         )
 
     def detect_split_role(self, filename: str) -> Optional[str]:
+        match = re.search(r"\.z(?P<number>\d{2})$", filename, re.IGNORECASE)
+        if match:
+            return "first" if int(match.group("number")) == 1 else "member"
         return _native_detect_split_role(filename)
 
     def get_logical_name(self, filename: str, is_archive: bool = False) -> str:
+        match = re.match(r"^(?P<prefix>.+)\.z\d{2}$", filename, re.IGNORECASE)
+        if match:
+            return str(match.group("prefix"))
         return _native_logical_name(filename, is_archive)
 
     def build_file_relation(self, filename: str, sibling_names: Set[str]) -> FileRelation:
@@ -127,7 +164,9 @@ class RelationsGroupBuilder:
         split_index = 0
         if parsed_volume:
             split_index = int(parsed_volume["number"])
-            if parsed_volume["style"] == "rar_part":
+            if parsed_volume["style"] == "zip_spanned":
+                split_family = "zip_spanned"
+            elif parsed_volume["style"] == "rar_part":
                 split_family = "rar_part"
             else:
                 parsed_prefix = str(parsed_volume["prefix"]).lower()
@@ -193,6 +232,14 @@ class RelationsGroupBuilder:
         )
 
     def parse_numbered_volume(self, path: str):
+        match = re.match(r"^(?P<prefix>.+)\.z(?P<number>\d{2})$", path, re.IGNORECASE)
+        if match:
+            return {
+                "prefix": str(match.group("prefix")),
+                "number": int(match.group("number")),
+                "style": "zip_spanned",
+                "width": 2,
+            }
         return _native_parse_numbered_volume(path)
 
     def select_first_volume(self, paths: List[str]) -> str:
@@ -242,6 +289,7 @@ class RelationsGroupBuilder:
             f"{base}.part1.exe".lower(),
             f"{base}.part01.exe".lower(),
             f"{base}.part001.exe".lower(),
+            f"{base}.z01".lower(),
         }
         oldstyle_rar_head = f"{base}.rar".lower()
         oldstyle_rar_present = oldstyle_rar_head in lower_names and any(
@@ -263,6 +311,8 @@ class RelationsGroupBuilder:
         return sorted(siblings, key=self.split_sort_key)
 
     def is_standard_split_sibling(self, base: str, lower_name: str, oldstyle_rar_present: bool) -> bool:
+        if re.match(rf"^{re.escape(base)}\.z\d{{2}}$", lower_name) or lower_name == f"{base}.zip":
+            return True
         if re.match(rf"^{re.escape(base)}\.(7z|zip|rar)\.\d{{3}}$", lower_name):
             return True
         if re.match(rf"^{re.escape(base)}\.\d{{3}}$", lower_name):
@@ -440,6 +490,17 @@ class RelationsGroupBuilder:
 
         assigned_candidates: dict[int, str] = {}
         available_candidates = list(dict.fromkeys(candidates + fuzzy_candidates))
+        terminal_candidates: List[str] = []
+        if style == "zip_spanned":
+            terminal_name = f"{archive_prefix}.zip"
+            terminal_candidates = [
+                path for path in available_candidates
+                if case_key(normalized_path(path)) == case_key(normalized_path(terminal_name))
+            ]
+            available_candidates = [
+                path for path in available_candidates
+                if path_key(path) not in {path_key(candidate) for candidate in terminal_candidates}
+            ]
         for number in missing_numbers:
             match = self._select_candidate_for_missing_number(
                 number,
@@ -452,6 +513,7 @@ class RelationsGroupBuilder:
             assigned_candidates[number] = match
             available_candidates = [path for path in available_candidates if path_key(path) != path_key(match)]
 
+        available_candidates.extend(terminal_candidates)
         next_number = max_confirmed + 1
         for path in available_candidates:
             while next_number in confirmed or next_number in assigned_candidates:
@@ -487,6 +549,23 @@ class RelationsGroupBuilder:
         if unresolved:
             reason = "missing_head" if 1 in unresolved else "missing_middle"
             return sorted(entries, key=lambda volume: (volume.number, volume.path.lower())), False, reason, unresolved
+
+        if style == "zip_spanned" and not terminal_candidates:
+            return (
+                sorted(entries, key=lambda volume: (volume.number, volume.path.lower())),
+                False,
+                "missing_tail",
+                [max_confirmed + 1],
+            )
+
+        substituted = [number for number in missing_numbers if number in assigned_candidates]
+        if substituted:
+            return (
+                sorted(entries, key=lambda volume: (volume.number, volume.path.lower())),
+                None,
+                "candidate_substitution",
+                substituted,
+            )
 
         return sorted(entries, key=lambda volume: (volume.number, volume.path.lower())), True, "", []
 

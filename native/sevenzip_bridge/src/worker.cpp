@@ -686,6 +686,9 @@ std::string diagnostics_json(const sunpack::sevenzip::ExtractArchiveResult& resu
         ",\"hresult_hex\":\"" + hresult_hex(result.hresult) +
         "\",\"operation_result\":" + std::to_string(result.operation_result) +
         ",\"operation_result_name\":\"" + json_escape(sunpack::sevenzip::operation_result_name(result.operation_result)) +
+        "\",\"missing_volume_suspected\":" + std::string(result.missing_volume_suspected ? "true" : "false") +
+        ",\"missing_volume_evidence\":\"" + json_escape(result.missing_volume_evidence) +
+        "\",\"missing_volume_name\":\"" + json_escape(wide_to_utf8(result.missing_volume_name)) +
         "\",\"handler_attempts\":" + handler_attempts_json(result.handler_attempts) +
         ",\"input_trace\":" + input_trace_json(result.input_trace) +
         ",\"output_trace\":" + output_trace_json(result.output_trace) +
@@ -790,7 +793,10 @@ int run_request(const std::string& request) {
         ",\"damaged\":" + std::string(result.damaged ? "true" : "false") +
         ",\"checksum_error\":" + std::string(result.checksum_error ? "true" : "false") +
         ",\"missing_volume\":" + std::string(result.missing_volume ? "true" : "false") +
-        ",\"wrong_password\":" + std::string(result.wrong_password ? "true" : "false") +
+        ",\"missing_volume_suspected\":" + std::string(result.missing_volume_suspected ? "true" : "false") +
+        ",\"missing_volume_evidence\":\"" + json_escape(result.missing_volume_evidence) +
+        "\",\"missing_volume_name\":\"" + json_escape(wide_to_utf8(result.missing_volume_name)) +
+        "\",\"wrong_password\":" + std::string(result.wrong_password ? "true" : "false") +
         ",\"unsupported_method\":" + std::string(result.unsupported_method ? "true" : "false") +
         ",\"item_count\":" + std::to_string(result.item_count) +
         ",\"files_written\":" + std::to_string(result.files_written) +

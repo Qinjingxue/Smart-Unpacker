@@ -100,6 +100,7 @@ struct ExtractArchiveResult {
     bool damaged = false;
     bool checksum_error = false;
     bool missing_volume = false;
+    bool missing_volume_suspected = false;
     bool wrong_password = false;
     bool unsupported_method = false;
     int operation_result = 0;
@@ -112,11 +113,13 @@ struct ExtractArchiveResult {
     int hresult = 0;
     std::wstring archive_type;
     std::wstring failed_item;
+    std::wstring missing_volume_name;
     std::wstring requested_codepage;
     std::wstring applied_codepage;
     std::wstring filename_decoder;
     std::string failure_stage;
     std::string failure_kind;
+    std::string missing_volume_evidence;
     std::string message;
     ExtractInputTrace input_trace;
     ExtractOutputTrace output_trace;
@@ -310,6 +313,20 @@ struct Sup7zArchiveHealth {
     wchar_t archive_type[32];
 };
 
+struct Sup7zArchiveHealthV2 {
+    int status;
+    int is_archive;
+    int is_encrypted;
+    int is_broken;
+    int is_missing_volume;
+    int is_wrong_password;
+    int operation_result;
+    wchar_t archive_type[32];
+    int is_missing_volume_suspected;
+    wchar_t missing_volume_name[260];
+    wchar_t missing_volume_evidence[64];
+};
+
 struct Sup7zArchiveResourceAnalysis {
     int status;
     int is_archive;
@@ -391,6 +408,17 @@ SUP7Z_API int sup7z_check_archive_health_with_parts(
     int part_count,
     const wchar_t* password,
     Sup7zArchiveHealth* health,
+    wchar_t* message,
+    int message_chars
+);
+
+SUP7Z_API int sup7z_check_archive_health_with_parts_v2(
+    const wchar_t* seven_zip_dll_path,
+    const wchar_t* archive_path,
+    const wchar_t* const* part_paths,
+    int part_count,
+    const wchar_t* password,
+    Sup7zArchiveHealthV2* health,
     wchar_t* message,
     int message_chars
 );

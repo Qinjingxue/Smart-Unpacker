@@ -310,6 +310,11 @@ def _probe_zip_view(view, eocd_offset: int, max_cd_entries_to_walk: int) -> dict
         "central_directory_offset": 0,
         "central_directory_size": 0,
         "total_entries": 0,
+        "is_multi_disk": False,
+        "disk_number": 0,
+        "central_directory_disk": 0,
+        "disk_entries": 0,
+        "declared_total_disks": 1,
         "central_directory_present": False,
         "central_directory_walk_ok": False,
         "central_directory_entries_checked": 0,
@@ -329,9 +334,23 @@ def _probe_zip_view(view, eocd_offset: int, max_cd_entries_to_walk: int) -> dict
     cd_offset = _u32(eocd, 16)
     comment_length = _u16(eocd, 20)
     segment_end = eocd_offset + 22 + comment_length
-    result.update({"segment_end": segment_end, "central_directory_size": cd_size, "total_entries": total_entries})
-    if disk_number != 0 or central_directory_disk != 0 or disk_entries != total_entries:
-        result["error"] = "multi_disk_or_entry_mismatch"
+    is_multi_disk = disk_number != 0 or central_directory_disk != 0
+    result.update({
+        "segment_end": segment_end,
+        "central_directory_size": cd_size,
+        "total_entries": total_entries,
+        "is_multi_disk": is_multi_disk,
+        "disk_number": disk_number,
+        "central_directory_disk": central_directory_disk,
+        "disk_entries": disk_entries,
+        "declared_total_disks": disk_number + 1,
+    })
+    if is_multi_disk:
+        result["error"] = "zip_multi_disk"
+        result["evidence"] = ["zip:eocd_multi_disk"]
+        return result
+    if disk_entries != total_entries:
+        result["error"] = "entry_count_mismatch"
         return result
     if eocd_offset < cd_size:
         result["error"] = "central_directory_size_out_of_range"

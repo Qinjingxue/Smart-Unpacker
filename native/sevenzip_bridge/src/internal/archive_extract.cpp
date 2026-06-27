@@ -106,6 +106,25 @@ void set_failure(ExtractArchiveResult& result, const std::string& stage, const s
 
 }
 
+void set_missing_volume_failure(
+    ExtractArchiveResult& result,
+    const std::string& stage,
+    const std::string& evidence,
+    const std::wstring& requested_name = L"",
+    HRESULT hr = S_OK
+) {
+    result.status = PasswordTestStatus::Damaged;
+    result.damaged = true;
+    result.missing_volume = true;
+    result.missing_volume_suspected = false;
+    result.missing_volume_evidence = evidence;
+    result.missing_volume_name = requested_name;
+    set_failure(result, stage, "missing_volume", hr);
+    result.message = requested_name.empty()
+        ? "archive split volume appears incomplete"
+        : "archive handler requested a missing split volume";
+}
+
 std::string kind_for_operation_result(Int32 op_res) {
 
     if (op_res == kOpWrongPassword) {
@@ -172,6 +191,16 @@ ExtractArchiveResult extract_archive_internal(
 
     result.backend_available = true;
     result.requested_codepage = codepage;
+
+    if (has_split_volume_gap(part_paths)) {
+        set_missing_volume_failure(result, "input_preflight", "standard_sequence_gap");
+        return result;
+    }
+
+    if (likely_missing_split_tail(part_paths)) {
+        result.missing_volume_suspected = true;
+        result.missing_volume_evidence = "tail_size_heuristic";
+    }
 
     bool any_format_created = false;
 
@@ -301,9 +330,22 @@ ExtractArchiveResult extract_archive_internal(
 
 
 
-        ComPtr<IArchiveOpenCallback> open_callback(new OpenCallback(password, callback_archive_path(archive_path, part_paths), part_paths));
+        auto* raw_open_callback = new OpenCallback(password, callback_archive_path(archive_path, part_paths), part_paths);
+        ComPtr<IArchiveOpenCallback> open_callback(raw_open_callback);
 
         hr = archive->Open(stream.get(), nullptr, open_callback.get());
+
+        if (raw_open_callback->missing_volume_requested()) {
+            set_missing_volume_failure(
+                result,
+                "archive_open",
+                "open_volume_callback_not_found",
+                raw_open_callback->missing_volume_name(),
+                hr
+            );
+            result.handler_attempts.push_back(attempt);
+            return result;
+        }
 
         attempt.open_hresult = static_cast<int>(hr);
 
@@ -428,6 +470,11 @@ ExtractArchiveResult extract_archive_internal(
 
             result.command_ok = true;
 
+            result.missing_volume_suspected = false;
+            if (result.missing_volume_evidence == "tail_size_heuristic") {
+                result.missing_volume_evidence.clear();
+            }
+
             result.message = dry_run ? "archive dry-run completed" : "archive extracted";
 
             return result;
@@ -497,22 +544,6 @@ ExtractArchiveResult extract_archive_internal(
 
         }
 
-        if (looks_missing_volume(archive_path, last_op_res)) {
-
-            result.status = PasswordTestStatus::Damaged;
-
-            result.damaged = true;
-
-            result.missing_volume = true;
-
-            set_failure(result, "item_extract", "missing_volume", hr);
-
-            result.message = "archive split volume appears incomplete";
-
-            return result;
-
-        }
-
         if (looks_damaged(last_op_res)) {
 
             result.status = PasswordTestStatus::Damaged;
@@ -574,23 +605,6 @@ ExtractArchiveResult extract_archive_internal(
             set_failure(result, "archive_open", kind_for_operation_result(last_op_res), last_hr);
 
             result.message = result.checksum_error ? "archive checksum error" : "archive appears damaged";
-
-            return result;
-
-        }
-
-        if (has_split_volume_gap(part_paths) || likely_missing_split_tail(part_paths) ||
-            (has_split_volume_evidence(archive_path, part_paths) && looks_missing_volume(archive_path, last_op_res))) {
-
-            result.status = PasswordTestStatus::Damaged;
-
-            result.damaged = true;
-
-            result.missing_volume = true;
-
-            set_failure(result, "archive_open", "missing_volume", last_hr);
-
-            result.message = "archive split volume appears incomplete";
 
             return result;
 

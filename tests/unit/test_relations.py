@@ -74,3 +74,49 @@ def test_relation_public_helpers_parse_split_names():
         "style": "rar_part",
         "width": 3,
     }
+    assert scheduler.parse_numbered_volume(r"C:\tmp\classic.z01") == {
+        "prefix": r"C:\tmp\classic",
+        "number": 1,
+        "style": "zip_spanned",
+        "width": 2,
+    }
+
+
+def test_relation_group_builder_groups_classic_zip_spanned_volumes(tmp_path):
+    first = tmp_path / "classic.z01"
+    second = tmp_path / "classic.z02"
+    terminal = tmp_path / "classic.zip"
+    for path in (first, second, terminal):
+        path.write_bytes(b"volume")
+
+    groups = RelationsScheduler().build_candidate_groups(DirectoryScanner(str(tmp_path)).scan())
+    split_group = next(group for group in groups if group.logical_name == "classic")
+
+    assert Path(split_group.head_path).name == "classic.z01"
+    assert [Path(path).name for path in split_group.all_paths] == ["classic.z01", "classic.z02", "classic.zip"]
+    assert split_group.split_group_complete is True
+
+
+def test_relation_group_builder_reports_classic_zip_middle_gap(tmp_path):
+    for name in ("classic.z01", "classic.z03", "classic.zip"):
+        (tmp_path / name).write_bytes(b"volume")
+
+    groups = RelationsScheduler().build_candidate_groups(DirectoryScanner(str(tmp_path)).scan())
+    split_group = next(group for group in groups if group.logical_name == "classic")
+
+    assert split_group.split_group_complete is False
+    assert split_group.split_missing_reason == "missing_middle"
+    assert split_group.split_missing_indices == [2]
+
+
+def test_relation_group_builder_reports_missing_classic_zip_terminal_volume(tmp_path):
+    for name in ("classic.z01", "classic.z02"):
+        (tmp_path / name).write_bytes(b"volume")
+
+    groups = RelationsScheduler().build_candidate_groups(DirectoryScanner(str(tmp_path)).scan())
+    split_group = next(group for group in groups if group.logical_name == "classic")
+
+    assert [Path(path).name for path in split_group.all_paths] == ["classic.z01", "classic.z02"]
+    assert split_group.split_group_complete is False
+    assert split_group.split_missing_reason == "missing_tail"
+    assert split_group.split_missing_indices == [3]

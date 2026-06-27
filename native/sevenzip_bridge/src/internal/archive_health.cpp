@@ -28,6 +28,20 @@ HealthProbeResult check_archive_health_internal(
 
     result.backend_available = true;
 
+    if (has_split_volume_gap(part_paths)) {
+        result.status = PasswordTestStatus::Damaged;
+        result.is_archive = true;
+        result.missing_volume = true;
+        result.missing_volume_evidence = "standard_sequence_gap";
+        result.message = "split archive is missing one or more numbered volumes";
+        return result;
+    }
+
+    if (likely_missing_split_tail(part_paths)) {
+        result.missing_volume_suspected = true;
+        result.missing_volume_evidence = "tail_size_heuristic";
+    }
+
     bool any_format_created = false;
 
     HRESULT last_hr = E_FAIL;
@@ -84,9 +98,21 @@ HealthProbeResult check_archive_health_internal(
 
 
 
-        ComPtr<IArchiveOpenCallback> open_callback(new OpenCallback(password, callback_archive_path(archive_path, part_paths), part_paths));
+        auto* raw_open_callback = new OpenCallback(password, callback_archive_path(archive_path, part_paths), part_paths);
+        ComPtr<IArchiveOpenCallback> open_callback(raw_open_callback);
 
         hr = archive->Open(stream.get(), nullptr, open_callback.get());
+
+        if (raw_open_callback->missing_volume_requested()) {
+            result.status = PasswordTestStatus::Damaged;
+            result.is_archive = true;
+            result.missing_volume = true;
+            result.missing_volume_suspected = false;
+            result.missing_volume_name = raw_open_callback->missing_volume_name();
+            result.missing_volume_evidence = "open_volume_callback_not_found";
+            result.message = "archive handler requested a missing split volume";
+            return result;
+        }
 
         if (hr != S_OK) {
 
@@ -108,18 +134,6 @@ HealthProbeResult check_archive_health_internal(
 
         result.operation_result = kOpOk;
 
-        if (has_split_volume_gap(part_paths) || likely_missing_split_tail(part_paths)) {
-
-            result.status = PasswordTestStatus::Damaged;
-
-            result.missing_volume = true;
-
-            result.message = "split archive is missing one or more volumes";
-
-            return result;
-
-        }
-
         if (opened_as_encrypted && password.empty()) {
 
             result.status = PasswordTestStatus::WrongPassword;
@@ -135,6 +149,11 @@ HealthProbeResult check_archive_health_internal(
         }
 
         result.encrypted = opened_as_encrypted;
+
+        result.missing_volume_suspected = false;
+        if (result.missing_volume_evidence == "tail_size_heuristic") {
+            result.missing_volume_evidence.clear();
+        }
 
         result.status = PasswordTestStatus::Ok;
 
@@ -153,18 +172,6 @@ HealthProbeResult check_archive_health_internal(
         result.status = PasswordTestStatus::Unsupported;
 
         result.message = "7z.dll did not create a supported archive handler";
-
-    } else if (has_split_volume_gap(part_paths) || likely_missing_split_tail(part_paths) ||
-
-        (has_split_volume_evidence(archive_path, part_paths) && looks_missing_volume(archive_path, last_op_res))) {
-
-        result.status = PasswordTestStatus::Damaged;
-
-        result.is_archive = true;
-
-        result.missing_volume = true;
-
-        result.message = "split archive is missing one or more volumes";
 
     } else if (looks_damaged_health_result(password, last_op_res)) {
 

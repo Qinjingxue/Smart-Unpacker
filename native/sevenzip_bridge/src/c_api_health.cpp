@@ -89,4 +89,50 @@ SUP7Z_API int sup7z_check_archive_health_with_parts(
     return status_code(result.status);
 }
 
+SUP7Z_API int sup7z_check_archive_health_with_parts_v2(
+    const wchar_t* seven_zip_dll_path,
+    const wchar_t* archive_path,
+    const wchar_t* const* part_paths,
+    int part_count,
+    const wchar_t* password,
+    Sup7zArchiveHealthV2* health,
+    wchar_t* message,
+    int message_chars
+) {
+    using namespace sunpack::sevenzip;
+    using namespace sunpack::sevenzip::capi;
+    if (health) {
+        *health = Sup7zArchiveHealthV2{};
+    }
+    if (!seven_zip_dll_path || !archive_path) {
+        copy_message(message, message_chars, "missing required path");
+        if (health) {
+            health->status = status_code(PasswordTestStatus::Error);
+        }
+        return status_code(PasswordTestStatus::Error);
+    }
+
+    const std::wstring archive_path_text(archive_path);
+    const auto result = check_archive_health_with_parts(
+        seven_zip_dll_path,
+        archive_path_text,
+        collect_part_paths(archive_path, part_paths, part_count),
+        password ? password : L"");
+    if (health) {
+        health->status = status_code(result.status);
+        health->is_archive = result.is_archive ? 1 : 0;
+        health->is_encrypted = result.encrypted ? 1 : 0;
+        health->is_broken = result.damaged ? 1 : 0;
+        health->is_missing_volume = result.missing_volume ? 1 : 0;
+        health->is_wrong_password = result.wrong_password ? 1 : 0;
+        health->operation_result = result.operation_result;
+        copy_wide(health->archive_type, 32, archive_type_for_path(archive_path_text));
+        health->is_missing_volume_suspected = result.missing_volume_suspected ? 1 : 0;
+        copy_wide(health->missing_volume_name, 260, result.missing_volume_name);
+        copy_wide(health->missing_volume_evidence, 64, std::wstring(result.missing_volume_evidence.begin(), result.missing_volume_evidence.end()));
+    }
+    copy_message(message, message_chars, result.message);
+    return status_code(result.status);
+}
+
 #endif

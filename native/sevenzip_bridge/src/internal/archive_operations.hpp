@@ -19,8 +19,11 @@ struct HealthProbeResult {
     bool encrypted = false;
     bool damaged = false;
     bool missing_volume = false;
+    bool missing_volume_suspected = false;
     bool wrong_password = false;
     Int32 operation_result = 0;
+    std::wstring missing_volume_name;
+    std::string missing_volume_evidence;
     std::string message;
 };
 

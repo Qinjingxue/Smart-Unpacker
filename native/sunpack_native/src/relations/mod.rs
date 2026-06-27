@@ -397,7 +397,14 @@ fn get_logical_name(filename: &str, is_archive: bool) -> String {
         return clean_logical_name(&second);
     }
 
-    let third = plain_numeric_suffix_re().replace(&second, "").to_string();
+    let zip_spanned = zip_spanned_suffix_re().replace(&second, "").to_string();
+    if zip_spanned != second {
+        return clean_logical_name(&zip_spanned);
+    }
+
+    let third = plain_numeric_suffix_re()
+        .replace(&zip_spanned, "")
+        .to_string();
     if third != second {
         return clean_logical_name(&third);
     }
@@ -416,6 +423,14 @@ fn get_logical_name(filename: &str, is_archive: bool) -> String {
 }
 
 fn parse_numbered_volume(path: &str) -> Option<ParsedVolume> {
+    if let Some(captures) = parse_zip_spanned_re().captures(path) {
+        return Some(ParsedVolume {
+            prefix: captures.name("prefix")?.as_str().to_string(),
+            number: captures.name("number")?.as_str().parse().ok()?,
+            style: "zip_spanned",
+            width: 2,
+        });
+    }
     if let Some(captures) = parse_archive_numbered_re().captures(path) {
         return Some(ParsedVolume {
             prefix: captures.name("prefix")?.as_str().to_string(),
@@ -469,6 +484,7 @@ fn has_split_companions_in_dir(lower_names: &HashSet<String>, base_name: &str) -
         format!(r"^{escaped}\.(7z|zip|rar)\.\d+(?:\.[^.]+)?$"),
         format!(r"^{escaped}\.\d{{3}}(?:\.[^.]+)?$"),
         format!(r"^{escaped}\.part\d+\.(?:rar|exe)(?:\.[^.]+)?$"),
+        format!(r"^{escaped}\.z\d{{2}}$"),
     ];
     patterns.iter().any(|pattern| {
         RegexBuilder::new(pattern)
@@ -514,20 +530,21 @@ fn re(pattern: &str) -> Regex {
         .expect("relation regex should compile")
 }
 
-fn split_first_patterns() -> &'static [Regex; 3] {
-    static VALUE: OnceLock<[Regex; 3]> = OnceLock::new();
+fn split_first_patterns() -> &'static [Regex; 4] {
+    static VALUE: OnceLock<[Regex; 4]> = OnceLock::new();
     VALUE.get_or_init(|| {
         [
             re(r"\.part0*1\.(?:rar|exe)(?:\.[^.]+)?$"),
             re(r"\.(7z|zip|rar)\.001(?:\.[^.]+)?$"),
             re(r"\.001(?:\.[^.]+)?$"),
+            re(r"\.z01$"),
         ]
     })
 }
 
 fn split_member_pattern() -> &'static Regex {
     static VALUE: OnceLock<Regex> = OnceLock::new();
-    VALUE.get_or_init(|| re(r"\.(part\d+\.(?:rar|exe)|\d{3})(?:\.[^.]+)?$"))
+    VALUE.get_or_init(|| re(r"\.(part\d+\.(?:rar|exe)|\d{3}|z\d{2})(?:\.[^.]+)?$"))
 }
 
 fn plain_numeric_member_re() -> &'static Regex {
@@ -573,6 +590,16 @@ fn plain_numeric_suffix_re() -> &'static Regex {
 fn parse_archive_numbered_re() -> &'static Regex {
     static VALUE: OnceLock<Regex> = OnceLock::new();
     VALUE.get_or_init(|| re(r"^(?P<prefix>.+\.(?:7z|zip|rar))\.(?P<number>\d{3})$"))
+}
+
+fn zip_spanned_suffix_re() -> &'static Regex {
+    static VALUE: OnceLock<Regex> = OnceLock::new();
+    VALUE.get_or_init(|| re(r"\.z\d{2}$"))
+}
+
+fn parse_zip_spanned_re() -> &'static Regex {
+    static VALUE: OnceLock<Regex> = OnceLock::new();
+    VALUE.get_or_init(|| re(r"^(?P<prefix>.+)\.z(?P<number>\d{2})$"))
 }
 
 fn parse_rar_part_re() -> &'static Regex {

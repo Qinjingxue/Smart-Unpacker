@@ -192,7 +192,7 @@ public:
         *inStream = nullptr;
 
         if (!name) {
-
+            volume_open_failed_ = true;
             return E_FAIL;
 
         }
@@ -212,7 +212,8 @@ public:
         }
 
         if (found == volume_paths_.end()) {
-
+            missing_volume_requested_ = true;
+            missing_volume_name_ = std::filesystem::path(name).filename().wstring();
             return E_FAIL;
 
         }
@@ -222,7 +223,8 @@ public:
         auto* stream = new FileInStream(found->second);
 
         if (!stream->is_open()) {
-
+            volume_open_failed_ = true;
+            failed_volume_name_ = std::filesystem::path(found->second).filename().wstring();
             stream->Release();
 
             return E_FAIL;
@@ -234,6 +236,11 @@ public:
         return S_OK;
 
     }
+
+    bool missing_volume_requested() const { return missing_volume_requested_; }
+    bool volume_open_failed() const { return volume_open_failed_; }
+    const std::wstring& missing_volume_name() const { return missing_volume_name_; }
+    const std::wstring& failed_volume_name() const { return failed_volume_name_; }
 
     HRESULT STDMETHODCALLTYPE CryptoGetTextPassword(BSTR* password) override {
 
@@ -272,6 +279,11 @@ private:
     std::vector<std::wstring> part_paths_;
 
     std::map<std::wstring, std::wstring> volume_paths_;
+
+    bool missing_volume_requested_ = false;
+    bool volume_open_failed_ = false;
+    std::wstring missing_volume_name_;
+    std::wstring failed_volume_name_;
 
 };
 

@@ -83,6 +83,11 @@ impl AnalysisBinaryView {
         result.set_item("central_directory_offset", 0u64)?;
         result.set_item("central_directory_size", 0u64)?;
         result.set_item("total_entries", 0u16)?;
+        result.set_item("is_multi_disk", false)?;
+        result.set_item("disk_number", 0u16)?;
+        result.set_item("central_directory_disk", 0u16)?;
+        result.set_item("disk_entries", 0u16)?;
+        result.set_item("declared_total_disks", 1u32)?;
         result.set_item("central_directory_present", false)?;
         result.set_item("central_directory_walk_ok", false)?;
         result.set_item("central_directory_entries_checked", 0usize)?;
@@ -112,8 +117,21 @@ impl AnalysisBinaryView {
         result.set_item("segment_end", segment_end)?;
         result.set_item("central_directory_size", central_directory_size)?;
         result.set_item("total_entries", total_entries)?;
-        if disk_number != 0 || central_directory_disk != 0 || disk_entries != total_entries {
-            result.set_item("error", "multi_disk_or_entry_mismatch")?;
+        let is_multi_disk = disk_number != 0 || central_directory_disk != 0;
+        result.set_item("is_multi_disk", is_multi_disk)?;
+        result.set_item("disk_number", disk_number)?;
+        result.set_item("central_directory_disk", central_directory_disk)?;
+        result.set_item("disk_entries", disk_entries)?;
+        result.set_item("declared_total_disks", u32::from(disk_number) + 1)?;
+        if is_multi_disk {
+            result.set_item("error", "zip_multi_disk")?;
+            let evidence = PyList::empty(py);
+            evidence.append("zip:eocd_multi_disk")?;
+            result.set_item("evidence", evidence)?;
+            return Ok(result.unbind());
+        }
+        if disk_entries != total_entries {
+            result.set_item("error", "entry_count_mismatch")?;
             return Ok(result.unbind());
         }
         if eocd_offset < central_directory_size {

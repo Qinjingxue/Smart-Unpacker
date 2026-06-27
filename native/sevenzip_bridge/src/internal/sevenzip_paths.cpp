@@ -130,6 +130,14 @@ std::optional<int> parse_volume_number(const std::wstring& path) {
 
     }
 
+    if (name.size() >= 4 && name[name.size() - 4] == L'.' && name[name.size() - 3] == L'z') {
+        const wchar_t a = name[name.size() - 2];
+        const wchar_t b = name[name.size() - 1];
+        if (iswdigit(a) && iswdigit(b)) {
+            return ((a - L'0') * 10) + (b - L'0');
+        }
+    }
+
     if (ends_with(name, L".rar")) {
 
         return 1;
@@ -252,6 +260,9 @@ bool looks_missing_volume(const std::wstring& archive_path, Int32 op_res) {
 
         lower.find(L".part") != std::wstring::npos ||
 
+        (lower.size() >= 4 && lower[lower.size() - 4] == L'.' && lower[lower.size() - 3] == L'z' &&
+            iswdigit(lower[lower.size() - 2]) && iswdigit(lower[lower.size() - 1])) ||
+
         lower.find(L".r00") != std::wstring::npos ||
 
         lower.find(L".r01") != std::wstring::npos;
@@ -280,6 +291,10 @@ bool has_numbered_split_head(const std::vector<std::wstring>& part_paths) {
 
             return true;
 
+        }
+
+        if (name.size() >= 4 && name.compare(name.size() - 4, 4, L".z01") == 0) {
+            return true;
         }
 
     }
@@ -346,7 +361,11 @@ bool has_split_volume_gap(const std::vector<std::wstring>& part_paths) {
 
         const int current = parse_volume_number(path).value_or(expected);
 
-        if (current != expected) {
+        if (current < expected) {
+            continue;
+        }
+
+        if (current > expected) {
 
             return true;
 
