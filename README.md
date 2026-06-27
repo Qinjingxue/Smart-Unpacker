@@ -1,28 +1,11 @@
 # SunPack
 
-本项目仅限Windows
-SunPack 是一个可以处理各种压缩资源，包括伪装归档，混乱后缀，载体嵌套等类型压缩包的自动化工具，主要交互模式是右键菜单调用和CLI命令行交互。
+SunPack主要功能是批量处理大量混乱压缩包，可以实现右键菜单一键解压目录内所有压缩包，或者递归解压嵌套目录。还可以使用右键菜单监控文件夹，之后所有进入该文件夹内的混乱压缩包均会被自动解压，有密码只需复制密码，项目会读剪贴板自动记录并尝试。
+主要交互模式是右键菜单调用和CLI命令行交互，
 
 注意，该项目由于输入复杂，不保证稳定，目前项目仍在稳定性测试中
 
-项目还有一个实验性深度学习的压缩包修复系统，但目前因为过于复杂而开发搁置
-
-## 开发相关
-
-准备开发环境：
-
-```powershell
-.\scripts\setup_windows_dev.ps1
-```
-
-构建项目：
-
-```powershell
-.\scripts\build_windows.ps1
-```
-
-开发环境和构建说明见 [文档](docs/development_setup.md)。
-开发边界见文档 [文档](docs\development_boundaries.md)。
+项目还有一个实验性深度学习的压缩包修复系统，但目前因为过于复杂而开发搁置。
 
 ## 命令速览
 
@@ -49,6 +32,23 @@ python sunpack.py config validate
 ```
 
 完整配置说明见 [配置文件说明](docs/configuration.md)。
+
+## 开发相关
+
+准备开发环境：
+
+```powershell
+.\scripts\setup_windows_dev.ps1
+```
+
+构建项目：
+
+```powershell
+.\scripts\build_windows.ps1
+```
+
+开发环境和构建说明见 [文档](docs/development_setup.md)。
+开发边界见文档 [文档](docs\development_boundaries.md)
 
 ## 架构速览
 
