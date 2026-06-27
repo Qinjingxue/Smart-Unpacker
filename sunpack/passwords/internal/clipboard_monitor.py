@@ -106,6 +106,11 @@ class _WindowsClipboardLoop:
         if not self.user32.AddClipboardFormatListener(hwnd):
             self.user32.DestroyWindow(hwnd)
             return
+        # Close the startup race between launching the watch service and
+        # registering for clipboard notifications.  A copy made during that
+        # window does not produce another WM_CLIPBOARDUPDATE, so read the
+        # current clipboard once after the listener is active.
+        self.monitor._handle_clipboard_update()
         msg = wintypes.MSG()
         while not self.monitor._stop_event.is_set():
             result = self.user32.GetMessageW(ctypes.byref(msg), None, 0, 0)

@@ -3,6 +3,7 @@ from __future__ import annotations
 import sunpack.passwords.internal.builtin as builtin_module
 import sunpack.passwords.internal.clipboard_monitor as clipboard_monitor_module
 from sunpack.passwords.internal.clipboard_monitor import ClipboardPasswordMonitor
+from sunpack.passwords.internal.clipboard_monitor import _WindowsClipboardLoop
 
 
 def test_clipboard_monitor_persists_clipboard_passwords_and_notifies(tmp_path, monkeypatch):
@@ -26,3 +27,40 @@ def test_clipboard_monitor_persists_clipboard_passwords_and_notifies(tmp_path, m
     assert "clip-0" not in passwords
     assert "clip-5" in passwords
     assert "clip-34" in passwords
+
+
+def test_windows_clipboard_loop_reads_current_clipboard_after_listener_registration():
+    handled = []
+
+    class FakeStopEvent:
+        def is_set(self):
+            return False
+
+    class FakeMonitor:
+        _stop_event = FakeStopEvent()
+        _hwnd = None
+
+        def _handle_clipboard_update(self):
+            handled.append("clipboard")
+
+    class FakeUser32:
+        def AddClipboardFormatListener(self, _hwnd):
+            return True
+
+        def GetMessageW(self, _msg, _hwnd, _minimum, _maximum):
+            return 0
+
+        def RemoveClipboardFormatListener(self, _hwnd):
+            return True
+
+        def DestroyWindow(self, _hwnd):
+            return True
+
+    loop = object.__new__(_WindowsClipboardLoop)
+    loop.monitor = FakeMonitor()
+    loop.user32 = FakeUser32()
+    loop._create_window = lambda: 123
+
+    loop.run()
+
+    assert handled == ["clipboard"]
