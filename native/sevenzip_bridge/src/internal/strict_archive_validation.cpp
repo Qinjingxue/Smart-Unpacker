@@ -1,11 +1,13 @@
 #include "strict_archive_validation.hpp"
 
 #include "sevenzip_sdk.hpp"
+#include "sevenzip_paths.hpp"
 
 #ifdef _WIN32
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <vector>
 #endif
 
@@ -262,6 +264,47 @@ bool strict_seven_zip_headers_ok(const std::wstring& path) {
         return true;
     }
     return crc32_bytes(data.data() + next_start, static_cast<std::size_t>(next_size)) == next_crc;
+}
+
+bool seven_zip_parts_prove_missing_tail(const std::vector<std::wstring>& part_paths) {
+    const auto volumes = sorted_data_volume_paths(unique_existing_paths(L"", part_paths));
+    if (volumes.empty() || !has_numbered_split_head(volumes)) {
+        return false;
+    }
+
+    RangeFile first(volumes.front());
+    std::vector<unsigned char> header;
+    if (!first.valid() || !first.read(0, 32, header)) {
+        return false;
+    }
+    const unsigned char signature[] = {'7', 'z', 0xBC, 0xAF, 0x27, 0x1C};
+    if (!std::equal(std::begin(signature), std::end(signature), header.begin())) {
+        return false;
+    }
+    if (crc32_bytes(header.data() + 12, 20) != le32_at(header, 8)) {
+        return false;
+    }
+
+    const UInt64 next_offset =
+        static_cast<UInt64>(le32_at(header, 12)) |
+        (static_cast<UInt64>(le32_at(header, 16)) << 32);
+    const UInt64 next_size =
+        static_cast<UInt64>(le32_at(header, 20)) |
+        (static_cast<UInt64>(le32_at(header, 24)) << 32);
+    if (next_offset > std::numeric_limits<UInt64>::max() - 32u ||
+        next_size > std::numeric_limits<UInt64>::max() - (32u + next_offset)) {
+        return false;
+    }
+    const UInt64 expected_size = 32u + next_offset + next_size;
+    UInt64 available_size = 0;
+    for (const auto& path : volumes) {
+        const UInt64 size = file_size_or_zero(path);
+        if (size > std::numeric_limits<UInt64>::max() - available_size) {
+            return false;
+        }
+        available_size += size;
+    }
+    return available_size < expected_size;
 }
 
 #endif

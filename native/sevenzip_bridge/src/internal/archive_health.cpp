@@ -6,6 +6,7 @@
 #include "sevenzip_properties.hpp"
 #include "sevenzip_status.hpp"
 #include "sevenzip_streams.hpp"
+#include "strict_archive_validation.hpp"
 
 namespace sunpack::sevenzip {
 
@@ -34,6 +35,15 @@ HealthProbeResult check_archive_health_internal(
         result.missing_volume = true;
         result.missing_volume_evidence = "standard_sequence_gap";
         result.message = "split archive is missing one or more numbered volumes";
+        return result;
+    }
+
+    if (seven_zip_parts_prove_missing_tail(part_paths)) {
+        result.status = PasswordTestStatus::Damaged;
+        result.is_archive = true;
+        result.missing_volume = true;
+        result.missing_volume_evidence = "seven_zip_start_header_length";
+        result.message = "7z start header proves that the split archive tail is missing";
         return result;
     }
 
@@ -149,11 +159,6 @@ HealthProbeResult check_archive_health_internal(
         }
 
         result.encrypted = opened_as_encrypted;
-
-        result.missing_volume_suspected = false;
-        if (result.missing_volume_evidence == "tail_size_heuristic") {
-            result.missing_volume_evidence.clear();
-        }
 
         result.status = PasswordTestStatus::Ok;
 

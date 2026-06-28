@@ -17,6 +17,8 @@ bool strict_zip_stored_entries_ok(const std::wstring& path, const ExtractOutputT
 
 bool strict_seven_zip_headers_ok(const std::wstring& path);
 
+bool seven_zip_parts_prove_missing_tail(const std::vector<std::wstring>& part_paths);
+
 
 
 #endif

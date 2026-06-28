@@ -197,6 +197,11 @@ ExtractArchiveResult extract_archive_internal(
         return result;
     }
 
+    if (seven_zip_parts_prove_missing_tail(part_paths)) {
+        set_missing_volume_failure(result, "input_preflight", "seven_zip_start_header_length");
+        return result;
+    }
+
     if (likely_missing_split_tail(part_paths)) {
         result.missing_volume_suspected = true;
         result.missing_volume_evidence = "tail_size_heuristic";

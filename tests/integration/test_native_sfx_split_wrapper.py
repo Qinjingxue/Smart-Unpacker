@@ -172,7 +172,10 @@ def test_native_wrapper_detects_missing_zip_sfx_split_tail(tmp_path):
 
     health = get_native_password_tester().check_archive_health(str(case.entry_path), part_paths=_parts(case))
 
-    assert health.is_missing_volume
+    assert health.ok
+    assert not health.is_missing_volume
+    assert health.is_missing_volume_suspected
+    assert health.missing_volume_evidence == "tail_size_heuristic"
 
 
 def test_native_wrapper_detects_damaged_zip_sfx_split_tail(tmp_path):

@@ -16,7 +16,6 @@ def test_real_7z_sfx_missing_tail_reports_missing_volume_not_partial_payload(tmp
         "7z",
         split=True,
         sfx=True,
-        split_issue="missing_last",
         payload_size=2 * 1024 * 1024,
     )
     _remove_current_tail_volume(case)
@@ -70,7 +69,8 @@ def test_real_7z_missing_volume_priority_survives_irrelevant_wrong_password(tmp_
 def test_real_rar_sfx_missing_tail_reports_missing_volume_when_rar_available(tmp_path):
     if get_optional_rar() is None:
         pytest.skip("RAR generator is not configured")
-    case = _create_real_case_or_skip(tmp_path, "rar_sfx_missing_tail", "rar", split=True, sfx=True, split_issue="missing_last")
+    case = _create_real_case_or_skip(tmp_path, "rar_sfx_missing_tail", "rar", split=True, sfx=True)
+    _remove_current_tail_volume(case)
     scheduler = ExtractionScheduler(max_retries=1)
     try:
         result = scheduler.extract(_task(case.entry_path, parts=_case_parts(case), detected_ext="rar"), str(tmp_path / "out"))
