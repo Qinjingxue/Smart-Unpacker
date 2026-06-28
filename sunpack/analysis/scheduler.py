@@ -1,15 +1,15 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
-from sunpack.analysis.config import analysis_config, enabled_fuzzy_module_configs, enabled_module_configs
+from sunpack.analysis.config import analysis_config, enabled_fuzzy_module_configs
 from sunpack.analysis.fuzzy_pipeline.registry import discover_fuzzy_analysis_modules, get_fuzzy_analysis_module_registry
 from sunpack.analysis.structure_pipeline.prepass import extend_signature_prepass_full, run_signature_prepass
 from sunpack.analysis.structure_pipeline.registry import discover_analysis_modules, get_analysis_module_registry
 from sunpack.analysis.result import ArchiveAnalysisReport, ArchiveFormatEvidence
 from sunpack.analysis.view import MultiVolumeBinaryView, PatchedBinaryView, SharedBinaryView
 from sunpack.contracts.archive_input import ArchiveInputDescriptor
-from sunpack.contracts.archive_state import ArchiveState
-from sunpack.support import archive_knowledge_projection as knowledge_view
+from sunpack.contracts.tasks import ArchiveTask
+from sunpack.support.module_config import enabled_module_configs
 
 
 class ArchiveAnalysisScheduler:
@@ -41,42 +41,20 @@ class ArchiveAnalysisScheduler:
             return self.analyze_paths(paths, report_path=getattr(group, "head_path", None))
         return self.analyze_paths(getattr(group, "all_paths", None) or [group.head_path], report_path=getattr(group, "head_path", None))
 
-    def analyze_task(self, task) -> ArchiveAnalysisReport:
-        archive_input_report = self._analyze_archive_state(task)
-        if archive_input_report is None:
-            archive_input_report = self._analyze_archive_input(task)
-        if archive_input_report is not None:
-            return archive_input_report
-        volumes = list(getattr(getattr(task, "split_info", None), "volumes", None) or [])
-        if volumes:
-            return self.analyze_paths(volumes, report_path=getattr(task, "main_path", None))
-        paths = list(getattr(getattr(task, "split_info", None), "parts", None) or getattr(task, "all_parts", None) or [])
-        if paths:
-            return self.analyze_paths(paths, report_path=getattr(task, "main_path", None))
-        return self.analyze_path(task.main_path)
-
-    def _analyze_archive_state(self, task) -> ArchiveAnalysisReport | None:
-        try:
-            state = task.archive_state() if hasattr(task, "archive_state") else None
-        except (TypeError, ValueError):
-            return None
-        if state is None:
-            return None
+    def analyze_task(self, task: ArchiveTask) -> ArchiveAnalysisReport:
+        state = task.archive_state()
         if state.patches:
-            return self.analyze_view(PatchedBinaryView(state), report_path=state.source.entry_path or getattr(task, "main_path", None))
-        return self._analyze_descriptor(state.to_archive_input_descriptor(), task)
-
-    def _analyze_archive_input(self, task) -> ArchiveAnalysisReport | None:
-        raw = knowledge_view.source_input(task)
-        if not isinstance(raw, dict):
-            return None
-        if hasattr(task, "archive_input"):
-            descriptor = task.archive_input()
-        else:
-            descriptor = self._normalize_archive_input(raw, task)
-            if descriptor is None:
-                return None
-        return self._analyze_descriptor(descriptor, task)
+            return self.analyze_view(PatchedBinaryView(state), report_path=state.source.entry_path or task.main_path)
+        report = self._analyze_descriptor(state.to_archive_input_descriptor(), task)
+        if report is not None:
+            return report
+        volumes = list(task.split_info.volumes or [])
+        if volumes:
+            return self.analyze_paths(volumes, report_path=task.main_path)
+        paths = list(task.split_info.parts or task.all_parts or [])
+        if paths:
+            return self.analyze_paths(paths, report_path=task.main_path)
+        return self.analyze_path(task.main_path)
 
     def _analyze_descriptor(self, descriptor: ArchiveInputDescriptor, task) -> ArchiveAnalysisReport | None:
         if descriptor.open_mode == "file" and descriptor.entry_path:
@@ -104,29 +82,6 @@ class ArchiveAnalysisScheduler:
                 return self.analyze_path(part.path)
         return None
 
-    def _normalize_archive_state(self, raw: dict, task) -> ArchiveState | None:
-        archive_path = str(getattr(task, "main_path", "") or "")
-        part_paths = list(getattr(task, "all_parts", None) or [])
-        try:
-            return ArchiveState.from_any(
-                raw,
-                archive_path=archive_path,
-                part_paths=part_paths,
-                format_hint=str(getattr(task, "detected_ext", "") or ""),
-                logical_name=str(getattr(task, "logical_name", "") or ""),
-            )
-        except (TypeError, ValueError):
-            return None
-
-    def _normalize_archive_input(self, raw: dict, task) -> ArchiveInputDescriptor | None:
-        archive_path = str(getattr(task, "main_path", "") or "")
-        part_paths = list(getattr(task, "all_parts", None) or [])
-        try:
-            if raw.get("kind") == "archive_input" or raw.get("open_mode"):
-                return ArchiveInputDescriptor.from_dict(raw, archive_path=archive_path, part_paths=part_paths)
-            return ArchiveInputDescriptor.from_source_input(raw, archive_path=archive_path, part_paths=part_paths)
-        except (TypeError, ValueError):
-            return None
 
     def analyze_view(self, view: SharedBinaryView | MultiVolumeBinaryView, *, report_path: str | None = None) -> ArchiveAnalysisReport:
         prepass_config = self.config.get("prepass") if isinstance(self.config.get("prepass"), dict) else {}

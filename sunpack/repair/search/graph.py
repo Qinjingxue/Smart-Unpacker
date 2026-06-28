@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-import hashlib
 from typing import Any, Literal
 
 from sunpack.contracts.archive_state import ArchiveState, PatchPlan
@@ -9,6 +8,7 @@ from sunpack.repair.candidate import RepairCandidate
 from sunpack.repair.job import RepairJob
 from sunpack.repair.search.recovery import PolicyRecoverySnapshot
 from sunpack.repair.search.types import PolicyExplorationGraph, PolicyGraphEdge, PolicyGraphNode
+from sunpack.support.hash_features import hash_unit as _hash_unit
 
 
 GraphOperationKind = Literal["init", "forward", "undo", "stop"]
@@ -668,14 +668,6 @@ def _top_root(scores: dict[str, Any]) -> str:
     if not scores:
         return ""
     return max(scores.items(), key=lambda item: _float(item[1]))[0]
-
-
-def _hash_unit(value: Any, *, buckets: int = 2048) -> float:
-    text = str(value or "")
-    if not text:
-        return 0.0
-    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
-    return (int(digest[:8], 16) % buckets) / float(buckets - 1)
 
 
 def _clamp01(value: float) -> float:

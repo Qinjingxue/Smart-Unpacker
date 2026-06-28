@@ -12,7 +12,7 @@ class FakeVerifier:
         self.correct_password = correct_password
         self.batches: list[list[str]] = []
 
-    def verify_batch(self, archive_path, passwords, *, part_paths=None):
+    def verify_batch(self, archive_path, passwords, *, part_paths=None, archive_input=None):
         self.batches.append(list(passwords))
         if self.correct_password in passwords:
             return PasswordBatchVerification(
@@ -34,7 +34,7 @@ class StaticVerifier:
         self.outcome = outcome
         self.batches: list[list[str]] = []
 
-    def verify_batch(self, archive_path, passwords, *, part_paths=None):
+    def verify_batch(self, archive_path, passwords, *, part_paths=None, archive_input=None):
         self.batches.append(list(passwords))
         return self.outcome
 

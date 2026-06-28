@@ -4,12 +4,10 @@ import argparse
 import binascii
 import hashlib
 import json
-import os
 import random
 import shutil
 import struct
 import subprocess
-import sys
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -228,10 +226,6 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--archive-variant-config", default="")
     parser.add_argument("--skip-clean-build", action="store_true")
     parser.add_argument("--clean-only", action="store_true")
-    parser.add_argument("--per-sample", type=int, default=0, help="Accepted for wrapper compatibility; explicit distribution counts drive generation.")
-    parser.add_argument("--formats", default="", help="Accepted for wrapper compatibility.")
-    parser.add_argument("--sample", action="append", default=[], help="Accepted for wrapper compatibility.")
-    parser.add_argument("--no-pretty", action="store_true", help="Accepted for wrapper compatibility.")
     return parser
 
 
@@ -850,18 +844,6 @@ def _bounded_offset(start: int, end: int, rng: random.Random) -> int:
     if end <= start:
         return max(0, start)
     return rng.randrange(start, end)
-
-
-def _scan_structure(data: bytes) -> dict[str, Any]:
-    try:
-        import sunpack_native
-
-        scan = sunpack_native.seven_zip_scan_source({"kind": "bytes", "data": data})
-        structure = dict(scan.get("structure") or {})
-        structure["native_scan_status"] = scan.get("status")
-        return structure
-    except Exception:
-        return {}
 
 
 def _structure_from_flags(flags: list[str]) -> dict[str, Any]:

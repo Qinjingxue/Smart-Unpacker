@@ -24,7 +24,6 @@ from sunpack.contracts.verification import (
     ASSESSMENT_UNUSABLE,
     DECISION_ACCEPT,
     DECISION_NONE,
-    DECISION_REPAIR,
     SOURCE_INTEGRITY_UNKNOWN,
     VerificationResult,
 )
@@ -672,20 +671,6 @@ def _verification_score_with_assessment(
 
 def _default_assessment_score(assessment: dict[str, Any]) -> float:
     return float(assessment.get("completeness", 0.0) or 0.0)
-
-
-def _candidate_progress_score(candidate: RepairCandidate) -> float:
-    best = 0.0
-    for validation in candidate.validations:
-        details = validation.details if isinstance(validation.details, dict) else {}
-        dry_run = details.get("dry_run") if isinstance(details.get("dry_run"), dict) else {}
-        if dry_run.get("ok"):
-            best = max(best, 1.0)
-        elif int(dry_run.get("files_written", 0) or 0) > 0:
-            best = max(best, 0.55)
-        elif int(dry_run.get("bytes_written", 0) or 0) > 0:
-            best = max(best, 0.35)
-    return best
 
 
 def _state_recovery_score(state: RepairBeamState | None) -> float:

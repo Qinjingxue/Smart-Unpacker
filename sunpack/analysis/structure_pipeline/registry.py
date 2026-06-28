@@ -1,8 +1,7 @@
-import importlib
-import pkgutil
 from typing import Dict
 
 from sunpack.analysis.structure_pipeline.module import AnalysisModule
+from sunpack.support.module_discovery import discover_package_modules
 
 
 class AnalysisModuleRegistry:
@@ -20,7 +19,6 @@ class AnalysisModuleRegistry:
 
 
 _global_registry = AnalysisModuleRegistry()
-_discovered = False
 
 
 def register_analysis_module(module: AnalysisModule):
@@ -33,12 +31,4 @@ def get_analysis_module_registry() -> AnalysisModuleRegistry:
 
 
 def discover_analysis_modules():
-    global _discovered
-    if _discovered:
-        return
-
-    package = importlib.import_module("sunpack.analysis.structure_pipeline.modules")
-    for module_info in pkgutil.iter_modules(package.__path__, package.__name__ + "."):
-        importlib.import_module(module_info.name)
-
-    _discovered = True
+    discover_package_modules("sunpack.analysis.structure_pipeline.modules")

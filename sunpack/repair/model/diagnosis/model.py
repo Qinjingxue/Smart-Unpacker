@@ -12,17 +12,6 @@ except Exception:  # pragma: no cover - depends on optional training environment
     _BASE_MODULE = object
 
 
-def require_torch():
-    try:
-        import torch  # noqa: F401
-        import torch.nn as nn  # noqa: F401
-    except Exception as exc:  # pragma: no cover
-        raise RuntimeError(
-            "DiagnosisGNN requires torch and torch-geometric. "
-            f"Install the project runtime dependencies. Import error: {exc}"
-        ) from exc
-
-
 def build_diagnosis_gnn_model(*, metadata: tuple[list[str], list[tuple[str, str, str]]], config: dict[str, Any] | None = None):
     require_pyg()
     config = dict(config or {})

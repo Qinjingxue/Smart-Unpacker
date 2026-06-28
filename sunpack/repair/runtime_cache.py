@@ -4,8 +4,9 @@ import copy
 import hashlib
 import json
 from collections import OrderedDict, Counter
-from pathlib import Path
 from typing import Any, Callable
+
+from sunpack.support.json_values import stable_json_value
 
 
 class RepairRuntimeCache:
@@ -57,22 +58,10 @@ class RepairRuntimeCache:
 
 
 def stable_cache_key(payload: Any) -> str:
-    data = json.dumps(_jsonable(payload), ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    data = json.dumps(stable_json_value(payload, bytes_digest_key="bytes_sha256"), ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(data.encode("utf-8")).hexdigest()
 
 
-def _jsonable(value: Any) -> Any:
-    if isinstance(value, dict):
-        return {str(key): _jsonable(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_jsonable(item) for item in value]
-    if isinstance(value, set):
-        return sorted(_jsonable(item) for item in value)
-    if isinstance(value, bytes):
-        return {"bytes_sha256": hashlib.sha256(value).hexdigest(), "size": len(value)}
-    if isinstance(value, Path):
-        return str(value)
-    return value
 
 
 def _cached_value_still_valid(value: Any) -> bool:

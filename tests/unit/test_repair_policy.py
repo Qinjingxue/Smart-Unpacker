@@ -5,7 +5,6 @@ import pytest
 from sunpack.contracts.archive_input import ArchiveInputDescriptor
 from sunpack.contracts.archive_state import ArchiveState, PatchOperation, PatchPlan
 from sunpack.repair.candidate import RepairCandidate, materialize_candidate
-from sunpack.repair.config import normalize_repair_config
 from sunpack.repair.job import RepairJob
 from sunpack.repair.pipeline.module import RepairModuleSpec, RepairRoute
 from sunpack.repair.search import proposals as search_proposals
@@ -18,22 +17,6 @@ from sunpack.repair.scheduler import RepairScheduler
 @pytest.fixture(autouse=True)
 def _skip_module_discovery(monkeypatch):
     monkeypatch.setattr("sunpack.repair.scheduler.discover_repair_modules", lambda: None)
-
-
-def test_policy_config_rejects_removed_compatibility_flags():
-    config = normalize_repair_config({"policy": {"enabled": "true", "strict_model_errors": "false"}})
-
-    assert config["policy"]["enabled"] is True
-    assert config["policy"]["strict_model_errors"] is False
-    assert "provider_package" not in config["policy"]
-    assert "fallback_to_selector" not in config["policy"]
-    assert "disable_beam_when_model_active" not in config["policy"]
-    assert "step_mode" not in config["policy"]
-
-    with pytest.raises(ValueError, match="was removed"):
-        normalize_repair_config({"policy": {"step_mode": True}})
-    with pytest.raises(ValueError, match="was removed"):
-        normalize_repair_config({"policy": {"provider_package": "legacy_provider"}})
 
 
 def test_model_runtime_uses_paired_diagnosis_and_graph_models(tmp_path, monkeypatch):

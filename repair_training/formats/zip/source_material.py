@@ -28,8 +28,6 @@ from repair_training.formats.zip.corruption import (
 
 
 DEFAULT_MATERIAL_ROOT = Path("repair_training") / "material"
-DEFAULT_OUTPUT_DIR = Path("repair_training") / "tmp" / "corpus"
-DEFAULT_MANIFEST = DEFAULT_OUTPUT_DIR / "repair_plan_manifest.jsonl"
 DEFAULT_ZIP_V3_DISTRIBUTION = Path("repair_training") / "formats" / "zip" / "distributions" / "damage_distribution_zip_root_transition_v3.json"
 PROFILE_LAYERS = (
     ("structural", 0.30, ("structural_boundary", "structural_header_tail", "structural_footer_tail")),
@@ -120,8 +118,6 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"material_root": str(material_root), "format_dirs": list(MATERIAL_FORMAT_DIRS)}, ensure_ascii=False, sort_keys=True))
         return 0
     _init_material(material_root)
-    if args.input_dir:
-        return _legacy_build(args)
     return _material_build(args, material_root)
 
 
@@ -139,11 +135,6 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--distribution-report", default="", help="Write a material distribution report JSON after generation.")
     parser.set_defaults(pretty=True)
 
-    parser.add_argument("--input-dir", default="", help="Legacy: directory of clean archives.")
-    parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR), help="Legacy output directory.")
-    parser.add_argument("--manifest", default=str(DEFAULT_MANIFEST), help="Legacy aggregate manifest JSONL path.")
-    parser.add_argument("--per-source", type=int, default=0, help="Legacy variants per source; defaults to --per-sample.")
-    parser.add_argument("--append", action="store_true", help="Legacy append to aggregate manifest.")
     return parser
 
 
@@ -364,57 +355,6 @@ def _material_build_with_profile_distribution(
     report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True, default=str), encoding="utf-8")
     summary["distribution_report"] = str(report_path)
     print(json.dumps(summary, ensure_ascii=False, sort_keys=True))
-    return 0
-
-
-def _legacy_build(args: argparse.Namespace) -> int:
-    input_dir = Path(args.input_dir)
-    output_dir = Path(args.output_dir)
-    damaged_dir = output_dir / "damaged"
-    manifest_path = Path(args.manifest or output_dir / "repair_plan_manifest.jsonl")
-    damaged_dir.mkdir(parents=True, exist_ok=True)
-    manifest_path.parent.mkdir(parents=True, exist_ok=True)
-    formats = _format_filter(args.formats)
-    seed = _resolve_seed(args.seed)
-    rng = random.Random(seed)
-    per_source = int(args.per_source or args.per_sample)
-    records: list[dict[str, Any]] = []
-    sources = _source_archives(input_dir, formats)
-    for source_index, source in enumerate(sources):
-        fmt = detect_archive_format(source)
-        if fmt is None:
-            continue
-        source_archive_id = _source_archive_id(source)
-        layer_plan = _damage_layer_plan(rng, fmt, max(0, per_source))
-        for variant_index, (requested_layer, layer, layer_weight, profile, skip_reason) in enumerate(layer_plan):
-            case_root = damaged_dir / source_archive_id / f"v{variant_index:03d}"
-            try:
-                case = build_corpus_corruption_case(
-                    case_root,
-                    source_path=source,
-                    fmt=fmt,
-                    seed=rng.randrange(1, 2**31 - 1) + source_index,
-                    variant_index=variant_index,
-                    damage_profile=profile,
-                )
-            except Exception as exc:
-                records.append(_skipped_record(source, fmt, source_archive_id, variant_index, profile, exc, damage_layer=layer, damage_layer_weight=layer_weight, requested_damage_layer=requested_layer, actual_damage_layer=layer, skip_reason=skip_reason))
-                continue
-            record = case.corpus_manifest_record(source_archive_id=source_archive_id, source_path=str(source), damage_profile=profile, variant_index=variant_index)
-            record["damage_layer"] = layer
-            record["requested_damage_layer"] = requested_layer
-            record["actual_damage_layer"] = layer
-            record["damage_layer_weight"] = layer_weight
-            if skip_reason:
-                record["skip_reason"] = skip_reason
-            records.append(record)
-    mode = "a" if args.append else "w"
-    with manifest_path.open(mode, encoding="utf-8") as handle:
-        for record in records:
-            handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True, default=str) + "\n")
-    if args.pretty:
-        _pretty_path(manifest_path).write_text(json.dumps(records, ensure_ascii=False, indent=2, sort_keys=True, default=str), encoding="utf-8")
-    print(json.dumps({"sources": len(sources), "records": len(records), "generated": sum(1 for item in records if item.get("damaged_input")), "seed": seed, "manifest": str(manifest_path)}, ensure_ascii=False, sort_keys=True))
     return 0
 
 
@@ -920,22 +860,6 @@ def _safe_sample_name(raw: str) -> str:
     return value or "sample"
 
 
-def _source_archives(input_dir: Path, formats: set[str]) -> list[Path]:
-    if not input_dir.is_dir():
-        raise SystemExit(f"input directory does not exist: {input_dir}")
-    output = []
-    for path in sorted(input_dir.rglob("*")):
-        if not path.is_file():
-            continue
-        fmt = detect_archive_format(path)
-        if fmt is None:
-            continue
-        if formats and fmt not in formats:
-            continue
-        output.append(path)
-    return output
-
-
 def _format_filter(raw: str) -> set[str]:
     return {item.strip().lower() for item in str(raw or "").split(",") if item.strip()}
 
@@ -1120,13 +1044,6 @@ def _skipped_record(
         record["source_derivation"] = source_derivation
         _copy_zip_derivation_fields(record, source_derivation)
     return record
-
-
-def _pretty_path(path: Path) -> Path:
-    suffix = "".join(path.suffixes)
-    if suffix:
-        return path.with_name(path.name.removesuffix(suffix) + ".pretty.json")
-    return path.with_name(path.name + ".pretty.json")
 
 
 if __name__ == "__main__":

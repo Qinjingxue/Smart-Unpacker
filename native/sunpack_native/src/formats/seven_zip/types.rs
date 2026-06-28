@@ -3,11 +3,6 @@ enum TargetFormat {
     SevenZip,
 }
 
-impl TargetFormat {
-    fn name(self) -> &'static str { "7z" }
-    fn ext(self) -> &'static str { ".7z" }
-}
-
 struct ArchiveCandidate {
     format: TargetFormat,
     offset: usize,

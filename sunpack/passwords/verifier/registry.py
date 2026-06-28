@@ -139,8 +139,7 @@ class PasswordVerifierChain:
         archive_input: dict | None = None,
     ) -> PasswordBatchVerification:
         for verifier in self._ordered_fast_verifiers(archive_path, archive_input):
-            outcome = _call_verifier(
-                verifier,
+            outcome = verifier.verify_batch(
                 archive_path,
                 passwords,
                 part_paths=part_paths,
@@ -192,8 +191,7 @@ class PasswordVerifierChain:
     ) -> PasswordBatchVerification:
         if self.final_verifier is None:
             return PasswordBatchVerification(ok=True, status="match", matched_index=0, attempts=1, terminal=True)
-        return _call_verifier(
-            self.final_verifier,
+        return self.final_verifier.verify_batch(
             archive_path,
             [password],
             part_paths=part_paths,
@@ -216,8 +214,7 @@ class PasswordVerifierChain:
                 error_text="no final password verifier configured",
                 terminal=True,
             )
-        return _call_verifier(
-            self.final_verifier,
+        return self.final_verifier.verify_batch(
             archive_path,
             passwords,
             part_paths=part_paths,
@@ -225,25 +222,6 @@ class PasswordVerifierChain:
         )
 
 
-def _call_verifier(
-    verifier: PasswordVerifier,
-    archive_path: str,
-    passwords: list[str],
-    *,
-    part_paths: list[str] | None = None,
-    archive_input: dict | None = None,
-) -> PasswordBatchVerification:
-    try:
-        return verifier.verify_batch(
-            archive_path,
-            passwords,
-            part_paths=part_paths,
-            archive_input=archive_input,
-        )
-    except TypeError as error:
-        if "archive_input" not in str(error):
-            raise
-        return verifier.verify_batch(archive_path, passwords, part_paths=part_paths)
 
 
 def _preferred_archive_format(archive_path: str, archive_input: dict | None = None) -> str:

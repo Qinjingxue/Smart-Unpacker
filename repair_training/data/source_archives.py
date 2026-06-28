@@ -10,10 +10,8 @@ import os
 import random
 import shutil
 import struct
-import subprocess
 import sys
 import time
-import zipfile
 import zlib
 from dataclasses import dataclass
 from pathlib import Path
@@ -466,86 +464,6 @@ def _weighted_choice(items: list[str], weights: dict[str, float], rng: random.Ra
     return weighted[-1][0]
 
 
-def _zip_tasks(sample: Path, material_root: Path, cfg: dict[str, Any], tools: dict[str, Path]) -> tuple[list[DeriveTask], list[dict[str, Any]]]:
-    seven_zip = tools.get("seven_zip")
-    tasks = []
-    variants = [str(item) for item in _as_list(cfg.get("variants") or ["normal_deflate"]) if str(item)]
-    variant_weights = _float_map(cfg.get("variant_weights"))
-    levels = _levels(cfg, [5])
-    for variant in variants:
-        for method, level in _zip_variant_method_levels(variant, cfg, levels):
-            output = _output_path(material_root, "zip", sample.name, f"{sample.name}__zip__{variant}__{method}__l{level}.zip")
-            tags = _zip_variant_tags(variant)
-            features = _zip_variant_features(variant, method, level)
-            features["variant_weight"] = max(0.0, float(variant_weights.get(variant, 1.0) or 0.0))
-            runner: Callable[[DeriveTask, float], None] = _run_zip_python
-            tool = "python-zipfile"
-            tool_path = ""
-            command: tuple[str, ...] = ()
-            if variant in {"normal_deflate", "normal_store"} and seven_zip and seven_zip.is_file():
-                command_list = [str(seven_zip), "a", "-tzip", f"-mx={level}", "-y", str(output.resolve()), "."]
-                command_list.insert(4, "-mm=Copy" if method == "store" else "-mm=Deflate")
-                command = tuple(command_list)
-                runner = _run_external
-                tool = "7z"
-                tool_path = str(seven_zip)
-            zip_password = ""
-            if variant == "encrypted_zipcrypto":
-                zip_password = "sunpack"
-                command_list = [str(seven_zip), "a", "-tzip", f"-mx={level}", f"-p{zip_password}", "-mem=ZipCrypto", "-y", str(output.resolve()), "."]
-                command = tuple(command_list)
-                runner = _run_external
-                tool = "7z"
-                tool_path = str(seven_zip)
-            tasks.append(DeriveTask(
-                sample.name,
-                sample,
-                material_root,
-                "zip",
-                output,
-                "zip",
-                method=str(method),
-                level=level,
-                tool=tool,
-                tool_path=tool_path,
-                command=command,
-                runner=runner,
-                zip_variant=variant,
-                zip_container_tags=tags,
-                zip_structure_features=features,
-                zip_password=zip_password,
-            ))
-    return tasks, []
-
-
-def _zip_variant_method_levels(variant: str, cfg: dict[str, Any], levels: list[int]) -> list[tuple[str, int]]:
-    if variant == "normal_store":
-        return [("store", level) for level in levels]
-    if variant == "normal_deflate":
-        return [("deflate", level) for level in levels]
-    if variant == "mixed_store_deflate":
-        return [("mixed", level) for level in levels]
-    if variant in {"data_descriptor_bit3", "long_comment", "sfx_stub", "duplicate_entries", "zip64_forced", "zip64_eocd_locator", "non_utf8_names", "split_zip", "sfx_split_zip", "encrypted_zipcrypto"}:
-        return [("deflate", level) for level in levels]
-    methods = [str(item) for item in _as_list(cfg.get("methods") or ["deflate"])]
-    return [(method, level) for method in methods for level in levels]
-
-
-def _seven_zip_tasks(sample: Path, material_root: Path, cfg: dict[str, Any], tools: dict[str, Path]) -> tuple[list[DeriveTask], list[dict[str, Any]]]:
-    seven_zip = tools.get("seven_zip")
-    if not seven_zip or not seven_zip.is_file():
-        return [], [_skip_record(sample, "7z", "missing_tool", tool="seven_zip", tool_path=str(seven_zip or ""))]
-    tasks = []
-    for method in _as_list(cfg.get("methods") or ["lzma2"]):
-        for solid in _as_list(cfg.get("solid") or [False]):
-            for level in _levels(cfg, [5]):
-                solid_bool = bool(solid)
-                output = _output_path(material_root, "7z", sample.name, f"{sample.name}__7z__{method}__solid{int(solid_bool)}__l{level}.7z")
-                command = [str(seven_zip), "a", "-t7z", f"-mx={level}", f"-m0={method}", f"-ms={'on' if solid_bool else 'off'}", "-y", str(output.resolve()), "."]
-                tasks.append(DeriveTask(sample.name, sample, material_root, "7z", output, "7z", method=str(method), level=level, solid=solid_bool, tool="7z", tool_path=str(seven_zip), command=tuple(command), runner=_run_external))
-    return tasks, []
-
-
 def _run_task(task: DeriveTask, timeout: float) -> dict[str, Any]:
     started = time.perf_counter()
     task.output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -576,71 +494,12 @@ def _run_task(task: DeriveTask, timeout: float) -> dict[str, Any]:
         return record
 
 
-def _run_external(task: DeriveTask, timeout: float) -> None:
-    completed = subprocess.run(
-        list(task.command),
-        cwd=str(task.source_dir),
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        timeout=timeout if timeout > 0 else None,
-    )
-    if completed.returncode != 0:
-        raise RuntimeError((completed.stderr or completed.stdout or "").strip() or f"tool exited {completed.returncode}")
-
-
-def _run_zip_python(task: DeriveTask, timeout: float) -> None:
-    variant = str(task.zip_variant or "normal_deflate")
-    if variant == "data_descriptor_bit3":
-        write_zip_data_descriptor(task.source_dir, task.output_path, int(task.level or 6))
-    elif variant == "zip64_eocd_locator":
-        _write_zip64_eocd_locator(task.source_dir, task.output_path, str(task.method or "deflate"), int(task.level or 6))
-    else:
-        _write_zipfile_variant(task.source_dir, task.output_path, variant, str(task.method or "deflate"), int(task.level or 6))
-    if variant in {"sfx_stub", "sfx_split_zip"}:
-        original = task.output_path.read_bytes()
-        task.output_path.write_bytes(_fake_sfx_stub() + original)
-    if variant in {"split_zip", "sfx_split_zip"}:
-        _write_zip_split_sidecars(task.output_path)
-
-
 def _source_files(source_dir: Path) -> list[Path]:
     return [
         path
         for path in sorted(source_dir.rglob("*"))
         if path.is_file() and not path.name.startswith("derived_manifest.")
     ]
-
-
-def _write_zipfile_variant(source_dir: Path, output: Path, variant: str, method: str, level: int) -> None:
-    compression = zipfile.ZIP_STORED if method == "store" else zipfile.ZIP_DEFLATED
-    compresslevel = None if compression == zipfile.ZIP_STORED else max(0, min(9, int(level)))
-    files = _source_files(source_dir)
-    with zipfile.ZipFile(output, "w", compression=compression, compresslevel=compresslevel, allowZip64=True) as archive:
-        for index, path in enumerate(files):
-            arcname = str(path.relative_to(source_dir)).replace("\\", "/")
-            item_compression = compression
-            item_level = compresslevel
-            if variant == "mixed_store_deflate" and index % 2 == 0:
-                item_compression = zipfile.ZIP_STORED
-                item_level = None
-            elif variant == "mixed_store_deflate":
-                item_compression = zipfile.ZIP_DEFLATED
-                item_level = compresslevel
-            if variant == "non_utf8_names":
-                arcname = f"cp437_cafe_{index}.txt" if index == 0 else arcname
-            info = zipfile.ZipInfo(arcname)
-            info.compress_type = item_compression
-            if variant == "zip64_forced":
-                info.extra = _zip64_extra_for_file(path.stat().st_size)
-            if variant == "duplicate_entries" and index == 1 and files:
-                archive.writestr(str(files[0].relative_to(source_dir)).replace("\\", "/"), path.read_bytes(), compress_type=item_compression, compresslevel=item_level)
-            archive.writestr(info, path.read_bytes(), compress_type=item_compression, compresslevel=item_level)
-        if variant == "duplicate_entries" and len(files) == 1:
-            archive.writestr(str(files[0].relative_to(source_dir)).replace("\\", "/"), files[0].read_bytes() + b"_duplicate")
-        if variant == "long_comment":
-            archive.comment = (b"SUNPACK-LONG-COMMENT-" * 128)[:2048]
 
 
 def write_zip_data_descriptor(source_dir: Path, output: Path, level: int) -> None:
@@ -664,124 +523,6 @@ def write_zip_data_descriptor(source_dir: Path, output: Path, level: int) -> Non
     body.extend(central)
     body.extend(struct.pack("<IHHHHIIH", 0x06054B50, 0, 0, len(files), len(files), len(central), cd_offset, 0))
     output.write_bytes(bytes(body))
-
-
-def _write_zip64_eocd_locator(source_dir: Path, output: Path, method: str, level: int) -> None:
-    files = _source_files(source_dir)
-    body = bytearray()
-    central = bytearray()
-    compression_method = 0 if method == "store" else 8
-    for path in files:
-        arcname = str(path.relative_to(source_dir)).replace("\\", "/").encode("utf-8")
-        payload = path.read_bytes()
-        if compression_method == 0:
-            compressed = payload
-        else:
-            compressor = zlib.compressobj(max(0, min(9, int(level))), zlib.DEFLATED, -15)
-            compressed = compressor.compress(payload) + compressor.flush()
-        crc = binascii.crc32(payload) & 0xFFFFFFFF
-        local_offset = len(body)
-        local_extra = struct.pack("<HHQQ", 0x0001, 16, len(payload), len(compressed))
-        body.extend(struct.pack(
-            "<IHHHHHIIIHH",
-            0x04034B50,
-            45,
-            0x0800,
-            compression_method,
-            0,
-            0,
-            crc,
-            len(compressed),
-            len(payload),
-            len(arcname),
-            len(local_extra),
-        ))
-        body.extend(arcname)
-        body.extend(local_extra)
-        body.extend(compressed)
-        central_extra = struct.pack("<HHQQQ", 0x0001, 24, len(payload), len(compressed), local_offset)
-        central.extend(struct.pack(
-            "<IHHHHHHIIIHHHHHII",
-            0x02014B50,
-            45,
-            45,
-            0x0800,
-            compression_method,
-            0,
-            0,
-            crc,
-            len(compressed),
-            len(payload),
-            len(arcname),
-            len(central_extra),
-            0,
-            0,
-            0,
-            0,
-            local_offset,
-        ))
-        central.extend(arcname)
-        central.extend(central_extra)
-    cd_offset = len(body)
-    body.extend(central)
-    zip64_offset = len(body)
-    entry_count = len(files)
-    body.extend(struct.pack(
-        "<IQHHIIQQQQ",
-        0x06064B50,
-        44,
-        45,
-        45,
-        0,
-        0,
-        entry_count,
-        entry_count,
-        len(central),
-        cd_offset,
-    ))
-    body.extend(struct.pack("<IIQI", 0x07064B50, 0, zip64_offset, 1))
-    body.extend(struct.pack(
-        "<IHHHHIIH",
-        0x06054B50,
-        0,
-        0,
-        min(entry_count, 0xFFFF),
-        min(entry_count, 0xFFFF),
-        min(len(central), 0xFFFFFFFF),
-        min(cd_offset, 0xFFFFFFFF),
-        0,
-    ))
-    output.write_bytes(bytes(body))
-
-
-def _zip64_extra_for_file(size: int) -> bytes:
-    payload = struct.pack("<QQ", int(size), int(size))
-    return struct.pack("<HH", 0x0001, len(payload)) + payload
-
-
-def _fake_sfx_stub() -> bytes:
-    return b"MZ" + b"\x90" * 58 + b"PE\x00\x00SUNPACK-SFX-STUB" + b"\x00" * 64
-
-
-def _write_zip_split_sidecars(output: Path) -> None:
-    data = output.read_bytes()
-    if len(data) < 4:
-        return
-    split_root = output.with_suffix(output.suffix + ".volumes")
-    split_root.mkdir(parents=True, exist_ok=True)
-    part_size = max(1, len(data) // 3)
-    volumes = []
-    for index, start in enumerate(range(0, len(data), part_size), start=1):
-        part = split_root / f"{output.stem}.z{index:02d}"
-        chunk = data[start:start + part_size]
-        part.write_bytes(chunk)
-        volumes.append({"path": str(part), "index": index, "start": start, "end": start + len(chunk), "size": len(chunk)})
-    sidecar = output.with_name(output.name + ".split.json")
-    sidecar.write_text(json.dumps({"volumes": volumes, "assembled_path": str(output)}, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
-def _output_path(material_root: Path, material_format: str, sample_id: str, filename: str) -> Path:
-    return material_root / material_format / sample_id / filename
 
 
 def _base_record(task: DeriveTask, status: str) -> dict[str, Any]:
@@ -883,19 +624,6 @@ def _remove_zip_split_sidecars(output: Path, root: Path) -> None:
         shutil.rmtree(split_root)
 
 
-def _levels(cfg: dict[str, Any], default: list[int]) -> list[int]:
-    values = cfg.get("levels", default)
-    if not isinstance(values, list):
-        values = default
-    return [int(value) for value in values]
-
-
-def _as_list(value: Any) -> list[Any]:
-    if isinstance(value, list):
-        return value
-    return [value]
-
-
 def _csv_filter(raw: str) -> set[str]:
     return {item.strip().lower() for item in str(raw or "").split(",") if item.strip()}
 
@@ -910,46 +638,6 @@ def _float_map(value: Any) -> dict[str, float]:
         except Exception:
             continue
     return output
-
-
-def _zip_variant_tags(variant: str) -> tuple[str, ...]:
-    mapping = {
-        "normal_deflate": ("normal", "deflate"),
-        "normal_store": ("normal", "store"),
-        "mixed_store_deflate": ("mixed_methods", "store", "deflate"),
-        "data_descriptor_bit3": ("data_descriptor", "bit3", "deflate"),
-        "long_comment": ("eocd_comment", "long_comment"),
-        "sfx_stub": ("sfx", "carrier_prefix"),
-        "duplicate_entries": ("duplicate_entries", "entry_mapping"),
-        "zip64_forced": ("zip64", "extra_field"),
-        "zip64_eocd_locator": ("zip64", "zip64_eocd", "zip64_locator", "extra_field"),
-        "non_utf8_names": ("filename_encoding", "non_utf8_names"),
-        "split_zip": ("split", "multi_volume"),
-        "sfx_split_zip": ("sfx", "split", "multi_volume"),
-        "encrypted_zipcrypto": ("encrypted", "password_protected", "zipcrypto"),
-    }
-    return tuple(mapping.get(variant, ("zip",)))
-
-
-def _zip_variant_features(variant: str, method: str, level: int) -> dict[str, Any]:
-    tags = set(_zip_variant_tags(variant))
-    return {
-        "variant": variant,
-        "method": method,
-        "level": level,
-        "has_sfx_prefix": "sfx" in tags,
-        "has_data_descriptor": "data_descriptor" in tags,
-        "has_split_sidecars": "split" in tags,
-        "has_duplicate_entries": "duplicate_entries" in tags,
-        "has_zip64_extra": "zip64" in tags,
-        "has_zip64_eocd": "zip64_eocd" in tags,
-        "has_zip64_locator": "zip64_locator" in tags,
-        "has_long_comment": "long_comment" in tags,
-        "has_filename_encoding_risk": "filename_encoding" in tags,
-        "has_mixed_methods": "mixed_methods" in tags,
-        "has_encryption": "encrypted" in tags,
-        "encryption_method": "ZipCrypto" if "zipcrypto" in tags else "",
-    }
 
 
 def _format_counts(tasks: list[DeriveTask]) -> dict[str, int]:

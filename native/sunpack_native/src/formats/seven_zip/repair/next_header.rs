@@ -497,7 +497,7 @@ fn skip_bool_vector_and_crc_values(raw: &[u8], pos: &mut usize, count: usize) ->
 fn skip_property_payload(raw: &[u8], pos: &mut usize) -> Option<()> {
     let count = raw.len().saturating_sub(*pos);
     for possible in 0..=count {
-        let mut probe = *pos + possible;
+        let probe = *pos + possible;
         if matches!(raw.get(probe).copied(), Some(SZ_END) | Some(SZ_SIZE) | Some(SZ_CRC)) {
             *pos += possible;
             return Some(());

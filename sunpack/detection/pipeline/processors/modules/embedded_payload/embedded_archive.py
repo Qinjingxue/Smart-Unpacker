@@ -1,7 +1,6 @@
 import os
 from typing import Any, Dict, Optional
 
-from sunpack_native import scan_after_markers as _NATIVE_SCAN_AFTER_MARKERS
 from sunpack_native import scan_carrier_archive as _NATIVE_SCAN_CARRIER_ARCHIVE
 from sunpack_native import scan_magics_anywhere as _NATIVE_SCAN_MAGICS_ANYWHERE
 
@@ -40,114 +39,6 @@ def _empty_result() -> dict[str, Any]:
         "mode": "",
         "carrier_ext": "",
         "zip_local_header": {},
-    }
-
-
-def _find_tail_after_markers_layered(
-    path: str,
-    markers: tuple[bytes, ...],
-    file_size: int,
-    config: Dict[str, Any],
-) -> Optional[Dict[str, Any]]:
-    tail_window = positive_int(
-        config,
-        "carrier_scan_tail_window_bytes",
-        DEFAULT_CARRIER_SCAN_TAIL_WINDOW_BYTES,
-    )
-    prefix_window = non_negative_int(
-        config,
-        "carrier_scan_prefix_window_bytes",
-        DEFAULT_CARRIER_SCAN_PREFIX_WINDOW_BYTES,
-    )
-    full_scan_max = non_negative_int(
-        config,
-        "carrier_scan_full_scan_max_bytes",
-        DEFAULT_CARRIER_SCAN_FULL_SCAN_MAX_BYTES,
-    )
-    deep_scan = bool_value(config, "carrier_scan_deep_scan", DEFAULT_CARRIER_SCAN_DEEP_SCAN)
-
-    tail_start = max(0, file_size - tail_window)
-    should_full_scan = deep_scan or (full_scan_max > 0 and file_size <= full_scan_max)
-
-    native_hit = _native_find_tail_after_markers_layered(
-        path,
-        markers,
-        tail_start,
-        file_size,
-        should_full_scan,
-    )
-    if native_hit or should_full_scan:
-        return native_hit
-
-    if prefix_window <= 0 or tail_start <= 0:
-        return None
-
-    return _native_find_after_markers_in_prefix(path, markers, min(file_size, prefix_window))
-
-
-def _native_find_tail_after_markers_layered(
-    path: str,
-    markers: tuple[bytes, ...],
-    tail_start: int,
-    file_size: int,
-    should_full_scan: bool,
-) -> Optional[Dict[str, Any]]:
-    result = _NATIVE_SCAN_AFTER_MARKERS(
-        path,
-        list(markers),
-        [(magic, detected_ext) for magic, detected_ext in TAIL_MAGICS.items()],
-        int(tail_start),
-        int(file_size),
-        bool(should_full_scan),
-    )
-    if result is None:
-        return None
-    if not isinstance(result, dict):
-        raise TypeError("Native scan_after_markers returned a non-dict result")
-    detected_ext = result.get("detected_ext")
-    offset = result.get("offset")
-    if not isinstance(detected_ext, str) or not detected_ext:
-        raise TypeError("Native scan_after_markers returned an invalid detected_ext")
-    try:
-        offset = int(offset)
-    except (TypeError, ValueError):
-        raise TypeError("Native scan_after_markers returned an invalid offset")
-    return {
-        "detected_ext": detected_ext,
-        "offset": offset,
-        "scan_scope": str(result.get("scan_scope") or ""),
-    }
-
-
-def _native_find_after_markers_in_prefix(
-    path: str,
-    markers: tuple[bytes, ...],
-    prefix_end: int,
-) -> Optional[Dict[str, Any]]:
-    result = _NATIVE_SCAN_AFTER_MARKERS(
-        path,
-        list(markers),
-        [(magic, detected_ext) for magic, detected_ext in TAIL_MAGICS.items()],
-        0,
-        int(max(0, prefix_end)),
-        False,
-    )
-    if result is None:
-        return None
-    if not isinstance(result, dict):
-        raise TypeError("Native scan_after_markers returned a non-dict result")
-    detected_ext = result.get("detected_ext")
-    offset = result.get("offset")
-    if not isinstance(detected_ext, str) or not detected_ext:
-        raise TypeError("Native scan_after_markers returned an invalid detected_ext")
-    try:
-        offset = int(offset)
-    except (TypeError, ValueError):
-        raise TypeError("Native scan_after_markers returned an invalid offset")
-    return {
-        "detected_ext": detected_ext,
-        "offset": offset,
-        "scan_scope": "prefix",
     }
 
 

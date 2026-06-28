@@ -3,6 +3,9 @@ from __future__ import annotations
 import hashlib
 from typing import Any
 
+from sunpack.support.json_values import jsonable_value as _jsonable
+from sunpack.support.nested_values import get_path as _get_path
+
 from sunpack.repair.job import RepairJob
 from sunpack.repair.pipeline.modules._common import (
     cached_repair_operation,
@@ -160,28 +163,6 @@ def _bump_revision(payload: dict[str, Any]) -> None:
         meta["revision"] = 1
 
 
-def _get_path(payload: dict[str, Any], path: str, default: Any = None) -> Any:
-    current: Any = payload
-    for part in [part for part in str(path or "").split(".") if part]:
-        if not isinstance(current, dict) or part not in current:
-            return default
-        current = current[part]
-    return current
-
-
-def _add_flags(payload: dict[str, Any], namespace: str, flags: list[str]) -> None:
-    path = f"{namespace}.flags" if namespace else "flags"
-    existing = [str(item) for item in _get_path(payload, path, []) or [] if str(item)]
-    merged: list[str] = []
-    seen: set[str] = set()
-    for item in [*existing, *flags]:
-        if item in seen:
-            continue
-        seen.add(item)
-        merged.append(item)
-    _set_path(payload, path, merged)
-
-
 def _merge_scan_flags(payload: dict[str, Any], namespace: str, flags: list[str]) -> None:
     path = f"{namespace}.flags" if namespace else "flags"
     _set_path(payload, path, _merged_flags(payload, path, flags))
@@ -202,18 +183,3 @@ def _merged_flags(payload: dict[str, Any], path: str, flags: list[str]) -> list[
         seen.add(item)
         merged.append(item)
     return merged
-
-
-def _jsonable(value: Any) -> Any:
-    if isinstance(value, dict):
-        return {str(key): _jsonable(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple, set)):
-        return [_jsonable(item) for item in value]
-    if isinstance(value, (str, int, float, bool)) or value is None:
-        return value
-    if hasattr(value, "to_dict"):
-        try:
-            return _jsonable(value.to_dict())
-        except Exception:
-            return str(value)
-    return str(value)

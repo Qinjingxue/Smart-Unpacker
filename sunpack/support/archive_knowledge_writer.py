@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from sunpack.contracts.archive_knowledge import ArchiveKnowledge
+from sunpack.support.json_values import jsonable_value as _jsonable
 
 
 def ensure_knowledge(target: Any) -> ArchiveKnowledge:
@@ -214,23 +215,6 @@ def write_evidence(
     rows.append({"path": path, "value": _compact_evidence_value(value), "provenance": provenance})
     knowledge.set("_evidence", rows[-500:])
     return knowledge
-
-
-def _jsonable(value: Any) -> Any:
-    if isinstance(value, ArchiveKnowledge):
-        return value.to_dict()
-    if isinstance(value, dict):
-        return {str(key): _jsonable(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple, set)):
-        return [_jsonable(item) for item in value]
-    if isinstance(value, (str, int, float, bool)) or value is None:
-        return value
-    if hasattr(value, "to_dict"):
-        try:
-            return _jsonable(value.to_dict())
-        except Exception:
-            return str(value)
-    return str(value)
 
 
 def _compact_evidence_value(value: Any) -> Any:

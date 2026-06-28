@@ -1,10 +1,9 @@
-import importlib
-import pkgutil
 from dataclasses import dataclass
 from typing import Any, Callable
 
 from sunpack.detection.pipeline.facts.schema import get_fact_schema, register_fact_schema
 from sunpack.detection.pipeline.processors.context import FactProcessorContext
+from sunpack.support.module_discovery import discover_package_modules
 
 
 FactProcessorFunc = Callable[[FactProcessorContext], Any]
@@ -60,7 +59,6 @@ class ProcessorRegistry:
 
 
 _global_registry = ProcessorRegistry()
-_discovered = False
 
 
 def register_processor(
@@ -87,12 +85,4 @@ def get_processor_registry() -> ProcessorRegistry:
 
 
 def discover_processors():
-    global _discovered
-    if _discovered:
-        return
-
-    package = importlib.import_module("sunpack.detection.pipeline.processors.modules")
-    for module_info in pkgutil.walk_packages(package.__path__, package.__name__ + "."):
-        importlib.import_module(module_info.name)
-
-    _discovered = True
+    discover_package_modules("sunpack.detection.pipeline.processors.modules", recursive=True)

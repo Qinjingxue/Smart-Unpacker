@@ -377,37 +377,3 @@ fn sanitize_archive_name(name: &str) -> String {
         .collect::<Vec<_>>();
     parts.join("/")
 }
-
-fn plausible_tar_header(header: &[u8]) -> bool {
-    if header.len() != 512 {
-        return false;
-    }
-    let name_end = header[0..100]
-        .iter()
-        .position(|byte| *byte == 0)
-        .unwrap_or(100);
-    if name_end == 0
-        || !header[..name_end]
-            .iter()
-            .all(|byte| (0x20..=0x7e).contains(byte))
-    {
-        return false;
-    }
-    parse_tar_number(&header[124..136]).is_some()
-}
-
-fn parse_tar_number(field: &[u8]) -> Option<u64> {
-    let mut value = 0u64;
-    let mut seen = false;
-    for byte in field {
-        match *byte {
-            b'0'..=b'7' => {
-                seen = true;
-                value = value.checked_mul(8)?.checked_add((byte - b'0') as u64)?;
-            }
-            b'\0' | b' ' => {}
-            _ => return None,
-        }
-    }
-    Some(if seen { value } else { 0 })
-}

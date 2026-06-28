@@ -40,9 +40,6 @@ class ArchiveMetadataScanner:
         self.cache = {}
         self.i18n = I18nContext(language)
 
-    def clear_caches(self):
-        self.cache.clear()
-
     def scan(self, archive_path: str, password: Optional[str] = None, part_paths: list[str] | None = None) -> ArchiveMetadataScanResult:
         archive_path = os.path.normpath(archive_path)
         cache_key = self._build_cache_key(archive_path, part_paths=part_paths)

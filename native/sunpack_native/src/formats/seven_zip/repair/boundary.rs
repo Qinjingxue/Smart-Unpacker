@@ -82,9 +82,9 @@ fn seven_zip_repair_boundary_target(
         &[],
     )?;
     if let Ok(Some(candidates_obj)) = result.bind(py).get_item("candidates") {
-        if let Ok(candidate_list) = candidates_obj.downcast::<PyList>() {
+        if let Ok(candidate_list) = candidates_obj.cast::<PyList>() {
             for raw in candidate_list.iter() {
-                if let Ok(item) = raw.downcast::<PyDict>() {
+                if let Ok(item) = raw.cast::<PyDict>() {
                     let offset = item
                         .get_item("offset")?
                         .and_then(|value| value.extract::<usize>().ok())

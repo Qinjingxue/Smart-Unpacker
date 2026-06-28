@@ -1,7 +1,6 @@
-import importlib
-import pkgutil
 from typing import Any, Callable, Dict
 from sunpack.detection.pipeline.facts.schema import get_fact_schema, register_fact_schema
+from sunpack.support.module_discovery import discover_package_modules
 
 FactCollectorFunc = Callable[[str], Any]
 BatchFactCollectorFunc = Callable[[Any], None]
@@ -50,7 +49,6 @@ class FactRegistry:
         return dict(self._schemas)
 
 _global_registry = FactRegistry()
-_discovered = False
 
 def register_fact(
     fact_name: str,
@@ -82,12 +80,4 @@ def get_registry() -> FactRegistry:
     return _global_registry
 
 def discover_collectors():
-    global _discovered
-    if _discovered:
-        return
-
-    package = importlib.import_module("sunpack.detection.pipeline.facts.collectors")
-    for module_info in pkgutil.iter_modules(package.__path__, package.__name__ + "."):
-        importlib.import_module(module_info.name)
-
-    _discovered = True
+    discover_package_modules("sunpack.detection.pipeline.facts.collectors")

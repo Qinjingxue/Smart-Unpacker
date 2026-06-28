@@ -4,6 +4,9 @@ import hashlib
 import json
 from typing import Any
 
+from sunpack.support.json_values import jsonable_value as _jsonable
+from sunpack.support.nested_values import get_path as _get_path
+
 from sunpack.repair.diagnosis import RepairDiagnosis
 from sunpack.repair.job import RepairJob
 from sunpack.repair.pipeline.module import RepairModuleSpec, RepairRoute
@@ -628,15 +631,6 @@ def _archive_authentication(job: RepairJob) -> dict[str, Any]:
     }
 
 
-def _get_path(payload: dict[str, Any], path: str, default: Any = None) -> Any:
-    current: Any = payload
-    for part in [part for part in str(path or "").split(".") if part]:
-        if not isinstance(current, dict) or part not in current:
-            return default
-        current = current[part]
-    return current
-
-
 def _set_path(payload: dict[str, Any], path: str, value: Any) -> None:
     current = payload
     parts = [part for part in str(path or "").split(".") if part]
@@ -668,19 +662,6 @@ def _stable_digest(payload: Any) -> str:
     return hashlib.sha256(data.encode("utf-8", errors="replace")).hexdigest()
 
 
-def _jsonable(value: Any) -> Any:
-    if isinstance(value, dict):
-        return {str(key): _jsonable(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple, set)):
-        return [_jsonable(item) for item in value]
-    if isinstance(value, (str, int, float, bool)) or value is None:
-        return value
-    if hasattr(value, "to_dict"):
-        try:
-            return _jsonable(value.to_dict())
-        except Exception:
-            return str(value)
-    return str(value)
 
 
 for _module in (

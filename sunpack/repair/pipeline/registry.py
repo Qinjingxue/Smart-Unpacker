@@ -1,8 +1,7 @@
-import importlib
-import pkgutil
 from typing import Dict
 
 from sunpack.repair.pipeline.module import RepairModule
+from sunpack.support.module_discovery import discover_package_modules
 
 
 class RepairModuleRegistry:
@@ -21,7 +20,6 @@ class RepairModuleRegistry:
 
 
 _global_registry = RepairModuleRegistry()
-_discovered = False
 
 
 def register_repair_module(module: RepairModule):
@@ -34,12 +32,4 @@ def get_repair_module_registry() -> RepairModuleRegistry:
 
 
 def discover_repair_modules():
-    global _discovered
-    if _discovered:
-        return
-
-    package = importlib.import_module("sunpack.repair.pipeline.modules")
-    for module_info in pkgutil.walk_packages(package.__path__, package.__name__ + "."):
-        importlib.import_module(module_info.name)
-
-    _discovered = True
+    discover_package_modules("sunpack.repair.pipeline.modules", recursive=True)

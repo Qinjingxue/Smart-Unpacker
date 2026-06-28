@@ -202,13 +202,5 @@ def archive_state_manifest(
     )
 
 
-def _looks_like_zip(data: bytes, state: ArchiveState) -> bool:
-    if _format_hint(state) == "zip":
-        return True
-    if data.startswith(b"PK\x03\x04") or data.startswith(b"PK\x05\x06") or b"PK\x05\x06" in data[-66000:]:
-        return True
-    return Path(state.source.entry_path).suffix.lower() == ".zip"
-
-
 def _format_hint(state: ArchiveState) -> str:
     return str(state.format_hint or state.source.format_hint or "").strip().lower().lstrip(".")

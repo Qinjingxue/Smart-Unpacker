@@ -26,7 +26,3 @@ class PasswordSession:
         with self._lock:
             self._resolved_passwords[archive_key] = password
 
-    def to_dict(self) -> dict[str, str | None]:
-        with self._lock:
-            return dict(self._resolved_passwords)
-

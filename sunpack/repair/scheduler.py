@@ -1,18 +1,14 @@
 from dataclasses import replace
 from contextlib import nullcontext
 import json
-import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from sunpack.contracts.archive_state import ArchiveState
-from sunpack.contracts.detection import FactBag
-from sunpack.contracts.tasks import ArchiveTask
-from sunpack.repair.candidate import CandidateSelector, CandidateValidation, RepairCandidate, RepairCandidateBatch, candidate_feature_payload, materialize_candidate, materialize_candidates
+from sunpack.repair.candidate import CandidateSelector, CandidateValidation, RepairCandidate, RepairCandidateBatch, candidate_feature_payload, materialize_candidates
 from sunpack.repair.capability import ModuleCapabilityDecision, RepairCapabilityDecision
-from sunpack.repair.config import enabled_module_configs, repair_config
+from sunpack.repair.config import repair_config
 from sunpack.repair.context import RepairContext, build_repair_context
-from sunpack.repair.control_candidates import is_accept_current_state_candidate, with_accept_current_state_candidate
 from sunpack.repair.diagnosis import RepairDiagnosis, diagnose_repair_job
 from sunpack.support.archive_formats import canonical_format as _normalize_format
 from sunpack.repair.job import RepairJob
@@ -21,9 +17,6 @@ from sunpack.repair.pipeline.modules._common import job_source_size, repair_oper
 from sunpack.repair.pipeline.registry import discover_repair_modules, get_repair_module_registry
 from sunpack.repair.search.features import (
     archive_state_for_job,
-    candidate_snapshot,
-    recovery_score_from_job,
-    runtime_context_from_job,
     state_source_input,
 )
 from sunpack.repair.search.recovery import PolicyRecoverySnapshot, RecoveryEvaluator
@@ -32,17 +25,15 @@ from sunpack.repair.search.graph import (
     best_node_id as graph_best_node_id,
     find_node_by_digest as graph_find_node_by_digest,
     policy_graph_edge_id,
-    policy_graph_node_id,
-    remove_frontier as graph_remove_frontier,
 )
-from sunpack.repair.search.types import PolicyExplorationGraph, PolicyGraphEdge, PolicyGraphNode
+from sunpack.repair.search.types import PolicyExplorationGraph, PolicyGraphNode
 from sunpack.repair.search.proposals import available_module_proposals, materialize_module_proposal
 from sunpack.repair.result import RepairResult
 from sunpack.repair.runtime_cache import RepairRuntimeCache
 from sunpack.contracts.archive_knowledge import ArchiveKnowledge
 from sunpack.support import archive_knowledge_projection as knowledge_view
-from sunpack.support.archive_state_view import ArchiveStateByteView
 from sunpack.support import repair_trace
+from sunpack.support.module_config import enabled_module_configs
 
 if TYPE_CHECKING:
     from sunpack.repair.model.runtime import RepairModelRuntime
@@ -958,10 +949,6 @@ def _telemetry_selected_ids(
     }
 
 
-def _policy_candidate_snapshot(job: RepairJob, candidate: RepairCandidate, *, index: int = 0) -> dict[str, Any]:
-    return candidate_snapshot(candidate, index=index)
-
-
 def _module_selection_cache_key(
     job: RepairJob,
     diagnosis: RepairDiagnosis,
@@ -1105,91 +1092,6 @@ def _state_source_input(state: ArchiveState | None, job: RepairJob) -> dict[str,
 
 
 
-def _nested(payload: dict[str, Any], *path: str) -> Any:
-    current: Any = payload
-    for key in path:
-        if not isinstance(current, dict):
-            return {}
-        current = current.get(key)
-    return current if isinstance(current, dict) else {}
-
-
-def _route_flags_from_damage_analysis(damage_analysis: dict[str, Any]) -> list[str]:
-    labels = [str(item) for item in damage_analysis.get("damage_labels") or [] if str(item)]
-    metadata = damage_analysis.get("metadata") if isinstance(damage_analysis.get("metadata"), dict) else {}
-    labels.extend(str(item) for item in metadata.get("uncertain_labels") or [] if str(item))
-    flags: list[str] = ["policy_damage_analysis_route"]
-    for label in labels:
-        name = label.split(":", 1)[1] if ":" in label else label
-        flags.append(name.replace(".", "_"))
-        if name.startswith("eocd."):
-            flags.append("eocd_bad")
-        if name in {"eocd.cd_offset", "central_directory.offset"}:
-            flags.append("central_directory_offset_bad")
-        if name in {"eocd.entry_count", "central_directory.entry_count"}:
-            flags.append("central_directory_count_bad")
-        if name == "eocd.comment_length":
-            flags.extend(["zip_comment_length_bad", "comment_length_bad"])
-        if name.startswith("central_directory."):
-            flags.append("central_directory_bad")
-        if name == "central_directory.local_header_offset":
-            flags.extend(["central_directory_offset_bad", "local_header_conflict"])
-        if name in {"central_directory.compressed_size", "local_header.compressed_size", "local_header.uncompressed_size"}:
-            flags.extend(["compressed_size_bad", "local_header_size_bad"])
-        if name in {"central_directory.crc", "central_directory.flags", "central_directory.filename"}:
-            flags.append("local_header_conflict")
-        if name.startswith("local_header."):
-            flags.append("local_header_bad")
-        if name in {"local_header.extra", "local_header.extra_length", "central_directory.extra", "central_directory.extra_length"}:
-            flags.extend(["extra_field_bad", "extra_field_length_bad", "extra_length_bad"])
-        if name.startswith("data_descriptor."):
-            flags.extend(["data_descriptor", "bit3_data_descriptor"])
-        if name == "data_descriptor.record":
-            flags.extend(["spurious_data_descriptor_candidate", "compressed_size_bad"])
-        if name.startswith("payload."):
-            flags.extend(["entry_payload_bad", "payload_damaged", "checksum_error"])
-        if name.startswith("split_volume."):
-            flags.extend(["missing_volume", "input_truncated", "stream_truncated", "local_header_recovery"])
-        if name.startswith("sfx_prefix."):
-            flags.extend(["sfx", "carrier_prefix", "carrier_archive"])
-        if name.startswith("zip64."):
-            flags.append("zip64")
-            if "locator" in name:
-                flags.append("zip64_locator_bad")
-            elif "extra" in name:
-                flags.extend(["zip64_extra_bad", "zip64_extra_size_bad"])
-            else:
-                flags.append("zip64_eocd_bad")
-        if name.startswith("tail.") or name == "trailing_junk":
-            flags.extend(["trailing_junk", "boundary_unreliable"])
-        if label == "zone:eocd":
-            flags.append("eocd_bad")
-        if label == "zone:central_directory":
-            flags.append("central_directory_bad")
-        if label == "zone:local_header":
-            flags.append("local_header_bad")
-        if label == "zone:data_descriptor":
-            flags.append("data_descriptor")
-        if label == "zone:payload":
-            flags.append("entry_payload_bad")
-        if label == "zone:split_volume":
-            flags.extend(["missing_volume", "input_truncated", "stream_truncated"])
-        if label == "zone:sfx_prefix":
-            flags.extend(["sfx", "carrier_prefix"])
-        if label == "zone:zip64":
-            flags.append("zip64")
-    return _dedupe(flags)
-
-
-def _job_with_policy_route_flags(job: RepairJob, flags: list[str]) -> RepairJob:
-    knowledge = ArchiveKnowledge.from_any(job.knowledge)
-    normalized = _dedupe([str(flag) for flag in flags if str(flag)])
-    knowledge.set("repair.damage.flags", normalized, source_layer="policy", source_module="damage_analysis_route_bridge")
-    if _normalize_format(job.format) == "zip":
-        knowledge.set("format.zip.route_evidence_flags", normalized, source_layer="policy", source_module="damage_analysis_route_bridge")
-    return replace(job, damage_flags=normalized, knowledge=knowledge.to_dict())
-
-
 def _policy_route_rejects_are_soft(context_flags, rejected_flags: set[str]) -> bool:
     flags = {str(item) for item in context_flags if str(item)}
     if "policy_damage_analysis_route" not in flags:
@@ -1211,83 +1113,6 @@ def _policy_route_rejects_are_soft(context_flags, rejected_flags: set[str]) -> b
         "unknown",
     }
     return bool(rejected_flags) and rejected_flags <= soft
-
-
-def _policy_candidate_snapshot_with_damage(
-    job: RepairJob,
-    candidate: RepairCandidate,
-    damage_analysis: dict[str, Any],
-    *,
-    index: int,
-) -> dict[str, Any]:
-    return candidate_snapshot(
-        candidate,
-        index=index,
-        damage_analysis=damage_analysis,
-    )
-
-
-def _policy_candidate_available(candidate: RepairCandidate) -> bool:
-    if candidate.is_lazy:
-        return True
-    return candidate.repaired_state is not None
-
-
-def _policy_select_materialized_candidate(candidates: list[RepairCandidate]) -> RepairCandidate | None:
-    if not candidates:
-        return None
-    return max(
-        candidates,
-        key=lambda candidate: (
-            float(candidate.score_hint or 0.0),
-            float(candidate.confidence or 0.0),
-            0 if candidate.partial else 1,
-        ),
-    )
-
-
-def _policy_materialization_errors(candidates: list[RepairCandidate]) -> list[str]:
-    errors: list[str] = []
-    for candidate in candidates:
-        diagnosis = candidate.diagnosis if isinstance(candidate.diagnosis, dict) else {}
-        error = str(diagnosis.get("materialization_error") or "")
-        if error:
-            errors.append(error)
-            continue
-        errors.extend(str(item) for item in candidate.warnings or [] if str(item))
-    return _dedupe(errors)
-
-
-def _policy_graph_from_job(job: RepairJob, current_state: ArchiveState | None, current_recovery: PolicyRecoverySnapshot) -> PolicyExplorationGraph:
-    graph_payload = _latest_policy_graph_payload(job)
-    graph = _policy_graph_from_payload(graph_payload)
-    if graph.nodes:
-        current_digest = current_state.effective_patch_digest() if current_state is not None else ""
-        node_id = _policy_graph_find_node_by_digest(graph, current_digest)
-        if node_id:
-            graph.current_node_id = node_id
-            node = graph.nodes[node_id]
-            node.archive_state = current_state
-            node.patch_digest = current_digest
-            if not node.recovery:
-                node.recovery = current_recovery.to_dict()
-        graph.best_node_id = _policy_graph_best_node_id(graph, fallback=graph.current_node_id)
-        return graph
-    root_digest = current_state.effective_patch_digest() if current_state is not None else ""
-    root_id = _policy_graph_node_id(root_digest, 0)
-    return PolicyExplorationGraph(
-        nodes={
-            root_id: PolicyGraphNode(
-                node_id=root_id,
-                patch_digest=root_digest,
-                archive_state=current_state,
-                recovery=current_recovery.to_dict(),
-                created_round=0,
-            )
-        },
-        current_node_id=root_id,
-        best_node_id=root_id,
-    )
 
 
 def _policy_repair_graph_from_job(job: RepairJob, current_state: ArchiveState | None, current_recovery: PolicyRecoverySnapshot) -> PolicyRepairGraph:
@@ -1373,75 +1198,6 @@ def _latest_policy_action_type(job: RepairJob) -> str:
             if action_type:
                 return action_type
     return ""
-
-
-def _policy_graph_from_payload(payload: dict[str, Any]) -> PolicyExplorationGraph:
-    if not isinstance(payload, dict):
-        return PolicyExplorationGraph()
-    graph = PolicyExplorationGraph(
-        current_node_id=str(payload.get("current_node_id") or ""),
-        best_node_id=str(payload.get("best_node_id") or ""),
-        frontier=[str(item) for item in payload.get("frontier") or [] if str(item)],
-        expansion_count=int(payload.get("expansion_count") or 0),
-        stale_expansion_count=int(payload.get("stale_expansion_count") or 0),
-    )
-    nodes = payload.get("nodes") if isinstance(payload.get("nodes"), dict) else {}
-    for node_id, raw in nodes.items():
-        if not isinstance(raw, dict):
-            continue
-        archive_state = None
-        if isinstance(raw.get("archive_state"), dict) and raw.get("archive_state"):
-            try:
-                archive_state = ArchiveState.from_dict(raw["archive_state"])
-            except Exception:
-                archive_state = None
-        graph.nodes[str(node_id)] = PolicyGraphNode(
-            node_id=str(raw.get("node_id") or node_id),
-            parent_id=str(raw.get("parent_id") or ""),
-            patch_digest=str(raw.get("patch_digest") or ""),
-            archive_state=archive_state,
-            recovery=dict(raw.get("recovery") or {}),
-            status=str(raw.get("status") or "active"),
-            created_round=int(raw.get("created_round") or 0),
-            expanded_candidate_ids={str(item) for item in raw.get("expanded_candidate_ids") or [] if str(item)},
-            exploration=dict(raw.get("exploration") or {}),
-        )
-    edges = payload.get("edges") if isinstance(payload.get("edges"), dict) else {}
-    for edge_id, raw in edges.items():
-        if not isinstance(raw, dict):
-            continue
-        graph.edges[str(edge_id)] = PolicyGraphEdge(
-            edge_id=str(raw.get("edge_id") or edge_id),
-            from_node_id=str(raw.get("from_node_id") or ""),
-            to_node_id=str(raw.get("to_node_id") or ""),
-            candidate_id=str(raw.get("candidate_id") or ""),
-            module_name=str(raw.get("module_name") or ""),
-            module_family=str(raw.get("module_family") or raw.get("route_family") or ""),
-            action_score=dict(raw.get("action_score") or {}),
-            status=str(raw.get("status") or "frontier"),
-            created_round=int(raw.get("created_round") or 0),
-            exploration=dict(raw.get("exploration") or {}),
-        )
-    graph.frontier = [edge_id for edge_id in graph.frontier if edge_id in graph.edges and graph.edges[edge_id].status == "frontier"]
-    if not graph.current_node_id or graph.current_node_id not in graph.nodes:
-        graph.current_node_id = next(iter(graph.nodes), "")
-    if not graph.best_node_id or graph.best_node_id not in graph.nodes:
-        graph.best_node_id = graph.current_node_id
-    return graph
-
-
-def _policy_graph_best_node_id(graph: PolicyExplorationGraph, *, fallback: str = "") -> str:
-    best_id = graph.best_node_id if graph.best_node_id in graph.nodes else fallback
-    best_score = -1.0
-    for node_id, node in graph.nodes.items():
-        try:
-            score = float((node.recovery or {}).get("score") or 0.0)
-        except (TypeError, ValueError):
-            score = 0.0
-        if score > best_score:
-            best_id = node_id
-            best_score = score
-    return best_id or fallback
 
 
 def _policy_step_state_result(
@@ -1543,66 +1299,6 @@ def _policy_graph_node_id(patch_digest: str, index: int) -> str:
     return f"node_{digest[:32]}"
 
 
-def _policy_graph_edge_id(node_id: str, candidate_id: str) -> str:
-    return f"{node_id}::{candidate_id}"
-
-
-def _policy_graph_find_node_by_digest(graph: PolicyExplorationGraph, patch_digest: str) -> str:
-    digest = str(patch_digest or "")
-    for node_id, node in graph.nodes.items():
-        if node.patch_digest == digest:
-            return node_id
-    return ""
-
-
-def _policy_graph_remove_frontier(graph: PolicyExplorationGraph, edge_id: str) -> None:
-    graph.frontier = [item for item in graph.frontier if item != edge_id]
-
-
-def _policy_graph_register_frontier(
-    graph: PolicyExplorationGraph,
-    *,
-    current_node: PolicyGraphNode,
-    candidate_payloads: list[dict[str, Any]],
-    round_index: int,
-) -> None:
-    for payload in candidate_payloads:
-        candidate_id = str(payload.get("candidate_id") or "")
-        if not candidate_id or candidate_id in current_node.expanded_candidate_ids:
-            continue
-        edge_id = _policy_graph_edge_id(current_node.node_id, candidate_id)
-        if edge_id in graph.edges:
-            edge = graph.edges[edge_id]
-            if edge.status == "frontier" and edge_id not in graph.frontier:
-                graph.frontier.append(edge_id)
-            continue
-        edge = PolicyGraphEdge(
-            edge_id=edge_id,
-            from_node_id=current_node.node_id,
-            candidate_id=candidate_id,
-            module_name=str(payload.get("module_name") or payload.get("module") or ""),
-            module_family=str(payload.get("module_family") or payload.get("route_family") or payload.get("atomic_action_group") or payload.get("module_name") or payload.get("module") or ""),
-            status="frontier",
-            created_round=round_index,
-        )
-        graph.edges[edge_id] = edge
-        graph.frontier.append(edge_id)
-
-
-def _policy_graph_update_edge_scores(graph: PolicyExplorationGraph, step_action_selection: dict[str, Any]) -> None:
-    scores: list[dict[str, Any]] = []
-    if isinstance(step_action_selection.get("action_scores"), list):
-        scores.extend(item for item in step_action_selection.get("action_scores", []) if isinstance(item, dict))
-    if isinstance(step_action_selection.get("raw_action_scores"), list):
-        scores.extend(item for item in step_action_selection.get("raw_action_scores", []) if isinstance(item, dict))
-    for score in scores:
-        for edge in graph.edges.values():
-            if str(score.get("edge_id") or "") == edge.edge_id or str(score.get("candidate_id") or "") == edge.candidate_id:
-                merged = dict(edge.action_score or {})
-                merged.update({key: value for key, value in score.items() if value is not None})
-                edge.action_score = merged
-
-
 def _policy_graph_update_action_scores(graph: PolicyExplorationGraph, scores: list[dict[str, Any]]) -> None:
     for score in scores:
         action_id = str(score.get("action_id") or score.get("candidate_id") or "")
@@ -1691,127 +1387,6 @@ def _verification_from_job(job: RepairJob) -> dict[str, Any]:
     }
 
 
-def _policy_graph_frontier_top(graph: PolicyExplorationGraph, *, limit: int = 5) -> list[dict[str, Any]]:
-    edges = sorted(graph.active_frontier_edges(), key=_policy_graph_edge_score, reverse=True)
-    return [edge.to_dict() for edge in edges[: max(0, int(limit or 0))]]
-
-
-def _policy_graph_edge_score(edge: PolicyGraphEdge) -> float:
-    action_score = edge.action_score or {}
-    for key in ("final_score", "arbiter_score", "logic_score"):
-        try:
-            value = action_score.get(key)
-            if value is not None:
-                return float(value)
-        except (TypeError, ValueError):
-            pass
-    return 0.0
-
-
-def _policy_graph_best_frontier_edge(graph: PolicyExplorationGraph) -> PolicyGraphEdge | None:
-    edges = graph.active_frontier_edges()
-    if not edges:
-        return None
-    return max(edges, key=_policy_graph_edge_score)
-
-
-def _policy_graph_frontier_summary(graph: PolicyExplorationGraph) -> dict[str, Any]:
-    edges = graph.active_frontier_edges()
-    modules: dict[str, int] = {}
-    scores: list[float] = []
-    for edge in edges:
-        if edge.module_name:
-            modules[edge.module_name] = modules.get(edge.module_name, 0) + 1
-        scores.append(_policy_graph_edge_score(edge))
-    return {
-        "frontier_count": len(edges),
-        "module_counts": modules,
-        "max_logic_score": max(scores, default=0.0),
-        "mean_logic_score": sum(scores) / max(1, len(scores)),
-    }
-
-
-def _candidate_value_budget(config: dict[str, Any], round_index: int) -> int:
-    repair_config = config.get("repair") if isinstance(config.get("repair"), dict) else {}
-    policy = repair_config.get("policy") if isinstance(repair_config.get("policy"), dict) else config.get("policy")
-    policy = policy if isinstance(policy, dict) else {}
-    arbiter = policy.get("arbiter") if isinstance(policy.get("arbiter"), dict) else {}
-    if int(round_index or 0) <= 1:
-        return max(0, int(arbiter.get("candidate_value_budget_root", policy.get("candidate_value_budget_root", 4)) or 0))
-    return max(0, int(arbiter.get("candidate_value_budget_branch", policy.get("candidate_value_budget_branch", 2)) or 0))
-
-
-def _candidate_by_id(
-    candidates: list[RepairCandidate],
-    payloads: list[dict[str, Any]],
-    candidate_id: str,
-) -> RepairCandidate | None:
-    for candidate, payload in zip(candidates, payloads):
-        if str(payload.get("candidate_id") or "") == str(candidate_id or ""):
-            return candidate
-    return None
-
-
-def _loop_history_payload(history: list[dict[str, Any]]) -> dict[str, Any]:
-    modules = []
-    actions = []
-    for item in history:
-        action = item.get("action") if isinstance(item.get("action"), dict) else {}
-        module = str(action.get("selected_module") or "")
-        if module:
-            modules.append(module)
-        action_name = str(action.get("action") or "")
-        if action_name:
-            actions.append(action_name)
-    return {
-        "policy_loop": list(history),
-        "previous_modules": modules,
-        "previous_actions": actions,
-    }
-
-
-def _policy_loop_stop_plateau_satisfied(
-    *,
-    round_index: int,
-    max_rounds: int,
-    best_round_index: int,
-    current_recovery: PolicyRecoverySnapshot,
-    config: dict[str, Any],
-) -> bool:
-    policy = config.get("policy") if isinstance(config.get("policy"), dict) else {}
-    ratio = float(policy.get("stop_plateau_window_ratio", 0.5) or 0.5)
-    minimum = max(1, int(policy.get("stop_plateau_min_rounds", 2) or 2))
-    window = max(minimum, int(max(1, max_rounds) * max(0.0, ratio) + 0.999999))
-    return max(0, int(round_index) - int(best_round_index)) >= window
-
-
-
-
-def _policy_recovery_tie_breaks_best(
-    recovery: PolicyRecoverySnapshot,
-    best_recovery: PolicyRecoverySnapshot,
-    *,
-    depth: int,
-    best_depth: int,
-) -> bool:
-    source = str((recovery.metadata or {}).get("score_source") or "")
-    best_source = str((best_recovery.metadata or {}).get("score_source") or "")
-    if source == "native_validation_capped" and best_source == "native_validation_capped":
-        native_score = _native_validation_raw_score(recovery.native_validation)
-        best_native_score = _native_validation_raw_score(best_recovery.native_validation)
-        if native_score != best_native_score:
-            return native_score > best_native_score
-        return depth < best_depth
-    return depth > best_depth
-
-
-def _native_validation_raw_score(payload: dict[str, Any]) -> float:
-    try:
-        return float((payload or {}).get("score") or 0.0)
-    except (TypeError, ValueError):
-        return 0.0
-
-
 def _loop_graph_finish_result(
     job: RepairJob,
     graph: PolicyExplorationGraph,
@@ -1887,10 +1462,6 @@ def _policy_states_differ(state: ArchiveState | None, current_state: ArchiveStat
     if state is None or current_state is None:
         return state is not current_state
     return state.effective_patch_digest() != current_state.effective_patch_digest()
-
-
-def _loop_recovery_score(job: RepairJob) -> float:
-    return recovery_score_from_job(job)
 
 
 def _record_module_feedback(
@@ -2090,12 +1661,6 @@ def _with_job_password_result(result: RepairResult, job: RepairJob) -> RepairRes
         return result
     repaired_input = _with_password(result.repaired_input, job.password)
     return replace(result, repaired_input=repaired_input)
-
-
-def _terminal_result_allows_policy_noop(result: RepairResult | None) -> bool:
-    if result is None:
-        return False
-    return str(getattr(result, "status", "") or "") in {"unrepairable", "unsupported"}
 
 
 def _with_job_password_candidates(candidates: list[RepairCandidate], job: RepairJob) -> list[RepairCandidate]:

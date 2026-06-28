@@ -4,7 +4,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any
 
 from sunpack.repair.candidate import CandidateValidation, RepairCandidate, materialize_candidate
-from sunpack.repair.config import enabled_module_configs
+from sunpack.support.module_config import enabled_module_configs
 from sunpack.repair.diagnosis import RepairDiagnosis
 from sunpack.support.archive_formats import canonical_format as _normalize_format
 from sunpack.repair.job import RepairJob

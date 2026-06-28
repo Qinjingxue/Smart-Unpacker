@@ -302,10 +302,3 @@ def _json_text(payload: Any, *, pretty: bool = False) -> str:
     if pretty:
         return json.dumps(payload, ensure_ascii=False, indent=2)
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-
-
-def _relative_path(path: Path, root: Path) -> str:
-    try:
-        return str(path.relative_to(root))
-    except ValueError:
-        return path.name

@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from sunpack.contracts.archive_knowledge import ArchiveKnowledge
+from sunpack.support.json_values import stable_json_value as _jsonable
 
 _PROJECTION_CACHE_MAX = 512
 _PROJECTION_CACHE: OrderedDict[tuple[str, str, str], Any] = OrderedDict()
@@ -133,12 +134,12 @@ def repair_route_context(task: Any) -> dict[str, Any]:
 
 def zip_runtime_facts(task: Any) -> dict[str, Any]:
     knowledge = task_knowledge(task)
-    return _cached_projection(knowledge, "zip_runtime_facts", lambda: _zip_runtime_facts_uncached(knowledge))
+    return _cached_projection(knowledge, "zip_runtime_facts", lambda: _format_runtime_facts_uncached(knowledge, "zip"))
 
 
 def seven_zip_runtime_facts(task: Any) -> dict[str, Any]:
     knowledge = task_knowledge(task)
-    return _cached_projection(knowledge, "seven_zip_runtime_facts", lambda: _seven_zip_runtime_facts_uncached(knowledge))
+    return _cached_projection(knowledge, "seven_zip_runtime_facts", lambda: _format_runtime_facts_uncached(knowledge, "7z"))
 
 
 def policy_runtime_context(task: Any) -> dict[str, Any]:
@@ -250,21 +251,11 @@ def _cached_projection(knowledge: ArchiveKnowledge, name: str, compute) -> Any:
     return value
 
 
-def _zip_runtime_facts_uncached(knowledge: ArchiveKnowledge) -> dict[str, Any]:
-    structure = _dict(knowledge.get("format.zip.structure", {}))
-    tags = knowledge.get("format.zip.container_tags", [])
-    route_flags = knowledge.get("format.zip.route_evidence_flags", [])
-    return {
-        "structure": structure,
-        "container_tags": [str(item) for item in tags if str(item)] if isinstance(tags, list) else [],
-        "route_evidence_flags": [str(item) for item in route_flags if str(item)] if isinstance(route_flags, list) else [],
-    }
-
-
-def _seven_zip_runtime_facts_uncached(knowledge: ArchiveKnowledge) -> dict[str, Any]:
-    structure = _dict(knowledge.get("format.7z.structure", {}))
-    tags = knowledge.get("format.7z.container_tags", [])
-    route_flags = knowledge.get("format.7z.route_evidence_flags", [])
+def _format_runtime_facts_uncached(knowledge: ArchiveKnowledge, format_name: str) -> dict[str, Any]:
+    prefix = f"format.{format_name}"
+    structure = _dict(knowledge.get(f"{prefix}.structure", {}))
+    tags = knowledge.get(f"{prefix}.container_tags", [])
+    route_flags = knowledge.get(f"{prefix}.route_evidence_flags", [])
     return {
         "structure": structure,
         "container_tags": [str(item) for item in tags if str(item)] if isinstance(tags, list) else [],
@@ -658,20 +649,6 @@ def _path_fingerprint(path: str) -> dict[str, Any]:
 
 def _stable_digest(payload: Any) -> str:
     return hashlib.sha256(json.dumps(_jsonable(payload), ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")).hexdigest()
-
-
-def _jsonable(value: Any) -> Any:
-    if isinstance(value, dict):
-        return {str(key): _jsonable(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_jsonable(item) for item in value]
-    if isinstance(value, set):
-        return sorted(_jsonable(item) for item in value)
-    if isinstance(value, bytes):
-        return {"sha256": hashlib.sha256(value).hexdigest(), "size": len(value)}
-    if isinstance(value, Path):
-        return str(value)
-    return value
 
 
 def _dedupe(values: list[str]) -> list[str]:

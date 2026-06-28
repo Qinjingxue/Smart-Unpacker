@@ -386,21 +386,6 @@ def collection_record_context(record: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _dedupe(values: list[str]) -> list[str]:
-    output: list[str] = []
-    for value in values:
-        if value and value not in output:
-            output.append(value)
-    return output
-
-
-def _float(value: Any, *, default: float = 0.0) -> float:
-    try:
-        return float(value if value is not None else default)
-    except (TypeError, ValueError):
-        return float(default)
-
-
 def resolve_collection_material_report(run_dir: Path, run_manifest: dict[str, Any]) -> Path | None:
     for candidate in _manifest_sibling_reports(run_manifest):
         if candidate.is_file():

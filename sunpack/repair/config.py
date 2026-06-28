@@ -2,7 +2,6 @@ import os
 from copy import deepcopy
 from typing import Any
 
-
 DEFAULT_REPAIR_CONFIG = {
     "enabled": True,
     "workspace": ".sunpack_repair",
@@ -161,16 +160,6 @@ def normalize_repair_config(value: Any) -> dict[str, Any]:
         value = {}
     if not isinstance(value, dict):
         raise ValueError("repair must be an object")
-    if "trigger_on_medium_confidence" in value:
-        raise ValueError("repair.trigger_on_medium_confidence was removed; repair now runs after extraction verification")
-    if "thresholds" in value:
-        raise ValueError("repair.thresholds was removed; analysis confidence no longer triggers repair directly")
-    if "trigger_on_extraction_failure" in value:
-        raise ValueError("repair.trigger_on_extraction_failure was removed; repair now runs from verification decisions")
-    removed = sorted({"stages", "deep", "auto_deep", "max_modules_per_job"} & set(value))
-    if removed:
-        joined = ", ".join(f"repair.{name}" for name in removed)
-        raise ValueError(f"{joined} was removed; repair now always uses maximum module exploration. Move resource budgets to repair.module_limits or per-module module_limits.")
     config = _merge(DEFAULT_REPAIR_CONFIG, value)
     config["enabled"] = _bool_value(config.get("enabled", True), "repair.enabled")
     config["workspace"] = str(config.get("workspace") or ".sunpack_repair")
@@ -195,24 +184,6 @@ def normalize_repair_config(value: Any) -> dict[str, Any]:
         config["max_repair_rounds_per_task"] = 0
         config["policy"]["enabled"] = False
     return config
-
-
-def enabled_module_configs(config: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    modules = config.get("modules")
-    if not isinstance(modules, list):
-        return {}
-    result = {}
-    for item in modules:
-        if not isinstance(item, dict) or not item.get("enabled", False):
-            continue
-        name = item.get("name")
-        if isinstance(name, str) and name.strip():
-            result[name.strip()] = {
-                key: value
-                for key, value in item.items()
-                if key not in {"name", "enabled"}
-            }
-    return result
 
 
 def _merge(base: dict, override: dict) -> dict:
@@ -286,12 +257,10 @@ def _normalize_telemetry(value: Any) -> dict[str, bool]:
 def _normalize_policy(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError("repair.policy must be an object")
-    removed = sorted({"fallback_to_selector", "disable_beam_when_model_active", "step_mode"} & set(value))
-    if removed:
-        joined = ", ".join(f"repair.policy.{name}" for name in removed)
-        raise ValueError(f"{joined} was removed; repair policy now always uses graph step mode without selector/beam fallback")
-    if "provider_package" in value:
-        raise ValueError("repair.policy.provider_package was removed; RepairModelRuntime loads bundled models directly")
+    allowed = {"enabled", "strict_model_errors", "graph_stop_stale_patience", "min_best_recovery_improvement"}
+    unknown = sorted(set(value) - allowed)
+    if unknown:
+        raise ValueError(f"unknown repair.policy fields: {', '.join(unknown)}")
     return {
         "enabled": _bool_value(value.get("enabled", True), "repair.policy.enabled"),
         "strict_model_errors": _bool_value(value.get("strict_model_errors", False), "repair.policy.strict_model_errors"),

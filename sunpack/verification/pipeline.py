@@ -534,14 +534,6 @@ def _coverage_confidence(source: dict) -> float:
     return _as_float(source.get("confidence"), 0.5)
 
 
-def _min_float(values, *, default: float) -> float:
-    parsed = [_as_float(value, None) for value in values]
-    parsed = [value for value in parsed if value is not None]
-    if not parsed:
-        return default
-    return min(parsed)
-
-
 def _as_int(value) -> int:
     try:
         return max(0, int(value or 0))

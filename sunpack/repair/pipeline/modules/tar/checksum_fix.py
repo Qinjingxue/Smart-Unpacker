@@ -10,7 +10,23 @@ from sunpack.repair.result import RepairResult
 from sunpack_native import tar_boundary_repair as _native_tar_boundary_repair
 
 
-class TarHeaderChecksumFix:
+class TarBoundaryRepairModule:
+    spec: RepairModuleSpec
+
+    def repair(self, job: RepairJob, diagnosis: RepairDiagnosis, workspace: str, config: dict) -> RepairResult:
+        result = _run_native_tar_boundary(job, workspace, config, self.spec.name)
+        return native_patch_repair_result(
+            module_name=self.spec.name,
+            fmt="tar",
+            native_key="native_tar_boundary_repair",
+            result=result,
+            job=job,
+            diagnosis=diagnosis,
+            config=config,
+        )
+
+
+class TarHeaderChecksumFix(TarBoundaryRepairModule):
     spec = RepairModuleSpec(
         name="tar_header_checksum_fix",
         formats=("tar",),
@@ -34,19 +50,6 @@ class TarHeaderChecksumFix:
         if diagnosis.format == "tar" and "safe_repair" in diagnosis.categories:
             return 0.45
         return 0.0
-
-    def repair(self, job: RepairJob, diagnosis: RepairDiagnosis, workspace: str, config: dict) -> RepairResult:
-        result = _run_native_tar_boundary(job, workspace, config, self.spec.name)
-        return native_patch_repair_result(
-            module_name=self.spec.name,
-            fmt="tar",
-            native_key="native_tar_boundary_repair",
-            result=result,
-            job=job,
-            diagnosis=diagnosis,
-            config=config,
-        )
-
 
 def _run_native_tar_boundary(job: RepairJob, workspace: str, config: dict, repair_name: str) -> dict:
     limits = module_limits(config)

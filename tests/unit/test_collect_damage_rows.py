@@ -133,13 +133,13 @@ def test_zip_sfx_compound_profiles_do_not_auto_add_local_header(tmp_path):
 
 def test_zip_sfx_payload_no_local_header_profiles_are_explicit(tmp_path):
     payload_zones = _profile_zones(tmp_path, "compound_sfx_cd_offset_with_payload_no_local_header")
-    legacy_payload_zones = _profile_zones(tmp_path, "compound_sfx_cd_offset_payload_partial")
+    payload_zones = _profile_zones(tmp_path, "compound_sfx_cd_offset_payload_partial")
 
     assert "zip.sfx.prefix" in payload_zones
     assert any("payload" in zone for zone in payload_zones)
     assert not any(zone.startswith("zip.local_header") for zone in payload_zones)
-    assert any("payload" in zone for zone in legacy_payload_zones)
-    assert not any(zone.startswith("zip.local_header") for zone in legacy_payload_zones)
+    assert any("payload" in zone for zone in payload_zones)
+    assert not any(zone.startswith("zip.local_header") for zone in payload_zones)
 
 
 def test_zip_non_sfx_compound_still_auto_adds_local_header(tmp_path):

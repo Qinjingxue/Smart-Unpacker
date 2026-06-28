@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import hashlib
 from typing import Any
 
 from sunpack.repair.model.diagnosis.root_cases import ROOT_CASES
 from sunpack.repair.model.policy.schema import PolicyAction, PolicyGraphTrainingSample, PolicyWorldTrainingSample
+from sunpack.support.hash_features import hash_unit as _hash_unit
 
 
 NODE_FEATURE_DIM = 55
@@ -712,14 +712,6 @@ def _prediction_error_value(payload: dict[str, Any], key: str) -> float:
     if error is None:
         error = payload.get("prediction_error") if isinstance(payload.get("prediction_error"), dict) else {}
     return _float((error or {}).get(key))
-
-
-def _hash_unit(value: Any, *, buckets: int = 2048) -> float:
-    text = str(value or "")
-    if not text:
-        return 0.0
-    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
-    return (int(digest[:8], 16) % buckets) / float(buckets - 1)
 
 
 def _float(value: Any) -> float:

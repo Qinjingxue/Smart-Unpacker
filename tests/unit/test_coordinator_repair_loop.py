@@ -3,9 +3,7 @@ from pathlib import Path
 from sunpack.analysis.result import ArchiveAnalysisReport
 from sunpack.analysis.scheduler import ArchiveAnalysisScheduler
 from sunpack.contracts.detection import FactBag
-from sunpack.contracts.run_context import RunContext
 from sunpack.contracts.tasks import ArchiveTask
-from sunpack.coordinator.extraction_batch import ExtractionBatchRunner
 from sunpack.repair.loop import RepairLoopLimits, RepairLoopState
 from sunpack.contracts.extraction import ExtractionResult
 from sunpack.repair.result import RepairResult
@@ -53,9 +51,9 @@ def test_policy_stop_records_final_extraction_gate(tmp_path):
     handled = state.record_result(result, trigger="verification_policy")
 
     assert handled is True
-    assert task.fact_bag.get("repair.loop.terminal_reason") == "policy_stop"
-    assert task.fact_bag.get("repair.loop.policy_stop_after_next_extraction") is True
-    assert task.fact_bag.get("repair.loop.repair_disabled_after_policy_stop") is True
+    assert task.knowledge().get("repair.loop.terminal_reason") == "policy_stop"
+    assert task.knowledge().get("repair.loop.policy_stop_after_next_extraction") is True
+    assert task.knowledge().get("repair.loop.repair_disabled_after_policy_stop") is True
     assert RepairLoopState(task, RepairLoopLimits(max_rounds=3)).can_attempt(trigger="verification") is False
 
 
@@ -71,10 +69,10 @@ def test_recovery_no_improvement_requires_patience(tmp_path):
 
     for _ in range(19):
         assert state.record_recovery_comparison(comparison, trigger="verification_comparison") is False
-        assert not task.fact_bag.get("repair.loop.terminal_reason")
+        assert not task.knowledge().get("repair.loop.terminal_reason")
 
     assert state.record_recovery_comparison(comparison, trigger="verification_comparison") is True
-    assert task.fact_bag.get("repair.loop.terminal_reason") == "comparison_no_improvement_patience"
+    assert task.knowledge().get("repair.loop.terminal_reason") == "comparison_no_improvement_patience"
 
 
 class _FakeOutputScanPolicy:

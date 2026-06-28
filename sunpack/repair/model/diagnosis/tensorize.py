@@ -1,15 +1,17 @@
 from __future__ import annotations
 
-import hashlib
 from dataclasses import dataclass
+from functools import partial
 from typing import Any
 
 from sunpack.repair.model.diagnosis.graph_schema import DiagnosisGraphSample
 from sunpack.repair.model.diagnosis.root_cases import ROOT_CASES, ROOT_CASE_INDEX
+from sunpack.support.hash_features import hash_unit
 
 
 NODE_TYPES = ("observation", "theory", "cause")
 NODE_FEATURE_DIM = 10
+_hash_unit = partial(hash_unit, buckets=1024)
 THEORY_DEPENDS_EDGE_TYPE = ("theory", "theory_depends_on", "theory")
 
 
@@ -157,14 +159,6 @@ def _node_features(node: Any, *, layer_index: int) -> list[float]:
         _clamp(confidence),
         _clamp(delta / 1000.0),
     ]
-
-
-def _hash_unit(value: Any, *, buckets: int = 1024) -> float:
-    text = str(value or "")
-    if not text:
-        return 0.0
-    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
-    return (int(digest[:8], 16) % buckets) / float(buckets - 1)
 
 
 def _float(value: Any) -> float:

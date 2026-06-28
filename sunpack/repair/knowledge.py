@@ -5,7 +5,6 @@ from dataclasses import asdict
 from typing import Any, Callable
 
 from sunpack.contracts.tasks import ArchiveTask
-from sunpack.contracts.extraction import ExtractionResult
 from sunpack.support.runtime_route_evidence import normalize_runtime_route_evidence
 from sunpack.repair.result import RepairResult
 from sunpack.support.archive_knowledge_writer import (
@@ -166,11 +165,11 @@ def write_repair_loop_update(
     stop_payload: dict[str, Any] | None = None,
 ) -> None:
     knowledge = ensure_knowledge(task)
-    legacy_payload = dict(loop_payload or {})
+    payload = dict(loop_payload or {})
     write_payload(
         knowledge,
         "repair.loop",
-        legacy_payload,
+        payload,
         source_layer="repair",
         source_module="loop",
     )
@@ -184,11 +183,6 @@ def write_repair_loop_update(
             source_module="loop",
         )
     commit_task_knowledge(task, knowledge)
-    for key, value in legacy_payload.items():
-        try:
-            task.fact_bag.set(f"repair.loop.{key}", value)
-        except Exception:
-            pass
 
 
 def write_repair_attempt(task: ArchiveTask, attempts: int, *, trigger: str = "") -> None:
@@ -205,20 +199,15 @@ def write_repair_attempt(task: ArchiveTask, attempts: int, *, trigger: str = "")
 
 def write_repair_loop_state(task: ArchiveTask, payload: dict[str, Any]) -> None:
     knowledge = ensure_knowledge(task)
-    legacy_payload = dict(payload or {})
+    loop_payload = dict(payload or {})
     write_payload(
         knowledge,
         "repair.loop",
-        legacy_payload,
+        loop_payload,
         source_layer="repair",
         source_module="loop",
     )
     commit_task_knowledge(task, knowledge)
-    for key, value in legacy_payload.items():
-        try:
-            task.fact_bag.set(f"repair.loop.{key}", value)
-        except Exception:
-            pass
 
 
 def write_repair_candidate_log(task: ArchiveTask, entries: list[dict[str, Any]], *, path: str = "") -> None:
@@ -291,17 +280,6 @@ def _verification_payload(verification: VerificationResult) -> dict[str, Any]:
         "output_quality": output_quality,
         "archive_coverage": asdict(verification.archive_coverage),
         "repair_hints": dict(verification.repair_hints or {}),
-    }
-
-
-def _repair_result_payload(result: RepairResult) -> dict[str, Any]:
-    return {
-        "ok": bool(result.ok),
-        "status": result.status,
-        "module_name": result.module_name,
-        "actions": list(result.actions or []),
-        "diagnosis": dict(result.diagnosis or {}),
-        "repaired_input": dict(result.repaired_input or {}),
     }
 
 
@@ -395,18 +373,6 @@ def _compact_repaired_input(repaired_input: dict[str, Any]) -> dict[str, Any]:
         output["range_count"] = len(repaired_input.get("ranges") or [])
     if repaired_input.get("parts"):
         output["part_count"] = len(repaired_input.get("parts") or [])
-    return output
-
-
-def _dedupe(values: list[Any]) -> list[str]:
-    output: list[str] = []
-    seen: set[str] = set()
-    for value in values:
-        text = str(value)
-        if not text or text in seen:
-            continue
-        seen.add(text)
-        output.append(text)
     return output
 
 

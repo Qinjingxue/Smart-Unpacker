@@ -10,7 +10,6 @@ from sunpack.verification.methods._archive_output_match import (
     coverage_from_archive_and_output,
 )
 from sunpack.verification.methods._output_stats import (
-    output_files_for_evidence,
     output_file_index_for_evidence,
     output_stats_for_evidence,
     should_emit_file_observations,
@@ -163,10 +162,6 @@ class ExpectedNamePresenceMethod:
             if len(names) >= max_names:
                 break
         return names
-
-def _output_files_for_coverage(evidence: VerificationEvidence) -> list[dict[str, Any]]:
-    return output_files_for_evidence(evidence)
-
 
 def _iter_name_values(value: Any):
     if value is None:

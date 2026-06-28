@@ -3,14 +3,12 @@ from __future__ import annotations
 from sunpack.repair.diagnosis import RepairDiagnosis
 from sunpack.repair.job import RepairJob
 from sunpack.repair.pipeline.module import RepairModuleSpec, RepairRoute
-from sunpack.repair.pipeline.modules._native_patch_result import native_patch_repair_result
 from sunpack.repair.pipeline.registry import register_repair_module
-from sunpack.repair.result import RepairResult
 
-from .checksum_fix import _run_native_tar_boundary
+from .checksum_fix import TarBoundaryRepairModule
 
 
-class TarTrailingJunkTrim:
+class TarTrailingJunkTrim(TarBoundaryRepairModule):
     spec = RepairModuleSpec(
         name="tar_trailing_junk_trim",
         formats=("tar",),
@@ -34,18 +32,5 @@ class TarTrailingJunkTrim:
         if diagnosis.format == "tar" and "boundary_repair" in diagnosis.categories:
             return 0.62
         return 0.0
-
-    def repair(self, job: RepairJob, diagnosis: RepairDiagnosis, workspace: str, config: dict) -> RepairResult:
-        result = _run_native_tar_boundary(job, workspace, config, self.spec.name)
-        return native_patch_repair_result(
-            module_name=self.spec.name,
-            fmt="tar",
-            native_key="native_tar_boundary_repair",
-            result=result,
-            job=job,
-            diagnosis=diagnosis,
-            config=config,
-        )
-
 
 register_repair_module(TarTrailingJunkTrim())

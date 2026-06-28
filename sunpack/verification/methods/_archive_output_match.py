@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
 from sunpack.support.path_names import clean_relative_archive_path, normalize_match_path
@@ -293,10 +292,3 @@ def _optional_crc(value: Any) -> int | None:
         return int(value) & 0xFFFFFFFF
     except (TypeError, ValueError):
         return None
-
-
-def _relative_path(path: Path, root: Path) -> str:
-    try:
-        return str(path.relative_to(root)).replace("\\", "/")
-    except ValueError:
-        return path.name

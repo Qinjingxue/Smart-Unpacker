@@ -64,7 +64,7 @@ def test_watch_holds_orphan_non_head_until_first_volume_arrives(tmp_path):
     ("orphan_names", "head_name"),
     [
         (("plain.002", "plain.003"), "plain.001"),
-        (("legacy.r00",), "legacy.rar"),
+        (("old-style.r00",), "old-style.rar"),
     ],
 )
 def test_watch_conservatively_holds_other_orphan_volume_families(tmp_path, orphan_names, head_name):

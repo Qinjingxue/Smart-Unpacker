@@ -124,7 +124,7 @@ fn central_directory_suffix_patch_and_stats(
     let patch = patch_plan_dict(py, module, format, confidence, actions, &operations, native_target)?;
     let provenance = patch.bind(py).get_item("provenance")?;
     if let Some(provenance) = provenance {
-        if let Ok(provenance) = provenance.downcast::<PyDict>() {
+        if let Ok(provenance) = provenance.cast::<PyDict>() {
             provenance.set_item("semantic_patch", "central_directory_suffix")?;
             provenance.set_item("semantic_cd_start", cd_start)?;
             provenance.set_item("semantic_suffix_size", suffix.len())?;

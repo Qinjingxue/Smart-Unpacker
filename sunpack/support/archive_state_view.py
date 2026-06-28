@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import base64
-import hashlib
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -172,67 +171,3 @@ def _translate_native_patch_error(exc: ValueError) -> ValueError:
     if "patch precondition" in message or "expected_" in message:
         return ArchivePatchValidationError(message)
     return exc
-
-
-def _validate_patch_stack(state: ArchiveState) -> None:
-    source = state.source.to_dict()
-    applied: list[dict[str, Any]] = []
-    for patch_index, patch in enumerate(state.patches):
-        patch_prefix: list[dict[str, Any]] = []
-        for operation_index, operation in enumerate(patch.operations):
-            current = bytes(_native_archive_state_to_bytes(source, [*applied, {"operations": patch_prefix}]))
-            _validate_operation(
-                current,
-                operation.to_dict(),
-                patch_index=patch_index,
-                operation_index=operation_index,
-            )
-            patch_prefix.append(operation.to_dict())
-        applied.append(patch.to_dict())
-
-
-def _validate_operation(
-    current: bytes,
-    operation: dict[str, Any],
-    *,
-    patch_index: int,
-    operation_index: int,
-) -> None:
-    expected_b64 = str(operation.get("expected_b64") or "")
-    expected_sha256 = str(operation.get("expected_sha256") or "")
-    if not expected_b64 and not expected_sha256:
-        return
-    expected = None
-    if expected_b64:
-        try:
-            expected = base64.b64decode(expected_b64.encode("ascii"), validate=True)
-        except Exception as exc:
-            raise ArchivePatchValidationError(
-                f"invalid expected_b64 at patch {patch_index} operation {operation_index}: {exc}"
-            ) from exc
-    expected_len = len(expected) if expected is not None else _expected_length(operation)
-    offset = max(0, int(operation.get("offset") or 0))
-    op = str(operation.get("op") or "replace_range")
-    if op == "append":
-        offset = len(current)
-    actual = current[offset:] if expected_len is None else current[offset:offset + expected_len]
-    if expected is not None:
-        if actual != expected:
-            raise ArchivePatchValidationError(
-                f"patch precondition failed at patch {patch_index} operation {operation_index}: expected bytes do not match"
-            )
-    if expected_sha256 and hashlib.sha256(actual).hexdigest() != expected_sha256:
-        raise ArchivePatchValidationError(
-            f"patch precondition failed at patch {patch_index} operation {operation_index}: expected sha256 does not match"
-        )
-
-
-def _expected_length(operation: dict[str, Any]) -> int | None:
-    op = str(operation.get("op") or "replace_range")
-    if op in {"replace_range", "delete"} and operation.get("size") is not None:
-        return max(0, int(operation.get("size") or 0))
-    if op == "insert":
-        return 0
-    if op == "append":
-        return 0
-    return None

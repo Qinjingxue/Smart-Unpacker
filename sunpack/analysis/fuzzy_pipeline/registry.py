@@ -1,8 +1,7 @@
-import importlib
-import pkgutil
 from typing import Dict
 
 from sunpack.analysis.fuzzy_pipeline.module import FuzzyAnalysisModule
+from sunpack.support.module_discovery import discover_package_modules
 
 
 class FuzzyAnalysisModuleRegistry:
@@ -20,7 +19,6 @@ class FuzzyAnalysisModuleRegistry:
 
 
 _global_registry = FuzzyAnalysisModuleRegistry()
-_discovered = False
 
 
 def register_fuzzy_analysis_module(module: FuzzyAnalysisModule):
@@ -33,12 +31,4 @@ def get_fuzzy_analysis_module_registry() -> FuzzyAnalysisModuleRegistry:
 
 
 def discover_fuzzy_analysis_modules():
-    global _discovered
-    if _discovered:
-        return
-
-    package = importlib.import_module("sunpack.analysis.fuzzy_pipeline.modules")
-    for module_info in pkgutil.iter_modules(package.__path__, package.__name__ + "."):
-        importlib.import_module(module_info.name)
-
-    _discovered = True
+    discover_package_modules("sunpack.analysis.fuzzy_pipeline.modules")

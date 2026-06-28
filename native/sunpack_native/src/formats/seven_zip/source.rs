@@ -1,18 +1,3 @@
-fn write_vint(mut value: u64) -> Vec<u8> {
-    let mut output = Vec::new();
-    loop {
-        let mut byte = (value & 0x7f) as u8;
-        value >>= 7;
-        if value != 0 {
-            byte |= 0x80;
-        }
-        output.push(byte);
-        if value == 0 {
-            return output;
-        }
-    }
-}
-
 fn read_source_input(
     source_input: &Bound<'_, PyDict>,
     max_bytes: Option<u64>,
@@ -192,10 +177,6 @@ fn write_slice_candidate(bytes: &[u8], output: &Path) -> std::io::Result<u64> {
         }
     }
 }
-fn confidence_for_candidate(candidate: &ArchiveCandidate) -> f64 {
-    if candidate.start_crc_ok && candidate.next_header_crc_ok { 0.92 } else { 0.82 }
-}
-
 fn carrier_crop_patch_facts(format: &str, offset: u64, end_offset: u64) -> Vec<String> {
     vec![
         "fixed_field=carrier_prefix_crop".to_string(),
@@ -289,10 +270,6 @@ fn mb_to_bytes(value: f64) -> Option<u64> {
     }
 }
 
-fn u16_le(bytes: &[u8], offset: usize) -> u16 {
-    u16::from_le_bytes([bytes[offset], bytes[offset + 1]])
-}
-
 fn u32_le(bytes: &[u8], offset: usize) -> u32 {
     u32::from_le_bytes([
         bytes[offset],
@@ -314,20 +291,6 @@ fn u64_le(bytes: &[u8], offset: usize) -> u64 {
         bytes[offset + 7],
     ])
 }
-fn read_vint(data: &[u8], offset: usize) -> Option<(u64, usize)> {
-    let mut value = 0u64;
-    let mut shift = 0;
-    for index in offset..data.len().min(offset + 10) {
-        let byte = data[index];
-        value |= ((byte & 0x7f) as u64) << shift;
-        if byte & 0x80 == 0 {
-            return Some((value, index + 1));
-        }
-        shift += 7;
-    }
-    None
-}
-
 fn crc32(bytes: &[u8]) -> u32 {
     let mut crc = 0xffff_ffffu32;
     for byte in bytes {

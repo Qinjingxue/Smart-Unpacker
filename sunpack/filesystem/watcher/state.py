@@ -54,6 +54,8 @@ class WatchStateStore:
             payload = json.loads(self.path.read_text(encoding="utf-8"))
         except Exception:
             return
+        if not isinstance(payload, dict) or payload.get("version") != 5:
+            return
         entries = payload.get("entries") if isinstance(payload, dict) else {}
         groups = payload.get("groups") if isinstance(payload, dict) else {}
         try:
@@ -95,11 +97,8 @@ class WatchStateStore:
         os.replace(temp, self.path)
 
     def key_for(self, path: str, size: int, mtime: float, sample_digest: str = "") -> str:
-        legacy_key = self._legacy_key_for(path, size, mtime)
-        return f"{legacy_key}|{sample_digest}" if sample_digest else legacy_key
-
-    def _legacy_key_for(self, path: str, size: int, mtime: float) -> str:
-        return f"{os.path.abspath(path)}|{size}|{mtime:.6f}"
+        base_key = f"{os.path.abspath(path)}|{size}|{mtime:.6f}"
+        return f"{base_key}|{sample_digest}" if sample_digest else base_key
 
     def is_done(self, path: str, size: int, mtime: float, sample_digest: str = "") -> bool:
         entry = self.entries.get(self.key_for(path, size, mtime, sample_digest))

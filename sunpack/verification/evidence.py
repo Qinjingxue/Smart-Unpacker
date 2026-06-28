@@ -118,20 +118,6 @@ def _analysis_facts_from_task(task: ArchiveTask) -> dict[str, Any]:
     return output
 
 
-def _analysis_facts(fact_bag: Any) -> dict[str, Any]:
-    if fact_bag is None or not hasattr(fact_bag, "to_dict"):
-        return {}
-    facts = fact_bag.to_dict()
-    if not isinstance(facts, dict):
-        return {}
-    prefix = "analysis."
-    return {
-        key[len(prefix):]: value
-        for key, value in facts.items()
-        if isinstance(key, str) and key.startswith(prefix)
-    }
-
-
 def _worker_result(diagnostics: dict[str, Any]) -> dict[str, Any]:
     result = diagnostics.get("result") if isinstance(diagnostics, dict) else {}
     return dict(result) if isinstance(result, dict) else {}

@@ -694,12 +694,6 @@ def patch_repair_result(
     )
 
 
-def _slice_bytes(data: bytes, offset: int, size: int) -> bytes:
-    start = max(0, int(offset))
-    end = start + max(0, int(size))
-    return bytes(data[start:end])
-
-
 def write_candidate(data: bytes, workspace: str, filename: str) -> str:
     return str(_native_write_candidate(data, workspace, filename))
 

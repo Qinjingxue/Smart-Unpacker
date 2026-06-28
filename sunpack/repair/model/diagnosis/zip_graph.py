@@ -16,7 +16,6 @@ from sunpack.repair.model.diagnosis.graph_schema import (
 )
 from sunpack.repair.model.diagnosis.root_cases import (
     FIELD_TO_ROOT_CASE,
-    IGNORED_ROOT_FIELDS,
     ROOT_CASES,
     ROOT_CASE_SET,
     canonical_root_case,
@@ -705,15 +704,6 @@ def _actionable_root_labels_for_row(row: dict[str, Any]) -> list[str]:
 def _repair_root_for_field(field: str) -> str:
     text = str(field or "").lower().replace("zip.", "")
     return canonical_root_case(text)
-
-
-def _zone_labels_for_repair_roots(field_labels: list[str]) -> list[str]:
-    zones: set[str] = set()
-    for label in field_labels:
-        zone = _zone_for_repair_root(field_from_label(label))
-        if zone in ZIP_ZONE_LABELS:
-            zones.add(f"zone:{zone}")
-    return sorted(zones)
 
 
 def _zone_for_repair_root(field: str) -> str:

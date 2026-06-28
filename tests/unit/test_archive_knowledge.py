@@ -137,17 +137,6 @@ def test_archive_knowledge_commit_reuses_unchanged_branches_and_isolates_working
     assert len(task.knowledge().get("analysis.large.rows")) == 500
 
 
-def test_zip_runtime_facts_do_not_read_source_derivation_legacy_zip_fields():
-    knowledge = ArchiveKnowledge()
-    knowledge.set("source.derivation", {"zip_structure_features": {"has_data_descriptor": True}, "zip_container_tags": ["data_descriptor"]})
-
-    facts = knowledge_view.zip_runtime_facts(knowledge)
-
-    assert facts["structure"] == {}
-    assert facts["container_tags"] == []
-    assert knowledge_view.repair_route_context(knowledge)["route_evidence_flags"] == []
-
-
 def test_repair_route_context_and_history_summary_are_canonical():
     knowledge = ArchiveKnowledge()
     knowledge.set("format.zip.route_evidence_flags", ["data_descriptor"])

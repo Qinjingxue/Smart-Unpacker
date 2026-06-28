@@ -133,7 +133,6 @@ pub(crate) fn zip_deep_partial_recovery(
     let workspace = Path::new(workspace);
     for plan in plans.into_iter().take(options.max_candidates) {
         let action_refs = plan.actions.to_vec();
-        let timing_semantic_started = Instant::now();
         if let Some((patch_plan, stats)) = central_directory_suffix_patch_and_stats(
             py,
             plan.name,
@@ -145,7 +144,6 @@ pub(crate) fn zip_deep_partial_recovery(
             &action_refs,
             "zip_deep_partial_recovery",
         )? {
-            let semantic_seconds = timing_semantic_started.elapsed().as_secs_f64();
             written.push(WrittenCandidate {
                 name: plan.name,
                 policy: "",
@@ -162,9 +160,7 @@ pub(crate) fn zip_deep_partial_recovery(
             });
             continue;
         }
-        let semantic_seconds = timing_semantic_started.elapsed().as_secs_f64();
         let output_path = workspace.join(format!("{}.zip", plan.name));
-        let timing_write_started = Instant::now();
         match write_candidate_zip(
             &data,
             &scan.entries,
@@ -173,8 +169,6 @@ pub(crate) fn zip_deep_partial_recovery(
             options.max_output_bytes,
         ) {
             Ok(stats) => {
-                let _write_seconds = timing_write_started.elapsed().as_secs_f64();
-                let _ = semantic_seconds;
                 written.push(WrittenCandidate {
                 name: plan.name,
                 policy: "",

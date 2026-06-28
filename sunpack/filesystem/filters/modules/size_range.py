@@ -36,12 +36,12 @@ class NumericRange:
         return max(minimums) if minimums else None
 
     @classmethod
-    def from_config(cls, config: dict[str, Any], *, legacy_min_key: str | None = None):
+    def from_config(cls, config: dict[str, Any]):
         expression = config.get("range")
         parsed = parse_range_expression(expression, parse_size_value, variable="r") if expression is not None else cls()
         explicit = cls(
             gt=_int_or_none(_first(config, "gt", "greater_than")),
-            gte=_int_or_none(_first(config, "gte", "greater_than_or_equal", "min", "minimum", legacy_min_key)),
+            gte=_int_or_none(_first(config, "gte", "greater_than_or_equal", "min", "minimum")),
             lt=_int_or_none(_first(config, "lt", "less_than")),
             lte=_int_or_none(_first(config, "lte", "less_than_or_equal", "max", "maximum")),
             eq=_int_or_none(_first(config, "eq", "equal", "equals")),
