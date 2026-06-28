@@ -10,6 +10,7 @@ from sunpack.contracts.run_context import RunContext
 from sunpack.contracts.archive_state import ArchiveState
 from sunpack.contracts.tasks import ArchiveTask
 from sunpack.coordinator.analysis_stage import ArchiveAnalysisStage
+from sunpack.postprocess.failed_output_cleanup import REPAIR_ENTERED_FACT, cleanup_failed_output_if_eligible
 from sunpack.coordinator.repair_beam import RepairBeamCandidate, RepairBeamLoop, RepairBeamState
 from sunpack.coordinator.repair_loop import RepairLoopLimits, RepairLoopState, terminal_failure_reason
 from sunpack.coordinator.repair_runtime_transition import RepairRuntimeTransitionEvaluator
@@ -63,6 +64,7 @@ class BatchExtractionOutcome:
     recovery_rank: dict[str, Any] = field(default_factory=dict)
     comparison: dict[str, Any] = field(default_factory=dict)
     rejected_attempts: list[dict[str, Any]] = field(default_factory=list)
+    planned_out_dir: str = ""
 
     @property
     def success(self) -> bool:
@@ -259,7 +261,9 @@ class ExtractionBatchRunner:
         )
         executor = TaskExecutor(scheduler, max_workers=self.max_workers)
         def execute_one(task, runtime_scheduler):
-            outcome = self._extract_verify_with_retries(task, output_dir_resolver(task), runtime_scheduler)
+            planned_out_dir = output_dir_resolver(task)
+            outcome = self._extract_verify_with_retries(task, planned_out_dir, runtime_scheduler)
+            outcome.planned_out_dir = planned_out_dir
             self._report_task_finished(task, outcome)
             return task, outcome
 
@@ -433,6 +437,7 @@ class ExtractionBatchRunner:
         out_dir: str,
         runtime_scheduler: ConcurrencyScheduler,
     ) -> BatchExtractionOutcome:
+        task.fact_bag.set(REPAIR_ENTERED_FACT, False)
         verification_config = self.verifier.config
         max_verification_retries = max(0, int(verification_config.get("max_retries", 0) or 0))
         cleanup_failed_output = bool(verification_config.get("cleanup_failed_output", True))
@@ -475,6 +480,7 @@ class ExtractionBatchRunner:
                         selected = self._selected_acceptable_outcome(incumbent_outcome, current_outcome, out_dir, final=True)
                         return selected or current_outcome
                     if state.can_attempt(trigger="verification", failure=result):
+                        task.fact_bag.set(REPAIR_ENTERED_FACT, True)
                         self._report_task_status(task, "repairing")
                         handled = self._repair_after_verification_decision_with_beam(
                             task,
@@ -517,6 +523,7 @@ class ExtractionBatchRunner:
                     selected = self._selected_acceptable_outcome(incumbent_outcome, outcome, out_dir, final=True)
                     return selected or outcome
                 if state.can_attempt(trigger="verification"):
+                    task.fact_bag.set(REPAIR_ENTERED_FACT, True)
                     self._report_task_status(task, "repairing")
                     if self._repair_policy_disables_beam(task, result, verification):
                         handled = self._repair_after_verification_with_scheduler(
@@ -1378,6 +1385,15 @@ class ExtractionBatchRunner:
             "candidate_log_count": len(knowledge_view.repair_candidate_log(task)),
             "repair_candidate_log_path": knowledge_view.repair_candidate_log_path(task),
         })
+
+        cleanup = cleanup_failed_output_if_eligible(
+            out_dir,
+            planned_output_dir=outcome.planned_out_dir,
+            failed=not outcome.success,
+            repair_entered=bool(task.fact_bag.get(REPAIR_ENTERED_FACT)),
+        )
+        diagnostics = res.diagnostics if isinstance(res.diagnostics, dict) else {}
+        res.diagnostics = {**diagnostics, "failed_output_cleanup": cleanup.to_dict()}
 
         with self.context.lock:
             if outcome.success:
