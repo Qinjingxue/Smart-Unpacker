@@ -121,6 +121,59 @@ def test_watch_roots_are_stored_in_program_txt(tmp_path, monkeypatch):
     assert roots_path.read_text(encoding="utf-8").splitlines() == [str(second.resolve())]
 
 
+def test_relative_watch_paths_use_program_directory_not_process_working_directory(tmp_path, monkeypatch):
+    program_dir = tmp_path / "program"
+    working_dir = tmp_path / "windows-system-directory"
+    roots_path = program_dir / "sunpack_watch_roots.txt"
+    program_dir.mkdir()
+    working_dir.mkdir()
+    monkeypatch.chdir(working_dir)
+    monkeypatch.setattr(service_module, "watch_roots_path", lambda: roots_path)
+
+    config = {"watch": {"out_dir": ".", "state_dir": "runtime/state"}}
+
+    assert service_module.service_state_dir(config) == str((program_dir / "runtime" / "state").resolve())
+
+
+def test_default_watch_state_and_output_paths_use_program_directory(tmp_path, monkeypatch):
+    program_dir = tmp_path / "program"
+    working_dir = tmp_path / "windows-system-directory"
+    watch_root = tmp_path / "watched"
+    roots_path = program_dir / "sunpack_watch_roots.txt"
+    program_dir.mkdir()
+    working_dir.mkdir()
+    watch_root.mkdir()
+    roots_path.write_text(str(watch_root), encoding="utf-8")
+    monkeypatch.chdir(working_dir)
+    monkeypatch.setattr(service_module, "watch_roots_path", lambda: roots_path)
+    monkeypatch.setattr(
+        service_module,
+        "load_config",
+        lambda: {"watch": {"out_dir": ".", "state_dir": "", "tray_enabled": False}},
+    )
+    captured = {}
+
+    class FakeScheduler:
+        def __init__(self, config, roots, **kwargs):
+            captured["out_dir"] = kwargs["out_dir"]
+            captured["state_path"] = kwargs["state_path"]
+
+        def start(self):
+            pass
+
+        def stop(self):
+            pass
+
+    monkeypatch.setattr(service_module, "WatchScheduler", FakeScheduler)
+
+    service = WatchService(runner_factory=FakeRunner)
+    service._start_scheduler()
+
+    assert service.state_dir == str((program_dir / ".sunpack_watch").resolve())
+    assert captured["out_dir"] == str(program_dir.resolve())
+    assert captured["state_path"] == str((program_dir / ".sunpack_watch" / "state.json").resolve())
+
+
 def test_watch_roots_add_is_serialized_across_concurrent_callers(tmp_path, monkeypatch):
     roots_path = tmp_path / "sunpack_watch_roots.txt"
     first = tmp_path / "first"

@@ -42,6 +42,14 @@ def normalize_root(path: str) -> str:
     return os.path.abspath(os.path.normpath(path))
 
 
+def resolve_service_path(path: str) -> str:
+    """Resolve daemon paths without depending on the process working directory."""
+    candidate = Path(path).expanduser()
+    if not candidate.is_absolute():
+        candidate = watch_roots_path().resolve().parent / candidate
+    return normalize_root(str(candidate))
+
+
 def existing_roots(roots: list[str]) -> list[str]:
     result = []
     seen = set()
@@ -59,8 +67,8 @@ def service_state_dir(config: dict) -> str:
     service = service_config_from(config)
     state_dir = str(service.get("state_dir") or "").strip()
     if state_dir:
-        return normalize_root(state_dir)
-    out_dir = normalize_root(str(service.get("out_dir") or config.get("output", {}).get("root") or "."))
+        return resolve_service_path(state_dir)
+    out_dir = resolve_service_path(str(service.get("out_dir") or config.get("output", {}).get("root") or "."))
     return os.path.join(out_dir, ".sunpack_watch")
 
 
@@ -271,7 +279,7 @@ class WatchService:
         if not roots:
             self.log.write("scheduler_not_started", reason="no_existing_roots", configured_roots=list(self.service_config.get("roots") or []))
             return
-        out_dir = normalize_root(str(self.service_config.get("out_dir") or self.config.get("output", {}).get("root") or "."))
+        out_dir = resolve_service_path(str(self.service_config.get("out_dir") or self.config.get("output", {}).get("root") or "."))
         state_path = os.path.join(self.state_dir, SERVICE_STATE)
         run_config = dict(self.config)
         watch_config = dict(run_config.get("watch") if isinstance(run_config.get("watch"), dict) else {})
