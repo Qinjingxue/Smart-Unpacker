@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 
-from sunpack.coordinator.repair_stage import ArchiveRepairStage
+from sunpack.repair.stage import ArchiveRepairStage
 from sunpack.coordinator.reporting import RunReporter
 from sunpack.repair.model.assets import ModelAssetRegistry
 from sunpack.repair.config import repair_config, repair_system_mode

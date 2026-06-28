@@ -18,7 +18,7 @@ from sunpack.contracts.tasks import ArchiveTask
 from sunpack.config.schema import normalize_config
 from sunpack.coordinator.extraction_batch import BatchExtractionOutcome, ExtractionBatchRunner
 from sunpack.coordinator.runner import PipelineRunner
-from sunpack.coordinator.analysis_stage import ArchiveAnalysisStage
+from sunpack.analysis.stage import ArchiveAnalysisStage
 from sunpack.contracts.archive_input import ArchiveInputDescriptor, ArchiveInputRange
 from sunpack.extraction.progress import write_extraction_progress_manifest
 from sunpack.contracts.extraction import ExtractionResult

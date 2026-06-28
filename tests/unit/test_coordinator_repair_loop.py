@@ -6,7 +6,7 @@ from sunpack.contracts.detection import FactBag
 from sunpack.contracts.run_context import RunContext
 from sunpack.contracts.tasks import ArchiveTask
 from sunpack.coordinator.extraction_batch import ExtractionBatchRunner
-from sunpack.coordinator.repair_loop import RepairLoopLimits, RepairLoopState
+from sunpack.repair.loop import RepairLoopLimits, RepairLoopState
 from sunpack.contracts.extraction import ExtractionResult
 from sunpack.repair.result import RepairResult
 from sunpack.contracts.verification import ArchiveCoverageSummary, VerificationResult

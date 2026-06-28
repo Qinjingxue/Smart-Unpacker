@@ -2,7 +2,7 @@ from pathlib import Path
 
 from sunpack.contracts.detection import FactBag
 from sunpack.contracts.tasks import ArchiveTask
-from sunpack.coordinator.repair_stage import ArchiveRepairStage
+from sunpack.repair.stage import ArchiveRepairStage
 from sunpack.contracts.extraction import ExtractionResult
 from sunpack.repair.result import RepairResult
 from sunpack.contracts.verification import ArchiveCoverageSummary, VerificationResult

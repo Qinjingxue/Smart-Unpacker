@@ -1,7 +1,7 @@
 import json
 import subprocess
 
-from sunpack.coordinator.repair_loop import terminal_failure_reason
+from sunpack.repair.loop import terminal_failure_reason
 from sunpack.extraction.internal.workflow.errors import classify_extract_failure
 from sunpack.contracts.extraction import ExtractionResult
 from sunpack.contracts.failures import FailureKind
