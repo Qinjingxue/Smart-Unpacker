@@ -42,3 +42,25 @@ def test_cross_layer_results_are_owned_by_contracts_only():
     assert not (root / "verification" / "result.py").exists()
     assert (root / "contracts" / "extraction.py").is_file()
     assert (root / "contracts" / "verification.py").is_file()
+
+
+def test_layer_stages_are_not_implemented_in_coordinator():
+    root = Path(__file__).parents[2] / "sunpack"
+    moved_modules = {
+        "analysis_stage.py": root / "analysis" / "stage.py",
+        "relation_stage.py": root / "relations" / "stage.py",
+        "repair_beam.py": root / "repair" / "beam.py",
+        "repair_loop.py": root / "repair" / "loop.py",
+        "repair_runtime_strategy.py": root / "repair" / "runtime_strategy.py",
+        "repair_stage.py": root / "repair" / "stage.py",
+    }
+    for compatibility_name, implementation in moved_modules.items():
+        assert implementation.is_file()
+        compatibility = root / "coordinator" / compatibility_name
+        tree = ast.parse(compatibility.read_text(encoding="utf-8"), filename=str(compatibility))
+        definitions = [
+            node.name
+            for node in tree.body
+            if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
+        ]
+        assert not definitions, f"{compatibility_name} still implements layer behavior: {definitions}"

@@ -18,7 +18,7 @@ from sunpack.coordinator.reporting import RunReporter
 from sunpack.coordinator.output_scan_policy import NestedOutputScanPolicy
 from sunpack.coordinator.recursion import RecursionController
 from sunpack.coordinator.task_scan import ArchiveTaskScanner
-from sunpack.coordinator.analysis_stage import ArchiveAnalysisStage
+from sunpack.analysis.stage import ArchiveAnalysisStage
 from sunpack.i18n import I18nContext
 
 class PipelineRunner:

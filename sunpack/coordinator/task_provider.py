@@ -8,7 +8,7 @@ from sunpack.contracts.failures import FailureInfo, FailureKind
 from sunpack.contracts.tasks import ArchiveTask
 from sunpack.detection.knowledge import write_detection_task
 from sunpack.detection.scheduler import DetectionScheduler
-from sunpack.coordinator.analysis_stage import ArchiveAnalysisStage
+from sunpack.analysis.stage import ArchiveAnalysisStage
 from sunpack.coordinator.scan_session import DetectionScanSession
 from sunpack.coordinator.target_scan import build_fact_bags_for_targets
 from sunpack.filesystem.knowledge import write_filesystem_task

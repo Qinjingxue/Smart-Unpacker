@@ -6,7 +6,7 @@ from sunpack.contracts.detection import FactBag
 from sunpack.contracts.run_context import RunContext
 from sunpack.contracts.tasks import ArchiveTask
 from sunpack.coordinator.task_provider import ArchiveTaskProvider
-from sunpack.coordinator.analysis_stage import ArchiveAnalysisStage
+from sunpack.analysis.stage import ArchiveAnalysisStage
 
 
 class ArchiveTaskScanner:

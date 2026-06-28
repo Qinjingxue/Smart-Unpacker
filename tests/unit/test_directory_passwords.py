@@ -1,7 +1,7 @@
 from types import SimpleNamespace
 
 from sunpack.contracts.detection import FactBag
-from sunpack.coordinator.extraction_batch import ExtractionBatchRunner
+from sunpack.passwords.directory_context import DirectoryPasswordContextStore
 from sunpack.passwords.internal.clipboard import _plausible_passwords
 from sunpack.passwords.internal.local_files import (
     DIRECTORY_PASSWORD_CONTEXT_FACT,
@@ -38,14 +38,13 @@ def test_directory_password_context_inherits_and_extends(tmp_path):
     archive.write_bytes(b"not really an archive")
     (child / ".sunpack-passwords.txt").write_text("inner-secret\nouter-secret\n", encoding="utf-8")
 
-    runner = object.__new__(ExtractionBatchRunner)
-    runner.config = {}
-    runner._directory_password_contexts = {
-        __import__("os").path.normcase(__import__("os").path.abspath(str(parent))): ["outer-secret"],
-    }
+    store = DirectoryPasswordContextStore({})
+    parent_task = SimpleNamespace(fact_bag=FactBag())
+    parent_task.fact_bag.set(DIRECTORY_PASSWORD_CONTEXT_FACT, ["outer-secret"])
+    store.remember(str(parent), parent_task)
     task = SimpleNamespace(main_path=str(archive), fact_bag=FactBag())
 
-    runner._annotate_directory_password_contexts([task])
+    store.annotate([task])
 
     assert task.fact_bag.get(DIRECTORY_PASSWORD_CONTEXT_FACT) == ["outer-secret", "inner-secret"]
 

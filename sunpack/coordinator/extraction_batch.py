@@ -1,5 +1,4 @@
 import os
-import shutil
 import hashlib
 import json
 from dataclasses import dataclass, field
@@ -9,14 +8,22 @@ from typing import Any, List
 from sunpack.contracts.run_context import RunContext
 from sunpack.contracts.archive_state import ArchiveState
 from sunpack.contracts.tasks import ArchiveTask
-from sunpack.coordinator.analysis_stage import ArchiveAnalysisStage
+from sunpack.analysis.stage import ArchiveAnalysisStage
 from sunpack.postprocess.failed_output_cleanup import REPAIR_ENTERED_FACT, cleanup_failed_output_if_eligible
-from sunpack.coordinator.repair_beam import RepairBeamCandidate, RepairBeamLoop, RepairBeamState
-from sunpack.coordinator.repair_loop import RepairLoopLimits, RepairLoopState, terminal_failure_reason
+from sunpack.postprocess.recovery_outputs import (
+    cleanup_beam_evaluations,
+    cleanup_shelved_outcome,
+    promote_beam_output,
+    promote_recovery_outcome,
+    remove_output,
+    shelve_outcome_if_needed,
+)
+from sunpack.repair.beam import RepairBeamCandidate, RepairBeamLoop, RepairBeamState
+from sunpack.repair.loop import RepairLoopLimits, RepairLoopState, terminal_failure_reason
 from sunpack.coordinator.repair_runtime_transition import RepairRuntimeTransitionEvaluator
-from sunpack.coordinator.repair_stage import ArchiveRepairStage
+from sunpack.repair.stage import ArchiveRepairStage
 from sunpack.coordinator.resource_preflight import ResourcePreflightInspector
-from sunpack.coordinator.relation_stage import ArchiveRelationStage
+from sunpack.relations.stage import ArchiveRelationStage
 from sunpack.coordinator.verification_stage import verify_and_project
 from sunpack.coordinator.scheduling import (
     ConcurrencyScheduler,
@@ -29,11 +36,7 @@ from sunpack.contracts.extraction import ExtractionResult
 from sunpack.extraction.knowledge import write_extraction_result
 from sunpack.extraction.scheduler import ExtractionScheduler
 from sunpack.extraction.progress import filter_extraction_manifest_payload, filter_extraction_outputs
-from sunpack.passwords.internal.lists import dedupe_passwords
-from sunpack.passwords.internal.local_files import (
-    DIRECTORY_PASSWORD_CONTEXT_FACT,
-    discover_directory_passwords_for_archive,
-)
+from sunpack.passwords.directory_context import DirectoryPasswordContextStore
 from sunpack.rename.scheduler import RenameScheduler
 from sunpack.repair.candidate import RepairCandidate, candidate_feature_payload
 from sunpack.repair.knowledge import (
@@ -42,6 +45,7 @@ from sunpack.repair.knowledge import (
     write_repair_result,
 )
 from sunpack.verification import RecoveryAttempt, VerificationResult, VerificationScheduler, compare_attempts, rank_attempt
+from sunpack.verification.comparison import score_verification_payload
 from sunpack.contracts.verification import DECISION_ACCEPT, DECISION_ACCEPT_PARTIAL, DECISION_REPAIR, DECISION_RETRY_EXTRACT
 from sunpack.support.path_keys import absolute_path_key
 from sunpack.support import repair_trace
@@ -137,7 +141,7 @@ class ExtractionBatchRunner:
         self.repair_stage = ArchiveRepairStage(self.config)
         self.repair_loop_limits = RepairLoopLimits.from_config(self.repair_stage.config)
         self.verifier = VerificationScheduler(self.config, password_session=self.extractor.password_session)
-        self._directory_password_contexts: dict[str, list[str]] = {}
+        self.directory_password_contexts = DirectoryPasswordContextStore(self.config)
         performance = self.config.get("performance", {}) if isinstance(self.config.get("performance"), dict) else {}
         self.resource_inspector = ResourcePreflightInspector(
             password_session=self.extractor.password_session,
@@ -156,36 +160,6 @@ class ExtractionBatchRunner:
             for task in tasks:
                 task.apply_path_mapping(path_map)
 
-    def _annotate_directory_password_contexts(self, tasks: list[ArchiveTask]) -> None:
-        for task in tasks:
-            inherited = self._inherited_directory_passwords(task.main_path)
-            local = discover_directory_passwords_for_archive(task.main_path, self.config)
-            context = dedupe_passwords([*inherited, *local])
-            task.fact_bag.set(DIRECTORY_PASSWORD_CONTEXT_FACT, context)
-
-    def _remember_directory_password_context(self, output_dir: str, task: ArchiveTask) -> None:
-        if not output_dir:
-            return
-        values = task.fact_bag.get(DIRECTORY_PASSWORD_CONTEXT_FACT)
-        if not isinstance(values, list):
-            return
-        context = dedupe_passwords([str(value) for value in values if isinstance(value, str)])
-        key = os.path.normcase(os.path.abspath(output_dir))
-        self._directory_password_contexts[key] = context
-
-    def _inherited_directory_passwords(self, archive_path: str) -> list[str]:
-        if not archive_path:
-            return []
-        archive_key = os.path.normcase(os.path.abspath(archive_path))
-        best_root = ""
-        best_context: list[str] = []
-        for root_key, context in self._directory_password_contexts.items():
-            if archive_key == root_key or archive_key.startswith(root_key + os.sep):
-                if len(root_key) > len(best_root):
-                    best_root = root_key
-                    best_context = context
-        return list(best_context)
-
     def execute(self, tasks: List[ArchiveTask]) -> List[str]:
         if not tasks:
             if self.progress_reporter is not None:
@@ -194,7 +168,7 @@ class ExtractionBatchRunner:
 
         self.prepare_tasks(tasks)
         tasks = self.analysis_stage.analyze_tasks(tasks)
-        self._annotate_directory_password_contexts(tasks)
+        self.directory_password_contexts.annotate(tasks)
         output_dir_resolver = self.rename_scheduler.build_output_dir_resolver(
             tasks,
             self.extractor.default_output_dir_for_task,
@@ -211,7 +185,7 @@ class ExtractionBatchRunner:
             output_dir = self.collect_result(task, outcome)
             if output_dir:
                 output_dirs.append(output_dir)
-                self._remember_directory_password_context(output_dir, task)
+                self.directory_password_contexts.remember(output_dir, task)
                 payload = outcome.result.output_inventory_payload
                 if isinstance(payload, dict):
                     output_inventories[os.path.normcase(os.path.abspath(output_dir))] = payload
@@ -493,7 +467,7 @@ class ExtractionBatchRunner:
                             current_sequence,
                         )
                         if isinstance(handled, BatchExtractionOutcome):
-                            self._cleanup_shelved_outcome(incumbent_outcome, keep=handled)
+                            cleanup_shelved_outcome(incumbent_outcome, keep=handled)
                             return handled
                         if handled:
                             self._refresh_analysis_after_repair(task)
@@ -508,7 +482,7 @@ class ExtractionBatchRunner:
             self._annotate_recovery_outcome(task, outcome, source="original", round_index=current_sequence)
             if _verification_accepts_complete(verification):
                 selected = self._selected_acceptable_outcome(incumbent_outcome, outcome, out_dir) or outcome
-                self._cleanup_shelved_outcome(incumbent_outcome, keep=selected)
+                cleanup_shelved_outcome(incumbent_outcome, keep=selected)
                 return selected
 
             incumbent_outcome = self._select_better_recovery_outcome(incumbent_outcome, outcome)
@@ -536,7 +510,7 @@ class ExtractionBatchRunner:
                             self._refresh_analysis_after_repair(task)
                             continue
                     elif self._beam_enabled():
-                        self._shelve_outcome_if_needed(incumbent_outcome, out_dir)
+                        shelve_outcome_if_needed(incumbent_outcome, out_dir)
                         beam_evaluation = self._repair_after_verification_with_beam(
                             task,
                             result,
@@ -554,7 +528,7 @@ class ExtractionBatchRunner:
                                 current_sequence,
                             )
                             if isinstance(handled, BatchExtractionOutcome):
-                                self._cleanup_shelved_outcome(incumbent_outcome, keep=handled)
+                                cleanup_shelved_outcome(incumbent_outcome, keep=handled)
                                 return handled
                             if handled:
                                 self._refresh_analysis_after_repair(task)
@@ -569,7 +543,7 @@ class ExtractionBatchRunner:
             if verification.decision_hint not in {DECISION_RETRY_EXTRACT, DECISION_REPAIR} and not self._retry_on_verification_failure():
                 break
             if cleanup_failed_output:
-                shutil.rmtree(result.out_dir, ignore_errors=True)
+                remove_output(result.out_dir)
             attempt_index += 1
 
         selected = self._selected_acceptable_outcome(incumbent_outcome, last_outcome, out_dir, final=True)
@@ -711,7 +685,7 @@ class ExtractionBatchRunner:
         if not self._outcome_accepts(selected, final=final):
             return None
         _ensure_recovery_rank(selected)
-        self._promote_recovery_outcome(selected, out_dir)
+        promote_recovery_outcome(selected, out_dir)
         if self._accept_partial_output(selected.result, selected.verification):
             self._filter_partial_outputs(selected.result)
         return selected
@@ -756,44 +730,6 @@ class ExtractionBatchRunner:
             "comparison": dict(comparison),
         })
         return exhausted
-
-    def _shelve_outcome_if_needed(self, outcome: BatchExtractionOutcome | None, out_dir: str) -> None:
-        if outcome is None:
-            return
-        current = Path(outcome.result.out_dir)
-        target = Path(out_dir)
-        if os.path.abspath(str(current)) != os.path.abspath(str(target)):
-            return
-        if not current.exists():
-            return
-        suffix = (outcome.attempt_id or _recovery_attempt_id(outcome))[:12]
-        held = target.with_name(f"{target.name}.incumbent_{suffix}")
-        shutil.rmtree(held, ignore_errors=True)
-        shutil.move(str(current), str(held))
-        _retarget_result_output(outcome.result, str(current), str(held))
-
-    def _promote_recovery_outcome(self, outcome: BatchExtractionOutcome, out_dir: str) -> None:
-        current = Path(outcome.result.out_dir)
-        target = Path(out_dir)
-        if os.path.abspath(str(current)) == os.path.abspath(str(target)):
-            return
-        shutil.rmtree(target, ignore_errors=True)
-        if current.exists():
-            shutil.move(str(current), str(target))
-        _retarget_result_output(outcome.result, str(current), str(target))
-
-    def _cleanup_shelved_outcome(
-        self,
-        outcome: BatchExtractionOutcome | None,
-        *,
-        keep: BatchExtractionOutcome | None = None,
-    ) -> None:
-        if outcome is None or keep is outcome:
-            return
-        path = Path(outcome.result.out_dir)
-        if ".incumbent_" not in path.name:
-            return
-        shutil.rmtree(path, ignore_errors=True)
 
     def _retry_on_verification_failure(self) -> bool:
         return bool(self.verifier.config.get("retry_on_verification_failure", True))
@@ -852,7 +788,7 @@ class ExtractionBatchRunner:
             )
         if not self._beam_enabled():
             return False
-        self._shelve_outcome_if_needed(incumbent_outcome, out_dir)
+        shelve_outcome_if_needed(incumbent_outcome, out_dir)
         beam_evaluation = self._repair_after_verification_with_beam(
             task,
             result,
@@ -925,6 +861,7 @@ class ExtractionBatchRunner:
             analyze=lambda candidate: {"confidence": float(candidate.confidence or 0.0)},
             assess=lambda item: self._assess_beam_candidate(task, item, out_dir, runtime_scheduler, evaluated),
             should_assess=self._beam_candidate_should_assess,
+            score_assessment=score_verification_payload,
         )
         initial = RepairBeamState(
             source_input=dict(job.source_input),
@@ -962,7 +899,7 @@ class ExtractionBatchRunner:
             if terminal_result is not None:
                 write_repair_result(task, terminal_result, phase="beam_terminal")
                 return _BeamRepairTerminal(repair_result=terminal_result)
-            self._cleanup_beam_evaluations(evaluated)
+            cleanup_beam_evaluations(evaluated)
             return None
 
         digest = _source_input_digest(best.source_input)
@@ -971,7 +908,7 @@ class ExtractionBatchRunner:
             digest = _source_input_digest({"archive_state": best.archive_state})
             selected = evaluated.get(digest)
         if selected is None:
-            self._cleanup_beam_evaluations(evaluated)
+            cleanup_beam_evaluations(evaluated)
             _append_repair_candidate_log(task, {
                 "phase": "beam_no_selected_evaluation",
                 "best_state": _beam_state_summary(best),
@@ -979,7 +916,7 @@ class ExtractionBatchRunner:
             })
             return None
         candidate, extracted, assessed, temp_dir = selected
-        self._cleanup_beam_evaluations({
+        cleanup_beam_evaluations({
             key: value
             for key, value in evaluated.items()
             if key != digest
@@ -1047,7 +984,7 @@ class ExtractionBatchRunner:
                     "candidate": candidate_feature_payload(evaluation.candidate),
                     "comparison": dict(beam_outcome.comparison),
                 })
-                self._cleanup_beam_evaluations({evaluation.outcome.attempt_id: (
+                cleanup_beam_evaluations({evaluation.outcome.attempt_id: (
                     evaluation.candidate,
                     evaluation.result,
                     evaluation.verification,
@@ -1060,7 +997,7 @@ class ExtractionBatchRunner:
                 "candidate": candidate_feature_payload(evaluation.candidate),
                 "comparison": dict(beam_outcome.comparison),
             })
-            self._cleanup_beam_evaluations({evaluation.outcome.attempt_id: (
+            cleanup_beam_evaluations({evaluation.outcome.attempt_id: (
                 evaluation.candidate,
                 evaluation.result,
                 evaluation.verification,
@@ -1069,7 +1006,7 @@ class ExtractionBatchRunner:
             return False
         self._apply_beam_candidate_to_task(task, evaluation.candidate)
         if not loop_state.record_result(evaluation.repair_result, trigger="verification_beam"):
-            self._cleanup_beam_evaluations({evaluation.outcome.attempt_id: (
+            cleanup_beam_evaluations({evaluation.outcome.attempt_id: (
                 evaluation.candidate,
                 evaluation.result,
                 evaluation.verification,
@@ -1086,9 +1023,9 @@ class ExtractionBatchRunner:
             })
             if self._accept_partial_output(evaluation.result, evaluation.verification):
                 self._filter_partial_outputs(evaluation.result)
-            final_result = self._promote_beam_output(evaluation.result, evaluation.temp_dir, out_dir)
+            final_result = promote_beam_output(evaluation.result, evaluation.temp_dir, out_dir)
             beam_outcome.result = final_result
-            self._promote_recovery_outcome(beam_outcome, out_dir)
+            promote_recovery_outcome(beam_outcome, out_dir)
             return beam_outcome
 
         if _verification_accepts_partial(evaluation.verification) and not loop_state.can_attempt(trigger="verification_beam_best_partial"):
@@ -1100,9 +1037,9 @@ class ExtractionBatchRunner:
             })
             if self._accept_partial_output(evaluation.result, evaluation.verification):
                 self._filter_partial_outputs(evaluation.result)
-            final_result = self._promote_beam_output(evaluation.result, evaluation.temp_dir, out_dir)
+            final_result = promote_beam_output(evaluation.result, evaluation.temp_dir, out_dir)
             beam_outcome.result = final_result
-            self._promote_recovery_outcome(beam_outcome, out_dir)
+            promote_recovery_outcome(beam_outcome, out_dir)
             return beam_outcome
 
         if not bool(beam_outcome.comparison.get("should_continue_repair", True)):
@@ -1117,13 +1054,13 @@ class ExtractionBatchRunner:
                     "candidate": candidate_feature_payload(evaluation.candidate),
                     "comparison": dict(beam_outcome.comparison),
                 })
-                self._cleanup_beam_evaluations({evaluation.outcome.attempt_id: (
+                cleanup_beam_evaluations({evaluation.outcome.attempt_id: (
                     evaluation.candidate,
                     evaluation.result,
                     evaluation.verification,
                     evaluation.temp_dir,
                 )})
-                shutil.rmtree(out_dir, ignore_errors=True)
+                remove_output(out_dir)
                 return True
             _append_repair_candidate_log(task, {
                 "phase": "beam_stop",
@@ -1131,7 +1068,7 @@ class ExtractionBatchRunner:
                 "candidate": candidate_feature_payload(evaluation.candidate),
                 "comparison": dict(beam_outcome.comparison),
             })
-            self._cleanup_beam_evaluations({evaluation.outcome.attempt_id: (
+            cleanup_beam_evaluations({evaluation.outcome.attempt_id: (
                 evaluation.candidate,
                 evaluation.result,
                 evaluation.verification,
@@ -1139,13 +1076,13 @@ class ExtractionBatchRunner:
             )})
             return False
 
-        self._cleanup_beam_evaluations({evaluation.outcome.attempt_id: (
+        cleanup_beam_evaluations({evaluation.outcome.attempt_id: (
             evaluation.candidate,
             evaluation.result,
             evaluation.verification,
             evaluation.temp_dir,
         )})
-        shutil.rmtree(out_dir, ignore_errors=True)
+        remove_output(out_dir)
         _append_repair_candidate_log(task, {
             "phase": "beam_continue",
             "candidate": candidate_feature_payload(evaluation.candidate),
@@ -1308,33 +1245,6 @@ class ExtractionBatchRunner:
             transition.temp_dir,
         )
         return transition.verification
-
-    def _promote_beam_output(self, result: ExtractionResult, temp_dir: str, out_dir: str) -> ExtractionResult:
-        if os.path.abspath(temp_dir) != os.path.abspath(out_dir):
-            shutil.rmtree(out_dir, ignore_errors=True)
-            if os.path.exists(temp_dir):
-                shutil.move(temp_dir, out_dir)
-        result.out_dir = out_dir
-        if isinstance(result.output_inventory_payload, dict):
-            result.output_inventory_payload = {
-                **result.output_inventory_payload,
-                "root": os.path.abspath(out_dir),
-            }
-        manifest = Path(out_dir) / ".sunpack" / "extraction_manifest.json"
-        result.progress_manifest = str(manifest) if manifest.exists() else ""
-        return result
-
-    def _cleanup_beam_evaluations(
-        self,
-        evaluated: dict[str, tuple[RepairCandidate, ExtractionResult, VerificationResult, str]],
-        *,
-        keep: str = "",
-    ) -> None:
-        keep_abs = os.path.abspath(keep) if keep else ""
-        for _candidate, _result, _verification, temp_dir in evaluated.values():
-            if keep_abs and os.path.abspath(temp_dir) == keep_abs:
-                continue
-            shutil.rmtree(temp_dir, ignore_errors=True)
 
     def _skip_tasks_inside_batch_outputs(self, tasks: List[ArchiveTask], output_dir_resolver=None) -> List[ArchiveTask]:
         output_dir_resolver = output_dir_resolver or self.extractor.default_output_dir_for_task
@@ -1892,23 +1802,6 @@ def _patch_cost(archive_state: dict[str, Any]) -> float:
             except (TypeError, ValueError):
                 continue
     return min(1.0, cost)
-
-
-def _retarget_result_output(result: ExtractionResult, old_dir: str, new_dir: str) -> None:
-    old = Path(old_dir)
-    new = Path(new_dir)
-    progress_manifest = result.progress_manifest
-    result.out_dir = str(new)
-    if not progress_manifest:
-        return
-    manifest_path = Path(progress_manifest)
-    try:
-        relative = manifest_path.relative_to(old)
-    except ValueError:
-        candidate = new / ".sunpack" / "extraction_manifest.json"
-        result.progress_manifest = str(candidate) if candidate.exists() else progress_manifest
-        return
-    result.progress_manifest = str(new / relative)
 
 
 def _coverage_payload(verification: VerificationResult) -> dict[str, Any]:

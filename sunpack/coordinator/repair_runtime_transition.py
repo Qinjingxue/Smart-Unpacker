@@ -12,7 +12,7 @@ from typing import Any, Callable
 from sunpack.contracts.archive_state import ArchiveState
 from sunpack.contracts.detection import FactBag
 from sunpack.contracts.tasks import ArchiveTask
-from sunpack.coordinator.analysis_stage import ArchiveAnalysisStage
+from sunpack.analysis.stage import ArchiveAnalysisStage
 from sunpack.coordinator.verification_stage import verify_and_project
 from sunpack.contracts.extraction import ExtractionResult
 from sunpack.extraction.knowledge import write_extraction_result

@@ -10,7 +10,7 @@ from sunpack.app.cli_types import CliCommandResult
 from sunpack.contracts.detection import FactBag
 from sunpack.contracts.tasks import ArchiveTask
 from sunpack.config.loader import load_config
-from sunpack.coordinator.analysis_stage import ArchiveAnalysisStage
+from sunpack.analysis.stage import ArchiveAnalysisStage
 from sunpack.coordinator.inspector import InspectOrchestrator
 from sunpack.support.json_format import to_json_text
 

@@ -16,7 +16,7 @@ from repair_training.policy.sanitize import (
 )
 from sunpack.repair.model.policy.schema import PolicyAction, PolicyGraphTrainingSample, sample_from_dict
 from sunpack.analysis.knowledge import write_zip_runtime_evidence_facts
-from sunpack.coordinator.analysis_stage import ArchiveAnalysisStage
+from sunpack.analysis.stage import ArchiveAnalysisStage
 from sunpack.contracts.archive_input import ArchiveInputDescriptor
 from sunpack.contracts.archive_state import ArchiveState
 from sunpack.repair.job import RepairJob

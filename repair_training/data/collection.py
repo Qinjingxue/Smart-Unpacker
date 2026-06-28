@@ -33,7 +33,7 @@ from sunpack.contracts.archive_input import ArchiveInputDescriptor
 from sunpack.contracts.archive_state import ArchiveState
 from sunpack.contracts.detection import FactBag
 from sunpack.contracts.tasks import ArchiveTask
-from sunpack.coordinator.analysis_stage import ArchiveAnalysisStage
+from sunpack.analysis.stage import ArchiveAnalysisStage
 from sunpack.analysis.knowledge import write_zip_structure_facts
 from sunpack.detection.pipeline.processors.modules.format_structure.zip_directory_consistency import (
     inspect_zip_directory_consistency,
