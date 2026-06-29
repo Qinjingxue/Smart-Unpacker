@@ -158,6 +158,11 @@ class WatchScheduler:
         self._observer.start()
         self._clipboard_monitor.start()
         self._started = True
+        for snapshot in self.state.pending_snapshots():
+            if os.path.exists(snapshot.path):
+                self.enqueue(snapshot.path, force=True, event_type="recovery")
+            else:
+                self.state.forget_path(snapshot.path)
         if self.initial_scan:
             for candidate in scan_watch_candidates(self.watch_roots, recursive=self.recursive):
                 self.enqueue(candidate.path, event_type="initial_scan")
@@ -230,6 +235,7 @@ class WatchScheduler:
             result.succeeded += single.succeeded
             result.failed += single.failed
             result.errors.extend(single.errors)
+        self.state.complete_work(candidate.path for candidate in ready)
         result.pending = self.pending_count
         return result
 
@@ -347,20 +353,6 @@ class WatchScheduler:
         if candidate is None:
             self._log_candidate_ignored(path, "sample_unreadable")
             return
-        if self.state.should_skip(
-            candidate.path,
-            candidate.size,
-            candidate.mtime,
-            candidate.sample_digest,
-            force=force,
-        ):
-            self._log_candidate_ignored(
-                candidate.path,
-                "already_processed",
-                size=candidate.size,
-                mtime=candidate.mtime,
-            )
-            return
         with self._lock:
             previous = self._pending.get(candidate.path)
             previous_state = self._pending_states.get(candidate.path)
@@ -375,6 +367,12 @@ class WatchScheduler:
                     previous_state.src_path = src_path or previous_state.src_path
                     previous_state.from_temporary_download = previous_state.from_temporary_download or _is_temporary_download_path(src_path)
                     previous_state.filter_revision = filter_revision
+                return
+            if previous is not None and force and previous_state is not None:
+                previous_state.force = True
+                previous_state.event_type = _prefer_event_type(previous_state.event_type, event_type)
+                previous_state.src_path = src_path or previous_state.src_path
+                previous_state.filter_revision = filter_revision
                 return
             self._pending[candidate.path] = candidate
             if previous is None or previous.size != candidate.size or previous.mtime != candidate.mtime:
@@ -470,12 +468,12 @@ class WatchScheduler:
                 self._pending.pop(candidate_path, None)
                 self._stable_since.pop(candidate_path, None)
                 self._pending_states.pop(candidate_path, None)
-        invalidated = self.state.invalidate_path(normalized, recursive=recursive)
+        forgotten = self.state.forget_path(normalized, recursive=recursive)
         self.log.write(
             "candidate_departed",
             path=normalized,
             recursive=recursive,
-            invalidated=invalidated,
+            forgotten=forgotten,
             pending_removed=len(pending_paths),
         )
 
@@ -524,7 +522,7 @@ class WatchScheduler:
                         continue
                     if sampled.sample_digest != candidate.sample_digest:
                         if state.sample_invalidated:
-                            ready.append(sampled)
+                            self._accept_ready_candidate(sampled, state, ready)
                             self._pending.pop(path, None)
                             self._stable_since.pop(path, None)
                             self._pending_states.pop(path, None)
@@ -534,11 +532,38 @@ class WatchScheduler:
                         state.last_changed = now
                         state.change_count += 1
                         continue
-                    ready.append(sampled)
+                    self._accept_ready_candidate(sampled, state, ready)
                     self._pending.pop(path, None)
                     self._stable_since.pop(path, None)
                     self._pending_states.pop(path, None)
         return ready
+
+    def _accept_ready_candidate(
+        self,
+        candidate: WatchCandidate,
+        pending_state: _PendingCandidateState,
+        ready: list[WatchCandidate],
+    ) -> None:
+        if not pending_state.force and self.state.snapshot_matches(
+            candidate.path,
+            candidate.size,
+            candidate.mtime,
+            candidate.sample_digest,
+        ):
+            self._log_candidate_ignored(
+                candidate.path,
+                "unchanged_input",
+                size=candidate.size,
+                mtime=candidate.mtime,
+            )
+            return
+        self.state.observe_and_queue(
+            candidate.path,
+            candidate.size,
+            candidate.mtime,
+            candidate.sample_digest,
+        )
+        ready.append(candidate)
 
     def _process_password_dirty_dirs(self, now: float) -> None:
         ready_dirs: list[str] = []
@@ -625,8 +650,6 @@ class WatchScheduler:
                 candidate.mtime,
                 sample_digest=candidate.sample_digest,
                 status=status,
-                output_dir=generated_output_dirs[0] if generated_output_dirs else "",
-                generated_output_dirs=[],
                 error=error,
                 failure_payload=payload,
             )
@@ -653,8 +676,6 @@ class WatchScheduler:
             candidate.mtime,
             sample_digest=candidate.sample_digest,
             status="done",
-            output_dir=generated_output_dirs[0] if generated_output_dirs else "",
-            generated_output_dirs=generated_output_dirs,
         )
         self.log.write("done", path=candidate.path, success_count=summary.success_count, output_dirs=generated_output_dirs)
         return WatchRunResult(processed=1, succeeded=summary.success_count)
@@ -784,6 +805,7 @@ class WatchScheduler:
             return
         with self._lock:
             self._known_output_roots = _dedupe_paths([*self._known_output_roots, *roots])
+        self.state.remember_output_roots(roots)
 
     def _prune_recent_output_roots(self, now: float) -> None:
         with self._lock:
@@ -973,7 +995,7 @@ def _is_temporary_download_path(path: str) -> bool:
 
 
 def _prefer_event_type(current: str, incoming: str) -> str:
-    order = {"unknown": 0, "initial_scan": 1, "modified": 2, "created": 3, "moved": 4}
+    order = {"unknown": 0, "initial_scan": 1, "modified": 2, "created": 3, "moved": 4, "recovery": 5}
     return incoming if order.get(incoming, 0) >= order.get(current, 0) else current
 
 

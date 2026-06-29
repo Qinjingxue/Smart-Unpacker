@@ -56,8 +56,6 @@ class WatchGroupState:
     def retry_ready(self, snapshot: WatchGroupSnapshot, password_generation: int) -> bool:
         if self.status == "running":
             return True
-        if self.status == "done" and self.relation_fingerprint == snapshot.fingerprint:
-            return False
         if not self.blockers:
             return self.last_attempted_fingerprint != snapshot.fingerprint
         missing_ready = (

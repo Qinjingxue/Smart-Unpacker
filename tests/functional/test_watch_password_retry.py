@@ -82,14 +82,12 @@ def test_watch_retries_real_encrypted_zip_after_password_source_update(tmp_path,
         monkeypatch.setattr(clipboard_monitor_module, "read_clipboard_passwords", lambda: [password])
         watcher._clipboard_monitor._handle_clipboard_update()
     second = watcher.run_once()
-    final_entry = next(iter(watcher.state.entries.values()))
     extracted = list(output_root.rglob("payload.txt"))
 
     assert first.failed == 1
     assert first_entry.status == "failed_password"
     assert second.succeeded == 1
-    assert final_entry.status == "done"
-    assert final_entry.attempt_count == 2
+    assert not watcher.state.entries
     assert len(extracted) == 1
     assert extracted[0].read_text(encoding="utf-8") == payload
     if source == "watch_clipboard":
