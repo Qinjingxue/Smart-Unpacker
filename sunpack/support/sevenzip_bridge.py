@@ -800,12 +800,26 @@ def _cache_key(tester: NativePasswordTester, archive_path: str, part_paths: list
     )
 
 
-def cached_probe_archive(archive_path: str, part_paths: list[str] | None = None) -> NativeArchiveProbe:
+def _archive_input_cache_key(archive_input: dict | None) -> str | None:
+    if not isinstance(archive_input, dict):
+        return None
+    return json.dumps(archive_input, ensure_ascii=True, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def cached_probe_archive(
+    archive_path: str,
+    part_paths: list[str] | None = None,
+    archive_input: dict | None = None,
+) -> NativeArchiveProbe:
     tester = get_native_password_tester()
+    key = _cache_key(tester, archive_path, part_paths)
+    archive_input_key = _archive_input_cache_key(archive_input)
+    if archive_input_key is not None:
+        key += (archive_input_key,)
     return cached_value(
         "native_7z_probe",
-        _cache_key(tester, archive_path, part_paths),
-        lambda: tester.probe_archive(archive_path, part_paths=part_paths),
+        key,
+        lambda: tester.probe_archive(archive_path, part_paths=part_paths, archive_input=archive_input),
     )
 
 

@@ -16,13 +16,15 @@ class FakeTester:
 
     def __init__(self):
         self.probe_calls = 0
+        self.probe_inputs = []
         self.test_calls = 0
         self.health_calls = 0
         self.resource_calls = 0
         self.crc_manifest_calls = 0
 
-    def probe_archive(self, archive_path: str, part_paths=None):
+    def probe_archive(self, archive_path: str, part_paths=None, archive_input=None):
         self.probe_calls += 1
+        self.probe_inputs.append(archive_input)
         return native.NativeArchiveProbe(
             status=native.STATUS_OK,
             is_archive=True,
@@ -97,8 +99,9 @@ class FakeTester:
 
 
 class UnsupportedProbeTester(FakeTester):
-    def probe_archive(self, archive_path: str, part_paths=None):
+    def probe_archive(self, archive_path: str, part_paths=None, archive_input=None):
         self.probe_calls += 1
+        self.probe_inputs.append(archive_input)
         return native.NativeArchiveProbe(
             status=native.STATUS_UNSUPPORTED,
             is_archive=True,
@@ -136,6 +139,32 @@ def test_cached_probe_reuses_result_for_unchanged_file(tmp_path, monkeypatch):
     assert first.archive_type == "zip"
     assert second.archive_type == "zip"
     assert fake.probe_calls == 1
+    _clear_native_7z_caches()
+
+
+def test_cached_probe_separates_and_reuses_archive_input_ranges(tmp_path, monkeypatch):
+    fake = _install_fake_tester(monkeypatch)
+    archive = tmp_path / "carrier.jpg"
+    archive.write_bytes(b"jpeg-and-archive")
+    first_input = {
+        "entry_path": str(archive),
+        "open_mode": "file_range",
+        "format_hint": "rar",
+        "parts": [{"path": str(archive), "start": 4}],
+    }
+    second_input = {
+        "entry_path": str(archive),
+        "open_mode": "file_range",
+        "format_hint": "rar",
+        "parts": [{"path": str(archive), "start": 8}],
+    }
+
+    native.cached_probe_archive(str(archive), archive_input=first_input)
+    native.cached_probe_archive(str(archive), archive_input=dict(first_input))
+    native.cached_probe_archive(str(archive), archive_input=second_input)
+
+    assert fake.probe_calls == 2
+    assert fake.probe_inputs == [first_input, second_input]
     _clear_native_7z_caches()
 
 

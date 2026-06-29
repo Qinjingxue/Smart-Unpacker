@@ -44,27 +44,6 @@ def pytest_addoption(parser):
         help="Payload size in MiB for each generated large archive.",
     )
     parser.addoption(
-        "--large-archive-max-extract-seconds",
-        action="store",
-        type=float,
-        default=300.0,
-        help="Maximum allowed end-to-end extraction time for the large archive performance test.",
-    )
-    parser.addoption(
-        "--large-archive-min-parallel-7z",
-        action="store",
-        type=int,
-        default=2,
-        help="Minimum observed concurrent 7z.exe process count for the large archive performance test.",
-    )
-    parser.addoption(
-        "--large-archive-scheduler-profile",
-        action="store",
-        default="auto",
-        choices=("auto", "conservative", "aggressive"),
-        help="Scheduler profile used by the large archive performance test.",
-    )
-    parser.addoption(
         "--repair-performance-repetitions",
         action="store",
         type=int,
