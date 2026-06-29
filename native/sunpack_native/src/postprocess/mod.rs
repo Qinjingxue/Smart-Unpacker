@@ -62,7 +62,7 @@ pub(crate) fn flatten_single_branch_directories(
     }
 
     let mut stats = FlattenStats::default();
-    flatten_dir_bottom_up(&base_path, &mut stats);
+    flatten_single_branch_chain(&base_path, &mut stats);
     result.set_item("moved", stats.moved)?;
     result.set_item("removed_dirs", stats.removed_dirs)?;
     result.set_item("errors", PyList::new(py, stats.errors)?)?;
@@ -207,22 +207,13 @@ struct FlattenStats {
     errors: Vec<String>,
 }
 
-fn flatten_dir_bottom_up(root: &Path, stats: &mut FlattenStats) {
-    let Ok(entries) = fs::read_dir(root) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            flatten_dir_bottom_up(&path, stats);
-        }
-    }
-    flatten_single_branch(root, stats);
+fn flatten_single_branch_chain(root: &Path, stats: &mut FlattenStats) {
+    while flatten_single_branch(root, stats) {}
 }
 
-fn flatten_single_branch(root: &Path, stats: &mut FlattenStats) {
+fn flatten_single_branch(root: &Path, stats: &mut FlattenStats) -> bool {
     let Ok(entries) = fs::read_dir(root) else {
-        return;
+        return false;
     };
     let mut dirs = Vec::new();
     let mut files = 0usize;
@@ -235,11 +226,11 @@ fn flatten_single_branch(root: &Path, stats: &mut FlattenStats) {
         }
     }
     if dirs.len() != 1 || files != 0 {
-        return;
+        return false;
     }
     let child = dirs.remove(0);
     let Ok(child_entries) = fs::read_dir(&child) else {
-        return;
+        return false;
     };
     for entry in child_entries.flatten() {
         let src = entry.path();
@@ -258,10 +249,16 @@ fn flatten_single_branch(root: &Path, stats: &mut FlattenStats) {
         }
     }
     match fs::remove_dir(&child) {
-        Ok(()) => stats.removed_dirs += 1,
-        Err(error) => stats
-            .errors
-            .push(format!("{}: {}", normalize_path(&child), error)),
+        Ok(()) => {
+            stats.removed_dirs += 1;
+            true
+        }
+        Err(error) => {
+            stats
+                .errors
+                .push(format!("{}: {}", normalize_path(&child), error));
+            false
+        }
     }
 }
 
@@ -319,4 +316,78 @@ fn mtime_seconds(metadata: &fs::Metadata) -> f64 {
         .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
         .map(|duration| duration.as_secs_f64())
         .unwrap_or(0.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    struct TestDirectory(PathBuf);
+
+    impl TestDirectory {
+        fn new(name: &str) -> Self {
+            let unique = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock should be after the Unix epoch")
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!(
+                "sunpack-postprocess-{name}-{}-{unique}",
+                std::process::id()
+            ));
+            fs::create_dir_all(&path).expect("test directory should be created");
+            Self(path)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TestDirectory {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn flatten_stops_at_first_branching_level() {
+        let output = TestDirectory::new("branching");
+        let build = output.path().join("Build");
+        fs::create_dir_all(build.join("Plugins/x86_64")).unwrap();
+        fs::create_dir_all(build.join("StreamingAssets/aa")).unwrap();
+        fs::write(build.join("Clicker.exe"), b"exe").unwrap();
+        fs::write(build.join("Plugins/x86_64/plugin.dll"), b"dll").unwrap();
+        fs::write(build.join("StreamingAssets/aa/catalog.bin"), b"catalog").unwrap();
+
+        let mut stats = FlattenStats::default();
+        flatten_single_branch_chain(output.path(), &mut stats);
+
+        assert!(!output.path().join("Build").exists());
+        assert!(output.path().join("Clicker.exe").is_file());
+        assert!(output.path().join("Plugins/x86_64/plugin.dll").is_file());
+        assert!(output
+            .path()
+            .join("StreamingAssets/aa/catalog.bin")
+            .is_file());
+        assert_eq!(stats.removed_dirs, 1);
+        assert!(stats.errors.is_empty());
+    }
+
+    #[test]
+    fn flatten_continues_along_an_unbranched_directory_chain() {
+        let output = TestDirectory::new("chain");
+        let payload = output.path().join("outer/inner/payload.txt");
+        fs::create_dir_all(payload.parent().unwrap()).unwrap();
+        fs::write(&payload, b"payload").unwrap();
+
+        let mut stats = FlattenStats::default();
+        flatten_single_branch_chain(output.path(), &mut stats);
+
+        assert!(output.path().join("payload.txt").is_file());
+        assert!(!output.path().join("outer").exists());
+        assert!(!output.path().join("inner").exists());
+        assert_eq!(stats.removed_dirs, 2);
+        assert!(stats.errors.is_empty());
+    }
 }
