@@ -648,6 +648,91 @@ def test_watch_scheduler_processes_archive_when_output_root_matches_watch_root(t
     assert entry.generated_output_dirs == [str((tmp_path / "sample").resolve())]
 
 
+def test_watch_scheduler_reprocesses_identical_archive_after_output_is_deleted(tmp_path, monkeypatch):
+    monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
+    archive_path = tmp_path / "sample.zip"
+    output_dir = tmp_path / "sample"
+    _write_zip(archive_path)
+    runs = []
+
+    class FakePipelineRunner:
+        def __init__(self, config):
+            self.context = SimpleNamespace(flatten_candidates={str(output_dir)}, recovered_outputs=[])
+
+        def run_targets(self, paths):
+            runs.append(list(paths))
+            output_dir.mkdir(exist_ok=True)
+            return FakeSummary()
+
+    watcher = WatchScheduler(
+        {"watch": {"clipboard_monitor_enabled": False}},
+        [str(tmp_path)],
+        out_dir=".",
+        state_path=str(tmp_path / ".sunpack_watch" / "state.json"),
+        stable_seconds=0,
+        initial_scan=False,
+        runner_factory=FakePipelineRunner,
+    )
+
+    watcher.enqueue(str(archive_path))
+    assert watcher.run_once().succeeded == 1
+    assert len(runs) == 1
+
+    watcher.enqueue(str(archive_path))
+    assert watcher.pending_count == 0
+
+    output_dir.rmdir()
+    watcher.enqueue(str(archive_path))
+
+    assert watcher.pending_count == 1
+    assert watcher.run_once().succeeded == 1
+    assert len(runs) == 2
+
+
+def test_watch_scheduler_reprocesses_identical_archive_after_it_moves_out_and_back(tmp_path, monkeypatch):
+    monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
+    watch_root = tmp_path / "watched"
+    outside_root = tmp_path / "outside"
+    watch_root.mkdir()
+    outside_root.mkdir()
+    archive_path = watch_root / "sample.zip"
+    outside_path = outside_root / archive_path.name
+    output_dir = watch_root / "sample"
+    _write_zip(archive_path)
+    runs = []
+
+    class FakePipelineRunner:
+        def __init__(self, config):
+            self.context = SimpleNamespace(flatten_candidates={str(output_dir)}, recovered_outputs=[])
+
+        def run_targets(self, paths):
+            runs.append(list(paths))
+            output_dir.mkdir(exist_ok=True)
+            return FakeSummary()
+
+    watcher = WatchScheduler(
+        {"watch": {"clipboard_monitor_enabled": False}},
+        [str(watch_root)],
+        out_dir=".",
+        state_path=str(tmp_path / ".sunpack_watch" / "state.json"),
+        stable_seconds=0,
+        initial_scan=False,
+        runner_factory=FakePipelineRunner,
+    )
+    handler = scheduler_module._WatchEventHandler(watcher)
+    watcher.enqueue(str(archive_path))
+    assert watcher.run_once().succeeded == 1
+
+    archive_path.replace(outside_path)
+    handler.on_moved(SimpleNamespace(src_path=str(archive_path), dest_path=str(outside_path), is_directory=False))
+    outside_path.replace(archive_path)
+    handler.on_moved(SimpleNamespace(src_path=str(outside_path), dest_path=str(archive_path), is_directory=False))
+
+    assert watcher.pending_count == 1
+    assert watcher.run_once().succeeded == 1
+    assert len(runs) == 2
+
+
 def test_relative_output_directory_is_resolved_per_matching_watch_root(tmp_path, monkeypatch):
     monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
     first_root = tmp_path / "first"

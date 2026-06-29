@@ -458,6 +458,27 @@ class WatchScheduler:
         with self._lock:
             self._password_dirty_dirs[directory] = time.time()
 
+    def notify_path_departed(self, path: str, *, recursive: bool = False) -> None:
+        normalized = os.path.abspath(path)
+        with self._lock:
+            pending_paths = [
+                candidate_path
+                for candidate_path in self._pending
+                if _paths_match(candidate_path, normalized, recursive=recursive)
+            ]
+            for candidate_path in pending_paths:
+                self._pending.pop(candidate_path, None)
+                self._stable_since.pop(candidate_path, None)
+                self._pending_states.pop(candidate_path, None)
+        invalidated = self.state.invalidate_path(normalized, recursive=recursive)
+        self.log.write(
+            "candidate_departed",
+            path=normalized,
+            recursive=recursive,
+            invalidated=invalidated,
+            pending_removed=len(pending_paths),
+        )
+
     def _pop_ready(self, now: float) -> list[WatchCandidate]:
         ready: list[WatchCandidate] = []
         with self._lock:
@@ -809,18 +830,35 @@ class _WatchEventHandler(FileSystemEventHandler):
         self._handle(event, "modified")
 
     def on_deleted(self, event: FileSystemEvent):
-        self._handle(event, "deleted")
+        self._handle_departure(event)
 
     def on_moved(self, event: FileSystemEvent):
         src_path = getattr(event, "src_path", "")
-        if src_path and (
-            self.scheduler.is_builtin_password_file(src_path)
-            or is_directory_password_file(src_path, self.scheduler.config)
-        ):
-            self._handle_path(src_path, event_type="moved")
+        if src_path:
+            self._handle_departure_path(
+                src_path,
+                is_directory=bool(getattr(event, "is_directory", False)),
+            )
         dest_path = getattr(event, "dest_path", "")
         if dest_path:
             self._handle_path(dest_path, event_type="moved", src_path=src_path)
+
+    def _handle_departure(self, event: FileSystemEvent) -> None:
+        src_path = getattr(event, "src_path", "")
+        if src_path:
+            self._handle_departure_path(
+                src_path,
+                is_directory=bool(getattr(event, "is_directory", False)),
+            )
+
+    def _handle_departure_path(self, path: str, *, is_directory: bool) -> None:
+        if self.scheduler.is_builtin_password_file(path):
+            self.scheduler.notify_password_source_changed("builtin_password_file", path="")
+            return
+        if is_directory_password_file(path, self.scheduler.config):
+            self.scheduler.notify_password_table_changed(path)
+            return
+        self.scheduler.notify_path_departed(path, recursive=is_directory)
 
     def _handle(self, event: FileSystemEvent, event_type: str):
         if getattr(event, "is_directory", False):
@@ -902,6 +940,14 @@ def _is_relative_to(path: str, root: str) -> bool:
         return True
     except ValueError:
         return False
+
+
+def _paths_match(path: str, expected: str, *, recursive: bool) -> bool:
+    normalized = os.path.abspath(path)
+    expected = os.path.abspath(expected)
+    return os.path.normcase(normalized) == os.path.normcase(expected) or (
+        recursive and _is_relative_to(normalized, expected)
+    )
 
 
 def _is_under_any_root(path: str, roots: list[str]) -> bool:

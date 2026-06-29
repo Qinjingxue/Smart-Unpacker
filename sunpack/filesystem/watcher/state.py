@@ -23,6 +23,8 @@ class WatchStateEntry:
     status: str = "pending"
     output_dir: str = ""
     generated_output_dirs: list[str] = field(default_factory=list)
+    tracked_output_dirs: list[str] = field(default_factory=list)
+    output_tracking_initialized: bool = False
     last_error: str = ""
     attempt_count: int = 0
     failure_kind: str = ""
@@ -43,6 +45,7 @@ class WatchStateStore:
         self.entries: dict[str, WatchStateEntry] = {}
         self._latest_entries_by_path: dict[str, WatchStateEntry] = {}
         self.groups: dict[str, WatchGroupState] = {}
+        self.invalidated_paths: set[str] = set()
         self.password_generation = 0
         self.password_source_signature = ""
         self.load()
@@ -58,11 +61,18 @@ class WatchStateStore:
             return
         entries = payload.get("entries") if isinstance(payload, dict) else {}
         groups = payload.get("groups") if isinstance(payload, dict) else {}
+        invalidated_paths = payload.get("invalidated_paths") if isinstance(payload, dict) else []
         try:
             self.password_generation = max(0, int(payload.get("password_generation", 0))) if isinstance(payload, dict) else 0
         except (TypeError, ValueError):
             self.password_generation = 0
         self.password_source_signature = str(payload.get("password_source_signature") or "") if isinstance(payload, dict) else ""
+        if isinstance(invalidated_paths, list):
+            self.invalidated_paths = {
+                os.path.normcase(os.path.abspath(str(path)))
+                for path in invalidated_paths
+                if str(path or "").strip()
+            }
         if not isinstance(entries, dict):
             return
         for key, value in entries.items():
@@ -89,6 +99,7 @@ class WatchStateStore:
             "version": 5,
             "password_generation": self.password_generation,
             "password_source_signature": self.password_source_signature,
+            "invalidated_paths": sorted(self.invalidated_paths),
             "entries": {key: asdict(value) for key, value in self.entries.items()},
             "groups": {key: asdict(value) for key, value in self.groups.items()},
         }
@@ -102,7 +113,7 @@ class WatchStateStore:
 
     def is_done(self, path: str, size: int, mtime: float, sample_digest: str = "") -> bool:
         entry = self.entries.get(self.key_for(path, size, mtime, sample_digest))
-        return bool(entry and entry.status == "done")
+        return bool(entry and entry.status == "done" and self._can_skip_entry(entry))
 
     def should_skip(
         self,
@@ -113,16 +124,82 @@ class WatchStateStore:
         *,
         force: bool = False,
     ) -> bool:
+        normalized_path = os.path.normcase(os.path.abspath(path))
+        if normalized_path in self.invalidated_paths:
+            return False
         entry = self.entries.get(self.key_for(path, size, mtime, sample_digest))
         if entry is None:
             return False
-        if entry.status in {"done", "failed_terminal", "ignored_no_tasks"}:
+        if entry.status == "done":
+            if self._done_outputs_exist(entry):
+                return True
+            self.invalidate_path(path)
+            return False
+        if entry.status in {"failed_terminal", "ignored_no_tasks"}:
             return True
         if entry.status == "failed_password":
             if force:
                 return False
             return entry.password_generation >= self.password_generation
         return False
+
+    def invalidate_path(self, path: str, *, recursive: bool = False) -> bool:
+        normalized = os.path.normcase(os.path.abspath(path))
+        matched_paths = {
+            key
+            for key in self._latest_entries_by_path
+            if key == normalized or (recursive and _is_path_under(key, normalized))
+        }
+        for key, entry in self._latest_entries_by_path.items():
+            if entry.status != "done":
+                continue
+            output_roots = (
+                entry.tracked_output_dirs
+                if entry.output_tracking_initialized
+                else entry.generated_output_dirs or ([entry.output_dir] if entry.output_dir else [])
+            )
+            if any(
+                _output_path_affected(normalized, output_root, recursive=recursive)
+                for output_root in output_roots
+            ):
+                matched_paths.add(key)
+        changed = False
+        for key in matched_paths:
+            if key not in self.invalidated_paths:
+                self.invalidated_paths.add(key)
+                changed = True
+        for group in self.groups.values():
+            member_paths = [group.head_path, *group.member_paths]
+            if not any(
+                os.path.normcase(os.path.abspath(candidate)) in matched_paths
+                or _path_matches(candidate, normalized, recursive=recursive)
+                for candidate in member_paths
+                if candidate
+            ):
+                continue
+            if group.status != "waiting" or group.last_attempted_fingerprint or group.blockers:
+                group.status = "waiting"
+                group.blockers = []
+                group.last_attempted_fingerprint = ""
+                group.updated_at = time.time()
+                changed = True
+        if changed:
+            self.save()
+        return changed
+
+    def _can_skip_entry(self, entry: WatchStateEntry) -> bool:
+        normalized = os.path.normcase(os.path.abspath(entry.path))
+        return normalized not in self.invalidated_paths and self._done_outputs_exist(entry)
+
+    @staticmethod
+    def _done_outputs_exist(entry: WatchStateEntry) -> bool:
+        outputs = (
+            entry.tracked_output_dirs
+            if entry.output_tracking_initialized
+            else entry.generated_output_dirs or ([entry.output_dir] if entry.output_dir else [])
+        )
+        outputs = _dedupe_paths(outputs)
+        return not outputs or all(os.path.exists(path) for path in outputs)
 
     def mark_password_source_changed(self, signature: str | None = None) -> int:
         if signature is not None:
@@ -296,6 +373,7 @@ class WatchStateStore:
         key = self.key_for(path, size, mtime, sample_digest)
         previous = self.entries.get(key)
         payload = dict(failure_payload or {})
+        normalized_output_dirs = _dedupe_paths(generated_output_dirs or ([output_dir] if output_dir else []))
         entry = WatchStateEntry(
             path=os.path.abspath(path),
             size=size,
@@ -303,7 +381,9 @@ class WatchStateStore:
             sample_digest=sample_digest,
             status=status,
             output_dir=output_dir,
-            generated_output_dirs=_dedupe_paths(generated_output_dirs or ([output_dir] if output_dir else [])),
+            generated_output_dirs=normalized_output_dirs,
+            tracked_output_dirs=[path for path in normalized_output_dirs if os.path.exists(path)] if status == "done" else [],
+            output_tracking_initialized=status == "done",
             last_error=error,
             attempt_count=(previous.attempt_count + 1) if previous else 1,
             failure_kind=str(payload.get("kind") or ""),
@@ -314,6 +394,7 @@ class WatchStateStore:
         )
         self.entries[key] = entry
         self._remember_latest_entry(entry)
+        self.invalidated_paths.discard(os.path.normcase(os.path.abspath(path)))
         self.save()
 
     def generated_output_roots(self) -> list[str]:
@@ -339,3 +420,24 @@ def _dedupe_paths(paths: list[str]) -> list[str]:
         seen.add(key)
         output.append(normalized)
     return output
+
+
+def _path_matches(path: str, expected: str, *, recursive: bool) -> bool:
+    normalized = os.path.normcase(os.path.abspath(path))
+    return normalized == expected or (recursive and _is_path_under(normalized, expected))
+
+
+def _is_path_under(path: str, root: str) -> bool:
+    try:
+        return os.path.commonpath([path, root]) == root
+    except ValueError:
+        return False
+
+
+def _output_path_affected(path: str, output_root: str, *, recursive: bool) -> bool:
+    root = os.path.normcase(os.path.abspath(output_root))
+    return (
+        path == root
+        or _is_path_under(path, root)
+        or (recursive and _is_path_under(root, path))
+    )
