@@ -80,6 +80,38 @@ function Get-PeMachine {
     }
 }
 
+function Get-PeSubsystem {
+    param([Parameter(Mandatory = $true)][string]$LiteralPath)
+
+    $stream = [System.IO.File]::Open($LiteralPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+    try {
+        $reader = [System.IO.BinaryReader]::new($stream)
+        try {
+            $stream.Seek(0x3C, [System.IO.SeekOrigin]::Begin) | Out-Null
+            $peOffset = $reader.ReadUInt32()
+            $stream.Seek([int64]$peOffset + 24 + 68, [System.IO.SeekOrigin]::Begin) | Out-Null
+            return [int]$reader.ReadUInt16()
+        } finally {
+            $reader.Dispose()
+        }
+    } finally {
+        $stream.Dispose()
+    }
+}
+
+function Assert-PeSubsystem {
+    param(
+        [Parameter(Mandatory = $true)][string]$LiteralPath,
+        [Parameter(Mandatory = $true)][int]$Expected,
+        [string]$Description = "PE image"
+    )
+
+    $actual = Get-PeSubsystem -LiteralPath $LiteralPath
+    if ($actual -ne $Expected) {
+        throw ("{0} subsystem mismatch: expected {1}, got {2}: {3}" -f $Description, $Expected, $actual, $LiteralPath)
+    }
+}
+
 function Assert-PeMachine {
     param(
         [Parameter(Mandatory = $true)][string]$LiteralPath,
@@ -109,6 +141,9 @@ if ($null -eq $nativeExtension) {
 }
 
 Assert-PeMachine -LiteralPath (Join-Path $root "sunpack.exe") -BuildArch $Arch -Description "sunpack.exe"
+Assert-PeMachine -LiteralPath (Join-Path $root "sunpack-watch.exe") -BuildArch $Arch -Description "sunpack-watch.exe"
+Assert-PeSubsystem -LiteralPath (Join-Path $root "sunpack.exe") -Expected 3 -Description "sunpack.exe"
+Assert-PeSubsystem -LiteralPath (Join-Path $root "sunpack-watch.exe") -Expected 2 -Description "sunpack-watch.exe"
 Assert-PeMachine -LiteralPath $nativeExtension.FullName -BuildArch $Arch -Description "sunpack_native extension"
 Assert-PathMissing -LiteralPath (Join-Path $root "tools\7z.exe") -Description "build-only tools\7z.exe"
 Assert-PeMachine -LiteralPath (Join-Path $root "tools\7z.dll") -BuildArch $Arch -Description "tools\7z.dll"

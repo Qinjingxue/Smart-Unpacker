@@ -48,6 +48,7 @@ def dry_run_archive(
             text=True,
             encoding="utf-8",
             timeout=max(1.0, float(timeout or 30.0)),
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
     except subprocess.TimeoutExpired as exc:
         stdout = _coerce_text(exc.stdout)

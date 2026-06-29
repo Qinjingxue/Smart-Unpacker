@@ -2,7 +2,7 @@ import importlib
 import pkgutil
 from types import ModuleType
 
-from sunpack.app import commands
+from sunpack.cli import commands
 
 
 def discover_command_modules() -> list[ModuleType]:

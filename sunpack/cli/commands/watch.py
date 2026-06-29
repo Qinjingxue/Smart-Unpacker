@@ -1,17 +1,12 @@
 from __future__ import annotations
 
-import os
 import subprocess
-import sys
-from pathlib import Path
 
-from sunpack.app.cli_constants import EXIT_TASK_FAILED, EXIT_USAGE
-from sunpack.app.cli_parsers import CliHelpFormatter, build_common_parser, localize_help_action
-from sunpack.app.cli_types import CliCommandResult
+from sunpack.cli.cli_constants import EXIT_TASK_FAILED, EXIT_USAGE
+from sunpack.cli.cli_parsers import CliHelpFormatter, build_common_parser, localize_help_action
+from sunpack.cli.cli_types import CliCommandResult
 from sunpack.config.loader import load_config
-from sunpack.coordinator.runner import PipelineRunner
 from sunpack.filesystem.watcher.service import (
-    WatchService,
     add_watch_roots,
     is_watch_lock_active,
     list_watch_roots,
@@ -83,19 +78,12 @@ def handle(args, ctx):
 
 
 def _handle_start(args, ctx):
-    tray_factory = None
-    if not getattr(args, "no_tray", False) and not getattr(args, "once", False):
-        from sunpack.platform.windows.tray import WindowsTrayIcon
+    from sunpack.coordinator.watch_runtime import run_watch_service
 
-        tray_factory = WindowsTrayIcon
-    from sunpack.coordinator.watch_group_coordinator import WatchGroupCoordinator
-
-    service = WatchService(
-        runner_factory=PipelineRunner,
-        tray_factory=tray_factory,
-        group_coordinator_factory=WatchGroupCoordinator,
+    code = run_watch_service(
+        tray_enabled=not bool(getattr(args, "no_tray", False)),
+        once=bool(getattr(args, "once", False)),
     )
-    code = service.run(once=bool(getattr(args, "once", False)))
     if code == 2:
         return EXIT_TASK_FAILED, CliCommandResult(
             command=COMMAND,
@@ -198,7 +186,6 @@ def _start_watch_background() -> bool:
 
 
 def _watch_start_argv() -> list[str]:
-    repo_script = Path(__file__).resolve().parents[3] / "sunpack.py"
-    if repo_script.exists():
-        return [sys.executable, str(repo_script), COMMAND, "start"]
-    return [sys.executable, COMMAND, "start"]
+    from sunpack.gui.launcher import watch_launch_argv
+
+    return watch_launch_argv()

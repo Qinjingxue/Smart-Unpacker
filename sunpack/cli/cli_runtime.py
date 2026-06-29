@@ -2,8 +2,8 @@ import os
 from dataclasses import asdict
 from typing import Any
 
-from sunpack.app.cli_constants import EXIT_USAGE
-from sunpack.app.cli_types import CliCommandResult, CliPasswordSummary
+from sunpack.cli.cli_constants import EXIT_USAGE
+from sunpack.cli.cli_types import CliCommandResult, CliPasswordSummary
 from sunpack.config.schema import normalize_config_value
 from sunpack.config.detection_view import directory_scan_mode, rule_pipeline_config, scan_filter_config, scan_filters_enabled
 from sunpack.coordinator.scheduling import build_scheduler_profile_config

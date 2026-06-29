@@ -1,14 +1,14 @@
 import json
 
-from sunpack.app.cli_constants import EXIT_TASK_FAILED, EXIT_USAGE
-from sunpack.app.cli_parsers import (
+from sunpack.cli.cli_constants import EXIT_TASK_FAILED, EXIT_USAGE
+from sunpack.cli.cli_parsers import (
     CliHelpFormatter,
     build_common_parser,
     build_extract_config_override_parser,
     build_password_parser,
     localize_help_action,
 )
-from sunpack.app.cli_runtime import (
+from sunpack.cli.cli_runtime import (
     apply_runtime_config_overrides,
     build_password_summary,
     collect_clipboard_passwords,
@@ -19,7 +19,7 @@ from sunpack.app.cli_runtime import (
     resolve_target_paths,
     result_for_missing,
 )
-from sunpack.app.cli_types import CliCommandResult
+from sunpack.cli.cli_types import CliCommandResult
 from sunpack.config.loader import load_config
 from sunpack.coordinator.runner import PipelineRunner
 from sunpack.contracts.failures import FailureInfo

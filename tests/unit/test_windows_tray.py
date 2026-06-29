@@ -3,8 +3,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import sunpack.filesystem.watcher.service as service_module
-import sunpack.platform.windows.tray as tray_module
-from sunpack.platform.windows.tray import WindowsTrayIcon, _tray_language_from_service
+import sunpack.gui.tray as tray_module
+from sunpack.gui.tray import WindowsTrayIcon, _tray_language_from_service
 
 
 def test_tray_open_watch_roots_file_creates_and_opens_txt(tmp_path, monkeypatch):

@@ -31,7 +31,7 @@ def test_installer_optionally_registers_watch_autostart():
     assert "Start SunPack Watch when Windows starts" in script
     assert "Software\\Microsoft\\Windows\\CurrentVersion\\Run" in script
     assert 'ValueName: "SunPackWatchService"' in script
-    assert 'ValueData: """{app}\\sunpack.exe"" watch start"' in script
+    assert 'ValueData: """{app}\\sunpack-watch.exe"""' in script
     assert "Tasks: autostart" in script
     assert "uninsdeletevalue" in script
 
@@ -73,7 +73,11 @@ def test_uninstaller_stops_running_watch_before_removing_files():
     assert "Result := StopExistingWatchAndWait;" in script
     assert "Please stop it and run the uninstaller again." in script
     assert "Get-Process -ErrorAction SilentlyContinue" in script
-    assert "[System.IO.Path]::GetFullPath($_.Path).Equals([System.IO.Path]::GetFullPath($target)" in script
+    assert "WatchAppPath := ExpandConstant('{app}\\sunpack-watch.exe')" in script
+    assert "$targets = @(" in script
+    assert "CliAppPath: string;" in script
+    assert "WatchAppPath: string;" in script
+    assert "ExpandConstant('{app}\\sunpack.exe')" in script
     assert "$deadline = (Get-Date).AddSeconds(20)" in script
     assert "Start-Sleep -Milliseconds 250" in script
 
@@ -135,3 +139,13 @@ def test_release_packages_exclude_build_only_7z_executable():
     assert "Remove-Item -LiteralPath $packagedSevenZipExe" in build_script
     assert 'Assert-PathMissing -LiteralPath (Join-Path $distToolsRoot "7z.exe")' in build_script
     assert 'Assert-PathMissing -LiteralPath (Join-Path $root "tools\\7z.exe")' in verifier
+
+
+def test_release_package_includes_console_and_gui_executables():
+    build_script = (ROOT / "scripts" / "build_windows.ps1").read_text(encoding="utf-8")
+    spec = (ROOT / "SunPack.spec").read_text(encoding="utf-8")
+
+    assert '$watchExeName = "sunpack-watch.exe"' in build_script
+    assert "Packaged SunPack watch GUI executable" in build_script
+    assert "console=False" in spec
+    assert "watch_exe" in spec

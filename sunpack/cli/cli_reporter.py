@@ -1,7 +1,7 @@
 import sys
 from dataclasses import asdict
 
-from sunpack.app.cli_types import CliCommandResult
+from sunpack.cli.cli_types import CliCommandResult
 from sunpack.support.json_format import to_json_text
 
 

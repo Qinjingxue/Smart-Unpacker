@@ -648,6 +648,42 @@ def test_watch_scheduler_processes_archive_when_output_root_matches_watch_root(t
     assert entry.generated_output_dirs == [str((tmp_path / "sample").resolve())]
 
 
+def test_relative_output_directory_is_resolved_per_matching_watch_root(tmp_path, monkeypatch):
+    monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
+    first_root = tmp_path / "first"
+    second_root = tmp_path / "second"
+    first_root.mkdir()
+    second_root.mkdir()
+    archive_path = second_root / "sample.zip"
+    _write_zip(archive_path)
+    captured = {}
+
+    class FakePipelineRunner:
+        def __init__(self, config):
+            captured["output"] = config["output"]
+            self.context = SimpleNamespace(flatten_candidates={str(second_root / "sample")}, recovered_outputs=[])
+
+        def run_targets(self, paths):
+            return FakeSummary()
+
+    watcher = WatchScheduler(
+        {"watch": {"clipboard_monitor_enabled": False}},
+        [str(first_root), str(second_root)],
+        out_dir=".",
+        state_path=str(first_root / ".sunpack_watch" / "state.json"),
+        stable_seconds=0,
+        initial_scan=False,
+        runner_factory=FakePipelineRunner,
+    )
+    watcher.enqueue(str(archive_path))
+
+    result = watcher.run_once()
+
+    assert result.succeeded == 1
+    assert captured["output"]["root"] == str(second_root.resolve())
+    assert captured["output"]["common_root"] == str(second_root.resolve())
+
+
 def test_watch_scheduler_suppresses_recursive_output_events_during_same_root_extract(tmp_path, monkeypatch):
     monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
     watcher = None

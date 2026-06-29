@@ -1,12 +1,12 @@
-from sunpack.app.cli_parsers import CliHelpFormatter, build_common_parser, localize_help_action
-from sunpack.app.cli_runtime import (
+from sunpack.cli.cli_parsers import CliHelpFormatter, build_common_parser, localize_help_action
+from sunpack.cli.cli_runtime import (
     build_effective_config,
     inspect_result_to_item,
     resolve_common_root,
     resolve_target_paths,
     result_for_missing,
 )
-from sunpack.app.cli_types import CliCommandResult
+from sunpack.cli.cli_types import CliCommandResult
 from sunpack.contracts.detection import FactBag
 from sunpack.contracts.tasks import ArchiveTask
 from sunpack.config.loader import load_config

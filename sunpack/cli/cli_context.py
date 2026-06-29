@@ -1,7 +1,7 @@
 from dataclasses import dataclass, field
 from types import ModuleType
 
-from sunpack.app.cli_reporter import CliReporter
+from sunpack.cli.cli_reporter import CliReporter
 from sunpack.config.cli_settings import DEFAULT_CLI_LANG
 from sunpack.i18n import I18nContext
 

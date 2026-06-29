@@ -1,8 +1,8 @@
 import argparse
 
-from sunpack.app.cli_constants import SCHEDULER_PROFILES
-from sunpack.app.cli_context import CliContext
-from sunpack.app.cli_values import parse_archive_cleanup_value, parse_recursive_extract_value
+from sunpack.cli.cli_constants import SCHEDULER_PROFILES
+from sunpack.cli.cli_context import CliContext
+from sunpack.cli.cli_values import parse_archive_cleanup_value, parse_recursive_extract_value
 from sunpack.i18n import I18nContext
 
 

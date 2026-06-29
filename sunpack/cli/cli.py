@@ -3,18 +3,18 @@ import contextlib
 import os
 import sys
 
-from sunpack.app.cli_commands import command_map, discover_command_modules
-from sunpack.app.cli_constants import EXIT_OK, EXIT_RUNTIME, EXIT_USAGE
-from sunpack.app.cli_context import (
+from sunpack.cli.cli_commands import command_map, discover_command_modules
+from sunpack.cli.cli_constants import EXIT_OK, EXIT_RUNTIME, EXIT_USAGE
+from sunpack.cli.cli_context import (
     CliContext,
 )
 from sunpack.config.cli_settings import DEFAULT_CLI_LANG, load_cli_language_from_config
-from sunpack.app.cli_parsers import (
+from sunpack.cli.cli_parsers import (
     CliHelpFormatter,
     localize_help_action,
 )
-from sunpack.app.cli_reporter import CliReporter
-from sunpack.app.cli_types import CliCommandResult
+from sunpack.cli.cli_reporter import CliReporter
+from sunpack.cli.cli_types import CliCommandResult
 
 CURRENT_CLI_LANG = DEFAULT_CLI_LANG
 

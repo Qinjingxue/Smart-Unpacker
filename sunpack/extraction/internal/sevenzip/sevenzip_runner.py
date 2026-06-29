@@ -37,6 +37,7 @@ class _PersistentWorker:
             encoding="utf-8",
             errors="replace",
             startupinfo=self.startupinfo,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         threading.Thread(target=self._pump, args=(self.process.stdout, self.stdout_queue), daemon=True).start()
         threading.Thread(target=self._pump, args=(self.process.stderr, self.stderr_queue), daemon=True).start()
@@ -375,6 +376,7 @@ class SevenZipRunner:
                     encoding="utf-8",
                     errors="replace",
                     startupinfo=startupinfo,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
                 )
                 return attach_worker_diagnostics(completed, request_payload=job)
             except (OSError, FileNotFoundError) as exc:
@@ -401,6 +403,7 @@ class SevenZipRunner:
                 encoding="utf-8",
                 errors="replace",
                 startupinfo=startupinfo,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
         except (OSError, FileNotFoundError) as exc:
             return self._completed_process(

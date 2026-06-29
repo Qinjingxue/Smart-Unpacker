@@ -1,8 +1,8 @@
 from types import SimpleNamespace
 
-import sunpack.app.cli_runtime as cli_runtime
-import sunpack.app.commands.passwords as passwords_command
-from sunpack.app.cli_context import CliContext
+import sunpack.cli.cli_runtime as cli_runtime
+import sunpack.cli.commands.passwords as passwords_command
+from sunpack.cli.cli_context import CliContext
 
 
 def _password_args() -> SimpleNamespace:

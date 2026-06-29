@@ -1,6 +1,16 @@
-from sunpack.app.cli import build_cli_parser
-from sunpack.app.cli_commands import discover_command_modules
-from sunpack.app.cli_context import CliContext
+from pathlib import Path
+
+from sunpack.cli.cli import build_cli_parser
+from sunpack.cli.cli_commands import discover_command_modules
+from sunpack.cli.cli_context import CliContext
+
+
+def test_cli_and_gui_packages_have_explicit_boundaries():
+    package_root = Path(__file__).resolve().parents[2] / "sunpack"
+
+    assert (package_root / "cli" / "__init__.py").is_file()
+    assert (package_root / "gui" / "__init__.py").is_file()
+    assert not (package_root / "app").exists()
 from sunpack.i18n.catalog import CATALOG
 
 

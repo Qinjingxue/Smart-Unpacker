@@ -1,11 +1,11 @@
-from sunpack.app.cli_parsers import CliHelpFormatter, build_common_parser, localize_help_action
-from sunpack.app.cli_runtime import (
+from sunpack.cli.cli_parsers import CliHelpFormatter, build_common_parser, localize_help_action
+from sunpack.cli.cli_runtime import (
     resolve_common_root,
     resolve_target_paths,
     result_for_missing,
     scan_result_to_item,
 )
-from sunpack.app.cli_types import CliCommandResult
+from sunpack.cli.cli_types import CliCommandResult
 from sunpack.config.loader import load_config
 from sunpack.coordinator.scanner import ScanOrchestrator
 

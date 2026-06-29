@@ -345,6 +345,38 @@ assert not missing, missing
     )
 }
 
+function Get-PeSubsystem {
+    param([Parameter(Mandatory = $true)][string]$LiteralPath)
+
+    $stream = [System.IO.File]::Open($LiteralPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+    try {
+        $reader = [System.IO.BinaryReader]::new($stream)
+        try {
+            $stream.Seek(0x3C, [System.IO.SeekOrigin]::Begin) | Out-Null
+            $peOffset = $reader.ReadUInt32()
+            $stream.Seek([int64]$peOffset + 24 + 68, [System.IO.SeekOrigin]::Begin) | Out-Null
+            return [int]$reader.ReadUInt16()
+        } finally {
+            $reader.Dispose()
+        }
+    } finally {
+        $stream.Dispose()
+    }
+}
+
+function Assert-PeSubsystem {
+    param(
+        [Parameter(Mandatory = $true)][string]$LiteralPath,
+        [Parameter(Mandatory = $true)][int]$Expected,
+        [string]$Description = "PE image"
+    )
+
+    $actual = Get-PeSubsystem -LiteralPath $LiteralPath
+    if ($actual -ne $Expected) {
+        throw ("{0} subsystem mismatch: expected {1}, got {2}: {3}" -f $Description, $Expected, $actual, $LiteralPath)
+    }
+}
+
 function Get-InnoSetupCompiler {
     param([string]$PreferredPath)
 
@@ -635,8 +667,10 @@ $nativeWheelRoot = Join-Path $buildRoot ("native-wheels-" + $buildArch)
 $releaseRoot = Join-Path $repoRoot "release"
 $distFolderName = if ($env:SUNPACK_DIST_NAME) { $env:SUNPACK_DIST_NAME } else { "sunpack-" + $buildArch + "-" + $repairSystemMode }
 $appExeName = if ($env:SUNPACK_EXE_NAME) { $env:SUNPACK_EXE_NAME + ".exe" } else { "sunpack.exe" }
+$watchExeName = "sunpack-watch.exe"
 $distAppRoot = Join-Path $distRoot $distFolderName
 $distExePath = Join-Path $distAppRoot $appExeName
+$distWatchExePath = Join-Path $distAppRoot $watchExeName
 $distInternalRoot = Join-Path $distAppRoot "_internal"
 $distToolsRoot = Join-Path $distAppRoot "tools"
 $distLicensesRoot = Join-Path $distAppRoot "licenses"
@@ -748,12 +782,17 @@ if ($runAcceptanceTests) {
 Write-Step "Building Windows release with PyInstaller"
 $env:SUNPACK_DIST_NAME = $distFolderName
 $env:SUNPACK_EXE_NAME = [System.IO.Path]::GetFileNameWithoutExtension($appExeName)
+$env:SUNPACK_WATCH_EXE_NAME = [System.IO.Path]::GetFileNameWithoutExtension($watchExeName)
 $env:SUNPACK_REPAIR_SYSTEM = $repairSystemMode
 Invoke-Native -FilePath $venvPython -Arguments @("-m", "PyInstaller", "--noconfirm", $specPath)
 
 Write-Step "Validating packaged outputs"
 Assert-PathExists -LiteralPath $distExePath -Description "Packaged sunpack executable"
 Assert-PeMachine -LiteralPath $distExePath -BuildArch $buildArch -Description "Packaged sunpack executable"
+Assert-PeSubsystem -LiteralPath $distExePath -Expected 3 -Description "Packaged sunpack executable"
+Assert-PathExists -LiteralPath $distWatchExePath -Description "Packaged SunPack watch GUI executable"
+Assert-PeMachine -LiteralPath $distWatchExePath -BuildArch $buildArch -Description "Packaged SunPack watch GUI executable"
+Assert-PeSubsystem -LiteralPath $distWatchExePath -Expected 2 -Description "Packaged SunPack watch GUI executable"
 Assert-PathExists -LiteralPath $distInternalRoot -Description "PyInstaller internal resource directory"
 Assert-PackagedNativeExtension -PackageRoot $distAppRoot -BuildArch $buildArch
 Assert-PathMissing -LiteralPath (Join-Path $distInternalRoot "builtin_passwords.txt") -Description "Duplicate internal password file"

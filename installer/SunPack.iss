@@ -87,7 +87,7 @@ Type: filesandordirs; Name: "{localappdata}\SunPack\cache"
 Type: dirifempty; Name: "{localappdata}\SunPack"
 
 [Registry]
-Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "SunPackWatchService"; ValueData: """{app}\sunpack.exe"" watch start"; Tasks: autostart; Flags: uninsdeletevalue
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "SunPackWatchService"; ValueData: """{app}\sunpack-watch.exe"""; Tasks: autostart; Flags: uninsdeletevalue
 
 [Icons]
 Name: "{group}\SunPack Command Prompt"; Filename: "{cmd}"; Parameters: "/K cd /D ""{app}"""; WorkingDir: "{app}"; IconFilename: "{app}\sunpack.ico"
@@ -257,22 +257,24 @@ end;
 function WaitForExistingWatchToExit: Boolean;
 var
   PowerShellPath: string;
-  AppPath: string;
+  CliAppPath: string;
+  WatchAppPath: string;
   Command: string;
   Parameters: string;
   ResultCode: Integer;
 begin
   Result := True;
-  AppPath := ExpandConstant('{app}\sunpack.exe');
-  if not FileExists(AppPath) then
+  CliAppPath := ExpandConstant('{app}\sunpack.exe');
+  WatchAppPath := ExpandConstant('{app}\sunpack-watch.exe');
+  if (not FileExists(CliAppPath)) and (not FileExists(WatchAppPath)) then
     Exit;
   PowerShellPath := ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe');
   Command :=
-    '$target = ' + PowerShellSingleQuotedString(AppPath) + '; ' +
+    '$targets = @(' + PowerShellSingleQuotedString(CliAppPath) + ', ' + PowerShellSingleQuotedString(WatchAppPath) + '); ' +
     '$deadline = (Get-Date).AddSeconds(20); ' +
     'do { ' +
     '  $running = @(Get-Process -ErrorAction SilentlyContinue | Where-Object { ' +
-    '    try { $_.Path -and ([System.IO.Path]::GetFullPath($_.Path).Equals([System.IO.Path]::GetFullPath($target), [System.StringComparison]::OrdinalIgnoreCase)) } catch { $false } ' +
+    '    try { $processPath = [System.IO.Path]::GetFullPath($_.Path); @($targets | Where-Object { [System.IO.Path]::GetFullPath($_).Equals($processPath, [System.StringComparison]::OrdinalIgnoreCase) }).Count -gt 0 } catch { $false } ' +
     '  }); ' +
     '  if ($running.Count -eq 0) { exit 0 }; ' +
     '  Start-Sleep -Milliseconds 250; ' +

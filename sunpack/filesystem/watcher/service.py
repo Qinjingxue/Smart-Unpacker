@@ -43,7 +43,7 @@ def normalize_root(path: str) -> str:
 
 
 def resolve_service_path(path: str) -> str:
-    """Resolve daemon paths without depending on the process working directory."""
+    """Resolve service metadata paths without depending on the process cwd."""
     candidate = Path(path).expanduser()
     if not candidate.is_absolute():
         candidate = watch_roots_path().resolve().parent / candidate
@@ -68,8 +68,7 @@ def service_state_dir(config: dict) -> str:
     state_dir = str(service.get("state_dir") or "").strip()
     if state_dir:
         return resolve_service_path(state_dir)
-    out_dir = resolve_service_path(str(service.get("out_dir") or config.get("output", {}).get("root") or "."))
-    return os.path.join(out_dir, ".sunpack_watch")
+    return os.path.join(normalize_root(str(watch_roots_path().resolve().parent)), ".sunpack_watch")
 
 
 def watch_roots_path() -> Path:
@@ -279,7 +278,8 @@ class WatchService:
         if not roots:
             self.log.write("scheduler_not_started", reason="no_existing_roots", configured_roots=list(self.service_config.get("roots") or []))
             return
-        out_dir = resolve_service_path(str(self.service_config.get("out_dir") or self.config.get("output", {}).get("root") or "."))
+        configured_out_dir = str(self.service_config.get("out_dir") or self.config.get("output", {}).get("root") or ".")
+        out_dir = resolve_service_path(configured_out_dir) if Path(configured_out_dir).expanduser().is_absolute() else configured_out_dir
         state_path = os.path.join(self.state_dir, SERVICE_STATE)
         run_config = dict(self.config)
         watch_config = dict(run_config.get("watch") if isinstance(run_config.get("watch"), dict) else {})
@@ -312,8 +312,9 @@ class WatchService:
         try:
             self.tray = self.tray_factory(self)
             self.tray.start()
-        except Exception:
+        except Exception as exc:
             self.tray = None
+            self.log.write("tray_start_error", error=str(exc), error_type=type(exc).__name__)
 
     def _stop_tray(self) -> None:
         if self.tray is not None:

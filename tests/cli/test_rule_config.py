@@ -1,4 +1,4 @@
-from sunpack.app.cli_runtime import (
+from sunpack.cli.cli_runtime import (
     apply_runtime_config_overrides,
     build_effective_config,
 )

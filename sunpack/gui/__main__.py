@@ -1,4 +1,4 @@
-from sunpack.cli.cli import main
+from sunpack.gui.main import main
 
 
 if __name__ == "__main__":

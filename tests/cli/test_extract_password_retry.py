@@ -2,9 +2,9 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
-from sunpack.app.cli_context import CliContext
-from sunpack.app.cli_reporter import CliReporter
-from sunpack.app.commands import extract
+from sunpack.cli.cli_context import CliContext
+from sunpack.cli.cli_reporter import CliReporter
+from sunpack.cli.commands import extract
 from sunpack.contracts.failures import FailureInfo, FailureKind
 
 

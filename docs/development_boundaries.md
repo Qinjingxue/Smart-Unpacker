@@ -87,7 +87,8 @@ contracts
 
 | 领域 | 公开入口 | 职责 |
 | ---- | -------- | ---- |
-| CLI | `sunpack.app.cli.main` | 命令行入口。 |
+| CLI | `sunpack.cli.cli.main` | 命令行入口。 |
+| GUI Watch | `sunpack.gui.main.main` | 无控制台托盘入口，复用 watch runtime。 |
 | 配置 | `config.loader.load_config` / `config.schema` | 配置读取、校验、归一化。 |
 | 契约 | `contracts.*` | 跨模块共享数据结构，包括 `RunContext`。 |
 | 文件系统 | `filesystem.directory_scanner.DirectoryScanner` | 目录扫描和过滤。 |
@@ -101,7 +102,7 @@ contracts
 | 校验 | `verification.VerificationScheduler` | 解压结果完整度、来源完整性和下一步决策。 |
 | 修复 | `repair.RepairScheduler` | 根据 verification repair 决策生成修复候选。 |
 | 后处理 | `postprocess.actions.PostProcessActions` | 成功后清理和扁平化。 |
-| 文件系统监控 | `filesystem.watcher.WatchScheduler` | watchdog 事件、稳定文件队列和自动处理。 |
+| 文件系统监控 | `coordinator.watch_runtime.run_watch_service` / `filesystem.watcher.WatchScheduler` | CLI/GUI 共用服务入口、watchdog 事件、稳定文件队列和自动处理。 |
 | 修复模型 | `repair.model.RepairModelRuntime` / `repair.model.ModelAssetRegistry` | 模型资产校验、图构建和双模型推理。 |
 | 修复搜索 | `repair.search.PolicyRepairGraph` | 搜索图、恢复度评估、运行特征和模块提案。 |
 | Native ABI | `support.sevenzip_bridge` | C++ 7z.dll bridge 绑定和缓存。 |

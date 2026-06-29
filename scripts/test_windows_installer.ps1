@@ -81,8 +81,12 @@ try {
     )
 
     $appPath = Join-Path $installRoot "sunpack.exe"
+    $watchAppPath = Join-Path $installRoot "sunpack-watch.exe"
     if (-not (Test-Path -LiteralPath $appPath)) {
         throw "Installed executable was not found: $appPath"
+    }
+    if (-not (Test-Path -LiteralPath $watchAppPath)) {
+        throw "Installed watch GUI executable was not found: $watchAppPath"
     }
     Invoke-Checked -FilePath $appPath -Arguments @("--help")
 
@@ -101,7 +105,7 @@ try {
         throw "Context menu command does not reference the installed executable: $directCommand"
     }
     $startupCommand = [string](Get-ItemProperty -LiteralPath $startupRunKey -Name $startupValueName).$startupValueName
-    if ($startupCommand -ne ('"{0}" watch start' -f $appPath)) {
+    if ($startupCommand -ne ('"{0}"' -f $watchAppPath)) {
         throw "Startup Run value is incorrect: $startupCommand"
     }
 
@@ -128,7 +132,7 @@ try {
     $localSunPackCache = Join-Path $env:LOCALAPPDATA "SunPack\cache"
     New-Item -ItemType Directory -Path $localSunPackCache -Force | Out-Null
     Set-Content -LiteralPath (Join-Path $localSunPackCache "machine_probe.json") -Value "{}" -Encoding UTF8
-    Set-ItemProperty -LiteralPath $startupRunKey -Name $startupValueName -Value ('"{0}" watch start' -f $appPath)
+    Set-ItemProperty -LiteralPath $startupRunKey -Name $startupValueName -Value ('"{0}"' -f $watchAppPath)
 
     $uninstaller = Get-ChildItem -LiteralPath $installRoot -Filter "unins*.exe" -File | Select-Object -First 1
     if ($null -eq $uninstaller) {

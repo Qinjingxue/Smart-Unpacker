@@ -9,6 +9,7 @@ project_root = Path(SPECPATH)
 icon_path = project_root / "sunpack.ico"
 dist_name = os.environ.get("SUNPACK_DIST_NAME", "sunpack")
 exe_name = os.environ.get("SUNPACK_EXE_NAME", "sunpack")
+watch_exe_name = os.environ.get("SUNPACK_WATCH_EXE_NAME", "sunpack-watch")
 repair_system = os.environ.get("SUNPACK_REPAIR_SYSTEM", "full").strip().lower()
 include_repair_models = repair_system != "lite"
 runtime_hook_path = project_root / "build" / "sunpack_repair_system_runtime.py"
@@ -24,7 +25,7 @@ datas = []
 for package in (
     "watchdog",
     "zstandard",
-    "sunpack.app.commands",
+    "sunpack.cli.commands",
     "sunpack.config.fields",
     "sunpack.filesystem.filters.modules",
     "sunpack.detection.pipeline.facts.collectors",
@@ -94,8 +95,24 @@ exe = EXE(
     icon=str(icon_path),
 )
 
+watch_exe = EXE(
+    pyz,
+    a.scripts,
+    [],
+    exclude_binaries=True,
+    name=watch_exe_name,
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=True,
+    console=False,
+    disable_windowed_traceback=True,
+    icon=str(icon_path),
+)
+
 coll = COLLECT(
     exe,
+    watch_exe,
     a.binaries,
     a.datas,
     name=dist_name,

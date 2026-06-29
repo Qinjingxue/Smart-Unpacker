@@ -80,7 +80,9 @@ class WatchScheduler:
     ):
         self.config = config
         self.watch_roots = [os.path.abspath(path) for path in watch_roots]
-        self.out_dir = os.path.abspath(out_dir)
+        expanded_out_dir = os.path.expanduser(out_dir)
+        self._relative_out_dir = not os.path.isabs(expanded_out_dir)
+        self.out_dir = os.path.normpath(expanded_out_dir) if self._relative_out_dir else os.path.abspath(expanded_out_dir)
         self.interval_seconds = max(0.1, float(DEFAULT_WATCH_CONFIG["interval_seconds"] if interval_seconds is None else interval_seconds))
         self.stable_seconds = max(0.0, float(DEFAULT_WATCH_CONFIG["stable_seconds"] if stable_seconds is None else stable_seconds))
         self.recursive = directory_scan_is_recursive(config) if recursive is None else bool(recursive)
@@ -551,9 +553,10 @@ class WatchScheduler:
         self.log.write("processing_started", path=candidate.path, size=candidate.size, mtime=candidate.mtime)
         with self._password_source_lock:
             run_config = dict(self.config)
+        output_root = self._output_root_for(candidate.path)
         run_config["output"] = {
             **(run_config.get("output", {}) if isinstance(run_config.get("output"), dict) else {}),
-            "root": self.out_dir,
+            "root": output_root,
             "common_root": self._common_root_for(candidate.path),
         }
         predicted_output_dirs = self._predicted_output_dirs(candidate.path, run_config)
@@ -644,12 +647,22 @@ class WatchScheduler:
             return os.path.dirname(matched)
         return os.path.dirname(path)
 
+    def _output_root_for(self, path: str) -> str:
+        if not self._relative_out_dir:
+            return self.out_dir
+        return os.path.abspath(os.path.join(self._common_root_for(path), self.out_dir))
+
     def _is_under_watched_root(self, path: str) -> bool:
         return _longest_matching_root(path, self.watch_roots) is not None
 
     def _is_under_broad_output_root(self, path: str) -> bool:
         if not self.out_dir:
             return False
+        if self._relative_out_dir:
+            if self.out_dir in {"", "."}:
+                return False
+            normalized = os.path.abspath(path)
+            return any(_is_relative_to(normalized, os.path.join(root, self.out_dir)) for root in self.watch_roots)
         if any(_is_relative_to(root, self.out_dir) for root in self.watch_roots):
             return False
         return _is_relative_to(os.path.abspath(path), self.out_dir)
