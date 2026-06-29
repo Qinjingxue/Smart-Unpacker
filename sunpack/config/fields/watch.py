@@ -16,6 +16,7 @@ DEFAULT_WATCH_CONFIG = {
     "output_suppression_seconds": 120.0,
     "password_retry_debounce_seconds": 1.0,
     "password_retry_include_subtree": True,
+    "partial_retry_seconds": 30.0,
     "clipboard_monitor_enabled": True,
     "clipboard_builtin_max_entries": 30,
     "enabled": False,
@@ -47,6 +48,7 @@ def normalize_watch_config(value: Any) -> dict[str, Any]:
     config["output_suppression_seconds"] = max(0.0, _float_field(config, "output_suppression_seconds"))
     config["password_retry_debounce_seconds"] = max(0.0, _float_field(config, "password_retry_debounce_seconds"))
     config["password_retry_include_subtree"] = bool(config.get("password_retry_include_subtree", True))
+    config["partial_retry_seconds"] = max(1.0, _float_field(config, "partial_retry_seconds"))
     config["clipboard_monitor_enabled"] = bool(config.get("clipboard_monitor_enabled", True))
     config["clipboard_builtin_max_entries"] = max(1, _int_field(config, "clipboard_builtin_max_entries"))
     roots = config.get("roots", [])

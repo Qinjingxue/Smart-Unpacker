@@ -14,7 +14,7 @@ from .group_models import (
 )
 
 
-STATE_VERSION = 6
+STATE_VERSION = 7
 
 
 @dataclass
@@ -53,6 +53,25 @@ class WatchStateEntry:
         return f"{base}|{self.sample_digest}" if self.sample_digest else base
 
 
+@dataclass
+class PartialProbeState:
+    path: str
+    size: int
+    mtime: float
+    sample_digest: str
+    verification_signature: str
+    verification_payload: dict[str, Any] = field(default_factory=dict)
+    status: str = "awaiting_confirmation"
+    attempt_count: int = 1
+    retry_at: float = 0.0
+    last_attempt_at: float = 0.0
+
+    @property
+    def fingerprint(self) -> str:
+        base = f"{self.path}|{self.size}|{self.mtime:.6f}"
+        return f"{base}|{self.sample_digest}" if self.sample_digest else base
+
+
 class WatchStateStore:
     """Persistent input snapshot, crash queue, and retry blockers for watch mode."""
 
@@ -61,6 +80,7 @@ class WatchStateStore:
         self.snapshots: dict[str, WatchInputSnapshot] = {}
         self.pending_work: dict[str, WatchInputSnapshot] = {}
         self.entries: dict[str, WatchStateEntry] = {}
+        self.partial_probes: dict[str, PartialProbeState] = {}
         self.groups: dict[str, WatchGroupState] = {}
         self.owned_output_roots: list[str] = []
         self.password_generation = 0
@@ -84,6 +104,7 @@ class WatchStateStore:
         self.snapshots = self._load_records(payload.get("snapshots"), WatchInputSnapshot)
         self.pending_work = self._load_records(payload.get("pending_work"), WatchInputSnapshot)
         self.entries = self._load_records(payload.get("entries"), WatchStateEntry)
+        self.partial_probes = self._load_records(payload.get("partial_probes"), PartialProbeState)
         self.groups = self._load_records(payload.get("groups"), WatchGroupState, normalize_keys=False)
         roots = payload.get("owned_output_roots")
         self.owned_output_roots = _dedupe_paths(roots if isinstance(roots, list) else [])
@@ -113,6 +134,7 @@ class WatchStateStore:
             "snapshots": {key: asdict(value) for key, value in self.snapshots.items()},
             "pending_work": {key: asdict(value) for key, value in self.pending_work.items()},
             "entries": {key: asdict(value) for key, value in self.entries.items()},
+            "partial_probes": {key: asdict(value) for key, value in self.partial_probes.items()},
             "groups": {key: asdict(value) for key, value in self.groups.items()},
             "owned_output_roots": list(self.owned_output_roots),
         }
@@ -155,7 +177,7 @@ class WatchStateStore:
         normalized = os.path.abspath(path)
         keys = {
             key
-            for collection in (self.snapshots, self.pending_work, self.entries)
+            for collection in (self.snapshots, self.pending_work, self.entries, self.partial_probes)
             for key in collection
             if _path_matches(key, normalized, recursive=recursive)
         }
@@ -164,6 +186,7 @@ class WatchStateStore:
             changed = self.snapshots.pop(key, None) is not None or changed
             changed = self.pending_work.pop(key, None) is not None or changed
             changed = self.entries.pop(key, None) is not None or changed
+            changed = self.partial_probes.pop(key, None) is not None or changed
         for group_id, group in list(self.groups.items()):
             members = [group.head_path, *group.member_paths]
             if any(_path_matches(member, normalized, recursive=recursive) for member in members if member):
@@ -190,6 +213,56 @@ class WatchStateStore:
             changed = self.entries.pop(_path_key(path), None) is not None or changed
         if changed:
             self.save()
+
+    def partial_probe_for(self, path: str) -> PartialProbeState | None:
+        return self.partial_probes.get(_path_key(path))
+
+    def due_partial_probes(self, now: float) -> list[PartialProbeState]:
+        return [
+            probe
+            for probe in self.partial_probes.values()
+            if probe.status == "awaiting_confirmation" and probe.retry_at <= now
+        ]
+
+    def next_partial_retry_at(self) -> float | None:
+        retries = [
+            probe.retry_at
+            for probe in self.partial_probes.values()
+            if probe.status == "awaiting_confirmation"
+        ]
+        return min(retries) if retries else None
+
+    def record_partial_probe(
+        self,
+        snapshot: WatchInputSnapshot,
+        *,
+        verification_signature: str,
+        verification_payload: dict[str, Any],
+        retry_at: float,
+        status: str = "awaiting_confirmation",
+        attempt_count: int = 1,
+    ) -> None:
+        key = _path_key(snapshot.path)
+        self.partial_probes[key] = PartialProbeState(
+            path=os.path.abspath(snapshot.path),
+            size=snapshot.size,
+            mtime=snapshot.mtime,
+            sample_digest=snapshot.sample_digest,
+            verification_signature=verification_signature,
+            verification_payload=dict(verification_payload),
+            status=status,
+            attempt_count=max(1, int(attempt_count)),
+            retry_at=float(retry_at),
+            last_attempt_at=time.time(),
+        )
+        self.pending_work.pop(key, None)
+        self.save()
+
+    def clear_partial_probe(self, path: str) -> bool:
+        changed = self.partial_probes.pop(_path_key(path), None) is not None
+        if changed:
+            self.save()
+        return changed
 
     def mark_password_source_changed(self, signature: str | None = None) -> int:
         if signature is not None:

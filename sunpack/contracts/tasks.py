@@ -27,16 +27,6 @@ class SplitArchiveInfo:
 
 
 @dataclass
-class RenameInstruction:
-    kind: str  # "single" or "series"
-    root: str
-    source: Optional[str] = None
-    target: Optional[str] = None
-    prefix: Optional[str] = None
-    separator: Optional[str] = None
-    new_ext_suffix: Optional[str] = None
-
-@dataclass
 class ArchiveTask:
     fact_bag: FactBag
     score: int
@@ -341,6 +331,7 @@ class ArchiveTask:
             or knowledge.get("analysis.summary.format", "")
             or knowledge.get("archive.format_hint", "")
             or self.detected_ext
+            or self.fact_bag.get("file.detected_ext")
             or ""
         ).lstrip(".")
 
@@ -355,7 +346,7 @@ class ArchiveTask:
             raw_source if isinstance(raw_source, dict) else None,
             archive_path=self.main_path,
             part_paths=list(self.all_parts or [self.main_path]),
-            format_hint=str(self.detected_ext or ""),
+            format_hint=self._format_hint(),
             logical_name=str(self.logical_name or ""),
         )
         source_input = source_descriptor.to_dict()

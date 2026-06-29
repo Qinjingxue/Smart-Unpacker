@@ -4,7 +4,7 @@ from sunpack.rename.scheduler import RenameScheduler
 from sunpack.rename.conflicts import next_available_path
 
 
-def test_rename_planner_and_executor_apply_disguised_archive_extensions(tmp_path):
+def test_detected_extensions_do_not_rename_source_files(tmp_path):
     split_first = tmp_path / "disguised.part1.rar.001"
     split_second = tmp_path / "disguised.part2.rar.002"
     fake_doc = tmp_path / "fake_doc.txt"
@@ -26,19 +26,16 @@ def test_rename_planner_and_executor_apply_disguised_archive_extensions(tmp_path
         ArchiveTask(fact_bag=single_bag, score=10, main_path=str(fake_doc), all_parts=[str(fake_doc)]),
     ]
 
-    scheduler = RenameScheduler()
-    instructions = scheduler.plan(tasks)
-    path_map = scheduler.execute(instructions)
-
-    assert instructions
-    assert (tmp_path / "disguised.part1.rar").exists()
-    assert (tmp_path / "disguised.part2.rar").exists()
-    assert (tmp_path / "fake_doc.zip").exists()
-    assert str(split_first) in path_map
-    assert str(fake_doc) in path_map
+    assert split_first.exists()
+    assert split_second.exists()
+    assert fake_doc.exists()
+    assert tasks[0].archive_input().format_hint == "rar"
+    assert tasks[1].archive_input().format_hint == "zip"
+    assert not (tmp_path / "disguised.part1.rar").exists()
+    assert not (tmp_path / "fake_doc.zip").exists()
 
 
-def test_rename_planner_keeps_embedded_carrier_extension(tmp_path):
+def test_embedded_carrier_keeps_physical_extension_and_detected_format(tmp_path):
     carrier = tmp_path / "carrier.jpg"
     carrier.touch()
 
@@ -48,9 +45,10 @@ def test_rename_planner_keeps_embedded_carrier_extension(tmp_path):
     bag.set("file.embedded_archive_found", True)
     bag.set("embedded_archive.analysis", {"found": True, "detected_ext": ".rar", "offset": 128})
 
-    instructions = RenameScheduler().plan([ArchiveTask(fact_bag=bag, score=10, main_path=str(carrier), all_parts=[str(carrier)])])
-
-    assert instructions == []
+    task = ArchiveTask(fact_bag=bag, score=10, main_path=str(carrier), all_parts=[str(carrier)])
+    assert carrier.exists()
+    assert task.main_path == str(carrier)
+    assert task.archive_input().format_hint == "rar"
 
 
 def test_output_dir_resolver_disambiguates_duplicate_task_outputs(tmp_path):

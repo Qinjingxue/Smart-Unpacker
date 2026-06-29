@@ -29,6 +29,8 @@ class PipelineRunner:
         self.language = self.i18n.language
         self.quiet = bool(cli_config.get("quiet", False))
         self.verbose = bool(cli_config.get("verbose", False))
+        post_extract_config = config.get("post_extract") if isinstance(config.get("post_extract"), dict) else {}
+        self.defer_success_actions = bool(post_extract_config.get("defer_success_actions", False))
         self.context = RunContext()
         self.analysis_stage = ArchiveAnalysisStage(config)
         self.task_scanner = ArchiveTaskScanner(config, self.context, analysis_stage=self.analysis_stage)
@@ -94,6 +96,18 @@ class PipelineRunner:
     def _apply_postprocess_actions(self):
         self.postprocess_actions.apply()
 
+    def apply_deferred_postprocess(self, output_path_map: dict[str, str] | None = None) -> None:
+        mapping = {
+            os.path.normcase(os.path.abspath(old)): os.path.abspath(new)
+            for old, new in (output_path_map or {}).items()
+        }
+        if mapping:
+            self.context.flatten_candidates = {
+                mapping.get(os.path.normcase(os.path.abspath(path)), path)
+                for path in self.context.flatten_candidates
+            }
+        self._apply_postprocess_actions()
+
     def _execute_tasks(self, tasks: List[ArchiveTask]) -> List[str]:
         return self.batch_runner.execute(tasks)
 
@@ -119,7 +133,7 @@ class PipelineRunner:
                 self.batch_runner.set_progress_round(round_index)
             new_roots = self._execute_tasks(tasks)
 
-            if prompt_mode:
+            if prompt_mode and not getattr(self, "defer_success_actions", False):
                 self._apply_postprocess_actions()
                 postprocess_applied = True
 
@@ -132,7 +146,7 @@ class PipelineRunner:
             current_roots = new_roots
             round_index += 1
 
-        if not postprocess_applied:
+        if not postprocess_applied and not getattr(self, "defer_success_actions", False):
             self._apply_postprocess_actions()
 
         log_dir = first_target if os.path.isdir(first_target) else os.path.dirname(first_target)
@@ -153,6 +167,7 @@ class PipelineRunner:
             partial_success_count=self.context.partial_success_count,
             recovered_outputs=list(self.context.recovered_outputs),
             failures=list(self.context.failures),
+            target_results=list(getattr(self.context, "target_results", [])),
         )
 
     def run_direct_files(self, file_paths: List[str]) -> RunSummary:
@@ -171,7 +186,7 @@ class PipelineRunner:
                 self.batch_runner.set_progress_round(round_index, direct=round_index == 1)
             new_roots = self._execute_tasks(current_tasks)
 
-            if prompt_mode:
+            if prompt_mode and not getattr(self, "defer_success_actions", False):
                 self._apply_postprocess_actions()
                 postprocess_applied = True
 
@@ -185,7 +200,7 @@ class PipelineRunner:
             current_tasks = self._scan_targets(new_roots)
             round_index += 1
 
-        if not postprocess_applied:
+        if not postprocess_applied and not getattr(self, "defer_success_actions", False):
             self._apply_postprocess_actions()
 
         self.logger.log_final_summary(
@@ -205,4 +220,5 @@ class PipelineRunner:
             partial_success_count=self.context.partial_success_count,
             recovered_outputs=list(self.context.recovered_outputs),
             failures=list(self.context.failures),
+            target_results=list(getattr(self.context, "target_results", [])),
         )

@@ -55,7 +55,7 @@ class FakePasswordResolver:
 
 
 class FakeMetadataScanner:
-    def scan(self, archive, password=None, part_paths=None):
+    def scan(self, archive, password=None, part_paths=None, format_hint=""):
         return ArchiveMetadataScanResult(
             archive_path=str(archive),
             archive_type=Path(str(archive)).suffix.lower().lstrip(".") or "unknown",
@@ -64,7 +64,7 @@ class FakeMetadataScanner:
 
 
 class FakeFailingMetadataScanner:
-    def scan(self, archive, password=None, part_paths=None):
+    def scan(self, archive, password=None, part_paths=None, format_hint=""):
         result = ArchiveMetadataScanResult(
             archive_path=str(archive),
             archive_type="zip",

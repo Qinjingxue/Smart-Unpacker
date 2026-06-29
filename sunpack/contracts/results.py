@@ -1,7 +1,24 @@
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import List
 
 from sunpack.contracts.failures import FailureInfo
+
+
+class OutcomeKind(str, Enum):
+    COMPLETE_SUCCESS = "complete_success"
+    PARTIAL_SUCCESS = "partial_success"
+    FAILURE = "failure"
+
+
+@dataclass(frozen=True)
+class TargetRunResult:
+    input_path: str
+    outcome_kind: OutcomeKind
+    output_dir: str = ""
+    verification: dict = field(default_factory=dict)
+    error: str = ""
+
 
 @dataclass
 class RunSummary:
@@ -11,3 +28,4 @@ class RunSummary:
     partial_success_count: int = 0
     recovered_outputs: List[dict] = field(default_factory=list)
     failures: List[FailureInfo] = field(default_factory=list)
+    target_results: List[TargetRunResult] = field(default_factory=list)

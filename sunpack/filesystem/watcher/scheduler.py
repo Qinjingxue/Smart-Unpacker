@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
+import shutil
 import threading
 import time
 from dataclasses import dataclass, field, replace
@@ -14,6 +16,7 @@ from sunpack.config.fields.watch import DEFAULT_WATCH_CONFIG
 from sunpack.contracts.detection import FactBag
 from sunpack.contracts.failures import FailureKind
 from sunpack.contracts.filesystem import FileEntry
+from sunpack.contracts.results import OutcomeKind
 from sunpack.contracts.tasks import ArchiveTask
 from sunpack.filesystem.directory_scanner import apply_ordered_filters_to_entries
 from sunpack.filesystem.filters import build_filters
@@ -26,7 +29,7 @@ from sunpack.filesystem.watcher.group_models import (
 )
 from sunpack.filesystem.watcher.scanner import WatchCandidate, scan_watch_candidates
 from sunpack.filesystem.watcher.scanner import _candidate_for as _watch_candidate_for_path
-from sunpack.filesystem.watcher.state import WatchStateStore
+from sunpack.filesystem.watcher.state import WatchInputSnapshot, WatchStateStore
 from sunpack.passwords.internal import builtin as builtin_passwords_module
 from sunpack.passwords.internal.builtin import get_builtin_passwords
 from sunpack.passwords.internal.clipboard_monitor import ClipboardPasswordMonitor
@@ -128,6 +131,7 @@ class WatchScheduler:
         self.output_suppression_seconds = max(0.0, float(watch_config.get("output_suppression_seconds", 120.0)))
         self.password_retry_debounce_seconds = max(0.0, float(watch_config.get("password_retry_debounce_seconds", 1.0)))
         self.password_retry_include_subtree = bool(watch_config.get("password_retry_include_subtree", True))
+        self.partial_retry_seconds = max(1.0, float(watch_config.get("partial_retry_seconds", 30.0)))
         self._configured_user_passwords = dedupe_passwords(list(config.get("user_passwords") or []))
         self._configured_builtin_passwords = dedupe_passwords(list(config.get("builtin_passwords") or []))
         self.builtin_password_file = os.path.abspath(str(builtin_passwords_module.builtin_password_path()))
@@ -145,6 +149,7 @@ class WatchScheduler:
         if self._started:
             return
         self._ensure_directory_password_files()
+        self._recover_probe_workspaces()
         handler = _WatchEventHandler(self)
         scheduled_paths: set[str] = set()
         for root in self.watch_roots:
@@ -209,6 +214,7 @@ class WatchScheduler:
     def run_once(self) -> WatchRunResult:
         now = time.time()
         self._process_password_dirty_dirs(now)
+        self._process_due_partial_probes(now)
         ready = self._pop_ready(now)
         with self._lock:
             unstable_paths = {os.path.normcase(os.path.abspath(path)) for path in self._pending}
@@ -255,16 +261,21 @@ class WatchScheduler:
 
     def next_delay_seconds(self) -> float:
         now = time.time()
+        partial_retry_at = self.state.next_partial_retry_at()
+        partial_delay = max(0.0, partial_retry_at - now) if partial_retry_at is not None else None
         with self._lock:
             if not self._pending:
-                return self.interval_seconds
+                return min(self.interval_seconds, partial_delay) if partial_delay is not None else self.interval_seconds
             delays = []
             for path in self._pending:
                 stable_since = self._stable_since.get(path, now)
                 state = self._pending_states.get(path) or _PendingCandidateState(first_seen=stable_since, last_changed=stable_since)
                 delays.append(max(0.0, self._candidate_ready_delay(state) - (now - stable_since)))
             next_ready = min(delays) if delays else self.pending_check_interval_seconds
-        return max(0.0, min(self.pending_check_interval_seconds, next_ready))
+        delays = [self.pending_check_interval_seconds, next_ready]
+        if partial_delay is not None:
+            delays.append(partial_delay)
+        return max(0.0, min(delays))
 
     def enqueue(self, path: str, *, force: bool = False, event_type: str = "unknown", src_path: str = ""):
         if self.should_ignore_event_path(path):
@@ -353,6 +364,15 @@ class WatchScheduler:
         if candidate is None:
             self._log_candidate_ignored(path, "sample_unreadable")
             return
+        partial_probe = self.state.partial_probe_for(candidate.path)
+        if partial_probe is not None and not force:
+            sampled = _candidate_with_sample_digest(candidate)
+            if sampled is not None and _probe_matches_candidate(partial_probe, sampled):
+                self._log_candidate_ignored(candidate.path, "partial_snapshot_quarantined")
+                return
+            self.state.clear_partial_probe(candidate.path)
+            if sampled is not None:
+                candidate = sampled
         with self._lock:
             previous = self._pending.get(candidate.path)
             previous_state = self._pending_states.get(candidate.path)
@@ -413,7 +433,7 @@ class WatchScheduler:
     def should_ignore_event_path(self, path: str) -> bool:
         if not path:
             return True
-        return self._is_under_metadata_dir(path) or bool(self._output_suppression_reason(path))
+        return self._is_under_metadata_dir(path) or self._is_under_probe_root(path) or bool(self._output_suppression_reason(path))
 
     def _log_candidate_ignored(self, path: str, reason: str, **payload) -> None:
         normalized = os.path.normcase(os.path.abspath(str(path))) if path else ""
@@ -605,16 +625,74 @@ class WatchScheduler:
             "root": output_root,
             "common_root": self._common_root_for(candidate.path),
         }
-        predicted_output_dirs = self._predicted_output_dirs(candidate.path, run_config)
-        self._activate_output_roots(predicted_output_dirs)
+        final_output_config = dict(run_config)
+        final_output_config["output"] = dict(run_config["output"])
+        predicted_final_dirs = self._predicted_output_dirs(candidate.path, final_output_config)
+        probe_workspace = self._prepare_probe_workspace(candidate.path)
+        run_config["output"] = {
+            **run_config["output"],
+            "root": probe_workspace,
+            "common_root": final_output_config["output"]["common_root"],
+        }
+        run_config["post_extract"] = {
+            **(run_config.get("post_extract", {}) if isinstance(run_config.get("post_extract"), dict) else {}),
+            "defer_success_actions": True,
+        }
+        predicted_probe_dirs = self._predicted_output_dirs(candidate.path, run_config)
+        self._activate_output_roots([probe_workspace, *predicted_probe_dirs])
         runner = self.runner_factory(run_config)
         try:
             summary = runner.run_targets([candidate.path])
         finally:
-            self._release_output_roots(predicted_output_dirs)
+            self._release_output_roots([probe_workspace, *predicted_probe_dirs])
         self._remember_recent_passwords(getattr(runner, "recent_passwords", []))
-        generated_output_dirs = self._generated_output_dirs(runner, predicted_output_dirs)
-        self._remember_recent_output_roots(generated_output_dirs)
+        target_result = _target_result_for_path(summary, candidate.path)
+        outcome_kind = _summary_outcome_kind(summary, target_result)
+        probe_output_dirs = self._generated_output_dirs(runner, predicted_probe_dirs)
+
+        if outcome_kind == OutcomeKind.PARTIAL_SUCCESS:
+            verification = dict(getattr(target_result, "verification", {}) or {})
+            signature = _verification_signature(verification)
+            previous = self.state.partial_probe_for(candidate.path)
+            snapshot = WatchInputSnapshot(
+                path=candidate.path,
+                size=candidate.size,
+                mtime=candidate.mtime,
+                sample_digest=candidate.sample_digest,
+            )
+            if previous is None or previous.fingerprint != snapshot.fingerprint:
+                status = "awaiting_confirmation"
+                retry_at = time.time() + self.partial_retry_seconds
+                attempt_count = 1
+                event = "partial_confirmation_scheduled"
+            else:
+                attempt_count = previous.attempt_count + 1
+                retry_at = 0.0
+                if previous.verification_signature == signature:
+                    status = "quarantined_snapshot"
+                    event = "partial_snapshot_quarantined"
+                else:
+                    status = "awaiting_input_change"
+                    event = "partial_result_changed"
+            self.state.record_partial_probe(
+                snapshot,
+                verification_signature=signature,
+                verification_payload=verification,
+                retry_at=retry_at,
+                status=status,
+                attempt_count=attempt_count,
+            )
+            self._cleanup_probe_workspace(probe_workspace)
+            self.log.write(
+                event,
+                path=candidate.path,
+                status=status,
+                attempt_count=attempt_count,
+                retry_at=retry_at,
+                verification_signature=signature,
+            )
+            return WatchRunResult(processed=1)
+
         failed = list(summary.failed_tasks)
         if failed:
             error = failed[0] if failed else "watch extraction failed"
@@ -654,6 +732,7 @@ class WatchScheduler:
                 failure_payload=payload,
             )
             self.log.write(status, path=candidate.path, error=error, failures=failure_payloads)
+            self._cleanup_probe_workspace(probe_workspace)
             return WatchRunResult(processed=1, failed=1, errors=failed)
         if _summary_processed_no_tasks(summary):
             if group is not None:
@@ -666,7 +745,24 @@ class WatchScheduler:
                 status="ignored_no_tasks",
             )
             self.log.write("no_tasks_found", path=candidate.path)
+            self._cleanup_probe_workspace(probe_workspace)
             return WatchRunResult(processed=1)
+        if outcome_kind != OutcomeKind.COMPLETE_SUCCESS:
+            self._cleanup_probe_workspace(probe_workspace)
+            error = "watch pipeline returned no complete target outcome"
+            self.log.write("failed_terminal", path=candidate.path, error=error, failures=[])
+            return WatchRunResult(processed=1, failed=1, errors=[error])
+
+        generated_output_dirs, output_path_map = self._promote_probe_outputs(
+            probe_output_dirs,
+            predicted_final_dirs,
+            probe_workspace,
+        )
+        apply_deferred = getattr(runner, "apply_deferred_postprocess", None)
+        if callable(apply_deferred):
+            apply_deferred(output_path_map)
+        self.state.clear_partial_probe(candidate.path)
+        self._remember_recent_output_roots(generated_output_dirs)
         self._remember_known_output_roots(generated_output_dirs)
         if group is not None:
             self.state.record_group_done(group)
@@ -693,6 +789,87 @@ class WatchScheduler:
         if not self._relative_out_dir:
             return self.out_dir
         return os.path.abspath(os.path.join(self._common_root_for(path), self.out_dir))
+
+    def _probe_root_for(self, path: str) -> str:
+        return os.path.join(self._common_root_for(path), ".sunpack_watch_probes")
+
+    def _probe_roots(self) -> list[str]:
+        roots = []
+        for root in self.watch_roots:
+            base = root if os.path.isdir(root) else os.path.dirname(root)
+            roots.append(os.path.join(os.path.abspath(base), ".sunpack_watch_probes"))
+        return _dedupe_paths(roots)
+
+    def _is_under_probe_root(self, path: str) -> bool:
+        normalized = os.path.abspath(path)
+        return _is_under_any_root(normalized, self._probe_roots())
+
+    def _recover_probe_workspaces(self) -> None:
+        for root in self._probe_roots():
+            shutil.rmtree(root, ignore_errors=True)
+
+    def _prepare_probe_workspace(self, path: str) -> str:
+        identity = hashlib.sha256(os.path.normcase(os.path.abspath(path)).encode("utf-8")).hexdigest()[:20]
+        owner_dir = os.path.join(self._probe_root_for(path), identity)
+        shutil.rmtree(owner_dir, ignore_errors=True)
+        workspace = os.path.join(owner_dir, "work")
+        os.makedirs(workspace, exist_ok=True)
+        return workspace
+
+    def _cleanup_probe_workspace(self, workspace: str) -> None:
+        owner_dir = os.path.dirname(os.path.abspath(workspace))
+        probe_root = os.path.dirname(owner_dir)
+        shutil.rmtree(owner_dir, ignore_errors=True)
+        try:
+            os.rmdir(probe_root)
+        except OSError:
+            pass
+
+    def _promote_probe_outputs(
+        self,
+        probe_outputs: list[str],
+        predicted_final_dirs: list[str],
+        workspace: str,
+    ) -> tuple[list[str], dict[str, str]]:
+        sources = [
+            path
+            for path in _dedupe_paths(probe_outputs)
+            if os.path.isdir(path) and _is_relative_to(path, workspace)
+        ]
+        promoted: list[str] = []
+        path_map: dict[str, str] = {}
+        for index, source in enumerate(sources):
+            if index < len(predicted_final_dirs):
+                target = predicted_final_dirs[index]
+            else:
+                target = os.path.join(os.path.dirname(predicted_final_dirs[0]), os.path.basename(source))
+            target = _next_nonexisting_path(target)
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            try:
+                os.replace(source, target)
+            except OSError as exc:
+                if exc.errno != errno.EXDEV and getattr(exc, "winerror", None) != 17:
+                    raise
+                shutil.move(source, target)
+            promoted.append(target)
+            path_map[source] = target
+        self._cleanup_probe_workspace(workspace)
+        return promoted, path_map
+
+    def _process_due_partial_probes(self, now: float) -> None:
+        for probe in self.state.due_partial_probes(now):
+            candidate = _candidate_for_event_path(probe.path)
+            if candidate is None:
+                self.state.clear_partial_probe(probe.path)
+                continue
+            sampled = _candidate_with_sample_digest(candidate)
+            if sampled is None:
+                continue
+            if _probe_matches_candidate(probe, sampled):
+                self.enqueue(sampled.path, force=True, event_type="partial_confirmation")
+                continue
+            self.state.clear_partial_probe(probe.path)
+            self.enqueue(sampled.path, event_type="modified")
 
     def _is_under_watched_root(self, path: str) -> bool:
         return _longest_matching_root(path, self.watch_roots) is not None
@@ -992,6 +1169,91 @@ def _is_temporary_download_path(path: str) -> bool:
         ".!ut",
     )
     return name.endswith(suffixes)
+
+
+def _probe_matches_candidate(probe, candidate: WatchCandidate) -> bool:
+    return bool(
+        int(getattr(probe, "size", -1)) == int(candidate.size)
+        and float(getattr(probe, "mtime", -1.0)) == float(candidate.mtime)
+        and str(getattr(probe, "sample_digest", "")) == str(candidate.sample_digest)
+    )
+
+
+def _target_result_for_path(summary, path: str):
+    expected = os.path.normcase(os.path.abspath(path))
+    for item in list(getattr(summary, "target_results", []) or []):
+        raw_path = item.get("input_path", "") if isinstance(item, dict) else getattr(item, "input_path", "")
+        if raw_path and os.path.normcase(os.path.abspath(str(raw_path))) == expected:
+            return item
+    return None
+
+
+def _summary_outcome_kind(summary, target_result) -> OutcomeKind:
+    raw = (
+        target_result.get("outcome_kind")
+        if isinstance(target_result, dict)
+        else getattr(target_result, "outcome_kind", None)
+    ) if target_result is not None else None
+    if isinstance(raw, OutcomeKind):
+        return raw
+    if raw:
+        try:
+            return OutcomeKind(str(raw))
+        except ValueError:
+            pass
+    if int(getattr(summary, "partial_success_count", 0) or 0) > 0:
+        return OutcomeKind.PARTIAL_SUCCESS
+    if int(getattr(summary, "success_count", 0) or 0) > 0:
+        return OutcomeKind.COMPLETE_SUCCESS
+    return OutcomeKind.FAILURE
+
+
+def _verification_signature(payload: dict) -> str:
+    coverage = payload.get("archive_coverage") if isinstance(payload.get("archive_coverage"), dict) else {}
+    files = []
+    for item in payload.get("files") or []:
+        if not isinstance(item, dict):
+            continue
+        files.append({
+            "archive_path": str(item.get("archive_path") or ""),
+            "status": str(item.get("status") or ""),
+            "bytes_written": int(item.get("bytes_written", 0) or 0),
+            "expected_size": item.get("expected_size"),
+            "crc_expected": item.get("crc_expected"),
+            "crc_actual": item.get("crc_actual"),
+            "failure_stage": str(item.get("failure_stage") or ""),
+            "failure_kind": str(item.get("failure_kind") or ""),
+        })
+    canonical = {
+        "assessment_status": str(payload.get("assessment_status") or ""),
+        "source_integrity": str(payload.get("source_integrity") or ""),
+        "decision_hint": str(payload.get("decision_hint") or ""),
+        "completeness": round(float(payload.get("completeness", 0.0) or 0.0), 9),
+        "recoverable_upper_bound": round(float(payload.get("recoverable_upper_bound", 0.0) or 0.0), 9),
+        "coverage": {
+            key: coverage.get(key)
+            for key in (
+                "expected_files", "matched_files", "complete_files", "partial_files",
+                "failed_files", "missing_files", "unverified_files", "expected_bytes",
+                "matched_bytes", "complete_bytes",
+            )
+        },
+        "repair_hints": dict(payload.get("repair_hints") or {}),
+        "files": sorted(files, key=lambda item: (item["archive_path"], item["status"])),
+    }
+    return hashlib.sha256(json.dumps(canonical, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")).hexdigest()
+
+
+def _next_nonexisting_path(path: str) -> str:
+    if not os.path.exists(path):
+        return path
+    base = f"{path}_extracted"
+    if not os.path.exists(base):
+        return base
+    index = 2
+    while os.path.exists(f"{base}_{index}"):
+        index += 1
+    return f"{base}_{index}"
 
 
 def _prefer_event_type(current: str, incoming: str) -> str:

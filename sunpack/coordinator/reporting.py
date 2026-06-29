@@ -180,7 +180,7 @@ class RunReporter:
     ):
         recovered = list(recovered_outputs or [])
         partial_count = len(recovered)
-        complete_count = max(0, int(success_count) - partial_count)
+        complete_count = max(0, int(success_count))
         failed_count = len(failed_tasks)
         elapsed = max(0.0, time.time() - start_time)
 
@@ -230,7 +230,7 @@ class RunReporter:
             except OSError:
                 pass
             if not self.quiet:
-                print(self.i18n.t("report.all_success"))
+                print(self.i18n.t("report.partial_complete" if recovered else "report.all_success"))
 
         if not self.quiet:
             print("-" * 54)

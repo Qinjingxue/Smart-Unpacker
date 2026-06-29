@@ -40,14 +40,26 @@ class ArchiveMetadataScanner:
         self.cache = {}
         self.i18n = I18nContext(language)
 
-    def scan(self, archive_path: str, password: Optional[str] = None, part_paths: list[str] | None = None) -> ArchiveMetadataScanResult:
+    def scan(
+        self,
+        archive_path: str,
+        password: Optional[str] = None,
+        part_paths: list[str] | None = None,
+        format_hint: str = "",
+    ) -> ArchiveMetadataScanResult:
         archive_path = os.path.normpath(archive_path)
-        cache_key = self._build_cache_key(archive_path, part_paths=part_paths)
+        normalized_hint = str(format_hint or "").lower().lstrip(".")
+        cache_key = (*self._build_cache_key(archive_path, part_paths=part_paths), normalized_hint)
         cached = self.cache.get(cache_key)
         if cached is not None:
             return cached
 
-        result = self._scan_uncached(archive_path, password=password, part_paths=part_paths)
+        result = self._scan_uncached(
+            archive_path,
+            password=password,
+            part_paths=part_paths,
+            format_hint=normalized_hint,
+        )
         self.cache[cache_key] = result
         return result
 
@@ -65,8 +77,14 @@ class ArchiveMetadataScanner:
         except OSError:
             return (archive_path, 0, 0, tuple(part_keys))
 
-    def _scan_uncached(self, archive_path: str, password: Optional[str] = None, part_paths: list[str] | None = None) -> ArchiveMetadataScanResult:
-        ext = os.path.splitext(archive_path)[1].lower()
+    def _scan_uncached(
+        self,
+        archive_path: str,
+        password: Optional[str] = None,
+        part_paths: list[str] | None = None,
+        format_hint: str = "",
+    ) -> ArchiveMetadataScanResult:
+        ext = f".{format_hint}" if format_hint else os.path.splitext(archive_path)[1].lower()
         if ext == ".zip":
             return self._scan_zip_central_directory(archive_path)
         if ext in {".7z", ".rar"}:

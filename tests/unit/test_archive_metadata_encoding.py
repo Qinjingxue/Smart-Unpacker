@@ -40,6 +40,19 @@ def test_shift_jis_zip_scan_returns_decoded_item_paths(tmp_path):
     assert result.confidence > 0.5
 
 
+def test_format_hint_scans_disguised_zip_without_renaming_it(tmp_path):
+    archive = tmp_path / "downloaded.data"
+    expected_name = "日本語.txt"
+    _write_stored_zip(archive, expected_name.encode("cp932"), b"payload")
+
+    result = ArchiveMetadataScanner().scan(str(archive), format_hint="zip")
+
+    assert archive.is_file()
+    assert not (tmp_path / "downloaded.zip").exists()
+    assert result.archive_type == "zip"
+    assert result.decoded_names == [expected_name]
+
+
 def test_unicode_path_extra_field_takes_precedence_over_codepage_guess(tmp_path):
     archive = tmp_path / "unicode-extra.zip"
     raw_name = "【びよびよ研究室】ケイ.psd".encode("cp932")

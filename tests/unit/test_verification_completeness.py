@@ -6,6 +6,7 @@ from sunpack.contracts.run_context import RunContext
 from sunpack.contracts.tasks import ArchiveTask
 from sunpack.coordinator.extraction_batch import ExtractionBatchRunner
 from sunpack.contracts.extraction import ExtractionResult
+from sunpack.contracts.results import OutcomeKind
 from sunpack.repair.result import RepairResult
 from sunpack.verification import VerificationScheduler
 
@@ -75,7 +76,7 @@ def test_repair_loop_keeps_original_partial_when_repaired_attempt_is_worse(tmp_p
 
     outcome = runner._extract_verify_with_retries(_task(archive), str(out_dir), runtime_scheduler=None)
 
-    assert outcome.success is True
+    assert outcome.outcome_kind == OutcomeKind.PARTIAL_SUCCESS
     assert outcome.verification is not None
     assert outcome.verification.archive_coverage.complete_files == 3
     assert (out_dir / "good-0.txt").exists()
@@ -151,7 +152,7 @@ def test_main_flow_accepts_recoverable_partial_after_repair_has_no_candidate(tmp
     task = _task(archive)
     outcome = runner._extract_verify_with_retries(task, str(out_dir), runtime_scheduler=None)
 
-    assert outcome.success is True
+    assert outcome.outcome_kind == OutcomeKind.PARTIAL_SUCCESS
     assert outcome.verification is not None
     assert outcome.verification.decision_hint == "accept_partial"
     assert good.exists()
@@ -159,6 +160,9 @@ def test_main_flow_accepts_recoverable_partial_after_repair_has_no_candidate(tmp
     assert not failed.exists()
     assert runner.collect_result(task, outcome) == str(out_dir)
     assert runner.context.partial_success_count == 1
+    assert runner.context.success_count == 0
+    assert runner.context.unpacked_archives == []
+    assert runner.context.flatten_candidates == set()
     recovered = runner.context.recovered_outputs[0]
     assert recovered["archive_coverage"]["expected_files"] == 3
     report_text = (out_dir / ".sunpack" / "recovery_report.json").read_text(encoding="utf-8")

@@ -188,10 +188,15 @@ class SingleArchiveExtractor:
                 test_result = resolution.test_result
                 test_err = resolution.error_text
                 with _phase(phase_timer, f"{phase_prefix}_scan_filename_encoding"):
+                    try:
+                        format_hint = task.archive_input().format_hint
+                    except (TypeError, ValueError, AttributeError):
+                        format_hint = str(getattr(task, "detected_ext", "") or "").lstrip(".")
                     filename_encoding = self.metadata_scanner.scan(
                         run_archive,
                         password=correct_pwd,
                         part_paths=run_parts,
+                        format_hint=format_hint,
                     )
                     selected_codepage = filename_encoding.selected_codepage
                     if filename_encoding.error:

@@ -22,6 +22,7 @@ from sunpack.analysis.stage import ArchiveAnalysisStage
 from sunpack.contracts.archive_input import ArchiveInputDescriptor, ArchiveInputRange
 from sunpack.extraction.progress import write_extraction_progress_manifest
 from sunpack.contracts.extraction import ExtractionResult
+from sunpack.contracts.results import OutcomeKind
 from sunpack.repair.candidate import RepairCandidate, RepairCandidateBatch
 from sunpack.repair.result import RepairResult
 from sunpack.support import archive_knowledge_projection as knowledge_view
@@ -602,7 +603,7 @@ def test_resource_guard_blocks_many_entry_archive_as_guarded_not_generic_failure
     [(returned_task, outcome)] = runner._execute_ready_tasks([task], lambda _task: str(out_dir))
 
     assert returned_task is task
-    assert outcome.success is False
+    assert outcome.outcome_kind == OutcomeKind.FAILURE
     assert outcome.result.error == "resource_guard"
     assert outcome.result.diagnostics["result"]["failure_kind"] == "resource_guard"
     assert outcome.result.diagnostics["result"]["guard_status"] == "guarded"
@@ -638,7 +639,7 @@ def test_resource_guard_uses_native_archive_analysis_before_worker_for_zip_bomb(
     guard = task.fact_bag.get("resource.guard")
 
     assert returned_task is task
-    assert outcome.success is False
+    assert outcome.outcome_kind == OutcomeKind.FAILURE
     assert outcome.result.error == "resource_guard"
     assert analysis["file_count"] == 1
     assert analysis["total_unpacked_size"] >= 256 * 1024
@@ -830,7 +831,7 @@ def test_repair_terminal_missing_volume_feedback_stops_later_repairs(tmp_path):
 
     outcome = runner._extract_verify_with_retries(task, str(out_dir), runtime_scheduler=None)
 
-    assert outcome.success is False
+    assert outcome.outcome_kind == OutcomeKind.FAILURE
     assert repair_scheduler.calls == 1
     repair_loop = knowledge_view.repair_loop(task)
     assert repair_loop.get("terminal_reason") == "repair_unrepairable"
@@ -956,7 +957,7 @@ def test_missing_tail_volume_partial_outputs_do_not_become_partial_success(tmp_p
     collected = runner.collect_result(task, outcome)
 
     assert collected is None
-    assert outcome.success is False
+    assert outcome.outcome_kind == OutcomeKind.FAILURE
     assert outcome.verification is not None
     assert outcome.verification.decision_hint == "accept_partial"
     assert runner.context.partial_success_count == 0
@@ -981,7 +982,7 @@ def test_main_flow_nested_archive_keeps_outer_complete_and_inner_partial_coverag
     inner_report = json.loads((inner_out_dir / ".sunpack" / "recovery_report.json").read_text(encoding="utf-8"))
     outer_manifest = json.loads((outer_out_dir / ".sunpack" / "extraction_manifest.json").read_text(encoding="utf-8"))
 
-    assert summary.success_count == 2
+    assert summary.success_count == 1
     assert summary.partial_success_count == 1
     assert not summary.failed_tasks
     assert outer_manifest["summary"]["complete"] == 2
@@ -1063,11 +1064,11 @@ def test_recursive_partial_report_survives_delete_cleanup_and_remains_discoverab
     inner_report_path = outer_out_dir / "inner" / ".sunpack" / "recovery_report.json"
     inner_report = json.loads(inner_report_path.read_text(encoding="utf-8"))
 
-    assert summary.success_count == 2
+    assert summary.success_count == 1
     assert summary.partial_success_count == 1
     assert not summary.failed_tasks
     assert not archive.exists()
-    assert not inner_archive.exists()
+    assert inner_archive.exists()
     assert inner_report_path.is_file()
     assert summary.recovered_outputs[0]["recovery_report"] == str(inner_report_path)
     assert inner_report["archive"].endswith("inner.zip")
@@ -1140,7 +1141,7 @@ def test_batch_flow_repair_structure_then_accepts_best_effort_payload_partial(tm
     report = json.loads((out_dir / ".sunpack" / "recovery_report.json").read_text(encoding="utf-8"))
 
     assert collected == str(out_dir)
-    assert outcome.success is True
+    assert outcome.outcome_kind == OutcomeKind.PARTIAL_SUCCESS
     assert outcome.result.partial_outputs is True
     assert extractor.calls == 2
     assert repair_scheduler.calls == 1
@@ -1170,7 +1171,7 @@ def test_main_flow_accepts_best_effort_payload_damage_and_reports_coverage(tmp_p
     report = json.loads((out_dir / ".sunpack" / "recovery_report.json").read_text(encoding="utf-8"))
     bad_entries = [item for item in report["files"] if item["archive_path"] == "bad.bin"]
 
-    assert summary.success_count == 1
+    assert summary.success_count == 0
     assert summary.partial_success_count == 1
     assert not summary.failed_tasks
     assert report["success_kind"] == "partial"

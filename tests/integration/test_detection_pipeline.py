@@ -49,7 +49,7 @@ class DetectionPipelineTests(unittest.TestCase):
             self.assertIn("extension", decision.matched_rules)
             self.assertEqual(bag.get("file.path"), str(archive_path))
 
-    def test_archive_task_updates_paths_after_rename(self):
+    def test_archive_task_keeps_physical_path_and_exposes_format_hint(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             source = root / "fake_doc.txt"
@@ -63,15 +63,10 @@ class DetectionPipelineTests(unittest.TestCase):
             bag.set("file.detected_ext", ".zip")
             task = ArchiveTask.from_fact_bag(bag, score=10)
 
-            scheduler = RenameScheduler()
-            instructions = scheduler.plan([task])
-            path_map = scheduler.execute(instructions)
-            task.apply_path_mapping(path_map)
-
-            expected = root / "fake_doc.zip"
-            self.assertTrue(expected.exists())
-            self.assertEqual(os.path.normcase(task.main_path), os.path.normcase(str(expected)))
-            self.assertEqual(os.path.normcase(task.fact_bag.get("file.path")), os.path.normcase(str(expected)))
+            self.assertTrue(source.exists())
+            self.assertEqual(os.path.normcase(task.main_path), os.path.normcase(str(source)))
+            self.assertEqual(task.archive_input().format_hint, "zip")
+            self.assertFalse((root / "fake_doc.zip").exists())
 
     def test_pipeline_can_scan_and_extract_zip(self):
         with tempfile.TemporaryDirectory() as tmp:

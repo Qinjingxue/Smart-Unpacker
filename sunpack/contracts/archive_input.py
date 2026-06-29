@@ -84,6 +84,9 @@ class ArchiveInputDescriptor:
     segment: ArchiveInputSegment | None = None
     analysis: dict[str, Any] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "format_hint", str(self.format_hint or "").strip().lower().lstrip("."))
+
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "kind": "archive_input",

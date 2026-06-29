@@ -1,6 +1,6 @@
 import json
 
-from sunpack.filesystem.watcher.state import WatchStateStore
+from sunpack.filesystem.watcher.state import WatchInputSnapshot, WatchStateStore
 
 
 def test_input_snapshot_persists_and_matches_only_identical_stable_input(tmp_path):
@@ -83,4 +83,26 @@ def test_previous_state_schema_is_intentionally_not_loaded(tmp_path):
     state = WatchStateStore(str(state_path))
 
     assert not state.snapshots
+
+
+def test_partial_probe_state_persists_verification_and_retry_status(tmp_path):
+    state_path = tmp_path / "state.json"
+    archive = tmp_path / "sample.zip"
+    archive.write_bytes(b"partial")
+    stat = archive.stat()
+    state = WatchStateStore(str(state_path))
+    state.record_partial_probe(
+        WatchInputSnapshot(str(archive), stat.st_size, stat.st_mtime, "digest"),
+        verification_signature="signature",
+        verification_payload={"decision_hint": "accept_partial"},
+        retry_at=123.0,
+        status="awaiting_confirmation",
+        attempt_count=1,
+    )
+
+    probe = WatchStateStore(str(state_path)).partial_probe_for(str(archive))
+    assert probe is not None
+    assert probe.verification_signature == "signature"
+    assert probe.verification_payload["decision_hint"] == "accept_partial"
+    assert probe.retry_at == 123.0
     assert not state.entries

@@ -10,6 +10,7 @@ import sunpack.filesystem.watcher.scheduler as scheduler_module
 import sunpack.passwords.internal.builtin as builtin_module
 import sunpack.passwords.internal.clipboard_monitor as clipboard_monitor_module
 from sunpack.contracts.failures import FailureInfo, FailureKind
+from sunpack.contracts.results import OutcomeKind, TargetRunResult
 from sunpack.filesystem.watcher.scheduler import WatchScheduler
 
 
@@ -48,6 +49,131 @@ class FakeSummary:
 def _write_zip(path: Path):
     with zipfile.ZipFile(path, "w") as archive:
         archive.writestr("inside.txt", "ok")
+
+
+def _watch_summary(path: str, kind: OutcomeKind, verification: dict):
+    return SimpleNamespace(
+        success_count=1 if kind == OutcomeKind.COMPLETE_SUCCESS else 0,
+        partial_success_count=1 if kind == OutcomeKind.PARTIAL_SUCCESS else 0,
+        failed_tasks=[],
+        failures=[],
+        processed_keys=[path],
+        target_results=[TargetRunResult(path, kind, verification=verification)],
+    )
+
+
+def test_partial_snapshot_is_rechecked_quarantined_then_released_on_content_change(tmp_path, monkeypatch):
+    monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
+    archive = tmp_path / "sample.zip"
+    _write_zip(archive)
+    calls = []
+    postprocess_maps = []
+    outcomes = [OutcomeKind.PARTIAL_SUCCESS, OutcomeKind.PARTIAL_SUCCESS, OutcomeKind.COMPLETE_SUCCESS]
+
+    class SequenceRunner:
+        recent_passwords = []
+
+        def __init__(self, config):
+            self.output_dir = Path(config["output"]["root"]) / "sample"
+            self.context = SimpleNamespace(flatten_candidates=set(), recovered_outputs=[])
+
+        def run_targets(self, paths):
+            kind = outcomes[len(calls)]
+            calls.append(kind)
+            self.output_dir.mkdir(parents=True)
+            (self.output_dir / "payload.bin").write_bytes(b"payload")
+            if kind == OutcomeKind.PARTIAL_SUCCESS:
+                self.context.recovered_outputs = [{"out_dir": str(self.output_dir)}]
+                verification = {"decision_hint": "accept_partial", "archive_coverage": {"complete_files": 1}}
+            else:
+                self.context.flatten_candidates = {str(self.output_dir)}
+                verification = {"decision_hint": "accept"}
+            return _watch_summary(paths[0], kind, verification)
+
+        def apply_deferred_postprocess(self, output_path_map):
+            assert all(Path(target).exists() for target in output_path_map.values())
+            postprocess_maps.append(dict(output_path_map))
+
+    watcher = WatchScheduler(
+        {"watch": {"clipboard_monitor_enabled": False, "partial_retry_seconds": 1}},
+        [str(tmp_path)],
+        out_dir=str(tmp_path / "out"),
+        state_path=str(tmp_path / "state.json"),
+        stable_seconds=0,
+        initial_scan=False,
+        runner_factory=SequenceRunner,
+    )
+    watcher.enqueue(str(archive))
+    assert watcher.run_once().processed == 1
+    first = watcher.state.partial_probe_for(str(archive))
+    assert first is not None and first.status == "awaiting_confirmation"
+    assert not (tmp_path / ".sunpack_watch_probes").exists()
+
+    first.retry_at = 0
+    watcher.state.save()
+    assert watcher.run_once().processed == 1
+    second = watcher.state.partial_probe_for(str(archive))
+    assert second is not None and second.status == "quarantined_snapshot"
+    assert second.attempt_count == 2
+    assert not (tmp_path / ".sunpack_watch_probes").exists()
+
+    watcher.enqueue(str(archive), event_type="modified")
+    assert watcher.pending_count == 0
+    archive.write_bytes(archive.read_bytes() + b"changed")
+    watcher.enqueue(str(archive), event_type="modified")
+    final = watcher.run_once()
+
+    assert final.succeeded == 1
+    assert watcher.state.partial_probe_for(str(archive)) is None
+    assert (tmp_path / "out" / "sample" / "payload.bin").is_file()
+    assert len(postprocess_maps) == 1
+    assert not (tmp_path / ".sunpack_watch_probes").exists()
+
+
+def test_partial_recheck_with_different_verification_waits_for_input_change(tmp_path, monkeypatch):
+    monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
+    archive = tmp_path / "sample.zip"
+    _write_zip(archive)
+    attempts = 0
+
+    class ChangingPartialRunner:
+        recent_passwords = []
+
+        def __init__(self, config):
+            self.output_dir = Path(config["output"]["root"]) / "sample"
+            self.context = SimpleNamespace(flatten_candidates=set(), recovered_outputs=[])
+
+        def run_targets(self, paths):
+            nonlocal attempts
+            attempts += 1
+            self.output_dir.mkdir(parents=True)
+            self.context.recovered_outputs = [{"out_dir": str(self.output_dir)}]
+            verification = {
+                "decision_hint": "accept_partial",
+                "archive_coverage": {"complete_files": attempts},
+            }
+            return _watch_summary(paths[0], OutcomeKind.PARTIAL_SUCCESS, verification)
+
+    watcher = WatchScheduler(
+        {"watch": {"clipboard_monitor_enabled": False, "partial_retry_seconds": 1}},
+        [str(tmp_path)],
+        out_dir=str(tmp_path / "out"),
+        state_path=str(tmp_path / "state.json"),
+        stable_seconds=0,
+        initial_scan=False,
+        runner_factory=ChangingPartialRunner,
+    )
+    watcher.enqueue(str(archive))
+    watcher.run_once()
+    probe = watcher.state.partial_probe_for(str(archive))
+    probe.retry_at = 0
+    watcher.state.save()
+    watcher.run_once()
+
+    probe = watcher.state.partial_probe_for(str(archive))
+    assert probe is not None and probe.status == "awaiting_input_change"
+    assert probe.attempt_count == 2
+    assert watcher.state.next_partial_retry_at() is None
 
 
 def test_watch_scheduler_uses_watchdog_observer_and_initial_scan(tmp_path, monkeypatch):
@@ -366,7 +492,8 @@ def test_watch_scheduler_processes_stable_candidate_with_watch_root_common_root(
     assert result.processed == 1
     assert result.succeeded == 1
     assert captured["paths"] == [str(archive_path.resolve())]
-    assert captured["config"]["output"]["root"] == str((tmp_path / "out").resolve())
+    assert Path(captured["config"]["output"]["root"]).parent.parent.name == ".sunpack_watch_probes"
+    assert Path(captured["config"]["output"]["root"]).is_relative_to(watch_root)
     assert captured["config"]["output"]["common_root"] == str(watch_root.resolve())
 
 
@@ -619,10 +746,12 @@ def test_watch_scheduler_processes_archive_when_output_root_matches_watch_root(t
     class FakePipelineRunner:
         def __init__(self, config):
             captured["config"] = config
-            self.context = SimpleNamespace(flatten_candidates={str(tmp_path / "sample")}, recovered_outputs=[])
+            self.output_dir = Path(config["output"]["root"]) / "sample"
+            self.context = SimpleNamespace(flatten_candidates={str(self.output_dir)}, recovered_outputs=[])
 
         def run_targets(self, paths):
             captured["paths"] = paths
+            self.output_dir.mkdir(parents=True)
             return FakeSummary()
 
     archive_path = tmp_path / "sample.zip"
@@ -831,9 +960,11 @@ def test_relative_output_directory_is_resolved_per_matching_watch_root(tmp_path,
     class FakePipelineRunner:
         def __init__(self, config):
             captured["output"] = config["output"]
-            self.context = SimpleNamespace(flatten_candidates={str(second_root / "sample")}, recovered_outputs=[])
+            self.output_dir = Path(config["output"]["root"]) / "sample"
+            self.context = SimpleNamespace(flatten_candidates={str(self.output_dir)}, recovered_outputs=[])
 
         def run_targets(self, paths):
+            self.output_dir.mkdir(parents=True)
             return FakeSummary()
 
     watcher = WatchScheduler(
@@ -850,7 +981,8 @@ def test_relative_output_directory_is_resolved_per_matching_watch_root(tmp_path,
     result = watcher.run_once()
 
     assert result.succeeded == 1
-    assert captured["output"]["root"] == str(second_root.resolve())
+    assert Path(captured["output"]["root"]).is_relative_to(second_root)
+    assert ".sunpack_watch_probes" in Path(captured["output"]["root"]).parts
     assert captured["output"]["common_root"] == str(second_root.resolve())
 
 
@@ -860,12 +992,12 @@ def test_watch_scheduler_suppresses_recursive_output_events_during_same_root_ext
 
     class FakePipelineRunner:
         def __init__(self, config):
-            self.context = SimpleNamespace(flatten_candidates={str(tmp_path / "outer")}, recovered_outputs=[])
+            self.output_dir = Path(config["output"]["root"]) / "outer"
+            self.context = SimpleNamespace(flatten_candidates={str(self.output_dir)}, recovered_outputs=[])
 
         def run_targets(self, paths):
-            output_dir = tmp_path / "outer"
-            output_dir.mkdir()
-            nested = output_dir / "inner.zip"
+            self.output_dir.mkdir(parents=True)
+            nested = self.output_dir / "inner.zip"
             _write_zip(nested)
             watcher.enqueue(str(nested))
             return FakeSummary()

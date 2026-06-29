@@ -107,7 +107,7 @@ class SplitVolumeNormalizer:
             result = self._native_tester.test_archive(staged_archive, part_paths=staged_paths)
             if result.ok:
                 cleanup_parts = list(dict.fromkeys(list(all_parts) + candidates))
-                print("[RENAME] Fixed misnamed split volumes in temporary staging directory.")
+                print("[STAGING] Prepared canonical split-volume names in an isolated workspace.")
                 return StagedSplit(
                     archive=staged_archive,
                     run_parts=staged_paths,

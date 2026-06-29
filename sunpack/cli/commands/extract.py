@@ -1,6 +1,6 @@
 import json
 
-from sunpack.cli.cli_constants import EXIT_TASK_FAILED, EXIT_USAGE
+from sunpack.cli.cli_constants import EXIT_PARTIAL, EXIT_TASK_FAILED, EXIT_USAGE
 from sunpack.cli.cli_parsers import (
     CliHelpFormatter,
     build_common_parser,
@@ -146,7 +146,11 @@ def handle(args, ctx):
         items=[password_summary_item(password_summary)],
         tasks=attempts,
     )
-    return (EXIT_TASK_FAILED if failed_tasks else 0), result
+    if failed_tasks:
+        return EXIT_TASK_FAILED, result
+    if getattr(summary, "partial_success_count", 0):
+        return EXIT_PARTIAL, result
+    return 0, result
 
 
 def _run_extract_attempt(

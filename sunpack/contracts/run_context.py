@@ -2,6 +2,7 @@ import threading
 from typing import List, Set
 
 from sunpack.contracts.failures import FailureInfo
+from sunpack.contracts.results import TargetRunResult
 
 
 class RunContext:
@@ -15,3 +16,4 @@ class RunContext:
         self.processed_keys: Set[str] = set()
         self.unpacked_archives: List[List[str]] = []
         self.flatten_candidates: Set[str] = set()
+        self.target_results: List[TargetRunResult] = []

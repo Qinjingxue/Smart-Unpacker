@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, List
 
 from sunpack.contracts.run_context import RunContext
+from sunpack.contracts.results import OutcomeKind, TargetRunResult
 from sunpack.contracts.archive_state import ArchiveState
 from sunpack.contracts.tasks import ArchiveTask
 from sunpack.analysis.stage import ArchiveAnalysisStage
@@ -71,12 +72,14 @@ class BatchExtractionOutcome:
     planned_out_dir: str = ""
 
     @property
-    def success(self) -> bool:
-        if not self.result.success:
-            if terminal_failure_reason(self.result):
-                return False
-            return _verification_accepts_partial(self.verification)
-        return self.verification is None or _verification_accepts(self.verification)
+    def outcome_kind(self) -> OutcomeKind:
+        if terminal_failure_reason(self.result):
+            return OutcomeKind.FAILURE
+        if _verification_accepts_partial(self.verification):
+            return OutcomeKind.PARTIAL_SUCCESS
+        if self.result.success and _verification_accepts_complete_strict(self.verification):
+            return OutcomeKind.COMPLETE_SUCCESS
+        return OutcomeKind.FAILURE
 
 
 @dataclass
@@ -155,10 +158,8 @@ class ExtractionBatchRunner:
 
     def prepare_tasks(self, tasks: List[ArchiveTask]):
         self.relation_stage.resolve_tasks(tasks)
-        path_map = self.rename_scheduler.apply_renames(tasks)
-        if path_map:
-            for task in tasks:
-                task.apply_path_mapping(path_map)
+        # Physical source paths are immutable. Detected formats and logical
+        # volume identities travel through ArchiveInputDescriptor/ArchiveState.
 
     def execute(self, tasks: List[ArchiveTask]) -> List[str]:
         if not tasks:
@@ -1288,7 +1289,7 @@ class ExtractionBatchRunner:
             "round": int(outcome.round_index or 0),
             "repair_module": outcome.repair_module,
             "patch_digest": outcome.patch_digest,
-            "success": bool(outcome.success),
+            "outcome_kind": outcome.outcome_kind.value,
             "extraction": _extraction_summary(outcome.result),
             "verification": _verification_summary(outcome.verification) if outcome.verification is not None else {},
             "comparison": dict(outcome.comparison or {}),
@@ -1299,16 +1300,27 @@ class ExtractionBatchRunner:
         cleanup = cleanup_failed_output_if_eligible(
             out_dir,
             planned_output_dir=outcome.planned_out_dir,
-            failed=not outcome.success,
+            failed=outcome.outcome_kind == OutcomeKind.FAILURE,
             repair_entered=bool(task.fact_bag.get(REPAIR_ENTERED_FACT)),
         )
         diagnostics = res.diagnostics if isinstance(res.diagnostics, dict) else {}
         res.diagnostics = {**diagnostics, "failed_output_cleanup": cleanup.to_dict()}
 
         with self.context.lock:
-            if outcome.success:
+            if outcome.outcome_kind == OutcomeKind.COMPLETE_SUCCESS:
                 self.context.success_count += 1
-                if outcome.verification is not None and outcome.verification.decision_hint == DECISION_ACCEPT_PARTIAL:
+                self.context.processed_keys.add(task.key)
+                self.context.unpacked_archives.append(res.all_parts or task.all_parts)
+                self.context.flatten_candidates.add(out_dir)
+                self.context.target_results.append(TargetRunResult(
+                    input_path=task.main_path,
+                    outcome_kind=OutcomeKind.COMPLETE_SUCCESS,
+                    output_dir=out_dir,
+                    verification=_verification_payload(outcome.verification) if outcome.verification is not None else {},
+                ))
+                return out_dir
+            if outcome.outcome_kind == OutcomeKind.PARTIAL_SUCCESS:
+                if outcome.verification is not None:
                     _ensure_recovery_rank(outcome)
                     recovery_report = _write_recovery_report(task, outcome, out_dir, config=self.config)
                     self.context.partial_success_count += 1
@@ -1325,12 +1337,24 @@ class ExtractionBatchRunner:
                         "comparison": dict(outcome.comparison),
                     })
                 self.context.processed_keys.add(task.key)
-                self.context.unpacked_archives.append(res.all_parts or task.all_parts)
-                self.context.flatten_candidates.add(out_dir)
+                self.context.target_results.append(TargetRunResult(
+                    input_path=task.main_path,
+                    outcome_kind=OutcomeKind.PARTIAL_SUCCESS,
+                    output_dir=out_dir,
+                    verification=_verification_payload(outcome.verification) if outcome.verification is not None else {},
+                    error=str(res.error or ""),
+                ))
                 return out_dir
             self.context.failed_tasks.append(self._failure_message(task, outcome))
             if outcome.result.failure is not None:
                 self.context.failures.append(outcome.result.failure)
+            self.context.target_results.append(TargetRunResult(
+                input_path=task.main_path,
+                outcome_kind=OutcomeKind.FAILURE,
+                output_dir=out_dir,
+                verification=_verification_payload(outcome.verification) if outcome.verification is not None else {},
+                error=str(res.error or ""),
+            ))
             return None
 
     def _failure_message(self, task: ArchiveTask, outcome: BatchExtractionOutcome) -> str:
@@ -1364,6 +1388,15 @@ def _verification_accepts_complete(verification: VerificationResult | Any) -> bo
     decision = getattr(verification, "decision_hint", "")
     status = getattr(verification, "assessment_status", "")
     return decision == DECISION_ACCEPT or status == "complete"
+
+
+def _verification_accepts_complete_strict(verification: VerificationResult | Any) -> bool:
+    if verification is None:
+        return False
+    # The verifier's decision is the contract boundary. Some extraction backends
+    # cannot provide per-file coverage, so an accepted result may legitimately
+    # carry an "unknown" assessment while still being a full success.
+    return getattr(verification, "decision_hint", "") == DECISION_ACCEPT
 
 
 def _verification_accepts_partial(verification: VerificationResult | Any) -> bool:

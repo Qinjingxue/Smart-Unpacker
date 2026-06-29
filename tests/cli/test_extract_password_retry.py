@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+from sunpack.cli.cli_constants import EXIT_PARTIAL
 from sunpack.cli.cli_context import CliContext
 from sunpack.cli.cli_reporter import CliReporter
 from sunpack.cli.commands import extract
@@ -113,7 +114,7 @@ def test_extract_verbose_prints_partial_recovery_file_details(tmp_path, monkeypa
 
         def run_targets(self, _target_paths):
             return SimpleNamespace(
-                success_count=1,
+                success_count=0,
                 failed_tasks=[],
                 processed_keys=["broken"],
                 failures=[],
@@ -142,7 +143,7 @@ def test_extract_verbose_prints_partial_recovery_file_details(tmp_path, monkeypa
     exit_code, result = extract.handle(args, ctx)
 
     captured = capsys.readouterr()
-    assert exit_code == 0
+    assert exit_code == EXIT_PARTIAL
     assert result.summary["partial_success_count"] == 1
     assert "[complete] good.txt 2/2 B" in captured.out
     assert "[partial] partial.bin 4/8 B" in captured.out
@@ -172,7 +173,7 @@ def test_extract_normal_mode_keeps_partial_file_details_out_of_console(tmp_path,
 
         def run_targets(self, _target_paths):
             return SimpleNamespace(
-                success_count=1,
+                success_count=0,
                 failed_tasks=[],
                 processed_keys=["broken"],
                 failures=[],
@@ -205,7 +206,7 @@ def test_extract_normal_mode_keeps_partial_file_details_out_of_console(tmp_path,
     exit_code, result = extract.handle(args, ctx)
 
     captured = capsys.readouterr()
-    assert exit_code == 0
+    assert exit_code == EXIT_PARTIAL
     assert result.summary["partial_success_count"] == 1
     assert result.summary["recovered_outputs"][0]["recovery_report"] == str(report)
     assert "[partial]" not in captured.out
@@ -244,7 +245,7 @@ def test_extract_json_schema_includes_partial_recovery_contract(tmp_path, monkey
 
         def run_targets(self, _target_paths):
             return SimpleNamespace(
-                success_count=1,
+                success_count=0,
                 failed_tasks=[],
                 processed_keys=["broken"],
                 failures=[],
@@ -289,7 +290,7 @@ def test_extract_json_schema_includes_partial_recovery_contract(tmp_path, monkey
     payload = json.loads(capsys.readouterr().out)
     recovered = payload["summary"]["recovered_outputs"][0]
 
-    assert exit_code == 0
+    assert exit_code == EXIT_PARTIAL
     assert payload["command"] == "extract"
     assert payload["summary"]["partial_success_count"] == 1
     assert payload["summary"]["password_retry_count"] == 0
