@@ -314,7 +314,9 @@
   },
   "watch": {
     "interval_seconds": 5.0,
-    "stable_seconds": 10.0,
+    "cold_start_seconds": 1.0,
+    "quiet_min_seconds": 2.5,
+    "quiet_max_seconds": 180.0,
     "recursive": true,
     "initial_scan": true,
     "max_folders": 16,

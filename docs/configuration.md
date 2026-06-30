@@ -169,15 +169,15 @@ CLI 可用 `--recur` 临时覆盖。
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
 | `interval_seconds` | `float` | 没有活跃文件时调度循环的最大等待时间。 |
-| `quiet_seconds` | `float` | 每个文件首次进入活跃态时使用的初始静默时间，默认 10 秒。设为 `0` 会关闭动态等待。 |
-| `quiet_min_seconds` | `float` | 动态静默时间下限，默认 2.5 秒，不会高于 `quiet_seconds`。 |
-| `quiet_max_seconds` | `float` | 动态静默时间上限，默认 180 秒，不会低于 `quiet_seconds`。 |
+| `cold_start_seconds` | `float` | 文件首次进入活跃态、尚无写入间隔样本时的等待时间，默认 1 秒。设为 `0` 会关闭动态等待。旧字段 `quiet_seconds` 仍作为该字段的兼容别名。 |
+| `quiet_min_seconds` | `float` | 取得首个有效间隔后，动态静默时间的下限，默认 2.5 秒。它可以高于冷启动时间。 |
+| `quiet_max_seconds` | `float` | 动态静默时间上限，默认 180 秒。 |
 | `recursive` | `bool` | 是否递归监控目录。 |
 | `initial_scan` | `bool` | 启动 watcher 时是否扫描已有文件。 |
 | `max_folders` | `int` | 单次 watch 接受的最大路径数量。 |
 | `observer_stop_timeout_seconds` | `float` | 停止 watchdog observer 时等待线程退出的超时。 |
 
-watch 不按扩展名或下载器类型推测下载状态。`created`、`moved`、`modified` 事件使输入进入活跃态；首次使用 `quiet_seconds`，随后按该文件最近 12 次实际内容变化的最大间隔动态调整。短间隔经过至少 3 个样本后缓慢缩短静默时间，长间隔会立即拉长，最终受 `quiet_min_seconds` 和 `quiet_max_seconds` 限制。只有 size 或 mtime 变化的事件参与间隔学习，但其他内容事件仍会重置当前静默计时。每个活跃周期只触发一次主流程；普通成功、部分成功和失败都不会自行重试。新分卷到达或密码源变化会把受影响的输入重新置为活跃态。
+watch 不按扩展名或下载器类型推测下载状态。`created`、`moved`、`modified` 事件使输入进入活跃态；首次使用 `cold_start_seconds`，取得首个有效内容变化间隔后立即进入不低于 `quiet_min_seconds` 的动态区间，随后按该文件最近 12 次实际内容变化的最大间隔调整。长间隔会立即拉长，缩短时每次只向目标移动一部分，最终受 `quiet_min_seconds` 和 `quiet_max_seconds` 限制。只有 size 或 mtime 变化的事件参与间隔学习，但其他内容事件仍会重置当前静默计时。每个活跃周期只触发一次主流程；普通成功、部分成功和失败都不会自行重试。新分卷到达或密码源变化会把受影响的输入重新置为活跃态。
 
 watch 的试解压输出位于监控根目录下的 `.sunpack_watch_probes`。该顶层目录在 watcher 运行和多次尝试之间保持存在；启动恢复以及每次尝试结束时只清理其内部工作内容，避免监控目录因为顶层临时目录反复创建、删除而刷新。
 

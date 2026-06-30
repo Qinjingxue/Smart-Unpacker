@@ -5,7 +5,7 @@ from sunpack.config.schema import ConfigField
 
 DEFAULT_WATCH_CONFIG = {
     "interval_seconds": 1.0,
-    "quiet_seconds": 10.0,
+    "cold_start_seconds": 1.0,
     "quiet_min_seconds": 2.5,
     "quiet_max_seconds": 180.0,
     "initial_scan": True,
@@ -30,17 +30,18 @@ def normalize_watch_config(value: Any) -> dict[str, Any]:
         value = {}
     if not isinstance(value, dict):
         raise ValueError("watch must be an object")
+    raw_config = dict(value)
     config = dict(DEFAULT_WATCH_CONFIG)
-    config.update(value)
+    config.update(raw_config)
+    if "cold_start_seconds" not in raw_config and "quiet_seconds" in raw_config:
+        config["cold_start_seconds"] = raw_config["quiet_seconds"]
+    config.pop("quiet_seconds", None)
     config.pop("recursive", None)
     config["interval_seconds"] = max(0.1, _float_field(config, "interval_seconds"))
-    config["quiet_seconds"] = max(0.0, _float_field(config, "quiet_seconds"))
-    config["quiet_min_seconds"] = min(
-        config["quiet_seconds"],
-        max(0.0, _float_field(config, "quiet_min_seconds")),
-    )
+    config["cold_start_seconds"] = max(0.0, _float_field(config, "cold_start_seconds"))
+    config["quiet_min_seconds"] = max(0.0, _float_field(config, "quiet_min_seconds"))
     config["quiet_max_seconds"] = max(
-        config["quiet_seconds"],
+        config["cold_start_seconds"],
         config["quiet_min_seconds"],
         _float_field(config, "quiet_max_seconds"),
     )

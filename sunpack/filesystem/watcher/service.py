@@ -8,6 +8,7 @@ from contextlib import contextmanager
 from ctypes import wintypes
 from pathlib import Path
 
+from sunpack.config.fields.watch import DEFAULT_WATCH_CONFIG
 from sunpack.config.loader import load_config
 from sunpack.filesystem.watcher.log import WatchLogStore
 from sunpack.filesystem.watcher.scheduler import WatchScheduler
@@ -291,7 +292,12 @@ class WatchService:
             out_dir=out_dir,
             state_path=state_path,
             interval_seconds=float(watch_config.get("interval_seconds", 1.0)),
-            quiet_seconds=float(watch_config.get("quiet_seconds", 10.0)),
+            quiet_seconds=float(
+                watch_config.get(
+                    "cold_start_seconds",
+                    watch_config.get("quiet_seconds", DEFAULT_WATCH_CONFIG["cold_start_seconds"]),
+                )
+            ),
             initial_scan=bool(watch_config.get("initial_scan", True)),
             observer_stop_timeout_seconds=float(watch_config.get("observer_stop_timeout_seconds", 5.0)),
             runner_factory=self.runner_factory,

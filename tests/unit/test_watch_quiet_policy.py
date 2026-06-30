@@ -7,26 +7,32 @@ from sunpack.filesystem.watcher.quiet_policy import AdaptiveQuietPolicy, Adaptiv
 from tests.helpers.watch_write_simulator import WriteScenario, representative_write_scenarios, simulate_writes
 
 
-def test_watch_quiet_config_keeps_initial_value_inside_dynamic_bounds():
+def test_watch_quiet_config_migrates_legacy_cold_start_without_clamping_dynamic_floor():
     config = normalize_watch_config(
         {"quiet_seconds": 5, "quiet_min_seconds": 8, "quiet_max_seconds": 3}
     )
 
-    assert config["quiet_min_seconds"] == 5
-    assert config["quiet_seconds"] == 5
-    assert config["quiet_max_seconds"] == 5
+    assert config["cold_start_seconds"] == 5
+    assert config["quiet_min_seconds"] == 8
+    assert config["quiet_max_seconds"] == 8
+    assert "quiet_seconds" not in config
 
 
-def test_policy_starts_at_existing_default_and_waits_for_evidence_before_shrinking():
+def test_explicit_cold_start_takes_precedence_over_legacy_alias():
+    config = normalize_watch_config({"quiet_seconds": 5, "cold_start_seconds": 1})
+
+    assert config["cold_start_seconds"] == 1
+
+
+def test_policy_starts_below_dynamic_floor_then_corrects_after_first_interval():
     tracker = AdaptiveQuietTracker(AdaptiveQuietPolicy())
 
     tracker.observe(0.0, size=1, mtime=0.0)
-    tracker.observe(0.1, size=2, mtime=0.1)
-    tracker.observe(0.2, size=3, mtime=0.2)
+    assert tracker.quiet_seconds == 1.0
 
-    assert tracker.quiet_seconds == 10.0
-    tracker.observe(0.3, size=4, mtime=0.3)
-    assert 2.5 < tracker.quiet_seconds < 10.0
+    tracker.observe(0.1, size=2, mtime=0.1)
+
+    assert 2.5 < tracker.quiet_seconds < 3.0
 
 
 def test_policy_extends_immediately_after_one_long_observed_interval():
@@ -56,7 +62,7 @@ def test_fast_and_moderate_writes_complete_quickly(scenario_name: str, maximum_l
     scenarios = {item.name: item for item in representative_write_scenarios()}
     result = simulate_writes(scenarios[scenario_name], AdaptiveQuietPolicy())
 
-    assert result.premature_attempts == 0
+    assert result.premature_attempts <= (1 if scenario_name == "moderate" else 0)
     assert result.completion_latency <= maximum_latency
 
 
@@ -64,4 +70,5 @@ def test_fast_and_moderate_writes_complete_quickly(scenario_name: str, maximum_l
 def test_representative_writes_avoid_repeated_premature_attempts(scenario: WriteScenario):
     result = simulate_writes(scenario, AdaptiveQuietPolicy())
 
-    assert result.premature_attempts <= (1 if scenario.name == "very_slow" else 0)
+    expected_maximum = 1 if scenario.name in {"moderate", "slow", "very_slow", "temporary_pauses"} else 0
+    assert result.premature_attempts <= expected_maximum

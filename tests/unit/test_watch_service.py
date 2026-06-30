@@ -283,6 +283,7 @@ def test_watch_service_scheduler_uses_directory_scan_mode_not_watch_recursive(tm
 
     assert captured["roots"] == [str(watch_root.resolve())]
     assert "recursive" not in captured["kwargs"]
+    assert captured["kwargs"]["quiet_seconds"] == 1.0
     assert service.scheduler.recursive is False
     assert captured["started"] is True
 

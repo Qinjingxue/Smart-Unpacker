@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 class AdaptiveQuietPolicy:
     """Maps observed content-write intervals to a per-file quiet window."""
 
-    initial_seconds: float = 10.0
+    initial_seconds: float = 1.0
     minimum_seconds: float = 2.5
     maximum_seconds: float = 180.0
     window_size: int = 12
@@ -23,7 +23,7 @@ class AdaptiveQuietPolicy:
     def __post_init__(self) -> None:
         minimum = max(0.0, float(self.minimum_seconds))
         maximum = max(minimum, float(self.maximum_seconds))
-        initial = min(max(minimum, float(self.initial_seconds)), maximum)
+        initial = min(max(0.0, float(self.initial_seconds)), maximum)
         object.__setattr__(self, "minimum_seconds", minimum)
         object.__setattr__(self, "maximum_seconds", maximum)
         object.__setattr__(self, "initial_seconds", initial)

@@ -80,12 +80,21 @@ class WatchScheduler:
         group_coordinator=None,
     ):
         self.config = config
+        watch_config = config.get("watch") if isinstance(config.get("watch"), dict) else {}
         self.watch_roots = [os.path.abspath(path) for path in watch_roots]
         expanded_out_dir = os.path.expanduser(out_dir)
         self._relative_out_dir = not os.path.isabs(expanded_out_dir)
         self.out_dir = os.path.normpath(expanded_out_dir) if self._relative_out_dir else os.path.abspath(expanded_out_dir)
         self.interval_seconds = max(0.1, float(DEFAULT_WATCH_CONFIG["interval_seconds"] if interval_seconds is None else interval_seconds))
-        self.quiet_seconds = max(0.0, float(DEFAULT_WATCH_CONFIG["quiet_seconds"] if quiet_seconds is None else quiet_seconds))
+        configured_cold_start = watch_config.get(
+            "cold_start_seconds",
+            watch_config.get("quiet_seconds", DEFAULT_WATCH_CONFIG["cold_start_seconds"]),
+        )
+        self.cold_start_seconds = max(
+            0.0,
+            float(configured_cold_start if quiet_seconds is None else quiet_seconds),
+        )
+        self.quiet_seconds = self.cold_start_seconds
         self.recursive = directory_scan_is_recursive(config) if recursive is None else bool(recursive)
         self.initial_scan = bool(DEFAULT_WATCH_CONFIG["initial_scan"] if initial_scan is None else initial_scan)
         self.observer_stop_timeout_seconds = max(
@@ -121,21 +130,23 @@ class WatchScheduler:
         self._observer = Observer()
         self._started = False
         self.runner_factory = runner_factory
-        watch_config = config.get("watch") if isinstance(config.get("watch"), dict) else {}
-        quiet_min_seconds = min(
-            self.quiet_seconds,
-            max(0.0, float(watch_config.get("quiet_min_seconds", DEFAULT_WATCH_CONFIG["quiet_min_seconds"]))),
+        quiet_min_seconds = max(
+            0.0,
+            float(watch_config.get("quiet_min_seconds", DEFAULT_WATCH_CONFIG["quiet_min_seconds"])),
         )
         quiet_max_seconds = (
             0.0
-            if self.quiet_seconds <= 0.0
+            if self.cold_start_seconds <= 0.0
             else max(
-                self.quiet_seconds,
+                self.cold_start_seconds,
+                quiet_min_seconds,
                 float(watch_config.get("quiet_max_seconds", DEFAULT_WATCH_CONFIG["quiet_max_seconds"])),
             )
         )
+        if self.cold_start_seconds <= 0.0:
+            quiet_min_seconds = 0.0
         self._quiet_policy = AdaptiveQuietPolicy(
-            initial_seconds=self.quiet_seconds,
+            initial_seconds=self.cold_start_seconds,
             minimum_seconds=quiet_min_seconds,
             maximum_seconds=quiet_max_seconds,
         )
@@ -188,7 +199,9 @@ class WatchScheduler:
             recursive=self.recursive,
             initial_scan=self.initial_scan,
             pending=self.pending_count,
-            quiet_seconds=self.quiet_seconds,
+            cold_start_seconds=self.cold_start_seconds,
+            quiet_min_seconds=self._quiet_policy.minimum_seconds,
+            quiet_max_seconds=self._quiet_policy.maximum_seconds,
             interval_seconds=self.interval_seconds,
         )
 
@@ -321,7 +334,7 @@ class WatchScheduler:
             self._log_candidate_ignored(candidate.path, "filtered_out")
             return
         became_active = False
-        active_quiet_seconds = self.quiet_seconds
+        active_quiet_seconds = self.cold_start_seconds
         with self._lock:
             active_quiet_seconds = self._observe_candidate_activity(candidate, now)
             self._pending[candidate.path] = candidate

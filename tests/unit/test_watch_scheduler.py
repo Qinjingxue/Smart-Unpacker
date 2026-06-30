@@ -1695,6 +1695,33 @@ def test_watch_scheduler_adapts_quiet_window_to_fast_content_writes(tmp_path, mo
     assert watcher.run_once().processed == 1
 
 
+def test_watch_scheduler_default_cold_start_is_one_second(tmp_path, monkeypatch):
+    monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
+    now = [2000035000.0]
+    monkeypatch.setattr(scheduler_module.time, "time", lambda: now[0])
+    archive_path = tmp_path / "sample.zip"
+    _write_zip(archive_path)
+    watcher = WatchScheduler(
+        {"watch": {"clipboard_monitor_enabled": False}},
+        [str(tmp_path)],
+        out_dir=str(tmp_path / "out"),
+        state_path=str(tmp_path / "state.json"),
+        initial_scan=False,
+        runner_factory=lambda _config: SimpleNamespace(
+            context=SimpleNamespace(flatten_candidates=set(), recovered_outputs=[]),
+            recent_passwords=[],
+            run_targets=lambda paths: FakeSummary(),
+        ),
+    )
+    watcher.enqueue(str(archive_path), event_type="created")
+
+    assert watcher._active_states[str(archive_path)].quiet_seconds == 1.0
+    now[0] += 0.99
+    assert watcher.run_once().processed == 0
+    now[0] += 0.02
+    assert watcher.run_once().processed == 1
+
+
 def test_watch_scheduler_retains_slow_interval_learning_across_active_epochs(tmp_path, monkeypatch):
     monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
     now = [2000040000.0]
