@@ -1,5 +1,5 @@
 use base64::Engine;
-use encoding_rs::{BIG5, GBK, SHIFT_JIS};
+use encoding_rs::{BIG5, GBK, SHIFT_JIS, UTF_8};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList};
 use sha2::{Digest, Sha256};
@@ -589,6 +589,7 @@ fn decode_zip_filename(
     }
     if let Some(codepage) = codepage.filter(|value| !value.is_empty()) {
         let encoding = match codepage {
+            "65001" => UTF_8,
             "932" => SHIFT_JIS,
             "936" => GBK,
             "950" => BIG5,
@@ -693,6 +694,14 @@ mod tests {
     fn zip_filename_decoder_uses_selected_shift_jis_codepage() {
         assert_eq!(
             decode_zip_filename(b"\x93\xfa\x96{\x8c\xea.txt", b"", 0, Some("932")).unwrap(),
+            "日本語.txt"
+        );
+    }
+
+    #[test]
+    fn zip_filename_decoder_uses_selected_utf8_codepage_without_flag() {
+        assert_eq!(
+            decode_zip_filename("日本語.txt".as_bytes(), b"", 0, Some("65001")).unwrap(),
             "日本語.txt"
         );
     }

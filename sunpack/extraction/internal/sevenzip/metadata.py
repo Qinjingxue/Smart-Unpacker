@@ -294,6 +294,7 @@ class ArchiveMetadataScanner:
         total_halfwidth_kana = 0
         total_latin_symbols = 0
         reasons = []
+        decoded_components = set()
 
         for raw_name in raw_names:
             try:
@@ -302,7 +303,15 @@ class ArchiveMetadataScanner:
                 score -= 12
                 continue
             decoded_count += 1
-            name_score, stats = self._score_decoded_name(decoded, encoding)
+            # Parent directories are repeated in every ZIP entry. Decode before
+            # splitting because a DBCS trail byte can have the value of a
+            # backslash, then score each logical path component only once.
+            decoded_components.update(
+                component for component in re.split(r"[\\/]+", decoded) if component
+            )
+
+        for component in decoded_components:
+            name_score, stats = self._score_decoded_name(component, encoding)
             score += name_score
             total_cjk += stats["cjk"]
             total_kana += stats["kana"]
@@ -333,8 +342,11 @@ class ArchiveMetadataScanner:
             score -= 10
         if any(part in {"", ".", ".."} for part in re.split(r"[\\/]+", decoded) if part != ""):
             score -= 3
+        # CP932 maps vendor/user-defined byte ranges into Unicode private-use
+        # characters. They are technically decodable but are very unlikely in
+        # archive paths and are a strong mojibake signal for GBK input.
+        score -= sum(1 for ch in decoded if "\ue000" <= ch <= "\uf8ff") * 8
 
-        ascii_chars = sum(1 for ch in decoded if ord(ch) < 128)
         cjk_chars = sum(1 for ch in decoded if "\u4e00" <= ch <= "\u9fff")
         kana_chars = sum(1 for ch in decoded if "\u3040" <= ch <= "\u30ff")
         halfwidth_kana_chars = sum(1 for ch in decoded if "\uff66" <= ch <= "\uff9f")
@@ -344,22 +356,24 @@ class ArchiveMetadataScanner:
         stats["halfwidth_kana"] = halfwidth_kana_chars
         stats["latin_symbols"] = latin_symbols
 
-        score += min(ascii_chars, 16) // 4
         if encoding == "cp932":
-            score += kana_chars * 5 + halfwidth_kana_chars + cjk_chars
+            # Han characters alone do not distinguish Chinese from Japanese.
+            # Give every CJK candidate the same neutral Han weight and let kana
+            # plus language-specific common characters provide the evidence.
+            score += cjk_chars * 3 + kana_chars * 6 + halfwidth_kana_chars * 6
             score += sum(1 for ch in decoded if ch in self.JAPANESE_COMMON_KANJI) * 4
             if halfwidth_kana_chars and not kana_chars:
                 score -= halfwidth_kana_chars * 3
         elif encoding == "cp936":
             score += cjk_chars * 3
             score -= (kana_chars + halfwidth_kana_chars) * 2
-            score += sum(1 for ch in decoded if ch in self.SIMPLIFIED_COMMON_CHARS) * 2
+            score += sum(1 for ch in decoded if ch in self.SIMPLIFIED_COMMON_CHARS) * 3
             score -= sum(1 for ch in decoded if ch in self.TRADITIONAL_COMMON_CHARS - self.SIMPLIFIED_COMMON_CHARS)
             score -= sum(1 for ch in decoded if ch in self.JAPANESE_COMMON_KANJI - self.SIMPLIFIED_COMMON_CHARS)
         elif encoding == "cp950":
             score += cjk_chars * 3
             score -= (kana_chars + halfwidth_kana_chars) * 2
-            score += sum(1 for ch in decoded if ch in self.TRADITIONAL_COMMON_CHARS) * 2
+            score += sum(1 for ch in decoded if ch in self.TRADITIONAL_COMMON_CHARS) * 3
             score -= sum(1 for ch in decoded if ch in self.SIMPLIFIED_COMMON_CHARS - self.TRADITIONAL_COMMON_CHARS)
         elif encoding == "utf-8":
             score += (cjk_chars + kana_chars) * 4

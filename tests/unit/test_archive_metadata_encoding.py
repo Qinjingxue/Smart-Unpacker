@@ -20,12 +20,46 @@ def test_shift_jis_kanji_directory_name_is_not_misclassified_as_gbk():
     assert selected["codepage"] == "932"
 
 
+def test_repeated_shift_jis_parent_is_not_misclassified_as_gbk():
+    scanner = ArchiveMetadataScanner()
+    parent = "無知ロリと化け物_製品0519c"
+    raw_names = [f"{parent}/assets/file_{index:04d}.bin".encode("cp932") for index in range(2500)]
+
+    selected = scanner._select_codepage(raw_names)
+
+    assert selected["codepage"] == "932"
+
+
+def test_unflagged_utf8_name_can_be_selected_explicitly():
+    scanner = ArchiveMetadataScanner()
+
+    selected = scanner._select_codepage(["日本語/説明.txt".encode("utf-8")])
+
+    assert selected["codepage"] == "65001"
+
+
+def test_shift_jis_halfwidth_kana_name_remains_cp932():
+    scanner = ArchiveMetadataScanner()
+
+    selected = scanner._select_codepage(["ﾃｽﾄ.txt".encode("cp932")])
+
+    assert selected["codepage"] == "932"
+
+
 def test_gbk_chinese_name_remains_cp936():
     scanner = ArchiveMetadataScanner()
 
     selected = scanner._select_codepage(["中文说明资料.txt".encode("cp936")])
 
     assert selected["codepage"] == "936"
+
+
+def test_big5_chinese_name_remains_cp950():
+    scanner = ArchiveMetadataScanner()
+
+    selected = scanner._select_codepage(["繁體中文說明資料檔案測試.txt".encode("cp950")])
+
+    assert selected["codepage"] == "950"
 
 
 def test_shift_jis_zip_scan_returns_decoded_item_paths(tmp_path):
@@ -51,6 +85,18 @@ def test_format_hint_scans_disguised_zip_without_renaming_it(tmp_path):
     assert not (tmp_path / "downloaded.zip").exists()
     assert result.archive_type == "zip"
     assert result.decoded_names == [expected_name]
+
+
+def test_unicode_native_archive_formats_do_not_receive_zip_codepage_override():
+    scanner = ArchiveMetadataScanner()
+
+    for archive_type in ("7z", "rar"):
+        result = scanner.scan(f"unused.{archive_type}", format_hint=archive_type)
+
+        assert result.archive_type == archive_type
+        assert result.selected_codepage is None
+        assert result.decoded_names == []
+        assert result.warnings == []
 
 
 def test_unicode_path_extra_field_takes_precedence_over_codepage_guess(tmp_path):
