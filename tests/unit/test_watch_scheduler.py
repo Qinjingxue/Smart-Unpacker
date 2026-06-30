@@ -105,7 +105,9 @@ def test_partial_result_does_not_self_retry_but_modified_epoch_does(tmp_path, mo
     )
     watcher.enqueue(str(archive))
     assert watcher.run_once().processed == 1
-    assert not (tmp_path / ".sunpack_watch_probes").exists()
+    probe_root = tmp_path / ".sunpack_watch_probes"
+    assert probe_root.is_dir()
+    assert list(probe_root.iterdir()) == []
     assert watcher.run_once().processed == 0
     watcher.enqueue(str(archive), event_type="modified")
     final = watcher.run_once()
@@ -113,7 +115,8 @@ def test_partial_result_does_not_self_retry_but_modified_epoch_does(tmp_path, mo
     assert final.succeeded == 1
     assert (tmp_path / "out" / "sample" / "payload.bin").is_file()
     assert len(postprocess_maps) == 1
-    assert not (tmp_path / ".sunpack_watch_probes").exists()
+    assert probe_root.is_dir()
+    assert list(probe_root.iterdir()) == []
 
 
 def test_content_event_during_processing_starts_a_new_active_epoch(tmp_path, monkeypatch):
@@ -225,6 +228,27 @@ def test_watch_scheduler_preserves_existing_directory_password_file(tmp_path, mo
 
     assert password_file.read_text(encoding="utf-8") == "existing-secret\n"
     assert watcher.pending_count == 0
+
+
+def test_watch_scheduler_start_cleans_probe_contents_but_keeps_probe_root(tmp_path, monkeypatch):
+    monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
+    probe_root = tmp_path / ".sunpack_watch_probes"
+    stale_workspace = probe_root / "stale-owner" / "work"
+    stale_workspace.mkdir(parents=True)
+    (stale_workspace / "partial.bin").write_bytes(b"partial")
+    watcher = WatchScheduler(
+        {"watch": {"clipboard_monitor_enabled": False}},
+        [str(tmp_path)],
+        out_dir=str(tmp_path / "out"),
+        state_path=str(tmp_path / "state.json"),
+        initial_scan=False,
+    )
+
+    watcher.start()
+
+    assert probe_root.is_dir()
+    assert list(probe_root.iterdir()) == []
+    watcher.stop()
 
 
 def test_watch_scheduler_uses_directory_scan_mode_for_non_recursive_watch(tmp_path, monkeypatch):
@@ -1635,6 +1659,74 @@ def test_modified_epoch_triggers_even_when_size_mtime_and_file_id_are_unchanged(
     assert watcher.run_once().processed == 0
     now[0] += 0.2
     assert watcher.run_once().processed == 1
+
+
+def test_watch_scheduler_adapts_quiet_window_to_fast_content_writes(tmp_path, monkeypatch):
+    monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
+    now = [2000030000.0]
+    monkeypatch.setattr(scheduler_module.time, "time", lambda: now[0])
+    archive_path = tmp_path / "sample.zip"
+    archive_path.write_bytes(b"0")
+    os.utime(archive_path, (now[0], now[0]))
+    watcher = WatchScheduler(
+        {"watch": {"clipboard_monitor_enabled": False}},
+        [str(tmp_path)],
+        out_dir=str(tmp_path / "out"),
+        state_path=str(tmp_path / "state.json"),
+        initial_scan=False,
+        runner_factory=lambda _config: SimpleNamespace(
+            context=SimpleNamespace(flatten_candidates=set(), recovered_outputs=[]),
+            recent_passwords=[],
+            run_targets=lambda paths: FakeSummary(),
+        ),
+    )
+    watcher.enqueue(str(archive_path), event_type="created")
+    for index in range(20):
+        now[0] += 0.5
+        archive_path.write_bytes(bytes([index % 256]) * (index + 2))
+        os.utime(archive_path, (now[0], now[0]))
+        watcher.enqueue(str(archive_path), event_type="modified")
+
+    state = watcher._active_states[str(archive_path)]
+    assert 3.5 <= state.quiet_seconds <= 4.5
+    now[0] += state.quiet_seconds - 0.01
+    assert watcher.run_once().processed == 0
+    now[0] += 0.02
+    assert watcher.run_once().processed == 1
+
+
+def test_watch_scheduler_retains_slow_interval_learning_across_active_epochs(tmp_path, monkeypatch):
+    monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
+    now = [2000040000.0]
+    monkeypatch.setattr(scheduler_module.time, "time", lambda: now[0])
+    archive_path = tmp_path / "sample.zip"
+    archive_path.write_bytes(b"first")
+    os.utime(archive_path, (now[0], now[0]))
+    watcher = WatchScheduler(
+        {"watch": {"clipboard_monitor_enabled": False}},
+        [str(tmp_path)],
+        out_dir=str(tmp_path / "out"),
+        state_path=str(tmp_path / "state.json"),
+        initial_scan=False,
+        runner_factory=lambda _config: SimpleNamespace(
+            context=SimpleNamespace(flatten_candidates=set(), recovered_outputs=[]),
+            recent_passwords=[],
+            run_targets=lambda paths: FakeSummary(),
+        ),
+    )
+    watcher.enqueue(str(archive_path), event_type="created")
+
+    now[0] += 10.01
+    assert watcher.run_once().processed == 1
+    now[0] += 9.99
+    archive_path.write_bytes(b"second")
+    os.utime(archive_path, (now[0], now[0]))
+    watcher.enqueue(str(archive_path), event_type="modified")
+
+    state = watcher._active_states[str(archive_path)]
+    assert state.quiet_seconds > 20.0
+    now[0] += 20.0
+    assert watcher.run_once().processed == 0
 
 
 def test_modified_event_retries_same_metadata_identity(tmp_path, monkeypatch):

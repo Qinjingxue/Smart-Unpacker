@@ -27,6 +27,7 @@ from sunpack.filesystem.watcher.group_models import (
     BLOCKER_PASSWORD,
     WatchGroupSnapshot,
 )
+from sunpack.filesystem.watcher.quiet_policy import AdaptiveQuietPolicy, AdaptiveQuietTracker
 from sunpack.filesystem.watcher.scanner import WatchCandidate, scan_watch_candidates
 from sunpack.filesystem.watcher.scanner import _candidate_for as _watch_candidate_for_path
 from sunpack.filesystem.watcher.state import WatchStateStore
@@ -53,6 +54,7 @@ class WatchRunResult:
 @dataclass
 class _ActiveCandidateState:
     last_event_at: float
+    quiet_seconds: float
     filtered_size: int
     filtered_mtime: float
     generation: int = 1
@@ -111,6 +113,7 @@ class WatchScheduler:
         self._password_source_lock = threading.Lock()
         self._pending: dict[str, WatchCandidate] = {}
         self._active_states: dict[str, _ActiveCandidateState] = {}
+        self._quiet_trackers: dict[str, AdaptiveQuietTracker] = {}
         self._password_dirty_dirs: dict[str, float] = {}
         self._active_output_roots: dict[str, int] = {}
         self._recent_output_roots: dict[str, float] = {}
@@ -119,6 +122,23 @@ class WatchScheduler:
         self._started = False
         self.runner_factory = runner_factory
         watch_config = config.get("watch") if isinstance(config.get("watch"), dict) else {}
+        quiet_min_seconds = min(
+            self.quiet_seconds,
+            max(0.0, float(watch_config.get("quiet_min_seconds", DEFAULT_WATCH_CONFIG["quiet_min_seconds"]))),
+        )
+        quiet_max_seconds = (
+            0.0
+            if self.quiet_seconds <= 0.0
+            else max(
+                self.quiet_seconds,
+                float(watch_config.get("quiet_max_seconds", DEFAULT_WATCH_CONFIG["quiet_max_seconds"])),
+            )
+        )
+        self._quiet_policy = AdaptiveQuietPolicy(
+            initial_seconds=self.quiet_seconds,
+            minimum_seconds=quiet_min_seconds,
+            maximum_seconds=quiet_max_seconds,
+        )
         self.output_suppression_seconds = max(0.0, float(watch_config.get("output_suppression_seconds", 120.0)))
         self.password_retry_debounce_seconds = max(0.0, float(watch_config.get("password_retry_debounce_seconds", 1.0)))
         self.password_retry_include_subtree = bool(watch_config.get("password_retry_include_subtree", True))
@@ -257,7 +277,7 @@ class WatchScheduler:
             return max(
                 0.0,
                 min(
-                    self.quiet_seconds - (now - state.last_event_at)
+                    state.quiet_seconds - (now - state.last_event_at)
                     for state in self._active_states.values()
                 ),
             )
@@ -289,8 +309,10 @@ class WatchScheduler:
         with self._lock:
             state = self._active_states.get(candidate.path)
             if state is not None:
+                quiet_seconds = self._observe_candidate_activity(candidate, now)
                 self._pending[candidate.path] = candidate
                 state.last_event_at = now
+                state.quiet_seconds = quiet_seconds
                 state.generation += 1
                 state.force = state.force or force
                 state.event_requires_attempt = state.event_requires_attempt or _event_requires_attempt(event_type)
@@ -299,13 +321,16 @@ class WatchScheduler:
             self._log_candidate_ignored(candidate.path, "filtered_out")
             return
         became_active = False
+        active_quiet_seconds = self.quiet_seconds
         with self._lock:
+            active_quiet_seconds = self._observe_candidate_activity(candidate, now)
             self._pending[candidate.path] = candidate
             state = self._active_states.get(candidate.path)
             if state is None:
                 became_active = True
                 self._active_states[candidate.path] = _ActiveCandidateState(
                     last_event_at=now,
+                    quiet_seconds=active_quiet_seconds,
                     filtered_size=candidate.size,
                     filtered_mtime=candidate.mtime,
                     force=force,
@@ -314,6 +339,7 @@ class WatchScheduler:
                 )
             else:
                 state.last_event_at = now
+                state.quiet_seconds = active_quiet_seconds
                 state.generation += 1
                 state.force = state.force or force
                 state.event_requires_attempt = state.event_requires_attempt or _event_requires_attempt(event_type)
@@ -328,6 +354,7 @@ class WatchScheduler:
                 src_path=src_path,
                 size=candidate.size,
                 mtime=candidate.mtime,
+                quiet_seconds=active_quiet_seconds,
                 pending=self.pending_count,
             )
 
@@ -388,6 +415,13 @@ class WatchScheduler:
             for candidate_path in pending_paths:
                 self._pending.pop(candidate_path, None)
                 self._active_states.pop(candidate_path, None)
+            tracker_paths = [
+                candidate_path
+                for candidate_path in self._quiet_trackers
+                if _paths_match(candidate_path, normalized, recursive=recursive)
+            ]
+            for candidate_path in tracker_paths:
+                self._quiet_trackers.pop(candidate_path, None)
         forgotten = self.state.forget_path(normalized, recursive=recursive)
         self.log.write(
             "candidate_departed",
@@ -399,11 +433,11 @@ class WatchScheduler:
 
     def _pop_ready(self, now: float) -> list[WatchCandidate]:
         ready: list[WatchCandidate] = []
-        due: list[tuple[str, WatchCandidate, int, bool, bool, int, int, float]] = []
+        due: list[tuple[str, WatchCandidate, int, bool, bool, int, int, float, float]] = []
         with self._lock:
             for path, candidate in self._pending.items():
                 state = self._active_states[path]
-                if now - state.last_event_at >= self.quiet_seconds:
+                if now - state.last_event_at >= state.quiet_seconds:
                     due.append((
                         path,
                         candidate,
@@ -413,9 +447,10 @@ class WatchScheduler:
                         state.filter_revision,
                         state.filtered_size,
                         state.filtered_mtime,
+                        state.quiet_seconds,
                     ))
 
-        for path, candidate, generation, force, event_requires_attempt, filter_revision, filtered_size, filtered_mtime in due:
+        for path, candidate, generation, force, event_requires_attempt, filter_revision, filtered_size, filtered_mtime, quiet_seconds in due:
             refreshed = _candidate_for_event_path(path)
             if refreshed is None:
                 self._drop_active(path, generation)
@@ -458,7 +493,7 @@ class WatchScheduler:
                 identified.mtime,
                 identified.file_id,
             )
-            self.log.write("candidate_quiet", path=path, generation=generation)
+            self.log.write("candidate_quiet", path=path, generation=generation, quiet_seconds=quiet_seconds)
             ready.append(identified)
         return ready
 
@@ -483,10 +518,18 @@ class WatchScheduler:
                 return
             self._pending[path] = candidate
             state.last_event_at = now
+            state.quiet_seconds = self._observe_candidate_activity(candidate, now)
             state.generation += 1
             state.filter_revision = self._filter_revision
             state.filtered_size = candidate.size
             state.filtered_mtime = candidate.mtime
+
+    def _observe_candidate_activity(self, candidate: WatchCandidate, now: float) -> float:
+        tracker = self._quiet_trackers.get(candidate.path)
+        if tracker is None:
+            tracker = AdaptiveQuietTracker(self._quiet_policy)
+            self._quiet_trackers[candidate.path] = tracker
+        return tracker.observe(now, size=candidate.size, mtime=candidate.mtime)
 
     def _process_password_dirty_dirs(self, now: float) -> None:
         ready_dirs: list[str] = []
@@ -681,11 +724,14 @@ class WatchScheduler:
 
     def _recover_probe_workspaces(self) -> None:
         for root in self._probe_roots():
-            shutil.rmtree(root, ignore_errors=True)
+            os.makedirs(root, exist_ok=True)
+            _clear_directory_contents(root)
 
     def _prepare_probe_workspace(self, path: str) -> str:
         identity = hashlib.sha256(os.path.normcase(os.path.abspath(path)).encode("utf-8")).hexdigest()[:20]
-        owner_dir = os.path.join(self._probe_root_for(path), identity)
+        probe_root = self._probe_root_for(path)
+        os.makedirs(probe_root, exist_ok=True)
+        owner_dir = os.path.join(probe_root, identity)
         shutil.rmtree(owner_dir, ignore_errors=True)
         workspace = os.path.join(owner_dir, "work")
         os.makedirs(workspace, exist_ok=True)
@@ -695,10 +741,7 @@ class WatchScheduler:
         owner_dir = os.path.dirname(os.path.abspath(workspace))
         probe_root = os.path.dirname(owner_dir)
         shutil.rmtree(owner_dir, ignore_errors=True)
-        try:
-            os.rmdir(probe_root)
-        except OSError:
-            pass
+        os.makedirs(probe_root, exist_ok=True)
 
     def _promote_probe_outputs(
         self,
@@ -982,6 +1025,21 @@ def _paths_match(path: str, expected: str, *, recursive: bool) -> bool:
 
 def _is_under_any_root(path: str, roots: list[str]) -> bool:
     return any(_is_relative_to(path, root) for root in roots if root)
+
+
+def _clear_directory_contents(path: str) -> None:
+    try:
+        entries = list(os.scandir(path))
+    except OSError:
+        return
+    for entry in entries:
+        try:
+            if entry.is_dir(follow_symlinks=False):
+                shutil.rmtree(entry.path, ignore_errors=True)
+            else:
+                os.unlink(entry.path)
+        except OSError:
+            continue
 
 
 def _target_result_for_path(summary, path: str):
