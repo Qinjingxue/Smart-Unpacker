@@ -29,7 +29,7 @@ from sunpack.filesystem.watcher.group_models import (
 )
 from sunpack.filesystem.watcher.scanner import WatchCandidate, scan_watch_candidates
 from sunpack.filesystem.watcher.scanner import _candidate_for as _watch_candidate_for_path
-from sunpack.filesystem.watcher.state import WatchInputSnapshot, WatchStateStore
+from sunpack.filesystem.watcher.state import WatchStateStore
 from sunpack.passwords.internal import builtin as builtin_passwords_module
 from sunpack.passwords.internal.builtin import get_builtin_passwords
 from sunpack.passwords.internal.clipboard_monitor import ClipboardPasswordMonitor
@@ -51,17 +51,13 @@ class WatchRunResult:
 
 
 @dataclass
-class _PendingCandidateState:
-    first_seen: float
-    last_changed: float
-    event_type: str = "unknown"
-    src_path: str = ""
+class _ActiveCandidateState:
+    last_event_at: float
+    filtered_size: int
+    filtered_mtime: float
+    generation: int = 1
     force: bool = False
-    change_count: int = 0
-    size_change_count: int = 0
-    saw_copy_final_attributes: bool = False
-    from_temporary_download: bool = False
-    sample_invalidated: bool = False
+    event_requires_attempt: bool = False
     filter_revision: int = 0
 
 
@@ -74,7 +70,7 @@ class WatchScheduler:
         out_dir: str,
         state_path: str,
         interval_seconds: float | None = None,
-        stable_seconds: float | None = None,
+        quiet_seconds: float | None = None,
         recursive: bool | None = None,
         initial_scan: bool | None = None,
         observer_stop_timeout_seconds: float | None = None,
@@ -87,7 +83,7 @@ class WatchScheduler:
         self._relative_out_dir = not os.path.isabs(expanded_out_dir)
         self.out_dir = os.path.normpath(expanded_out_dir) if self._relative_out_dir else os.path.abspath(expanded_out_dir)
         self.interval_seconds = max(0.1, float(DEFAULT_WATCH_CONFIG["interval_seconds"] if interval_seconds is None else interval_seconds))
-        self.stable_seconds = max(0.0, float(DEFAULT_WATCH_CONFIG["stable_seconds"] if stable_seconds is None else stable_seconds))
+        self.quiet_seconds = max(0.0, float(DEFAULT_WATCH_CONFIG["quiet_seconds"] if quiet_seconds is None else quiet_seconds))
         self.recursive = directory_scan_is_recursive(config) if recursive is None else bool(recursive)
         self.initial_scan = bool(DEFAULT_WATCH_CONFIG["initial_scan"] if initial_scan is None else initial_scan)
         self.observer_stop_timeout_seconds = max(
@@ -114,8 +110,7 @@ class WatchScheduler:
         self._lock = threading.Lock()
         self._password_source_lock = threading.Lock()
         self._pending: dict[str, WatchCandidate] = {}
-        self._stable_since: dict[str, float] = {}
-        self._pending_states: dict[str, _PendingCandidateState] = {}
+        self._active_states: dict[str, _ActiveCandidateState] = {}
         self._password_dirty_dirs: dict[str, float] = {}
         self._active_output_roots: dict[str, int] = {}
         self._recent_output_roots: dict[str, float] = {}
@@ -124,14 +119,9 @@ class WatchScheduler:
         self._started = False
         self.runner_factory = runner_factory
         watch_config = config.get("watch") if isinstance(config.get("watch"), dict) else {}
-        self.fast_stable_seconds = max(0.0, float(watch_config.get("fast_stable_seconds", 0.5)))
-        self.copy_final_stable_seconds = max(0.0, float(watch_config.get("copy_final_stable_seconds", 0.75)))
-        self.new_file_stable_seconds = max(0.0, float(watch_config.get("new_file_stable_seconds", 1.0)))
-        self.pending_check_interval_seconds = max(0.1, float(watch_config.get("pending_check_interval_seconds", 0.5)))
         self.output_suppression_seconds = max(0.0, float(watch_config.get("output_suppression_seconds", 120.0)))
         self.password_retry_debounce_seconds = max(0.0, float(watch_config.get("password_retry_debounce_seconds", 1.0)))
         self.password_retry_include_subtree = bool(watch_config.get("password_retry_include_subtree", True))
-        self.partial_retry_seconds = max(1.0, float(watch_config.get("partial_retry_seconds", 30.0)))
         self._configured_user_passwords = dedupe_passwords(list(config.get("user_passwords") or []))
         self._configured_builtin_passwords = dedupe_passwords(list(config.get("builtin_passwords") or []))
         self.builtin_password_file = os.path.abspath(str(builtin_passwords_module.builtin_password_path()))
@@ -165,7 +155,7 @@ class WatchScheduler:
         self._started = True
         for snapshot in self.state.pending_snapshots():
             if os.path.exists(snapshot.path):
-                self.enqueue(snapshot.path, force=True, event_type="recovery")
+                self.enqueue(snapshot.path, force=snapshot.force, event_type="recovery")
             else:
                 self.state.forget_path(snapshot.path)
         if self.initial_scan:
@@ -178,7 +168,7 @@ class WatchScheduler:
             recursive=self.recursive,
             initial_scan=self.initial_scan,
             pending=self.pending_count,
-            stable_seconds=self.stable_seconds,
+            quiet_seconds=self.quiet_seconds,
             interval_seconds=self.interval_seconds,
         )
 
@@ -207,20 +197,19 @@ class WatchScheduler:
         try:
             while True:
                 self.run_once()
-                time.sleep(self.interval_seconds)
+                time.sleep(self.next_delay_seconds())
         finally:
             self.stop()
 
     def run_once(self) -> WatchRunResult:
         now = time.time()
         self._process_password_dirty_dirs(now)
-        self._process_due_partial_probes(now)
-        ready = self._pop_ready(now)
+        ready = self._pop_ready(time.time())
         with self._lock:
-            unstable_paths = {os.path.normcase(os.path.abspath(path)) for path in self._pending}
+            active_paths = {os.path.normcase(os.path.abspath(path)) for path in self._pending}
         dispatches, waiting = plan_watch_dispatches(
             ready,
-            unstable_paths=unstable_paths,
+            active_paths=active_paths,
             coordinator=self.group_coordinator,
             state=self.state,
             prepare_candidate=self._prepare_group_head,
@@ -241,7 +230,8 @@ class WatchScheduler:
             result.succeeded += single.succeeded
             result.failed += single.failed
             result.errors.extend(single.errors)
-        self.state.complete_work(candidate.path for candidate in ready)
+        for candidate in ready:
+            self.state.complete_work_if_matches(candidate)
         result.pending = self.pending_count
         return result
 
@@ -261,30 +251,22 @@ class WatchScheduler:
 
     def next_delay_seconds(self) -> float:
         now = time.time()
-        partial_retry_at = self.state.next_partial_retry_at()
-        partial_delay = max(0.0, partial_retry_at - now) if partial_retry_at is not None else None
         with self._lock:
             if not self._pending:
-                return min(self.interval_seconds, partial_delay) if partial_delay is not None else self.interval_seconds
-            delays = []
-            for path in self._pending:
-                stable_since = self._stable_since.get(path, now)
-                state = self._pending_states.get(path) or _PendingCandidateState(first_seen=stable_since, last_changed=stable_since)
-                delays.append(max(0.0, self._candidate_ready_delay(state) - (now - stable_since)))
-            next_ready = min(delays) if delays else self.pending_check_interval_seconds
-        delays = [self.pending_check_interval_seconds, next_ready]
-        if partial_delay is not None:
-            delays.append(partial_delay)
-        return max(0.0, min(delays))
+                return self.interval_seconds
+            return max(
+                0.0,
+                min(
+                    self.quiet_seconds - (now - state.last_event_at)
+                    for state in self._active_states.values()
+                ),
+            )
 
     def enqueue(self, path: str, *, force: bool = False, event_type: str = "unknown", src_path: str = ""):
         if self.should_ignore_event_path(path):
             return
         if is_directory_password_file(path, self.config):
             self._log_candidate_ignored(path, "directory_password_file")
-            return
-        if _is_temporary_download_path(path):
-            self._log_candidate_ignored(path, "temporary_download_file")
             return
         candidate = _candidate_for_event_path(path)
         if candidate is None:
@@ -303,132 +285,51 @@ class WatchScheduler:
         if self._is_under_metadata_dir(candidate.path):
             self._log_candidate_ignored(candidate.path, "under_metadata_dir")
             return
-        filter_revision = self._filter_revision
         now = time.time()
         with self._lock:
-            previous = self._pending.get(candidate.path)
-            previous_state = self._pending_states.get(candidate.path)
-            if (
-                previous is not None
-                and previous.size == candidate.size
-                and previous.mtime == candidate.mtime
-                and previous_state is not None
-                and previous_state.filter_revision == filter_revision
-                and not force
-            ):
-                previous_state.event_type = _prefer_event_type(previous_state.event_type, event_type)
-                previous_state.src_path = src_path or previous_state.src_path
-                previous_state.from_temporary_download = previous_state.from_temporary_download or _is_temporary_download_path(src_path)
-                if event_type == "modified":
-                    self._stable_since[candidate.path] = now
-                    previous_state.last_changed = now
-                    previous_state.change_count += 1
-                    previous_state.sample_invalidated = True
+            state = self._active_states.get(candidate.path)
+            if state is not None:
+                self._pending[candidate.path] = candidate
+                state.last_event_at = now
+                state.generation += 1
+                state.force = state.force or force
+                state.event_requires_attempt = state.event_requires_attempt or _event_requires_attempt(event_type)
                 return
         if not self._passes_filesystem_filters(candidate):
             self._log_candidate_ignored(candidate.path, "filtered_out")
             return
+        became_active = False
         with self._lock:
-            previous = self._pending.get(candidate.path)
-            previous_state = self._pending_states.get(candidate.path)
-            if previous is not None and not force:
-                metadata_changed = previous.size != candidate.size or previous.mtime != candidate.mtime
-                if metadata_changed:
-                    self._pending[candidate.path] = replace(candidate, sample_digest=previous.sample_digest)
-                    self._stable_since[candidate.path] = now
-                    state = previous_state or _PendingCandidateState(first_seen=now, last_changed=now)
-                    self._pending_states[candidate.path] = state
-                    state.last_changed = now
-                    state.event_type = _prefer_event_type(state.event_type, event_type)
-                    state.src_path = src_path or state.src_path
-                    state.change_count += 1
-                    state.sample_invalidated = True
-                    state.from_temporary_download = state.from_temporary_download or _is_temporary_download_path(src_path)
-                    if previous.size != candidate.size:
-                        state.size_change_count += 1
-                    if _looks_like_copy_final_mtime(previous.mtime, candidate.mtime, now):
-                        state.saw_copy_final_attributes = True
-                    state.filter_revision = filter_revision
-                    return
-                if previous_state is not None:
-                    previous_state.event_type = _prefer_event_type(previous_state.event_type, event_type)
-                    previous_state.src_path = src_path or previous_state.src_path
-                    previous_state.from_temporary_download = previous_state.from_temporary_download or _is_temporary_download_path(src_path)
-                    if event_type == "modified":
-                        self._stable_since[candidate.path] = now
-                        previous_state.last_changed = now
-                        previous_state.change_count += 1
-                        previous_state.sample_invalidated = True
-                return
-        candidate = _candidate_with_sample_digest(candidate)
-        if candidate is None:
-            self._log_candidate_ignored(path, "sample_unreadable")
-            return
-        partial_probe = self.state.partial_probe_for(candidate.path)
-        if partial_probe is not None and not force:
-            sampled = _candidate_with_sample_digest(candidate)
-            if sampled is not None and _probe_matches_candidate(partial_probe, sampled):
-                self._log_candidate_ignored(candidate.path, "partial_snapshot_quarantined")
-                return
-            self.state.clear_partial_probe(candidate.path)
-            if sampled is not None:
-                candidate = sampled
-        with self._lock:
-            previous = self._pending.get(candidate.path)
-            previous_state = self._pending_states.get(candidate.path)
-            if (
-                previous is not None
-                and previous.size == candidate.size
-                and previous.mtime == candidate.mtime
-                and not force
-            ):
-                if previous_state is not None:
-                    previous_state.event_type = _prefer_event_type(previous_state.event_type, event_type)
-                    previous_state.src_path = src_path or previous_state.src_path
-                    previous_state.from_temporary_download = previous_state.from_temporary_download or _is_temporary_download_path(src_path)
-                    previous_state.filter_revision = filter_revision
-                return
-            if previous is not None and force and previous_state is not None:
-                previous_state.force = True
-                previous_state.event_type = _prefer_event_type(previous_state.event_type, event_type)
-                previous_state.src_path = src_path or previous_state.src_path
-                previous_state.filter_revision = filter_revision
-                return
             self._pending[candidate.path] = candidate
-            if previous is None or previous.size != candidate.size or previous.mtime != candidate.mtime:
-                self._stable_since[candidate.path] = now
-                if previous_state is None:
-                    self._pending_states[candidate.path] = _PendingCandidateState(
-                        first_seen=now,
-                        last_changed=now,
-                        event_type=event_type,
-                        src_path=src_path,
-                        force=force,
-                        from_temporary_download=_is_temporary_download_path(src_path),
-                        filter_revision=filter_revision,
-                    )
-                else:
-                    previous_state.last_changed = now
-                    previous_state.event_type = _prefer_event_type(previous_state.event_type, event_type)
-                    previous_state.src_path = src_path or previous_state.src_path
-                    previous_state.force = previous_state.force or force
-                    previous_state.change_count += 1
-                    previous_state.from_temporary_download = previous_state.from_temporary_download or _is_temporary_download_path(src_path)
-                    if previous is not None and previous.size != candidate.size:
-                        previous_state.size_change_count += 1
-                    if previous is not None and _looks_like_copy_final_mtime(previous.mtime, candidate.mtime, now):
-                        previous_state.saw_copy_final_attributes = True
-                    previous_state.filter_revision = filter_revision
-        self.log.write(
-            "candidate_queued",
-            path=candidate.path,
-            force=force,
-            event_type=event_type,
-            src_path=src_path,
-            size=candidate.size,
-            mtime=candidate.mtime,
-            pending=self.pending_count,
-        )
+            state = self._active_states.get(candidate.path)
+            if state is None:
+                became_active = True
+                self._active_states[candidate.path] = _ActiveCandidateState(
+                    last_event_at=now,
+                    filtered_size=candidate.size,
+                    filtered_mtime=candidate.mtime,
+                    force=force,
+                    event_requires_attempt=_event_requires_attempt(event_type),
+                    filter_revision=self._filter_revision,
+                )
+            else:
+                state.last_event_at = now
+                state.generation += 1
+                state.force = state.force or force
+                state.event_requires_attempt = state.event_requires_attempt or _event_requires_attempt(event_type)
+                state.filter_revision = self._filter_revision
+        if became_active:
+            self.state.queue_active(candidate, force=force or _event_requires_attempt(event_type))
+            self.log.write(
+                "candidate_active",
+                path=candidate.path,
+                force=force,
+                event_type=event_type,
+                src_path=src_path,
+                size=candidate.size,
+                mtime=candidate.mtime,
+                pending=self.pending_count,
+            )
 
     def should_ignore_event_path(self, path: str) -> bool:
         if not path:
@@ -486,8 +387,7 @@ class WatchScheduler:
             ]
             for candidate_path in pending_paths:
                 self._pending.pop(candidate_path, None)
-                self._stable_since.pop(candidate_path, None)
-                self._pending_states.pop(candidate_path, None)
+                self._active_states.pop(candidate_path, None)
         forgotten = self.state.forget_path(normalized, recursive=recursive)
         self.log.write(
             "candidate_departed",
@@ -499,91 +399,94 @@ class WatchScheduler:
 
     def _pop_ready(self, now: float) -> list[WatchCandidate]:
         ready: list[WatchCandidate] = []
+        due: list[tuple[str, WatchCandidate, int, bool, bool, int, int, float]] = []
         with self._lock:
-            for path, candidate in list(self._pending.items()):
-                refreshed = _candidate_for_event_path(path)
-                if refreshed is None:
-                    self._pending.pop(path, None)
-                    self._stable_since.pop(path, None)
-                    self._pending_states.pop(path, None)
+            for path, candidate in self._pending.items():
+                state = self._active_states[path]
+                if now - state.last_event_at >= self.quiet_seconds:
+                    due.append((
+                        path,
+                        candidate,
+                        state.generation,
+                        state.force,
+                        state.event_requires_attempt,
+                        state.filter_revision,
+                        state.filtered_size,
+                        state.filtered_mtime,
+                    ))
+
+        for path, candidate, generation, force, event_requires_attempt, filter_revision, filtered_size, filtered_mtime in due:
+            refreshed = _candidate_for_event_path(path)
+            if refreshed is None:
+                self._drop_active(path, generation)
+                self.state.forget_path(path)
+                continue
+            filter_stale = (
+                filter_revision != self._filter_revision
+                or filtered_size != refreshed.size
+                or filtered_mtime != refreshed.mtime
+            )
+            if filter_stale and not self._passes_filesystem_filters(refreshed):
+                self._drop_active(path, generation)
+                self.state.complete_work([path])
+                continue
+            if refreshed.size != candidate.size or refreshed.mtime != candidate.mtime:
+                self._record_boundary_activity(path, generation, refreshed, now)
+                continue
+            identified = _candidate_with_file_identity(refreshed)
+            if identified is None:
+                self._record_boundary_activity(path, generation, refreshed, now)
+                continue
+            with self._lock:
+                state = self._active_states.get(path)
+                if state is None or state.generation != generation:
                     continue
-                stable_since = self._stable_since.setdefault(path, now)
-                state = self._pending_states.setdefault(
-                    path,
-                    _PendingCandidateState(
-                        first_seen=stable_since,
-                        last_changed=stable_since,
-                    ),
-                )
-                metadata_changed = refreshed.size != candidate.size or refreshed.mtime != candidate.mtime
-                filter_revision = self._filter_revision
-                if metadata_changed or state.filter_revision != filter_revision:
-                    if not self._passes_filesystem_filters(refreshed):
-                        self._pending.pop(path, None)
-                        self._stable_since.pop(path, None)
-                        self._pending_states.pop(path, None)
-                        continue
-                    state.filter_revision = filter_revision
-                if metadata_changed:
-                    self._pending[path] = replace(refreshed, sample_digest=candidate.sample_digest)
-                    self._stable_since[path] = now
-                    state.last_changed = now
-                    state.change_count += 1
-                    state.sample_invalidated = True
-                    if refreshed.size != candidate.size:
-                        state.size_change_count += 1
-                    if _looks_like_copy_final_mtime(candidate.mtime, refreshed.mtime, now):
-                        state.saw_copy_final_attributes = True
-                    continue
-                if self._candidate_ready_delay(state) <= 0 or now - stable_since >= self._candidate_ready_delay(state):
-                    sampled = _candidate_with_sample_digest(refreshed)
-                    if sampled is None:
-                        self._stable_since[path] = now
-                        continue
-                    if sampled.sample_digest != candidate.sample_digest:
-                        if state.sample_invalidated:
-                            self._accept_ready_candidate(sampled, state, ready)
-                            self._pending.pop(path, None)
-                            self._stable_since.pop(path, None)
-                            self._pending_states.pop(path, None)
-                            continue
-                        self._pending[path] = sampled
-                        self._stable_since[path] = now
-                        state.last_changed = now
-                        state.change_count += 1
-                        continue
-                    self._accept_ready_candidate(sampled, state, ready)
-                    self._pending.pop(path, None)
-                    self._stable_since.pop(path, None)
-                    self._pending_states.pop(path, None)
+                self._pending.pop(path, None)
+                self._active_states.pop(path, None)
+            if not force and not event_requires_attempt and self.state.snapshot_matches(
+                identified.path,
+                identified.size,
+                identified.mtime,
+                identified.file_id,
+            ):
+                self.state.complete_work([path])
+                self._log_candidate_ignored(path, "unchanged_input", size=identified.size, mtime=identified.mtime)
+                continue
+            self.state.record_attempt(
+                identified.path,
+                identified.size,
+                identified.mtime,
+                identified.file_id,
+            )
+            self.log.write("candidate_quiet", path=path, generation=generation)
+            ready.append(identified)
         return ready
 
-    def _accept_ready_candidate(
+    def _drop_active(self, path: str, generation: int) -> None:
+        with self._lock:
+            state = self._active_states.get(path)
+            if state is None or state.generation != generation:
+                return
+            self._pending.pop(path, None)
+            self._active_states.pop(path, None)
+
+    def _record_boundary_activity(
         self,
+        path: str,
+        generation: int,
         candidate: WatchCandidate,
-        pending_state: _PendingCandidateState,
-        ready: list[WatchCandidate],
+        now: float,
     ) -> None:
-        if not pending_state.force and self.state.snapshot_matches(
-            candidate.path,
-            candidate.size,
-            candidate.mtime,
-            candidate.sample_digest,
-        ):
-            self._log_candidate_ignored(
-                candidate.path,
-                "unchanged_input",
-                size=candidate.size,
-                mtime=candidate.mtime,
-            )
-            return
-        self.state.observe_and_queue(
-            candidate.path,
-            candidate.size,
-            candidate.mtime,
-            candidate.sample_digest,
-        )
-        ready.append(candidate)
+        with self._lock:
+            state = self._active_states.get(path)
+            if state is None or state.generation != generation:
+                return
+            self._pending[path] = candidate
+            state.last_event_at = now
+            state.generation += 1
+            state.filter_revision = self._filter_revision
+            state.filtered_size = candidate.size
+            state.filtered_mtime = candidate.mtime
 
     def _process_password_dirty_dirs(self, now: float) -> None:
         ready_dirs: list[str] = []
@@ -606,7 +509,7 @@ class WatchScheduler:
         candidate = _candidate_for_event_path(path)
         if candidate is None or not self._passes_filesystem_filters(candidate):
             return None
-        return _candidate_with_sample_digest(candidate)
+        return _candidate_with_file_identity(candidate)
 
     def _process_candidate(
         self,
@@ -651,46 +554,17 @@ class WatchScheduler:
         probe_output_dirs = self._generated_output_dirs(runner, predicted_probe_dirs)
 
         if outcome_kind == OutcomeKind.PARTIAL_SUCCESS:
-            verification = dict(getattr(target_result, "verification", {}) or {})
-            signature = _verification_signature(verification)
-            previous = self.state.partial_probe_for(candidate.path)
-            snapshot = WatchInputSnapshot(
-                path=candidate.path,
-                size=candidate.size,
-                mtime=candidate.mtime,
-                sample_digest=candidate.sample_digest,
-            )
-            if previous is None or previous.fingerprint != snapshot.fingerprint:
-                status = "awaiting_confirmation"
-                retry_at = time.time() + self.partial_retry_seconds
-                attempt_count = 1
-                event = "partial_confirmation_scheduled"
-            else:
-                attempt_count = previous.attempt_count + 1
-                retry_at = 0.0
-                if previous.verification_signature == signature:
-                    status = "quarantined_snapshot"
-                    event = "partial_snapshot_quarantined"
-                else:
-                    status = "awaiting_input_change"
-                    event = "partial_result_changed"
-            self.state.record_partial_probe(
-                snapshot,
-                verification_signature=signature,
-                verification_payload=verification,
-                retry_at=retry_at,
-                status=status,
-                attempt_count=attempt_count,
-            )
             self._cleanup_probe_workspace(probe_workspace)
-            self.log.write(
-                event,
-                path=candidate.path,
-                status=status,
-                attempt_count=attempt_count,
-                retry_at=retry_at,
-                verification_signature=signature,
+            if group is not None:
+                self.state.record_group_terminal(group, status="partial")
+            self.state.mark(
+                candidate.path,
+                candidate.size,
+                candidate.mtime,
+                file_id=candidate.file_id,
+                status="partial",
             )
+            self.log.write("partial", path=candidate.path)
             return WatchRunResult(processed=1)
 
         failed = list(summary.failed_tasks)
@@ -726,7 +600,7 @@ class WatchScheduler:
                 candidate.path,
                 candidate.size,
                 candidate.mtime,
-                sample_digest=candidate.sample_digest,
+                file_id=candidate.file_id,
                 status=status,
                 error=error,
                 failure_payload=payload,
@@ -741,7 +615,7 @@ class WatchScheduler:
                 candidate.path,
                 candidate.size,
                 candidate.mtime,
-                sample_digest=candidate.sample_digest,
+                file_id=candidate.file_id,
                 status="ignored_no_tasks",
             )
             self.log.write("no_tasks_found", path=candidate.path)
@@ -750,6 +624,8 @@ class WatchScheduler:
         if outcome_kind != OutcomeKind.COMPLETE_SUCCESS:
             self._cleanup_probe_workspace(probe_workspace)
             error = "watch pipeline returned no complete target outcome"
+            if group is not None:
+                self.state.record_group_terminal(group, status="failed_terminal")
             self.log.write("failed_terminal", path=candidate.path, error=error, failures=[])
             return WatchRunResult(processed=1, failed=1, errors=[error])
 
@@ -761,7 +637,6 @@ class WatchScheduler:
         apply_deferred = getattr(runner, "apply_deferred_postprocess", None)
         if callable(apply_deferred):
             apply_deferred(output_path_map)
-        self.state.clear_partial_probe(candidate.path)
         self._remember_recent_output_roots(generated_output_dirs)
         self._remember_known_output_roots(generated_output_dirs)
         if group is not None:
@@ -770,7 +645,7 @@ class WatchScheduler:
             candidate.path,
             candidate.size,
             candidate.mtime,
-            sample_digest=candidate.sample_digest,
+            file_id=candidate.file_id,
             status="done",
         )
         self.log.write("done", path=candidate.path, success_count=summary.success_count, output_dirs=generated_output_dirs)
@@ -856,21 +731,6 @@ class WatchScheduler:
         self._cleanup_probe_workspace(workspace)
         return promoted, path_map
 
-    def _process_due_partial_probes(self, now: float) -> None:
-        for probe in self.state.due_partial_probes(now):
-            candidate = _candidate_for_event_path(probe.path)
-            if candidate is None:
-                self.state.clear_partial_probe(probe.path)
-                continue
-            sampled = _candidate_with_sample_digest(candidate)
-            if sampled is None:
-                continue
-            if _probe_matches_candidate(probe, sampled):
-                self.enqueue(sampled.path, force=True, event_type="partial_confirmation")
-                continue
-            self.state.clear_partial_probe(probe.path)
-            self.enqueue(sampled.path, event_type="modified")
-
     def _is_under_watched_root(self, path: str) -> bool:
         return _longest_matching_root(path, self.watch_roots) is not None
 
@@ -897,17 +757,6 @@ class WatchScheduler:
             return True
         entry = _file_entry_from_watch_candidate(candidate)
         return bool(apply_ordered_filters_to_entries([entry], self.filters))
-
-    def _candidate_ready_delay(self, state: _PendingCandidateState) -> float:
-        if self.stable_seconds <= 0 or state.force:
-            return 0.0
-        if state.from_temporary_download or state.event_type == "moved":
-            return self.fast_stable_seconds
-        if state.saw_copy_final_attributes:
-            return self.copy_final_stable_seconds
-        if state.size_change_count > 0:
-            return self.stable_seconds
-        return self.new_file_stable_seconds
 
     def _output_suppression_reason(self, path: str) -> str:
         normalized = os.path.abspath(path)
@@ -1084,37 +933,19 @@ def _candidate_for_event_path(path: str) -> WatchCandidate | None:
     return _watch_candidate_for_path(path)
 
 
-def _candidate_with_sample_digest(candidate: WatchCandidate) -> WatchCandidate | None:
-    digest = _sample_file_digest(candidate.path, candidate.size)
-    if digest is None:
-        return None
-    return replace(candidate, sample_digest=digest)
-
-
-def _sample_file_digest(path: str, size: int) -> str | None:
-    window_size = 32 * 1024
-    sample_count = 8
+def _candidate_with_file_identity(candidate: WatchCandidate) -> WatchCandidate | None:
     try:
-        with open(path, "rb") as handle:
-            if size <= window_size * sample_count:
-                offsets = [0]
-                read_sizes = [max(0, size)]
-            else:
-                max_offset = size - window_size
-                offsets = sorted({(max_offset * index) // (sample_count - 1) for index in range(sample_count)})
-                read_sizes = [window_size] * len(offsets)
-            digest = hashlib.blake2s(digest_size=16)
-            digest.update(int(size).to_bytes(8, "little", signed=False))
-            for offset, read_size in zip(offsets, read_sizes):
-                handle.seek(offset)
-                data = handle.read(read_size)
-                if len(data) != read_size:
-                    return None
-                digest.update(int(offset).to_bytes(8, "little", signed=False))
-                digest.update(data)
-    except (OSError, OverflowError):
+        stat = os.stat(candidate.path, follow_symlinks=False)
+    except OSError:
         return None
-    return digest.hexdigest()
+    if int(stat.st_size) != candidate.size or abs(float(stat.st_mtime) - candidate.mtime) > 1e-6:
+        return None
+    file_id = f"{int(stat.st_dev)}:{int(stat.st_ino)}"
+    return replace(candidate, file_id=file_id)
+
+
+def _event_requires_attempt(event_type: str) -> bool:
+    return event_type in {"created", "modified", "moved"}
 
 
 def _file_entry_from_watch_candidate(candidate: WatchCandidate) -> FileEntry:
@@ -1153,32 +984,6 @@ def _is_under_any_root(path: str, roots: list[str]) -> bool:
     return any(_is_relative_to(path, root) for root in roots if root)
 
 
-def _is_temporary_download_path(path: str) -> bool:
-    if not path:
-        return False
-    name = os.path.basename(str(path)).lower()
-    suffixes = (
-        ".baiduyun.p.downloading",
-        ".downloading",
-        ".crdownload",
-        ".part",
-        ".tmp",
-        ".download",
-        ".partial",
-        ".!qb",
-        ".!ut",
-    )
-    return name.endswith(suffixes)
-
-
-def _probe_matches_candidate(probe, candidate: WatchCandidate) -> bool:
-    return bool(
-        int(getattr(probe, "size", -1)) == int(candidate.size)
-        and float(getattr(probe, "mtime", -1.0)) == float(candidate.mtime)
-        and str(getattr(probe, "sample_digest", "")) == str(candidate.sample_digest)
-    )
-
-
 def _target_result_for_path(summary, path: str):
     expected = os.path.normcase(os.path.abspath(path))
     for item in list(getattr(summary, "target_results", []) or []):
@@ -1208,42 +1013,6 @@ def _summary_outcome_kind(summary, target_result) -> OutcomeKind:
     return OutcomeKind.FAILURE
 
 
-def _verification_signature(payload: dict) -> str:
-    coverage = payload.get("archive_coverage") if isinstance(payload.get("archive_coverage"), dict) else {}
-    files = []
-    for item in payload.get("files") or []:
-        if not isinstance(item, dict):
-            continue
-        files.append({
-            "archive_path": str(item.get("archive_path") or ""),
-            "status": str(item.get("status") or ""),
-            "bytes_written": int(item.get("bytes_written", 0) or 0),
-            "expected_size": item.get("expected_size"),
-            "crc_expected": item.get("crc_expected"),
-            "crc_actual": item.get("crc_actual"),
-            "failure_stage": str(item.get("failure_stage") or ""),
-            "failure_kind": str(item.get("failure_kind") or ""),
-        })
-    canonical = {
-        "assessment_status": str(payload.get("assessment_status") or ""),
-        "source_integrity": str(payload.get("source_integrity") or ""),
-        "decision_hint": str(payload.get("decision_hint") or ""),
-        "completeness": round(float(payload.get("completeness", 0.0) or 0.0), 9),
-        "recoverable_upper_bound": round(float(payload.get("recoverable_upper_bound", 0.0) or 0.0), 9),
-        "coverage": {
-            key: coverage.get(key)
-            for key in (
-                "expected_files", "matched_files", "complete_files", "partial_files",
-                "failed_files", "missing_files", "unverified_files", "expected_bytes",
-                "matched_bytes", "complete_bytes",
-            )
-        },
-        "repair_hints": dict(payload.get("repair_hints") or {}),
-        "files": sorted(files, key=lambda item: (item["archive_path"], item["status"])),
-    }
-    return hashlib.sha256(json.dumps(canonical, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")).hexdigest()
-
-
 def _next_nonexisting_path(path: str) -> str:
     if not os.path.exists(path):
         return path
@@ -1254,19 +1023,6 @@ def _next_nonexisting_path(path: str) -> str:
     while os.path.exists(f"{base}_{index}"):
         index += 1
     return f"{base}_{index}"
-
-
-def _prefer_event_type(current: str, incoming: str) -> str:
-    order = {"unknown": 0, "initial_scan": 1, "modified": 2, "created": 3, "moved": 4, "recovery": 5}
-    return incoming if order.get(incoming, 0) >= order.get(current, 0) else current
-
-
-def _looks_like_copy_final_mtime(previous_mtime: float, current_mtime: float, now: float) -> bool:
-    if current_mtime <= 0:
-        return False
-    if current_mtime < previous_mtime - 1.0:
-        return True
-    return current_mtime < now - 60.0 and previous_mtime > now - 60.0
 
 
 def _dedupe_paths(paths: Iterable[str]) -> list[str]:

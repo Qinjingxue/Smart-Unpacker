@@ -102,7 +102,7 @@ contracts
 | 校验 | `verification.VerificationScheduler` | 解压结果完整度、来源完整性和下一步决策。 |
 | 修复 | `repair.RepairScheduler` | 根据 verification repair 决策生成修复候选。 |
 | 后处理 | `postprocess.actions.PostProcessActions` | 成功后清理和扁平化。 |
-| 文件系统监控 | `coordinator.watch_runtime.run_watch_service` / `filesystem.watcher.WatchScheduler` | CLI/GUI 共用服务入口、watchdog 事件、稳定文件队列和自动处理。 |
+| 文件系统监控 | `coordinator.watch_runtime.run_watch_service` / `filesystem.watcher.WatchScheduler` | CLI/GUI 共用服务入口、watchdog 事件、活跃到静默状态机和自动处理。 |
 | 修复模型 | `repair.model.RepairModelRuntime` / `repair.model.ModelAssetRegistry` | 模型资产校验、图构建和双模型推理。 |
 | 修复搜索 | `repair.search.PolicyRepairGraph` | 搜索图、恢复度评估、运行特征和模块提案。 |
 | Native ABI | `support.sevenzip_bridge` | C++ 7z.dll bridge 绑定和缓存。 |
@@ -123,7 +123,7 @@ contracts
 
 ### filesystem
 
-`filesystem` 负责目录遍历、过滤、`DirectorySnapshot` 构建，以及 watchdog 监控能力。watcher 复用 `filesystem.scan_filters`，稳定文件直接交给调用方注入的主流程 runner；它不按扩展名自行判断归档。
+`filesystem` 负责目录遍历、过滤、`DirectorySnapshot` 构建，以及 watchdog 监控能力。watcher 复用 `filesystem.scan_filters`，输入从活跃态进入静默态时交给调用方注入的主流程 runner；它不按扩展名或处理结果自行推测重试时机。
 
 ### relations
 

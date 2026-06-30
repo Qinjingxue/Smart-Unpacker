@@ -67,7 +67,7 @@ def test_watch_retries_real_encrypted_zip_after_password_source_update(tmp_path,
         [str(watch_root)],
         out_dir=str(output_root),
         state_path=str(tmp_path / "state.json"),
-        stable_seconds=0,
+        quiet_seconds=0,
         initial_scan=False,
         runner_factory=PipelineRunner,
     )

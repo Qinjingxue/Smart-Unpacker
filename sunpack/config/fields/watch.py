@@ -5,18 +5,13 @@ from sunpack.config.schema import ConfigField
 
 DEFAULT_WATCH_CONFIG = {
     "interval_seconds": 1.0,
-    "stable_seconds": 10.0,
-    "fast_stable_seconds": 0.5,
-    "copy_final_stable_seconds": 0.75,
-    "new_file_stable_seconds": 1.0,
-    "pending_check_interval_seconds": 0.5,
+    "quiet_seconds": 10.0,
     "initial_scan": True,
     "max_folders": 16,
     "observer_stop_timeout_seconds": 5.0,
     "output_suppression_seconds": 120.0,
     "password_retry_debounce_seconds": 1.0,
     "password_retry_include_subtree": True,
-    "partial_retry_seconds": 30.0,
     "clipboard_monitor_enabled": True,
     "clipboard_builtin_max_entries": 30,
     "enabled": False,
@@ -37,18 +32,13 @@ def normalize_watch_config(value: Any) -> dict[str, Any]:
     config.update(value)
     config.pop("recursive", None)
     config["interval_seconds"] = max(0.1, _float_field(config, "interval_seconds"))
-    config["stable_seconds"] = max(0.0, _float_field(config, "stable_seconds"))
-    config["fast_stable_seconds"] = max(0.0, _float_field(config, "fast_stable_seconds"))
-    config["copy_final_stable_seconds"] = max(0.0, _float_field(config, "copy_final_stable_seconds"))
-    config["new_file_stable_seconds"] = max(0.0, _float_field(config, "new_file_stable_seconds"))
-    config["pending_check_interval_seconds"] = max(0.1, _float_field(config, "pending_check_interval_seconds"))
+    config["quiet_seconds"] = max(0.0, _float_field(config, "quiet_seconds"))
     config["initial_scan"] = bool(config.get("initial_scan", True))
     config["max_folders"] = max(1, _int_field(config, "max_folders"))
     config["observer_stop_timeout_seconds"] = max(0.0, _float_field(config, "observer_stop_timeout_seconds"))
     config["output_suppression_seconds"] = max(0.0, _float_field(config, "output_suppression_seconds"))
     config["password_retry_debounce_seconds"] = max(0.0, _float_field(config, "password_retry_debounce_seconds"))
     config["password_retry_include_subtree"] = bool(config.get("password_retry_include_subtree", True))
-    config["partial_retry_seconds"] = max(1.0, _float_field(config, "partial_retry_seconds"))
     config["clipboard_monitor_enabled"] = bool(config.get("clipboard_monitor_enabled", True))
     config["clipboard_builtin_max_entries"] = max(1, _int_field(config, "clipboard_builtin_max_entries"))
     roots = config.get("roots", [])

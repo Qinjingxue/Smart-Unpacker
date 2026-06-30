@@ -141,7 +141,7 @@ python sunpack.py inspect D:\Downloads -v
 python sunpack.py watch [options] <paths...>
 ```
 
-`watch` 会监听一个或多个文件夹。发现候选归档后先等待文件大小稳定，再把路径交给同一套 `extract` pipeline，因此 detection、analysis、verification、repair、递归和后处理能力都与普通 `extract` 保持一致。
+`watch` 会监听一个或多个文件夹。文件发生变化后进入活跃态，持续静默达到配置阈值时触发一次 `extract` pipeline；相同快照不因解压结果而重试。新分卷和密码源变化会开启新的活跃周期。
 
 常用参数与 `extract` 基本一致，包括密码、输出目录、递归、调度档位、清理策略、JSON/quiet/verbose/pause 等。
 

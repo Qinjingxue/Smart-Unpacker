@@ -25,7 +25,7 @@ def _watcher(tmp_path, runner_factory) -> WatchScheduler:
         [str(root)],
         out_dir=str(tmp_path / "out"),
         state_path=str(tmp_path / "state.json"),
-        stable_seconds=0,
+        quiet_seconds=0,
         initial_scan=False,
         runner_factory=runner_factory,
         group_coordinator=WatchGroupCoordinator({}),

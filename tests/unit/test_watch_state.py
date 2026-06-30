@@ -1,6 +1,6 @@
 import json
 
-from sunpack.filesystem.watcher.state import WatchInputSnapshot, WatchStateStore
+from sunpack.filesystem.watcher.state import WatchStateStore
 
 
 def test_input_snapshot_persists_and_matches_only_identical_stable_input(tmp_path):
@@ -10,11 +10,11 @@ def test_input_snapshot_persists_and_matches_only_identical_stable_input(tmp_pat
     stat = archive.stat()
     state = WatchStateStore(str(state_path))
 
-    state.observe_and_queue(str(archive), stat.st_size, stat.st_mtime, "digest")
+    state.record_attempt(str(archive), stat.st_size, stat.st_mtime, "device:inode")
     state.complete_work([str(archive)])
 
     reloaded = WatchStateStore(str(state_path))
-    assert reloaded.snapshot_matches(str(archive), stat.st_size, stat.st_mtime, "digest")
+    assert reloaded.snapshot_matches(str(archive), stat.st_size, stat.st_mtime, "device:inode")
     assert not reloaded.snapshot_matches(str(archive), stat.st_size, stat.st_mtime, "different")
     assert not reloaded.pending_snapshots()
 
@@ -24,11 +24,11 @@ def test_departure_removes_snapshot_so_identical_input_is_new_again(tmp_path):
     archive = tmp_path / "sample.zip"
     archive.write_bytes(b"archive")
     stat = archive.stat()
-    state.observe_and_queue(str(archive), stat.st_size, stat.st_mtime, "digest")
+    state.record_attempt(str(archive), stat.st_size, stat.st_mtime, "device:inode")
     state.complete_work([str(archive)])
 
     assert state.forget_path(str(archive))
-    assert not state.snapshot_matches(str(archive), stat.st_size, stat.st_mtime, "digest")
+    assert not state.snapshot_matches(str(archive), stat.st_size, stat.st_mtime, "device:inode")
 
 
 def test_pending_work_survives_restart_until_completed(tmp_path):
@@ -37,7 +37,7 @@ def test_pending_work_survives_restart_until_completed(tmp_path):
     archive.write_bytes(b"archive")
     stat = archive.stat()
     state = WatchStateStore(str(state_path))
-    state.observe_and_queue(str(archive), stat.st_size, stat.st_mtime, "digest")
+    state.record_attempt(str(archive), stat.st_size, stat.st_mtime, "device:inode")
 
     reloaded = WatchStateStore(str(state_path))
     assert [item.path for item in reloaded.pending_snapshots()] == [str(archive.resolve())]
@@ -85,24 +85,18 @@ def test_previous_state_schema_is_intentionally_not_loaded(tmp_path):
     assert not state.snapshots
 
 
-def test_partial_probe_state_persists_verification_and_retry_status(tmp_path):
+def test_active_work_persists_force_cause_for_restart(tmp_path):
     state_path = tmp_path / "state.json"
     archive = tmp_path / "sample.zip"
-    archive.write_bytes(b"partial")
-    stat = archive.stat()
+    archive.write_bytes(b"active")
     state = WatchStateStore(str(state_path))
-    state.record_partial_probe(
-        WatchInputSnapshot(str(archive), stat.st_size, stat.st_mtime, "digest"),
-        verification_signature="signature",
-        verification_payload={"decision_hint": "accept_partial"},
-        retry_at=123.0,
-        status="awaiting_confirmation",
-        attempt_count=1,
-    )
+    candidate = type("Candidate", (), {
+        "path": str(archive),
+        "size": archive.stat().st_size,
+        "mtime": archive.stat().st_mtime,
+    })()
+    state.queue_active(candidate, force=True)
 
-    probe = WatchStateStore(str(state_path)).partial_probe_for(str(archive))
-    assert probe is not None
-    assert probe.verification_signature == "signature"
-    assert probe.verification_payload["decision_hint"] == "accept_partial"
-    assert probe.retry_at == 123.0
-    assert not state.entries
+    [pending] = WatchStateStore(str(state_path)).pending_snapshots()
+    assert pending.path == str(archive.resolve())
+    assert pending.force is True

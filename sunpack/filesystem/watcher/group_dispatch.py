@@ -29,12 +29,12 @@ class NullWatchGroupResolver:
 def plan_watch_dispatches(
     ready: list[WatchCandidate],
     *,
-    unstable_paths: set[str],
+    active_paths: set[str],
     coordinator: WatchGroupResolver,
     state: WatchStateStore,
     prepare_candidate: Callable[[str], WatchCandidate | None],
 ) -> tuple[list[WatchDispatch], list[WatchGroupSnapshot]]:
-    """Collapse stable part events into one canonical head dispatch per split group."""
+    """Collapse quiet part events into one canonical head dispatch per split group."""
     if not ready:
         return [], []
     resolved = coordinator.resolve_paths([candidate.path for candidate in ready])
@@ -54,7 +54,7 @@ def plan_watch_dispatches(
         if snapshot.group_id in seen_groups:
             continue
         seen_groups.add(snapshot.group_id)
-        if any(path_key(member) in unstable_paths for member in snapshot.member_paths):
+        if any(path_key(member) in active_paths for member in snapshot.member_paths):
             continue
         if not snapshot.has_head or snapshot.has_confirmed_gap:
             state.record_group_waiting(snapshot)

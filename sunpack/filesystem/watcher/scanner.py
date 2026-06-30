@@ -11,7 +11,7 @@ class WatchCandidate:
     path: str
     size: int
     mtime: float
-    sample_digest: str = ""
+    file_id: str = ""
 
 
 def scan_watch_candidates(roots: list[str], *, recursive: bool = True) -> list[WatchCandidate]:

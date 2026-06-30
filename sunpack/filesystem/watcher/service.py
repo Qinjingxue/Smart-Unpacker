@@ -291,7 +291,7 @@ class WatchService:
             out_dir=out_dir,
             state_path=state_path,
             interval_seconds=float(watch_config.get("interval_seconds", 1.0)),
-            stable_seconds=float(watch_config.get("stable_seconds", 10.0)),
+            quiet_seconds=float(watch_config.get("quiet_seconds", 10.0)),
             initial_scan=bool(watch_config.get("initial_scan", True)),
             observer_stop_timeout_seconds=float(watch_config.get("observer_stop_timeout_seconds", 5.0)),
             runner_factory=self.runner_factory,

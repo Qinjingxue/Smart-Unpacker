@@ -168,14 +168,14 @@ CLI 可用 `--recur` 临时覆盖。
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
-| `interval_seconds` | `float` | watcher 轮询稳定文件的间隔。 |
-| `stable_seconds` | `float` | 文件大小和修改时间保持不变多久后才开始处理。 |
+| `interval_seconds` | `float` | 没有活跃文件时调度循环的最大等待时间。 |
+| `quiet_seconds` | `float` | 文件最后一次变化后保持静默多久，才触发一次处理。 |
 | `recursive` | `bool` | 是否递归监控目录。 |
 | `initial_scan` | `bool` | 启动 watcher 时是否扫描已有文件。 |
 | `max_folders` | `int` | 单次 watch 接受的最大路径数量。 |
 | `observer_stop_timeout_seconds` | `float` | 停止 watchdog observer 时等待线程退出的超时。 |
 
-watch 不再按扩展名判断“是否归档”。稳定文件先经过 `filesystem.scan_filters`，然后直接进入主流程，由 detection 判断是否应该解压。
+watch 不按扩展名或下载器类型推测下载状态。`created`、`moved`、`modified` 事件使输入进入活跃态；最后一次事件经过 `quiet_seconds` 后进入静默态，每个活跃周期只触发一次主流程。即使 size、mtime 和文件标识未变，包含 `modified` 事件的周期仍会触发。普通成功、部分成功和失败都不会自行重试。新分卷到达或密码源变化会把受影响的输入重新置为活跃态，之后仍经过同一个静默窗口。
 
 ## extraction
 
