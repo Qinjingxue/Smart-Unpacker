@@ -28,14 +28,12 @@ class SevenZipProbeConfirmationRule(RuleBase):
         },
         "reject_executable_container": {
             "type": "bool",
-            "required": False,
-            "default": False,
+            "required": True,
             "description": "Reject when 7-Zip identifies a plain executable container.",
         },
         "reject_clear_non_archive": {
             "type": "bool",
-            "required": False,
-            "default": True,
+            "required": True,
             "description": "Reject when 7-Zip clearly does not identify an archive.",
         },
     }
@@ -48,7 +46,7 @@ class SevenZipProbeConfirmationRule(RuleBase):
         probe_type = probe.get("type")
         if probe_type in {"pe", "elf", "macho", "te"}:
             facts.set("file.container_type", probe_type)
-            if config.get("reject_executable_container", False):
+            if config["reject_executable_container"]:
                 return ConfirmationEffect.reject(f"7z probe identified executable container {probe_type}")
             return ConfirmationEffect.pass_()
 
@@ -66,6 +64,6 @@ class SevenZipProbeConfirmationRule(RuleBase):
         if probe.get("is_encrypted") or probe.get("is_broken"):
             return ConfirmationEffect.confirm("7z probe found archive-like encrypted/broken structure")
 
-        if config.get("reject_clear_non_archive", True):
+        if config["reject_clear_non_archive"]:
             return ConfirmationEffect.reject("7z probe did not identify archive")
         return ConfirmationEffect.pass_()

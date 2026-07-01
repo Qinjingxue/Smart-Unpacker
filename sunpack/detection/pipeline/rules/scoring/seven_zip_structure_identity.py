@@ -7,8 +7,6 @@ from sunpack.detection.pipeline.rules.registry import register_rule
 
 
 DEFAULT_SEVEN_Z_STRUCTURE_SCORE = 5
-DEFAULT_SEVEN_Z_MAGIC_SCORE = 2
-DEFAULT_SEVEN_Z_NID_SCORE = 6
 
 
 @register_rule(name="seven_zip_structure_identity", layer="scoring")
@@ -25,14 +23,12 @@ class SevenZipStructureIdentityScoreRule(RuleBase):
         },
         "magic_score": {
             "type": "int",
-            "required": False,
-            "default": DEFAULT_SEVEN_Z_MAGIC_SCORE,
+            "required": True,
             "description": "Score for a 7z magic signature without stronger start-header structure.",
         },
         "next_header_nid_score": {
             "type": "int",
-            "required": False,
-            "default": DEFAULT_SEVEN_Z_NID_SCORE,
+            "required": True,
             "description": "Score for a 7z next header whose CRC and first NID are both valid.",
         },
     }
@@ -46,13 +42,13 @@ class SevenZipStructureIdentityScoreRule(RuleBase):
         facts.set("file.probe_detected_archive", True)
         facts.set("file.probe_offset", 0)
         if structure.get("next_header_semantic_ok"):
-            score = config.get("next_header_nid_score", DEFAULT_SEVEN_Z_NID_SCORE)
+            score = config["next_header_nid_score"]
             reason = "7z structure: next header CRC and NID"
         elif structure.get("plausible"):
             score = config.get("structure_score", DEFAULT_SEVEN_Z_STRUCTURE_SCORE)
             reason = "7z structure: start header CRC and next header range"
         else:
-            score = config.get("magic_score", DEFAULT_SEVEN_Z_MAGIC_SCORE)
+            score = config["magic_score"]
             reason = "7z structure: magic signature"
         if not score:
             return RuleEffect.pass_()

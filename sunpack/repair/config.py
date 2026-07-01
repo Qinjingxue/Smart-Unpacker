@@ -2,146 +2,10 @@ import os
 from copy import deepcopy
 from typing import Any
 
-DEFAULT_REPAIR_CONFIG = {
-    "enabled": True,
-    "workspace": ".sunpack_repair",
-    "keep_candidates": False,
-    "max_attempts_per_task": 3,
-    "max_repair_rounds_per_task": 100,
-    "max_repair_seconds_per_task": 200.0,
-    "max_repair_generated_files_per_task": 16,
-    "max_repair_generated_mb_per_task": 2048.0,
-    "stagnation_patience_rounds": 3,
-    "min_recovery_improvement": 0.01,
-    "continue_after_partial": True,
-    "runtime_cache": {
-        "enabled": True,
-        "max_entries": 512,
-    },
-    "safety": {
-        "allow_unsafe": False,
-        "allow_partial": True,
-        "allow_lossy": False,
-    },
-    "module_limits": {
-        "max_candidates_per_module": 3,
-        "max_entries": 20000,
-        "max_seconds_per_module": 30.0,
-        "max_input_size_mb": 512,
-        "max_output_size_mb": 2048,
-        "max_entry_uncompressed_mb": 512,
-        "verify_candidates": True,
-        "max_stream_trim_probe_attempts": 32,
-        "max_stream_trim_decode_mb": 64,
-        "max_gzip_footer_fix_decode_mb": 32,
-        "max_next_header_scan_bytes": 1024 * 1024,
-    },
-    "beam": {
-        "enabled": True,
-        "beam_width": 6,
-        "max_candidates_per_state": 8,
-        "max_analyze_candidates": 24,
-        "max_assess_candidates": 12,
-        "max_rounds": 6,
-        "min_improvement": 0.01,
-        "patience_rounds": 3,
-        "return_best_partial": True,
-    },
-    "policy": {
-        "enabled": True,
-        "strict_model_errors": False,
-        "graph_stop_stale_patience": 100,
-        "min_best_recovery_improvement": 0.01,
-    },
-    "telemetry": {
-        "enabled": False,
-    },
-    "modules": [
-        {"name": "zip_trim_trailing_junk", "enabled": True},
-        {"name": "zip_fix_eocd_comment_length", "enabled": True},
-        {"name": "zip_fix_eocd_record", "enabled": True},
-        {"name": "zip_fix_cd_offset", "enabled": True},
-        {"name": "zip_fix_cd_entry_count", "enabled": True},
-        {"name": "zip_fix_local_header_fields", "enabled": True},
-        {"name": "zip_fix_extra_field_length", "enabled": True},
-        {"name": "zip_fix_zip64_locator", "enabled": True},
-        {"name": "zip_fix_zip64_eocd", "enabled": True},
-        {"name": "zip_fix_zip64_extra_size", "enabled": True},
-        {"name": "zip_rebuild_cd_from_local_headers", "enabled": True},
-        {"name": "zip_rebuild_cd_preserve_raw_names", "enabled": True},
-        {"name": "zip_rebuild_cd_from_data_descriptors", "enabled": True},
-        {"name": "zip_remove_spurious_data_descriptor", "enabled": True},
-        {"name": "zip_normalize_data_descriptor_flags", "enabled": True},
-        {"name": "zip_reconcile_cd_entry_names_from_local_headers", "enabled": True},
-        {"name": "zip_reconcile_cd_local_headers", "enabled": True},
-        {"name": "zip_quarantine_failed_entries", "enabled": True},
-        {"name": "zip_salvage_verified_entries", "enabled": True},
-        {"name": "zip_partial_salvage_missing_volume", "enabled": True},
-        {"name": "zip_local_header_partial_scan", "enabled": True},
-        {"name": "zip_resolve_duplicate_entries", "enabled": True},
-        {"name": "zip_resolve_overlapping_entries", "enabled": True},
-        {"name": "zip_reconcile_cd_data_descriptor_conflict", "enabled": True},
-        {"name": "tar_header_checksum_fix", "enabled": True},
-        {"name": "tar_truncated_partial_recovery", "enabled": True},
-        {"name": "tar_metadata_downgrade_recovery", "enabled": True},
-        {"name": "tar_sparse_pax_longname_repair", "enabled": True},
-        {"name": "tar_trailing_junk_trim", "enabled": True},
-        {"name": "tar_trailing_zero_block_repair", "enabled": True},
-        {"name": "gzip_trailing_junk_trim", "enabled": True},
-        {"name": "gzip_footer_fix", "enabled": True},
-        {"name": "gzip_deflate_member_resync", "enabled": True},
-        {"name": "gzip_deflate_prefix_salvage", "enabled": True},
-        {"name": "gzip_truncated_partial_recovery", "enabled": True},
-        {"name": "tar_gzip_truncated_partial_recovery", "enabled": True},
-        {"name": "bzip2_trailing_junk_trim", "enabled": True},
-        {"name": "bzip2_block_salvage", "enabled": True},
-        {"name": "bzip2_truncated_partial_recovery", "enabled": True},
-        {"name": "tar_bzip2_truncated_partial_recovery", "enabled": True},
-        {"name": "xz_trailing_junk_trim", "enabled": True},
-        {"name": "xz_block_salvage", "enabled": True},
-        {"name": "xz_truncated_partial_recovery", "enabled": True},
-        {"name": "tar_xz_truncated_partial_recovery", "enabled": True},
-        {"name": "zstd_trailing_junk_trim", "enabled": True},
-        {"name": "zstd_frame_salvage", "enabled": True},
-        {"name": "zstd_truncated_partial_recovery", "enabled": True},
-        {"name": "tar_zstd_truncated_partial_recovery", "enabled": True},
-        {"name": "archive_carrier_crop_deep_recovery", "enabled": True},
-        {"name": "archive_nested_payload_salvage", "enabled": True},
-        {"name": "seven_zip_trim_trailing_junk", "enabled": True},
-        {"name": "seven_zip_crop_carrier_prefix", "enabled": True},
-        {"name": "seven_zip_fix_start_header_crc", "enabled": True},
-        {"name": "seven_zip_fix_signature_header_version", "enabled": True},
-        {"name": "seven_zip_fix_next_header_crc", "enabled": True},
-        {"name": "seven_zip_fix_next_header_offset", "enabled": True},
-        {"name": "seven_zip_fix_next_header_size", "enabled": True},
-        {"name": "seven_zip_repoint_next_header", "enabled": True},
-        {"name": "seven_zip_decode_encoded_header", "enabled": True},
-        {"name": "seven_zip_fix_pack_stream_offset", "enabled": True},
-        {"name": "seven_zip_fix_pack_stream_size", "enabled": True},
-        {"name": "seven_zip_fix_stream_crc", "enabled": True},
-        {"name": "seven_zip_quarantine_bad_folder", "enabled": True},
-        {"name": "seven_zip_fix_empty_stream_flags", "enabled": True},
-        {"name": "seven_zip_fix_encoded_header_stream_crc", "enabled": True},
-        {"name": "seven_zip_fix_header_end_marker", "enabled": True},
-        {"name": "seven_zip_repair_encoded_header_coder_properties", "enabled": True},
-        {"name": "seven_zip_fix_unpack_size", "enabled": True},
-        {"name": "seven_zip_repair_folder_bind_pairs", "enabled": True},
-        {"name": "seven_zip_repair_folder_stream_counts", "enabled": True},
-        {"name": "seven_zip_fix_file_count_metadata", "enabled": True},
-        {"name": "seven_zip_reconcile_file_names_utf16", "enabled": True},
-        {"name": "seven_zip_drop_unreferenced_folder", "enabled": True},
-        {"name": "seven_zip_drop_unreferenced_file_record", "enabled": True},
-        {"name": "seven_zip_clear_invalid_stream_crc_defined_flag", "enabled": True},
-        {"name": "seven_zip_salvage_non_solid_entries", "enabled": True},
-        {"name": "seven_zip_salvage_solid_prefix", "enabled": True},
-        {"name": "rar_trailing_junk_trim", "enabled": True},
-        {"name": "rar_carrier_crop_deep_recovery", "enabled": True},
-        {"name": "rar_block_chain_trim", "enabled": True},
-        {"name": "rar_end_block_repair", "enabled": True},
-        {"name": "rar_file_quarantine_rebuild", "enabled": True},
-        {"name": "rar4_file_quarantine_rebuild", "enabled": True},
-    ],
-}
+from sunpack.config.advanced_defaults import advanced_config_value
+
+DEFAULT_REPAIR_CONFIG = advanced_config_value(("repair",))
+
 
 def repair_config(config: dict[str, Any] | None) -> dict[str, Any]:
     payload = dict((config or {}).get("repair") or {})
@@ -171,7 +35,7 @@ def normalize_repair_config(value: Any) -> dict[str, Any]:
     config["max_repair_generated_mb_per_task"] = _float_at_least(config, "max_repair_generated_mb_per_task", 0.0)
     config["stagnation_patience_rounds"] = _int_at_least(config, "stagnation_patience_rounds", 0)
     config["min_recovery_improvement"] = _float_at_least(config, "min_recovery_improvement", 0.0)
-    config["continue_after_partial"] = _bool_value(config.get("continue_after_partial", True), "repair.continue_after_partial")
+    config["continue_after_partial"] = _bool_value(config["continue_after_partial"], "repair.continue_after_partial")
     config["safety"] = _normalize_safety(config.get("safety"))
     config["module_limits"] = _normalize_module_limits(config.get("module_limits"))
     config["beam"] = _normalize_beam(config.get("beam"))
@@ -242,7 +106,7 @@ def _normalize_beam(value: Any) -> dict[str, Any]:
         "max_rounds": _int_at_least(value, "max_rounds", 0),
         "min_improvement": _float_at_least(value, "min_improvement", 0.0),
         "patience_rounds": _int_at_least(value, "patience_rounds", 0),
-        "return_best_partial": _bool_value(value.get("return_best_partial", True), "repair.beam.return_best_partial"),
+        "return_best_partial": _bool_value(value["return_best_partial"], "repair.beam.return_best_partial"),
     }
 
 
@@ -262,10 +126,10 @@ def _normalize_policy(value: Any) -> dict[str, Any]:
     if unknown:
         raise ValueError(f"unknown repair.policy fields: {', '.join(unknown)}")
     return {
-        "enabled": _bool_value(value.get("enabled", True), "repair.policy.enabled"),
-        "strict_model_errors": _bool_value(value.get("strict_model_errors", False), "repair.policy.strict_model_errors"),
-        "graph_stop_stale_patience": _int_at_least(value, "graph_stop_stale_patience", 0) if "graph_stop_stale_patience" in value else 100,
-        "min_best_recovery_improvement": _float_at_least(value, "min_best_recovery_improvement", 0.0) if "min_best_recovery_improvement" in value else 0.01,
+        "enabled": _bool_value(value["enabled"], "repair.policy.enabled"),
+        "strict_model_errors": _bool_value(value["strict_model_errors"], "repair.policy.strict_model_errors"),
+        "graph_stop_stale_patience": _int_at_least(value, "graph_stop_stale_patience", 0),
+        "min_best_recovery_improvement": _float_at_least(value, "min_best_recovery_improvement", 0.0),
     }
 
 

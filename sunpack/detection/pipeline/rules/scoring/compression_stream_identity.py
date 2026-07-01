@@ -7,7 +7,6 @@ from sunpack.detection.pipeline.rules.registry import register_rule
 
 
 DEFAULT_COMPRESSION_STREAM_SCORE = 5
-DEFAULT_COMPRESSION_MAGIC_SCORE = 2
 
 
 @register_rule(name="compression_stream_identity", layer="scoring")
@@ -24,8 +23,7 @@ class CompressionStreamIdentityScoreRule(RuleBase):
         },
         "magic_score": {
             "type": "int",
-            "required": False,
-            "default": DEFAULT_COMPRESSION_MAGIC_SCORE,
+            "required": True,
             "description": "Score for a compression stream magic signature without stronger stream structure.",
         },
     }
@@ -44,7 +42,7 @@ class CompressionStreamIdentityScoreRule(RuleBase):
         score = (
             config.get("stream_score", DEFAULT_COMPRESSION_STREAM_SCORE)
             if structure.get("plausible")
-            else config.get("magic_score", DEFAULT_COMPRESSION_MAGIC_SCORE)
+            else config["magic_score"]
         )
         if not score:
             return RuleEffect.pass_()

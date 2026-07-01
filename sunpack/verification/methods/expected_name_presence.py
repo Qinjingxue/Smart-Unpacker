@@ -1,6 +1,7 @@
 import os
 from typing import Any
 
+from sunpack.config.advanced_defaults import advanced_named_config
 from sunpack.support.sevenzip_bridge import STATUS_DAMAGED, STATUS_OK
 from sunpack.verification.archive_state_manifest import ArchiveStateManifest, archive_state_manifest_for_evidence
 from sunpack.verification.evidence import VerificationEvidence
@@ -42,6 +43,7 @@ class ExpectedNamePresenceMethod:
     name = "expected_name_presence"
 
     def verify(self, evidence: VerificationEvidence, config: dict) -> VerificationStepResult:
+        config = {**advanced_named_config(("verification", "methods"), self.name), **config}
         state_manifest = archive_state_manifest_for_evidence(
             evidence,
             max_items=max(1, int(config.get("max_expected_names", 50) or 50)),
@@ -93,16 +95,16 @@ class ExpectedNamePresenceMethod:
         total = len(expected_names)
         matched = total - len(missing)
         missing_ratio = len(missing) / max(1, total)
-        required_match_ratio = float(config.get("required_match_ratio", 0.8) or 0.0)
+        required_match_ratio = float(config["required_match_ratio"] or 0.0)
         actual_match_ratio = matched / max(1, total)
         if actual_match_ratio >= required_match_ratio:
-            penalty = int(config.get("minor_missing_penalty", 10) or 10)
+            penalty = int(config["minor_missing_penalty"])
             code = "warning.expected_names_partially_missing"
         elif matched == 0:
-            penalty = int(config.get("all_missing_penalty", 60) or 60)
+            penalty = int(config["all_missing_penalty"])
             code = "fail.expected_names_all_missing"
         else:
-            penalty = int(config.get("missing_penalty", 35) or 35)
+            penalty = int(config["missing_penalty"])
             code = "fail.expected_names_missing"
 
         issue = VerificationIssue(

@@ -1,5 +1,6 @@
 from typing import Any
 
+from sunpack.config.advanced_defaults import advanced_config_value
 from sunpack.config.schema import ConfigField
 
 
@@ -24,13 +25,13 @@ def normalize_directory_scan_mode(value: Any) -> str:
 CONFIG_FIELDS = (
     ConfigField(
         path=("filesystem", "scan_filters_enabled"),
-        default=True,
+        default=advanced_config_value(("filesystem", "scan_filters_enabled")),
         normalize=bool,
         owner=__name__,
     ),
     ConfigField(
         path=("filesystem", "directory_scan_mode"),
-        default="*",
+        default=advanced_config_value(("filesystem", "directory_scan_mode")),
         normalize=normalize_directory_scan_mode,
         owner=__name__,
     ),

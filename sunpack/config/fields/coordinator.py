@@ -1,5 +1,6 @@
 from typing import Any
 
+from sunpack.config.advanced_defaults import advanced_config_value
 from sunpack.config.schema import ConfigField
 
 
@@ -18,11 +19,7 @@ def normalize_recursive_extract(value: Any) -> dict[str, Any]:
     return {"mode": "fixed", "max_rounds": rounds}
 
 
-DEFAULT_PIPELINE_CONFIG = {
-    "batch_window_seconds": 0.0,
-    "max_batch_requests": 64,
-    "queue_capacity": 4096,
-}
+DEFAULT_PIPELINE_CONFIG = advanced_config_value(("pipeline",))
 
 
 def normalize_pipeline_config(value: Any) -> dict[str, Any]:
@@ -43,7 +40,7 @@ def normalize_pipeline_config(value: Any) -> dict[str, Any]:
 CONFIG_FIELDS = (
     ConfigField(
         path=("recursive_extract",),
-        default="1",
+        default=advanced_config_value(("recursive_extract",)),
         normalize=normalize_recursive_extract,
         owner=__name__,
     ),

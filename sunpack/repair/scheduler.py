@@ -43,10 +43,10 @@ class RepairScheduler:
     def __init__(self, config: dict[str, Any] | None = None):
         self.config = repair_config(config or {})
         self._module_selection_cache: dict[tuple[Any, ...], tuple[list[Any], RepairCapabilityDecision]] = {}
-        cache_config = self.config.get("runtime_cache") if isinstance(self.config.get("runtime_cache"), dict) else {}
+        cache_config = self.config["runtime_cache"]
         self.repair_cache = RepairRuntimeCache(
-            enabled=bool(cache_config.get("enabled", True)),
-            max_entries=int(cache_config.get("max_entries", 512) or 512),
+            enabled=bool(cache_config["enabled"]),
+            max_entries=int(cache_config["max_entries"]),
         )
         self.model_runtime = self._build_model_runtime()
         discover_repair_modules()

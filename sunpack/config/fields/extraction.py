@@ -1,11 +1,10 @@
 from typing import Any
 
+from sunpack.config.advanced_defaults import advanced_config_value
 from sunpack.config.schema import ConfigField
 
 
-DEFAULT_EXTRACTION_CONFIG = {
-    "write_progress_manifest": False,
-}
+DEFAULT_EXTRACTION_CONFIG = advanced_config_value(("extraction",))
 
 
 def normalize_extraction_config(value: Any) -> dict[str, Any]:

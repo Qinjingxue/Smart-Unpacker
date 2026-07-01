@@ -8,7 +8,9 @@
   },
   "recursive_extract": "*",
   "pipeline": {
-    "batch_window_seconds": 0
+    "batch_window_seconds": 0,
+    "max_batch_requests": 64,
+    "queue_capacity": 4096
   },
   "post_extract": {
     "archive_cleanup_mode": "r",
@@ -297,6 +299,9 @@
   },
   "performance": {
     "scheduler_profile": "auto",
+    "precise_resource_min_size_mb": 256,
+    "throughput_window_size": 8,
+    "throughput_regression_ratio": 0.95,
     "max_extract_task_seconds": 1800,
     "process_no_progress_timeout_seconds": 180,
     "process_sample_interval_ms": 500,
@@ -307,6 +312,10 @@
     "profile_calibration_max_delta": 1,
     "profile_calibration_min_parallel": 2,
     "profile_calibration_cache_enabled": true,
+    "cpu_scale_up_threshold_percent": 65,
+    "cpu_scale_down_threshold_percent": 88,
+    "memory_scale_down_available_mb": 1024,
+    "memory_scale_up_available_mb": 2048,
     "resource_guard": {
       "enabled": false,
       "max_file_count": 0,
@@ -320,13 +329,26 @@
     "cold_start_seconds": 1.0,
     "quiet_min_seconds": 2.5,
     "quiet_max_seconds": 180.0,
-    "recursive": true,
     "initial_scan": true,
     "max_folders": 16,
-    "observer_stop_timeout_seconds": 5.0
+    "observer_stop_timeout_seconds": 5.0,
+    "output_suppression_seconds": 120.0,
+    "password_retry_debounce_seconds": 1.0,
+    "password_retry_include_subtree": true,
+    "clipboard_monitor_enabled": true,
+    "clipboard_builtin_max_entries": 30,
+    "enabled": false,
+    "roots": [],
+    "out_dir": ".",
+    "tray_enabled": true,
+    "state_dir": "",
+    "reload_poll_seconds": 1.0
   },
   "passwords": {
-    "clipboard_passwords_enabled": true
+    "clipboard_passwords_enabled": true,
+    "directory_passwords_enabled": true,
+    "directory_passwords_max_file_bytes": 1048576,
+    "directory_passwords_max_password_length": 512
   },
   "extraction": {
     "write_progress_manifest": false
@@ -442,6 +464,7 @@
     "partial_min_completeness": 0.2,
     "complete_accept_threshold": 0.999,
     "partial_accept_threshold": 0.2,
+    "recovery_min_improvement": 0.0,
     "retry_on_verification_failure": true,
     "methods": [
       {
@@ -455,12 +478,20 @@
       {
         "name": "expected_name_presence",
         "enabled": true,
-        "max_expected_names": 50
+        "max_expected_names": 50,
+        "required_match_ratio": 0.8,
+        "minor_missing_penalty": 10,
+        "missing_penalty": 35,
+        "all_missing_penalty": 60
       },
       {
         "name": "manifest_size_match",
         "enabled": true,
-        "max_expected_names": 2000
+        "max_expected_names": 2000,
+        "file_count_abs_tolerance": 2,
+        "file_count_ratio_tolerance": 0.05,
+        "size_abs_tolerance_bytes": 1048576,
+        "size_ratio_tolerance": 0.02
       },
       {
         "name": "archive_test_crc",
@@ -487,6 +518,13 @@
     "comparison_no_improvement_patience_rounds": 20,
     "max_repair_generated_files_per_task": 16,
     "max_repair_generated_mb_per_task": 2048,
+    "stagnation_patience_rounds": 3,
+    "min_recovery_improvement": 0.01,
+    "continue_after_partial": true,
+    "runtime_cache": {
+      "enabled": true,
+      "max_entries": 512
+    },
     "safety": {
       "allow_unsafe": false,
       "allow_partial": true,
@@ -512,7 +550,15 @@
       "max_analyze_candidates": 8,
       "max_assess_candidates": 4,
       "max_rounds": 3,
-      "min_improvement": 0.01
+      "min_improvement": 0.01,
+      "patience_rounds": 3,
+      "return_best_partial": true
+    },
+    "policy": {
+      "enabled": true,
+      "strict_model_errors": false,
+      "graph_stop_stale_patience": 100,
+      "min_best_recovery_improvement": 0.01
     },
     "telemetry": {
       "enabled": false
@@ -704,6 +750,14 @@
       },
       {
         "name": "seven_zip_fix_encoded_header_stream_crc",
+        "enabled": true
+      },
+      {
+        "name": "seven_zip_fix_header_end_marker",
+        "enabled": true
+      },
+      {
+        "name": "seven_zip_repair_encoded_header_coder_properties",
         "enabled": true
       },
       {
@@ -903,25 +957,33 @@
         {
           "name": "seven_zip_structure_identity",
           "enabled": true,
-          "structure_score": 5
+          "structure_score": 5,
+          "magic_score": 2,
+          "next_header_nid_score": 6
         },
         {
           "name": "rar_structure_identity",
           "enabled": true,
-          "structure_score": 5
+          "structure_score": 5,
+          "magic_score": 2,
+          "block_walk_score": 6
         },
         {
           "name": "zip_structure_identity",
           "enabled": true,
           "eocd_score": 6,
           "embedded_eocd_score": 4,
-          "empty_eocd_score": 4
+          "empty_eocd_score": 4,
+          "magic_score": 2,
+          "local_header_score": 4,
+          "cd_walk_score": 7
         },
         {
           "name": "tar_structure_identity",
           "enabled": true,
           "tar_header_score": 5,
-          "ustar_header_score": 6
+          "ustar_header_score": 6,
+          "entry_walk_score": 7
         },
         {
           "name": "archive_container_identity",
@@ -931,7 +993,8 @@
         {
           "name": "compression_stream_identity",
           "enabled": true,
-          "stream_score": 5
+          "stream_score": 5,
+          "magic_score": 2
         }
       ],
       "confirmation": [
@@ -943,11 +1006,14 @@
         },
         {
           "name": "seven_zip_probe",
-          "enabled": true
+          "enabled": true,
+          "reject_executable_container": false,
+          "reject_clear_non_archive": true
         },
         {
           "name": "seven_zip_validation",
-          "enabled": true
+          "enabled": true,
+          "reject_on_failed": false
         }
       ]
     }

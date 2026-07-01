@@ -91,7 +91,9 @@ class WatchScheduler:
         group_coordinator=None,
     ):
         self.config = config
-        watch_config = config.get("watch") if isinstance(config.get("watch"), dict) else {}
+        watch_config = dict(DEFAULT_WATCH_CONFIG)
+        if isinstance(config.get("watch"), dict):
+            watch_config.update(config["watch"])
         self.watch_roots = [os.path.abspath(path) for path in watch_roots]
         expanded_out_dir = os.path.expanduser(out_dir)
         self._relative_out_dir = not os.path.isabs(expanded_out_dir)
@@ -163,9 +165,9 @@ class WatchScheduler:
             minimum_seconds=quiet_min_seconds,
             maximum_seconds=quiet_max_seconds,
         )
-        self.output_suppression_seconds = max(0.0, float(watch_config.get("output_suppression_seconds", 120.0)))
-        self.password_retry_debounce_seconds = max(0.0, float(watch_config.get("password_retry_debounce_seconds", 1.0)))
-        self.password_retry_include_subtree = bool(watch_config.get("password_retry_include_subtree", True))
+        self.output_suppression_seconds = max(0.0, float(watch_config["output_suppression_seconds"]))
+        self.password_retry_debounce_seconds = max(0.0, float(watch_config["password_retry_debounce_seconds"]))
+        self.password_retry_include_subtree = bool(watch_config["password_retry_include_subtree"])
         self._configured_user_passwords = dedupe_passwords(list(config.get("user_passwords") or []))
         self._configured_builtin_passwords = dedupe_passwords(list(config.get("builtin_passwords") or []))
         self.builtin_password_file = os.path.abspath(str(builtin_passwords_module.builtin_password_path()))
@@ -175,8 +177,8 @@ class WatchScheduler:
             self._mark_all_password_failures_dirty()
         self._clipboard_monitor = ClipboardPasswordMonitor(
             on_passwords_changed=self.notify_password_source_changed,
-            enabled=bool(watch_config.get("clipboard_monitor_enabled", False)),
-            max_entries=int(watch_config.get("clipboard_builtin_max_entries", 30)),
+            enabled=bool(watch_config["clipboard_monitor_enabled"]),
+            max_entries=int(watch_config["clipboard_builtin_max_entries"]),
         )
 
     def start(self):

@@ -3,6 +3,7 @@ import threading
 
 import psutil
 
+from sunpack.config.advanced_defaults import advanced_config_value
 from sunpack.coordinator.scheduling.machine_probe import detect_max_workers, resolve_max_workers
 from sunpack.coordinator.scheduling.profile_calibration import SchedulerFeedback
 from sunpack.coordinator.scheduling.resource_model import (
@@ -20,7 +21,9 @@ from sunpack.coordinator.scheduling.scheduler_profiles import (
 
 class ConcurrencyScheduler:
     def __init__(self, config: dict, current_limit: int = 2, max_workers: int = 8):
-        self.config = config
+        self.config = advanced_config_value(("performance",))
+        self.config.update(config)
+        config = self.config
         initial_limit = config.get("initial_concurrency_limit", current_limit)
         self.current_limit = max(1, min(initial_limit, max_workers))
         self.cpu_limit = self.current_limit
@@ -125,10 +128,10 @@ class ConcurrencyScheduler:
             self.config.get("scale_up_threshold_mb_s", 50) * 2,
         ) * 1024 * 1024
         scale_down_threshold = self.config.get("scale_down_threshold_mb_s", 200) * 1024 * 1024
-        cpu_scale_up_threshold = self.config.get("cpu_scale_up_threshold_percent", 65)
-        cpu_scale_down_threshold = self.config.get("cpu_scale_down_threshold_percent", 88)
-        memory_scale_down_available = self.config.get("memory_scale_down_available_mb", 1024) * 1024 * 1024
-        memory_scale_up_available = self.config.get("memory_scale_up_available_mb", 2048) * 1024 * 1024
+        cpu_scale_up_threshold = self.config["cpu_scale_up_threshold_percent"]
+        cpu_scale_down_threshold = self.config["cpu_scale_down_threshold_percent"]
+        memory_scale_down_available = self.config["memory_scale_down_available_mb"] * 1024 * 1024
+        memory_scale_up_available = self.config["memory_scale_up_available_mb"] * 1024 * 1024
         scale_up_streak_req = max(1, self.config.get("scale_up_streak_required", 3))
         scale_down_streak_req = max(1, self.config.get("scale_down_streak_required", 2))
         medium_backlog_threshold = max(1, self.config.get("medium_backlog_threshold", 8))

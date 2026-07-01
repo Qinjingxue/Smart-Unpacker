@@ -1,5 +1,6 @@
 from collections import defaultdict, deque
 
+from sunpack.config.advanced_defaults import advanced_config_value
 from sunpack.coordinator.scheduling.profile_cache import (
     clean_profile_adjustment,
     load_profile_adjustments,
@@ -11,20 +12,21 @@ from sunpack.coordinator.scheduling.resource_model import ResourceDemand, TaskRu
 
 class SchedulerFeedback:
     def __init__(self, config: dict):
-        self.feedback_window_size = max(4, int(config.get("throughput_window_size", 8) or 8))
-        self.throughput_regression_ratio = float(config.get("throughput_regression_ratio", 0.95) or 0.95)
+        config = {**advanced_config_value(("performance",)), **config}
+        self.feedback_window_size = max(4, int(config["throughput_window_size"]))
+        self.throughput_regression_ratio = float(config["throughput_regression_ratio"])
         self.feedback_window: deque[TaskRunFeedback] = deque(maxlen=self.feedback_window_size)
 
-        self.profile_window_size = max(4, int(config.get("profile_calibration_window_size", 4) or 4))
-        self.profile_regression_ratio = float(config.get("profile_regression_ratio", 0.80) or 0.80)
-        self.profile_improvement_ratio = float(config.get("profile_improvement_ratio", 1.20) or 1.20)
-        self.profile_calibration_max_delta = max(0, int(config.get("profile_calibration_max_delta", 1) or 1))
-        self.profile_calibration_min_parallel = max(1, int(config.get("profile_calibration_min_parallel", 2) or 2))
+        self.profile_window_size = max(4, int(config["profile_calibration_window_size"]))
+        self.profile_regression_ratio = float(config["profile_regression_ratio"])
+        self.profile_improvement_ratio = float(config["profile_improvement_ratio"])
+        self.profile_calibration_max_delta = max(0, int(config["profile_calibration_max_delta"]))
+        self.profile_calibration_min_parallel = max(1, int(config["profile_calibration_min_parallel"]))
         self.profile_feedback_windows: dict[str, deque[TaskRunFeedback]] = defaultdict(
             lambda: deque(maxlen=self.profile_window_size)
         )
 
-        self.profile_calibration_cache_enabled = bool(config.get("profile_calibration_cache_enabled", True))
+        self.profile_calibration_cache_enabled = bool(config["profile_calibration_cache_enabled"])
         self.profile_calibration_cache_path = resolve_profile_calibration_cache_path(
             config.get("profile_calibration_cache_path")
         )

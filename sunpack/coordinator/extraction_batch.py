@@ -52,6 +52,7 @@ from sunpack.support.path_keys import absolute_path_key
 from sunpack.support import repair_trace
 from sunpack.support import archive_knowledge_projection as knowledge_view
 from sunpack.i18n import I18nContext
+from sunpack.config.advanced_defaults import advanced_config_value
 
 
 @dataclass
@@ -147,11 +148,13 @@ class ExtractionBatchRunner:
         self.repair_loop_limits = RepairLoopLimits.from_config(self.repair_stage.config)
         self.verifier = VerificationScheduler(self.config, password_session=self.extractor.password_session)
         self.directory_password_contexts = DirectoryPasswordContextStore(self.config)
-        performance = self.config.get("performance", {}) if isinstance(self.config.get("performance"), dict) else {}
+        performance = advanced_config_value(("performance",))
+        if isinstance(self.config.get("performance"), dict):
+            performance.update(self.config["performance"])
         self.resource_inspector = ResourcePreflightInspector(
             password_session=self.extractor.password_session,
             rename_scheduler=self.rename_scheduler,
-            precise_resource_min_size_mb=performance.get("precise_resource_min_size_mb", 256),
+            precise_resource_min_size_mb=performance["precise_resource_min_size_mb"],
         )
 
     def set_progress_round(self, round_index: int, *, direct: bool = False) -> None:
@@ -325,7 +328,9 @@ class ExtractionBatchRunner:
         return dict(guard)
 
     def _build_scheduler_config(self, config: dict) -> dict:
-        performance = config.get("performance", {}) if isinstance(config.get("performance"), dict) else {}
+        performance = advanced_config_value(("performance",))
+        if isinstance(config.get("performance"), dict):
+            performance.update(config["performance"])
         scheduler_config = build_scheduler_profile_config(performance.get("scheduler_profile", "auto"))
         scheduler_config.update({
             key: value
@@ -715,7 +720,7 @@ class ExtractionBatchRunner:
     def _recovery_min_improvement(self) -> float:
         verification_config = self.verifier.config
         try:
-            return max(0.0, float(verification_config.get("recovery_min_improvement", 0.0) or 0.0))
+            return max(0.0, float(verification_config["recovery_min_improvement"] or 0.0))
         except (TypeError, ValueError):
             return 0.0
 

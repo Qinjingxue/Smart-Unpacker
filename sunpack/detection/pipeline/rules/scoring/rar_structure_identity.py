@@ -7,8 +7,6 @@ from sunpack.detection.pipeline.rules.registry import register_rule
 
 
 DEFAULT_RAR_STRUCTURE_SCORE = 5
-DEFAULT_RAR_MAGIC_SCORE = 2
-DEFAULT_RAR_BLOCK_WALK_SCORE = 6
 
 
 @register_rule(name="rar_structure_identity", layer="scoring")
@@ -25,14 +23,12 @@ class RarStructureIdentityScoreRule(RuleBase):
         },
         "magic_score": {
             "type": "int",
-            "required": False,
-            "default": DEFAULT_RAR_MAGIC_SCORE,
+            "required": True,
             "description": "Score for a RAR magic signature without stronger first-header structure.",
         },
         "block_walk_score": {
             "type": "int",
-            "required": False,
-            "default": DEFAULT_RAR_BLOCK_WALK_SCORE,
+            "required": True,
             "description": "Score for a RAR main header plus a valid following block/header.",
         },
     }
@@ -46,13 +42,13 @@ class RarStructureIdentityScoreRule(RuleBase):
         facts.set("file.probe_detected_archive", True)
         facts.set("file.probe_offset", 0)
         if structure.get("block_walk_ok"):
-            score = config.get("block_walk_score", DEFAULT_RAR_BLOCK_WALK_SCORE)
+            score = config["block_walk_score"]
             reason = f"RAR structure: RAR{structure.get('version') or ''} second block walk"
         elif structure.get("plausible"):
             score = config.get("structure_score", DEFAULT_RAR_STRUCTURE_SCORE)
             reason = f"RAR structure: RAR{structure.get('version') or ''} first header"
         else:
-            score = config.get("magic_score", DEFAULT_RAR_MAGIC_SCORE)
+            score = config["magic_score"]
             reason = "RAR structure: magic signature"
         if not score:
             return RuleEffect.pass_()

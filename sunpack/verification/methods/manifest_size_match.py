@@ -1,3 +1,4 @@
+from sunpack.config.advanced_defaults import advanced_named_config
 from sunpack.support.sevenzip_bridge import STATUS_DAMAGED, STATUS_OK
 from sunpack.verification.archive_state_manifest import ArchiveStateManifest, archive_state_manifest_for_evidence
 from sunpack.verification.evidence import VerificationEvidence
@@ -27,6 +28,7 @@ class ManifestSizeMatchMethod:
     name = "manifest_size_match"
 
     def verify(self, evidence: VerificationEvidence, config: dict) -> VerificationStepResult:
+        config = {**advanced_named_config(("verification", "methods"), self.name), **config}
         state_manifest = archive_state_manifest_for_evidence(
             evidence,
             max_items=max(1, int(config.get("max_expected_names", 2000) or 2000)),
@@ -64,8 +66,8 @@ class ManifestSizeMatchMethod:
 
         if expected_files > 0:
             file_tolerance = max(
-                int(config.get("file_count_abs_tolerance", 2) or 0),
-                int(expected_files * float(config.get("file_count_ratio_tolerance", 0.05) or 0.0)),
+                int(config["file_count_abs_tolerance"] or 0),
+                int(expected_files * float(config["file_count_ratio_tolerance"] or 0.0)),
             )
             lower_bound = max(0, expected_files - file_tolerance)
             upper_bound = expected_files + file_tolerance
@@ -90,8 +92,8 @@ class ManifestSizeMatchMethod:
 
         if expected_size > 0:
             size_tolerance = max(
-                int(config.get("size_abs_tolerance_bytes", 1024 * 1024) or 0),
-                int(expected_size * float(config.get("size_ratio_tolerance", 0.02) or 0.0)),
+                int(config["size_abs_tolerance_bytes"] or 0),
+                int(expected_size * float(config["size_ratio_tolerance"] or 0.0)),
             )
             lower_bound = max(0, expected_size - size_tolerance)
             upper_bound = expected_size + size_tolerance

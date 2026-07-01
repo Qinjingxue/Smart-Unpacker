@@ -10,9 +10,6 @@ from sunpack.detection.pipeline.rules.registry import register_rule
 DEFAULT_ZIP_EOCD_SCORE = 6
 DEFAULT_ZIP_EMBEDDED_EOCD_SCORE = 4
 DEFAULT_ZIP_EMPTY_EOCD_SCORE = 4
-DEFAULT_ZIP_MAGIC_SCORE = 2
-DEFAULT_ZIP_LOCAL_HEADER_SCORE = 4
-DEFAULT_ZIP_CD_WALK_SCORE = 7
 ZIP_START_MAGICS = (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")
 
 
@@ -45,20 +42,17 @@ class ZipStructureIdentityScoreRule(RuleBase):
         },
         "magic_score": {
             "type": "int",
-            "required": False,
-            "default": DEFAULT_ZIP_MAGIC_SCORE,
+            "required": True,
             "description": "Score for a ZIP-like magic signature at offset zero without stronger ZIP structure.",
         },
         "local_header_score": {
             "type": "int",
-            "required": False,
-            "default": DEFAULT_ZIP_LOCAL_HEADER_SCORE,
+            "required": True,
             "description": "Score for a plausible ZIP local file header without EOCD evidence.",
         },
         "cd_walk_score": {
             "type": "int",
-            "required": False,
-            "default": DEFAULT_ZIP_CD_WALK_SCORE,
+            "required": True,
             "description": "Score for ZIP EOCD, central directory entry walk, and local-header back references.",
         },
         "max_cd_entries_to_walk": {
@@ -85,7 +79,7 @@ class ZipStructureIdentityScoreRule(RuleBase):
             and structure.get("local_header_links_ok")
             and archive_offset == 0
         ):
-            score = config.get("cd_walk_score", DEFAULT_ZIP_CD_WALK_SCORE)
+            score = config["cd_walk_score"]
             reason = "ZIP structure: central directory entries and local header links"
         elif structure.get("plausible") and archive_offset > 0:
             score = config.get("embedded_eocd_score", DEFAULT_ZIP_EMBEDDED_EOCD_SCORE)
@@ -97,10 +91,10 @@ class ZipStructureIdentityScoreRule(RuleBase):
             score = config.get("empty_eocd_score", DEFAULT_ZIP_EMPTY_EOCD_SCORE)
             reason = "ZIP structure: empty EOCD"
         elif local_header.get("plausible"):
-            score = config.get("local_header_score", DEFAULT_ZIP_LOCAL_HEADER_SCORE)
+            score = config["local_header_score"]
             reason = "ZIP structure: local file header"
         else:
-            score = config.get("magic_score", DEFAULT_ZIP_MAGIC_SCORE)
+            score = config["magic_score"]
             reason = "ZIP structure: magic signature"
         if not score:
             return RuleEffect.pass_()

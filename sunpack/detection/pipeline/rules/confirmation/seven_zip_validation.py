@@ -23,8 +23,7 @@ class SevenZipValidationConfirmationRule(RuleBase):
         },
         "reject_on_failed": {
             "type": "bool",
-            "required": False,
-            "default": False,
+            "required": True,
             "description": "Reject when 7-Zip validation fails without encryption.",
         },
     }
@@ -48,6 +47,6 @@ class SevenZipValidationConfirmationRule(RuleBase):
             facts.set("file.validation_encrypted", True)
             return ConfirmationEffect.confirm("7z test encountered encrypted archive")
 
-        if config.get("reject_on_failed", False):
+        if config["reject_on_failed"]:
             return ConfirmationEffect.reject("7z test failed")
         return ConfirmationEffect.pass_()

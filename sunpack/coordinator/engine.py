@@ -71,9 +71,9 @@ class PipelineEngine:
     def __init__(self, config: dict):
         self.config = config
         pipeline_config = config.get("pipeline") if isinstance(config.get("pipeline"), dict) else {}
-        self.batch_window_seconds = max(0.0, float(pipeline_config.get("batch_window_seconds", 0.0)))
-        self.max_batch_requests = max(1, int(pipeline_config.get("max_batch_requests", 64)))
-        queue_capacity = max(1, int(pipeline_config.get("queue_capacity", 4096)))
+        self.batch_window_seconds = max(0.0, float(pipeline_config["batch_window_seconds"]))
+        self.max_batch_requests = max(1, int(pipeline_config["max_batch_requests"]))
+        queue_capacity = max(1, int(pipeline_config["queue_capacity"]))
         self._queue: queue.Queue = queue.Queue(maxsize=queue_capacity)
         self._runtime = _PipelineRuntime(config)
         self._thread: threading.Thread | None = None
