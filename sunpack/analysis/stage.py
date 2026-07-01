@@ -28,9 +28,18 @@ from sunpack.support import archive_knowledge_projection as knowledge_view
 
 class ArchiveAnalysisStage:
     """Own analysis-layer task batching, caching, and report projection."""
-    def __init__(self, config: dict[str, Any] | None = None, *, executor_pool=None, module_executor_pool=None):
+    def __init__(
+        self,
+        config: dict[str, Any] | None = None,
+        *,
+        executor_pool=None,
+        module_executor_pool=None,
+        workload_executor=None,
+    ):
         self.config = config or {}
         self.executor_pool = executor_pool
+        self.module_executor_pool = module_executor_pool
+        self.workload_executor = workload_executor
         analysis_config = self.config.get("analysis") if isinstance(self.config.get("analysis"), dict) else {}
         self.enabled = bool(analysis_config.get("enabled", True))
         self.scheduler = (
@@ -48,6 +57,21 @@ class ArchiveAnalysisStage:
         max_workers = self._task_max_workers(len(groups))
         if max_workers > 1:
             grouped_results: list[list[ArchiveTask]] = [[] for _ in tasks]
+            if self.workload_executor is not None:
+                completed_groups = self.workload_executor(
+                    groups,
+                    self._analyze_task_group,
+                    max_workers=max_workers,
+                    workload_label="analysis-task",
+                )
+                for group_result in completed_groups:
+                    for index, task_results in group_result:
+                        grouped_results[index] = task_results
+                return [
+                    task_result
+                    for task_results in grouped_results
+                    for task_result in task_results
+                ]
             executor_context = (
                 nullcontext(self.executor_pool)
                 if self.executor_pool is not None

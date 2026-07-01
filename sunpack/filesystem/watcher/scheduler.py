@@ -140,6 +140,11 @@ class WatchScheduler:
         self._active_output_roots: dict[str, int] = {}
         self._recent_output_roots: dict[str, float] = {}
         self._known_output_roots: list[str] = self.state.generated_output_roots()
+        if not self._relative_out_dir and not any(
+            _is_under_any_root(watch_root, [self.out_dir]) for watch_root in self.watch_roots
+        ):
+            self._known_output_roots = _compact_paths([*self._known_output_roots, self.out_dir])
+            self.state.remember_output_roots([self.out_dir])
         self._observer = Observer()
         self._started = False
         if pipeline_engine is None:
@@ -919,7 +924,7 @@ class WatchScheduler:
         if not roots:
             return
         with self._lock:
-            self._known_output_roots = _dedupe_paths([*self._known_output_roots, *roots])
+            self._known_output_roots = _compact_paths([*self._known_output_roots, *roots])
         self.state.remember_output_roots(roots)
 
     def _prune_recent_output_roots(self, now: float) -> None:
@@ -1143,6 +1148,16 @@ def _dedupe_paths(paths: Iterable[str]) -> list[str]:
         seen.add(key)
         output.append(normalized)
     return output
+
+
+def _compact_paths(paths: Iterable[str]) -> list[str]:
+    compacted: list[str] = []
+    for path in sorted(_dedupe_paths(paths), key=len):
+        if _is_under_any_root(path, compacted):
+            continue
+        compacted = [root for root in compacted if not _is_under_any_root(root, [path])]
+        compacted.append(path)
+    return compacted
 
 
 def _password_source_signature(

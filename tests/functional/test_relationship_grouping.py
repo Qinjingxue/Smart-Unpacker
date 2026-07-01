@@ -4,6 +4,7 @@ import zlib
 
 import pytest
 
+from sunpack.config.schema import normalize_config
 from sunpack.coordinator.scanner import ScanOrchestrator
 from tests.helpers.pipeline_engine import execute_pipeline
 from sunpack.coordinator.target_scan import build_fact_bags_for_targets
@@ -11,16 +12,16 @@ from sunpack.detection.scheduler import DetectionScheduler
 from tests.helpers.detection_config import with_detection_pipeline
 
 
-SCAN_CONFIG = with_detection_pipeline({
+SCAN_CONFIG = normalize_config(with_detection_pipeline({
     "thresholds": {"archive_score_threshold": 1, "maybe_archive_threshold": 1},
 }, precheck=[
     {"name": "size_range", "enabled": True, "gte": 0},
 ], scoring=[
     {"name": "extension", "enabled": True, "extension_score_groups": [{"score": 1, "extensions": [".zip", ".7z", ".rar", ".001"]}]},
     {"name": "embedded_payload_identity", "enabled": True},
-    {"name": "seven_zip_structure_identity", "enabled": True, "structure_score": 1},
-    {"name": "rar_structure_identity", "enabled": True, "structure_score": 1},
-])
+    {"name": "seven_zip_structure_identity", "enabled": True, "structure_score": 1, "magic_score": 1, "next_header_nid_score": 1},
+    {"name": "rar_structure_identity", "enabled": True, "structure_score": 1, "magic_score": 1, "block_walk_score": 1},
+]))
 
 
 def _minimal_7z_header() -> bytes:
@@ -156,7 +157,7 @@ def test_missing_middle_split_volume_is_failed_before_detection(tmp_path):
     summary = execute_pipeline(SCAN_CONFIG, str(root))
 
     assert summary.success_count == 0
-    assert any("missing or incomplete split volume" in item for item in summary.failed_tasks)
+    assert any("gap.7z.001" in item for item in summary.failed_tasks)
     assert any(failure.kind.value == "missing_volume" for failure in summary.failures)
 
 
@@ -174,7 +175,7 @@ def test_missing_head_split_volume_is_failed_before_detection(tmp_path):
     summary = execute_pipeline(SCAN_CONFIG, str(root))
 
     assert summary.success_count == 0
-    assert any("missing or incomplete split volume" in item for item in summary.failed_tasks)
+    assert any("lost.7z.002" in item for item in summary.failed_tasks)
     assert any(failure.kind.value == "missing_volume" for failure in summary.failures)
 
 

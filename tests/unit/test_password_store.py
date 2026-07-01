@@ -5,6 +5,7 @@ from sunpack.passwords.job import PasswordJob
 from sunpack.passwords.result import PasswordProbeResult, PasswordResolutionStatus
 from sunpack.passwords.scheduler import PasswordSearchResult, PasswordSearchStatus
 from sunpack.passwords import PasswordResolver, PasswordSession, PasswordStore
+from sunpack.passwords.internal.store import MAX_RECENT_PASSWORDS
 
 
 def test_password_store_orders_user_recent_builtin_and_dedupes():
@@ -29,6 +30,15 @@ def test_password_store_remembers_success_at_front():
 
     assert store.recent_passwords == ["secret", "old"]
     assert store.candidates() == ["secret", "old", "cli"]
+
+
+def test_password_store_bounds_recent_success_history():
+    store = PasswordStore.from_sources()
+    for index in range(MAX_RECENT_PASSWORDS + 20):
+        store.remember_success(f"password-{index}")
+
+    assert len(store.recent_passwords) == MAX_RECENT_PASSWORDS
+    assert store.recent_passwords[0] == f"password-{MAX_RECENT_PASSWORDS + 19}"
 
 
 class FakePasswordTester:

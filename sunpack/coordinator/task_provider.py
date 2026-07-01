@@ -35,7 +35,12 @@ class ArchiveTaskProvider:
         rescue_prepass = rescue_config.setdefault("analysis", {}).setdefault("prepass", {})
         rescue_prepass.setdefault("full_scan_max_bytes", int(detector_config.get("content_structure_rescue_full_scan_max_bytes", 64 * 1024 * 1024) or 0))
         rescue_prepass.setdefault("deep_scan", bool(detector_config.get("content_structure_rescue_deep_scan", False)))
-        self.rescue_analysis_stage = ArchiveAnalysisStage(rescue_config)
+        self.rescue_analysis_stage = ArchiveAnalysisStage(
+            rescue_config,
+            executor_pool=self.analysis_stage.executor_pool,
+            module_executor_pool=self.analysis_stage.module_executor_pool,
+            workload_executor=self.analysis_stage.workload_executor,
+        )
         self.failed_candidates: list[str] = []
         self.failed_candidate_failures: list[FailureInfo] = []
 

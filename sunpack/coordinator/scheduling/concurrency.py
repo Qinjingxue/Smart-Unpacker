@@ -1,5 +1,7 @@
 import os
 import threading
+import time
+from itertools import count
 
 import psutil
 
@@ -25,7 +27,8 @@ class ConcurrencyScheduler:
         self.config.update(config)
         config = self.config
         initial_limit = config.get("initial_concurrency_limit", current_limit)
-        self.current_limit = max(1, min(initial_limit, max_workers))
+        self.initial_limit = max(1, min(initial_limit, max_workers))
+        self.current_limit = self.initial_limit
         self.cpu_limit = self.current_limit
         self.io_limit = self.current_limit
         self.memory_limit = self.current_limit
@@ -41,6 +44,12 @@ class ConcurrencyScheduler:
         self.active_io_tokens = 0
         self.active_memory_tokens = 0
         self.pending_task_estimate = 0
+        self.pipeline_request_backlog = 0
+        self._workloads: dict[int, tuple[int, int, str]] = {}
+        self._workload_ids = count(1)
+        self.idle_decay_seconds = max(1.0, float(config.get("scheduler_idle_decay_seconds", 30.0) or 30.0))
+        self._last_activity_at = time.monotonic()
+        self._last_idle_decay_at = self._last_activity_at
 
         self.scale_up_streak = 0
         self.scale_down_streak = 0
@@ -77,14 +86,21 @@ class ConcurrencyScheduler:
         return self.feedback.profile_calibration_cache_path
 
     def start(self):
-        self.is_running = True
-        self.thread = threading.Thread(target=self._adjust_loop, daemon=True)
-        self.thread.start()
+        with self.cond:
+            if self.is_running:
+                return
+            self.is_running = True
+            self._wake_event.clear()
+            self.thread = threading.Thread(target=self._adjust_loop, name="sunpack-resource-scheduler", daemon=True)
+            self.thread.start()
 
     def stop(self):
-        self.is_running = False
-        self._wake_event.set()
-        if self.thread:
+        with self.cond:
+            was_running = self.is_running
+            self.is_running = False
+        if was_running:
+            self._wake_event.set()
+        if was_running and self.thread:
             self.thread.join(timeout=2.0)
         self._save_profile_adjustments()
 
@@ -140,6 +156,7 @@ class ConcurrencyScheduler:
         high_floor_workers = max(medium_floor_workers, self.config.get("high_floor_workers", 3))
 
         with self.cond:
+            self._decay_idle_locked(time.monotonic())
             backlog = self.pending_task_estimate
             if cpu_percent is None:
                 effective_cpu_percent = self.live_process_cpu_percent
@@ -195,9 +212,59 @@ class ConcurrencyScheduler:
             if old_limits != (self.cpu_limit, self.io_limit, self.memory_limit, self.current_limit):
                 self.cond.notify_all()
 
-    def update_pending_task_estimate(self, pending_count: int, futures_count: int = 0):
+    def set_pipeline_request_backlog(self, request_count: int) -> None:
         with self.cond:
-            self.pending_task_estimate = pending_count + futures_count + self.active_workers
+            self.pipeline_request_backlog = max(0, int(request_count or 0))
+            self._refresh_pending_estimate_locked()
+
+    def register_workload(self, pending_count: int, *, label: str = "") -> int:
+        with self.cond:
+            workload_id = next(self._workload_ids)
+            self._workloads[workload_id] = (max(0, int(pending_count or 0)), 0, str(label or ""))
+            self._mark_activity_locked()
+            self._refresh_pending_estimate_locked()
+            return workload_id
+
+    def update_workload(self, workload_id: int, pending_count: int, futures_count: int = 0) -> None:
+        with self.cond:
+            if workload_id not in self._workloads:
+                raise RuntimeError(f"unknown scheduler workload: {workload_id}")
+            label = self._workloads[workload_id][2]
+            self._workloads[workload_id] = (
+                max(0, int(pending_count or 0)),
+                max(0, int(futures_count or 0)),
+                label,
+            )
+            self._mark_activity_locked()
+            self._refresh_pending_estimate_locked()
+
+    def unregister_workload(self, workload_id: int) -> None:
+        with self.cond:
+            self._workloads.pop(workload_id, None)
+            self._refresh_pending_estimate_locked()
+
+    def pressure_snapshot(self) -> dict:
+        with self.cond:
+            return {
+                "pipeline_requests": self.pipeline_request_backlog,
+                "pending_tasks": self.pending_task_estimate,
+                "active_workers": self.active_workers,
+                "active_tokens": {
+                    "cpu": self.active_cpu_tokens,
+                    "io": self.active_io_tokens,
+                    "memory": self.active_memory_tokens,
+                },
+                "limits": {
+                    "cpu": self.cpu_limit,
+                    "io": self.io_limit,
+                    "memory": self.memory_limit,
+                    "current": self.current_limit,
+                },
+                "workloads": {
+                    workload_id: {"pending": pending, "running": running, "label": label}
+                    for workload_id, (pending, running, label) in self._workloads.items()
+                },
+            }
 
     def active_workers_snapshot(self) -> int:
         with self.cond:
@@ -224,6 +291,7 @@ class ConcurrencyScheduler:
             return
         with self.cond:
             self.feedback.record_task_feedback(feedback)
+            self._mark_activity_locked()
 
     def record_process_sample(
         self,
@@ -235,6 +303,7 @@ class ConcurrencyScheduler:
         cpu_count = os.cpu_count() or 1
         normalized_cpu = max(0.0, float(cpu_percent or 0.0)) / max(1, cpu_count)
         with self.cond:
+            self._mark_activity_locked()
             self.live_process_cpu_percent = max(self.live_process_cpu_percent, normalized_cpu)
             self.live_process_memory_bytes = max(self.live_process_memory_bytes, max(0, int(memory_bytes or 0)))
             self.live_process_io_bytes += max(0, int(io_bytes or 0))
@@ -254,6 +323,7 @@ class ConcurrencyScheduler:
                 self.cond.wait()
             self.active_workers += 1
             self._add_demand_locked(demand_value)
+            self._mark_activity_locked()
 
     def try_acquire_slot(self, token_cost: int = 1, demand: ResourceDemand | dict | None = None) -> bool:
         demand_value = demand_from_value(demand or token_cost)
@@ -262,6 +332,7 @@ class ConcurrencyScheduler:
                 return False
             self.active_workers += 1
             self._add_demand_locked(demand_value)
+            self._mark_activity_locked()
             return True
 
     def fit_score(self, demand: ResourceDemand | dict) -> int | None:
@@ -283,7 +354,42 @@ class ConcurrencyScheduler:
             self.active_io_tokens = max(0, self.active_io_tokens - demand_value.io)
             self.active_memory_tokens = max(0, self.active_memory_tokens - demand_value.memory)
             self._refresh_active_scalar_locked()
+            self._mark_activity_locked()
             self.cond.notify_all()
+
+    def _refresh_pending_estimate_locked(self) -> None:
+        workload_pressure = sum(pending + running for pending, running, _label in self._workloads.values())
+        self.pending_task_estimate = self.pipeline_request_backlog + workload_pressure
+        if self.pending_task_estimate > 0:
+            self._mark_activity_locked()
+        self.cond.notify_all()
+
+    def _mark_activity_locked(self) -> None:
+        self._last_activity_at = time.monotonic()
+
+    def _decay_idle_locked(self, now: float) -> None:
+        if self.pending_task_estimate > 0 or self.active_workers > 0:
+            return
+        if now - self._last_activity_at < self.idle_decay_seconds:
+            return
+        if now - self._last_idle_decay_at < self.idle_decay_seconds:
+            return
+        self._last_idle_decay_at = now
+        self.cpu_limit = _step_toward(self.cpu_limit, self.initial_limit)
+        self.io_limit = _step_toward(self.io_limit, self.initial_limit)
+        self.memory_limit = _step_toward(self.memory_limit, self.initial_limit)
+        self._refresh_current_limit_locked()
+        self.scale_up_streak = 0
+        self.scale_down_streak = 0
+        self.cpu_scale_up_streak = 0
+        self.cpu_scale_down_streak = 0
+        self.io_scale_up_streak = 0
+        self.io_scale_down_streak = 0
+        self.memory_scale_up_streak = 0
+        self.memory_scale_down_streak = 0
+        self.live_process_cpu_percent = 0.0
+        self.live_process_io_bytes = 0
+        self.feedback.decay_idle()
 
     def _effective_budget_locked(self):
         normalized = self.base_budget.normalized()
@@ -436,3 +542,11 @@ class ConcurrencyScheduler:
         except Exception:
             with self.cond:
                 self.feedback.mark_save_failed()
+
+
+def _step_toward(value: int, target: int) -> int:
+    if value < target:
+        return value + 1
+    if value > target:
+        return value - 1
+    return value

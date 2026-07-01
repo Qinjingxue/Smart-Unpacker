@@ -60,12 +60,12 @@ CONFIGS: dict[str, dict[str, Any]] = {
     ], scoring=[
         {"name": "extension", "enabled": True, "extension_score_groups": [{"score": 5, "extensions": [".zip", ".7z", ".rar", ".gz", ".bz2", ".xz", ".001"]}]},
         {"name": "embedded_payload_identity", "enabled": True},
-        {"name": "seven_zip_structure_identity", "enabled": True},
-        {"name": "rar_structure_identity", "enabled": True},
+        {"name": "seven_zip_structure_identity", "enabled": True, "magic_score": 5, "next_header_nid_score": 5},
+        {"name": "rar_structure_identity", "enabled": True, "magic_score": 5, "block_walk_score": 5},
         {"name": "scene_penalty", "enabled": True},
     ], confirmation=[
-        {"name": "seven_zip_probe", "enabled": True},
-        {"name": "seven_zip_validation", "enabled": True},
+        {"name": "seven_zip_probe", "enabled": True, "reject_executable_container": False, "reject_clear_non_archive": True},
+        {"name": "seven_zip_validation", "enabled": True, "reject_on_failed": False},
     ]),
     "archive_scan_deep_embedded": with_detection_pipeline({
         "thresholds": {"archive_score_threshold": 6, "maybe_archive_threshold": 3},
@@ -75,12 +75,12 @@ CONFIGS: dict[str, dict[str, Any]] = {
     ], scoring=[
         {"name": "extension", "enabled": True, "extension_score_groups": [{"score": 5, "extensions": [".zip", ".7z", ".rar", ".gz", ".bz2", ".xz", ".001"]}]},
         {"name": "embedded_payload_identity", "enabled": True, "embedded_payload_scan_level": "deep"},
-        {"name": "seven_zip_structure_identity", "enabled": True},
-        {"name": "rar_structure_identity", "enabled": True},
+        {"name": "seven_zip_structure_identity", "enabled": True, "magic_score": 5, "next_header_nid_score": 5},
+        {"name": "rar_structure_identity", "enabled": True, "magic_score": 5, "block_walk_score": 5},
         {"name": "scene_penalty", "enabled": True},
     ], confirmation=[
-        {"name": "seven_zip_probe", "enabled": True},
-        {"name": "seven_zip_validation", "enabled": True},
+        {"name": "seven_zip_probe", "enabled": True, "reject_executable_container": False, "reject_clear_non_archive": True},
+        {"name": "seven_zip_validation", "enabled": True, "reject_on_failed": False},
     ]),
 }
 

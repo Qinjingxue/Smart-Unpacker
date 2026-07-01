@@ -409,7 +409,7 @@ class WatchStateStore:
         return list(self.owned_output_roots)
 
     def remember_output_roots(self, roots: Iterable[str]) -> None:
-        updated = _dedupe_paths([*self.owned_output_roots, *roots])
+        updated = _compact_paths([*self.owned_output_roots, *roots])
         if updated != self.owned_output_roots:
             self.owned_output_roots = updated
             self.save()
@@ -433,6 +433,17 @@ def _dedupe_paths(paths: Iterable[str]) -> list[str]:
         seen.add(key)
         output.append(normalized)
     return output
+
+
+def _compact_paths(paths: Iterable[str]) -> list[str]:
+    compacted: list[str] = []
+    for path in sorted(_dedupe_paths(paths), key=len):
+        key = _path_key(path)
+        if any(_is_path_under(key, _path_key(root)) for root in compacted):
+            continue
+        compacted = [root for root in compacted if not _is_path_under(_path_key(root), key)]
+        compacted.append(path)
+    return compacted
 
 
 def _path_matches(path: str, expected: str, *, recursive: bool) -> bool:

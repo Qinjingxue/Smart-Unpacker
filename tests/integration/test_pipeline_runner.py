@@ -35,6 +35,8 @@ def test_pipeline_runner_uses_tmp_path_and_applies_success_postprocess(tmp_path,
     config = normalize_config(with_detection_pipeline({
         "thresholds": {"archive_score_threshold": 5, "maybe_archive_threshold": 3},
         "recursive_extract": "1",
+        "repair": {"enabled": False},
+        "verification": {"enabled": False, "methods": []},
         "post_extract": {
             "archive_cleanup_mode": "d",
             "flatten_single_directory": True,
@@ -76,6 +78,8 @@ def test_pipeline_runner_uses_tmp_path_and_applies_success_postprocess(tmp_path,
 def test_pipeline_runner_exposes_recent_passwords_without_password_manager():
     engine = PipelineEngine(normalize_config(with_detection_pipeline({
         "recursive_extract": "1",
+        "repair": {"enabled": False},
+        "verification": {"enabled": False, "methods": []},
         "post_extract": {
             "archive_cleanup_mode": "k",
             "flatten_single_directory": False,
@@ -98,6 +102,8 @@ def test_batch_does_not_treat_existing_same_name_directory_as_output(tmp_path, m
 
     engine = PipelineEngine(normalize_config(with_detection_pipeline({
         "recursive_extract": "1",
+        "repair": {"enabled": False},
+        "verification": {"enabled": False, "methods": []},
         "post_extract": {
             "archive_cleanup_mode": "k",
             "flatten_single_directory": False,
@@ -117,7 +123,11 @@ def test_batch_does_not_treat_existing_same_name_directory_as_output(tmp_path, m
         return ExtractionResult(success=True, archive=task.main_path, out_dir=out_dir, all_parts=task.all_parts)
 
     monkeypatch.setattr(engine.extractor, "extract", fake_extract)
-    engine.batch_runner.execute([task_for(archive), task_for(nested)])
+    engine.start()
+    try:
+        engine.batch_runner.execute([task_for(archive), task_for(nested)])
+    finally:
+        engine.close()
 
     assert extracted == [str(archive), str(nested)]
     engine.close()
@@ -132,6 +142,8 @@ def test_output_root_preserves_tree_and_recursive_scan_uses_success_outputs(tmp_
 
     config = normalize_config(with_detection_pipeline({
         "recursive_extract": "2",
+        "repair": {"enabled": False},
+        "verification": {"enabled": False, "methods": []},
         "output": {
             "root": str(output_root),
             "common_root": str(input_root),
@@ -157,7 +169,11 @@ def test_output_root_preserves_tree_and_recursive_scan_uses_success_outputs(tmp_
 
     monkeypatch.setattr(engine.extractor, "extract", fake_extract)
 
-    scan_roots = engine.batch_runner.execute([task])
+    engine.start()
+    try:
+        scan_roots = engine.batch_runner.execute([task])
+    finally:
+        engine.close()
 
     expected_out_dir = output_root / "sub" / "payload"
     assert expected_out_dir.exists()

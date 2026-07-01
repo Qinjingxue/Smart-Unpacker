@@ -32,10 +32,10 @@ def edge_config(passwords: list[str] | None = None) -> dict:
     ], scoring=[
         {"name": "extension", "enabled": True, "extension_score_groups": [{"score": 5, "extensions": [".zip", ".7z", ".rar", ".tar", ".gz", ".bz2", ".xz", ".zst", ".001"]}]},
         {"name": "embedded_payload_identity", "enabled": True},
-        {"name": "seven_zip_structure_identity", "enabled": True},
-        {"name": "rar_structure_identity", "enabled": True},
+        {"name": "seven_zip_structure_identity", "enabled": True, "magic_score": 5, "next_header_nid_score": 5},
+        {"name": "rar_structure_identity", "enabled": True, "magic_score": 5, "block_walk_score": 5},
     ], confirmation=[
-        {"name": "seven_zip_probe", "enabled": True},
+        {"name": "seven_zip_probe", "enabled": True, "reject_executable_container": False, "reject_clear_non_archive": True},
         {"name": "seven_zip_validation", "enabled": True, "reject_on_failed": False},
     ]))
 
@@ -277,7 +277,7 @@ def test_real_archive_edge_password_archives_require_matching_password(tmp_path,
     require_7z()
     case = FACTORY.create(tmp_path, f"pwd_single_{archive_format}", archive_format, password=PASSWORD)
 
-    assert_failure_contains(case, {"Archive password is required"})
+    assert_failure_contains(case, {"压缩包需要密码"})
     assert_success(case, passwords=[PASSWORD])
 
 

@@ -54,7 +54,7 @@ def test_partial_extraction_manifest_produces_accept_partial_assessment(tmp_path
     assert verification.failed_files == 1
 
 
-def test_repair_loop_keeps_original_partial_when_repaired_attempt_is_worse(tmp_path):
+def test_repair_loop_keeps_original_partial_when_repaired_attempt_is_worse(tmp_path, pipeline_resource_scheduler):
     archive = tmp_path / "broken.zip"
     archive.write_bytes(b"broken")
     out_dir = tmp_path / "out"
@@ -63,12 +63,14 @@ def test_repair_loop_keeps_original_partial_when_repaired_attempt_is_worse(tmp_p
         RunContext(),
         extractor,
         _FakeOutputScanPolicy(),
+        pipeline_resource_scheduler,
         config={
             "repair": {"enabled": True, "workspace": str(tmp_path / "repair"), "max_repair_rounds_per_task": 1},
             "verification": {
                 "enabled": True,
                 "methods": [{"name": "extraction_exit_signal"}, {"name": "output_presence"}],
                 "partial_min_completeness": 0.1,
+                "recovery_min_improvement": 0.0,
             },
         },
     )
@@ -104,7 +106,7 @@ def test_output_presence_ignores_sunpack_manifest_files(tmp_path):
     assert verification.issues[0].code == "fail.output_empty"
 
 
-def test_main_flow_accepts_recoverable_partial_after_repair_has_no_candidate(tmp_path):
+def test_main_flow_accepts_recoverable_partial_after_repair_has_no_candidate(tmp_path, pipeline_resource_scheduler):
     archive = tmp_path / "broken.zip"
     archive.write_bytes(b"broken")
     out_dir = tmp_path / "out"
@@ -138,12 +140,14 @@ def test_main_flow_accepts_recoverable_partial_after_repair_has_no_candidate(tmp
         RunContext(),
         _SingleResultExtractor(result),
         _FakeOutputScanPolicy(),
+        pipeline_resource_scheduler,
         config={
             "repair": {"enabled": True, "workspace": str(tmp_path / "repair"), "max_repair_rounds_per_task": 1},
             "verification": {
                 "enabled": True,
                 "methods": [{"name": "extraction_exit_signal"}],
                 "partial_min_completeness": 0.1,
+                "recovery_min_improvement": 0.0,
             },
         },
     )

@@ -123,6 +123,7 @@ class ExtractionBatchRunner:
         context: RunContext,
         extractor: ExtractionScheduler,
         output_scan_policy: NestedOutputScanPolicy,
+        runtime_scheduler: ConcurrencyScheduler,
         rename_scheduler: RenameScheduler | None = None,
         config: dict | None = None,
         analysis_stage: ArchiveAnalysisStage | None = None,
@@ -132,13 +133,17 @@ class ExtractionBatchRunner:
         self.context = context
         self.extractor = extractor
         self.output_scan_policy = output_scan_policy
+        self.runtime_scheduler = runtime_scheduler
         self.rename_scheduler = rename_scheduler or RenameScheduler()
         self.config = config or {}
         cli_config = self.config.get("cli") if isinstance(self.config.get("cli"), dict) else {}
         self.i18n = I18nContext(cli_config.get("language"))
         self.scheduler_config = self._build_scheduler_config(self.config)
         self.max_workers = resolve_max_workers()
-        self.analysis_stage = analysis_stage or ArchiveAnalysisStage(self.config)
+        self.analysis_stage = analysis_stage or ArchiveAnalysisStage(
+            self.config,
+            workload_executor=self._execute_analysis_workload,
+        )
         self.progress_reporter = progress_reporter
         self.executor_pool = executor_pool
         self.progress_round_index = 1
@@ -238,13 +243,11 @@ class ExtractionBatchRunner:
         if not ready_tasks:
             return skipped_results
 
-        initial_limit = self.scheduler_config.get("initial_concurrency_limit", 4)
-        scheduler = ConcurrencyScheduler(
-            self.scheduler_config,
-            current_limit=initial_limit,
+        executor = TaskExecutor(
+            self.runtime_scheduler,
             max_workers=self.max_workers,
+            executor_pool=self.executor_pool,
         )
-        executor = TaskExecutor(scheduler, max_workers=self.max_workers, executor_pool=self.executor_pool)
         def execute_one(task, runtime_scheduler):
             planned_out_dir = output_dir_resolver(task)
             outcome = self._extract_verify_with_retries(task, planned_out_dir, runtime_scheduler)
@@ -252,7 +255,11 @@ class ExtractionBatchRunner:
             self._report_task_finished(task, outcome)
             return task, outcome
 
-        return skipped_results + executor.execute_all(ready_tasks, execute_one)
+        return skipped_results + executor.execute_all(
+            ready_tasks,
+            execute_one,
+            workload_label="extraction",
+        )
 
     def _report_task_started(self, task: ArchiveTask) -> None:
         if self.progress_reporter is not None:
@@ -361,7 +368,12 @@ class ExtractionBatchRunner:
             out_dir = output_dir_resolver(item.task)
             return item.index, item.task, out_dir, self.extractor.inspect(item.task, out_dir)
 
-        results = self._execute_indexed_stage(indexed, max_workers=max_workers, worker=inspect_one)
+        results = self._execute_indexed_stage(
+            indexed,
+            max_workers=max_workers,
+            worker=inspect_one,
+            workload_label="preflight-inspect",
+        )
         return sorted(results, key=lambda item: item[0])
 
     def _inspect_resource_profiles(self, tasks: list[ArchiveTask]) -> None:
@@ -381,18 +393,38 @@ class ExtractionBatchRunner:
             indexed,
             max_workers=max_workers,
             worker=lambda item: (item.index, self.resource_inspector.inspect(item.task)),
+            workload_label="resource-preflight",
         )
 
-    def _execute_indexed_stage(self, tasks: list[_IndexedStageTask], *, max_workers: int, worker) -> list[Any]:
-        scheduler_config = dict(self.scheduler_config)
-        scheduler_config["initial_concurrency_limit"] = max_workers
-        scheduler = ConcurrencyScheduler(
-            scheduler_config,
-            current_limit=max_workers,
+    def _execute_indexed_stage(
+        self,
+        tasks: list[_IndexedStageTask],
+        *,
+        max_workers: int,
+        worker,
+        workload_label: str,
+    ) -> list[Any]:
+        executor = TaskExecutor(
+            self.runtime_scheduler,
             max_workers=max_workers,
+            executor_pool=self.executor_pool,
         )
-        executor = TaskExecutor(scheduler, max_workers=max_workers, executor_pool=self.executor_pool)
-        return executor.execute_all(tasks, worker)
+        return executor.execute_all(tasks, worker, workload_label=workload_label)
+
+    def _execute_analysis_workload(
+        self,
+        tasks,
+        worker,
+        *,
+        max_workers: int,
+        workload_label: str,
+    ):
+        executor = TaskExecutor(
+            self.runtime_scheduler,
+            max_workers=max_workers,
+            executor_pool=self.executor_pool,
+        )
+        return executor.execute_all(tasks, worker, workload_label=workload_label)
 
     def _stage_max_workers(
         self,

@@ -567,7 +567,7 @@ def test_windows_reserved_ads_and_case_conflicts_are_counted_as_blocked_or_disti
     assert "case/a.txt" in states
 
 
-def test_resource_guard_blocks_many_entry_archive_as_guarded_not_generic_failure(tmp_path):
+def test_resource_guard_blocks_many_entry_archive_as_guarded_not_generic_failure(tmp_path, pipeline_resource_scheduler):
     archive = _zip_with_many_entries(tmp_path, count=260)
     out_dir = tmp_path / "out"
     task = _task(archive)
@@ -588,6 +588,7 @@ def test_resource_guard_blocks_many_entry_archive_as_guarded_not_generic_failure
         RunContext(),
         _FailIfCalledExtractor(archive, out_dir),
         _NoNestedOutputScanPolicy(),
+        pipeline_resource_scheduler,
         config={
             "performance": {
                 "resource_guard": {
@@ -611,7 +612,7 @@ def test_resource_guard_blocks_many_entry_archive_as_guarded_not_generic_failure
     assert not out_dir.exists()
 
 
-def test_resource_guard_uses_native_archive_analysis_before_worker_for_zip_bomb(tmp_path):
+def test_resource_guard_uses_native_archive_analysis_before_worker_for_zip_bomb(tmp_path, pipeline_resource_scheduler):
     _require_7z_dll_or_skip()
     archive = _zip_high_compression_resource_guard_sample(tmp_path)
     out_dir = tmp_path / "guarded-native-out"
@@ -620,6 +621,7 @@ def test_resource_guard_uses_native_archive_analysis_before_worker_for_zip_bomb(
         RunContext(),
         _FailIfCalledExtractor(archive, out_dir),
         _NoNestedOutputScanPolicy(),
+        pipeline_resource_scheduler,
         config={
             "performance": {
                 "precise_resource_min_size_mb": 0,
@@ -741,7 +743,7 @@ def test_patch_stack_crop_then_cd_rebuild_then_payload_partial_uses_same_state(t
                if source.get("method") == "archive_test_crc")
 
 
-def test_recovery_report_includes_failure_kind_coverage_and_patch_lineage(tmp_path):
+def test_recovery_report_includes_failure_kind_coverage_and_patch_lineage(tmp_path, pipeline_resource_scheduler):
     sfx, patch_stack, expected_digest = _sfx_zip_with_payload_damage_and_bad_cd_patch_stack(tmp_path)
     task = _task(sfx, detected_ext="zip")
     task.set_archive_state(ArchiveState.from_archive_input(task.archive_input(), patches=patch_stack))
@@ -762,6 +764,7 @@ def test_recovery_report_includes_failure_kind_coverage_and_patch_lineage(tmp_pa
         RunContext(),
         _NoopExtractor(out_dir),
         _NoNestedOutputScanPolicy(),
+        pipeline_resource_scheduler,
         config={"verification": {"enabled": True, "methods": []}},
     )
 
@@ -780,7 +783,7 @@ def test_recovery_report_includes_failure_kind_coverage_and_patch_lineage(tmp_pa
     assert bad[0]["failure_kind"] in {"checksum_error", "data_error", "corrupted_data"}
 
 
-def test_recovery_report_schema_contract_for_partial_result(tmp_path):
+def test_recovery_report_schema_contract_for_partial_result(tmp_path, pipeline_resource_scheduler):
     archive, out_dir, _completed, worker_result = _run_payload_damaged_zip_worker(tmp_path)
     verification = _verify_worker_output(archive, out_dir, worker_result, detected_ext="zip")
     result = ExtractionResult(
@@ -797,6 +800,7 @@ def test_recovery_report_schema_contract_for_partial_result(tmp_path):
         RunContext(),
         _NoopExtractor(out_dir),
         _NoNestedOutputScanPolicy(),
+        pipeline_resource_scheduler,
         config={"verification": {"enabled": True, "methods": []}},
     )
 
@@ -811,7 +815,7 @@ def test_recovery_report_schema_contract_for_partial_result(tmp_path):
     assert any(item["archive_path"] == "bad.bin" and item["failure_kind"] for item in report["files"])
 
 
-def test_repair_terminal_missing_volume_feedback_stops_later_repairs(tmp_path):
+def test_repair_terminal_missing_volume_feedback_stops_later_repairs(tmp_path, pipeline_resource_scheduler):
     archive = tmp_path / "missing-tail.7z.001"
     archive.write_bytes(b"7z\xbc\xaf\x27\x1cmissing tail placeholder")
     out_dir = tmp_path / "out"
@@ -820,9 +824,14 @@ def test_repair_terminal_missing_volume_feedback_stops_later_repairs(tmp_path):
         RunContext(),
         extractor,
         _NoNestedOutputScanPolicy(),
+        pipeline_resource_scheduler,
         config={
             "repair": {"enabled": True, "workspace": str(tmp_path / "repair"), "max_repair_rounds_per_task": 3},
-            "verification": {"enabled": True, "methods": [{"name": "extraction_exit_signal"}]},
+            "verification": {
+                "enabled": True,
+                "methods": [{"name": "extraction_exit_signal"}],
+                "recovery_min_improvement": 0.0,
+            },
         },
     )
     repair_scheduler = _TerminalMissingVolumeRepairScheduler()
@@ -932,7 +941,7 @@ def test_encrypted_sfx_patch_partial_preserves_password_priority(tmp_path):
     assert verification.archive_coverage.failed_files == 1
 
 
-def test_missing_tail_volume_partial_outputs_do_not_become_partial_success(tmp_path):
+def test_missing_tail_volume_partial_outputs_do_not_become_partial_success(tmp_path, pipeline_resource_scheduler):
     archive = tmp_path / "tail-missing.7z.001"
     archive.write_bytes(b"7z\xbc\xaf\x27\x1cmissing tail placeholder")
     out_dir = tmp_path / "out"
@@ -941,6 +950,7 @@ def test_missing_tail_volume_partial_outputs_do_not_become_partial_success(tmp_p
         RunContext(),
         extractor,
         _NoNestedOutputScanPolicy(),
+        pipeline_resource_scheduler,
         config={
             "repair": {"enabled": True, "workspace": str(tmp_path / "repair"), "max_repair_rounds_per_task": 1},
             "verification": {
@@ -948,6 +958,7 @@ def test_missing_tail_volume_partial_outputs_do_not_become_partial_success(tmp_p
                 "methods": [{"name": "extraction_exit_signal"}, {"name": "output_presence"}],
                 "partial_min_completeness": 0.2,
                 "partial_accept_threshold": 0.2,
+                "recovery_min_improvement": 0.0,
             },
         },
     )
@@ -1101,7 +1112,7 @@ def test_main_flow_recurses_into_truncated_tar_gz_partial_tar_stream(tmp_path):
     assert "f2.bin" not in extracted_names
 
 
-def test_batch_flow_repair_structure_then_accepts_best_effort_payload_partial(tmp_path):
+def test_batch_flow_repair_structure_then_accepts_best_effort_payload_partial(tmp_path, pipeline_resource_scheduler):
     _require_worker_or_skip()
     _require_7z_dll_or_skip()
     input_root = tmp_path / "input"
@@ -1128,10 +1139,17 @@ def test_batch_flow_repair_structure_then_accepts_best_effort_payload_partial(tm
             ],
             "partial_min_completeness": 0.2,
             "partial_accept_threshold": 0.2,
+            "recovery_min_improvement": 0.0,
         },
     }
     extractor = _StructureFailureThenWorkerExtractor(repaired_archive)
-    runner = ExtractionBatchRunner(RunContext(), extractor, _NoNestedOutputScanPolicy(), config=config)
+    runner = ExtractionBatchRunner(
+        RunContext(),
+        extractor,
+        _NoNestedOutputScanPolicy(),
+        pipeline_resource_scheduler,
+        config=config,
+    )
     repair_scheduler = _ApplyRepairedArchiveScheduler(repaired_archive)
     runner.repair_stage.scheduler = repair_scheduler
     task = _task(archive)
@@ -1394,9 +1412,15 @@ def _zip_tar_gz_recursive_pipeline_config(tmp_path: Path) -> dict:
             "enabled": True,
             "extension_score_groups": [{"score": 5, "extensions": [".zip", ".tar", ".gz", ".tgz", ".tar.gz"]}],
         },
-        {"name": "zip_structure_identity", "enabled": True},
-        {"name": "compression_stream_identity", "enabled": True},
-        {"name": "tar_structure_identity", "enabled": True},
+        {
+            "name": "zip_structure_identity",
+            "enabled": True,
+            "magic_score": 5,
+            "local_header_score": 5,
+            "cd_walk_score": 5,
+        },
+        {"name": "compression_stream_identity", "enabled": True, "magic_score": 5},
+        {"name": "tar_structure_identity", "enabled": True, "entry_walk_score": 5},
     ]))
 
 
@@ -1432,8 +1456,19 @@ def _zip_7z_recursive_pipeline_config(tmp_path: Path) -> dict:
             "enabled": True,
             "extension_score_groups": [{"score": 5, "extensions": [".zip", ".7z", ".001"]}],
         },
-        {"name": "zip_structure_identity", "enabled": True},
-        {"name": "seven_zip_structure_identity", "enabled": True},
+        {
+            "name": "zip_structure_identity",
+            "enabled": True,
+            "magic_score": 5,
+            "local_header_score": 5,
+            "cd_walk_score": 5,
+        },
+        {
+            "name": "seven_zip_structure_identity",
+            "enabled": True,
+            "magic_score": 5,
+            "next_header_nid_score": 5,
+        },
     ]))
 
 
@@ -1469,8 +1504,8 @@ def _tar_gz_recursive_pipeline_config(tmp_path: Path) -> dict:
             "enabled": True,
             "extension_score_groups": [{"score": 5, "extensions": [".tar", ".gz", ".tgz", ".tar.gz"]}],
         },
-        {"name": "compression_stream_identity", "enabled": True},
-        {"name": "tar_structure_identity", "enabled": True},
+        {"name": "compression_stream_identity", "enabled": True, "magic_score": 5},
+        {"name": "tar_structure_identity", "enabled": True, "entry_walk_score": 5},
     ]))
 
 

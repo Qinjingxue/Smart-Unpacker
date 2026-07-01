@@ -18,7 +18,13 @@ from sunpack.coordinator.extraction_batch import ExtractionBatchRunner
 from sunpack.coordinator.output_scan_policy import NestedOutputScanPolicy
 from sunpack.coordinator.recursion import RecursionController
 from sunpack.coordinator.reporting import RunReporter
-from sunpack.coordinator.scheduling import resolve_max_workers
+from sunpack.coordinator.scheduling import (
+    ConcurrencyScheduler,
+    TaskExecutor,
+    build_scheduler_profile_config,
+    resolve_max_workers,
+)
+from sunpack.config.advanced_defaults import advanced_config_value
 from sunpack.coordinator.space_guard import ExtractionSpaceGuard
 from sunpack.coordinator.task_scan import ArchiveTaskScanner
 from sunpack.extraction.scheduler import ExtractionScheduler
@@ -78,6 +84,8 @@ class PipelineEngine:
         self._runtime = _PipelineRuntime(config)
         self._thread: threading.Thread | None = None
         self._lifecycle_lock = threading.Lock()
+        self._pressure_lock = threading.Lock()
+        self._active_request_count = 0
         self._password_source_lock = threading.Lock()
         self._user_passwords = tuple(config.get("user_passwords", []) or [])
         self._builtin_passwords = tuple(config.get("builtin_passwords", []) or [])
@@ -92,6 +100,10 @@ class PipelineEngine:
     @property
     def batch_runner(self) -> ExtractionBatchRunner:
         return self._runtime.batch_runner
+
+    @property
+    def resource_scheduler(self) -> ConcurrencyScheduler:
+        return self._runtime.resource_scheduler
 
     @property
     def task_scanner(self) -> ArchiveTaskScanner:
@@ -111,6 +123,7 @@ class PipelineEngine:
                 raise RuntimeError("PipelineEngine is closed")
             if self._started:
                 return self
+            self._runtime.start()
             self._started = True
             self._accepting = True
             self._thread = threading.Thread(target=self._dispatch_loop, name="sunpack-pipeline", daemon=True)
@@ -143,6 +156,7 @@ class PipelineEngine:
             if not self._started or not self._accepting:
                 raise RuntimeError("PipelineEngine must be started before submit")
             self._queue.put(submission)
+            self._sync_pipeline_pressure()
         return PipelineHandle(self, submission)
 
     def update_password_sources(self, *, user_passwords: Iterable[str], builtin_passwords: Iterable[str]) -> None:
@@ -191,9 +205,11 @@ class PipelineEngine:
         while True:
             item = self._queue.get()
             if item is self._STOP:
+                self._set_active_request_count(0)
                 self._queue.task_done()
                 return
             batch = [item]
+            self._set_active_request_count(len(batch))
             deadline = time.monotonic() + self.batch_window_seconds
             while len(batch) < self.max_batch_requests:
                 timeout = deadline - time.monotonic()
@@ -205,9 +221,11 @@ class PipelineEngine:
                     break
                 if candidate is self._STOP:
                     self._queue.task_done()
+                    self._set_active_request_count(len(batch))
                     self._execute_batch(batch)
                     return
                 batch.append(candidate)
+                self._set_active_request_count(len(batch))
             self._execute_batch(batch)
 
     def _execute_batch(self, submissions: list[_Submission]) -> None:
@@ -221,7 +239,10 @@ class PipelineEngine:
                     user_passwords=list(user_passwords),
                     builtin_passwords=list(builtin_passwords),
                 )
-                self._runtime.execute(group, direct=direct)
+                try:
+                    self._runtime.execute(group, direct=direct)
+                finally:
+                    self._runtime.release_request_state()
         except Exception as exc:
             for submission in submissions:
                 if not submission.future.done():
@@ -229,6 +250,18 @@ class PipelineEngine:
         finally:
             for _submission in submissions:
                 self._queue.task_done()
+            self._set_active_request_count(0)
+
+    def _set_active_request_count(self, count: int) -> None:
+        with self._pressure_lock:
+            self._active_request_count = max(0, int(count or 0))
+            pressure = self._active_request_count + self._queue.qsize()
+        self.resource_scheduler.set_pipeline_request_backlog(pressure)
+
+    def _sync_pipeline_pressure(self) -> None:
+        with self._pressure_lock:
+            pressure = self._active_request_count + self._queue.qsize()
+        self.resource_scheduler.set_pipeline_request_backlog(pressure)
 
     @staticmethod
     def _normalize_target(target: str | PipelineTarget) -> PipelineTarget:
@@ -250,6 +283,22 @@ class _PipelineRuntime:
         analysis_config = config.get("analysis") if isinstance(config.get("analysis"), dict) else {}
         analysis_workers = max(1, int(analysis_config.get("task_max_workers", 4) or 4))
         module_workers = max(1, int(analysis_config.get("max_workers", 3) or 3))
+        max_workers = resolve_max_workers()
+        performance = advanced_config_value(("performance",))
+        if isinstance(config.get("performance"), dict):
+            performance.update(config["performance"])
+        scheduler_config = build_scheduler_profile_config(performance.get("scheduler_profile", "auto"))
+        scheduler_config.update({
+            key: value
+            for key, value in performance.items()
+            if key != "scheduler_profile" and value is not None
+        })
+        initial_limit = scheduler_config.get("initial_concurrency_limit", max_workers)
+        self.resource_scheduler = ConcurrencyScheduler(
+            scheduler_config,
+            current_limit=initial_limit,
+            max_workers=max_workers,
+        )
         self.analysis_executor_pool = ThreadPoolExecutor(
             max_workers=analysis_workers,
             thread_name_prefix="sunpack-analysis-task",
@@ -262,9 +311,10 @@ class _PipelineRuntime:
             config,
             executor_pool=self.analysis_executor_pool,
             module_executor_pool=self.analysis_module_pool,
+            workload_executor=self._execute_analysis_workload,
         )
         self.executor_pool = ThreadPoolExecutor(
-            max_workers=resolve_max_workers(),
+            max_workers=max_workers,
             thread_name_prefix="sunpack-task",
         )
         initial_context = RunContext()
@@ -288,12 +338,31 @@ class _PipelineRuntime:
             initial_context,
             self.extractor,
             self.output_scan_policy,
+            self.resource_scheduler,
             self.rename_scheduler,
             config,
             analysis_stage=self.analysis_stage,
             progress_reporter=initial_reporter,
             executor_pool=self.executor_pool,
         )
+
+    def start(self) -> None:
+        self.resource_scheduler.start()
+
+    def _execute_analysis_workload(
+        self,
+        tasks,
+        worker,
+        *,
+        max_workers: int,
+        workload_label: str,
+    ):
+        executor = TaskExecutor(
+            self.resource_scheduler,
+            max_workers=max_workers,
+            executor_pool=self.analysis_executor_pool,
+        )
+        return executor.execute_all(tasks, worker, workload_label=workload_label)
 
     def execute(self, submissions: list[_Submission], *, direct: bool) -> None:
         start_time = time.time()
@@ -364,10 +433,22 @@ class _PipelineRuntime:
             submission.future.set_result(response)
 
     def close(self) -> None:
+        self.resource_scheduler.set_pipeline_request_backlog(0)
+        self.resource_scheduler.stop()
         self.extractor.close()
         self.executor_pool.shutdown(wait=True, cancel_futures=False)
         self.analysis_executor_pool.shutdown(wait=True, cancel_futures=False)
         self.analysis_module_pool.shutdown(wait=True, cancel_futures=False)
+
+    def release_request_state(self) -> None:
+        """Drop references that are valid only for one compatible request group."""
+        context = RunContext()
+        self.task_scanner.context = context
+        self.batch_runner.context = context
+        self.batch_runner.progress_reporter = None
+        self.batch_runner.directory_password_contexts.clear()
+        self.extractor.ensure_space = lambda _required_gb: True
+        self.extractor.set_progress_callback(None)
 
     def _new_reporter(self) -> RunReporter:
         return RunReporter(language=self.language, quiet=self.quiet, verbose=self.verbose)

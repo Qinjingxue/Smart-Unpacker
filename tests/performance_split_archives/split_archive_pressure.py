@@ -289,13 +289,13 @@ def pressure_config(passwords: list[str] | None = None, scheduler_profile: str =
             }],
         },
         {"name": "embedded_payload_identity", "enabled": True},
-        {"name": "seven_zip_structure_identity", "enabled": True},
-        {"name": "zip_structure_identity", "enabled": True},
-        {"name": "rar_structure_identity", "enabled": True},
-        {"name": "tar_structure_identity", "enabled": True},
-        {"name": "compression_stream_identity", "enabled": True},
+        {"name": "seven_zip_structure_identity", "enabled": True, "magic_score": 5, "next_header_nid_score": 5},
+        {"name": "zip_structure_identity", "enabled": True, "magic_score": 5, "local_header_score": 5, "cd_walk_score": 5},
+        {"name": "rar_structure_identity", "enabled": True, "magic_score": 5, "block_walk_score": 5},
+        {"name": "tar_structure_identity", "enabled": True, "entry_walk_score": 5},
+        {"name": "compression_stream_identity", "enabled": True, "magic_score": 5},
     ], confirmation=[
-        {"name": "seven_zip_probe", "enabled": True},
+        {"name": "seven_zip_probe", "enabled": True, "reject_executable_container": False, "reject_clear_non_archive": True},
         {"name": "seven_zip_validation", "enabled": True, "reject_on_failed": False},
     ]))
 

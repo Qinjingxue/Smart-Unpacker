@@ -1,4 +1,5 @@
 from pathlib import Path
+import threading
 
 import pytest
 
@@ -15,6 +16,8 @@ def _config(**pipeline):
         "recursive_extract": "1",
         "cli": {"quiet": True},
         "pipeline": {"batch_window_seconds": 0.1, **pipeline},
+        "repair": {"enabled": False},
+        "verification": {"enabled": False, "methods": []},
         "post_extract": {"archive_cleanup_mode": "k", "flatten_single_directory": False},
         "thresholds": {"archive_score_threshold": 5, "maybe_archive_threshold": 3},
     }, scoring=[
@@ -41,6 +44,7 @@ def test_engine_micro_batches_independent_submissions_and_keeps_results_isolated
 
     def fake_extract(task, out_dir, runtime_scheduler=None, **_kwargs):
         Path(out_dir).mkdir(parents=True, exist_ok=True)
+        (Path(out_dir) / "payload.txt").write_text(task.logical_name, encoding="utf-8")
         return ExtractionResult(success=True, archive=task.main_path, out_dir=out_dir, all_parts=task.all_parts)
 
     monkeypatch.setattr(engine.extractor, "extract", fake_extract)
@@ -72,11 +76,13 @@ def test_engine_only_closes_resident_extractor_when_engine_closes(tmp_path, monk
     assert engine.batch_runner.executor_pool is executor_pool
     assert executor_pool._shutdown is False
     assert analysis_pool._shutdown is False
+    assert engine.resource_scheduler.is_running is True
 
     engine.close()
     assert close_calls == [True]
     assert executor_pool._shutdown is True
     assert analysis_pool._shutdown is True
+    assert engine.resource_scheduler.is_running is False
     with pytest.raises(RuntimeError, match="started"):
         engine.submit([str(tmp_path)])
 
@@ -126,3 +132,72 @@ def test_watch_submits_all_quiet_files_to_one_engine_micro_batch(tmp_path, monke
     assert batch_sizes == [2]
     assert result.succeeded == 2
     assert len(list((tmp_path / "out").rglob("payload.txt"))) == 2
+
+
+def test_engine_scheduler_keeps_feedback_across_separate_micro_batches(tmp_path, monkeypatch):
+    engine = PipelineEngine(_config(batch_window_seconds=0))
+    scheduler = engine.resource_scheduler
+
+    def record_batch(submissions, **_kwargs):
+        for submission in submissions:
+            scheduler.record_task_feedback(
+                demand={"cpu": 1, "io": 1, "memory": 1},
+                duration_seconds=1.0,
+                estimated_bytes=1024,
+                active_workers_at_start=1,
+                success=True,
+                profile_key="zip:test",
+            )
+            submission.future.set_result(None)
+
+    monkeypatch.setattr(engine._runtime, "execute", record_batch)
+    engine.start()
+    engine.submit([str(tmp_path / "first.zip")]).result(timeout=5)
+    engine.submit([str(tmp_path / "second.zip")]).result(timeout=5)
+
+    assert engine.resource_scheduler is scheduler
+    assert scheduler.is_running is True
+    assert len(scheduler.feedback.feedback_window) == 2
+    assert len(scheduler.feedback.profile_feedback_windows["zip:test"]) == 2
+    engine.close()
+
+
+def test_engine_queue_and_active_batch_feed_pipeline_pressure(tmp_path, monkeypatch):
+    engine = PipelineEngine(_config(batch_window_seconds=0))
+    entered = threading.Event()
+    release = threading.Event()
+
+    def blocked_batch(submissions, **_kwargs):
+        entered.set()
+        assert release.wait(timeout=5)
+        for submission in submissions:
+            submission.future.set_result(None)
+
+    monkeypatch.setattr(engine._runtime, "execute", blocked_batch)
+    engine.start()
+    first = engine.submit([str(tmp_path / "first.zip")])
+    assert entered.wait(timeout=5)
+    second = engine.submit([str(tmp_path / "second.zip")])
+
+    assert engine.resource_scheduler.pressure_snapshot()["pipeline_requests"] >= 2
+    release.set()
+    first.result(timeout=5)
+    second.result(timeout=5)
+    engine.close()
+
+
+def test_engine_releases_request_scoped_password_contexts(tmp_path, monkeypatch):
+    engine = PipelineEngine(_config(batch_window_seconds=0))
+
+    def complete_batch(submissions, **_kwargs):
+        engine.batch_runner.directory_password_contexts._contexts[str(tmp_path)] = ["secret"]
+        for submission in submissions:
+            submission.future.set_result(None)
+
+    monkeypatch.setattr(engine._runtime, "execute", complete_batch)
+    engine.start()
+    engine.submit([str(tmp_path / "archive.zip")]).result(timeout=5)
+
+    assert engine.batch_runner.directory_password_contexts._contexts == {}
+    assert engine.batch_runner.progress_reporter is None
+    engine.close()

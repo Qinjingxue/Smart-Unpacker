@@ -280,6 +280,8 @@ sunpack/
   verification/ 解压结果校验流水线
 ```
 
+`PipelineEngine` 拥有进程级资源调度器。调度器随 Engine 启停，所有 coordinator/analysis 并发阶段只能注册 workload 和申请资源 token，不能按批次自行创建或关闭调度器。
+
 仓库级目录：
 
 ```text

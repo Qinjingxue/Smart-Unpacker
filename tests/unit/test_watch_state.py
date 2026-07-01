@@ -76,6 +76,16 @@ def test_owned_output_roots_are_separate_from_input_snapshots(tmp_path):
     assert not reloaded.snapshots
 
 
+def test_owned_output_roots_compact_descendants_under_common_root(tmp_path):
+    state = WatchStateStore(str(tmp_path / "state.json"))
+    output_root = tmp_path / "outputs"
+    state.remember_output_roots([str(output_root)])
+    for index in range(100):
+        state.remember_output_roots([str(output_root / f"archive-{index}")])
+
+    assert state.generated_output_roots() == [str(output_root.resolve())]
+
+
 def test_previous_state_schema_is_intentionally_not_loaded(tmp_path):
     state_path = tmp_path / "state.json"
     state_path.write_text(json.dumps({"version": 5, "entries": {"legacy": {"status": "done"}}}), encoding="utf-8")

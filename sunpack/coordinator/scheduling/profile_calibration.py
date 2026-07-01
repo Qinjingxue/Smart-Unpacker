@@ -103,6 +103,19 @@ class SchedulerFeedback:
         recent_total_throughput = recent_throughput * recent_workers
         return recent_total_throughput >= previous_total_throughput * self.throughput_regression_ratio
 
+    def decay_idle(self) -> None:
+        """Age runtime samples without discarding learned profile adjustments."""
+        if self.feedback_window:
+            self.feedback_window.popleft()
+        empty_profiles = []
+        for profile_key, window in self.profile_feedback_windows.items():
+            if window:
+                window.popleft()
+            if not window:
+                empty_profiles.append(profile_key)
+        for profile_key in empty_profiles:
+            self.profile_feedback_windows.pop(profile_key, None)
+
     def save(self) -> None:
         if (
             not self.profile_calibration_cache_enabled

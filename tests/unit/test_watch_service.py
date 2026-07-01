@@ -21,7 +21,14 @@ def test_watch_service_releases_named_mutex_after_exit(tmp_path, monkeypatch):
     monkeypatch.setattr(
         service_module,
         "load_config",
-        lambda: {"watch": {"state_dir": str(state_dir), "roots": [], "tray_enabled": False}},
+        lambda: {
+            "watch": {
+                "state_dir": str(state_dir),
+                "roots": [],
+                "tray_enabled": False,
+                "clipboard_monitor_enabled": False,
+            }
+        },
     )
 
     service = WatchService(engine_factory=lambda _config: FakePipelineEngine(FakeRunner))

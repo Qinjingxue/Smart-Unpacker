@@ -302,6 +302,7 @@
     "precise_resource_min_size_mb": 256,
     "throughput_window_size": 8,
     "throughput_regression_ratio": 0.95,
+    "scheduler_idle_decay_seconds": 30.0,
     "max_extract_task_seconds": 1800,
     "process_no_progress_timeout_seconds": 180,
     "process_sample_interval_ms": 500,

@@ -32,6 +32,10 @@ class DirectoryPasswordContextStore:
         context = dedupe_passwords([str(value) for value in values if isinstance(value, str)])
         self._contexts[os.path.normcase(os.path.abspath(output_dir))] = context
 
+    def clear(self) -> None:
+        """Release request-scoped recursion hints after a pipeline run."""
+        self._contexts.clear()
+
     def inherited_for(self, archive_path: str) -> list[str]:
         if not archive_path:
             return []

@@ -3,6 +3,20 @@ from pathlib import Path
 import pytest
 
 
+@pytest.fixture(scope="session", autouse=True)
+def isolate_builtin_password_file(tmp_path_factory):
+    """Prevent watch tests from persisting clipboard contents into the checkout."""
+    import sunpack.passwords.internal.builtin as builtin_module
+
+    builtin_path = tmp_path_factory.mktemp("sunpack-resources") / "builtin_passwords.txt"
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(builtin_module, "builtin_password_path", lambda: builtin_path)
+    yield
+    monkeypatch.undo()
+
+from sunpack.coordinator.scheduling import ConcurrencyScheduler
+
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -14,6 +28,16 @@ def repo_root() -> Path:
 @pytest.fixture
 def case_workspace(tmp_path: Path) -> Path:
     return tmp_path / "workspace"
+
+
+@pytest.fixture
+def pipeline_resource_scheduler():
+    scheduler = ConcurrencyScheduler({}, current_limit=8, max_workers=8)
+    scheduler.start()
+    try:
+        yield scheduler
+    finally:
+        scheduler.stop()
 
 
 def pytest_addoption(parser):

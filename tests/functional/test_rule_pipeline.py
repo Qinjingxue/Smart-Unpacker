@@ -24,7 +24,7 @@ def _rule_pipeline_config():
     ], scoring=[
         {"name": "extension", "enabled": True, "extension_score_groups": [{"score": 5, "extensions": [".zip", ".7z", ".rar", ".gz", ".bz2", ".xz", ".001"]}]},
         {"name": "embedded_payload_identity", "enabled": True},
-        {"name": "zip_structure_identity", "enabled": True},
+        {"name": "zip_structure_identity", "enabled": True, "magic_score": 5, "local_header_score": 5, "cd_walk_score": 5},
         {
             "name": "scene_penalty",
             "enabled": True,
@@ -72,7 +72,7 @@ def test_scoring_stops_after_archive_threshold_when_remaining_rules_cannot_reduc
         "thresholds": {"archive_score_threshold": 5, "maybe_archive_threshold": 3},
     }, scoring=[
         {"name": "extension", "enabled": True, "extension_score_groups": [{"score": 5, "extensions": [".zip"]}]},
-        {"name": "zip_structure_identity", "enabled": True},
+        {"name": "zip_structure_identity", "enabled": True, "magic_score": 5, "local_header_score": 5, "cd_walk_score": 5},
     ])
 
     bag = FactBag()

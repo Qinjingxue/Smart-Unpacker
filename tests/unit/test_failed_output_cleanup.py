@@ -115,7 +115,7 @@ def test_collect_result_applies_main_pipeline_cleanup_after_diagnostics(tmp_path
     assert runner.context.failed_tasks == ["broken.zip [damaged]"]
 
 
-def test_pipeline_marks_actual_repair_entry_and_preserves_zero_output(tmp_path):
+def test_pipeline_marks_actual_repair_entry_and_preserves_zero_output(tmp_path, pipeline_resource_scheduler):
     archive = tmp_path / "repairable.zip"
     archive.write_bytes(b"broken")
     output = tmp_path / "repairable"
@@ -146,7 +146,11 @@ def test_pipeline_marks_actual_repair_entry_and_preserves_zero_output(tmp_path):
             )
 
     class RepairVerifier:
-        config = {"max_retries": 0, "cleanup_failed_output": True}
+        config = {
+            "max_retries": 0,
+            "cleanup_failed_output": True,
+            "recovery_min_improvement": 0.0,
+        }
 
         def verify(self, _task, _result):
             return VerificationResult(
@@ -159,6 +163,7 @@ def test_pipeline_marks_actual_repair_entry_and_preserves_zero_output(tmp_path):
         RunContext(),
         Extractor(),
         NestedOutputScanPolicy({}),
+        pipeline_resource_scheduler,
         config={},
     )
     runner.verifier = RepairVerifier()

@@ -72,7 +72,7 @@ CLI 可用 `--recur` 临时覆盖。
 | `max_batch_requests` | `int` | `64` | 一个微批最多包含的提交请求数。 |
 | `queue_capacity` | `int` | `4096` | 入口队列上限；达到上限时提交方产生背压。 |
 
-CLI 在当前命令结束后关闭 Engine；watch 在服务生命周期内保持同一个 Engine 和 7-Zip worker pool。
+CLI 在当前命令结束后关闭 Engine；watch 在服务生命周期内保持同一个 Engine、资源调度器和 7-Zip worker pool。入口队列、分析、预检、资源分析和解压共享同一份 CPU/IO/内存预算；调度反馈跨微批保留，到 Engine 关闭时统一保存。
 
 ## post_extract
 
@@ -155,6 +155,7 @@ CLI 在当前命令结束后关闭 Engine；watch 在服务生命周期内保持
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
 | `scheduler_profile` | `str` | `auto`、`conservative` 或 `aggressive`。 |
+| `scheduler_idle_decay_seconds` | `int` / `float` | 流水线持续空闲多久后逐步将动态并发限制和短期反馈衰减到初始状态；不会清除持久 profile 校准。 |
 | `max_extract_task_seconds` | `int` / `float` | 单个解压任务总时长上限，`0` 表示不限。 |
 | `process_no_progress_timeout_seconds` | `int` / `float` | worker 无进展超时，`0` 表示不限。 |
 | `process_sample_interval_ms` | `int` / `float` | worker 进程采样间隔。 |

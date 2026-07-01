@@ -2,13 +2,26 @@ import threading
 import time
 from pathlib import Path
 
+import pytest
+
 from sunpack.contracts.detection import FactBag
 from sunpack.contracts.run_context import RunContext
 from sunpack.contracts.tasks import ArchiveTask
 from sunpack.coordinator.extraction_batch import ExtractionBatchRunner
+from sunpack.coordinator.scheduling import ConcurrencyScheduler
 
 
-def test_preflight_inspect_uses_conservative_parallel_stage(tmp_path):
+@pytest.fixture
+def resource_scheduler():
+    scheduler = ConcurrencyScheduler({}, current_limit=8, max_workers=8)
+    scheduler.start()
+    try:
+        yield scheduler
+    finally:
+        scheduler.stop()
+
+
+def test_preflight_inspect_uses_conservative_parallel_stage(tmp_path, resource_scheduler):
     tasks = [_task(tmp_path / f"archive_{index}.zip") for index in range(3)]
     extractor = _ConcurrentInspectExtractor(delay_seconds=0.05)
     runner = _runner(
@@ -20,6 +33,7 @@ def test_preflight_inspect_uses_conservative_parallel_stage(tmp_path):
                 "preflight_inspect_max_workers": 2,
             }
         },
+        resource_scheduler,
     )
     runner.max_workers = 8
 
@@ -29,7 +43,7 @@ def test_preflight_inspect_uses_conservative_parallel_stage(tmp_path):
     assert extractor.max_active == 2
 
 
-def test_resource_preflight_uses_parallel_stage_when_ready_tasks_are_many(tmp_path):
+def test_resource_preflight_uses_parallel_stage_when_ready_tasks_are_many(tmp_path, resource_scheduler):
     tasks = [_task(tmp_path / f"archive_{index}.zip") for index in range(4)]
     runner = _runner(
         tmp_path,
@@ -40,6 +54,7 @@ def test_resource_preflight_uses_parallel_stage_when_ready_tasks_are_many(tmp_pa
                 "resource_preflight_max_workers": 2,
             }
         },
+        resource_scheduler,
     )
     runner.max_workers = 8
     inspector = _ConcurrentResourceInspector(delay_seconds=0.05)
@@ -101,11 +116,12 @@ class _FakeOutputScanPolicy:
         return list(outputs)
 
 
-def _runner(tmp_path, extractor, config=None):
+def _runner(tmp_path, extractor, config=None, resource_scheduler=None):
     return ExtractionBatchRunner(
         RunContext(),
         extractor,
         _FakeOutputScanPolicy(),
+        resource_scheduler,
         config={
             "repair": {"enabled": False, "workspace": str(tmp_path / "repair")},
             **(config or {}),

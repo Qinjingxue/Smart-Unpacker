@@ -3,6 +3,7 @@ import threading
 import time
 import os
 from types import SimpleNamespace
+from concurrent.futures import ThreadPoolExecutor
 
 from sunpack.contracts.detection import FactBag
 from sunpack.contracts.tasks import ArchiveTask
@@ -292,7 +293,11 @@ def test_task_executor_submits_only_after_resource_tokens_are_available(tmp_path
             active -= 1
         return task.main_path
 
-    results = executor.execute_all([make_task(index) for index in range(4)], worker)
+    scheduler.start()
+    try:
+        results = executor.execute_all([make_task(index) for index in range(4)], worker)
+    finally:
+        scheduler.stop()
 
     assert len(results) == 4
     assert peak_active == 1
@@ -416,4 +421,91 @@ def test_profile_calibration_ignores_corrupt_project_cache(tmp_path):
     )
 
     assert scheduler.profile_adjustments == {}
+
+
+def test_scheduler_aggregates_independent_pipeline_workloads():
+    scheduler = ConcurrencyScheduler({}, current_limit=4, max_workers=4)
+    first = scheduler.register_workload(3, label="analysis")
+    second = scheduler.register_workload(5, label="extraction")
+    scheduler.set_pipeline_request_backlog(2)
+
+    assert scheduler.pending_task_estimate == 10
+    snapshot = scheduler.pressure_snapshot()
+    assert snapshot["workloads"][first]["label"] == "analysis"
+    assert snapshot["workloads"][second]["label"] == "extraction"
+
+    scheduler.update_workload(first, 1, 1)
+    scheduler.unregister_workload(second)
+    assert scheduler.pending_task_estimate == 4
+
+
+def test_idle_decay_preserves_scheduler_but_ages_runtime_feedback():
+    scheduler = ConcurrencyScheduler(
+        {"initial_concurrency_limit": 2, "scheduler_idle_decay_seconds": 1},
+        current_limit=2,
+        max_workers=6,
+    )
+    scheduler.cpu_limit = 5
+    scheduler.io_limit = 5
+    scheduler.memory_limit = 5
+    scheduler.record_task_feedback(
+        demand={"cpu": 1, "io": 1, "memory": 1},
+        duration_seconds=1,
+        estimated_bytes=1024,
+        active_workers_at_start=1,
+        success=True,
+    )
+    scheduler._last_activity_at -= 2
+    scheduler._last_idle_decay_at -= 2
+
+    scheduler.adjust_once(0, cpu_percent=0, available_memory=8 * 1024 * 1024 * 1024)
+
+    assert scheduler.cpu_limit <= 4
+    assert len(scheduler.feedback.feedback_window) == 0
+
+
+def test_shared_scheduler_enforces_one_budget_across_concurrent_executors():
+    scheduler = ConcurrencyScheduler(
+        {
+            "initial_concurrency_limit": 4,
+            "cpu_tokens": 1,
+            "io_tokens": 1,
+            "memory_tokens": 1,
+        },
+        current_limit=4,
+        max_workers=4,
+    )
+    task_pool = ThreadPoolExecutor(max_workers=4)
+    caller_pool = ThreadPoolExecutor(max_workers=2)
+    lock = threading.Lock()
+    active = 0
+    peak_active = 0
+
+    def worker(_task):
+        nonlocal active, peak_active
+        with lock:
+            active += 1
+            peak_active = max(peak_active, active)
+        time.sleep(0.02)
+        with lock:
+            active -= 1
+        return True
+
+    def execute(label):
+        executor = TaskExecutor(scheduler, max_workers=2, executor_pool=task_pool)
+        tasks = [SimpleNamespace(resource_token_cost=1) for _ in range(2)]
+        return executor.execute_all(tasks, worker, workload_label=label)
+
+    scheduler.start()
+    try:
+        first = caller_pool.submit(execute, "analysis")
+        second = caller_pool.submit(execute, "extraction")
+        assert len(first.result(timeout=5)) == 2
+        assert len(second.result(timeout=5)) == 2
+    finally:
+        scheduler.stop()
+        caller_pool.shutdown(wait=True)
+        task_pool.shutdown(wait=True)
+
+    assert peak_active == 1
 

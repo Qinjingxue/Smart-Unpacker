@@ -25,13 +25,19 @@ class TaskExecutor:
         self.max_workers = max_workers
         self.executor_pool = executor_pool
 
-    def execute_all(self, tasks: list[Any], worker_func: Callable[[Any], Any]) -> list[Any]:
+    def execute_all(
+        self,
+        tasks: list[Any],
+        worker_func: Callable[[Any], Any],
+        *,
+        workload_label: str = "task",
+    ) -> list[Any]:
+        if not self.scheduler.is_running:
+            raise RuntimeError("TaskExecutor requires a running pipeline scheduler")
         results = []
         pass_scheduler = self._worker_accepts_scheduler(worker_func)
         fifo_selection = self._can_use_fifo_selection(tasks)
-
-        self.scheduler.update_pending_task_estimate(len(tasks), 0)
-        self.scheduler.start()
+        workload_id = self.scheduler.register_workload(len(tasks), label=workload_label)
 
         def wrapped_worker(task: Any, demand: ResourceDemand, profile_key: str) -> Any:
             started_at = time.perf_counter()
@@ -64,7 +70,7 @@ class TaskExecutor:
                 futures: dict[concurrent.futures.Future, ResourceDemand] = {}
                 while pending or futures:
                     submitted = False
-                    while pending:
+                    while pending and len(futures) < self.max_workers:
                         selected = self._select_next_task(pending, fifo=fifo_selection)
                         if selected is None:
                             break
@@ -79,7 +85,7 @@ class TaskExecutor:
                             raise
                         futures[future] = demand
                         submitted = True
-                        self.scheduler.update_pending_task_estimate(len(pending), len(futures))
+                        self.scheduler.update_workload(workload_id, len(pending), len(futures))
 
                     if not futures:
                         task = pending.pop(0)
@@ -93,7 +99,7 @@ class TaskExecutor:
                             self.scheduler.release_slot(demand=demand)
                             raise
                         futures[future] = demand
-                        self.scheduler.update_pending_task_estimate(len(pending), len(futures))
+                        self.scheduler.update_workload(workload_id, len(pending), len(futures))
                         continue
 
                     if not submitted:
@@ -115,10 +121,9 @@ class TaskExecutor:
                     for future in done:
                         futures.pop(future, None)
                         results.append(future.result())
-                    self.scheduler.update_pending_task_estimate(len(pending), len(futures))
+                    self.scheduler.update_workload(workload_id, len(pending), len(futures))
         finally:
-            self.scheduler.update_pending_task_estimate(0, 0)
-            self.scheduler.stop()
+            self.scheduler.unregister_workload(workload_id)
 
         return results
 

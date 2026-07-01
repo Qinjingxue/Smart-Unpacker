@@ -5,6 +5,9 @@ from typing import List
 from sunpack.passwords.internal.lists import dedupe_passwords, read_password_file
 
 
+MAX_RECENT_PASSWORDS = 64
+
+
 @dataclass
 class PasswordStore:
     user_passwords: List[str] = field(default_factory=list)
@@ -61,6 +64,7 @@ class PasswordStore:
         with self._lock:
             self.recent_passwords = [item for item in self.recent_passwords if item != password]
             self.recent_passwords.insert(0, password)
+            del self.recent_passwords[MAX_RECENT_PASSWORDS:]
 
     def replace_sources(self, *, user_passwords: List[str], builtin_passwords: List[str]) -> None:
         """Atomically refresh dynamic sources without discarding learned passwords."""
