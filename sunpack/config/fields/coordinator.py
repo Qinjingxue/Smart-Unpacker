@@ -19,7 +19,7 @@ def normalize_recursive_extract(value: Any) -> dict[str, Any]:
 
 
 DEFAULT_PIPELINE_CONFIG = {
-    "batch_window_seconds": 0.05,
+    "batch_window_seconds": 0.0,
     "max_batch_requests": 64,
     "queue_capacity": 4096,
 }
