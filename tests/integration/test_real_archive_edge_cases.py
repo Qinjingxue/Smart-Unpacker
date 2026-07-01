@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from sunpack.coordinator.runner import PipelineRunner
+from tests.helpers.pipeline_engine import execute_pipeline
 from sunpack.config.schema import normalize_config
 from tests.helpers.real_archives import ArchiveCase, ArchiveFixtureFactory
 from tests.helpers.detection_config import with_detection_pipeline
@@ -64,11 +64,11 @@ def detection_disabled_config(passwords: list[str] | None = None) -> dict:
 
 
 def run_pipeline(target: Path, passwords: list[str] | None = None):
-    return PipelineRunner(edge_config(passwords=passwords)).run(str(target))
+    return execute_pipeline(edge_config(passwords=passwords), str(target))
 
 
 def run_pipeline_detection_disabled(target: Path, passwords: list[str] | None = None):
-    return PipelineRunner(detection_disabled_config(passwords=passwords)).run(str(target))
+    return execute_pipeline(detection_disabled_config(passwords=passwords), str(target))
 
 
 def marker_was_extracted(root: Path, marker_name: str, marker_text: str) -> bool:

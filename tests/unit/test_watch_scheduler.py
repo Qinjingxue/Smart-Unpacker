@@ -11,7 +11,28 @@ import sunpack.passwords.internal.builtin as builtin_module
 import sunpack.passwords.internal.clipboard_monitor as clipboard_monitor_module
 from sunpack.contracts.failures import FailureInfo, FailureKind
 from sunpack.contracts.results import OutcomeKind, TargetRunResult
-from sunpack.filesystem.watcher.scheduler import WatchScheduler
+from sunpack.filesystem.watcher.scheduler import WatchScheduler as RuntimeWatchScheduler
+from tests.helpers.fake_pipeline_engine import FakePipelineEngine
+
+
+def WatchScheduler(*args, pipeline_engine=None, **kwargs):
+    if pipeline_engine is None:
+        pipeline_engine = FakePipelineEngine(
+            lambda _config: SimpleNamespace(
+                recent_passwords=[],
+                context=SimpleNamespace(flatten_candidates=set(), unpacked_archives=[]),
+                run_targets=lambda _paths: SimpleNamespace(
+                    success_count=0,
+                    partial_success_count=0,
+                    failed_tasks=[],
+                    failures=[],
+                    processed_keys=[],
+                    recovered_outputs=[],
+                    target_results=[],
+                ),
+            )
+        )
+    return RuntimeWatchScheduler(*args, pipeline_engine=pipeline_engine, **kwargs)
 
 
 class FakeObserver:
@@ -101,7 +122,7 @@ def test_partial_result_does_not_self_retry_but_modified_epoch_does(tmp_path, mo
         state_path=str(tmp_path / "state.json"),
         quiet_seconds=0,
         initial_scan=False,
-        runner_factory=SequenceRunner,
+        pipeline_engine=FakePipelineEngine(SequenceRunner),
     )
     watcher.enqueue(str(archive))
     assert watcher.run_once().processed == 1
@@ -147,7 +168,7 @@ def test_content_event_during_processing_starts_a_new_active_epoch(tmp_path, mon
         state_path=str(tmp_path / "state.json"),
         quiet_seconds=0,
         initial_scan=False,
-        runner_factory=MutatingRunner,
+        pipeline_engine=FakePipelineEngine(MutatingRunner),
     )
     watcher.enqueue(str(archive))
 
@@ -438,11 +459,11 @@ def test_event_burst_reads_file_identity_once_at_quiet_transition(tmp_path, monk
         state_path=str(tmp_path / "state.json"),
         quiet_seconds=0,
         initial_scan=False,
-        runner_factory=lambda _config: SimpleNamespace(
+        pipeline_engine=FakePipelineEngine(lambda _config: SimpleNamespace(
             context=SimpleNamespace(flatten_candidates=set(), recovered_outputs=[]),
             run_targets=lambda paths: _watch_summary(paths[0], OutcomeKind.PARTIAL_SUCCESS, {}),
             recent_passwords=[],
-        ),
+        )),
     )
 
     for _ in range(100):
@@ -521,7 +542,7 @@ def test_watch_scheduler_processes_quiet_candidate_with_watch_root_common_root(t
         state_path=str(tmp_path / "state.json"),
         quiet_seconds=0,
         initial_scan=False,
-        runner_factory=FakePipelineRunner,
+        pipeline_engine=FakePipelineEngine(FakePipelineRunner),
     )
     watcher.enqueue(str(archive_path))
 
@@ -559,7 +580,7 @@ def test_watch_scheduler_sends_quiet_nonstandard_extension_to_main_pipeline(tmp_
         state_path=str(tmp_path / "state.json"),
         quiet_seconds=0,
         initial_scan=False,
-        runner_factory=FakePipelineRunner,
+        pipeline_engine=FakePipelineEngine(FakePipelineRunner),
     )
     watcher.enqueue(str(target))
 
@@ -594,7 +615,7 @@ def test_watch_scheduler_moved_file_uses_common_quiet_window(tmp_path, monkeypat
         state_path=str(tmp_path / ".sunpack_watch" / "state.json"),
         quiet_seconds=10,
         initial_scan=False,
-        runner_factory=FakePipelineRunner,
+        pipeline_engine=FakePipelineEngine(FakePipelineRunner),
     )
     watcher.enqueue(str(archive_path), event_type="moved", src_path=str(tmp_path / "sample.zip"))
 
@@ -631,7 +652,7 @@ def test_watch_scheduler_copy_events_reset_common_quiet_window(tmp_path, monkeyp
         state_path=str(tmp_path / ".sunpack_watch" / "state.json"),
         quiet_seconds=10,
         initial_scan=False,
-        runner_factory=FakePipelineRunner,
+        pipeline_engine=FakePipelineEngine(FakePipelineRunner),
     )
     watcher.enqueue(str(archive_path), event_type="created")
 
@@ -676,7 +697,7 @@ def test_watch_scheduler_growth_resets_the_common_quiet_window(tmp_path, monkeyp
         state_path=str(tmp_path / ".sunpack_watch" / "state.json"),
         quiet_seconds=10,
         initial_scan=False,
-        runner_factory=FakePipelineRunner,
+        pipeline_engine=FakePipelineEngine(FakePipelineRunner),
     )
     watcher.enqueue(str(archive_path), event_type="created")
 
@@ -737,7 +758,7 @@ def test_watch_scheduler_logs_no_tasks_found_without_done_for_empty_summary(tmp_
         state_path=str(tmp_path / ".sunpack_watch" / "state.json"),
         quiet_seconds=0,
         initial_scan=False,
-        runner_factory=NoTasksRunner,
+        pipeline_engine=FakePipelineEngine(NoTasksRunner),
     )
     watcher.enqueue(str(target))
 
@@ -802,7 +823,7 @@ def test_watch_scheduler_processes_archive_when_output_root_matches_watch_root(t
         state_path=str(tmp_path / ".sunpack_watch" / "state.json"),
         quiet_seconds=0,
         initial_scan=False,
-        runner_factory=FakePipelineRunner,
+        pipeline_engine=FakePipelineEngine(FakePipelineRunner),
     )
     watcher.enqueue(str(archive_path))
 
@@ -844,7 +865,7 @@ def test_watch_scheduler_does_not_reprocess_unchanged_input_when_output_is_delet
         state_path=str(tmp_path / ".sunpack_watch" / "state.json"),
         quiet_seconds=0,
         initial_scan=False,
-        runner_factory=FakePipelineRunner,
+        pipeline_engine=FakePipelineEngine(FakePipelineRunner),
     )
 
     watcher.enqueue(str(archive_path))
@@ -889,7 +910,7 @@ def test_watch_scheduler_reprocesses_identical_archive_after_it_moves_out_and_ba
         state_path=str(tmp_path / ".sunpack_watch" / "state.json"),
         quiet_seconds=0,
         initial_scan=False,
-        runner_factory=FakePipelineRunner,
+        pipeline_engine=FakePipelineEngine(FakePipelineRunner),
     )
     handler = scheduler_module._WatchEventHandler(watcher)
     watcher.enqueue(str(archive_path))
@@ -926,7 +947,7 @@ def test_watch_scheduler_processes_same_path_again_after_input_changes(tmp_path,
         state_path=str(tmp_path / ".sunpack_watch" / "state.json"),
         quiet_seconds=0,
         initial_scan=False,
-        runner_factory=FakePipelineRunner,
+        pipeline_engine=FakePipelineEngine(FakePipelineRunner),
     )
     watcher.enqueue(str(archive_path))
     assert watcher.run_once().succeeded == 1
@@ -972,7 +993,7 @@ def test_watch_scheduler_recovers_persisted_pending_input_after_restart(tmp_path
         state_path=str(state_path),
         quiet_seconds=0,
         initial_scan=False,
-        runner_factory=FakePipelineRunner,
+        pipeline_engine=FakePipelineEngine(FakePipelineRunner),
     )
     restarted.start()
 
@@ -1009,7 +1030,7 @@ def test_relative_output_directory_is_resolved_per_matching_watch_root(tmp_path,
         state_path=str(first_root / ".sunpack_watch" / "state.json"),
         quiet_seconds=0,
         initial_scan=False,
-        runner_factory=FakePipelineRunner,
+        pipeline_engine=FakePipelineEngine(FakePipelineRunner),
     )
     watcher.enqueue(str(archive_path))
 
@@ -1047,7 +1068,7 @@ def test_watch_scheduler_suppresses_recursive_output_events_during_same_root_ext
         state_path=str(tmp_path / ".sunpack_watch" / "state.json"),
         quiet_seconds=0,
         initial_scan=False,
-        runner_factory=FakePipelineRunner,
+        pipeline_engine=FakePipelineEngine(FakePipelineRunner),
     )
     watcher.enqueue(str(archive_path))
 
@@ -1130,7 +1151,7 @@ def test_watch_scheduler_marks_terminal_failure_and_skips_retry(tmp_path, monkey
         state_path=str(tmp_path / "state.json"),
         quiet_seconds=0,
         initial_scan=False,
-        runner_factory=FailingRunner,
+        pipeline_engine=FakePipelineEngine(FailingRunner),
     )
     watcher.enqueue(str(archive_path))
 
@@ -1179,7 +1200,7 @@ def test_watch_scheduler_retries_password_failure_after_password_source_change(t
         state_path=str(tmp_path / "state.json"),
         quiet_seconds=0,
         initial_scan=False,
-        runner_factory=PasswordThenSuccessRunner,
+        pipeline_engine=FakePipelineEngine(PasswordThenSuccessRunner),
     )
     watcher.enqueue(str(archive_path))
     first = watcher.run_once()
@@ -1220,7 +1241,7 @@ def test_watch_scheduler_defaults_to_user_and_builtin_password_sources(tmp_path,
         state_path=str(state_path),
         quiet_seconds=0,
         initial_scan=False,
-        runner_factory=CapturingRunner,
+        pipeline_engine=FakePipelineEngine(CapturingRunner),
     )
 
     watcher.enqueue(str(archive_path))
@@ -1268,7 +1289,7 @@ def test_watch_scheduler_clipboard_persistence_refreshes_candidates_and_retries(
         state_path=str(tmp_path / "state.json"),
         quiet_seconds=0,
         initial_scan=False,
-        runner_factory=ConfigAwareRunner,
+        pipeline_engine=FakePipelineEngine(ConfigAwareRunner),
     )
     watcher.enqueue(str(archive_path))
     first = watcher.run_once()
@@ -1323,7 +1344,7 @@ def test_watch_scheduler_retries_on_builtin_password_file_watchdog_event(tmp_pat
         state_path=str(tmp_path / "state.json"),
         quiet_seconds=0,
         initial_scan=False,
-        runner_factory=ConfigAwareRunner,
+        pipeline_engine=FakePipelineEngine(ConfigAwareRunner),
     )
     watcher.enqueue(str(archive_path))
     watcher.run_once()
@@ -1377,7 +1398,7 @@ def test_watch_scheduler_retries_persisted_password_failure_when_config_password
         state_path=str(state_path),
         quiet_seconds=0,
         initial_scan=False,
-        runner_factory=ConfigAwareRunner,
+        pipeline_engine=FakePipelineEngine(ConfigAwareRunner),
     )
     first_watcher.enqueue(str(archive_path))
     first_watcher.run_once()
@@ -1389,7 +1410,7 @@ def test_watch_scheduler_retries_persisted_password_failure_when_config_password
         state_path=str(state_path),
         quiet_seconds=0,
         initial_scan=False,
-        runner_factory=ConfigAwareRunner,
+        pipeline_engine=FakePipelineEngine(ConfigAwareRunner),
     )
     result = second_watcher.run_once()
 
@@ -1435,7 +1456,7 @@ def test_watch_scheduler_promotes_recent_success_password_and_retries_other_fail
         state_path=str(tmp_path / "state.json"),
         quiet_seconds=0,
         initial_scan=False,
-        runner_factory=LearningRunner,
+        pipeline_engine=FakePipelineEngine(LearningRunner),
     )
     watcher.enqueue(str(failed_archive))
     watcher.run_once()
@@ -1489,7 +1510,7 @@ def test_watch_scheduler_password_table_event_retries_password_failure(tmp_path,
         state_path=str(tmp_path / "state.json"),
         quiet_seconds=0,
         initial_scan=False,
-        runner_factory=PasswordThenSuccessRunner,
+        pipeline_engine=FakePipelineEngine(PasswordThenSuccessRunner),
     )
     watcher.enqueue(str(archive_path))
     watcher.run_once()
@@ -1529,7 +1550,7 @@ def test_watch_scheduler_writes_jsonl_log_for_failures(tmp_path, monkeypatch):
         state_path=str(tmp_path / ".sunpack_watch" / "state.json"),
         quiet_seconds=0,
         initial_scan=False,
-        runner_factory=FailingRunner,
+        pipeline_engine=FakePipelineEngine(FailingRunner),
     )
     watcher.enqueue(str(archive_path))
     watcher.run_once()
@@ -1610,7 +1631,7 @@ def test_watch_scheduler_same_stat_modified_event_resets_quiet_window(tmp_path, 
         state_path=str(tmp_path / "state.json"),
         quiet_seconds=10,
         initial_scan=False,
-        runner_factory=FakePipelineRunner,
+        pipeline_engine=FakePipelineEngine(FakePipelineRunner),
     )
     watcher.enqueue(str(archive_path), event_type="created")
     now[0] += 0.8
@@ -1646,7 +1667,7 @@ def test_modified_epoch_triggers_even_when_size_mtime_and_file_id_are_unchanged(
         state_path=str(tmp_path / "state.json"),
         quiet_seconds=10,
         initial_scan=False,
-        runner_factory=FakePipelineRunner,
+        pipeline_engine=FakePipelineEngine(FakePipelineRunner),
     )
     watcher.enqueue(str(archive_path), event_type="created")
     with archive_path.open("r+b") as handle:
@@ -1674,11 +1695,11 @@ def test_watch_scheduler_adapts_quiet_window_to_fast_content_writes(tmp_path, mo
         out_dir=str(tmp_path / "out"),
         state_path=str(tmp_path / "state.json"),
         initial_scan=False,
-        runner_factory=lambda _config: SimpleNamespace(
+        pipeline_engine=FakePipelineEngine(lambda _config: SimpleNamespace(
             context=SimpleNamespace(flatten_candidates=set(), recovered_outputs=[]),
             recent_passwords=[],
             run_targets=lambda paths: FakeSummary(),
-        ),
+        )),
     )
     watcher.enqueue(str(archive_path), event_type="created")
     for index in range(20):
@@ -1707,11 +1728,11 @@ def test_watch_scheduler_default_cold_start_is_one_second(tmp_path, monkeypatch)
         out_dir=str(tmp_path / "out"),
         state_path=str(tmp_path / "state.json"),
         initial_scan=False,
-        runner_factory=lambda _config: SimpleNamespace(
+        pipeline_engine=FakePipelineEngine(lambda _config: SimpleNamespace(
             context=SimpleNamespace(flatten_candidates=set(), recovered_outputs=[]),
             recent_passwords=[],
             run_targets=lambda paths: FakeSummary(),
-        ),
+        )),
     )
     watcher.enqueue(str(archive_path), event_type="created")
 
@@ -1735,11 +1756,11 @@ def test_watch_scheduler_retains_slow_interval_learning_across_active_epochs(tmp
         out_dir=str(tmp_path / "out"),
         state_path=str(tmp_path / "state.json"),
         initial_scan=False,
-        runner_factory=lambda _config: SimpleNamespace(
+        pipeline_engine=FakePipelineEngine(lambda _config: SimpleNamespace(
             context=SimpleNamespace(flatten_candidates=set(), recovered_outputs=[]),
             recent_passwords=[],
             run_targets=lambda paths: FakeSummary(),
-        ),
+        )),
     )
     watcher.enqueue(str(archive_path), event_type="created")
 
@@ -1780,7 +1801,7 @@ def test_modified_event_retries_same_metadata_identity(tmp_path, monkeypatch):
         state_path=str(tmp_path / "state.json"),
         quiet_seconds=0,
         initial_scan=False,
-        runner_factory=FakePipelineRunner,
+        pipeline_engine=FakePipelineEngine(FakePipelineRunner),
     )
     watcher.enqueue(str(archive_path), event_type="modified")
     assert watcher.run_once().processed == 1

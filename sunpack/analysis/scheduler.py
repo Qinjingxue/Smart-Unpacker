@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import nullcontext
 from typing import Any
 
 from sunpack.analysis.config import analysis_config, enabled_fuzzy_module_configs
@@ -13,8 +14,9 @@ from sunpack.support.module_config import enabled_module_configs
 
 
 class ArchiveAnalysisScheduler:
-    def __init__(self, config: dict[str, Any] | None = None):
+    def __init__(self, config: dict[str, Any] | None = None, *, executor_pool=None):
         self.config = analysis_config(config or {})
+        self.executor_pool = executor_pool
         discover_fuzzy_analysis_modules()
         discover_analysis_modules()
 
@@ -174,7 +176,12 @@ class ArchiveAnalysisScheduler:
 
         max_workers = max(1, int(self.config.get("max_workers", 3) or 1))
         evidences = []
-        with ThreadPoolExecutor(max_workers=min(max_workers, len(modules))) as executor:
+        executor_context = (
+            nullcontext(self.executor_pool)
+            if self.executor_pool is not None
+            else ThreadPoolExecutor(max_workers=min(max_workers, len(modules)))
+        )
+        with executor_context as executor:
             futures = {
                 executor.submit(self._run_module, module, view, prepass, module_configs.get(module.spec.name, {})): module
                 for module in modules

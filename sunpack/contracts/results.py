@@ -18,6 +18,7 @@ class TargetRunResult:
     output_dir: str = ""
     verification: dict = field(default_factory=dict)
     error: str = ""
+    failure: FailureInfo | None = None
 
 
 @dataclass

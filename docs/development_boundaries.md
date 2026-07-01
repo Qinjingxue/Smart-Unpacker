@@ -222,10 +222,15 @@ facts = bag._facts
 不要读取私有状态。使用 `FactBag.to_dict()` 或补公开方法。
 
 ```python
-from sunpack.coordinator.runner import PipelineRunner  # inside filesystem watcher scheduler
+from sunpack.coordinator.engine import PipelineEngine  # inside filesystem watcher scheduler
 ```
 
-`filesystem.watcher` 不直接绑定 coordinator runner，由 app 注入 runner factory。
+`filesystem.watcher` 不直接构造 coordinator engine。应用组合层创建并启动进程级
+`PipelineEngine`，再把实例注入 watcher；watcher 只提交稳定输入和消费请求结果。
+
+`PipelineEngine` 拥有跨请求常驻的扫描器、分析器、修复/验证组件、资源调度器和
+7-Zip worker pool。`PipelineResponse`、输出策略、后处理清单和统计属于请求，不能
+写回 Engine 的全局累计状态。
 
 ```python
 from sunpack.detection.pipeline.processors.modules... import SOME_RULE_DEFAULT

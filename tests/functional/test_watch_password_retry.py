@@ -7,7 +7,7 @@ import pytest
 import sunpack.passwords.internal.builtin as builtin_module
 import sunpack.passwords.internal.clipboard_monitor as clipboard_monitor_module
 from sunpack.config.loader import load_config
-from sunpack.coordinator.runner import PipelineRunner
+from sunpack.coordinator.engine import PipelineEngine
 from sunpack.filesystem.watcher.scheduler import WatchScheduler
 from tests.helpers.tool_config import get_test_tools
 
@@ -62,6 +62,7 @@ def test_watch_retries_real_encrypted_zip_after_password_source_update(tmp_path,
         "clipboard_monitor_enabled": source == "watch_clipboard",
         "password_retry_debounce_seconds": 0,
     }
+    engine = PipelineEngine(config).start()
     watcher = WatchScheduler(
         config,
         [str(watch_root)],
@@ -69,7 +70,7 @@ def test_watch_retries_real_encrypted_zip_after_password_source_update(tmp_path,
         state_path=str(tmp_path / "state.json"),
         quiet_seconds=0,
         initial_scan=False,
-        runner_factory=PipelineRunner,
+        pipeline_engine=engine,
     )
     watcher.enqueue(str(archive))
     first = watcher.run_once()
@@ -83,6 +84,7 @@ def test_watch_retries_real_encrypted_zip_after_password_source_update(tmp_path,
         watcher._clipboard_monitor._handle_clipboard_update()
     second = watcher.run_once()
     extracted = list(output_root.rglob("payload.txt"))
+    engine.close()
 
     assert first.failed == 1
     assert first_entry.status == "failed_password"

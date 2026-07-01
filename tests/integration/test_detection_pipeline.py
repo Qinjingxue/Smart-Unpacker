@@ -5,7 +5,7 @@ import unittest
 import zipfile
 from pathlib import Path
 
-from sunpack.coordinator.runner import PipelineRunner
+from tests.helpers.pipeline_engine import execute_pipeline
 from sunpack.config.schema import normalize_config
 from sunpack.contracts.detection import FactBag
 from sunpack.contracts.tasks import ArchiveTask
@@ -75,7 +75,7 @@ class DetectionPipelineTests(unittest.TestCase):
             with zipfile.ZipFile(archive_path, "w") as archive:
                 archive.writestr("hello.txt", "hello from SunPack")
 
-            summary = PipelineRunner(minimal_config()).run(str(root))
+            summary = execute_pipeline(minimal_config(), str(root))
 
             self.assertEqual(summary.success_count, 1)
             self.assertEqual(summary.failed_tasks, [])

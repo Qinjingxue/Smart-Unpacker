@@ -17,7 +17,7 @@ from sunpack.contracts.run_context import RunContext
 from sunpack.contracts.tasks import ArchiveTask
 from sunpack.config.schema import normalize_config
 from sunpack.coordinator.extraction_batch import BatchExtractionOutcome, ExtractionBatchRunner
-from sunpack.coordinator.runner import PipelineRunner
+from tests.helpers.pipeline_engine import execute_pipeline
 from sunpack.analysis.stage import ArchiveAnalysisStage
 from sunpack.contracts.archive_input import ArchiveInputDescriptor, ArchiveInputRange
 from sunpack.extraction.progress import write_extraction_progress_manifest
@@ -975,7 +975,7 @@ def test_main_flow_nested_archive_keeps_outer_complete_and_inner_partial_coverag
     config = _best_effort_pipeline_config(tmp_path)
     config.setdefault("extraction", {})["write_progress_manifest"] = True
 
-    summary = PipelineRunner(config).run(str(input_root))
+    summary = execute_pipeline(config, str(input_root))
 
     outer_out_dir = input_root / outer.stem
     inner_out_dir = outer_out_dir / "inner"
@@ -1005,7 +1005,7 @@ def test_main_flow_outer_partial_and_inner_tar_gz_partial_keep_coverage_separate
     archive = _outer_zip_partial_with_inner_truncated_tar_gz(input_root)
     config = _zip_tar_gz_recursive_pipeline_config(tmp_path)
 
-    summary = PipelineRunner(config).run(str(input_root))
+    summary = execute_pipeline(config, str(input_root))
 
     outer_out_dir = input_root / archive.stem
     inner_out_dir = outer_out_dir / "inner.tar"
@@ -1034,7 +1034,7 @@ def test_main_flow_outer_complete_inner_missing_volume_does_not_mix_coverage(tmp
     config = _zip_7z_recursive_pipeline_config(tmp_path)
     config.setdefault("extraction", {})["write_progress_manifest"] = True
 
-    summary = PipelineRunner(config).run(str(input_root))
+    summary = execute_pipeline(config, str(input_root))
 
     outer_out_dir = input_root / archive.stem
     outer_manifest = json.loads((outer_out_dir / ".sunpack" / "extraction_manifest.json").read_text(encoding="utf-8"))
@@ -1057,7 +1057,7 @@ def test_recursive_partial_report_survives_delete_cleanup_and_remains_discoverab
     config["post_extract"]["archive_cleanup_mode"] = "delete"
     config["post_extract"]["flatten_single_directory"] = True
 
-    summary = PipelineRunner(config).run(str(input_root))
+    summary = execute_pipeline(config, str(input_root))
 
     outer_out_dir = input_root / archive.stem
     inner_archive = outer_out_dir / "inner.zip"
@@ -1084,7 +1084,7 @@ def test_main_flow_recurses_into_truncated_tar_gz_partial_tar_stream(tmp_path):
     archive = _truncated_tar_gz_with_valid_partial_tar_prefix(input_root)
     config = _tar_gz_recursive_pipeline_config(tmp_path)
 
-    summary = PipelineRunner(config).run(str(input_root))
+    summary = execute_pipeline(config, str(input_root))
 
     outer_out_dir = input_root / archive.stem
     report = json.loads((outer_out_dir / ".sunpack" / "recovery_report.json").read_text(encoding="utf-8"))
@@ -1165,7 +1165,7 @@ def test_main_flow_accepts_best_effort_payload_damage_and_reports_coverage(tmp_p
     archive = _zip_with_one_bad_payload(input_root)
     config = _best_effort_pipeline_config(tmp_path)
 
-    summary = PipelineRunner(config).run(str(input_root))
+    summary = execute_pipeline(config, str(input_root))
 
     out_dir = input_root / archive.stem
     report = json.loads((out_dir / ".sunpack" / "recovery_report.json").read_text(encoding="utf-8"))

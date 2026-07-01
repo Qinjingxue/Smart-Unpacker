@@ -7,6 +7,8 @@ from sunpack.cli.cli_context import CliContext
 from sunpack.cli.cli_reporter import CliReporter
 from sunpack.cli.commands import extract
 from sunpack.contracts.failures import FailureInfo, FailureKind
+from sunpack.cli.cli_runtime import build_password_summary
+from tests.helpers.fake_pipeline_engine import FakePipelineEngine
 
 
 def test_wrong_password_failure_detection():
@@ -16,29 +18,15 @@ def test_wrong_password_failure_detection():
     assert extract.has_password_failure([damaged]) is False
 
 
-def test_extract_attempt_passes_clipboard_passwords_to_pipeline(monkeypatch):
-    received_configs = []
-
-    class FakeRunner:
-        recent_passwords = []
-
-        def __init__(self, config):
-            received_configs.append(config)
-
-        def run_targets(self, _target_paths):
-            return SimpleNamespace(success_count=1, failed_tasks=[], processed_keys=[], failures=[])
-
-    monkeypatch.setattr(extract, "PipelineRunner", FakeRunner)
-
-    extract._run_extract_attempt(
-        {},
+def test_extract_config_combines_clipboard_passwords_for_engine():
+    password_summary = build_password_summary(
         ["cli-secret", "shared-secret"],
-        clipboard_passwords=["clipboard-secret", "shared-secret"],
         use_builtin_passwords=False,
-        target_paths=["archive.zip"],
+        clipboard_passwords=["clipboard-secret", "shared-secret"],
     )
+    config = extract._extract_run_config({}, password_summary)
 
-    assert received_configs[0]["user_passwords"] == ["cli-secret", "shared-secret", "clipboard-secret"]
+    assert config["user_passwords"] == ["cli-secret", "shared-secret", "clipboard-secret"]
 
 
 def test_extract_prompts_for_password_retry_after_wrong_password(tmp_path, monkeypatch):
@@ -63,7 +51,7 @@ def test_extract_prompts_for_password_retry_after_wrong_password(tmp_path, monke
             return SimpleNamespace(success_count=1, failed_tasks=[], processed_keys=["secret"], failures=[])
 
     answers = iter(["y", "secret", ""])
-    monkeypatch.setattr(extract, "PipelineRunner", FakeRunner)
+    monkeypatch.setattr(extract, "PipelineEngine", lambda _config: FakePipelineEngine(FakeRunner))
     monkeypatch.setattr(extract, "collect_clipboard_passwords", lambda _config: [])
     monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
 
@@ -122,7 +110,7 @@ def test_extract_verbose_prints_partial_recovery_file_details(tmp_path, monkeypa
                 recovered_outputs=[{"archive": "broken.zip", "recovery_report": str(report)}],
             )
 
-    monkeypatch.setattr(extract, "PipelineRunner", FakeRunner)
+    monkeypatch.setattr(extract, "PipelineEngine", lambda _config: FakePipelineEngine(FakeRunner))
     monkeypatch.setattr(extract, "collect_clipboard_passwords", lambda _config: [])
     args = SimpleNamespace(
         paths=[str(target)],
@@ -185,7 +173,7 @@ def test_extract_normal_mode_keeps_partial_file_details_out_of_console(tmp_path,
                 }],
             )
 
-    monkeypatch.setattr(extract, "PipelineRunner", FakeRunner)
+    monkeypatch.setattr(extract, "PipelineEngine", lambda _config: FakePipelineEngine(FakeRunner))
     monkeypatch.setattr(extract, "collect_clipboard_passwords", lambda _config: [])
     args = SimpleNamespace(
         paths=[str(target)],
@@ -265,7 +253,7 @@ def test_extract_json_schema_includes_partial_recovery_contract(tmp_path, monkey
                 }],
             )
 
-    monkeypatch.setattr(extract, "PipelineRunner", FakeRunner)
+    monkeypatch.setattr(extract, "PipelineEngine", lambda _config: FakePipelineEngine(FakeRunner))
     monkeypatch.setattr(extract, "collect_clipboard_passwords", lambda _config: [])
     args = SimpleNamespace(
         paths=[str(target)],

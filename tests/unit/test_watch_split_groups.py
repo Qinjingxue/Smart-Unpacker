@@ -6,6 +6,7 @@ import pytest
 
 from sunpack.contracts.failures import FailureInfo, FailureKind
 from sunpack.coordinator.watch_group_coordinator import WatchGroupCoordinator
+from tests.helpers.fake_pipeline_engine import FakePipelineEngine
 from sunpack.filesystem.watcher.scheduler import WatchScheduler
 
 
@@ -27,7 +28,7 @@ def _watcher(tmp_path, runner_factory) -> WatchScheduler:
         state_path=str(tmp_path / "state.json"),
         quiet_seconds=0,
         initial_scan=False,
-        runner_factory=runner_factory,
+        pipeline_engine=FakePipelineEngine(runner_factory),
         group_coordinator=WatchGroupCoordinator({}),
     )
 

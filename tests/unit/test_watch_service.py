@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import sunpack.filesystem.watcher.service as service_module
 from sunpack.filesystem.watcher.service import CONTROL_RELOAD, CONTROL_STOP, WatchService
 from sunpack.cli.commands.watch import _watch_running
+from tests.helpers.fake_pipeline_engine import FakePipelineEngine
 
 
 class FakeRunner:
@@ -23,7 +24,7 @@ def test_watch_service_releases_named_mutex_after_exit(tmp_path, monkeypatch):
         lambda: {"watch": {"state_dir": str(state_dir), "roots": [], "tray_enabled": False}},
     )
 
-    service = WatchService(runner_factory=FakeRunner)
+    service = WatchService(engine_factory=lambda _config: FakePipelineEngine(FakeRunner))
 
     assert service.run(once=True) == 0
     assert not _watch_running({"watch": {"state_dir": str(state_dir)}})
@@ -40,8 +41,8 @@ def test_watch_service_keeps_active_named_mutex(tmp_path, monkeypatch):
         lambda: {"watch": {"state_dir": str(state_dir), "roots": [], "tray_enabled": False}},
     )
 
-    first = WatchService(runner_factory=FakeRunner)
-    second = WatchService(runner_factory=FakeRunner)
+    first = WatchService(engine_factory=lambda _config: FakePipelineEngine(FakeRunner))
+    second = WatchService(engine_factory=lambda _config: FakePipelineEngine(FakeRunner))
 
     assert first._acquire_lock()
     try:
@@ -61,7 +62,7 @@ def test_watch_running_reflects_named_mutex_owner(tmp_path, monkeypatch):
     roots_path = tmp_path / "sunpack_watch_roots.txt"
     monkeypatch.setattr(service_module, "watch_roots_path", lambda: roots_path)
 
-    service = WatchService(runner_factory=FakeRunner)
+    service = WatchService(engine_factory=lambda _config: FakePipelineEngine(FakeRunner))
 
     assert not _watch_running({"watch": {"state_dir": str(state_dir)}})
     assert service._acquire_lock()
@@ -169,7 +170,7 @@ def test_default_watch_state_uses_program_directory_and_output_stays_relative(tm
 
     monkeypatch.setattr(service_module, "WatchScheduler", FakeScheduler)
 
-    service = WatchService(runner_factory=FakeRunner)
+    service = WatchService(engine_factory=lambda _config: FakePipelineEngine(FakeRunner))
     service._start_scheduler()
 
     assert service.state_dir == str((program_dir / ".sunpack_watch").resolve())
@@ -236,7 +237,7 @@ def test_watch_service_reads_roots_from_txt_not_config(tmp_path, monkeypatch):
         },
     )
 
-    service = WatchService(runner_factory=FakeRunner)
+    service = WatchService(engine_factory=lambda _config: FakePipelineEngine(FakeRunner))
 
     assert service.roots == [str(txt_root.resolve())]
 
@@ -278,7 +279,7 @@ def test_watch_service_scheduler_uses_directory_scan_mode_not_watch_recursive(tm
         },
     )
 
-    service = WatchService(runner_factory=FakeRunner)
+    service = WatchService(engine_factory=lambda _config: FakePipelineEngine(FakeRunner))
     service._start_scheduler()
 
     assert captured["roots"] == [str(watch_root.resolve())]
@@ -303,7 +304,7 @@ def test_watch_service_waits_on_control_event_until_scheduler_is_due(tmp_path, m
             }
         },
     )
-    service = WatchService(runner_factory=FakeRunner)
+    service = WatchService(engine_factory=lambda _config: FakePipelineEngine(FakeRunner))
     scheduler_runs = []
     waits = []
 
@@ -348,7 +349,7 @@ def test_watch_service_deduplicates_unchanged_pending_ticks(tmp_path, monkeypatc
         "load_config",
         lambda: {"watch": {"state_dir": str(state_dir), "roots": [], "tray_enabled": False}},
     )
-    service = WatchService(runner_factory=FakeRunner)
+    service = WatchService(engine_factory=lambda _config: FakePipelineEngine(FakeRunner))
     written = []
 
     class FakeLog:

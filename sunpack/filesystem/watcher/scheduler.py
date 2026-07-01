@@ -18,6 +18,7 @@ from sunpack.contracts.failures import FailureKind
 from sunpack.contracts.filesystem import FileEntry
 from sunpack.contracts.results import OutcomeKind
 from sunpack.contracts.tasks import ArchiveTask
+from sunpack.contracts.pipeline import PipelineTarget
 from sunpack.filesystem.directory_scanner import apply_ordered_filters_to_entries
 from sunpack.filesystem.filters import build_filters
 from sunpack.filesystem.watcher.log import WatchLogStore
@@ -63,6 +64,16 @@ class _ActiveCandidateState:
     filter_revision: int = 0
 
 
+@dataclass
+class _ActivePipelineRequest:
+    candidate: WatchCandidate
+    group: WatchGroupSnapshot | None
+    handle: object
+    probe_workspace: str
+    predicted_probe_dirs: list[str]
+    predicted_final_dirs: list[str]
+
+
 class WatchScheduler:
     def __init__(
         self,
@@ -76,7 +87,7 @@ class WatchScheduler:
         recursive: bool | None = None,
         initial_scan: bool | None = None,
         observer_stop_timeout_seconds: float | None = None,
-        runner_factory=None,
+        pipeline_engine=None,
         group_coordinator=None,
     ):
         self.config = config
@@ -129,7 +140,9 @@ class WatchScheduler:
         self._known_output_roots: list[str] = self.state.generated_output_roots()
         self._observer = Observer()
         self._started = False
-        self.runner_factory = runner_factory
+        if pipeline_engine is None:
+            raise ValueError("WatchScheduler requires a PipelineEngine")
+        self.pipeline_engine = pipeline_engine
         quiet_min_seconds = max(
             0.0,
             float(watch_config.get("quiet_min_seconds", DEFAULT_WATCH_CONFIG["quiet_min_seconds"])),
@@ -256,9 +269,13 @@ class WatchScheduler:
                 missing_reason=snapshot.missing_reason,
                 missing_indices=list(snapshot.missing_indices),
             )
+        active_requests = [
+            self._submit_candidate(dispatch.candidate, group=dispatch.group)
+            for dispatch in dispatches
+        ]
         result = WatchRunResult(pending=self.pending_count)
-        for dispatch in dispatches:
-            single = self._process_candidate(dispatch.candidate, group=dispatch.group)
+        for active_request in active_requests:
+            single = self._complete_candidate(active_request)
             result.processed += single.processed
             result.succeeded += single.succeeded
             result.failed += single.failed
@@ -567,17 +584,19 @@ class WatchScheduler:
             return None
         return _candidate_with_file_identity(candidate)
 
-    def _process_candidate(
+    def _submit_candidate(
         self,
         candidate: WatchCandidate,
         *,
         group: WatchGroupSnapshot | None = None,
-    ) -> WatchRunResult:
-        if self.runner_factory is None:
-            raise RuntimeError("WatchScheduler requires a runner_factory.")
+    ) -> _ActivePipelineRequest:
         self.log.write("processing_started", path=candidate.path, size=candidate.size, mtime=candidate.mtime)
         with self._password_source_lock:
             run_config = dict(self.config)
+            self.pipeline_engine.update_password_sources(
+                user_passwords=run_config.get("user_passwords", []),
+                builtin_passwords=run_config.get("builtin_passwords", []),
+            )
         output_root = self._output_root_for(candidate.path)
         run_config["output"] = {
             **(run_config.get("output", {}) if isinstance(run_config.get("output"), dict) else {}),
@@ -593,24 +612,52 @@ class WatchScheduler:
             "root": probe_workspace,
             "common_root": final_output_config["output"]["common_root"],
         }
-        run_config["post_extract"] = {
-            **(run_config.get("post_extract", {}) if isinstance(run_config.get("post_extract"), dict) else {}),
-            "defer_success_actions": True,
-        }
         predicted_probe_dirs = self._predicted_output_dirs(candidate.path, run_config)
         self._activate_output_roots([probe_workspace, *predicted_probe_dirs])
-        runner = self.runner_factory(run_config)
         try:
-            summary = runner.run_targets([candidate.path])
-        finally:
+            handle = self.pipeline_engine.submit(
+                [PipelineTarget(candidate.path, output=run_config["output"])],
+                defer_postprocess=True,
+            )
+        except Exception:
             self._release_output_roots([probe_workspace, *predicted_probe_dirs])
-        self._remember_recent_passwords(getattr(runner, "recent_passwords", []))
+            self._cleanup_probe_workspace(probe_workspace)
+            raise
+        return _ActivePipelineRequest(
+            candidate=candidate,
+            group=group,
+            handle=handle,
+            probe_workspace=probe_workspace,
+            predicted_probe_dirs=predicted_probe_dirs,
+            predicted_final_dirs=predicted_final_dirs,
+        )
+
+    def _complete_candidate(self, request: _ActivePipelineRequest) -> WatchRunResult:
+        candidate = request.candidate
+        group = request.group
+        try:
+            response = request.handle.result()
+        except Exception:
+            self._cleanup_probe_workspace(request.probe_workspace)
+            raise
+        finally:
+            self._release_output_roots([request.probe_workspace, *request.predicted_probe_dirs])
+        summary = response.summary
+        self._remember_recent_passwords(response.recent_passwords)
         target_result = _target_result_for_path(summary, candidate.path)
         outcome_kind = _summary_outcome_kind(summary, target_result)
-        probe_output_dirs = self._generated_output_dirs(runner, predicted_probe_dirs)
+        probe_output_dirs = _dedupe_paths([
+            *response.artifacts.flatten_targets,
+            *(
+                str(item.get("out_dir") or "")
+                for item in (getattr(summary, "recovered_outputs", []) or [])
+                if isinstance(item, dict)
+            ),
+            *request.predicted_probe_dirs,
+        ])
 
         if outcome_kind == OutcomeKind.PARTIAL_SUCCESS:
-            self._cleanup_probe_workspace(probe_workspace)
+            self._cleanup_probe_workspace(request.probe_workspace)
             if group is not None:
                 self.state.record_group_terminal(group, status="partial")
             self.state.mark(
@@ -662,7 +709,7 @@ class WatchScheduler:
                 failure_payload=payload,
             )
             self.log.write(status, path=candidate.path, error=error, failures=failure_payloads)
-            self._cleanup_probe_workspace(probe_workspace)
+            self._cleanup_probe_workspace(request.probe_workspace)
             return WatchRunResult(processed=1, failed=1, errors=failed)
         if _summary_processed_no_tasks(summary):
             if group is not None:
@@ -675,10 +722,10 @@ class WatchScheduler:
                 status="ignored_no_tasks",
             )
             self.log.write("no_tasks_found", path=candidate.path)
-            self._cleanup_probe_workspace(probe_workspace)
+            self._cleanup_probe_workspace(request.probe_workspace)
             return WatchRunResult(processed=1)
         if outcome_kind != OutcomeKind.COMPLETE_SUCCESS:
-            self._cleanup_probe_workspace(probe_workspace)
+            self._cleanup_probe_workspace(request.probe_workspace)
             error = "watch pipeline returned no complete target outcome"
             if group is not None:
                 self.state.record_group_terminal(group, status="failed_terminal")
@@ -687,12 +734,10 @@ class WatchScheduler:
 
         generated_output_dirs, output_path_map = self._promote_probe_outputs(
             probe_output_dirs,
-            predicted_final_dirs,
-            probe_workspace,
+            request.predicted_final_dirs,
+            request.probe_workspace,
         )
-        apply_deferred = getattr(runner, "apply_deferred_postprocess", None)
-        if callable(apply_deferred):
-            apply_deferred(output_path_map)
+        request.handle.finalize(output_path_map)
         self._remember_recent_output_roots(generated_output_dirs)
         self._remember_known_output_roots(generated_output_dirs)
         if group is not None:
@@ -840,20 +885,6 @@ class WatchScheduler:
             return _dedupe_paths([default_output_dir_for_task(task, run_config.get("output", {}))])
         except Exception:
             return []
-
-    def _generated_output_dirs(self, runner, predicted: list[str]) -> list[str]:
-        roots: list[str] = []
-        context = getattr(runner, "context", None)
-        flatten_candidates = getattr(context, "flatten_candidates", None)
-        if flatten_candidates:
-            roots.extend(str(path) for path in flatten_candidates if path)
-        recovered_outputs = getattr(context, "recovered_outputs", None)
-        if recovered_outputs:
-            for item in recovered_outputs:
-                if isinstance(item, dict) and item.get("out_dir"):
-                    roots.append(str(item["out_dir"]))
-        roots.extend(predicted)
-        return _dedupe_paths(roots)
 
     def _activate_output_roots(self, roots: list[str]) -> None:
         if not roots:

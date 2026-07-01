@@ -126,6 +126,7 @@ class ExtractionBatchRunner:
         config: dict | None = None,
         analysis_stage: ArchiveAnalysisStage | None = None,
         progress_reporter: Any | None = None,
+        executor_pool=None,
     ):
         self.context = context
         self.extractor = extractor
@@ -138,6 +139,7 @@ class ExtractionBatchRunner:
         self.max_workers = resolve_max_workers()
         self.analysis_stage = analysis_stage or ArchiveAnalysisStage(self.config)
         self.progress_reporter = progress_reporter
+        self.executor_pool = executor_pool
         self.progress_round_index = 1
         self.progress_direct_mode = False
         self.relation_stage = ArchiveRelationStage()
@@ -161,7 +163,12 @@ class ExtractionBatchRunner:
         # Physical source paths are immutable. Detected formats and logical
         # volume identities travel through ArchiveInputDescriptor/ArchiveState.
 
-    def execute(self, tasks: List[ArchiveTask]) -> List[str]:
+    def execute(
+        self,
+        tasks: List[ArchiveTask],
+        *,
+        default_output_dir_for_task=None,
+    ) -> List[str]:
         if not tasks:
             if self.progress_reporter is not None:
                 self.progress_reporter.begin_round(self.progress_round_index, [], direct=self.progress_direct_mode)
@@ -172,7 +179,7 @@ class ExtractionBatchRunner:
         self.directory_password_contexts.annotate(tasks)
         output_dir_resolver = self.rename_scheduler.build_output_dir_resolver(
             tasks,
-            self.extractor.default_output_dir_for_task,
+            default_output_dir_for_task or self.extractor.default_output_dir_for_task,
         )
         output_dir_resolver = self._cached_output_dir_resolver(output_dir_resolver)
         tasks = self._skip_tasks_inside_batch_outputs(tasks, output_dir_resolver)
@@ -234,7 +241,7 @@ class ExtractionBatchRunner:
             current_limit=initial_limit,
             max_workers=self.max_workers,
         )
-        executor = TaskExecutor(scheduler, max_workers=self.max_workers)
+        executor = TaskExecutor(scheduler, max_workers=self.max_workers, executor_pool=self.executor_pool)
         def execute_one(task, runtime_scheduler):
             planned_out_dir = output_dir_resolver(task)
             outcome = self._extract_verify_with_retries(task, planned_out_dir, runtime_scheduler)
@@ -379,7 +386,7 @@ class ExtractionBatchRunner:
             current_limit=max_workers,
             max_workers=max_workers,
         )
-        executor = TaskExecutor(scheduler, max_workers=max_workers)
+        executor = TaskExecutor(scheduler, max_workers=max_workers, executor_pool=self.executor_pool)
         return executor.execute_all(tasks, worker)
 
     def _stage_max_workers(
@@ -1354,6 +1361,7 @@ class ExtractionBatchRunner:
                 output_dir=out_dir,
                 verification=_verification_payload(outcome.verification) if outcome.verification is not None else {},
                 error=str(res.error or ""),
+                failure=outcome.result.failure,
             ))
             return None
 

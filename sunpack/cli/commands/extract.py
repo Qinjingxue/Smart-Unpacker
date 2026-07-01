@@ -21,7 +21,7 @@ from sunpack.cli.cli_runtime import (
 )
 from sunpack.cli.cli_types import CliCommandResult
 from sunpack.config.loader import load_config
-from sunpack.coordinator.runner import PipelineRunner
+from sunpack.coordinator.engine import PipelineEngine
 from sunpack.contracts.failures import FailureInfo
 from sunpack.passwords import dedupe_passwords
 
@@ -73,52 +73,68 @@ def handle(args, ctx):
 
     attempts = []
     retry_count = 0
-    while True:
-        runner, summary, password_summary = _run_extract_attempt(
-            config,
-            passwords,
-            clipboard_passwords=clipboard_passwords,
-            use_builtin_passwords=not args.no_builtin_passwords,
-            target_paths=target_paths,
-            direct_file=bool(getattr(args, "direct_file", False)),
-            quiet=bool(getattr(reporter, "quiet", False) or getattr(reporter, "json_mode", False)),
-            verbose=bool(getattr(reporter, "verbose", False)),
-        )
-        failed_tasks = list(summary.failed_tasks)
-        failures = list(summary.failures)
-        processed_keys = list(summary.processed_keys)
-        attempts.append({
-            "success_count": summary.success_count,
-            "failed_count": len(failed_tasks),
-            "processed_count": len(set(processed_keys)),
-            "partial_success_count": getattr(summary, "partial_success_count", 0),
-            "recovered_outputs": list(getattr(summary, "recovered_outputs", []) or []),
-            "wrong_password_failure": has_password_failure(failures),
-            "failures": [failure.to_dict() for failure in failures],
-        })
-        _emit_verbose_recovery_details(reporter, summary)
-        if not _should_retry_password_failure(args, failures):
-            break
-        if not _confirm_password_retry(ctx):
-            break
-        try:
-            new_passwords = prompt_for_passwords(
-                prompt_text=ctx.t("cli.password_prompt"),
-                input_prompt=ctx.t("cli.password_input_prompt"),
+    initial_password_summary = build_password_summary(
+        passwords,
+        use_builtin_passwords=not args.no_builtin_passwords,
+        clipboard_passwords=clipboard_passwords,
+    )
+    run_config = _extract_run_config(
+        config,
+        initial_password_summary,
+        quiet=bool(getattr(reporter, "quiet", False) or getattr(reporter, "json_mode", False)),
+        verbose=bool(getattr(reporter, "verbose", False)),
+    )
+    with PipelineEngine(run_config) as engine:
+        while True:
+            password_summary = build_password_summary(
+                passwords,
+                use_builtin_passwords=not args.no_builtin_passwords,
+                clipboard_passwords=clipboard_passwords,
             )
-        except (EOFError, KeyboardInterrupt):
-            break
-        if not new_passwords:
-            reporter.info(ctx.t("cli.extract.retry_no_passwords"))
-            break
-        passwords = _dedupe([*passwords, *new_passwords])
-        retry_count += 1
-        reporter.info(ctx.t("cli.extract.retry_round"))
+            engine.update_password_sources(
+                user_passwords=dedupe_passwords(password_summary.user_passwords + password_summary.clipboard_passwords),
+                builtin_passwords=password_summary.builtin_passwords,
+            )
+            summary = engine.submit(
+                target_paths,
+                direct=bool(getattr(args, "direct_file", False)),
+            ).result().summary
+            failed_tasks = list(summary.failed_tasks)
+            failures = list(summary.failures)
+            processed_keys = list(summary.processed_keys)
+            attempts.append({
+                "success_count": summary.success_count,
+                "failed_count": len(failed_tasks),
+                "processed_count": len(set(processed_keys)),
+                "partial_success_count": getattr(summary, "partial_success_count", 0),
+                "recovered_outputs": list(getattr(summary, "recovered_outputs", []) or []),
+                "wrong_password_failure": has_password_failure(failures),
+                "failures": [failure.to_dict() for failure in failures],
+            })
+            _emit_verbose_recovery_details(reporter, summary)
+            if not _should_retry_password_failure(args, failures):
+                break
+            if not _confirm_password_retry(ctx):
+                break
+            try:
+                new_passwords = prompt_for_passwords(
+                    prompt_text=ctx.t("cli.password_prompt"),
+                    input_prompt=ctx.t("cli.password_input_prompt"),
+                )
+            except (EOFError, KeyboardInterrupt):
+                break
+            if not new_passwords:
+                reporter.info(ctx.t("cli.extract.retry_no_passwords"))
+                break
+            passwords = _dedupe([*passwords, *new_passwords])
+            retry_count += 1
+            reporter.info(ctx.t("cli.extract.retry_round"))
+        recent_passwords = engine.recent_passwords
 
     password_summary = build_password_summary(
         passwords,
         use_builtin_passwords=not args.no_builtin_passwords,
-        recent_passwords=runner.recent_passwords,
+        recent_passwords=recent_passwords,
         clipboard_passwords=clipboard_passwords,
     )
 
@@ -153,22 +169,13 @@ def handle(args, ctx):
     return 0, result
 
 
-def _run_extract_attempt(
+def _extract_run_config(
     config: dict,
-    passwords: list[str],
+    password_summary,
     *,
-    clipboard_passwords: list[str] | None = None,
-    use_builtin_passwords: bool,
-    target_paths: list[str],
-    direct_file: bool = False,
     quiet: bool = False,
     verbose: bool = False,
-):
-    password_summary = build_password_summary(
-        passwords,
-        use_builtin_passwords=use_builtin_passwords,
-        clipboard_passwords=clipboard_passwords,
-    )
+) -> dict:
     run_config = dict(config)
     run_config["cli"] = {
         **(config.get("cli", {}) if isinstance(config.get("cli"), dict) else {}),
@@ -183,15 +190,7 @@ def _run_extract_attempt(
         password_summary.user_passwords + password_summary.clipboard_passwords
     )
     run_config["builtin_passwords"] = password_summary.builtin_passwords
-    runner = PipelineRunner(run_config)
-    summary = runner.run_direct_files(target_paths) if direct_file else runner.run_targets(target_paths)
-    password_summary = build_password_summary(
-        passwords,
-        use_builtin_passwords=use_builtin_passwords,
-        recent_passwords=runner.recent_passwords,
-        clipboard_passwords=clipboard_passwords,
-    )
-    return runner, summary, password_summary
+    return run_config
 
 
 def has_password_failure(failures: list[FailureInfo]) -> bool:

@@ -61,3 +61,9 @@ class PasswordStore:
         with self._lock:
             self.recent_passwords = [item for item in self.recent_passwords if item != password]
             self.recent_passwords.insert(0, password)
+
+    def replace_sources(self, *, user_passwords: List[str], builtin_passwords: List[str]) -> None:
+        """Atomically refresh dynamic sources without discarding learned passwords."""
+        with self._lock:
+            self.user_passwords = dedupe_passwords(user_passwords)
+            self.builtin_passwords = dedupe_passwords(builtin_passwords)

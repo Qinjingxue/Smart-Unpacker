@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from sunpack.config.schema import normalize_config
-from sunpack.coordinator.runner import PipelineRunner
+from tests.helpers.pipeline_engine import execute_pipeline
 from sunpack.support.resources import get_7z_dll_path, get_sevenzip_bridge_worker_path
 from tests.helpers.detection_config import with_detection_pipeline
 
@@ -24,7 +24,7 @@ def test_resource_guard_opt_in_rejects_high_compression_zip_before_extraction(tm
         max_compression_ratio=4.0,
     )
 
-    summary = PipelineRunner(config).run(str(tmp_path))
+    summary = execute_pipeline(config, str(tmp_path))
 
     record_property("payload_size_mb", size_mb)
     record_property("archive_size_bytes", archive.stat().st_size)
@@ -46,7 +46,7 @@ def test_many_small_file_storm_can_still_extract_when_guard_allows(tmp_path, req
         max_compression_ratio=1000.0,
     )
 
-    summary = PipelineRunner(config).run(str(tmp_path))
+    summary = execute_pipeline(config, str(tmp_path))
 
     extracted = list((tmp_path / archive.stem / "items").glob("*.txt"))
     record_property("entry_count", count)

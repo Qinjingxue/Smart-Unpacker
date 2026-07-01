@@ -5,7 +5,7 @@ import zlib
 import pytest
 
 from sunpack.coordinator.scanner import ScanOrchestrator
-from sunpack.coordinator.runner import PipelineRunner
+from tests.helpers.pipeline_engine import execute_pipeline
 from sunpack.coordinator.target_scan import build_fact_bags_for_targets
 from sunpack.detection.scheduler import DetectionScheduler
 from tests.helpers.detection_config import with_detection_pipeline
@@ -153,7 +153,7 @@ def test_missing_middle_split_volume_is_failed_before_detection(tmp_path):
     assert gap.get("relation.split_missing_reason") == "missing_middle"
     assert gap.get("relation.split_missing_indices") == [3]
 
-    summary = PipelineRunner(SCAN_CONFIG).run(str(root))
+    summary = execute_pipeline(SCAN_CONFIG, str(root))
 
     assert summary.success_count == 0
     assert any("missing or incomplete split volume" in item for item in summary.failed_tasks)
@@ -171,7 +171,7 @@ def test_missing_head_split_volume_is_failed_before_detection(tmp_path):
     assert lost.get("relation.split_missing_reason") == "missing_head"
     assert lost.get("relation.split_missing_indices") == [1]
 
-    summary = PipelineRunner(SCAN_CONFIG).run(str(root))
+    summary = execute_pipeline(SCAN_CONFIG, str(root))
 
     assert summary.success_count == 0
     assert any("missing or incomplete split volume" in item for item in summary.failed_tasks)

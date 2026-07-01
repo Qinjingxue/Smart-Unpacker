@@ -1,6 +1,7 @@
 import concurrent.futures
 import inspect
 import time
+from contextlib import nullcontext
 from typing import Any, Callable
 
 from sunpack.coordinator.scheduling.concurrency import ConcurrencyScheduler
@@ -14,9 +15,15 @@ from sunpack.support import archive_knowledge_projection as knowledge_view
 
 
 class TaskExecutor:
-    def __init__(self, scheduler: ConcurrencyScheduler, max_workers: int = 8):
+    def __init__(
+        self,
+        scheduler: ConcurrencyScheduler,
+        max_workers: int = 8,
+        executor_pool: concurrent.futures.ThreadPoolExecutor | None = None,
+    ):
         self.scheduler = scheduler
         self.max_workers = max_workers
+        self.executor_pool = executor_pool
 
     def execute_all(self, tasks: list[Any], worker_func: Callable[[Any], Any]) -> list[Any]:
         results = []
@@ -47,7 +54,12 @@ class TaskExecutor:
                 self.scheduler.release_slot(demand=demand)
 
         try:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as pool:
+            pool_context = (
+                nullcontext(self.executor_pool)
+                if self.executor_pool is not None
+                else concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers)
+            )
+            with pool_context as pool:
                 pending = list(tasks)
                 futures: dict[concurrent.futures.Future, ResourceDemand] = {}
                 while pending or futures:

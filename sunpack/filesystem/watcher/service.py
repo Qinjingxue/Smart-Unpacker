@@ -191,10 +191,10 @@ def is_watch_lock_active(config: dict) -> bool:
 
 
 class WatchService:
-    def __init__(self, *, runner_factory=None, tray_factory=None, group_coordinator_factory=None):
-        if runner_factory is None:
-            raise ValueError("WatchService requires a runner_factory.")
-        self.runner_factory = runner_factory
+    def __init__(self, *, engine_factory=None, tray_factory=None, group_coordinator_factory=None):
+        if engine_factory is None:
+            raise ValueError("WatchService requires an engine_factory.")
+        self.engine_factory = engine_factory
         self.group_coordinator_factory = group_coordinator_factory
         self.tray_factory = tray_factory
         self.config = load_config()
@@ -203,6 +203,7 @@ class WatchService:
         self.lock_name = watch_service_mutex_name(self.config)
         self.control_events = WatchControlEvents(self.config)
         self.scheduler: WatchScheduler | None = None
+        self.pipeline_engine = None
         self.tray = None
         self._stop_requested = False
         self._lock_handle = None
@@ -286,6 +287,8 @@ class WatchService:
         watch_config = dict(run_config.get("watch") if isinstance(run_config.get("watch"), dict) else {})
         watch_config["clipboard_monitor_enabled"] = bool(self.service_config.get("clipboard_monitor_enabled", True))
         run_config["watch"] = watch_config
+        self.pipeline_engine = self.engine_factory(run_config)
+        self.pipeline_engine.start()
         self.scheduler = WatchScheduler(
             run_config,
             roots,
@@ -300,7 +303,7 @@ class WatchService:
             ),
             initial_scan=bool(watch_config.get("initial_scan", True)),
             observer_stop_timeout_seconds=float(watch_config.get("observer_stop_timeout_seconds", 5.0)),
-            runner_factory=self.runner_factory,
+            pipeline_engine=self.pipeline_engine,
             group_coordinator=(self.group_coordinator_factory(run_config) if self.group_coordinator_factory else None),
         )
         self.scheduler.start()
@@ -310,6 +313,9 @@ class WatchService:
         if self.scheduler is not None:
             self.scheduler.stop()
         self.scheduler = None
+        if self.pipeline_engine is not None:
+            self.pipeline_engine.close(graceful=True)
+        self.pipeline_engine = None
         self._last_idle_tick_signature = None
 
     def _start_tray(self) -> None:

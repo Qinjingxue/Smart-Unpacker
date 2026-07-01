@@ -62,6 +62,18 @@ python sunpack.py config show
 
 CLI 可用 `--recur` 临时覆盖。
 
+## pipeline
+
+`pipeline` 控制进程级常驻 Engine 的入口队列和自动微批，不改变单个压缩包的检测、验证或修复策略。
+
+| 字段 | 类型 | 默认 | 说明 |
+| --- | --- | --- | --- |
+| `batch_window_seconds` | `float` | `0.05` | 首个请求到达后继续收集兼容请求的最大时间。 |
+| `max_batch_requests` | `int` | `64` | 一个微批最多包含的提交请求数。 |
+| `queue_capacity` | `int` | `4096` | 入口队列上限；达到上限时提交方产生背压。 |
+
+CLI 在当前命令结束后关闭 Engine；watch 在服务生命周期内保持同一个 Engine 和 7-Zip worker pool。
+
 ## post_extract
 
 | 字段 | 类型 | 可选值 | 说明 |

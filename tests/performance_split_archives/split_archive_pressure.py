@@ -15,7 +15,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from sunpack.config.schema import normalize_config
-from sunpack.coordinator.runner import PipelineRunner
+from sunpack.coordinator.engine import PipelineEngine
 from sunpack.coordinator.scanner import ScanOrchestrator
 from sunpack.coordinator.scheduling.executor import TaskExecutor
 from tests.helpers.detection_config import with_detection_pipeline
@@ -164,7 +164,7 @@ def wrap_method(owner, method_name: str, recorder: TimingRecorder, label: str, d
     recorder.add_restore(lambda: setattr(owner, method_name, original))
 
 
-def attach_pipeline_timing(runner: PipelineRunner) -> TimingRecorder:
+def attach_pipeline_timing(runner: PipelineEngine) -> TimingRecorder:
     recorder = TimingRecorder()
     wrap_method(runner.task_scanner, "scan_targets", recorder, "pipeline_scan")
     wrap_method(runner.batch_runner, "execute", recorder, "batch_execute")
@@ -186,8 +186,6 @@ def attach_pipeline_timing(runner: PipelineRunner) -> TimingRecorder:
     wrap_method(runner.extractor.password_tester.native_password_tester, "try_passwords", recorder, "password_native_try", detail=_password_try_detail)
     wrap_method(runner.extractor, "extract", recorder, "extract", detail=_archive_task_detail)
     wrap_method(runner.batch_runner.verifier, "verify", recorder, "verify")
-    wrap_method(runner.postprocess_actions, "apply", recorder, "postprocess")
-    wrap_method(runner.logger, "log_final_summary", recorder, "final_summary")
     wrap_method(runner.extractor, "close", recorder, "extractor_close")
     return recorder
 
@@ -572,13 +570,14 @@ def run_case(pressure_case: PressureCase) -> dict:
     scan_results = ScanOrchestrator(scan_config).scan(str(pressure_case.case.archive_dir))
     scan_seconds = time.perf_counter() - started
 
-    runner = PipelineRunner(pressure_config(passwords=pressure_case.passwords))
+    runner = PipelineEngine(pressure_config(passwords=pressure_case.passwords)).start()
     pipeline_timing = attach_pipeline_timing(runner)
     started = time.perf_counter()
     try:
-        summary = runner.run(str(pressure_case.case.archive_dir))
+        summary = runner.submit([str(pressure_case.case.archive_dir)]).result().summary
     finally:
         pipeline_timing.restore()
+        runner.close()
     pipeline_seconds = time.perf_counter() - started
 
     extracted = marker_extracted(pressure_case.case)
@@ -658,13 +657,14 @@ def run_batch_cases(pressure_cases: list[PressureCase]) -> list[dict]:
     scan_results = ScanOrchestrator(scan_config).scan(str(batch_dir))
     scan_seconds = time.perf_counter() - started
 
-    runner = PipelineRunner(pressure_config(passwords=PASSWORD_TRY_LIST, scheduler_profile="auto"))
+    runner = PipelineEngine(pressure_config(passwords=PASSWORD_TRY_LIST, scheduler_profile="auto")).start()
     pipeline_timing = attach_pipeline_timing(runner)
     started = time.perf_counter()
     try:
-        summary = runner.run(str(batch_dir))
+        summary = runner.submit([str(batch_dir)]).result().summary
     finally:
         pipeline_timing.restore()
+        runner.close()
     pipeline_seconds = time.perf_counter() - started
     timing_data = timing_columns(pipeline_timing)
 

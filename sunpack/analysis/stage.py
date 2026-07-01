@@ -28,11 +28,16 @@ from sunpack.support import archive_knowledge_projection as knowledge_view
 
 class ArchiveAnalysisStage:
     """Own analysis-layer task batching, caching, and report projection."""
-    def __init__(self, config: dict[str, Any] | None = None):
+    def __init__(self, config: dict[str, Any] | None = None, *, executor_pool=None, module_executor_pool=None):
         self.config = config or {}
+        self.executor_pool = executor_pool
         analysis_config = self.config.get("analysis") if isinstance(self.config.get("analysis"), dict) else {}
         self.enabled = bool(analysis_config.get("enabled", True))
-        self.scheduler = ArchiveAnalysisScheduler(self.config) if self.enabled else None
+        self.scheduler = (
+            ArchiveAnalysisScheduler(self.config, executor_pool=module_executor_pool)
+            if self.enabled
+            else None
+        )
         self._report_cache: dict[tuple, ArchiveAnalysisReport] = {}
         self._report_cache_lock = threading.Lock()
 
@@ -43,7 +48,12 @@ class ArchiveAnalysisStage:
         max_workers = self._task_max_workers(len(groups))
         if max_workers > 1:
             grouped_results: list[list[ArchiveTask]] = [[] for _ in tasks]
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            executor_context = (
+                nullcontext(self.executor_pool)
+                if self.executor_pool is not None
+                else ThreadPoolExecutor(max_workers=max_workers)
+            )
+            with executor_context as executor:
                 futures = {
                     executor.submit(self._analyze_task_group, group): group
                     for group in groups
