@@ -25,6 +25,8 @@ class CompressionStreamPartialRecovery:
             stage="deep",
             safe=True,
             partial=True,
+            atomic=True,
+            route_family="stream_verified_prefix_salvage",
             routes=(
                 RepairRoute(
                     formats=self.aliases,

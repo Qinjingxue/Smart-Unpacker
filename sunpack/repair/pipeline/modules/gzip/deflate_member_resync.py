@@ -20,6 +20,8 @@ class GzipDeflateMemberResync:
         stage="deep",
         safe=True,
         partial=True,
+        atomic=True,
+        route_family="gzip_member_resync",
         routes=(
             RepairRoute(
                 formats=("gzip", "gz"),

@@ -18,6 +18,8 @@ class RarEndBlockRepair:
         categories=("boundary_repair",),
         stage="deep",
         safe=True,
+        atomic=True,
+        route_family="rar_end_block_boundary",
         routes=(
             RepairRoute(
                 formats=("rar",),

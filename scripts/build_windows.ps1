@@ -328,11 +328,11 @@ required = [
     'zip_directory_field_repair', 'zip_conflict_resolver_rebuild',
     'gzip_footer_fix_repair', 'gzip_deflate_member_resync_repair',
     'zstd_frame_salvage_repair', 'tar_boundary_repair',
-    'tar_sparse_pax_longname_repair', 'compression_stream_partial_recovery',
+    'compression_stream_partial_recovery',
     'compression_stream_trailing_junk_trim', 'tar_compressed_partial_recovery',
-    'tar_metadata_downgrade_recovery', 'archive_carrier_crop_recovery',
+    'archive_carrier_crop_recovery',
     'seven_zip_scan_source', 'seven_zip_atomic_repair',
-    'rar_file_quarantine_rebuild', 'archive_nested_payload_salvage',
+    'archive_nested_payload_salvage',
     'rar_block_chain_trim_recovery', 'rar_end_block_repair',
 ]
 assert n.native_available()

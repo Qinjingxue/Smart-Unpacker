@@ -590,21 +590,16 @@
       { "name": "zip_resolve_overlapping_entries", "enabled": true },
       { "name": "zip_reconcile_cd_data_descriptor_conflict", "enabled": true },
       {
-        "name": "tar_header_checksum_fix",
+        "name": "tar_single_header_checksum_repair",
         "enabled": true
       },
       {
         "name": "tar_truncated_partial_recovery",
         "enabled": true
       },
-      {
-        "name": "tar_metadata_downgrade_recovery",
-        "enabled": true
-      },
-      {
-        "name": "tar_sparse_pax_longname_repair",
-        "enabled": true
-      },
+      { "name": "tar_pax_header_quarantine", "enabled": true },
+      { "name": "tar_gnu_longname_quarantine", "enabled": true },
+      { "name": "tar_sparse_entry_quarantine", "enabled": true },
       {
         "name": "tar_trailing_junk_trim",
         "enabled": true
@@ -621,6 +616,8 @@
         "name": "gzip_footer_fix",
         "enabled": true
       },
+      { "name": "gzip_header_crc_repair", "enabled": true },
+      { "name": "gzip_reserved_flags_repair", "enabled": true },
       {
         "name": "gzip_deflate_member_resync",
         "enabled": true
@@ -649,6 +646,7 @@
         "name": "bzip2_truncated_partial_recovery",
         "enabled": true
       },
+      { "name": "bzip2_block_size_header_repair", "enabled": true },
       {
         "name": "tar_bzip2_truncated_partial_recovery",
         "enabled": true
@@ -665,6 +663,8 @@
         "name": "xz_truncated_partial_recovery",
         "enabled": true
       },
+      { "name": "xz_stream_header_crc_repair", "enabled": true },
+      { "name": "xz_stream_footer_crc_repair", "enabled": true },
       {
         "name": "tar_xz_truncated_partial_recovery",
         "enabled": true
@@ -806,10 +806,6 @@
         "enabled": true
       },
       {
-        "name": "rar_carrier_crop_deep_recovery",
-        "enabled": true
-      },
-      {
         "name": "rar_block_chain_trim",
         "enabled": true
       },
@@ -817,14 +813,12 @@
         "name": "rar_end_block_repair",
         "enabled": true
       },
-      {
-        "name": "rar_file_quarantine_rebuild",
-        "enabled": true
-      },
-      {
-        "name": "rar4_file_quarantine_rebuild",
-        "enabled": true
-      }
+      { "name": "rar_main_header_crc_repair", "enabled": true },
+      { "name": "rar_file_header_crc_repair", "enabled": true },
+      { "name": "rar_service_header_crc_repair", "enabled": true },
+      { "name": "rar_end_header_crc_repair", "enabled": true },
+      { "name": "rar_invalid_file_block_quarantine", "enabled": true },
+      { "name": "rar_invalid_service_block_quarantine", "enabled": true }
     ]
   },
   "detection": {

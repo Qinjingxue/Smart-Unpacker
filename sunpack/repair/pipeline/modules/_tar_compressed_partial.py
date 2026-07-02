@@ -25,6 +25,8 @@ class TarCompressedPartialRecovery:
             stage="deep",
             safe=True,
             partial=True,
+            atomic=True,
+            route_family="compressed_tar_verified_prefix_salvage",
             routes=(
                 RepairRoute(
                     formats=self.aliases,

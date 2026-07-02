@@ -27,6 +27,8 @@ class CompressionStreamBlockSalvage:
             stage="deep",
             safe=True,
             partial=True,
+            atomic=True,
+            route_family="stream_independent_unit_salvage",
             routes=(
                 RepairRoute(
                     formats=self.aliases,

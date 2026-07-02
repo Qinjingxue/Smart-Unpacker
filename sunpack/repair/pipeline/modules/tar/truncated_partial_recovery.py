@@ -17,6 +17,8 @@ class TarTruncatedPartialRecovery:
         stage="deep",
         safe=True,
         partial=True,
+        atomic=True,
+        route_family="tar_complete_member_prefix_salvage",
         routes=(
             RepairRoute(
                 formats=("tar",),

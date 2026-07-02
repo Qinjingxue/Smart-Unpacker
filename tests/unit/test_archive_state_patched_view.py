@@ -22,7 +22,7 @@ from sunpack.repair.pipeline.modules.archive_carrier_crop import attach_native_c
 from sunpack.repair.pipeline.modules.gzip.trailing_junk_trim import GzipTrailingJunkTrim
 from sunpack.repair.pipeline.modules._native_candidates import candidates_from_native_result
 from sunpack.repair.pipeline.modules._common import source_input_for_job
-from sunpack.repair.pipeline.modules.tar.checksum_fix import TarHeaderChecksumFix
+from sunpack.repair.pipeline.modules.tar.atomic import TarSingleHeaderChecksumRepair
 from sunpack.repair.pipeline.modules.zip._rebuild import rebuild_zip_from_source
 from sunpack.repair.pipeline.modules.zip.atomic import ZipTrimTrailingJunk
 from sunpack.support.archive_state_view import ArchiveStateByteView
@@ -296,7 +296,7 @@ def test_stream_repair_module_can_return_virtual_patch_candidate(tmp_path):
     assert gzip.decompress(ArchiveStateByteView(result.repaired_state).to_bytes()) == b"payload"
 
 
-def test_tar_checksum_fix_can_return_virtual_patch_candidate(tmp_path):
+def test_tar_single_header_checksum_repair_returns_materialized_atomic_candidate(tmp_path):
     buffer = io.BytesIO()
     with tarfile.open(fileobj=buffer, mode="w") as tar:
         info = tarfile.TarInfo("payload.txt")
@@ -314,15 +314,15 @@ def test_tar_checksum_fix_can_return_virtual_patch_candidate(tmp_path):
         workspace=str(tmp_path / "repair"),
     )
 
-    result = TarHeaderChecksumFix().repair(
+    result = TarSingleHeaderChecksumRepair().repair(
         job,
         diagnose_repair_job(job),
         str(tmp_path / "repair"),
-        {"virtual_patch_candidate": True},
+        {},
     )
 
     assert result.ok
-    repaired = ArchiveStateByteView(result.repaired_state).to_bytes()
+    repaired = Path(result.repaired_input["path"]).read_bytes()
     with tarfile.open(fileobj=io.BytesIO(repaired), mode="r:") as tar:
         assert tar.extractfile("payload.txt").read() == b"hello"
 
@@ -351,9 +351,9 @@ def test_native_crop_metadata_can_become_virtual_patch_candidate(tmp_path):
         }],
     }
 
-    attach_native_crop_patch_plans(native_result, job, "rar_carrier_crop_deep_recovery")
+    attach_native_crop_patch_plans(native_result, job, "archive_carrier_crop_deep_recovery")
     candidates = candidates_from_native_result(
-        "rar_carrier_crop_deep_recovery",
+        "archive_carrier_crop_deep_recovery",
         native_result,
         job,
         diagnosis,

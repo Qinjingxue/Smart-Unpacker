@@ -1,13 +1,12 @@
 use formats::carrier::{
     archive_carrier_crop_recovery, archive_nested_payload_salvage, rar_block_chain_trim_recovery,
-    rar_end_block_repair, rar_file_quarantine_rebuild,
+    rar_end_block_repair,
 };
 use formats::seven_zip::{seven_zip_atomic_repair, seven_zip_scan_source};
 use formats::stream::{
     compression_stream_block_salvage, compression_stream_partial_recovery,
     compression_stream_trailing_junk_trim, gzip_deflate_member_resync_repair,
     gzip_footer_fix_repair, tar_boundary_repair, tar_compressed_partial_recovery,
-    tar_metadata_downgrade_recovery, tar_sparse_pax_longname_repair,
     tar_truncated_partial_recovery, zstd_frame_salvage_repair,
 };
 use formats::zip::{
@@ -215,17 +214,14 @@ fn sunpack_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(gzip_deflate_member_resync_repair, m)?)?;
     m.add_function(wrap_pyfunction!(zstd_frame_salvage_repair, m)?)?;
     m.add_function(wrap_pyfunction!(tar_boundary_repair, m)?)?;
-    m.add_function(wrap_pyfunction!(tar_sparse_pax_longname_repair, m)?)?;
     m.add_function(wrap_pyfunction!(compression_stream_partial_recovery, m)?)?;
     m.add_function(wrap_pyfunction!(compression_stream_block_salvage, m)?)?;
     m.add_function(wrap_pyfunction!(compression_stream_trailing_junk_trim, m)?)?;
     m.add_function(wrap_pyfunction!(tar_compressed_partial_recovery, m)?)?;
     m.add_function(wrap_pyfunction!(tar_truncated_partial_recovery, m)?)?;
-    m.add_function(wrap_pyfunction!(tar_metadata_downgrade_recovery, m)?)?;
     m.add_function(wrap_pyfunction!(archive_carrier_crop_recovery, m)?)?;
     m.add_function(wrap_pyfunction!(seven_zip_scan_source, m)?)?;
     m.add_function(wrap_pyfunction!(seven_zip_atomic_repair, m)?)?;
-    m.add_function(wrap_pyfunction!(rar_file_quarantine_rebuild, m)?)?;
     m.add_function(wrap_pyfunction!(archive_nested_payload_salvage, m)?)?;
     m.add_function(wrap_pyfunction!(rar_block_chain_trim_recovery, m)?)?;
     m.add_function(wrap_pyfunction!(rar_end_block_repair, m)?)?;

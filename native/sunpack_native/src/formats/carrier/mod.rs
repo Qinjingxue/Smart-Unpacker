@@ -11,7 +11,6 @@ include!("../nested/repair.rs");
 include!("types.rs");
 include!("scan.rs");
 include!("../rar/parse.rs");
-include!("../rar/write.rs");
 include!("../nested/scan.rs");
 include!("source.rs");
 include!("write.rs");

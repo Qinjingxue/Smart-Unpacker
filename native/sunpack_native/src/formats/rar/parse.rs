@@ -252,10 +252,6 @@ fn rar5_end_block() -> Vec<u8> {
     rar5_block(5, 0, &[])
 }
 
-fn rar5_main_block(archive_flags: u64) -> Vec<u8> {
-    rar5_header_block(1, 0, &write_vint(archive_flags), &[])
-}
-
 fn rar4_block(header_type: u8, flags: u16, payload: &[u8]) -> Vec<u8> {
     let add_size = if payload.is_empty() {
         Vec::new()

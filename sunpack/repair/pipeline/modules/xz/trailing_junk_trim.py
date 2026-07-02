@@ -17,6 +17,8 @@ class XzTrailingJunkTrim:
         formats=("xz",),
         categories=("boundary_repair",),
         stage="safe_repair",
+        atomic=True,
+        route_family="xz_stream_boundary_trim",
         routes=(
             RepairRoute(
                 formats=("xz",),

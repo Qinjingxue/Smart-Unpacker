@@ -22,6 +22,8 @@ class ArchiveNestedPayloadSalvage:
         stage="deep",
         safe=True,
         partial=True,
+        atomic=True,
+        route_family="nested_payload_candidate_salvage",
         routes=(
             RepairRoute(
                 formats=("zip", "7z", "seven_zip", "rar", "tar", "gzip", "archive"),

@@ -19,6 +19,8 @@ class GzipFooterFix:
         formats=("gzip", "gz"),
         categories=("content_recovery", "boundary_repair"),
         stage="targeted",
+        atomic=True,
+        route_family="gzip_member_footer_integrity",
         routes=(
             RepairRoute(
                 formats=("gzip", "gz"),

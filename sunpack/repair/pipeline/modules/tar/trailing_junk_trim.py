@@ -5,7 +5,7 @@ from sunpack.repair.job import RepairJob
 from sunpack.repair.pipeline.module import RepairModuleSpec, RepairRoute
 from sunpack.repair.pipeline.registry import register_repair_module
 
-from .checksum_fix import TarBoundaryRepairModule
+from ._boundary import TarBoundaryRepairModule
 
 
 class TarTrailingJunkTrim(TarBoundaryRepairModule):
@@ -14,6 +14,8 @@ class TarTrailingJunkTrim(TarBoundaryRepairModule):
         formats=("tar",),
         categories=("boundary_repair",),
         stage="safe_repair",
+        atomic=True,
+        route_family="tar_boundary_trim",
         routes=(
             RepairRoute(
                 formats=("tar",),

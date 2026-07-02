@@ -2,15 +2,16 @@ from __future__ import annotations
 
 from sunpack.repair.diagnosis import RepairDiagnosis
 from sunpack.repair.job import RepairJob
-from sunpack.repair.pipeline.module import RepairModuleSpec, RepairRoute
-from sunpack.repair.pipeline.modules._common import source_input_for_job, module_limits
+from sunpack.repair.pipeline.module import RepairModuleSpec
+from sunpack.repair.pipeline.modules._common import module_limits, source_input_for_job
 from sunpack.repair.pipeline.modules._native_patch_result import native_patch_repair_result
-from sunpack.repair.pipeline.registry import register_repair_module
 from sunpack.repair.result import RepairResult
 from sunpack_native import tar_boundary_repair as _native_tar_boundary_repair
 
 
 class TarBoundaryRepairModule:
+    """Execution helper for one named TAR boundary mutation."""
+
     spec: RepairModuleSpec
 
     def repair(self, job: RepairJob, diagnosis: RepairDiagnosis, workspace: str, config: dict) -> RepairResult:
@@ -26,31 +27,6 @@ class TarBoundaryRepairModule:
         )
 
 
-class TarHeaderChecksumFix(TarBoundaryRepairModule):
-    spec = RepairModuleSpec(
-        name="tar_header_checksum_fix",
-        formats=("tar",),
-        categories=("directory_rebuild", "safe_repair"),
-        stage="targeted",
-        routes=(
-            RepairRoute(
-                formats=("tar",),
-                require_any_categories=("directory_rebuild", "safe_repair"),
-                require_any_flags=("tar_checksum_bad", "header_checksum_bad"),
-                require_any_failure_kinds=("structure_recognition", "corrupted_data"),
-                base_score=0.78,
-            ),
-        ),
-    )
-
-    def can_handle(self, job: RepairJob, diagnosis: RepairDiagnosis, config: dict) -> float:
-        flags = set(job.damage_flags)
-        if flags & {"tar_checksum_bad", "header_checksum_bad"}:
-            return 0.9
-        if diagnosis.format == "tar" and "safe_repair" in diagnosis.categories:
-            return 0.45
-        return 0.0
-
 def _run_native_tar_boundary(job: RepairJob, workspace: str, config: dict, repair_name: str) -> dict:
     limits = module_limits(config)
     return dict(
@@ -63,6 +39,3 @@ def _run_native_tar_boundary(job: RepairJob, workspace: str, config: dict, repai
             int(limits.get("max_entries", 20000) or 20000),
         )
     )
-
-
-register_repair_module(TarHeaderChecksumFix())

@@ -17,6 +17,8 @@ class ZstdTrailingJunkTrim:
         formats=("zstd", "zst"),
         categories=("boundary_repair",),
         stage="safe_repair",
+        atomic=True,
+        route_family="zstd_frame_boundary_trim",
         routes=(
             RepairRoute(
                 formats=("zstd", "zst"),

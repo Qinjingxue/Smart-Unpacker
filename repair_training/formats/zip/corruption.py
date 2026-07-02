@@ -414,7 +414,7 @@ class BinaryCorruptor:
             mutations,
             damage_flags=["tar_checksum_bad", "trailing_junk", "boundary_unreliable"],
             expected_statuses=("repaired",),
-            expected_module="tar_header_checksum_fix",
+            expected_module="tar_single_header_checksum_repair",
             expected_files=entries,
         )
 
@@ -440,7 +440,7 @@ class BinaryCorruptor:
             mutations,
             damage_flags=["tar_checksum_bad", "missing_end_block", "probably_truncated"],
             expected_statuses=("repaired",),
-            expected_module="tar_header_checksum_fix",
+            expected_module="tar_single_header_checksum_repair",
             expected_files=entries,
         )
 
@@ -479,7 +479,7 @@ class BinaryCorruptor:
                 "boundary_unreliable",
             ],
             expected_statuses=("repaired",),
-            expected_module="tar_header_checksum_fix",
+            expected_module="tar_single_header_checksum_repair",
             expected_files=entries,
         )
 
@@ -646,7 +646,7 @@ class BinaryCorruptor:
             mutations,
             damage_flags=["carrier_archive", "sfx", "boundary_unreliable", "trailing_junk"],
             expected_statuses=("repaired",),
-            expected_module="rar_carrier_crop_deep_recovery",
+            expected_module="archive_carrier_crop_deep_recovery",
             expected_bytes=without_end,
         )
 

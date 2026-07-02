@@ -19,6 +19,8 @@ class RarBlockChainTrim:
         stage="deep",
         safe=True,
         partial=True,
+        atomic=True,
+        route_family="rar_block_chain_boundary",
         routes=(
             RepairRoute(
                 formats=("rar",),

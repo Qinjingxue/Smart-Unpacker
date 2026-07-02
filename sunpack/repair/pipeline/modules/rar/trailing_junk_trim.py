@@ -15,6 +15,8 @@ class RarTrailingJunkTrim:
         formats=("rar",),
         categories=("boundary_repair",),
         stage="safe_repair",
+        atomic=True,
+        route_family="rar_boundary_trim",
         routes=(
             RepairRoute(
                 formats=("rar",),

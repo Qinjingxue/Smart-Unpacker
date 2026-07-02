@@ -17,6 +17,8 @@ class GzipTrailingJunkTrim:
         formats=("gzip", "gz"),
         categories=("boundary_repair",),
         stage="safe_repair",
+        atomic=True,
+        route_family="gzip_member_boundary_trim",
         routes=(
             RepairRoute(
                 formats=("gzip", "gz"),

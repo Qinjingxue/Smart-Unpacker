@@ -17,6 +17,8 @@ class Bzip2TrailingJunkTrim:
         formats=("bzip2", "bz2"),
         categories=("boundary_repair",),
         stage="safe_repair",
+        atomic=True,
+        route_family="bzip2_stream_boundary_trim",
         routes=(
             RepairRoute(
                 formats=("bzip2", "bz2"),

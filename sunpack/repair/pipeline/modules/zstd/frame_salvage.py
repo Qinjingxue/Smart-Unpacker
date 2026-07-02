@@ -17,6 +17,8 @@ class ZstdFrameSalvage:
         stage="deep",
         safe=True,
         partial=True,
+        atomic=True,
+        route_family="zstd_independent_frame_salvage",
         routes=(
             RepairRoute(
                 formats=("zstd", "zst"),
