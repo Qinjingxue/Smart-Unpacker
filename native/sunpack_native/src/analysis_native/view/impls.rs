@@ -159,6 +159,7 @@ impl AnalysisBinaryView {
             if cursor + 7 > size {
                 result.set_item("blocks_checked", index)?;
                 result.set_item("error", "rar4_block_header_out_of_range")?;
+                result.set_item("damage_flags", PyList::new(py, ["probably_truncated"])?)?;
                 return Ok(());
             }
             let fixed = self.read_at_bytes(cursor, 7)?;
@@ -180,6 +181,15 @@ impl AnalysisBinaryView {
             if (crc32(&full_header[2..]) & 0xFFFF) != header_crc as u32 {
                 result.set_item("blocks_checked", index)?;
                 result.set_item("error", "rar4_block_crc_mismatch")?;
+                result.set_item("damaged_header_type", header_type)?;
+                let flag = match header_type {
+                    0x73 => "rar_main_header_crc_bad",
+                    0x74 => "rar_file_header_crc_bad",
+                    0x7A => "rar_service_header_crc_bad",
+                    0x7B => "rar_end_header_crc_bad",
+                    _ => "rar_header_crc_bad",
+                };
+                result.set_item("damage_flags", PyList::new(py, [flag])?)?;
                 return Ok(());
             }
             let mut block_size = header_size;
@@ -240,6 +250,7 @@ impl AnalysisBinaryView {
             if cursor + 6 > size {
                 result.set_item("blocks_checked", index)?;
                 result.set_item("error", "rar5_block_header_out_of_range")?;
+                result.set_item("damage_flags", PyList::new(py, ["probably_truncated"])?)?;
                 return Ok(());
             }
             let first = self.read_at_bytes(cursor, 64)?;
@@ -279,6 +290,15 @@ impl AnalysisBinaryView {
             if crc32(&full[4..]) != stored_crc {
                 result.set_item("blocks_checked", index)?;
                 result.set_item("error", "rar5_block_crc_mismatch")?;
+                result.set_item("damaged_header_type", header_type)?;
+                let flag = match header_type {
+                    1 => "rar_main_header_crc_bad",
+                    2 => "rar_file_header_crc_bad",
+                    3 => "rar_service_header_crc_bad",
+                    5 => "rar_end_header_crc_bad",
+                    _ => "rar_header_crc_bad",
+                };
+                result.set_item("damage_flags", PyList::new(py, [flag])?)?;
                 return Ok(());
             }
             let mut field_cursor = after_flags;
@@ -359,6 +379,7 @@ impl AnalysisBinaryView {
     ) -> PyResult<Bound<'py, PyDict>> {
         let result = PyDict::new(py);
         result.set_item("format", "tar")?;
+        result.set_item("magic_matched", false)?;
         result.set_item("plausible", false)?;
         result.set_item("error", "")?;
         result.set_item("entries_checked", 0usize)?;
@@ -368,6 +389,7 @@ impl AnalysisBinaryView {
         result.set_item("boundary_confidence", "none")?;
         result.set_item("integrity_confidence", "unknown")?;
         result.set_item("evidence", PyList::empty(py))?;
+        result.set_item("damage_flags", PyList::empty(py))?;
 
         let size = self.lock()?.size;
         let mut cursor = start_offset;
@@ -404,11 +426,23 @@ impl AnalysisBinaryView {
                 }
                 continue;
             }
+            // Candidate recognition belongs to the native walker.  This lets
+            // Python dispatch damaged TAR files without re-reading or parsing
+            // archive bytes as a fallback.
+            result.set_item("magic_matched", true)?;
             zero_blocks = 0;
             let (ok, error, member_size, ustar) = tar_header_plausible(&header);
             if !ok {
                 result.set_item("entries_checked", checked)?;
                 result.set_item("error", error)?;
+                let flag = match header[156] {
+                    b'x' | b'g' => "pax_header_bad",
+                    b'L' | b'K' => "gnu_longname_bad",
+                    b'S' => "sparse_header_bad",
+                    _ if error == "tar_header_checksum_mismatch" => "tar_checksum_bad",
+                    _ => "tar_metadata_bad",
+                };
+                result.set_item("damage_flags", PyList::new(py, [flag])?)?;
                 if checked > 0 {
                     result.set_item("plausible", true)?;
                     result.set_item("entry_walk_ok", true)?;
@@ -445,6 +479,7 @@ impl AnalysisBinaryView {
             result.set_item("segment_end", cursor)?;
             result.set_item("boundary_confidence", "medium")?;
             result.set_item("error", "tar_end_zero_blocks_not_found")?;
+            result.set_item("damage_flags", PyList::new(py, ["missing_end_block"])?)?;
             result.set_item(
                 "evidence",
                 PyList::new(py, ["tar:header_checksum", "tar:block_walk_prefix"])?,
@@ -467,6 +502,7 @@ impl AnalysisBinaryView {
         result.set_item("boundary_confidence", "medium")?;
         result.set_item("integrity_confidence", "unknown")?;
         result.set_item("evidence", PyList::empty(py))?;
+        result.set_item("damage_flags", PyList::empty(py))?;
         let header = self.read_at_bytes(0, 64)?;
         match format {
             "gzip" => {
@@ -477,7 +513,20 @@ impl AnalysisBinaryView {
                 result.set_item("magic_matched", true)?;
                 if header.len() < 10 || header[3] & 0xE0 != 0 {
                     result.set_item("error", "gzip_reserved_flags_set")?;
+                    result.set_item(
+                        "damage_flags",
+                        PyList::new(py, ["gzip_reserved_flags_set"])?,
+                    )?;
                     return Ok(result);
+                }
+                if header[3] & 0x02 != 0 && header.len() >= 12 {
+                    let stored_header_crc = u16_le(&header, 10) as u32;
+                    if crc32(&header[..10]) & 0xFFFF != stored_header_crc {
+                        result.set_item("error", "gzip_header_crc_mismatch")?;
+                        result
+                            .set_item("damage_flags", PyList::new(py, ["gzip_header_crc_bad"])?)?;
+                        return Ok(result);
+                    }
                 }
                 result.set_item("plausible", true)?;
                 result.set_item("confidence", 0.90f64)?;
@@ -506,6 +555,15 @@ impl AnalysisBinaryView {
                         || &header[4..10] == b"\x17\x72\x45\x38\x50\x90");
                 if !ok {
                     result.set_item("error", "bzip2_block_marker_not_found")?;
+                    let flag = if header.len() >= 4
+                        && header.starts_with(BZIP2)
+                        && !b"123456789".contains(&header[3])
+                    {
+                        "bzip2_block_size_bad"
+                    } else {
+                        "bzip2_block_bad"
+                    };
+                    result.set_item("damage_flags", PyList::new(py, [flag])?)?;
                     return Ok(result);
                 }
                 result.set_item("plausible", true)?;
@@ -521,8 +579,19 @@ impl AnalysisBinaryView {
                     return Ok(result);
                 }
                 result.set_item("magic_matched", true)?;
+                if header.len() < 12 || u32_le(&header, 8) != crc32(&header[6..8]) {
+                    result.set_item("error", "xz_header_crc_mismatch")?;
+                    result.set_item("damage_flags", PyList::new(py, ["xz_header_crc_bad"])?)?;
+                    return Ok(result);
+                }
                 let footer = self.read_tail_bytes(12)?;
                 if footer.len() == 12 && &footer[10..12] == b"YZ" {
+                    if u32_le(&footer, 0) != crc32(&footer[4..10]) || footer[8..10] != header[6..8]
+                    {
+                        result.set_item("error", "xz_footer_crc_mismatch")?;
+                        result.set_item("damage_flags", PyList::new(py, ["xz_footer_crc_bad"])?)?;
+                        return Ok(result);
+                    }
                     result.set_item("plausible", true)?;
                     result.set_item("confidence", 0.95f64)?;
                     result.set_item("boundary_confidence", "high")?;
@@ -534,6 +603,7 @@ impl AnalysisBinaryView {
                     result.set_item("plausible", true)?;
                     result.set_item("confidence", 0.72f64)?;
                     result.set_item("error", "xz_footer_magic_not_found")?;
+                    result.set_item("damage_flags", PyList::new(py, ["xz_footer_crc_bad"])?)?;
                     result.set_item("evidence", PyList::new(py, ["xz:magic"])?)?;
                 }
             }
@@ -545,6 +615,7 @@ impl AnalysisBinaryView {
                 result.set_item("magic_matched", true)?;
                 if header.len() < 6 || header[4] & 0x08 != 0 {
                     result.set_item("error", "zstd_reserved_bit_set")?;
+                    result.set_item("damage_flags", PyList::new(py, ["zstd_frame_bad"])?)?;
                     return Ok(result);
                 }
                 result.set_item("plausible", true)?;

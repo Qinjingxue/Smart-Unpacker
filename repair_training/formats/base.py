@@ -40,6 +40,7 @@ class TrainingFormatPlugin:
     damage_feature_spec: Callable[[], TrainingFeatureSpec | dict[str, Any]] | None = None
     damage_eval_profile_plan: Callable[[int, int], list[str]] | None = None
     generate_damage_eval_records: Callable[[str | Path, str | Path, int, int, list[str]], list[dict[str, Any]]] | None = None
+    generate_collection_records: Callable[[str | Path, str | Path, int, int, int], list[dict[str, Any]]] | None = None
     damage_eval_metadata: Callable[[], dict[str, Any]] | None = None
     diagnostic_feature_groups: Callable[[], dict[str, list[str]]] | None = None
     diagnostic_profile_pairs: Callable[[], list[tuple[str, str]]] | None = None
@@ -71,5 +72,8 @@ def normalize_format_name(format_name: str) -> str:
         "7zip": "seven_zip",
         "7z": "seven_zip",
         "zip": "zip",
+        "gz": "gzip",
+        "bz2": "bzip2",
+        "zst": "zstd",
     }
     return aliases.get(value, value)

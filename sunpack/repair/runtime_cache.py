@@ -4,6 +4,7 @@ import copy
 import hashlib
 import json
 from collections import OrderedDict, Counter
+from pathlib import Path
 from typing import Any, Callable
 
 from sunpack.support.json_values import stable_json_value

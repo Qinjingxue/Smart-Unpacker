@@ -34,9 +34,13 @@ class _CompressionModule:
             format=self.fmt,
             confidence=0.35,
             status="weak",
-            segments=[ArchiveSegment(start_offset=0, end_offset=None, confidence=0.35, damage_flags=[str(result.get("error") or "stream_unverified")], evidence=list(result.get("evidence") or []))],
-            details=result,
+            segments=[ArchiveSegment(start_offset=0, end_offset=None, confidence=0.35, damage_flags=_stream_damage_flags(result), evidence=list(result.get("evidence") or []))],
+            details={**result, "route_evidence_flags": _stream_damage_flags(result)},
         )
+
+
+def _stream_damage_flags(result: dict) -> list[str]:
+    return sorted(set(result.get("damage_flags") or [str(result.get("error") or "stream_unverified")]))
 
 
 class GzipAnalysisModule(_CompressionModule):

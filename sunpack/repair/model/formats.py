@@ -10,4 +10,5 @@ def normalize_format_name(value: Any) -> str:
         "seven_zip": "7z",
         "gz": "gzip",
         "bz2": "bzip2",
+        "zst": "zstd",
     }.get(text, text)

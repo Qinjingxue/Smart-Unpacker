@@ -35,7 +35,14 @@ class TarAnalysisModule:
                     segments=[ArchiveSegment(start_offset=start, end_offset=result.get("segment_end"), confidence=confidence, damage_flags=damage_flags, evidence=evidence)],
                     details=details,
                 )
+            if result and result.get("magic_matched"):
+                details = dict(result)
+                damage_flags = list(result.get("damage_flags") or ["tar_metadata_bad"])
+                return ArchiveFormatEvidence(
+                    format="tar", confidence=0.72, status="damaged",
+                    segments=[ArchiveSegment(start_offset=start, end_offset=None, confidence=0.72,
+                                             damage_flags=damage_flags, evidence=list(result.get("evidence") or ["tar:header"]))],
+                    details={**details, "route_evidence_flags": damage_flags},
+                )
         return ArchiveFormatEvidence(format="tar", confidence=0.0, status="not_found")
-
-
 register_analysis_module(TarAnalysisModule())

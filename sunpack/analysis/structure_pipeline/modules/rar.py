@@ -44,7 +44,7 @@ class RarAnalysisModule:
         else:
             status = "weak"
             confidence = 0.35
-        damage_flags = []
+        damage_flags = list(native.get("damage_flags") or [])
         if error:
             damage_flags.append(str(error))
         if taxonomy:

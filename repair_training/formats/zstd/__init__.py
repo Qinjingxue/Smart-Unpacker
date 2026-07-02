@@ -1,0 +1,1 @@
+"""Zstandard training plugin."""

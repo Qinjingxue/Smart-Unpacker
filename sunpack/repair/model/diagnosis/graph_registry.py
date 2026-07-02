@@ -19,4 +19,8 @@ def get_diagnosis_graph_plugin(format_name: str) -> Any:
         from sunpack.repair.model.diagnosis.seven_zip_graph import SevenZipDiagnosisGraphPlugin
 
         return SevenZipDiagnosisGraphPlugin()
+    if normalized in {"rar", "tar", "gzip", "bzip2", "xz", "zstd"}:
+        from sunpack.repair.model.diagnosis.atomic_format_graph import get_atomic_format_graph_plugin
+
+        return get_atomic_format_graph_plugin(normalized)
     raise UnsupportedDiagnosisGraphFormat(f"diagnosis graph format is not supported yet: {format_name}")

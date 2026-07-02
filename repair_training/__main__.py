@@ -234,7 +234,22 @@ def pipeline_main(argv: list[str] | None = None) -> int:
     ensure_run_layout(run_dir)
     stages = [item.strip() for item in args.stage.split(",") if item.strip()]
     for stage in stages:
-        if stage in {"graphs", "graphs:diagnosis_gnn"}:
+        if stage == "collect":
+            command = [
+                sys.executable, "-m", "repair_training.data.collection",
+                "--format", fmt,
+                "--material-root", str(Path(args.material_root)),
+                "--output", str(run_dir / "datasets" / "damage_rows.jsonl"),
+                "--failure-output", str(run_dir / "reports" / "collection_failures.jsonl"),
+                "--summary-output", str(run_dir / "reports" / "collection_summary.json"),
+                "--workspace", str(run_dir / "workspace" / "collection"),
+                "--workers", str(args.workers),
+                "--limit", str(args.limit),
+                "--per-source", str(args.per_source),
+                "--seed", str(args.seed),
+            ]
+            _run_pipeline_command(command)
+        elif stage in {"graphs", "graphs:diagnosis_gnn"}:
             input_path = Path(args.input) if args.input else run_dir / "datasets" / "damage_rows.jsonl"
             _run_pipeline_command([
                 sys.executable, "-m", "repair_training.diagnosis.graph_rows",
@@ -296,8 +311,16 @@ def _pipeline_parser() -> argparse.ArgumentParser:
     parser.add_argument("--run-dir", default="")
     parser.add_argument("--run-name", default="")
     parser.add_argument("--model", choices=["", "diagnosis_gnn", "repair_policy_transformer"], default="")
-    parser.add_argument("--stage", default="graphs:diagnosis_gnn,train:diagnosis_gnn")
+    parser.add_argument(
+        "--stage",
+        default="collect,graphs:diagnosis_gnn,train:diagnosis_gnn,transitions:policy_transformer,world_rows:policy_transformer,train:policy_transformer",
+    )
     parser.add_argument("--input", default="")
+    parser.add_argument("--material-root", default=str(Path("repair_training") / "material"))
+    parser.add_argument("--workers", type=int, default=1)
+    parser.add_argument("--limit", type=int, default=0)
+    parser.add_argument("--per-source", type=int, default=0)
+    parser.add_argument("--seed", default="20260515")
     return parser
 
 

@@ -55,8 +55,7 @@ SCHEMA_VERSION = 1
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     fmt = normalize_format_name(args.format)
-    if fmt != "zip":
-        raise SystemExit("collect_damage_rows currently supports --format zip only")
+    load_training_format_plugin(fmt)
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
     run_root = output.parents[1] if output.parent.name == "datasets" else output.parent
@@ -143,9 +142,10 @@ def collect_damage_row(
     workspace = Path(workspace)
     workspace.mkdir(parents=True, exist_ok=True)
     target = normalize_damage_record(record)
-    target_payload = _location_target(target.to_dict())
+    target_payload = _location_target(target.to_dict(), target.format)
     job = _job_from_record(record, target.format)
     knowledge_payload, observation = observe_damage_runtime(job, workspace=workspace / "runtime", config=config)
+    knowledge_payload = _apply_training_plugin_context(record, target.format, knowledge_payload)
     if target.format == "zip":
         target_payload = apply_zip_observability(target_payload, knowledge_payload)
     target_payload = _enforce_single_field_target(record, target_payload)
@@ -290,6 +290,15 @@ def _ensure_zip_structure_facts(task: ArchiveTask) -> None:
 def _records_for_args(args: argparse.Namespace, *, workspace: Path) -> list[dict[str, Any]]:
     if args.manifest:
         return [record for record in read_jsonl(args.manifest) if record.get("damaged_input")]
+    fmt = normalize_format_name(args.format)
+    if fmt != "zip":
+        plugin = load_training_format_plugin(fmt)
+        if plugin.generate_collection_records is None:
+            raise SystemExit(f"training format {fmt} requires --manifest or a collection generator")
+        return plugin.generate_collection_records(
+            Path(args.material_root), workspace / "generated", _seed(args.seed),
+            max(1, int(args.per_source or 1)), max(0, int(args.limit or 0)),
+        )
     return _generate_zip_records(
         material_root=Path(args.material_root),
         workspace=workspace / "generated",
@@ -479,8 +488,8 @@ def _preserve_source_split_metadata(task: ArchiveTask, job: RepairJob) -> None:
         task.set_knowledge(knowledge)
 
 
-def _location_target(raw_target: dict[str, Any]) -> dict[str, Any]:
-    plugin = load_training_format_plugin("zip")
+def _location_target(raw_target: dict[str, Any], format_name: str = "zip") -> dict[str, Any]:
+    plugin = load_training_format_plugin(format_name)
     allowed = set(plugin.damage_label_schema().labels if plugin.damage_label_schema else [])
     labels = [
         label
@@ -489,18 +498,40 @@ def _location_target(raw_target: dict[str, Any]) -> dict[str, Any]:
     ]
     return {
         "schema_version": 2,
-        "format": "zip",
+        "format": format_name,
         "analysis_target": "location_only",
         "damage_labels": sorted(set(labels)),
         "labels": [
             {"label": label, "zone": {"kind": label.split(":", 1)[0], "path": label.split(":", 1)[1]}}
             for label in sorted(set(labels))
         ],
+        "route_hints": list(raw_target.get("route_hints") or []),
         "metadata": {
             "taxonomy": raw_target,
             "label_source": "corruptor",
         },
     }
+
+
+def _apply_training_plugin_context(record: dict[str, Any], format_name: str, knowledge_payload: dict[str, Any]) -> dict[str, Any]:
+    plugin = load_training_format_plugin(format_name)
+    if plugin.collection_record_context is None:
+        return knowledge_payload
+    context = plugin.collection_record_context(record)
+    merged = dict(knowledge_payload)
+    for key, value in dict(context.get("payloads") or {}).items():
+        if key.startswith("format."):
+            fmt = key.split(".", 1)[1]
+            formats = dict(merged.get("format") or {})
+            formats[fmt] = value
+            merged["format"] = formats
+        else:
+            merged[key] = value
+    flags = dict(merged.get("flags") or {})
+    flags.update(dict(context.get("flags") or {}))
+    if flags:
+        merged["flags"] = flags
+    return merged
 
 
 def _enforce_single_field_target(record: dict[str, Any], target_payload: dict[str, Any]) -> dict[str, Any]:
@@ -713,7 +744,7 @@ def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Collect supervised ZIP damage-analysis rows without repair candidates.")
+    parser = argparse.ArgumentParser(description="Collect supervised archive damage-analysis rows without repair candidates.")
     parser.add_argument("--format", default="zip")
     parser.add_argument("--material-root", default=str(Path("repair_training") / "material"))
     parser.add_argument("--manifest", default="")

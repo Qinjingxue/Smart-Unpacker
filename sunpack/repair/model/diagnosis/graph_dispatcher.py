@@ -53,7 +53,7 @@ def _normalize_detected(value: Any) -> str:
     text = str(value or "").strip().lower().lstrip(".")
     if not text:
         return ""
-    if text in {"zip", "7z", "7zip", "seven_zip", "seven-zip"}:
+    if text in {"zip", "7z", "7zip", "seven_zip", "seven-zip", "rar", "tar", "gzip", "gz", "bzip2", "bz2", "xz", "zstd", "zst"}:
         return normalize_format_name(text)
     return ""
 
