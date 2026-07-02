@@ -7,12 +7,13 @@ from repair_training.data.io import write_json
 from repair_training.policy.dataset import read_policy_graph_samples, read_policy_world_samples, split_policy_graph_samples, split_policy_world_samples
 from sunpack.repair.model.policy import POLICY_TRANSFORMER_ALGORITHM, POLICY_TRANSFORMER_SEMANTICS
 from sunpack.repair.model.policy.model import build_repair_policy_transformer
-from sunpack.repair.model.policy.tensorize import EDGE_FEATURE_DIM, NODE_FEATURE_DIM, tensorize_sample, tensorize_world_sample
+from sunpack.repair.model.policy.tensorize import ACTION_FEATURE_DIM, EDGE_FEATURE_DIM, NODE_FEATURE_DIM, tensorize_sample, tensorize_world_sample
 
 
 DEFAULT_CONFIG = {
     "hidden_dim": 128,
     "heads": 4,
+    "balance_formats": True,
     "layers": 2,
     "dropout": 0.15,
     "epochs": 1,
@@ -80,7 +81,8 @@ def train_repair_policy_transformer(
     resolved_device = _resolve_device(device, torch)
     model = build_repair_policy_transformer(config).to(resolved_device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=float(config["lr"]), weight_decay=float(config["weight_decay"]))
-    train_data = [tensorize_sample(sample) for sample in splits["train"]]
+    train_samples = _balanced_by_format(splits["train"]) if config.get("balance_formats", True) else splits["train"]
+    train_data = [tensorize_sample(sample) for sample in train_samples]
     history = []
     for epoch in range(1, max(1, int(config["epochs"])) + 1):
         model.train()
@@ -131,6 +133,7 @@ def train_repair_policy_transformer(
         history.append({"epoch": epoch, "train_loss": total / max(1, len(train_batches)), "train_items": used, "batch_size": int(config.get("batch_size", 8) or 8)})
     metrics = {
         "samples": {split: len(rows) for split, rows in splits.items()},
+        "format_counts": _format_counts(samples),
         "history": history,
         "device": str(resolved_device),
     }
@@ -142,10 +145,12 @@ def train_repair_policy_transformer(
         "algorithm": POLICY_TRANSFORMER_ALGORITHM,
         "policy_semantics": POLICY_TRANSFORMER_SEMANTICS,
         "format": format_name,
+        "training_formats": sorted(_format_counts(samples)),
+        "expert_mode": "shared_meta_policy",
         "run_id": run_id,
     })
-    write_json(model_dir / "graph_schema.json", {"schema": "policy_loop.graph", "node_feature_dim": NODE_FEATURE_DIM, "edge_feature_dim": EDGE_FEATURE_DIM})
-    write_json(model_dir / "action_schema.json", {"actions": ["stop", "undo", "module"], "semantics": POLICY_TRANSFORMER_SEMANTICS})
+    write_json(model_dir / "graph_schema.json", {"schema": "policy_loop.graph_v2", "node_feature_dim": NODE_FEATURE_DIM, "edge_feature_dim": EDGE_FEATURE_DIM, "action_feature_dim": ACTION_FEATURE_DIM})
+    write_json(model_dir / "action_schema.json", {"schema": "repair_action_v2", "actions": ["stop", "undo", "module"], "semantics": POLICY_TRANSFORMER_SEMANTICS})
     write_json(model_dir / "train_metrics.json", metrics)
     return metrics
 
@@ -169,7 +174,8 @@ def _train_world_policy_transformer(
     resolved_device = _resolve_device(device, torch)
     model = build_repair_policy_transformer(config).to(resolved_device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=float(config["lr"]), weight_decay=float(config["weight_decay"]))
-    train_data = [tensorize_world_sample(sample) for sample in splits["train"]]
+    train_samples = _balanced_by_format(splits["train"]) if config.get("balance_formats", True) else splits["train"]
+    train_data = [tensorize_world_sample(sample) for sample in train_samples]
     history = []
     for epoch in range(1, max(1, int(config["epochs"])) + 1):
         model.train()
@@ -201,6 +207,7 @@ def _train_world_policy_transformer(
     metrics = {
         "samples": {split: len(rows) for split, rows in splits.items()},
         "task_counts": _task_counts(samples),
+        "format_counts": _format_counts(samples),
         "history": history,
         "device": str(resolved_device),
     }
@@ -212,10 +219,12 @@ def _train_world_policy_transformer(
         "algorithm": POLICY_TRANSFORMER_ALGORITHM,
         "policy_semantics": POLICY_TRANSFORMER_SEMANTICS,
         "format": format_name,
+        "training_formats": sorted(_format_counts(samples)),
+        "expert_mode": "shared_meta_policy",
         "run_id": run_id,
     })
-    write_json(model_dir / "graph_schema.json", {"schema": "repair_policy_world_row_v1", "node_feature_dim": NODE_FEATURE_DIM, "edge_feature_dim": EDGE_FEATURE_DIM})
-    write_json(model_dir / "action_schema.json", {"actions": ["stop", "undo", "module"], "semantics": POLICY_TRANSFORMER_SEMANTICS})
+    write_json(model_dir / "graph_schema.json", {"schema": "repair_policy_world_row_v2", "node_feature_dim": NODE_FEATURE_DIM, "edge_feature_dim": EDGE_FEATURE_DIM, "action_feature_dim": ACTION_FEATURE_DIM})
+    write_json(model_dir / "action_schema.json", {"schema": "repair_action_v2", "actions": ["stop", "undo", "module"], "semantics": POLICY_TRANSFORMER_SEMANTICS})
     write_json(model_dir / "train_metrics.json", metrics)
     return metrics
 
@@ -530,3 +539,26 @@ def _resolve_device(device: str, torch_module) -> str:
     if requested == "cuda" and not torch_module.cuda.is_available():
         raise SystemExit("RepairPolicyTransformer requested --device cuda but CUDA is not available")
     return requested
+
+
+def _format_counts(samples: list[Any]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for sample in samples:
+        fmt = str(getattr(sample, "format", "") or "unknown")
+        counts[fmt] = counts.get(fmt, 0) + 1
+    return dict(sorted(counts.items()))
+
+
+def _balanced_by_format(samples: list[Any]) -> list[Any]:
+    groups: dict[str, list[Any]] = {}
+    for sample in samples:
+        groups.setdefault(str(getattr(sample, "format", "") or "unknown"), []).append(sample)
+    if len(groups) <= 1:
+        return list(samples)
+    width = max(len(group) for group in groups.values())
+    balanced: list[Any] = []
+    for index in range(width):
+        for fmt in sorted(groups):
+            group = groups[fmt]
+            balanced.append(group[index % len(group)])
+    return balanced

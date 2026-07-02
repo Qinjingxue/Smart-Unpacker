@@ -4,9 +4,9 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 
-POLICY_GRAPH_ROW_SCHEMA = "repair_policy_graph_row_v1"
-POLICY_TRANSITION_ROW_SCHEMA = "repair_policy_transition_row_v1"
-POLICY_WORLD_ROW_SCHEMA = "repair_policy_world_row_v1"
+POLICY_GRAPH_ROW_SCHEMA = "repair_policy_graph_row_v2"
+POLICY_TRANSITION_ROW_SCHEMA = "repair_policy_transition_row_v2"
+POLICY_WORLD_ROW_SCHEMA = "repair_policy_world_row_v2"
 ActionType = Literal["stop", "undo", "module"]
 WorldTask = Literal["transition", "masked_graph", "ranking"]
 

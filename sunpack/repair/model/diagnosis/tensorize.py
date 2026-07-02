@@ -5,7 +5,7 @@ from functools import partial
 from typing import Any
 
 from sunpack.repair.model.diagnosis.graph_schema import DiagnosisGraphSample
-from sunpack.repair.model.diagnosis.root_cases import ROOT_CASES, ROOT_CASE_INDEX
+from sunpack.repair.model.diagnosis.root_cases import ROOT_CASES
 from sunpack.support.hash_features import hash_unit
 
 
@@ -35,7 +35,7 @@ def require_pyg():
         ) from exc
 
 
-def tensorize_sample(sample: DiagnosisGraphSample):
+def tensorize_sample(sample: DiagnosisGraphSample, *, root_cases: list[str] | tuple[str, ...] | None = None):
     require_pyg()
     import torch
     from torch_geometric.data import HeteroData
@@ -65,17 +65,19 @@ def tensorize_sample(sample: DiagnosisGraphSample):
             if not y:
                 y = [0.0]
             data[node_type].y_alignment = torch.tensor(y, dtype=torch.float32)
-    root_y = [0.0] * len(ROOT_CASES)
+    root_cases = list(root_cases or ROOT_CASES)
+    root_case_index = {label: index for index, label in enumerate(root_cases)}
+    root_y = [0.0] * len(root_cases)
     for label in sample.labels.root_case_labels:
-        index = ROOT_CASE_INDEX.get(str(label))
+        index = root_case_index.get(str(label))
         if index is not None:
             root_y[index] = 1.0
     data.root_case_y = torch.tensor(root_y, dtype=torch.float32)
-    evidence_y, evidence_mask = _root_target_vector(sample, "root_evidence_targets")
-    transition_y, transition_mask = _root_target_vector(sample, "root_transition_gain_targets")
-    viability_y, viability_mask = _root_target_vector(sample, "root_probe_viability_targets")
-    positive_y, positive_mask = _root_target_vector(sample, "root_positive_probe_targets")
-    hard_negative_y, hard_negative_mask = _root_target_vector(sample, "root_hard_negative_targets")
+    evidence_y, evidence_mask = _root_target_vector(sample, "root_evidence_targets", root_cases)
+    transition_y, transition_mask = _root_target_vector(sample, "root_transition_gain_targets", root_cases)
+    viability_y, viability_mask = _root_target_vector(sample, "root_probe_viability_targets", root_cases)
+    positive_y, positive_mask = _root_target_vector(sample, "root_positive_probe_targets", root_cases)
+    hard_negative_y, hard_negative_mask = _root_target_vector(sample, "root_hard_negative_targets", root_cases)
     data.root_evidence_y = torch.tensor(evidence_y, dtype=torch.float32)
     data.root_evidence_mask = torch.tensor(evidence_mask, dtype=torch.float32)
     data.root_transition_gain_y = torch.tensor(transition_y, dtype=torch.float32)
@@ -108,7 +110,7 @@ def tensorize_sample(sample: DiagnosisGraphSample):
     return data
 
 
-def metadata_for_sample(sample: DiagnosisGraphSample) -> TensorizedGraphMetadata:
+def metadata_for_sample(sample: DiagnosisGraphSample, *, root_cases: list[str] | tuple[str, ...] | None = None) -> TensorizedGraphMetadata:
     cause_nodes = sorted((node for node in sample.graph.nodes if node.node_layer == "cause"), key=lambda item: item.node_id)
     theory_nodes = sorted((node for node in sample.graph.nodes if node.node_layer == "theory"), key=lambda item: item.node_id)
     theory_edges = sorted(
@@ -125,7 +127,7 @@ def metadata_for_sample(sample: DiagnosisGraphSample) -> TensorizedGraphMetadata
         cause_labels=[node.label for node in cause_nodes],
         theory_node_ids=[node.node_id for node in theory_nodes],
         theory_edge_ids=[edge.edge_id for edge in theory_edges],
-        root_cases=list(ROOT_CASES),
+        root_cases=list(root_cases or ROOT_CASES),
     )
 
 
@@ -172,13 +174,14 @@ def _clamp(value: float) -> float:
     return max(-1.0, min(1.0, float(value or 0.0)))
 
 
-def _root_target_vector(sample: DiagnosisGraphSample, key: str) -> tuple[list[float], list[float]]:
+def _root_target_vector(sample: DiagnosisGraphSample, key: str, root_cases: list[str]) -> tuple[list[float], list[float]]:
     auxiliary = sample.labels.auxiliary if isinstance(sample.labels.auxiliary, dict) else {}
     raw = auxiliary.get(key) if isinstance(auxiliary.get(key), dict) else {}
-    values = [0.0] * len(ROOT_CASES)
-    mask = [0.0] * len(ROOT_CASES)
+    root_case_index = {label: index for index, label in enumerate(root_cases)}
+    values = [0.0] * len(root_cases)
+    mask = [0.0] * len(root_cases)
     for label, value in raw.items():
-        index = ROOT_CASE_INDEX.get(str(label))
+        index = root_case_index.get(str(label))
         if index is None:
             continue
         values[index] = max(0.0, min(1.0, _float(value)))

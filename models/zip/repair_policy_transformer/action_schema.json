@@ -1,8 +1,0 @@
-{
-  "actions": [
-    "stop",
-    "undo",
-    "module"
-  ],
-  "semantics": "repair_graph_world_policy_uncertainty_v1"
-}

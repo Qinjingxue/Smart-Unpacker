@@ -25,7 +25,7 @@ def read_policy_world_samples(path: str | Path) -> list[PolicyWorldTrainingSampl
     rows = read_jsonl(path)
     output: list[PolicyWorldTrainingSample] = []
     for row in rows:
-        if row.get("schema_version") == "repair_policy_graph_row_v1" or "actions" in row and "graph" in row and not row.get("task"):
+        if row.get("schema_version") in {"repair_policy_graph_row_v1", "repair_policy_graph_row_v2"} or "actions" in row and "graph" in row and not row.get("task"):
             ranking = sample_from_dict(row)
             output.append(world_sample_from_dict({
                 "task": "ranking",

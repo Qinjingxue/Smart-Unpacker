@@ -7,7 +7,7 @@ from typing import Any
 from sunpack.repair.model.policy import POLICY_TRANSFORMER_SEMANTICS
 from sunpack.repair.model.policy.model import build_repair_policy_transformer
 from sunpack.repair.model.policy.schema import PolicyGraphTrainingSample, PolicyWorldTrainingSample
-from sunpack.repair.model.policy.tensorize import WORLD_BASE_TARGET_DIM, ROOT_CASES, tensorize_sample, tensorize_world_sample
+from sunpack.repair.model.policy.tensorize import WORLD_BASE_TARGET_DIM, WORLD_DIAGNOSIS_TARGET_DIM, tensorize_sample, tensorize_world_sample
 
 
 class RepairPolicyTransformerModel:
@@ -112,13 +112,18 @@ class RepairPolicyTransformerModel:
 
 def _decode_predicted_next_state(values: list[float]) -> dict[str, Any]:
     padded = [float(value or 0.0) for value in list(values or [])]
-    if len(padded) < WORLD_BASE_TARGET_DIM + len(ROOT_CASES):
-        padded.extend([0.0] * (WORLD_BASE_TARGET_DIM + len(ROOT_CASES) - len(padded)))
+    if len(padded) < WORLD_BASE_TARGET_DIM + WORLD_DIAGNOSIS_TARGET_DIM:
+        padded.extend([0.0] * (WORLD_BASE_TARGET_DIM + WORLD_DIAGNOSIS_TARGET_DIM - len(padded)))
     root_offset = WORLD_BASE_TARGET_DIM
-    recovery_offset = WORLD_BASE_TARGET_DIM + len(ROOT_CASES)
+    recovery_offset = WORLD_BASE_TARGET_DIM + WORLD_DIAGNOSIS_TARGET_DIM
+    diagnosis_names = (
+        "max_score", "mean_top3", "selected_count", "evidence_max_score",
+        "gain_max_score", "viability_max_score", "direct_gain_top_match",
+        "gain_viability_top_match",
+    )
     root_scores = {
-        root_case: _clamp01(padded[root_offset + index])
-        for index, root_case in enumerate(ROOT_CASES)
+        name: _clamp01(padded[root_offset + index])
+        for index, name in enumerate(diagnosis_names)
         if root_offset + index < len(padded)
     }
     recovery = {
@@ -136,7 +141,7 @@ def _decode_predicted_next_state(values: list[float]) -> dict[str, Any]:
         "predicted_patch_status_hash": _at(padded, 2),
         "predicted_best_updated": _at(padded, 3) >= 0.5,
         "predicted_branch_stale_delta": _at(padded, 4),
-        "predicted_diagnosis_root_scores": root_scores,
+        "predicted_diagnosis_summary": root_scores,
         "predicted_verification_summary": {
             "completeness": recovery["completeness"],
             "complete_files_scaled": recovery["complete_files_scaled"],

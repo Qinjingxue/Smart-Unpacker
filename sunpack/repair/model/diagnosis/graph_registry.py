@@ -11,8 +11,12 @@ class UnsupportedDiagnosisGraphFormat(ValueError):
 
 def get_diagnosis_graph_plugin(format_name: str) -> Any:
     normalized = normalize_format_name(format_name)
-    if normalized != "zip":
-        raise UnsupportedDiagnosisGraphFormat(f"diagnosis graph format is not supported yet: {format_name}")
-    from sunpack.repair.model.diagnosis.zip_graph import ZipDiagnosisGraphPlugin
+    if normalized == "zip":
+        from sunpack.repair.model.diagnosis.zip_graph import ZipDiagnosisGraphPlugin
 
-    return ZipDiagnosisGraphPlugin()
+        return ZipDiagnosisGraphPlugin()
+    if normalized == "7z":
+        from sunpack.repair.model.diagnosis.seven_zip_graph import SevenZipDiagnosisGraphPlugin
+
+        return SevenZipDiagnosisGraphPlugin()
+    raise UnsupportedDiagnosisGraphFormat(f"diagnosis graph format is not supported yet: {format_name}")

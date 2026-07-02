@@ -135,6 +135,9 @@ class ModelAssetRegistry:
         formats = self.payload.get("formats") if isinstance(self.payload.get("formats"), dict) else {}
         format_payload = formats.get(fmt) if isinstance(formats.get(fmt), dict) else {}
         entry = format_payload.get(role)
+        if not isinstance(entry, dict):
+            shared = self.payload.get("shared") if isinstance(self.payload.get("shared"), dict) else {}
+            entry = shared.get(role)
         return dict(entry) if isinstance(entry, dict) else None
 
     def _resolve_entry_path(self, entry: dict[str, Any]) -> Path:

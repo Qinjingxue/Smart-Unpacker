@@ -72,7 +72,7 @@ DEFAULT_CONFIG = {
     "score_normalization": "raw",
 }
 
-TENSOR_CACHE_VERSION = "diagnosis_hgt_tensor_cache_v1"
+TENSOR_CACHE_VERSION = "diagnosis_format_expert_tensor_cache_v2"
 
 
 def train_diagnosis_gnn_model(
@@ -99,6 +99,9 @@ def train_diagnosis_gnn_model(
     samples = read_diagnosis_graph_samples(input_path)
     if not samples:
         raise SystemExit(f"no diagnosis graph samples found: {input_path}")
+    root_labels = _cause_label_names(samples)
+    config["root_labels"] = root_labels
+    config["root_label_count"] = len(root_labels)
     splits = split_diagnosis_graph_samples(samples)
     metadata = metadata_from_samples(samples)
     resolved_device = _resolve_device(device, torch)
@@ -646,13 +649,14 @@ def _grad_scaler(torch_module, device: str, enabled: bool):
 
 
 def _tensorize_split(samples: list[DiagnosisGraphSample], *, split: str, input_path: Path, config: dict[str, Any]) -> list[Any]:
+    root_labels = [str(item) for item in config.get("root_labels") or ROOT_CASES]
     cache_dir = Path(str(config.get("tensor_cache_dir") or "")) if config.get("tensor_cache_dir") else None
     if cache_dir is None:
-        return [tensorize_sample(sample) for sample in samples]
+        return [tensorize_sample(sample, root_cases=root_labels) for sample in samples]
     try:
         import torch
     except Exception:
-        return [tensorize_sample(sample) for sample in samples]
+        return [tensorize_sample(sample, root_cases=root_labels) for sample in samples]
     cache_dir.mkdir(parents=True, exist_ok=True)
     cache_key = _tensor_cache_key(input_path, split)
     cache_path = cache_dir / f"{cache_key}.pt"
@@ -660,7 +664,7 @@ def _tensorize_split(samples: list[DiagnosisGraphSample], *, split: str, input_p
         loaded = torch.load(cache_path, map_location="cpu", weights_only=False)
         if isinstance(loaded, dict) and loaded.get("version") == TENSOR_CACHE_VERSION:
             return list(loaded.get("items") or [])
-    items = [tensorize_sample(sample) for sample in samples]
+    items = [tensorize_sample(sample, root_cases=root_labels) for sample in samples]
     torch.save({"version": TENSOR_CACHE_VERSION, "items": items}, cache_path)
     return items
 
@@ -959,7 +963,7 @@ def _positive_vs_hard_negative_accuracy(
 
 def _label_schema(samples: list[DiagnosisGraphSample]) -> dict[str, Any]:
     return {
-        "labels": list(ROOT_CASES),
+        "labels": _cause_label_names(samples),
         "metadata": {
             "kind": "diagnosis_gnn_root_case",
             "diagnosis_semantics": DIAGNOSIS_GNN_SEMANTICS,
@@ -973,7 +977,13 @@ def _label_schema(samples: list[DiagnosisGraphSample]) -> dict[str, Any]:
 def _cause_label_names(samples: list[DiagnosisGraphSample]) -> list[str]:
     if not samples:
         return []
-    return list(ROOT_CASES)
+    labels = sorted({
+        str(label)
+        for sample in samples
+        for label in sample.labels.root_case_labels
+        if str(label)
+    })
+    return labels or list(ROOT_CASES)
 
 
 def _resolve_device(device: str, torch_module) -> str:

@@ -35,8 +35,10 @@ class RepairModelRuntime:
         if not self.enabled:
             return {**base, "decision_status": "disabled", "fallback_reason": "policy_disabled"}
         fmt = _normalize_format(job.format)
-        if not fmt or fmt not in self.assets.supported_formats():
+        if not fmt:
             return {**base, "decision_status": "unavailable", "fallback_reason": "unsupported_format"}
+        if fmt in self._diagnosis_models and fmt in self._policy_models:
+            return {**base, "decision_status": "available", "source": "loaded_experts"}
         diagnosis = self.assets.asset(fmt, "diagnosis")
         if diagnosis is None or not diagnosis.available:
             return {**base, "decision_status": "unavailable", "fallback_reason": "diagnosis_hgt_unavailable"}
@@ -62,7 +64,11 @@ class RepairModelRuntime:
                 {
                     "format": fmt,
                     "sample_id": f"{job.archive_key}:{round_index}",
-                    "knowledge_payload": dict(job.knowledge or {}),
+                    "knowledge_payload": {
+                        **dict(job.knowledge or {}),
+                        "damage_flags": list(job.damage_flags),
+                        "runtime_damage_flags": list(job.damage_flags),
+                    },
                 }
             )
             result = _normalize_diagnosis(model.predict_sample(sample), fmt=fmt)
@@ -100,7 +106,7 @@ class RepairModelRuntime:
                     action_type=str(action.get("action_type") or "module"),  # type: ignore[arg-type]
                     action_id=str(action.get("action_id") or action.get("candidate_id") or action.get("action_type") or ""),
                     module_name=str(action.get("module_name") or action.get("module") or ""),
-                    features=dict(action),
+                    features=dict(action.get("features") or action),
                 )
                 for action in available_actions
                 if str(action.get("action_type") or "") in {"stop", "undo", "module"}

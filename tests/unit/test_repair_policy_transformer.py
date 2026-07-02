@@ -17,7 +17,7 @@ from sunpack.repair.model.policy.model import build_repair_policy_transformer
 from sunpack.repair.model.policy.schema import PolicyAction, PolicyGraphTrainingSample, transition_sample_from_dict, world_sample_from_dict, sample_from_dict
 from repair_training.policy.teacher import build_policy_teacher_samples, label_teacher_sample
 from sunpack.repair.model.policy.tensorize import tensorize_sample, tensorize_world_sample
-from sunpack.repair.model.policy.tensorize import WORLD_TARGET_DIM
+from sunpack.repair.model.policy.tensorize import WORLD_BASE_TARGET_DIM, WORLD_DIAGNOSIS_TARGET_DIM, WORLD_TARGET_DIM
 from repair_training.policy.world_rows import build_policy_world_samples
 from repair_training.__main__ import train_main
 
@@ -189,9 +189,9 @@ def test_transition_target_contains_next_node_hgt_and_verification_state():
     assert len(target) == WORLD_TARGET_DIM
     assert target[0] == pytest.approx(0.8)
     assert target[1] == pytest.approx(0.6)
-    # root-case vector starts after the six base delta fields; eocd.cd_size is index 1.
-    assert target[6 + 1] == pytest.approx(0.2)
-    recovery_offset = 6 + 26
+    # The shared meta-policy consumes label-independent diagnosis summaries.
+    assert target[WORLD_BASE_TARGET_DIM] == pytest.approx(0.2)
+    recovery_offset = WORLD_BASE_TARGET_DIM + WORLD_DIAGNOSIS_TARGET_DIM
     assert target[recovery_offset] == pytest.approx(0.8)
     assert target[recovery_offset + 1] == pytest.approx(0.75)
     assert target[recovery_offset + 4] == pytest.approx(2 / 1024)

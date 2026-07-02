@@ -21,6 +21,7 @@ def build_diagnosis_gnn_model(*, metadata: tuple[list[str], list[tuple[str, str,
         "hidden_dim": int(config.get("hidden_dim", 64)),
         "layers": int(config.get("layers", 2)),
         "dropout": float(config.get("dropout", 0.15)),
+        "root_label_count": int(config.get("root_label_count", len(ROOT_CASES))),
     }
     if arch == "hetero_graphsage":
         return DiagnosisHeteroGraphSAGE(**common)
@@ -62,7 +63,7 @@ def _bool_config(value: Any, *, default: bool = False) -> bool:
 
 
 class _DiagnosisBase(_BASE_MODULE):
-    def _init_common_heads(self, hidden_dim: int, dropout: float):
+    def _init_common_heads(self, hidden_dim: int, dropout: float, root_label_count: int):
         import torch.nn as nn
         from torch_geometric.nn import Linear
 
@@ -70,25 +71,25 @@ class _DiagnosisBase(_BASE_MODULE):
             Linear(hidden_dim * 3, hidden_dim),
             nn.ReLU(),
             nn.Dropout(float(dropout)),
-            Linear(hidden_dim, len(ROOT_CASES)),
+            Linear(hidden_dim, root_label_count),
         )
         self.root_evidence_head = nn.Sequential(
             Linear(hidden_dim * 3, hidden_dim),
             nn.ReLU(),
             nn.Dropout(float(dropout)),
-            Linear(hidden_dim, len(ROOT_CASES)),
+            Linear(hidden_dim, root_label_count),
         )
         self.root_transition_gain_head = nn.Sequential(
             Linear(hidden_dim * 3, hidden_dim),
             nn.ReLU(),
             nn.Dropout(float(dropout)),
-            Linear(hidden_dim, len(ROOT_CASES)),
+            Linear(hidden_dim, root_label_count),
         )
         self.root_probe_viability_head = nn.Sequential(
             Linear(hidden_dim * 3, hidden_dim),
             nn.ReLU(),
             nn.Dropout(float(dropout)),
-            Linear(hidden_dim, len(ROOT_CASES)),
+            Linear(hidden_dim, root_label_count),
         )
         self.cause_head = Linear(hidden_dim, 1)
         self.theory_head = Linear(hidden_dim, 1)
@@ -154,6 +155,7 @@ class DiagnosisHeteroGraphSAGE(_DiagnosisBase):
         hidden_dim: int = 64,
         layers: int = 2,
         dropout: float = 0.15,
+        root_label_count: int = len(ROOT_CASES),
     ):
         require_pyg()
         import torch.nn as nn
@@ -175,7 +177,7 @@ class DiagnosisHeteroGraphSAGE(_DiagnosisBase):
                 for edge_type in edge_types
             }
             self.convs.append(HeteroConv(convs, aggr="sum"))
-        self._init_common_heads(self.hidden_dim, self.dropout)
+        self._init_common_heads(self.hidden_dim, self.dropout, root_label_count)
 
     def forward(self, x_dict, edge_index_dict, batch_dict=None):
         x_dict = {
@@ -213,6 +215,7 @@ class DiagnosisRGCN(_DiagnosisBase):
         layers: int = 2,
         dropout: float = 0.15,
         num_bases: int = 8,
+        root_label_count: int = len(ROOT_CASES),
     ):
         require_pyg()
         import torch.nn as nn
@@ -239,7 +242,7 @@ class DiagnosisRGCN(_DiagnosisBase):
             )
             for _ in range(max(1, int(layers)))
         ])
-        self._init_common_heads(self.hidden_dim, self.dropout)
+        self._init_common_heads(self.hidden_dim, self.dropout, root_label_count)
 
     def forward(self, x_dict, edge_index_dict, batch_dict=None):
         import torch
@@ -309,6 +312,7 @@ class DiagnosisHGT(_DiagnosisBase):
         heads: int = 4,
         residual: bool = True,
         layernorm: bool = True,
+        root_label_count: int = len(ROOT_CASES),
     ):
         require_pyg()
         import torch.nn as nn
@@ -337,7 +341,7 @@ class DiagnosisHGT(_DiagnosisBase):
             ])
         else:
             self.norms = nn.ModuleList()
-        self._init_common_heads(self.hidden_dim, self.dropout)
+        self._init_common_heads(self.hidden_dim, self.dropout, root_label_count)
 
     def forward(self, x_dict, edge_index_dict, batch_dict=None):
         x_dict = {

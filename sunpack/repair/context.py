@@ -325,3 +325,15 @@ def _first_text(values: list[Any]) -> str:
         if text:
             return text
     return ""
+
+
+def _dedupe(values: list[Any]) -> list[str]:
+    output: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        text = str(value or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        output.append(text)
+    return output

@@ -34,8 +34,13 @@ def _root_parser() -> argparse.ArgumentParser:
 def train_main(argv: list[str] | None = None) -> int:
     args = _train_parser().parse_args(argv)
     fmt = normalize_format_name(args.format)
-    load_training_format_plugin(fmt)
     model_type = str(args.model)
+    if model_type == "diagnosis_gnn" or fmt not in {"shared", "mixed", "all"}:
+        load_training_format_plugin(fmt)
+    elif model_type != "repair_policy_transformer":
+        raise SystemExit(f"shared format training is only supported for the repair meta-policy: {model_type}")
+    if fmt in {"mixed", "all"}:
+        fmt = "shared"
     run_dir = Path(args.run_dir).resolve()
     if model_type == "diagnosis_gnn":
         input_path = Path(args.input) if args.input else run_dir / "datasets" / "diagnosis_graph_rows.jsonl"

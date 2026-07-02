@@ -1,6 +1,6 @@
 import pytest
 
-from sunpack.repair.model.diagnosis.graph_dispatcher import build_diagnosis_graph_sample
+from sunpack.repair.model.diagnosis.graph_dispatcher import build_diagnosis_graph_sample, build_diagnosis_graph_sample_for_format
 from sunpack.repair.model.diagnosis.tensorize import THEORY_DEPENDS_EDGE_TYPE, metadata_for_sample, tensorize_sample
 
 
@@ -56,3 +56,18 @@ def test_diagnosis_gnn_tensorize_reads_root_hypothesis_targets():
     assert data.root_transition_gain_mask.sum().item() == 1
     assert data.root_evidence_y.sum().item() == pytest.approx(1.0)
     assert data.root_evidence_mask.sum().item() == 1
+
+
+def test_diagnosis_gnn_tensorize_uses_format_private_root_vocabulary():
+    labels = ["folder_bind_pairs_bad", "next_header_crc_bad"]
+    sample = build_diagnosis_graph_sample_for_format("7z", {
+        "sample_id": "seven_zip",
+        "format": "7z",
+        "damage_flags": ["folder_bind_pairs_bad"],
+    })
+
+    data = tensorize_sample(sample, root_cases=labels)
+    metadata = metadata_for_sample(sample, root_cases=labels)
+
+    assert data.root_case_y.tolist() == [1.0, 0.0]
+    assert metadata.root_cases == labels

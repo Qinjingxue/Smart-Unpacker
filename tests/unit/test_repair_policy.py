@@ -1,10 +1,11 @@
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from sunpack.contracts.archive_input import ArchiveInputDescriptor
 from sunpack.contracts.archive_state import ArchiveState, PatchOperation, PatchPlan
-from sunpack.repair.candidate import RepairCandidate, materialize_candidate
+from sunpack.repair.candidate import RepairCandidate, RepairCandidateBatch, materialize_candidate
 from sunpack.repair.job import RepairJob
 from sunpack.repair.pipeline.module import RepairModuleSpec, RepairRoute
 from sunpack.repair.search import proposals as search_proposals
@@ -182,12 +183,68 @@ def test_zip_policy_plugin_enumerates_registry_without_rule_context(tmp_path, mo
     )
 
     assert [proposal.module_name for proposal in proposals] == ["zip_fake_fix"]
-    assert proposals[0].to_action_payload() == {
+    payload = proposals[0].to_action_payload()
+    assert {key: payload[key] for key in ("action_type", "action_id", "candidate_id", "module_name")} == {
         "action_type": "module",
         "action_id": "zip_fake_fix:0",
         "candidate_id": "zip_fake_fix:0",
         "module_name": "zip_fake_fix",
     }
+    assert payload["features"]["schema_version"] == "repair_action_v2"
+    assert payload["features"]["granularity"] == "atomic"
+
+
+def test_policy_proposals_keep_seven_zip_private_operation_with_shared_contract(tmp_path, monkeypatch):
+    class SevenZipModule:
+        spec = RepairModuleSpec(
+            name="seven_zip_repair_folder_bind_pairs",
+            formats=("7z", "seven_zip"),
+            stage="deep",
+            atomic=True,
+            route_family="seven_zip_folder_graph",
+        )
+
+        def repair(self, job, diagnosis, workspace, config):
+            raise AssertionError("proposal enumeration must stay lazy")
+
+    monkeypatch.setattr(search_proposals, "get_repair_module_registry", lambda: _FakeRegistry({"7z": SevenZipModule()}))
+    monkeypatch.setattr(search_proposals, "enabled_module_configs", lambda config: {})
+    scheduler = _scheduler(tmp_path)
+    job = replace(_job(tmp_path), format="7z", source_input={"kind": "file", "path": str(tmp_path / "source.zip"), "format_hint": "7z"})
+
+    proposals = search_proposals.available_module_proposals(
+        scheduler=scheduler,
+        job=job,
+        diagnosis_hgt={"root_case": {"scores": {"folder_bind_pairs_bad": 0.9}}},
+        graph=_root_graph(job),
+    )
+
+    payload = proposals[0].to_action_payload()
+    assert payload["module_name"] == "seven_zip_repair_folder_bind_pairs"
+    assert payload["features"]["expert"] == "7z"
+    assert payload["features"]["format_family"] == "coder_graph_container"
+    assert payload["features"]["mutation_scope"] == "folder"
+
+
+def test_missing_models_fall_back_to_registered_rule_experts(tmp_path, monkeypatch):
+    scheduler = _scheduler(tmp_path)
+    candidate = RepairCandidate(
+        module_name="gzip_footer_fix",
+        format="gzip",
+        repaired_input={"kind": "file", "path": str(tmp_path / "fixed.gz"), "format_hint": "gzip"},
+        status="repaired",
+        confidence=0.8,
+        actions=["fix_footer"],
+    )
+    job = replace(_job(tmp_path), format="gzip", source_input={"kind": "file", "path": str(tmp_path / "source.zip"), "format_hint": "gzip"})
+    monkeypatch.setattr(scheduler, "generate_repair_candidates", lambda job: RepairCandidateBatch(candidates=[candidate]))
+    monkeypatch.setattr("sunpack.repair.scheduler.CandidateSelector.select", lambda self, candidates: (candidate, {"selected_module": candidate.module_name}))
+
+    result = scheduler.repair(job)
+
+    assert result.status == "repaired"
+    assert result.module_name == "gzip_footer_fix"
+    assert result.diagnosis["candidate_selection"]["selection_mode"] == "rule_expert"
 
 
 class _GraphModels:

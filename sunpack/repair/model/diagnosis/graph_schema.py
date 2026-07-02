@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 
-DIAGNOSIS_GRAPH_SCHEMA_VERSION = "diagnosis_graph_v1"
+DIAGNOSIS_GRAPH_SCHEMA_VERSION = "diagnosis_graph_v2"
 
 NODE_LAYERS = frozenset({"observation", "theory", "cause"})
 EDGE_TYPES = frozenset({

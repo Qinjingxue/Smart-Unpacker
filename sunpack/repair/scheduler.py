@@ -73,18 +73,46 @@ class RepairScheduler:
     def repair(self, job: RepairJob) -> RepairResult:
         if self.model_runtime.active_for_job(job):
             return self.repair_policy_step(job)
-        status = self.model_runtime.status_for_job(job)
+        return self._repair_with_rules(job, model_status=self.model_runtime.status_for_job(job))
+
+    def _repair_with_rules(self, job: RepairJob, *, model_status: dict[str, Any]) -> RepairResult:
+        """Run the maintained rule/candidate pipeline when learned experts are absent.
+
+        Models are an optional ranking accelerator.  They must not be a hard
+        dependency for the registered repair modules, especially for formats
+        that intentionally use deterministic experts.
+        """
+        batch = self.generate_repair_candidates(job)
+        if batch.terminal_result is not None:
+            result = batch.terminal_result
+            result.diagnosis.setdefault("policy", model_status)
+            result.diagnosis.setdefault("selection_mode", "rule_expert")
+            return result
+        selector = CandidateSelector(self.config)
+        selected, selection = selector.select(batch.candidates)
+        selection = {
+            **selection,
+            "selection_mode": "rule_expert",
+            "model_status": dict(model_status),
+        }
+        if selected is not None:
+            return selected.to_result(selection=selection)
         return RepairResult(
-            status="unsupported",
+            status="unrepairable" if batch.candidates else "unsupported",
             confidence=float(job.confidence or 0.0),
             format=job.format,
             repaired_input=dict(job.source_input or {}),
-            actions=["policy_unavailable"],
+            actions=["rule_expert_no_candidate"],
             damage_flags=list(job.damage_flags),
-            warnings=[str(status.get("fallback_reason") or "policy_unavailable")],
-            module_name="policy_unavailable",
-            diagnosis={"policy": status},
-            message="repair policy graph runtime is unavailable",
+            warnings=[*list(batch.warnings), str(model_status.get("fallback_reason") or "model_unavailable")],
+            module_name="rule_expert",
+            diagnosis={
+                **dict(batch.diagnosis or {}),
+                "policy": dict(model_status),
+                "selection": selection,
+                "selection_mode": "rule_expert",
+            },
+            message=batch.message or "registered repair modules did not produce an accepted candidate",
         )
 
     def repair_policy_step(self, job: RepairJob) -> RepairResult:

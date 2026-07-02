@@ -24,6 +24,10 @@ class DiagnosisGNNModel:
         self.model_dir = Path(model_dir)
         self.model_card = _read_json(self.model_dir / "model_card.json")
         self.thresholds = _read_json(self.model_dir / "thresholds.json")
+        label_schema = _read_json(self.model_dir / "label_schema.json")
+        self.root_labels = [str(item) for item in label_schema.get("labels") or []]
+        if not self.root_labels:
+            raise RuntimeError("diagnosis model label schema is missing root labels")
         if self.model_card.get("diagnosis_semantics") != DIAGNOSIS_GNN_SEMANTICS:
             raise RuntimeError(f"unsupported DiagnosisGNN semantics: {self.model_card.get('diagnosis_semantics')!r}")
         if self.model_card.get("graph_schema") != DIAGNOSIS_GRAPH_SCHEMA_VERSION:
@@ -32,6 +36,8 @@ class DiagnosisGNNModel:
         self.metadata = (list(checkpoint.get("metadata", ([], []))[0]), [tuple(item) for item in checkpoint.get("metadata", ([], []))[1]])
         self.edge_types = {tuple(item) for item in self.metadata[1]}
         self.config = dict(checkpoint.get("config") or {})
+        self.config["root_labels"] = list(self.root_labels)
+        self.config["root_label_count"] = len(self.root_labels)
         self.config = _normalize_checkpoint_config(self.config, checkpoint.get("state_dict") or {})
         self.device = _resolve_device(device, torch)
         self.model = build_diagnosis_gnn_model(metadata=self.metadata, config=self.config).to(self.device)
@@ -48,10 +54,10 @@ class DiagnosisGNNModel:
 
         data_items = []
         for index, sample in enumerate(samples):
-            data = tensorize_sample(sample)
+            data = tensorize_sample(sample, root_cases=self.root_labels)
             data.sample_index = self.torch.tensor([index], dtype=self.torch.long)
             data_items.append(data)
-        metadatas = [metadata_for_sample(sample) for sample in samples]
+        metadatas = [metadata_for_sample(sample, root_cases=self.root_labels) for sample in samples]
         outputs: list[dict[str, Any] | None] = [None] * len(samples)
         loader = DataLoader(data_items, batch_size=16)
         with self.torch.no_grad():
@@ -94,10 +100,11 @@ class DiagnosisGNNModel:
         transition_gain: list[float] | None = None,
         probe_viability: list[float] | None = None,
     ) -> dict[str, Any]:
-        evidence = {label: float(score) for label, score in zip(ROOT_CASES, evidence_scores or scores)}
-        gain = {label: float(score) for label, score in zip(ROOT_CASES, transition_gain or scores)}
-        viability = {label: float(score) for label, score in zip(ROOT_CASES, probe_viability or scores)}
+        evidence = {label: float(score) for label, score in zip(self.root_labels, evidence_scores or scores)}
+        gain = {label: float(score) for label, score in zip(self.root_labels, transition_gain or scores)}
+        viability = {label: float(score) for label, score in zip(self.root_labels, probe_viability or scores)}
         root_scores = _priority_scores(
+            labels=self.root_labels,
             scores=scores,
             evidence_scores=evidence_scores or scores,
             transition_gain=transition_gain or scores,
@@ -146,6 +153,7 @@ class DiagnosisGNNModel:
 
 def _priority_scores(
     *,
+    labels: list[str],
     scores: list[float],
     evidence_scores: list[float],
     transition_gain: list[float],
@@ -163,7 +171,7 @@ def _priority_scores(
                 + weights["probe_viability"] * float(viability)
             ) / total
         )
-        for label, direct, evidence, gain, viability in zip(ROOT_CASES, scores, evidence_scores, transition_gain, probe_viability)
+        for label, direct, evidence, gain, viability in zip(labels, scores, evidence_scores, transition_gain, probe_viability)
     }
 
 

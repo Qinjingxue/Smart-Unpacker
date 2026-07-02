@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from typing import Any
 
+from sunpack.repair.action_contract import describe_repair_module
 from sunpack.repair.candidate import CandidateValidation, RepairCandidate, materialize_candidate
 from sunpack.support.module_config import enabled_module_configs
 from sunpack.repair.diagnosis import RepairDiagnosis
@@ -44,20 +45,21 @@ def available_module_proposals(
     diagnosis_hgt: dict[str, Any],
     graph: PolicyExplorationGraph | None,
 ) -> list[PolicyModuleProposal]:
-    del diagnosis_hgt, graph
-    if _normalize_format(job.format) != "zip":
+    del graph
+    fmt = _normalize_format(job.format)
+    if not fmt:
         return []
     effective_job = job
     if effective_job.repair_cache is None:
         effective_job = replace(effective_job, repair_cache=scheduler.repair_cache)
-    diagnosis = _policy_zip_diagnosis(effective_job)
+    diagnosis = _policy_diagnosis(effective_job, diagnosis_hgt)
     workspace = scheduler._workspace_for(effective_job)
     workspace.mkdir(parents=True, exist_ok=True)
     module_configs = enabled_module_configs(scheduler.config)
     proposals: list[PolicyModuleProposal] = []
-    for index, module in enumerate(_zip_policy_modules(scheduler, effective_job, module_configs)):
+    for index, module in enumerate(_policy_modules(scheduler, effective_job, diagnosis, module_configs)):
         module_config = scheduler._module_runtime_config(module.spec.name, module_configs)
-        candidate = _lazy_zip_policy_candidate(
+        candidate = _lazy_policy_candidate(
             module=module,
             job=effective_job,
             diagnosis=diagnosis,
@@ -71,6 +73,7 @@ def available_module_proposals(
             PolicyModuleProposal(
                 action_id=action_id,
                 module_name=candidate.module_name,
+                payload={"features": dict(candidate.diagnosis.get("action_descriptor") or {})},
                 candidate=candidate,
             )
         )
@@ -101,12 +104,18 @@ def materialize_module_proposal(
     )
 
 
-def _zip_policy_modules(scheduler: Any, job: RepairJob, module_configs: dict[str, dict[str, Any]]) -> list[Any]:
+def _policy_modules(
+    scheduler: Any,
+    job: RepairJob,
+    diagnosis: RepairDiagnosis,
+    module_configs: dict[str, dict[str, Any]],
+) -> list[Any]:
+    fmt = _normalize_format(job.format)
     modules = []
     for module in get_repair_module_registry().all().values():
         spec = module.spec
         formats = {_normalize_format(item) for item in spec.formats}
-        if "zip" not in formats and "archive" not in formats:
+        if fmt not in formats and "archive" not in formats:
             continue
         if module_configs and spec.name not in module_configs:
             continue
@@ -115,22 +124,34 @@ def _zip_policy_modules(scheduler: Any, job: RepairJob, module_configs: dict[str
             continue
         if not scheduler._module_input_allowed(job, module_config):
             continue
+        # Atomic experts are exposed for learned format-specific diagnosis.
+        # Legacy macro options remain guarded by their mature rule predicates.
+        if not bool(getattr(spec, "atomic", False)) and hasattr(module, "can_handle"):
+            try:
+                if float(module.can_handle(job, diagnosis, module_config) or 0.0) <= 0.0:
+                    continue
+            except Exception:
+                continue
         modules.append(module)
     return sorted(modules, key=lambda module: module.spec.name)
 
 
-def _policy_zip_diagnosis(job: RepairJob) -> RepairDiagnosis:
+def _policy_diagnosis(job: RepairJob, diagnosis_hgt: dict[str, Any]) -> RepairDiagnosis:
+    categories = ["policy_graph"]
+    raw_categories = diagnosis_hgt.get("categories")
+    if isinstance(raw_categories, list):
+        categories.extend(str(item) for item in raw_categories if str(item))
     return RepairDiagnosis(
-        format="zip",
-        categories=["policy_graph"],
+        format=_normalize_format(job.format),
+        categories=sorted(set(categories)),
         severity="unknown",
         confidence=float(job.confidence or 0.0),
         repairable=True,
-        notes=["policy_zip_format_module_proposal"],
+        notes=["policy_format_expert_module_proposal"],
     )
 
 
-def _lazy_zip_policy_candidate(
+def _lazy_policy_candidate(
     *,
     module: Any,
     job: RepairJob,
@@ -139,8 +160,10 @@ def _lazy_zip_policy_candidate(
     module_config: dict[str, Any],
 ) -> RepairCandidate:
     module_name = module.spec.name
+    fmt = _normalize_format(job.format)
     route_family = str(getattr(module.spec, "route_family", "") or "")
     atomic_action_group = route_family or module_name
+    action_descriptor = describe_repair_module(module, format_name=fmt).to_dict()
 
     def materialize():
         def compute():
@@ -172,7 +195,7 @@ def _lazy_zip_policy_candidate(
                     "module_config": module_config,
                     "virtual_patch_candidate": True,
                     "materialization_semantics": "graph_patch_state_v2",
-                    "policy_proposal_source": "zip_format_module_registry",
+                    "policy_proposal_source": "format_expert_module_registry",
                 },
             ),
             compute,
@@ -185,11 +208,12 @@ def _lazy_zip_policy_candidate(
         "atomic_action_group": atomic_action_group,
         "route_family": route_family,
         "route_reject_reason": "",
-        "policy_proposal_source": "zip_format_module_registry",
+        "policy_proposal_source": "format_expert_module_registry",
+        "action_descriptor": action_descriptor,
     })
     return RepairCandidate(
         module_name=module_name,
-        format="zip",
+        format=fmt,
         repaired_input={},
         status="partial" if module.spec.partial else "repaired",
         stage=module.spec.stage,
@@ -198,7 +222,7 @@ def _lazy_zip_policy_candidate(
         actions=["plan_repair", module_name],
         damage_flags=list(job.damage_flags),
         diagnosis=diagnosis_payload,
-        message="ZIP policy graph module proposal pending materialization",
+        message=f"{fmt} policy graph module proposal pending materialization",
         validations=[
             CandidateValidation(
                 name="policy_graph_proposal",
@@ -210,6 +234,7 @@ def _lazy_zip_policy_candidate(
                     "lazy": True,
                     "atomic": bool(getattr(module.spec, "atomic", False)),
                     "route_family": route_family,
+                    "action_descriptor": action_descriptor,
                 },
             )
         ],
@@ -224,6 +249,7 @@ def _lazy_zip_policy_candidate(
             "plan_kind": "lazy_repair",
             "requires_materialization": True,
             "estimated_cost": 0.5,
+            "action_descriptor": action_descriptor,
         },
     )
 

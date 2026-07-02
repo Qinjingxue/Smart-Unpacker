@@ -3,27 +3,25 @@ from sunpack.repair.model import ModelAssetRegistry, RepairModelRuntime
 from sunpack.repair.search.types import PolicyExplorationGraph, PolicyGraphNode
 
 
-def test_model_registry_resolves_zip_assets():
+def test_model_registry_starts_without_packaged_models():
     registry = ModelAssetRegistry()
     diagnosis = registry.asset("zip", "diagnosis")
     policy = registry.asset("zip", "policy")
 
-    assert registry.supported_formats() == ["zip"]
-    assert diagnosis is not None and diagnosis.available
-    assert diagnosis.semantics == "repair_actionable_root_v2"
-    assert policy is not None and policy.available
-    assert policy.semantics == "repair_graph_world_policy_uncertainty_v1"
+    assert registry.supported_formats() == []
+    assert diagnosis is None
+    assert policy is None
     assert registry.asset("7z", "diagnosis") is None
 
 
-def test_model_registry_loads_current_zip_models_on_cpu():
+def test_model_registry_reports_training_required_without_assets():
     status = ModelAssetRegistry().status(load=True, device="cpu")
 
-    assert status["ok"] is True
-    assert all(model["loaded"] for model in status["models"])
+    assert status["ok"] is False
+    assert status["models"] == []
 
 
-def test_repair_model_runtime_runs_current_zip_model_pair():
+def test_repair_model_runtime_reports_missing_experts():
     runtime = RepairModelRuntime(assets=ModelAssetRegistry())
     job = RepairJob(
         source_input={"kind": "memory", "format_hint": "zip"},
@@ -67,9 +65,7 @@ def test_repair_model_runtime_runs_current_zip_model_pair():
         round_index=0,
     )
 
-    assert diagnosis_status["decision_status"] == "diagnosed"
-    assert len(diagnosis["root_case"]["scores"]) == 26
-    assert diagnosis["root_case"]["ranked"]
-    assert policy_status["decision_status"] == "scored"
-    assert len(actions) == 2
-    assert all("predicted_next_state" in action.metadata for action in actions)
+    assert diagnosis == {}
+    assert diagnosis_status["decision_status"] == "unavailable"
+    assert actions == []
+    assert policy_status["decision_status"] == "unavailable"

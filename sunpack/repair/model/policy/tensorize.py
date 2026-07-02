@@ -2,18 +2,18 @@ from __future__ import annotations
 
 from typing import Any
 
-from sunpack.repair.model.diagnosis.root_cases import ROOT_CASES
 from sunpack.repair.model.policy.schema import PolicyAction, PolicyGraphTrainingSample, PolicyWorldTrainingSample
 from sunpack.support.hash_features import hash_unit as _hash_unit
 
 
 NODE_FEATURE_DIM = 55
 EDGE_FEATURE_DIM = 19
-ACTION_FEATURE_DIM = 54
+ACTION_FEATURE_DIM = 72
 MEMORY_FEATURE_DIM = 17
 WORLD_BASE_TARGET_DIM = 6
 WORLD_RECOVERY_TARGET_DIM = 11
-WORLD_TARGET_DIM = WORLD_BASE_TARGET_DIM + len(ROOT_CASES) + WORLD_RECOVERY_TARGET_DIM
+WORLD_DIAGNOSIS_TARGET_DIM = 8
+WORLD_TARGET_DIM = WORLD_BASE_TARGET_DIM + WORLD_DIAGNOSIS_TARGET_DIM + WORLD_RECOVERY_TARGET_DIM
 UNCERTAINTY_TARGET_DIM = 1
 MASK_TARGET_DIM = 4
 
@@ -515,6 +515,36 @@ def _action_features(action: Any, index: int, action_context: dict[str, Any]) ->
         min(_float(family_history.get("attempts")), 64.0) / 64.0,
         _float(family_history.get("mean_delta")),
         _float(action.features.get("module_history_no_gain_penalty")),
+        *_action_descriptor_features(action.features),
+    ]
+
+
+def _action_descriptor_features(features: dict[str, Any]) -> list[float]:
+    descriptor = features.get("action_descriptor")
+    if not isinstance(descriptor, dict):
+        nested = features.get("features")
+        descriptor = nested if isinstance(nested, dict) else features
+    granularity = str(descriptor.get("granularity") or "")
+    stage = str(descriptor.get("stage") or "")
+    return [
+        _hash_unit(descriptor.get("format_family")),
+        _hash_unit(descriptor.get("expert")),
+        _hash_unit(descriptor.get("operation")),
+        _hash_unit(descriptor.get("route_family")),
+        1.0 if granularity == "atomic" else 0.0,
+        1.0 if granularity == "macro" else 0.0,
+        _hash_unit(descriptor.get("mutation_scope")),
+        _hash_unit(descriptor.get("mutation_kind")),
+        1.0 if stage == "targeted" else 0.0,
+        1.0 if stage == "deep" else 0.0,
+        1.0 if descriptor.get("safe") else 0.0,
+        1.0 if descriptor.get("reversible") else 0.0,
+        1.0 if descriptor.get("partial") else 0.0,
+        1.0 if descriptor.get("lossy") else 0.0,
+        1.0 if descriptor.get("atomic") else 0.0,
+        _float(descriptor.get("estimated_cost")),
+        _hash_unit(descriptor.get("verification_contract")),
+        1.0 if descriptor.get("schema_version") == "repair_action_v2" else 0.0,
     ]
 
 
@@ -690,7 +720,7 @@ def _diagnosis_root_stats(diagnosis: dict[str, Any]) -> dict[str, Any]:
 
 
 def _score_stats(scores: dict[str, Any]) -> dict[str, Any]:
-    parsed = [(str(key), _float(value)) for key, value in scores.items() if str(key) in ROOT_CASES]
+    parsed = [(str(key), _float(value)) for key, value in scores.items() if str(key)]
     parsed.sort(key=lambda item: item[1], reverse=True)
     top = parsed[:3]
     return {
@@ -701,10 +731,17 @@ def _score_stats(scores: dict[str, Any]) -> dict[str, Any]:
 
 
 def _root_case_score_vector(diagnosis: dict[str, Any]) -> list[float]:
-    root = diagnosis.get("root_case") if isinstance(diagnosis.get("root_case"), dict) else {}
-    scores = root.get("scores") if isinstance(root.get("scores"), dict) else diagnosis.get("root_case_scores")
-    scores = scores if isinstance(scores, dict) else {}
-    return [_clamp01(_float(scores.get(label))) for label in ROOT_CASES]
+    stats = _diagnosis_root_stats(diagnosis)
+    return [
+        stats["max_score"],
+        stats["mean_top3"],
+        stats["selected_count"],
+        stats["evidence_max_score"],
+        stats["gain_max_score"],
+        stats["viability_max_score"],
+        stats["direct_gain_top_match"],
+        stats["gain_viability_top_match"],
+    ]
 
 
 def _prediction_error_value(payload: dict[str, Any], key: str) -> float:
