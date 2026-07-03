@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Sequence
 
 from sunpack.support.path_names import clean_relative_archive_path, normalize_match_path
 from sunpack.contracts.verification import FileVerificationObservation, VerificationIssue
@@ -27,7 +27,7 @@ class ArchiveOutputCoverage:
 
 def coverage_from_archive_and_output(
     archive_files: list[dict[str, Any]],
-    output_files: list[dict[str, Any]],
+    output_files: Sequence[dict[str, Any]],
     *,
     method: str,
     issues_by_path: dict[str, list[VerificationIssue]] | None = None,

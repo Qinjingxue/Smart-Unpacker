@@ -83,7 +83,8 @@ def archive_state_manifest_for_evidence(evidence, *, max_items: int = 200000) ->
 def _worker_verified_manifest(evidence) -> ArchiveStateManifest | None:
     result = evidence.worker_result if isinstance(evidence.worker_result, dict) else {}
     payload = result.get("verified_manifest") if isinstance(result.get("verified_manifest"), dict) else {}
-    files = [dict(item) for item in payload.get("files") or [] if isinstance(item, dict)]
+    raw_files = payload.get("files")
+    files = raw_files if isinstance(raw_files, list) and all(isinstance(item, dict) for item in raw_files) else []
     if (
         result.get("status") != "ok"
         or not payload.get("validated")
@@ -91,14 +92,6 @@ def _worker_verified_manifest(evidence) -> ArchiveStateManifest | None:
         or any(str(item.get("status") or "") != "complete" for item in files)
     ):
         return None
-    normalized_files = []
-    for item in files:
-        normalized_files.append({
-            "path": str(item.get("path") or ""),
-            "size": int(item.get("size", item.get("bytes_written", 0)) or 0),
-            "has_crc": bool(item.get("has_crc")),
-            "crc32": (int(item.get("crc32", 0) or 0) & 0xFFFFFFFF) if item.get("has_crc") else None,
-        })
     return ArchiveStateManifest(
         status=STATUS_OK,
         is_archive=True,
@@ -106,7 +99,7 @@ def _worker_verified_manifest(evidence) -> ArchiveStateManifest | None:
         checksum_error=False,
         item_count=int(payload.get("item_count", len(files)) or 0),
         file_count=len(files),
-        files=normalized_files,
+        files=files,
         message="Archive payload was verified during extraction",
         archive_type=str(result.get("archive_type") or ""),
         source=str(payload.get("source") or "sevenzip_worker_extract"),

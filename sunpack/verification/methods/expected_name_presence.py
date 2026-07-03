@@ -6,12 +6,14 @@ from sunpack.support.sevenzip_bridge import STATUS_DAMAGED, STATUS_OK
 from sunpack.verification.archive_state_manifest import ArchiveStateManifest, archive_state_manifest_for_evidence
 from sunpack.verification.evidence import VerificationEvidence
 from sunpack.verification.methods._archive_output_match import (
+    ArchiveOutputCoverage,
     archive_files_from_names,
     coverage_details,
     coverage_from_archive_and_output,
 )
 from sunpack.verification.methods._output_stats import (
     output_file_index_for_evidence,
+    output_inventory_for_evidence,
     output_stats_for_evidence,
     should_emit_file_observations,
 )
@@ -56,24 +58,35 @@ class ExpectedNamePresenceMethod:
         if not stats.exists or not stats.is_dir or not stats.relative_paths:
             return VerificationStepResult(method=self.name, status="skipped")
 
-        output_index = output_file_index_for_evidence(evidence)
-        output_paths = output_index.normalized_paths
-        output_basenames = output_index.normalized_basenames
-        output_files = list(output_index.files)
-        coverage = coverage_from_archive_and_output(
-            archive_files_from_names(expected_names),
-            output_files,
-            method=self.name,
-            include_observations=should_emit_file_observations(evidence, self.name),
-            output_index=output_index,
-        )
-        missing = []
-        for expected in expected_names:
-            normalized_path = normalize_match_path(expected)
-            basename = normalize_match_name(os.path.basename(normalized_path))
-            if normalized_path in output_paths or basename in output_basenames:
-                continue
-            missing.append(expected)
+        emit_observations = should_emit_file_observations(evidence, self.name)
+        inventory = output_inventory_for_evidence(evidence)
+        if inventory.worker_inventory_complete and inventory.identity_paths and not emit_observations:
+            count = len(expected_names)
+            coverage = ArchiveOutputCoverage(
+                completeness=1.0, file_coverage=1.0, byte_coverage=1.0,
+                expected_files=count, matched_files=count, complete_files=count,
+                partial_files=0, failed_files=0, missing_files=0,
+                expected_bytes=0, matched_bytes=0, complete_bytes=0,
+            )
+            missing = []
+        else:
+            output_index = output_file_index_for_evidence(evidence)
+            output_paths = output_index.normalized_paths
+            output_basenames = output_index.normalized_basenames
+            coverage = coverage_from_archive_and_output(
+                archive_files_from_names(expected_names),
+                output_index.files,
+                method=self.name,
+                include_observations=emit_observations,
+                output_index=output_index,
+            )
+            missing = []
+            for expected in expected_names:
+                normalized_path = normalize_match_path(expected)
+                basename = normalize_match_name(os.path.basename(normalized_path))
+                if normalized_path in output_paths or basename in output_basenames:
+                    continue
+                missing.append(expected)
 
         if not missing:
             return VerificationStepResult(

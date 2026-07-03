@@ -1,12 +1,11 @@
 import os
 import sys
-from pathlib import Path
 
 # Ensure import path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 def _main():
-    if getattr(sys, "frozen", False) and Path(sys.executable).name.lower() == "sunpack-watch.exe":
+    if getattr(sys, "frozen", False) and os.path.basename(sys.executable).lower() == "sunpack-watch.exe":
         from sunpack.gui.main import main
     else:
         from sunpack.cli.persistent_process import handle_early_argv

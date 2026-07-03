@@ -17,6 +17,7 @@ from sunpack.cli.cli_reporter import CliReporter
 from sunpack.cli.cli_types import CliCommandResult
 
 CURRENT_CLI_LANG = DEFAULT_CLI_LANG
+_PARSER_CACHE: dict[str, argparse.ArgumentParser] = {}
 
 
 def configure_stdio_encoding():
@@ -68,6 +69,16 @@ def build_cli_parser(ctx: CliContext | None = None) -> argparse.ArgumentParser:
     return parser
 
 
+def cached_cli_parser(ctx: CliContext) -> argparse.ArgumentParser:
+    parser = _PARSER_CACHE.get(ctx.language)
+    if parser is None:
+        parser = build_cli_parser(ctx)
+        _PARSER_CACHE[ctx.language] = parser
+    elif ctx.commands is None:
+        ctx.commands = command_map()
+    return parser
+
+
 def dispatch_command(args, ctx: CliContext) -> tuple[int, CliCommandResult]:
     if ctx.commands is None:
         ctx.commands = command_map()
@@ -109,7 +120,7 @@ def main(argv=None):
     argv = preprocess_sys_argv(argv)
     CURRENT_CLI_LANG = load_cli_language_from_config()
     ctx = CliContext(language=CURRENT_CLI_LANG)
-    parser = build_cli_parser(ctx)
+    parser = cached_cli_parser(ctx)
     if not argv:
         parser.print_help()
         return EXIT_OK

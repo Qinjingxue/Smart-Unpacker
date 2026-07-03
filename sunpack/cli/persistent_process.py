@@ -1,20 +1,15 @@
 from __future__ import annotations
 
-import contextlib
-import getpass
-import hashlib
-import io
 import os
-from pathlib import Path
-import subprocess
 import sys
-import time
-from typing import Any
 
 
 SERVER_ARG = "--persistent-server"
 REUSE_ARG = "--reuse"
 SHUTDOWN_ARG = "--persistent-shutdown"
+_REQUEST_MAGIC = b"SPK1"
+_RESPONSE_MAGIC = b"SPR1"
+_MAX_FIELD_BYTES = 16 * 1024 * 1024
 
 
 def handle_early_argv(argv: list[str]) -> int | None:
@@ -30,22 +25,42 @@ def handle_early_argv(argv: list[str]) -> int | None:
 
 
 def pipe_address() -> str:
-    identity = f"{getpass.getuser()}|{Path(sys.executable).resolve().parent}".encode("utf-8", "surrogatepass")
+    import getpass
+    import hashlib
+
+    executable_dir = os.path.dirname(os.path.abspath(sys.executable))
+    identity = f"{getpass.getuser()}|{executable_dir}".encode("utf-8", "surrogatepass")
     suffix = hashlib.sha256(identity).hexdigest()[:16]
     return rf"\\.\pipe\sunpack-batch-{suffix}"
 
 
 def auth_key() -> bytes:
-    seed = f"sunpack|{getpass.getuser()}|{Path(sys.executable).resolve().parent}".encode("utf-8", "surrogatepass")
+    import getpass
+    import hashlib
+
+    executable_dir = os.path.dirname(os.path.abspath(sys.executable))
+    seed = f"sunpack|{getpass.getuser()}|{executable_dir}".encode("utf-8", "surrogatepass")
     return hashlib.sha256(seed).digest()
+
+
+def state_path() -> str:
+    import tempfile
+
+    executable_dir = os.path.normcase(os.path.dirname(os.path.abspath(sys.executable)))
+    digest = 0xCBF29CE484222325
+    for byte in executable_dir.encode("utf-8", "surrogatepass"):
+        digest ^= byte
+        digest = (digest * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
+    root = os.path.join(os.environ.get("LOCALAPPDATA") or tempfile.gettempdir(), "SunPack")
+    return os.path.join(root, f"runtime-{digest:016x}.state")
 
 
 def server_command() -> list[str]:
     if getattr(sys, "frozen", False):
         return [sys.executable, SERVER_ARG]
-    entry = Path(__file__).resolve().parents[2] / "sunpack.py"
-    if entry.is_file():
-        return [sys.executable, str(entry), SERVER_ARG]
+    entry = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "sunpack.py"))
+    if os.path.isfile(entry):
+        return [sys.executable, entry, SERVER_ARG]
     return [sys.executable, "-m", "sunpack", SERVER_ARG]
 
 
@@ -82,6 +97,9 @@ def _send_or_start(payload: dict[str, Any]) -> dict[str, Any]:
         return response
     if payload.get("shutdown"):
         return {"exit_code": 0, "stdout": "", "stderr": ""}
+    import subprocess
+    import time
+
     creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
     subprocess.Popen(
         server_command(),
@@ -101,46 +119,77 @@ def _send_or_start(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _try_send(payload: dict[str, Any]) -> dict[str, Any] | None:
-    from multiprocessing.connection import Client
+    import socket
+    import struct
 
     try:
-        connection = Client(pipe_address(), family="AF_PIPE", authkey=auth_key())
-    except (FileNotFoundError, ConnectionError, OSError):
+        with open(state_path(), "r", encoding="ascii") as stream:
+            port_text, token_hex = stream.read().splitlines()[:2]
+        port = int(port_text)
+        token = bytes.fromhex(token_hex)
+        connection = socket.create_connection(("127.0.0.1", port), timeout=2.0)
+    except (FileNotFoundError, ConnectionError, OSError, ValueError):
         return None
     try:
-        connection.send(payload)
-        response = connection.recv()
-        return response if isinstance(response, dict) else None
-    except (EOFError, OSError):
+        cwd = str(payload.get("cwd") or "").encode("utf-8", "surrogatepass")
+        argv = [str(item).encode("utf-8", "surrogatepass") for item in payload.get("argv") or []]
+        flags = 1 if payload.get("shutdown") else 0
+        body = [token, struct.pack("!III", flags, len(cwd), len(argv)), cwd]
+        for item in argv:
+            body.extend((struct.pack("!I", len(item)), item))
+        connection.sendall(_REQUEST_MAGIC + b"".join(body))
+        header = _recv_exact(connection, 16)
+        if header[:4] != _RESPONSE_MAGIC:
+            return None
+        exit_code, stdout_size, stderr_size = struct.unpack("!iII", header[4:])
+        if stdout_size > _MAX_FIELD_BYTES or stderr_size > _MAX_FIELD_BYTES:
+            return None
+        stdout = _recv_exact(connection, stdout_size).decode("utf-8", "replace")
+        stderr = _recv_exact(connection, stderr_size).decode("utf-8", "replace")
+        return {"exit_code": exit_code, "stdout": stdout, "stderr": stderr}
+    except (EOFError, OSError, ValueError):
         return None
     finally:
         connection.close()
 
 
 def run_server() -> int:
-    from multiprocessing.connection import Listener
+    import secrets
+    import socket
+    import struct
 
-    try:
-        listener = Listener(pipe_address(), family="AF_PIPE", authkey=auth_key())
-    except OSError:
+    lock_stream = _acquire_server_lock()
+    if lock_stream is None:
         return 0
+    token = secrets.token_bytes(32)
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(8)
     from sunpack.cli.cli import main
     from sunpack.cli.persistent_runtime import close_persistent_runtime, enable_persistent_runtime
 
     enable_persistent_runtime()
+    _write_state(listener.getsockname()[1], token)
 
     try:
         while True:
-            connection = listener.accept()
+            connection, _ = listener.accept()
             try:
-                payload = connection.recv()
-                if not isinstance(payload, dict):
-                    connection.send({"exit_code": 2, "stdout": "", "stderr": "Invalid request.\n"})
+                payload = _recv_request(connection, token)
+                if payload is None:
+                    _send_response(connection, {"exit_code": 2, "stdout": "", "stderr": "Invalid request.\n"})
                     continue
                 if payload.get("shutdown"):
-                    connection.send({"exit_code": 0, "stdout": "", "stderr": ""})
+                    try:
+                        os.remove(state_path())
+                    except OSError:
+                        pass
+                    lock_stream.close()
+                    lock_stream = None
+                    _send_response(connection, {"exit_code": 0, "stdout": "", "stderr": ""})
                     return 0
-                connection.send(_execute_request(main, payload))
+                _send_response(connection, _execute_request(main, payload))
             except (EOFError, OSError):
                 continue
             finally:
@@ -148,9 +197,82 @@ def run_server() -> int:
     finally:
         close_persistent_runtime()
         listener.close()
+        if lock_stream is not None:
+            lock_stream.close()
+        try:
+            os.remove(state_path())
+        except OSError:
+            pass
+
+
+def _recv_exact(connection, size: int) -> bytes:
+    chunks = bytearray()
+    while len(chunks) < size:
+        chunk = connection.recv(size - len(chunks))
+        if not chunk:
+            raise EOFError("persistent connection closed")
+        chunks.extend(chunk)
+    return bytes(chunks)
+
+
+def _recv_request(connection, token: bytes) -> dict[str, Any] | None:
+    import struct
+
+    if _recv_exact(connection, 4) != _REQUEST_MAGIC or _recv_exact(connection, len(token)) != token:
+        return None
+    flags, cwd_size, argc = struct.unpack("!III", _recv_exact(connection, 12))
+    if cwd_size > _MAX_FIELD_BYTES or argc > 4096:
+        return None
+    cwd = _recv_exact(connection, cwd_size).decode("utf-8", "surrogatepass")
+    argv = []
+    for _ in range(argc):
+        size = struct.unpack("!I", _recv_exact(connection, 4))[0]
+        if size > _MAX_FIELD_BYTES:
+            return None
+        argv.append(_recv_exact(connection, size).decode("utf-8", "surrogatepass"))
+    return {"cwd": cwd, "argv": argv, "shutdown": bool(flags & 1)}
+
+
+def _send_response(connection, response: dict[str, Any]) -> None:
+    import struct
+
+    stdout = str(response.get("stdout") or "").encode("utf-8", "surrogatepass")
+    stderr = str(response.get("stderr") or "").encode("utf-8", "surrogatepass")
+    header = _RESPONSE_MAGIC + struct.pack("!iII", int(response.get("exit_code", 1)), len(stdout), len(stderr))
+    connection.sendall(header + stdout + stderr)
+
+
+def _write_state(port: int, token: bytes) -> None:
+    path = state_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    temporary = f"{path}.{os.getpid()}.tmp"
+    with open(temporary, "w", encoding="ascii", newline="\n") as stream:
+        stream.write(f"{port}\n{token.hex()}\n")
+    os.replace(temporary, path)
+
+
+def _acquire_server_lock():
+    import msvcrt
+
+    path = state_path() + ".lock"
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    stream = open(path, "a+b")
+    if stream.tell() == 0:
+        stream.write(b"0")
+        stream.flush()
+    stream.seek(0)
+    try:
+        msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+    except OSError:
+        stream.close()
+        return None
+    return stream
 
 
 def _execute_request(main, payload: dict[str, Any]) -> dict[str, Any]:
+    import contextlib
+    import io
+
     stdout = io.StringIO()
     stderr = io.StringIO()
     previous_cwd = os.getcwd()

@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, Sequence
 
 from sunpack.support.sevenzip_bridge import (
     STATUS_BACKEND_UNAVAILABLE,
@@ -9,7 +9,7 @@ from sunpack.support.sevenzip_bridge import (
 )
 from sunpack.verification.archive_state_manifest import archive_state_manifest_for_evidence
 from sunpack.verification.evidence import VerificationEvidence
-from sunpack.verification.methods._archive_output_match import coverage_details, coverage_from_archive_and_output
+from sunpack.verification.methods._archive_output_match import ArchiveOutputCoverage, coverage_details, coverage_from_archive_and_output
 from sunpack.verification.methods._output_stats import output_file_index_for_evidence, output_inventory_for_evidence, should_emit_file_observations
 from sunpack.verification.registry import register_verification_method
 from sunpack.contracts.verification import (
@@ -41,16 +41,33 @@ class ArchiveTestCrcMethod:
         if not archive_files:
             return VerificationStepResult(method=self.name, status="skipped")
         inventory = output_inventory_for_evidence(evidence)
-        output_index = output_file_index_for_evidence(evidence)
-        if _can_use_worker_output_crc(archive_files, inventory.files, inventory.worker_crc_available, output_by_path=output_index.by_path):
-            match_result = _worker_crc_match_result(
+        if (
+            inventory.worker_inventory_complete
+            and inventory.identity_paths
+            and len(archive_files) == len(inventory.files)
+            and inventory.worker_crc_available
+            and all(
+                not source.get("has_crc", source.get("crc32") is not None)
+                or output.get("crc32") is not None
+                for source, output in zip(archive_files, inventory.files)
+            )
+        ):
+            match_result = _trusted_worker_crc_match_result(
                 archive_files,
-                list(inventory.files),
+                inventory.files,
                 include_observations=should_emit_file_observations(evidence, self.name),
-                output_index=output_index,
             )
         else:
-            match_result = dict(_match_archive_output_crc_coverage(archive_files, evidence.output_dir, max_items))
+            output_index = output_file_index_for_evidence(evidence)
+            if _can_use_worker_output_crc(archive_files, inventory.files, inventory.worker_crc_available, output_by_path=output_index.by_path):
+                match_result = _worker_crc_match_result(
+                    archive_files,
+                    inventory.files,
+                    include_observations=should_emit_file_observations(evidence, self.name),
+                    output_index=output_index,
+                )
+            else:
+                match_result = dict(_match_archive_output_crc_coverage(archive_files, evidence.output_dir, max_items))
 
         status = str(match_result.get("status") or "")
         if status != "ok":
@@ -302,7 +319,7 @@ def _can_use_worker_output_crc(
 
 def _worker_crc_match_result(
     archive_files: list[dict[str, Any]],
-    output_files: list[dict[str, Any]],
+    output_files: Sequence[dict[str, Any]],
     *,
     include_observations: bool = True,
     output_index=None,
@@ -330,23 +347,82 @@ def _worker_crc_match_result(
         for observation in coverage.observations
         if observation.state == "missing"
     ]
-    observations = [{
-        "path": observation.path,
-        "archive_path": observation.archive_path,
-        "state": observation.state,
-        "bytes_written": observation.bytes_written,
-        "expected_size": observation.expected_size,
-        "progress": observation.progress,
-        "crc_expected": observation.crc_expected,
-        "crc_actual": observation.crc_actual,
-        "details": dict(observation.details),
-    } for observation in coverage.observations]
     return {
         "status": "ok",
         "mismatches": mismatches,
         "missing": missing,
         "coverage": coverage_details(coverage),
-        "observations": observations,
         "_file_observations": coverage.observations,
+        "source": "sevenzip_worker_write",
+    }
+
+
+def _trusted_worker_crc_match_result(
+    archive_files: Sequence[dict[str, Any]],
+    output_files: Sequence[dict[str, Any]],
+    *,
+    include_observations: bool,
+) -> dict[str, Any]:
+    observations: list[FileVerificationObservation] = []
+    mismatches: list[dict[str, Any]] = []
+    expected_bytes = 0
+    matched_bytes = 0
+    complete_bytes = 0
+    for archive_item, output_item in zip(archive_files, output_files):
+        path = str(archive_item.get("path") or "")
+        expected_size = _optional_int(archive_item.get("size"))
+        actual_size = _optional_int(output_item.get("size", output_item.get("bytes_written")))
+        expected_crc = _optional_crc(archive_item.get("crc32")) if archive_item.get("has_crc") else None
+        actual_crc = _optional_crc(output_item.get("crc32"))
+        if expected_size is not None:
+            expected_bytes += max(0, expected_size)
+            matched_bytes += min(max(0, actual_size or 0), max(0, expected_size))
+        elif actual_size is not None:
+            matched_bytes += max(0, actual_size)
+        if expected_crc is not None and actual_crc is not None and expected_crc != actual_crc:
+            mismatches.append({"path": path, "expected_crc32": expected_crc, "actual_crc32": actual_crc})
+        elif expected_size is not None:
+            complete_bytes += max(0, expected_size)
+        if include_observations:
+            observations.append(FileVerificationObservation(
+                path=str(output_item.get("path") or path),
+                archive_path=path,
+                state="complete",
+                method="archive_test_crc",
+                bytes_written=max(0, actual_size or 0),
+                expected_size=expected_size,
+                progress=1.0,
+                crc_expected=expected_crc,
+                crc_actual=actual_crc,
+                details={
+                    "expected_has_crc": expected_crc is not None,
+                    "crc_ok": expected_crc is None or actual_crc is None or expected_crc == actual_crc,
+                    "matched_by": "identity_worker_inventory",
+                },
+            ))
+    count = len(archive_files)
+    byte_coverage = min(1.0, matched_bytes / expected_bytes) if expected_bytes else 1.0
+    completeness = min(byte_coverage, (count - len(mismatches)) / max(1, count))
+    coverage = ArchiveOutputCoverage(
+        completeness=completeness,
+        file_coverage=1.0,
+        byte_coverage=byte_coverage,
+        expected_files=count,
+        matched_files=count,
+        complete_files=count - len(mismatches),
+        partial_files=0,
+        failed_files=len(mismatches),
+        missing_files=0,
+        expected_bytes=expected_bytes,
+        matched_bytes=matched_bytes,
+        complete_bytes=complete_bytes,
+        observations=observations,
+    )
+    return {
+        "status": "ok",
+        "mismatches": mismatches,
+        "missing": [],
+        "coverage": coverage_details(coverage),
+        "_file_observations": observations,
         "source": "sevenzip_worker_write",
     }

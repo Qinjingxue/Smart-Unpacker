@@ -27,6 +27,8 @@ class OutputInventory:
     stats: OutputStats
     files: tuple[dict[str, Any], ...] = ()
     worker_crc_available: bool = False
+    worker_inventory_complete: bool = False
+    identity_paths: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -36,8 +38,10 @@ class OutputInventory:
                 **asdict(self.stats),
                 "relative_paths": list(self.stats.relative_paths),
             },
-            "files": [dict(item) for item in self.files],
+            "files": list(self.files),
             "worker_crc_available": self.worker_crc_available,
+            "worker_inventory_complete": self.worker_inventory_complete,
+            "identity_paths": self.identity_paths,
         }
 
     @classmethod
@@ -48,7 +52,7 @@ class OutputInventory:
         if expected_root and _path_key(root) != _path_key(expected_root):
             return None
         raw_stats = payload.get("stats") if isinstance(payload.get("stats"), dict) else {}
-        files = tuple(dict(item) for item in payload.get("files") or [] if isinstance(item, dict))
+        files = tuple(item for item in payload.get("files") or [] if isinstance(item, dict))
         stats = OutputStats(
             exists=bool(raw_stats.get("exists")),
             is_dir=bool(raw_stats.get("is_dir")),
@@ -64,6 +68,8 @@ class OutputInventory:
             stats=stats,
             files=files,
             worker_crc_available=bool(payload.get("worker_crc_available")),
+            worker_inventory_complete=bool(payload.get("worker_inventory_complete")),
+            identity_paths=bool(payload.get("identity_paths")),
         )
 
 
@@ -96,6 +102,8 @@ def collect_output_inventory(
             ),
             files=merged_files,
             worker_crc_available=bool(files),
+            worker_inventory_complete=True,
+            identity_paths=bool(inventory.get("identity_paths")),
         )
     scan = dict(_native_scan_output_tree(output_dir))
     files = [dict(item) for item in scan.get("files") or [] if isinstance(item, dict)]
@@ -145,7 +153,8 @@ def verified_worker_files(worker_result: dict[str, Any] | None) -> list[dict[str
     manifest = result.get("verified_manifest") if isinstance(result.get("verified_manifest"), dict) else {}
     if result.get("status") != "ok" or not manifest.get("validated"):
         return []
-    return [dict(item) for item in manifest.get("files") or [] if isinstance(item, dict)]
+    files = manifest.get("files")
+    return files if isinstance(files, list) and all(isinstance(item, dict) for item in files) else []
 
 
 def _complete_worker_inventory(worker_result: dict[str, Any] | None) -> tuple[list[dict[str, Any]], dict[str, Any]] | None:

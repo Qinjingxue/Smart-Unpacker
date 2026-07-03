@@ -480,10 +480,13 @@ function Build-SevenZipWrapper {
 
     $wrapperDll = Join-Path $BuildDir "Release\sunpack_sevenzip.dll"
     $workerExe = Join-Path $BuildDir "Release\sunpack_sevenzip_worker.exe"
+    $launcherExe = Join-Path $BuildDir "Release\sunpack_launcher.exe"
     Assert-PathExists -LiteralPath $wrapperDll -Description "Built 7z wrapper DLL"
     Assert-PathExists -LiteralPath $workerExe -Description "Built 7z worker executable"
+    Assert-PathExists -LiteralPath $launcherExe -Description "Built SunPack launcher executable"
     Assert-PeMachine -LiteralPath $wrapperDll -BuildArch $BuildArch -Description "Built 7z wrapper DLL"
     Assert-PeMachine -LiteralPath $workerExe -BuildArch $BuildArch -Description "Built 7z worker executable"
+    Assert-PeMachine -LiteralPath $launcherExe -BuildArch $BuildArch -Description "Built SunPack launcher executable"
     Copy-Item -LiteralPath $wrapperDll -Destination (Join-Path $ToolsRoot "sunpack_sevenzip.dll") -Force
     Copy-Item -LiteralPath $workerExe -Destination (Join-Path $ToolsRoot "sunpack_sevenzip_worker.exe") -Force
 }
@@ -660,6 +663,7 @@ $sevenZipPath = Join-Path $toolsRoot "7z.exe"
 $sevenZipDllPath = Join-Path $toolsRoot "7z.dll"
 $sevenZipWrapperDllPath = Join-Path $toolsRoot "sunpack_sevenzip.dll"
 $sevenZipWorkerPath = Join-Path $toolsRoot "sunpack_sevenzip_worker.exe"
+$launcherBuildPath = Join-Path $sevenZipWrapperBuildDir "Release\sunpack_launcher.exe"
 $sevenZipLicensePath = Join-Path $repoRoot "licenses\7zip-license.txt"
 $distRoot = Join-Path $repoRoot "dist"
 $buildRoot = Join-Path $repoRoot "build"
@@ -667,9 +671,11 @@ $nativeWheelRoot = Join-Path $buildRoot ("native-wheels-" + $buildArch)
 $releaseRoot = Join-Path $repoRoot "release"
 $distFolderName = if ($env:SUNPACK_DIST_NAME) { $env:SUNPACK_DIST_NAME } else { "sunpack-" + $buildArch + "-" + $repairSystemMode }
 $appExeName = if ($env:SUNPACK_EXE_NAME) { $env:SUNPACK_EXE_NAME + ".exe" } else { "sunpack.exe" }
+$runtimeExeName = "sunpack-runtime.exe"
 $watchExeName = "sunpack-watch.exe"
 $distAppRoot = Join-Path $distRoot $distFolderName
 $distExePath = Join-Path $distAppRoot $appExeName
+$distRuntimeExePath = Join-Path $distAppRoot $runtimeExeName
 $distWatchExePath = Join-Path $distAppRoot $watchExeName
 $distInternalRoot = Join-Path $distAppRoot "_internal"
 $distToolsRoot = Join-Path $distAppRoot "tools"
@@ -781,14 +787,17 @@ if ($runAcceptanceTests) {
 
 Write-Step "Building Windows release with PyInstaller"
 $env:SUNPACK_DIST_NAME = $distFolderName
-$env:SUNPACK_EXE_NAME = [System.IO.Path]::GetFileNameWithoutExtension($appExeName)
+$env:SUNPACK_EXE_NAME = [System.IO.Path]::GetFileNameWithoutExtension($runtimeExeName)
 $env:SUNPACK_WATCH_EXE_NAME = [System.IO.Path]::GetFileNameWithoutExtension($watchExeName)
 $env:SUNPACK_REPAIR_SYSTEM = $repairSystemMode
 Invoke-Native -FilePath $venvPython -Arguments @("-m", "PyInstaller", "--noconfirm", $specPath)
+Copy-Item -LiteralPath $launcherBuildPath -Destination $distExePath -Force
 
 Write-Step "Validating packaged outputs"
 Assert-PathExists -LiteralPath $distExePath -Description "Packaged sunpack executable"
+Assert-PathExists -LiteralPath $distRuntimeExePath -Description "Packaged SunPack runtime executable"
 Assert-PeMachine -LiteralPath $distExePath -BuildArch $buildArch -Description "Packaged sunpack executable"
+Assert-PeMachine -LiteralPath $distRuntimeExePath -BuildArch $buildArch -Description "Packaged SunPack runtime executable"
 Assert-PeSubsystem -LiteralPath $distExePath -Expected 3 -Description "Packaged sunpack executable"
 Assert-PathExists -LiteralPath $distWatchExePath -Description "Packaged SunPack watch GUI executable"
 Assert-PeMachine -LiteralPath $distWatchExePath -BuildArch $buildArch -Description "Packaged SunPack watch GUI executable"

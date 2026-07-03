@@ -90,11 +90,10 @@ class ExtractionExitSignalMethod:
                 message=result.error,
                 path=result.archive or evidence.archive_path,
             ))
-        observations = _observations_from_manifest(evidence)
         manifest = evidence.progress_manifest or {}
         files_written = int(getattr(result, "files_written", 0) or manifest.get("files_written") or 0)
         bytes_written = int(getattr(result, "bytes_written", 0) or manifest.get("bytes_written") or 0)
-        if not observations and files_written <= 0 and bytes_written <= 0:
+        if files_written <= 0 and bytes_written <= 0 and not _observations_from_manifest(evidence):
             return VerificationStepResult(
                 method=self.name,
                 status="failed",

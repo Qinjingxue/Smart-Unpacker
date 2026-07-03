@@ -147,8 +147,10 @@ class NestedOutputScanPolicy:
         return config
 
     def _should_consider_candidate(self, path: str, size: int | None) -> bool:
-        filename = os.path.basename(path).lower()
-        _, ext = os.path.splitext(filename)
+        separator = max(path.rfind("/"), path.rfind("\\"))
+        filename = path[separator + 1:].lower()
+        dot = filename.rfind(".")
+        ext = filename[dot:] if dot > 0 and filename not in {".", ".."} else ""
         if ext in self._standard_exts:
             return True
         if ext in self._carrier_exts:

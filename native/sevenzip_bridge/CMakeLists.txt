@@ -102,6 +102,11 @@ target_link_libraries(sunpack_sevenzip_worker
 
 if(WIN32)
     target_compile_definitions(sunpack_sevenzip_worker PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+
+    add_executable(sunpack_launcher src/launcher.cpp)
+    apply_release_optimizations(sunpack_launcher)
+    target_compile_definitions(sunpack_launcher PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
+    target_link_libraries(sunpack_launcher PRIVATE Ws2_32 Shell32)
 endif()
 
 enable_testing()

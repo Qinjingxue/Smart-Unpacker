@@ -59,10 +59,10 @@ def write_verification_result(
         write_prepared_payload(
             knowledge,
             "verification",
-            prepare_knowledge_value({
+            {
                 "issues": [_issue_payload(item) for item in result.issues],
                 "file_observations": [_observation_payload(item) for item in result.file_observations],
-            }),
+            },
             source_layer="verification",
             source_module="scheduler",
         )
