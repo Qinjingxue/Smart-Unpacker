@@ -1,3 +1,126 @@
+use std::io::Cursor;
+
+const GZIP_FIELDS: &[&str] = &[
+    "member.header.magic",
+    "member.header.compression_method",
+    "member.header.flags",
+    "member.header.mtime_xfl_os",
+    "member.header.extra_length",
+    "member.header.extra",
+    "member.header.name",
+    "member.header.comment",
+    "member.header.crc16",
+    "member.deflate.blocks",
+    "member.deflate.final_block",
+    "member.decoded_content",
+    "member.trailer.crc32",
+    "member.trailer.isize",
+    "member.boundary",
+    "member.next_member",
+    "archive.trailing_data",
+];
+const BZIP2_FIELDS: &[&str] = &[
+    "stream.magic",
+    "stream.block_size_100k",
+    "block.marker",
+    "block.crc32",
+    "block.randomized",
+    "block.orig_ptr",
+    "block.huffman_tables",
+    "block.encoded_data",
+    "block.decoded_content",
+    "block.sequence",
+    "stream.end_marker",
+    "stream.combined_crc32",
+    "archive.trailing_data",
+];
+const XZ_FIELDS: &[&str] = &[
+    "stream.header.magic",
+    "stream.header.flags",
+    "stream.header.crc32",
+    "block.header.size",
+    "block.header.flags",
+    "block.header.compressed_size",
+    "block.header.uncompressed_size",
+    "block.header.filters",
+    "block.header.crc32",
+    "block.compressed_data",
+    "block.uncompressed_data",
+    "block.padding",
+    "block.check",
+    "block.sequence",
+    "index.indicator",
+    "index.record_count",
+    "index.records.unpadded_size",
+    "index.records.uncompressed_size",
+    "index.padding",
+    "index.crc32",
+    "stream.footer.crc32",
+    "stream.footer.backward_size",
+    "stream.footer.flags",
+    "stream.footer.magic",
+    "stream.padding",
+    "archive.stream_sequence",
+    "archive.trailing_data",
+];
+const ZSTD_FIELDS: &[&str] = &[
+    "frame.magic",
+    "frame.header.descriptor",
+    "frame.header.content_size_flag",
+    "frame.header.single_segment_flag",
+    "frame.header.checksum_flag",
+    "frame.header.dictionary_id_flag",
+    "frame.header.window_descriptor",
+    "frame.header.dictionary_id",
+    "frame.header.content_size",
+    "block.header.last_block",
+    "block.header.type",
+    "block.header.size",
+    "block.content",
+    "block.literals",
+    "block.sequences",
+    "block.previous_window",
+    "block.previous_entropy_tables",
+    "frame.decoded_content",
+    "frame.content_checksum",
+    "frame.sequence",
+    "skippable.magic",
+    "skippable.frame_size",
+    "skippable.user_data",
+    "archive.trailing_data",
+];
+
+fn compression_base<'py>(
+    py: Python<'py>,
+    format: &str,
+    ext: &str,
+    magic: bool,
+) -> PyResult<Bound<'py, PyDict>> {
+    let d = dict(py)?;
+    d.set_item("plausible", false)?;
+    d.set_item("error", "")?;
+    d.set_item("magic_matched", magic)?;
+    d.set_item("format", format)?;
+    d.set_item("detected_ext", ext)?;
+    d.set_item("confidence", "none")?;
+    d.set_item("evidence", PyList::empty(py))?;
+    Ok(d)
+}
+
+fn finish_fields(d: &Bound<'_, PyDict>, fields: &[&str]) -> PyResult<()> {
+    let missing = PyList::empty(d.py());
+    for field in fields {
+        if !d.contains(field)? {
+            d.set_item(field, "unavailable")?;
+            missing.append(field)?;
+        }
+    }
+    d.set_item("semantic_field_count", fields.len())?;
+    d.set_item("semantic_fields", PyList::new(d.py(), fields)?)?;
+    d.set_item("semantic_missing_fields", missing)?;
+    Ok(())
+}
+
 fn compression_empty(
     py: Python<'_>,
     error: &str,
@@ -5,160 +128,796 @@ fn compression_empty(
     ext: &str,
     magic: bool,
 ) -> PyResult<Py<PyDict>> {
-    let d = dict(py)?;
-    d.set_item("plausible", false)?;
+    let d = compression_base(py, format, ext, magic)?;
     d.set_item("error", error)?;
-    d.set_item("magic_matched", magic)?;
-    d.set_item("format", format)?;
-    d.set_item("detected_ext", ext)?;
-    d.set_item("confidence", "none")?;
-    let evidence = PyList::empty(py);
-    if !format.is_empty() && magic {
-        evidence.append(format!("{format}:magic"))?;
-    }
-    d.set_item("evidence", evidence)?;
     Ok(d.unbind())
 }
 
-fn compression_ok(
+fn hex_bytes(value: &[u8]) -> String {
+    value.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn c_string(data: &[u8], cursor: &mut usize) -> Option<String> {
+    let start = *cursor;
+    let rel = data.get(start..)?.iter().position(|b| *b == 0)?;
+    *cursor = start + rel + 1;
+    Some(String::from_utf8_lossy(&data[start..start + rel]).into_owned())
+}
+
+fn parse_gzip_header(data: &[u8], start: usize) -> Result<(usize, u8), &'static str> {
+    if data.len() < start + 10 {
+        return Err("short_gzip_header");
+    }
+    if &data[start..start + 3] != b"\x1f\x8b\x08" {
+        return Err("gzip_magic_not_found");
+    }
+    let flags = data[start + 3];
+    if flags & 0xe0 != 0 {
+        return Err("gzip_reserved_flags_set");
+    }
+    let mut cursor = start + 10;
+    if flags & 0x04 != 0 {
+        if data.len() < cursor + 2 {
+            return Err("gzip_extra_length_missing");
+        }
+        let length = u16::from_le_bytes([data[cursor], data[cursor + 1]]) as usize;
+        cursor += 2;
+        if data.len() < cursor + length {
+            return Err("gzip_extra_out_of_range");
+        }
+        cursor += length;
+    }
+    if flags & 0x08 != 0 {
+        c_string(data, &mut cursor).ok_or("gzip_name_unterminated")?;
+    }
+    if flags & 0x10 != 0 {
+        c_string(data, &mut cursor).ok_or("gzip_comment_unterminated")?;
+    }
+    if flags & 0x02 != 0 {
+        if data.len() < cursor + 2 {
+            return Err("gzip_header_crc_missing");
+        }
+        cursor += 2;
+    }
+    Ok((cursor, flags))
+}
+
+fn inspect_gzip(py: Python<'_>, path: &str, header: &[u8], file_size: u64) -> PyResult<Py<PyDict>> {
+    let data = match std::fs::read(path) {
+        Ok(data) => data,
+        Err(_) => {
+            return compression_empty(
+                py,
+                "os_error",
+                "gzip",
+                ".gz",
+                header.starts_with(b"\x1f\x8b"),
+            )
+        }
+    };
+    let d = compression_base(py, "gzip", ".gz", data.starts_with(b"\x1f\x8b"))?;
+    let mut damage_flags = Vec::new();
+    d.set_item(
+        "member.header.magic",
+        hex_bytes(data.get(0..2).unwrap_or(&[])),
+    )?;
+    let (payload_start, flags) = match parse_gzip_header(&data, 0) {
+        Ok(value) => value,
+        Err(error) => {
+            d.set_item("error", error)?;
+            finish_fields(&d, GZIP_FIELDS)?;
+            return Ok(d.unbind());
+        }
+    };
+    d.set_item("member.header.compression_method", data[2])?;
+    d.set_item("member.header.flags", flags)?;
+    d.set_item(
+        "member.header.mtime_xfl_os",
+        format!("mtime={};xfl={};os={}", u32_le(&data, 4), data[8], data[9]),
+    )?;
+    let mut cursor = 10usize;
+    if flags & 0x04 != 0 {
+        let length = u16_le(&data, cursor) as usize;
+        d.set_item("member.header.extra_length", length)?;
+        cursor += 2;
+        d.set_item(
+            "member.header.extra",
+            hex_bytes(&data[cursor..cursor + length]),
+        )?;
+        cursor += length;
+    } else {
+        d.set_item("member.header.extra_length", 0)?;
+        d.set_item("member.header.extra", "absent")?;
+    }
+    if flags & 0x08 != 0 {
+        d.set_item(
+            "member.header.name",
+            c_string(&data, &mut cursor).unwrap_or_default(),
+        )?;
+    } else {
+        d.set_item("member.header.name", "absent")?;
+    }
+    if flags & 0x10 != 0 {
+        d.set_item(
+            "member.header.comment",
+            c_string(&data, &mut cursor).unwrap_or_default(),
+        )?;
+    } else {
+        d.set_item("member.header.comment", "absent")?;
+    }
+    if flags & 0x02 != 0 {
+        let stored = u16_le(&data, cursor);
+        let computed = (crc32(&data[..cursor]) & 0xffff) as u16;
+        let ok = stored == computed;
+        d.set_item(
+            "member.header.crc16",
+            format!("stored={stored};computed={computed};ok={ok}"),
+        )?;
+        if !ok {
+            damage_flags.push("gzip_header_crc_bad");
+        }
+    } else {
+        d.set_item("member.header.crc16", "absent")?;
+    }
+
+    let mut inflater = flate2::read::DeflateDecoder::new(Cursor::new(&data[payload_start..]));
+    let mut decoded = Vec::new();
+    let status = inflater.read_to_end(&mut decoded);
+    let deflate_len = inflater.total_in() as usize;
+    let boundary = payload_start.saturating_add(deflate_len).saturating_add(8);
+    let stream_end = status.is_ok() && boundary <= data.len();
+    d.set_item(
+        "member.deflate.blocks",
+        format!("compressed_bytes={deflate_len};decoder_status={status:?}"),
+    )?;
+    d.set_item("member.deflate.final_block", stream_end)?;
+    d.set_item("member.decoded_content", decoded.len())?;
+    if boundary <= data.len() && boundary >= 8 {
+        let trailer = boundary - 8;
+        let stored_crc = u32_le(&data, trailer);
+        let stored_size = u32_le(&data, trailer + 4);
+        let footer_ok = stored_crc == crc32(&decoded) && stored_size == decoded.len() as u32;
+        d.set_item(
+            "member.trailer.crc32",
+            format!(
+                "stored={stored_crc};computed={};ok={}",
+                crc32(&decoded),
+                stored_crc == crc32(&decoded)
+            ),
+        )?;
+        d.set_item(
+            "member.trailer.isize",
+            format!(
+                "stored={stored_size};decoded_mod={};ok={}",
+                decoded.len() as u32,
+                stored_size == decoded.len() as u32
+            ),
+        )?;
+        if !footer_ok {
+            damage_flags.push("gzip_footer_bad");
+        }
+    }
+    d.set_item("member.boundary", boundary.min(data.len()))?;
+    let next_member = boundary + 2 <= data.len() && &data[boundary..boundary + 2] == b"\x1f\x8b";
+    d.set_item("member.next_member", next_member)?;
+    let trailing = if next_member {
+        0
+    } else {
+        data.len().saturating_sub(boundary)
+    };
+    d.set_item("archive.trailing_data", trailing)?;
+    if trailing > 0 {
+        damage_flags.push("trailing_junk");
+    }
+    d.set_item("plausible", stream_end)?;
+    d.set_item("confidence", if stream_end { "strong" } else { "medium" })?;
+    if !stream_end {
+        d.set_item("error", "gzip_deflate_or_trailer_incomplete")?;
+        damage_flags.push("probably_truncated");
+    }
+    d.set_item("damage_flags", PyList::new(py, damage_flags)?)?;
+    d.set_item("file_size", file_size)?;
+    finish_fields(&d, GZIP_FIELDS)?;
+    Ok(d.unbind())
+}
+
+struct BitReader<'a> {
+    data: &'a [u8],
+    bit: usize,
+}
+impl<'a> BitReader<'a> {
+    fn read(&mut self, bits: usize) -> Option<u64> {
+        if self.bit + bits > self.data.len() * 8 {
+            return None;
+        }
+        let mut value = 0u64;
+        for _ in 0..bits {
+            value = (value << 1) | ((self.data[self.bit / 8] >> (7 - self.bit % 8)) & 1) as u64;
+            self.bit += 1;
+        }
+        Some(value)
+    }
+}
+
+fn marker_positions(data: &[u8], marker: u64) -> Vec<usize> {
+    let mut output = Vec::new();
+    let mut window = 0u64;
+    for bit in 0..data.len() * 8 {
+        window = ((window << 1) | ((data[bit / 8] >> (7 - bit % 8)) & 1) as u64) & 0xffff_ffff_ffff;
+        if bit >= 47 && window == marker {
+            output.push(bit + 1 - 48);
+        }
+    }
+    output
+}
+
+fn bzip_huffman_summary(data: &[u8], start_bit: usize) -> String {
+    let mut reader = BitReader {
+        data,
+        bit: start_bit,
+    };
+    let mut groups = 0usize;
+    if let Some(in_use16) = reader.read(16) {
+        let mut symbols = 0usize;
+        for group in 0..16 {
+            if in_use16 & (1 << (15 - group)) != 0 {
+                if let Some(bits) = reader.read(16) {
+                    symbols += bits.count_ones() as usize;
+                } else {
+                    return "truncated".into();
+                }
+            }
+        }
+        groups = reader.read(3).unwrap_or(0) as usize;
+        let selectors = reader.read(15).unwrap_or(0);
+        return format!("symbols={symbols};groups={groups};selectors={selectors}");
+    }
+    format!("groups={groups};truncated")
+}
+
+fn inspect_bzip2(
     py: Python<'_>,
-    format: &str,
-    ext: &str,
-    confidence: &str,
-    evidence_items: &[&str],
+    path: &str,
+    header: &[u8],
+    file_size: u64,
 ) -> PyResult<Py<PyDict>> {
-    let d = dict(py)?;
-    d.set_item("plausible", true)?;
-    d.set_item("error", "")?;
-    d.set_item("magic_matched", true)?;
-    d.set_item("format", format)?;
-    d.set_item("detected_ext", ext)?;
-    d.set_item("confidence", confidence)?;
-    d.set_item("evidence", PyList::new(py, evidence_items)?)?;
+    let data = match std::fs::read(path) {
+        Ok(data) => data,
+        Err(_) => {
+            return compression_empty(py, "os_error", "bzip2", ".bz2", header.starts_with(b"BZh"))
+        }
+    };
+    let magic = data.starts_with(b"BZh") && data.get(3).is_some_and(|v| b"123456789".contains(v));
+    let d = compression_base(py, "bzip2", ".bz2", magic)?;
+    let mut damage_flags = Vec::new();
+    d.set_item(
+        "stream.magic",
+        String::from_utf8_lossy(data.get(0..3).unwrap_or(&[])).to_string(),
+    )?;
+    d.set_item(
+        "stream.block_size_100k",
+        data.get(3).map(|v| v.saturating_sub(b'0')).unwrap_or(0),
+    )?;
+    if !magic {
+        d.set_item("error", "bzip2_magic_not_found")?;
+        finish_fields(&d, BZIP2_FIELDS)?;
+        return Ok(d.unbind());
+    }
+    let blocks = marker_positions(&data, 0x314159265359);
+    let ends = marker_positions(&data, 0x177245385090);
+    d.set_item(
+        "block.marker",
+        blocks.first().map(|v| *v as u64).unwrap_or(u64::MAX),
+    )?;
+    d.set_item("block.sequence", blocks.len())?;
+    if let Some(bit) = blocks.first() {
+        let mut reader = BitReader {
+            data: &data,
+            bit: bit + 48,
+        };
+        let block_crc = reader.read(32).unwrap_or(0) as u32;
+        let randomized = reader.read(1).unwrap_or(0) != 0;
+        let orig_ptr = reader.read(24).unwrap_or(0);
+        d.set_item("block.crc32", block_crc)?;
+        d.set_item("block.randomized", randomized)?;
+        d.set_item("block.orig_ptr", orig_ptr)?;
+        d.set_item(
+            "block.huffman_tables",
+            bzip_huffman_summary(&data, reader.bit),
+        )?;
+        let end_bit = blocks
+            .get(1)
+            .copied()
+            .or_else(|| ends.first().copied())
+            .unwrap_or(data.len() * 8);
+        d.set_item("block.encoded_data", end_bit.saturating_sub(reader.bit))?;
+    }
+    d.set_item("stream.end_marker", !ends.is_empty())?;
+    if let Some(bit) = ends.first() {
+        let mut reader = BitReader {
+            data: &data,
+            bit: bit + 48,
+        };
+        d.set_item("stream.combined_crc32", reader.read(32).unwrap_or(0) as u32)?;
+    }
+    let mut decoder = bzip2::read::BzDecoder::new(Cursor::new(data.as_slice()));
+    let mut decoded = Vec::new();
+    let decode_ok = decoder.read_to_end(&mut decoded).is_ok();
+    let marker_boundary = ends
+        .first()
+        .map(|bit| (bit + 48 + 32 + 7) / 8)
+        .unwrap_or(data.len());
+    let consumed = decoder.get_ref().position() as usize;
+    d.set_item("block.decoded_content", decoded.len())?;
+    let trailing = data.len().saturating_sub(marker_boundary.min(consumed));
+    d.set_item("archive.trailing_data", trailing)?;
+    if trailing > 0 {
+        damage_flags.push("trailing_junk");
+    }
+    d.set_item("plausible", decode_ok && !ends.is_empty())?;
+    d.set_item("confidence", if decode_ok { "strong" } else { "medium" })?;
+    if ends.is_empty() {
+        damage_flags.push("probably_truncated");
+    }
+    if !decode_ok {
+        d.set_item("error", "bzip2_decode_failed")?;
+        damage_flags.push("bzip2_block_bad");
+    }
+    d.set_item("damage_flags", PyList::new(py, damage_flags)?)?;
+    d.set_item("file_size", file_size)?;
+    finish_fields(&d, BZIP2_FIELDS)?;
     Ok(d.unbind())
 }
 
-fn inspect_gzip(py: Python<'_>, header: &[u8], file_size: u64) -> PyResult<Py<PyDict>> {
-    if file_size < 18 {
-        return compression_empty(py, "gzip_too_small", "gzip", ".gz", true);
+fn read_vli(data: &[u8], cursor: &mut usize) -> Option<u64> {
+    let mut value = 0u64;
+    let mut shift = 0usize;
+    loop {
+        let byte = *data.get(*cursor)?;
+        *cursor += 1;
+        if shift >= 63 || (shift > 0 && byte == 0) {
+            return None;
+        }
+        value |= ((byte & 0x7f) as u64) << shift;
+        if byte & 0x80 == 0 {
+            return Some(value);
+        }
+        shift += 7;
     }
-    if header.len() < 10 {
-        return compression_empty(
-            py,
-            "short_gzip_header",
-            "gzip",
-            ".gz",
-            header.starts_with(b"\x1f\x8b"),
-        );
-    }
-    if !header.starts_with(b"\x1f\x8b\x08") {
-        return compression_empty(py, "gzip_magic_not_found", "", "", false);
-    }
-    if header[3] & 0xE0 != 0 {
-        return compression_empty(py, "gzip_reserved_flags_set", "gzip", ".gz", true);
-    }
-    compression_ok(
-        py,
-        "gzip",
-        ".gz",
-        "medium",
-        &["gzip:magic", "gzip:method:deflate", "gzip:flags_valid"],
-    )
 }
 
-fn inspect_bzip2(py: Python<'_>, header: &[u8], file_size: u64) -> PyResult<Py<PyDict>> {
-    if file_size < 14 {
-        return compression_empty(py, "bzip2_too_small", "bzip2", ".bz2", true);
+fn xz_check_size(check_type: u8) -> usize {
+    match check_type {
+        0 => 0,
+        1 => 4,
+        4 => 8,
+        10 => 32,
+        _ => 0,
     }
-    if header.len() < 10 {
-        return compression_empty(
-            py,
-            "short_bzip2_header",
-            "bzip2",
-            ".bz2",
-            header.starts_with(b"BZh"),
-        );
-    }
-    if !header.starts_with(b"BZh") || !b"123456789".contains(&header[3]) {
-        return compression_empty(
-            py,
-            "bzip2_magic_not_found",
-            "bzip2",
-            ".bz2",
-            header.starts_with(b"BZh"),
-        );
-    }
-    if !matches!(
-        &header[4..10],
-        b"\x31\x41\x59\x26\x53\x59" | b"\x17\x72\x45\x38\x50\x90"
-    ) {
-        return compression_empty(py, "bzip2_block_marker_not_found", "bzip2", ".bz2", true);
-    }
-    compression_ok(
-        py,
-        "bzip2",
-        ".bz2",
-        "strong",
-        &["bzip2:magic", "bzip2:block_marker"],
-    )
 }
 
 fn inspect_xz(py: Python<'_>, path: &str, header: &[u8], file_size: u64) -> PyResult<Py<PyDict>> {
-    if file_size < 24 {
-        return compression_empty(py, "xz_too_small", "xz", ".xz", true);
-    }
-    if header.len() < 12 || !header.starts_with(XZ_MAGIC) {
-        return compression_empty(
-            py,
-            "xz_magic_not_found",
-            "xz",
-            ".xz",
-            header.starts_with(XZ_MAGIC),
-        );
-    }
-    let stream_flags = &header[6..8];
-    if u32_le(header, 8) != crc32(stream_flags) {
-        return compression_empty(py, "xz_header_crc_mismatch", "xz", ".xz", true);
-    }
-    let Ok((_, footer)) = read_at(path, file_size - 12, 12) else {
-        return compression_empty(py, "os_error", "xz", ".xz", true);
+    let data = match std::fs::read(path) {
+        Ok(data) => data,
+        Err(_) => {
+            return compression_empty(py, "os_error", "xz", ".xz", header.starts_with(XZ_MAGIC))
+        }
     };
-    if footer.len() != 12 || &footer[10..12] != b"YZ" {
-        return compression_empty(py, "xz_footer_magic_not_found", "xz", ".xz", true);
+    let d = compression_base(py, "xz", ".xz", data.starts_with(XZ_MAGIC))?;
+    let mut damage_flags = Vec::new();
+    d.set_item(
+        "stream.header.magic",
+        hex_bytes(data.get(..6).unwrap_or(&[])),
+    )?;
+    if data.len() < 24 || !data.starts_with(XZ_MAGIC) {
+        d.set_item("error", "xz_header_or_footer_missing")?;
+        finish_fields(&d, XZ_FIELDS)?;
+        return Ok(d.unbind());
     }
-    if u32_le(&footer, 0) != crc32(&footer[4..10]) {
-        return compression_empty(py, "xz_footer_crc_mismatch", "xz", ".xz", true);
+    let flags = &data[6..8];
+    let header_crc = u32_le(&data, 8);
+    d.set_item("stream.header.flags", hex_bytes(flags))?;
+    d.set_item(
+        "stream.header.crc32",
+        format!(
+            "stored={header_crc};computed={};ok={}",
+            crc32(flags),
+            header_crc == crc32(flags)
+        ),
+    )?;
+    if header_crc != crc32(flags) {
+        damage_flags.push("xz_header_crc_bad");
     }
-    if &footer[8..10] != stream_flags {
-        return compression_empty(py, "xz_stream_flags_mismatch", "xz", ".xz", true);
+
+    let footer_start = (10..data.len())
+        .rev()
+        .find_map(|magic_end| {
+            if data.get(magic_end - 1..=magic_end) != Some(b"YZ".as_slice()) || magic_end + 1 < 12 {
+                return None;
+            }
+            let start = magic_end + 1 - 12;
+            let footer = &data[start..start + 12];
+            (u32_le(footer, 0) == crc32(&footer[4..10])).then_some(start)
+        })
+        .unwrap_or(data.len() - 12);
+    let footer = &data[footer_start..];
+    let footer_crc = u32_le(footer, 0);
+    let backward_size = (u32_le(footer, 4) as u64 + 1) * 4;
+    d.set_item(
+        "stream.footer.crc32",
+        format!(
+            "stored={footer_crc};computed={};ok={}",
+            crc32(&footer[4..10]),
+            footer_crc == crc32(&footer[4..10])
+        ),
+    )?;
+    if footer_crc != crc32(&footer[4..10]) {
+        damage_flags.push("xz_footer_crc_bad");
     }
-    compression_ok(
-        py,
-        "xz",
-        ".xz",
-        "strong",
-        &["xz:magic", "xz:header_crc", "xz:footer_crc"],
-    )
+    if &footer[8..10] != flags {
+        damage_flags.push("xz_stream_flags_mismatch");
+    }
+    d.set_item("stream.footer.backward_size", backward_size)?;
+    d.set_item("stream.footer.flags", hex_bytes(&footer[8..10]))?;
+    d.set_item("stream.footer.magic", hex_bytes(&footer[10..12]))?;
+    let index_start = footer_start
+        .checked_sub(backward_size as usize)
+        .unwrap_or(0);
+    let mut index_cursor = index_start;
+    let index_valid_start = data.get(index_cursor) == Some(&0);
+    d.set_item("index.indicator", index_valid_start)?;
+    if !index_valid_start {
+        damage_flags.push("xz_index_bad");
+    }
+    index_cursor = index_cursor.saturating_add(1);
+    let record_count = read_vli(&data, &mut index_cursor).unwrap_or(0) as usize;
+    d.set_item("index.record_count", record_count)?;
+    let mut records = Vec::new();
+    for _ in 0..record_count {
+        let unpadded = read_vli(&data, &mut index_cursor).unwrap_or(0);
+        let uncompressed = read_vli(&data, &mut index_cursor).unwrap_or(0);
+        records.push((unpadded, uncompressed));
+    }
+    d.set_item(
+        "index.records.unpadded_size",
+        records.iter().map(|r| r.0).sum::<u64>(),
+    )?;
+    d.set_item(
+        "index.records.uncompressed_size",
+        records.iter().map(|r| r.1).sum::<u64>(),
+    )?;
+    let index_crc_pos = footer_start.saturating_sub(4);
+    d.set_item("index.padding", index_crc_pos.saturating_sub(index_cursor))?;
+    if index_crc_pos + 4 <= data.len() && index_start <= index_crc_pos {
+        let stored = u32_le(&data, index_crc_pos);
+        let ok = stored == crc32(&data[index_start..index_crc_pos]);
+        d.set_item(
+            "index.crc32",
+            format!(
+                "stored={stored};computed={};ok={ok}",
+                crc32(&data[index_start..index_crc_pos])
+            ),
+        )?;
+        if !ok {
+            damage_flags.push("xz_index_bad");
+        }
+    }
+
+    let mut block_cursor = 12usize;
+    let mut block_count = 0usize;
+    let mut total_compressed = 0u64;
+    let mut total_padding = 0usize;
+    let mut first_filters = String::new();
+    let check_size = xz_check_size(flags[1] & 0x0f);
+    for (unpadded, expected_uncompressed) in &records {
+        if block_cursor >= index_start {
+            break;
+        }
+        let header_size = (data[block_cursor] as usize + 1) * 4;
+        if block_cursor + header_size > data.len() || header_size < 8 {
+            break;
+        }
+        let block_flags = data[block_cursor + 1];
+        let mut c = block_cursor + 2;
+        let declared_compressed = if block_flags & 0x40 != 0 {
+            read_vli(&data, &mut c)
+        } else {
+            None
+        };
+        let declared_uncompressed = if block_flags & 0x80 != 0 {
+            read_vli(&data, &mut c)
+        } else {
+            None
+        };
+        let filter_count = (block_flags & 0x03) as usize + 1;
+        let mut filters = Vec::new();
+        for _ in 0..filter_count {
+            let id = read_vli(&data, &mut c).unwrap_or(0);
+            let prop_size = read_vli(&data, &mut c).unwrap_or(0) as usize;
+            let props_end = c
+                .saturating_add(prop_size)
+                .min(block_cursor + header_size - 4);
+            filters.push(format!("id={id}:props={}", hex_bytes(&data[c..props_end])));
+            c = props_end;
+        }
+        if first_filters.is_empty() {
+            first_filters = filters.join(",");
+        }
+        let stored_header_crc = u32_le(&data, block_cursor + header_size - 4);
+        if block_count == 0 {
+            d.set_item("block.header.size", header_size)?;
+            d.set_item("block.header.flags", block_flags)?;
+            d.set_item(
+                "block.header.compressed_size",
+                declared_compressed
+                    .unwrap_or(unpadded.saturating_sub(header_size as u64 + check_size as u64)),
+            )?;
+            d.set_item(
+                "block.header.uncompressed_size",
+                declared_uncompressed.unwrap_or(*expected_uncompressed),
+            )?;
+            d.set_item(
+                "block.header.crc32",
+                format!(
+                    "stored={stored_header_crc};computed={};ok={}",
+                    crc32(&data[block_cursor..block_cursor + header_size - 4]),
+                    stored_header_crc == crc32(&data[block_cursor..block_cursor + header_size - 4])
+                ),
+            )?;
+        }
+        let compressed_size = declared_compressed
+            .unwrap_or(unpadded.saturating_sub(header_size as u64 + check_size as u64));
+        total_compressed += compressed_size;
+        let unpadded_actual = header_size as u64 + compressed_size + check_size as u64;
+        let padding = ((4 - unpadded_actual % 4) % 4) as usize;
+        total_padding += padding;
+        block_cursor = block_cursor.saturating_add(unpadded_actual as usize + padding);
+        block_count += 1;
+    }
+    d.set_item("block.header.filters", first_filters)?;
+    d.set_item("block.compressed_data", total_compressed)?;
+    d.set_item("block.padding", total_padding)?;
+    d.set_item(
+        "block.check",
+        format!("type={};size={check_size}", flags[1] & 0x0f),
+    )?;
+    d.set_item("block.sequence", block_count)?;
+    let mut decoder = xz2::read::XzDecoder::new(Cursor::new(data.as_slice()));
+    let mut decoded = Vec::new();
+    let decode_ok = decoder.read_to_end(&mut decoded).is_ok();
+    d.set_item("block.uncompressed_data", decoded.len())?;
+    let stream_count = data.windows(6).filter(|w| *w == XZ_MAGIC).count();
+    d.set_item("archive.stream_sequence", stream_count)?;
+    let after_footer = footer_start + 12;
+    let zero_padding = data[after_footer..].iter().take_while(|b| **b == 0).count();
+    let aligned_padding = zero_padding - zero_padding % 4;
+    d.set_item("stream.padding", aligned_padding)?;
+    let trailing = data.len().saturating_sub(after_footer + aligned_padding);
+    d.set_item("archive.trailing_data", trailing)?;
+    if trailing > 0 {
+        damage_flags.push("trailing_junk");
+    }
+    let valid =
+        decode_ok && &footer[10..12] == b"YZ" && &footer[8..10] == flags && index_valid_start;
+    d.set_item("plausible", valid)?;
+    d.set_item("confidence", if valid { "strong" } else { "medium" })?;
+    if !valid {
+        d.set_item("error", "xz_structural_validation_failed")?;
+    }
+    d.set_item("damage_flags", PyList::new(py, damage_flags)?)?;
+    d.set_item("file_size", file_size)?;
+    finish_fields(&d, XZ_FIELDS)?;
+    Ok(d.unbind())
 }
 
-fn inspect_zstd(py: Python<'_>, header: &[u8], file_size: u64) -> PyResult<Py<PyDict>> {
-    if file_size < 6 {
-        return compression_empty(py, "zstd_too_small", "zstd", ".zst", true);
+fn zstd_field_size(flag: u8, single: bool, content_size: bool) -> usize {
+    if !content_size {
+        return 0;
     }
-    if !header.starts_with(ZSTD_MAGIC) {
-        return compression_empty(py, "zstd_magic_not_found", "", "", false);
+    match flag {
+        0 if single => 1,
+        0 => 0,
+        1 => 2,
+        2 => 4,
+        _ => 8,
     }
-    if header[4] & 0x08 != 0 {
-        return compression_empty(py, "zstd_reserved_bit_set", "zstd", ".zst", true);
+}
+
+fn little_uint(data: &[u8]) -> u64 {
+    data.iter()
+        .enumerate()
+        .fold(0u64, |v, (i, b)| v | ((*b as u64) << (8 * i)))
+}
+
+fn inspect_zstd(py: Python<'_>, path: &str, header: &[u8], file_size: u64) -> PyResult<Py<PyDict>> {
+    let data = match std::fs::read(path) {
+        Ok(data) => data,
+        Err(_) => {
+            return compression_empty(
+                py,
+                "os_error",
+                "zstd",
+                ".zst",
+                header.starts_with(ZSTD_MAGIC),
+            )
+        }
+    };
+    let d = compression_base(py, "zstd", ".zst", data.starts_with(ZSTD_MAGIC))?;
+    let mut damage_flags = Vec::new();
+    d.set_item("frame.magic", hex_bytes(data.get(..4).unwrap_or(&[])))?;
+    if data.len() < 6 || !data.starts_with(ZSTD_MAGIC) {
+        d.set_item("error", "zstd_magic_or_header_missing")?;
+        finish_fields(&d, ZSTD_FIELDS)?;
+        return Ok(d.unbind());
     }
-    if header[4] & 0x20 == 0 && header.len() < 6 {
-        return compression_empty(py, "zstd_window_descriptor_missing", "zstd", ".zst", true);
+    let descriptor = data[4];
+    let fcs_flag = descriptor >> 6;
+    let single = descriptor & 0x20 != 0;
+    let checksum = descriptor & 0x04 != 0;
+    let dict_flag = descriptor & 0x03;
+    d.set_item("frame.header.descriptor", descriptor)?;
+    d.set_item("frame.header.content_size_flag", fcs_flag)?;
+    d.set_item("frame.header.single_segment_flag", single)?;
+    d.set_item("frame.header.checksum_flag", checksum)?;
+    d.set_item("frame.header.dictionary_id_flag", dict_flag)?;
+    let mut cursor = 5usize;
+    if !single {
+        let wd = data[cursor];
+        cursor += 1;
+        let exponent = (wd >> 3) as u32;
+        let base = 1u64 << (10 + exponent);
+        let window = base + (base / 8) * (wd & 7) as u64;
+        d.set_item(
+            "frame.header.window_descriptor",
+            format!("raw={wd};window={window}"),
+        )?;
+    } else {
+        d.set_item("frame.header.window_descriptor", "absent(single_segment)")?;
     }
-    compression_ok(
-        py,
-        "zstd",
-        ".zst",
-        "medium",
-        &["zstd:magic", "zstd:frame_descriptor"],
-    )
+    let dict_size = match dict_flag {
+        0 => 0,
+        1 => 1,
+        2 => 2,
+        _ => 4,
+    };
+    let dict_end = cursor.saturating_add(dict_size).min(data.len());
+    d.set_item(
+        "frame.header.dictionary_id",
+        if dict_size == 0 {
+            0
+        } else {
+            little_uint(&data[cursor..dict_end])
+        },
+    )?;
+    cursor = dict_end;
+    let fcs_size = zstd_field_size(fcs_flag, single, single || fcs_flag != 0);
+    let fcs_end = cursor.saturating_add(fcs_size).min(data.len());
+    let mut content_size = little_uint(&data[cursor..fcs_end]);
+    if fcs_flag == 1 {
+        content_size += 256;
+    }
+    d.set_item(
+        "frame.header.content_size",
+        if fcs_size == 0 {
+            "absent".to_string()
+        } else {
+            content_size.to_string()
+        },
+    )?;
+    cursor = fcs_end;
+    let mut blocks = 0usize;
+    let mut total_content = 0usize;
+    let mut last = false;
+    let mut first_type = 0u8;
+    let mut first_size = 0usize;
+    while cursor + 3 <= data.len() && !last {
+        let h =
+            data[cursor] as u32 | (data[cursor + 1] as u32) << 8 | (data[cursor + 2] as u32) << 16;
+        cursor += 3;
+        last = h & 1 != 0;
+        let block_type = ((h >> 1) & 3) as u8;
+        let block_size = (h >> 3) as usize;
+        if blocks == 0 {
+            first_type = block_type;
+            first_size = block_size;
+        }
+        let stored_size = if block_type == 1 { 1 } else { block_size };
+        if block_type == 3 || cursor + stored_size > data.len() {
+            break;
+        }
+        total_content += stored_size;
+        cursor += stored_size;
+        blocks += 1;
+    }
+    d.set_item("block.header.last_block", last)?;
+    d.set_item("block.header.type", first_type)?;
+    d.set_item("block.header.size", first_size)?;
+    d.set_item("block.content", total_content)?;
+    d.set_item(
+        "block.literals",
+        if first_type == 2 {
+            "compressed_block_literals_section"
+        } else {
+            "not_compressed_layout"
+        },
+    )?;
+    d.set_item(
+        "block.sequences",
+        if first_type == 2 {
+            "compressed_block_sequences_section"
+        } else {
+            "not_compressed_layout"
+        },
+    )?;
+    d.set_item(
+        "block.previous_window",
+        if dict_size > 0 {
+            "dictionary_or_previous_block"
+        } else {
+            "previous_blocks"
+        },
+    )?;
+    d.set_item(
+        "block.previous_entropy_tables",
+        if first_type == 2 {
+            "repeat_mode_possible"
+        } else {
+            "not_used"
+        },
+    )?;
+    if checksum && cursor + 4 <= data.len() {
+        d.set_item("frame.content_checksum", u32_le(&data, cursor))?;
+        cursor += 4;
+    } else {
+        d.set_item("frame.content_checksum", "absent")?;
+    }
+    let mut decoded = Vec::new();
+    let decode_ok = zstd::stream::copy_decode(Cursor::new(&data[..cursor]), &mut decoded).is_ok();
+    d.set_item("frame.decoded_content", decoded.len())?;
+    d.set_item(
+        "frame.sequence",
+        data.windows(4).filter(|w| *w == ZSTD_MAGIC).count(),
+    )?;
+    let mut skippable_count = 0usize;
+    let mut skip_size = 0usize;
+    let mut skip_data = 0usize;
+    let mut scan = 0usize;
+    while scan + 8 <= data.len() {
+        let magic = u32_le(&data, scan);
+        if (0x184d2a50..=0x184d2a5f).contains(&magic) {
+            let size = u32_le(&data, scan + 4) as usize;
+            skippable_count += 1;
+            skip_size += size;
+            skip_data += size.min(data.len().saturating_sub(scan + 8));
+            scan = scan.saturating_add(8 + size);
+            continue;
+        }
+        scan += 1;
+    }
+    d.set_item("skippable.magic", skippable_count)?;
+    d.set_item("skippable.frame_size", skip_size)?;
+    d.set_item("skippable.user_data", skip_data)?;
+    let trailing = data.len().saturating_sub(cursor);
+    d.set_item("archive.trailing_data", trailing)?;
+    if trailing > 0 {
+        damage_flags.push("trailing_junk");
+    }
+    let valid = decode_ok && last && descriptor & 0x08 == 0;
+    d.set_item("plausible", valid)?;
+    d.set_item("confidence", if valid { "strong" } else { "medium" })?;
+    if descriptor & 0x08 != 0 {
+        d.set_item("error", "zstd_reserved_bit_set")?;
+        damage_flags.push("zstd_reserved_bit_set");
+    } else if !valid {
+        d.set_item("error", "zstd_frame_validation_failed")?;
+        damage_flags.push(if !last {
+            "probably_truncated"
+        } else {
+            "zstd_frame_bad"
+        });
+    }
+    d.set_item("damage_flags", PyList::new(py, damage_flags)?)?;
+    d.set_item("file_size", file_size)?;
+    finish_fields(&d, ZSTD_FIELDS)?;
+    Ok(d.unbind())
 }

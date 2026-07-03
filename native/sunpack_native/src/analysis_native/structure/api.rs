@@ -378,10 +378,7 @@ pub(crate) fn inspect_rar_structure(
         data.truncate(len);
     }
     if data.starts_with(RAR4_SIGNATURE) && data.len() >= RAR4_SIGNATURE.len() + 7 {
-        let header_size = u16_le(&data, RAR4_SIGNATURE.len() + 5) as u64;
-        let read_size = file_size
-            .min(RAR4_SIGNATURE.len() as u64 + header_size + 64)
-            .min(max_first_header_check_bytes);
+        let read_size = file_size.min(max_first_header_check_bytes);
         if data.len() < read_size as usize {
             data.resize(read_size as usize, 0);
             file.seek(SeekFrom::Start(0))?;
@@ -389,10 +386,8 @@ pub(crate) fn inspect_rar_structure(
             data.truncate(len);
         }
     } else if data.starts_with(RAR5_SIGNATURE) {
-        if let Some((header_size, _)) = read_vint(&data, RAR5_SIGNATURE.len() + 4) {
-            let read_size = file_size
-                .min(RAR5_SIGNATURE.len() as u64 + 4 + header_size + 64)
-                .min(max_first_header_check_bytes);
+        if read_vint(&data, RAR5_SIGNATURE.len() + 4).is_some() {
+            let read_size = file_size.min(max_first_header_check_bytes);
             if data.len() < read_size as usize {
                 data.resize(read_size as usize, 0);
                 file.seek(SeekFrom::Start(0))?;
@@ -402,10 +397,12 @@ pub(crate) fn inspect_rar_structure(
         }
     }
     if data.starts_with(RAR5_SIGNATURE) {
-        return inspect_rar5(py, &data, file_size);
+        let out = inspect_rar5(py, &data, file_size)?;
+        return finalize_rar_result(py, out, &data, file_size, 5);
     }
     if data.starts_with(RAR4_SIGNATURE) {
-        return inspect_rar4(py, &data, file_size);
+        let out = inspect_rar4(py, &data, file_size)?;
+        return finalize_rar_result(py, out, &data, file_size, 4);
     }
     if data.starts_with(b"Rar!") {
         let out = rar_empty(py, "rar_signature_incomplete_or_unknown")?;
@@ -413,9 +410,12 @@ pub(crate) fn inspect_rar_structure(
         out.set_item("format", "rar")?;
         out.set_item("detected_ext", ".rar")?;
         out.set_item("evidence", PyList::new(py, ["rar:signature"])?)?;
+        finish_fields(&out, RAR_FIELDS)?;
         return Ok(out.unbind());
     }
-    Ok(rar_empty(py, "rar_signature_not_found")?.unbind())
+    let out = rar_empty(py, "rar_signature_not_found")?;
+    finish_fields(&out, RAR_FIELDS)?;
+    Ok(out.unbind())
 }
 
 #[pyfunction]
@@ -426,11 +426,15 @@ pub(crate) fn inspect_tar_header_structure(
     max_entries_to_walk: usize,
 ) -> PyResult<Py<PyDict>> {
     let Ok(mut file) = File::open(path) else {
-        return Ok(tar_empty(py, "os_error")?.unbind());
+        let out = tar_empty(py, "os_error")?;
+        finish_fields(&out, TAR_FIELDS)?;
+        return Ok(out.unbind());
     };
     let file_size = file.seek(SeekFrom::End(0))?;
     if file_size < TAR_BLOCK_SIZE as u64 {
-        return Ok(tar_empty(py, "file_too_small")?.unbind());
+        let out = tar_empty(py, "file_too_small")?;
+        finish_fields(&out, TAR_FIELDS)?;
+        return Ok(out.unbind());
     }
     let mut header = vec![0; TAR_BLOCK_SIZE];
     file.seek(SeekFrom::Start(0))?;
@@ -440,6 +444,7 @@ pub(crate) fn inspect_tar_header_structure(
     if header.iter().all(|b| *b == 0) {
         result.set_item("error", "leading_zero_block")?;
         result.set_item("zero_block", true)?;
+        finish_fields(&result, TAR_FIELDS)?;
         return Ok(result.unbind());
     }
     let stored_checksum = parse_octal(&header[148..156]);
@@ -454,14 +459,17 @@ pub(crate) fn inspect_tar_header_structure(
     )?;
     if stored_checksum.is_none() {
         result.set_item("error", "invalid_checksum_field")?;
+        finish_fields(&result, TAR_FIELDS)?;
         return Ok(result.unbind());
     }
     if member_size.is_none() {
         result.set_item("error", "invalid_size_field")?;
+        finish_fields(&result, TAR_FIELDS)?;
         return Ok(result.unbind());
     }
     if stored_checksum.unwrap() != computed {
         result.set_item("error", "checksum_mismatch")?;
+        finish_fields(&result, TAR_FIELDS)?;
         return Ok(result.unbind());
     }
     result.set_item("plausible", true)?;
@@ -481,6 +489,7 @@ pub(crate) fn inspect_tar_header_structure(
         result.set_item("error", walk.3)?;
         result.set_item("plausible", false)?;
     }
+    enrich_tar_semantics(&result, &mut file, file_size, max_entries_to_walk)?;
     Ok(result.unbind())
 }
 
@@ -493,16 +502,16 @@ pub(crate) fn inspect_compression_stream_structure(
         return compression_empty(py, "os_error", "", "", false);
     };
     if header.starts_with(b"\x1f\x8b") {
-        return inspect_gzip(py, &header, file_size);
+        return inspect_gzip(py, path, &header, file_size);
     }
     if header.starts_with(b"BZh") {
-        return inspect_bzip2(py, &header, file_size);
+        return inspect_bzip2(py, path, &header, file_size);
     }
     if header.starts_with(XZ_MAGIC) {
         return inspect_xz(py, path, &header, file_size);
     }
     if header.starts_with(ZSTD_MAGIC) {
-        return inspect_zstd(py, &header, file_size);
+        return inspect_zstd(py, path, &header, file_size);
     }
     compression_empty(py, "compression_stream_magic_not_found", "", "", false)
 }

@@ -1,3 +1,331 @@
+const RAR_FIELDS: &[&str] = &[
+    "archive.signature",
+    "block.header_crc32",
+    "block.header_size",
+    "block.header_type",
+    "block.header_flags",
+    "block.extra_area",
+    "block.data_area",
+    "block.sequence",
+    "main_header.flags",
+    "main_header.extra_area",
+    "main_header.locator.quick_open_offset",
+    "main_header.locator.recovery_offset",
+    "file_header.flags",
+    "file_header.unpacked_size",
+    "file_header.data_crc32",
+    "file_header.compression_info",
+    "file_header.name_size",
+    "file_header.name",
+    "file_header.extra_area",
+    "file_data.packed_span",
+    "file_data.decoded_content",
+    "service_header",
+    "encryption_header",
+    "end_header.flags",
+    "volume.parts",
+];
+
+fn finalize_rar_result(
+    py: Python<'_>,
+    out: Py<PyDict>,
+    data: &[u8],
+    file_size: u64,
+    version: u8,
+) -> PyResult<Py<PyDict>> {
+    let d = out.bind(py);
+    d.set_item(
+        "archive.signature",
+        hex_bytes(if version == 5 {
+            data.get(..RAR5_SIGNATURE.len()).unwrap_or(&[])
+        } else {
+            data.get(..RAR4_SIGNATURE.len()).unwrap_or(&[])
+        }),
+    )?;
+    d.set_item(
+        "file_data.decoded_content",
+        "not_decoded_by_structure_probe",
+    )?;
+    d.set_item("volume.parts", "single_or_external_parts_not_loaded")?;
+    if version == 5 {
+        enrich_rar5_semantics(d, data, file_size)?;
+    } else if version == 4 {
+        enrich_rar4_semantics(d, data, file_size)?;
+    }
+    finish_fields(d, RAR_FIELDS)?;
+    let error = d
+        .get_item("error")?
+        .and_then(|item| item.extract::<String>().ok())
+        .unwrap_or_default();
+    let mut flags = Vec::new();
+    if error.contains("header_crc_mismatch") {
+        flags.push("rar_main_header_crc_bad");
+    }
+    if error.contains("second_block_crc_mismatch") {
+        flags.push("rar_file_header_crc_bad");
+    }
+    if d.get_item("end_header.flags")?
+        .and_then(|item| item.extract::<String>().ok())
+        .as_deref()
+        == Some("unavailable")
+    {
+        flags.push("missing_end_block");
+    }
+    d.set_item("damage_flags", PyList::new(py, flags)?)?;
+    Ok(out)
+}
+
+fn enrich_rar5_semantics(d: &Bound<'_, PyDict>, data: &[u8], file_size: u64) -> PyResult<()> {
+    let mut offset = RAR5_SIGNATURE.len();
+    let mut blocks = 0usize;
+    let mut crc_ok = 0usize;
+    while offset + 6 <= data.len() && offset < file_size as usize {
+        let stored_crc = u32_le(data, offset);
+        let Some((header_size, after_size)) = read_vint(data, offset + 4) else {
+            break;
+        };
+        let total_header = 4usize + (after_size - (offset + 4)) + header_size as usize;
+        if header_size == 0 || offset + total_header > data.len() {
+            break;
+        }
+        let Some((header_type, mut cursor)) = read_vint(data, after_size) else {
+            break;
+        };
+        let Some((header_flags, after_flags)) = read_vint(data, cursor) else {
+            break;
+        };
+        cursor = after_flags;
+        let extra_size = if header_flags & 0x01 != 0 {
+            let Some((value, next)) = read_vint(data, cursor) else {
+                break;
+            };
+            cursor = next;
+            value
+        } else {
+            0
+        };
+        let data_size = if header_flags & 0x02 != 0 {
+            let Some((value, next)) = read_vint(data, cursor) else {
+                break;
+            };
+            cursor = next;
+            value
+        } else {
+            0
+        };
+        let computed_crc = crc32(&data[offset + 4..offset + total_header]);
+        if computed_crc == stored_crc {
+            crc_ok += 1;
+        }
+        if blocks == 0 {
+            d.set_item("block.header_size", total_header)?;
+            d.set_item("block.header_type", header_type)?;
+            d.set_item("block.header_flags", header_flags)?;
+            d.set_item(
+                "block.header_crc32",
+                format!(
+                    "stored={stored_crc};computed={computed_crc};ok={}",
+                    stored_crc == computed_crc
+                ),
+            )?;
+            d.set_item("block.extra_area", extra_size)?;
+            d.set_item("block.data_area", data_size)?;
+        }
+        let body_end = offset + total_header - extra_size as usize;
+        match header_type {
+            1 => {
+                let (main_flags, next) = read_vint(data, cursor).unwrap_or((0, cursor));
+                d.set_item("main_header.flags", main_flags)?;
+                d.set_item("main_header.extra_area", extra_size)?;
+                d.set_item(
+                    "volume.parts",
+                    if main_flags & 0x01 != 0 {
+                        "volume_chain"
+                    } else {
+                        "single_volume"
+                    },
+                )?;
+                // Locator records are optional extra records. Preserve explicit absence instead of inventing offsets.
+                d.set_item(
+                    "main_header.locator.quick_open_offset",
+                    "absent_or_unparsed_locator",
+                )?;
+                d.set_item(
+                    "main_header.locator.recovery_offset",
+                    "absent_or_unparsed_locator",
+                )?;
+                let _ = next;
+            }
+            2 => {
+                let (file_flags, next) = read_vint(data, cursor).unwrap_or((0, cursor));
+                cursor = next;
+                let (unpacked, next) = read_vint(data, cursor).unwrap_or((0, cursor));
+                cursor = next;
+                let (_, next) = read_vint(data, cursor).unwrap_or((0, cursor));
+                cursor = next; // attributes
+                if file_flags & 0x02 != 0 {
+                    cursor = cursor.saturating_add(4);
+                }
+                let file_crc = if file_flags & 0x04 != 0 && cursor + 4 <= body_end {
+                    let value = u32_le(data, cursor);
+                    cursor += 4;
+                    Some(value)
+                } else {
+                    None
+                };
+                let (compression, next) = read_vint(data, cursor).unwrap_or((0, cursor));
+                cursor = next;
+                let (_, next) = read_vint(data, cursor).unwrap_or((0, cursor));
+                cursor = next; // host OS
+                let (name_size, next) = read_vint(data, cursor).unwrap_or((0, cursor));
+                cursor = next;
+                let name_end = cursor.saturating_add(name_size as usize).min(body_end);
+                d.set_item("file_header.flags", file_flags)?;
+                d.set_item("file_header.unpacked_size", unpacked)?;
+                d.set_item(
+                    "file_header.data_crc32",
+                    file_crc
+                        .map(|v| v.to_string())
+                        .unwrap_or_else(|| "absent".into()),
+                )?;
+                d.set_item("file_header.compression_info", compression)?;
+                d.set_item("file_header.name_size", name_size)?;
+                d.set_item(
+                    "file_header.name",
+                    String::from_utf8_lossy(&data[cursor..name_end]).to_string(),
+                )?;
+                d.set_item("file_header.extra_area", extra_size)?;
+                d.set_item(
+                    "file_data.packed_span",
+                    format!("offset={};size={data_size}", offset + total_header),
+                )?;
+            }
+            3 => {
+                d.set_item(
+                    "service_header",
+                    format!("offset={offset};header={total_header};data={data_size}"),
+                )?;
+            }
+            4 => {
+                d.set_item(
+                    "encryption_header",
+                    format!("offset={offset};size={total_header}"),
+                )?;
+            }
+            5 => {
+                let end_flags = read_vint(data, cursor).map(|v| v.0).unwrap_or(0);
+                d.set_item("end_header.flags", end_flags)?;
+            }
+            _ => {}
+        }
+        blocks += 1;
+        let next = offset
+            .saturating_add(total_header)
+            .saturating_add(data_size as usize);
+        if next <= offset || next > data.len() {
+            break;
+        }
+        offset = next;
+    }
+    d.set_item("block.sequence", blocks)?;
+    d.set_item("block_crc_valid_count", crc_ok)?;
+    Ok(())
+}
+
+fn enrich_rar4_semantics(d: &Bound<'_, PyDict>, data: &[u8], file_size: u64) -> PyResult<()> {
+    let mut offset = RAR4_SIGNATURE.len();
+    let mut blocks = 0usize;
+    while offset + 7 <= data.len() && offset < file_size as usize {
+        let stored_crc = u16_le(data, offset) as u32;
+        let header_type = data[offset + 2];
+        let flags = u16_le(data, offset + 3) as u64;
+        let header_size = u16_le(data, offset + 5) as usize;
+        if header_size < 7 || offset + header_size > data.len() {
+            break;
+        }
+        let add_size = if flags & 0x8000 != 0 && header_size >= 11 {
+            u32_le(data, offset + 7) as usize
+        } else {
+            0
+        };
+        if blocks == 0 {
+            d.set_item(
+                "block.header_crc32",
+                format!(
+                    "stored16={stored_crc};computed16={}",
+                    crc32(&data[offset + 2..offset + header_size]) & 0xffff
+                ),
+            )?;
+            d.set_item("block.header_size", header_size)?;
+            d.set_item("block.header_type", header_type)?;
+            d.set_item("block.header_flags", flags)?;
+            d.set_item("block.extra_area", 0)?;
+            d.set_item("block.data_area", add_size)?;
+        }
+        match header_type {
+            0x73 => {
+                d.set_item("main_header.flags", flags)?;
+                d.set_item("main_header.extra_area", header_size.saturating_sub(13))?;
+            }
+            0x74 if header_size >= 32 => {
+                let packed = u32_le(data, offset + 7) as u64;
+                let unpacked = u32_le(data, offset + 11) as u64;
+                let crc = u32_le(data, offset + 16);
+                let method = data[offset + 25];
+                let name_size = u16_le(data, offset + 26) as usize;
+                let name_start = offset + 32;
+                let name_end = name_start
+                    .saturating_add(name_size)
+                    .min(offset + header_size);
+                d.set_item("file_header.flags", flags)?;
+                d.set_item("file_header.unpacked_size", unpacked)?;
+                d.set_item("file_header.data_crc32", crc)?;
+                d.set_item("file_header.compression_info", method)?;
+                d.set_item("file_header.name_size", name_size)?;
+                d.set_item(
+                    "file_header.name",
+                    String::from_utf8_lossy(&data[name_start..name_end]).to_string(),
+                )?;
+                d.set_item(
+                    "file_header.extra_area",
+                    (offset + header_size).saturating_sub(name_end),
+                )?;
+                d.set_item(
+                    "file_data.packed_span",
+                    format!("offset={};size={packed}", offset + header_size),
+                )?;
+            }
+            0x7a => {
+                d.set_item(
+                    "service_header",
+                    format!("offset={offset};size={header_size}"),
+                )?;
+            }
+            0x7b => {
+                d.set_item("end_header.flags", flags)?;
+            }
+            _ => {}
+        }
+        blocks += 1;
+        let next = offset.saturating_add(header_size).saturating_add(add_size);
+        if next <= offset || next > data.len() {
+            break;
+        }
+        offset = next;
+    }
+    d.set_item("block.sequence", blocks)?;
+    d.set_item(
+        "main_header.locator.quick_open_offset",
+        "not_in_rar4_layout",
+    )?;
+    d.set_item("main_header.locator.recovery_offset", "not_in_rar4_layout")?;
+    d.set_item(
+        "encryption_header",
+        "rar4_encryption_is_flag_or_file_header_based",
+    )?;
+    Ok(())
+}
+
 fn rar_empty<'py>(py: Python<'py>, error: &str) -> PyResult<Bound<'py, PyDict>> {
     let d = dict(py)?;
     d.set_item("plausible", false)?;
@@ -252,7 +580,12 @@ fn inspect_rar5_block(
         return (false, 0, 0, "rar5_second_header_size_vint_missing");
     };
     if after_size.saturating_sub(offset + 4) > 3 {
-        return (false, 0, header_size, "rar5_second_header_size_vint_too_long");
+        return (
+            false,
+            0,
+            header_size,
+            "rar5_second_header_size_vint_too_long",
+        );
     }
     let Some((header_type, after_type)) = read_vint(data, after_size) else {
         return (
@@ -263,7 +596,12 @@ fn inspect_rar5_block(
         );
     };
     let Some((header_flags, _)) = read_vint(data, after_type) else {
-        return (false, header_type, header_size, "rar5_second_header_flags_vint_missing");
+        return (
+            false,
+            header_type,
+            header_size,
+            "rar5_second_header_flags_vint_missing",
+        );
     };
     if !matches!(header_type, 1..=5) && header_flags & 0x0004 == 0 {
         return (
