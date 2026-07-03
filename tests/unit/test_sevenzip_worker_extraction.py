@@ -179,6 +179,20 @@ def test_persistent_worker_result_escapes_control_characters(tmp_path):
     assert worker_result["diagnostics"]["failed_item"]["path"] == "control-\x01-name.txt"
 
 
+def test_compact_worker_manifest_is_expanded_for_pipeline():
+    from sunpack.extraction.internal.sevenzip.worker_diagnostics import build_worker_diagnostics
+
+    stdout = (
+        '{"type":"result","status":"ok","verified_manifest":'
+        '{"version":2,"validated":true,"item_count":1,"file_count":1,'
+        '"inventory":[1,1,0,3,1],"rows":[[0,"a.txt","a.txt",3,3,1,1,1,1,1,1]]}}\n'
+    )
+    result = build_worker_diagnostics(stdout=stdout, stderr="", returncode=0)["result"]
+
+    assert result["verified_manifest"]["files"][0]["status"] == "complete"
+    assert result["verified_manifest"]["inventory"]["identity_paths"] is True
+
+
 def test_worker_dry_run_reads_archive_state_with_patch_stack(tmp_path):
     worker = _require_worker_or_skip()
     seven_zip_dll = _require_7z_dll_or_skip()

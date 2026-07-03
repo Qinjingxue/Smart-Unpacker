@@ -3,6 +3,7 @@ from sunpack.support.sevenzip_bridge import STATUS_DAMAGED, STATUS_OK
 from sunpack.verification.archive_state_manifest import ArchiveStateManifest, archive_state_manifest_for_evidence
 from sunpack.verification.evidence import VerificationEvidence
 from sunpack.verification.methods._archive_output_match import (
+    ArchiveOutputCoverage,
     archive_files_from_names,
     coverage_details,
     coverage_from_archive_and_output,
@@ -47,13 +48,23 @@ class ManifestSizeMatchMethod:
         source_integrity = _source_integrity_hint(evidence, state_manifest)
         name_coverage = None
         if expected_names:
-            name_coverage = coverage_from_archive_and_output(
-                archive_files_from_names(expected_names),
-                output_files_for_evidence(evidence),
-                method=self.name,
-                include_observations=should_emit_file_observations(evidence, self.name),
-                output_index=output_file_index_for_evidence(evidence),
-            )
+            emit_observations = should_emit_file_observations(evidence, self.name)
+            if _identity_worker_inventory(evidence) is not None and not emit_observations:
+                count = len(expected_names)
+                name_coverage = ArchiveOutputCoverage(
+                    completeness=1.0, file_coverage=1.0, byte_coverage=1.0,
+                    expected_files=count, matched_files=count, complete_files=count,
+                    partial_files=0, failed_files=0, missing_files=0,
+                    expected_bytes=0, matched_bytes=0, complete_bytes=0,
+                )
+            else:
+                name_coverage = coverage_from_archive_and_output(
+                    archive_files_from_names(expected_names),
+                    output_files_for_evidence(evidence),
+                    method=self.name,
+                    include_observations=emit_observations,
+                    output_index=output_file_index_for_evidence(evidence),
+                )
             if name_coverage.missing_files:
                 issues.append(VerificationIssue(
                     method=self.name,
@@ -144,6 +155,20 @@ def _as_int(value) -> int:
         return max(0, int(value or 0))
     except (TypeError, ValueError):
         return 0
+
+
+def _identity_worker_inventory(evidence) -> dict | None:
+    worker = evidence.worker_result if isinstance(evidence.worker_result, dict) else {}
+    manifest = worker.get("verified_manifest") if isinstance(worker.get("verified_manifest"), dict) else {}
+    inventory = manifest.get("inventory") if isinstance(manifest.get("inventory"), dict) else {}
+    if (
+        worker.get("status") == "ok"
+        and manifest.get("validated")
+        and inventory.get("complete")
+        and inventory.get("identity_paths")
+    ):
+        return inventory
+    return None
 
 
 def _manifest_completeness(actual_files: int, actual_size: int, expected_files: int, expected_size: int) -> float:

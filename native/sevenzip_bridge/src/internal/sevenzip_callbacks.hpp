@@ -45,8 +45,17 @@ namespace sunpack::sevenzip {
 #ifdef _WIN32
 
 inline UInt32 update_crc32(UInt32 crc, const void* data, std::size_t size) {
-    static const std::array<std::array<UInt32, 256>, 8> tables = [] {
-        std::array<std::array<UInt32, 256>, 8> values{};
+    using RtlComputeCrc32Fn = ULONG(WINAPI*)(ULONG, const void*, SIZE_T);
+    static const auto system_crc32 = []() -> RtlComputeCrc32Fn {
+        const HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+        return ntdll ? reinterpret_cast<RtlComputeCrc32Fn>(GetProcAddress(ntdll, "RtlComputeCrc32")) : nullptr;
+    }();
+    if (system_crc32 != nullptr) {
+        const UInt32 finalized = system_crc32(crc ^ 0xFFFFFFFFU, data, size);
+        return finalized ^ 0xFFFFFFFFU;
+    }
+    static const std::array<std::array<UInt32, 256>, 16> tables = [] {
+        std::array<std::array<UInt32, 256>, 16> values{};
         for (UInt32 index = 0; index < 256; ++index) {
             UInt32 value = index;
             for (int bit = 0; bit < 8; ++bit) {
@@ -63,20 +72,22 @@ inline UInt32 update_crc32(UInt32 crc, const void* data, std::size_t size) {
         return values;
     }();
     const auto* bytes = static_cast<const unsigned char*>(data);
-    while (size >= 8) {
+    while (size >= 16) {
         UInt32 first = 0;
         std::memcpy(&first, bytes, sizeof(first));
         first ^= crc;
-        crc = tables[7][first & 0xFFU]
-            ^ tables[6][(first >> 8) & 0xFFU]
-            ^ tables[5][(first >> 16) & 0xFFU]
-            ^ tables[4][(first >> 24) & 0xFFU]
-            ^ tables[3][bytes[4]]
-            ^ tables[2][bytes[5]]
-            ^ tables[1][bytes[6]]
-            ^ tables[0][bytes[7]];
-        bytes += 8;
-        size -= 8;
+        crc = tables[15][first & 0xFFU]
+            ^ tables[14][(first >> 8) & 0xFFU]
+            ^ tables[13][(first >> 16) & 0xFFU]
+            ^ tables[12][(first >> 24) & 0xFFU]
+            ^ tables[11][bytes[4]] ^ tables[10][bytes[5]]
+            ^ tables[9][bytes[6]] ^ tables[8][bytes[7]]
+            ^ tables[7][bytes[8]] ^ tables[6][bytes[9]]
+            ^ tables[5][bytes[10]] ^ tables[4][bytes[11]]
+            ^ tables[3][bytes[12]] ^ tables[2][bytes[13]]
+            ^ tables[1][bytes[14]] ^ tables[0][bytes[15]];
+        bytes += 16;
+        size -= 16;
     }
     while (size-- > 0) {
         crc = tables[0][(crc ^ *bytes++) & 0xFFU] ^ (crc >> 8);
@@ -437,7 +448,8 @@ public:
         : trace_(trace),
           item_trace_index_(item_trace_index),
 
-          handle_(CreateFileW(win32_extended_path(path).c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr)) {
+          handle_(CreateFileW(win32_extended_path(path).c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
+                              FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, nullptr)) {
 
         if (trace_ && handle_ == INVALID_HANDLE_VALUE) {
 
@@ -849,7 +861,9 @@ public:
 
         bool dry_run = false,
 
-        ExtractOutputTrace* output_trace = nullptr
+        ExtractOutputTrace* output_trace = nullptr,
+
+        UInt32 estimated_items = 0
 
     ) : archive_(archive),
 
@@ -867,7 +881,10 @@ public:
 
         output_root_(win32_extended_path(output_dir_)),
 
-        output_root_initially_empty_(directory_is_empty_or_missing(output_root_)) {}
+        output_root_initially_empty_(directory_is_empty_or_missing(output_root_)) {
+        used_output_paths_.reserve(static_cast<std::size_t>(estimated_items) * 2U + 1U);
+        created_directories_.reserve(static_cast<std::size_t>(estimated_items) + 1U);
+    }
 
 
 
@@ -888,6 +905,8 @@ public:
     UInt64 failed_item_bytes_written() const { return failed_item_bytes_written_; }
 
     bool output_error() const { return output_error_; }
+
+    bool output_root_initially_empty() const { return output_root_initially_empty_; }
 
 
 
@@ -1087,6 +1106,10 @@ public:
                     target = output_root_ / safe_path.value();
 
                     ensure_directory(target);
+
+                    if (output_trace_ && current_trace_index_ < output_trace_->items.size()) {
+                        output_trace_->items[current_trace_index_].output_path = target.lexically_relative(output_root_).generic_wstring();
+                    }
 
                 }
 

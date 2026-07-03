@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import os
 import queue
 import threading
@@ -164,6 +165,13 @@ class PipelineEngine:
             self._user_passwords = tuple(user_passwords)
             self._builtin_passwords = tuple(builtin_passwords)
 
+    def reconfigure_request(self, config: dict) -> None:
+        """Refresh request-scoped config while preserving long-lived native workers."""
+        _replace_mapping_in_place(self.config, config)
+        cli_config = self.config.get("cli") if isinstance(self.config.get("cli"), dict) else {}
+        self._runtime.quiet = bool(cli_config.get("quiet", False))
+        self._runtime.verbose = bool(cli_config.get("verbose", False))
+
     def finalize(
         self,
         response: PipelineResponse,
@@ -287,6 +295,18 @@ class PipelineEngine:
         if isinstance(target, PipelineTarget):
             return PipelineTarget(os.path.abspath(os.path.normpath(target.path)), dict(target.output))
         return PipelineTarget(os.path.abspath(os.path.normpath(str(target))))
+
+
+def _replace_mapping_in_place(target: dict, source: dict) -> None:
+    for key in tuple(target):
+        if key not in source:
+            target.pop(key, None)
+    for key, value in source.items():
+        current = target.get(key)
+        if isinstance(current, dict) and isinstance(value, dict):
+            _replace_mapping_in_place(current, value)
+        else:
+            target[key] = copy.deepcopy(value)
 
 
 class _PipelineRuntime:

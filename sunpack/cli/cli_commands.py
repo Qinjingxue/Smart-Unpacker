@@ -1,11 +1,20 @@
 import importlib
 import pkgutil
+import threading
 from types import ModuleType
 
 from sunpack.cli import commands
 
 
+_COMMAND_CACHE_LOCK = threading.Lock()
+_COMMAND_MODULE_CACHE: tuple[ModuleType, ...] | None = None
+
+
 def discover_command_modules() -> list[ModuleType]:
+    global _COMMAND_MODULE_CACHE
+    with _COMMAND_CACHE_LOCK:
+        if _COMMAND_MODULE_CACHE is not None:
+            return list(_COMMAND_MODULE_CACHE)
     modules: list[ModuleType] = []
     seen: set[str] = set()
     for module_info in pkgutil.iter_modules(commands.__path__, commands.__name__ + "."):
@@ -22,7 +31,15 @@ def discover_command_modules() -> list[ModuleType]:
         seen.add(command)
         modules.append(module)
     modules.sort(key=lambda module: (getattr(module, "ORDER", 1000), getattr(module, "COMMAND")))
+    with _COMMAND_CACHE_LOCK:
+        _COMMAND_MODULE_CACHE = tuple(modules)
     return modules
+
+
+def clear_command_module_cache() -> None:
+    global _COMMAND_MODULE_CACHE
+    with _COMMAND_CACHE_LOCK:
+        _COMMAND_MODULE_CACHE = None
 
 
 def command_map(modules: list[ModuleType] | None = None) -> dict[str, ModuleType]:

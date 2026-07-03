@@ -88,7 +88,10 @@ class ArchiveTestCrcMethod:
             for path in missing:
                 issue_by_path.setdefault(str(path), []).append(issue)
 
-        observations = _native_observations(match_result.get("observations") or [], issue_by_path, self.name)
+        direct_observations = match_result.get("_file_observations")
+        observations = list(direct_observations) if isinstance(direct_observations, list) else _native_observations(
+            match_result.get("observations") or [], issue_by_path, self.name
+        )
         completeness = _coverage_float(coverage, "completeness", 1.0)
 
         if not issues:
@@ -344,5 +347,6 @@ def _worker_crc_match_result(
         "missing": missing,
         "coverage": coverage_details(coverage),
         "observations": observations,
+        "_file_observations": coverage.observations,
         "source": "sevenzip_worker_write",
     }

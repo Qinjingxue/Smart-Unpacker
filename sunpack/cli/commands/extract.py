@@ -21,6 +21,7 @@ from sunpack.cli.cli_runtime import (
 )
 from sunpack.cli.cli_types import CliCommandResult
 from sunpack.config.loader import load_config
+from sunpack.cli.persistent_runtime import persistent_runtime_enabled, pipeline_engine
 from sunpack.coordinator.engine import PipelineEngine
 from sunpack.contracts.failures import FailureInfo
 from sunpack.passwords import dedupe_passwords
@@ -84,7 +85,8 @@ def handle(args, ctx):
         quiet=bool(getattr(reporter, "quiet", False) or getattr(reporter, "json_mode", False)),
         verbose=bool(getattr(reporter, "verbose", False)),
     )
-    with PipelineEngine(run_config) as engine:
+    engine_context = pipeline_engine(run_config) if persistent_runtime_enabled() else PipelineEngine(run_config)
+    with engine_context as engine:
         while True:
             password_summary = build_password_summary(
                 passwords,

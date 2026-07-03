@@ -103,6 +103,7 @@ struct ExtractArchiveResult {
     bool missing_volume_suspected = false;
     bool wrong_password = false;
     bool unsupported_method = false;
+    bool output_inventory_complete = false;
     int operation_result = 0;
     unsigned int item_count = 0;
     unsigned int files_written = 0;

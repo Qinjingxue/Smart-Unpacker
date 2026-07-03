@@ -105,6 +105,28 @@ def test_output_inventory_scans_once_and_merges_worker_crc(monkeypatch):
     assert calls == ["out"]
 
 
+def test_complete_worker_inventory_skips_output_tree_scan(monkeypatch):
+    worker = _worker_result()
+    worker["verified_manifest"]["inventory"] = {
+        "complete": True,
+        "file_count": 1,
+        "dir_count": 0,
+        "total_size": 5,
+        "identity_paths": True,
+    }
+    monkeypatch.setattr(
+        output_inventory_module,
+        "_native_scan_output_tree",
+        lambda _path: (_ for _ in ()).throw(AssertionError("complete inventory must skip scan")),
+    )
+
+    inventory = output_inventory_module.collect_output_inventory("out", worker)
+
+    assert inventory.stats.file_count == 1
+    assert inventory.stats.total_size == 5
+    assert inventory.files[0]["path"] == "a.txt"
+
+
 def test_output_file_index_normalizes_each_path_only_once(monkeypatch):
     files = [{"path": f"dir/file_{index}.txt", "size": index} for index in range(100)]
     inventory = output_inventory_module.OutputInventory(

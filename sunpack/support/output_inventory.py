@@ -74,6 +74,29 @@ def collect_output_inventory(
     root = os.path.abspath(output_dir) if output_dir else ""
     if not output_dir:
         return OutputInventory(root=root, stats=OutputStats(exists=False, is_dir=False))
+    worker_inventory = _complete_worker_inventory(worker_result)
+    if worker_inventory is not None:
+        files, inventory = worker_inventory
+        merged_files = tuple({
+            "path": str(item.get("output_path") or item.get("path") or ""),
+            "size": int(item.get("size", item.get("bytes_written", 0)) or 0),
+            "bytes_written": int(item.get("bytes_written", 0) or 0),
+            "status": str(item.get("status") or "complete"),
+            "crc_ok": item.get("crc_ok"),
+            **({"crc32": int(item["output_crc32"]) & 0xFFFFFFFF, "crc_source": "sevenzip_worker_write"}
+               if item.get("has_output_crc") and item.get("output_crc32") is not None else {}),
+        } for item in files)
+        return OutputInventory(
+            root=root,
+            stats=OutputStats(
+                exists=True, is_dir=True,
+                file_count=int(inventory["file_count"]), dir_count=int(inventory["dir_count"]),
+                total_size=int(inventory["total_size"]), transient_file_count=0, unreadable_count=0,
+                relative_paths=tuple(str(item["path"]) for item in merged_files),
+            ),
+            files=merged_files,
+            worker_crc_available=bool(files),
+        )
     scan = dict(_native_scan_output_tree(output_dir))
     files = [dict(item) for item in scan.get("files") or [] if isinstance(item, dict)]
     worker_files = verified_worker_files(worker_result)
@@ -123,6 +146,20 @@ def verified_worker_files(worker_result: dict[str, Any] | None) -> list[dict[str
     if result.get("status") != "ok" or not manifest.get("validated"):
         return []
     return [dict(item) for item in manifest.get("files") or [] if isinstance(item, dict)]
+
+
+def _complete_worker_inventory(worker_result: dict[str, Any] | None) -> tuple[list[dict[str, Any]], dict[str, Any]] | None:
+    result = worker_result if isinstance(worker_result, dict) else {}
+    manifest = result.get("verified_manifest") if isinstance(result.get("verified_manifest"), dict) else {}
+    inventory = manifest.get("inventory") if isinstance(manifest.get("inventory"), dict) else {}
+    files = verified_worker_files(result)
+    if (
+        not inventory.get("complete")
+        or int(inventory.get("file_count", -1)) != len(files)
+        or any(str(item.get("status") or "") != "complete" for item in files)
+    ):
+        return None
+    return files, inventory
 
 
 def _path_key(path: str) -> str:

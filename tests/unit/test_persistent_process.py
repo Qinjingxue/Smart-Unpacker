@@ -52,3 +52,39 @@ def test_shutdown_does_not_start_a_missing_server(monkeypatch):
     response = persistent_process._send_or_start({"shutdown": True})
 
     assert response["exit_code"] == 0
+
+
+def test_persistent_runtime_reuses_engine_for_request_only_config(monkeypatch):
+    from sunpack.cli import persistent_runtime
+
+    events = []
+
+    class FakeEngine:
+        def __init__(self, config):
+            events.append(("init", config["output"]["root"]))
+
+        def start(self):
+            events.append(("start",))
+            return self
+
+        def reconfigure_request(self, config):
+            events.append(("reconfigure", config["output"]["root"]))
+
+        def close(self, *, graceful=True):
+            events.append(("close", graceful))
+
+    monkeypatch.setattr(persistent_runtime, "PipelineEngine", FakeEngine)
+    monkeypatch.setattr(persistent_runtime, "config_cache_token", lambda: ("same",))
+    persistent_runtime.enable_persistent_runtime()
+    first = {"output": {"root": "one", "common_root": "a"}, "cli": {"quiet": True}}
+    second = {"output": {"root": "two", "common_root": "b"}, "cli": {"quiet": False}}
+    try:
+        with persistent_runtime.pipeline_engine(first) as first_engine:
+            pass
+        with persistent_runtime.pipeline_engine(second) as second_engine:
+            pass
+        assert first_engine is second_engine
+        assert events[:2] == [("init", "one"), ("start",)]
+        assert ("reconfigure", "two") in events
+    finally:
+        persistent_runtime.close_persistent_runtime()

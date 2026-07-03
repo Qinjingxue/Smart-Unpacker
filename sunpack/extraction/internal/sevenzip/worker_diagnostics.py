@@ -91,8 +91,35 @@ def _json_events(text: str) -> list[dict[str, Any]]:
         except json.JSONDecodeError:
             continue
         if isinstance(payload, dict):
+            _expand_manifest(payload)
             events.append(payload)
     return events
+
+
+def _expand_manifest(payload: dict[str, Any]) -> None:
+    manifest = payload.get("verified_manifest")
+    if not isinstance(manifest, dict) or int(manifest.get("version", 0) or 0) != 2:
+        return
+    files: list[dict[str, Any]] = []
+    statuses = {0: "unverified", 1: "complete", 2: "failed"}
+    for row in manifest.get("rows") or []:
+        if not isinstance(row, list) or len(row) != 11:
+            continue
+        files.append({
+            "index": int(row[0]), "path": str(row[1]), "output_path": str(row[2] or row[1]),
+            "size": int(row[3]), "bytes_written": int(row[4]),
+            "has_crc": bool(row[5]), "crc32": int(row[6]),
+            "has_output_crc": bool(row[7]), "output_crc32": int(row[8]),
+            "crc_ok": bool(row[9]), "status": statuses.get(int(row[10]), "unverified"),
+        })
+    manifest["files"] = files
+    inventory = manifest.get("inventory")
+    if isinstance(inventory, list) and len(inventory) == 5:
+        manifest["inventory"] = {
+            "complete": bool(inventory[0]), "file_count": int(inventory[1]),
+            "dir_count": int(inventory[2]), "total_size": int(inventory[3]),
+            "identity_paths": bool(inventory[4]),
+        }
 
 
 def _tail_lines(text: str, limit: int = _STDIO_TAIL_LINES) -> list[str]:

@@ -1,4 +1,6 @@
+import copy
 from pathlib import Path
+import threading
 from typing import Any
 
 from sunpack.config.detection_view import DIRECTORY_SCAN_MODES, directory_scan_mode, rule_pipeline_config, scan_filters_config
@@ -13,6 +15,13 @@ class ConfigError(RuntimeError):
 
 SIMPLE_CONFIG_FILENAME = "sunpack_config.json"
 ADVANCED_CONFIG_FILENAME = "sunpack_advanced_config.json"
+
+
+_CONFIG_CACHE_LOCK = threading.RLock()
+_CONFIG_CACHE_SIGNATURE: tuple[Any, ...] | None = None
+_CONFIG_CACHE_VALUE: dict[str, Any] | None = None
+_CONFIG_CACHE_RAW_VALUE: dict[str, Any] | None = None
+_CONFIG_CACHE_PATH: Path | None = None
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -108,6 +117,10 @@ def _merge_named_module_list(base: list[Any], override: list[Any], *, override_o
 def _load_layered_config() -> tuple[Path, dict[str, Any]]:
     simple_path = _first_existing_config(SIMPLE_CONFIG_FILENAME)
     advanced_path = _first_existing_config(ADVANCED_CONFIG_FILENAME)
+    return _load_layered_config_paths(simple_path, advanced_path)
+
+
+def _load_layered_config_paths(simple_path: Path | None, advanced_path: Path | None) -> tuple[Path, dict[str, Any]]:
     if simple_path is None and advanced_path is None:
         searched = [
             *[str(path) for path in _candidate_config_paths(SIMPLE_CONFIG_FILENAME)],
@@ -120,6 +133,32 @@ def _load_layered_config() -> tuple[Path, dict[str, Any]]:
         return advanced_path, advanced
     simple = _load_json(simple_path)
     return simple_path, _deep_merge_config(advanced, simple)
+
+
+def _config_file_signature(path: Path | None) -> tuple[str, int, int] | None:
+    if path is None:
+        return None
+    try:
+        stat = path.stat()
+    except OSError:
+        return (str(path.resolve()), -1, -1)
+    return (str(path.resolve()), int(stat.st_mtime_ns), int(stat.st_size))
+
+
+def config_cache_token() -> tuple[Any, ...]:
+    """Return the selected config files and mtimes used for cache invalidation."""
+    simple_path = _first_existing_config(SIMPLE_CONFIG_FILENAME)
+    advanced_path = _first_existing_config(ADVANCED_CONFIG_FILENAME)
+    return (_config_file_signature(simple_path), _config_file_signature(advanced_path))
+
+
+def clear_config_cache() -> None:
+    global _CONFIG_CACHE_SIGNATURE, _CONFIG_CACHE_VALUE, _CONFIG_CACHE_RAW_VALUE, _CONFIG_CACHE_PATH
+    with _CONFIG_CACHE_LOCK:
+        _CONFIG_CACHE_SIGNATURE = None
+        _CONFIG_CACHE_VALUE = None
+        _CONFIG_CACHE_RAW_VALUE = None
+        _CONFIG_CACHE_PATH = None
 
 
 def _validate_pipeline(config: dict[str, Any]):
@@ -165,15 +204,53 @@ def _validate_pipeline(config: dict[str, Any]):
 
 def load_config() -> dict[str, Any]:
     """Read the external configuration required to run the pipeline."""
-    _, config = _load_layered_config()
-    _validate_pipeline(config)
+    global _CONFIG_CACHE_SIGNATURE, _CONFIG_CACHE_VALUE, _CONFIG_CACHE_RAW_VALUE, _CONFIG_CACHE_PATH
+    simple_path = _first_existing_config(SIMPLE_CONFIG_FILENAME)
+    advanced_path = _first_existing_config(ADVANCED_CONFIG_FILENAME)
+    signature = (_config_file_signature(simple_path), _config_file_signature(advanced_path))
+    with _CONFIG_CACHE_LOCK:
+        if signature == _CONFIG_CACHE_SIGNATURE and _CONFIG_CACHE_VALUE is not None:
+            return copy.deepcopy(_CONFIG_CACHE_VALUE)
+        cached_raw = copy.deepcopy(_CONFIG_CACHE_RAW_VALUE) if signature == _CONFIG_CACHE_SIGNATURE else None
+    if cached_raw is None:
+        config_path, config = _load_layered_config_paths(simple_path, advanced_path)
+        _validate_pipeline(config)
+    else:
+        config_path, config = (_CONFIG_CACHE_PATH or simple_path or advanced_path), cached_raw
+    raw_for_cache = copy.deepcopy(config)
     try:
-        return normalize_config(config)
+        normalized = normalize_config(config)
     except ConfigSchemaError as exc:
         raise ConfigError(str(exc)) from exc
+    with _CONFIG_CACHE_LOCK:
+        _CONFIG_CACHE_SIGNATURE = signature
+        _CONFIG_CACHE_VALUE = copy.deepcopy(normalized)
+        _CONFIG_CACHE_RAW_VALUE = raw_for_cache
+        _CONFIG_CACHE_PATH = config_path
+    return normalized
 
 
 def load_effective_config_payload() -> tuple[Path, dict[str, Any]]:
-    config_path, config = _load_layered_config()
+    global _CONFIG_CACHE_SIGNATURE, _CONFIG_CACHE_VALUE, _CONFIG_CACHE_RAW_VALUE, _CONFIG_CACHE_PATH
+    simple_path = _first_existing_config(SIMPLE_CONFIG_FILENAME)
+    advanced_path = _first_existing_config(ADVANCED_CONFIG_FILENAME)
+    signature = (_config_file_signature(simple_path), _config_file_signature(advanced_path))
+    with _CONFIG_CACHE_LOCK:
+        if (
+            signature == _CONFIG_CACHE_SIGNATURE
+            and _CONFIG_CACHE_RAW_VALUE is not None
+            and _CONFIG_CACHE_PATH is not None
+        ):
+            return _CONFIG_CACHE_PATH, copy.deepcopy(_CONFIG_CACHE_RAW_VALUE)
+    config_path, config = _load_layered_config_paths(simple_path, advanced_path)
     _validate_pipeline(config)
+    try:
+        normalized = normalize_config(copy.deepcopy(config))
+    except ConfigSchemaError as exc:
+        raise ConfigError(str(exc)) from exc
+    with _CONFIG_CACHE_LOCK:
+        _CONFIG_CACHE_SIGNATURE = signature
+        _CONFIG_CACHE_VALUE = copy.deepcopy(normalized)
+        _CONFIG_CACHE_RAW_VALUE = copy.deepcopy(config)
+        _CONFIG_CACHE_PATH = config_path
     return config_path, config

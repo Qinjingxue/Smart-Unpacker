@@ -405,7 +405,8 @@ ExtractArchiveResult extract_archive_internal(
             decoded_names,
             std::move(progress),
             dry_run,
-            &result.output_trace);
+            &result.output_trace,
+            num_items);
 
         ComPtr<IArchiveExtractCallback> extract_callback(raw_extract_callback);
 
@@ -420,6 +421,8 @@ ExtractArchiveResult extract_archive_internal(
         result.files_written = raw_extract_callback->files_written();
 
         result.dirs_written = raw_extract_callback->dirs_written();
+
+        result.output_inventory_complete = raw_extract_callback->output_root_initially_empty();
 
         result.bytes_written = result.output_trace.total_bytes_written;
 

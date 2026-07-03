@@ -6,10 +6,12 @@
 
 #include <algorithm>
 #include <chrono>
+#include <filesystem>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 #include "internal/sevenzip_status.hpp"
@@ -616,37 +618,58 @@ std::string output_trace_json(const sunpack::sevenzip::ExtractOutputTrace& trace
 }
 
 std::string verified_manifest_json(const sunpack::sevenzip::ExtractArchiveResult& result, bool validated) {
-    std::string files = "[";
+    std::string rows = "[";
+    rows.reserve(result.output_trace.items.size() * 96);
     bool first = true;
     unsigned int file_count = 0;
+    unsigned long long total_size = 0;
+    bool identity_paths = true;
+    std::unordered_set<std::wstring> directories;
     for (const auto& item : result.output_trace.items) {
+        const std::filesystem::path output_path(item.output_path);
         if (item.is_dir) {
+            if (!item.output_path.empty()) {
+                directories.insert(output_path.lexically_normal().generic_wstring());
+            }
             continue;
         }
+        for (auto parent = output_path.parent_path(); !parent.empty(); parent = parent.parent_path()) {
+            directories.insert(parent.lexically_normal().generic_wstring());
+        }
         if (!first) {
-            files += ",";
+            rows += ",";
         }
         first = false;
         ++file_count;
-        files += "{\"index\":" + std::to_string(item.index) +
-            ",\"path\":\"" + json_escape(wide_to_utf8(item.path)) +
-            "\",\"output_path\":\"" + json_escape(wide_to_utf8(item.output_path)) +
-            "\",\"size\":" + std::to_string(item.has_expected_size ? item.expected_size : item.bytes_written) +
-            ",\"bytes_written\":" + std::to_string(item.bytes_written) +
-            ",\"has_crc\":" + std::string(item.has_source_crc32 ? "true" : "false") +
-            ",\"crc32\":" + std::to_string(item.source_crc32) +
-            ",\"has_output_crc\":" + std::string(item.has_output_crc32 ? "true" : "false") +
-            ",\"output_crc32\":" + std::to_string(item.output_crc32) +
-            ",\"crc_ok\":" + std::string(item.crc_verified ? "true" : "false") +
-            ",\"status\":\"" + std::string(item.done ? "complete" : item.failed ? "failed" : "unverified") + "\"}";
+        total_size += item.bytes_written;
+        const bool identity_path =
+            std::filesystem::path(item.path).lexically_normal().generic_wstring() == output_path.lexically_normal().generic_wstring();
+        identity_paths = identity_paths && identity_path;
+        rows += "[" + std::to_string(item.index) +
+            ",\"" + json_escape(wide_to_utf8(item.path)) +
+            "\",\"" + (identity_path ? std::string() : json_escape(wide_to_utf8(item.output_path))) +
+            "\"," + std::to_string(item.has_expected_size ? item.expected_size : item.bytes_written) +
+            "," + std::to_string(item.bytes_written) +
+            "," + std::string(item.has_source_crc32 ? "1" : "0") +
+            "," + std::to_string(item.source_crc32) +
+            "," + std::string(item.has_output_crc32 ? "1" : "0") +
+            "," + std::to_string(item.output_crc32) +
+            "," + std::string(item.crc_verified ? "1" : "0") +
+            "," + std::string(item.done ? "1" : item.failed ? "2" : "0") + "]";
     }
-    files += "]";
+    rows += "]";
+    const bool inventory_complete = validated && result.output_inventory_complete && file_count == result.files_written;
     return std::string("{") +
-        "\"version\":1,\"source\":\"sevenzip_worker_extract\"" +
+        "\"version\":2,\"source\":\"sevenzip_worker_extract\"" +
         ",\"validated\":" + std::string(validated ? "true" : "false") +
         ",\"item_count\":" + std::to_string(result.item_count) +
         ",\"file_count\":" + std::to_string(file_count) +
-        ",\"files\":" + files + "}";
+        ",\"inventory\":[" + std::string(inventory_complete ? "1" : "0") +
+        "," + std::to_string(file_count) +
+        "," + std::to_string(directories.size()) +
+        "," + std::to_string(total_size) +
+        "," + std::string(identity_paths ? "1" : "0") + "]" +
+        ",\"rows\":" + rows + "}";
 }
 
 std::string handler_attempts_json(const std::vector<sunpack::sevenzip::ExtractHandlerAttempt>& attempts) {

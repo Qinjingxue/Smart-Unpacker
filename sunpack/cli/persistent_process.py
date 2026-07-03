@@ -125,6 +125,9 @@ def run_server() -> int:
     except OSError:
         return 0
     from sunpack.cli.cli import main
+    from sunpack.cli.persistent_runtime import close_persistent_runtime, enable_persistent_runtime
+
+    enable_persistent_runtime()
 
     try:
         while True:
@@ -143,6 +146,7 @@ def run_server() -> int:
             finally:
                 connection.close()
     finally:
+        close_persistent_runtime()
         listener.close()
 
 
