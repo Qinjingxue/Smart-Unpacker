@@ -1,5 +1,26 @@
 use std::io::Cursor;
 
+const FULL_STREAM_STRUCTURE_MAX_BYTES: u64 = 4 * 1024 * 1024;
+const STREAM_STRUCTURE_HEAD_BYTES: usize = 256 * 1024;
+const STREAM_STRUCTURE_TAIL_BYTES: usize = 1024 * 1024;
+const STREAM_STRUCTURE_DECODE_MAX_BYTES: u64 = 8 * 1024 * 1024;
+
+fn read_prefix(path: &str, limit: usize) -> std::io::Result<Vec<u8>> {
+    let mut file = File::open(path)?;
+    let mut data = Vec::with_capacity(limit);
+    file.by_ref().take(limit as u64).read_to_end(&mut data)?;
+    Ok(data)
+}
+
+fn read_suffix(path: &str, file_size: u64, limit: usize) -> std::io::Result<(u64, Vec<u8>)> {
+    let start = file_size.saturating_sub(limit as u64);
+    let mut file = File::open(path)?;
+    file.seek(SeekFrom::Start(start))?;
+    let mut data = Vec::with_capacity((file_size - start) as usize);
+    file.read_to_end(&mut data)?;
+    Ok((start, data))
+}
+
 const GZIP_FIELDS: &[&str] = &[
     "member.header.magic",
     "member.header.compression_method",
@@ -182,7 +203,126 @@ fn parse_gzip_header(data: &[u8], start: usize) -> Result<(usize, u8), &'static 
     Ok((cursor, flags))
 }
 
+fn inspect_gzip_bounded(
+    py: Python<'_>,
+    path: &str,
+    header: &[u8],
+    file_size: u64,
+) -> PyResult<Py<PyDict>> {
+    let data = match read_prefix(path, STREAM_STRUCTURE_HEAD_BYTES) {
+        Ok(data) => data,
+        Err(_) => {
+            return compression_empty(
+                py,
+                "os_error",
+                "gzip",
+                ".gz",
+                header.starts_with(b"\x1f\x8b"),
+            )
+        }
+    };
+    let (_, tail) = read_suffix(path, file_size, 64).unwrap_or((file_size, Vec::new()));
+    let magic = data.starts_with(b"\x1f\x8b\x08");
+    let d = compression_base(py, "gzip", ".gz", magic)?;
+    let mut damage_flags = Vec::new();
+    d.set_item("validation_scope", "bounded_structure")?;
+    d.set_item("validation_complete", false)?;
+    d.set_item(
+        "member.header.magic",
+        hex_bytes(data.get(0..2).unwrap_or(&[])),
+    )?;
+    let (payload_start, flags) = match parse_gzip_header(&data, 0) {
+        Ok(value) => value,
+        Err(error) => {
+            d.set_item("error", error)?;
+            d.set_item("damage_flags", PyList::new(py, damage_flags)?)?;
+            finish_fields(&d, GZIP_FIELDS)?;
+            return Ok(d.unbind());
+        }
+    };
+    d.set_item("member.header.compression_method", data[2])?;
+    d.set_item("member.header.flags", flags)?;
+    d.set_item(
+        "member.header.mtime_xfl_os",
+        format!("mtime={};xfl={};os={}", u32_le(&data, 4), data[8], data[9]),
+    )?;
+    let mut cursor = 10usize;
+    if flags & 0x04 != 0 {
+        let length = u16_le(&data, cursor) as usize;
+        d.set_item("member.header.extra_length", length)?;
+        cursor += 2;
+        d.set_item(
+            "member.header.extra",
+            hex_bytes(data.get(cursor..cursor + length).unwrap_or(&[])),
+        )?;
+        cursor += length;
+    } else {
+        d.set_item("member.header.extra_length", 0)?;
+        d.set_item("member.header.extra", "absent")?;
+    }
+    if flags & 0x08 != 0 {
+        d.set_item(
+            "member.header.name",
+            c_string(&data, &mut cursor).unwrap_or_default(),
+        )?;
+    } else {
+        d.set_item("member.header.name", "absent")?;
+    }
+    if flags & 0x10 != 0 {
+        d.set_item(
+            "member.header.comment",
+            c_string(&data, &mut cursor).unwrap_or_default(),
+        )?;
+    } else {
+        d.set_item("member.header.comment", "absent")?;
+    }
+    if flags & 0x02 != 0 {
+        let stored = u16_le(&data, cursor);
+        let computed = (crc32(&data[..cursor]) & 0xffff) as u16;
+        let ok = stored == computed;
+        d.set_item(
+            "member.header.crc16",
+            format!("stored={stored};computed={computed};ok={ok}"),
+        )?;
+        if !ok {
+            damage_flags.push("gzip_header_crc_bad");
+        }
+    } else {
+        d.set_item("member.header.crc16", "absent")?;
+    }
+    d.set_item(
+        "member.deflate.blocks",
+        format!("payload_offset={payload_start};validation=deferred"),
+    )?;
+    d.set_item("member.deflate.final_block", false)?;
+    d.set_item("member.decoded_content", 0)?;
+    if tail.len() >= 8 {
+        let trailer = tail.len() - 8;
+        d.set_item(
+            "member.trailer.crc32",
+            format!("stored={};computed=deferred", u32_le(&tail, trailer)),
+        )?;
+        d.set_item(
+            "member.trailer.isize",
+            format!("stored={};decoded_mod=deferred", u32_le(&tail, trailer + 4)),
+        )?;
+    }
+    d.set_item("member.boundary", file_size)?;
+    d.set_item("member.next_member", false)?;
+    d.set_item("archive.trailing_data", 0)?;
+    d.set_item("trailing_data_verified", false)?;
+    d.set_item("plausible", magic)?;
+    d.set_item("confidence", if magic { "medium" } else { "none" })?;
+    d.set_item("damage_flags", PyList::new(py, damage_flags)?)?;
+    d.set_item("file_size", file_size)?;
+    finish_fields(&d, GZIP_FIELDS)?;
+    Ok(d.unbind())
+}
+
 fn inspect_gzip(py: Python<'_>, path: &str, header: &[u8], file_size: u64) -> PyResult<Py<PyDict>> {
+    if file_size > FULL_STREAM_STRUCTURE_MAX_BYTES {
+        return inspect_gzip_bounded(py, path, header, file_size);
+    }
     let data = match std::fs::read(path) {
         Ok(data) => data,
         Err(_) => {
@@ -260,19 +400,22 @@ fn inspect_gzip(py: Python<'_>, path: &str, header: &[u8], file_size: u64) -> Py
         d.set_item("member.header.crc16", "absent")?;
     }
 
-    let mut inflater = flate2::read::DeflateDecoder::new(Cursor::new(&data[payload_start..]));
+    let inflater = flate2::read::DeflateDecoder::new(Cursor::new(&data[payload_start..]));
+    let mut limited_inflater = inflater.take(STREAM_STRUCTURE_DECODE_MAX_BYTES + 1);
     let mut decoded = Vec::new();
-    let status = inflater.read_to_end(&mut decoded);
+    let status = limited_inflater.read_to_end(&mut decoded);
+    let inflater = limited_inflater.into_inner();
+    let decode_limited = decoded.len() as u64 > STREAM_STRUCTURE_DECODE_MAX_BYTES;
     let deflate_len = inflater.total_in() as usize;
     let boundary = payload_start.saturating_add(deflate_len).saturating_add(8);
-    let stream_end = status.is_ok() && boundary <= data.len();
+    let stream_end = status.is_ok() && !decode_limited && boundary <= data.len();
     d.set_item(
         "member.deflate.blocks",
         format!("compressed_bytes={deflate_len};decoder_status={status:?}"),
     )?;
     d.set_item("member.deflate.final_block", stream_end)?;
     d.set_item("member.decoded_content", decoded.len())?;
-    if boundary <= data.len() && boundary >= 8 {
+    if stream_end && boundary <= data.len() && boundary >= 8 {
         let trailer = boundary - 8;
         let stored_crc = u32_le(&data, trailer);
         let stored_size = u32_le(&data, trailer + 4);
@@ -297,10 +440,12 @@ fn inspect_gzip(py: Python<'_>, path: &str, header: &[u8], file_size: u64) -> Py
             damage_flags.push("gzip_footer_bad");
         }
     }
+    d.set_item("validation_complete", stream_end)?;
     d.set_item("member.boundary", boundary.min(data.len()))?;
-    let next_member = boundary + 2 <= data.len() && &data[boundary..boundary + 2] == b"\x1f\x8b";
+    let next_member =
+        stream_end && boundary + 2 <= data.len() && &data[boundary..boundary + 2] == b"\x1f\x8b";
     d.set_item("member.next_member", next_member)?;
-    let trailing = if next_member {
+    let trailing = if decode_limited || next_member {
         0
     } else {
         data.len().saturating_sub(boundary)
@@ -309,9 +454,13 @@ fn inspect_gzip(py: Python<'_>, path: &str, header: &[u8], file_size: u64) -> Py
     if trailing > 0 {
         damage_flags.push("trailing_junk");
     }
-    d.set_item("plausible", stream_end)?;
+    d.set_item("trailing_data_verified", stream_end)?;
+    d.set_item(
+        "plausible",
+        stream_end || (decode_limited && data.starts_with(b"\x1f\x8b\x08")),
+    )?;
     d.set_item("confidence", if stream_end { "strong" } else { "medium" })?;
-    if !stream_end {
+    if !stream_end && !decode_limited {
         d.set_item("error", "gzip_deflate_or_trailer_incomplete")?;
         damage_flags.push("probably_truncated");
     }
@@ -375,12 +524,108 @@ fn bzip_huffman_summary(data: &[u8], start_bit: usize) -> String {
     format!("groups={groups};truncated")
 }
 
+fn inspect_bzip2_bounded(
+    py: Python<'_>,
+    path: &str,
+    header: &[u8],
+    file_size: u64,
+) -> PyResult<Py<PyDict>> {
+    let data = match read_prefix(path, STREAM_STRUCTURE_HEAD_BYTES) {
+        Ok(data) => data,
+        Err(_) => {
+            return compression_empty(py, "os_error", "bzip2", ".bz2", header.starts_with(b"BZh"))
+        }
+    };
+    let (tail_start, tail) = read_suffix(path, file_size, STREAM_STRUCTURE_TAIL_BYTES)
+        .unwrap_or((file_size, Vec::new()));
+    let magic = data.starts_with(b"BZh") && data.get(3).is_some_and(|v| b"123456789".contains(v));
+    let d = compression_base(py, "bzip2", ".bz2", magic)?;
+    let mut damage_flags = Vec::new();
+    d.set_item("validation_scope", "bounded_structure")?;
+    d.set_item("validation_complete", false)?;
+    d.set_item(
+        "stream.magic",
+        String::from_utf8_lossy(data.get(0..3).unwrap_or(&[])).to_string(),
+    )?;
+    d.set_item(
+        "stream.block_size_100k",
+        data.get(3).map(|v| v.saturating_sub(b'0')).unwrap_or(0),
+    )?;
+    if !magic {
+        d.set_item("error", "bzip2_magic_not_found")?;
+        d.set_item("damage_flags", PyList::new(py, damage_flags)?)?;
+        finish_fields(&d, BZIP2_FIELDS)?;
+        return Ok(d.unbind());
+    }
+    let blocks = marker_positions(&data, 0x314159265359);
+    let tail_ends = marker_positions(&tail, 0x177245385090);
+    let global_end = tail_ends.first().map(|bit| tail_start as usize * 8 + *bit);
+    d.set_item(
+        "block.marker",
+        blocks.first().map(|v| *v as u64).unwrap_or(u64::MAX),
+    )?;
+    d.set_item("block.sequence", blocks.len())?;
+    if let Some(bit) = blocks.first() {
+        let mut reader = BitReader {
+            data: &data,
+            bit: bit + 48,
+        };
+        d.set_item("block.crc32", reader.read(32).unwrap_or(0) as u32)?;
+        d.set_item("block.randomized", reader.read(1).unwrap_or(0) != 0)?;
+        d.set_item("block.orig_ptr", reader.read(24).unwrap_or(0))?;
+        d.set_item(
+            "block.huffman_tables",
+            bzip_huffman_summary(&data, reader.bit),
+        )?;
+        d.set_item(
+            "block.encoded_data",
+            global_end
+                .unwrap_or(file_size as usize * 8)
+                .saturating_sub(reader.bit),
+        )?;
+    }
+    d.set_item("stream.end_marker", global_end.is_some())?;
+    if let Some(local_bit) = tail_ends.first() {
+        let mut reader = BitReader {
+            data: &tail,
+            bit: *local_bit + 48,
+        };
+        d.set_item("stream.combined_crc32", reader.read(32).unwrap_or(0) as u32)?;
+    }
+    d.set_item("block.decoded_content", 0)?;
+    let trailing = global_end
+        .map(|bit| file_size.saturating_sub(((bit + 48 + 32 + 7) / 8) as u64))
+        .unwrap_or(0);
+    d.set_item("archive.trailing_data", trailing)?;
+    d.set_item("trailing_data_verified", global_end.is_some())?;
+    if trailing > 0 {
+        damage_flags.push("trailing_junk");
+    }
+    let plausible = magic && !blocks.is_empty();
+    d.set_item("plausible", plausible)?;
+    d.set_item(
+        "confidence",
+        if global_end.is_some() {
+            "medium"
+        } else {
+            "weak"
+        },
+    )?;
+    d.set_item("damage_flags", PyList::new(py, damage_flags)?)?;
+    d.set_item("file_size", file_size)?;
+    finish_fields(&d, BZIP2_FIELDS)?;
+    Ok(d.unbind())
+}
+
 fn inspect_bzip2(
     py: Python<'_>,
     path: &str,
     header: &[u8],
     file_size: u64,
 ) -> PyResult<Py<PyDict>> {
+    if file_size > FULL_STREAM_STRUCTURE_MAX_BYTES {
+        return inspect_bzip2_bounded(py, path, header, file_size);
+    }
     let data = match std::fs::read(path) {
         Ok(data) => data,
         Err(_) => {
@@ -440,26 +685,39 @@ fn inspect_bzip2(
         };
         d.set_item("stream.combined_crc32", reader.read(32).unwrap_or(0) as u32)?;
     }
-    let mut decoder = bzip2::read::BzDecoder::new(Cursor::new(data.as_slice()));
+    let decoder = bzip2::read::BzDecoder::new(Cursor::new(data.as_slice()));
+    let mut limited_decoder = decoder.take(STREAM_STRUCTURE_DECODE_MAX_BYTES + 1);
     let mut decoded = Vec::new();
-    let decode_ok = decoder.read_to_end(&mut decoded).is_ok();
+    let decode_status = limited_decoder.read_to_end(&mut decoded);
+    let decoder = limited_decoder.into_inner();
+    let decode_limited = decoded.len() as u64 > STREAM_STRUCTURE_DECODE_MAX_BYTES;
+    let decode_ok = decode_status.is_ok() && !decode_limited;
     let marker_boundary = ends
         .first()
         .map(|bit| (bit + 48 + 32 + 7) / 8)
         .unwrap_or(data.len());
     let consumed = decoder.get_ref().position() as usize;
     d.set_item("block.decoded_content", decoded.len())?;
-    let trailing = data.len().saturating_sub(marker_boundary.min(consumed));
+    let trailing = if decode_limited {
+        0
+    } else {
+        data.len().saturating_sub(marker_boundary.min(consumed))
+    };
     d.set_item("archive.trailing_data", trailing)?;
     if trailing > 0 {
         damage_flags.push("trailing_junk");
     }
-    d.set_item("plausible", decode_ok && !ends.is_empty())?;
+    d.set_item("validation_complete", decode_ok)?;
+    d.set_item("trailing_data_verified", decode_ok)?;
+    d.set_item(
+        "plausible",
+        (decode_ok && !ends.is_empty()) || (decode_limited && magic),
+    )?;
     d.set_item("confidence", if decode_ok { "strong" } else { "medium" })?;
-    if ends.is_empty() {
+    if ends.is_empty() && !decode_limited {
         damage_flags.push("probably_truncated");
     }
-    if !decode_ok {
+    if !decode_ok && !decode_limited {
         d.set_item("error", "bzip2_decode_failed")?;
         damage_flags.push("bzip2_block_bad");
     }
@@ -496,7 +754,145 @@ fn xz_check_size(check_type: u8) -> usize {
     }
 }
 
+fn inspect_xz_bounded(
+    py: Python<'_>,
+    path: &str,
+    header: &[u8],
+    file_size: u64,
+) -> PyResult<Py<PyDict>> {
+    let data = match read_prefix(path, STREAM_STRUCTURE_HEAD_BYTES) {
+        Ok(data) => data,
+        Err(_) => {
+            return compression_empty(py, "os_error", "xz", ".xz", header.starts_with(XZ_MAGIC))
+        }
+    };
+    let (tail_start, tail) = read_suffix(path, file_size, STREAM_STRUCTURE_TAIL_BYTES)
+        .unwrap_or((file_size, Vec::new()));
+    let magic = data.starts_with(XZ_MAGIC);
+    let d = compression_base(py, "xz", ".xz", magic)?;
+    let mut damage_flags = Vec::new();
+    d.set_item("validation_scope", "bounded_structure")?;
+    d.set_item("validation_complete", false)?;
+    d.set_item(
+        "stream.header.magic",
+        hex_bytes(data.get(..6).unwrap_or(&[])),
+    )?;
+    if data.len() < 12 || !magic {
+        d.set_item("error", "xz_header_missing")?;
+        d.set_item("damage_flags", PyList::new(py, damage_flags)?)?;
+        finish_fields(&d, XZ_FIELDS)?;
+        return Ok(d.unbind());
+    }
+    let flags = &data[6..8];
+    let header_crc = u32_le(&data, 8);
+    let header_crc_ok = header_crc == crc32(flags);
+    d.set_item("stream.header.flags", hex_bytes(flags))?;
+    d.set_item(
+        "stream.header.crc32",
+        format!(
+            "stored={header_crc};computed={};ok={header_crc_ok}",
+            crc32(flags)
+        ),
+    )?;
+    if !header_crc_ok {
+        damage_flags.push("xz_header_crc_bad");
+    }
+    let footer_local = (10..tail.len()).rev().find_map(|magic_end| {
+        if tail.get(magic_end - 1..=magic_end) != Some(b"YZ".as_slice()) || magic_end + 1 < 12 {
+            return None;
+        }
+        let start = magic_end + 1 - 12;
+        let footer = &tail[start..start + 12];
+        (u32_le(footer, 0) == crc32(&footer[4..10])).then_some(start)
+    });
+    let mut footer_valid = false;
+    let mut trailing = 0u64;
+    if let Some(local_start) = footer_local {
+        let footer = &tail[local_start..local_start + 12];
+        let footer_crc = u32_le(footer, 0);
+        let backward_size = (u32_le(footer, 4) as u64 + 1) * 4;
+        footer_valid = footer_crc == crc32(&footer[4..10]) && &footer[8..10] == flags;
+        d.set_item(
+            "stream.footer.crc32",
+            format!(
+                "stored={footer_crc};computed={};ok={}",
+                crc32(&footer[4..10]),
+                footer_crc == crc32(&footer[4..10])
+            ),
+        )?;
+        d.set_item("stream.footer.backward_size", backward_size)?;
+        d.set_item("stream.footer.flags", hex_bytes(&footer[8..10]))?;
+        d.set_item("stream.footer.magic", hex_bytes(&footer[10..12]))?;
+        let after_footer = local_start + 12;
+        let zero_padding = tail[after_footer..].iter().take_while(|b| **b == 0).count();
+        let aligned_padding = zero_padding - zero_padding % 4;
+        d.set_item("stream.padding", aligned_padding)?;
+        let global_after_padding = tail_start + (after_footer + aligned_padding) as u64;
+        trailing = file_size.saturating_sub(global_after_padding);
+        if &footer[8..10] != flags {
+            damage_flags.push("xz_stream_flags_mismatch");
+        }
+    }
+    if data.len() >= 14 {
+        let block_cursor = 12usize;
+        let header_size = (data[block_cursor] as usize + 1) * 4;
+        if header_size >= 8 && block_cursor + header_size <= data.len() {
+            let block_flags = data[block_cursor + 1];
+            d.set_item("block.header.size", header_size)?;
+            d.set_item("block.header.flags", block_flags)?;
+            d.set_item(
+                "block.header.crc32",
+                format!(
+                    "stored={};computed={}",
+                    u32_le(&data, block_cursor + header_size - 4),
+                    crc32(&data[block_cursor..block_cursor + header_size - 4])
+                ),
+            )?;
+            d.set_item("block.header.filters", "bounded_header")?;
+        }
+    }
+    d.set_item("block.header.compressed_size", 0)?;
+    d.set_item("block.header.uncompressed_size", 0)?;
+    d.set_item("block.compressed_data", file_size)?;
+    d.set_item("block.uncompressed_data", 0)?;
+    d.set_item("block.padding", 0)?;
+    d.set_item(
+        "block.check",
+        format!(
+            "type={};size={}",
+            flags[1] & 0x0f,
+            xz_check_size(flags[1] & 0x0f)
+        ),
+    )?;
+    d.set_item("block.sequence", 1)?;
+    d.set_item("index.indicator", footer_local.is_some())?;
+    d.set_item("index.record_count", 0)?;
+    d.set_item("index.records.unpadded_size", 0)?;
+    d.set_item("index.records.uncompressed_size", 0)?;
+    d.set_item("index.padding", 0)?;
+    d.set_item("index.crc32", "deferred")?;
+    d.set_item("archive.stream_sequence", 1)?;
+    d.set_item("archive.trailing_data", trailing)?;
+    d.set_item("trailing_data_verified", footer_local.is_some())?;
+    if trailing > 0 {
+        damage_flags.push("trailing_junk");
+    }
+    let valid = magic && header_crc_ok && footer_valid;
+    d.set_item("plausible", valid)?;
+    d.set_item("confidence", if valid { "medium" } else { "weak" })?;
+    if footer_local.is_none() {
+        d.set_item("error", "xz_footer_not_in_bounded_tail")?;
+    }
+    d.set_item("damage_flags", PyList::new(py, damage_flags)?)?;
+    d.set_item("file_size", file_size)?;
+    finish_fields(&d, XZ_FIELDS)?;
+    Ok(d.unbind())
+}
+
 fn inspect_xz(py: Python<'_>, path: &str, header: &[u8], file_size: u64) -> PyResult<Py<PyDict>> {
+    if file_size > FULL_STREAM_STRUCTURE_MAX_BYTES {
+        return inspect_xz_bounded(py, path, header, file_size);
+    }
     let data = match std::fs::read(path) {
         Ok(data) => data,
         Err(_) => {
@@ -682,9 +1078,12 @@ fn inspect_xz(py: Python<'_>, path: &str, header: &[u8], file_size: u64) -> PyRe
         format!("type={};size={check_size}", flags[1] & 0x0f),
     )?;
     d.set_item("block.sequence", block_count)?;
-    let mut decoder = xz2::read::XzDecoder::new(Cursor::new(data.as_slice()));
+    let decoder = xz2::read::XzDecoder::new(Cursor::new(data.as_slice()));
+    let mut limited_decoder = decoder.take(STREAM_STRUCTURE_DECODE_MAX_BYTES + 1);
     let mut decoded = Vec::new();
-    let decode_ok = decoder.read_to_end(&mut decoded).is_ok();
+    let decode_status = limited_decoder.read_to_end(&mut decoded);
+    let decode_limited = decoded.len() as u64 > STREAM_STRUCTURE_DECODE_MAX_BYTES;
+    let decode_ok = decode_status.is_ok() && !decode_limited;
     d.set_item("block.uncompressed_data", decoded.len())?;
     let stream_count = data.windows(6).filter(|w| *w == XZ_MAGIC).count();
     d.set_item("archive.stream_sequence", stream_count)?;
@@ -697,8 +1096,11 @@ fn inspect_xz(py: Python<'_>, path: &str, header: &[u8], file_size: u64) -> PyRe
     if trailing > 0 {
         damage_flags.push("trailing_junk");
     }
-    let valid =
-        decode_ok && &footer[10..12] == b"YZ" && &footer[8..10] == flags && index_valid_start;
+    let valid = (decode_ok || decode_limited)
+        && &footer[10..12] == b"YZ"
+        && &footer[8..10] == flags
+        && index_valid_start;
+    d.set_item("validation_complete", decode_ok)?;
     d.set_item("plausible", valid)?;
     d.set_item("confidence", if valid { "strong" } else { "medium" })?;
     if !valid {
@@ -872,7 +1274,16 @@ fn inspect_zstd(py: Python<'_>, path: &str, header: &[u8], file_size: u64) -> Py
         d.set_item("frame.content_checksum", "absent")?;
     }
     let mut decoded = Vec::new();
-    let decode_ok = zstd::stream::copy_decode(Cursor::new(&data[..cursor]), &mut decoded).is_ok();
+    let (decode_ok, decode_limited) =
+        match zstd::stream::read::Decoder::new(Cursor::new(&data[..cursor])) {
+            Ok(decoder) => {
+                let mut limited_decoder = decoder.take(STREAM_STRUCTURE_DECODE_MAX_BYTES + 1);
+                let status = limited_decoder.read_to_end(&mut decoded);
+                let limited = decoded.len() as u64 > STREAM_STRUCTURE_DECODE_MAX_BYTES;
+                (status.is_ok() && !limited, limited)
+            }
+            Err(_) => (false, false),
+        };
     d.set_item("frame.decoded_content", decoded.len())?;
     d.set_item(
         "frame.sequence",
@@ -902,7 +1313,8 @@ fn inspect_zstd(py: Python<'_>, path: &str, header: &[u8], file_size: u64) -> Py
     if trailing > 0 {
         damage_flags.push("trailing_junk");
     }
-    let valid = decode_ok && last && descriptor & 0x08 == 0;
+    let valid = (decode_ok || decode_limited) && last && descriptor & 0x08 == 0;
+    d.set_item("validation_complete", decode_ok)?;
     d.set_item("plausible", valid)?;
     d.set_item("confidence", if valid { "strong" } else { "medium" })?;
     if descriptor & 0x08 != 0 {

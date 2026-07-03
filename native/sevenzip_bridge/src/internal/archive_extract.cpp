@@ -378,6 +378,8 @@ ExtractArchiveResult extract_archive_internal(
 
             result.item_count = num_items;
 
+            result.output_trace.items.reserve(num_items);
+
         }
 
         if (!codepage.empty()) {

@@ -252,6 +252,10 @@ begin
     Log('Failed to start existing SunPack watch stop command: ' + ExistingApp)
   else if ResultCode <> 0 then
     Log(Format('Existing SunPack watch stop command exited with code %d', [ResultCode]));
+  if not Exec(ExistingApp, '--persistent-shutdown', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+    Log('Failed to stop existing SunPack persistent process: ' + ExistingApp)
+  else if ResultCode <> 0 then
+    Log(Format('Existing SunPack persistent shutdown exited with code %d', [ResultCode]));
 end;
 
 function WaitForExistingWatchToExit: Boolean;

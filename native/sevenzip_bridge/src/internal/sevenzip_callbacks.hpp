@@ -16,6 +16,10 @@
 
 #include <cstddef>
 
+#include <cstring>
+
+#include <cwctype>
+
 #include <filesystem>
 
 #include <map>
@@ -23,6 +27,8 @@
 #include <optional>
 
 #include <string>
+
+#include <unordered_set>
 
 #include <utility>
 
@@ -39,20 +45,41 @@ namespace sunpack::sevenzip {
 #ifdef _WIN32
 
 inline UInt32 update_crc32(UInt32 crc, const void* data, std::size_t size) {
-    static const std::array<UInt32, 256> table = [] {
-        std::array<UInt32, 256> values{};
-        for (UInt32 index = 0; index < values.size(); ++index) {
+    static const std::array<std::array<UInt32, 256>, 8> tables = [] {
+        std::array<std::array<UInt32, 256>, 8> values{};
+        for (UInt32 index = 0; index < 256; ++index) {
             UInt32 value = index;
             for (int bit = 0; bit < 8; ++bit) {
                 value = (value >> 1) ^ ((value & 1) ? 0xEDB88320U : 0U);
             }
-            values[index] = value;
+            values[0][index] = value;
+        }
+        for (std::size_t slice = 1; slice < values.size(); ++slice) {
+            for (std::size_t index = 0; index < 256; ++index) {
+                const UInt32 previous = values[slice - 1][index];
+                values[slice][index] = values[0][previous & 0xFFU] ^ (previous >> 8);
+            }
         }
         return values;
     }();
     const auto* bytes = static_cast<const unsigned char*>(data);
-    for (std::size_t index = 0; index < size; ++index) {
-        crc = table[(crc ^ bytes[index]) & 0xFFU] ^ (crc >> 8);
+    while (size >= 8) {
+        UInt32 first = 0;
+        std::memcpy(&first, bytes, sizeof(first));
+        first ^= crc;
+        crc = tables[7][first & 0xFFU]
+            ^ tables[6][(first >> 8) & 0xFFU]
+            ^ tables[5][(first >> 16) & 0xFFU]
+            ^ tables[4][(first >> 24) & 0xFFU]
+            ^ tables[3][bytes[4]]
+            ^ tables[2][bytes[5]]
+            ^ tables[1][bytes[6]]
+            ^ tables[0][bytes[7]];
+        bytes += 8;
+        size -= 8;
+    }
+    while (size-- > 0) {
+        crc = tables[0][(crc ^ *bytes++) & 0xFFU] ^ (crc >> 8);
     }
     return crc;
 }
@@ -734,6 +761,24 @@ inline std::filesystem::path browser_style_available_path(const std::filesystem:
     }
 }
 
+inline bool directory_is_empty_or_missing(const std::filesystem::path& path) {
+    std::error_code error;
+    if (!std::filesystem::exists(path, error)) {
+        return !error;
+    }
+    error.clear();
+    const bool empty = std::filesystem::is_empty(path, error);
+    return !error && empty;
+}
+
+inline std::wstring normalized_output_path_key(const std::filesystem::path& path) {
+    auto key = path.lexically_normal().wstring();
+    std::transform(key.begin(), key.end(), key.begin(), [](wchar_t value) {
+        return static_cast<wchar_t>(std::towlower(value));
+    });
+    return key;
+}
+
 
 
 inline std::optional<std::filesystem::path> safe_relative_item_path(const std::wstring& raw_name) {
@@ -818,7 +863,11 @@ public:
 
         dry_run_(dry_run),
 
-        output_trace_(output_trace) {}
+        output_trace_(output_trace),
+
+        output_root_(win32_extended_path(output_dir_)),
+
+        output_root_initially_empty_(directory_is_empty_or_missing(output_root_)) {}
 
 
 
@@ -1031,15 +1080,13 @@ public:
         std::filesystem::path target;
         try {
 
-            const auto output_root = std::filesystem::path(win32_extended_path(output_dir_));
-
             if (is_dir) {
 
                 if (!dry_run_) {
 
-                    target = output_root / safe_path.value();
+                    target = output_root_ / safe_path.value();
 
-                    std::filesystem::create_directories(target);
+                    ensure_directory(target);
 
                 }
 
@@ -1051,13 +1098,13 @@ public:
 
             if (!dry_run_) {
 
-                target = browser_style_available_path(output_root / safe_path.value());
+                target = available_output_path(output_root_ / safe_path.value());
 
-                std::filesystem::create_directories(target.parent_path());
+                ensure_directory(target.parent_path());
 
                 if (output_trace_ && current_trace_index_ < output_trace_->items.size()) {
 
-                    output_trace_->items[current_trace_index_].output_path = target.lexically_relative(output_root).generic_wstring();
+                    output_trace_->items[current_trace_index_].output_path = target.lexically_relative(output_root_).generic_wstring();
 
                 }
 
@@ -1169,6 +1216,25 @@ public:
 
 
 private:
+
+    std::filesystem::path available_output_path(const std::filesystem::path& requested) {
+        const auto requested_key = normalized_output_path_key(requested);
+        if (output_root_initially_empty_ && used_output_paths_.insert(requested_key).second) {
+            return requested;
+        }
+        auto candidate = browser_style_available_path(requested);
+        while (!used_output_paths_.insert(normalized_output_path_key(candidate)).second) {
+            candidate = browser_style_available_path(candidate);
+        }
+        return candidate;
+    }
+
+    void ensure_directory(const std::filesystem::path& directory) {
+        const auto key = normalized_output_path_key(directory);
+        if (created_directories_.insert(key).second) {
+            std::filesystem::create_directories(directory);
+        }
+    }
 
     void begin_item_trace(
         UInt32 index,
@@ -1312,6 +1378,14 @@ private:
     bool dry_run_ = false;
 
     ExtractOutputTrace* output_trace_ = nullptr;
+
+    std::filesystem::path output_root_;
+
+    bool output_root_initially_empty_ = false;
+
+    std::unordered_set<std::wstring> used_output_paths_;
+
+    std::unordered_set<std::wstring> created_directories_;
 
     UInt64 completed_bytes_ = 0;
 

@@ -9,6 +9,11 @@ def _main():
     if getattr(sys, "frozen", False) and Path(sys.executable).name.lower() == "sunpack-watch.exe":
         from sunpack.gui.main import main
     else:
+        from sunpack.cli.persistent_process import handle_early_argv
+
+        early_result = handle_early_argv(sys.argv[1:])
+        if early_result is not None:
+            return early_result
         from sunpack.cli.cli import main
     return main()
 

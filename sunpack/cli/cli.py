@@ -98,6 +98,12 @@ def main(argv=None):
     global CURRENT_CLI_LANG
     if argv is None:
         argv = sys.argv[1:]
+    if argv and argv[0] in {"--reuse", "--persistent-shutdown"}:
+        from sunpack.cli.persistent_process import handle_early_argv
+
+        result = handle_early_argv(list(argv))
+        if result is not None:
+            return result
 
     configure_stdio_encoding()
     argv = preprocess_sys_argv(argv)

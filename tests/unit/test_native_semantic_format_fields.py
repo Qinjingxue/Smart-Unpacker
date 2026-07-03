@@ -111,3 +111,25 @@ def test_native_stream_parsers_report_trailing_data(tmp_path, fmt, compress, suf
         "knowledge_payload": {"format": {fmt: {"structure": result}}},
     })
     assert sample.labels.root_case_labels == ["trailing_junk"]
+
+
+@pytest.mark.parametrize(
+    ("compress", "suffix"),
+    [
+        (gzip.compress, ".gz"),
+        (bz2.compress, ".bz2"),
+        (lambda data: lzma.compress(data, format=lzma.FORMAT_XZ), ".xz"),
+        (zstandard.ZstdCompressor().compress, ".zst"),
+    ],
+)
+def test_native_stream_structure_decode_is_bounded_for_high_ratio_input(tmp_path, compress, suffix):
+    path = tmp_path / f"bounded{suffix}"
+    path.write_bytes(compress(b"A" * (10 * 1024 * 1024)))
+
+    result = sunpack_native.inspect_compression_stream_structure(str(path))
+
+    assert result["plausible"] is True
+    assert result["validation_complete"] is False
+    assert not {"gzip_footer_bad", "bzip2_block_bad", "xz_structural_validation_failed", "zstd_frame_bad"}.intersection(
+        result["damage_flags"]
+    )

@@ -2,6 +2,7 @@ from dataclasses import replace
 from contextlib import nullcontext
 import json
 from pathlib import Path
+import threading
 from typing import TYPE_CHECKING, Any
 
 from sunpack.contracts.archive_state import ArchiveState
@@ -48,9 +49,24 @@ class RepairScheduler:
             enabled=bool(cache_config["enabled"]),
             max_entries=int(cache_config["max_entries"]),
         )
-        self.model_runtime = self._build_model_runtime()
+        self._model_runtime = None
+        self._model_runtime_lock = threading.Lock()
         discover_repair_modules()
         self._validate_configured_modules()
+
+    @property
+    def model_runtime(self) -> "RepairModelRuntime":
+        runtime = self._model_runtime
+        if runtime is not None:
+            return runtime
+        with self._model_runtime_lock:
+            if self._model_runtime is None:
+                self._model_runtime = self._build_model_runtime()
+            return self._model_runtime
+
+    @model_runtime.setter
+    def model_runtime(self, runtime: "RepairModelRuntime") -> None:
+        self._model_runtime = runtime
 
     def _build_model_runtime(self) -> "RepairModelRuntime":
         from sunpack.repair.model.runtime import RepairModelRuntime
