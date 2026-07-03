@@ -814,10 +814,15 @@ class WatchScheduler:
         predicted_final_dirs: list[str],
         workspace: str,
     ) -> tuple[list[str], dict[str, str]]:
-        sources = [
+        reported_sources = [
             path
             for path in _dedupe_paths(probe_outputs)
             if os.path.isdir(path) and _is_relative_to(path, workspace)
+        ]
+        sources = [
+            path
+            for path in reported_sources
+            if not any(path != parent and _is_relative_to(path, parent) for parent in reported_sources)
         ]
         promoted: list[str] = []
         path_map: dict[str, str] = {}
@@ -836,6 +841,9 @@ class WatchScheduler:
                 shutil.move(source, target)
             promoted.append(target)
             path_map[source] = target
+            for reported in reported_sources:
+                if reported != source and _is_relative_to(reported, source):
+                    path_map[reported] = os.path.join(target, os.path.relpath(reported, source))
         self._cleanup_probe_workspace(workspace)
         return promoted, path_map
 

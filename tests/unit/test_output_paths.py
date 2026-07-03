@@ -43,3 +43,18 @@ def test_default_output_dir_avoids_existing_same_name_file(tmp_path):
     (tmp_path / "sample").write_text("existing", encoding="utf-8")
 
     assert default_output_dir_for_task(_task(archive)) == str(tmp_path / "sample_extracted")
+
+
+def test_nested_archive_under_output_root_keeps_generated_parent(tmp_path):
+    input_root = tmp_path / "downloads"
+    output_root = tmp_path / "probe" / "work"
+    nested_archive = output_root / "outer" / "inner.zip"
+    nested_archive.parent.mkdir(parents=True)
+    nested_archive.write_bytes(b"zip")
+
+    result = default_output_dir_for_task(
+        _task(nested_archive),
+        {"root": str(output_root), "common_root": str(input_root)},
+    )
+
+    assert result == str(output_root / "outer" / "inner")

@@ -3,8 +3,11 @@ import threading
 
 import pytest
 
+import sunpack.coordinator.engine as engine_module
 from sunpack.config.schema import normalize_config
 from sunpack.contracts.extraction import ExtractionResult
+from sunpack.contracts.pipeline import PipelineArtifacts, PipelineResponse
+from sunpack.contracts.results import RunSummary
 from sunpack.coordinator.engine import PipelineEngine
 from sunpack.filesystem.watcher.scheduler import WatchScheduler
 from tests.helpers.detection_config import with_detection_pipeline
@@ -23,6 +26,36 @@ def _config(**pipeline):
     }, scoring=[
         {"name": "extension", "enabled": True, "extension_score_groups": [{"score": 5, "extensions": [".zip"]}]},
     ]))
+
+
+def test_finalize_remaps_nested_cleanup_and_flatten_paths_with_promoted_parent(tmp_path, monkeypatch):
+    probe_outer = tmp_path / "probe" / "outer"
+    final_outer = tmp_path / "downloads" / "outer"
+    captured = {}
+
+    class FakePostProcessActions:
+        def __init__(self, _config):
+            pass
+
+        def apply(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr(engine_module, "PostProcessActions", FakePostProcessActions)
+    engine = object.__new__(PipelineEngine)
+    engine.config = {}
+    response = PipelineResponse(
+        request_id="request",
+        summary=RunSummary(success_count=1, failed_tasks=[], processed_keys=[]),
+        artifacts=PipelineArtifacts(
+            archives_to_clean=((str(probe_outer / "inner.7z"),),),
+            flatten_targets=(str(probe_outer / "inner"),),
+        ),
+    )
+
+    engine.finalize(response, output_path_map={str(probe_outer): str(final_outer)})
+
+    assert captured["archives_to_clean"] == [[str(final_outer / "inner.7z")]]
+    assert captured["flatten_targets"] == [str(final_outer / "inner")]
 
 
 def test_engine_micro_batches_independent_submissions_and_keeps_results_isolated(tmp_path, monkeypatch):

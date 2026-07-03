@@ -174,9 +174,28 @@ class PipelineEngine:
             path_key(old): os.path.abspath(new)
             for old, new in (output_path_map or {}).items()
         }
-        flatten_targets = [mapping.get(path_key(path), path) for path in response.artifacts.flatten_targets]
+        def remap(path: str) -> str:
+            normalized = os.path.abspath(path)
+            exact = mapping.get(path_key(normalized))
+            if exact:
+                return exact
+            ancestors = [
+                (old, new)
+                for old, new in (output_path_map or {}).items()
+                if _is_relative_to(normalized, old)
+            ]
+            if not ancestors:
+                return path
+            old, new = max(ancestors, key=lambda item: len(os.path.abspath(item[0])))
+            return os.path.join(os.path.abspath(new), os.path.relpath(normalized, os.path.abspath(old)))
+
+        archives_to_clean = [
+            [remap(path) for path in archive_parts]
+            for archive_parts in response.artifacts.archives_to_clean
+        ]
+        flatten_targets = [remap(path) for path in response.artifacts.flatten_targets]
         PostProcessActions(self.config).apply(
-            archives_to_clean=response.artifacts.archives_to_clean,
+            archives_to_clean=archives_to_clean,
             flatten_targets=flatten_targets,
         )
 

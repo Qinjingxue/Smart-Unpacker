@@ -140,6 +140,34 @@ def test_partial_result_does_not_self_retry_but_modified_epoch_does(tmp_path, mo
     assert list(probe_root.iterdir()) == []
 
 
+def test_probe_promotion_keeps_nested_outputs_inside_outer_directory(tmp_path):
+    watch_root = tmp_path / "downloads"
+    watch_root.mkdir()
+    watcher = WatchScheduler(
+        {"watch": {"clipboard_monitor_enabled": False}},
+        [str(watch_root)],
+        out_dir=str(watch_root),
+        state_path=str(tmp_path / "state.json"),
+        initial_scan=False,
+    )
+    workspace = Path(watcher._prepare_probe_workspace(str(watch_root / "outer.zip")))
+    outer = workspace / "outer"
+    inner = outer / "inner"
+    inner.mkdir(parents=True)
+    (inner / "payload.bin").write_bytes(b"payload")
+
+    promoted, path_map = watcher._promote_probe_outputs(
+        [str(outer), str(inner)],
+        [str(watch_root / "outer")],
+        str(workspace),
+    )
+
+    assert promoted == [str(watch_root / "outer")]
+    assert path_map[str(inner)] == str(watch_root / "outer" / "inner")
+    assert (watch_root / "outer" / "inner" / "payload.bin").is_file()
+    assert not (watch_root / "inner").exists()
+
+
 def test_content_event_during_processing_starts_a_new_active_epoch(tmp_path, monkeypatch):
     monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
     archive = tmp_path / "sample.zip"

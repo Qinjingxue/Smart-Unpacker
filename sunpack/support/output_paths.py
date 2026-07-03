@@ -11,7 +11,11 @@ def default_output_dir_for_task(task: ArchiveTask, output_config: dict | None = 
     if output_config.get("root"):
         output_root = os.path.abspath(os.path.normpath(str(output_config.get("root"))))
         common_root = output_config.get("common_root")
-        relative_parent = _relative_parent(path, common_root)
+        # Recursive archives are created below the configured output root.  In
+        # that case their output must stay beside the generated archive instead
+        # of being relativized against the original input root.
+        relative_root = output_root if _is_relative_to(os.path.dirname(path), output_root) else common_root
+        relative_parent = _relative_parent(path, relative_root)
         out_dir = os.path.join(output_root, relative_parent, os.path.basename(out_name))
     else:
         out_dir = os.path.join(os.path.dirname(path), os.path.basename(out_name))
@@ -40,6 +44,13 @@ def _safe_path_component(value: str) -> str:
     drive, tail = os.path.splitdrive(os.path.abspath(value))
     text = (drive.rstrip(":") + "_" + tail.strip(os.sep)).strip("_")
     return "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in text) or "input"
+
+
+def _is_relative_to(path: str, root: str) -> bool:
+    try:
+        return os.path.commonpath((os.path.abspath(path), os.path.abspath(root))) == os.path.abspath(root)
+    except ValueError:
+        return False
 
 
 def _non_existing_output_dir(path: str) -> str:
