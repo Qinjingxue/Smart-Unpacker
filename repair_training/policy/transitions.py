@@ -188,7 +188,10 @@ def _collect_one(index: int, row: dict[str, Any], format_name: str, budget: dict
     try:
         for episode_index in range(episodes_per_archive):
             policy = EXPLORATION_POLICIES[episode_index % len(EXPLORATION_POLICIES)]
-            episode = _run_episode(ctx, row, row_index=index, format_name=format_name, episode_index=episode_index, exploration_policy=policy, max_steps=max_steps)
+            row_format = str(row.get("format") or format_name)
+            if format_name not in {"shared", "mixed", "all", "auto"}:
+                row_format = format_name
+            episode = _run_episode(ctx, row, row_index=index, format_name=row_format, episode_index=episode_index, exploration_policy=policy, max_steps=max_steps)
             output.extend(annotate_episode_future_best_q(episode))
     finally:
         ctx.close()

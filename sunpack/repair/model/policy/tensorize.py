@@ -6,9 +6,11 @@ from sunpack.repair.model.policy.schema import PolicyAction, PolicyGraphTraining
 from sunpack.support.hash_features import hash_unit as _hash_unit
 
 
-NODE_FEATURE_DIM = 55
+POLICY_FORMATS = ("zip", "seven_zip", "rar", "tar", "gzip", "bzip2", "xz", "zstd")
+FORMAT_FEATURE_DIM = len(POLICY_FORMATS)
+NODE_FEATURE_DIM = 55 + FORMAT_FEATURE_DIM
 EDGE_FEATURE_DIM = 19
-ACTION_FEATURE_DIM = 72
+ACTION_FEATURE_DIM = 72 + FORMAT_FEATURE_DIM + 1
 MEMORY_FEATURE_DIM = 17
 WORLD_BASE_TARGET_DIM = 6
 WORLD_RECOVERY_TARGET_DIM = 11
@@ -33,7 +35,8 @@ def tensorize_sample(sample: PolicyGraphTrainingSample) -> dict[str, Any]:
 
     nodes = _nodes(sample.graph)
     graph_context = _graph_context(sample.graph, sample)
-    node_features = [_node_features(node_id, node, sample, graph_context) for node_id, node in nodes]
+    format_features = _policy_format_features(sample.format)
+    node_features = [_node_features(node_id, node, sample, graph_context) + format_features for node_id, node in nodes]
     if not node_features:
         node_features = [[0.0] * NODE_FEATURE_DIM]
     edge_features = [_edge_features(edge, sample) for _edge_id, edge in _edges(sample.graph)]
@@ -41,7 +44,12 @@ def tensorize_sample(sample: PolicyGraphTrainingSample) -> dict[str, Any]:
         edge_features = [[0.0] * EDGE_FEATURE_DIM]
     actions = sample.actions
     action_context = _action_context(sample)
-    action_features = [_action_features(action, index, action_context) for index, action in enumerate(actions)]
+    action_features = [
+        _action_features(action, index, action_context)
+        + format_features
+        + [1.0 if _action_format_legal(action, sample.format) else 0.0]
+        for index, action in enumerate(actions)
+    ]
     if not action_features:
         action_features = [[0.0] * ACTION_FEATURE_DIM]
     memory_features = [_memory_features(item, index) for index, item in enumerate(sample.memory[-64:])]
@@ -67,8 +75,31 @@ def tensorize_sample(sample: PolicyGraphTrainingSample) -> dict[str, Any]:
         "action_continue_target": torch.tensor([_action_continue_target(action, continue_branch) for action in actions] or [0.0], dtype=torch.float32),
         "action_continue_mask": torch.tensor([_action_continue_mask(action, continue_branch) for action in actions] or [0.0], dtype=torch.float32),
         "actions": [action.to_dict() for action in actions],
+        "action_legal_mask": torch.tensor(
+            [1.0 if _action_format_legal(action, sample.format) else 0.0 for action in actions] or [1.0],
+            dtype=torch.float32,
+        ),
+        "format": sample.format,
         "sample_id": sample.sample_id,
     }
+
+
+def _policy_format_features(format_name: str) -> list[float]:
+    normalized = "seven_zip" if str(format_name) in {"7z", "7zip"} else str(format_name)
+    return [1.0 if normalized == name else 0.0 for name in POLICY_FORMATS]
+
+
+def _action_format_legal(action: PolicyAction, format_name: str) -> bool:
+    if action.action_type in {"stop", "undo"}:
+        return True
+    normalized = "seven_zip" if str(format_name) in {"7z", "7zip"} else str(format_name)
+    explicit = action.features.get("formats") or action.features.get("supported_formats")
+    if isinstance(explicit, (list, tuple, set)):
+        allowed = {"seven_zip" if str(item) in {"7z", "7zip"} else str(item) for item in explicit}
+        return normalized in allowed
+    module = str(action.module_name or "")
+    owned = next((name for name in POLICY_FORMATS if module.startswith(f"{name}_")), "")
+    return not owned or owned == normalized
 
 
 def tensorize_world_sample(sample: PolicyWorldTrainingSample) -> dict[str, Any]:

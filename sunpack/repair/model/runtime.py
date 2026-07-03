@@ -147,26 +147,30 @@ class RepairModelRuntime:
             }
 
     def _diagnosis_model(self, fmt: str) -> Any:
-        if fmt not in self._diagnosis_models:
-            asset = self.assets.asset(fmt, "diagnosis")
+        shared_asset = self.assets.asset("shared", "diagnosis")
+        cache_key = "shared" if shared_asset is not None and shared_asset.available else fmt
+        if cache_key not in self._diagnosis_models:
+            asset = shared_asset if cache_key == "shared" else self.assets.asset(fmt, "diagnosis")
             if asset is None or not asset.available:
                 raise RuntimeError("diagnosis model asset is unavailable")
-            self._diagnosis_models[fmt] = DiagnosisGNNModel(
+            self._diagnosis_models[cache_key] = DiagnosisGNNModel(
                 model_dir=asset.model_dir,
                 device=os.environ.get("SUNPACK_MODEL_DEVICE", "auto"),
             )
-        return self._diagnosis_models[fmt]
+        return self._diagnosis_models[cache_key]
 
     def _policy_model(self, fmt: str) -> Any:
-        if fmt not in self._policy_models:
-            asset = self.assets.asset(fmt, "policy")
+        shared_asset = self.assets.asset("shared", "policy")
+        cache_key = "shared" if shared_asset is not None and shared_asset.available else fmt
+        if cache_key not in self._policy_models:
+            asset = shared_asset if cache_key == "shared" else self.assets.asset(fmt, "policy")
             if asset is None or not asset.available:
                 raise RuntimeError("policy model asset is unavailable")
-            self._policy_models[fmt] = RepairPolicyTransformerModel(
+            self._policy_models[cache_key] = RepairPolicyTransformerModel(
                 model_dir=asset.model_dir,
                 device=os.environ.get("SUNPACK_MODEL_DEVICE", "auto"),
             )
-        return self._policy_models[fmt]
+        return self._policy_models[cache_key]
 
 
 def _normalize_diagnosis(value: Any, *, fmt: str) -> dict[str, Any]:

@@ -10,7 +10,9 @@ from sunpack.support.hash_features import hash_unit
 
 
 NODE_TYPES = ("observation", "theory", "cause")
-NODE_FEATURE_DIM = 10
+FORMAT_NAMES = ("zip", "seven_zip", "rar", "tar", "gzip", "bzip2", "xz", "zstd")
+FORMAT_FEATURE_DIM = len(FORMAT_NAMES)
+NODE_FEATURE_DIM = 10 + FORMAT_FEATURE_DIM
 _hash_unit = partial(hash_unit, buckets=1024)
 THEORY_DEPENDS_EDGE_TYPE = ("theory", "theory_depends_on", "theory")
 
@@ -35,7 +37,12 @@ def require_pyg():
         ) from exc
 
 
-def tensorize_sample(sample: DiagnosisGraphSample, *, root_cases: list[str] | tuple[str, ...] | None = None):
+def tensorize_sample(
+    sample: DiagnosisGraphSample,
+    *,
+    root_cases: list[str] | tuple[str, ...] | None = None,
+    root_label_formats: dict[str, list[str]] | None = None,
+):
     require_pyg()
     import torch
     from torch_geometric.data import HeteroData
@@ -49,7 +56,8 @@ def tensorize_sample(sample: DiagnosisGraphSample, *, root_cases: list[str] | tu
         nodes = sorted(nodes_by_type.get(node_type, []), key=lambda item: item.node_id)
         for index, node in enumerate(nodes):
             node_index[node.node_id] = (node_type, index)
-        features = [_node_features(node, layer_index=NODE_TYPES.index(node_type)) for node in nodes]
+        format_features = _format_features(sample.format)
+        features = [_node_features(node, layer_index=NODE_TYPES.index(node_type)) + format_features for node in nodes]
         if not features:
             features = [[0.0] * NODE_FEATURE_DIM]
         data[node_type].x = torch.tensor(features, dtype=torch.float32)
@@ -73,6 +81,12 @@ def tensorize_sample(sample: DiagnosisGraphSample, *, root_cases: list[str] | tu
         if index is not None:
             root_y[index] = 1.0
     data.root_case_y = torch.tensor(root_y, dtype=torch.float32)
+    allowed = root_label_formats or {}
+    root_mask = [
+        1.0 if not allowed.get(label) or sample.format in allowed.get(label, []) else 0.0
+        for label in root_cases
+    ]
+    data.root_case_mask = torch.tensor(root_mask, dtype=torch.float32)
     evidence_y, evidence_mask = _root_target_vector(sample, "root_evidence_targets", root_cases)
     transition_y, transition_mask = _root_target_vector(sample, "root_transition_gain_targets", root_cases)
     viability_y, viability_mask = _root_target_vector(sample, "root_probe_viability_targets", root_cases)
@@ -108,6 +122,11 @@ def tensorize_sample(sample: DiagnosisGraphSample, *, root_cases: list[str] | tu
             y = [1.0 if edge_id in labels else 0.0 for edge_id in edge_ids_by_type.get(edge_type, [])]
             data[edge_type].edge_label = torch.tensor(y, dtype=torch.float32)
     return data
+
+
+def _format_features(format_name: str) -> list[float]:
+    normalized = "seven_zip" if str(format_name) in {"7z", "7zip"} else str(format_name)
+    return [1.0 if normalized == name else 0.0 for name in FORMAT_NAMES]
 
 
 def metadata_for_sample(sample: DiagnosisGraphSample, *, root_cases: list[str] | tuple[str, ...] | None = None) -> TensorizedGraphMetadata:

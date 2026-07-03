@@ -100,6 +100,7 @@ def train_repair_policy_transformer(
                     item["action_x"].to(resolved_device),
                     item["edge_x"].to(resolved_device),
                 )
+                logits = _mask_action_logits(logits, item, resolved_device)
                 q = item["q"].to(resolved_device).view_as(logits)
                 prior = item["prior"].to(resolved_device).view_as(logits)
                 promising_logit = model.promising_logit(item["node_x"].to(resolved_device), item["memory_x"].to(resolved_device), item["edge_x"].to(resolved_device))
@@ -193,6 +194,7 @@ def _train_world_policy_transformer(
                     item["action_x"].to(resolved_device),
                     item["edge_x"].to(resolved_device),
                 )
+                outputs["action_logits"] = _mask_action_logits(outputs["action_logits"], item, resolved_device)
                 item_loss = _world_loss(item, outputs, config=config, F=F, device=resolved_device)
                 batch_loss = item_loss if batch_loss is None else batch_loss + item_loss
                 batch_used += 1
@@ -550,15 +552,32 @@ def _format_counts(samples: list[Any]) -> dict[str, int]:
 
 
 def _balanced_by_format(samples: list[Any]) -> list[Any]:
-    groups: dict[str, list[Any]] = {}
+    groups: dict[str, dict[tuple[str, str], list[Any]]] = {}
     for sample in samples:
-        groups.setdefault(str(getattr(sample, "format", "") or "unknown"), []).append(sample)
+        fmt = str(getattr(sample, "format", "") or "unknown")
+        source = getattr(sample, "source", {}) or {}
+        damage = str(source.get("damage_family") or source.get("damage_profile") or "unknown")
+        actions = getattr(sample, "actions", None) or getattr(sample, "available_actions", None) or []
+        action_family = ",".join(sorted({
+            str(getattr(action, "features", {}).get("module_family") or getattr(action, "module_name", "") or getattr(action, "action_type", ""))
+            for action in actions
+        })) or "unknown"
+        groups.setdefault(fmt, {}).setdefault((damage, action_family), []).append(sample)
     if len(groups) <= 1:
         return list(samples)
-    width = max(len(group) for group in groups.values())
+    width = max(sum(len(rows) for rows in semantic.values()) for semantic in groups.values())
     balanced: list[Any] = []
     for index in range(width):
         for fmt in sorted(groups):
-            group = groups[fmt]
-            balanced.append(group[index % len(group)])
+            semantic = groups[fmt]
+            keys = sorted(semantic)
+            rows = semantic[keys[index % len(keys)]]
+            balanced.append(rows[(index // len(keys)) % len(rows)])
     return balanced
+
+
+def _mask_action_logits(logits, item: dict[str, Any], device):
+    mask = item.get("action_legal_mask")
+    if mask is None:
+        return logits
+    return logits.masked_fill(mask.to(device).view_as(logits) <= 0, -1e4)

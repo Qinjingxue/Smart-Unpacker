@@ -47,6 +47,7 @@ def normalize_diagnosis_gnn_arch(value: Any) -> str:
         "r_gcn": "rgcn",
         "hetero_rgcn": "rgcn",
         "heterogeneous_graph_transformer": "hgt",
+        "shared_format_hgt": "hgt",
     }
     text = aliases.get(text, text)
     if text not in {"hetero_graphsage", "rgcn", "hgt"}:

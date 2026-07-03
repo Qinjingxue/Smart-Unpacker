@@ -136,6 +136,9 @@ class ModelAssetRegistry:
         format_payload = formats.get(fmt) if isinstance(formats.get(fmt), dict) else {}
         entry = format_payload.get(role)
         if not isinstance(entry, dict):
+            shared_payload = formats.get("shared") if isinstance(formats.get("shared"), dict) else {}
+            entry = shared_payload.get(role)
+        if not isinstance(entry, dict):
             shared = self.payload.get("shared") if isinstance(self.payload.get("shared"), dict) else {}
             entry = shared.get(role)
         return dict(entry) if isinstance(entry, dict) else None

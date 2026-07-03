@@ -54,7 +54,11 @@ class DiagnosisGNNModel:
 
         data_items = []
         for index, sample in enumerate(samples):
-            data = tensorize_sample(sample, root_cases=self.root_labels)
+            data = tensorize_sample(
+                sample,
+                root_cases=self.root_labels,
+                root_label_formats=dict(self.config.get("root_label_formats") or {}),
+            )
             data.sample_index = self.torch.tensor([index], dtype=self.torch.long)
             data_items.append(data)
         metadatas = [metadata_for_sample(sample, root_cases=self.root_labels) for sample in samples]
@@ -83,6 +87,11 @@ class DiagnosisGNNModel:
                     metadata = metadatas[sample_index]
                     sample = samples[sample_index]
                     root_scores = root_scores_all[local_index].tolist()
+                    label_formats = dict(self.config.get("root_label_formats") or {})
+                    root_scores = [
+                        score if not label_formats.get(label) or sample.format in label_formats.get(label, []) else 0.0
+                        for label, score in zip(self.root_labels, root_scores)
+                    ]
                     edge_scores_raw = edge_scores_all[edge_batch == local_index].tolist() if edge_batch is not None else []
                     evidence_scores = evidence_scores_all[local_index].tolist()
                     transition_gain = transition_gain_all[local_index].tolist()
@@ -116,11 +125,15 @@ class DiagnosisGNNModel:
             for label, score in sorted(root_scores.items(), key=lambda item: item[1], reverse=True)
         ]
         threshold = float((self.thresholds.get("root_case") or {}).get("threshold", self.thresholds.get("root_case_threshold", 0.5)))
+        label_thresholds = dict(self.thresholds.get("root_case_label_thresholds") or {})
         return {
             "root_case": {
                 "scores": dict(sorted(root_scores.items())),
                 "ranked": ranked,
-                "selected": [item["root_case"] for item in ranked if float(item["score"]) >= threshold],
+                "selected": [
+                    item["root_case"] for item in ranked
+                    if float(item["score"]) >= float(label_thresholds.get(item["root_case"], threshold))
+                ],
                 "score_semantics": DIAGNOSIS_GNN_SCORE_SEMANTICS,
             },
             "diagnostics": {

@@ -15,7 +15,7 @@ from repair_training.run_store.cleanup import remove_tree_fast
 from repair_training.data.io import read_jsonl, sha256_file, write_json
 from sunpack.repair.model.diagnosis.features import damage_labels_for_row, damage_location_labels_from_target
 from repair_training.data.material import attach_split_volumes
-from repair_training.formats.base import load_training_format_plugin, normalize_format_name
+from repair_training.formats.base import ALL_TRAINING_FORMATS, load_training_format_plugin, normalize_format_name
 from repair_training.run_store.layout import ensure_run_layout
 from repair_training.formats.zip.source_material import (
     DEFAULT_ZIP_V3_DISTRIBUTION,
@@ -55,7 +55,8 @@ SCHEMA_VERSION = 1
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     fmt = normalize_format_name(args.format)
-    load_training_format_plugin(fmt)
+    if fmt not in {"shared", "mixed", "all"}:
+        load_training_format_plugin(fmt)
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
     run_root = output.parents[1] if output.parent.name == "datasets" else output.parent
@@ -291,6 +292,32 @@ def _records_for_args(args: argparse.Namespace, *, workspace: Path) -> list[dict
     if args.manifest:
         return [record for record in read_jsonl(args.manifest) if record.get("damaged_input")]
     fmt = normalize_format_name(args.format)
+    if fmt in {"shared", "mixed", "all"}:
+        requested = tuple(
+            normalize_format_name(item)
+            for item in str(getattr(args, "formats", "") or ",".join(ALL_TRAINING_FORMATS)).split(",")
+            if str(item).strip()
+        )
+        unknown = sorted(set(requested) - set(ALL_TRAINING_FORMATS))
+        if unknown:
+            raise SystemExit(f"unsupported mixed training formats: {', '.join(unknown)}")
+        total_limit = max(0, int(args.limit or 0))
+        per_format_limit = max(1, math.ceil(total_limit / len(requested))) if total_limit else 0
+        groups: dict[str, list[dict[str, Any]]] = {}
+        for index, child_format in enumerate(requested):
+            child = argparse.Namespace(**vars(args))
+            child.format = child_format
+            child.limit = per_format_limit
+            child.seed = str(_seed(args.seed) + index * 1009)
+            groups[child_format] = _records_for_args(child, workspace=workspace / child_format)
+        missing = [fmt for fmt, rows in groups.items() if not rows]
+        if missing:
+            raise SystemExit(
+                "mixed collection produced no records for: " + ", ".join(missing)
+                + "; provide prepared material or use a mixed --manifest"
+            )
+        mixed = _balanced_mixed_records(groups)
+        return mixed[:total_limit] if total_limit else mixed
     if fmt != "zip":
         plugin = load_training_format_plugin(fmt)
         if plugin.generate_collection_records is None:
@@ -307,6 +334,29 @@ def _records_for_args(args: argparse.Namespace, *, workspace: Path) -> list[dict
         limit=max(0, int(args.limit or 0)),
         distribution_path=Path(args.profile_distribution or DEFAULT_ZIP_V3_DISTRIBUTION),
     )
+
+
+def _balanced_mixed_records(groups: dict[str, list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    buckets: dict[str, dict[tuple[str, str], list[dict[str, Any]]]] = {}
+    for fmt, rows in groups.items():
+        semantic: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        for row in rows:
+            damage_family = str(row.get("damage_layer") or row.get("damage_profile") or "unknown")
+            action_family = str(row.get("expected_module") or "unknown").split("_", 1)[0]
+            enriched = dict(row)
+            enriched["mixed_training_balance"] = {
+                "format": fmt, "damage_family": damage_family, "action_family": action_family,
+            }
+            semantic.setdefault((damage_family, action_family), []).append(enriched)
+        buckets[fmt] = semantic
+    output: list[dict[str, Any]] = []
+    while any(any(rows for rows in semantic.values()) for semantic in buckets.values()):
+        for fmt in sorted(buckets):
+            for key in sorted(buckets[fmt]):
+                if buckets[fmt][key]:
+                    output.append(buckets[fmt][key].pop(0))
+                    break
+    return output
 
 
 def _generate_zip_records(
@@ -746,6 +796,7 @@ def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Collect supervised archive damage-analysis rows without repair candidates.")
     parser.add_argument("--format", default="zip")
+    parser.add_argument("--formats", default=",".join(ALL_TRAINING_FORMATS))
     parser.add_argument("--material-root", default=str(Path("repair_training") / "material"))
     parser.add_argument("--manifest", default="")
     parser.add_argument("--output", required=True)

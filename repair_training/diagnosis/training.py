@@ -30,7 +30,7 @@ from sunpack.repair.model.diagnosis.tensorize import (
 
 
 DIAGNOSIS_LABEL_SOURCE = "damage_root_labels"
-DIAGNOSIS_TRAINING_OBJECTIVE = "repair_root_priority_v1"
+DIAGNOSIS_TRAINING_OBJECTIVE = "shared_format_masked_repair_root_priority_v3"
 
 
 DEFAULT_CONFIG = {
@@ -72,7 +72,7 @@ DEFAULT_CONFIG = {
     "score_normalization": "raw",
 }
 
-TENSOR_CACHE_VERSION = "diagnosis_format_expert_tensor_cache_v2"
+TENSOR_CACHE_VERSION = "diagnosis_shared_format_tensor_cache_v3"
 
 
 def train_diagnosis_gnn_model(
@@ -102,11 +102,14 @@ def train_diagnosis_gnn_model(
     root_labels = _cause_label_names(samples)
     config["root_labels"] = root_labels
     config["root_label_count"] = len(root_labels)
+    config["root_label_formats"] = _root_label_formats(samples)
+    config["training_formats"] = sorted({sample.format for sample in samples})
     splits = split_diagnosis_graph_samples(samples)
     metadata = metadata_from_samples(samples)
     resolved_device = _resolve_device(device, torch)
+    balanced_train_samples = _balanced_diagnosis_samples(splits["train"])
     train_data = _tensorize_split(
-        splits["train"],
+        balanced_train_samples,
         split="train",
         input_path=Path(input_path),
         config=config,
@@ -123,7 +126,7 @@ def train_diagnosis_gnn_model(
         input_path=Path(input_path),
         config=config,
     )
-    _attach_graph_weights(train_data, splits["train"], config)
+    _attach_graph_weights(train_data, balanced_train_samples, config)
     _attach_graph_weights(valid_data, splits["valid"], config)
     _attach_graph_weights(test_data, splits["test"], config)
     model = build_diagnosis_gnn_model(metadata=metadata, config=config).to(resolved_device)
@@ -303,6 +306,9 @@ def _eval_loss(model, loader, device, F, *, aux_weight: float, edge_weight: floa
 def _root_case_loss(out: dict[str, Any], batch, F, *, config: dict[str, Any], pos_weight):
     logits = out["root_case"]
     labels = batch.root_case_y.float().view_as(logits)
+    mask = getattr(batch, "root_case_mask", None)
+    if mask is not None:
+        mask = mask.float().view_as(logits)
     loss_kind = str(config.get("loss") or "bce").lower()
     weight = _graph_sample_weights(batch, logits)
     if loss_kind == "weighted_bce":
@@ -319,9 +325,11 @@ def _root_case_loss(out: dict[str, Any], batch, F, *, config: dict[str, Any], po
         )
     else:
         element = F.binary_cross_entropy_with_logits(logits, labels, reduction="none")
+    if mask is not None:
+        element = element * mask
     if weight is not None and weight.numel() == element.numel():
         element = element * weight
-    return element.mean()
+    return element.sum() / (mask.sum().clamp(min=1.0) if mask is not None else max(1, element.numel()))
 
 
 def _theory_loss(out: dict[str, Any], batch, F):
@@ -650,13 +658,14 @@ def _grad_scaler(torch_module, device: str, enabled: bool):
 
 def _tensorize_split(samples: list[DiagnosisGraphSample], *, split: str, input_path: Path, config: dict[str, Any]) -> list[Any]:
     root_labels = [str(item) for item in config.get("root_labels") or ROOT_CASES]
+    root_label_formats = dict(config.get("root_label_formats") or {})
     cache_dir = Path(str(config.get("tensor_cache_dir") or "")) if config.get("tensor_cache_dir") else None
     if cache_dir is None:
-        return [tensorize_sample(sample, root_cases=root_labels) for sample in samples]
+        return [tensorize_sample(sample, root_cases=root_labels, root_label_formats=root_label_formats) for sample in samples]
     try:
         import torch
     except Exception:
-        return [tensorize_sample(sample, root_cases=root_labels) for sample in samples]
+        return [tensorize_sample(sample, root_cases=root_labels, root_label_formats=root_label_formats) for sample in samples]
     cache_dir.mkdir(parents=True, exist_ok=True)
     cache_key = _tensor_cache_key(input_path, split)
     cache_path = cache_dir / f"{cache_key}.pt"
@@ -664,7 +673,7 @@ def _tensorize_split(samples: list[DiagnosisGraphSample], *, split: str, input_p
         loaded = torch.load(cache_path, map_location="cpu", weights_only=False)
         if isinstance(loaded, dict) and loaded.get("version") == TENSOR_CACHE_VERSION:
             return list(loaded.get("items") or [])
-    items = [tensorize_sample(sample, root_cases=root_labels) for sample in samples]
+    items = [tensorize_sample(sample, root_cases=root_labels, root_label_formats=root_label_formats) for sample in samples]
     torch.save({"version": TENSOR_CACHE_VERSION, "items": items}, cache_path)
     return items
 
@@ -984,6 +993,33 @@ def _cause_label_names(samples: list[DiagnosisGraphSample]) -> list[str]:
         if str(label)
     })
     return labels or list(ROOT_CASES)
+
+
+def _root_label_formats(samples: list[DiagnosisGraphSample]) -> dict[str, list[str]]:
+    output: dict[str, set[str]] = {}
+    for sample in samples:
+        for label in sample.labels.root_case_labels:
+            output.setdefault(str(label), set()).add(str(sample.format))
+    return {label: sorted(formats) for label, formats in sorted(output.items())}
+
+
+def _balanced_diagnosis_samples(samples: list[DiagnosisGraphSample]) -> list[DiagnosisGraphSample]:
+    groups: dict[str, dict[str, list[DiagnosisGraphSample]]] = {}
+    for sample in samples:
+        damage = ",".join(sorted(sample.labels.root_case_labels)) or "clean"
+        action = str((sample.source or {}).get("expected_module") or (sample.source or {}).get("action_family") or "unknown")
+        groups.setdefault(sample.format, {}).setdefault(f"{damage}|{action}", []).append(sample)
+    if len(groups) <= 1:
+        return list(samples)
+    width = max(sum(len(rows) for rows in damage.values()) for damage in groups.values())
+    output: list[DiagnosisGraphSample] = []
+    for index in range(width):
+        for fmt in sorted(groups):
+            damage_groups = groups[fmt]
+            keys = sorted(damage_groups)
+            rows = damage_groups[keys[index % len(keys)]]
+            output.append(rows[(index // len(keys)) % len(rows)])
+    return output
 
 
 def _resolve_device(device: str, torch_module) -> str:

@@ -40,6 +40,9 @@ class RepairPolicyTransformerModel:
                 item["edge_x"].to(self.device),
             )
             logits = outputs["action_logits"]
+            legal_mask = item.get("action_legal_mask")
+            if legal_mask is not None:
+                logits = logits.masked_fill(legal_mask.to(self.device).view_as(logits) <= 0, -1e4)
             scores = self.torch.softmax(logits, dim=0).detach().cpu().tolist()
             transition = self.torch.sigmoid(outputs["transition"]).detach().cpu().tolist()
             uncertainty = self.torch.sigmoid(outputs["uncertainty"]).detach().cpu().tolist()
@@ -74,7 +77,11 @@ class RepairPolicyTransformerModel:
                 item["action_x"].to(self.device),
                 item["edge_x"].to(self.device),
             )
-            scores = self.torch.softmax(outputs["action_logits"], dim=0).detach().cpu().tolist()
+            logits = outputs["action_logits"]
+            legal_mask = item.get("action_legal_mask")
+            if legal_mask is not None:
+                logits = logits.masked_fill(legal_mask.to(self.device).view_as(logits) <= 0, -1e4)
+            scores = self.torch.softmax(logits, dim=0).detach().cpu().tolist()
             transition_raw = self.torch.sigmoid(outputs["transition"]).detach().cpu().tolist()
             uncertainty_raw = self.torch.sigmoid(outputs["uncertainty"]).detach().cpu().tolist()
             chosen_index = int(item.get("chosen_action_index", -1))

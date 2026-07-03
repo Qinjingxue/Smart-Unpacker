@@ -7,6 +7,7 @@ import subprocess
 import sys
 
 from repair_training.diagnosis.training import train_diagnosis_gnn_model
+from repair_training.data.io import write_json
 from repair_training.formats.base import load_training_format_plugin, normalize_format_name
 from repair_training.policy.training import train_repair_policy_transformer
 from repair_training.run_store.layout import create_or_resolve_run_dir, ensure_run_layout, write_latest_run
@@ -35,10 +36,8 @@ def train_main(argv: list[str] | None = None) -> int:
     args = _train_parser().parse_args(argv)
     fmt = normalize_format_name(args.format)
     model_type = str(args.model)
-    if model_type == "diagnosis_gnn" or fmt not in {"shared", "mixed", "all"}:
+    if fmt not in {"shared", "mixed", "all"}:
         load_training_format_plugin(fmt)
-    elif model_type != "repair_policy_transformer":
-        raise SystemExit(f"shared format training is only supported for the repair meta-policy: {model_type}")
     if fmt in {"mixed", "all"}:
         fmt = "shared"
     run_dir = Path(args.run_dir).resolve()
@@ -144,12 +143,14 @@ def train_main(argv: list[str] | None = None) -> int:
         )
     else:
         raise SystemExit(f"unsupported model: {args.model}")
+    if fmt == "shared":
+        _write_shared_model_manifest(run_dir)
     print(json.dumps({"format": fmt, "model": model_type, "model_dir": str(model_dir), "metrics": metrics}, ensure_ascii=False, sort_keys=True))
     return 0
 
 
 def _train_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Train format-specific repair training models.")
+    parser = argparse.ArgumentParser(description="Train shared or format-specific repair models.")
     parser.add_argument("--format", default="zip")
     parser.add_argument("--model", choices=["diagnosis_gnn", "repair_policy_transformer"], required=True)
     parser.add_argument("--run-dir", required=True)
@@ -228,9 +229,12 @@ def _bool_arg(value: str) -> bool:
 
 def pipeline_main(argv: list[str] | None = None) -> int:
     args = _pipeline_parser().parse_args(argv)
-    fmt = normalize_format_name(args.format)
-    plugin = load_training_format_plugin(fmt)
-    run_dir = create_or_resolve_run_dir(format_name=fmt, run_name=args.run_name or plugin.default_run_name, run_dir=args.run_dir)
+    requested_fmt = normalize_format_name(args.format)
+    shared = requested_fmt in {"shared", "mixed", "all"}
+    fmt = "shared" if shared else requested_fmt
+    plugin = None if shared else load_training_format_plugin(fmt)
+    default_run_name = "shared_all_formats" if shared else plugin.default_run_name
+    run_dir = create_or_resolve_run_dir(format_name=fmt, run_name=args.run_name or default_run_name, run_dir=args.run_dir)
     ensure_run_layout(run_dir)
     stages = [item.strip() for item in args.stage.split(",") if item.strip()]
     for stage in stages:
@@ -238,16 +242,20 @@ def pipeline_main(argv: list[str] | None = None) -> int:
             command = [
                 sys.executable, "-m", "repair_training.data.collection",
                 "--format", fmt,
+                "--formats", args.formats,
                 "--material-root", str(Path(args.material_root)),
                 "--output", str(run_dir / "datasets" / "damage_rows.jsonl"),
                 "--failure-output", str(run_dir / "reports" / "collection_failures.jsonl"),
                 "--summary-output", str(run_dir / "reports" / "collection_summary.json"),
                 "--workspace", str(run_dir / "workspace" / "collection"),
+                "--keep-workspace",
                 "--workers", str(args.workers),
                 "--limit", str(args.limit),
                 "--per-source", str(args.per_source),
                 "--seed", str(args.seed),
             ]
+            if args.manifest:
+                command.extend(["--manifest", str(Path(args.manifest))])
             _run_pipeline_command(command)
         elif stage in {"graphs", "graphs:diagnosis_gnn"}:
             input_path = Path(args.input) if args.input else run_dir / "datasets" / "damage_rows.jsonl"
@@ -301,6 +309,8 @@ def pipeline_main(argv: list[str] | None = None) -> int:
         else:
             raise SystemExit(f"unknown pipeline stage: {stage}")
     write_latest_run(fmt, run_dir)
+    if shared:
+        _write_shared_model_manifest(run_dir)
     print(json.dumps({"format": fmt, "run_dir": str(run_dir), "stages": stages}, ensure_ascii=False, sort_keys=True))
     return 0
 
@@ -308,6 +318,7 @@ def pipeline_main(argv: list[str] | None = None) -> int:
 def _pipeline_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run the repair diagnosis and policy model training pipeline.")
     parser.add_argument("--format", default="zip")
+    parser.add_argument("--formats", default="zip,seven_zip,rar,tar,gzip,bzip2,xz,zstd")
     parser.add_argument("--run-dir", default="")
     parser.add_argument("--run-name", default="")
     parser.add_argument("--model", choices=["", "diagnosis_gnn", "repair_policy_transformer"], default="")
@@ -317,6 +328,7 @@ def _pipeline_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--input", default="")
     parser.add_argument("--material-root", default=str(Path("repair_training") / "material"))
+    parser.add_argument("--manifest", default="", help="Optional prebuilt mixed damage manifest.")
     parser.add_argument("--workers", type=int, default=1)
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--per-source", type=int, default=0)
@@ -326,6 +338,18 @@ def _pipeline_parser() -> argparse.ArgumentParser:
 
 def _run_pipeline_command(command: list[str]) -> None:
     subprocess.run(command, check=True)
+
+
+def _write_shared_model_manifest(run_dir: Path) -> None:
+    diagnosis_dir = (run_dir / "models" / "diagnosis_gnn").resolve()
+    policy_dir = (run_dir / "models" / "repair_policy_transformer").resolve()
+    shared: dict[str, dict[str, str]] = {}
+    if (diagnosis_dir / "model.pt").is_file():
+        shared["diagnosis"] = {"packaged_path": str(diagnosis_dir), "model_type": "diagnosis_gnn"}
+    if (policy_dir / "model.pt").is_file():
+        shared["policy"] = {"packaged_path": str(policy_dir), "model_type": "repair_policy_transformer"}
+    if shared:
+        write_json(run_dir / "models" / "model_manifest.json", {"formats": {"shared": shared}})
 
 
 if __name__ == "__main__":

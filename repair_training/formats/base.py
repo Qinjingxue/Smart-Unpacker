@@ -6,6 +6,9 @@ from pathlib import Path
 from typing import Any, Callable
 
 
+ALL_TRAINING_FORMATS = ("zip", "seven_zip", "rar", "tar", "gzip", "bzip2", "xz", "zstd")
+
+
 @dataclass(frozen=True)
 class TrainingFeatureSpec:
     include_prefixes: tuple[str, ...] = ()

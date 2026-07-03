@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from repair_training.formats.base import TrainingFeatureSpec, TrainingFormatPlugin, TrainingLabelSchema
+from repair_training.data.io import read_jsonl
 from repair_training.data.taxonomy import SEVEN_ZIP_DAMAGE_FAMILIES
 
 
@@ -37,7 +38,23 @@ def get_training_plugin() -> TrainingFormatPlugin:
         diagnostic_feature_groups=diagnostic_feature_groups,
         diagnostic_profile_pairs=diagnostic_profile_pairs,
         diagnostic_focus_labels=diagnostic_focus_labels,
+        generate_collection_records=_generate_collection_records,
     )
+
+
+def _generate_collection_records(material_root, workspace, seed, per_source, limit):
+    from repair_training.formats.seven_zip.source_material import main as build_material
+
+    root = Path(workspace) / "seven_zip_material"
+    manifest = root / "damage_manifest.jsonl"
+    args = [
+        "--material-root", str(root), "--manifest", str(manifest),
+        "--seed", str(seed),
+    ]
+    if int(limit or 0) > 0:
+        args.extend(["--limit", str(int(limit))])
+    build_material(args)
+    return [row for row in read_jsonl(manifest) if row.get("damaged_input")]
 
 
 def damage_label_schema() -> TrainingLabelSchema:

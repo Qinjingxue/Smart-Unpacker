@@ -16,9 +16,9 @@ from sunpack.repair.model.diagnosis.graph_schema import (
     DiagnosisNode,
     GraphFragment,
 )
-DIAGNOSIS_GNN_SEMANTICS = "format_expert_root_labels_v2"
+DIAGNOSIS_GNN_SEMANTICS = "shared_format_conditioned_root_labels_v3"
 DIAGNOSIS_GNN_SCORE_SEMANTICS = "repair_priority"
-DIAGNOSIS_GNN_ALGORITHM = "hgt"
+DIAGNOSIS_GNN_ALGORITHM = "shared_format_hgt"
 
 __all__ = [
     "DIAGNOSIS_GNN_ALGORITHM",
