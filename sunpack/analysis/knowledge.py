@@ -276,6 +276,18 @@ def _write_format_evidence(knowledge: Any, evidence: ArchiveFormatEvidence, *, t
 def _format_structure_payload(fmt: str, details: dict[str, Any], *, task: ArchiveTask | None = None) -> dict[str, Any]:
     if fmt in {"7z", "seven_zip"}:
         return dict(details.get("seven_zip_structure") or details.get("7z_structure") or details.get("structure") or {})
+    if fmt != "zip":
+        private = details.get(f"{fmt}_structure_features") or details.get("structure")
+        if isinstance(private, dict) and private:
+            return dict(private)
+        # The native RAR/TAR/stream probes return their structural fields at
+        # the top level. Preserve them under format.<fmt>.structure so the
+        # format-private diagnosis graph can observe the fields it models.
+        return {
+            key: value
+            for key, value in details.items()
+            if key not in {"format", "suggested_extension"}
+        }
     structure = dict(details.get("zip_structure_features") or details.get("structure") or {})
     if task is not None:
         structure = _merge_zip_structure_facts(structure, task)
