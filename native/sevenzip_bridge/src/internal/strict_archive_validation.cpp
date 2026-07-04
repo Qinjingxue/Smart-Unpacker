@@ -5,8 +5,6 @@
 
 #ifdef _WIN32
 #include <algorithm>
-#include <filesystem>
-#include <fstream>
 #include <limits>
 #include <vector>
 #endif
@@ -14,13 +12,6 @@
 namespace sunpack::sevenzip {
 
 #ifdef _WIN32
-
-UInt16 le16_at(const std::vector<unsigned char>& data, std::size_t offset) {
-    if (offset + 2 > data.size()) {
-        return 0;
-    }
-    return static_cast<UInt16>(data[offset] | (data[offset + 1] << 8));
-}
 
 UInt32 le32_at(const std::vector<unsigned char>& data, std::size_t offset) {
     if (offset + 4 > data.size()) {
@@ -39,24 +30,6 @@ UInt32 crc32_bytes(const unsigned char* bytes, std::size_t size) {
         }
     }
     return ~crc;
-}
-
-bool read_file_bytes(const std::wstring& path, std::vector<unsigned char>& data) {
-    try {
-        const auto size = std::filesystem::file_size(path);
-        data.resize(static_cast<std::size_t>(size));
-    } catch (...) {
-        return false;
-    }
-    HANDLE handle = CreateFileW(win32_extended_path(path).c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                                nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (handle == INVALID_HANDLE_VALUE) {
-        return false;
-    }
-    DWORD read = 0;
-    const BOOL ok = data.empty() || ReadFile(handle, data.data(), static_cast<DWORD>(data.size()), &read, nullptr);
-    CloseHandle(handle);
-    return ok && read == data.size();
 }
 
 class RangeFile {
@@ -110,36 +83,6 @@ private:
     UInt64 size_ = 0;
     bool valid_ = false;
 };
-
-bool strict_seven_zip_headers_ok(const std::wstring& path) {
-    std::vector<unsigned char> data;
-    if (!read_file_bytes(path, data) || data.size() < 32) {
-        return false;
-    }
-    const unsigned char signature[] = {'7', 'z', 0xBC, 0xAF, 0x27, 0x1C};
-    if (!std::equal(std::begin(signature), std::end(signature), data.begin())) {
-        return false;
-    }
-    const UInt32 stored_start_crc = le32_at(data, 8);
-    if (crc32_bytes(data.data() + 12, 20) != stored_start_crc) {
-        return false;
-    }
-    const UInt64 next_offset =
-        static_cast<UInt64>(le32_at(data, 12)) |
-        (static_cast<UInt64>(le32_at(data, 16)) << 32);
-    const UInt64 next_size =
-        static_cast<UInt64>(le32_at(data, 20)) |
-        (static_cast<UInt64>(le32_at(data, 24)) << 32);
-    const UInt32 next_crc = le32_at(data, 28);
-    const UInt64 next_start = 32u + next_offset;
-    if (next_start > data.size() || next_size > data.size() || next_start + next_size > data.size()) {
-        return false;
-    }
-    if (next_size == 0) {
-        return true;
-    }
-    return crc32_bytes(data.data() + next_start, static_cast<std::size_t>(next_size)) == next_crc;
-}
 
 bool seven_zip_parts_prove_missing_tail(const std::vector<std::wstring>& part_paths) {
     const auto volumes = sorted_data_volume_paths(unique_existing_paths(L"", part_paths));

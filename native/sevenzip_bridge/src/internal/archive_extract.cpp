@@ -572,20 +572,6 @@ ExtractArchiveResult extract_archive_internal(
 
     } else if (!any_opened) {
 
-        if (password.empty() && input_ranges.empty() && lower_extension(archive_path) == L".7z" && !strict_seven_zip_headers_ok(archive_path)) {
-
-            result.status = PasswordTestStatus::Damaged;
-
-            result.damaged = true;
-
-            set_failure(result, "archive_open", "structure_recognition", last_hr);
-
-            result.message = "7z structure or header checksum error";
-
-            return result;
-
-        }
-
         if (password.empty() && (last_op_res == kOpDataError || last_op_res == kOpCrcError || last_op_res == kOpHeadersError || last_op_res == kOpUnexpectedEnd)) {
 
             result.status = PasswordTestStatus::Damaged;
