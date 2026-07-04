@@ -458,24 +458,6 @@ ExtractArchiveResult extract_archive_internal(
 
             }
 
-            if (password.empty() && input_ranges.empty() && input_patches.empty() && lower_extension(archive_path) == L".zip" && !strict_zip_stored_entries_ok(archive_path, result.output_trace)) {
-
-                result.status = PasswordTestStatus::Damaged;
-
-                result.command_ok = false;
-
-                result.damaged = true;
-
-                result.checksum_error = true;
-
-                set_failure(result, "post_validate", "checksum_error");
-
-                result.message = "zip structure or stored-entry checksum error";
-
-                return result;
-
-            }
-
             result.status = PasswordTestStatus::Ok;
 
             result.command_ok = true;
