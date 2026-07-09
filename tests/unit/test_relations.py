@@ -66,7 +66,10 @@ def test_relation_public_helpers_parse_split_names():
 
     assert scheduler.detect_split_role("game.part01.rar") == "first"
     assert scheduler.detect_split_role("game.part02.rar") == "member"
+    assert scheduler.detect_split_role("payload.zip.0000") == "first"
+    assert scheduler.detect_split_role("payload.zip.0001") == "member"
     assert scheduler.logical_name_for_archive("game.7z.001") == "game"
+    assert scheduler.logical_name_for_archive("payload.zip.0000") == "payload"
     assert scheduler.logical_name_for_archive("payload.bin") == "payload"
     assert scheduler.parse_numbered_volume(r"C:\tmp\game.part001.rar") == {
         "prefix": r"C:\tmp\game",
@@ -79,6 +82,18 @@ def test_relation_public_helpers_parse_split_names():
         "number": 1,
         "style": "zip_spanned",
         "width": 2,
+    }
+    assert scheduler.parse_numbered_volume(r"C:\tmp\payload.zip.0000") == {
+        "prefix": r"C:\tmp\payload.zip",
+        "number": 1,
+        "style": "zip_zero_numbered",
+        "width": 4,
+    }
+    assert scheduler.parse_numbered_volume(r"C:\tmp\payload.zip.0002") == {
+        "prefix": r"C:\tmp\payload.zip",
+        "number": 3,
+        "style": "zip_zero_numbered",
+        "width": 4,
     }
 
 
@@ -120,3 +135,27 @@ def test_relation_group_builder_reports_missing_classic_zip_terminal_volume(tmp_
     assert split_group.split_group_complete is False
     assert split_group.split_missing_reason == "missing_tail"
     assert split_group.split_missing_indices == [3]
+
+
+def test_relation_group_builder_groups_zero_based_zip_numbered_volumes(tmp_path):
+    first = tmp_path / "payload.zip.0000"
+    second = tmp_path / "payload.zip.0001"
+    third = tmp_path / "payload.zip.0002"
+    for path in (first, second, third):
+        path.write_bytes(b"volume")
+
+    groups = RelationsScheduler().build_candidate_groups(DirectoryScanner(str(tmp_path)).scan())
+    split_group = next(group for group in groups if group.logical_name == "payload")
+
+    assert Path(split_group.head_path).name == "payload.zip.0000"
+    assert [Path(path).name for path in split_group.all_paths] == [
+        "payload.zip.0000",
+        "payload.zip.0001",
+        "payload.zip.0002",
+    ]
+    assert [(volume.number, Path(volume.path).name) for volume in split_group.split_volumes] == [
+        (1, "payload.zip.0000"),
+        (2, "payload.zip.0001"),
+        (3, "payload.zip.0002"),
+    ]
+    assert split_group.split_group_complete is True

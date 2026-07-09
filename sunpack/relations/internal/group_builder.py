@@ -42,6 +42,8 @@ class RelationsGroupBuilder:
         }
         native_groups = _native_build_candidate_groups(rows)
         classic_groups, classic_paths = self._build_classic_zip_spanned_groups(dir_files, directory_indexes)
+        zero_zip_groups, zero_zip_paths = self._build_zero_based_zip_numbered_groups(dir_files, directory_indexes)
+        claimed_paths = classic_paths | zero_zip_paths
         groups: List[CandidateGroup] = []
         for raw in native_groups:
             if not isinstance(raw, dict):
@@ -49,10 +51,11 @@ class RelationsGroupBuilder:
             group = self._candidate_group_from_native(raw, directory_indexes)
             if group is None:
                 raise ValueError("native relations returned an invalid group")
-            if any(path_key(path) in classic_paths for path in group.all_paths):
+            if any(path_key(path) in claimed_paths for path in group.all_paths):
                 continue
             groups.append(group)
         groups.extend(classic_groups)
+        groups.extend(zero_zip_groups)
         return groups
 
     def _build_classic_zip_spanned_groups(
@@ -80,6 +83,32 @@ class RelationsGroupBuilder:
                 }
                 groups.append(self._build_group(group_entries, relations, directory_indexes.get(directory)))
                 claimed.update(path_key(entry.path) for entry in group_entries)
+        return groups, claimed
+
+    def _build_zero_based_zip_numbered_groups(
+        self,
+        dir_files: Dict[str, List[FileEntry]],
+        directory_indexes: Dict[str, DirectoryFileIndex],
+    ) -> tuple[List[CandidateGroup], set[str]]:
+        groups: List[CandidateGroup] = []
+        claimed: set[str] = set()
+        for directory, entries in dir_files.items():
+            by_prefix: Dict[str, List[FileEntry]] = defaultdict(list)
+            for entry in entries:
+                match = re.match(r"^(?P<prefix>.+\.zip)\.(?P<number>\d{4})$", entry.path.name, re.IGNORECASE)
+                if match:
+                    by_prefix[match.group("prefix").lower()].append(entry)
+
+            lower_names = {entry.path.name.lower() for entry in entries}
+            for prefix, members in by_prefix.items():
+                if f"{prefix}.0000" not in lower_names:
+                    continue
+                relations = {
+                    entry.path.name: self._build_file_relation(entry.path.name, lower_names)
+                    for entry in members
+                }
+                groups.append(self._build_group(members, relations, directory_indexes.get(directory)))
+                claimed.update(path_key(entry.path) for entry in members)
         return groups, claimed
 
     def _candidate_group_from_native(
@@ -144,12 +173,18 @@ class RelationsGroupBuilder:
         match = re.search(r"\.z(?P<number>\d{2})$", filename, re.IGNORECASE)
         if match:
             return "first" if int(match.group("number")) == 1 else "member"
+        match = re.search(r"\.zip\.(?P<number>\d{4})$", filename, re.IGNORECASE)
+        if match:
+            return "first" if int(match.group("number")) == 0 else "member"
         return _native_detect_split_role(filename)
 
     def get_logical_name(self, filename: str, is_archive: bool = False) -> str:
         match = re.match(r"^(?P<prefix>.+)\.z\d{2}$", filename, re.IGNORECASE)
         if match:
             return str(match.group("prefix"))
+        match = re.match(r"^(?P<prefix>.+)\.zip\.\d{4}$", filename, re.IGNORECASE)
+        if match:
+            return str(match.group("prefix")).removesuffix(".zip")
         return _native_logical_name(filename, is_archive)
 
     def build_file_relation(self, filename: str, sibling_names: Set[str]) -> FileRelation:
@@ -240,6 +275,14 @@ class RelationsGroupBuilder:
                 "style": "zip_spanned",
                 "width": 2,
             }
+        match = re.match(r"^(?P<prefix>.+\.zip)\.(?P<number>\d{4})$", path, re.IGNORECASE)
+        if match:
+            return {
+                "prefix": str(match.group("prefix")),
+                "number": int(match.group("number")) + 1,
+                "style": "zip_zero_numbered",
+                "width": 4,
+            }
         return _native_parse_numbered_volume(path)
 
     def select_first_volume(self, paths: List[str]) -> str:
@@ -281,6 +324,7 @@ class RelationsGroupBuilder:
         expected_heads = {
             f"{base}.7z.001".lower(),
             f"{base}.zip.001".lower(),
+            f"{base}.zip.0000".lower(),
             f"{base}.rar.001".lower(),
             f"{base}.001".lower(),
             f"{base}.part1.rar".lower(),
@@ -312,6 +356,8 @@ class RelationsGroupBuilder:
 
     def is_standard_split_sibling(self, base: str, lower_name: str, oldstyle_rar_present: bool) -> bool:
         if re.match(rf"^{re.escape(base)}\.z\d{{2}}$", lower_name) or lower_name == f"{base}.zip":
+            return True
+        if re.match(rf"^{re.escape(base)}\.zip\.\d{{4}}$", lower_name):
             return True
         if re.match(rf"^{re.escape(base)}\.(7z|zip|rar)\.\d{{3}}$", lower_name):
             return True
