@@ -1,23 +1,26 @@
 import binascii
 import struct
 
+import pytest
+
 from sunpack.extraction.internal.sevenzip.metadata import ArchiveMetadataScanner
 
 
-def test_shift_jis_kanji_only_name_is_not_misclassified_as_gbk():
-    scanner = ArchiveMetadataScanner()
+@pytest.mark.parametrize(
+    ("name", "encoding", "expected_codepage"),
+    [
+        ("日本語.txt", "cp932", "932"),
+        ("説明書/第一章.txt", "cp932", "932"),
+        ("日本語/説明.txt", "utf-8", "65001"),
+        ("ﾃｽﾄ.txt", "cp932", "932"),
+        ("中文说明资料.txt", "cp936", "936"),
+        ("繁體中文說明資料檔案測試.txt", "cp950", "950"),
+    ],
+)
+def test_codepage_selection_preserves_known_unicode_families(name, encoding, expected_codepage):
+    selected = ArchiveMetadataScanner()._select_codepage([name.encode(encoding)])
 
-    selected = scanner._select_codepage(["日本語.txt".encode("cp932")])
-
-    assert selected["codepage"] == "932"
-
-
-def test_shift_jis_kanji_directory_name_is_not_misclassified_as_gbk():
-    scanner = ArchiveMetadataScanner()
-
-    selected = scanner._select_codepage(["説明書/第一章.txt".encode("cp932")])
-
-    assert selected["codepage"] == "932"
+    assert selected["codepage"] == expected_codepage
 
 
 def test_repeated_shift_jis_parent_is_not_misclassified_as_gbk():
@@ -28,38 +31,6 @@ def test_repeated_shift_jis_parent_is_not_misclassified_as_gbk():
     selected = scanner._select_codepage(raw_names)
 
     assert selected["codepage"] == "932"
-
-
-def test_unflagged_utf8_name_can_be_selected_explicitly():
-    scanner = ArchiveMetadataScanner()
-
-    selected = scanner._select_codepage(["日本語/説明.txt".encode("utf-8")])
-
-    assert selected["codepage"] == "65001"
-
-
-def test_shift_jis_halfwidth_kana_name_remains_cp932():
-    scanner = ArchiveMetadataScanner()
-
-    selected = scanner._select_codepage(["ﾃｽﾄ.txt".encode("cp932")])
-
-    assert selected["codepage"] == "932"
-
-
-def test_gbk_chinese_name_remains_cp936():
-    scanner = ArchiveMetadataScanner()
-
-    selected = scanner._select_codepage(["中文说明资料.txt".encode("cp936")])
-
-    assert selected["codepage"] == "936"
-
-
-def test_big5_chinese_name_remains_cp950():
-    scanner = ArchiveMetadataScanner()
-
-    selected = scanner._select_codepage(["繁體中文說明資料檔案測試.txt".encode("cp950")])
-
-    assert selected["codepage"] == "950"
 
 
 def test_shift_jis_zip_scan_returns_decoded_item_paths(tmp_path):

@@ -1,6 +1,8 @@
 import json
 import subprocess
 
+import pytest
+
 from sunpack.repair.loop import terminal_failure_reason
 from sunpack.extraction.internal.workflow.errors import classify_extract_failure
 from sunpack.contracts.extraction import ExtractionResult
@@ -66,27 +68,29 @@ def test_plain_wrong_password_stays_terminal_for_split_archive():
     assert terminal_failure_reason(result) == "wrong_password"
 
 
-def test_worker_failure_kind_classifies_wrong_password_without_boolean_flag():
-    completed = _worker_completed({
-        "wrong_password": False,
-        "native_status": "error",
-        "failure_kind": "encrypted_or_wrong_password",
-        "operation_result_name": "data_error",
-        "message": "archive could not be extracted",
-    })
-
-    assert classify_extract_failure(completed, "").message_key == "failure.wrong_password"
-
-
-def test_nested_worker_operation_result_classifies_wrong_password():
-    completed = _worker_completed({
-        "wrong_password": False,
-        "native_status": "error",
-        "diagnostics": {
-            "failure_kind": "unknown",
-            "operation_result_name": "wrong_password",
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "wrong_password": False,
+            "native_status": "error",
+            "failure_kind": "encrypted_or_wrong_password",
+            "operation_result_name": "data_error",
+            "message": "archive could not be extracted",
         },
-    })
+        {
+            "wrong_password": False,
+            "native_status": "error",
+            "diagnostics": {
+                "failure_kind": "unknown",
+                "operation_result_name": "wrong_password",
+            },
+        },
+    ],
+    ids=["failure-kind", "nested-operation-result"],
+)
+def test_worker_wrong_password_evidence_maps_to_wrong_password(payload):
+    completed = _worker_completed(payload)
 
     assert classify_extract_failure(completed, "").message_key == "failure.wrong_password"
 
@@ -136,14 +140,13 @@ def test_tail_size_suspicion_does_not_override_explicit_wrong_password():
     assert failure.kind is FailureKind.WRONG_PASSWORD
 
 
-def test_split_name_plus_unexpected_end_is_still_damage_without_hard_evidence():
-    failure = classify_extract_failure(None, "Unexpected end of archive", archive="payload.7z.001")
-
-    assert failure.kind is FailureKind.DAMAGED
-
-
-def test_split_name_plus_cannot_open_is_still_damage_without_hard_evidence():
-    failure = classify_extract_failure(None, "Can not open the file as archive", archive="payload.7z.001")
+@pytest.mark.parametrize(
+    "message",
+    ["Unexpected end of archive", "Can not open the file as archive"],
+    ids=["unexpected-end", "cannot-open"],
+)
+def test_split_archive_generic_backend_errors_are_damage_without_hard_evidence(message):
+    failure = classify_extract_failure(None, message, archive="payload.7z.001")
 
     assert failure.kind is FailureKind.DAMAGED
 

@@ -5,11 +5,25 @@ import os
 from types import SimpleNamespace
 from concurrent.futures import ThreadPoolExecutor
 
+import pytest
+
 from sunpack.contracts.detection import FactBag
 from sunpack.contracts.tasks import ArchiveTask
 from sunpack.coordinator.scheduling.concurrency import ConcurrencyScheduler
 from sunpack.coordinator.scheduling.executor import TaskExecutor
 from sunpack.coordinator.scheduling.resource_model import build_resource_profile_key, estimate_resource_demand
+
+
+def _record_feedback(scheduler, durations, *, profile_key=None):
+    for active_workers, duration in zip((1, 1, 3, 3), durations):
+        scheduler.record_task_feedback(
+            demand={"cpu": 2 if profile_key else 1, "io": 2 if profile_key else 1, "memory": 1},
+            duration_seconds=duration,
+            estimated_bytes=100 * 1024 * 1024,
+            active_workers_at_start=active_workers,
+            success=True,
+            profile_key=profile_key,
+        )
 
 
 def test_resource_demand_estimation_distinguishes_heavy_lzma_archive():
@@ -121,7 +135,12 @@ def test_concurrency_scheduler_adjusts_cpu_io_memory_limits_independently():
     assert scheduler.cpu_limit >= 1
 
 
-def test_concurrency_scheduler_blocks_scale_up_when_throughput_regresses():
+@pytest.mark.parametrize(
+    ("durations", "should_scale"),
+    [((1.0, 1.0, 4.0, 4.0), False), ((1.0, 1.0, 2.0, 2.0), True)],
+    ids=["regresses", "improves"],
+)
+def test_concurrency_scheduler_scales_only_when_throughput_improves(durations, should_scale):
     scheduler = ConcurrencyScheduler(
         {
             "initial_concurrency_limit": 2,
@@ -140,14 +159,7 @@ def test_concurrency_scheduler_blocks_scale_up_when_throughput_regresses():
         current_limit=2,
         max_workers=6,
     )
-    for active_workers, duration in ((1, 1.0), (1, 1.0), (3, 4.0), (3, 4.0)):
-        scheduler.record_task_feedback(
-            demand={"cpu": 1, "io": 1, "memory": 1},
-            duration_seconds=duration,
-            estimated_bytes=100 * 1024 * 1024,
-            active_workers_at_start=active_workers,
-            success=True,
-        )
+    _record_feedback(scheduler, durations)
     scheduler.pending_task_estimate = 20
 
     scheduler.adjust_once(
@@ -156,106 +168,44 @@ def test_concurrency_scheduler_blocks_scale_up_when_throughput_regresses():
         available_memory=8 * 1024 * 1024 * 1024,
     )
 
-    assert scheduler.cpu_limit == 2
-    assert scheduler.io_limit == 2
-    assert scheduler.memory_limit == 2
+    if should_scale:
+        assert scheduler.cpu_limit > 2
+        assert scheduler.io_limit > 2
+        assert scheduler.memory_limit > 2
+    else:
+        assert scheduler.cpu_limit == 2
+        assert scheduler.io_limit == 2
+        assert scheduler.memory_limit == 2
 
 
-def test_concurrency_scheduler_allows_scale_up_when_total_throughput_improves():
-    scheduler = ConcurrencyScheduler(
-        {
-            "initial_concurrency_limit": 2,
-            "cpu_tokens": 6,
-            "io_tokens": 6,
-            "memory_tokens": 6,
-            "throughput_window_size": 4,
-            "throughput_regression_ratio": 0.95,
-            "scale_up_threshold_mb_s": 10,
-            "scale_up_backlog_threshold_mb_s": 20,
-            "cpu_scale_up_threshold_percent": 65,
-            "memory_scale_up_available_mb": 2048,
-            "scale_up_streak_required": 1,
-            "scale_down_streak_required": 1,
-        },
-        current_limit=2,
-        max_workers=6,
-    )
-    for active_workers, duration in ((1, 1.0), (1, 1.0), (3, 2.0), (3, 2.0)):
-        scheduler.record_task_feedback(
-            demand={"cpu": 1, "io": 1, "memory": 1},
-            duration_seconds=duration,
-            estimated_bytes=100 * 1024 * 1024,
-            active_workers_at_start=active_workers,
-            success=True,
-        )
-    scheduler.pending_task_estimate = 20
-
-    scheduler.adjust_once(
-        0,
-        cpu_percent=20,
-        available_memory=8 * 1024 * 1024 * 1024,
-    )
-
-    assert scheduler.cpu_limit > 2
-    assert scheduler.io_limit > 2
-    assert scheduler.memory_limit > 2
-
-
-def test_profile_calibration_raises_tokens_when_same_profile_regresses():
+@pytest.mark.parametrize(
+    ("profile_key", "durations", "ratio_key", "ratio", "expected_cpu", "expected_io"),
+    [
+        ("7z|lzma|solid|dict>=256m|size>=4g|files<1k", (1.0, 1.0, 4.0, 4.0), "profile_regression_ratio", 0.95, 3, 3),
+        ("zip|deflate|nonsolid|dict<16m|size<1g|files<1k", (1.0, 1.0, 2.0, 2.0), "profile_improvement_ratio", 1.05, 1, 2),
+    ],
+    ids=["regression-raises", "improvement-lowers"],
+)
+def test_profile_calibration_adjusts_tokens_from_same_profile_feedback(
+    profile_key, durations, ratio_key, ratio, expected_cpu, expected_io
+):
     scheduler = ConcurrencyScheduler(
         {
             "initial_concurrency_limit": 2,
             "profile_calibration_window_size": 4,
-            "profile_regression_ratio": 0.95,
+            ratio_key: ratio,
             "profile_calibration_max_delta": 2,
             "profile_calibration_min_parallel": 1,
         },
         current_limit=2,
         max_workers=6,
     )
-    profile_key = "7z|lzma|solid|dict>=256m|size>=4g|files<1k"
-    for active_workers, duration in ((1, 1.0), (1, 1.0), (3, 4.0), (3, 4.0)):
-        scheduler.record_task_feedback(
-            demand={"cpu": 2, "io": 2, "memory": 1},
-            duration_seconds=duration,
-            estimated_bytes=100 * 1024 * 1024,
-            active_workers_at_start=active_workers,
-            success=True,
-            profile_key=profile_key,
-        )
+    _record_feedback(scheduler, durations, profile_key=profile_key)
 
     adjusted = scheduler.apply_profile_calibration({"cpu": 2, "io": 2, "memory": 1}, profile_key)
 
-    assert adjusted.cpu == 3
-    assert adjusted.io == 3
-    assert adjusted.memory == 1
-
-
-def test_profile_calibration_lowers_tokens_when_same_profile_improves():
-    scheduler = ConcurrencyScheduler(
-        {
-            "initial_concurrency_limit": 2,
-            "profile_calibration_window_size": 4,
-            "profile_improvement_ratio": 1.05,
-        },
-        current_limit=2,
-        max_workers=6,
-    )
-    profile_key = "zip|deflate|nonsolid|dict<16m|size<1g|files<1k"
-    for active_workers, duration in ((1, 1.0), (1, 1.0), (3, 2.0), (3, 2.0)):
-        scheduler.record_task_feedback(
-            demand={"cpu": 2, "io": 2, "memory": 1},
-            duration_seconds=duration,
-            estimated_bytes=100 * 1024 * 1024,
-            active_workers_at_start=active_workers,
-            success=True,
-            profile_key=profile_key,
-        )
-
-    adjusted = scheduler.apply_profile_calibration({"cpu": 2, "io": 2, "memory": 1}, profile_key)
-
-    assert adjusted.cpu == 1
-    assert adjusted.io == 2
+    assert adjusted.cpu == expected_cpu
+    assert adjusted.io == expected_io
     assert adjusted.memory == 1
 
 

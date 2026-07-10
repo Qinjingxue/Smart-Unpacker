@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from sunpack.relations.scheduler import RelationsScheduler
 from sunpack.filesystem.directory_scanner import DirectoryScanner
 
@@ -97,44 +99,29 @@ def test_relation_public_helpers_parse_split_names():
     }
 
 
-def test_relation_group_builder_groups_classic_zip_spanned_volumes(tmp_path):
-    first = tmp_path / "classic.z01"
-    second = tmp_path / "classic.z02"
-    terminal = tmp_path / "classic.zip"
-    for path in (first, second, terminal):
-        path.write_bytes(b"volume")
-
-    groups = RelationsScheduler().build_candidate_groups(DirectoryScanner(str(tmp_path)).scan())
-    split_group = next(group for group in groups if group.logical_name == "classic")
-
-    assert Path(split_group.head_path).name == "classic.z01"
-    assert [Path(path).name for path in split_group.all_paths] == ["classic.z01", "classic.z02", "classic.zip"]
-    assert split_group.split_group_complete is True
-
-
-def test_relation_group_builder_reports_classic_zip_middle_gap(tmp_path):
-    for name in ("classic.z01", "classic.z03", "classic.zip"):
+@pytest.mark.parametrize(
+    ("names", "complete", "missing_reason", "missing_indices", "all_paths"),
+    [
+        (("classic.z01", "classic.z02", "classic.zip"), True, "", [], True),
+        (("classic.z01", "classic.z03", "classic.zip"), False, "missing_middle", [2], False),
+        (("classic.z01", "classic.z02"), False, "missing_tail", [3], False),
+    ],
+    ids=["complete", "missing-middle", "missing-tail"],
+)
+def test_relation_group_builder_reports_classic_zip_volume_contract(
+    tmp_path, names, complete, missing_reason, missing_indices, all_paths
+):
+    for name in names:
         (tmp_path / name).write_bytes(b"volume")
 
     groups = RelationsScheduler().build_candidate_groups(DirectoryScanner(str(tmp_path)).scan())
     split_group = next(group for group in groups if group.logical_name == "classic")
 
-    assert split_group.split_group_complete is False
-    assert split_group.split_missing_reason == "missing_middle"
-    assert split_group.split_missing_indices == [2]
-
-
-def test_relation_group_builder_reports_missing_classic_zip_terminal_volume(tmp_path):
-    for name in ("classic.z01", "classic.z02"):
-        (tmp_path / name).write_bytes(b"volume")
-
-    groups = RelationsScheduler().build_candidate_groups(DirectoryScanner(str(tmp_path)).scan())
-    split_group = next(group for group in groups if group.logical_name == "classic")
-
-    assert [Path(path).name for path in split_group.all_paths] == ["classic.z01", "classic.z02"]
-    assert split_group.split_group_complete is False
-    assert split_group.split_missing_reason == "missing_tail"
-    assert split_group.split_missing_indices == [3]
+    assert split_group.split_group_complete is complete
+    assert split_group.split_missing_reason == missing_reason
+    assert split_group.split_missing_indices == missing_indices
+    if all_paths:
+        assert [Path(path).name for path in split_group.all_paths] == list(names)
 
 
 def test_relation_group_builder_groups_zero_based_zip_numbered_volumes(tmp_path):

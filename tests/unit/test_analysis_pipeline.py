@@ -7,6 +7,8 @@ import lzma
 from binascii import crc32
 from io import BytesIO
 
+import pytest
+
 from sunpack.analysis.result import ArchiveFormatEvidence
 from sunpack.analysis.scheduler import ArchiveAnalysisScheduler
 from sunpack.analysis.structure_pipeline.module import AnalysisModuleSpec
@@ -207,10 +209,15 @@ def test_analysis_scheduler_prefers_structural_boundary_over_next_signature(tmp_
     assert by_format["7z"].confidence == 0.97
 
 
-def test_analysis_scheduler_walks_rar4_blocks_to_endarc(tmp_path):
-    rar_data = _rar4_bytes()
+@pytest.mark.parametrize(
+    ("version", "build_rar", "expected_version"),
+    [(4, _rar4_bytes, None), (5, _rar5_bytes, 5)],
+    ids=["rar4", "rar5"],
+)
+def test_analysis_scheduler_walks_rar_blocks_to_endarc(tmp_path, version, build_rar, expected_version):
+    rar_data = build_rar()
     payload = b"shell" + rar_data + b"tail-shell"
-    path = tmp_path / "rar4.bin"
+    path = tmp_path / f"rar{version}.bin"
     path.write_bytes(payload)
 
     report = ArchiveAnalysisScheduler().analyze_path(str(path))
@@ -221,24 +228,8 @@ def test_analysis_scheduler_walks_rar4_blocks_to_endarc(tmp_path):
     assert rar.segments[0].start_offset == len(b"shell")
     assert rar.segments[0].end_offset == len(b"shell") + len(rar_data)
     assert not rar.warnings
-    assert rar.details["end_block_found"] is True
-
-
-def test_analysis_scheduler_walks_rar5_blocks_to_endarc(tmp_path):
-    rar_data = _rar5_bytes()
-    payload = b"shell" + rar_data + b"tail-shell"
-    path = tmp_path / "rar5.bin"
-    path.write_bytes(payload)
-
-    report = ArchiveAnalysisScheduler().analyze_path(str(path))
-    rar = {item.format: item for item in report.evidences}["rar"]
-
-    assert rar.status == "extractable"
-    assert rar.confidence == 0.97
-    assert rar.segments[0].start_offset == len(b"shell")
-    assert rar.segments[0].end_offset == len(b"shell") + len(rar_data)
-    assert not rar.warnings
-    assert rar.details["version"] == 5
+    if expected_version is not None:
+        assert rar.details["version"] == expected_version
     assert rar.details["end_block_found"] is True
 
 
@@ -313,40 +304,32 @@ def test_7z_next_header_crc_damage_keeps_boundary_but_lowers_integrity(tmp_path)
     assert seven.details["integrity_confidence"] == "low"
 
 
-def test_analysis_scheduler_reads_zip_across_split_volumes(tmp_path):
-    zip_data = _zip_bytes(tmp_path)
-    first = tmp_path / "archive.zip.001"
-    second = tmp_path / "archive.zip.002"
-    first.write_bytes(zip_data[:37])
-    second.write_bytes(zip_data[37:])
+@pytest.mark.parametrize(
+    ("extension", "build_data", "split_at", "expected_format", "confidence"),
+    [
+        ("zip", _zip_bytes, 37, "zip", 0.99),
+        ("7z", lambda _tmp_path: _seven_zip_bytes(), 20, "7z", 0.97),
+    ],
+    ids=["zip", "seven-zip"],
+)
+def test_analysis_scheduler_reads_archives_across_split_volumes(
+    tmp_path, extension, build_data, split_at, expected_format, confidence
+):
+    data = build_data(tmp_path)
+    first = tmp_path / f"archive.{extension}.001"
+    second = tmp_path / f"archive.{extension}.002"
+    first.write_bytes(data[:split_at])
+    second.write_bytes(data[split_at:])
 
     report = ArchiveAnalysisScheduler().analyze_paths([str(first), str(second)])
-    zip_evidence = {item.format: item for item in report.evidences}["zip"]
+    evidence = {item.format: item for item in report.evidences}[expected_format]
 
     assert report.fuzzy["binary_profile"]["sampled"] is True
     assert "warnings" not in report.fuzzy
-    assert zip_evidence.status == "extractable"
-    assert zip_evidence.confidence == 0.99
-    assert zip_evidence.segments[0].start_offset == 0
-    assert zip_evidence.segments[0].end_offset == len(zip_data)
-
-
-def test_analysis_scheduler_reads_7z_across_split_volumes(tmp_path):
-    seven_data = _seven_zip_bytes()
-    first = tmp_path / "archive.7z.001"
-    second = tmp_path / "archive.7z.002"
-    first.write_bytes(seven_data[:20])
-    second.write_bytes(seven_data[20:])
-
-    report = ArchiveAnalysisScheduler().analyze_paths([str(first), str(second)])
-    seven = {item.format: item for item in report.evidences}["7z"]
-
-    assert report.fuzzy["binary_profile"]["sampled"] is True
-    assert "warnings" not in report.fuzzy
-    assert seven.status == "extractable"
-    assert seven.confidence == 0.97
-    assert seven.segments[0].start_offset == 0
-    assert seven.segments[0].end_offset == len(seven_data)
+    assert evidence.status == "extractable"
+    assert evidence.confidence == confidence
+    assert evidence.segments[0].start_offset == 0
+    assert evidence.segments[0].end_offset == len(data)
 
 
 def test_analysis_scheduler_detects_tar(tmp_path):
