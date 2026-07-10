@@ -7,6 +7,7 @@ from sunpack.contracts.run_context import RunContext
 from sunpack.contracts.tasks import ArchiveTask
 from sunpack.coordinator.task_provider import ArchiveTaskProvider
 from sunpack.analysis.stage import ArchiveAnalysisStage
+from sunpack.relations.internal.group_builder import RelationsGroupBuilder
 
 
 class ArchiveTaskScanner:
@@ -30,31 +31,72 @@ class ArchiveTaskScanner:
 
     def direct_file_tasks(self, file_paths: list[str]) -> list[ArchiveTask]:
         tasks = []
+        normalized_paths = []
         for raw_path in file_paths:
             path = os.path.abspath(os.path.normpath(raw_path))
             if not os.path.isfile(path):
                 self.context.failed_tasks.append(f"{raw_path} [direct mode requires a file]")
                 continue
-            task = direct_file_task(path)
+            normalized_paths.append(path)
+
+        grouped_paths = _group_explicit_split_paths(normalized_paths)
+        for paths in grouped_paths:
+            task = direct_file_task(paths[0], all_parts=paths)
             if task.key in self.context.processed_keys:
                 continue
             tasks.append(task)
         return tasks
 
 
-def direct_file_task(path: str) -> ArchiveTask:
+def _group_explicit_split_paths(file_paths: list[str]) -> list[list[str]]:
+    """Group only explicitly supplied split volumes without scanning their directory."""
+    builder = RelationsGroupBuilder()
+    groups: dict[tuple[str, str], list[tuple[int, str]]] = {}
+    standalone: list[str] = []
+    for path in file_paths:
+        parsed = builder.parse_numbered_volume(path)
+        if not parsed:
+            standalone.append(path)
+            continue
+        prefix = os.path.normcase(os.path.abspath(str(parsed["prefix"])))
+        key = (prefix, str(parsed["style"]))
+        groups.setdefault(key, []).append((int(parsed["number"]), path))
+
+    grouped: list[list[str]] = []
+    for members in groups.values():
+        ordered = [path for _, path in sorted(members, key=lambda item: (item[0], item[1].lower()))]
+        grouped.append(ordered if len(ordered) > 1 else ordered)
+    grouped.extend([[path] for path in standalone])
+    return grouped
+
+
+def direct_file_task(path: str, all_parts: list[str] | None = None) -> ArchiveTask:
     path = os.path.abspath(os.path.normpath(path))
     name = os.path.basename(path)
     logical_name, ext = os.path.splitext(name)
+    parts = [os.path.abspath(os.path.normpath(item)) for item in (all_parts or [path])]
+    is_split = len(parts) > 1
+    if is_split:
+        builder = RelationsGroupBuilder()
+        logical_name = builder.get_logical_name(name, is_archive=True) or logical_name
+        parsed = builder.parse_numbered_volume(path)
+        format_hint = ""
+        if parsed:
+            format_hint = os.path.splitext(os.path.basename(str(parsed["prefix"])))[1].lower().lstrip(".")
+        format_hint = format_hint or logical_name.rsplit(".", 1)[-1].lower()
+    else:
+        format_hint = ext.lower().lstrip(".")
     bag = FactBag()
     bag.set("file.path", path)
     bag.set("file.logical_name", logical_name or name)
-    bag.set("file.detected_ext", ext.lower())
+    bag.set("file.detected_ext", f".{format_hint}" if is_split and format_hint else ext.lower())
     bag.set("candidate.entry_path", path)
-    bag.set("candidate.kind", "direct_file")
+    bag.set("candidate.kind", "split_archive" if is_split else "direct_file")
     bag.set("candidate.logical_name", logical_name or name)
-    bag.set("candidate.member_paths", [path])
-    bag.set("archive.format_hint", ext.lower().lstrip("."))
+    bag.set("candidate.member_paths", parts)
+    bag.set("archive.format_hint", format_hint)
+    if is_split:
+        bag.set("relation.is_split_related", True)
     try:
         bag.set("file.size", os.path.getsize(path))
     except OSError:

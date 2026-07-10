@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from sunpack.coordinator.scheduling import ConcurrencyScheduler
+from sunpack.coordinator.task_scan import _group_explicit_split_paths, direct_file_task
 from sunpack.coordinator.target_scan import build_fact_bags_for_targets
 
 
@@ -28,6 +29,24 @@ def test_selected_split_member_scans_parent_and_returns_group(tmp_path):
     assert bags[0].get("candidate.kind") == "split_archive"
     assert bags[0].get("candidate.entry_path") == str(first)
     assert bags[0].get("candidate.member_paths") == [str(first), str(second)]
+
+
+def test_direct_file_arguments_group_explicit_zero_based_split_volumes_without_directory_scan(tmp_path):
+    parts = [
+        tmp_path / "payload.zip.0000",
+        tmp_path / "payload.zip.0001",
+        tmp_path / "payload.zip.0002",
+    ]
+    for index, part in enumerate(parts):
+        part.write_bytes(f"part-{index}".encode())
+
+    grouped = _group_explicit_split_paths([str(parts[2]), str(parts[0]), str(parts[1])])
+
+    assert grouped == [[str(parts[0]), str(parts[1]), str(parts[2])]]
+    task = direct_file_task(grouped[0][0], all_parts=grouped[0])
+    assert task.main_path == str(parts[0])
+    assert task.all_parts == [str(part) for part in parts]
+    assert task.split_info.is_split
 
 
 def test_scheduler_uses_current_backlog_floor_and_scale_up_step():
