@@ -124,11 +124,12 @@ pub(crate) fn relations_build_candidate_groups(
         let mut logical_order: Vec<String> = Vec::new();
         for entry in entries {
             if let Some(relation) = relations.get(&entry.name) {
-                if !logical_groups.contains_key(&relation.logical_name) {
-                    logical_order.push(relation.logical_name.clone());
+                let group_key = relation_group_key(relation);
+                if !logical_groups.contains_key(&group_key) {
+                    logical_order.push(group_key.clone());
                 }
                 logical_groups
-                    .entry(relation.logical_name.clone())
+                    .entry(group_key)
                     .or_default()
                     .push(entry);
             }
@@ -268,6 +269,8 @@ fn build_file_relation(filename: &str, lower_names: &HashSet<String>) -> FileRel
         split_index = parsed.number;
         if parsed.style == "rar_part" {
             split_family = "rar_part".to_string();
+        } else if parsed.style == "zip_spanned" {
+            split_family = "zip_spanned".to_string();
         } else {
             let parsed_prefix = parsed.prefix.to_ascii_lowercase();
             split_family = if parsed_prefix.ends_with(".7z") {
@@ -555,6 +558,33 @@ fn split_first_patterns() -> &'static [Regex; 5] {
             re(r"\.z01$"),
         ]
     })
+}
+
+fn relation_group_key(relation: &FileRelationNative) -> String {
+    let family = match relation.split_family.as_str() {
+        "7z_numbered" => "7z",
+        "zip_numbered" | "zip_spanned" => "zip",
+        "rar_numbered" | "rar_part" => "rar",
+        "exe_companion" => "companion",
+        "generic_numbered" => "generic",
+        _ => {
+            if relation.split_role.is_some() {
+                // Disguised split members intentionally share the carrier
+                // family with an SFX companion (for example .001.camouflage).
+                "companion"
+            } else {
+                let (_, ext) = split_ext(&relation.filename);
+                match ext.to_ascii_lowercase().as_str() {
+                    ".7z" => "7z",
+                    ".zip" => "zip",
+                    ".rar" => "rar",
+                    ".exe" => "exe",
+                    _ => "plain",
+                }
+            }
+        }
+    };
+    format!("{}\u{001f}{}", relation.logical_name, family)
 }
 
 fn split_member_pattern() -> &'static Regex {

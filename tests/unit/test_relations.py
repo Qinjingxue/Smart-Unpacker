@@ -63,6 +63,31 @@ def test_relation_group_builder_keeps_same_stem_archives_separate(tmp_path):
     assert all(group.is_split_candidate is False for group in collision_groups)
 
 
+def test_relation_group_builder_keeps_same_stem_split_archive_formats_separate(tmp_path):
+    seven_zip_first = tmp_path / "collision.7z.001"
+    seven_zip_second = tmp_path / "collision.7z.002"
+    zip_file = tmp_path / "collision.zip"
+    seven_zip_first.write_bytes(b"seven-first")
+    seven_zip_second.write_bytes(b"seven-second")
+    zip_file.write_bytes(b"zip")
+
+    snapshot = DirectoryScanner(str(tmp_path)).scan()
+    groups = RelationsScheduler().build_candidate_groups(snapshot)
+    collision_groups = [group for group in groups if group.logical_name == "collision"]
+
+    assert sorted(Path(group.head_path).name for group in collision_groups) == [
+        "collision.7z.001",
+        "collision.zip",
+    ]
+    split_group = next(group for group in collision_groups if group.is_split_candidate)
+    assert [Path(path).name for path in split_group.all_paths] == [
+        "collision.7z.001",
+        "collision.7z.002",
+    ]
+    zip_group = next(group for group in collision_groups if not group.is_split_candidate)
+    assert zip_group.member_paths == []
+
+
 def test_relation_public_helpers_parse_split_names():
     scheduler = RelationsScheduler()
 
