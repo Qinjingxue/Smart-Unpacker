@@ -20,10 +20,6 @@ class OutputFileIndex:
     normalized_basenames: frozenset[str]
 
 
-def collect_output_stats(output_dir: str) -> OutputStats:
-    return collect_output_inventory(output_dir).stats
-
-
 def output_stats_for_evidence(evidence: Any) -> OutputStats:
     return output_inventory_for_evidence(evidence).stats
 

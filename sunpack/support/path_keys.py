@@ -26,7 +26,3 @@ def safe_relative_path(path: Any, start: Any) -> str | None:
     if rel == "." or rel.startswith(".."):
         return None
     return rel
-
-
-def relative_os_path(rel_path: str) -> str:
-    return os.path.join(*str(rel_path or "").split("/"))
