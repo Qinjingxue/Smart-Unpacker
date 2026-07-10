@@ -95,6 +95,26 @@ class FakePasswordScheduler:
         pass
 
 
+class QueuePasswordScheduler:
+    def __init__(self):
+        self.planned = []
+
+    def plan_for_extraction(self, job: PasswordJob):
+        candidates = tuple(candidate.value for candidate in job.candidate_pipeline())
+        self.planned.extend(candidates)
+        return PasswordSearchResult(
+            password=None,
+            status=PasswordSearchStatus.INCONCLUSIVE,
+            extraction_candidates=candidates,
+        )
+
+    def remember_extraction_success(self, fingerprint_key, password):
+        pass
+
+    def remember_extraction_rejection(self, fingerprint_key, password):
+        pass
+
+
 def test_password_resolver_records_archive_password_in_session():
     session = PasswordSession()
     resolver = PasswordResolver(FakePasswordTester(), session)
@@ -202,32 +222,15 @@ def test_password_resolver_queues_all_inconclusive_sources_for_extraction_confir
         builtin_passwords=["builtin-password"],
     )
     tester.passwords = tester.password_store.candidates()
-    planned = []
-
-    class QueueScheduler:
-        def plan_for_extraction(self, job):
-            candidates = tuple(candidate.value for candidate in job.candidate_pipeline())
-            planned.extend(candidates)
-            return PasswordSearchResult(
-                password=None,
-                status=PasswordSearchStatus.INCONCLUSIVE,
-                extraction_candidates=candidates,
-            )
-
-        def remember_extraction_success(self, fingerprint_key, password):
-            pass
-
-        def remember_extraction_rejection(self, fingerprint_key, password):
-            pass
-
     session = PasswordSession()
-    resolver = PasswordResolver(tester, session, QueueScheduler())
+    scheduler = QueuePasswordScheduler()
+    resolver = PasswordResolver(tester, session, scheduler)
 
     first = resolver.resolve("large.rar", archive_key="archive-key")
     resolver.reject_extraction_candidate(first)
     second = resolver.resolve("large.rar", archive_key="archive-key")
 
-    assert planned == ["user-password", "builtin-password"]
+    assert scheduler.planned == ["user-password", "builtin-password"]
     assert first.password == "user-password"
     assert second.password == "builtin-password"
     assert first.requires_extraction_confirmation is True
@@ -248,25 +251,8 @@ def test_password_resolver_uses_directory_passwords_before_user_and_builtin():
         clipboard_passwords=["clipboard-password"],
         builtin_passwords=["builtin-password"],
     )
-    planned = []
-
-    class QueueScheduler:
-        def plan_for_extraction(self, job):
-            candidates = tuple(candidate.value for candidate in job.candidate_pipeline())
-            planned.extend(candidates)
-            return PasswordSearchResult(
-                password=None,
-                status=PasswordSearchStatus.INCONCLUSIVE,
-                extraction_candidates=candidates,
-            )
-
-        def remember_extraction_success(self, fingerprint_key, password):
-            pass
-
-        def remember_extraction_rejection(self, fingerprint_key, password):
-            pass
-
-    resolver = PasswordResolver(tester, PasswordSession(), QueueScheduler())
+    scheduler = QueuePasswordScheduler()
+    resolver = PasswordResolver(tester, PasswordSession(), scheduler)
 
     first = resolver.resolve(
         "large.rar",
@@ -274,7 +260,7 @@ def test_password_resolver_uses_directory_passwords_before_user_and_builtin():
         directory_passwords=["directory-password", "user-password"],
     )
 
-    assert planned == ["directory-password", "user-password", "clipboard-password", "builtin-password"]
+    assert scheduler.planned == ["directory-password", "user-password", "clipboard-password", "builtin-password"]
     assert first.password == "directory-password"
 
 
@@ -285,22 +271,7 @@ def test_confirmed_password_is_promoted_across_already_planned_archives():
         builtin_passwords=[],
     )
 
-    class QueueScheduler:
-        def plan_for_extraction(self, job):
-            candidates = tuple(candidate.value for candidate in job.candidate_pipeline())
-            return PasswordSearchResult(
-                password=None,
-                status=PasswordSearchStatus.INCONCLUSIVE,
-                extraction_candidates=candidates,
-            )
-
-        def remember_extraction_success(self, fingerprint_key, password):
-            pass
-
-        def remember_extraction_rejection(self, fingerprint_key, password):
-            pass
-
-    resolver = PasswordResolver(tester, PasswordSession(), QueueScheduler())
+    resolver = PasswordResolver(tester, PasswordSession(), QueuePasswordScheduler())
     archive_a = resolver.resolve("first.unknown", archive_key="first")
     archive_b = resolver.resolve("second.unknown", archive_key="second")
     resolver.reject_extraction_candidate(archive_a)
@@ -321,22 +292,7 @@ def test_hundreds_of_archives_reuse_batch_success_instead_of_rewalking_password_
     tester = FakePasswordTester()
     tester.password_store = PasswordStore.from_sources(cli_passwords=passwords, builtin_passwords=[])
 
-    class QueueScheduler:
-        def plan_for_extraction(self, job):
-            candidates = tuple(candidate.value for candidate in job.candidate_pipeline())
-            return PasswordSearchResult(
-                password=None,
-                status=PasswordSearchStatus.INCONCLUSIVE,
-                extraction_candidates=candidates,
-            )
-
-        def remember_extraction_success(self, fingerprint_key, password):
-            pass
-
-        def remember_extraction_rejection(self, fingerprint_key, password):
-            pass
-
-    resolver = PasswordResolver(tester, PasswordSession(), QueueScheduler())
+    resolver = PasswordResolver(tester, PasswordSession(), QueuePasswordScheduler())
     attempts = 0
     resolution = resolver.resolve("archive-0.mixed", archive_key="archive-0")
     while resolution.password != "shared-secret":

@@ -2,6 +2,8 @@ import json
 import zlib
 import zipfile
 
+import pytest
+
 from sunpack.contracts.detection import FactBag
 from sunpack.contracts.tasks import ArchiveTask
 from sunpack.contracts.extraction import ExtractionResult
@@ -9,42 +11,34 @@ from sunpack.verification import VerificationScheduler
 from sunpack.verification import archive_state_manifest as archive_state_manifest_module
 
 
-def test_extraction_exit_signal_reports_unusable_failed_extraction(tmp_path):
-    task = _task(tmp_path)
-    result = ExtractionResult(
-        success=False,
-        archive=task.main_path,
-        out_dir=str(tmp_path / "out"),
-        all_parts=task.all_parts,
-        error="boom",
-    )
-
-    verification = _scheduler([{"name": "extraction_exit_signal"}]).verify(task, result)
-
-    assert verification.decision_hint == "repair"
-    assert verification.assessment_status == "unusable"
-    assert verification.completeness == 0.0
-    assert verification.issues[0].code == "fail.extraction_failed"
-
-
-def test_extraction_exit_signal_rejects_success_with_empty_output(tmp_path):
+@pytest.mark.parametrize(
+    ("success", "progress", "expected_issue"),
+    [
+        (False, None, "fail.extraction_failed"),
+        (True, {"files_written": 0, "bytes_written": 0, "files": []}, "fail.extraction_success_empty"),
+    ],
+    ids=["failed", "success-empty"],
+)
+def test_extraction_exit_signal_reports_unusable_extraction(tmp_path, success, progress, expected_issue):
     task = _task(tmp_path)
     out_dir = tmp_path / "out"
-    out_dir.mkdir()
     result = ExtractionResult(
-        success=True,
+        success=success,
         archive=task.main_path,
         out_dir=str(out_dir),
         all_parts=task.all_parts,
-        progress_manifest_payload={"files_written": 0, "bytes_written": 0, "files": []},
+        error="boom" if not success else None,
+        progress_manifest_payload=progress,
     )
+    if success:
+        out_dir.mkdir()
 
     verification = _scheduler([{"name": "extraction_exit_signal"}]).verify(task, result)
 
     assert verification.decision_hint == "repair"
     assert verification.assessment_status == "unusable"
     assert verification.completeness == 0.0
-    assert verification.issues[0].code == "fail.extraction_success_empty"
+    assert verification.issues[0].code == expected_issue
 
 
 def test_output_presence_reports_missing_or_empty_output_as_unusable(tmp_path):

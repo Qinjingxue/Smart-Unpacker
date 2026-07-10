@@ -67,6 +67,61 @@ class FakeSummary:
     failures = []
 
 
+class WatchClock:
+    def __init__(self, value: float):
+        self.value = value
+
+    def install(self, monkeypatch):
+        monkeypatch.setattr(scheduler_module.time, "time", lambda: self.value)
+
+    def advance(self, seconds: float):
+        self.value += seconds
+
+
+class WatchEvents:
+    def __init__(self, watcher, clock: WatchClock):
+        self.watcher = watcher
+        self.clock = clock
+
+    def emit(self, path: Path | str, *, event_type: str = "created", after: float = 0.0):
+        self.clock.advance(after)
+        self.watcher.enqueue(str(path), event_type=event_type)
+
+    def run_after(self, seconds: float, *, processed: int):
+        self.clock.advance(seconds)
+        result = self.watcher.run_once()
+        assert result.processed == processed
+        return result
+
+
+class WatchState:
+    @staticmethod
+    def assert_pending(watcher, count: int):
+        assert watcher.pending_count == count
+
+    @staticmethod
+    def assert_processed(result, count: int):
+        assert result.processed == count
+
+    @staticmethod
+    def assert_quiet_seconds(watcher, path: Path | str, *, minimum: float, maximum: float | None = None):
+        quiet_seconds = watcher._active_states[str(path)].quiet_seconds
+        assert quiet_seconds >= minimum
+        if maximum is not None:
+            assert quiet_seconds <= maximum
+        return quiet_seconds
+
+
+def _summary_pipeline_engine():
+    return FakePipelineEngine(
+        lambda _config: SimpleNamespace(
+            context=SimpleNamespace(flatten_candidates=set(), recovered_outputs=[]),
+            recent_passwords=[],
+            run_targets=lambda _paths: FakeSummary(),
+        )
+    )
+
+
 def _write_zip(path: Path):
     with zipfile.ZipFile(path, "w") as archive:
         archive.writestr("inside.txt", "ok")
@@ -1638,8 +1693,8 @@ def test_watch_scheduler_does_not_special_case_downloader_suffixes(tmp_path, mon
 
 def test_watch_scheduler_same_stat_modified_event_resets_quiet_window(tmp_path, monkeypatch):
     monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
-    now = [2000010000.0]
-    monkeypatch.setattr(scheduler_module.time, "time", lambda: now[0])
+    clock = WatchClock(2000010000.0)
+    clock.install(monkeypatch)
 
     class FakePipelineRunner:
         def __init__(self, config):
@@ -1661,20 +1716,18 @@ def test_watch_scheduler_same_stat_modified_event_resets_quiet_window(tmp_path, 
         initial_scan=False,
         pipeline_engine=FakePipelineEngine(FakePipelineRunner),
     )
-    watcher.enqueue(str(archive_path), event_type="created")
-    now[0] += 0.8
-    watcher.enqueue(str(archive_path), event_type="modified")
+    events = WatchEvents(watcher, clock)
+    events.emit(archive_path)
+    events.emit(archive_path, event_type="modified", after=0.8)
 
-    now[0] += 0.3
-    assert watcher.run_once().processed == 0
-    now[0] += 9.8
-    assert watcher.run_once().processed == 1
+    events.run_after(0.3, processed=0)
+    events.run_after(9.8, processed=1)
 
 
 def test_modified_epoch_triggers_even_when_size_mtime_and_file_id_are_unchanged(tmp_path, monkeypatch):
     monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
-    now = [2000020000.0]
-    monkeypatch.setattr(scheduler_module.time, "time", lambda: now[0])
+    clock = WatchClock(2000020000.0)
+    clock.install(monkeypatch)
 
     class FakePipelineRunner:
         def __init__(self, config):
@@ -1697,57 +1750,50 @@ def test_modified_epoch_triggers_even_when_size_mtime_and_file_id_are_unchanged(
         initial_scan=False,
         pipeline_engine=FakePipelineEngine(FakePipelineRunner),
     )
-    watcher.enqueue(str(archive_path), event_type="created")
+    events = WatchEvents(watcher, clock)
+    events.emit(archive_path)
     with archive_path.open("r+b") as handle:
         handle.seek(0)
         handle.write(b"B" * 32 * 1024)
     os.utime(archive_path, (original_mtime, original_mtime))
-    watcher.enqueue(str(archive_path), event_type="modified")
+    events.emit(archive_path, event_type="modified")
 
-    now[0] += 9.9
-    assert watcher.run_once().processed == 0
-    now[0] += 0.2
-    assert watcher.run_once().processed == 1
+    events.run_after(9.9, processed=0)
+    events.run_after(0.2, processed=1)
 
 
 def test_watch_scheduler_adapts_quiet_window_to_fast_content_writes(tmp_path, monkeypatch):
     monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
-    now = [2000030000.0]
-    monkeypatch.setattr(scheduler_module.time, "time", lambda: now[0])
+    clock = WatchClock(2000030000.0)
+    clock.install(monkeypatch)
     archive_path = tmp_path / "sample.zip"
     archive_path.write_bytes(b"0")
-    os.utime(archive_path, (now[0], now[0]))
+    os.utime(archive_path, (clock.value, clock.value))
     watcher = WatchScheduler(
         {"watch": {"clipboard_monitor_enabled": False}},
         [str(tmp_path)],
         out_dir=str(tmp_path / "out"),
         state_path=str(tmp_path / "state.json"),
         initial_scan=False,
-        pipeline_engine=FakePipelineEngine(lambda _config: SimpleNamespace(
-            context=SimpleNamespace(flatten_candidates=set(), recovered_outputs=[]),
-            recent_passwords=[],
-            run_targets=lambda paths: FakeSummary(),
-        )),
+        pipeline_engine=_summary_pipeline_engine(),
     )
-    watcher.enqueue(str(archive_path), event_type="created")
+    events = WatchEvents(watcher, clock)
+    events.emit(archive_path)
     for index in range(20):
-        now[0] += 0.5
+        clock.advance(0.5)
         archive_path.write_bytes(bytes([index % 256]) * (index + 2))
-        os.utime(archive_path, (now[0], now[0]))
-        watcher.enqueue(str(archive_path), event_type="modified")
+        os.utime(archive_path, (clock.value, clock.value))
+        events.emit(archive_path, event_type="modified")
 
-    state = watcher._active_states[str(archive_path)]
-    assert 3.5 <= state.quiet_seconds <= 4.5
-    now[0] += state.quiet_seconds - 0.01
-    assert watcher.run_once().processed == 0
-    now[0] += 0.02
-    assert watcher.run_once().processed == 1
+    quiet_seconds = WatchState.assert_quiet_seconds(watcher, archive_path, minimum=3.5, maximum=4.5)
+    events.run_after(quiet_seconds - 0.01, processed=0)
+    events.run_after(0.02, processed=1)
 
 
 def test_watch_scheduler_default_cold_start_is_one_second(tmp_path, monkeypatch):
     monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
-    now = [2000035000.0]
-    monkeypatch.setattr(scheduler_module.time, "time", lambda: now[0])
+    clock = WatchClock(2000035000.0)
+    clock.install(monkeypatch)
     archive_path = tmp_path / "sample.zip"
     _write_zip(archive_path)
     watcher = WatchScheduler(
@@ -1756,53 +1802,42 @@ def test_watch_scheduler_default_cold_start_is_one_second(tmp_path, monkeypatch)
         out_dir=str(tmp_path / "out"),
         state_path=str(tmp_path / "state.json"),
         initial_scan=False,
-        pipeline_engine=FakePipelineEngine(lambda _config: SimpleNamespace(
-            context=SimpleNamespace(flatten_candidates=set(), recovered_outputs=[]),
-            recent_passwords=[],
-            run_targets=lambda paths: FakeSummary(),
-        )),
+        pipeline_engine=_summary_pipeline_engine(),
     )
-    watcher.enqueue(str(archive_path), event_type="created")
+    events = WatchEvents(watcher, clock)
+    events.emit(archive_path)
 
     assert watcher._active_states[str(archive_path)].quiet_seconds == 1.0
-    now[0] += 0.99
-    assert watcher.run_once().processed == 0
-    now[0] += 0.02
-    assert watcher.run_once().processed == 1
+    events.run_after(0.99, processed=0)
+    events.run_after(0.02, processed=1)
 
 
 def test_watch_scheduler_retains_slow_interval_learning_across_active_epochs(tmp_path, monkeypatch):
     monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
-    now = [2000040000.0]
-    monkeypatch.setattr(scheduler_module.time, "time", lambda: now[0])
+    clock = WatchClock(2000040000.0)
+    clock.install(monkeypatch)
     archive_path = tmp_path / "sample.zip"
     archive_path.write_bytes(b"first")
-    os.utime(archive_path, (now[0], now[0]))
+    os.utime(archive_path, (clock.value, clock.value))
     watcher = WatchScheduler(
         {"watch": {"clipboard_monitor_enabled": False}},
         [str(tmp_path)],
         out_dir=str(tmp_path / "out"),
         state_path=str(tmp_path / "state.json"),
         initial_scan=False,
-        pipeline_engine=FakePipelineEngine(lambda _config: SimpleNamespace(
-            context=SimpleNamespace(flatten_candidates=set(), recovered_outputs=[]),
-            recent_passwords=[],
-            run_targets=lambda paths: FakeSummary(),
-        )),
+        pipeline_engine=_summary_pipeline_engine(),
     )
-    watcher.enqueue(str(archive_path), event_type="created")
+    events = WatchEvents(watcher, clock)
+    events.emit(archive_path)
 
-    now[0] += 10.01
-    assert watcher.run_once().processed == 1
-    now[0] += 9.99
+    events.run_after(10.01, processed=1)
+    clock.advance(9.99)
     archive_path.write_bytes(b"second")
-    os.utime(archive_path, (now[0], now[0]))
-    watcher.enqueue(str(archive_path), event_type="modified")
+    os.utime(archive_path, (clock.value, clock.value))
+    events.emit(archive_path, event_type="modified")
 
-    state = watcher._active_states[str(archive_path)]
-    assert state.quiet_seconds > 20.0
-    now[0] += 20.0
-    assert watcher.run_once().processed == 0
+    WatchState.assert_quiet_seconds(watcher, archive_path, minimum=20.0)
+    events.run_after(20.0, processed=0)
 
 
 def test_modified_event_retries_same_metadata_identity(tmp_path, monkeypatch):
@@ -1831,11 +1866,12 @@ def test_modified_event_retries_same_metadata_identity(tmp_path, monkeypatch):
         initial_scan=False,
         pipeline_engine=FakePipelineEngine(FakePipelineRunner),
     )
-    watcher.enqueue(str(archive_path), event_type="modified")
-    assert watcher.run_once().processed == 1
+    events = WatchEvents(watcher, WatchClock(0.0))
+    events.emit(archive_path, event_type="modified")
+    WatchState.assert_processed(events.watcher.run_once(), 1)
 
     archive_path.write_bytes(b"B" * (256 * 1024))
     os.utime(archive_path, (original_mtime, original_mtime))
-    watcher.enqueue(str(archive_path), event_type="modified")
-    assert watcher.run_once().processed == 1
+    events.emit(archive_path, event_type="modified")
+    WatchState.assert_processed(events.watcher.run_once(), 1)
     assert len(attempts) == 2
