@@ -38,6 +38,7 @@ from sunpack.passwords.internal.clipboard_monitor import ClipboardPasswordMonito
 from sunpack.passwords.internal.lists import dedupe_passwords
 from sunpack.passwords.internal.local_files import DIRECTORY_PASSWORD_FILE_NAME, is_directory_password_file
 from sunpack.support.output_paths import default_output_dir_for_task
+from sunpack.support.collections import dedupe_normalized_paths
 
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
@@ -653,7 +654,7 @@ class WatchScheduler:
         self._remember_recent_passwords(response.recent_passwords)
         target_result = _target_result_for_path(summary, candidate.path)
         outcome_kind = _summary_outcome_kind(summary, target_result)
-        probe_output_dirs = _dedupe_paths([
+        probe_output_dirs = dedupe_normalized_paths([
             *response.artifacts.flatten_targets,
             *(
                 str(item.get("out_dir") or "")
@@ -781,7 +782,7 @@ class WatchScheduler:
         for root in self.watch_roots:
             base = root if os.path.isdir(root) else os.path.dirname(root)
             roots.append(os.path.join(os.path.abspath(base), ".sunpack_watch_probes"))
-        return _dedupe_paths(roots)
+        return dedupe_normalized_paths(roots)
 
     def _is_under_probe_root(self, path: str) -> bool:
         normalized = os.path.abspath(path)
@@ -816,7 +817,7 @@ class WatchScheduler:
     ) -> tuple[list[str], dict[str, str]]:
         reported_sources = [
             path
-            for path in _dedupe_paths(probe_outputs)
+            for path in dedupe_normalized_paths(probe_outputs)
             if os.path.isdir(path) and _is_relative_to(path, workspace)
         ]
         sources = [
@@ -897,7 +898,7 @@ class WatchScheduler:
                 main_path=os.path.abspath(path),
                 all_parts=[os.path.abspath(path)],
             )
-            return _dedupe_paths([default_output_dir_for_task(task, run_config.get("output", {}))])
+            return dedupe_normalized_paths([default_output_dir_for_task(task, run_config.get("output", {}))])
         except Exception:
             return []
 
@@ -905,14 +906,14 @@ class WatchScheduler:
         if not roots:
             return
         with self._lock:
-            for root in _dedupe_paths(roots):
+            for root in dedupe_normalized_paths(roots):
                 self._active_output_roots[root] = self._active_output_roots.get(root, 0) + 1
 
     def _release_output_roots(self, roots: list[str]) -> None:
         if not roots:
             return
         with self._lock:
-            for root in _dedupe_paths(roots):
+            for root in dedupe_normalized_paths(roots):
                 count = self._active_output_roots.get(root, 0)
                 if count <= 1:
                     self._active_output_roots.pop(root, None)
@@ -925,7 +926,7 @@ class WatchScheduler:
             return
         expires_at = time.time() + self.output_suppression_seconds
         with self._lock:
-            for root in _dedupe_paths(roots):
+            for root in dedupe_normalized_paths(roots):
                 self._recent_output_roots[root] = max(expires_at, self._recent_output_roots.get(root, 0.0))
 
     def _remember_known_output_roots(self, roots: list[str]) -> None:
@@ -1142,25 +1143,9 @@ def _next_nonexisting_path(path: str) -> str:
     return f"{base}_{index}"
 
 
-def _dedupe_paths(paths: Iterable[str]) -> list[str]:
-    output: list[str] = []
-    seen: set[str] = set()
-    for path in paths:
-        value = str(path or "").strip()
-        if not value:
-            continue
-        normalized = os.path.abspath(value)
-        key = os.path.normcase(normalized)
-        if key in seen:
-            continue
-        seen.add(key)
-        output.append(normalized)
-    return output
-
-
 def _compact_paths(paths: Iterable[str]) -> list[str]:
     compacted: list[str] = []
-    for path in sorted(_dedupe_paths(paths), key=len):
+    for path in sorted(dedupe_normalized_paths(paths), key=len):
         if _is_under_any_root(path, compacted):
             continue
         compacted = [root for root in compacted if not _is_under_any_root(root, [path])]

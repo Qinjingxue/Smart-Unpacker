@@ -4,6 +4,7 @@ from typing import Any
 from sunpack.contracts.archive_knowledge import ArchiveKnowledge
 from sunpack.repair.job import RepairJob
 from sunpack.support import archive_knowledge_projection as knowledge_view
+from sunpack.support.collections import dedupe_values
 
 
 BOUNDARY_FLAGS = {
@@ -347,12 +348,4 @@ def _first_text(values) -> str:
     return "unknown"
 
 
-def _dedupe(values) -> list:
-    result = []
-    seen = set()
-    for value in values:
-        if value in seen:
-            continue
-        seen.add(value)
-        result.append(value)
-    return result
+_dedupe = dedupe_values

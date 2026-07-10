@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from sunpack.support.collections import clamp01 as _clamp01
+
 from dataclasses import asdict, dataclass
 from typing import Any
 
@@ -107,6 +109,3 @@ def _coverage_quality(
         _clamp01(float(archive_coverage.confidence)),
     )
 
-
-def _clamp01(value: float) -> float:
-    return min(1.0, max(0.0, value))

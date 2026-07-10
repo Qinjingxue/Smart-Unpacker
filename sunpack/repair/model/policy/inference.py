@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from sunpack.support.collections import clamp01 as _clamp01
+
 import json
 from pathlib import Path
 from typing import Any
@@ -175,8 +177,6 @@ def _at(values: list[float], index: int) -> float:
     return _clamp01(values[index])
 
 
-def _clamp01(value: float) -> float:
-    return max(0.0, min(1.0, float(value)))
 
 
 def _resolve_device(device: str, torch_module) -> str:

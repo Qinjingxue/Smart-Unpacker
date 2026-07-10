@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from sunpack.support.collections import clamp01 as _clamp01
+
 import hashlib
 import json
 from dataclasses import dataclass, field
@@ -424,5 +426,3 @@ def _as_int(value: Any) -> int:
         return 0
 
 
-def _clamp01(value: float) -> float:
-    return min(1.0, max(0.0, value))

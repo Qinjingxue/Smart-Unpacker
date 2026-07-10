@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from sunpack.support.collections import clamp01 as _clamp01
+
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -636,5 +638,3 @@ def _int(value: Any) -> int:
         return 0
 
 
-def _clamp01(value: float) -> float:
-    return max(0.0, min(1.0, float(value or 0.0)))

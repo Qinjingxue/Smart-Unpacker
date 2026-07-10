@@ -11,6 +11,7 @@ from sunpack.repair.pipeline.modules._common import module_limits
 from sunpack.repair.result import RepairResult, RepairStatus
 from sunpack.support.sevenzip_bridge import get_native_password_tester
 from sunpack.support.sevenzip_bridge_worker import dry_run_archive
+from sunpack.support.collections import clamp01 as _clamp01, dedupe_strings as _dedupe
 
 
 @dataclass(frozen=True)
@@ -1254,10 +1255,6 @@ def _native_validation_strength(validation: CandidateValidation) -> float:
     return _clamp01(strength)
 
 
-def _clamp01(value: float) -> float:
-    return min(1.0, max(0.0, value))
-
-
 def _analyze_resources(tester, path: str, password: str):
     analyze = getattr(tester, "analyze_archive_resources", None)
     if not callable(analyze):
@@ -1298,18 +1295,6 @@ def _candidate_coverage_ratio(resources, complete_files: int) -> float | None:
     if expected <= 0:
         return None
     return _clamp01(float(max(0, int(complete_files or 0))) / float(expected))
-
-
-def _dedupe(values: list[str]) -> list[str]:
-    output: list[str] = []
-    seen: set[str] = set()
-    for value in values:
-        text = str(value)
-        if not text or text in seen:
-            continue
-        seen.add(text)
-        output.append(text)
-    return output
 
 
 def _is_patch_primary_format(value: str) -> bool:

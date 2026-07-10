@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from sunpack.support.collections import clamp01 as _clamp01
+
 import json
 from pathlib import Path
 from typing import Any
@@ -216,8 +218,6 @@ def _root_case_score_summary(ranked: list[dict[str, Any]], threshold: float) -> 
     }
 
 
-def _clamp01(value: float) -> float:
-    return max(0.0, min(1.0, float(value)))
 
 
 def _edge_batch_for_theory_depends(batch):

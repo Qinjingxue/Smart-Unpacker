@@ -1,7 +1,6 @@
-import importlib
-import pkgutil
 from typing import Dict, Type
 from sunpack.detection.pipeline.rules.base import RuleBase
+from sunpack.support.module_discovery import discover_package_modules
 
 class RuleRegistry:
     def __init__(self):
@@ -44,8 +43,6 @@ def discover_rules():
         "sunpack.detection.pipeline.rules.scoring",
         "sunpack.detection.pipeline.rules.confirmation",
     ):
-        package = importlib.import_module(package_name)
-        for module_info in pkgutil.iter_modules(package.__path__, package.__name__ + "."):
-            importlib.import_module(module_info.name)
+        discover_package_modules(package_name)
 
     _discovered = True

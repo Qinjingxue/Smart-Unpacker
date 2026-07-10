@@ -9,6 +9,7 @@ from sunpack.analysis.result import ArchiveFormatEvidence, ArchiveSegment
 from sunpack.contracts.tasks import ArchiveTask
 from sunpack.support.runtime_route_evidence import normalize_runtime_route_evidence
 from sunpack.support.archive_knowledge_writer import commit_task_knowledge, ensure_knowledge, prepare_knowledge_value, write_flags, write_payload, write_prepared_payload, write_value
+from sunpack.support.collections import dedupe_strings as _dedupe
 
 
 def write_analysis_report(task: ArchiveTask, report: ArchiveAnalysisReport) -> None:
@@ -833,18 +834,6 @@ def _seven_zip_route_flags_from_details(details: dict[str, Any]) -> list[str]:
     if structure.get("non_solid_archive"):
         flags.append("non_solid_archive")
     return _dedupe(flags)
-
-
-def _dedupe(values: list[str]) -> list[str]:
-    output: list[str] = []
-    seen: set[str] = set()
-    for value in values:
-        text = str(value)
-        if not text or text in seen:
-            continue
-        seen.add(text)
-        output.append(text)
-    return output
 
 
 def _evidence_payload(evidence: ArchiveFormatEvidence) -> dict[str, Any]:

@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import copy
-import hashlib
 import json
 from collections import OrderedDict, Counter
 from pathlib import Path
 from typing import Any, Callable
 
-from sunpack.support.json_values import stable_json_value
+from sunpack.support.json_values import canonical_digest, stable_json_value
 
 
 class RepairRuntimeCache:
@@ -59,8 +58,7 @@ class RepairRuntimeCache:
 
 
 def stable_cache_key(payload: Any) -> str:
-    data = json.dumps(stable_json_value(payload, bytes_digest_key="bytes_sha256"), ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
-    return hashlib.sha256(data.encode("utf-8")).hexdigest()
+    return canonical_digest(payload, bytes_digest_key="bytes_sha256")
 
 
 

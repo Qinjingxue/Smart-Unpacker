@@ -14,6 +14,7 @@ from sunpack.contracts.archive_state import ArchiveState
 from sunpack.contracts.detection import FactBag
 from sunpack.support import archive_knowledge_projection as knowledge_view
 from sunpack.support.path_keys import normalized_path, path_key
+from sunpack.support.collections import dedupe_values
 
 
 @dataclass
@@ -439,12 +440,4 @@ def _phase(timer: Any | None, name: str):
     return timer(name)
 
 
-def _dedupe(values: list[str]) -> list[str]:
-    output = []
-    seen = set()
-    for value in values:
-        if value in seen:
-            continue
-        seen.add(value)
-        output.append(value)
-    return output
+_dedupe = dedupe_values

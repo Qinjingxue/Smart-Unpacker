@@ -12,6 +12,7 @@ from .group_models import (
     WatchGroupSnapshot,
     WatchGroupState,
 )
+from sunpack.support.collections import dedupe_normalized_paths
 
 
 STATE_VERSION = 9
@@ -87,7 +88,7 @@ class WatchStateStore:
         self.entries = self._load_records(payload.get("entries"), WatchStateEntry)
         self.groups = self._load_records(payload.get("groups"), WatchGroupState, normalize_keys=False)
         roots = payload.get("owned_output_roots")
-        self.owned_output_roots = _dedupe_paths(roots if isinstance(roots, list) else [])
+        self.owned_output_roots = dedupe_normalized_paths(roots if isinstance(roots, list) else [])
 
     @staticmethod
     def _load_records(payload, record_type, *, normalize_keys: bool = True) -> dict:
@@ -419,25 +420,9 @@ def _path_key(path: str) -> str:
     return os.path.normcase(os.path.abspath(path))
 
 
-def _dedupe_paths(paths: Iterable[str]) -> list[str]:
-    output: list[str] = []
-    seen: set[str] = set()
-    for path in paths:
-        value = str(path or "").strip()
-        if not value:
-            continue
-        normalized = os.path.abspath(value)
-        key = os.path.normcase(normalized)
-        if key in seen:
-            continue
-        seen.add(key)
-        output.append(normalized)
-    return output
-
-
 def _compact_paths(paths: Iterable[str]) -> list[str]:
     compacted: list[str] = []
-    for path in sorted(_dedupe_paths(paths), key=len):
+    for path in sorted(dedupe_normalized_paths(paths), key=len):
         key = _path_key(path)
         if any(_is_path_under(key, _path_key(root)) for root in compacted):
             continue

@@ -25,6 +25,7 @@ from sunpack.cli.persistent_runtime import persistent_runtime_enabled, pipeline_
 from sunpack.coordinator.engine import PipelineEngine
 from sunpack.contracts.failures import FailureInfo
 from sunpack.passwords import dedupe_passwords
+from sunpack.support.collections import dedupe_values
 
 COMMAND = "extract"
 ORDER = 10
@@ -307,12 +308,4 @@ def _confirm_password_retry(ctx) -> bool:
         print(ctx.t("cli.answer_yes_no"), flush=True)
 
 
-def _dedupe(values: list[str]) -> list[str]:
-    result = []
-    seen = set()
-    for value in values:
-        if value in seen:
-            continue
-        seen.add(value)
-        result.append(value)
-    return result
+_dedupe = dedupe_values

@@ -1,21 +1,20 @@
-from typing import Dict
-
 from sunpack.analysis.structure_pipeline.module import AnalysisModule
 from sunpack.support.module_discovery import discover_package_modules
+from sunpack.support.registry import NamedRegistry
 
 
-class AnalysisModuleRegistry:
+class AnalysisModuleRegistry(NamedRegistry[AnalysisModule]):
     def __init__(self):
-        self._modules: Dict[str, AnalysisModule] = {}
+        super().__init__()
 
     def register(self, module: AnalysisModule):
-        self._modules[module.spec.name] = module
+        self.register_named(module.spec.name, module)
 
     def get(self, name: str) -> AnalysisModule | None:
-        return self._modules.get(name)
+        return self.get_named(name)
 
     def all(self) -> dict[str, AnalysisModule]:
-        return dict(self._modules)
+        return self.all_named()
 
 
 _global_registry = AnalysisModuleRegistry()

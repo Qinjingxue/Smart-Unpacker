@@ -1,4 +1,5 @@
 from contextlib import nullcontext
+from sunpack.support.collections import clamp01 as _clamp01
 from dataclasses import replace
 from typing import Any, Callable
 
@@ -644,8 +645,6 @@ def _decision_hint(
     return DECISION_FAIL
 
 
-def _clamp01(value: float) -> float:
-    return min(1.0, max(0.0, value))
 
 
 def _phase(timer: Callable[..., Any] | None, name: str):

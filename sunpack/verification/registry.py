@@ -1,9 +1,8 @@
-from importlib import import_module
-from pkgutil import iter_modules
 from typing import Callable, Protocol
 
 from sunpack.verification.evidence import VerificationEvidence
 from sunpack.contracts.verification import VerificationStepResult
+from sunpack.support.module_discovery import discover_package_modules
 
 
 class VerificationMethod(Protocol):
@@ -47,10 +46,6 @@ def discover_verification_methods() -> None:
     global _DISCOVERED
     if _DISCOVERED:
         return
-    package_name = "sunpack.verification.methods"
-    package = import_module(package_name)
-    for module_info in iter_modules(package.__path__):
-        if not module_info.ispkg:
-            import_module(f"{package_name}.{module_info.name}")
+    discover_package_modules("sunpack.verification.methods")
     _DISCOVERED = True
 

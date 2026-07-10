@@ -9,6 +9,8 @@ from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any
 
+from sunpack.support.json_values import canonical_digest, jsonable_value
+
 
 _LOCK = threading.Lock()
 
@@ -36,11 +38,7 @@ def write_probe_event(event: str, payload: dict[str, Any] | None = None) -> None
 
 
 def canonical_hash(value: Any) -> str:
-    try:
-        encoded = json.dumps(_jsonable(value), ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    except Exception:
-        encoded = str(value).encode("utf-8", errors="replace")
-    return hashlib.sha256(encoded).hexdigest()
+    return canonical_digest(value)
 
 
 def public_policy_payload(payload: dict[str, Any]) -> dict[str, Any]:
@@ -108,23 +106,7 @@ def _strict() -> bool:
     return str(os.environ.get("SUNPACK_REPAIR_TRACE_STRICT") or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _jsonable(value: Any) -> Any:
-    if value is None or isinstance(value, (str, int, float, bool)):
-        return value
-    if isinstance(value, Path):
-        return str(value)
-    if is_dataclass(value):
-        return _jsonable(asdict(value))
-    if isinstance(value, dict):
-        return {str(key): _jsonable(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple, set)):
-        return [_jsonable(item) for item in value]
-    if hasattr(value, "to_dict") and callable(value.to_dict):
-        try:
-            return _jsonable(value.to_dict())
-        except Exception:
-            pass
-    return str(value)
+_jsonable = jsonable_value
 
 
 _FORBIDDEN_POLICY_KEYS = {

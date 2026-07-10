@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from sunpack.support.collections import clamp01 as _clamp01
+
 import hashlib
 import json
 from dataclasses import dataclass, field, replace
@@ -728,14 +730,6 @@ def _state_patch_digest(state: RepairBeamState) -> str:
             return str(value)
         return _stable_digest(_archive_state_equivalence_payload(state.archive_state))
     return str(state.source_input.get("patch_digest") or "")
-
-
-def _clamp01(value: Any) -> float:
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return 0.0
-    return min(1.0, max(0.0, number))
 
 
 def _state_accepted(state: RepairBeamState) -> bool:

@@ -6,6 +6,7 @@ from typing import Any
 from sunpack.contracts.tasks import ArchiveTask
 from sunpack.contracts.verification import VerificationResult
 from sunpack.support.archive_knowledge_writer import commit_task_knowledge, ensure_knowledge, prepare_knowledge_value, write_flags, write_payload, write_prepared_payload
+from sunpack.support.collections import dedupe_values
 
 
 def write_verification_result(
@@ -233,15 +234,7 @@ def _ratio(value: int, total: int) -> float:
     return float(value) / float(max(1, int(total or 0)))
 
 
-def _dedupe(values: list[str]) -> list[str]:
-    output: list[str] = []
-    seen: set[str] = set()
-    for value in values:
-        if value in seen:
-            continue
-        seen.add(value)
-        output.append(value)
-    return output
+_dedupe = dedupe_values
 
 
 def _phase(timer: Any | None, name: str):

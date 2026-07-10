@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from sunpack.support.collections import clamp01 as _clamp01
+
 from typing import Any
 
 from sunpack.repair.model.policy.schema import PolicyAction, PolicyGraphTrainingSample, PolicyWorldTrainingSample
@@ -788,6 +790,3 @@ def _float(value: Any) -> float:
     except (TypeError, ValueError):
         return 0.0
 
-
-def _clamp01(value: float) -> float:
-    return max(0.0, min(1.0, float(value)))

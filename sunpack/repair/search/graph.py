@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from sunpack.support.collections import clamp01 as _clamp01
+
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -670,8 +672,6 @@ def _top_root(scores: dict[str, Any]) -> str:
     return max(scores.items(), key=lambda item: _float(item[1]))[0]
 
 
-def _clamp01(value: float) -> float:
-    return max(0.0, min(1.0, float(value)))
 
 
 def _normalized_entropy(values: list[float]) -> float:

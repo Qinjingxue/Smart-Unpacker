@@ -35,6 +35,7 @@ from sunpack.contracts.archive_knowledge import ArchiveKnowledge
 from sunpack.support import archive_knowledge_projection as knowledge_view
 from sunpack.support import repair_trace
 from sunpack.support.module_config import enabled_module_configs
+from sunpack.support.collections import dedupe_values
 
 if TYPE_CHECKING:
     from sunpack.repair.model.runtime import RepairModelRuntime
@@ -1562,15 +1563,7 @@ def _format_specificity_penalty(fmt: str, expected) -> int:
     return 2
 
 
-def _dedupe(values: list[str]) -> list[str]:
-    result = []
-    seen = set()
-    for value in values:
-        if value in seen:
-            continue
-        seen.add(value)
-        result.append(value)
-    return result
+_dedupe = dedupe_values
 
 
 def _intersects(left, right) -> bool:

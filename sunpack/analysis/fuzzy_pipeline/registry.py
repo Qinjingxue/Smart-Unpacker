@@ -1,21 +1,20 @@
-from typing import Dict
-
 from sunpack.analysis.fuzzy_pipeline.module import FuzzyAnalysisModule
 from sunpack.support.module_discovery import discover_package_modules
+from sunpack.support.registry import NamedRegistry
 
 
-class FuzzyAnalysisModuleRegistry:
+class FuzzyAnalysisModuleRegistry(NamedRegistry[FuzzyAnalysisModule]):
     def __init__(self):
-        self._modules: Dict[str, FuzzyAnalysisModule] = {}
+        super().__init__()
 
     def register(self, module: FuzzyAnalysisModule):
-        self._modules[module.spec.name] = module
+        self.register_named(module.spec.name, module)
 
     def get(self, name: str) -> FuzzyAnalysisModule | None:
-        return self._modules.get(name)
+        return self.get_named(name)
 
     def all(self) -> dict[str, FuzzyAnalysisModule]:
-        return dict(self._modules)
+        return self.all_named()
 
 
 _global_registry = FuzzyAnalysisModuleRegistry()

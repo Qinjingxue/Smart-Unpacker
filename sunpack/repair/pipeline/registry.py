@@ -1,22 +1,20 @@
-from typing import Dict
-
 from sunpack.repair.pipeline.module import RepairModule
 from sunpack.support.module_discovery import discover_package_modules
+from sunpack.support.registry import NamedRegistry
 
 
-class RepairModuleRegistry:
+class RepairModuleRegistry(NamedRegistry[RepairModule]):
     def __init__(self):
-        self._modules: Dict[str, RepairModule] = {}
+        super().__init__()
 
     def register(self, module: RepairModule):
-        name = module.spec.name
-        self._modules[name] = module
+        self.register_named(module.spec.name, module)
 
     def get(self, name: str) -> RepairModule | None:
-        return self._modules.get(name)
+        return self.get_named(name)
 
     def all(self) -> dict[str, RepairModule]:
-        return dict(self._modules)
+        return self.all_named()
 
 
 _global_registry = RepairModuleRegistry()
