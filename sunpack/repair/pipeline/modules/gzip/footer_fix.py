@@ -47,24 +47,15 @@ class GzipFooterFix:
 
     def repair(self, job: RepairJob, diagnosis: RepairDiagnosis, workspace: str, config: dict) -> RepairResult:
         limits = module_limits(config)
-        try:
-            result = dict(
-                _native_gzip_footer_fix_repair(
-                    source_input_for_job(job),
-                    workspace,
-                    float(limits.get("max_input_size_mb", 512) or 0),
-                    float(limits.get("max_seconds_per_module", 30.0) or 0),
-                    float(limits.get("max_gzip_footer_fix_decode_mb", 32) or 0),
-                )
+        result = dict(
+            _native_gzip_footer_fix_repair(
+                source_input_for_job(job),
+                workspace,
+                float(limits.get("max_input_size_mb", 512) or 0),
+                float(limits.get("max_seconds_per_module", 30.0) or 0),
+                float(limits.get("max_gzip_footer_fix_decode_mb", 32) or 32),
             )
-        except TypeError:
-            result = dict(
-                _native_gzip_footer_fix_repair(
-                    source_input_for_job(job),
-                    workspace,
-                    float(limits.get("max_input_size_mb", 512) or 0),
-                )
-            )
+        )
         return native_patch_repair_result(
             module_name=self.spec.name,
             fmt="gzip",
