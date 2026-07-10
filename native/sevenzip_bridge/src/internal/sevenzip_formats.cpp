@@ -122,6 +122,8 @@ std::vector<GUID> candidate_formats(const std::wstring& archive_path, const std:
         ids = rar_format_ids_for_paths(archive_path, part_paths, true);
     } else if (ext == L".zip" || ext == L".jar" || ext == L".docx" || ext == L".xlsx" || ext == L".apk") {
         ids = {0x01};
+    } else if (split_family == L"zip") {
+        ids = {0x01};
     } else if (name.size() >= 8 && name.compare(name.size() - 8, 8, L".zip.001") == 0) {
         ids = {0x01, 0x07};
     } else if (name.size() >= 7 && name.compare(name.size() - 7, 7, L".7z.001") == 0) {

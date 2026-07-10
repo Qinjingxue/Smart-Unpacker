@@ -20,6 +20,33 @@ namespace sunpack::sevenzip {
 
 #ifdef _WIN32
 
+namespace {
+
+bool is_zip_numbered_volume_name(const std::wstring& name) {
+    constexpr std::size_t suffix_length = 4;
+    constexpr std::size_t marker_length = 5;  // ".zip."
+    if (name.size() < marker_length + suffix_length ||
+        name.compare(name.size() - marker_length - suffix_length, marker_length, L".zip.") != 0) {
+        return false;
+    }
+    for (std::size_t index = name.size() - suffix_length; index < name.size(); ++index) {
+        if (!iswdigit(name[index])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+int zip_numbered_volume(const std::wstring& name) {
+    int number = 0;
+    for (std::size_t index = name.size() - 4; index < name.size(); ++index) {
+        number = number * 10 + (name[index] - L'0');
+    }
+    return number;
+}
+
+}  // namespace
+
 
 
 std::wstring lower_text(std::wstring value) {
@@ -63,6 +90,10 @@ bool is_sfx_path(const std::wstring& path) {
 std::optional<int> parse_volume_number(const std::wstring& path) {
 
     const std::wstring name = filename_lower(path);
+
+    if (is_zip_numbered_volume_name(name)) {
+        return zip_numbered_volume(name);
+    }
 
     if (name.size() >= 4 && name[name.size() - 4] == L'.') {
 
@@ -258,6 +289,8 @@ bool looks_missing_volume(const std::wstring& archive_path, Int32 op_res) {
 
     return lower.find(L".001") != std::wstring::npos ||
 
+        is_zip_numbered_volume_name(lower) ||
+
         lower.find(L".part") != std::wstring::npos ||
 
         (lower.size() >= 4 && lower[lower.size() - 4] == L'.' && lower[lower.size() - 3] == L'z' &&
@@ -282,6 +315,12 @@ bool has_numbered_split_head(const std::vector<std::wstring>& part_paths) {
         std::wstring name = filename_lower(path);
 
         if (name.size() >= 4 && name.compare(name.size() - 4, 4, L".001") == 0) {
+
+            return true;
+
+        }
+
+        if (is_zip_numbered_volume_name(name) && zip_numbered_volume(name) == 0) {
 
             return true;
 

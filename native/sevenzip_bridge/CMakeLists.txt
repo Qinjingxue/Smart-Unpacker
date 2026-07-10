@@ -91,6 +91,11 @@ target_link_libraries(sunpack_sevenzip_smoke
     PRIVATE sunpack_sevenzip_core
 )
 
+target_include_directories(sunpack_sevenzip_smoke
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
 add_executable(sunpack_sevenzip_worker
     src/worker.cpp
 )
