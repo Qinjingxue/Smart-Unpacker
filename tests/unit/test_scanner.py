@@ -1,9 +1,37 @@
+from types import SimpleNamespace
+
+import pytest
+
+from sunpack.contracts.detection import FactBag
 from sunpack.filesystem.directory_scanner import DirectoryScanner
 from sunpack.detection import DetectionScheduler
 from sunpack.coordinator.task_provider import ArchiveTaskProvider
 from sunpack.coordinator.target_scan import build_fact_bags_for_targets
 from tests.helpers.scene_rules import RECOMMENDED_SCENE_RULES_PAYLOAD
 from tests.helpers.detection_config import with_detection_pipeline
+
+
+def _rescue_decision():
+    return SimpleNamespace(should_extract=False, discarded_at="scoring")
+
+
+def test_structure_rescue_eligibility_is_independent_of_extension():
+    provider = ArchiveTaskProvider.__new__(ArchiveTaskProvider)
+
+    carrier = FactBag()
+    carrier.set("candidate.entry_path", "cover.jpg")
+    ordinary = FactBag()
+    ordinary.set("candidate.entry_path", "video.mp4")
+    unknown = FactBag()
+    unknown.set("candidate.entry_path", "payload.unknown")
+    probed = FactBag()
+    probed.set("candidate.entry_path", "payload.mp4")
+    probed.set("file.probe_detected_archive", True)
+
+    assert provider._structure_rescue_eligible(carrier, _rescue_decision()) is True
+    assert provider._structure_rescue_eligible(ordinary, _rescue_decision()) is True
+    assert provider._structure_rescue_eligible(unknown, _rescue_decision()) is True
+    assert provider._structure_rescue_eligible(probed, _rescue_decision()) is True
 
 
 def test_directory_scanner_captures_files_and_directories(tmp_path):
@@ -184,7 +212,6 @@ def test_directory_scanner_custom_filters_fail_without_native_mapping(tmp_path):
             from sunpack.filesystem.filters.base import keep
             return keep()
 
-    import pytest
     with pytest.raises(RuntimeError, match="Native directory scan requires"):
         DirectoryScanner(str(tmp_path), filters=[KeepAllFilter()]).scan()
 

@@ -35,8 +35,20 @@ class ArchiveTaskProvider:
         rescue_prepass = rescue_config.setdefault("analysis", {}).setdefault("prepass", {})
         rescue_prepass.setdefault("full_scan_max_bytes", int(detector_config.get("content_structure_rescue_full_scan_max_bytes", 64 * 1024 * 1024) or 0))
         rescue_prepass.setdefault("deep_scan", bool(detector_config.get("content_structure_rescue_deep_scan", False)))
+        deep_rescue_config = deepcopy(rescue_config)
+        rescue_fuzzy = rescue_config.setdefault("analysis", {}).setdefault("fuzzy", {})
+        rescue_fuzzy.setdefault(
+            "enabled",
+            bool(detector_config.get("content_structure_rescue_fuzzy", False)),
+        )
         self.rescue_analysis_stage = ArchiveAnalysisStage(
             rescue_config,
+            executor_pool=self.analysis_stage.executor_pool,
+            module_executor_pool=self.analysis_stage.module_executor_pool,
+            workload_executor=self.analysis_stage.workload_executor,
+        )
+        self.deep_rescue_analysis_stage = ArchiveAnalysisStage(
+            deep_rescue_config,
             executor_pool=self.analysis_stage.executor_pool,
             module_executor_pool=self.analysis_stage.module_executor_pool,
             workload_executor=self.analysis_stage.workload_executor,
@@ -90,28 +102,85 @@ class ArchiveTaskProvider:
         candidate_bags = build_fact_bags_for_targets(scan_roots, session=scan_session, config=self.config)
         fact_bags = self._filter_incomplete_split_groups(candidate_bags)
         detections = self.detector.evaluate_bags(fact_bags, scan_session=scan_session)
+        rescue_rows = []
+        for index, detection in enumerate(detections):
+            if self._structure_rescue_eligible(detection.fact_bag, detection.decision):
+                rescue_rows.append((index, ArchiveTask.from_fact_bag(
+                    detection.fact_bag,
+                    score=detection.decision.total_score,
+                    decision=detection.decision,
+                )))
+        reports = self._analyze_rescue_batch([task for _index, task in rescue_rows])
+        reports_by_index = {
+            index: report
+            for (index, _task), report in zip(rescue_rows, reports)
+        }
         return [
             type(detection)(
                 fact_bag=detection.fact_bag,
-                decision=self._refine_with_structure_rescue(detection.fact_bag, detection.decision),
+                decision=self._refine_with_structure_rescue(
+                    detection.fact_bag,
+                    detection.decision,
+                    report=reports_by_index.get(index),
+                ),
             )
-            for detection in detections
+            for index, detection in enumerate(detections)
         ]
 
-    def _refine_with_structure_rescue(self, bag: FactBag, decision):
+    def _analyze_rescue_batch(self, tasks: list[ArchiveTask]):
+        if not tasks:
+            return []
+        analyze_reports = getattr(self.rescue_analysis_stage, "analyze_reports", None)
+        if callable(analyze_reports):
+            reports = list(analyze_reports(tasks))
+        else:
+            reports = [self.rescue_analysis_stage.analyze_task(task) for task in tasks]
+        deep_rows = [
+            (index, task)
+            for index, (task, report) in enumerate(zip(tasks, reports))
+            if self._requires_deep_structure_rescue(task.fact_bag, report)
+        ]
+        if deep_rows:
+            deep_analyze = getattr(self.deep_rescue_analysis_stage, "analyze_reports", None)
+            deep_tasks = [task for _index, task in deep_rows]
+            deep_reports = (
+                list(deep_analyze(deep_tasks))
+                if callable(deep_analyze)
+                else [self.deep_rescue_analysis_stage.analyze_task(task) for task in deep_tasks]
+            )
+            for (index, _task), report in zip(deep_rows, deep_reports):
+                reports[index] = report
+        return reports
+
+    @staticmethod
+    def _requires_deep_structure_rescue(bag: FactBag, report) -> bool:
+        if report is not None and list(getattr(report, "selected", []) or []):
+            return False
+        return bool(
+            bag.get("relation.is_split_related")
+            or bag.get("relation.is_split_member")
+            or bag.get("relation.is_split_exe_companion")
+            or bag.get("relation.is_disguised_split_exe_companion")
+            or int(bag.get("relation.split_member_count") or 0) > 1
+        )
+
+    def _structure_rescue_eligible(self, bag: FactBag, decision) -> bool:
+        if decision.should_extract or decision.discarded_at in {"precheck", "confirmation"}:
+            return False
+        # Extensions are deliberately excluded from this gate: SunPack's inputs
+        # frequently have missing, misleading, or arbitrary suffixes. Every
+        # undecided candidate receives the cheap signature/structure rescue pass.
+        return bool(bag.get("candidate.entry_path") or bag.get("file.path"))
+
+    def _refine_with_structure_rescue(self, bag: FactBag, decision, *, report=None):
         if decision.should_extract or decision.discarded_at in {"precheck", "confirmation"}:
             return decision
         path = str(bag.get("candidate.entry_path") or bag.get("file.path") or "")
         if not path:
             return decision
-        task = ArchiveTask.from_fact_bag(bag, score=decision.total_score, decision=decision)
-        try:
-            report = self.rescue_analysis_stage.analyze_task(task)
-        except Exception as exc:
-            bag.mark_error("content.structure_rescue", str(exc))
-            return decision
         if report is None:
             return decision
+        task = ArchiveTask.from_fact_bag(bag, score=decision.total_score, decision=decision)
         self.analysis_stage.remember_report(task, report)
         candidates = list(report.selected)
         if not candidates:

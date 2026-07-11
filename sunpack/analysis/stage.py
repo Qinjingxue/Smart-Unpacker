@@ -96,6 +96,42 @@ class ArchiveAnalysisStage:
                 expanded_tasks.extend(task_results)
         return expanded_tasks
 
+    def analyze_reports(self, tasks: list[ArchiveTask]) -> list[ArchiveAnalysisReport | None]:
+        """Analyze tasks in parallel without projecting reports into task knowledge.
+
+        Detection rescue only needs reports to decide whether a rejected candidate
+        contains an archive.  Keeping that path report-only avoids creating and
+        serializing analysis knowledge for the overwhelmingly common no-hit case.
+        """
+        if not self.enabled or self.scheduler is None or not tasks:
+            return [None for _ in tasks]
+        max_workers = self._task_max_workers(len(tasks))
+        if max_workers <= 1:
+            return [self._report_for_rescue(task) for task in tasks]
+        reports: list[ArchiveAnalysisReport | None] = [None for _ in tasks]
+        executor_context = (
+            nullcontext(self.executor_pool)
+            if self.executor_pool is not None
+            else ThreadPoolExecutor(max_workers=max_workers)
+        )
+        with executor_context as executor:
+            futures = {
+                executor.submit(self._report_for_rescue, task): index
+                for index, task in enumerate(tasks)
+            }
+            for future in as_completed(futures):
+                reports[futures[future]] = future.result()
+        return reports
+
+    def _report_for_rescue(self, task: ArchiveTask) -> ArchiveAnalysisReport | None:
+        try:
+            task.ensure_archive_state()
+            return self._get_or_analyze_report(task)
+        except Exception as exc:
+            task.fact_bag.set("analysis.status", "error")
+            task.fact_bag.set("analysis.error", str(exc))
+            return None
+
     def _task_max_workers(self, task_count: int) -> int:
         if task_count <= 1:
             return 1
