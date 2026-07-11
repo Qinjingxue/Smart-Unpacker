@@ -1,6 +1,11 @@
 from typing import Any, Callable, Dict
 from sunpack.detection.pipeline.facts.schema import get_fact_schema, register_fact_schema
-from sunpack.support.module_discovery import discover_package_modules
+from sunpack.support.module_discovery import import_static_modules
+
+_COLLECTOR_MODULES = (
+    "sunpack.detection.pipeline.facts.collectors.file_facts",
+    "sunpack.detection.pipeline.facts.collectors.magic_bytes",
+)
 
 FactCollectorFunc = Callable[[str], Any]
 BatchFactCollectorFunc = Callable[[Any], None]
@@ -80,4 +85,4 @@ def get_registry() -> FactRegistry:
     return _global_registry
 
 def discover_collectors():
-    discover_package_modules("sunpack.detection.pipeline.facts.collectors")
+    import_static_modules(_COLLECTOR_MODULES)

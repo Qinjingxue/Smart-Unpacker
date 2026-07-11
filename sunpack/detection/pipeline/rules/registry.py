@@ -1,6 +1,24 @@
 from typing import Dict, Type
 from sunpack.detection.pipeline.rules.base import RuleBase
-from sunpack.support.module_discovery import discover_package_modules
+from sunpack.support.module_discovery import import_static_modules
+
+_RULE_MODULES = (
+    "sunpack.detection.pipeline.rules.precheck.rar_structure_accept",
+    "sunpack.detection.pipeline.rules.precheck.seven_zip_structure_accept",
+    "sunpack.detection.pipeline.rules.precheck.tar_structure_accept",
+    "sunpack.detection.pipeline.rules.precheck.zip_structure_accept",
+    "sunpack.detection.pipeline.rules.scoring.archive_container_identity",
+    "sunpack.detection.pipeline.rules.scoring.compression_stream_identity",
+    "sunpack.detection.pipeline.rules.scoring.embedded_payload_identity",
+    "sunpack.detection.pipeline.rules.scoring.extension",
+    "sunpack.detection.pipeline.rules.scoring.rar_structure_identity",
+    "sunpack.detection.pipeline.rules.scoring.seven_zip_structure_identity",
+    "sunpack.detection.pipeline.rules.scoring.tar_structure_identity",
+    "sunpack.detection.pipeline.rules.scoring.zip_structure_identity",
+    "sunpack.detection.pipeline.rules.confirmation.executable_carrier_policy",
+    "sunpack.detection.pipeline.rules.confirmation.seven_zip_probe",
+    "sunpack.detection.pipeline.rules.confirmation.seven_zip_validation",
+)
 
 class RuleRegistry:
     def __init__(self):
@@ -38,11 +56,6 @@ def discover_rules():
     if _discovered:
         return
 
-    for package_name in (
-        "sunpack.detection.pipeline.rules.precheck",
-        "sunpack.detection.pipeline.rules.scoring",
-        "sunpack.detection.pipeline.rules.confirmation",
-    ):
-        discover_package_modules(package_name)
+    import_static_modules(_RULE_MODULES)
 
     _discovered = True
