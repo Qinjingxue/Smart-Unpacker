@@ -234,6 +234,9 @@ fn gzip_header_end(data: &[u8]) -> Option<usize> {
         return None;
     }
     let flags = data[3];
+    if flags & 0xe0 != 0 {
+        return None;
+    }
     let mut offset = 10usize;
     if flags & 0x04 != 0 {
         if offset + 2 > data.len() {
@@ -249,7 +252,16 @@ fn gzip_header_end(data: &[u8]) -> Option<usize> {
         offset = skip_c_string(data, offset)?;
     }
     if flags & 0x02 != 0 {
-        offset = offset.checked_add(2)?;
+        let crc_end = offset.checked_add(2)?;
+        if crc_end > data.len() {
+            return None;
+        }
+        let expected = u16::from_le_bytes([data[offset], data[offset + 1]]);
+        let actual = (crc32_hash(&data[..offset]) & 0xffff) as u16;
+        if expected != actual {
+            return None;
+        }
+        offset = crc_end;
     }
     (offset <= data.len()).then_some(offset)
 }

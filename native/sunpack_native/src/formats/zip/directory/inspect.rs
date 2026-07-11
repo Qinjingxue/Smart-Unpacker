@@ -1836,49 +1836,110 @@ fn descriptor_record_at(
     entry: &CentralEntry,
     local: &LocalHeader,
 ) -> Option<DataDescriptorRecord> {
-    if offset + 16 <= data.len() && data.get(offset..offset + 4) == Some(DD_SIG) {
+    let zip64 = descriptor_uses_zip64(entry, local);
+    let has_signature = data.get(offset..offset.checked_add(4)?) == Some(DD_SIG);
+    let values_offset = offset.checked_add(if has_signature { 4 } else { 0 })?;
+    if zip64 {
+        if values_offset.checked_add(20)? > data.len() || local.flags & 0x08 == 0 {
+            return None;
+        }
         return Some(DataDescriptorRecord {
-            crc32: u32_le(data, offset + 4),
-            compressed_size: u32_le(data, offset + 8) as u64,
-            uncompressed_size: u32_le(data, offset + 12) as u64,
-            has_signature: true,
+            crc32: u32_le(data, values_offset),
+            compressed_size: u64_le(data, values_offset + 4),
+            uncompressed_size: u64_le(data, values_offset + 12),
+            has_signature,
         });
     }
-    if offset + 24 <= data.len() && data.get(offset..offset + 4) == Some(DD_SIG) {
-        return Some(DataDescriptorRecord {
-            crc32: u32_le(data, offset + 4),
-            compressed_size: u64_le(data, offset + 8),
-            uncompressed_size: u64_le(data, offset + 16),
-            has_signature: true,
-        });
-    }
-    if local.flags & 0x08 != 0 && offset + 12 <= data.len() {
-        let compressed_size = u32_le(data, offset + 4) as u64;
-        let uncompressed_size = u32_le(data, offset + 8) as u64;
+    if local.flags & 0x08 != 0 && values_offset.checked_add(12)? <= data.len() {
+        let compressed_size = u32_le(data, values_offset + 4) as u64;
+        let uncompressed_size = u32_le(data, values_offset + 8) as u64;
         if !descriptor_sizes_match_entry(compressed_size, uncompressed_size, entry, local) {
             return None;
         }
         return Some(DataDescriptorRecord {
-            crc32: u32_le(data, offset),
+            crc32: u32_le(data, values_offset),
             compressed_size,
             uncompressed_size,
-            has_signature: false,
-        });
-    }
-    if local.flags & 0x08 != 0 && offset + 20 <= data.len() {
-        let compressed_size = u64_le(data, offset + 4);
-        let uncompressed_size = u64_le(data, offset + 12);
-        if !descriptor_sizes_match_entry(compressed_size, uncompressed_size, entry, local) {
-            return None;
-        }
-        return Some(DataDescriptorRecord {
-            crc32: u32_le(data, offset),
-            compressed_size,
-            uncompressed_size,
-            has_signature: false,
+            has_signature,
         });
     }
     None
+}
+
+fn descriptor_uses_zip64(entry: &CentralEntry, local: &LocalHeader) -> bool {
+    entry.compressed_size == u32::MAX
+        || entry.uncompressed_size == u32::MAX
+        || local.compressed_size == u32::MAX
+        || local.uncompressed_size == u32::MAX
+        || extra_contains_zip64(&entry.extra)
+        || extra_contains_zip64(&local.extra)
+}
+
+fn extra_contains_zip64(extra: &[u8]) -> bool {
+    let mut pos = 0usize;
+    while pos.checked_add(4).is_some_and(|end| end <= extra.len()) {
+        let header_id = u16_le(extra, pos);
+        let size = u16_le(extra, pos + 2) as usize;
+        let Some(end) = pos.checked_add(4).and_then(|start| start.checked_add(size)) else {
+            return false;
+        };
+        if end > extra.len() {
+            return false;
+        }
+        if header_id == 0x0001 {
+            return true;
+        }
+        pos = end;
+    }
+    false
+}
+
+#[cfg(test)]
+mod data_descriptor_width_tests {
+    use super::*;
+
+    fn entry_and_local(zip64: bool) -> (CentralEntry, LocalHeader) {
+        let size = if zip64 { u32::MAX } else { 7 };
+        let entry = CentralEntry {
+            offset: 0, flags: 0x08, method: 0, crc32: 1,
+            compressed_size: size, uncompressed_size: size,
+            name_len: 1, extra_len: 0, name: vec![b'a'], extra: Vec::new(),
+            extra_offset: 0, disk_number_start: 0, local_header_offset: 0,
+        };
+        let local = LocalHeader {
+            offset: 0, flags: 0x08, method: 0, crc32: 0,
+            compressed_size: size, uncompressed_size: size,
+            name: vec![b'a'], extra: Vec::new(), extra_offset: 0,
+            name_len: 1, extra_len: 0,
+        };
+        (entry, local)
+    }
+
+    #[test]
+    fn signed_zip64_descriptor_is_read_at_64_bit_width() {
+        let (entry, local) = entry_and_local(true);
+        let mut bytes = DD_SIG.to_vec();
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&0x1_0000_0007u64.to_le_bytes());
+        bytes.extend_from_slice(&0x2_0000_0007u64.to_le_bytes());
+        let descriptor = descriptor_record_at(&bytes, 0, &entry, &local).unwrap();
+        assert_eq!(descriptor.compressed_size, 0x1_0000_0007);
+        assert_eq!(descriptor.uncompressed_size, 0x2_0000_0007);
+        assert!(descriptor.has_signature);
+    }
+
+    #[test]
+    fn unsigned_zip32_descriptor_is_not_widened_by_trailing_bytes() {
+        let (entry, local) = entry_and_local(false);
+        let mut bytes = 1u32.to_le_bytes().to_vec();
+        bytes.extend_from_slice(&7u32.to_le_bytes());
+        bytes.extend_from_slice(&7u32.to_le_bytes());
+        bytes.extend_from_slice(&[0xaa; 16]);
+        let descriptor = descriptor_record_at(&bytes, 0, &entry, &local).unwrap();
+        assert_eq!(descriptor.compressed_size, 7);
+        assert_eq!(descriptor.uncompressed_size, 7);
+        assert!(!descriptor.has_signature);
+    }
 }
 
 fn descriptor_sizes_match_entry(

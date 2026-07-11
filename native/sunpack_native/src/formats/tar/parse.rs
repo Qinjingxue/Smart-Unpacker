@@ -43,6 +43,12 @@ fn repair_tar_trailing_zero_blocks(data: &[u8]) -> Result<TarRepair, String> {
         .ok_or_else(|| "TAR entries could not be walked safely".to_string())?;
     let end = canonical_tar_end(data, payload_end);
     let zero_bytes_present = end.saturating_sub(payload_end);
+    if zero_bytes_present < 1024 {
+        return Err(
+            "TAR has a noncanonical but readable physical EOF; zero-block normalization is not an automatic repair"
+                .to_string(),
+        );
+    }
     let missing_zeros = 1024usize.saturating_sub(zero_bytes_present.min(1024));
     if end == data.len() && missing_zeros == 0 {
         return Err("TAR already has canonical zero block ending".to_string());
@@ -63,6 +69,13 @@ fn walk_tar_payload_end(data: &[u8]) -> Option<usize> {
         let header = &data[offset..offset + 512];
         if is_zero_block(header) {
             return Some(offset);
+        }
+        if !plausible_tar_header(header) {
+            return None;
+        }
+        let stored_checksum = parse_tar_number(&header[148..156])?;
+        if stored_checksum != tar_checksum(header) {
+            return None;
         }
         let size = parse_tar_number(&header[124..136])?;
         let payload_span = padded_tar_payload_span(size)?;

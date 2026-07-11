@@ -214,6 +214,53 @@ mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    fn minimal_tar_header() -> [u8; 512] {
+        let mut header = [0u8; 512];
+        header[..8].copy_from_slice(b"file.txt");
+        header[100..108].copy_from_slice(b"0000644\0");
+        header[108..116].copy_from_slice(b"0000000\0");
+        header[116..124].copy_from_slice(b"0000000\0");
+        header[124..136].copy_from_slice(b"00000000000\0");
+        header[136..148].copy_from_slice(b"00000000000\0");
+        header[156] = b'0';
+        header[257..263].copy_from_slice(b"ustar\0");
+        let checksum = tar_checksum(&header);
+        header[148..156].copy_from_slice(&format_tar_checksum(checksum));
+        header
+    }
+
+    #[test]
+    fn gzip_header_rejects_reserved_flags_and_bad_fhcrc() {
+        let mut reserved = [0u8; 10];
+        reserved[..4].copy_from_slice(&[0x1f, 0x8b, 8, 0x20]);
+        assert_eq!(gzip_header_end(&reserved), None);
+
+        let mut with_crc = vec![0x1f, 0x8b, 8, 0x02, 0, 0, 0, 0, 0, 0, 0, 0];
+        assert_eq!(gzip_header_end(&with_crc), None);
+        let crc = (crc32_hash(&with_crc[..10]) & 0xffff) as u16;
+        with_crc[10..12].copy_from_slice(&crc.to_le_bytes());
+        assert_eq!(gzip_header_end(&with_crc), Some(12));
+    }
+
+    #[test]
+    fn tar_boundary_walk_requires_valid_checksum() {
+        let mut archive = minimal_tar_header().to_vec();
+        archive.extend_from_slice(&[0u8; 1024]);
+        assert_eq!(walk_tar_payload_end(&archive), Some(512));
+        archive[148] ^= 1;
+        assert_eq!(walk_tar_payload_end(&archive), None);
+    }
+
+    #[test]
+    fn readable_tar_eof_is_not_automatically_normalized() {
+        let archive = minimal_tar_header();
+        let error = match repair_tar_trailing_zero_blocks(&archive) {
+            Ok(_) => panic!("readable EOF must not be normalized automatically"),
+            Err(error) => error,
+        };
+        assert!(error.contains("noncanonical but readable"));
+    }
+
     #[test]
     fn gzip_truncated_stream_recompresses_recovered_prefix() {
         let payload = patterned_payload(512 * 1024);
