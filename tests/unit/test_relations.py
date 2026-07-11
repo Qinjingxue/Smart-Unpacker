@@ -88,6 +88,30 @@ def test_relation_group_builder_keeps_same_stem_split_archive_formats_separate(t
     assert zip_group.member_paths == []
 
 
+def test_relation_group_builder_attaches_sfx_companion_without_merging_formats(tmp_path):
+    names = [
+        "bundle.exe",
+        "bundle.7z.001.camouflage",
+        "bundle.7z.002.camouflage",
+        "bundle.zip.001.camouflage",
+        "bundle.zip.002.camouflage",
+    ]
+    for name in names:
+        (tmp_path / name).write_bytes(name.encode("ascii"))
+
+    groups = RelationsScheduler().build_candidate_groups(DirectoryScanner(str(tmp_path)).scan())
+    bundle_groups = [group for group in groups if group.logical_name == "bundle"]
+    part_sets = {
+        frozenset(Path(path).name for path in group.all_paths)
+        for group in bundle_groups
+    }
+
+    assert part_sets == {
+        frozenset({"bundle.exe", "bundle.7z.001.camouflage", "bundle.7z.002.camouflage"}),
+        frozenset({"bundle.exe", "bundle.zip.001.camouflage", "bundle.zip.002.camouflage"}),
+    }
+
+
 def test_relation_public_helpers_parse_split_names():
     scheduler = RelationsScheduler()
 

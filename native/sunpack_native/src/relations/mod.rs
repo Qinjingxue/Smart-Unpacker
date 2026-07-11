@@ -135,6 +135,61 @@ pub(crate) fn relations_build_candidate_groups(
             }
         }
 
+        // An SFX executable and explicitly formatted disguised volumes use
+        // different family keys ("companion" vs. "7z"/"zip"/"rar"). Attach
+        // the executable to every matching split-format group instead of
+        // collapsing those formats into one group. This preserves format
+        // isolation while ensuring the archive header in the executable is
+        // available to downstream detection.
+        let companion_keys: Vec<String> = logical_order
+            .iter()
+            .filter(|key| {
+                logical_groups.get(*key).is_some_and(|group| {
+                    group.iter().any(|entry| {
+                        relations.get(&entry.name).is_some_and(|relation| {
+                            relation.is_split_exe_companion
+                                || relation.is_disguised_split_exe_companion
+                        })
+                    })
+                })
+            })
+            .cloned()
+            .collect();
+        for companion_key in companion_keys {
+            let Some(companions) = logical_groups.get(&companion_key).cloned() else {
+                continue;
+            };
+            let logical_names: HashSet<String> = companions
+                .iter()
+                .filter_map(|entry| relations.get(&entry.name))
+                .map(|relation| relation.logical_name.clone())
+                .collect();
+            let target_keys: Vec<String> = logical_order
+                .iter()
+                .filter(|key| **key != companion_key)
+                .filter(|key| {
+                    logical_groups.get(*key).is_some_and(|group| {
+                        group.iter().any(|entry| {
+                            relations.get(&entry.name).is_some_and(|relation| {
+                                logical_names.contains(&relation.logical_name)
+                                    && relation.is_split_member
+                            })
+                        })
+                    })
+                })
+                .cloned()
+                .collect();
+            if target_keys.is_empty() {
+                continue;
+            }
+            for target_key in target_keys {
+                if let Some(target) = logical_groups.get_mut(&target_key) {
+                    target.extend(companions.iter().cloned());
+                }
+            }
+            logical_groups.remove(&companion_key);
+        }
+
         for logical_name in logical_order {
             let Some(mut group_entries) = logical_groups.remove(&logical_name) else {
                 continue;
@@ -569,9 +624,10 @@ fn relation_group_key(relation: &FileRelationNative) -> String {
         "generic_numbered" => "generic",
         _ => {
             if relation.split_role.is_some() {
-                // Disguised split members intentionally share the carrier
-                // family with an SFX companion (for example .001.camouflage).
-                "companion"
+                // Preserve an explicit archive family even when an extra suffix
+                // prevented parse_numbered_volume from assigning split_family.
+                // The matching executable is attached to this group separately.
+                disguised_archive_family(&relation.filename).unwrap_or("companion")
             } else {
                 let (_, ext) = split_ext(&relation.filename);
                 match ext.to_ascii_lowercase().as_str() {
@@ -585,6 +641,21 @@ fn relation_group_key(relation: &FileRelationNative) -> String {
         }
     };
     format!("{}\u{001f}{}", relation.logical_name, family)
+}
+
+fn disguised_archive_family(filename: &str) -> Option<&'static str> {
+    let captures = disguised_archive_numbered_re().captures(filename)?;
+    match captures.get(1)?.as_str().to_ascii_lowercase().as_str() {
+        "7z" => Some("7z"),
+        "zip" => Some("zip"),
+        "rar" => Some("rar"),
+        _ => None,
+    }
+}
+
+fn disguised_archive_numbered_re() -> &'static Regex {
+    static VALUE: OnceLock<Regex> = OnceLock::new();
+    VALUE.get_or_init(|| re(r"\.(7z|zip|rar)\.\d+\.[^.]+$"))
 }
 
 fn split_member_pattern() -> &'static Regex {
