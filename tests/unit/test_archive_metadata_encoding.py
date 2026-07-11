@@ -3,6 +3,7 @@ import struct
 
 import pytest
 
+from sunpack.contracts.detection import FactBag
 from sunpack.extraction.internal.sevenzip.metadata import ArchiveMetadataScanner
 
 
@@ -68,6 +69,20 @@ def test_unicode_native_archive_formats_do_not_receive_zip_codepage_override():
         assert result.selected_codepage is None
         assert result.decoded_names == []
         assert result.warnings == []
+
+
+def test_task_metadata_cache_survives_scanner_instance_change(tmp_path):
+    archive = tmp_path / "cached.zip"
+    _write_stored_zip(archive, b"plain.txt", b"payload")
+    task = type("Task", (), {"fact_bag": FactBag()})()
+
+    first = ArchiveMetadataScanner().scan_for_task(task, str(archive), format_hint="zip")
+    second_scanner = ArchiveMetadataScanner()
+    second_scanner._scan_uncached = lambda *_args, **_kwargs: pytest.fail("metadata was rescanned")
+    second = second_scanner.scan_for_task(task, str(archive), format_hint="zip")
+
+    assert second.decoded_names == first.decoded_names
+    assert second.sample_count == first.sample_count
 
 
 def test_unicode_path_extra_field_takes_precedence_over_codepage_guess(tmp_path):

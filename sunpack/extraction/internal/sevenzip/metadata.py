@@ -18,6 +18,7 @@ class ArchiveMetadataScanResult:
         self.sample_count: int = 0
 
 class ArchiveMetadataScanner:
+    TASK_CACHE_FACT = "extraction.filename_metadata"
     MAX_ZIP_SAMPLES = 200000
     MAX_FILENAME_BYTES = 64 * 1024 * 1024
     LIST_TIMEOUT_SECONDS = 5
@@ -61,6 +62,50 @@ class ArchiveMetadataScanner:
             format_hint=normalized_hint,
         )
         self.cache[cache_key] = result
+        return result
+
+    def scan_for_task(
+        self,
+        task,
+        archive_path: str,
+        password: Optional[str] = None,
+        part_paths: list[str] | None = None,
+        format_hint: str = "",
+    ) -> ArchiveMetadataScanResult:
+        """Reuse filename metadata across detection/extraction/worker retries."""
+        normalized_hint = str(format_hint or "").lower().lstrip(".")
+        signature = self._build_cache_key(os.path.normpath(archive_path), part_paths=part_paths)
+        cached = task.fact_bag.get(self.TASK_CACHE_FACT) if task is not None else None
+        if isinstance(cached, dict) and cached.get("signature") == signature and cached.get("format_hint") == normalized_hint:
+            return self._result_from_dict(cached.get("result"), archive_path)
+        result = self.scan(archive_path, password=password, part_paths=part_paths, format_hint=normalized_hint)
+        if task is not None:
+            task.fact_bag.set(self.TASK_CACHE_FACT, {
+                "signature": signature,
+                "format_hint": normalized_hint,
+                "result": self._result_to_dict(result),
+            })
+        return result
+
+    @staticmethod
+    def _result_to_dict(result: ArchiveMetadataScanResult) -> dict:
+        return {
+            "archive_type": result.archive_type, "warnings": list(result.warnings),
+            "reasons": list(result.reasons), "selected_codepage": result.selected_codepage,
+            "decoded_names": list(result.decoded_names), "error": result.error,
+            "confidence": result.confidence, "sample_count": result.sample_count,
+        }
+
+    @staticmethod
+    def _result_from_dict(payload: dict, archive_path: str) -> ArchiveMetadataScanResult:
+        payload = payload if isinstance(payload, dict) else {}
+        result = ArchiveMetadataScanResult(archive_path, str(payload.get("archive_type") or "unknown"), list(payload.get("reasons") or []))
+        result.warnings = list(payload.get("warnings") or [])
+        result.selected_codepage = payload.get("selected_codepage")
+        result.decoded_names = list(payload.get("decoded_names") or [])
+        result.error = payload.get("error")
+        result.confidence = float(payload.get("confidence", 0.0) or 0.0)
+        result.sample_count = int(payload.get("sample_count", 0) or 0)
         return result
 
     def _build_cache_key(self, archive_path: str, part_paths: list[str] | None = None) -> tuple:

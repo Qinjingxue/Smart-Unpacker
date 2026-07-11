@@ -120,10 +120,14 @@ class SingleArchiveExtractor:
         with _phase(phase_timer, f"{phase_prefix}_startupinfo"):
             startupinfo = self._startupinfo()
         retry_count = 0
+        # The initial preflight already checked the same requirement.  Recheck
+        # only after an extraction attempt, when disk usage may have changed.
+        space_checked = True
         password_candidate_rejections = 0
         while retry_count < self.retry_policy.max_retries:
             with _phase(phase_timer, f"{phase_prefix}_ensure_space_retry"):
-                has_space = self.ensure_space(5)
+                has_space = space_checked or self.ensure_space(5)
+                space_checked = False
             if not has_space:
                 shutil.rmtree(out_dir, ignore_errors=True)
                 failure = self._failure_info(FailureKind.PROCESS_ERROR, "preflight", "failure.insufficient_space")
@@ -192,12 +196,17 @@ class SingleArchiveExtractor:
                         format_hint = task.archive_input().format_hint
                     except (TypeError, ValueError, AttributeError):
                         format_hint = str(getattr(task, "detected_ext", "") or "").lstrip(".")
-                    filename_encoding = self.metadata_scanner.scan(
-                        run_archive,
-                        password=correct_pwd,
-                        part_paths=run_parts,
-                        format_hint=format_hint,
-                    )
+                    scan_for_task = getattr(self.metadata_scanner, "scan_for_task", None)
+                    if scan_for_task is not None:
+                        filename_encoding = scan_for_task(
+                            task, run_archive, password=correct_pwd,
+                            part_paths=run_parts, format_hint=format_hint,
+                        )
+                    else:
+                        filename_encoding = self.metadata_scanner.scan(
+                            run_archive, password=correct_pwd,
+                            part_paths=run_parts, format_hint=format_hint,
+                        )
                     selected_codepage = filename_encoding.selected_codepage
                     if filename_encoding.error:
                         # Filename detection is an optional override.  Failure or
