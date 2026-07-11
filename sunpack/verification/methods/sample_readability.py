@@ -3,6 +3,7 @@ from sunpack.verification.registry import register_verification_method
 from sunpack.contracts.verification import FileVerificationObservation, VerificationIssue, VerificationStepResult
 
 from sunpack_native import sample_directory_readability as _sample_directory_readability
+from sunpack.verification.methods._output_stats import output_inventory_for_evidence
 
 
 @register_verification_method("sample_readability")
@@ -10,6 +11,17 @@ class SampleReadabilityMethod:
     name = "sample_readability"
 
     def verify(self, evidence: VerificationEvidence, config: dict) -> VerificationStepResult:
+        inventory = output_inventory_for_evidence(evidence)
+        if (
+            inventory.worker_inventory_complete and inventory.identity_paths
+            and inventory.worker_crc_available
+            and all(item.get("crc_ok") is not False for item in inventory.files)
+        ):
+            return VerificationStepResult(method=self.name, status="skipped", issues=[VerificationIssue(
+                method=self.name, code="info.worker_output_already_verified",
+                message="Complete worker CRC inventory makes sample rereads unnecessary",
+                path=evidence.output_dir,
+            )])
         max_samples = max(1, int(config.get("max_samples", 64) or 64))
         read_bytes = max(1, int(config.get("read_bytes", 4096) or 4096))
         sample = _sample_directory_readability(evidence.output_dir, max_samples, read_bytes)

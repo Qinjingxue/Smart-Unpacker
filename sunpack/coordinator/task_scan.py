@@ -49,7 +49,7 @@ class ArchiveTaskScanner:
 
 
 def _group_explicit_split_paths(file_paths: list[str]) -> list[list[str]]:
-    """Group only explicitly supplied split volumes without scanning their directory."""
+    """Group explicit volumes and discover siblings when the user supplies one volume."""
     builder = RelationsGroupBuilder()
     groups: dict[tuple[str, str], list[tuple[int, str]]] = {}
     standalone: list[str] = []
@@ -58,13 +58,22 @@ def _group_explicit_split_paths(file_paths: list[str]) -> list[list[str]]:
         if not parsed:
             standalone.append(path)
             continue
-        prefix = os.path.normcase(os.path.abspath(str(parsed["prefix"])))
+        prefix_path = os.path.abspath(str(parsed["prefix"]))
+        prefix = os.path.normcase(prefix_path)
         key = (prefix, str(parsed["style"]))
         groups.setdefault(key, []).append((int(parsed["number"]), path))
+        directory = os.path.dirname(path) or os.getcwd()
+        for candidate_name in os.listdir(directory):
+            candidate = os.path.join(directory, candidate_name)
+            sibling = builder.parse_numbered_volume(candidate)
+            if not sibling or os.path.normcase(os.path.abspath(str(sibling["prefix"]))) != prefix:
+                continue
+            if str(sibling["style"]) == str(parsed["style"]):
+                groups[key].append((int(sibling["number"]), candidate))
 
     grouped: list[list[str]] = []
     for members in groups.values():
-        ordered = [path for _, path in sorted(members, key=lambda item: (item[0], item[1].lower()))]
+        ordered = list(dict.fromkeys(path for _, path in sorted(members, key=lambda item: (item[0], item[1].lower()))))
         grouped.append(ordered if len(ordered) > 1 else ordered)
     grouped.extend([[path] for path in standalone])
     return grouped

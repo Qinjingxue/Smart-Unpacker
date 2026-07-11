@@ -45,10 +45,10 @@ def preprocess_sys_argv(argv: list[str]) -> list[str]:
     return cleaned
 
 
-def build_cli_parser(ctx: CliContext | None = None) -> argparse.ArgumentParser:
+def build_cli_parser(ctx: CliContext | None = None, command: str | None = None) -> argparse.ArgumentParser:
     ctx = ctx or CliContext(language=CURRENT_CLI_LANG)
     CliHelpFormatter.language = ctx.language
-    modules = discover_command_modules()
+    modules = discover_command_modules(command)
     ctx.commands = command_map(modules)
 
     parser = argparse.ArgumentParser(
@@ -69,11 +69,12 @@ def build_cli_parser(ctx: CliContext | None = None) -> argparse.ArgumentParser:
     return parser
 
 
-def cached_cli_parser(ctx: CliContext) -> argparse.ArgumentParser:
-    parser = _PARSER_CACHE.get(ctx.language)
+def cached_cli_parser(ctx: CliContext, command: str | None = None) -> argparse.ArgumentParser:
+    cache_key = f"{ctx.language}:{command or '*'}"
+    parser = _PARSER_CACHE.get(cache_key)
     if parser is None:
-        parser = build_cli_parser(ctx)
-        _PARSER_CACHE[ctx.language] = parser
+        parser = build_cli_parser(ctx, command=command)
+        _PARSER_CACHE[cache_key] = parser
     elif ctx.commands is None:
         ctx.commands = command_map()
     return parser
@@ -120,7 +121,11 @@ def main(argv=None):
     argv = preprocess_sys_argv(argv)
     CURRENT_CLI_LANG = load_cli_language_from_config()
     ctx = CliContext(language=CURRENT_CLI_LANG)
-    parser = cached_cli_parser(ctx)
+    # Extract is the latency-sensitive shell/context-menu path. Other commands
+    # retain full discovery because some inspection registrations are imported
+    # by companion command modules today.
+    selected_command = "extract" if argv and argv[0] == "extract" else None
+    parser = cached_cli_parser(ctx, command=selected_command)
     if not argv:
         parser.print_help()
         return EXIT_OK

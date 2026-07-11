@@ -8,10 +8,17 @@ from sunpack.cli import commands
 
 _COMMAND_CACHE_LOCK = threading.Lock()
 _COMMAND_MODULE_CACHE: tuple[ModuleType, ...] | None = None
+_COMMAND_MODULE_NAMES = {
+    "extract": "sunpack.cli.commands.extract", "watch": "sunpack.cli.commands.watch",
+    "scan": "sunpack.cli.commands.scan", "inspect": "sunpack.cli.commands.inspect",
+    "passwords": "sunpack.cli.commands.passwords", "config": "sunpack.cli.commands.config",
+}
 
 
-def discover_command_modules() -> list[ModuleType]:
+def discover_command_modules(command: str | None = None) -> list[ModuleType]:
     global _COMMAND_MODULE_CACHE
+    if command in _COMMAND_MODULE_NAMES:
+        return [importlib.import_module(_COMMAND_MODULE_NAMES[command])]
     with _COMMAND_CACHE_LOCK:
         if _COMMAND_MODULE_CACHE is not None:
             return list(_COMMAND_MODULE_CACHE)

@@ -838,10 +838,32 @@ int run_request(const std::string& request) {
     return ok ? 0 : 1;
 }
 
+int run_message(const std::string& request) {
+    const std::string command = json_string_field(request, "worker_command", "");
+    if (command != "batch_extract") return run_request(request);
+    const std::string batch_id = json_string_field(request, "batch_id", "");
+    const auto jobs = json_object_array_field(request, "jobs");
+    if (jobs.empty()) {
+        print_json_line("{\"type\":\"batch_result\",\"batch_id\":\"" + json_escape(batch_id) +
+            "\",\"status\":\"error\",\"message\":\"jobs must be a non-empty array\"}");
+        return 2;
+    }
+    std::size_t failed = 0;
+    for (const auto& job : jobs) {
+        // Each extraction is a complete transaction. A failed job is reported but
+        // never aborts later jobs in the envelope.
+        if (run_request(job) != 0) ++failed;
+    }
+    print_json_line("{\"type\":\"batch_result\",\"batch_id\":\"" + json_escape(batch_id) +
+        "\",\"status\":\"" + (failed ? "partial" : "ok") + "\",\"job_count\":" +
+        std::to_string(jobs.size()) + ",\"failed_count\":" + std::to_string(failed) + "}");
+    return failed ? 1 : 0;
+}
+
 int main(int argc, char** argv) {
     const bool persistent = has_arg(argc, argv, "--persistent");
     if (!persistent) {
-        return run_request(read_stdin());
+        return run_message(read_stdin());
     }
 
     std::string line;
@@ -852,7 +874,7 @@ int main(int argc, char** argv) {
         if (line.empty()) {
             continue;
         }
-        const int code = run_request(line);
+        const int code = run_message(line);
         if (json_string_field(line, "worker_command", "") == "shutdown") {
             return code;
         }

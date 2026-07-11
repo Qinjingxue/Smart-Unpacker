@@ -198,6 +198,75 @@ class SevenZipRunner:
             phase_prefix=phase_prefix,
         )
 
+    def run_extract_batch(self, requests: list[dict], startupinfo=None) -> list[subprocess.CompletedProcess]:
+        """Execute small independent archives through one persistent-worker IPC.
+
+        Every request uses the same schema as ``_build_job``. Results retain their
+        own job id and failure status; one bad archive does not suppress later jobs.
+        The worker is discarded if the envelope times out, which cancels the only
+        active native transaction safely.
+        """
+        if not requests:
+            return []
+        jobs = [dict(request) for request in requests]
+        for index, job in enumerate(jobs):
+            job.setdefault("job_id", f"batch-{index}")
+            job.setdefault("seven_zip_dll_path", self._seven_zip_dll_path())
+        batch_id = f"batch-{time.monotonic_ns()}"
+        envelope = json.dumps(
+            {"worker_command": "batch_extract", "batch_id": batch_id, "jobs": jobs},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        worker = self._pool().acquire(startupinfo)
+        reusable = False
+        lines_by_job: dict[str, list[str]] = {str(job["job_id"]): [] for job in jobs}
+        returncodes: dict[str, int] = {}
+        stderr_lines: list[str] = []
+        deadline_seconds = max(0.0, float(self.process_config.get("max_extract_task_seconds", 0) or 0))
+        deadline = time.monotonic() + deadline_seconds * len(jobs) if deadline_seconds else 0.0
+        try:
+            worker.send(envelope)
+            while True:
+                self._drain_stderr(worker, stderr_lines)
+                if deadline and time.monotonic() > deadline:
+                    worker.close()
+                    raise TimeoutError("sevenzip_worker batch timed out")
+                try:
+                    line = worker.stdout_queue.get(timeout=0.1)
+                except queue.Empty:
+                    if not worker.is_alive():
+                        raise RuntimeError("sevenzip_worker exited during batch")
+                    continue
+                if line is None:
+                    raise RuntimeError("sevenzip_worker closed stdout during batch")
+                payload = self._json_line(line)
+                job_id = str(payload.get("job_id") or "")
+                if job_id in lines_by_job:
+                    lines_by_job[job_id].append(line)
+                    if payload.get("type") == "result":
+                        returncodes[job_id] = 0 if payload.get("status") == "ok" else 1
+                if payload.get("type") == "batch_result" and payload.get("batch_id") == batch_id:
+                    reusable = True
+                    break
+            stderr = "".join(stderr_lines)
+            return [self._completed_process(
+                [worker.worker_path, "--persistent"],
+                returncodes.get(str(job["job_id"]), -100),
+                "".join(lines_by_job[str(job["job_id"])]),
+                stderr,
+                request_payload=job,
+            ) for job in jobs]
+        except Exception as exc:
+            worker.close()
+            return [self._completed_process(
+                [self.worker_path or "sunpack_sevenzip_worker.exe"], -100, "",
+                f"sevenzip_worker batch communication failed: {exc}", request_payload=job,
+                process_failure={"failure_stage": "worker_communication", "failure_kind": "process_io", "message": str(exc)},
+            ) for job in jobs]
+        finally:
+            self._pool().release(worker, reusable=reusable)
+
     def run_extract_command(
         self,
         cmd: list[str],

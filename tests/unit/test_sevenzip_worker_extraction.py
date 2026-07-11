@@ -367,6 +367,33 @@ def test_worker_applies_explicit_shift_jis_item_paths(tmp_path):
     assert (out_dir / "日本語" / "説明.txt").read_bytes() == payload_bytes
 
 
+def test_worker_batch_isolates_failed_job_and_continues(tmp_path):
+    worker = _require_worker_or_skip()
+    seven_zip_dll = _require_7z_dll_or_skip()
+    archive = tmp_path / "ok.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("ok.txt", "batch payload")
+    request = {
+        "worker_command": "batch_extract",
+        "batch_id": "isolation",
+        "jobs": [
+            {"job_id": "bad", "seven_zip_dll_path": seven_zip_dll, "archive_path": str(tmp_path / "missing.zip"), "output_dir": str(tmp_path / "bad")},
+            {"job_id": "ok", "seven_zip_dll_path": seven_zip_dll, "archive_path": str(archive), "output_dir": str(tmp_path / "ok")},
+        ],
+    }
+
+    result = subprocess.run([worker], input=json.dumps(request), capture_output=True, text=True, encoding="utf-8")
+    messages = [json.loads(line) for line in result.stdout.splitlines() if line.startswith("{")]
+    results = {message["job_id"]: message for message in messages if message.get("type") == "result"}
+    batch = next(message for message in messages if message.get("type") == "batch_result")
+
+    assert results["bad"]["status"] == "failed"
+    assert results["ok"]["status"] == "ok"
+    assert batch["status"] == "partial"
+    assert batch["failed_count"] == 1
+    assert (tmp_path / "ok" / "ok.txt").read_text(encoding="utf-8") == "batch payload"
+
+
 def test_extraction_scheduler_saves_process_failure_diagnostics(tmp_path):
     archive = tmp_path / "sample.bin"
     archive.write_bytes(b"not an archive")
