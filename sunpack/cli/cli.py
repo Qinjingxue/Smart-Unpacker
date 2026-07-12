@@ -110,14 +110,21 @@ def main(argv=None):
     global CURRENT_CLI_LANG
     if argv is None:
         argv = sys.argv[1:]
-    if argv and argv[0] in {"--reuse", "--persistent-shutdown"}:
+    configure_stdio_encoding()
+    if argv and argv[0] in {"--persistent-server", "--persistent-shutdown"}:
         from sunpack.cli.persistent_process import handle_early_argv
 
         result = handle_early_argv(list(argv))
         if result is not None:
             return result
+    if argv and argv[0] == "extract" and not any(item in {"-h", "--help"} for item in argv[1:]):
+        from sunpack.cli.persistent_runtime import server_runtime_active
 
-    configure_stdio_encoding()
+        if not server_runtime_active():
+            from sunpack.cli.persistent_process import submit_request
+
+            return submit_request(list(argv))
+
     argv = preprocess_sys_argv(argv)
     CURRENT_CLI_LANG = load_cli_language_from_config()
     ctx = CliContext(language=CURRENT_CLI_LANG)

@@ -1,11 +1,14 @@
 import io
 import os
+import socket
+import threading
 
 from sunpack.cli import persistent_process
 
 
-def test_execute_request_restores_cwd_and_captures_output(tmp_path):
+def test_streaming_execute_restores_cwd_and_forwards_output(tmp_path):
     original = os.getcwd()
+    server, client = socket.socketpair()
 
     def fake_main(argv):
         print(f"cwd={os.getcwd()}")
@@ -13,14 +16,23 @@ def test_execute_request_restores_cwd_and_captures_output(tmp_path):
         assert argv == ["config", "validate"]
         return 7
 
-    response = persistent_process._execute_request(
-        fake_main,
-        {"cwd": str(tmp_path), "argv": ["config", "validate"]},
-    )
+    try:
+        exit_code = persistent_process._execute_streaming_request(
+            fake_main,
+            {"cwd": str(tmp_path), "argv": ["config", "validate"]},
+            server,
+        )
+        server.shutdown(socket.SHUT_WR)
+        wire = bytearray()
+        while chunk := client.recv(4096):
+            wire.extend(chunk)
+    finally:
+        server.close()
+        client.close()
 
-    assert response["exit_code"] == 7
-    assert f"cwd={tmp_path}" in response["stdout"]
-    assert response["stderr"] == "warning\n"
+    assert exit_code == 7
+    assert f"cwd={tmp_path}".encode() in wire
+    assert b"warning" in wire and wire.endswith(b"\n")
     assert os.getcwd() == original
 
 
@@ -41,9 +53,95 @@ def test_submit_request_strips_server_side_pause(monkeypatch):
     assert persistent_process.sys.stdout.getvalue() == "done\n"
 
 
-def test_pipe_address_is_stable_and_user_scoped():
-    assert persistent_process.pipe_address() == persistent_process.pipe_address()
-    assert persistent_process.pipe_address().startswith(r"\\.\pipe\sunpack-batch-")
+def test_extract_is_submitted_to_persistent_server_by_default(monkeypatch):
+    from sunpack.cli import cli
+    from sunpack.cli import persistent_runtime
+
+    submitted = []
+    monkeypatch.setattr(persistent_runtime, "server_runtime_active", lambda: False)
+    monkeypatch.setattr(persistent_process, "submit_request", lambda argv: submitted.append(argv) or 6)
+
+    assert cli.main(["extract", "sample.zip"]) == 6
+    assert submitted == [["extract", "sample.zip"]]
+
+
+def test_extract_help_stays_local_and_does_not_start_server(monkeypatch):
+    from sunpack.cli import cli
+
+    monkeypatch.setattr(persistent_process, "submit_request", lambda _argv: (_ for _ in ()).throw(AssertionError()))
+
+    assert cli.main(["extract", "--help"]) == 0
+
+
+def test_streaming_request_forwards_output_before_final_result(monkeypatch):
+    server, client = socket.socketpair()
+    output = io.StringIO()
+    error = io.StringIO()
+    monkeypatch.setattr(persistent_process.sys, "stdout", output)
+    monkeypatch.setattr(persistent_process.sys, "stderr", error)
+
+    def send_frames():
+        import struct
+
+        server.sendall(struct.pack("!BI", 1, 4) + b"25%\n")
+        server.sendall(struct.pack("!BI", 2, 5) + b"warn\n")
+        server.sendall(struct.pack("!BIi", 0, 4, 7))
+        server.close()
+
+    thread = threading.Thread(target=send_frames)
+    thread.start()
+    try:
+        response = persistent_process._recv_stream(client)
+    finally:
+        client.close()
+        thread.join()
+
+    assert response["exit_code"] == 7
+    assert output.getvalue() == "25%\n"
+    assert error.getvalue() == "warn\n"
+
+
+def test_connection_stream_preserves_client_tty_capability():
+    server, client = socket.socketpair()
+    try:
+        stream = persistent_process._ConnectionTextStream(server, 1, is_tty=True)
+        assert stream.isatty()
+        assert stream.supports_terminal_updates
+        assert stream.write("progress") == 8
+        import struct
+
+        kind, size = struct.unpack("!BI", persistent_process._recv_exact(client, 5))
+        assert (kind, size) == (1, 8)
+        assert persistent_process._recv_exact(client, size) == b"progress"
+    finally:
+        server.close()
+        client.close()
+
+
+def test_streaming_request_round_trips_interactive_input():
+    server, client = socket.socketpair()
+    result = {}
+
+    def execute():
+        result["code"] = persistent_process._execute_streaming_request(
+            lambda _argv: 0 if input("password: ") == "secret" else 1,
+            {"argv": ["extract"], "stdin_tty": True},
+            server,
+        )
+        import struct
+
+        server.sendall(struct.pack("!BIi", 0, 4, result["code"]))
+        server.close()
+
+    thread = threading.Thread(target=execute)
+    thread.start()
+    try:
+        response = persistent_process._recv_stream(client, io.StringIO("secret\n"))
+    finally:
+        client.close()
+        thread.join()
+
+    assert response["exit_code"] == 0
 
 
 def test_shutdown_does_not_start_a_missing_server(monkeypatch):

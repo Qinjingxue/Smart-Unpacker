@@ -31,7 +31,7 @@ def enable_persistent_runtime() -> None:
         _ENABLED = True
 
 
-def persistent_runtime_enabled() -> bool:
+def server_runtime_active() -> bool:
     with _LOCK:
         return _ENABLED
 
@@ -53,9 +53,7 @@ def pipeline_engine(config: dict) -> Iterator[PipelineEngine]:
     with _LOCK:
         enabled = _ENABLED
     if not enabled:
-        with PipelineEngine(config) as engine:
-            yield engine
-        return
+        raise RuntimeError("extract pipeline is only available inside the persistent server")
 
     key = (config_cache_token(), _stable_config_key(config))
     with _LOCK:

@@ -19,7 +19,7 @@
 namespace {
 
 constexpr char kRequestMagic[] = "SPK1";
-constexpr char kResponseMagic[] = "SPR1";
+constexpr char kStreamMagic[] = "SPS1";
 constexpr std::size_t kMaxFieldBytes = 16u * 1024u * 1024u;
 
 std::wstring executable_directory() {
@@ -121,8 +121,25 @@ std::uint32_t read_u32(const char* source) {
     return ntohl(value);
 }
 
-bool request(const std::vector<std::wstring>& arguments, bool shutdown,
-             int& exit_code, std::string& stdout_text, std::string& stderr_text) {
+void write_stream(DWORD handle_id, const std::string& text);
+
+std::string read_input_line() {
+    HANDLE handle = GetStdHandle(STD_INPUT_HANDLE);
+    if (handle == nullptr || handle == INVALID_HANDLE_VALUE) return {};
+    DWORD mode = 0;
+    if (GetConsoleMode(handle, &mode)) {
+        std::array<wchar_t, 4096> buffer{};
+        DWORD read = 0;
+        if (!ReadConsoleW(handle, buffer.data(), static_cast<DWORD>(buffer.size() - 1), &read, nullptr)) return {};
+        return utf8(std::wstring(buffer.data(), read));
+    }
+    std::array<char, 4096> buffer{};
+    DWORD read = 0;
+    if (!ReadFile(handle, buffer.data(), static_cast<DWORD>(buffer.size()), &read, nullptr)) return {};
+    return std::string(buffer.data(), read);
+}
+
+bool request(const std::vector<std::wstring>& arguments, bool shutdown, int& exit_code) {
     std::uint16_t port = 0;
     std::array<unsigned char, 32> token{};
     if (!parse_state(port, token)) return false;
@@ -145,7 +162,11 @@ bool request(const std::vector<std::wstring>& arguments, bool shutdown,
     const std::string cwd = utf8(std::wstring(cwd_buffer.data(), cwd_size));
     std::string wire(kRequestMagic, 4);
     wire.append(reinterpret_cast<const char*>(token.data()), token.size());
-    append_u32(wire, shutdown ? 1u : 0u);
+    DWORD console_mode = 0;
+    const bool stdout_tty = GetConsoleMode(GetStdHandle(STD_OUTPUT_HANDLE), &console_mode) != 0;
+    DWORD input_mode = 0;
+    const bool stdin_tty = GetConsoleMode(GetStdHandle(STD_INPUT_HANDLE), &input_mode) != 0;
+    append_u32(wire, (shutdown ? 1u : 0u) | (stdout_tty ? 2u : 0u) | (stdin_tty ? 4u : 0u));
     append_u32(wire, static_cast<std::uint32_t>(cwd.size()));
     append_u32(wire, static_cast<std::uint32_t>(arguments.size()));
     wire.append(cwd);
@@ -158,24 +179,39 @@ bool request(const std::vector<std::wstring>& arguments, bool shutdown,
         closesocket(socket);
         return false;
     }
-    std::array<char, 16> header{};
-    if (!recv_all(socket, header.data(), header.size()) || memcmp(header.data(), kResponseMagic, 4) != 0) {
+    const DWORD no_timeout = 0;
+    setsockopt(socket, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&no_timeout), sizeof(no_timeout));
+    std::array<char, 4> magic{};
+    if (!recv_all(socket, magic.data(), magic.size()) || memcmp(magic.data(), kStreamMagic, 4) != 0) {
         closesocket(socket);
         return false;
     }
-    exit_code = static_cast<std::int32_t>(read_u32(header.data() + 4));
-    const std::uint32_t stdout_size = read_u32(header.data() + 8);
-    const std::uint32_t stderr_size = read_u32(header.data() + 12);
-    if (stdout_size > kMaxFieldBytes || stderr_size > kMaxFieldBytes) {
-        closesocket(socket);
-        return false;
+    while (true) {
+        std::array<char, 5> header{};
+        if (!recv_all(socket, header.data(), header.size())) break;
+        const unsigned char kind = static_cast<unsigned char>(header[0]);
+        const std::uint32_t size = read_u32(header.data() + 1);
+        if (size > kMaxFieldBytes) break;
+        std::string payload(size, '\0');
+        if (!recv_all(socket, payload.data(), payload.size())) break;
+        if (kind == 0) {
+            if (size != 4) break;
+            exit_code = static_cast<std::int32_t>(read_u32(payload.data()));
+            closesocket(socket);
+            return true;
+        }
+        if (kind == 1) write_stream(STD_OUTPUT_HANDLE, payload);
+        else if (kind == 2) write_stream(STD_ERROR_HANDLE, payload);
+        else if (kind == 3) {
+            const std::string input = read_input_line();
+            std::string response;
+            append_u32(response, static_cast<std::uint32_t>(input.size()));
+            response.append(input);
+            if (!send_all(socket, response.data(), response.size())) break;
+        }
     }
-    stdout_text.resize(stdout_size);
-    stderr_text.resize(stderr_size);
-    const bool ok = recv_all(socket, stdout_text.data(), stdout_text.size()) &&
-                    recv_all(socket, stderr_text.data(), stderr_text.size());
     closesocket(socket);
-    return ok;
+    return false;
 }
 
 std::wstring quote_argument(const std::wstring& value) {
@@ -241,7 +277,9 @@ void write_stream(DWORD handle_id, const std::string& text) {
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
-    if (argc < 2 || (wcscmp(argv[1], L"--reuse") != 0 && wcscmp(argv[1], L"--persistent-shutdown") != 0)) {
+    const bool extract = argc >= 2 && wcscmp(argv[1], L"extract") == 0;
+    const bool shutdown_request = argc >= 2 && wcscmp(argv[1], L"--persistent-shutdown") == 0;
+    if (!extract && !shutdown_request) {
         std::vector<std::wstring> forwarded;
         for (int index = 1; index < argc; ++index) forwarded.emplace_back(argv[index]);
         DWORD code = 1;
@@ -251,10 +289,11 @@ int wmain(int argc, wchar_t** argv) {
 
     WSADATA winsock{};
     if (WSAStartup(MAKEWORD(2, 2), &winsock) != 0) return 1;
-    const bool shutdown = wcscmp(argv[1], L"--persistent-shutdown") == 0;
+    const bool shutdown = shutdown_request;
     bool pause = false;
     std::vector<std::wstring> request_arguments;
-    for (int index = 2; index < argc; ++index) {
+    const int first_request_argument = extract ? 1 : 2;
+    for (int index = first_request_argument; index < argc; ++index) {
         if (wcscmp(argv[index], L"--pause") == 0) {
             pause = true;
         } else {
@@ -265,23 +304,19 @@ int wmain(int argc, wchar_t** argv) {
         request_arguments.emplace_back(L"--no-pause");
     }
     int code = 1;
-    std::string stdout_text;
-    std::string stderr_text;
-    bool ok = request(request_arguments, shutdown, code, stdout_text, stderr_text);
+    bool ok = request(request_arguments, shutdown, code);
     if (!ok && !shutdown) {
         spawn_runtime({L"--persistent-server"}, true);
         for (int attempt = 0; attempt < 400 && !ok; ++attempt) {
             Sleep(25);
-            ok = request(request_arguments, false, code, stdout_text, stderr_text);
+            ok = request(request_arguments, false, code);
             if (!ok && attempt != 0 && attempt % 40 == 0) {
                 spawn_runtime({L"--persistent-server"}, true);
             }
         }
     }
     if (!ok && shutdown) code = 0;
-    if (!ok && !shutdown) stderr_text = "SunPack persistent process did not start in time.\n";
-    write_stream(STD_OUTPUT_HANDLE, stdout_text);
-    write_stream(STD_ERROR_HANDLE, stderr_text);
+    if (!ok && !shutdown) write_stream(STD_ERROR_HANDLE, "SunPack persistent process did not start in time.\n");
     if (pause && GetFileType(GetStdHandle(STD_INPUT_HANDLE)) == FILE_TYPE_CHAR) {
         write_stream(STD_OUTPUT_HANDLE, "Press Enter to continue...");
         wchar_t buffer[2]{};

@@ -96,6 +96,14 @@ def test_interactive_panel_updates_fixed_row_with_progress_and_colors(tmp_path, 
     assert "\033[1A" in output
 
 
+def test_forwarded_terminal_capability_does_not_require_server_console():
+    stream = io.StringIO()
+    stream.isatty = lambda: True
+    stream.supports_terminal_updates = True
+
+    assert reporting._terminal_supports_updates(stream)
+
+
 def test_noninteractive_terminal_streams_throttled_progress_bar(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(reporting, "_terminal_supports_updates", lambda _stream: False)
     reporter = RunReporter("zh")

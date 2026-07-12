@@ -5,10 +5,9 @@ import sys
 
 
 SERVER_ARG = "--persistent-server"
-REUSE_ARG = "--reuse"
 SHUTDOWN_ARG = "--persistent-shutdown"
 _REQUEST_MAGIC = b"SPK1"
-_RESPONSE_MAGIC = b"SPR1"
+_STREAM_MAGIC = b"SPS1"
 _MAX_FIELD_BYTES = 16 * 1024 * 1024
 
 
@@ -19,28 +18,7 @@ def handle_early_argv(argv: list[str]) -> int | None:
         return run_server()
     if argv[0] == SHUTDOWN_ARG:
         return submit_request([], shutdown=True)
-    if argv[0] == REUSE_ARG:
-        return submit_request(argv[1:])
     return None
-
-
-def pipe_address() -> str:
-    import getpass
-    import hashlib
-
-    executable_dir = os.path.dirname(os.path.abspath(sys.executable))
-    identity = f"{getpass.getuser()}|{executable_dir}".encode("utf-8", "surrogatepass")
-    suffix = hashlib.sha256(identity).hexdigest()[:16]
-    return rf"\\.\pipe\sunpack-batch-{suffix}"
-
-
-def auth_key() -> bytes:
-    import getpass
-    import hashlib
-
-    executable_dir = os.path.dirname(os.path.abspath(sys.executable))
-    seed = f"sunpack|{getpass.getuser()}|{executable_dir}".encode("utf-8", "surrogatepass")
-    return hashlib.sha256(seed).digest()
 
 
 def state_path() -> str:
@@ -75,6 +53,8 @@ def submit_request(argv: list[str], *, shutdown: bool = False) -> int:
         "argv": request_argv,
         "cwd": os.getcwd(),
         "shutdown": bool(shutdown),
+        "stdout_tty": bool(sys.stdout is not None and sys.stdout.isatty()),
+        "stdin_tty": bool(sys.stdin is not None and sys.stdin.isatty()),
     }
     response = _send_or_start(payload)
     stdout = str(response.get("stdout") or "")
@@ -133,20 +113,17 @@ def _try_send(payload: dict[str, Any]) -> dict[str, Any] | None:
     try:
         cwd = str(payload.get("cwd") or "").encode("utf-8", "surrogatepass")
         argv = [str(item).encode("utf-8", "surrogatepass") for item in payload.get("argv") or []]
-        flags = 1 if payload.get("shutdown") else 0
+        flags = ((1 if payload.get("shutdown") else 0)
+                 | (2 if payload.get("stdout_tty") else 0)
+                 | (4 if payload.get("stdin_tty") else 0))
         body = [token, struct.pack("!III", flags, len(cwd), len(argv)), cwd]
         for item in argv:
             body.extend((struct.pack("!I", len(item)), item))
         connection.sendall(_REQUEST_MAGIC + b"".join(body))
-        header = _recv_exact(connection, 16)
-        if header[:4] != _RESPONSE_MAGIC:
+        connection.settimeout(None)
+        if _recv_exact(connection, 4) != _STREAM_MAGIC:
             return None
-        exit_code, stdout_size, stderr_size = struct.unpack("!iII", header[4:])
-        if stdout_size > _MAX_FIELD_BYTES or stderr_size > _MAX_FIELD_BYTES:
-            return None
-        stdout = _recv_exact(connection, stdout_size).decode("utf-8", "replace")
-        stderr = _recv_exact(connection, stderr_size).decode("utf-8", "replace")
-        return {"exit_code": exit_code, "stdout": stdout, "stderr": stderr}
+        return _recv_stream(connection)
     except (EOFError, OSError, ValueError):
         return None
     finally:
@@ -178,8 +155,8 @@ def run_server() -> int:
             try:
                 payload = _recv_request(connection, token)
                 if payload is None:
-                    _send_response(connection, {"exit_code": 2, "stdout": "", "stderr": "Invalid request.\n"})
                     continue
+                connection.sendall(_STREAM_MAGIC)
                 if payload.get("shutdown"):
                     try:
                         os.remove(state_path())
@@ -187,9 +164,10 @@ def run_server() -> int:
                         pass
                     lock_stream.close()
                     lock_stream = None
-                    _send_response(connection, {"exit_code": 0, "stdout": "", "stderr": ""})
+                    connection.sendall(struct.pack("!BIi", 0, 4, 0))
                     return 0
-                _send_response(connection, _execute_request(main, payload))
+                exit_code = _execute_streaming_request(main, payload, connection)
+                connection.sendall(struct.pack("!BIi", 0, 4, exit_code))
             except (EOFError, OSError):
                 continue
             finally:
@@ -230,16 +208,105 @@ def _recv_request(connection, token: bytes) -> dict[str, Any] | None:
         if size > _MAX_FIELD_BYTES:
             return None
         argv.append(_recv_exact(connection, size).decode("utf-8", "surrogatepass"))
-    return {"cwd": cwd, "argv": argv, "shutdown": bool(flags & 1)}
+    return {
+        "cwd": cwd,
+        "argv": argv,
+        "shutdown": bool(flags & 1),
+        "stdout_tty": bool(flags & 2),
+        "stdin_tty": bool(flags & 4),
+    }
 
 
-def _send_response(connection, response: dict[str, Any]) -> None:
+def _recv_stream(connection, input_stream=None) -> dict[str, Any]:
     import struct
 
-    stdout = str(response.get("stdout") or "").encode("utf-8", "surrogatepass")
-    stderr = str(response.get("stderr") or "").encode("utf-8", "surrogatepass")
-    header = _RESPONSE_MAGIC + struct.pack("!iII", int(response.get("exit_code", 1)), len(stdout), len(stderr))
-    connection.sendall(header + stdout + stderr)
+    input_stream = sys.stdin if input_stream is None else input_stream
+    while True:
+        kind, size = struct.unpack("!BI", _recv_exact(connection, 5))
+        if size > _MAX_FIELD_BYTES:
+            raise ValueError("persistent stream frame is too large")
+        payload = _recv_exact(connection, size)
+        if kind == 0:
+            if size != 4:
+                raise ValueError("invalid persistent final frame")
+            return {"exit_code": struct.unpack("!i", payload)[0], "stdout": "", "stderr": ""}
+        if kind == 3:
+            line = input_stream.readline() if input_stream is not None else ""
+            encoded = line.encode("utf-8", "surrogatepass")
+            connection.sendall(struct.pack("!I", len(encoded)) + encoded)
+        else:
+            stream = sys.stdout if kind == 1 else sys.stderr
+            stream.write(payload.decode("utf-8", "replace"))
+            stream.flush()
+
+
+class _ConnectionTextStream:
+    encoding = "utf-8"
+    errors = "replace"
+
+    def __init__(self, connection, kind: int, *, is_tty: bool = False):
+        self.connection = connection
+        self.kind = kind
+        self._is_tty = is_tty
+        self.supports_terminal_updates = is_tty
+
+    def write(self, text: str) -> int:
+        import struct
+
+        value = str(text)
+        data = value.encode("utf-8", "surrogatepass")
+        if data:
+            self.connection.sendall(struct.pack("!BI", self.kind, len(data)) + data)
+        return len(value)
+
+    def flush(self) -> None:
+        return None
+
+    def isatty(self) -> bool:
+        return self._is_tty
+
+
+class _ConnectionInputStream:
+    encoding = "utf-8"
+    errors = "replace"
+
+    def __init__(self, connection, *, is_tty: bool = False):
+        self.connection = connection
+        self._is_tty = is_tty
+
+    def readline(self, _size: int = -1) -> str:
+        import struct
+
+        self.connection.sendall(struct.pack("!BI", 3, 0))
+        size = struct.unpack("!I", _recv_exact(self.connection, 4))[0]
+        if size > _MAX_FIELD_BYTES:
+            raise ValueError("persistent input frame is too large")
+        return _recv_exact(self.connection, size).decode("utf-8", "replace")
+
+    def isatty(self) -> bool:
+        return self._is_tty
+
+
+def _execute_streaming_request(main, payload: dict[str, Any], connection) -> int:
+    import contextlib
+
+    stdout = _ConnectionTextStream(connection, 1, is_tty=bool(payload.get("stdout_tty")))
+    stderr = _ConnectionTextStream(connection, 2, is_tty=False)
+    stdin = _ConnectionInputStream(connection, is_tty=bool(payload.get("stdin_tty")))
+    previous_cwd = os.getcwd()
+    previous_stdin = sys.stdin
+    try:
+        os.chdir(str(payload.get("cwd") or previous_cwd))
+        argv = [str(item) for item in payload.get("argv") or []]
+        sys.stdin = stdin
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            return int(main(argv) or 0)
+    except BaseException as exc:
+        print(f"SunPack persistent request failed: {exc}", file=stderr)
+        return 1
+    finally:
+        sys.stdin = previous_stdin
+        os.chdir(previous_cwd)
 
 
 def _write_state(port: int, token: bytes) -> None:
@@ -267,24 +334,3 @@ def _acquire_server_lock():
         stream.close()
         return None
     return stream
-
-
-def _execute_request(main, payload: dict[str, Any]) -> dict[str, Any]:
-    import contextlib
-    import io
-
-    stdout = io.StringIO()
-    stderr = io.StringIO()
-    previous_cwd = os.getcwd()
-    try:
-        cwd = str(payload.get("cwd") or previous_cwd)
-        os.chdir(cwd)
-        argv = [str(item) for item in payload.get("argv") or []]
-        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
-            exit_code = int(main(argv) or 0)
-    except BaseException as exc:
-        exit_code = 1
-        print(f"SunPack persistent request failed: {exc}", file=stderr)
-    finally:
-        os.chdir(previous_cwd)
-    return {"exit_code": exit_code, "stdout": stdout.getvalue(), "stderr": stderr.getvalue()}

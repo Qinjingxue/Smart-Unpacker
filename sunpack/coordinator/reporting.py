@@ -370,6 +370,9 @@ def _terminal_supports_updates(stream: Any) -> bool:
     isatty = getattr(stream, "isatty", None)
     if not callable(isatty) or not isatty():
         return False
+    forwarded_capability = getattr(stream, "supports_terminal_updates", None)
+    if forwarded_capability is not None:
+        return bool(forwarded_capability)
     try:
         import ctypes
 
