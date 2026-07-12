@@ -94,3 +94,19 @@ def test_interactive_panel_updates_fixed_row_with_progress_and_colors(tmp_path, 
     assert "正在修复" in output
     assert "\033[32m" in output and "完成" in output
     assert "\033[1A" in output
+
+
+def test_noninteractive_terminal_streams_throttled_progress_bar(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(reporting, "_terminal_supports_updates", lambda _stream: False)
+    reporter = RunReporter("zh")
+    task = _task(tmp_path / "large.7z")
+
+    reporter.begin_round(1, [task])
+    reporter.task_progress(task, {"completed_bytes": 5, "total_bytes": 100})
+    reporter.task_progress(task, {"completed_bytes": 9, "total_bytes": 100})
+    reporter.task_progress(task, {"completed_bytes": 50, "total_bytes": 100})
+
+    output = capsys.readouterr().out
+    assert output.count("正在解压") == 2
+    assert "  5%" in output
+    assert " 50%" in output

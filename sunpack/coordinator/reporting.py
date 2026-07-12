@@ -30,6 +30,7 @@ class RunReporter:
         self._use_color = self._interactive and os.environ.get("NO_COLOR") is None
         self._panel_tasks: list[int] = []
         self._task_rows: dict[int, dict[str, Any]] = {}
+        self._last_streamed_progress: dict[int, int] = {}
         self._last_render_at = 0.0
 
     def scan_started(self, round_index: int) -> None:
@@ -99,7 +100,7 @@ class RunReporter:
                 print(self.i18n.t("report.repairing", name=_task_name(task)), flush=True)
 
     def task_progress(self, task: Any, event: dict[str, Any]) -> None:
-        if self.quiet or not self._interactive:
+        if self.quiet:
             return
         try:
             completed = max(0, int(event.get("completed_bytes", 0) or 0))
@@ -119,8 +120,19 @@ class RunReporter:
                 "completed_bytes": completed,
                 "total_bytes": total,
             })
-            if new_percent != old_percent:
+            if self._interactive and new_percent != old_percent:
                 self._render_panel_locked(force=False)
+            elif not self._interactive:
+                # Terminals without cursor-control support still deserve visible
+                # extraction progress.  Emit a throttled, line-based bar so this
+                # also works through wrappers and redirected output without
+                # flooding logs for every worker event.
+                task_id = id(task)
+                last_percent = self._last_streamed_progress.get(task_id, -10)
+                displayed_percent = (new_percent // 10) * 10
+                if new_percent >= 100 or displayed_percent >= last_percent + 10:
+                    self._last_streamed_progress[task_id] = displayed_percent
+                    print(self._format_task_row(row), flush=True)
 
     def task_finished(self, task: Any, outcome: Any, round_index: int) -> None:
         with self._lock:
