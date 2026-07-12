@@ -107,7 +107,12 @@ def prompt_for_passwords(
     print(prompt_text, flush=True)
     while True:
         line = input(input_prompt)
-        if not line:
+        # ``input()`` normally removes the line ending, but some Windows
+        # console hosts used by Explorer context-menu launches leave a bare
+        # carriage return behind.  That is still an empty submitted line, not
+        # a password.  Do not strip other whitespace: it may intentionally be
+        # part of a password.
+        if not line.rstrip("\r\n"):
             break
         passwords.append(line)
     return dedupe_passwords(passwords)
