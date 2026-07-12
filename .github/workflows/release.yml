@@ -8,8 +8,6 @@ on:
         required: false
         type: string
   push:
-    branches:
-      - "**"
     tags:
       - "v*"
 
