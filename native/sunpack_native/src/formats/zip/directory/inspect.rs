@@ -1853,7 +1853,13 @@ fn descriptor_record_at(
     if local.flags & 0x08 != 0 && values_offset.checked_add(12)? <= data.len() {
         let compressed_size = u32_le(data, values_offset + 4) as u64;
         let uncompressed_size = u32_le(data, values_offset + 8) as u64;
-        if !descriptor_sizes_match_entry(compressed_size, uncompressed_size, entry, local) {
+        // A signature gives us an independent structural anchor, so preserve
+        // mismatched values for the relation diagnostics above. Without that
+        // anchor, require the values to agree with an entry header; otherwise
+        // arbitrary bytes at the payload boundary look like a descriptor.
+        if !has_signature
+            && !descriptor_sizes_match_entry(compressed_size, uncompressed_size, entry, local)
+        {
             return None;
         }
         return Some(DataDescriptorRecord {
@@ -1864,6 +1870,21 @@ fn descriptor_record_at(
         });
     }
     None
+}
+
+fn descriptor_sizes_match_entry(
+    compressed_size: u64,
+    uncompressed_size: u64,
+    entry: &CentralEntry,
+    local: &LocalHeader,
+) -> bool {
+    let central_matches = entry.compressed_size as u64 == compressed_size
+        && entry.uncompressed_size as u64 == uncompressed_size;
+    let local_has_sizes = local.compressed_size != 0 || local.uncompressed_size != 0;
+    let local_matches = local_has_sizes
+        && local.compressed_size as u64 == compressed_size
+        && local.uncompressed_size as u64 == uncompressed_size;
+    central_matches || local_matches
 }
 
 fn descriptor_uses_zip64(entry: &CentralEntry, local: &LocalHeader) -> bool {
@@ -1940,21 +1961,19 @@ mod data_descriptor_width_tests {
         assert_eq!(descriptor.uncompressed_size, 7);
         assert!(!descriptor.has_signature);
     }
-}
 
-fn descriptor_sizes_match_entry(
-    compressed_size: u64,
-    uncompressed_size: u64,
-    entry: &CentralEntry,
-    local: &LocalHeader,
-) -> bool {
-    let central_matches = entry.compressed_size as u64 == compressed_size
-        && entry.uncompressed_size as u64 == uncompressed_size;
-    let local_has_sizes = local.compressed_size != 0 || local.uncompressed_size != 0;
-    let local_matches = local_has_sizes
-        && local.compressed_size as u64 == compressed_size
-        && local.uncompressed_size as u64 == uncompressed_size;
-    central_matches || local_matches
+    #[test]
+    fn mismatched_zip32_descriptor_remains_parseable_for_diagnostics() {
+        let (entry, local) = entry_and_local(false);
+        let mut bytes = DD_SIG.to_vec();
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&8u32.to_le_bytes());
+        bytes.extend_from_slice(&7u32.to_le_bytes());
+        let descriptor = descriptor_record_at(&bytes, 0, &entry, &local).unwrap();
+        assert_eq!(descriptor.compressed_size, 8);
+        assert_eq!(descriptor.uncompressed_size, 7);
+        assert!(descriptor.has_signature);
+    }
 }
 
 #[derive(Clone, Copy)]
