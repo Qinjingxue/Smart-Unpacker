@@ -3,6 +3,10 @@ param(
     [switch]$VerboseOutput,
     [switch]$NoWait,
     [switch]$SkipEnvironmentRefresh,
+    [ValidateSet("x64", "arm64")]
+    [string]$Arch = "x64",
+    [ValidateSet("full", "lite")]
+    [string]$RepairSystem = "full",
     [int]$StepTimeoutSeconds = 900
 )
 
@@ -307,7 +311,9 @@ function Ensure-AcceptanceEnvironment {
     }
     Invoke-Native -FilePath "powershell" -Arguments @(
         "-ExecutionPolicy", "Bypass",
-        "-File", (Join-Path $RepoRoot "scripts\setup_windows_dev.ps1")
+        "-File", (Join-Path $RepoRoot "scripts\setup_windows_dev.ps1"),
+        "-Arch", $Arch,
+        "-RepairSystem", $RepairSystem
     )
 }
 

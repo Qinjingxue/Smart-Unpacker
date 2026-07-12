@@ -112,6 +112,16 @@ def test_build_and_release_workflow_publish_portable_and_setup_packages():
     assert "*-setup.exe" in workflow
 
 
+def test_build_passes_edition_and_architecture_to_acceptance_setup():
+    build_script = (ROOT / "scripts" / "build_windows.ps1").read_text(encoding="utf-8")
+    acceptance_script = (ROOT / "run_acceptance_tests.ps1").read_text(encoding="utf-8")
+
+    assert '"-Arch", $buildArch' in build_script
+    assert '"-RepairSystem", $repairSystemMode' in build_script
+    assert '[string]$RepairSystem = "full"' in acceptance_script
+    assert '"-RepairSystem", $RepairSystem' in acceptance_script
+
+
 def test_installer_smoke_uses_process_exit_code_not_last_exit_code():
     script = (ROOT / "scripts" / "test_windows_installer.ps1").read_text(encoding="utf-8")
 

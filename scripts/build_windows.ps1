@@ -779,7 +779,9 @@ if ($runAcceptanceTests) {
     Invoke-Native -FilePath "powershell" -Arguments @(
         "-ExecutionPolicy", "Bypass",
         "-File", (Join-Path $repoRoot "run_acceptance_tests.ps1"),
-        "-NoWait"
+        "-NoWait",
+        "-Arch", $buildArch,
+        "-RepairSystem", $repairSystemMode
     )
 } else {
     Write-Host "Skipping acceptance tests by request." -ForegroundColor Yellow
