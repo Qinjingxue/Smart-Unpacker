@@ -526,6 +526,11 @@ class RelationsGroupBuilder:
 
         max_confirmed = max(confirmed)
         missing_numbers = [number for number in range(1, max_confirmed + 1) if number not in confirmed]
+        # Fuzzy recovery needs a confirmed first-volume anchor.  A later orphan
+        # such as ``name.7z.005`` does not provide enough evidence to assign
+        # unrelated sibling files to volumes 1..4.  Besides creating false
+        # split groups, that synthetic group can claim the same logical key as
+        # a genuine ``.001``-anchored group and hide it during target deduping.
         fuzzy_candidates = self._find_fuzzy_candidates_for_missing_volumes(
             archive=archive,
             archive_prefix=archive_prefix,
@@ -533,6 +538,22 @@ class RelationsGroupBuilder:
             known_paths=set(seen_paths),
             directory_index=directory_index,
         )
+        if 1 not in confirmed:
+            archive_name = os.path.basename(archive_prefix).lower()
+            logical_name = (
+                archive_name
+                if style == "rar_part"
+                else os.path.splitext(archive_name)[0]
+            )
+            # Without a confirmed first volume, only an exact prefix companion
+            # is strong enough to stand in for it (for example ``lost.7z`` for
+            # ``lost.7z.002``).  Similar size/time and a vaguely similar name
+            # are not sufficient evidence for inventing a head volume.
+            fuzzy_candidates = [
+                path
+                for path in fuzzy_candidates
+                if os.path.basename(path).lower() in {archive_name, logical_name}
+            ]
 
         assigned_candidates: dict[int, str] = {}
         available_candidates = list(dict.fromkeys(candidates + fuzzy_candidates))

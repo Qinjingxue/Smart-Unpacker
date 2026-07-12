@@ -26,6 +26,27 @@ def test_relation_group_builder_groups_split_volumes(tmp_path):
     assert orphan_group.relation.is_split_related is False
 
 
+def test_later_orphan_volume_does_not_invent_a_fuzzy_head(tmp_path):
+    orphan = tmp_path / "other.7z.005"
+    real_head = tmp_path / "archive.7z.001"
+    disguised_part = tmp_path / "archive"
+    for path in (orphan, real_head, disguised_part):
+        path.write_bytes(b"7z\xbc\xaf\x27\x1c" + b"x" * (1024 * 1024))
+
+    snapshot = DirectoryScanner(str(tmp_path)).scan()
+    groups = RelationsScheduler().build_candidate_groups(snapshot)
+
+    orphan_group = next(group for group in groups if group.head_path == str(orphan))
+    real_group = next(group for group in groups if str(real_head) in group.all_paths)
+
+    assert orphan_group.head_path == str(orphan)
+    assert orphan_group.all_paths == [str(orphan)]
+    assert orphan_group.split_group_complete is False
+    assert orphan_group.split_missing_reason == "missing_head"
+    assert real_group.head_path == str(real_head)
+    assert str(disguised_part) in real_group.all_paths
+
+
 def test_relation_group_builder_groups_rar_sfx_split_volumes(tmp_path):
     first = tmp_path / "installer.part1.exe"
     second = tmp_path / "installer.part2.rar"

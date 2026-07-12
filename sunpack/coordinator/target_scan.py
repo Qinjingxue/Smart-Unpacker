@@ -31,9 +31,29 @@ def _add_unique(target: List[FactBag], seen_keys: set[str], bags: List[FactBag])
     for bag in bags:
         key = _bag_key(bag)
         if key in seen_keys:
+            for index, current in enumerate(target):
+                if _bag_key(current) == key and _bag_rank(bag) > _bag_rank(current):
+                    target[index] = bag
+                    break
             continue
         seen_keys.add(key)
         target.append(bag)
+
+
+def _bag_rank(bag: FactBag) -> tuple[int, int, int]:
+    """Prefer the best-supported representation of one logical candidate."""
+    complete = bag.get("relation.split_group_complete")
+    if complete is True:
+        relation_strength = 3
+    elif complete is None and bag.get("relation.is_split_related"):
+        relation_strength = 2
+    elif not bag.get("relation.is_split_related"):
+        relation_strength = 1
+    else:
+        relation_strength = 0
+    volumes = len(bag.get("relation.split_volumes") or [])
+    members = len(bag.get("candidate.member_paths") or [])
+    return relation_strength, volumes, members
 
 
 def build_fact_bags_for_target(target_path: str, session: DetectionScanSession | None = None) -> List[FactBag]:
