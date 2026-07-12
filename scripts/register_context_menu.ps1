@@ -123,8 +123,7 @@ function New-CommandString {
 
     $passwordArg = if ($PromptPasswords) { " --ask-pw" } else { "" }
     if ($Launcher.Mode -eq "app") {
-        $reuseArg = if ($PromptPasswords) { "" } else { " --reuse" }
-        return ('"{0}"{1} extract "{2}" --out-dir "{3}"{4} --pause' -f $Launcher.AppPath, $reuseArg, $TargetToken, $OutDirToken, $passwordArg)
+        return ('"{0}" extract "{1}" --out-dir "{2}"{3} --pause' -f $Launcher.AppPath, $TargetToken, $OutDirToken, $passwordArg)
     }
 
     return ('"{0}" "{1}" extract "{2}" --out-dir "{3}"{4} --pause' -f $Launcher.AppPath, $Launcher.ScriptPath, $TargetToken, $OutDirToken, $passwordArg)

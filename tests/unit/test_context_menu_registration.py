@@ -45,7 +45,8 @@ def test_context_menu_commands_are_safe_for_drive_roots_and_keep_password_flag()
     for key in ("folder_direct", "background_direct"):
         expanded = commands[key].replace("%1", "D:\\").replace("%V", "D:\\")
         argv = _windows_argv(expanded)
-        assert argv[1:3] == ["--reuse", "extract"]
+        assert argv[1] == "extract"
+        assert "--reuse" not in argv
         assert "--ask-pw" not in argv
         assert "--pause" in argv
 
