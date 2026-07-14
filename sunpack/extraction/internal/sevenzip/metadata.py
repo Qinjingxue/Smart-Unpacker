@@ -363,6 +363,13 @@ class ArchiveMetadataScanner:
             total_halfwidth_kana += stats["halfwidth_kana"]
             total_latin_symbols += stats["latin_symbols"]
 
+        # CP932, GBK and Big5 deliberately overlap: the same byte pairs can be
+        # valid in more than one codec while producing entirely different Han
+        # characters.  Their standard/common code areas do not overlap in the
+        # same way, though.  Use that byte-level evidence before falling back
+        # to the much weaker decoded-character heuristics below.
+        score += self._score_legacy_code_units(raw_names, encoding)
+
         if decoded_count == len(raw_names):
             score += 4
         if total_cjk:
@@ -374,6 +381,57 @@ class ArchiveMetadataScanner:
         if total_latin_symbols:
             reasons.append(self.i18n.t("metadata.latin_noise_count", count=total_latin_symbols))
         return score, decoded_count, reasons
+
+    @staticmethod
+    def _score_legacy_code_units(raw_names: List[bytes], encoding: str) -> int:
+        """Score unique DBCS units by their codec's standard/common area.
+
+        Strict decoding only proves that a byte sequence is possible.  In
+        particular, ordinary CP932 pairs frequently decode as rare GBK
+        extension characters.  Scoring unique units avoids repeated parent
+        directories dominating archives with many entries.
+        """
+        if encoding not in {"cp932", "cp936", "cp950"}:
+            return 0
+
+        units: set[tuple[int, int]] = set()
+        for raw_name in raw_names:
+            index = 0
+            while index + 1 < len(raw_name):
+                lead = raw_name[index]
+                if encoding == "cp932":
+                    is_lead = 0x81 <= lead <= 0x9F or 0xE0 <= lead <= 0xFC
+                else:
+                    is_lead = 0x81 <= lead <= 0xFE
+                if is_lead:
+                    units.add((lead, raw_name[index + 1]))
+                    index += 2
+                else:
+                    index += 1
+
+        score = 0
+        for lead, trail in units:
+            if encoding == "cp932":
+                # Windows-31J extensions occupy the NEC/IBM and user-defined
+                # rows.  Other valid pairs are in the standard JIS area.
+                extension = (
+                    (lead == 0x87 and 0x40 <= trail <= 0x9C)
+                    or 0xED <= lead <= 0xEE
+                    or 0xF0 <= lead <= 0xFC
+                )
+                score += 0 if extension else 2
+            elif encoding == "cp936":
+                # GB2312 is the common core of CP936.  GBK pairs outside it
+                # are valid but substantially weaker evidence for Chinese.
+                in_common_core = 0xA1 <= lead <= 0xF7 and 0xA1 <= trail <= 0xFE
+                score += 2 if in_common_core else 0
+            else:
+                # The original Big5 rows form CP950's common core; lower and
+                # upper extension rows are valid but uncommon in filenames.
+                valid_trail = 0x40 <= trail <= 0x7E or 0xA1 <= trail <= 0xFE
+                in_common_core = 0xA1 <= lead <= 0xF9 and valid_trail
+                score += 2 if in_common_core else 0
+        return score
 
     def _score_decoded_name(self, decoded: str, encoding: str) -> Tuple[int, Dict[str, int]]:
         score = 0

@@ -34,6 +34,24 @@ def test_repeated_shift_jis_parent_is_not_misclassified_as_gbk():
     assert selected["codepage"] == "932"
 
 
+def test_shift_jis_kanji_only_name_is_not_rejected_as_ambiguous_gbk():
+    selected = ArchiveMetadataScanner()._select_codepage(["更新履歴.txt".encode("cp932")])
+
+    assert selected["codepage"] == "932"
+
+
+def test_shift_jis_kanji_only_zip_scan_uses_cp932(tmp_path):
+    archive = tmp_path / "shift-jis-kanji-only.zip"
+    expected_name = "Warrior Girl ver2.01/更新履歴.txt"
+    _write_stored_zip(archive, expected_name.encode("cp932"), b"payload")
+
+    result = ArchiveMetadataScanner().scan(str(archive))
+
+    assert result.selected_codepage == "932"
+    assert result.decoded_names == [expected_name]
+    assert result.confidence > 0.5
+
+
 def test_shift_jis_zip_scan_returns_decoded_item_paths(tmp_path):
     archive = tmp_path / "shift-jis.zip"
     expected_name = "日本語/説明.txt"
