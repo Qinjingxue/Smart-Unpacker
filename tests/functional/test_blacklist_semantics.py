@@ -97,10 +97,13 @@ def test_docx_semantic_container_is_not_promoted_to_extract_task(tmp_path):
     assert "sample.docx" not in decisions
 
 
-def test_output_dir_scan_ignores_unitypackage_only_payloads(tmp_path):
+def test_output_dir_scan_preserves_explicit_filesystem_blacklist(tmp_path):
     archive = tmp_path / "asset.unitypackage"
     archive.write_bytes(b"\x1f\x8b" + b"x" * 128)
 
-    assert not OutputScanPolicy(scan_config()).should_scan_output_dir(str(tmp_path))
+    config = scan_config(blocked_extensions=[".unitypackage"])
+
+    assert not OutputScanPolicy(config).should_scan_output_dir(str(tmp_path))
+    assert ScanOrchestrator(config).scan(str(tmp_path)) == []
 
 
