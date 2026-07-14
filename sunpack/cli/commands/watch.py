@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import subprocess
 
+from sunpack.support.runtime_cwd import runtime_working_directory
+
 from sunpack.cli.cli_constants import EXIT_TASK_FAILED, EXIT_USAGE
 from sunpack.cli.cli_parsers import CliHelpFormatter, build_common_parser, localize_help_action
 from sunpack.cli.cli_types import CliCommandResult
@@ -181,6 +183,7 @@ def _start_watch_background() -> bool:
         creationflags=creationflags,
         startupinfo=startupinfo,
         close_fds=True,
+        cwd=runtime_working_directory(),
     )
     return True
 

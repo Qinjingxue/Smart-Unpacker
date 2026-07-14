@@ -36,20 +36,26 @@ def test_streaming_execute_restores_cwd_and_forwards_output(tmp_path):
     assert os.getcwd() == original
 
 
-def test_submit_request_strips_server_side_pause(monkeypatch):
+def test_submit_request_strips_server_side_pause(tmp_path, monkeypatch):
     captured = {}
+    request_cwd = os.getcwd()
 
     def fake_send(payload):
         captured.update(payload)
+        captured["client_cwd"] = os.getcwd()
         return {"exit_code": 0, "stdout": "done\n", "stderr": ""}
 
     monkeypatch.setattr(persistent_process, "_send_or_start", fake_send)
+    monkeypatch.setattr(persistent_process, "runtime_working_directory", lambda: str(tmp_path))
     monkeypatch.setattr(persistent_process.sys, "stdout", io.StringIO())
     monkeypatch.setattr(persistent_process.sys.stdin, "isatty", lambda: False)
 
     assert persistent_process.submit_request(["extract", "sample.zip", "--pause"]) == 0
     assert "--pause" not in captured["argv"]
     assert "--no-pause" in captured["argv"]
+    assert captured["cwd"] == request_cwd
+    assert captured["client_cwd"] == str(tmp_path)
+    assert os.getcwd() == request_cwd
     assert persistent_process.sys.stdout.getvalue() == "done\n"
 
 
@@ -152,6 +158,65 @@ def test_shutdown_does_not_start_a_missing_server(monkeypatch):
     assert response["exit_code"] == 0
 
 
+def test_server_idle_shutdown_requires_completed_request_and_idle_runtime():
+    assert not persistent_process._idle_shutdown_due(
+        served_request=False,
+        last_completed_at=10.0,
+        idle_seconds=5.0,
+        runtime_idle=True,
+        now=20.0,
+    )
+    assert not persistent_process._idle_shutdown_due(
+        served_request=True,
+        last_completed_at=10.0,
+        idle_seconds=5.0,
+        runtime_idle=False,
+        now=20.0,
+    )
+    assert not persistent_process._idle_shutdown_due(
+        served_request=True,
+        last_completed_at=10.0,
+        idle_seconds=5.0,
+        runtime_idle=True,
+        now=14.9,
+    )
+    assert persistent_process._idle_shutdown_due(
+        served_request=True,
+        last_completed_at=10.0,
+        idle_seconds=5.0,
+        runtime_idle=True,
+        now=15.0,
+    )
+
+
+def test_state_cleanup_only_removes_owned_server_state(tmp_path, monkeypatch):
+    state = tmp_path / "runtime.state"
+    token = b"a" * 32
+    monkeypatch.setattr(persistent_process, "state_path", lambda: str(state))
+
+    persistent_process._write_state(1234, token)
+    assert not persistent_process._remove_state_if_owned(9999, token)
+    assert state.exists()
+    assert not persistent_process._remove_state_if_owned(1234, b"b" * 32)
+    assert state.exists()
+    assert persistent_process._remove_state_if_owned(1234, token)
+    assert not state.exists()
+
+
+def test_server_process_starts_in_neutral_working_directory(tmp_path, monkeypatch):
+    captured = {}
+    attempts = iter([None, {"exit_code": 0, "stdout": "", "stderr": ""}])
+
+    monkeypatch.setattr(persistent_process, "_try_send", lambda _payload: next(attempts))
+    monkeypatch.setattr(persistent_process, "runtime_working_directory", lambda: str(tmp_path))
+    monkeypatch.setattr("subprocess.Popen", lambda *args, **kwargs: captured.update(kwargs))
+
+    response = persistent_process._send_or_start({"argv": ["extract", "sample.zip"]})
+
+    assert response["exit_code"] == 0
+    assert captured["cwd"] == str(tmp_path)
+
+
 def test_persistent_runtime_reuses_engine_for_request_only_config(monkeypatch):
     from sunpack.cli import persistent_runtime
 
@@ -159,6 +224,7 @@ def test_persistent_runtime_reuses_engine_for_request_only_config(monkeypatch):
 
     class FakeEngine:
         def __init__(self, config):
+            self.config = config
             events.append(("init", config["output"]["root"]))
 
         def start(self):
@@ -166,7 +232,11 @@ def test_persistent_runtime_reuses_engine_for_request_only_config(monkeypatch):
             return self
 
         def reconfigure_request(self, config):
+            self.config = config
             events.append(("reconfigure", config["output"]["root"]))
+
+        def is_idle(self):
+            return True
 
         def close(self, *, graceful=True):
             events.append(("close", graceful))
@@ -174,8 +244,16 @@ def test_persistent_runtime_reuses_engine_for_request_only_config(monkeypatch):
     monkeypatch.setattr(persistent_runtime, "PipelineEngine", FakeEngine)
     monkeypatch.setattr(persistent_runtime, "config_cache_token", lambda: ("same",))
     persistent_runtime.enable_persistent_runtime()
-    first = {"output": {"root": "one", "common_root": "a"}, "cli": {"quiet": True}}
-    second = {"output": {"root": "two", "common_root": "b"}, "cli": {"quiet": False}}
+    first = {
+        "output": {"root": "one", "common_root": "a"},
+        "cli": {"quiet": True},
+        "performance": {"persistent_server_idle_seconds": 3},
+    }
+    second = {
+        "output": {"root": "two", "common_root": "b"},
+        "cli": {"quiet": False},
+        "performance": {"persistent_server_idle_seconds": 9},
+    }
     try:
         with persistent_runtime.pipeline_engine(first) as first_engine:
             pass
@@ -184,5 +262,7 @@ def test_persistent_runtime_reuses_engine_for_request_only_config(monkeypatch):
         assert first_engine is second_engine
         assert events[:2] == [("init", "one"), ("start",)]
         assert ("reconfigure", "two") in events
+        assert persistent_runtime.persistent_runtime_is_idle()
+        assert persistent_runtime.persistent_server_idle_seconds() == 9
     finally:
         persistent_runtime.close_persistent_runtime()

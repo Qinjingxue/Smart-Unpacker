@@ -118,6 +118,10 @@ class PipelineEngine:
     def recent_passwords(self) -> list[str]:
         return list(self.extractor.recent_passwords)
 
+    def is_idle(self) -> bool:
+        with self._pressure_lock:
+            return self._active_request_count == 0 and self._queue.empty()
+
     def start(self) -> "PipelineEngine":
         with self._lifecycle_lock:
             if self._closed:

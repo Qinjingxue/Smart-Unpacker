@@ -5,6 +5,8 @@ import time
 from types import SimpleNamespace
 
 import sunpack.filesystem.watcher.service as service_module
+import sunpack.coordinator.watch_runtime as watch_runtime
+import sunpack.cli.commands.watch as watch_command
 from sunpack.filesystem.watcher.service import CONTROL_RELOAD, CONTROL_STOP, WatchService
 from sunpack.cli.commands.watch import _watch_running
 from tests.helpers.fake_pipeline_engine import FakePipelineEngine
@@ -12,6 +14,40 @@ from tests.helpers.fake_pipeline_engine import FakePipelineEngine
 
 class FakeRunner:
     pass
+
+
+def test_watch_runtime_uses_neutral_cwd_and_restores_caller_cwd(tmp_path, monkeypatch):
+    caller = tmp_path / "caller"
+    neutral = tmp_path / "neutral"
+    caller.mkdir()
+    neutral.mkdir()
+    observed = {}
+    monkeypatch.chdir(caller)
+    monkeypatch.setattr(watch_runtime, "runtime_working_directory", lambda: str(neutral))
+
+    class FakeService:
+        def __init__(self, **_kwargs):
+            observed["constructed"] = __import__("os").getcwd()
+
+        def run(self, *, once=False):
+            observed["run"] = (__import__("os").getcwd(), once)
+            return 7
+
+    monkeypatch.setattr(watch_runtime, "WatchService", FakeService)
+
+    assert watch_runtime.run_watch_service(tray_enabled=False, once=True) == 7
+    assert observed == {"constructed": str(neutral), "run": (str(neutral), True)}
+    assert __import__("os").getcwd() == str(caller)
+
+
+def test_watch_background_starts_in_neutral_working_directory(tmp_path, monkeypatch):
+    captured = {}
+    monkeypatch.setattr(watch_command, "runtime_working_directory", lambda: str(tmp_path))
+    monkeypatch.setattr(watch_command, "_watch_start_argv", lambda: ["sunpack", "watch", "start"])
+    monkeypatch.setattr(watch_command.subprocess, "Popen", lambda *args, **kwargs: captured.update(kwargs))
+
+    assert watch_command._start_watch_background()
+    assert captured["cwd"] == str(tmp_path)
 
 
 def test_watch_service_releases_named_mutex_after_exit(tmp_path, monkeypatch):

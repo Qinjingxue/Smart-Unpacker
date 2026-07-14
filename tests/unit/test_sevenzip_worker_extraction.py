@@ -179,6 +179,28 @@ def test_persistent_worker_result_escapes_control_characters(tmp_path):
     assert worker_result["diagnostics"]["failed_item"]["path"] == "control-\x01-name.txt"
 
 
+def test_persistent_worker_starts_in_neutral_working_directory(tmp_path, monkeypatch):
+    captured = {}
+
+    class StartObserved(RuntimeError):
+        pass
+
+    def fake_popen(*args, **kwargs):
+        captured.update(kwargs)
+        raise StartObserved
+
+    monkeypatch.setattr(
+        "sunpack.extraction.internal.sevenzip.sevenzip_runner.runtime_working_directory",
+        lambda: str(tmp_path),
+    )
+    monkeypatch.setattr("sunpack.extraction.internal.sevenzip.sevenzip_runner.subprocess.Popen", fake_popen)
+
+    with pytest.raises(StartObserved):
+        _PersistentWorker("worker.exe", None)
+
+    assert captured["cwd"] == str(tmp_path)
+
+
 def test_compact_worker_manifest_is_expanded_for_pipeline():
     from sunpack.extraction.internal.sevenzip.worker_diagnostics import build_worker_diagnostics
 

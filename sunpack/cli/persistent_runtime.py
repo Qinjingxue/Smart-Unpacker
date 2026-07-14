@@ -7,6 +7,7 @@ import threading
 from typing import Iterator
 
 from sunpack.config.loader import config_cache_token
+from sunpack.config.advanced_defaults import advanced_config_value
 from sunpack.coordinator.engine import PipelineEngine
 
 
@@ -18,6 +19,7 @@ _MUTABLE_PATHS = {
     ("extraction", "quiet"),
     ("output", "root"),
     ("output", "common_root"),
+    ("performance", "persistent_server_idle_seconds"),
 }
 _LOCK = threading.RLock()
 _ENABLED = False
@@ -45,6 +47,24 @@ def close_persistent_runtime() -> None:
         _ENABLED = False
     if engine is not None:
         engine.close(graceful=True)
+
+
+def persistent_runtime_is_idle() -> bool:
+    with _LOCK:
+        engine = _ENGINE
+    return engine is None or engine.is_idle()
+
+
+def persistent_server_idle_seconds() -> float:
+    default = advanced_config_value(("performance", "persistent_server_idle_seconds"))
+    with _LOCK:
+        engine = _ENGINE
+        config = engine.config if engine is not None else {}
+    performance = config.get("performance") if isinstance(config.get("performance"), dict) else {}
+    try:
+        return max(0.0, float(performance.get("persistent_server_idle_seconds", default)))
+    except (TypeError, ValueError):
+        return max(0.0, float(default))
 
 
 @contextmanager

@@ -16,6 +16,7 @@ from sunpack.extraction.internal.sevenzip.worker_diagnostics import attach_worke
 from sunpack.support import archive_knowledge_projection as knowledge_view
 from sunpack.support.archive_state_view import ArchiveStateByteView
 from sunpack.support.resources import get_7z_dll_path, get_sevenzip_bridge_worker_path
+from sunpack.support.runtime_cwd import runtime_working_directory
 
 
 class _PersistentWorker:
@@ -38,6 +39,7 @@ class _PersistentWorker:
             errors="replace",
             startupinfo=self.startupinfo,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            cwd=runtime_working_directory(),
         )
         threading.Thread(target=self._pump, args=(self.process.stdout, self.stdout_queue), daemon=True).start()
         threading.Thread(target=self._pump, args=(self.process.stderr, self.stderr_queue), daemon=True).start()

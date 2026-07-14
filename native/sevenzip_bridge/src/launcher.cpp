@@ -43,6 +43,13 @@ std::string utf8(const std::wstring& value) {
     return result;
 }
 
+std::wstring current_directory() {
+    std::vector<wchar_t> buffer(32768);
+    const DWORD size = GetCurrentDirectoryW(static_cast<DWORD>(buffer.size()), buffer.data());
+    if (size == 0 || size >= buffer.size()) return {};
+    return std::wstring(buffer.data(), size);
+}
+
 std::wstring wide_utf8(const std::string& value) {
     if (value.empty()) return {};
     const int size = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, value.data(),
@@ -139,7 +146,8 @@ std::string read_input_line() {
     return std::string(buffer.data(), read);
 }
 
-bool request(const std::vector<std::wstring>& arguments, bool shutdown, int& exit_code) {
+bool request(const std::vector<std::wstring>& arguments, bool shutdown, int& exit_code,
+             const std::wstring& request_cwd) {
     std::uint16_t port = 0;
     std::array<unsigned char, 32> token{};
     if (!parse_state(port, token)) return false;
@@ -157,9 +165,7 @@ bool request(const std::vector<std::wstring>& arguments, bool shutdown, int& exi
         return false;
     }
 
-    std::array<wchar_t, 32768> cwd_buffer{};
-    const DWORD cwd_size = GetCurrentDirectoryW(static_cast<DWORD>(cwd_buffer.size()), cwd_buffer.data());
-    const std::string cwd = utf8(std::wstring(cwd_buffer.data(), cwd_size));
+    const std::string cwd = utf8(request_cwd);
     std::string wire(kRequestMagic, 4);
     wire.append(reinterpret_cast<const char*>(token.data()), token.size());
     DWORD console_mode = 0;
@@ -236,7 +242,8 @@ std::wstring quote_argument(const std::wstring& value) {
     return result;
 }
 
-bool spawn_runtime(const std::vector<std::wstring>& arguments, bool detached, DWORD* exit_code = nullptr) {
+bool spawn_runtime(const std::vector<std::wstring>& arguments, bool detached, DWORD* exit_code = nullptr,
+                   const std::wstring& working_directory = {}) {
     const std::wstring runtime = executable_directory() + L"\\sunpack-runtime.exe";
     std::wstring command = quote_argument(runtime);
     for (const auto& argument : arguments) command += L" " + quote_argument(argument);
@@ -244,7 +251,9 @@ bool spawn_runtime(const std::vector<std::wstring>& arguments, bool detached, DW
     startup.cb = sizeof(startup);
     PROCESS_INFORMATION process{};
     const DWORD flags = detached ? CREATE_NO_WINDOW : 0;
-    if (!CreateProcessW(runtime.c_str(), command.data(), nullptr, nullptr, detached ? FALSE : TRUE, flags, nullptr, nullptr,
+    const wchar_t* child_cwd = working_directory.empty() ? nullptr : working_directory.c_str();
+    if (!CreateProcessW(runtime.c_str(), command.data(), nullptr, nullptr, detached ? FALSE : TRUE, flags, nullptr,
+                        child_cwd,
                         &startup, &process)) return false;
     CloseHandle(process.hThread);
     if (detached) {
@@ -277,13 +286,16 @@ void write_stream(DWORD handle_id, const std::string& text) {
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
+    const std::wstring invocation_cwd = current_directory();
+    const std::wstring launcher_cwd = executable_directory();
+    if (!launcher_cwd.empty()) SetCurrentDirectoryW(launcher_cwd.c_str());
     const bool extract = argc >= 2 && wcscmp(argv[1], L"extract") == 0;
     const bool shutdown_request = argc >= 2 && wcscmp(argv[1], L"--persistent-shutdown") == 0;
     if (!extract && !shutdown_request) {
         std::vector<std::wstring> forwarded;
         for (int index = 1; index < argc; ++index) forwarded.emplace_back(argv[index]);
         DWORD code = 1;
-        if (!spawn_runtime(forwarded, false, &code)) return 1;
+        if (!spawn_runtime(forwarded, false, &code, invocation_cwd)) return 1;
         return static_cast<int>(code);
     }
 
@@ -304,14 +316,14 @@ int wmain(int argc, wchar_t** argv) {
         request_arguments.emplace_back(L"--no-pause");
     }
     int code = 1;
-    bool ok = request(request_arguments, shutdown, code);
+    bool ok = request(request_arguments, shutdown, code, invocation_cwd);
     if (!ok && !shutdown) {
-        spawn_runtime({L"--persistent-server"}, true);
+        spawn_runtime({L"--persistent-server"}, true, nullptr, launcher_cwd);
         for (int attempt = 0; attempt < 400 && !ok; ++attempt) {
             Sleep(25);
-            ok = request(request_arguments, false, code);
+            ok = request(request_arguments, false, code, invocation_cwd);
             if (!ok && attempt != 0 && attempt % 40 == 0) {
-                spawn_runtime({L"--persistent-server"}, true);
+                spawn_runtime({L"--persistent-server"}, true, nullptr, launcher_cwd);
             }
         }
     }

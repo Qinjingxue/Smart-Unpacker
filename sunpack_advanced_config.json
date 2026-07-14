@@ -307,6 +307,7 @@
     "process_no_progress_timeout_seconds": 180,
     "process_sample_interval_ms": 500,
     "persistent_workers": true,
+    "persistent_server_idle_seconds": 15,
     "profile_calibration_window_size": 4,
     "profile_regression_ratio": 0.8,
     "profile_improvement_ratio": 1.2,

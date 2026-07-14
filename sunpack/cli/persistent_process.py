@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 import sys
 
+from sunpack.support.runtime_cwd import runtime_working_directory
+
 
 SERVER_ARG = "--persistent-server"
 SHUTDOWN_ARG = "--persistent-shutdown"
@@ -43,6 +45,7 @@ def server_command() -> list[str]:
 
 
 def submit_request(argv: list[str], *, shutdown: bool = False) -> int:
+    request_cwd = os.getcwd()
     request_argv = list(argv)
     pause = "--pause" in request_argv
     if pause:
@@ -51,24 +54,28 @@ def submit_request(argv: list[str], *, shutdown: bool = False) -> int:
             request_argv.append("--no-pause")
     payload = {
         "argv": request_argv,
-        "cwd": os.getcwd(),
+        "cwd": request_cwd,
         "shutdown": bool(shutdown),
         "stdout_tty": bool(sys.stdout is not None and sys.stdout.isatty()),
         "stdin_tty": bool(sys.stdin is not None and sys.stdin.isatty()),
     }
-    response = _send_or_start(payload)
-    stdout = str(response.get("stdout") or "")
-    stderr = str(response.get("stderr") or "")
-    if stdout:
-        print(stdout, end="", file=sys.stdout)
-    if stderr:
-        print(stderr, end="", file=sys.stderr)
-    if pause and sys.stdin is not None and sys.stdin.isatty():
-        try:
-            input("Press Enter to continue...")
-        except (EOFError, KeyboardInterrupt):
-            pass
-    return int(response.get("exit_code", 1))
+    os.chdir(runtime_working_directory())
+    try:
+        response = _send_or_start(payload)
+        stdout = str(response.get("stdout") or "")
+        stderr = str(response.get("stderr") or "")
+        if stdout:
+            print(stdout, end="", file=sys.stdout)
+        if stderr:
+            print(stderr, end="", file=sys.stderr)
+        if pause and sys.stdin is not None and sys.stdin.isatty():
+            try:
+                input("Press Enter to continue...")
+            except (EOFError, KeyboardInterrupt):
+                pass
+        return int(response.get("exit_code", 1))
+    finally:
+        os.chdir(request_cwd)
 
 
 def _send_or_start(payload: dict[str, Any]) -> dict[str, Any]:
@@ -88,6 +95,7 @@ def _send_or_start(payload: dict[str, Any]) -> dict[str, Any]:
         stderr=subprocess.DEVNULL,
         close_fds=True,
         creationflags=creationflags,
+        cwd=runtime_working_directory(),
     )
     deadline = time.monotonic() + 10.0
     while time.monotonic() < deadline:
@@ -134,53 +142,88 @@ def run_server() -> int:
     import secrets
     import socket
     import struct
+    import time
 
-    lock_stream = _acquire_server_lock()
-    if lock_stream is None:
-        return 0
-    token = secrets.token_bytes(32)
-    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    listener.bind(("127.0.0.1", 0))
-    listener.listen(8)
-    from sunpack.cli.cli import main
-    from sunpack.cli.persistent_runtime import close_persistent_runtime, enable_persistent_runtime
-
-    enable_persistent_runtime()
-    _write_state(listener.getsockname()[1], token)
-
+    previous_cwd = os.getcwd()
+    os.chdir(runtime_working_directory())
     try:
-        while True:
-            connection, _ = listener.accept()
-            try:
-                payload = _recv_request(connection, token)
-                if payload is None:
-                    continue
-                connection.sendall(_STREAM_MAGIC)
-                if payload.get("shutdown"):
-                    try:
-                        os.remove(state_path())
-                    except OSError:
-                        pass
-                    lock_stream.close()
-                    lock_stream = None
-                    connection.sendall(struct.pack("!BIi", 0, 4, 0))
-                    return 0
-                exit_code = _execute_streaming_request(main, payload, connection)
-                connection.sendall(struct.pack("!BIi", 0, 4, exit_code))
-            except (EOFError, OSError):
-                continue
-            finally:
-                connection.close()
-    finally:
-        close_persistent_runtime()
-        listener.close()
-        if lock_stream is not None:
-            lock_stream.close()
+        lock_stream = _acquire_server_lock()
+        if lock_stream is None:
+            return 0
+        token = secrets.token_bytes(32)
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(8)
+        listener.settimeout(0.25)
+        port = listener.getsockname()[1]
+        from sunpack.cli.cli import main
+        from sunpack.cli.persistent_runtime import (
+            close_persistent_runtime,
+            enable_persistent_runtime,
+            persistent_runtime_is_idle,
+            persistent_server_idle_seconds,
+        )
+
+        enable_persistent_runtime()
+        _write_state(port, token)
+        served_request = False
+        last_completed_at = time.monotonic()
+
         try:
-            os.remove(state_path())
-        except OSError:
-            pass
+            while True:
+                try:
+                    connection, _ = listener.accept()
+                except socket.timeout:
+                    if _idle_shutdown_due(
+                        served_request=served_request,
+                        last_completed_at=last_completed_at,
+                        idle_seconds=persistent_server_idle_seconds(),
+                        runtime_idle=persistent_runtime_is_idle(),
+                    ):
+                        return 0
+                    continue
+                try:
+                    payload = _recv_request(connection, token)
+                    if payload is None:
+                        continue
+                    connection.sendall(_STREAM_MAGIC)
+                    if payload.get("shutdown"):
+                        _remove_state_if_owned(port, token)
+                        connection.sendall(struct.pack("!BIi", 0, 4, 0))
+                        return 0
+                    exit_code = _execute_streaming_request(main, payload, connection)
+                    connection.sendall(struct.pack("!BIi", 0, 4, exit_code))
+                    served_request = True
+                    last_completed_at = time.monotonic()
+                except (EOFError, OSError):
+                    continue
+                finally:
+                    connection.close()
+        finally:
+            _remove_state_if_owned(port, token)
+            listener.close()
+            close_persistent_runtime()
+            lock_stream.close()
+    finally:
+        os.chdir(previous_cwd)
+
+
+def _idle_shutdown_due(
+    *,
+    served_request: bool,
+    last_completed_at: float,
+    idle_seconds: float,
+    runtime_idle: bool,
+    now: float | None = None,
+) -> bool:
+    if not served_request or not runtime_idle:
+        return False
+    if now is None:
+        import time
+
+        now = time.monotonic()
+    return now - last_completed_at >= max(0.0, float(idle_seconds))
 
 
 def _recv_exact(connection, size: int) -> bytes:
@@ -316,6 +359,19 @@ def _write_state(port: int, token: bytes) -> None:
     with open(temporary, "w", encoding="ascii", newline="\n") as stream:
         stream.write(f"{port}\n{token.hex()}\n")
     os.replace(temporary, path)
+
+
+def _remove_state_if_owned(port: int, token: bytes) -> bool:
+    path = state_path()
+    try:
+        with open(path, "r", encoding="ascii") as stream:
+            port_text, token_hex = stream.read().splitlines()[:2]
+        if int(port_text) != int(port) or bytes.fromhex(token_hex) != token:
+            return False
+        os.remove(path)
+        return True
+    except (FileNotFoundError, OSError, ValueError):
+        return False
 
 
 def _acquire_server_lock():

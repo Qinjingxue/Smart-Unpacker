@@ -1,4 +1,5 @@
 from pathlib import Path
+import queue
 import threading
 
 import pytest
@@ -26,6 +27,20 @@ def _config(**pipeline):
     }, scoring=[
         {"name": "extension", "enabled": True, "extension_score_groups": [{"score": 5, "extensions": [".zip"]}]},
     ]))
+
+
+def test_engine_idle_state_includes_active_and_queued_requests():
+    engine = object.__new__(PipelineEngine)
+    engine._pressure_lock = threading.Lock()
+    engine._active_request_count = 0
+    engine._queue = queue.Queue()
+
+    assert engine.is_idle()
+    engine._queue.put(object())
+    assert not engine.is_idle()
+    engine._queue.get_nowait()
+    engine._active_request_count = 1
+    assert not engine.is_idle()
 
 
 def test_finalize_remaps_nested_cleanup_and_flatten_paths_with_promoted_parent(tmp_path, monkeypatch):
