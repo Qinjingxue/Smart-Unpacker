@@ -33,6 +33,7 @@ from sunpack.coordinator.scheduling import (
     resolve_max_workers,
 )
 from sunpack.coordinator.output_scan_policy import NestedOutputScanPolicy
+from sunpack.support.output_inventory import OutputInventory
 from sunpack.contracts.extraction import ExtractionResult
 from sunpack.extraction.knowledge import write_extraction_result
 from sunpack.extraction.scheduler import ExtractionScheduler
@@ -196,15 +197,18 @@ class ExtractionBatchRunner:
         results = self._execute_ready_tasks(tasks, output_dir_resolver)
 
         output_dirs = []
-        output_inventories: dict[str, dict[str, Any]] = {}
+        output_inventories: dict[str, OutputInventory] = {}
         for task, outcome in results:
             output_dir = self.collect_result(task, outcome)
             if output_dir:
                 output_dirs.append(output_dir)
                 self.directory_password_contexts.remember(output_dir, task)
-                payload = outcome.result.output_inventory_payload
-                if isinstance(payload, dict):
-                    output_inventories[os.path.normcase(os.path.abspath(output_dir))] = payload
+                inventory = OutputInventory.from_value(
+                    outcome.result.output_inventory or outcome.result.output_inventory_payload,
+                    expected_root=output_dir,
+                )
+                if inventory is not None:
+                    output_inventories[os.path.normcase(os.path.abspath(output_dir))] = inventory
         if isinstance(self.output_scan_policy, NestedOutputScanPolicy):
             return self.output_scan_policy.scan_roots_from_outputs(
                 output_dirs,

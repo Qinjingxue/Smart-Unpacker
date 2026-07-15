@@ -61,10 +61,10 @@ def test_submit_request_strips_server_side_pause(tmp_path, monkeypatch):
 
 def test_extract_is_submitted_to_persistent_server_by_default(monkeypatch):
     from sunpack.cli import cli
-    from sunpack.cli import persistent_runtime
+    from sunpack.cli import runtime_state
 
     submitted = []
-    monkeypatch.setattr(persistent_runtime, "server_runtime_active", lambda: False)
+    monkeypatch.setattr(runtime_state, "server_runtime_active", lambda: False)
     monkeypatch.setattr(persistent_process, "submit_request", lambda argv: submitted.append(argv) or 6)
 
     assert cli.main(["extract", "sample.zip"]) == 6

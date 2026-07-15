@@ -48,7 +48,7 @@ class ArchiveTestCrcMethod:
             and inventory.worker_crc_available
             and all(
                 not source.get("has_crc", source.get("crc32") is not None)
-                or output.get("crc32") is not None
+                or output.get("output_crc32", output.get("crc32")) is not None
                 for source, output in zip(archive_files, inventory.files)
             )
         ):
@@ -307,12 +307,15 @@ def _can_use_worker_output_crc(
         return False
     from sunpack.support.path_names import normalize_match_path
 
-    outputs = output_by_path or {normalize_match_path(str(item.get("path") or "")): item for item in output_files}
+    outputs = output_by_path or {
+        normalize_match_path(str(item.get("output_path") or item.get("path") or "")): item
+        for item in output_files
+    }
     for item in archive_files:
         if not item.get("has_crc", item.get("crc32") is not None):
             continue
         output = outputs.get(normalize_match_path(str(item.get("path") or "")))
-        if output is not None and output.get("crc32") is None:
+        if output is not None and output.get("output_crc32", output.get("crc32")) is None:
             return False
     return True
 
@@ -373,7 +376,7 @@ def _trusted_worker_crc_match_result(
         expected_size = _optional_int(archive_item.get("size"))
         actual_size = _optional_int(output_item.get("size", output_item.get("bytes_written")))
         expected_crc = _optional_crc(archive_item.get("crc32")) if archive_item.get("has_crc") else None
-        actual_crc = _optional_crc(output_item.get("crc32"))
+        actual_crc = _optional_crc(output_item.get("output_crc32", output_item.get("crc32")))
         if expected_size is not None:
             expected_bytes += max(0, expected_size)
             matched_bytes += min(max(0, actual_size or 0), max(0, expected_size))
@@ -385,7 +388,7 @@ def _trusted_worker_crc_match_result(
             complete_bytes += max(0, expected_size)
         if include_observations:
             observations.append(FileVerificationObservation(
-                path=str(output_item.get("path") or path),
+                path=str(output_item.get("output_path") or output_item.get("path") or path),
                 archive_path=path,
                 state="complete",
                 method="archive_test_crc",

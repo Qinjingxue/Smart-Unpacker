@@ -162,7 +162,7 @@ def test_persistent_worker_result_escapes_control_characters(tmp_path):
 
     try:
         persistent.send(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
-        stdout, stderr, returncode, reusable = runner._read_persistent_worker_result(  # noqa: SLF001
+        stdout, stderr, returncode, reusable, result_payload, _progress_events = runner._read_persistent_worker_result(  # noqa: SLF001
             persistent,
             runtime_scheduler=None,
             task=_task(archive),
@@ -170,7 +170,7 @@ def test_persistent_worker_result_escapes_control_characters(tmp_path):
     finally:
         persistent.close()
 
-    worker_result = _worker_result(stdout)
+    worker_result = result_payload
     assert returncode != 0
     assert reusable is True
     assert "timed out" not in stderr.lower()
@@ -213,6 +213,55 @@ def test_compact_worker_manifest_is_expanded_for_pipeline():
 
     assert result["verified_manifest"]["files"][0]["status"] == "complete"
     assert result["verified_manifest"]["inventory"]["identity_paths"] is True
+    assert "rows" not in result["verified_manifest"]
+
+
+def test_preparsed_worker_result_avoids_stdout_reparse_and_bounds_tail():
+    from sunpack.extraction.internal.sevenzip.worker_diagnostics import build_worker_diagnostics
+
+    result_payload = {
+        "type": "result",
+        "status": "ok",
+        "verified_manifest": {
+            "version": 2,
+            "validated": True,
+            "rows": [[0, "source.txt", "output.txt", 3, 3, 1, 7, 1, 7, 1, 1]],
+            "inventory": [1, 1, 0, 3, 0],
+        },
+    }
+    diagnostics = build_worker_diagnostics(
+        stdout="x" * 100_000,
+        stderr="",
+        returncode=0,
+        result_payload=result_payload,
+    )
+
+    assert diagnostics["result"] is result_payload
+    assert "rows" not in result_payload["verified_manifest"]
+    assert result_payload["verified_manifest"]["files"][0]["path"] == "source.txt"
+    assert result_payload["verified_manifest"]["files"][0]["output_path"] == "output.txt"
+    assert sum(len(line) for line in diagnostics["process"]["stdout_tail"]) <= 4000
+
+
+def test_complete_worker_inventory_drops_redundant_output_trace_items():
+    from sunpack.extraction.internal.sevenzip.worker_diagnostics import compact_success_worker_diagnostics
+
+    diagnostics = {
+        "result": {
+            "status": "ok",
+            "verified_manifest": {
+                "validated": True,
+                "inventory": {"complete": True, "file_count": 1},
+                "files": [{"path": "a.txt", "output_path": "a.txt", "status": "complete"}],
+            },
+            "diagnostics": {"output_trace": {"items": [{"path": "a.txt"}], "files_written": 1}},
+        }
+    }
+
+    compact_success_worker_diagnostics(diagnostics)
+
+    assert "items" not in diagnostics["result"]["diagnostics"]["output_trace"]
+    assert diagnostics["result"]["verified_manifest"]["files"][0]["path"] == "a.txt"
 
 
 def test_worker_dry_run_reads_archive_state_with_patch_stack(tmp_path):

@@ -30,8 +30,10 @@ def output_inventory_for_evidence(evidence: Any) -> OutputInventory:
         return cached
     output_dir = getattr(evidence, "output_dir", "")
     extraction_result = getattr(evidence, "extraction_result", None)
-    payload = getattr(extraction_result, "output_inventory_payload", None)
-    inventory = OutputInventory.from_dict(payload, expected_root=output_dir)
+    value = getattr(extraction_result, "output_inventory", None)
+    if value is None:
+        value = getattr(extraction_result, "output_inventory_payload", None)
+    inventory = OutputInventory.from_value(value, expected_root=output_dir)
     if inventory is None:
         inventory = collect_output_inventory(
             output_dir,
@@ -58,17 +60,14 @@ def output_file_index_for_evidence(evidence: Any) -> OutputFileIndex:
     normalized_basenames: set[str] = set()
     indexed_files: list[dict[str, Any]] = []
     for raw in files:
-        path = clean_relative_archive_path(raw.get("path") or raw.get("archive_path"))
+        path = clean_relative_archive_path(raw.get("output_path") or raw.get("path"))
         if not path or ".sunpack/" in path:
             continue
-        item = dict(raw)
-        item["path"] = path
-        item["_matched_by"] = "path"
         key = normalize_match_path(path)
-        by_path[key] = item
+        by_path[key] = raw
         normalized_paths.add(key)
         normalized_basenames.add(normalize_match_name(os.path.basename(key)))
-        indexed_files.append(item)
+        indexed_files.append(raw)
     index = OutputFileIndex(
         files=tuple(indexed_files),
         by_path=by_path,

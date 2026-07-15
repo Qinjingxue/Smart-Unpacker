@@ -118,7 +118,7 @@ def main(argv=None):
         if result is not None:
             return result
     if argv and argv[0] == "extract" and not any(item in {"-h", "--help"} for item in argv[1:]):
-        from sunpack.cli.persistent_runtime import server_runtime_active
+        from sunpack.cli.runtime_state import server_runtime_active
 
         if not server_runtime_active():
             from sunpack.cli.persistent_process import submit_request

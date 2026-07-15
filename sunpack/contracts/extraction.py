@@ -18,6 +18,9 @@ class ExtractionResult:
     partial_outputs: bool = False
     progress_manifest: str = ""
     progress_manifest_payload: dict[str, Any] | None = None
+    # Canonical in-process inventory.  The payload field is reserved for
+    # explicit serialization boundaries and legacy callers.
+    output_inventory: Any = None
     output_inventory_payload: dict[str, Any] | None = None
     files_written: int = 0
     bytes_written: int = 0

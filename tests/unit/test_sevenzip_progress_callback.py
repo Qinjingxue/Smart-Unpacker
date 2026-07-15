@@ -22,8 +22,13 @@ def test_persistent_worker_progress_event_is_forwarded_to_task_callback():
     runner = SevenZipRunner({"process_sample_interval_ms": 100})
     runner.progress_callback = lambda current_task, event: events.append((current_task, event))
 
-    _stdout, _stderr, returncode, reusable = runner._read_persistent_worker_result(worker, None, task)
+    _stdout, _stderr, returncode, reusable, result_payload, progress_events = runner._read_persistent_worker_result(
+        worker, None, task
+    )
 
     assert returncode == 0
     assert reusable is True
+    assert _stdout == ""
+    assert result_payload == {"type": "result", "status": "ok"}
+    assert progress_events == [{"type": "progress", "completed_bytes": 25, "total_bytes": 100}]
     assert events == [(task, {"type": "progress", "completed_bytes": 25, "total_bytes": 100})]

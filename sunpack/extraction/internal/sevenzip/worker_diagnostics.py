@@ -5,6 +5,7 @@ from typing import Any
 
 
 _STDIO_TAIL_LINES = 40
+_STDIO_TAIL_CHARS = 4000
 
 
 def attach_worker_diagnostics(
@@ -12,6 +13,8 @@ def attach_worker_diagnostics(
     *,
     request_payload: dict[str, Any] | None = None,
     process_failure: dict[str, Any] | None = None,
+    result_payload: dict[str, Any] | None = None,
+    progress_events: list[dict[str, Any]] | None = None,
 ) -> subprocess.CompletedProcess:
     completed.worker_diagnostics = build_worker_diagnostics(
         stdout=str(completed.stdout or ""),
@@ -20,6 +23,8 @@ def attach_worker_diagnostics(
         args=completed.args,
         request_payload=request_payload,
         process_failure=process_failure,
+        result_payload=result_payload,
+        progress_events=progress_events,
     )
     return completed
 
@@ -32,16 +37,23 @@ def build_worker_diagnostics(
     args: Any = None,
     request_payload: dict[str, Any] | None = None,
     process_failure: dict[str, Any] | None = None,
+    result_payload: dict[str, Any] | None = None,
+    progress_events: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    events = _json_events(stdout)
-    result = next((event for event in reversed(events) if event.get("type") == "result"), {})
-    progress_events = [event for event in events if event.get("type") == "progress"]
+    if isinstance(result_payload, dict):
+        result = result_payload
+        _expand_manifest(result)
+        parsed_progress_events = list(progress_events or [])
+    else:
+        events = _json_events(stdout)
+        result = next((event for event in reversed(events) if event.get("type") == "result"), {})
+        parsed_progress_events = [event for event in events if event.get("type") == "progress"]
     diagnostics: dict[str, Any] = {
         "source": "sevenzip_worker",
         "returncode": returncode,
         "result": result,
-        "progress_events": progress_events,
-        "last_progress_event": progress_events[-1] if progress_events else {},
+        "progress_events": parsed_progress_events,
+        "last_progress_event": parsed_progress_events[-1] if parsed_progress_events else {},
         "process": {
             "args": list(args) if isinstance(args, (list, tuple)) else args,
             "stderr_tail": _tail_lines(stderr),
@@ -80,6 +92,25 @@ def worker_result_payload(completed_or_text: Any) -> dict[str, Any]:
     return {}
 
 
+def compact_success_worker_diagnostics(diagnostics: dict[str, Any]) -> None:
+    """Drop redundant per-item traces after the verified inventory owns them."""
+    result = diagnostics.get("result") if isinstance(diagnostics, dict) else None
+    if not isinstance(result, dict) or result.get("status") != "ok":
+        return
+    manifest = result.get("verified_manifest")
+    if not isinstance(manifest, dict) or not manifest.get("validated"):
+        return
+    inventory = manifest.get("inventory")
+    if not isinstance(inventory, dict) or not inventory.get("complete"):
+        return
+    native = result.get("diagnostics")
+    if not isinstance(native, dict):
+        return
+    output_trace = native.get("output_trace")
+    if isinstance(output_trace, dict):
+        output_trace.pop("items", None)
+
+
 def _json_events(text: str) -> list[dict[str, Any]]:
     events: list[dict[str, Any]] = []
     for line in (text or "").splitlines():
@@ -100,19 +131,26 @@ def _expand_manifest(payload: dict[str, Any]) -> None:
     manifest = payload.get("verified_manifest")
     if not isinstance(manifest, dict) or int(manifest.get("version", 0) or 0) != 2:
         return
+    if isinstance(manifest.get("files"), list) and "rows" not in manifest:
+        return
     files: list[dict[str, Any]] = []
     statuses = {0: "unverified", 1: "complete", 2: "failed"}
-    for row in manifest.get("rows") or []:
+    rows = manifest.get("rows")
+    if not isinstance(rows, list):
+        rows = []
+    for row_index, row in enumerate(rows):
         if not isinstance(row, list) or len(row) != 11:
             continue
         files.append({
             "index": int(row[0]), "path": str(row[1]), "output_path": str(row[2] or row[1]),
             "size": int(row[3]), "bytes_written": int(row[4]),
-            "has_crc": bool(row[5]), "crc32": int(row[6]),
-            "has_output_crc": bool(row[7]), "output_crc32": int(row[8]),
+            "has_crc": bool(row[5]), "crc32": int(row[6]) & 0xFFFFFFFF,
+            "has_output_crc": bool(row[7]), "output_crc32": int(row[8]) & 0xFFFFFFFF,
             "crc_ok": bool(row[9]), "status": statuses.get(int(row[10]), "unverified"),
         })
+        rows[row_index] = None
     manifest["files"] = files
+    manifest.pop("rows", None)
     inventory = manifest.get("inventory")
     if isinstance(inventory, list) and len(inventory) == 5:
         manifest["inventory"] = {
@@ -123,7 +161,10 @@ def _expand_manifest(payload: dict[str, Any]) -> None:
 
 
 def _tail_lines(text: str, limit: int = _STDIO_TAIL_LINES) -> list[str]:
-    lines = (text or "").splitlines()
+    # A successful worker result is a single multi-megabyte JSON line.  The
+    # structured payload is retained separately, so diagnostics only need a
+    # bounded textual tail for malformed output and process failures.
+    lines = (text or "")[-_STDIO_TAIL_CHARS:].splitlines()
     return lines[-limit:]
 
 

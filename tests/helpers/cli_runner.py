@@ -8,7 +8,10 @@ from typing import Any
 
 def run_cli(repo_root: Path, args: list[str], timeout: int = 20) -> dict[str, Any]:
     env = os.environ.copy()
-    env["PYTHONPATH"] = str(repo_root)
+    existing_pythonpath = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = os.pathsep.join(
+        part for part in (str(repo_root), existing_pythonpath) if part
+    )
     result = subprocess.run(
         [sys.executable, "-B", "sunpack.py", *args],
         cwd=repo_root,

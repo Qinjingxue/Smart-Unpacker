@@ -72,15 +72,15 @@ class NestedOutputScanPolicy:
             return None
         root = os.path.abspath(inventory.root)
         return (
-            (os.path.join(root, str(item.get("path") or "")), int(item.get("size", 0) or 0))
+            (os.path.join(root, str(item.get("output_path") or item.get("path") or "")), int(item.get("size", 0) or 0))
             for item in inventory.files
-            if item.get("path")
+            if item.get("output_path") or item.get("path")
         )
 
     def scan_roots_from_outputs(
         self,
         output_dirs: Iterable[str],
-        inventories: dict[str, dict[str, Any]] | None = None,
+        inventories: dict[str, OutputInventory | dict[str, Any]] | None = None,
     ) -> list[str]:
         roots = []
         seen = set()
@@ -90,7 +90,7 @@ class NestedOutputScanPolicy:
         for output_dir in output_dirs:
             if not output_dir or not os.path.isdir(output_dir):
                 continue
-            inventory = OutputInventory.from_dict(
+            inventory = OutputInventory.from_value(
                 inventories.get(os.path.normcase(os.path.abspath(output_dir))),
                 expected_root=output_dir,
             )

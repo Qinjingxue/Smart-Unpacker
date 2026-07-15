@@ -9,6 +9,7 @@ from typing import Iterator
 from sunpack.config.loader import config_cache_token
 from sunpack.config.advanced_defaults import advanced_config_value
 from sunpack.coordinator.engine import PipelineEngine
+from sunpack.cli.runtime_state import server_runtime_active, set_server_runtime_active
 
 
 _MUTABLE_PATHS = {
@@ -22,29 +23,21 @@ _MUTABLE_PATHS = {
     ("performance", "persistent_server_idle_seconds"),
 }
 _LOCK = threading.RLock()
-_ENABLED = False
 _ENGINE: PipelineEngine | None = None
 _ENGINE_KEY: tuple[tuple[object, ...], str] | None = None
 
 
 def enable_persistent_runtime() -> None:
-    global _ENABLED
-    with _LOCK:
-        _ENABLED = True
-
-
-def server_runtime_active() -> bool:
-    with _LOCK:
-        return _ENABLED
+    set_server_runtime_active(True)
 
 
 def close_persistent_runtime() -> None:
-    global _ENABLED, _ENGINE, _ENGINE_KEY
+    global _ENGINE, _ENGINE_KEY
     with _LOCK:
         engine = _ENGINE
         _ENGINE = None
         _ENGINE_KEY = None
-        _ENABLED = False
+        set_server_runtime_active(False)
     if engine is not None:
         engine.close(graceful=True)
 
@@ -71,7 +64,7 @@ def persistent_server_idle_seconds() -> float:
 def pipeline_engine(config: dict) -> Iterator[PipelineEngine]:
     global _ENGINE, _ENGINE_KEY
     with _LOCK:
-        enabled = _ENABLED
+        enabled = server_runtime_active()
     if not enabled:
         raise RuntimeError("extract pipeline is only available inside the persistent server")
 

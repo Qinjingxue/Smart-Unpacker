@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from typing import Any
 
 from sunpack_native import scan_output_tree as _native_scan_output_tree
@@ -35,7 +35,13 @@ class OutputInventory:
             "version": 1,
             "root": self.root,
             "stats": {
-                **asdict(self.stats),
+                "exists": self.stats.exists,
+                "is_dir": self.stats.is_dir,
+                "file_count": self.stats.file_count,
+                "dir_count": self.stats.dir_count,
+                "total_size": self.stats.total_size,
+                "transient_file_count": self.stats.transient_file_count,
+                "unreadable_count": self.stats.unreadable_count,
                 "relative_paths": list(self.stats.relative_paths),
             },
             "files": list(self.files),
@@ -72,6 +78,14 @@ class OutputInventory:
             identity_paths=bool(payload.get("identity_paths")),
         )
 
+    @classmethod
+    def from_value(cls, value: Any, *, expected_root: str = "") -> "OutputInventory | None":
+        if isinstance(value, cls):
+            if expected_root and _path_key(value.root) != _path_key(expected_root):
+                return None
+            return value
+        return cls.from_dict(value, expected_root=expected_root)
+
 
 def collect_output_inventory(
     output_dir: str,
@@ -83,22 +97,17 @@ def collect_output_inventory(
     worker_inventory = _complete_worker_inventory(worker_result)
     if worker_inventory is not None:
         files, inventory = worker_inventory
-        merged_files = tuple({
-            "path": str(item.get("output_path") or item.get("path") or ""),
-            "size": int(item.get("size", item.get("bytes_written", 0)) or 0),
-            "bytes_written": int(item.get("bytes_written", 0) or 0),
-            "status": str(item.get("status") or "complete"),
-            "crc_ok": item.get("crc_ok"),
-            **({"crc32": int(item["output_crc32"]) & 0xFFFFFFFF, "crc_source": "sevenzip_worker_write"}
-               if item.get("has_output_crc") and item.get("output_crc32") is not None else {}),
-        } for item in files)
+        # The verified worker manifest is the canonical file table.  Source
+        # consumers read path/crc32; output consumers read
+        # output_path/output_crc32 from these same dictionaries.
+        merged_files = tuple(files)
         return OutputInventory(
             root=root,
             stats=OutputStats(
                 exists=True, is_dir=True,
                 file_count=int(inventory["file_count"]), dir_count=int(inventory["dir_count"]),
                 total_size=int(inventory["total_size"]), transient_file_count=0, unreadable_count=0,
-                relative_paths=tuple(str(item["path"]) for item in merged_files),
+                relative_paths=tuple(str(item.get("output_path") or item.get("path") or "") for item in merged_files),
             ),
             files=merged_files,
             worker_crc_available=bool(files),
@@ -109,9 +118,9 @@ def collect_output_inventory(
     files = [dict(item) for item in scan.get("files") or [] if isinstance(item, dict)]
     worker_files = verified_worker_files(worker_result)
     worker_by_path = {
-        normalize_match_path(str(item.get("path") or "")): item
+        normalize_match_path(str(item.get("output_path") or item.get("path") or "")): item
         for item in worker_files
-        if item.get("path")
+        if item.get("output_path") or item.get("path")
     }
     merged_files: list[dict[str, Any]] = []
     for item in files:

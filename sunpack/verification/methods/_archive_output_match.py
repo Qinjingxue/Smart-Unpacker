@@ -105,7 +105,7 @@ def coverage_from_archive_and_output(
 
         matched_files += 1
         actual_size = _optional_int(output_item.get("size", output_item.get("bytes_written")))
-        actual_crc = _optional_crc(output_item.get("crc32"))
+        actual_crc = _optional_crc(output_item.get("output_crc32", output_item.get("crc32")))
         size_progress = _size_progress(actual_size, expected_size)
         crc_ok = True
         if expected_has_crc and expected_crc is not None and actual_crc is not None:
@@ -144,7 +144,7 @@ def coverage_from_archive_and_output(
 
         if include_observations:
             observations.append(FileVerificationObservation(
-            path=str(output_item.get("path") or expected_path),
+            path=str(output_item.get("output_path") or output_item.get("path") or expected_path),
             archive_path=expected_path,
             state=state,
             method=method,
@@ -157,7 +157,7 @@ def coverage_from_archive_and_output(
             details={
                 "expected_has_crc": expected_has_crc,
                 "crc_ok": crc_ok if expected_has_crc and actual_crc is not None else None,
-                "matched_by": str(output_item.get("_matched_by") or ""),
+                "matched_by": str(output_item.get("_matched_by") or "path"),
             },
             ))
 
@@ -258,13 +258,10 @@ def _index_output_files(files: list[dict[str, Any]]) -> dict[str, dict[str, Any]
     for raw in files:
         if not isinstance(raw, dict):
             continue
-        path = clean_relative_archive_path(raw.get("path") or raw.get("archive_path"))
+        path = clean_relative_archive_path(raw.get("output_path") or raw.get("path"))
         if not path or ".sunpack/" in path:
             continue
-        item = dict(raw)
-        item["path"] = path
-        item["_matched_by"] = "path"
-        by_path[normalize_match_path(path)] = item
+        by_path[normalize_match_path(path)] = raw
     return by_path
 
 

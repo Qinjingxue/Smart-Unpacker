@@ -11,6 +11,7 @@ from sunpack.contracts.tasks import ArchiveTask, SplitArchiveInfo
 from sunpack.extraction.internal.workflow.errors import classify_extract_failure
 from sunpack.extraction.internal.workflow.retry_policy import ExtractRetryPolicy
 from sunpack.extraction.internal.sevenzip.sevenzip_runner import SevenZipRunner
+from sunpack.extraction.internal.sevenzip.worker_diagnostics import compact_success_worker_diagnostics
 from sunpack.extraction.internal.workflow.split_entry import SplitEntryResolver
 from sunpack.extraction.progress import has_recoverable_partial_outputs, write_extraction_progress_manifest_payload
 from sunpack.contracts.extraction import ExtractionResult
@@ -247,6 +248,7 @@ class SingleArchiveExtractor:
                         with _phase(phase_timer, f"{phase_prefix}_output_stats_success"):
                             worker_result = diagnostics.get("result") if isinstance(diagnostics.get("result"), dict) else {}
                             output_inventory = collect_output_inventory(out_dir, worker_result)
+                            compact_success_worker_diagnostics(diagnostics)
                             output_stats = {
                                 "file_count": output_inventory.stats.file_count,
                                 "total_bytes": output_inventory.stats.total_size,
@@ -299,7 +301,7 @@ class SingleArchiveExtractor:
                             diagnostics=diagnostics,
                             progress_manifest=manifest_path,
                             progress_manifest_payload=manifest_payload,
-                            output_inventory_payload=output_inventory.to_dict(),
+                            output_inventory=output_inventory,
                             files_written=output_stats["file_count"],
                             bytes_written=output_stats["total_bytes"],
                         )
@@ -682,8 +684,8 @@ class SingleArchiveExtractor:
             if result.selected_codepage is not None and selected_codepage is None:
                 selected_codepage = result.selected_codepage
             with _phase(phase_timer, f"{phase_prefix}_segment_directory_stats"):
-                segment_inventory = OutputInventory.from_dict(
-                    result.output_inventory_payload,
+                segment_inventory = OutputInventory.from_value(
+                    result.output_inventory or result.output_inventory_payload,
                     expected_root=segment_dir,
                 )
                 stats = {
@@ -759,7 +761,7 @@ class SingleArchiveExtractor:
                 partial_outputs=any_partial and not all(item.get("success") for item in segment_results),
                 progress_manifest=manifest_path,
                 progress_manifest_payload=manifest_payload,
-                output_inventory_payload=output_inventory.to_dict(),
+                output_inventory=output_inventory,
                 files_written=totals["file_count"],
                 bytes_written=totals["total_bytes"],
             )

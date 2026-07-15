@@ -407,11 +407,15 @@ class SevenZipRunner:
         *,
         request_payload: dict | None = None,
         process_failure: dict | None = None,
+        result_payload: dict | None = None,
+        progress_events: list[dict] | None = None,
     ) -> subprocess.CompletedProcess:
         return attach_worker_diagnostics(
             subprocess.CompletedProcess(args, returncode, stdout or "", stderr or ""),
             request_payload=request_payload,
             process_failure=process_failure,
+            result_payload=result_payload,
+            progress_events=progress_events,
         )
 
     def _run_worker(
@@ -541,13 +545,17 @@ class SevenZipRunner:
             with _phase(phase_timer, f"{phase_prefix}_persistent_send"):
                 worker.send(payload)
             with _phase(phase_timer, f"{phase_prefix}_persistent_read_result"):
-                stdout, stderr, returncode, reusable = self._read_persistent_worker_result(worker, runtime_scheduler, task)
+                stdout, stderr, returncode, reusable, result_payload, progress_events = self._read_persistent_worker_result(
+                    worker, runtime_scheduler, task
+                )
             return self._completed_process(
                 [worker.worker_path, "--persistent"],
                 returncode,
                 stdout,
                 stderr,
                 request_payload=job,
+                result_payload=result_payload,
+                progress_events=progress_events,
             )
         except Exception as exc:
             worker.close()
@@ -572,13 +580,14 @@ class SevenZipRunner:
         worker: _PersistentWorker,
         runtime_scheduler: Any,
         task: ArchiveTask,
-    ) -> tuple[str, str, int, bool]:
+    ) -> tuple[str, str, int, bool, dict[str, Any] | None, list[dict[str, Any]]]:
         interval = max(0.1, float(self.process_config.get("process_sample_interval_ms", 500) or 500) / 1000.0)
         max_task_seconds = max(0.0, float(self.process_config.get("max_extract_task_seconds", 0) or 0))
         no_progress_timeout = max(0.0, float(self.process_config.get("process_no_progress_timeout_seconds", 0) or 0))
         profile_key = self._task_profile_key(task)
         stdout_lines: list[str] = []
         stderr_lines: list[str] = []
+        progress_events: list[dict[str, Any]] = []
         started_at = time.monotonic()
         last_progress_at = started_at
         last_io_bytes = 0
@@ -600,14 +609,14 @@ class SevenZipRunner:
             if worker.process is not None and worker.process.poll() is not None:
                 self._drain_stdout(worker, stdout_lines)
                 self._drain_stderr(worker, stderr_lines)
-                return "".join(stdout_lines), "".join(stderr_lines), worker.process.returncode or 1, False
+                return "".join(stdout_lines), "".join(stderr_lines), worker.process.returncode or 1, False, None, progress_events
             try:
                 line = worker.stdout_queue.get(timeout=interval)
             except queue.Empty:
                 now = time.monotonic()
                 if max_task_seconds and now - started_at > max_task_seconds:
                     worker.close()
-                    return "".join(stdout_lines), "\n".join([*stderr_lines, "sevenzip_worker timed out"]).strip(), -101, False
+                    return "".join(stdout_lines), "\n".join([*stderr_lines, "sevenzip_worker timed out"]).strip(), -101, False, None, progress_events
                 if self._record_persistent_progress(ps_process, runtime_scheduler, profile_key, last_io_bytes):
                     try:
                         io_counters = ps_process.io_counters() if ps_process is not None else None
@@ -617,20 +626,22 @@ class SevenZipRunner:
                     last_progress_at = now
                 if no_progress_timeout and now - last_progress_at > no_progress_timeout:
                     worker.close()
-                    return "".join(stdout_lines), "\n".join([*stderr_lines, "sevenzip_worker made no observable progress"]).strip(), -102, False
+                    return "".join(stdout_lines), "\n".join([*stderr_lines, "sevenzip_worker made no observable progress"]).strip(), -102, False, None, progress_events
                 continue
             if line is None:
                 code = worker.process.returncode if worker.process is not None else 1
-                return "".join(stdout_lines), "".join(stderr_lines), code or 1, False
-            stdout_lines.append(line)
+                return "".join(stdout_lines), "".join(stderr_lines), code or 1, False, None, progress_events
             last_progress_at = time.monotonic()
             payload = self._json_line(line)
             if payload and payload.get("type") == "progress":
+                progress_events.append(payload)
                 self._emit_progress(task, payload)
+                continue
             if payload and payload.get("type") == "result":
                 returncode = 0 if payload.get("status") == "ok" else 1
                 self._drain_stderr(worker, stderr_lines)
-                return "".join(stdout_lines), "".join(stderr_lines), returncode, True
+                return "".join(stdout_lines), "".join(stderr_lines), returncode, True, payload, progress_events
+            stdout_lines.append(line)
 
     @staticmethod
     def _json_line(line: str) -> dict:

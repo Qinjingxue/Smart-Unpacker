@@ -31,9 +31,10 @@ def build_extraction_progress_manifest(
 ) -> dict[str, Any]:
     result = _worker_result(diagnostics)
     output_trace = _output_trace(result)
+    source_items = output_trace.get("items") or _verified_manifest_files(result)
     items = [
         _manifest_item(item, out_dir=out_dir, round_index=round_index)
-        for item in output_trace.get("items") or []
+        for item in source_items
         if isinstance(item, dict) and not bool(item.get("is_dir"))
     ]
     items = _merge_untraced_files(items, out_dir, round_index=round_index, worker_ok=str(result.get("status") or "") == "ok")
@@ -82,6 +83,14 @@ def write_extraction_progress_manifest_payload(
     pretty: bool = False,
     write_file: bool = False,
 ) -> tuple[str, dict[str, Any]]:
+    if not write_file:
+        compact = _compact_complete_progress_manifest(
+            archive=archive,
+            out_dir=out_dir,
+            diagnostics=diagnostics,
+        )
+        if compact is not None:
+            return "", compact
     manifest = build_extraction_progress_manifest(
         archive=archive,
         out_dir=out_dir,
@@ -94,6 +103,41 @@ def write_extraction_progress_manifest_payload(
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(_json_text(manifest, pretty=pretty), encoding="utf-8")
     return str(target), manifest
+
+
+def _compact_complete_progress_manifest(
+    *,
+    archive: str,
+    out_dir: str,
+    diagnostics: dict[str, Any],
+) -> dict[str, Any] | None:
+    result = diagnostics.get("result") if isinstance(diagnostics.get("result"), dict) else {}
+    manifest = result.get("verified_manifest") if isinstance(result.get("verified_manifest"), dict) else {}
+    inventory = manifest.get("inventory") if isinstance(manifest.get("inventory"), dict) else {}
+    if result.get("status") != "ok" or not manifest.get("validated") or not inventory.get("complete"):
+        return None
+    file_count = int(inventory.get("file_count", manifest.get("file_count", 0)) or 0)
+    total_size = int(inventory.get("total_size", result.get("bytes_written", 0)) or 0)
+    return {
+        "version": 1,
+        "archive": archive,
+        "out_dir": out_dir,
+        "partial_outputs": bool(file_count),
+        "failure_stage": "",
+        "failure_kind": "",
+        "worker_status": "ok",
+        "native_status": str(result.get("native_status") or ""),
+        "files_written": int(result.get("files_written", 0) or file_count),
+        "bytes_written": int(result.get("bytes_written", 0) or total_size),
+        "summary": {
+            "total": file_count,
+            "complete": file_count,
+            "partial": 0,
+            "failed": 0,
+            "unverified": 0,
+        },
+        "files": [],
+    }
 
 
 def filter_extraction_outputs(manifest_path: str, *, partial_keep_ratio: float = 0.2) -> dict[str, Any]:
@@ -177,6 +221,12 @@ def _output_trace(result: dict[str, Any]) -> dict[str, Any]:
     native = result.get("diagnostics") if isinstance(result.get("diagnostics"), dict) else {}
     trace = native.get("output_trace") if isinstance(native.get("output_trace"), dict) else {}
     return dict(trace)
+
+
+def _verified_manifest_files(result: dict[str, Any]) -> list[dict[str, Any]]:
+    manifest = result.get("verified_manifest") if isinstance(result.get("verified_manifest"), dict) else {}
+    files = manifest.get("files")
+    return files if isinstance(files, list) else []
 
 
 def _trace_has_progress(output_trace: dict[str, Any]) -> bool:
