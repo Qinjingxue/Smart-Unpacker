@@ -70,51 +70,6 @@ class DetectionScheduler:
         finally:
             self._active_scan_session = None
 
-    def refine_with_structure(
-        self,
-        bag: FactBag,
-        decision: RuleDecision,
-        structure: dict[str, Any],
-    ) -> RuleDecision:
-        """Refine a decision from structure evidence supplied by the coordinator."""
-        detector_config = detection_config(self.config)
-        if detector_config.get("content_structure_rescue_enabled", True) is False:
-            return decision
-        selected = structure.get("selected") if isinstance(structure, dict) else None
-        if not structure.get("has_extractable") or not isinstance(selected, dict):
-            return decision
-        format_name = str(selected.get("format") or "")
-        confidence = float(selected.get("confidence") or 0.0)
-        offset = int(selected.get("start_offset") or 0)
-        bag.set("analysis.status", "extractable")
-        bag.set("analysis.selected_format", format_name)
-        bag.set("analysis.confidence", confidence)
-        bag.set("analysis.prepass", dict(structure.get("prepass") or {}))
-        bag.set("analysis.read_bytes", int(structure.get("read_bytes") or 0))
-        bag.set("analysis.structure_rescue", dict(structure))
-        bag.set("file.detected_ext", _format_extension(format_name))
-        bag.set("file.probe_detected_archive", True)
-        bag.set("file.probe_offset", offset)
-        bag.set("file.embedded_archive_found", offset > 0)
-        archive_threshold = int(detector_config.get("archive_score_threshold", (self.config.get("thresholds") or {}).get("archive_score_threshold", 6)) or 6)
-        rescue_score = max(0, archive_threshold - int(decision.total_score or 0))
-        total_score = int(decision.total_score or 0) + rescue_score
-        matched_rules = [*decision.matched_rules, "content_structure_rescue"]
-        score_breakdown = [
-            *decision.score_breakdown,
-            {
-                "rule": "content_structure_rescue",
-                "score": rescue_score,
-                "reason": f"Content analysis proved {format_name} structure",
-            },
-        ]
-        return self.rule_manager.finalize_scored_evidence(
-            bag,
-            total_score,
-            matched_rules,
-            score_breakdown=score_breakdown,
-        )
-
     def evaluate_bags(
         self,
         fact_bags: list[FactBag],
@@ -258,15 +213,3 @@ class DetectionScheduler:
             effective.update(config)
             merged[fact_name] = effective
         return merged
-
-
-def _format_extension(format_name: str) -> str:
-    normalized = str(format_name or "").strip().lower().lstrip(".")
-    return {
-        "gzip": ".gz",
-        "bzip2": ".bz2",
-        "zstd": ".zst",
-        "tar.gzip": ".tar.gz",
-        "tar.bzip2": ".tar.bz2",
-        "tar.zstd": ".tar.zst",
-    }.get(normalized, f".{normalized}" if normalized else "")

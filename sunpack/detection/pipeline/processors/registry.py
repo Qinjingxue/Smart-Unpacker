@@ -15,6 +15,7 @@ _PROCESSOR_MODULES = (
     "sunpack.detection.pipeline.processors.modules.format_structure.compression_stream",
     "sunpack.detection.pipeline.processors.modules.format_structure.rar",
     "sunpack.detection.pipeline.processors.modules.format_structure.seven_zip",
+    "sunpack.detection.pipeline.processors.modules.format_structure.structure_evidence",
     "sunpack.detection.pipeline.processors.modules.format_structure.tar_header",
     "sunpack.detection.pipeline.processors.modules.format_structure.zip_directory_consistency",
     "sunpack.detection.pipeline.processors.modules.format_structure.zip_eocd",

@@ -1,5 +1,3 @@
-from types import SimpleNamespace
-
 import pytest
 
 from sunpack.contracts.detection import FactBag
@@ -7,31 +5,40 @@ from sunpack.filesystem.directory_scanner import DirectoryScanner
 from sunpack.detection import DetectionScheduler
 from sunpack.coordinator.task_provider import ArchiveTaskProvider
 from sunpack.coordinator.target_scan import build_fact_bags_for_targets
+from sunpack.detection.pipeline.rules.fact_requirements import ArchiveStructureCandidate
 from tests.helpers.scene_rules import RECOMMENDED_SCENE_RULES_PAYLOAD
 from tests.helpers.detection_config import with_detection_pipeline
 
 
-def _rescue_decision():
-    return SimpleNamespace(should_extract=False, discarded_at="scoring")
-
-
-def test_structure_rescue_eligibility_is_independent_of_extension():
-    provider = ArchiveTaskProvider.__new__(ArchiveTaskProvider)
-
-    carrier = FactBag()
-    carrier.set("candidate.entry_path", "cover.jpg")
+def test_structure_evidence_requires_a_positive_archive_prior():
+    gate = ArchiveStructureCandidate()
     ordinary = FactBag()
     ordinary.set("candidate.entry_path", "video.mp4")
+    ordinary.set("file.path", "video.mp4")
+    ordinary.set("file.magic_bytes", b"OggS")
     unknown = FactBag()
     unknown.set("candidate.entry_path", "payload.unknown")
+    unknown.set("file.path", "payload.unknown")
+    unknown.set("file.magic_bytes", b"random")
     probed = FactBag()
     probed.set("candidate.entry_path", "payload.mp4")
+    probed.set("file.path", "payload.mp4")
+    probed.set("file.magic_bytes", b"random")
     probed.set("file.probe_detected_archive", True)
+    disguised = FactBag()
+    disguised.set("candidate.entry_path", "payload.data")
+    disguised.set("file.path", "payload.data")
+    disguised.set("file.magic_bytes", b"7z\xbc\xaf\x27\x1c")
+    damaged = FactBag()
+    damaged.set("candidate.entry_path", "broken.zip")
+    damaged.set("file.path", "broken.zip")
+    damaged.set("file.magic_bytes", b"broken")
 
-    assert provider._structure_rescue_eligible(carrier, _rescue_decision()) is True
-    assert provider._structure_rescue_eligible(ordinary, _rescue_decision()) is True
-    assert provider._structure_rescue_eligible(unknown, _rescue_decision()) is True
-    assert provider._structure_rescue_eligible(probed, _rescue_decision()) is True
+    assert gate.matches(ordinary, {}) is False
+    assert gate.matches(unknown, {}) is True
+    assert gate.matches(probed, {}) is True
+    assert gate.matches(disguised, {}) is True
+    assert gate.matches(damaged, {}) is True
 
 
 def test_directory_scanner_captures_files_and_directories(tmp_path):

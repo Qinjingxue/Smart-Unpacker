@@ -4,6 +4,7 @@ import pytest
 
 from sunpack.coordinator.task_provider import ArchiveTaskProvider
 from tests.helpers.real_archives import ArchiveFixtureFactory
+from tests.helpers.detection_config import with_detection_pipeline
 from tests.helpers.tool_config import get_optional_rar
 
 
@@ -23,7 +24,25 @@ ARCHIVE_FORMATS = [
 
 
 def _detected(path: Path):
-    results = ArchiveTaskProvider({}).detect_targets([str(path)])
+    config = with_detection_pipeline(
+        {"thresholds": {"archive_score_threshold": 6, "maybe_archive_threshold": 3}},
+        scoring=[
+            {
+                "name": "structure_evidence_identity",
+                "enabled": True,
+                "structure_score": 6,
+                "password_required_score": 6,
+                "minimum_confidence": 0.7,
+                "head_bytes": 1048576,
+                "tail_bytes": 1048576,
+                "full_scan_max_bytes": 67108864,
+                "deep_scan": False,
+                "fuzzy_enabled": False,
+                "max_read_mb_per_archive": 64,
+            }
+        ],
+    )
+    results = ArchiveTaskProvider(config).detect_targets([str(path)])
     return [item for item in results if item.decision.should_extract]
 
 
@@ -60,7 +79,7 @@ def test_split_7z_is_analyzed_as_one_logical_stream_with_chaotic_names(tmp_path)
 
 
 @pytest.mark.parametrize("archive_format", ["zip", "7z"])
-def test_archive_embedded_in_middle_is_found_by_bounded_structural_rescue(tmp_path, archive_format):
+def test_archive_embedded_in_middle_is_found_by_bounded_structure_evidence(tmp_path, archive_format):
     case = ArchiveFixtureFactory().create(tmp_path, f"middle_{archive_format}", archive_format)
     archive_bytes = case.entry_path.read_bytes()
     carrier = tmp_path / f"middle_{archive_format}.video"
@@ -96,7 +115,7 @@ def test_header_encrypted_rar_is_confirmed_from_crc_valid_encryption_header(tmp_
     assert evidence["offset"] == 0
 
 
-def test_signature_bytes_without_valid_structure_are_not_rescued(tmp_path):
+def test_signature_bytes_without_valid_structure_are_not_accepted(tmp_path):
     fake = tmp_path / "random.payload"
     fake.write_bytes(b"noise" * 100 + b"7z\xbc\xaf\x27\x1c" + b"not-a-seven-zip" * 100)
 

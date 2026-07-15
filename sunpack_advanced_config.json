@@ -824,9 +824,6 @@
   },
   "detection": {
     "enabled": true,
-    "content_structure_rescue_enabled": true,
-    "content_structure_rescue_full_scan_max_bytes": 67108864,
-    "content_structure_rescue_deep_scan": false,
     "fact_collectors": [
       {
         "name": "file_facts",
@@ -889,6 +886,16 @@
       {
         "name": "rar_structure",
         "enabled": true
+      },
+      {
+        "name": "structure_evidence",
+        "enabled": true,
+        "head_bytes": 1048576,
+        "tail_bytes": 1048576,
+        "full_scan_max_bytes": 67108864,
+        "deep_scan": false,
+        "fuzzy_enabled": false,
+        "max_read_mb_per_archive": 64
       }
     ],
     "rule_pipeline": {
@@ -991,6 +998,19 @@
           "enabled": true,
           "stream_score": 5,
           "magic_score": 2
+        },
+        {
+          "name": "structure_evidence_identity",
+          "enabled": true,
+          "structure_score": 6,
+          "password_required_score": 6,
+          "minimum_confidence": 0.7,
+          "head_bytes": 1048576,
+          "tail_bytes": 1048576,
+          "full_scan_max_bytes": 67108864,
+          "deep_scan": false,
+          "fuzzy_enabled": false,
+          "max_read_mb_per_archive": 64
         }
       ],
       "confirmation": [

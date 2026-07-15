@@ -22,7 +22,7 @@ PYINSTALLER_COOKIE = b"MEI\x0c\x0b\x0a\x0b\x0e"
 def classify_executable_carrier(
     path: str,
     pe_overlay: dict[str, Any] | None,
-    structure_rescue: dict[str, Any] | None = None,
+    structure_evidence: dict[str, Any] | None = None,
     *,
     scan_limit_bytes: int = DEFAULT_SCAN_LIMIT_BYTES,
 ) -> dict[str, Any]:
@@ -57,7 +57,7 @@ def classify_executable_carrier(
             overlay=overlay,
         )
 
-    structure = structure_rescue or {}
+    structure = structure_evidence or {}
     if structure.get("has_extractable"):
         selected = structure.get("selected") if isinstance(structure.get("selected"), dict) else {}
         archive_format = str(selected.get("format") or "")
@@ -158,7 +158,7 @@ def _result(
 
 @register_processor(
     "executable_carrier",
-    input_facts={"file.path", "pe.overlay_structure"},
+    input_facts=("file.path", "pe.overlay_structure"),
     output_facts={"executable.carrier"},
     schemas={
         "executable.carrier": {
@@ -172,6 +172,6 @@ def process_executable_carrier(context: FactProcessorContext) -> dict[str, Any]:
     return classify_executable_carrier(
         str(facts.get("file.path") or ""),
         facts.get("pe.overlay_structure") or {},
-        facts.get("analysis.structure_rescue") or {},
+        facts.get("analysis.structure_evidence") or {},
         scan_limit_bytes=int(context.fact_config.get("scan_limit_bytes", DEFAULT_SCAN_LIMIT_BYTES) or 0),
     )

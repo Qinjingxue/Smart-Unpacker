@@ -361,7 +361,7 @@ class _PipelineRuntime:
             thread_name_prefix="sunpack-task",
         )
         initial_context = RunContext()
-        self.task_scanner = ArchiveTaskScanner(config, initial_context, analysis_stage=self.analysis_stage)
+        self.task_scanner = ArchiveTaskScanner(config, initial_context)
         self.rename_scheduler = RenameScheduler()
         self.output_scan_policy = NestedOutputScanPolicy(config)
         performance_config = config.get("performance", {}) if isinstance(config.get("performance"), dict) else {}

@@ -198,38 +198,6 @@ def test_analysis_stage_reuses_batch_report_for_equivalent_inputs(tmp_path):
     assert second.fact_bag.get("analysis.cache_hits") == 2
 
 
-def test_analysis_reports_batch_preserves_order_without_projecting_knowledge(tmp_path):
-    first_path = tmp_path / "first.bin"
-    second_path = tmp_path / "second.bin"
-    first_path.write_bytes(b"first")
-    second_path.write_bytes(b"second")
-    first = _task(first_path)
-    second = _task(second_path)
-
-    class Scheduler:
-        def analyze_task(self, task):
-            return ArchiveAnalysisReport(
-                path=task.main_path,
-                size=0,
-                evidences=[],
-                selected=[],
-                prepass={},
-                read_bytes=0,
-            )
-
-    stage = ArchiveAnalysisStage({"analysis": {"enabled": False, "task_parallel": True, "task_max_workers": 2}})
-    stage.enabled = True
-    stage.scheduler = Scheduler()
-
-    reports = stage.analyze_reports([first, second])
-
-    assert [report.path for report in reports] == [str(first_path), str(second_path)]
-    assert first.fact_bag.get("analysis.status") is None
-    assert second.fact_bag.get("analysis.status") is None
-    assert knowledge_view.analysis_extractable_segments(first) == []
-    assert knowledge_view.analysis_extractable_segments(second) == []
-
-
 def test_analysis_stage_does_not_treat_primary_multipart_archive_as_embedded_segment(tmp_path):
     part1 = tmp_path / "archive.7z.001"
     part2 = tmp_path / "archive.7z.002"

@@ -1,5 +1,4 @@
 from sunpack.contracts.detection import FactBag
-from sunpack.contracts.rules import RuleDecision
 from sunpack.detection.pipeline.processors.modules.embedded_payload.executable_carrier import (
     classify_executable_carrier,
 )
@@ -19,16 +18,29 @@ def _overlay(*, archive_like: bool = False) -> dict:
     }
 
 
-def _rescue() -> dict:
+def _structure_evidence() -> dict:
     return {
+        "analyzed": True,
         "has_extractable": True,
-        "selected": {"format": "zip", "confidence": 0.99, "start_offset": 0},
+        "password_required": False,
+        "selected": {"format": "zip", "status": "extractable", "confidence": 0.99, "start_offset": 0},
+        "prepass": {},
+        "read_bytes": 1024,
     }
 
 
 def _policy_config() -> dict:
     return with_detection_pipeline(
         {"thresholds": {"archive_score_threshold": 6, "maybe_archive_threshold": 3}},
+        scoring=[
+            {
+                "name": "structure_evidence_identity",
+                "enabled": True,
+                "structure_score": 6,
+                "password_required_score": 6,
+                "minimum_confidence": 0.7,
+            }
+        ],
         confirmation=[
             {
                 "name": "executable_carrier_policy",
@@ -40,21 +52,11 @@ def _policy_config() -> dict:
     )
 
 
-def _initial_decision() -> RuleDecision:
-    return RuleDecision(
-        should_extract=False,
-        total_score=0,
-        matched_rules=[],
-        decision="not_archive",
-        decision_stage="scoring",
-    )
-
-
 def test_par_runtime_bundle_is_classified_separately_from_sfx(tmp_path):
     executable = tmp_path / "packed.exe"
     executable.write_bytes(b"MZ" + b"x" * 32 + b"PAR::Packer" + b"y" * 32 + b"PAR_TEMP")
 
-    carrier = classify_executable_carrier(str(executable), _overlay(), _rescue())
+    carrier = classify_executable_carrier(str(executable), _overlay(), _structure_evidence())
 
     assert carrier["kind"] == "runtime_bundle"
     assert carrier["runtime_profile"] == "par_packer"
@@ -86,51 +88,50 @@ def test_unknown_structural_executable_archive_remains_eligible(tmp_path):
     executable = tmp_path / "unusual-sfx.exe"
     executable.write_bytes(b"MZ" + b"custom stub without a known runtime packer")
 
-    carrier = classify_executable_carrier(str(executable), _overlay(), _rescue())
+    carrier = classify_executable_carrier(str(executable), _overlay(), _structure_evidence())
 
     assert carrier["kind"] == "executable_archive"
     assert carrier["confidence"] == "medium"
 
 
-def test_structure_rescue_rejects_runtime_bundle_through_confirmation_pipeline():
+def test_structure_evidence_rejects_runtime_bundle_through_confirmation_pipeline():
     bag = FactBag()
     bag.set("file.path", "packed.exe")
+    bag.set("file.magic_bytes", b"MZ")
+    bag.set("file.probe_detected_archive", True)
+    bag.set("analysis.structure_evidence", _structure_evidence())
     bag.set("executable.carrier", {
         "is_executable": True,
         "kind": "runtime_bundle",
         "runtime_profile": "par_packer",
     })
 
-    decision = DetectionScheduler(_policy_config()).refine_with_structure(
-        bag,
-        _initial_decision(),
-        _rescue(),
-    )
+    decision = DetectionScheduler(_policy_config()).evaluate_bag(bag)
 
     assert not decision.should_extract
     assert decision.decision == "not_archive"
     assert decision.deciding_rule == "executable_carrier_policy"
 
 
-def test_structure_rescue_keeps_sfx_including_damaged_or_encrypted_routes():
+def test_structure_evidence_keeps_sfx_including_damaged_or_encrypted_routes():
     bag = FactBag()
     bag.set("file.path", "archive.exe")
+    bag.set("file.magic_bytes", b"MZ")
+    bag.set("file.probe_detected_archive", True)
     bag.set("executable.carrier", {
         "is_executable": True,
         "kind": "self_extracting_archive",
         "runtime_profile": "",
     })
-    structure = _rescue()
+    structure = _structure_evidence()
+    structure["password_required"] = True
     structure["selected"]["details"] = {
         "password_required": True,
         "damage_flags": ["truncated_tail"],
     }
 
-    decision = DetectionScheduler(_policy_config()).refine_with_structure(
-        bag,
-        _initial_decision(),
-        structure,
-    )
+    bag.set("analysis.structure_evidence", structure)
+    decision = DetectionScheduler(_policy_config()).evaluate_bag(bag)
 
     assert decision.should_extract
     assert decision.decision == "archive"

@@ -7,14 +7,13 @@ from sunpack.contracts.run_context import RunContext
 from sunpack.contracts.tasks import ArchiveTask
 from sunpack.coordinator.task_provider import ArchiveTaskProvider
 from sunpack.coordinator.scan_session import DetectionScanSession
-from sunpack.analysis.stage import ArchiveAnalysisStage
 from sunpack.relations.internal.group_builder import RelationsGroupBuilder
 
 
 class ArchiveTaskScanner:
-    def __init__(self, config: dict[str, Any], context: RunContext, analysis_stage: ArchiveAnalysisStage | None = None):
+    def __init__(self, config: dict[str, Any], context: RunContext):
         self.context = context
-        self.provider = ArchiveTaskProvider(config, analysis_stage=analysis_stage)
+        self.provider = ArchiveTaskProvider(config)
         self.detector = self.provider.detector
 
     def scan_root(self, scan_root: str) -> list[ArchiveTask]:

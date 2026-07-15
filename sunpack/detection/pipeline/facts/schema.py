@@ -277,10 +277,10 @@ FACT_SCHEMA: dict[str, dict[str, Any]] = {
         "producer": "processors.executable_carrier",
         "description": "Executable carrier classification separating SFX archives from application runtime bundles.",
     },
-    "analysis.structure_rescue": {
+    "analysis.structure_evidence": {
         "type": "dict",
-        "producer": "coordinator.structure_rescue",
-        "description": "Deep structure evidence projected back into the detection confirmation pipeline.",
+        "producer": "processors.structure_evidence",
+        "description": "On-demand forensic structure evidence produced inside the detection pipeline.",
     },
     "7z.structure": {
         "type": "dict",
