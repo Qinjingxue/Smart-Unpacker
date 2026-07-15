@@ -185,6 +185,8 @@ def test_partial_result_does_not_self_retry_but_modified_epoch_does(tmp_path, mo
     assert probe_root.is_dir()
     assert list(probe_root.iterdir()) == []
     assert watcher.run_once().processed == 0
+    with archive.open("ab") as stream:
+        stream.write(b"changed")
     watcher.enqueue(str(archive), event_type="modified")
     final = watcher.run_once()
 
@@ -522,19 +524,10 @@ def test_watch_scheduler_reuses_filter_result_for_unchanged_pending_candidate(tm
     assert watcher.pending_count == 1
 
 
-def test_event_burst_reads_file_identity_once_at_quiet_transition(tmp_path, monkeypatch):
+def test_event_burst_with_unchanged_usn_does_not_restart_quiet_window(tmp_path, monkeypatch):
     monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
     archive = tmp_path / "sample.zip"
     _write_zip(archive)
-    identity_calls = 0
-    original_identity = scheduler_module._candidate_with_file_identity
-
-    def counted_identity(candidate):
-        nonlocal identity_calls
-        identity_calls += 1
-        return original_identity(candidate)
-
-    monkeypatch.setattr(scheduler_module, "_candidate_with_file_identity", counted_identity)
     watcher = WatchScheduler(
         {"watch": {"clipboard_monitor_enabled": False}},
         [str(tmp_path)],
@@ -552,10 +545,9 @@ def test_event_burst_reads_file_identity_once_at_quiet_transition(tmp_path, monk
     for _ in range(100):
         watcher.enqueue(str(archive), event_type="modified")
 
-    assert identity_calls == 0
     assert watcher.pending_count == 1
+    assert watcher._active_states[str(archive)].generation == 1
     assert watcher.run_once().processed == 1
-    assert identity_calls == 1
 
 
 def test_watch_scheduler_rechecks_filesystem_filters_before_processing(tmp_path, monkeypatch):
@@ -916,11 +908,13 @@ def test_watch_scheduler_processes_archive_when_output_root_matches_watch_root(t
     assert result.succeeded == 1
     assert captured["paths"] == [str(archive_path.resolve())]
     assert not watcher.state.entries
+    observed = scheduler_module._candidate_for_event_path(str(archive_path))
     assert watcher.state.snapshot_matches(
-        str(archive_path),
-        archive_path.stat().st_size,
-        archive_path.stat().st_mtime,
-        f"{archive_path.stat().st_dev}:{archive_path.stat().st_ino}",
+        observed.path,
+        observed.size,
+        observed.mtime,
+        observed.file_id,
+        observed.change_usn,
     )
     assert str((tmp_path / "sample").resolve()) in watcher.state.generated_output_roots()
 
@@ -1182,12 +1176,13 @@ def test_watch_scheduler_initial_scan_skips_known_outputs_when_output_root_match
         quiet_seconds=0,
         initial_scan=False,
     )
-    stat = old_archive.stat()
+    observed = scheduler_module._candidate_for_event_path(str(old_archive))
     first.state.record_attempt(
-        str(old_archive),
-        old_archive.stat().st_size,
-        stat.st_mtime,
-        f"{stat.st_dev}:{stat.st_ino}",
+        observed.path,
+        observed.size,
+        observed.mtime,
+        observed.file_id,
+        observed.change_usn,
     )
     first.state.complete_work([str(old_archive)])
     first.state.remember_output_roots([str(output_dir)])
@@ -1691,7 +1686,7 @@ def test_watch_scheduler_does_not_special_case_downloader_suffixes(tmp_path, mon
     assert watcher.pending_count == 1
 
 
-def test_watch_scheduler_same_stat_modified_event_resets_quiet_window(tmp_path, monkeypatch):
+def test_watch_scheduler_same_stat_same_usn_event_does_not_reset_quiet_window(tmp_path, monkeypatch):
     monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
     clock = WatchClock(2000010000.0)
     clock.install(monkeypatch)
@@ -1720,8 +1715,7 @@ def test_watch_scheduler_same_stat_modified_event_resets_quiet_window(tmp_path, 
     events.emit(archive_path)
     events.emit(archive_path, event_type="modified", after=0.8)
 
-    events.run_after(0.3, processed=0)
-    events.run_after(9.8, processed=1)
+    events.run_after(9.3, processed=1)
 
 
 def test_modified_epoch_triggers_even_when_size_mtime_and_file_id_are_unchanged(tmp_path, monkeypatch):

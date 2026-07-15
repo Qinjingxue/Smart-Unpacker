@@ -19,6 +19,21 @@ def test_input_snapshot_persists_and_matches_only_identical_stable_input(tmp_pat
     assert not reloaded.pending_snapshots()
 
 
+def test_input_snapshot_persists_usn_and_rejects_new_usn_with_same_metadata(tmp_path):
+    state_path = tmp_path / "state.json"
+    archive = tmp_path / "sample.zip"
+    archive.write_bytes(b"archive")
+    stat = archive.stat()
+    state = WatchStateStore(str(state_path))
+
+    state.record_attempt(str(archive), stat.st_size, stat.st_mtime, "file-id", 101)
+    state.complete_work([str(archive)])
+    reloaded = WatchStateStore(str(state_path))
+
+    assert reloaded.snapshot_matches(str(archive), stat.st_size, stat.st_mtime, "file-id", 101)
+    assert not reloaded.snapshot_matches(str(archive), stat.st_size, stat.st_mtime, "file-id", 102)
+
+
 def test_departure_removes_snapshot_so_identical_input_is_new_again(tmp_path):
     state = WatchStateStore(str(tmp_path / "state.json"))
     archive = tmp_path / "sample.zip"

@@ -77,6 +77,7 @@ class AdaptiveQuietTracker:
     last_content_event_at: float | None = None
     last_size: int | None = None
     last_mtime: float | None = None
+    last_change_usn: int | None = None
     _intervals: deque[float] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -87,10 +88,16 @@ class AdaptiveQuietTracker:
     def intervals(self) -> tuple[float, ...]:
         return tuple(self._intervals)
 
-    def observe(self, now: float, *, size: int, mtime: float) -> float:
+    def observe(self, now: float, *, size: int, mtime: float, change_usn: int = 0) -> float:
         size = int(size)
         mtime = float(mtime)
-        content_changed = self.last_size is None or self.last_size != size or self.last_mtime != mtime
+        change_usn = int(change_usn)
+        content_changed = (
+            self.last_size is None
+            or self.last_size != size
+            or self.last_mtime != mtime
+            or (change_usn > 0 and self.last_change_usn != change_usn)
+        )
         if not content_changed:
             return self.quiet_seconds
         if self.last_content_event_at is not None:
@@ -101,4 +108,5 @@ class AdaptiveQuietTracker:
         self.last_content_event_at = float(now)
         self.last_size = size
         self.last_mtime = mtime
+        self.last_change_usn = change_usn
         return self.quiet_seconds

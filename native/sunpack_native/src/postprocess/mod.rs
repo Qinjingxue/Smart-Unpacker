@@ -4,10 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-const WATCH_ARCHIVE_SUFFIXES: &[&str] = &[
-    ".zip", ".rar", ".7z", ".gz", ".bz2", ".xz", ".zst", ".tar", ".tgz", ".tbz", ".tbz2", ".txz",
-    ".tzst", ".001", ".exe",
-];
+use crate::filesystem::watch_file_observation;
 
 #[pyfunction]
 #[pyo3(signature = (roots, recursive=true))]
@@ -153,14 +150,6 @@ fn scan_watch_dir_shallow(
 }
 
 fn watch_candidate_dict(py: Python<'_>, path: &Path) -> PyResult<Option<Py<PyDict>>> {
-    let file_name = path
-        .file_name()
-        .and_then(|value| value.to_str())
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    if !looks_like_archive_name(&file_name) {
-        return Ok(None);
-    }
     let metadata = match fs::metadata(path) {
         Ok(metadata) => metadata,
         Err(_) => return Ok(None),
@@ -176,28 +165,17 @@ fn watch_candidate_from_metadata(
     path: &Path,
     metadata: &fs::Metadata,
 ) -> PyResult<Option<Py<PyDict>>> {
-    let file_name = path
-        .file_name()
-        .and_then(|value| value.to_str())
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    if !looks_like_archive_name(&file_name) {
-        return Ok(None);
-    }
     if metadata.len() == 0 {
         return Ok(None);
     }
+    let observation = watch_file_observation(path)?;
     let dict = PyDict::new(py);
     dict.set_item("path", normalize_path(path))?;
     dict.set_item("size", metadata.len())?;
     dict.set_item("mtime", mtime_seconds(metadata))?;
+    dict.set_item("file_id", observation.file_id)?;
+    dict.set_item("change_usn", observation.change_usn)?;
     Ok(Some(dict.unbind()))
-}
-
-fn looks_like_archive_name(name: &str) -> bool {
-    WATCH_ARCHIVE_SUFFIXES
-        .iter()
-        .any(|suffix| name.ends_with(suffix))
 }
 
 #[derive(Default)]

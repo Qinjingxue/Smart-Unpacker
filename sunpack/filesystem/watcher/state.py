@@ -15,7 +15,8 @@ from .group_models import (
 from sunpack.support.collections import dedupe_normalized_paths
 
 
-STATE_VERSION = 9
+STATE_VERSION = 10
+LOADABLE_STATE_VERSIONS = {9, STATE_VERSION}
 
 
 @dataclass
@@ -24,12 +25,13 @@ class WatchInputSnapshot:
     size: int
     mtime: float
     file_id: str = ""
+    change_usn: int = 0
     force: bool = False
 
     @property
     def fingerprint(self) -> str:
         base = f"{self.path}|{self.size}|{self.mtime:.6f}"
-        return f"{base}|{self.file_id}" if self.file_id else base
+        return f"{base}|{self.file_id}|{self.change_usn}"
 
 
 @dataclass
@@ -40,6 +42,7 @@ class WatchStateEntry:
     size: int
     mtime: float
     file_id: str = ""
+    change_usn: int = 0
     status: str = "pending"
     last_error: str = ""
     attempt_count: int = 0
@@ -52,7 +55,7 @@ class WatchStateEntry:
     @property
     def fingerprint(self) -> str:
         base = f"{self.path}|{self.size}|{self.mtime:.6f}"
-        return f"{base}|{self.file_id}" if self.file_id else base
+        return f"{base}|{self.file_id}|{self.change_usn}"
 
 
 class WatchStateStore:
@@ -76,7 +79,7 @@ class WatchStateStore:
             payload = json.loads(self.path.read_text(encoding="utf-8"))
         except Exception:
             return
-        if not isinstance(payload, dict) or payload.get("version") != STATE_VERSION:
+        if not isinstance(payload, dict) or payload.get("version") not in LOADABLE_STATE_VERSIONS:
             return
         try:
             self.password_generation = max(0, int(payload.get("password_generation", 0)))
@@ -122,13 +125,21 @@ class WatchStateStore:
         temp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         os.replace(temp, self.path)
 
-    def snapshot_matches(self, path: str, size: int, mtime: float, file_id: str = "") -> bool:
+    def snapshot_matches(
+        self,
+        path: str,
+        size: int,
+        mtime: float,
+        file_id: str = "",
+        change_usn: int = 0,
+    ) -> bool:
         snapshot = self.snapshots.get(_path_key(path))
         return bool(
             snapshot
             and snapshot.size == size
             and snapshot.mtime == mtime
             and snapshot.file_id == file_id
+            and snapshot.change_usn == int(change_usn)
         )
 
     def queue_active(self, candidate, *, force: bool = False) -> None:
@@ -136,6 +147,8 @@ class WatchStateStore:
             path=os.path.abspath(candidate.path),
             size=int(candidate.size),
             mtime=float(candidate.mtime),
+            file_id=str(getattr(candidate, "file_id", "") or ""),
+            change_usn=int(getattr(candidate, "change_usn", 0) or 0),
             force=bool(force),
         )
         self.pending_work[_path_key(candidate.path)] = snapshot
@@ -147,12 +160,14 @@ class WatchStateStore:
         size: int,
         mtime: float,
         file_id: str = "",
+        change_usn: int = 0,
     ) -> None:
         snapshot = WatchInputSnapshot(
             path=os.path.abspath(path),
             size=size,
             mtime=mtime,
             file_id=file_id,
+            change_usn=int(change_usn),
             force=False,
         )
         key = _path_key(path)
@@ -179,6 +194,7 @@ class WatchStateStore:
             pending.size != int(candidate.size)
             or pending.mtime != float(candidate.mtime)
             or pending.file_id != str(candidate.file_id or "")
+            or pending.change_usn != int(candidate.change_usn)
         ):
             return
         self.pending_work.pop(key, None)
@@ -268,6 +284,7 @@ class WatchStateStore:
         mtime: float,
         *,
         file_id: str = "",
+        change_usn: int = 0,
         status: str,
         error: str = "",
         failure_payload: dict[str, Any] | None = None,
@@ -286,6 +303,7 @@ class WatchStateStore:
             size=size,
             mtime=mtime,
             file_id=file_id,
+            change_usn=int(change_usn),
             status=status,
             last_error=error,
             attempt_count=(previous.attempt_count + 1) if previous else 1,

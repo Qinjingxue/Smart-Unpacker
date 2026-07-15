@@ -1,9 +1,12 @@
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 
-from sunpack_native import watch_candidate_for_path as _native_watch_candidate_for_path
+from sunpack_native import (
+    validate_ntfs_watch_root as _native_validate_ntfs_watch_root,
+    watch_candidate_for_path as _native_watch_candidate_for_path,
+    watch_file_is_ready as _native_watch_file_is_ready,
+)
 
 
 @dataclass(frozen=True)
@@ -12,6 +15,7 @@ class WatchCandidate:
     size: int
     mtime: float
     file_id: str = ""
+    change_usn: int = 0
 
 
 def scan_watch_candidates(roots: list[str], *, recursive: bool = True) -> list[WatchCandidate]:
@@ -20,9 +24,7 @@ def scan_watch_candidates(roots: list[str], *, recursive: bool = True) -> list[W
 
 def _candidate_for(path: str) -> WatchCandidate | None:
     item = _native_watch_candidate_for_path(str(path))
-    if item is None:
-        return _candidate_from_stat(path)
-    return _candidate_from_native(item)
+    return _candidate_from_native(item) if item is not None else None
 
 
 def _candidate_from_native(item: dict) -> WatchCandidate:
@@ -30,49 +32,21 @@ def _candidate_from_native(item: dict) -> WatchCandidate:
         path=str(item.get("path") or ""),
         size=int(item.get("size", 0) or 0),
         mtime=float(item.get("mtime", 0.0) or 0.0),
+        file_id=str(item.get("file_id") or ""),
+        change_usn=int(item.get("change_usn", 0) or 0),
     )
 
 
 def _scan_filesystem_candidates(roots: list[str], recursive: bool) -> list[WatchCandidate]:
-    candidates = []
+    from sunpack_native import scan_watch_candidates as native_scan_watch_candidates
+
+    return [_candidate_from_native(item) for item in native_scan_watch_candidates(roots, recursive)]
+
+
+def validate_ntfs_watch_roots(roots: list[str]) -> None:
     for root in roots:
-        path = os.path.abspath(str(root))
-        if os.path.isfile(path):
-            candidate = _candidate_from_stat(path)
-            if candidate is not None:
-                candidates.append(candidate)
-            continue
-        if not os.path.isdir(path):
-            continue
-        if recursive:
-            for dirpath, _dirnames, filenames in os.walk(path):
-                for filename in filenames:
-                    candidate = _candidate_from_stat(os.path.join(dirpath, filename))
-                    if candidate is not None:
-                        candidates.append(candidate)
-        else:
-            try:
-                names = os.listdir(path)
-            except OSError:
-                continue
-            for name in names:
-                candidate_path = os.path.join(path, name)
-                if os.path.isfile(candidate_path):
-                    candidate = _candidate_from_stat(candidate_path)
-                    if candidate is not None:
-                        candidates.append(candidate)
-    return candidates
+        _native_validate_ntfs_watch_root(str(root))
 
 
-def _candidate_from_stat(path: str) -> WatchCandidate | None:
-    try:
-        stat = os.stat(path)
-    except OSError:
-        return None
-    if not os.path.isfile(path):
-        return None
-    return WatchCandidate(
-        path=os.path.abspath(path),
-        size=int(stat.st_size),
-        mtime=float(stat.st_mtime),
-    )
+def watch_file_is_ready(path: str) -> bool:
+    return bool(_native_watch_file_is_ready(str(path)))

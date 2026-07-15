@@ -7,7 +7,7 @@ import os
 import shutil
 import threading
 import time
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
 
@@ -29,7 +29,12 @@ from sunpack.filesystem.watcher.group_models import (
     WatchGroupSnapshot,
 )
 from sunpack.filesystem.watcher.quiet_policy import AdaptiveQuietPolicy, AdaptiveQuietTracker
-from sunpack.filesystem.watcher.scanner import WatchCandidate, scan_watch_candidates
+from sunpack.filesystem.watcher.scanner import (
+    WatchCandidate,
+    scan_watch_candidates,
+    validate_ntfs_watch_roots,
+    watch_file_is_ready,
+)
 from sunpack.filesystem.watcher.scanner import _candidate_for as _watch_candidate_for_path
 from sunpack.filesystem.watcher.state import WatchStateStore
 from sunpack.passwords.internal import builtin as builtin_passwords_module
@@ -96,6 +101,7 @@ class WatchScheduler:
         if isinstance(config.get("watch"), dict):
             watch_config.update(config["watch"])
         self.watch_roots = [os.path.abspath(path) for path in watch_roots]
+        validate_ntfs_watch_roots(self.watch_roots)
         expanded_out_dir = os.path.expanduser(out_dir)
         self._relative_out_dir = not os.path.isabs(expanded_out_dir)
         self.out_dir = os.path.normpath(expanded_out_dir) if self._relative_out_dir else os.path.abspath(expanded_out_dir)
@@ -344,16 +350,30 @@ class WatchScheduler:
             self._log_candidate_ignored(candidate.path, "under_metadata_dir")
             return
         now = time.time()
+        event_requires_attempt = _event_requires_attempt(event_type) and not self.state.snapshot_matches(
+            candidate.path,
+            candidate.size,
+            candidate.mtime,
+            candidate.file_id,
+            candidate.change_usn,
+        )
         with self._lock:
             state = self._active_states.get(candidate.path)
             if state is not None:
-                quiet_seconds = self._observe_candidate_activity(candidate, now)
+                state.force = state.force or force
+                previous = self._pending.get(candidate.path)
+                changed = previous is None or _candidate_observation_changed(previous, candidate)
                 self._pending[candidate.path] = candidate
+                if not changed:
+                    return
+                quiet_seconds = self._observe_candidate_activity(candidate, now)
                 state.last_event_at = now
                 state.quiet_seconds = quiet_seconds
                 state.generation += 1
-                state.force = state.force or force
-                state.event_requires_attempt = state.event_requires_attempt or _event_requires_attempt(event_type)
+                state.event_requires_attempt = state.event_requires_attempt or event_requires_attempt
+                state.filter_revision = self._filter_revision
+                state.filtered_size = candidate.size
+                state.filtered_mtime = candidate.mtime
                 return
         if not self._passes_filesystem_filters(candidate):
             self._log_candidate_ignored(candidate.path, "filtered_out")
@@ -361,10 +381,10 @@ class WatchScheduler:
         became_active = False
         active_quiet_seconds = self.cold_start_seconds
         with self._lock:
-            active_quiet_seconds = self._observe_candidate_activity(candidate, now)
-            self._pending[candidate.path] = candidate
             state = self._active_states.get(candidate.path)
             if state is None:
+                active_quiet_seconds = self._observe_candidate_activity(candidate, now)
+                self._pending[candidate.path] = candidate
                 became_active = True
                 self._active_states[candidate.path] = _ActiveCandidateState(
                     last_event_at=now,
@@ -372,18 +392,25 @@ class WatchScheduler:
                     filtered_size=candidate.size,
                     filtered_mtime=candidate.mtime,
                     force=force,
-                    event_requires_attempt=_event_requires_attempt(event_type),
+                    event_requires_attempt=event_requires_attempt,
                     filter_revision=self._filter_revision,
                 )
             else:
-                state.last_event_at = now
-                state.quiet_seconds = active_quiet_seconds
-                state.generation += 1
                 state.force = state.force or force
-                state.event_requires_attempt = state.event_requires_attempt or _event_requires_attempt(event_type)
-                state.filter_revision = self._filter_revision
+                previous = self._pending.get(candidate.path)
+                changed = previous is None or _candidate_observation_changed(previous, candidate)
+                self._pending[candidate.path] = candidate
+                if changed:
+                    active_quiet_seconds = self._observe_candidate_activity(candidate, now)
+                    state.last_event_at = now
+                    state.quiet_seconds = active_quiet_seconds
+                    state.generation += 1
+                    state.event_requires_attempt = state.event_requires_attempt or event_requires_attempt
+                    state.filter_revision = self._filter_revision
+                    state.filtered_size = candidate.size
+                    state.filtered_mtime = candidate.mtime
         if became_active:
-            self.state.queue_active(candidate, force=force or _event_requires_attempt(event_type))
+            self.state.queue_active(candidate, force=force or event_requires_attempt)
             self.log.write(
                 "candidate_active",
                 path=candidate.path,
@@ -503,13 +530,19 @@ class WatchScheduler:
                 self._drop_active(path, generation)
                 self.state.complete_work([path])
                 continue
-            if refreshed.size != candidate.size or refreshed.mtime != candidate.mtime:
+            if _candidate_observation_changed(candidate, refreshed):
                 self._record_boundary_activity(path, generation, refreshed, now)
                 continue
-            identified = _candidate_with_file_identity(refreshed)
-            if identified is None:
+            if not watch_file_is_ready(path):
                 self._record_boundary_activity(path, generation, refreshed, now)
+                self.log.write_throttled(
+                    "candidate_busy",
+                    throttle_key=os.path.normcase(os.path.abspath(path)),
+                    interval_seconds=30.0,
+                    path=path,
+                )
                 continue
+            identified = refreshed
             with self._lock:
                 state = self._active_states.get(path)
                 if state is None or state.generation != generation:
@@ -521,6 +554,7 @@ class WatchScheduler:
                 identified.size,
                 identified.mtime,
                 identified.file_id,
+                identified.change_usn,
             ):
                 self.state.complete_work([path])
                 self._log_candidate_ignored(path, "unchanged_input", size=identified.size, mtime=identified.mtime)
@@ -530,6 +564,7 @@ class WatchScheduler:
                 identified.size,
                 identified.mtime,
                 identified.file_id,
+                identified.change_usn,
             )
             self.log.write("candidate_quiet", path=path, generation=generation, quiet_seconds=quiet_seconds)
             ready.append(identified)
@@ -567,7 +602,12 @@ class WatchScheduler:
         if tracker is None:
             tracker = AdaptiveQuietTracker(self._quiet_policy)
             self._quiet_trackers[candidate.path] = tracker
-        return tracker.observe(now, size=candidate.size, mtime=candidate.mtime)
+        return tracker.observe(
+            now,
+            size=candidate.size,
+            mtime=candidate.mtime,
+            change_usn=candidate.change_usn,
+        )
 
     def _process_password_dirty_dirs(self, now: float) -> None:
         ready_dirs: list[str] = []
@@ -590,7 +630,7 @@ class WatchScheduler:
         candidate = _candidate_for_event_path(path)
         if candidate is None or not self._passes_filesystem_filters(candidate):
             return None
-        return _candidate_with_file_identity(candidate)
+        return candidate
 
     def _submit_candidate(
         self,
@@ -673,6 +713,7 @@ class WatchScheduler:
                 candidate.size,
                 candidate.mtime,
                 file_id=candidate.file_id,
+                change_usn=candidate.change_usn,
                 status="partial",
             )
             self.log.write("partial", path=candidate.path)
@@ -712,6 +753,7 @@ class WatchScheduler:
                 candidate.size,
                 candidate.mtime,
                 file_id=candidate.file_id,
+                change_usn=candidate.change_usn,
                 status=status,
                 error=error,
                 failure_payload=payload,
@@ -727,6 +769,7 @@ class WatchScheduler:
                 candidate.size,
                 candidate.mtime,
                 file_id=candidate.file_id,
+                change_usn=candidate.change_usn,
                 status="ignored_no_tasks",
             )
             self.log.write("no_tasks_found", path=candidate.path)
@@ -755,6 +798,7 @@ class WatchScheduler:
             candidate.size,
             candidate.mtime,
             file_id=candidate.file_id,
+            change_usn=candidate.change_usn,
             status="done",
         )
         self.log.write("done", path=candidate.path, success_count=summary.success_count, output_dirs=generated_output_dirs)
@@ -1036,15 +1080,13 @@ def _candidate_for_event_path(path: str) -> WatchCandidate | None:
     return _watch_candidate_for_path(path)
 
 
-def _candidate_with_file_identity(candidate: WatchCandidate) -> WatchCandidate | None:
-    try:
-        stat = os.stat(candidate.path, follow_symlinks=False)
-    except OSError:
-        return None
-    if int(stat.st_size) != candidate.size or abs(float(stat.st_mtime) - candidate.mtime) > 1e-6:
-        return None
-    file_id = f"{int(stat.st_dev)}:{int(stat.st_ino)}"
-    return replace(candidate, file_id=file_id)
+def _candidate_observation_changed(previous: WatchCandidate, current: WatchCandidate) -> bool:
+    return (
+        previous.size != current.size
+        or previous.mtime != current.mtime
+        or previous.file_id != current.file_id
+        or previous.change_usn != current.change_usn
+    )
 
 
 def _event_requires_attempt(event_type: str) -> bool:
