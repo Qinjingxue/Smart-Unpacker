@@ -56,15 +56,20 @@ class ArchiveTaskProvider:
         self.failed_candidates: list[str] = []
         self.failed_candidate_failures: list[FailureInfo] = []
 
-    def scan_targets(self, scan_roots: list[str], processed_keys: set[str] | None = None) -> list[ArchiveTask]:
+    def scan_targets(
+        self,
+        scan_roots: list[str],
+        processed_keys: set[str] | None = None,
+        scan_session: DetectionScanSession | None = None,
+    ) -> list[ArchiveTask]:
         processed_keys = processed_keys or set()
         self.failed_candidates = []
         self.failed_candidate_failures = []
         if self._detection_pipeline_disabled():
-            return self._scan_standard_archive_targets(scan_roots, processed_keys)
+            return self._scan_standard_archive_targets(scan_roots, processed_keys, scan_session=scan_session)
 
         tasks: list[ArchiveTask] = []
-        for detection in self.detect_targets(scan_roots):
+        for detection in self.detect_targets(scan_roots, scan_session=scan_session):
             bag = detection.fact_bag
             if not bag.get("candidate.entry_path"):
                 continue
@@ -82,9 +87,11 @@ class ArchiveTaskProvider:
         self,
         scan_roots: list[str],
         processed_keys: set[str],
+        *,
+        scan_session: DetectionScanSession | None = None,
     ) -> list[ArchiveTask]:
         tasks: list[ArchiveTask] = []
-        scan_session = DetectionScanSession(config=self.config)
+        scan_session = scan_session or DetectionScanSession(config=self.config)
         candidate_bags = build_fact_bags_for_targets(scan_roots, session=scan_session, config=self.config)
         for bag in self._filter_incomplete_split_groups(candidate_bags):
             main_path = bag.get("candidate.entry_path")
@@ -97,8 +104,13 @@ class ArchiveTaskProvider:
             tasks.append(task)
         return tasks
 
-    def detect_targets(self, scan_roots: list[str]):
-        scan_session = DetectionScanSession(config=self.config)
+    def detect_targets(
+        self,
+        scan_roots: list[str],
+        *,
+        scan_session: DetectionScanSession | None = None,
+    ):
+        scan_session = scan_session or DetectionScanSession(config=self.config)
         candidate_bags = build_fact_bags_for_targets(scan_roots, session=scan_session, config=self.config)
         fact_bags = self._filter_incomplete_split_groups(candidate_bags)
         detections = self.detector.evaluate_bags(fact_bags, scan_session=scan_session)

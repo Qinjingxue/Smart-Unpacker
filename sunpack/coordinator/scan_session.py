@@ -38,6 +38,10 @@ class DetectionScanSession:
             seen.add(key)
             self._scan_roots.append(normalized)
 
+    def prime_snapshot(self, directory: str, snapshot: DirectorySnapshot) -> None:
+        """Seed a complete recursive snapshot without touching the directory again."""
+        self._snapshots[self._snapshot_key(directory, max_depth=None)] = snapshot
+
     def is_within_scan_scope(self, path: str) -> bool:
         if not self._scan_roots:
             return True

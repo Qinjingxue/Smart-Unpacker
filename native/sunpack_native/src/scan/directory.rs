@@ -1,7 +1,7 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use regex::RegexBuilder;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -81,6 +81,44 @@ pub(crate) fn scan_directory_entries(
         .into_iter()
         .map(|entry| entry.into_py_dict(py))
         .collect()
+}
+
+#[pyfunction]
+#[pyo3(signature = (root_path, paths, sizes, patterns, prune_dirs, blocked_extensions, min_size, whitelist_patterns=Vec::new(), whitelist_prune_dirs=Vec::new()))]
+pub(crate) fn filter_inventory_file_indices(
+    root_path: &str,
+    paths: Vec<String>,
+    sizes: Vec<u64>,
+    patterns: Vec<String>,
+    prune_dirs: Vec<String>,
+    blocked_extensions: Vec<String>,
+    min_size: Option<u64>,
+    whitelist_patterns: Vec<String>,
+    whitelist_prune_dirs: Vec<String>,
+) -> PyResult<Vec<usize>> {
+    let options = DirectoryScanOptions::new(
+        patterns,
+        prune_dirs,
+        whitelist_patterns,
+        whitelist_prune_dirs,
+        blocked_extensions,
+        min_size,
+    )?;
+    let root = PathBuf::from(root_path);
+    let mut accepted = Vec::new();
+    let mut directory_rejections = HashMap::new();
+    for (index, path) in paths.into_iter().enumerate() {
+        let size = sizes.get(index).copied().unwrap_or(0);
+        let path = PathBuf::from(path);
+        if options.min_size.is_some_and(|minimum| size < minimum)
+            || file_rejected_by_path(&path, &options)
+            || file_under_rejected_directory(&path, &root, &options, &mut directory_rejections)
+        {
+            continue;
+        }
+        accepted.push(index);
+    }
+    Ok(accepted)
 }
 
 #[pyfunction]
@@ -426,6 +464,39 @@ fn file_rejected_by_path(path: &Path, options: &DirectoryScanOptions) -> bool {
     let candidates = path_candidates(path);
     regex_matches(&options.patterns, &candidates)
         || !file_allowed_by_whitelist(&candidates, options)
+}
+
+fn file_under_rejected_directory(
+    path: &Path,
+    root: &Path,
+    options: &DirectoryScanOptions,
+    cache: &mut HashMap<PathBuf, bool>,
+) -> bool {
+    path.parent()
+        .is_some_and(|directory| directory_rejected_cached(directory, root, options, cache))
+}
+
+fn directory_rejected_cached(
+    directory: &Path,
+    root: &Path,
+    options: &DirectoryScanOptions,
+    cache: &mut HashMap<PathBuf, bool>,
+) -> bool {
+    if directory == root {
+        return false;
+    }
+    if !directory.starts_with(root) {
+        return true;
+    }
+    if let Some(rejected) = cache.get(directory) {
+        return *rejected;
+    }
+    let rejected = directory
+        .parent()
+        .is_some_and(|parent| directory_rejected_cached(parent, root, options, cache))
+        || dir_rejected(directory, options);
+    cache.insert(directory.to_path_buf(), rejected);
+    rejected
 }
 
 fn dir_allowed_by_whitelist(candidates: &[String], options: &DirectoryScanOptions) -> bool {

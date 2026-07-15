@@ -6,6 +6,7 @@ from sunpack.contracts.detection import FactBag
 from sunpack.contracts.run_context import RunContext
 from sunpack.contracts.tasks import ArchiveTask
 from sunpack.coordinator.task_provider import ArchiveTaskProvider
+from sunpack.coordinator.scan_session import DetectionScanSession
 from sunpack.analysis.stage import ArchiveAnalysisStage
 from sunpack.relations.internal.group_builder import RelationsGroupBuilder
 
@@ -19,8 +20,17 @@ class ArchiveTaskScanner:
     def scan_root(self, scan_root: str) -> list[ArchiveTask]:
         return self.scan_targets([scan_root])
 
-    def scan_targets(self, scan_roots: list[str]) -> list[ArchiveTask]:
-        tasks = self.provider.scan_targets(scan_roots, processed_keys=self.context.processed_keys)
+    def scan_targets(
+        self,
+        scan_roots: list[str],
+        *,
+        scan_session: DetectionScanSession | None = None,
+    ) -> list[ArchiveTask]:
+        tasks = self.provider.scan_targets(
+            scan_roots,
+            processed_keys=self.context.processed_keys,
+            scan_session=scan_session,
+        )
         for failure in self.provider.failed_candidates:
             if failure not in self.context.failed_tasks:
                 self.context.failed_tasks.append(failure)

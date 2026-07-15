@@ -428,13 +428,17 @@ class _PipelineRuntime:
         round_index = 1
         current_roots = list(dict.fromkeys(all_targets))
         current_tasks = self.task_scanner.direct_file_tasks(current_roots) if direct else None
+        current_scan_session = None
 
         while current_tasks if direct else current_roots:
             if direct:
                 tasks = current_tasks or []
             else:
                 reporter.scan_started(round_index)
-                tasks = self.task_scanner.scan_targets(current_roots)
+                tasks = self.task_scanner.scan_targets(
+                    current_roots,
+                    scan_session=current_scan_session,
+                )
             ownership.remember_tasks(tasks)
             self.batch_runner.set_progress_round(round_index, direct=direct and round_index == 1)
             before_results = len(context.target_results)
@@ -442,13 +446,19 @@ class _PipelineRuntime:
                 tasks,
                 default_output_dir_for_task=ownership.output_dir_for_task,
             )
+            next_scan_session = self.output_scan_policy.take_scan_session(new_roots)
             ownership.remember_results(context.target_results[before_results:])
             if not recursion.should_continue(round_index, bool(new_roots)):
                 break
             if recursion.mode == "prompt" and not recursion.prompt_continue(round_index):
                 break
             current_roots = new_roots
-            current_tasks = self.task_scanner.scan_targets(new_roots) if direct else None
+            current_scan_session = next_scan_session
+            current_tasks = (
+                self.task_scanner.scan_targets(new_roots, scan_session=current_scan_session)
+                if direct
+                else None
+            )
             round_index += 1
 
         responses = ownership.responses(context, recent_passwords=self.extractor.recent_passwords)

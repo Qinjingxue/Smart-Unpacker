@@ -1,14 +1,18 @@
 import os
 import logging
 from copy import deepcopy
+from pathlib import Path
 from typing import Any, Iterable
 
+from sunpack.contracts.filesystem import DirectorySnapshot, FileEntry
+from sunpack.coordinator.scan_session import DetectionScanSession
 from sunpack.filesystem.filters.modules.scene_semantics import (
     detect_scene_context_for_directory,
     is_strong_scene_context,
 )
 from sunpack.filesystem.directory_scanner import DirectoryScanner
 from sunpack.support.output_inventory import OutputInventory
+from sunpack.support.path_keys import path_key
 
 
 LOGGER = logging.getLogger(__name__)
@@ -20,6 +24,7 @@ class NestedOutputScanPolicy:
     def __init__(self, config: dict[str, Any]):
         self.config = config
         self._output_scan_config = self._build_recursive_output_scan_config()
+        self._pending_scan_session: DetectionScanSession | None = None
 
     def should_scan_output_dir(self, target_dir: str) -> bool:
         return bool(self._candidate_parent_roots(target_dir))
@@ -80,6 +85,8 @@ class NestedOutputScanPolicy:
         roots = []
         seen = set()
         inventories = inventories or {}
+        scan_session = DetectionScanSession(config=self.config)
+        has_primed_snapshot = False
         for output_dir in output_dirs:
             if not output_dir or not os.path.isdir(output_dir):
                 continue
@@ -87,13 +94,125 @@ class NestedOutputScanPolicy:
                 inventories.get(os.path.normcase(os.path.abspath(output_dir))),
                 expected_root=output_dir,
             )
+            snapshot = self._snapshot_from_inventory(inventory, scan_session)
+            if snapshot is not None:
+                ctx = detect_scene_context_for_directory(output_dir, entries=snapshot.entries)
+                if is_strong_scene_context(ctx):
+                    LOGGER.info(
+                        "skipping strong scene output directory: %s @ %s",
+                        ctx.get("scene_type"),
+                        os.path.basename(output_dir) or output_dir,
+                    )
+                    continue
+                if not any(not entry.is_dir for entry in snapshot.entries):
+                    continue
+                root = os.path.abspath(output_dir)
+                key = os.path.normcase(root)
+                if key not in seen:
+                    seen.add(key)
+                    roots.append(root)
+                scan_session.prime_snapshot(root, snapshot)
+                has_primed_snapshot = True
+                continue
             for root in self._candidate_parent_roots(output_dir, inventory):
                 key = os.path.normcase(os.path.abspath(root))
                 if key in seen:
                     continue
                 seen.add(key)
                 roots.append(root)
+        self._pending_scan_session = scan_session if has_primed_snapshot else None
         return roots
+
+    def take_scan_session(self, scan_roots: Iterable[str]) -> DetectionScanSession | None:
+        """Consume the inventory-backed session prepared for the next recursive round."""
+        session = self._pending_scan_session
+        self._pending_scan_session = None
+        if session is None:
+            return None
+        session.set_scan_roots(list(scan_roots))
+        return session
+
+    def _snapshot_from_inventory(
+        self,
+        inventory: OutputInventory | None,
+        scan_session: DetectionScanSession,
+    ) -> DirectorySnapshot | None:
+        inventory_files = self._inventory_files(inventory)
+        if inventory_files is None or inventory is None:
+            return None
+        root = Path(os.path.abspath(inventory.root))
+        inventory_rows = [
+            (path, size)
+            for path, size in inventory_files
+            if self._is_within_root(path, root)
+        ]
+        if not inventory_rows:
+            return DirectorySnapshot(root_path=root, entries=[])
+
+        accepted_indices = set(DirectoryScanner.inventory_file_indices(
+            str(root),
+            [path for path, _size in inventory_rows],
+            [size for _path, size in inventory_rows],
+            config=self._output_scan_config,
+        ))
+        directory_paths: set[str] = set()
+        root_text = str(root)
+        root_case = os.path.normcase(root_text)
+        for path, _size in inventory_rows:
+            parent = os.path.dirname(path)
+            while os.path.normcase(parent) != root_case:
+                directory_paths.add(parent)
+                next_parent = os.path.dirname(parent)
+                if next_parent == parent:
+                    break
+                parent = next_parent
+
+        entries = [
+            FileEntry(path=Path(path), is_dir=True)
+            for path in sorted(directory_paths, key=lambda item: (item.count(os.sep), item.lower()))
+        ]
+        entries.extend(
+            FileEntry(path=Path(os.path.abspath(path)), is_dir=False, size=size)
+            for index, (path, size) in enumerate(inventory_rows)
+            if index in accepted_indices
+        )
+        prefiltered = DirectoryScanner.snapshot_from_entries(
+            str(root),
+            entries,
+            config=self._output_scan_config,
+            stop_before_filter="mtime_range",
+        )
+        candidate_paths = [str(entry.path) for entry in prefiltered.entries if not entry.is_dir]
+        facts_by_key = scan_session.file_head_facts_for_paths(candidate_paths, magic_size=16)
+        hydrated_entries: list[FileEntry] = []
+        for entry in prefiltered.entries:
+            if entry.is_dir:
+                hydrated_entries.append(entry)
+                continue
+            facts = facts_by_key.get(path_key(entry.path), {})
+            if not facts.get("exists") or not facts.get("is_file"):
+                continue
+            hydrated_entries.append(FileEntry(
+                path=entry.path,
+                is_dir=False,
+                size=facts.get("size"),
+                mtime_ns=facts.get("mtime_ns"),
+                metadata=entry.metadata,
+            ))
+        return DirectoryScanner.snapshot_from_entries(
+            str(root),
+            hydrated_entries,
+            config=self._output_scan_config,
+            start_filter="mtime_range",
+        )
+
+    @staticmethod
+    def _is_within_root(path: str, root: Path) -> bool:
+        root_key = os.path.normcase(os.path.abspath(str(root))).rstrip("\\/")
+        path_key_value = os.path.normcase(os.path.abspath(path)).rstrip("\\/")
+        if path_key_value == root_key:
+            return True
+        return path_key_value.startswith(root_key + os.sep)
 
     def _build_recursive_output_scan_config(self) -> dict[str, Any]:
         config = deepcopy(self.config)

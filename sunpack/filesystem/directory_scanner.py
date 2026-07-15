@@ -1,7 +1,10 @@
 from pathlib import Path
 import re
 
-from sunpack_native import scan_directory_entries as _NATIVE_SCAN_DIRECTORY_ENTRIES
+from sunpack_native import (
+    filter_inventory_file_indices as _NATIVE_FILTER_INVENTORY_FILE_INDICES,
+    scan_directory_entries as _NATIVE_SCAN_DIRECTORY_ENTRIES,
+)
 
 from sunpack.contracts.filesystem import DirectorySnapshot, FileEntry
 from sunpack.config.detection_view import directory_scan_is_recursive
@@ -31,6 +34,101 @@ class DirectoryScanner:
 
     def scan(self) -> DirectorySnapshot:
         return self._scan_native()
+
+    @classmethod
+    def snapshot_from_entries(
+        cls,
+        root_path: str,
+        entries: list[FileEntry],
+        *,
+        config: dict | None = None,
+        start_filter: str | None = None,
+        stop_before_filter: str | None = None,
+    ) -> DirectorySnapshot:
+        """Apply the normal ordered filters to an already collected file table."""
+        scanner = cls(root_path, config=config)
+        return DirectorySnapshot(
+            root_path=scanner.root_path,
+            entries=scanner._apply_ordered_filters(
+                list(entries),
+                start_filter=start_filter,
+                stop_before_filter=stop_before_filter,
+            ),
+        )
+
+    @classmethod
+    def inventory_file_indices(
+        cls,
+        root_path: str,
+        paths: list[str],
+        sizes: list[int],
+        *,
+        config: dict | None = None,
+    ) -> list[int]:
+        scanner = cls(root_path, config=config)
+        options = scanner._native_inventory_filter_options()
+        if options is None:
+            return list(range(len(paths)))
+        return list(_NATIVE_FILTER_INVENTORY_FILE_INDICES(
+            str(scanner.root_path),
+            paths,
+            sizes,
+            options["patterns"],
+            options["prune_dirs"],
+            options["blocked_extensions"],
+            options["min_size"],
+            options["whitelist_patterns"],
+            options["whitelist_prune_dirs"],
+        ))
+
+    def _native_inventory_filter_options(self) -> dict | None:
+        if self._custom_filters:
+            return None
+        patterns: list[str] = []
+        prune_dirs: list[str] = []
+        whitelist_patterns: list[str] = []
+        whitelist_prune_dirs: list[str] = []
+        blocked_extensions: list[str] = []
+        min_size = None
+        for scan_filter in self.filters:
+            name = getattr(scan_filter, "name", "")
+            if name == "scene_semantics":
+                scene_config = getattr(scan_filter, "config", {}) or {}
+                prune_dirs.extend(_dir_glob_to_regex(item) for item in scene_prune_dir_globs(scene_config))
+                patterns.extend(_path_glob_to_regex(item) for item in scene_path_globs(scene_config))
+                continue
+            if name == "blacklist":
+                blocked_extensions.extend(getattr(scan_filter, "blocked_extensions", []) or [])
+                continue
+            if name == "size_range":
+                value = getattr(scan_filter, "native_min_size_bytes", None)
+                if value is not None:
+                    try:
+                        min_size = max(int(value), int(min_size or 0))
+                    except (TypeError, ValueError):
+                        return None
+                continue
+            if name == "whitelist":
+                whitelist_patterns.extend(
+                    _path_glob_to_regex(item)
+                    for item in (getattr(scan_filter, "path_globs", []) or [])
+                )
+                whitelist_prune_dirs.extend(
+                    _dir_glob_to_regex(item)
+                    for item in (getattr(scan_filter, "prune_dir_globs", []) or [])
+                )
+                continue
+            if name == "mtime_range":
+                continue
+            return None
+        return {
+            "patterns": patterns,
+            "prune_dirs": prune_dirs,
+            "whitelist_patterns": whitelist_patterns,
+            "whitelist_prune_dirs": whitelist_prune_dirs,
+            "blocked_extensions": blocked_extensions,
+            "min_size": min_size,
+        }
 
     def _scan_native(self) -> DirectorySnapshot | None:
         options = self._native_scan_options()
@@ -119,13 +217,27 @@ class DirectoryScanner:
             "min_size": min_size,
         }
 
-    def _apply_ordered_filters(self, entries: list[FileEntry]) -> list[FileEntry]:
+    def _apply_ordered_filters(
+        self,
+        entries: list[FileEntry],
+        *,
+        start_filter: str | None = None,
+        stop_before_filter: str | None = None,
+    ) -> list[FileEntry]:
         if not self.filters:
             return entries
 
         current = entries
+        started = start_filter is None
         for scan_filter in self.filters:
-            if getattr(scan_filter, "name", "") == "scene_semantics":
+            name = getattr(scan_filter, "name", "")
+            if not started:
+                if name != start_filter:
+                    continue
+                started = True
+            if stop_before_filter is not None and name == stop_before_filter:
+                break
+            if name == "scene_semantics":
                 current = annotate_scene_metadata(
                     current,
                     self.root_path.parent if self.root_path.is_file() else self.root_path,
