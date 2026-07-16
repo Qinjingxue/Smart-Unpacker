@@ -154,16 +154,10 @@ class SingleArchiveExtractor:
                     diagnostics={"failure_stage": "preflight", "failure_kind": "output_filesystem", "message": str(exc)},
                 )
 
-            with _phase(phase_timer, f"{phase_prefix}_normalize_archive_paths"):
-                staged = self.rename_scheduler.normalize_archive_paths(
-                    archive,
-                    all_parts,
-                    startupinfo=startupinfo,
-                    volume_entries=list(split_info.volumes or []),
-                )
-            run_archive = staged.archive
-            run_parts = staged.run_parts
-            cleanup_parts = staged.cleanup_parts
+            descriptor = split_info.archive_input or task.archive_input()
+            run_archive = descriptor.entry_path
+            run_parts = descriptor.part_paths()
+            cleanup_parts = list(run_parts)
             run_result = None
             test_result = None
             err = ""
@@ -308,8 +302,7 @@ class SingleArchiveExtractor:
 
                     err = f"{run_result.stdout}\n{run_result.stderr}".lower()
             finally:
-                with _phase(phase_timer, f"{phase_prefix}_cleanup_normalized_paths"):
-                    self.rename_scheduler.cleanup_normalized_split_group(staged)
+                pass
 
             if resolution.requires_extraction_confirmation and run_result is not None:
                 candidate_failure = classify_extract_failure(run_result, err, archive=archive, is_split_archive=is_split)

@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from sunpack.analysis.knowledge import write_extractable_segments
 from sunpack.contracts.detection import FactBag
 from sunpack.contracts.tasks import ArchiveTask, SplitArchiveInfo
+from sunpack.contracts.archive_input import ArchiveInputDescriptor
 from sunpack.extraction.internal.workflow.single_archive_extractor import SingleArchiveExtractor
 from sunpack.extraction.internal.sevenzip.metadata import ArchiveMetadataScanner
 
@@ -79,7 +80,7 @@ def _task(path):
         main_path=str(path),
         all_parts=[str(path)],
         logical_name="case",
-        split_info=SplitArchiveInfo(parts=[str(path)]),
+        split_info=SplitArchiveInfo(archive_input=ArchiveInputDescriptor.from_parts(archive_path=str(path))),
     )
 
 

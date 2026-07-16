@@ -26,6 +26,7 @@ class ArchiveSource:
     open_mode: ArchiveOpenMode = "file"
     format_hint: str = ""
     logical_name: str = ""
+    volume_style: str = ""
     password: str = ""
     parts: list[ArchiveInputPart] = field(default_factory=list)
     ranges: list[ArchiveInputRange] = field(default_factory=list)
@@ -43,6 +44,8 @@ class ArchiveSource:
             payload["format_hint"] = self.format_hint
         if self.logical_name:
             payload["logical_name"] = self.logical_name
+        if self.volume_style:
+            payload["volume_style"] = self.volume_style
         if self.password:
             payload["password"] = self.password
         if self.parts:
@@ -63,6 +66,7 @@ class ArchiveSource:
             open_mode=self.open_mode,
             format_hint=self.format_hint,
             logical_name=self.logical_name,
+            volume_style=self.volume_style,
             password=self.password,
             parts=list(self.parts),
             ranges=list(self.ranges),
@@ -91,6 +95,7 @@ class ArchiveSource:
             open_mode=descriptor.open_mode,
             format_hint=descriptor.format_hint,
             logical_name=descriptor.logical_name,
+            volume_style=descriptor.volume_style,
             password=descriptor.password,
             parts=list(descriptor.parts),
             ranges=list(descriptor.ranges),
@@ -373,6 +378,7 @@ class ArchiveState:
             open_mode=descriptor.open_mode,
             format_hint=self.format_hint or descriptor.format_hint,
             logical_name=self.logical_name or descriptor.logical_name,
+            volume_style=descriptor.volume_style,
             password=descriptor.password,
             parts=list(descriptor.parts),
             ranges=list(descriptor.ranges),

@@ -13,7 +13,7 @@ namespace sunpack::sevenzip {
 
 
 
-bool seven_zip_parts_prove_missing_tail(const std::vector<std::wstring>& part_paths);
+bool seven_zip_parts_prove_missing_tail(const std::vector<std::wstring>& part_paths, bool structured_order = false);
 
 
 

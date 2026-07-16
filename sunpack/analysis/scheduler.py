@@ -50,18 +50,12 @@ class ArchiveAnalysisScheduler:
         report = self._analyze_descriptor(state.to_archive_input_descriptor(), task)
         if report is not None:
             return report
-        volumes = list(task.split_info.volumes or [])
-        if volumes:
-            return self.analyze_paths(volumes, report_path=task.main_path)
-        paths = list(task.split_info.parts or task.all_parts or [])
-        if paths:
-            return self.analyze_paths(paths, report_path=task.main_path)
-        return self.analyze_path(task.main_path)
+        raise ValueError(f"unsupported archive input mode: {state.source.open_mode}")
 
     def _analyze_descriptor(self, descriptor: ArchiveInputDescriptor, task) -> ArchiveAnalysisReport | None:
         if descriptor.open_mode == "file" and descriptor.entry_path:
             return self.analyze_path(descriptor.entry_path)
-        if descriptor.open_mode in {"native_volumes", "staged_volumes", "sfx_with_volumes"} and descriptor.parts:
+        if descriptor.open_mode in {"native_volumes", "sfx_with_volumes"} and descriptor.parts:
             paths = [
                 {"path": part.path, "number": part.volume_number or index + 1}
                 for index, part in enumerate(descriptor.parts)

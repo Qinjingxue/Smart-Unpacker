@@ -4,6 +4,7 @@ from sunpack.analysis.knowledge import write_analysis_report, write_zip_runtime_
 from sunpack.analysis.result import ArchiveAnalysisReport, ArchiveFormatEvidence
 from sunpack.contracts.detection import FactBag
 from sunpack.contracts.tasks import ArchiveTask
+from sunpack.coordinator.task_scan import direct_file_task
 from sunpack.detection.knowledge import write_detection_task
 from sunpack.extraction.knowledge import write_extraction_result
 from sunpack.contracts.extraction import ExtractionResult
@@ -36,7 +37,7 @@ def test_layer_converters_write_archive_knowledge_namespaces(tmp_path):
     payload = task.knowledge().to_dict()
 
     assert payload["filesystem"]["path"] == str(archive)
-    assert payload["relations"]["parts"] == [str(archive)]
+    assert payload["relations"]["archive_input"]["parts"][0]["path"] == str(archive)
     assert payload["detection"]["detected_ext"] == "zip"
     assert payload["analysis"]["selected_format"] == "zip"
     assert "has_data_descriptor" not in payload["format"]["zip"].get("structure", {})
@@ -50,12 +51,10 @@ def test_layer_converters_write_archive_knowledge_namespaces(tmp_path):
 
 def test_extraction_verification_and_zip_runtime_evidence_facts(tmp_path):
     archive = tmp_path / "sample.zip"
+    sidecar = tmp_path / "sample.z01"
     archive.write_bytes(b"PK\x05\x06" + b"\0" * 18)
-    bag = FactBag()
-    bag.set("candidate.entry_path", str(archive))
-    bag.set("candidate.member_paths", [str(archive), str(tmp_path / "sample.z01")])
-    bag.set("file.detected_ext", "zip")
-    task = ArchiveTask.from_fact_bag(bag, score=10)
+    sidecar.write_bytes(b"sidecar")
+    task = direct_file_task(str(archive), all_parts=[str(archive), str(sidecar)])
     write_analysis_report(task, _analysis_report(str(archive)))
     knowledge = task.knowledge()
     knowledge.set("format.zip.structure.eocd", {"error": "bad_central_directory_signature", "physical_central_directory_offset": 10, "declared_central_directory_size": 40, "eocd_offset": 60}, source_layer="test")

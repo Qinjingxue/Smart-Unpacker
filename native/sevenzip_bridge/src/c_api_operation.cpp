@@ -42,6 +42,14 @@ std::vector<std::wstring> collect_passwords(const wchar_t* const* passwords, int
     return result;
 }
 
+std::vector<std::wstring> collect_names(const wchar_t* const* names, int count) {
+    std::vector<std::wstring> result;
+    if (!names || count <= 0) return result;
+    result.reserve(static_cast<std::size_t>(count));
+    for (int index = 0; index < count; ++index) result.emplace_back(names[index] ? names[index] : L"");
+    return result;
+}
+
 std::vector<ExtractInputRange> collect_ranges(const Sup7zInputRange* ranges, int range_count, const wchar_t* archive_path) {
     std::vector<ExtractInputRange> result;
     if (!ranges || range_count <= 0) {
@@ -70,6 +78,10 @@ ArchiveOperationRequest to_request(const Sup7zOperationRequest& request) {
         request.archive_path,
         request.part_paths,
         request.part_count);
+    operation.canonical_names = collect_names(request.canonical_names, request.part_count);
+    if (request.volume_numbers && request.part_count > 0) {
+        operation.volume_numbers.assign(request.volume_numbers, request.volume_numbers + request.part_count);
+    }
     operation.ranges = collect_ranges(request.ranges, request.range_count, request.archive_path);
     operation.format_hint = request.format_hint ? request.format_hint : L"";
     operation.password = request.password ? request.password : L"";

@@ -101,13 +101,21 @@ class OpenCallback final : public IArchiveOpenCallback, public IArchiveOpenVolum
 
 public:
 
-    explicit OpenCallback(std::wstring password, std::wstring archive_path = L"", std::vector<std::wstring> part_paths = {})
+    explicit OpenCallback(std::wstring password, std::wstring archive_path = L"", std::vector<std::wstring> part_paths = {}, std::vector<std::wstring> canonical_names = {})
 
         : password_(std::move(password)),
 
           archive_path_(std::move(archive_path)),
 
           part_paths_(std::move(part_paths)) {
+
+        if (!canonical_names.empty() && canonical_names.size() == part_paths_.size()) {
+            for (std::size_t index = 0; index < part_paths_.size(); ++index) {
+                const std::wstring alias = lower_path(std::filesystem::path(canonical_names[index]).filename().wstring());
+                if (!alias.empty()) volume_paths_[alias] = part_paths_[index];
+            }
+            return;
+        }
 
         for (const auto& path : part_paths_) {
 

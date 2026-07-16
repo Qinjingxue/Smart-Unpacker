@@ -107,8 +107,9 @@ PasswordTestResult test_one_password(
     const std::vector<GUID>& formats,
 
     const std::vector<ExtractInputRange>& input_ranges = {},
+    bool bounded_password_probe = false,
 
-    bool bounded_password_probe = false
+    const std::vector<std::wstring>& canonical_names = {}
 
 );
 
@@ -159,8 +160,9 @@ PasswordTestResult test_one_password(
     const std::vector<GUID>& formats,
 
     const std::vector<ExtractInputRange>& input_ranges,
+    bool bounded_password_probe,
 
-    bool bounded_password_probe
+    const std::vector<std::wstring>& canonical_names
 
 ) {
 
@@ -228,7 +230,8 @@ PasswordTestResult test_one_password(
 
 
 
-            ComPtr<IArchiveOpenCallback> open_callback(new OpenCallback(password, callback_archive_path(archive_path, part_paths), part_paths));
+            const std::wstring callback_path = canonical_names.empty() ? callback_archive_path(archive_path, part_paths) : canonical_names.front();
+            ComPtr<IArchiveOpenCallback> open_callback(new OpenCallback(password, callback_path, part_paths, canonical_names));
 
             hr = archive->Open(stream.get(), nullptr, open_callback.get());
 
@@ -566,7 +569,9 @@ PasswordTestResult test_password_with_parts(
 
     const std::vector<std::wstring>& part_paths,
 
-    const std::wstring& password
+    const std::wstring& password,
+
+    const std::vector<std::wstring>& canonical_names
 
 );
 
@@ -582,7 +587,9 @@ PasswordTestResult test_passwords_with_parts(
 
     const wchar_t* const* passwords,
 
-    int password_count
+    int password_count,
+
+    const std::vector<std::wstring>& canonical_names
 
 );
 
@@ -612,7 +619,9 @@ PasswordTestResult test_password_with_parts(
 
     const std::vector<std::wstring>& part_paths,
 
-    const std::wstring& password
+    const std::wstring& password,
+
+    const std::vector<std::wstring>& canonical_names
 
 ) {
 
@@ -634,7 +643,10 @@ PasswordTestResult test_password_with_parts(
 
 
 
-    PasswordTestResult result = test_one_password(create_object, archive_path, password, part_paths.empty() ? std::vector<std::wstring>{archive_path} : part_paths);
+    const auto effective_parts = part_paths.empty() ? std::vector<std::wstring>{archive_path} : part_paths;
+    PasswordTestResult result = test_one_password(
+        create_object, archive_path, password, effective_parts,
+        candidate_formats(archive_path, effective_parts), {}, false, canonical_names);
 
     result.attempts = 1;
 
@@ -692,7 +704,9 @@ PasswordTestResult test_passwords_with_parts(
 
     const wchar_t* const* passwords,
 
-    int password_count
+    int password_count,
+
+    const std::vector<std::wstring>& canonical_names
 
 ) {
 
@@ -780,7 +794,9 @@ PasswordTestResult test_passwords_with_parts(
 
             {},
 
-            true);
+            true,
+
+            canonical_names);
 
         current.attempts = i + 1;
 

@@ -187,6 +187,8 @@ class _Sup7zOperationRequest(ctypes.Structure):
         ("archive_path", ctypes.c_wchar_p),
         ("part_paths", ctypes.POINTER(ctypes.c_wchar_p)),
         ("part_count", ctypes.c_int),
+        ("canonical_names", ctypes.POINTER(ctypes.c_wchar_p)),
+        ("volume_numbers", ctypes.POINTER(ctypes.c_int)),
         ("ranges", ctypes.POINTER(_Sup7zInputRange)),
         ("range_count", ctypes.c_int),
         ("format_hint", ctypes.c_wchar_p),
@@ -233,13 +235,15 @@ class NativePasswordTester:
         archive_path: str,
         part_paths: list[str] | None = None,
         archive_input: dict | None = None,
-    ) -> tuple[str, list[str], list[dict], str]:
+    ) -> tuple[str, list[str], list[str], list[int], list[dict], str]:
         effective_archive = str(archive_path)
         effective_parts = list(dict.fromkeys(part_paths or [archive_path]))
         ranges: list[dict] = []
+        canonical_names: list[str] = []
+        volume_numbers: list[int] = []
         format_hint = ""
         if not isinstance(archive_input, dict):
-            return effective_archive, effective_parts, ranges, format_hint
+            return effective_archive, effective_parts, canonical_names, volume_numbers, ranges, format_hint
 
         effective_archive = str(archive_input.get("entry_path") or effective_archive)
         format_hint = str(archive_input.get("format_hint") or archive_input.get("format") or "")
@@ -253,6 +257,14 @@ class NativePasswordTester:
         if part_paths_from_descriptor:
             effective_parts = list(dict.fromkeys(part_paths_from_descriptor))
 
+        if mode in {"native_volumes", "sfx_with_volumes"}:
+            ordered = sorted(raw_parts, key=lambda item: int(item.get("volume_number") or 0))
+            volume_numbers = [int(item.get("volume_number") or 0) for item in ordered]
+            canonical_names = [str(item.get("canonical_name") or "") for item in ordered]
+            if volume_numbers != list(range(1, len(ordered) + 1)) or any(not name for name in canonical_names):
+                raise ValueError("structured volume descriptor requires contiguous volume_number and canonical_name")
+            effective_parts = [str(item.get("path") or "") for item in ordered]
+
         if mode == "file_range":
             ranges = self._ranges_from_objects(raw_parts, effective_archive)
             if not ranges and isinstance(archive_input.get("segment"), dict):
@@ -261,7 +273,7 @@ class NativePasswordTester:
         elif mode == "concat_ranges":
             raw_ranges = [item for item in archive_input.get("ranges") or [] if isinstance(item, dict)]
             ranges = self._ranges_from_objects(raw_ranges or raw_parts, effective_archive)
-        return effective_archive, effective_parts, ranges, format_hint
+        return effective_archive, effective_parts, canonical_names, volume_numbers, ranges, format_hint
 
     def _ranges_from_objects(self, items: list[dict], default_path: str) -> list[dict]:
         return [
@@ -289,7 +301,7 @@ class NativePasswordTester:
         passwords: list[str] | None = None,
     ) -> _Sup7zOperationResult:
         library = self._load()
-        effective_archive, effective_parts, ranges, format_hint = self._archive_operation_input(
+        effective_archive, effective_parts, canonical_names, volume_numbers, ranges, format_hint = self._archive_operation_input(
             archive_path,
             part_paths=part_paths,
             archive_input=archive_input,
@@ -298,6 +310,13 @@ class NativePasswordTester:
         if effective_parts:
             part_array_type = ctypes.c_wchar_p * len(effective_parts)
             part_array = part_array_type(*effective_parts)
+        canonical_array = None
+        number_array = None
+        if canonical_names:
+            canonical_array_type = ctypes.c_wchar_p * len(canonical_names)
+            canonical_array = canonical_array_type(*canonical_names)
+            number_array_type = ctypes.c_int * len(volume_numbers)
+            number_array = number_array_type(*volume_numbers)
 
         range_array = None
         if ranges:
@@ -324,6 +343,8 @@ class NativePasswordTester:
             ctypes.c_wchar_p(str(effective_archive)),
             part_array,
             ctypes.c_int(len(effective_parts)),
+            canonical_array,
+            number_array,
             range_array,
             ctypes.c_int(len(ranges)),
             ctypes.c_wchar_p(format_hint),
@@ -839,14 +860,24 @@ def _manifest_buffer_chars(max_items: int) -> int:
     return min(max(1024 * 1024, item_count * 256), 16 * 1024 * 1024)
 
 
-def cached_test_archive(archive_path: str, password: str = "", part_paths: list[str] | None = None) -> NativeArchiveTest:
+def cached_test_archive(
+    archive_path: str,
+    password: str = "",
+    part_paths: list[str] | None = None,
+    archive_input: dict | None = None,
+) -> NativeArchiveTest:
     tester = get_native_password_tester()
     password = password or ""
-    key = _cache_key(tester, archive_path, part_paths) + (password,)
+    descriptor_key = json.dumps(archive_input, ensure_ascii=False, sort_keys=True) if archive_input else ""
+    key = _cache_key(tester, archive_path, part_paths) + (password, descriptor_key)
     return cached_value(
         "native_7z_test",
         key,
-        lambda: tester.test_archive(archive_path, password=password, part_paths=part_paths),
+        lambda: (
+            tester.test_archive(archive_path, password=password, part_paths=part_paths, archive_input=archive_input)
+            if archive_input is not None
+            else tester.test_archive(archive_path, password=password, part_paths=part_paths)
+        ),
     )
 
 

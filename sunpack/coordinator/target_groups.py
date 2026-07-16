@@ -19,12 +19,24 @@ def relation_group_to_fact_bag(group: CandidateGroup) -> FactBag:
     bag.set("candidate.entry_path", group.entry_path)
     bag.set("candidate.member_paths", all_paths)
     bag.set("candidate.logical_name", group.logical_name)
-    source_descriptor = ArchiveInputDescriptor.from_parts(
-        archive_path=group.entry_path,
-        part_paths=all_paths,
-        logical_name=group.logical_name,
-    )
+    if group.split_volumes:
+        source_descriptor = ArchiveInputDescriptor.from_split_volumes(
+            archive_path=group.entry_path,
+            volumes=group.split_volumes,
+            format_hint=_split_format_hint(
+                relation.split_family,
+                group.split_volumes[0].style,
+                group.split_volumes[0].prefix,
+            ),
+            logical_name=group.logical_name,
+        )
+    else:
+        source_descriptor = ArchiveInputDescriptor.from_parts(
+            archive_path=group.entry_path,
+            logical_name=group.logical_name,
+        )
     state = ArchiveState.from_archive_input(source_descriptor)
+    bag.set("archive.input", source_descriptor.to_dict())
     bag.set("archive.state", state.to_dict())
     bag.set("archive.source", state.source.to_dict())
     bag.set("archive.patch_stack", [])
@@ -76,6 +88,17 @@ def relation_group_to_fact_bag(group: CandidateGroup) -> FactBag:
     if member_paths:
         bag.set("relation.member_paths", list(member_paths))
     return bag
+
+
+def _split_format_hint(family: str, style: str, prefix: str = "") -> str:
+    value = f"{family} {style} {prefix}".lower()
+    if "rar" in value:
+        return "rar"
+    if "zip" in value:
+        return "zip"
+    if "7z" in value:
+        return "7z"
+    return ""
 
 
 def _inject_scene_metadata(bag: FactBag, metadata: dict) -> None:

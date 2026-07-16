@@ -157,7 +157,8 @@ PasswordTestResult test_password_with_parts(
     const std::wstring& seven_zip_dll_path,
     const std::wstring& archive_path,
     const std::vector<std::wstring>& part_paths,
-    const std::wstring& password
+    const std::wstring& password,
+    const std::vector<std::wstring>& canonical_names = {}
 );
 
 PasswordTestResult test_passwords(
@@ -172,7 +173,8 @@ PasswordTestResult test_passwords_with_parts(
     const std::wstring& archive_path,
     const std::vector<std::wstring>& part_paths,
     const wchar_t* const* passwords,
-    int password_count
+    int password_count,
+    const std::vector<std::wstring>& canonical_names = {}
 );
 
 PasswordTestResult test_passwords_with_ranges(
@@ -194,7 +196,8 @@ ExtractArchiveResult extract_archive_with_parts(
     const std::wstring& codepage,
     const std::vector<std::wstring>& decoded_names,
     ExtractProgressCallback progress = nullptr,
-    bool dry_run = false
+    bool dry_run = false,
+    const std::vector<std::wstring>& canonical_names = {}
 );
 
 ExtractArchiveResult extract_archive_with_ranges(
@@ -365,6 +368,8 @@ struct Sup7zOperationRequest {
     const wchar_t* archive_path;
     const wchar_t* const* part_paths;
     int part_count;
+    const wchar_t* const* canonical_names;
+    const int* volume_numbers;
     const Sup7zInputRange* ranges;
     int range_count;
     const wchar_t* format_hint;

@@ -349,10 +349,8 @@ def clone_archive_task(task: ArchiveTask, *, key_suffix: str = "") -> ArchiveTas
         split_info=type(task.split_info)(
             is_split=task.split_info.is_split,
             is_sfx_stub=task.split_info.is_sfx_stub,
-            parts=list(task.split_info.parts or []),
-            preferred_entry=task.split_info.preferred_entry,
+            archive_input=task.split_info.archive_input,
             source=task.split_info.source,
-            volumes=list(task.split_info.volumes or []),
         ),
         decision=task.decision,
         stop_reason=task.stop_reason,

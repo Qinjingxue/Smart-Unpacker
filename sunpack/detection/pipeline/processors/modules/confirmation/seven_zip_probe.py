@@ -2,7 +2,7 @@ from typing import Dict, Any
 from sunpack.detection.pipeline.processors.context import FactProcessorContext
 from sunpack.detection.pipeline.processors.registry import register_processor
 from sunpack.support.sevenzip_bridge import cached_probe_archive
-from sunpack.rename.scheduler import RenameScheduler
+from sunpack.contracts.archive_state import ArchiveState
 
 EXECUTABLE_PROBE_TYPES = {"pe", "elf", "macho", "te"}
 
@@ -41,21 +41,22 @@ def _known_embedded_archive_input(path: str, facts, part_paths: list[str]) -> di
 )
 def process_7z_probe(context: FactProcessorContext) -> Dict[str, Any]:
     base_path = context.fact_bag.get("file.path") or ""
-    member_paths = list(context.fact_bag.get("candidate.member_paths") or [base_path])
-    volume_entries = list(context.fact_bag.get("relation.split_volumes") or [])
-    normalizer = RenameScheduler()
-    staged = normalizer.normalize_archive_paths(base_path, member_paths, volume_entries=volume_entries)
-    try:
-        archive_input = _known_embedded_archive_input(staged.archive, context.fact_bag, staged.run_parts)
-        probe = cached_probe_archive(
-            staged.archive,
-            part_paths=staged.run_parts,
-            archive_input=archive_input,
-        )
-    finally:
-        normalizer.cleanup_normalized_split_group(staged)
+    descriptor = ArchiveState.from_any(
+        context.fact_bag.get("archive.state"),
+        archive_path=base_path,
+        part_paths=list(context.fact_bag.get("candidate.member_paths") or [base_path]),
+    ).to_archive_input_descriptor()
+    archive_input = (
+        _known_embedded_archive_input(descriptor.entry_path, context.fact_bag, descriptor.part_paths())
+        or descriptor.to_dict()
+    )
+    probe = cached_probe_archive(
+        descriptor.entry_path,
+        part_paths=descriptor.part_paths(),
+        archive_input=archive_input,
+    )
     probe_offset = int(probe.offset or 0)
-    if archive_input is not None:
+    if archive_input.get("open_mode") == "file_range":
         probe_offset += int(archive_input["segment"]["start"])
     result = {
         "is_archive": probe.is_archive,

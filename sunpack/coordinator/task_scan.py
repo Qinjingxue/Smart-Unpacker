@@ -3,6 +3,8 @@ from types import SimpleNamespace
 from typing import Any
 
 from sunpack.contracts.detection import FactBag
+from sunpack.contracts.archive_input import ArchiveInputDescriptor
+from sunpack.contracts.archive_state import ArchiveState
 from sunpack.contracts.run_context import RunContext
 from sunpack.contracts.tasks import ArchiveTask
 from sunpack.coordinator.task_provider import ArchiveTaskProvider
@@ -115,6 +117,23 @@ def direct_file_task(path: str, all_parts: list[str] | None = None) -> ArchiveTa
     bag.set("archive.format_hint", format_hint)
     if is_split:
         bag.set("relation.is_split_related", True)
+        anchor = path if os.path.splitext(path)[1].lower() == ".exe" else next(
+            (item for item in parts if builder.parse_numbered_volume(item)),
+            path,
+        )
+        volumes, _complete, _reason, _missing = builder.build_split_volume_entries(anchor, parts)
+        if not volumes:
+            raise ValueError("explicit multi-volume input could not be represented structurally")
+        descriptor = ArchiveInputDescriptor.from_split_volumes(
+            archive_path=path,
+            volumes=volumes,
+            format_hint=format_hint,
+            logical_name=logical_name or name,
+        )
+        state = ArchiveState.from_archive_input(descriptor)
+        bag.set("archive.input", descriptor.to_dict())
+        bag.set("archive.state", state.to_dict())
+        bag.set("archive.source", state.source.to_dict())
     try:
         bag.set("file.size", os.path.getsize(path))
     except OSError:

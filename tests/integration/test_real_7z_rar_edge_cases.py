@@ -4,6 +4,7 @@ import pytest
 
 from sunpack.contracts.detection import FactBag
 from sunpack.contracts.tasks import ArchiveTask
+from sunpack.coordinator.task_scan import direct_file_task
 from sunpack.extraction.scheduler import ExtractionScheduler
 from tests.helpers.real_archives import ArchiveFixtureFactory
 from tests.helpers.tool_config import get_optional_rar
@@ -108,15 +109,7 @@ def _remove_current_tail_volume(case):
 
 def _task(path: Path, *, parts: list[Path] | None = None, detected_ext: str = "") -> ArchiveTask:
     all_parts = [str(item) for item in (parts or [path])]
-    bag = FactBag()
-    bag.set("candidate.entry_path", str(path))
-    bag.set("candidate.member_paths", all_parts)
-    bag.set("file.detected_ext", detected_ext)
-    return ArchiveTask(
-        fact_bag=bag,
-        score=100,
-        main_path=str(path),
-        all_parts=all_parts,
-        key=str(path),
-        detected_ext=detected_ext,
-    ).ensure_archive_state()
+    task = direct_file_task(str(path), all_parts=all_parts)
+    task.detected_ext = detected_ext
+    task.fact_bag.set("file.detected_ext", detected_ext)
+    return task.ensure_archive_state()

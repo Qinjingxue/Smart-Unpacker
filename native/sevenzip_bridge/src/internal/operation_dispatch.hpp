@@ -12,6 +12,8 @@ struct ArchiveOperationRequest {
     std::wstring seven_zip_dll_path;
     std::wstring archive_path;
     std::vector<std::wstring> part_paths;
+    std::vector<std::wstring> canonical_names;
+    std::vector<int> volume_numbers;
     std::vector<ExtractInputRange> ranges;
     std::wstring format_hint;
     std::wstring password;

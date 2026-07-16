@@ -21,10 +21,8 @@ from sunpack.support.collections import dedupe_values
 class SplitArchiveInfo:
     is_split: bool = False
     is_sfx_stub: bool = False
-    parts: List[str] = field(default_factory=list)
-    preferred_entry: str = ""
+    archive_input: ArchiveInputDescriptor | None = None
     source: str = ""
-    volumes: List[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -54,10 +52,10 @@ class ArchiveTask:
             self.key = self.logical_name or self.main_path
         if self.split_info is None:
             self.split_info = SplitArchiveInfo()
-        if not self.split_info.parts and self.all_parts:
-            self.split_info.parts = list(self.all_parts)
-        if len(self.split_info.parts) > 1:
-            self.split_info.is_split = True
+        if self.split_info.archive_input is not None:
+            self.all_parts = self.split_info.archive_input.part_paths()
+            self.main_path = self.split_info.archive_input.entry_path
+            self.split_info.is_split = self.split_info.archive_input.open_mode in {"native_volumes", "sfx_with_volumes"}
         if not isinstance(self.fact_bag.get("archive.knowledge"), dict):
             self._write_detection_boundary_knowledge()
 
@@ -76,13 +74,18 @@ class ArchiveTask:
             fact_bag.get("relation.is_split_exe_companion")
             or fact_bag.get("relation.is_disguised_split_exe_companion")
         )
+        state = ArchiveState.from_any(
+            fact_bag.get("archive.state"),
+            archive_path=main_path,
+            part_paths=all_parts,
+            logical_name=logical_name,
+        )
+        archive_input = state.to_archive_input_descriptor()
         split_info = SplitArchiveInfo(
             is_split=is_split or len(all_parts) > 1,
             is_sfx_stub=is_sfx_stub,
-            parts=list(all_parts),
-            preferred_entry="",
+            archive_input=archive_input,
             source="detection" if is_split or is_sfx_stub else "",
-            volumes=list(fact_bag.get("relation.split_volumes") or []),
         )
         task = cls(
             fact_bag=fact_bag,
@@ -114,20 +117,12 @@ class ArchiveTask:
 
         self.main_path = mapped(self.main_path)
         self.all_parts = [mapped(path) for path in self.all_parts]
-        self.split_info.parts = [mapped(path) for path in self.split_info.parts]
-        self.split_info.volumes = [
-            {**volume, "path": mapped(str(volume.get("path") or ""))}
-            for volume in self.split_info.volumes
-            if isinstance(volume, dict)
-        ]
-        if self.split_info.preferred_entry:
-            self.split_info.preferred_entry = mapped(self.split_info.preferred_entry)
+        if self.split_info.archive_input is not None:
+            self.split_info.archive_input = self.split_info.archive_input.with_path_mapping(mapped)
         self.fact_bag.set("file.path", self.main_path)
         self.fact_bag.set("candidate.entry_path", self.main_path)
         self.fact_bag.set("candidate.member_paths", list(self.all_parts))
         self.fact_bag.set("file.split_members", [path for path in self.all_parts if path != self.main_path])
-        if self.split_info.volumes:
-            self.fact_bag.set("relation.split_volumes", list(self.split_info.volumes))
         try:
             self.set_archive_state(self.archive_state().with_path_mapping(mapped))
         except (TypeError, ValueError):
@@ -248,7 +243,11 @@ class ArchiveTask:
         phase_prefix: str = "store_archive_state",
     ) -> None:
         with _phase(phase_timer, f"{phase_prefix}_source_input"):
-            source_input = state.to_archive_input_descriptor().to_dict()
+            source_descriptor = state.to_archive_input_descriptor()
+            source_input = source_descriptor.to_dict()
+            self.split_info.archive_input = source_descriptor
+            self.split_info.is_split = source_descriptor.open_mode in {"native_volumes", "sfx_with_volumes"}
+            self.split_info.is_sfx_stub = source_descriptor.open_mode == "sfx_with_volumes"
         with _phase(phase_timer, f"{phase_prefix}_merge_knowledge"):
             state_snapshot_for_knowledge = _archive_state_snapshot(state)
             knowledge = self._merged_state_knowledge(state, source_input, state_snapshot_for_knowledge)
@@ -343,13 +342,15 @@ class ArchiveTask:
     def _write_detection_boundary_knowledge(self) -> None:
         knowledge = self.knowledge()
         raw_source = self.fact_bag.get("archive.input")
-        source_descriptor = ArchiveInputDescriptor.from_any(
-            raw_source if isinstance(raw_source, dict) else None,
-            archive_path=self.main_path,
-            part_paths=list(self.all_parts or [self.main_path]),
-            format_hint=self._format_hint(),
-            logical_name=str(self.logical_name or ""),
-        )
+        source_descriptor = self.split_info.archive_input
+        if source_descriptor is None:
+            source_descriptor = ArchiveInputDescriptor.from_any(
+                raw_source if isinstance(raw_source, dict) else None,
+                archive_path=self.main_path,
+                part_paths=list(self.all_parts or [self.main_path]),
+                format_hint=self._format_hint(),
+                logical_name=str(self.logical_name or ""),
+            )
         source_input = source_descriptor.to_dict()
         knowledge.merge({
             "filesystem": {
@@ -371,8 +372,7 @@ class ArchiveTask:
             "relations": {
                 "is_split": bool(self.split_info.is_split),
                 "is_sfx_stub": bool(self.split_info.is_sfx_stub),
-                "parts": list(self.split_info.parts or []),
-                "volumes": list(self.split_info.volumes or []),
+                "archive_input": source_input,
             },
         }, source_layer="contracts", source_module="from_fact_bag")
         payload = knowledge.to_dict()

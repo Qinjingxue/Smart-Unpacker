@@ -20,7 +20,7 @@ def verifier_input(
         archive_path=archive_path,
         part_paths=part_paths,
     )
-    if descriptor.open_mode in {"file", "native_volumes", "staged_volumes", "sfx_with_volumes"}:
+    if descriptor.open_mode in {"file", "native_volumes", "sfx_with_volumes"}:
         return descriptor.entry_path or archive_path, None
 
     ranges = _descriptor_ranges(descriptor)

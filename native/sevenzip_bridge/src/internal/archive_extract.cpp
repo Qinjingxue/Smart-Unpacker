@@ -183,7 +183,9 @@ ExtractArchiveResult extract_archive_internal(
 
     ExtractProgressCallback progress,
 
-    bool dry_run = false
+    bool dry_run = false,
+
+    const std::vector<std::wstring>& canonical_names = {}
 
 ) {
 
@@ -192,17 +194,17 @@ ExtractArchiveResult extract_archive_internal(
     result.backend_available = true;
     result.requested_codepage = codepage;
 
-    if (has_split_volume_gap(part_paths)) {
+    if (canonical_names.empty() && has_split_volume_gap(part_paths)) {
         set_missing_volume_failure(result, "input_preflight", "standard_sequence_gap");
         return result;
     }
 
-    if (seven_zip_parts_prove_missing_tail(part_paths)) {
+    if (seven_zip_parts_prove_missing_tail(part_paths, !canonical_names.empty())) {
         set_missing_volume_failure(result, "input_preflight", "seven_zip_start_header_length");
         return result;
     }
 
-    if (likely_missing_split_tail(part_paths)) {
+    if (canonical_names.empty() && likely_missing_split_tail(part_paths)) {
         result.missing_volume_suspected = true;
         result.missing_volume_evidence = "tail_size_heuristic";
     }
@@ -335,7 +337,8 @@ ExtractArchiveResult extract_archive_internal(
 
 
 
-        auto* raw_open_callback = new OpenCallback(password, callback_archive_path(archive_path, part_paths), part_paths);
+        const std::wstring callback_path = canonical_names.empty() ? callback_archive_path(archive_path, part_paths) : canonical_names.front();
+        auto* raw_open_callback = new OpenCallback(password, callback_path, part_paths, canonical_names);
         ComPtr<IArchiveOpenCallback> open_callback(raw_open_callback);
 
         hr = archive->Open(stream.get(), nullptr, open_callback.get());
@@ -650,7 +653,9 @@ ExtractArchiveResult extract_archive_with_parts(
 
     ExtractProgressCallback progress,
 
-    bool dry_run
+    bool dry_run,
+
+    const std::vector<std::wstring>& canonical_names
 
 ) {
 
@@ -702,7 +707,9 @@ ExtractArchiveResult extract_archive_with_parts(
 
         std::move(progress),
 
-        dry_run);
+        dry_run,
+
+        canonical_names);
 
 #else
 

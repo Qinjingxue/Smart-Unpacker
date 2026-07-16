@@ -7,6 +7,7 @@ from sunpack.contracts.archive_input import ArchiveInputDescriptor
 from sunpack.contracts.archive_state import ArchiveState, PatchOperation, PatchPlan
 from sunpack.contracts.detection import FactBag
 from sunpack.contracts.tasks import ArchiveTask, SplitArchiveInfo
+from sunpack.coordinator.task_scan import direct_file_task
 from sunpack.analysis.stage import ArchiveAnalysisStage
 from sunpack.support import archive_knowledge_projection as knowledge_view
 
@@ -22,20 +23,12 @@ class _FakeAnalysisScheduler:
 
 
 def _task(path, *, parts=None, volumes=None):
-    bag = FactBag()
-    bag.set("candidate.entry_path", str(path))
-    bag.set("candidate.member_paths", [str(item) for item in (parts or [path])])
+    if parts and len(parts) > 1:
+        return direct_file_task(str(path), all_parts=[str(item) for item in parts])
+    descriptor = ArchiveInputDescriptor.from_parts(archive_path=str(path), logical_name="case")
     return ArchiveTask(
-        fact_bag=bag,
-        score=10,
-        main_path=str(path),
-        all_parts=[str(item) for item in (parts or [path])],
-        logical_name="case",
-        split_info=SplitArchiveInfo(
-            is_split=bool(parts and len(parts) > 1),
-            parts=[str(item) for item in (parts or [path])],
-            volumes=volumes or [],
-        ),
+        fact_bag=FactBag(), score=10, main_path=str(path), all_parts=[str(path)], logical_name="case",
+        split_info=SplitArchiveInfo(archive_input=descriptor),
     )
 
 

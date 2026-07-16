@@ -488,12 +488,39 @@ class RelationsGroupBuilder:
         parsed_main = self.parse_numbered_volume(normalized_path(archive))
         if not parsed_main:
             parsed_parts = [
-                parsed
+                (normalized_path(path), parsed)
                 for path in all_parts
                 if (parsed := self.parse_numbered_volume(normalized_path(path)))
             ]
+            if os.path.splitext(archive)[1].lower() == ".exe" and parsed_parts:
+                external = sorted(parsed_parts, key=lambda item: int(item[1]["number"]))
+                anchor = external[0][1]
+                external_numbers = [int(item[1]["number"]) for item in external]
+                missing = [number for number in range(1, max(external_numbers) + 1) if number not in external_numbers]
+                entries = [SplitVolumeEntry(
+                    path=normalized_path(archive),
+                    number=1,
+                    role="first",
+                    source="standard",
+                    style="sfx_numeric_suffix",
+                    prefix=str(anchor["prefix"]),
+                    width=int(anchor["width"]),
+                )]
+                entries.extend(
+                    SplitVolumeEntry(
+                        path=path,
+                        number=int(parsed["number"]) + 1,
+                        role="member",
+                        source="candidate" if parsed.get("decorated") else "standard",
+                        style="sfx_numeric_suffix",
+                        prefix=str(anchor["prefix"]),
+                        width=int(anchor["width"]),
+                    )
+                    for path, parsed in external
+                )
+                return entries, not missing, "missing_middle" if missing else "", [number + 1 for number in missing]
             oldstyle = next(
-                (parsed for parsed in parsed_parts if parsed["style"] == "rar_oldstyle"),
+                (parsed for _path, parsed in parsed_parts if parsed["style"] == "rar_oldstyle"),
                 None,
             )
             if oldstyle and case_key(normalized_path(archive)) == case_key(f'{oldstyle["prefix"]}.rar'):
@@ -503,8 +530,6 @@ class RelationsGroupBuilder:
                     "style": "rar_oldstyle",
                     "width": oldstyle["width"],
                 }
-            if os.path.splitext(archive)[1].lower() == ".exe":
-                return [], None, "", []
             if not parsed_main:
                 parsed_main = self._first_parsed_volume(all_parts)
         if not parsed_main:
@@ -606,7 +631,11 @@ class RelationsGroupBuilder:
             SplitVolumeEntry(
                 path=path,
                 number=number,
-                role="first" if number == 1 else "member",
+                role=(
+                    "terminal"
+                    if style == "zip_spanned" and path_key(path) in {path_key(item) for item in terminal_candidates}
+                    else "first" if number == 1 else "member"
+                ),
                 source="candidate" if path_key(path) in decorated_paths else "standard",
                 style=style,
                 prefix=archive_prefix,
@@ -619,7 +648,11 @@ class RelationsGroupBuilder:
             entries.append(SplitVolumeEntry(
                 path=path,
                 number=number,
-                role="first" if number == 1 else "member",
+                role=(
+                    "terminal"
+                    if style == "zip_spanned" and path_key(path) in {path_key(item) for item in terminal_candidates}
+                    else "first" if number == 1 else "member"
+                ),
                 source="candidate",
                 style=style,
                 prefix=archive_prefix,

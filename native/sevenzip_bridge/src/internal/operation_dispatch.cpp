@@ -85,7 +85,8 @@ PasswordTestResult run_password_attempts(const ArchiveOperationRequest& request)
         request.archive_path,
         effective_parts(request),
         pointers.data(),
-        static_cast<int>(pointers.size()));
+        static_cast<int>(pointers.size()),
+        request.canonical_names);
 }
 
 PasswordTestResult run_single_test(const ArchiveOperationRequest& request) {
@@ -103,7 +104,8 @@ PasswordTestResult run_single_test(const ArchiveOperationRequest& request) {
         request.seven_zip_dll_path,
         request.archive_path,
         effective_parts(request),
-        request.password);
+        request.password,
+        request.canonical_names);
 }
 
 ArchiveOperationResult run_probe(const ArchiveOperationRequest& request) {
@@ -140,6 +142,16 @@ ArchiveOperationResult invalid_request(const std::string& message) {
 ArchiveOperationResult run_archive_operation(const ArchiveOperationRequest& request) {
     if (request.seven_zip_dll_path.empty() || request.archive_path.empty()) {
         return invalid_request("missing required path");
+    }
+    if (request.part_paths.size() > 1) {
+        if (request.canonical_names.size() != request.part_paths.size() || request.volume_numbers.size() != request.part_paths.size()) {
+            return invalid_request("structured multi-volume input is required");
+        }
+        for (std::size_t index = 0; index < request.volume_numbers.size(); ++index) {
+            if (request.volume_numbers[index] != static_cast<int>(index + 1) || request.canonical_names[index].empty()) {
+                return invalid_request("invalid structured volume sequence");
+            }
+        }
     }
 
     switch (request.operation) {

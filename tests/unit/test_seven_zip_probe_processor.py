@@ -64,4 +64,5 @@ def test_probe_keeps_whole_file_path_without_known_offset(tmp_path, monkeypatch)
 
     seven_zip_probe.process_7z_probe(context)
 
-    assert calls == [None]
+    assert calls[0]["open_mode"] == "file"
+    assert calls[0]["entry_path"] == str(archive)

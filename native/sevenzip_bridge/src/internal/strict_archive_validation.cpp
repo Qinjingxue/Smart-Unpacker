@@ -84,19 +84,32 @@ private:
     bool valid_ = false;
 };
 
-bool seven_zip_parts_prove_missing_tail(const std::vector<std::wstring>& part_paths) {
-    const auto volumes = sorted_data_volume_paths(unique_existing_paths(L"", part_paths));
-    if (volumes.empty() || !has_numbered_split_head(volumes)) {
+bool seven_zip_parts_prove_missing_tail(const std::vector<std::wstring>& part_paths, bool structured_order) {
+    const auto existing = unique_existing_paths(L"", part_paths);
+    const auto volumes = structured_order ? existing : sorted_data_volume_paths(existing);
+    if (volumes.empty() || (!structured_order && !has_numbered_split_head(volumes))) {
         return false;
     }
 
-    RangeFile first(volumes.front());
-    std::vector<unsigned char> header;
-    if (!first.valid() || !first.read(0, 32, header)) {
-        return false;
-    }
     const unsigned char signature[] = {'7', 'z', 0xBC, 0xAF, 0x27, 0x1C};
-    if (!std::equal(std::begin(signature), std::end(signature), header.begin())) {
+    std::vector<unsigned char> header;
+    std::size_t signature_offset = 0;
+    std::size_t data_volume_index = 0;
+    bool signature_found = false;
+    for (std::size_t index = 0; index < volumes.size(); ++index) {
+        RangeFile candidate(volumes[index]);
+        std::vector<unsigned char> prefix;
+        const std::size_t scan_size = static_cast<std::size_t>(std::min<UInt64>(candidate.size(), 16u * 1024u * 1024u));
+        if (!candidate.valid() || scan_size < 32 || !candidate.read(0, scan_size, prefix)) continue;
+        const auto signature_it = std::search(prefix.begin(), prefix.end(), std::begin(signature), std::end(signature));
+        if (signature_it == prefix.end() || static_cast<std::size_t>(prefix.end() - signature_it) < 32) continue;
+        signature_offset = static_cast<std::size_t>(signature_it - prefix.begin());
+        data_volume_index = index;
+        header.assign(signature_it, signature_it + 32);
+        signature_found = true;
+        break;
+    }
+    if (!signature_found) {
         return false;
     }
     if (crc32_bytes(header.data() + 12, 20) != le32_at(header, 8)) {
@@ -113,10 +126,10 @@ bool seven_zip_parts_prove_missing_tail(const std::vector<std::wstring>& part_pa
         next_size > std::numeric_limits<UInt64>::max() - (32u + next_offset)) {
         return false;
     }
-    const UInt64 expected_size = 32u + next_offset + next_size;
+    const UInt64 expected_size = static_cast<UInt64>(signature_offset) + 32u + next_offset + next_size;
     UInt64 available_size = 0;
-    for (const auto& path : volumes) {
-        const UInt64 size = file_size_or_zero(path);
+    for (std::size_t index = data_volume_index; index < volumes.size(); ++index) {
+        const UInt64 size = file_size_or_zero(volumes[index]);
         if (size > std::numeric_limits<UInt64>::max() - available_size) {
             return false;
         }

@@ -337,6 +337,9 @@ struct WorkerArchiveInput {
     std::wstring format_hint;
     std::wstring open_mode;
     std::vector<std::wstring> part_paths;
+    std::vector<std::wstring> canonical_names;
+    std::vector<int> volume_numbers;
+    std::string validation_error;
     std::vector<sunpack::sevenzip::ExtractInputRange> ranges;
     std::vector<sunpack::sevenzip::ExtractPatchOperation> patches;
 };
@@ -466,12 +469,39 @@ WorkerArchiveInput parse_archive_input_descriptor(
     const std::string format_hint = json_string_field(descriptor, "format_hint", json_string_field(request, "format_hint", ""));
     input.format_hint = utf8_to_wide(format_hint);
 
+    struct ParsedPart { int number; std::wstring path; std::wstring canonical_name; };
+    std::vector<ParsedPart> structured_parts;
     std::vector<std::wstring> parts;
     for (const auto& object_json : json_object_array_field(descriptor, "parts")) {
         const std::string path = json_string_field(object_json, "path", "");
         if (!path.empty()) {
             parts.push_back(utf8_to_wide(path));
+            unsigned long long number = 0;
+            const std::string canonical_name = json_string_field(object_json, "canonical_name", "");
+            if (mode == "native_volumes" || mode == "sfx_with_volumes") {
+                if (!json_uint_field_in_object(object_json, "volume_number", &number) || number == 0 || canonical_name.empty()) {
+                    input.validation_error = "structured volume part requires volume_number and canonical_name";
+                } else {
+                    structured_parts.push_back({static_cast<int>(number), utf8_to_wide(path), utf8_to_wide(canonical_name)});
+                }
+            }
         }
+    }
+    if (mode == "native_volumes" || mode == "sfx_with_volumes") {
+        std::sort(structured_parts.begin(), structured_parts.end(), [](const ParsedPart& left, const ParsedPart& right) {
+            return left.number < right.number;
+        });
+        parts.clear();
+        for (std::size_t index = 0; index < structured_parts.size(); ++index) {
+            if (structured_parts[index].number != static_cast<int>(index + 1)) {
+                input.validation_error = "structured volume sequence must be contiguous and start at 1";
+                break;
+            }
+            parts.push_back(structured_parts[index].path);
+            input.canonical_names.push_back(structured_parts[index].canonical_name);
+            input.volume_numbers.push_back(structured_parts[index].number);
+        }
+        if (parts.empty()) input.validation_error = "structured volume descriptor has no parts";
     }
     if (!parts.empty()) {
         input.part_paths = parts;
@@ -791,10 +821,17 @@ int run_request(const std::string& request) {
     };
 
     const auto archive_input = parse_archive_input_descriptor(request, archive_path, format_hint, part_paths);
+    if (!archive_input.validation_error.empty()) {
+        print_json_line(
+            "{\"type\":\"result\",\"job_id\":\"" + json_escape(job_id) +
+            "\",\"status\":\"error\",\"category\":\"invalid_request\",\"message\":\"" +
+            json_escape(archive_input.validation_error) + "\"}");
+        return 2;
+    }
     ExtractArchiveResult result = !archive_input.patches.empty()
         ? extract_archive_with_patches(dll_path, archive_input.archive_path, archive_input.part_paths, archive_input.ranges, archive_input.patches, archive_input.format_hint, password, output_dir, codepage, decoded_names, progress, dry_run)
         : archive_input.ranges.empty()
-        ? extract_archive_with_parts(dll_path, archive_input.archive_path, archive_input.part_paths, archive_input.format_hint, password, output_dir, codepage, decoded_names, progress, dry_run)
+        ? extract_archive_with_parts(dll_path, archive_input.archive_path, archive_input.part_paths, archive_input.format_hint, password, output_dir, codepage, decoded_names, progress, dry_run, archive_input.canonical_names)
         : extract_archive_with_ranges(dll_path, archive_input.archive_path, archive_input.ranges, archive_input.format_hint, password, output_dir, codepage, decoded_names, progress, dry_run);
 
     const bool ok = result.status == PasswordTestStatus::Ok && result.command_ok;
