@@ -517,7 +517,16 @@ fn logical_name_from_parsed(parsed: &ParsedVolume) -> String {
 }
 
 fn parse_numbered_volume(path: &str) -> Option<ParsedVolume> {
-    if let Some(captures) = parse_zip_spanned_re().captures(path) {
+    let (directory, filename) = split_relation_path(path);
+    let mut parsed = parse_numbered_volume_name(filename)?;
+    if !directory.is_empty() {
+        parsed.prefix = format!("{directory}{}", parsed.prefix);
+    }
+    Some(parsed)
+}
+
+fn parse_numbered_volume_name(filename: &str) -> Option<ParsedVolume> {
+    if let Some(captures) = parse_zip_spanned_re().captures(filename) {
         return Some(ParsedVolume {
             prefix: captures.name("prefix")?.as_str().to_string(),
             number: captures.name("number")?.as_str().parse().ok()?,
@@ -527,7 +536,7 @@ fn parse_numbered_volume(path: &str) -> Option<ParsedVolume> {
             decorated: false,
         });
     }
-    if let Some(captures) = parse_zip_zero_numbered_re().captures(path) {
+    if let Some(captures) = parse_zip_zero_numbered_re().captures(filename) {
         let raw_number: u32 = captures.name("number")?.as_str().parse().ok()?;
         return Some(ParsedVolume {
             prefix: captures.name("prefix")?.as_str().to_string(),
@@ -538,7 +547,7 @@ fn parse_numbered_volume(path: &str) -> Option<ParsedVolume> {
             decorated: false,
         });
     }
-    if let Some(captures) = parse_archive_numbered_re().captures(path) {
+    if let Some(captures) = parse_archive_numbered_re().captures(filename) {
         let family = archive_family(captures.name("format")?.as_str())?;
         return Some(ParsedVolume {
             prefix: format!("{}.{}", captures.name("prefix")?.as_str(), family),
@@ -549,7 +558,7 @@ fn parse_numbered_volume(path: &str) -> Option<ParsedVolume> {
             decorated: false,
         });
     }
-    if let Some(captures) = parse_rar_part_re().captures(path) {
+    if let Some(captures) = parse_rar_part_re().captures(filename) {
         let number = captures.name("number")?.as_str();
         let format = captures.name("format")?.as_str();
         return Some(ParsedVolume {
@@ -565,7 +574,7 @@ fn parse_numbered_volume(path: &str) -> Option<ParsedVolume> {
             decorated: false,
         });
     }
-    if let Some(captures) = parse_plain_numbered_re().captures(path) {
+    if let Some(captures) = parse_plain_numbered_re().captures(filename) {
         return Some(ParsedVolume {
             prefix: captures.name("prefix")?.as_str().to_string(),
             number: captures.name("number")?.as_str().parse().ok()?,
@@ -575,7 +584,18 @@ fn parse_numbered_volume(path: &str) -> Option<ParsedVolume> {
             decorated: false,
         });
     }
-    parse_decorated_numbered_volume(path)
+    parse_decorated_numbered_volume(filename)
+}
+
+fn split_relation_path(path: &str) -> (&str, &str) {
+    let Some((separator_index, separator)) = path
+        .char_indices()
+        .rfind(|(_, character)| matches!(character, '/' | '\\'))
+    else {
+        return ("", path);
+    };
+    let filename_index = separator_index + separator.len_utf8();
+    (&path[..filename_index], &path[filename_index..])
 }
 
 fn parse_decorated_numbered_volume(path: &str) -> Option<ParsedVolume> {

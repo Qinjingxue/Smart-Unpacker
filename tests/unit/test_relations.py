@@ -247,6 +247,29 @@ def test_relation_public_helpers_parse_decorated_split_names(name, expected):
     }
 
 
+def test_relation_volume_parser_does_not_match_tokens_in_parent_directories():
+    scheduler = RelationsScheduler()
+    probe_payload = (
+        r"C:\watch\.sunpack_watch_probes\326f50021e731b520ffa"
+        r"\work\encrypted\payload.txt"
+    )
+
+    assert scheduler.parse_numbered_volume(probe_payload) is None
+    assert scheduler.detect_split_role(probe_payload) is None
+
+    decorated_volume = (
+        r"C:\watch\.sunpack_watch_probes\r-noise-32"
+        r"\work\bundle.AApart-01ZZ.BBexeCC"
+    )
+    assert scheduler.parse_numbered_volume(decorated_volume) == {
+        "prefix": r"C:\watch\.sunpack_watch_probes\r-noise-32\work\bundle",
+        "number": 1,
+        "style": "rar_sfx_part",
+        "width": 2,
+        "decorated": True,
+    }
+
+
 def test_relation_group_builder_groups_decorated_formats_without_cross_merging(tmp_path):
     names = [
         "bundle.AApart-01ZZ.BBrarCC",
