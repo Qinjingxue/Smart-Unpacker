@@ -39,6 +39,15 @@ class SplitVolumeNormalizer:
     def _format_numbered_volume(self, prefix: str, number: int, style: str, width: int) -> str:
         if style == "rar_part":
             return f"{prefix}.part{number:0{width}d}.rar"
+        if style == "rar_sfx_part":
+            extension = "exe" if number == 1 else "rar"
+            return f"{prefix}.part{number:0{width}d}.{extension}"
+        if style == "rar_oldstyle":
+            return f"{prefix}.rar" if number == 1 else f"{prefix}.r{number - 2:02d}"
+        if style == "zip_spanned":
+            return f"{prefix}.z{number:02d}"
+        if style == "zip_zero_numbered":
+            return f"{prefix}.{number - 1:04d}"
         return f"{prefix}.{number:03d}"
 
     def _link_or_copy(self, source: str, target: str):
@@ -163,7 +172,11 @@ class SplitVolumeNormalizer:
         normalized = []
         for path in all_parts:
             parsed = self._relations.parse_numbered_volume(normalized_path(path))
-            if parsed and parsed["style"] == style and case_key(parsed["prefix"]) == case_key(archive_prefix):
+            styles_match = parsed and (
+                parsed["style"] == style
+                or {str(parsed["style"]), style} <= {"rar_part", "rar_sfx_part"}
+            )
+            if styles_match and case_key(parsed["prefix"]) == case_key(archive_prefix):
                 normalized.append({
                     "path": normalized_path(path),
                     "number": int(parsed["number"]),

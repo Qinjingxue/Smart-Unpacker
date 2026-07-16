@@ -170,6 +170,146 @@ def test_relation_public_helpers_parse_split_names():
 
 
 @pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        (
+            r"C:\tmp\bundle.AA中part-01尾ZZ.BB前rar后CC",
+            {
+                "prefix": r"C:\tmp\bundle",
+                "number": 1,
+                "style": "rar_part",
+                "width": 2,
+                "decorated": True,
+            },
+        ),
+        (
+            r"C:\tmp\bundle.AAvolume_2尾ZZ.BB7zCC",
+            {
+                "prefix": r"C:\tmp\bundle.7z",
+                "number": 2,
+                "style": "numeric_suffix",
+                "width": 3,
+                "decorated": True,
+            },
+        ),
+        (
+            r"C:\tmp\bundle.AAzipZZ.BB0000CC.camouflage.more",
+            {
+                "prefix": r"C:\tmp\bundle.zip",
+                "number": 1,
+                "style": "zip_zero_numbered",
+                "width": 4,
+                "decorated": True,
+            },
+        ),
+        (
+            r"C:\tmp\classic.[z-02]~",
+            {
+                "prefix": r"C:\tmp\classic",
+                "number": 2,
+                "style": "zip_spanned",
+                "width": 2,
+                "decorated": True,
+            },
+        ),
+        (
+            r"C:\tmp\legacy.[r-00]~",
+            {
+                "prefix": r"C:\tmp\legacy",
+                "number": 2,
+                "style": "rar_oldstyle",
+                "width": 2,
+                "decorated": True,
+            },
+        ),
+        (
+            r"C:\tmp\setup.AApart-01ZZ.BBexeCC",
+            {
+                "prefix": r"C:\tmp\setup",
+                "number": 1,
+                "style": "rar_sfx_part",
+                "width": 2,
+                "decorated": True,
+            },
+        ),
+    ],
+)
+def test_relation_public_helpers_parse_decorated_split_names(name, expected):
+    scheduler = RelationsScheduler()
+
+    assert scheduler.parse_numbered_volume(name) == expected
+    assert scheduler.detect_split_role(name) == ("first" if expected["number"] == 1 else "member")
+    assert scheduler.logical_name_for_archive(name) in {
+        r"C:\tmp\bundle",
+        r"C:\tmp\classic",
+        r"C:\tmp\legacy",
+        r"C:\tmp\setup",
+    }
+
+
+def test_relation_group_builder_groups_decorated_formats_without_cross_merging(tmp_path):
+    names = [
+        "bundle.AApart-01ZZ.BBrarCC",
+        "bundle.AApart-02ZZ.BBrarCC",
+        "bundle.AAzipZZ.BB001CC",
+        "bundle.AAzipZZ.BB002CC",
+        "bundle.AA7zZZ.BB001CC",
+        "bundle.AA7zZZ.BB002CC",
+    ]
+    for name in names:
+        (tmp_path / name).write_bytes(name.encode("ascii"))
+
+    groups = RelationsScheduler().build_candidate_groups(DirectoryScanner(str(tmp_path)).scan())
+    bundle_groups = [group for group in groups if group.logical_name == "bundle"]
+
+    assert {
+        group.relation.split_family: {Path(path).name for path in group.all_paths}
+        for group in bundle_groups
+    } == {
+        "rar_part": {"bundle.AApart-01ZZ.BBrarCC", "bundle.AApart-02ZZ.BBrarCC"},
+        "zip_numbered": {"bundle.AAzipZZ.BB001CC", "bundle.AAzipZZ.BB002CC"},
+        "7z_numbered": {"bundle.AA7zZZ.BB001CC", "bundle.AA7zZZ.BB002CC"},
+    }
+    assert all(
+        volume.source == "candidate"
+        for group in bundle_groups
+        for volume in group.split_volumes
+    )
+
+
+def test_relation_group_builder_groups_decorated_sfx_with_rar_members(tmp_path):
+    names = [
+        "installer.AApart-01ZZ.BBexeCC",
+        "installer.AApart-02ZZ.BBrarCC",
+        "installer.AApart-03ZZ.BBrarCC",
+    ]
+    for name in names:
+        (tmp_path / name).write_bytes(name.encode("ascii"))
+
+    groups = RelationsScheduler().build_candidate_groups(DirectoryScanner(str(tmp_path)).scan())
+    split_group = next(group for group in groups if group.logical_name == "installer")
+
+    assert Path(split_group.head_path).name == "installer.AApart-01ZZ.BBexeCC"
+    assert {Path(path).name for path in split_group.all_paths} == set(names)
+    assert split_group.relation.split_family == "rar_part"
+    assert split_group.relation.split_role == "first"
+
+
+def test_relation_group_builder_groups_oldstyle_rar_volumes(tmp_path):
+    names = ["legacy.rar", "legacy.r00", "legacy.r01"]
+    for name in names:
+        (tmp_path / name).write_bytes(name.encode("ascii"))
+
+    groups = RelationsScheduler().build_candidate_groups(DirectoryScanner(str(tmp_path)).scan())
+    split_group = next(group for group in groups if group.logical_name == "legacy")
+
+    assert Path(split_group.head_path).name == "legacy.rar"
+    assert [Path(path).name for path in split_group.all_paths] == names
+    assert split_group.relation.split_family == "rar_oldstyle"
+    assert split_group.split_group_complete is True
+
+
+@pytest.mark.parametrize(
     ("names", "complete", "missing_reason", "missing_indices", "all_paths"),
     [
         (("classic.z01", "classic.z02", "classic.zip"), True, "", [], True),

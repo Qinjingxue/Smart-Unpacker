@@ -267,23 +267,15 @@ class RelationsGroupBuilder:
         )
 
     def parse_numbered_volume(self, path: str):
-        match = re.match(r"^(?P<prefix>.+)\.z(?P<number>\d{2})$", path, re.IGNORECASE)
-        if match:
-            return {
-                "prefix": str(match.group("prefix")),
-                "number": int(match.group("number")),
-                "style": "zip_spanned",
-                "width": 2,
-            }
-        match = re.match(r"^(?P<prefix>.+\.zip)\.(?P<number>\d{4})$", path, re.IGNORECASE)
-        if match:
-            return {
-                "prefix": str(match.group("prefix")),
-                "number": int(match.group("number")) + 1,
-                "style": "zip_zero_numbered",
-                "width": 4,
-            }
         return _native_parse_numbered_volume(path)
+
+    @staticmethod
+    def _is_rar_part_style(style: str) -> bool:
+        return style in {"rar_part", "rar_sfx_part"}
+
+    @classmethod
+    def _split_styles_match(cls, left: str, right: str) -> bool:
+        return left == right or (cls._is_rar_part_style(left) and cls._is_rar_part_style(right))
 
     def select_first_volume(self, paths: List[str]) -> str:
         if not paths:
@@ -391,7 +383,7 @@ class RelationsGroupBuilder:
         directory_index: DirectoryFileIndex | None = None,
     ):
         directory = os.path.dirname(archive)
-        logical_base = archive_prefix if style == "rar_part" else os.path.splitext(archive_prefix)[0]
+        logical_base = archive_prefix if self._is_rar_part_style(style) else os.path.splitext(archive_prefix)[0]
         known = {path_key(path) for path in all_parts}
         candidates = []
 
@@ -438,7 +430,7 @@ class RelationsGroupBuilder:
         archive_name = os.path.basename(archive_prefix).lower()
         logical_name = os.path.basename(logical_base).lower()
         candidate_names = {archive_name, logical_name}
-        if style == "rar_part":
+        if self._is_rar_part_style(style):
             candidate_names.add(f"{logical_name}.rar")
             for number in range(100):
                 candidate_names.add(f"{logical_name}.rar.{number}")
@@ -457,7 +449,7 @@ class RelationsGroupBuilder:
                     seen.add(key)
                     candidates.append(entry)
 
-        if style == "rar_part":
+        if self._is_rar_part_style(style):
             for entry in directory_index.entries:
                 name = entry.path.name.lower()
                 if logical_name not in name or ".part" not in name or ".rar." not in name:
@@ -495,9 +487,26 @@ class RelationsGroupBuilder:
     ) -> tuple[List[SplitVolumeEntry], bool | None, str, List[int]]:
         parsed_main = self.parse_numbered_volume(normalized_path(archive))
         if not parsed_main:
+            parsed_parts = [
+                parsed
+                for path in all_parts
+                if (parsed := self.parse_numbered_volume(normalized_path(path)))
+            ]
+            oldstyle = next(
+                (parsed for parsed in parsed_parts if parsed["style"] == "rar_oldstyle"),
+                None,
+            )
+            if oldstyle and case_key(normalized_path(archive)) == case_key(f'{oldstyle["prefix"]}.rar'):
+                parsed_main = {
+                    "prefix": oldstyle["prefix"],
+                    "number": 1,
+                    "style": "rar_oldstyle",
+                    "width": oldstyle["width"],
+                }
             if os.path.splitext(archive)[1].lower() == ".exe":
                 return [], None, "", []
-            parsed_main = self._first_parsed_volume(all_parts)
+            if not parsed_main:
+                parsed_main = self._first_parsed_volume(all_parts)
         if not parsed_main:
             return [], None, "", []
 
@@ -505,6 +514,7 @@ class RelationsGroupBuilder:
         style = str(parsed_main["style"])
         width = int(parsed_main["width"])
         confirmed: dict[int, str] = {}
+        decorated_paths: set[str] = set()
         candidates: List[str] = []
         seen_paths: set[str] = set()
 
@@ -516,8 +526,12 @@ class RelationsGroupBuilder:
             seen_paths.add(path_id)
 
             parsed = self.parse_numbered_volume(norm_path)
-            if parsed and parsed["style"] == style and case_key(parsed["prefix"]) == case_key(archive_prefix):
+            if parsed and self._split_styles_match(str(parsed["style"]), style) and case_key(parsed["prefix"]) == case_key(archive_prefix):
                 confirmed[int(parsed["number"])] = norm_path
+                if parsed.get("decorated"):
+                    decorated_paths.add(path_id)
+            elif style == "rar_oldstyle" and case_key(norm_path) == case_key(f"{archive_prefix}.rar"):
+                confirmed[1] = norm_path
             else:
                 candidates.append(norm_path)
 
@@ -542,7 +556,7 @@ class RelationsGroupBuilder:
             archive_name = os.path.basename(archive_prefix).lower()
             logical_name = (
                 archive_name
-                if style == "rar_part"
+                if self._is_rar_part_style(style)
                 else os.path.splitext(archive_name)[0]
             )
             # Without a confirmed first volume, only an exact prefix companion
@@ -593,7 +607,7 @@ class RelationsGroupBuilder:
                 path=path,
                 number=number,
                 role="first" if number == 1 else "member",
-                source="standard",
+                source="candidate" if path_key(path) in decorated_paths else "standard",
                 style=style,
                 prefix=archive_prefix,
                 width=width,
@@ -673,13 +687,13 @@ class RelationsGroupBuilder:
         directory_index: DirectoryFileIndex | None,
     ) -> str:
         parsed_archive = self.parse_numbered_volume(normalized_path(archive))
-        if parsed_archive and parsed_archive["style"] == style and case_key(parsed_archive["prefix"]) == case_key(archive_prefix):
+        if parsed_archive and self._split_styles_match(str(parsed_archive["style"]), style) and case_key(parsed_archive["prefix"]) == case_key(archive_prefix):
             return normalized_path(archive)
         entries = self._iter_directory_files(os.path.dirname(archive), directory_index)
         candidates = []
         for entry in entries:
             parsed = self.parse_numbered_volume(normalized_path(entry.path))
-            if parsed and parsed["style"] == style and case_key(parsed["prefix"]) == case_key(archive_prefix):
+            if parsed and self._split_styles_match(str(parsed["style"]), style) and case_key(parsed["prefix"]) == case_key(archive_prefix):
                 candidates.append((int(parsed["number"]), normalized_path(entry.path)))
         return sorted(candidates)[0][1] if candidates else ""
 
@@ -693,15 +707,15 @@ class RelationsGroupBuilder:
         if not candidates:
             return ""
         archive_name = os.path.basename(archive_prefix).lower()
-        logical_name = os.path.splitext(archive_name)[0] if style != "rar_part" else archive_name
+        logical_name = archive_name if self._is_rar_part_style(style) else os.path.splitext(archive_name)[0]
         exact_names = set()
         if number == 1:
             exact_names.update({archive_name, logical_name})
-            if style == "rar_part":
+            if self._is_rar_part_style(style):
                 exact_names.add(f"{logical_name}.rar")
         exact_names.add(f"{archive_name}.{number}")
         exact_names.add(f"{archive_name}.{number:02d}")
-        if style == "rar_part":
+        if self._is_rar_part_style(style):
             exact_names.add(f"{logical_name}.rar.{number}")
             exact_names.add(f"{logical_name}.rar.{number:02d}")
 
@@ -812,7 +826,7 @@ class RelationsGroupBuilder:
         logical_name = os.path.basename(logical_base).lower()
         if name == archive_name or name == logical_name:
             return True
-        if style == "rar_part":
+        if self._is_rar_part_style(style):
             return (
                 name == f"{logical_name}.rar"
                 or re.match(rf"^{re.escape(logical_name)}\.rar\.\d{{1,2}}$", name, re.IGNORECASE) is not None
@@ -823,14 +837,14 @@ class RelationsGroupBuilder:
     def _looks_like_fuzzy_volume_candidate(self, path: str, archive_prefix: str, style: str) -> bool:
         name = os.path.basename(path).lower()
         archive_name = os.path.basename(archive_prefix).lower()
-        logical_name = os.path.splitext(archive_name)[0] if style != "rar_part" else archive_name
+        logical_name = archive_name if self._is_rar_part_style(style) else os.path.splitext(archive_name)[0]
         if name == archive_name or name == logical_name:
             return True
         if re.search(r"\.\d{1,3}$", name):
             return True
         if style == "numeric_suffix" and re.search(r"\.(7z|zip|rar|\d{1,2})$", name):
             return True
-        if style == "rar_part" and (".rar" in name or ".part" in name):
+        if self._is_rar_part_style(style) and (".rar" in name or ".part" in name or ".exe" in name):
             return True
         return False
 
@@ -894,7 +908,7 @@ class RelationsGroupBuilder:
                 continue
 
             parsed = self.parse_numbered_volume(path)
-            if parsed and parsed["style"] == style and case_key(parsed["prefix"]) == case_key(archive_prefix):
+            if parsed and self._split_styles_match(str(parsed["style"]), style) and case_key(parsed["prefix"]) == case_key(archive_prefix):
                 continue
 
             if entry.size is None or entry.mtime_ns is None:

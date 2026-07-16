@@ -2,6 +2,14 @@ from sunpack.contracts.detection import FactBag
 from sunpack.contracts.tasks import ArchiveTask
 from sunpack.rename.scheduler import RenameScheduler
 from sunpack.rename.conflicts import next_available_path
+from sunpack.rename.internal.volume_normalizer import SplitVolumeNormalizer
+
+
+def test_split_volume_normalizer_preserves_sfx_head_extension():
+    formatter = SplitVolumeNormalizer._format_numbered_volume
+
+    assert formatter(None, "bundle", 1, "rar_sfx_part", 2) == "bundle.part01.exe"
+    assert formatter(None, "bundle", 2, "rar_sfx_part", 2) == "bundle.part02.rar"
 
 
 def test_detected_extensions_do_not_rename_source_files(tmp_path):

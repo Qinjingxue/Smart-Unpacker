@@ -36,6 +36,8 @@ struct ParsedVolume {
     number: u32,
     style: &'static str,
     width: usize,
+    family: &'static str,
+    decorated: bool,
 }
 
 #[pyfunction]
@@ -128,10 +130,7 @@ pub(crate) fn relations_build_candidate_groups(
                 if !logical_groups.contains_key(&group_key) {
                     logical_order.push(group_key.clone());
                 }
-                logical_groups
-                    .entry(group_key)
-                    .or_default()
-                    .push(entry);
+                logical_groups.entry(group_key).or_default().push(entry);
             }
         }
 
@@ -322,23 +321,16 @@ fn build_file_relation(filename: &str, lower_names: &HashSet<String>) -> FileRel
     let mut split_index = 0;
     if let Some(parsed) = &parsed_volume {
         split_index = parsed.number;
-        if parsed.style == "rar_part" {
-            split_family = "rar_part".to_string();
-        } else if parsed.style == "zip_spanned" {
-            split_family = "zip_spanned".to_string();
-        } else {
-            let parsed_prefix = parsed.prefix.to_ascii_lowercase();
-            split_family = if parsed_prefix.ends_with(".7z") {
-                "7z_numbered"
-            } else if parsed_prefix.ends_with(".zip") {
-                "zip_numbered"
-            } else if parsed_prefix.ends_with(".rar") {
-                "rar_numbered"
-            } else {
-                "generic_numbered"
-            }
-            .to_string();
+        split_family = match (parsed.family, parsed.style) {
+            ("rar", "rar_part" | "rar_sfx_part") => "rar_part",
+            ("rar", "rar_oldstyle") => "rar_oldstyle",
+            ("zip", "zip_spanned") => "zip_spanned",
+            ("7z", _) => "7z_numbered",
+            ("zip", _) => "zip_numbered",
+            ("rar", _) => "rar_numbered",
+            _ => "generic_numbered",
         }
+        .to_string();
     }
     let mut logical_name = get_logical_name(filename, false);
 
@@ -372,6 +364,14 @@ fn build_file_relation(filename: &str, lower_names: &HashSet<String>) -> FileRel
             split_family = "exe_companion".to_string();
             split_index = 1;
         }
+    }
+
+    if ext == ".rar" && has_oldstyle_rar_members(lower_names, &base) {
+        logical_name = base.clone();
+        split_role = Some("first".to_string());
+        is_split_member = true;
+        split_family = "rar_oldstyle".to_string();
+        split_index = 1;
     }
 
     let match_rar_disguised = rar_disguised_re().is_match(filename);
@@ -428,10 +428,20 @@ fn parsed_volume_to_dict(py: Python<'_>, parsed: &ParsedVolume) -> PyResult<Py<P
     dict.set_item("number", parsed.number)?;
     dict.set_item("style", parsed.style)?;
     dict.set_item("width", parsed.width)?;
+    if parsed.decorated {
+        dict.set_item("decorated", true)?;
+    }
     Ok(dict.unbind())
 }
 
 fn detect_split_role(filename: &str) -> Option<&'static str> {
+    if let Some(parsed) = parse_numbered_volume(filename) {
+        return Some(if parsed.number == 1 {
+            "first"
+        } else {
+            "member"
+        });
+    }
     if split_first_patterns()
         .iter()
         .any(|pattern| pattern.is_match(filename))
@@ -445,6 +455,9 @@ fn detect_split_role(filename: &str) -> Option<&'static str> {
 }
 
 fn get_logical_name(filename: &str, is_archive: bool) -> String {
+    if let Some(parsed) = parse_numbered_volume(filename) {
+        return logical_name_from_parsed(&parsed);
+    }
     let name = rar_part_suffix_re().replace(filename, "").to_string();
     if name != filename {
         return clean_logical_name(&name);
@@ -455,7 +468,9 @@ fn get_logical_name(filename: &str, is_archive: bool) -> String {
         return clean_logical_name(&zero_zip);
     }
 
-    let second = archive_numbered_suffix_re().replace(&zero_zip, "").to_string();
+    let second = archive_numbered_suffix_re()
+        .replace(&zero_zip, "")
+        .to_string();
     if second != zero_zip {
         return clean_logical_name(&second);
     }
@@ -485,6 +500,22 @@ fn get_logical_name(filename: &str, is_archive: bool) -> String {
     clean_logical_name(filename)
 }
 
+fn logical_name_from_parsed(parsed: &ParsedVolume) -> String {
+    if matches!(
+        parsed.style,
+        "rar_part" | "rar_sfx_part" | "rar_oldstyle" | "zip_spanned"
+    ) || parsed.family == "generic"
+    {
+        return clean_logical_name(&parsed.prefix);
+    }
+    let suffix = format!(".{}", parsed.family);
+    let lower = parsed.prefix.to_ascii_lowercase();
+    if lower.ends_with(&suffix) {
+        return clean_logical_name(&parsed.prefix[..parsed.prefix.len() - suffix.len()]);
+    }
+    clean_logical_name(&parsed.prefix)
+}
+
 fn parse_numbered_volume(path: &str) -> Option<ParsedVolume> {
     if let Some(captures) = parse_zip_spanned_re().captures(path) {
         return Some(ParsedVolume {
@@ -492,6 +523,8 @@ fn parse_numbered_volume(path: &str) -> Option<ParsedVolume> {
             number: captures.name("number")?.as_str().parse().ok()?,
             style: "zip_spanned",
             width: 2,
+            family: "zip",
+            decorated: false,
         });
     }
     if let Some(captures) = parse_zip_zero_numbered_re().captures(path) {
@@ -501,23 +534,35 @@ fn parse_numbered_volume(path: &str) -> Option<ParsedVolume> {
             number: raw_number + 1,
             style: "zip_zero_numbered",
             width: 4,
+            family: "zip",
+            decorated: false,
         });
     }
     if let Some(captures) = parse_archive_numbered_re().captures(path) {
+        let family = archive_family(captures.name("format")?.as_str())?;
         return Some(ParsedVolume {
-            prefix: captures.name("prefix")?.as_str().to_string(),
+            prefix: format!("{}.{}", captures.name("prefix")?.as_str(), family),
             number: captures.name("number")?.as_str().parse().ok()?,
             style: "numeric_suffix",
             width: 3,
+            family,
+            decorated: false,
         });
     }
     if let Some(captures) = parse_rar_part_re().captures(path) {
         let number = captures.name("number")?.as_str();
+        let format = captures.name("format")?.as_str();
         return Some(ParsedVolume {
             prefix: captures.name("prefix")?.as_str().to_string(),
             number: number.parse().ok()?,
-            style: "rar_part",
+            style: if format.eq_ignore_ascii_case("exe") {
+                "rar_sfx_part"
+            } else {
+                "rar_part"
+            },
             width: number.len(),
+            family: "rar",
+            decorated: false,
         });
     }
     if let Some(captures) = parse_plain_numbered_re().captures(path) {
@@ -526,9 +571,157 @@ fn parse_numbered_volume(path: &str) -> Option<ParsedVolume> {
             number: captures.name("number")?.as_str().parse().ok()?,
             style: "plain_numeric_suffix",
             width: 3,
+            family: "generic",
+            decorated: false,
+        });
+    }
+    parse_decorated_numbered_volume(path)
+}
+
+fn parse_decorated_numbered_volume(path: &str) -> Option<ParsedVolume> {
+    if let Some(captures) = decorated_marker_format_re().captures(path) {
+        let raw_number = captures.name("number")?.as_str();
+        let format = captures.name("format")?.as_str();
+        let family = archive_family(format)?;
+        return parsed_decorated_marker(
+            captures.name("prefix")?.as_str(),
+            raw_number,
+            family,
+            format.eq_ignore_ascii_case("exe"),
+        );
+    }
+    if let Some(captures) = decorated_format_marker_re().captures(path) {
+        let raw_number = captures.name("number")?.as_str();
+        let format = captures.name("format")?.as_str();
+        let family = archive_family(format)?;
+        return parsed_decorated_numeric(
+            captures.name("prefix")?.as_str(),
+            raw_number,
+            family,
+            true,
+            format.eq_ignore_ascii_case("exe"),
+        );
+    }
+    if let Some(captures) = decorated_numeric_format_re().captures(path) {
+        let raw_number = captures.name("number")?.as_str();
+        let family = archive_family(captures.name("format")?.as_str())?;
+        return parsed_decorated_numeric(
+            captures.name("prefix")?.as_str(),
+            raw_number,
+            family,
+            false,
+            false,
+        );
+    }
+    if let Some(captures) = decorated_format_numeric_re().captures(path) {
+        let raw_number = captures.name("number")?.as_str();
+        let family = archive_family(captures.name("format")?.as_str())?;
+        return parsed_decorated_numeric(
+            captures.name("prefix")?.as_str(),
+            raw_number,
+            family,
+            false,
+            false,
+        );
+    }
+    if let Some(captures) = decorated_zip_spanned_re().captures(path) {
+        let number = captures.name("number")?.as_str();
+        return Some(ParsedVolume {
+            prefix: captures.name("prefix")?.as_str().to_string(),
+            number: number.parse().ok()?,
+            style: "zip_spanned",
+            width: number.len(),
+            family: "zip",
+            decorated: true,
+        });
+    }
+    if let Some(captures) = decorated_old_rar_re().captures(path) {
+        let number = captures.name("number")?.as_str();
+        return Some(ParsedVolume {
+            prefix: captures.name("prefix")?.as_str().to_string(),
+            number: number.parse::<u32>().ok()?.saturating_add(2),
+            style: "rar_oldstyle",
+            width: number.len(),
+            family: "rar",
+            decorated: true,
         });
     }
     None
+}
+
+fn parsed_decorated_marker(
+    prefix: &str,
+    raw_number: &str,
+    family: &'static str,
+    sfx: bool,
+) -> Option<ParsedVolume> {
+    let number = raw_number.parse().ok()?;
+    if family == "rar" {
+        return Some(ParsedVolume {
+            prefix: prefix.to_string(),
+            number,
+            style: if sfx { "rar_sfx_part" } else { "rar_part" },
+            width: raw_number.len(),
+            family,
+            decorated: true,
+        });
+    }
+    Some(ParsedVolume {
+        prefix: format!("{prefix}.{family}"),
+        number,
+        style: "numeric_suffix",
+        width: 3,
+        family,
+        decorated: true,
+    })
+}
+
+fn parsed_decorated_numeric(
+    prefix: &str,
+    raw_number: &str,
+    family: &'static str,
+    marker_numbered: bool,
+    sfx: bool,
+) -> Option<ParsedVolume> {
+    let mut number: u32 = raw_number.parse().ok()?;
+    let style = if family == "zip" && raw_number.len() == 4 && raw_number.starts_with('0') {
+        number = number.saturating_add(1);
+        "zip_zero_numbered"
+    } else if family == "rar" && marker_numbered {
+        if sfx {
+            "rar_sfx_part"
+        } else {
+            "rar_part"
+        }
+    } else {
+        "numeric_suffix"
+    };
+    let canonical_prefix = if matches!(style, "rar_part" | "rar_sfx_part") {
+        prefix.to_string()
+    } else {
+        format!("{prefix}.{family}")
+    };
+    Some(ParsedVolume {
+        prefix: canonical_prefix,
+        number,
+        style,
+        width: if style == "numeric_suffix" {
+            3
+        } else {
+            raw_number.len()
+        },
+        family,
+        decorated: true,
+    })
+}
+
+fn archive_family(value: &str) -> Option<&'static str> {
+    match value.to_ascii_lowercase().as_str() {
+        "7z" => Some("7z"),
+        "zip" => Some("zip"),
+        "rar" | "exe" => Some("rar"),
+        _ => None,
+    }
 }
 
 fn split_sort_key(path: &str) -> (u8, u32, String) {
@@ -551,6 +744,14 @@ fn split_sort_key(path: &str) -> (u8, u32, String) {
 }
 
 fn has_split_companions_in_dir(lower_names: &HashSet<String>, base_name: &str) -> bool {
+    let expected = clean_logical_name(base_name).to_ascii_lowercase();
+    if lower_names.iter().any(|candidate| {
+        parse_numbered_volume(candidate).is_some_and(|parsed| {
+            logical_name_from_parsed(&parsed).to_ascii_lowercase() == expected
+        })
+    }) {
+        return true;
+    }
     let escaped = regex::escape(base_name);
     let patterns = [
         format!(r"^{escaped}\.(7z|zip|rar)\.\d+(?:\.[^.]+)?$"),
@@ -569,6 +770,19 @@ fn has_split_companions_in_dir(lower_names: &HashSet<String>, base_name: &str) -
             })
             .unwrap_or(false)
     })
+}
+
+fn has_oldstyle_rar_members(lower_names: &HashSet<String>, base_name: &str) -> bool {
+    let escaped = regex::escape(base_name);
+    RegexBuilder::new(&format!(r"^{escaped}\.r\d{{2}}$"))
+        .case_insensitive(true)
+        .build()
+        .map(|pattern| {
+            lower_names
+                .iter()
+                .any(|candidate| pattern.is_match(candidate))
+        })
+        .unwrap_or(false)
 }
 
 fn split_ext(filename: &str) -> (String, String) {
@@ -619,7 +833,7 @@ fn relation_group_key(relation: &FileRelationNative) -> String {
     let family = match relation.split_family.as_str() {
         "7z_numbered" => "7z",
         "zip_numbered" | "zip_spanned" => "zip",
-        "rar_numbered" | "rar_part" => "rar",
+        "rar_numbered" | "rar_part" | "rar_oldstyle" => "rar",
         "exe_companion" => "companion",
         "generic_numbered" => "generic",
         _ => {
@@ -710,7 +924,7 @@ fn plain_numeric_suffix_re() -> &'static Regex {
 
 fn parse_archive_numbered_re() -> &'static Regex {
     static VALUE: OnceLock<Regex> = OnceLock::new();
-    VALUE.get_or_init(|| re(r"^(?P<prefix>.+\.(?:7z|zip|rar))\.(?P<number>\d{3})$"))
+    VALUE.get_or_init(|| re(r"^(?P<prefix>.+)\.(?P<format>7z|zip|rar)\.(?P<number>\d{3})$"))
 }
 
 fn parse_zip_zero_numbered_re() -> &'static Regex {
@@ -730,12 +944,53 @@ fn parse_zip_spanned_re() -> &'static Regex {
 
 fn parse_rar_part_re() -> &'static Regex {
     static VALUE: OnceLock<Regex> = OnceLock::new();
-    VALUE.get_or_init(|| re(r"^(?P<prefix>.+)\.part(?P<number>\d+)\.(?:rar|exe)$"))
+    VALUE.get_or_init(|| re(r"^(?P<prefix>.+)\.part(?P<number>\d+)\.(?P<format>rar|exe)$"))
 }
 
 fn parse_plain_numbered_re() -> &'static Regex {
     static VALUE: OnceLock<Regex> = OnceLock::new();
     VALUE.get_or_init(|| re(r"^(?P<prefix>.+)\.(?P<number>\d{3})$"))
+}
+
+// Decorated names preserve only the meaningful token order. Everything surrounding
+// the marker, number, and archive-family token is intentionally treated as noise;
+// downstream archive structure detection is responsible for rejecting false positives.
+fn decorated_marker_format_re() -> &'static Regex {
+    static VALUE: OnceLock<Regex> = OnceLock::new();
+    VALUE.get_or_init(|| {
+        re(r"^(?P<prefix>.+)\.[^.]*(?:part|vol(?:ume)?)[^.\d]*(?P<number>\d{1,6})[^.]*\.[^.]*(?P<format>7z|zip|rar|exe)[^.]*(?:\.[^.]+)*$")
+    })
+}
+
+fn decorated_format_marker_re() -> &'static Regex {
+    static VALUE: OnceLock<Regex> = OnceLock::new();
+    VALUE.get_or_init(|| {
+        re(r"^(?P<prefix>.+)\.[^.]*(?P<format>7z|zip|rar|exe)[^.]*\.[^.]*(?:part|vol(?:ume)?)[^.\d]*(?P<number>\d{1,6})[^.]*(?:\.[^.]+)*$")
+    })
+}
+
+fn decorated_numeric_format_re() -> &'static Regex {
+    static VALUE: OnceLock<Regex> = OnceLock::new();
+    VALUE.get_or_init(|| {
+        re(r"^(?P<prefix>.+)\.[^.]*?(?P<number>0\d{2,3})[^.]*\.[^.]*(?P<format>7z|zip|rar)[^.]*(?:\.[^.]+)*$")
+    })
+}
+
+fn decorated_format_numeric_re() -> &'static Regex {
+    static VALUE: OnceLock<Regex> = OnceLock::new();
+    VALUE.get_or_init(|| {
+        re(r"^(?P<prefix>.+)\.[^.]*(?P<format>7z|zip|rar)[^.]*\.[^.]*?(?P<number>0\d{2,3})[^.]*(?:\.[^.]+)*$")
+    })
+}
+
+fn decorated_zip_spanned_re() -> &'static Regex {
+    static VALUE: OnceLock<Regex> = OnceLock::new();
+    VALUE.get_or_init(|| re(r"^(?P<prefix>.+)\.[^.]*z[^.\d]*(?P<number>\d{2})[^.]*(?:\.[^.]+)*$"))
+}
+
+fn decorated_old_rar_re() -> &'static Regex {
+    static VALUE: OnceLock<Regex> = OnceLock::new();
+    VALUE.get_or_init(|| re(r"^(?P<prefix>.+)\.[^.]*r[^.\d]*(?P<number>\d{2})[^.]*(?:\.[^.]+)*$"))
 }
 
 fn old_rar_member_re() -> &'static Regex {
