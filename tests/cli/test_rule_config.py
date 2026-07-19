@@ -15,7 +15,7 @@ def _payload():
 def test_config_validate_checks_rule_schema_types_even_when_disabled():
     payload = _payload()
     payload["detection"]["rule_pipeline"]["scoring"][0]["enabled"] = False
-    payload["detection"]["rule_pipeline"]["scoring"][0]["carrier_exts"] = 123
+    payload["detection"]["rule_pipeline"]["scoring"][0]["deep_scan_size_coverage_ratio"] = "many"
 
     result = validate_config_payload(payload)
 

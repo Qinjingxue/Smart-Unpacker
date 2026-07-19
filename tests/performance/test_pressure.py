@@ -4,7 +4,7 @@ from pathlib import Path
 
 from sunpack.coordinator.scanner import ScanOrchestrator
 from tests.helpers.detection_config import with_detection_pipeline
-from tests.helpers.fs_builder import make_zip
+from tests.helpers.fs_builder import make_minimal_7z, make_zip
 
 
 def pressure_scan_config() -> dict:
@@ -22,7 +22,7 @@ def pressure_scan_config() -> dict:
         },
     ], scoring=[
         {"name": "extension", "enabled": True, "extension_score_groups": [{"score": 5, "extensions": [".zip", ".7z", ".rar", ".gz", ".bz2", ".xz", ".001"]}]},
-        {"name": "embedded_payload_identity", "enabled": True, "carrier_tail_score": 5},
+        {"name": "embedded_payload_identity", "enabled": True, "deep_scan_size_coverage_ratio": 1.0, "embedded_payload_score": 5},
     ], confirmation=[
         {"name": "seven_zip_probe", "enabled": True, "reject_executable_container": False, "reject_clear_non_archive": True},
         {"name": "seven_zip_validation", "enabled": True, "reject_on_failed": False},
@@ -70,7 +70,7 @@ def build_pressure_corpus(root: Path):
 
     for index in range(2):
         disguised = root / f"masked_archive_{index:02d}.jpg"
-        disguised.write_bytes(b"\xff\xd8synthetic-image\xff\xd9" + b"7z\xbc\xaf\x27\x1c")
+        disguised.write_bytes(b"\xff\xd8synthetic-image\xff\xd9" + make_minimal_7z())
         expected.append(disguised.name)
 
     for index, kind in enumerate(["jar", "docx", "apk", "xlsx"]):

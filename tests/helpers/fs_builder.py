@@ -39,6 +39,8 @@ def render_content(content: Any) -> bytes:
         return make_zip(content.get("entries", {}))
     if content_type == "zip_with_prefix":
         return bytes.fromhex(content.get("prefix_hex", "")) + make_zip(content.get("entries", {}))
+    if content_type == "valid_7z":
+        return make_minimal_7z()
     if content_type == "parts":
         return b"".join(render_content(part) for part in content.get("items", []))
     raise ValueError(f"Unknown content type: {content_type}")
@@ -50,3 +52,11 @@ def make_zip(entries: dict[str, str]) -> bytes:
         for name, value in entries.items():
             archive.writestr(name, value)
     return buffer.getvalue()
+
+
+def make_minimal_7z() -> bytes:
+    from binascii import crc32
+    gap = b"abcde"
+    next_header = b"\x01"
+    start_header = len(gap).to_bytes(8, "little") + len(next_header).to_bytes(8, "little") + crc32(next_header).to_bytes(4, "little")
+    return b"7z\xbc\xaf\x27\x1c" + b"\x00\x04" + crc32(start_header).to_bytes(4, "little") + start_header + gap + next_header

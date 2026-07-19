@@ -113,6 +113,39 @@ def test_analysis_scheduler_finds_embedded_archive_segments(tmp_path):
     assert {item.format for item in report.selected} == {"zip", "rar"}
 
 
+def test_analysis_reuses_detection_hit_map_and_preserves_same_format_segments(tmp_path):
+    first = _zip_bytes(tmp_path)
+    second_path = tmp_path / "second.zip"
+    with zipfile.ZipFile(second_path, "w") as archive:
+        archive.writestr("second.txt", "world")
+    second = second_path.read_bytes()
+    prefix = b"carrier-prefix"
+    gap = b"between"
+    payload = prefix + first + gap + second
+    path = tmp_path / "two-zips.bin"
+    path.write_bytes(payload)
+
+    hits = []
+    for name, signature in (("zip_local", b"PK\x03\x04"), ("zip_eocd", b"PK\x05\x06")):
+        cursor = 0
+        while (offset := payload.find(signature, cursor)) >= 0:
+            hits.append({"name": name, "offset": offset, "source": "detection_embedded_scan"})
+            cursor = offset + 1
+    prepass = {
+        "hits": sorted(hits, key=lambda item: item["offset"]),
+        "formats": ["zip"],
+        "full_scan_complete": True,
+        "full_scan_bytes": len(payload),
+        "source": "detection_embedded_scan",
+    }
+    report = ArchiveAnalysisScheduler().analyze_path(str(path), initial_prepass=prepass)
+    zip_evidence = next(item for item in report.evidences if item.format == "zip")
+    assert [segment.start_offset for segment in zip_evidence.segments] == [
+        len(prefix), len(prefix) + len(first) + len(gap),
+    ]
+    assert report.prepass["source"] == "detection_embedded_scan"
+
+
 def test_analysis_scheduler_runs_fuzzy_binary_profile_before_structure(tmp_path):
     payload = b"MZ" + (b"A" * 8192) + _seven_zip_bytes() + b"\xff" * 8192
     path = tmp_path / "profiled.bin"

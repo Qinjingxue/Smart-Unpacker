@@ -20,8 +20,8 @@ class ArchiveAnalysisScheduler:
         discover_fuzzy_analysis_modules()
         discover_analysis_modules()
 
-    def analyze_path(self, path: str) -> ArchiveAnalysisReport:
-        return self.analyze_view(self._build_single_view(path), report_path=path)
+    def analyze_path(self, path: str, *, initial_prepass: dict | None = None) -> ArchiveAnalysisReport:
+        return self.analyze_view(self._build_single_view(path), report_path=path, initial_prepass=initial_prepass)
 
     def analyze_paths(self, paths, *, report_path: str | None = None) -> ArchiveAnalysisReport:
         volumes = list(paths or [])
@@ -54,6 +54,9 @@ class ArchiveAnalysisScheduler:
 
     def _analyze_descriptor(self, descriptor: ArchiveInputDescriptor, task) -> ArchiveAnalysisReport | None:
         if descriptor.open_mode == "file" and descriptor.entry_path:
+            initial_prepass = _task_detection_prepass(task)
+            if initial_prepass is not None:
+                return self.analyze_path(descriptor.entry_path, initial_prepass=initial_prepass)
             return self.analyze_path(descriptor.entry_path)
         if descriptor.open_mode in {"native_volumes", "sfx_with_volumes"} and descriptor.parts:
             paths = [
@@ -79,9 +82,17 @@ class ArchiveAnalysisScheduler:
         return None
 
 
-    def analyze_view(self, view: SharedBinaryView | MultiVolumeBinaryView, *, report_path: str | None = None) -> ArchiveAnalysisReport:
+    def analyze_view(
+        self,
+        view: SharedBinaryView | MultiVolumeBinaryView,
+        *,
+        report_path: str | None = None,
+        initial_prepass: dict | None = None,
+    ) -> ArchiveAnalysisReport:
         prepass_config = self.config.get("prepass") if isinstance(self.config.get("prepass"), dict) else {}
-        prepass = run_signature_prepass(view, prepass_config) if prepass_config.get("enabled", True) else {}
+        prepass = dict(initial_prepass or {})
+        if not prepass and prepass_config.get("enabled", True):
+            prepass = run_signature_prepass(view, prepass_config)
         fuzzy = self._run_fuzzy_pipeline(view, prepass)
         structure_context = {**prepass, "fuzzy": fuzzy}
         modules = self._selected_structure_modules(structure_context)
@@ -106,7 +117,6 @@ class ArchiveAnalysisScheduler:
             read_bytes=stats.read_bytes,
             cache_hits=stats.cache_hits,
         )
-
     def _build_single_view(self, path: str) -> SharedBinaryView:
         cache_bytes = int(self.config.get("shared_cache_mb", 64) or 0) * 1024 * 1024
         max_read_mb = self.config.get("max_read_mb_per_archive", 256)
@@ -204,3 +214,13 @@ class ArchiveAnalysisScheduler:
             for evidence in evidences
             if evidence.status == "extractable" and evidence.confidence >= extractable and evidence.segments
         ]
+
+
+def _task_detection_prepass(task) -> dict | None:
+    fact_bag = getattr(task, "fact_bag", None)
+    if fact_bag is None:
+        return None
+    value = fact_bag.get("analysis.signature_prepass")
+    if not isinstance(value, dict) or not value.get("full_scan_complete"):
+        return None
+    return dict(value)

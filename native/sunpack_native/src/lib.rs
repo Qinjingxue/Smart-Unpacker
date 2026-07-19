@@ -66,7 +66,7 @@ fn sunpack_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
         analysis_native::fuzzy_binary_profile_for_paths,
         m
     )?)?;
-    m.add_function(wrap_pyfunction!(scan::carrier::scan_carrier_archive, m)?)?;
+    m.add_function(wrap_pyfunction!(scan::embedded::scan_embedded_archives, m)?)?;
     m.add_function(wrap_pyfunction!(
         scan::zip_names::scan_zip_central_directory_names,
         m

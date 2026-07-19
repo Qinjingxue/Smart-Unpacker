@@ -41,7 +41,12 @@ def run_detection_case(case, workspace: Path) -> dict:
     for fact_name, value in act.get("facts", {}).items():
         bag.set(fact_name, value)
 
-    decision = DetectionScheduler(config).evaluate_bag(bag)
+    scheduler = DetectionScheduler(config)
+    decision = scheduler.evaluate_bag(bag)
+    if not decision.should_extract:
+        bag.set("candidate.embedded_deep_scan", True)
+        bag.unset("embedded_archive.analysis")
+        decision = scheduler.evaluate_bag(bag)
     return {
         "decision": {
             "should_extract": decision.should_extract,

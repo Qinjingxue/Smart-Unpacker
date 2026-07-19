@@ -1,12 +1,3 @@
-CARRIER_EXTS = [".jpg", ".jpeg", ".png", ".pdf", ".gif", ".webp"]
-AMBIGUOUS_RESOURCE_EXTS = [
-    ".dat", ".bin", ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tga",
-    ".mp3", ".wav", ".ogg", ".flac", ".aac",
-    ".mp4", ".mkv", ".avi", ".mov", ".wmv", ".webm",
-    ".txt", ".log", ".csv", ".pdf",
-]
-
-
 def with_detection_pipeline(
     config: dict | None = None,
     *,
@@ -30,17 +21,8 @@ def with_detection_pipeline(
     result["detection"] = {
         "rule_pipeline": {
             "precheck": remaining_precheck,
-            "scoring": [_complete_rule(rule) for rule in (scoring or [])],
+            "scoring": [dict(rule) for rule in (scoring or [])],
             "confirmation": confirmation or [],
         }
     }
-    return result
-
-
-def _complete_rule(rule: dict) -> dict:
-    result = dict(rule)
-    name = result.get("name")
-    if name == "embedded_payload_identity":
-        result.setdefault("carrier_exts", list(CARRIER_EXTS))
-        result.setdefault("ambiguous_resource_exts", list(AMBIGUOUS_RESOURCE_EXTS))
     return result

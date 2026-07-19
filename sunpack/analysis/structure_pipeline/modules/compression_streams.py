@@ -1,6 +1,7 @@
 from sunpack.analysis.structure_pipeline.module import AnalysisModuleSpec
 from sunpack.analysis.structure_pipeline.registry import register_analysis_module
 from sunpack.analysis.result import ArchiveFormatEvidence, ArchiveSegment
+from sunpack.analysis.structure_pipeline.modules._boundaries import next_archive_boundary
 
 GZIP_MAGIC = b"\x1f\x8b\x08"
 BZIP2_MAGIC = b"BZh"
@@ -18,6 +19,32 @@ class _CompressionModule:
         return AnalysisModuleSpec(name=self.name, formats=(self.fmt,), signatures=(self.magic,), io_profile="head_tail")
 
     def analyze(self, view, prepass: dict, config: dict) -> ArchiveFormatEvidence:
+        embedded = [
+            item for item in prepass.get("embedded_candidates", [])
+            if item.get("format") == self.fmt
+        ]
+        if embedded:
+            complete = all(item.get("end_offset") is not None for item in embedded)
+            confidence = min(float(max(item.get("confidence") or 0.0 for item in embedded)), 0.99)
+            segments = []
+            for item in embedded:
+                start = int(item.get("offset") or 0)
+                end = item.get("end_offset")
+                segments.append(ArchiveSegment(
+                    start_offset=start,
+                    end_offset=int(end) if end is not None else next_archive_boundary(prepass, start, view.size),
+                    confidence=confidence if complete else min(confidence, 0.80),
+                    damage_flags=[] if end is not None else ["stream_boundary_inferred"],
+                    evidence=[f"{self.fmt}:{item.get('validation') or 'validated_header'}"],
+                ))
+            return ArchiveFormatEvidence(
+                format=self.fmt,
+                confidence=confidence if complete else min(confidence, 0.80),
+                status="extractable" if complete else "damaged",
+                segments=segments,
+                details={"source": "detection_embedded_scan", "candidates": embedded,
+                         "boundary_confidence": "high" if complete else "low"},
+            )
         result = view.probe_compression_stream(format=self.fmt)
         if not result.get("magic_matched"):
             return ArchiveFormatEvidence(format=self.fmt, confidence=0.0, status="not_found", details=result)

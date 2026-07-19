@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from sunpack.detection import DetectionScheduler
+from sunpack.coordinator.task_provider import ArchiveTaskProvider
 from tests.helpers.archive_scan_case_loader import (
     archive_scan_case_id,
     load_archive_scan_cases,
@@ -22,9 +22,7 @@ def test_archive_scan_case(case, case_workspace):
     config_overrides = case.manifest.get("config_overrides")
     config = get_config(config_name, config_overrides)
 
-    detector = DetectionScheduler(config)
-    from sunpack.coordinator.target_scan import build_fact_bags_for_targets
-    results = detector.evaluate_bags(build_fact_bags_for_targets([str(workspace)]))
+    results = ArchiveTaskProvider(config).detect_targets([str(workspace)])
     by_relative_path = {
         Path(result.fact_bag.get("file.path")).relative_to(workspace).as_posix(): result
         for result in results

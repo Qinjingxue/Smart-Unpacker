@@ -794,6 +794,7 @@ name = "sunpack-native"
 version = "0.1.0"
 dependencies = [
  "aes",
+ "aho-corasick",
  "base64",
  "bzip2",
  "cbc",

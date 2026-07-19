@@ -34,11 +34,6 @@
   },
   "assert": {
     "decision.should_extract": false,
-    "decision.total_score": 0,
-    "facts.zip.local_header_plausible": false,
-    "facts.zip.local_header_offset": 64
-  },
-  "has": [
-    "facts.zip.local_header_error"
-  ]
+    "decision.total_score": 0
+  }
 }

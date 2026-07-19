@@ -3,6 +3,7 @@ from sunpack.analysis.structure_pipeline.registry import register_analysis_modul
 from sunpack.analysis.structure_pipeline.modules._boundaries import next_archive_boundary
 from sunpack.analysis.structure_pipeline.modules._fuzzy import apply_fuzzy_routes
 from sunpack.analysis.result import ArchiveFormatEvidence, ArchiveSegment
+from sunpack.analysis.structure_pipeline.modules._combine import combine_format_candidates
 
 
 class SevenZipAnalysisModule:
@@ -19,7 +20,7 @@ class SevenZipAnalysisModule:
                 max_next_header_check_bytes=int(config.get("max_next_header_check_bytes", 1024 * 1024) or 1024 * 1024),
             )
             candidates.append(self._from_native(dict(native), start, next_archive_boundary(prepass, start, view.size), prepass, view.size))
-        return max(candidates, key=lambda item: (item.status == "extractable", item.confidence))
+        return combine_format_candidates("7z", candidates, preserve_multiple=prepass.get("source") == "detection_embedded_scan")
 
     def _from_native(self, native: dict, start: int, boundary: int, prepass: dict, file_size: int) -> ArchiveFormatEvidence:
         if not native.get("magic_matched"):

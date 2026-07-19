@@ -79,7 +79,7 @@
       "scoring": [
         {
           "name": "embedded_payload_identity",
-          "embedded_payload_scan_level": "deep"
+          "deep_scan_size_coverage_ratio": 0.5
         }
       ]
     }

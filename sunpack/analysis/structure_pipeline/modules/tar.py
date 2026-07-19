@@ -2,6 +2,7 @@ from sunpack.analysis.structure_pipeline.module import AnalysisModuleSpec
 from sunpack.analysis.structure_pipeline.registry import register_analysis_module
 from sunpack.analysis.structure_pipeline.modules._fuzzy import apply_fuzzy_routes
 from sunpack.analysis.result import ArchiveFormatEvidence, ArchiveSegment
+from sunpack.analysis.structure_pipeline.modules._combine import combine_format_candidates
 
 
 class TarAnalysisModule:
@@ -11,6 +12,7 @@ class TarAnalysisModule:
         max_entries = int(config.get("max_entries_to_walk", 64) or 64)
         candidates = [0]
         candidates.extend(max(0, int(hit.get("offset") or 0) - 257) for hit in prepass.get("hits", []) if hit.get("name") == "tar_ustar")
+        evidences = []
         for start in sorted(set(candidates)):
             result = view.probe_tar(start_offset=start, max_entries_to_walk=max_entries)
             if result and result.get("plausible"):
@@ -28,21 +30,22 @@ class TarAnalysisModule:
                     file_size=int(view.size),
                     format_hint="tar",
                 )
-                return ArchiveFormatEvidence(
+                evidences.append(ArchiveFormatEvidence(
                     format="tar",
                     confidence=confidence,
                     status="extractable",
                     segments=[ArchiveSegment(start_offset=start, end_offset=result.get("segment_end"), confidence=confidence, damage_flags=damage_flags, evidence=evidence)],
                     details=details,
-                )
+                ))
+                continue
             if result and result.get("magic_matched"):
                 details = dict(result)
                 damage_flags = list(result.get("damage_flags") or ["tar_metadata_bad"])
-                return ArchiveFormatEvidence(
+                evidences.append(ArchiveFormatEvidence(
                     format="tar", confidence=0.72, status="damaged",
                     segments=[ArchiveSegment(start_offset=start, end_offset=None, confidence=0.72,
                                              damage_flags=damage_flags, evidence=list(result.get("evidence") or ["tar:header"]))],
                     details={**details, "route_evidence_flags": damage_flags},
-                )
-        return ArchiveFormatEvidence(format="tar", confidence=0.0, status="not_found")
+                ))
+        return combine_format_candidates("tar", evidences, preserve_multiple=prepass.get("source") == "detection_embedded_scan")
 register_analysis_module(TarAnalysisModule())

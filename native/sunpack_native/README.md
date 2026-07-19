@@ -58,19 +58,19 @@ one directory and returns path/size/mtime metadata. This is intentionally a thin
 filesystem helper used by relation grouping; Python still owns split-volume
 semantics and grouping decisions.
 
-`scan_carrier_archive(path, carrier_ext, archive_magics, file_size, tail_window, prefix_window, full_scan_max, deep_scan)`
-searches for archive magic bytes appended to supported carrier formats: JPEG,
-PNG, PDF, GIF, and WebP. It applies the same tail/prefix/full-scan window
-strategy used by Python for marker-based carriers, and parses GIF/WebP container
-boundaries directly.
+`scan_embedded_archives(path)` performs one extension-independent sequential
+scan for all supported embedded archive signatures. Every identity candidate
+must pass its format-specific structural checks; the complete hit map is also
+returned so the analysis stage can reuse the scan without another full-stream
+signature pass.
 
 Return value:
 
 ```python
-{"detected_ext": ".7z", "offset": 123, "scan_scope": "tail"}
+{"complete": True, "candidates": [{"format": "7z", "offset": 123}], "hits": [...]}
 ```
 
-or `None` when no embedded archive is found.
+An empty `candidates` list means no reliable embedded identity was found.
 
 `scan_after_markers(path, markers, archive_magics, tail_start, file_size, allow_full_scan)`
 searches for archive magic bytes after carrier markers.

@@ -608,10 +608,7 @@
     "processors": [
       {
         "name": "embedded_archive",
-        "enabled": true,
-        "carrier_exts": [".jpg", ".jpeg", ".png", ".pdf", ".gif", ".webp"],
-        "ambiguous_resource_exts": [".dat", ".bin"],
-        "loose_scan_min_tail_bytes": 4096
+        "enabled": true
       },
       {
         "name": "seven_zip_probe",
@@ -708,25 +705,8 @@
         {
           "name": "embedded_payload_identity",
           "enabled": true,
-          "carrier_tail_score": 5,
-          "loose_scan_score": 4,
-          "overlay_start_score": 6,
-          "overlay_near_start_score": 4,
-          "embedded_payload_scan_level": "balanced",
-          "zip_plausibility_required_for_loose_scan": true,
-          "zip_plausibility_required_for_carrier_tail": false,
-          "carrier_exts": [".jpg", ".jpeg", ".png", ".pdf", ".gif", ".webp"],
-          "ambiguous_resource_exts": [".dat", ".bin"],
-          "loose_scan_min_prefix": 32,
-          "loose_scan_min_tail_bytes": 4096,
-          "loose_scan_max_hits": 3,
-          "loose_scan_tail_window_bytes": 8388608,
-          "loose_scan_full_scan_max_bytes": 67108864,
-          "loose_scan_deep_scan": false,
-          "carrier_scan_tail_window_bytes": 8388608,
-          "carrier_scan_prefix_window_bytes": 8388608,
-          "carrier_scan_full_scan_max_bytes": 0,
-          "carrier_scan_deep_scan": false
+          "deep_scan_size_coverage_ratio": 0.5,
+          "embedded_payload_score": 6
         },
         {
           "name": "seven_zip_structure_identity",

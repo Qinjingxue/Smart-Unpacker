@@ -232,6 +232,11 @@ FACT_SCHEMA: dict[str, dict[str, Any]] = {
         "producer": "processors.structure_evidence",
         "description": "On-demand forensic structure evidence produced inside the detection pipeline.",
     },
+    "analysis.signature_prepass": {
+        "type": "dict",
+        "producer": "rules.embedded_payload_identity",
+        "description": "Reusable full-stream signature hit map produced by reliable embedded detection.",
+    },
     "7z.structure": {
         "type": "dict",
         "producer": "processors.seven_zip_structure",
@@ -271,6 +276,8 @@ def _matches_one_type(value: Any, type_name: str) -> bool:
         return isinstance(value, str)
     if type_name == "int":
         return isinstance(value, int) and not isinstance(value, bool)
+    if type_name == "float":
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
     if type_name == "bool":
         return isinstance(value, bool)
     if type_name == "bytes":

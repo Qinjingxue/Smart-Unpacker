@@ -27,7 +27,6 @@
   "assert": {
     "decision.should_extract": true,
     "facts.file.detected_ext": ".zip",
-    "facts.file.embedded_archive_found": true,
-    "facts.zip.local_header_plausible": true
+    "facts.file.embedded_archive_found": true
   }
 }

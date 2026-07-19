@@ -1,4 +1,5 @@
 import os
+import math
 from typing import Any
 
 from sunpack.config.detection_view import detection_config, rule_pipeline_config
@@ -87,7 +88,43 @@ class ArchiveTaskProvider:
         scan_session = scan_session or DetectionScanSession(config=self.config)
         candidate_bags = build_fact_bags_for_targets(scan_roots, session=scan_session, config=self.config)
         fact_bags = self._filter_incomplete_split_groups(candidate_bags)
-        return self.detector.evaluate_bags(fact_bags, scan_session=scan_session)
+        initial = self.detector.evaluate_bags(fact_bags, scan_session=scan_session)
+        ratio = self._embedded_deep_scan_ratio()
+        if ratio <= 0.0:
+            return initial
+
+        unresolved = [
+            result.fact_bag
+            for result in initial
+            if not result.decision.should_extract
+        ]
+        selected = _select_size_coverage(unresolved, ratio)
+        if not selected:
+            return initial
+
+        for bag in selected:
+            bag.set("candidate.embedded_deep_scan", True)
+            bag.unset("embedded_archive.analysis")
+        rescanned = {
+            result.fact_bag: result
+            for result in self.detector.evaluate_bags(selected, scan_session=scan_session)
+        }
+        return [rescanned.get(result.fact_bag, result) for result in initial]
+
+    def _embedded_deep_scan_ratio(self) -> float:
+        pipeline = rule_pipeline_config(self.config)
+        scoring = pipeline.get("scoring") if isinstance(pipeline.get("scoring"), list) else []
+        for item in scoring:
+            if not isinstance(item, dict) or item.get("name") != "embedded_payload_identity":
+                continue
+            if item.get("enabled", False) is False:
+                return 0.0
+            value = item.get("deep_scan_size_coverage_ratio", 0.5)
+            try:
+                return min(1.0, max(0.0, float(value)))
+            except (TypeError, ValueError):
+                return 0.0
+        return 0.0
 
     def _detection_pipeline_disabled(self) -> bool:
         detector_config = detection_config(self.config)
@@ -155,3 +192,24 @@ def _write_initial_task_knowledge(task: ArchiveTask) -> None:
     write_filesystem_task(task)
     write_relation_task(task)
     write_detection_task(task)
+
+
+def _select_size_coverage(fact_bags: list[FactBag], ratio: float) -> list[FactBag]:
+    """Select the smallest deterministic largest-file prefix covering ratio bytes."""
+    sized = [
+        (int(size), str(bag.get("file.path") or ""), bag)
+        for bag in fact_bags
+        if isinstance((size := bag.get("file.size")), int) and size > 0
+    ]
+    if not sized or ratio <= 0.0:
+        return []
+    sized.sort(key=lambda item: (-item[0], os.path.normcase(os.path.normpath(item[1]))))
+    target = max(1, math.ceil(sum(size for size, _path, _bag in sized) * min(1.0, ratio)))
+    selected: list[FactBag] = []
+    covered = 0
+    for size, _path, bag in sized:
+        selected.append(bag)
+        covered += size
+        if covered >= target:
+            break
+    return selected

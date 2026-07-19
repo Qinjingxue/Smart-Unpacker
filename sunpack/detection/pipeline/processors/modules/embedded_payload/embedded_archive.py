@@ -1,250 +1,88 @@
-import os
-from typing import Any, Dict, Optional
+from typing import Any
 
-from sunpack_native import scan_carrier_archive as _NATIVE_SCAN_CARRIER_ARCHIVE
-from sunpack_native import scan_magics_anywhere as _NATIVE_SCAN_MAGICS_ANYWHERE
+from sunpack_native import scan_embedded_archives as _NATIVE_SCAN_EMBEDDED_ARCHIVES
 
 from sunpack.detection.pipeline.processors.context import FactProcessorContext
 from sunpack.detection.pipeline.processors.identity import file_identity_for_context
-from sunpack.detection.pipeline.processors.modules.format_structure.zip_local_header import inspect_zip_local_header
 from sunpack.detection.pipeline.processors.registry import register_processor
-from sunpack.support.config_values import bool_value, non_negative_int, optional_positive_int, positive_int
-from sunpack.support.global_cache_manager import cached_value, file_identity, stable_fingerprint
-from sunpack.support.extensions import normalize_exts
+from sunpack.support.global_cache_manager import cached_value, file_identity
 
 
-DEFAULT_LOOSE_SCAN_MIN_PREFIX = 32
-DEFAULT_LOOSE_SCAN_MAX_HITS = 3
-DEFAULT_LOOSE_SCAN_TAIL_WINDOW_BYTES = 8 * 1024 * 1024
-DEFAULT_LOOSE_SCAN_FULL_SCAN_MAX_BYTES = 64 * 1024 * 1024
-DEFAULT_LOOSE_SCAN_DEEP_SCAN = False
-DEFAULT_CARRIER_SCAN_TAIL_WINDOW_BYTES = 8 * 1024 * 1024
-DEFAULT_CARRIER_SCAN_PREFIX_WINDOW_BYTES = 8 * 1024 * 1024
-DEFAULT_CARRIER_SCAN_FULL_SCAN_MAX_BYTES = 0
-DEFAULT_CARRIER_SCAN_DEEP_SCAN = False
-
-TAIL_MAGICS = {
-    b"7z\xbc\xaf\x27\x1c": ".7z",
-    b"Rar!\x1a\x07\x00": ".rar",
-    b"Rar!\x1a\x07\x01\x00": ".rar",
-    b"PK\x03\x04": ".zip",
-}
-
-
-def _empty_result() -> dict[str, Any]:
+def _empty_result(*, complete: bool = False) -> dict[str, Any]:
     return {
         "found": False,
-        "detected_ext": "",
-        "offset": 0,
-        "mode": "",
-        "carrier_ext": "",
-        "zip_local_header": {},
+        "complete": complete,
+        "candidates": [],
+        "hits": [],
+        "read_bytes": 0,
+        "file_size": 0,
     }
-
-
-def _stream_find_tail_magics_anywhere(
-    path: str,
-    min_offset: int,
-    max_hits: int,
-    end_offset: int | None = None,
-):
-    return _native_stream_find_tail_magics_anywhere(path, min_offset, max_hits, end_offset=end_offset)
-
-
-def _native_stream_find_tail_magics_anywhere(
-    path: str,
-    min_offset: int,
-    max_hits: int,
-    end_offset: int | None = None,
-) -> list[dict[str, Any]]:
-    result = _NATIVE_SCAN_MAGICS_ANYWHERE(
-        path,
-        [(magic, detected_ext) for magic, detected_ext in TAIL_MAGICS.items()],
-        int(max(0, min_offset)),
-        int(max(0, max_hits)),
-        None if end_offset is None else int(max(0, end_offset)),
-    )
-    if not isinstance(result, list):
-        raise TypeError("Native scan_magics_anywhere returned a non-list result")
-
-    hits: list[dict[str, Any]] = []
-    for item in result:
-        if not isinstance(item, dict):
-            raise TypeError("Native scan_magics_anywhere returned a non-dict item")
-        detected_ext = item.get("detected_ext")
-        offset = item.get("offset")
-        if not isinstance(detected_ext, str) or not detected_ext:
-            raise TypeError("Native scan_magics_anywhere returned an invalid detected_ext")
-        try:
-            offset = int(offset)
-        except (TypeError, ValueError):
-            raise TypeError("Native scan_magics_anywhere returned an invalid offset")
-        hits.append({"detected_ext": detected_ext, "offset": offset})
-    return hits
-
-
-def _find_after_carrier(path: str, ext: str, file_size: int, config: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    return _native_find_after_carrier(path, ext, file_size, config)
-
-
-def _native_find_after_carrier(path: str, ext: str, file_size: int, config: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    if ext not in {".jpg", ".jpeg", ".png", ".pdf", ".gif", ".webp"}:
-        return None
-
-    tail_window = positive_int(
-        config,
-        "carrier_scan_tail_window_bytes",
-        DEFAULT_CARRIER_SCAN_TAIL_WINDOW_BYTES,
-    )
-    prefix_window = non_negative_int(
-        config,
-        "carrier_scan_prefix_window_bytes",
-        DEFAULT_CARRIER_SCAN_PREFIX_WINDOW_BYTES,
-    )
-    full_scan_max = non_negative_int(
-        config,
-        "carrier_scan_full_scan_max_bytes",
-        DEFAULT_CARRIER_SCAN_FULL_SCAN_MAX_BYTES,
-    )
-    deep_scan = bool_value(config, "carrier_scan_deep_scan", DEFAULT_CARRIER_SCAN_DEEP_SCAN)
-    result = _NATIVE_SCAN_CARRIER_ARCHIVE(
-        path,
-        ext,
-        [(magic, detected_ext) for magic, detected_ext in TAIL_MAGICS.items()],
-        int(max(0, file_size)),
-        int(tail_window),
-        int(prefix_window),
-        int(full_scan_max),
-        bool(deep_scan),
-    )
-
-    if result is None:
-        return None
-    if not isinstance(result, dict):
-        raise TypeError("Native scan_carrier_archive returned a non-dict result")
-    detected_ext = result.get("detected_ext")
-    offset = result.get("offset")
-    if not isinstance(detected_ext, str) or not detected_ext:
-        raise TypeError("Native scan_carrier_archive returned an invalid detected_ext")
-    try:
-        offset = int(offset)
-    except (TypeError, ValueError):
-        raise TypeError("Native scan_carrier_archive returned an invalid offset")
-    return {
-        "detected_ext": detected_ext,
-        "offset": offset,
-        "scan_scope": str(result.get("scan_scope") or ""),
-    }
-
-
-def _find_by_loose_scan(path: str, file_size: int, config: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    min_prefix = non_negative_int(config, "loose_scan_min_prefix", DEFAULT_LOOSE_SCAN_MIN_PREFIX)
-    min_tail_bytes = optional_positive_int(config, "loose_scan_min_tail_bytes")
-    if min_tail_bytes is None:
-        return None
-    max_hits = positive_int(config, "loose_scan_max_hits", DEFAULT_LOOSE_SCAN_MAX_HITS)
-    tail_window = positive_int(
-        config,
-        "loose_scan_tail_window_bytes",
-        DEFAULT_LOOSE_SCAN_TAIL_WINDOW_BYTES,
-    )
-    full_scan_max = positive_int(
-        config,
-        "loose_scan_full_scan_max_bytes",
-        DEFAULT_LOOSE_SCAN_FULL_SCAN_MAX_BYTES,
-    )
-    deep_scan = bool_value(config, "loose_scan_deep_scan", DEFAULT_LOOSE_SCAN_DEEP_SCAN)
-    if file_size <= min_prefix + min_tail_bytes:
-        return None
-
-    tail_start = max(min_prefix, file_size - tail_window)
-    for hit in _stream_find_tail_magics_anywhere(
-        path,
-        min_offset=tail_start,
-        max_hits=max_hits,
-        end_offset=file_size,
-    ):
-        tail_bytes = file_size - hit["offset"]
-        if tail_bytes >= min_tail_bytes:
-            hit["mode"] = "loose_scan"
-            hit["scan_scope"] = "tail"
-            return hit
-
-    should_full_scan = deep_scan or file_size <= full_scan_max
-    if not should_full_scan:
-        return None
-
-    full_scan_end = tail_start if tail_start > min_prefix else file_size
-    for hit in _stream_find_tail_magics_anywhere(
-        path,
-        min_offset=min_prefix,
-        max_hits=max_hits,
-        end_offset=full_scan_end,
-    ):
-        tail_bytes = file_size - hit["offset"]
-        if tail_bytes >= min_tail_bytes:
-            hit["mode"] = "loose_scan"
-            hit["scan_scope"] = "full"
-            return hit
-    return None
-
-
-def _file_size(context: FactProcessorContext) -> int:
-    size = context.fact_bag.get("file.size")
-    if isinstance(size, int):
-        return size
-    return -1
 
 
 def analyze_embedded_archive(
     path: str,
     file_size: int,
-    config: Dict[str, Any],
+    config: dict[str, Any] | None = None,
     identity: tuple[str, int, int] | None = None,
 ) -> dict[str, Any]:
-    cache_key = (identity or file_identity(path), stable_fingerprint(config or {}))
+    """Run the native, extension-independent, complete embedded scan once."""
+    del config
+    cache_key = identity or file_identity(path)
     return cached_value(
         "embedded_archive_analysis",
         cache_key,
-        lambda: _analyze_embedded_archive_uncached(path, file_size, config, identity=identity),
+        lambda: _normalize_native_result(_NATIVE_SCAN_EMBEDDED_ARCHIVES(path), file_size),
     )
 
 
-def _analyze_embedded_archive_uncached(
-    path: str,
-    file_size: int,
-    config: Dict[str, Any],
-    *,
-    identity: tuple[str, int, int] | None = None,
-) -> dict[str, Any]:
-    ext = os.path.splitext(path)[1].lower()
-    carrier_exts = normalize_exts(config.get("carrier_exts"))
-    ambiguous_exts = normalize_exts(config.get("ambiguous_resource_exts"))
-    if ext not in carrier_exts and ext not in ambiguous_exts:
-        return _empty_result()
+def _normalize_native_result(value: Any, expected_size: int) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise TypeError("Native scan_embedded_archives returned a non-dict result")
+    rows = value.get("candidates")
+    if not isinstance(rows, list):
+        raise TypeError("Native scan_embedded_archives returned invalid candidates")
 
-    embedded = _find_after_carrier(path, ext, file_size, config) if ext in carrier_exts else None
-    if embedded:
-        embedded["mode"] = "carrier_tail"
-    if not embedded and ext in ambiguous_exts:
-        embedded = _find_by_loose_scan(path, file_size, config)
-    if not embedded:
-        return _empty_result()
+    candidates: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            raise TypeError("Native scan_embedded_archives returned a non-dict candidate")
+        archive_format = str(row.get("format") or "")
+        detected_ext = str(row.get("detected_ext") or "")
+        offset = int(row.get("offset") or 0)
+        if not archive_format or not detected_ext or offset <= 0:
+            raise TypeError("Native scan_embedded_archives returned an invalid candidate")
+        end_offset = row.get("end_offset")
+        candidates.append({
+            "format": archive_format,
+            "detected_ext": detected_ext,
+            "offset": offset,
+            "end_offset": None if end_offset is None else int(end_offset),
+            "confidence": float(row.get("confidence") or 0.0),
+            "validation": str(row.get("validation") or ""),
+        })
 
-    detected_ext = embedded.get("detected_ext") or ""
-    offset = int(embedded.get("offset") or 0)
-    result = {
-        "found": True,
-        "detected_ext": detected_ext,
-        "offset": offset,
-        "mode": embedded.get("mode") or "",
-        "scan_scope": embedded.get("scan_scope") or "",
-        "carrier_ext": ext,
-        "zip_local_header": {},
+    candidates.sort(key=lambda item: (item["offset"], item["format"]))
+    raw_hits = value.get("hits")
+    if not isinstance(raw_hits, list):
+        raise TypeError("Native scan_embedded_archives returned invalid hits")
+    hits = []
+    for row in raw_hits:
+        if not isinstance(row, dict):
+            raise TypeError("Native scan_embedded_archives returned a non-dict hit")
+        name = str(row.get("name") or "")
+        offset = int(row.get("offset") or 0)
+        if name and offset > 0:
+            hits.append({"name": name, "offset": offset, "source": "detection_embedded_scan"})
+    hits.sort(key=lambda item: (item["offset"], item["name"]))
+    file_size = int(value.get("file_size") or expected_size or 0)
+    return {
+        "found": bool(candidates),
+        "complete": bool(value.get("complete")),
+        "candidates": candidates,
+        "hits": hits,
+        "read_bytes": int(value.get("read_bytes") or 0),
+        "file_size": file_size,
     }
-    if detected_ext == ".zip":
-        result["zip_local_header"] = inspect_zip_local_header(path, offset, identity=identity)
-    return result
 
 
 @register_processor(
@@ -254,16 +92,22 @@ def _analyze_embedded_archive_uncached(
     schemas={
         "embedded_archive.analysis": {
             "type": "dict",
-            "description": "Embedded archive scan result including found, detected_ext, offset, mode, and ZIP plausibility.",
+            "description": "Complete extension-independent embedded archive scan with every validated candidate.",
         },
     },
 )
 def process_embedded_archive_analysis(context: FactProcessorContext) -> dict[str, Any]:
-    file_size = _file_size(context)
-    path = context.fact_bag.get("file.path") or ""
-    if not path or file_size < 0:
+    if not bool(context.fact_bag.get("candidate.embedded_deep_scan")):
+        return _empty_result()
+    path = str(context.fact_bag.get("file.path") or "")
+    file_size = context.fact_bag.get("file.size")
+    if not path or not isinstance(file_size, int) or file_size <= 0:
         return _empty_result()
     try:
-        return analyze_embedded_archive(path, file_size, context.fact_config, file_identity_for_context(context, path))
+        return analyze_embedded_archive(
+            path,
+            file_size,
+            identity=file_identity_for_context(context, path),
+        )
     except OSError:
         return _empty_result()

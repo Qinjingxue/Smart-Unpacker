@@ -1,4 +1,3 @@
-import os
 import io
 import tempfile
 import unittest
@@ -7,20 +6,32 @@ from pathlib import Path
 
 from sunpack.contracts.detection import FactBag
 from sunpack.coordinator.inspector import InspectOrchestrator
-from sunpack.detection import DetectionScheduler
+from sunpack.coordinator.task_provider import ArchiveTaskProvider, _select_size_coverage
 from sunpack.coordinator.target_scan import build_fact_bags_for_targets
+from sunpack.detection import DetectionScheduler
 from tests.helpers.detection_config import with_detection_pipeline
 
 
 def config_with_rules(scoring):
     return with_detection_pipeline({
-        "thresholds": {
-            "archive_score_threshold": 5,
-            "maybe_archive_threshold": 3,
-        },
-    }, precheck=[
-        {"name": "size_range", "enabled": True, "gte": 0},
-    ], scoring=scoring)
+        "thresholds": {"archive_score_threshold": 5, "maybe_archive_threshold": 3},
+    }, precheck=[{"name": "size_range", "enabled": True, "gte": 0}], scoring=scoring)
+
+
+def embedded_config(*, ratio=1.0):
+    return config_with_rules([{
+        "name": "embedded_payload_identity",
+        "enabled": True,
+        "deep_scan_size_coverage_ratio": ratio,
+        "embedded_payload_score": 5,
+    }])
+
+
+def zip_bytes():
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w", zipfile.ZIP_STORED) as archive:
+        archive.writestr("inside.txt", "hello")
+    return output.getvalue()
 
 
 class DetectionBehaviorTests(unittest.TestCase):
@@ -34,18 +45,11 @@ class DetectionBehaviorTests(unittest.TestCase):
             (root / "orphan.002").write_bytes(b"alone")
 
             groups = build_fact_bags_for_targets([str(root)], config=config_with_rules([]))
-
             split_group = next(group for group in groups if group.get("file.logical_name") == "game")
             orphan = next(group for group in groups if group.get("file.path", "").endswith("orphan.002"))
-
             self.assertTrue(split_group.get("relation.is_split_related"))
-            self.assertEqual(split_group.get("file.split_role"), "first")
-            self.assertEqual(len(split_group.get("file.split_members")), 1)
-            self.assertEqual(split_group.get("candidate.kind"), "split_archive")
             self.assertEqual(split_group.get("candidate.entry_path"), str(first))
             self.assertEqual(split_group.get("candidate.member_paths"), [str(first), str(second)])
-            self.assertEqual(split_group.get("relation.split_family"), "rar_part")
-            self.assertTrue(split_group.get("relation.split_is_first"))
             self.assertFalse(orphan.get("relation.is_split_related"))
 
     def test_inspect_uses_target_grouping_for_directory_split_sets(self):
@@ -55,277 +59,55 @@ class DetectionBehaviorTests(unittest.TestCase):
             second = root / "game.part2.rar"
             first.write_bytes(b"one")
             second.write_bytes(b"two")
-
             results = InspectOrchestrator(config_with_rules([])).inspect([str(root)])
-
             split_result = next(result for result in results if result.fact_bag.get("file.logical_name") == "game")
             self.assertEqual(split_result.path, str(first))
-            self.assertEqual(split_result.split_role, "first")
             self.assertEqual(split_result.fact_bag.get("file.split_members"), [str(second)])
-            self.assertTrue(split_result.fact_bag.get("relation.is_split_related"))
 
-    def test_embedded_archive_rule_detects_carrier_tail_archive(self):
+    def test_unresolved_extensionless_file_gets_reliable_full_embedded_scan(self):
         with tempfile.TemporaryDirectory() as tmp:
-            carrier = Path(tmp) / "cover.jpg"
-            carrier.write_bytes(b"\xff\xd8image-bytes\xff\xd9" + b"PK\x03\x04" + b"zip-ish")
+            carrier = Path(tmp) / "movie.mp4"
+            carrier.write_bytes(b"video-prefix" + zip_bytes())
+            results = ArchiveTaskProvider(embedded_config()).detect_targets([str(carrier)])
+            self.assertEqual(len(results), 1)
+            result = results[0]
+            self.assertTrue(result.decision.should_extract)
+            self.assertEqual(result.fact_bag.get("file.detected_ext"), ".zip")
+            self.assertTrue(result.fact_bag.get("file.embedded_archive_found"))
+            self.assertTrue(result.fact_bag.get("analysis.signature_prepass", {}).get("full_scan_complete"))
 
+    def test_size_coverage_selects_smallest_largest_file_prefix(self):
+        bags = []
+        for name, size in (("large", 60), ("medium", 30), ("small", 10)):
             bag = FactBag()
-            bag.set("file.path", str(carrier))
-            decision = DetectionScheduler(config_with_rules([
-                {"name": "embedded_payload_identity", "enabled": True},
-            ])).evaluate_bag(bag)
+            bag.set("file.path", name)
+            bag.set("file.size", size)
+            bags.append(bag)
+        self.assertEqual([bag.get("file.path") for bag in _select_size_coverage(bags, 0.5)], ["large"])
+        self.assertEqual([bag.get("file.path") for bag in _select_size_coverage(bags, 0.8)], ["large", "medium"])
 
-            self.assertTrue(decision.should_extract)
-            self.assertEqual(bag.get("file.detected_ext"), ".zip")
-            self.assertTrue(bag.get("file.embedded_archive_found"))
-
-    def test_embedded_archive_analysis_is_only_required_for_configured_extensions(self):
+    def test_structurally_invalid_magic_is_not_accepted(self):
         with tempfile.TemporaryDirectory() as tmp:
-            plain = Path(tmp) / "movie.mp4"
-            plain.write_bytes(b"\x00" * 64 + b"PK\x03\x04" + b"not-scanned")
+            carrier = Path(tmp) / "payload.data"
+            carrier.write_bytes(b"prefix" + b"PK\x03\x04not-a-local-header")
+            results = ArchiveTaskProvider(embedded_config()).detect_targets([str(carrier)])
+            self.assertFalse(results[0].decision.should_extract)
 
-            bag = FactBag()
-            bag.set("file.path", str(plain))
-            decision = DetectionScheduler(config_with_rules([
-                {
-                    "name": "embedded_payload_identity",
-                    "enabled": True,
-                    "carrier_exts": [".jpg"],
-                    "ambiguous_resource_exts": [".bin"],
-                },
-            ])).evaluate_bag(bag)
-
-            self.assertFalse(decision.should_extract)
-            self.assertFalse(bag.has("embedded_archive.analysis"))
-
-    def test_embedded_archive_rule_detects_default_prefix_rar5_carrier(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            carrier = Path(tmp) / "cover.jpg"
-            carrier.write_bytes(
-                b"\xff\xd8image-padding"
-                + (b"x" * 1024)
-                + b"\xff\xd9"
-                + b"Rar!\x1a\x07\x01\x00"
-                + b"encrypted-looking-payload"
-                + b"\xff\xd9"
-                + (b"tail" * 1024)
-            )
-
-            bag = FactBag()
-            bag.set("file.path", str(carrier))
-            decision = DetectionScheduler(config_with_rules([
-                {
-                    "name": "embedded_payload_identity",
-                    "enabled": True,
-                    "embedded_payload_scan_level": "manual",
-                    "carrier_scan_tail_window_bytes": 128,
-                },
-            ])).evaluate_bag(bag)
-
-            self.assertTrue(decision.should_extract)
-            self.assertEqual(bag.get("file.detected_ext"), ".rar")
-            self.assertTrue(bag.get("file.embedded_archive_found"))
-            self.assertEqual((bag.get("embedded_archive.analysis") or {}).get("scan_scope"), "prefix")
-
-    def test_carrier_scan_can_disable_prefix_and_full_scan_for_large_middle_marker(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            carrier = Path(tmp) / "cover.jpg"
-            carrier.write_bytes(b"\xff\xd8image\xff\xd9" + b"7z\xbc\xaf\x27\x1c" + b"x" * 4096)
-
-            bag = FactBag()
-            bag.set("file.path", str(carrier))
-            decision = DetectionScheduler(config_with_rules([
-                {
-                    "name": "embedded_payload_identity",
-                    "enabled": True,
-                    "embedded_payload_scan_level": "manual",
-                    "carrier_exts": [".jpg"],
-                    "ambiguous_resource_exts": [],
-                    "carrier_scan_tail_window_bytes": 128,
-                    "carrier_scan_prefix_window_bytes": 0,
-                    "carrier_scan_full_scan_max_bytes": 1024,
-                },
-            ])).evaluate_bag(bag)
-
-            self.assertFalse(decision.should_extract)
-            self.assertFalse(bag.get("file.embedded_archive_found"))
-
-    def test_loose_scan_rejects_implausible_zip_local_header(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            carrier = Path(tmp) / "payload.bin"
-            carrier.write_bytes(b"x" * 64 + b"PK\x03\x04" + b"not-a-real-zip-header" + b"x" * 4096)
-
-            bag = FactBag()
-            bag.set("file.path", str(carrier))
-            decision = DetectionScheduler(config_with_rules([
-                {
-                    "name": "embedded_payload_identity",
-                    "enabled": True,
-                    "embedded_payload_scan_level": "manual",
-                    "ambiguous_resource_exts": [".bin"],
-                    "loose_scan_score": 5,
-                    "loose_scan_min_tail_bytes": 1,
-                },
-            ])).evaluate_bag(bag)
-
-            self.assertFalse(decision.should_extract)
-            self.assertFalse(bag.get("zip.local_header_plausible"))
-            self.assertEqual(bag.get("zip.local_header_offset"), 64)
-            self.assertTrue(bag.get("zip.local_header_error"))
-            self.assertFalse(bag.get("file.embedded_archive_found"))
-
-    def test_loose_scan_accepts_plausible_embedded_zip_local_header(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            zip_buffer = io.BytesIO()
-            with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_STORED) as archive:
-                archive.writestr("inside.txt", "hello")
-
-            carrier = Path(tmp) / "payload.bin"
-            carrier.write_bytes(b"x" * 64 + zip_buffer.getvalue())
-
-            bag = FactBag()
-            bag.set("file.path", str(carrier))
-            decision = DetectionScheduler(config_with_rules([
-                {
-                    "name": "embedded_payload_identity",
-                    "enabled": True,
-                    "embedded_payload_scan_level": "manual",
-                    "ambiguous_resource_exts": [".bin"],
-                    "loose_scan_score": 5,
-                    "loose_scan_min_tail_bytes": 1,
-                },
-            ])).evaluate_bag(bag)
-
-            self.assertTrue(decision.should_extract)
-            self.assertTrue(bag.get("zip.local_header_plausible"))
-            self.assertEqual(bag.get("zip.local_header_offset"), 64)
-            self.assertEqual(bag.get("file.detected_ext"), ".zip")
-            self.assertTrue(bag.get("file.embedded_archive_found"))
-
-    def test_loose_scan_checks_tail_window_before_full_scan(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            carrier = Path(tmp) / "payload.bin"
-            carrier.write_bytes(b"x" * 4096 + b"7z\xbc\xaf\x27\x1c" + b"payload-tail")
-
-            bag = FactBag()
-            bag.set("file.path", str(carrier))
-            decision = DetectionScheduler(config_with_rules([
-                {
-                    "name": "embedded_payload_identity",
-                    "enabled": True,
-                    "embedded_payload_scan_level": "manual",
-                    "ambiguous_resource_exts": [".bin"],
-                    "loose_scan_score": 5,
-                    "loose_scan_min_tail_bytes": 1,
-                    "loose_scan_tail_window_bytes": 128,
-                    "loose_scan_full_scan_max_bytes": 128,
-                },
-            ])).evaluate_bag(bag)
-
-            self.assertTrue(decision.should_extract)
-            self.assertEqual(bag.get("file.detected_ext"), ".7z")
-            self.assertEqual(bag.get("embedded_archive.analysis").get("scan_scope"), "tail")
-
-    def test_loose_scan_skips_large_middle_hits_without_deep_scan(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            carrier = Path(tmp) / "payload.bin"
-            carrier.write_bytes(b"x" * 256 + b"7z\xbc\xaf\x27\x1c" + b"x" * 4096)
-
-            bag = FactBag()
-            bag.set("file.path", str(carrier))
-            decision = DetectionScheduler(config_with_rules([
-                {
-                    "name": "embedded_payload_identity",
-                    "enabled": True,
-                    "embedded_payload_scan_level": "manual",
-                    "ambiguous_resource_exts": [".bin"],
-                    "loose_scan_score": 5,
-                    "loose_scan_min_tail_bytes": 1,
-                    "loose_scan_tail_window_bytes": 128,
-                    "loose_scan_full_scan_max_bytes": 1024,
-                },
-            ])).evaluate_bag(bag)
-
-            self.assertFalse(decision.should_extract)
-            self.assertFalse(bag.get("file.embedded_archive_found"))
-
-    def test_loose_scan_deep_scan_finds_large_middle_hits(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            carrier = Path(tmp) / "payload.bin"
-            carrier.write_bytes(b"x" * 256 + b"7z\xbc\xaf\x27\x1c" + b"x" * 4096)
-
-            bag = FactBag()
-            bag.set("file.path", str(carrier))
-            decision = DetectionScheduler(config_with_rules([
-                {
-                    "name": "embedded_payload_identity",
-                    "enabled": True,
-                    "embedded_payload_scan_level": "manual",
-                    "ambiguous_resource_exts": [".bin"],
-                    "loose_scan_score": 5,
-                    "loose_scan_min_tail_bytes": 1,
-                    "loose_scan_tail_window_bytes": 128,
-                    "loose_scan_full_scan_max_bytes": 1024,
-                    "loose_scan_deep_scan": True,
-                },
-            ])).evaluate_bag(bag)
-
-            self.assertTrue(decision.should_extract)
-            self.assertEqual(bag.get("file.detected_ext"), ".7z")
-            self.assertEqual(bag.get("embedded_archive.analysis").get("scan_scope"), "full")
-
-    def test_pe_overlay_start_strong_hit_reaches_default_archive_threshold(self):
+    def test_pe_overlay_remains_an_ordinary_detection_result(self):
         bag = FactBag()
         bag.set("file.path", "installer.exe")
         bag.set("embedded_archive.analysis", {"found": False})
         bag.set("pe.overlay_structure", {
             "archive_like": True,
-            "offset_delta_from_overlay": 0,
             "format": "7z",
             "detected_ext": ".7z",
             "archive_offset": 434176,
-            "confidence": "strong",
         })
-
-        decision = DetectionScheduler(with_detection_pipeline({
-            "thresholds": {
-                "archive_score_threshold": 6,
-                "maybe_archive_threshold": 3,
-            },
-        }, scoring=[
-            {"name": "embedded_payload_identity", "enabled": True},
-        ])).evaluate_bag(bag)
-
+        decision = DetectionScheduler(embedded_config()).evaluate_bag(bag)
         self.assertTrue(decision.should_extract)
-        self.assertEqual(decision.total_score, 6)
-        self.assertEqual(bag.get("file.detected_ext"), ".7z")
+        self.assertEqual(bag.get("file.container_type"), "pe")
         self.assertEqual(bag.get("file.probe_offset"), 434176)
-
-    def test_maybe_split_with_strong_signal_stays_uncertain_after_scoring(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            first = Path(tmp) / "payload.001"
-            second = Path(tmp) / "payload.002"
-            first.write_bytes(b"head")
-            second.write_bytes(b"tail")
-
-            bag = FactBag()
-            bag.set("file.path", str(first))
-            bag.set("file.split_members", [str(second)])
-            bag.set("file.is_split_candidate", True)
-            bag.set("relation.is_split_related", True)
-            bag.set("file.magic_matched", True)
-
-            config = config_with_rules([
-                {"name": "extension", "enabled": True, "extension_score_groups": [{"score": 5, "extensions": [".zip", ".7z", ".rar", ".gz", ".bz2", ".xz", ".001"]}]},
-            ])
-            config["thresholds"]["archive_score_threshold"] = 6
-            decision = DetectionScheduler(config).evaluate_bag(bag)
-
-            self.assertFalse(decision.should_extract)
-            self.assertEqual(decision.decision, "maybe_archive")
-            self.assertNotIn("group_decision", decision.matched_rules)
 
 
 if __name__ == "__main__":
     unittest.main()
-

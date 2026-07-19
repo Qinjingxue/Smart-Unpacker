@@ -2,6 +2,7 @@ from sunpack.analysis.structure_pipeline.module import AnalysisModuleSpec
 from sunpack.analysis.structure_pipeline.registry import register_analysis_module
 from sunpack.analysis.structure_pipeline.modules._fuzzy import apply_fuzzy_routes
 from sunpack.analysis.result import ArchiveFormatEvidence, ArchiveSegment
+from sunpack.analysis.structure_pipeline.modules._combine import combine_format_candidates
 
 
 class ZipAnalysisModule:
@@ -14,21 +15,31 @@ class ZipAnalysisModule:
 
         max_entries = int(config.get("max_cd_entries_to_walk", 64) or 64)
         eocd_hits = [int(hit["offset"]) for hit in hits if hit.get("name") == "zip_eocd"]
-        native = None
+        evidences = []
         for eocd_offset in sorted(eocd_hits, reverse=True):
-            candidate = view.probe_zip(eocd_offset=eocd_offset, max_cd_entries_to_walk=max_entries)
-            if candidate and candidate.get("plausible"):
-                native = candidate
-                break
-        if native is None and eocd_hits:
-            native = view.probe_zip(eocd_offset=max(eocd_hits), max_cd_entries_to_walk=max_entries)
-        if native and (native.get("magic_matched") or native.get("plausible")):
+            native = view.probe_zip(eocd_offset=eocd_offset, max_cd_entries_to_walk=max_entries)
+            if not native or not (native.get("magic_matched") or native.get("plausible")):
+                continue
             native = dict(native)
             recovered = self._local_header_recovery(view, native, hits, prepass)
             if recovered:
-                return recovered
-            return self._from_native(view, native, hits, prepass)
-        return ArchiveFormatEvidence(format="zip", confidence=0.0, status="not_found")
+                evidences.append(recovered)
+            else:
+                evidences.append(self._from_native(view, native, hits, prepass))
+        known_starts = {segment.start_offset for evidence in evidences for segment in evidence.segments}
+        for item in prepass.get("embedded_candidates", []):
+            if item.get("format") == "zip" and "local_header" in str(item.get("validation") or ""):
+                start = int(item.get("offset") or 0)
+                if start in known_starts:
+                    continue
+                evidences.append(ArchiveFormatEvidence(
+                    format="zip", confidence=0.70, status="damaged",
+                    segments=[ArchiveSegment(start_offset=start, end_offset=None, confidence=0.70,
+                                             damage_flags=["central_directory_unavailable"],
+                                             evidence=["zip:validated_local_header"])],
+                    details={"recovery_strategy": "validated_local_header", "boundary_confidence": "low"},
+                ))
+        return combine_format_candidates("zip", evidences, preserve_multiple=prepass.get("source") == "detection_embedded_scan")
 
     def _from_native(self, view, native: dict, hits: list[dict], prepass: dict) -> ArchiveFormatEvidence:
         if not native.get("magic_matched") and not hits:

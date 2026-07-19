@@ -9,6 +9,7 @@ name = "sunpack_native"
 crate-type = ["cdylib"]
 
 [dependencies]
+aho-corasick = "1.1"
 aes = "0.9"
 base64 = "0.22"
 bzip2 = "0.4"

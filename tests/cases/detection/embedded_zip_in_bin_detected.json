@@ -33,7 +33,6 @@
     "decision.total_score": 5,
     "facts.file.detected_ext": ".zip",
     "facts.file.embedded_archive_found": true,
-    "facts.zip.local_header_plausible": true,
-    "facts.zip.local_header_offset": 64
+    "facts.file.probe_offset": 64
   }
 }

@@ -388,7 +388,7 @@ print(sorted(get_repair_module_registry().all()))
 
 | 名称 | 作用 |
 | --- | --- |
-| `embedded_archive` | 扫描图片、PDF、GIF、WebP 或可疑资源文件中的嵌入式归档。 |
+| `embedded_archive` | 对普通归档检测尚未解决且入选大小覆盖集的文件执行无扩展名嵌入归档深扫。 |
 | `scene_facts` | 识别游戏、程序、资源目录等场景。 |
 | `seven_zip_probe` | 生成 7z.dll 轻量 probe 结果。 |
 | `seven_zip_validation` | 生成 7z.dll test 结果。 |
@@ -401,22 +401,13 @@ print(sorted(get_repair_module_registry().all()))
 | `seven_zip_structure` | 检查 7z signature、start header CRC、next header 范围和 NID。 |
 | `rar_structure` | 检查 RAR4/RAR5 signature、main header 和 block/header walk。 |
 
-嵌入扫描常用字段：
+嵌入扫描只有一个成本字段，位于 `embedded_payload_identity` 规则：
 
 | 字段 | 说明 |
 | --- | --- |
-| `carrier_exts` | 可能携带尾部归档载荷的扩展名。 |
-| `ambiguous_resource_exts` | 需要宽松扫描的可疑资源扩展名。 |
-| `loose_scan_min_prefix` | 宽松扫描时要求归档头前至少有多少字节。 |
-| `loose_scan_min_tail_bytes` | 宽松扫描时要求候选尾部至少有多少字节。 |
-| `loose_scan_max_hits` | 宽松扫描最多接受的命中数量。 |
-| `loose_scan_tail_window_bytes` | 优先扫描的尾部窗口大小。 |
-| `loose_scan_full_scan_max_bytes` | 小于该大小时允许全文件扫描。 |
-| `loose_scan_deep_scan` | 是否启用更深入的宽松扫描。 |
-| `carrier_scan_tail_window_bytes` | 载体尾部扫描窗口大小。 |
-| `carrier_scan_prefix_window_bytes` | 载体头部前缀扫描窗口大小。 |
-| `carrier_scan_full_scan_max_bytes` | 载体全文件扫描上限，`0` 表示默认禁用。 |
-| `carrier_scan_deep_scan` | 是否启用更深入的载体扫描。 |
+| `deep_scan_size_coverage_ratio` | 按文件大小降序选择普通检测未解决的文件，直到累计大小覆盖该集合总大小的比例；默认 `0.5`。入选文件均执行可靠完整扫描。 |
+
+覆盖率决定“扫描哪些文件”，不限制单个文件读取范围。嵌入扫描不检查扩展名，也没有窗口、最大命中数或扫描档位。一次 Rust 顺序读取同时查找所有支持格式；结构校验得到的命中图会传给 analysis，避免再次执行全流签名扫描。
 
 ## detection.rule_pipeline
 
@@ -451,7 +442,7 @@ print(sorted(get_repair_module_registry().all()))
 | `seven_zip_structure_accept` | precheck | start/next header 可信的 7z 快速接受。 |
 | `rar_structure_accept` | precheck | main header/block walk 可信的 RAR 快速接受。 |
 | `extension` | scoring | 扩展名加分。 |
-| `embedded_payload_identity` | scoring | carrier、loose scan、PE overlay 归档载荷加分。 |
+| `embedded_payload_identity` | scoring | 对入选文件的可靠嵌入归档身份加分。 |
 | `zip_structure_identity` | scoring | ZIP local header、EOCD、CD walk 加分。 |
 | `tar_structure_identity` | scoring | TAR header、ustar、entry walk 加分。 |
 | `seven_zip_structure_identity` | scoring | 7z magic/header/NID 加分。 |
@@ -463,11 +454,9 @@ print(sorted(get_repair_module_registry().all()))
 
 历史 `magic_bytes`、`embedded_archive` scoring 规则已移出 active 规则包；当前主流水线由格式结构规则消费 magic/结构 fact，由 `embedded_payload_identity` 统一消费 embedded 和 overlay 事实。
 
-### embedded_payload_scan_level
+### deep_scan_size_coverage_ratio
 
-`embedded_payload_identity` 支持用 `embedded_payload_scan_level` 控制嵌入载荷扫描成本。该字段写在规则配置对象里，而不是全局 detection 配置里。简化配置和高级配置都可以写，简化配置优先级更高。
-
-当前默认推荐值是：
+默认扫描普通检测尚未解决集合中、按大小降序累计覆盖前 50% 字节的文件：
 
 ```json
 {
@@ -476,7 +465,7 @@ print(sorted(get_repair_module_registry().all()))
       "scoring": [
         {
           "name": "embedded_payload_identity",
-          "embedded_payload_scan_level": "balanced"
+          "deep_scan_size_coverage_ratio": 0.5
         }
       ]
     }
@@ -484,22 +473,13 @@ print(sorted(get_repair_module_registry().all()))
 }
 ```
 
-可选值：
-
-| 值 | 说明 |
-| --- | --- |
-| `light` | 最省资源。主要扫较小尾部窗口，适合大目录批量扫描、降低磁盘读取和内存压力。可能漏掉藏得较深的 carrier payload。 |
-| `balanced` | 默认推荐。兼顾性能和召回，适合日常扫描；会扫常见 carrier 尾部窗口，但避免对大文件做激进全文件扫描。 |
-| `deep` | 更高召回。扩大 carrier 前后窗口和 loose scan 范围，适合怀疑有伪装压缩包、carrier 样本或漏检时使用。扫描大文件会更慢。 |
-| `manual` | 完全使用同一个规则对象里的高级细项，例如 `carrier_scan_tail_window_bytes`、`loose_scan_full_scan_max_bytes` 等。只有选择 `manual` 时，高级细项才不会被档位覆盖。 |
-
-简单理解：普通用户调 `light / balanced / deep` 即可；只有需要精确控制扫描窗口时再用 `manual`。例如临时提高召回率：
+`0` 禁用该阶段，`1` 扫描全部未解决文件。中间值选择能够达到目标字节覆盖率的最小“大文件前缀”。例如扫描全部：
 
 ```json
 {
   "name": "embedded_payload_identity",
   "enabled": true,
-  "embedded_payload_scan_level": "deep"
+  "deep_scan_size_coverage_ratio": 1.0
 }
 ```
 

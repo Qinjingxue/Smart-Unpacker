@@ -11,12 +11,3 @@ pub(crate) fn read_range(path: &str, start: u64, len: u64) -> PyResult<Vec<u8>> 
     file.read_exact(&mut buffer)?;
     Ok(buffer)
 }
-
-pub(crate) fn normalize_ext(ext: &str) -> String {
-    let trimmed = ext.trim().to_ascii_lowercase();
-    if trimmed.starts_with('.') {
-        trimmed
-    } else {
-        format!(".{trimmed}")
-    }
-}
