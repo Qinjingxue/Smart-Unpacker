@@ -47,6 +47,20 @@ impl NativeDirectorySnapshot {
             .zip(&self.sizes)
             .filter_map(|((path, is_dir), size)| (!is_dir).then_some((path.as_str(), *size)))
     }
+
+    pub(crate) fn records(&self) -> impl Iterator<Item = (&str, bool, Option<u64>, Option<u64>)> {
+        self.paths
+            .iter()
+            .zip(&self.is_dirs)
+            .zip(&self.sizes)
+            .zip(&self.mtimes_ns)
+            .map(|(((path, is_dir), size), mtime_ns)| (path.as_str(), *is_dir, *size, *mtime_ns))
+    }
+}
+
+struct DirectoryScanRecords {
+    filtered: Vec<DirectoryEntryRecord>,
+    raw: Vec<DirectoryEntryRecord>,
 }
 
 #[pymethods]
@@ -374,6 +388,36 @@ pub(crate) fn scan_directory_snapshot(
 }
 
 #[pyfunction]
+#[pyo3(signature = (root_path, max_depth, patterns, prune_dir_globs, blocked_extensions, blocked_file_names, size_ranges, mtime_ranges, whitelist_rules))]
+pub(crate) fn scan_directory_snapshots(
+    py: Python<'_>,
+    root_path: &str,
+    max_depth: Option<usize>,
+    patterns: Vec<String>,
+    prune_dir_globs: Vec<String>,
+    blocked_extensions: Vec<String>,
+    blocked_file_names: Vec<String>,
+    size_ranges: Vec<NumericRangeTuple>,
+    mtime_ranges: Vec<NumericRangeTuple>,
+    whitelist_rules: Vec<WhitelistRuleTuple>,
+) -> PyResult<(Py<NativeDirectorySnapshot>, Py<NativeDirectorySnapshot>)> {
+    let options = DirectoryScanOptions::new(
+        patterns,
+        prune_dir_globs,
+        blocked_extensions,
+        blocked_file_names,
+        size_ranges,
+        mtime_ranges,
+        whitelist_rules,
+    )?;
+    let records = scan_directory_views(root_path, max_depth, &options)?;
+    Ok((
+        Py::new(py, NativeDirectorySnapshot::from_records(records.filtered))?,
+        Py::new(py, NativeDirectorySnapshot::from_records(records.raw))?,
+    ))
+}
+
+#[pyfunction]
 pub(crate) fn directory_snapshot_from_columns(
     py: Python<'_>,
     paths: Vec<String>,
@@ -426,10 +470,11 @@ pub(crate) fn profile_directory_scan(
     let options_compile = options_started.elapsed();
 
     let mut profile = DirectoryScanProfile::default();
-    let entries = scan_directory_impl::<true>(root_path, max_depth, &options, Some(&mut profile))?;
+    let entries =
+        scan_directory_impl::<true>(root_path, max_depth, &options, false, Some(&mut profile))?;
 
     let snapshot_started = Instant::now();
-    let snapshot = Py::new(py, NativeDirectorySnapshot::from_records(entries))?;
+    let snapshot = Py::new(py, NativeDirectorySnapshot::from_records(entries.filtered))?;
     let snapshot_building = snapshot_started.elapsed();
     let profiled_call_total = call_started.elapsed();
     let profile =
@@ -746,15 +791,24 @@ fn scan_directory(
     max_depth: Option<usize>,
     options: &DirectoryScanOptions,
 ) -> PyResult<Vec<DirectoryEntryRecord>> {
-    scan_directory_impl::<false>(root_path, max_depth, options, None)
+    Ok(scan_directory_impl::<false>(root_path, max_depth, options, false, None)?.filtered)
+}
+
+fn scan_directory_views(
+    root_path: &str,
+    max_depth: Option<usize>,
+    options: &DirectoryScanOptions,
+) -> PyResult<DirectoryScanRecords> {
+    scan_directory_impl::<false>(root_path, max_depth, options, true, None)
 }
 
 fn scan_directory_impl<const PROFILE: bool>(
     root_path: &str,
     max_depth: Option<usize>,
     options: &DirectoryScanOptions,
+    collect_raw: bool,
     mut profile: Option<&mut DirectoryScanProfile>,
-) -> PyResult<Vec<DirectoryEntryRecord>> {
+) -> PyResult<DirectoryScanRecords> {
     let scan_started = Instant::now();
     let root = PathBuf::from(root_path);
     if !root.exists() {
@@ -763,11 +817,26 @@ fn scan_directory_impl<const PROFILE: bool>(
                 profile.scan_total = scan_started.elapsed();
             }
         }
-        return Ok(Vec::new());
+        return Ok(DirectoryScanRecords {
+            filtered: Vec::new(),
+            raw: Vec::new(),
+        });
     }
     if root.is_file() {
         let match_root = root.parent().unwrap_or_else(|| Path::new(""));
-        let result = file_record_if_accepted(&root, match_root, options)
+        let raw = collect_raw
+            .then(|| {
+                fs::metadata(&root)
+                    .ok()
+                    .map(|metadata| DirectoryEntryRecord {
+                        path: path_to_string(&root),
+                        is_dir: false,
+                        size: Some(metadata.len()),
+                        mtime_ns: metadata_mtime_ns(&metadata),
+                    })
+            })
+            .flatten();
+        let filtered = file_record_if_accepted(&root, match_root, options)
             .into_iter()
             .collect();
         if PROFILE {
@@ -775,10 +844,14 @@ fn scan_directory_impl<const PROFILE: bool>(
                 profile.scan_total = scan_started.elapsed();
             }
         }
-        return Ok(result);
+        return Ok(DirectoryScanRecords {
+            filtered,
+            raw: raw.into_iter().collect(),
+        });
     }
 
     let mut records = Vec::new();
+    let mut raw_records = Vec::new();
     let mut stack = vec![(root.clone(), 0usize)];
     while let Some((dir, depth)) = stack.pop() {
         let read_dir =
@@ -829,6 +902,14 @@ fn scan_directory_impl<const PROFILE: bool>(
             }
 
             if metadata.is_dir() {
+                if collect_raw {
+                    raw_records.push(DirectoryEntryRecord {
+                        path: path_to_string(&path),
+                        is_dir: true,
+                        size: None,
+                        mtime_ns: None,
+                    });
+                }
                 let rejected =
                     measure::<PROFILE, _>(&mut profile, ProfileBucket::PathMatching, || {
                         max_depth.is_some_and(|limit| depth >= limit)
@@ -861,6 +942,14 @@ fn scan_directory_impl<const PROFILE: bool>(
 
             let size = metadata.len();
             let mtime_ns = metadata_mtime_ns(&metadata);
+            if collect_raw {
+                raw_records.push(DirectoryEntryRecord {
+                    path: path_to_string(&path),
+                    is_dir: false,
+                    size: Some(size),
+                    mtime_ns,
+                });
+            }
             let rejected = measure::<PROFILE, _>(&mut profile, ProfileBucket::PathMatching, || {
                 !metadata.is_file()
                     || file_rejected_by_path(&path, &root, options)
@@ -902,7 +991,10 @@ fn scan_directory_impl<const PROFILE: bool>(
             profile.scan_total = scan_started.elapsed();
         }
     }
-    Ok(records)
+    Ok(DirectoryScanRecords {
+        filtered: records,
+        raw: raw_records,
+    })
 }
 
 fn file_record_if_accepted(

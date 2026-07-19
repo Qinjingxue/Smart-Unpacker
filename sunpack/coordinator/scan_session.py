@@ -64,7 +64,12 @@ class DetectionScanSession:
     def _snapshot_for_directory(self, directory: str, max_depth: int | None) -> DirectorySnapshot:
         key = self._snapshot_key(directory, max_depth)
         if key not in self._snapshots:
-            self._snapshots[key] = DirectoryScanner(directory, max_depth=max_depth, config=self.config).scan()
+            self._snapshots[key] = DirectoryScanner(
+                directory,
+                max_depth=max_depth,
+                config=self.config,
+                include_raw_snapshot=True,
+            ).scan()
         return self._snapshots[key]
 
     def relation_groups_for_directory(self, directory: str) -> List[CandidateGroup]:

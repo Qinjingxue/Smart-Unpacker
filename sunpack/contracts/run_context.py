@@ -17,3 +17,4 @@ class RunContext:
         self.unpacked_archives: List[List[str]] = []
         self.flatten_candidates: Set[str] = set()
         self.target_results: List[TargetRunResult] = []
+        self.policy_skips: List[dict] = []

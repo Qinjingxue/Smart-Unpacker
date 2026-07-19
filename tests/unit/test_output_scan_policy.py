@@ -29,7 +29,7 @@ def test_output_scan_policy_finds_nested_archive_when_initial_scan_is_current_di
     policy = OutputScanPolicy(config)
 
     assert policy.should_scan_output_dir(str(tmp_path))
-    assert policy.scan_roots_from_outputs([str(tmp_path)]) == [str(segment_dir.resolve())]
+    assert policy.scan_roots_from_outputs([str(tmp_path)]) == [str(tmp_path.resolve())]
 
 
 def test_output_scan_policy_reuses_extraction_inventory(tmp_path, monkeypatch):

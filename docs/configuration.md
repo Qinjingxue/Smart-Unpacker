@@ -25,6 +25,7 @@ python sunpack.py config show
   "cli": {},
   "thresholds": {},
   "recursive_extract": "*",
+  "nested_extraction_policy": {},
   "post_extract": {},
   "filesystem": {},
   "performance": {},
@@ -58,9 +59,24 @@ python sunpack.py config show
 | 正整数 | 固定递归轮数。 |
 | `?` | 每轮递归后询问是否继续。 |
 
-递归轮次只表示最多允许继续扫描多少轮。每轮完成后，coordinator 会用 `NestedOutputScanPolicy` 检查输出目录是否还值得扫描；强游戏/程序场景会被保护，避免把运行目录资源继续误当嵌套压缩包。
+递归轮次只表示最多允许继续扫描多少轮。每轮完成后，coordinator 会用 `NestedOutputScanPolicy` 发现输出中的压缩包，再由 `nested_extraction_policy` 在实际分析和解压前做目录语义授权。
 
 CLI 可用 `--recur` 临时覆盖。
+
+## nested_extraction_policy
+
+该策略批量判断扫描到的压缩包是否像用户语义上的独立归档。它不会弹出确认，也不会减少 detection 的完整候选发现；被拒绝的候选在进入 analysis、密码处理和实际解压前停止。
+
+判断使用同一次 filesystem 枚举产生的过滤前原始快照，因此黑名单、大小过滤等不会把普通游戏文件从目录上下文中隐藏。统计和候选合并在 Rust 中一次完成，不会为每个嵌套压缩包重复扫描目录。
+
+| 字段 | 类型 | 默认 | 说明 |
+| --- | --- | --- | --- |
+| `enabled` | `bool` | `true` | 是否启用解压前批量授权。 |
+| `allow_initial_root_archives` | `bool` | `true` | 用户选择目录后，是否直接允许该目录第一层的压缩包。显式选择的文件始终允许。 |
+| `minimum_archive_byte_ratio` | `float` | `0.5` | 同一首层语义子树中，全部候选压缩包至少占多少文件字节才允许。 |
+| `maximum_other_projects` | `int` | `2` | 即使字节占比不足，最多允许存在多少个非候选文件或子目录。 |
+
+候选位于更深目录时，以扫描根下包含它的第一个目录作为语义子树；同一子树里的多个压缩包统一聚合。分卷成员按一个候选项目处理，成员大小去重求和。拒绝结果以 `nested_extraction_policy` 策略跳过记录在运行摘要中，不作为解压失败。
 
 ## pipeline
 

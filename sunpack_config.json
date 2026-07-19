@@ -7,6 +7,12 @@
     "maybe_archive_threshold": 3
   },
   "recursive_extract": "*",
+  "nested_extraction_policy": {
+    "enabled": true,
+    "allow_initial_root_archives": true,
+    "minimum_archive_byte_ratio": 0.5,
+    "maximum_other_projects": 2
+  },
   "pipeline": {
     "batch_window_seconds": 0
   },

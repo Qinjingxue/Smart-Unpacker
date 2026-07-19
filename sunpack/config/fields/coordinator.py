@@ -20,6 +20,7 @@ def normalize_recursive_extract(value: Any) -> dict[str, Any]:
 
 
 DEFAULT_PIPELINE_CONFIG = advanced_config_value(("pipeline",))
+DEFAULT_NESTED_EXTRACTION_POLICY = advanced_config_value(("nested_extraction_policy",))
 
 
 def normalize_pipeline_config(value: Any) -> dict[str, Any]:
@@ -37,6 +38,38 @@ def normalize_pipeline_config(value: Any) -> dict[str, Any]:
     return config
 
 
+def normalize_nested_extraction_policy(value: Any) -> dict[str, Any]:
+    if value is None:
+        value = {}
+    if not isinstance(value, dict):
+        raise ValueError("nested_extraction_policy must be an object")
+    config = {**DEFAULT_NESTED_EXTRACTION_POLICY, **value}
+    if not isinstance(config.get("enabled"), bool):
+        raise ValueError("nested_extraction_policy.enabled must be boolean")
+    if not isinstance(config.get("allow_initial_root_archives"), bool):
+        raise ValueError(
+            "nested_extraction_policy.allow_initial_root_archives must be boolean"
+        )
+    try:
+        ratio = float(config["minimum_archive_byte_ratio"])
+        maximum_other_projects = int(config["maximum_other_projects"])
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "nested_extraction_policy thresholds must be numeric"
+        ) from exc
+    if not 0.0 <= ratio <= 1.0:
+        raise ValueError(
+            "nested_extraction_policy.minimum_archive_byte_ratio must be between 0 and 1"
+        )
+    if maximum_other_projects < 0:
+        raise ValueError(
+            "nested_extraction_policy.maximum_other_projects must be non-negative"
+        )
+    config["minimum_archive_byte_ratio"] = ratio
+    config["maximum_other_projects"] = maximum_other_projects
+    return config
+
+
 CONFIG_FIELDS = (
     ConfigField(
         path=("recursive_extract",),
@@ -48,6 +81,12 @@ CONFIG_FIELDS = (
         path=("pipeline",),
         default=DEFAULT_PIPELINE_CONFIG,
         normalize=normalize_pipeline_config,
+        owner=__name__,
+    ),
+    ConfigField(
+        path=("nested_extraction_policy",),
+        default=DEFAULT_NESTED_EXTRACTION_POLICY,
+        normalize=normalize_nested_extraction_policy,
         owner=__name__,
     ),
 )

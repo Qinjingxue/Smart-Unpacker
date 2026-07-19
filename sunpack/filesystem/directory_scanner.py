@@ -4,6 +4,7 @@ import re
 from sunpack_native import (
     filter_inventory_file_indices as _NATIVE_FILTER_INVENTORY_FILE_INDICES,
     scan_directory_snapshot as _NATIVE_SCAN_DIRECTORY_SNAPSHOT,
+    scan_directory_snapshots as _NATIVE_SCAN_DIRECTORY_SNAPSHOTS,
 )
 
 from sunpack.contracts.filesystem import DirectorySnapshot, FileEntry
@@ -17,9 +18,10 @@ from sunpack.filesystem.filters.modules.directory_prune import (
 
 
 class DirectoryScanner:
-    def __init__(self, root_path: str, max_depth: int | None = None, filters: list[ScanFilter] | None = None, config: dict | None = None):
+    def __init__(self, root_path: str, max_depth: int | None = None, filters: list[ScanFilter] | None = None, config: dict | None = None, include_raw_snapshot: bool = False):
         self.root_path = Path(root_path)
         self.config = config or {}
+        self.include_raw_snapshot = include_raw_snapshot
         self._custom_filters = filters is not None
         self.max_depth = self._effective_max_depth(max_depth, config)
         self.filters = list(filters) if filters is not None else build_filters(config)
@@ -43,6 +45,7 @@ class DirectoryScanner:
         config: dict | None = None,
         start_filter: str | None = None,
         stop_before_filter: str | None = None,
+        raw_entries: list[FileEntry] | None = None,
     ) -> DirectorySnapshot:
         """Apply the normal ordered filters to an already collected file table."""
         scanner = cls(root_path, config=config)
@@ -53,6 +56,7 @@ class DirectoryScanner:
                 start_filter=start_filter,
                 stop_before_filter=stop_before_filter,
             ),
+            raw_entries=raw_entries,
         )
 
     @classmethod
@@ -87,19 +91,19 @@ class DirectoryScanner:
         options = self._native_scan_options()
         if options is None:
             raise RuntimeError("Native directory scan requires built-in filesystem filters only")
-        native_snapshot = _NATIVE_SCAN_DIRECTORY_SNAPSHOT(
-            str(self.root_path),
-            self.max_depth,
-            options["patterns"],
-            options["prune_dir_globs"],
-            options["blocked_extensions"],
-            options["blocked_file_names"],
-            options["size_ranges"],
-            options["mtime_ranges"],
-            options["whitelist_rules"],
+        args = (
+            str(self.root_path), self.max_depth, options["patterns"],
+            options["prune_dir_globs"], options["blocked_extensions"],
+            options["blocked_file_names"], options["size_ranges"],
+            options["mtime_ranges"], options["whitelist_rules"],
         )
+        if self.include_raw_snapshot:
+            native_snapshot, raw_native_snapshot = _NATIVE_SCAN_DIRECTORY_SNAPSHOTS(*args)
+        else:
+            native_snapshot = _NATIVE_SCAN_DIRECTORY_SNAPSHOT(*args)
+            raw_native_snapshot = native_snapshot
         root_path = self.root_path.parent if self.root_path.is_file() else self.root_path
-        return DirectorySnapshot.from_native(root_path, native_snapshot)
+        return DirectorySnapshot.from_native(root_path, native_snapshot, raw_native_snapshot)
 
     def _native_scan_options(self) -> dict | None:
         return self._native_filter_options()

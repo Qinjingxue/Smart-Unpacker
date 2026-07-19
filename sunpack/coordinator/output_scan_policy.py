@@ -89,12 +89,20 @@ class NestedOutputScanPolicy:
                 scan_session.prime_snapshot(root, snapshot)
                 has_primed_snapshot = True
                 continue
-            for root in self._candidate_parent_roots(output_dir, inventory):
-                key = os.path.normcase(os.path.abspath(root))
-                if key in seen:
-                    continue
+            snapshot = DirectoryScanner(
+                output_dir,
+                config=self._output_scan_config,
+                include_raw_snapshot=True,
+            ).scan()
+            if not snapshot.has_files:
+                continue
+            root = os.path.abspath(output_dir)
+            key = os.path.normcase(root)
+            if key not in seen:
                 seen.add(key)
                 roots.append(root)
+            scan_session.prime_snapshot(root, snapshot)
+            has_primed_snapshot = True
         self._pending_scan_session = scan_session if has_primed_snapshot else None
         return roots
 
@@ -131,18 +139,28 @@ class NestedOutputScanPolicy:
             config=self._output_scan_config,
         ))
         directory_paths: set[str] = set()
+        raw_directory_paths: set[str] = set()
         root_text = str(root)
         root_case = os.path.normcase(root_text)
         for index, (path, _size) in enumerate(inventory_rows):
-            if index not in accepted_indices:
-                continue
             parent = os.path.dirname(path)
             while os.path.normcase(parent) != root_case:
-                directory_paths.add(parent)
+                raw_directory_paths.add(parent)
+                if index in accepted_indices:
+                    directory_paths.add(parent)
                 next_parent = os.path.dirname(parent)
                 if next_parent == parent:
                     break
                 parent = next_parent
+
+        raw_entries = [
+            FileEntry(path=Path(path), is_dir=True)
+            for path in sorted(raw_directory_paths, key=lambda item: (item.count(os.sep), item.lower()))
+        ]
+        raw_entries.extend(
+            FileEntry(path=Path(os.path.abspath(path)), is_dir=False, size=size)
+            for path, size in inventory_rows
+        )
 
         entries = [
             FileEntry(path=Path(path), is_dir=True)
@@ -183,6 +201,7 @@ class NestedOutputScanPolicy:
             hydrated_entries,
             config=self._output_scan_config,
             start_filter="mtime_range",
+            raw_entries=raw_entries,
         )
 
     @staticmethod

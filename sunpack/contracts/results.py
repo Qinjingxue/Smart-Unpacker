@@ -30,3 +30,4 @@ class RunSummary:
     recovered_outputs: List[dict] = field(default_factory=list)
     failures: List[FailureInfo] = field(default_factory=list)
     target_results: List[TargetRunResult] = field(default_factory=list)
+    policy_skips: List[dict] = field(default_factory=list)

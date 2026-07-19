@@ -429,14 +429,14 @@ def test_directory_scanner_pushes_whitelist_directory_rules_to_native(tmp_path, 
         whitelist_rules,
     ):
         captured["whitelist_rules"] = whitelist_rules
-        return object()
+        return object(), object()
 
     monkeypatch.setattr(
-        "sunpack.filesystem.directory_scanner._NATIVE_SCAN_DIRECTORY_SNAPSHOT",
+        "sunpack.filesystem.directory_scanner._NATIVE_SCAN_DIRECTORY_SNAPSHOTS",
         fake_scan,
     )
 
-    DirectoryScanner(str(tmp_path), config={
+    DirectoryScanner(str(tmp_path), include_raw_snapshot=True, config={
         "filesystem": {
             "scan_filters": [
                 {
@@ -452,6 +452,37 @@ def test_directory_scanner_pushes_whitelist_directory_rules_to_native(tmp_path, 
     assert captured["whitelist_rules"] == [
         ([r"(^|/)archives($|/.*)"], [r"^downloads$"], [], [])
     ]
+
+
+def test_directory_scanner_keeps_filter_rejected_files_in_raw_snapshot(tmp_path):
+    blocked = tmp_path / "runtime.dll"
+    blocked.write_bytes(b"x" * 16)
+    archive = tmp_path / "keep.zip"
+    archive.write_bytes(b"PK\x03\x04payload")
+
+    snapshot = DirectoryScanner(str(tmp_path), include_raw_snapshot=True, config={
+        "filesystem": {
+            "scan_filters": [
+                {
+                    "name": "blacklist",
+                    "enabled": True,
+                    "blocked_extensions": [".dll"],
+                },
+            ]
+        }
+    }).scan()
+
+    filtered_paths = {entry.path for entry in _entries(snapshot)}
+    raw_paths, raw_is_dirs, _sizes, _mtimes = snapshot.raw_native_snapshot.materialize_columns()
+    raw_file_paths = {
+        Path(path)
+        for path, is_dir in zip(raw_paths, raw_is_dirs)
+        if not is_dir
+    }
+    assert blocked not in filtered_paths
+    assert blocked in raw_file_paths
+    assert archive in filtered_paths
+    assert archive in raw_file_paths
 
 
 def test_directory_scanner_whitelist_then_blacklist_both_apply(tmp_path):

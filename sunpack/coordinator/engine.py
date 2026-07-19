@@ -17,6 +17,7 @@ from sunpack.contracts.results import OutcomeKind, RunSummary
 from sunpack.contracts.run_context import RunContext
 from sunpack.coordinator.extraction_batch import ExtractionBatchRunner
 from sunpack.coordinator.output_scan_policy import NestedOutputScanPolicy
+from sunpack.coordinator.nested_extraction_policy import NestedExtractionPolicy
 from sunpack.coordinator.recursion import RecursionController
 from sunpack.coordinator.reporting import RunReporter
 from sunpack.coordinator.scheduling import (
@@ -364,6 +365,7 @@ class _PipelineRuntime:
         self.task_scanner = ArchiveTaskScanner(config, initial_context)
         self.rename_scheduler = RenameScheduler()
         self.output_scan_policy = NestedOutputScanPolicy(config)
+        self.nested_extraction_policy = NestedExtractionPolicy(config)
         performance_config = config.get("performance", {}) if isinstance(config.get("performance"), dict) else {}
         self.extractor = ExtractionScheduler(
             cli_passwords=config.get("user_passwords", []),
@@ -439,6 +441,15 @@ class _PipelineRuntime:
                     current_roots,
                     scan_session=current_scan_session,
                 )
+            authorization = self.nested_extraction_policy.authorize_batch(
+                tasks,
+                current_roots,
+                current_scan_session or self.task_scanner.last_scan_session,
+                round_index=round_index,
+                direct_initial=bool(direct and round_index == 1),
+            )
+            tasks = authorization.allowed_tasks
+            context.policy_skips.extend(authorization.skipped)
             ownership.remember_tasks(tasks)
             self.batch_runner.set_progress_round(round_index, direct=direct and round_index == 1)
             before_results = len(context.target_results)
@@ -612,6 +623,12 @@ class _RequestOwnership:
                 recovered_outputs=recovered,
                 failures=failures,
                 target_results=request_results,
+                policy_skips=[
+                    item
+                    for item in context.policy_skips
+                    if self.owner_for_path(str(item.get("path") or "")).request_id
+                    == submission.request_id
+                ],
             )
             responses[submission.request_id] = PipelineResponse(
                 request_id=submission.request_id,

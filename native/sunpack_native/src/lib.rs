@@ -76,6 +76,10 @@ fn sunpack_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(
+        scan::directory::scan_directory_snapshots,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
         scan::directory::directory_snapshot_from_columns,
         m
     )?)?;
@@ -92,6 +96,10 @@ fn sunpack_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(scan::directory::batch_file_head_facts, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        scan::nested_authorization::authorize_nested_candidates,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(relations::relations_detect_split_role, m)?)?;
     m.add_function(wrap_pyfunction!(relations::relations_logical_name, m)?)?;
     m.add_function(wrap_pyfunction!(

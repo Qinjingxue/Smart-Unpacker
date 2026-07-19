@@ -14,9 +14,11 @@ from sunpack.relations.internal.group_builder import RelationsGroupBuilder
 
 class ArchiveTaskScanner:
     def __init__(self, config: dict[str, Any], context: RunContext):
+        self.config = config
         self.context = context
         self.provider = ArchiveTaskProvider(config)
         self.detector = self.provider.detector
+        self.last_scan_session: DetectionScanSession | None = None
 
     def scan_root(self, scan_root: str) -> list[ArchiveTask]:
         return self.scan_targets([scan_root])
@@ -27,6 +29,8 @@ class ArchiveTaskScanner:
         *,
         scan_session: DetectionScanSession | None = None,
     ) -> list[ArchiveTask]:
+        scan_session = scan_session or DetectionScanSession(config=self.config)
+        self.last_scan_session = scan_session
         tasks = self.provider.scan_targets(
             scan_roots,
             processed_keys=self.context.processed_keys,
