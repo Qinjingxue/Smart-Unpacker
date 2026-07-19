@@ -262,8 +262,7 @@ class WatchScheduler:
             self.stop()
 
     def run_once(self) -> WatchRunResult:
-        now = time.time()
-        self._process_password_dirty_dirs(now)
+        self._process_password_dirty_dirs(time.monotonic())
         ready = self._pop_ready(time.time())
         with self._lock:
             active_paths = {os.path.normcase(os.path.abspath(path)) for path in self._pending}
@@ -467,7 +466,7 @@ class WatchScheduler:
             return
         directory = os.path.dirname(os.path.abspath(path))
         with self._lock:
-            self._password_dirty_dirs[directory] = time.time()
+            self._password_dirty_dirs[directory] = time.monotonic()
 
     def notify_path_departed(self, path: str, *, recursive: bool = False) -> None:
         normalized = os.path.abspath(path)
@@ -1007,7 +1006,7 @@ class WatchScheduler:
         self.notify_password_source_changed("recent_password")
 
     def _mark_all_password_failures_dirty(self) -> None:
-        now = time.time()
+        now = time.monotonic()
         with self._lock:
             for entry in self.state.entries.values():
                 if entry.status == "failed_password":

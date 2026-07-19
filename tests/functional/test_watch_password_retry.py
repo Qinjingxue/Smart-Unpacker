@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+import uuid
 
 import pytest
 
@@ -26,7 +27,9 @@ def test_watch_retries_real_encrypted_zip_after_password_source_update(tmp_path,
     output_root.mkdir()
     payload = "watch password retry payload"
     (source_dir / "payload.txt").write_text(payload, encoding="utf-8")
-    password = "watch-retry-secret"
+    # A per-test password prevents a prior run, clipboard entry, or configured
+    # password source from turning the intended first failure into a success.
+    password = f"watch-retry-secret-{uuid.uuid4().hex}"
     archive = watch_root / "encrypted.zip"
     completed = subprocess.run(
         [
@@ -72,22 +75,25 @@ def test_watch_retries_real_encrypted_zip_after_password_source_update(tmp_path,
         initial_scan=False,
         pipeline_engine=engine,
     )
-    watcher.enqueue(str(archive))
-    first = watcher.run_once()
-    first_entry = next(iter(watcher.state.entries.values()))
+    try:
+        watcher.enqueue(str(archive))
+        first = watcher.run_once()
+        assert first.failed == 1, first
+        first_entries = list(watcher.state.entries.values())
+        assert len(first_entries) == 1, first_entries
+        assert first_entries[0].status == "failed_password"
 
-    if source == "directory":
-        directory_password_file.write_text(password + "\n", encoding="utf-8")
-        watcher.notify_password_table_changed(str(directory_password_file))
-    else:
-        monkeypatch.setattr(clipboard_monitor_module, "read_clipboard_passwords", lambda: [password])
-        watcher._clipboard_monitor._handle_clipboard_update()
-    second = watcher.run_once()
-    extracted = list(output_root.rglob("payload.txt"))
-    engine.close()
+        if source == "directory":
+            directory_password_file.write_text(password + "\n", encoding="utf-8")
+            watcher.notify_password_table_changed(str(directory_password_file))
+        else:
+            monkeypatch.setattr(clipboard_monitor_module, "read_clipboard_passwords", lambda: [password])
+            watcher._clipboard_monitor._handle_clipboard_update()
+        second = watcher.run_once()
+        extracted = list(output_root.rglob("payload.txt"))
+    finally:
+        engine.close()
 
-    assert first.failed == 1
-    assert first_entry.status == "failed_password"
     assert second.succeeded == 1
     assert not watcher.state.entries
     assert len(extracted) == 1

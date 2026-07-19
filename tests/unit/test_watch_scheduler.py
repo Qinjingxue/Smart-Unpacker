@@ -1293,6 +1293,63 @@ def test_watch_scheduler_retries_password_failure_after_password_source_change(t
     assert not watcher.state.entries
 
 
+def test_password_retry_debounce_uses_monotonic_clock_when_wall_clock_moves_backward(tmp_path, monkeypatch):
+    monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
+    wall_clock = WatchClock(1_000.0)
+    wall_clock.install(monkeypatch)
+    monotonic_clock = {"value": 100.0}
+    monkeypatch.setattr(scheduler_module.time, "monotonic", lambda: monotonic_clock["value"])
+    attempts = {"count": 0}
+
+    class PasswordThenSuccessRunner:
+        def __init__(self, config):
+            pass
+
+        def run_targets(self, paths):
+            attempts["count"] += 1
+            if attempts["count"] == 1:
+                return SimpleNamespace(
+                    success_count=0,
+                    failed_tasks=["wrong password"],
+                    failures=[FailureInfo(FailureKind.WRONG_PASSWORD, "password_resolution", "wrong password")],
+                )
+            return SimpleNamespace(success_count=1, failed_tasks=[], failures=[])
+
+    watch_root = tmp_path / "in"
+    watch_root.mkdir()
+    archive_path = watch_root / "sample.zip"
+    archive_path.write_bytes(b"PK\x03\x04payload")
+    watcher = WatchScheduler(
+        {
+            "watch": {
+                "clipboard_monitor_enabled": False,
+                "password_retry_debounce_seconds": 5,
+            }
+        },
+        [str(watch_root)],
+        out_dir=str(tmp_path / "out"),
+        state_path=str(tmp_path / "state.json"),
+        quiet_seconds=0,
+        initial_scan=False,
+        pipeline_engine=FakePipelineEngine(PasswordThenSuccessRunner),
+    )
+
+    watcher.enqueue(str(archive_path))
+    first = watcher.run_once()
+    watcher.notify_password_source_changed("test")
+
+    wall_clock.value = 10.0
+    monotonic_clock["value"] = 104.9
+    before_debounce = watcher.run_once()
+    monotonic_clock["value"] = 105.0
+    after_debounce = watcher.run_once()
+
+    assert first.failed == 1
+    assert before_debounce.processed == 0
+    assert after_debounce.succeeded == 1
+    assert attempts["count"] == 2
+
+
 def test_watch_scheduler_defaults_to_user_and_builtin_password_sources(tmp_path, monkeypatch):
     monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
     monkeypatch.setattr(scheduler_module, "get_builtin_passwords", lambda: ["builtin-secret"])
