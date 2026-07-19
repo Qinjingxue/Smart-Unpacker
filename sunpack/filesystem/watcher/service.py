@@ -22,6 +22,7 @@ ROOTS_MUTEX_PREFIX = "Local\\SunPackWatchRoots"
 SERVICE_MUTEX_PREFIX = "Local\\SunPackWatchService"
 CONTROL_STOP = "stop"
 CONTROL_RELOAD = "reload"
+CONTROL_SCHEDULER_WAKEUP = "scheduler_wakeup"
 
 MUTEX_ALL_ACCESS = 0x001F0001
 WAIT_ABANDONED = 0x00000080
@@ -256,7 +257,11 @@ class WatchService:
                     sleep_seconds = max(0.0, next_scheduler_run - now)
                 else:
                     sleep_seconds = None
-                self._handle_control_event(self.control_events.wait(sleep_seconds))
+                control_event = self.control_events.wait(sleep_seconds)
+                if control_event == CONTROL_SCHEDULER_WAKEUP and self.scheduler is not None:
+                    next_scheduler_run = time.monotonic() + self._scheduler_next_delay()
+                else:
+                    self._handle_control_event(control_event)
             return 0
         except Exception as exc:
             self.log.write("service_error", error=str(exc), error_type=type(exc).__name__)
@@ -305,6 +310,7 @@ class WatchService:
             observer_stop_timeout_seconds=float(watch_config.get("observer_stop_timeout_seconds", 5.0)),
             pipeline_engine=self.pipeline_engine,
             group_coordinator=(self.group_coordinator_factory(run_config) if self.group_coordinator_factory else None),
+            wake_callback=self._wake_scheduler,
         )
         self.scheduler.start()
         self.log.write("scheduler_attached", roots=roots, out_dir=out_dir, state_path=state_path)
@@ -367,6 +373,9 @@ class WatchService:
                 pass
         return max(0.0, float(getattr(self.scheduler, "interval_seconds", 1.0)))
 
+    def _wake_scheduler(self) -> None:
+        self.control_events.wake_scheduler()
+
     def _reload_config(self) -> None:
         self.config = load_config()
         self.service_config = service_config_from(self.config)
@@ -414,7 +423,11 @@ class WatchControlEvents:
         self._handles = [
             _create_named_event(self._kernel32, self.names[CONTROL_STOP]),
             _create_named_event(self._kernel32, self.names[CONTROL_RELOAD]),
+            _create_named_event(self._kernel32, self.names[CONTROL_SCHEDULER_WAKEUP]),
         ]
+
+    def wake_scheduler(self) -> bool:
+        return _set_named_event(self.names[CONTROL_SCHEDULER_WAKEUP])
 
     def wait(self, timeout_seconds: float | None) -> str | None:
         if not self._handles:
@@ -426,6 +439,8 @@ class WatchControlEvents:
             return CONTROL_STOP
         if result == WAIT_OBJECT_0 + 1:
             return CONTROL_RELOAD
+        if result == WAIT_OBJECT_0 + 2:
+            return CONTROL_SCHEDULER_WAKEUP
         if result == WAIT_TIMEOUT:
             return None
         if result == WAIT_FAILED:
@@ -445,6 +460,7 @@ def watch_control_event_names(config: dict | None = None) -> dict[str, str]:
     return {
         CONTROL_STOP: f"{CONTROL_EVENT_PREFIX}-{digest}-stop",
         CONTROL_RELOAD: f"{CONTROL_EVENT_PREFIX}-{digest}-reload",
+        CONTROL_SCHEDULER_WAKEUP: f"{CONTROL_EVENT_PREFIX}-{digest}-scheduler-wakeup",
     }
 
 

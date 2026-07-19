@@ -550,6 +550,35 @@ def test_event_burst_with_unchanged_usn_does_not_restart_quiet_window(tmp_path, 
     assert watcher.run_once().processed == 1
 
 
+def test_candidate_deadline_changes_wake_watch_service(tmp_path, monkeypatch):
+    monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
+    archive = tmp_path / "sample.zip"
+    archive.write_bytes(b"PK\x03\x04payload")
+    wakeups = []
+    watcher = WatchScheduler(
+        {"filesystem": {"scan_filters": []}, "watch": {"clipboard_monitor_enabled": False}},
+        [str(tmp_path)],
+        out_dir=str(tmp_path / "out"),
+        state_path=str(tmp_path / "state.json"),
+        quiet_seconds=30,
+        initial_scan=False,
+        wake_callback=lambda: wakeups.append("wake"),
+    )
+
+    watcher.enqueue(str(archive), event_type="created")
+    assert wakeups == ["wake"]
+
+    watcher.enqueue(str(archive), event_type="modified")
+    assert wakeups == ["wake"]
+
+    archive.write_bytes(b"PK\x03\x04payload-more")
+    watcher.enqueue(str(archive), event_type="modified")
+    assert wakeups == ["wake", "wake"]
+
+    watcher.notify_path_departed(str(archive))
+    assert wakeups == ["wake", "wake", "wake"]
+
+
 def test_watch_scheduler_rechecks_filesystem_filters_before_processing(tmp_path, monkeypatch):
     monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
 

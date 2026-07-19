@@ -7,7 +7,12 @@ from types import SimpleNamespace
 import sunpack.filesystem.watcher.service as service_module
 import sunpack.coordinator.watch_runtime as watch_runtime
 import sunpack.cli.commands.watch as watch_command
-from sunpack.filesystem.watcher.service import CONTROL_RELOAD, CONTROL_STOP, WatchService
+from sunpack.filesystem.watcher.service import (
+    CONTROL_RELOAD,
+    CONTROL_SCHEDULER_WAKEUP,
+    CONTROL_STOP,
+    WatchService,
+)
 from sunpack.cli.commands.watch import _watch_running
 from tests.helpers.fake_pipeline_engine import FakePipelineEngine
 
@@ -382,6 +387,64 @@ def test_watch_service_waits_on_control_event_until_scheduler_is_due(tmp_path, m
     assert service.run() == 0
     assert len(scheduler_runs) == 2
     assert waits == [5.0, 5.0]
+
+
+def test_watch_service_recalculates_deadline_after_scheduler_wakeup(tmp_path, monkeypatch):
+    state_dir = tmp_path / ".sunpack_watch"
+    state_dir.mkdir()
+    monkeypatch.setattr(
+        service_module,
+        "load_config",
+        lambda: {"watch": {"state_dir": str(state_dir), "roots": [], "tray_enabled": False}},
+    )
+    service = WatchService(engine_factory=lambda _config: FakePipelineEngine(FakeRunner))
+    scheduler_runs = []
+    waits = []
+
+    class FakeScheduler:
+        interval_seconds = 5.0
+
+        def __init__(self):
+            self.delay = 120.0
+
+        def run_once(self):
+            scheduler_runs.append(len(scheduler_runs))
+            if len(scheduler_runs) == 2:
+                self.delay = self.interval_seconds
+            return SimpleNamespace(processed=0, succeeded=0, failed=0, pending=1, errors=[])
+
+        def next_delay_seconds(self):
+            return self.delay
+
+    scheduler = FakeScheduler()
+
+    class FakeControlEvents:
+        def start(self):
+            pass
+
+        def wait(self, timeout_seconds):
+            waits.append(timeout_seconds)
+            if len(waits) == 1:
+                scheduler.delay = 1.0
+                return CONTROL_SCHEDULER_WAKEUP
+            return CONTROL_STOP
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(service, "_acquire_lock", lambda: True)
+    monkeypatch.setattr(service, "_release_lock", lambda: None)
+    monkeypatch.setattr(service, "_start_scheduler", lambda: setattr(service, "scheduler", scheduler))
+    monkeypatch.setattr(service, "_stop_scheduler", lambda: setattr(service, "scheduler", None))
+    monkeypatch.setattr(service, "_start_tray", lambda: None)
+    monkeypatch.setattr(service, "_stop_tray", lambda: None)
+    service.control_events = FakeControlEvents()
+    times = iter([0.0, 0.0, 1.0])
+    monkeypatch.setattr(service_module.time, "monotonic", lambda: next(times))
+
+    assert service.run() == 0
+    assert len(scheduler_runs) == 2
+    assert waits == [120.0, 5.0]
 
 
 def test_watch_service_deduplicates_unchanged_pending_ticks(tmp_path, monkeypatch):

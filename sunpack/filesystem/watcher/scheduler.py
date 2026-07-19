@@ -9,7 +9,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 
 from sunpack.config.detection_view import directory_scan_is_recursive
 from sunpack.config.fields.watch import DEFAULT_WATCH_CONFIG
@@ -95,6 +95,7 @@ class WatchScheduler:
         observer_stop_timeout_seconds: float | None = None,
         pipeline_engine=None,
         group_coordinator=None,
+        wake_callback: Callable[[], None] | None = None,
     ):
         self.config = config
         watch_config = dict(DEFAULT_WATCH_CONFIG)
@@ -154,6 +155,7 @@ class WatchScheduler:
             self.state.remember_output_roots([self.out_dir])
         self._observer = Observer()
         self._started = False
+        self._wake_callback = wake_callback
         if pipeline_engine is None:
             raise ValueError("WatchScheduler requires a PipelineEngine")
         self.pipeline_engine = pipeline_engine
@@ -373,6 +375,7 @@ class WatchScheduler:
                 state.filter_revision = self._filter_revision
                 state.filtered_size = candidate.size
                 state.filtered_mtime = candidate.mtime
+                self._wake_service()
                 return
         if not self._passes_filesystem_filters(candidate):
             self._log_candidate_ignored(candidate.path, "filtered_out")
@@ -421,6 +424,7 @@ class WatchScheduler:
                 quiet_seconds=active_quiet_seconds,
                 pending=self.pending_count,
             )
+            self._wake_service()
 
     def should_ignore_event_path(self, path: str) -> bool:
         if not path:
@@ -494,6 +498,12 @@ class WatchScheduler:
             forgotten=forgotten,
             pending_removed=len(pending_paths),
         )
+        if pending_paths:
+            self._wake_service()
+
+    def _wake_service(self) -> None:
+        if self._wake_callback is not None:
+            self._wake_callback()
 
     def _pop_ready(self, now: float) -> list[WatchCandidate]:
         ready: list[WatchCandidate] = []
