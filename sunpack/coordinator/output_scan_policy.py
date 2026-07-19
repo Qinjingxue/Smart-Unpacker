@@ -1,21 +1,13 @@
 import os
-import logging
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Iterable
 
 from sunpack.contracts.filesystem import DirectorySnapshot, FileEntry
 from sunpack.coordinator.scan_session import DetectionScanSession
-from sunpack.filesystem.filters.modules.scene_semantics import (
-    detect_scene_context_for_directory,
-    is_strong_scene_context,
-)
 from sunpack.filesystem.directory_scanner import DirectoryScanner
 from sunpack.support.output_inventory import OutputInventory
 from sunpack.support.path_keys import path_key
-
-
-LOGGER = logging.getLogger(__name__)
 
 
 class NestedOutputScanPolicy:
@@ -42,15 +34,6 @@ class NestedOutputScanPolicy:
         snapshot = None
         if inventory_files is None:
             snapshot = DirectoryScanner(target_dir, config=self._output_scan_config).scan()
-        ctx = detect_scene_context_for_directory(target_dir, entries=snapshot.entries if snapshot is not None else None)
-        if is_strong_scene_context(ctx):
-            LOGGER.info(
-                "skipping strong scene output directory: %s @ %s",
-                ctx.get("scene_type"),
-                os.path.basename(target_dir) or target_dir,
-            )
-            return []
-
         roots = []
         seen = set()
         candidates = (
@@ -96,14 +79,6 @@ class NestedOutputScanPolicy:
             )
             snapshot = self._snapshot_from_inventory(inventory, scan_session)
             if snapshot is not None:
-                ctx = detect_scene_context_for_directory(output_dir, entries=snapshot.entries)
-                if is_strong_scene_context(ctx):
-                    LOGGER.info(
-                        "skipping strong scene output directory: %s @ %s",
-                        ctx.get("scene_type"),
-                        os.path.basename(output_dir) or output_dir,
-                    )
-                    continue
                 if not any(not entry.is_dir for entry in snapshot.entries):
                     continue
                 root = os.path.abspath(output_dir)
@@ -158,7 +133,9 @@ class NestedOutputScanPolicy:
         directory_paths: set[str] = set()
         root_text = str(root)
         root_case = os.path.normcase(root_text)
-        for path, _size in inventory_rows:
+        for index, (path, _size) in enumerate(inventory_rows):
+            if index not in accepted_indices:
+                continue
             parent = os.path.dirname(path)
             while os.path.normcase(parent) != root_case:
                 directory_paths.add(parent)

@@ -12,7 +12,6 @@ class InspectResult:
     matched_rules: List[str]
     detected_ext: str
     split_role: str
-    scene_type: str
     fact_bag: object
     decision: str
     decision_stage: str
@@ -37,9 +36,6 @@ class InspectOrchestrator:
 
             decision = detection.decision
 
-            scene_ctx = bag.get("scene.context", {})
-            scene_type = scene_ctx.get("scene_type", "generic") if isinstance(scene_ctx, dict) else "generic"
-
             results.append(InspectResult(
                 path=file_path_str,
                 should_extract=decision.should_extract,
@@ -48,7 +44,6 @@ class InspectOrchestrator:
                 matched_rules=decision.matched_rules,
                 detected_ext=bag.get("file.detected_ext", ""),
                 split_role=split_role or "",
-                scene_type=scene_type,
                 fact_bag=bag,
                 decision=decision.decision,
                 decision_stage=decision.decision_stage,

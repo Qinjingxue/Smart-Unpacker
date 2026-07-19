@@ -1,7 +1,6 @@
 from copy import deepcopy
 from typing import Any
 
-from tests.helpers.scene_rules import RECOMMENDED_SCENE_RULES_PAYLOAD
 from tests.helpers.detection_config import with_detection_pipeline
 
 
@@ -32,37 +31,15 @@ CONFIGS: dict[str, dict[str, Any]] = {
     ], scoring=[
         {"name": "embedded_payload_identity", "enabled": True, "carrier_tail_score": 5},
     ]),
-    "scene_protect_enabled": with_detection_pipeline({
-        "thresholds": {"archive_score_threshold": 5, "maybe_archive_threshold": 3},
-    }, precheck=[
-        {
-            "name": "scene_protect",
-            "enabled": True,
-            "scene_rules": RECOMMENDED_SCENE_RULES_PAYLOAD,
-        },
-    ]),
-    "scene_penalty_runtime": with_detection_pipeline({
-        "thresholds": {"archive_score_threshold": 5, "maybe_archive_threshold": 3},
-    }, scoring=[
-        {"name": "extension", "enabled": True, "extension_score_groups": [{"score": 5, "extensions": [".zip", ".7z", ".rar", ".001"]}]},
-        {
-            "name": "scene_penalty",
-            "enabled": True,
-            "scene_rules": RECOMMENDED_SCENE_RULES_PAYLOAD,
-            "runtime_resource_archive_penalty": -99,
-        },
-    ]),
     "archive_scan_full": with_detection_pipeline({
         "thresholds": {"archive_score_threshold": 6, "maybe_archive_threshold": 3},
     }, precheck=[
         {"name": "size_range", "enabled": True, "gte": 0},
-        {"name": "scene_protect", "enabled": True},
     ], scoring=[
         {"name": "extension", "enabled": True, "extension_score_groups": [{"score": 5, "extensions": [".zip", ".7z", ".rar", ".gz", ".bz2", ".xz", ".001"]}]},
         {"name": "embedded_payload_identity", "enabled": True},
         {"name": "seven_zip_structure_identity", "enabled": True, "magic_score": 5, "next_header_nid_score": 5},
         {"name": "rar_structure_identity", "enabled": True, "magic_score": 5, "block_walk_score": 5},
-        {"name": "scene_penalty", "enabled": True},
     ], confirmation=[
         {"name": "seven_zip_probe", "enabled": True, "reject_executable_container": False, "reject_clear_non_archive": True},
         {"name": "seven_zip_validation", "enabled": True, "reject_on_failed": False},
@@ -71,13 +48,11 @@ CONFIGS: dict[str, dict[str, Any]] = {
         "thresholds": {"archive_score_threshold": 6, "maybe_archive_threshold": 3},
     }, precheck=[
         {"name": "size_range", "enabled": True, "gte": 0},
-        {"name": "scene_protect", "enabled": True},
     ], scoring=[
         {"name": "extension", "enabled": True, "extension_score_groups": [{"score": 5, "extensions": [".zip", ".7z", ".rar", ".gz", ".bz2", ".xz", ".001"]}]},
         {"name": "embedded_payload_identity", "enabled": True, "embedded_payload_scan_level": "deep"},
         {"name": "seven_zip_structure_identity", "enabled": True, "magic_score": 5, "next_header_nid_score": 5},
         {"name": "rar_structure_identity", "enabled": True, "magic_score": 5, "block_walk_score": 5},
-        {"name": "scene_penalty", "enabled": True},
     ], confirmation=[
         {"name": "seven_zip_probe", "enabled": True, "reject_executable_container": False, "reject_clear_non_archive": True},
         {"name": "seven_zip_validation", "enabled": True, "reject_on_failed": False},

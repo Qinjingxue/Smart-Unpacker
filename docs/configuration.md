@@ -115,7 +115,7 @@ CLI 在当前命令结束后关闭 Engine；watch 在服务生命周期内保持
 
 `whitelist` 使用 `allowed_files` 和 `allowed_extensions` 表示允许的完整文件名和扩展名。每个 whitelist 字段为空时表示该维度不限制；多个非空字段会同时作为约束。`blacklist` 使用 `blocked_files` 和 `blocked_extensions` 表示禁止的完整文件名和扩展名。
 
-`scene_semantics` 的 `prune_dir_globs` / `path_globs` 用于目录语义剪枝；命中的目录子树不会进入后续过滤器。`blacklist` 现在只负责具体文件名和扩展名过滤。
+`directory_prune` 的 `prune_dir_globs` / `path_globs` 在原生目录遍历阶段执行；命中的目录不会入栈，其整个子树也不会进入后续过滤器。`prune_dir_globs` 匹配任意层级的目录名，`path_globs` 匹配相对于扫描根的路径。`blacklist` 只负责具体文件名和扩展名过滤。
 
 `blacklist` 常用字段：
 
@@ -412,8 +412,8 @@ print(sorted(get_repair_module_registry().all()))
 
 检测规则分三层：
 
-- `precheck`：强场景保护、高置信结构快速接受。
-- `scoring`：扩展名、真实结构、embedded payload、场景扣分。
+- `precheck`：高置信结构快速接受。
+- `scoring`：扩展名、真实结构、embedded payload。
 - `confirmation`：7z.dll probe/test 等确认层。
 
 每条规则至少包含：
@@ -426,7 +426,6 @@ print(sorted(get_repair_module_registry().all()))
 
 | 规则 | 层 | 说明 |
 | --- | --- | --- |
-| `scene_protect` | precheck | 保护强游戏/程序/资源场景。 |
 | `zip_structure_accept` | precheck | 结构可信的 ZIP 快速接受。 |
 | `tar_structure_accept` | precheck | 结构可信的 TAR 快速接受。 |
 | `seven_zip_structure_accept` | precheck | start/next header 可信的 7z 快速接受。 |
@@ -439,7 +438,6 @@ print(sorted(get_repair_module_registry().all()))
 | `rar_structure_identity` | scoring | RAR magic/header/block walk 加分。 |
 | `archive_container_identity` | scoring | CAB、ARJ、CPIO 等容器加分。 |
 | `compression_stream_identity` | scoring | gzip、bzip2、xz、zstd 结构加分。 |
-| `scene_penalty` | scoring | 对资源文件、运行目录、弱保护路径扣分。 |
 | `seven_zip_probe` | confirmation | 用 7z.dll probe 确认中间分候选。 |
 | `seven_zip_validation` | confirmation | 用 7z.dll test 确认中间分候选。 |
 
@@ -501,7 +499,7 @@ print(sorted(get_repair_module_registry().all()))
 
 ## 修改建议
 
-- 想减少误解压：优先调 `filesystem.scan_filters`、`scene_protect`、`scene_penalty`。
+- 想减少误解压：优先调 `filesystem.scan_filters`、结构 identity 和确认规则。
 - 想提高召回率：优先调 `extension`、结构 identity、`embedded_payload_identity` 和阈值。
 - 想控制修复成本：调 `repair.max_repair_*`、`deep`、`auto_deep` 和 `beam`。
 - 想看为什么失败或为什么接受：跑 `inspect -v`，再看 recovery report 和 verification coverage。

@@ -5,7 +5,6 @@ import pytest
 from sunpack.contracts.detection import FactBag
 from sunpack.detection import DetectionScheduler
 from sunpack.detection.pipeline.rules.scoring.zip_structure_identity import ZipStructureIdentityScoreRule
-from tests.helpers.scene_rules import RECOMMENDED_SCENE_RULES_PAYLOAD
 from tests.helpers.detection_config import with_detection_pipeline
 from tests.helpers.fs_builder import make_zip
 
@@ -16,20 +15,10 @@ def _rule_pipeline_config():
     }, precheck=[
         {"name": "blacklist", "enabled": True, "blocked_files": []},
         {"name": "size_range", "enabled": True, "gte": 0},
-        {
-            "name": "scene_protect",
-            "enabled": True,
-            "scene_rules": RECOMMENDED_SCENE_RULES_PAYLOAD,
-        },
     ], scoring=[
         {"name": "extension", "enabled": True, "extension_score_groups": [{"score": 5, "extensions": [".zip", ".7z", ".rar", ".gz", ".bz2", ".xz", ".001"]}]},
         {"name": "embedded_payload_identity", "enabled": True},
         {"name": "zip_structure_identity", "enabled": True, "magic_score": 5, "local_header_score": 5, "cd_walk_score": 5},
-        {
-            "name": "scene_penalty",
-            "enabled": True,
-            "scene_rules": RECOMMENDED_SCENE_RULES_PAYLOAD,
-        },
     ])
 
 
@@ -56,8 +45,6 @@ def test_rule_pipeline_evaluates_generated_files(tmp_path, relative_path, conten
     decision = DetectionScheduler(_rule_pipeline_config()).evaluate_bag(bag)
 
     assert decision.should_extract is expected_extract
-    if target.name == "bgm.7z":
-        assert bag.get("scene.is_runtime_resource_archive") is None
 
 
 def test_scoring_stops_after_archive_threshold_when_remaining_rules_cannot_reduce_score(tmp_path, monkeypatch):

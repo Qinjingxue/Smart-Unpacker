@@ -6,7 +6,6 @@ from sunpack.detection import DetectionScheduler
 from sunpack.coordinator.task_provider import ArchiveTaskProvider
 from sunpack.coordinator.target_scan import build_fact_bags_for_targets
 from sunpack.detection.pipeline.rules.fact_requirements import ArchiveStructureCandidate
-from tests.helpers.scene_rules import RECOMMENDED_SCENE_RULES_PAYLOAD
 from tests.helpers.detection_config import with_detection_pipeline
 
 
@@ -507,7 +506,7 @@ def test_directory_scanner_whitelist_non_empty_fields_are_combined_as_constraint
     assert "other.zip" not in names
 
 
-def test_directory_scanner_scene_semantics_prunes_directory(tmp_path):
+def test_directory_scanner_directory_prune_prunes_directory(tmp_path):
     blocked_dir = tmp_path / "blocked"
     blocked_dir.mkdir()
     (blocked_dir / "payload.zip").write_bytes(b"PK\x03\x04payload")
@@ -516,7 +515,7 @@ def test_directory_scanner_scene_semantics_prunes_directory(tmp_path):
     snapshot = DirectoryScanner(str(tmp_path), config={
         "filesystem": {
             "scan_filters": [
-                {"name": "scene_semantics", "enabled": True, "prune_dir_globs": ["blocked"]},
+                {"name": "directory_prune", "enabled": True, "prune_dir_globs": ["blocked"]},
             ]
         }
     }).scan()
@@ -527,7 +526,7 @@ def test_directory_scanner_scene_semantics_prunes_directory(tmp_path):
     assert "keep.zip" in names
 
 
-def test_directory_scanner_scene_semantics_supports_path_globs(tmp_path):
+def test_directory_scanner_directory_prune_supports_path_globs(tmp_path):
     blocked_dir = tmp_path / "$RECYCLE.BIN"
     blocked_dir.mkdir()
     (blocked_dir / "payload.zip").write_bytes(b"PK\x03\x04payload")
@@ -536,7 +535,7 @@ def test_directory_scanner_scene_semantics_supports_path_globs(tmp_path):
     snapshot = DirectoryScanner(str(tmp_path), config={
         "filesystem": {
             "scan_filters": [
-                {"name": "scene_semantics", "enabled": True, "path_globs": ["$RECYCLE.BIN/**"]},
+                {"name": "directory_prune", "enabled": True, "path_globs": ["$RECYCLE.BIN/**"]},
             ]
         }
     }).scan()
@@ -547,7 +546,7 @@ def test_directory_scanner_scene_semantics_supports_path_globs(tmp_path):
     assert "keep.zip" in names
 
 
-def test_directory_scanner_scene_semantics_supports_prune_dir_globs(tmp_path):
+def test_directory_scanner_directory_prune_supports_prune_dir_globs(tmp_path):
     blocked_dir = tmp_path / "node_modules"
     blocked_dir.mkdir()
     (blocked_dir / "payload.zip").write_bytes(b"PK\x03\x04payload")
@@ -556,7 +555,7 @@ def test_directory_scanner_scene_semantics_supports_prune_dir_globs(tmp_path):
     snapshot = DirectoryScanner(str(tmp_path), config={
         "filesystem": {
             "scan_filters": [
-                {"name": "scene_semantics", "enabled": True, "prune_dir_globs": ["node_*"]},
+                {"name": "directory_prune", "enabled": True, "prune_dir_globs": ["node_*"]},
             ]
         }
     }).scan()
@@ -567,7 +566,7 @@ def test_directory_scanner_scene_semantics_supports_prune_dir_globs(tmp_path):
     assert "keep.zip" in names
 
 
-def test_directory_scanner_scene_semantics_prune_dir_globs_are_directory_only(tmp_path):
+def test_directory_scanner_directory_prune_globs_are_directory_only(tmp_path):
     blocked_dir = tmp_path / "site-packages"
     blocked_dir.mkdir()
     (blocked_dir / "payload.zip").write_bytes(b"PK\x03\x04payload")
@@ -577,7 +576,7 @@ def test_directory_scanner_scene_semantics_prune_dir_globs_are_directory_only(tm
     snapshot = DirectoryScanner(str(tmp_path), config={
         "filesystem": {
             "scan_filters": [
-                {"name": "scene_semantics", "enabled": True, "prune_dir_globs": ["site-packages"]},
+                {"name": "directory_prune", "enabled": True, "prune_dir_globs": ["site-packages"]},
             ]
         }
     }).scan()
@@ -633,44 +632,3 @@ def test_archive_task_provider_detection_enabled_false_uses_standard_archive_fal
     tasks = provider.scan_targets([str(tmp_path)])
 
     assert [task.main_path for task in tasks] == [str(target)]
-
-
-def test_scene_context_does_not_scan_above_selected_root(tmp_path, monkeypatch):
-    selected_root = tmp_path / "selected"
-    archive = selected_root / "game" / "www" / "audio" / "bgm.7z"
-    archive.parent.mkdir(parents=True)
-    archive.write_bytes(b"7z\xbc\xaf\x27\x1c" + b"payload")
-
-    original_scan = DirectoryScanner.scan
-
-    def fail_if_outside_selected_root(self):
-        root = self.root_path
-        if root != selected_root and not str(root).startswith(str(selected_root) + "\\"):
-            raise AssertionError(f"scene scan escaped selected root: {root}")
-        return original_scan(self)
-
-    monkeypatch.setattr(DirectoryScanner, "scan", fail_if_outside_selected_root)
-
-    config = with_detection_pipeline(
-        {"thresholds": {"archive_score_threshold": 5, "maybe_archive_threshold": 3}},
-        precheck=[
-            {"name": "size_range", "enabled": True, "gte": 0},
-            {
-                "name": "scene_protect",
-                "enabled": True,
-                "scene_rules": RECOMMENDED_SCENE_RULES_PAYLOAD,
-            },
-        ],
-        scoring=[
-            {
-                "name": "extension",
-                "enabled": True,
-                "extension_score_groups": [{"score": 5, "extensions": [".7z"]}],
-            },
-        ],
-    )
-
-    tasks = ArchiveTaskProvider(config).scan_targets([str(selected_root)])
-
-    assert [task.main_path for task in tasks] == []
-

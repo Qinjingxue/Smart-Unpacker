@@ -10,10 +10,9 @@ from sunpack.contracts.filesystem import DirectorySnapshot, FileEntry
 from sunpack.config.detection_view import directory_scan_is_recursive
 from sunpack.filesystem.filters import build_filters
 from sunpack.filesystem.filters.base import ScanCandidate, ScanFilter
-from sunpack.filesystem.filters.modules.scene_semantics import (
-    annotate_scene_metadata,
-    scene_path_globs,
-    scene_prune_dir_globs,
+from sunpack.filesystem.filters.modules.directory_prune import (
+    path_globs as directory_path_globs,
+    prune_dir_globs as directory_prune_dir_globs,
 )
 
 
@@ -74,7 +73,7 @@ class DirectoryScanner:
             paths,
             sizes,
             options["patterns"],
-            options["prune_dirs"],
+            options["prune_dir_globs"],
             options["blocked_extensions"],
             options["min_size"],
             options["whitelist_patterns"],
@@ -82,53 +81,7 @@ class DirectoryScanner:
         ))
 
     def _native_inventory_filter_options(self) -> dict | None:
-        if self._custom_filters:
-            return None
-        patterns: list[str] = []
-        prune_dirs: list[str] = []
-        whitelist_patterns: list[str] = []
-        whitelist_prune_dirs: list[str] = []
-        blocked_extensions: list[str] = []
-        min_size = None
-        for scan_filter in self.filters:
-            name = getattr(scan_filter, "name", "")
-            if name == "scene_semantics":
-                scene_config = getattr(scan_filter, "config", {}) or {}
-                prune_dirs.extend(_dir_glob_to_regex(item) for item in scene_prune_dir_globs(scene_config))
-                patterns.extend(_path_glob_to_regex(item) for item in scene_path_globs(scene_config))
-                continue
-            if name == "blacklist":
-                blocked_extensions.extend(getattr(scan_filter, "blocked_extensions", []) or [])
-                continue
-            if name == "size_range":
-                value = getattr(scan_filter, "native_min_size_bytes", None)
-                if value is not None:
-                    try:
-                        min_size = max(int(value), int(min_size or 0))
-                    except (TypeError, ValueError):
-                        return None
-                continue
-            if name == "whitelist":
-                whitelist_patterns.extend(
-                    _path_glob_to_regex(item)
-                    for item in (getattr(scan_filter, "path_globs", []) or [])
-                )
-                whitelist_prune_dirs.extend(
-                    _dir_glob_to_regex(item)
-                    for item in (getattr(scan_filter, "prune_dir_globs", []) or [])
-                )
-                continue
-            if name == "mtime_range":
-                continue
-            return None
-        return {
-            "patterns": patterns,
-            "prune_dirs": prune_dirs,
-            "whitelist_patterns": whitelist_patterns,
-            "whitelist_prune_dirs": whitelist_prune_dirs,
-            "blocked_extensions": blocked_extensions,
-            "min_size": min_size,
-        }
+        return self._native_filter_options()
 
     def _scan_native(self) -> DirectorySnapshot | None:
         options = self._native_scan_options()
@@ -138,7 +91,7 @@ class DirectoryScanner:
             str(self.root_path),
             self.max_depth,
             options["patterns"],
-            options["prune_dirs"],
+            options["prune_dir_globs"],
             options["blocked_extensions"],
             options["min_size"],
             options["whitelist_patterns"],
@@ -160,33 +113,30 @@ class DirectoryScanner:
         return DirectorySnapshot(root_path=root_path, entries=entries)
 
     def _native_scan_options(self) -> dict | None:
+        return self._native_filter_options()
+
+    def _native_filter_options(self) -> dict | None:
         if self._custom_filters:
             return None
 
         patterns: list[str] = []
-        prune_dirs: list[str] = []
+        prune_dir_globs: list[str] = []
         whitelist_patterns: list[str] = []
         whitelist_prune_dirs: list[str] = []
         blocked_extensions: list[str] = []
         min_size = None
-        seen_scene_semantics = False
-
         for scan_filter in self.filters:
             name = getattr(scan_filter, "name", "")
             stage = getattr(scan_filter, "stage", "")
-            if name == "scene_semantics":
-                scene_config = getattr(scan_filter, "config", {}) or {}
-                prune_dirs.extend(_dir_glob_to_regex(item) for item in scene_prune_dir_globs(scene_config))
-                patterns.extend(_path_glob_to_regex(item) for item in scene_path_globs(scene_config))
-                seen_scene_semantics = True
+            if name == "directory_prune":
+                prune_config = getattr(scan_filter, "config", {}) or {}
+                prune_dir_globs.extend(directory_prune_dir_globs(prune_config))
+                patterns.extend(_path_glob_to_regex(item) for item in directory_path_globs(prune_config))
                 continue
             if name == "blacklist" and stage == "path":
-                if not seen_scene_semantics:
-                    blocked_extensions.extend(getattr(scan_filter, "blocked_extensions", []) or [])
+                blocked_extensions.extend(getattr(scan_filter, "blocked_extensions", []) or [])
                 continue
             if name == "size_range" and stage == "size":
-                if seen_scene_semantics:
-                    break
                 value = getattr(scan_filter, "native_min_size_bytes", None)
                 if value is not None:
                     try:
@@ -195,7 +145,7 @@ class DirectoryScanner:
                         return None
                 continue
             if name in {"whitelist", "mtime_range"}:
-                if name == "whitelist" and not seen_scene_semantics:
+                if name == "whitelist":
                     whitelist_patterns.extend(
                         _path_glob_to_regex(item)
                         for item in (getattr(scan_filter, "path_globs", []) or [])
@@ -205,12 +155,12 @@ class DirectoryScanner:
                         for item in (getattr(scan_filter, "prune_dir_globs", []) or [])
                     )
                     continue
-                break
+                continue
             return None
 
         return {
             "patterns": patterns,
-            "prune_dirs": prune_dirs,
+            "prune_dir_globs": prune_dir_globs,
             "whitelist_patterns": whitelist_patterns,
             "whitelist_prune_dirs": whitelist_prune_dirs,
             "blocked_extensions": blocked_extensions,
@@ -237,12 +187,8 @@ class DirectoryScanner:
                 started = True
             if stop_before_filter is not None and name == stop_before_filter:
                 break
-            if name == "scene_semantics":
-                current = annotate_scene_metadata(
-                    current,
-                    self.root_path.parent if self.root_path.is_file() else self.root_path,
-                    getattr(scan_filter, "config", {}) or {},
-                )
+            if name == "directory_prune":
+                continue
             current = apply_filter_to_entries(current, scan_filter)
         return current
 

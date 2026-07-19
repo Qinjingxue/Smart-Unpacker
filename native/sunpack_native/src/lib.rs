@@ -79,10 +79,6 @@ fn sunpack_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(
-        scan::scene_semantics::scene_semantics_filter_entries,
-        m
-    )?)?;
-    m.add_function(wrap_pyfunction!(
         scan::directory::list_regular_files_in_directory,
         m
     )?)?;

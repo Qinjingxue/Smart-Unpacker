@@ -35,24 +35,21 @@ tests to confirm the extension was imported.
 
 `scanner_version()` returns the crate package version.
 
-`scan_directory_entries(root_path, max_depth, patterns, prune_dirs, blocked_extensions, min_size, whitelist_patterns, whitelist_prune_dirs)`
+`scan_directory_entries(root_path, max_depth, patterns, prune_dir_globs, blocked_extensions, min_size, whitelist_patterns, whitelist_prune_dirs)`
 walks a directory tree and returns basic entry metadata after applying the
 built-in filesystem scan filters. Python still owns `DirectorySnapshot` /
 `FileEntry` construction. Custom filters must be expressible through native
 scan parameters or the caller should fail explicitly.
+
+Exact `prune_dir_globs` are matched through a case-insensitive name set;
+wildcards are compiled into a regex set. Path patterns match paths relative to
+the selected scan root, and rejected directories are never descended into.
 
 Return value:
 
 ```python
 [{"path": "C:/data/archive.zip", "is_dir": False, "size": 123, "mtime_ns": 123456789}]
 ```
-
-`scene_semantics_filter_entries(root_path, entries, rules, prune_dir_globs, path_globs)`
-evaluates filesystem scene semantics from an already-scanned entry list and
-returns the truncated entry path list. It does not touch the filesystem; Python
-supplies the rule payload and passes the returned tree to later filters.
-`prune_dir_globs` and `path_globs` cut directory subtrees before scene matching;
-for example `node_modules` or `.git/**`.
 
 `list_regular_files_in_directory(directory)` lists regular files directly under
 one directory and returns path/size/mtime metadata. This is intentionally a thin
