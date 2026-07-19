@@ -59,6 +59,7 @@ fn sunpack_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(scanner_version, m)?)?;
     m.add_class::<analysis_native::AnalysisBinaryView>()?;
     m.add_class::<analysis_native::AnalysisMultiVolumeView>()?;
+    m.add_class::<scan::directory::NativeDirectorySnapshot>()?;
     m.add_function(wrap_pyfunction!(scan::magic::scan_after_markers, m)?)?;
     m.add_function(wrap_pyfunction!(scan::magic::scan_magics_anywhere, m)?)?;
     m.add_function(wrap_pyfunction!(
@@ -71,7 +72,15 @@ fn sunpack_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(
-        scan::directory::scan_directory_entries,
+        scan::directory::scan_directory_snapshot,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        scan::directory::directory_snapshot_from_columns,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        scan::directory::profile_directory_scan,
         m
     )?)?;
     m.add_function(wrap_pyfunction!(
@@ -91,7 +100,7 @@ fn sunpack_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     m.add_function(wrap_pyfunction!(relations::relations_split_sort_key, m)?)?;
     m.add_function(wrap_pyfunction!(
-        relations::relations_build_candidate_groups,
+        relations::relations_build_candidate_groups_from_snapshot,
         m
     )?)?;
     m.add_function(wrap_pyfunction!(scan::directory::scan_output_tree, m)?)?;

@@ -6,7 +6,7 @@ from typing import Dict, List, Optional, Set
 
 from sunpack_native import (
     list_regular_files_in_directory as _native_list_regular_files_in_directory,
-    relations_build_candidate_groups as _native_build_candidate_groups,
+    relations_build_candidate_groups_from_snapshot as _native_build_candidate_groups,
     relations_detect_split_role as _native_detect_split_role,
     relations_logical_name as _native_logical_name,
     relations_parse_numbered_volume as _native_parse_numbered_volume,
@@ -22,25 +22,26 @@ class RelationsGroupBuilder:
     FUZZY_TIME_WINDOW_NS = 24 * 60 * 60 * 1_000_000_000
 
     def build_candidate_groups(self, snapshot: DirectorySnapshot) -> List[CandidateGroup]:
-        rows = []
+        native_groups = _native_build_candidate_groups(snapshot.native_snapshot)
+        support_directories = {
+            str(raw.get("directory") or "")
+            for raw in native_groups
+            if isinstance(raw, dict)
+            and (
+                bool(raw.get("is_split_candidate"))
+                or bool(raw.get("expand_misnamed"))
+                or bool((raw.get("relation") or {}).get("is_split_related"))
+            )
+            and raw.get("directory")
+        }
         dir_files: Dict[str, List[FileEntry]] = defaultdict(list)
-        for entry in snapshot.entries:
+        for entry in snapshot.file_entries_for_directories(support_directories):
             parent = str(entry.path.parent)
-            if not entry.is_dir:
-                dir_files[parent].append(entry)
-            rows.append({
-                "path": str(entry.path),
-                "parent": parent,
-                "name": entry.path.name,
-                "is_dir": bool(entry.is_dir),
-                "size": entry.size,
-                "mtime_ns": entry.mtime_ns,
-            })
+            dir_files[parent].append(entry)
         directory_indexes = {
             directory: self._build_directory_index(entries)
             for directory, entries in dir_files.items()
         }
-        native_groups = _native_build_candidate_groups(rows)
         classic_groups, classic_paths = self._build_classic_zip_spanned_groups(dir_files, directory_indexes)
         zero_zip_groups, zero_zip_paths = self._build_zero_based_zip_numbered_groups(dir_files, directory_indexes)
         claimed_paths = classic_paths | zero_zip_paths

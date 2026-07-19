@@ -35,21 +35,23 @@ tests to confirm the extension was imported.
 
 `scanner_version()` returns the crate package version.
 
-`scan_directory_entries(root_path, max_depth, patterns, prune_dir_globs, blocked_extensions, min_size, whitelist_patterns, whitelist_prune_dirs)`
-walks a directory tree and returns basic entry metadata after applying the
-built-in filesystem scan filters. Python still owns `DirectorySnapshot` /
-`FileEntry` construction. Custom filters must be expressible through native
-scan parameters or the caller should fail explicitly.
+`scan_directory_snapshot(...)` walks a directory tree, applies every built-in
+filesystem filter, and returns one `NativeDirectorySnapshot`. Entry data stays
+in four native columns (`path`, `is_dir`, `size`, and `mtime_ns`); the normal
+scan path does not create per-entry Python dictionaries, `Path` objects, or
+`FileEntry` objects. Custom filters must be expressible through native scan
+parameters or the caller fails explicitly.
 
 Exact `prune_dir_globs` are matched through a case-insensitive name set;
 wildcards are compiled into a regex set. Path patterns match paths relative to
 the selected scan root, and rejected directories are never descended into.
 
-Return value:
-
-```python
-[{"path": "C:/data/archive.zip", "is_dir": False, "size": 123, "mtime_ns": 123456789}]
-```
+`profile_directory_scan(...)` is the diagnostic equivalent. It returns the
+same native snapshot plus nanosecond counters for directory enumeration,
+metadata reads, path matching, native record construction, traversal overhead,
+and snapshot construction. The reproducible benchmark driver is
+`tests/performance/directory_scan_profile.py`; its `fresh-process` mode resets
+Python/PyO3 process state but does not flush the operating-system file cache.
 
 `list_regular_files_in_directory(directory)` lists regular files directly under
 one directory and returns path/size/mtime metadata. This is intentionally a thin

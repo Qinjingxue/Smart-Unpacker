@@ -24,17 +24,6 @@ class NumericRange:
     def configured(self) -> bool:
         return any(value is not None for value in (self.gt, self.gte, self.lt, self.lte, self.eq))
 
-    @property
-    def native_minimum(self) -> int | None:
-        if self.eq is not None:
-            return self.eq
-        minimums = []
-        if self.gte is not None:
-            minimums.append(self.gte)
-        if self.gt is not None:
-            minimums.append(self.gt + 1)
-        return max(minimums) if minimums else None
-
     @classmethod
     def from_config(cls, config: dict[str, Any]):
         expression = config.get("range")
@@ -81,7 +70,6 @@ class SizeRangeScanFilter:
 
     def __init__(self, value_range: NumericRange | None = None):
         self.value_range = value_range or NumericRange()
-        self.native_min_size_bytes = self.value_range.native_minimum
 
     @classmethod
     def from_config(cls, config: dict[str, Any]):

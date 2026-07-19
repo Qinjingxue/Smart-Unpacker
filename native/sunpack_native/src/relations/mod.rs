@@ -1,7 +1,9 @@
+use crate::scan::directory::NativeDirectorySnapshot;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use regex::{Regex, RegexBuilder};
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use std::sync::OnceLock;
 
 #[derive(Debug, Clone)]
@@ -67,44 +69,39 @@ pub(crate) fn relations_split_sort_key(path: &str) -> (u8, u32, String) {
 }
 
 #[pyfunction]
-pub(crate) fn relations_build_candidate_groups(
+pub(crate) fn relations_build_candidate_groups_from_snapshot(
     py: Python<'_>,
-    rows: Vec<Bound<'_, PyDict>>,
+    snapshot: PyRef<'_, NativeDirectorySnapshot>,
 ) -> PyResult<Vec<Py<PyDict>>> {
     let mut dir_files: HashMap<String, Vec<RelationInput>> = HashMap::new();
     let mut dir_order: Vec<String> = Vec::new();
-    for row in rows {
-        let is_dir = row
-            .get_item("is_dir")?
-            .and_then(|value| value.extract::<bool>().ok())
-            .unwrap_or(false);
-        if is_dir {
-            continue;
-        }
-        let path = row
-            .get_item("path")?
-            .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("relation row missing path"))?
-            .extract::<String>()?;
-        let parent = row
-            .get_item("parent")?
-            .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("relation row missing parent"))?
-            .extract::<String>()?;
-        let name = row
-            .get_item("name")?
-            .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("relation row missing name"))?
-            .extract::<String>()?;
-        let size = row
-            .get_item("size")?
-            .and_then(|value| value.extract::<u64>().ok());
+    for (path, size) in snapshot.file_records() {
+        let path_value = Path::new(path);
+        let parent = path_value
+            .parent()
+            .map(|value| value.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let name = path_value
+            .file_name()
+            .map(|value| value.to_string_lossy().to_string())
+            .unwrap_or_default();
         if !dir_files.contains_key(&parent) {
             dir_order.push(parent.clone());
         }
-        dir_files
-            .entry(parent.clone())
-            .or_default()
-            .push(RelationInput { path, name, size });
+        dir_files.entry(parent).or_default().push(RelationInput {
+            path: path.to_string(),
+            name,
+            size,
+        });
     }
+    build_candidate_groups_from_inputs(py, dir_files, dir_order)
+}
 
+fn build_candidate_groups_from_inputs(
+    py: Python<'_>,
+    mut dir_files: HashMap<String, Vec<RelationInput>>,
+    dir_order: Vec<String>,
+) -> PyResult<Vec<Py<PyDict>>> {
     let mut groups = Vec::new();
     for directory in dir_order {
         let Some(entries) = dir_files.remove(&directory) else {

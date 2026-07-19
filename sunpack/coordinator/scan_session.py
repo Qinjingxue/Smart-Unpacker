@@ -140,16 +140,7 @@ class DetectionScanSession:
         key = self._directory_key(directory)
         if key not in self._directory_identities:
             snapshot = self.shallow_snapshot_for_directory(directory, max_depth=0)
-            entries = []
-            for entry in snapshot.entries:
-                if path_key(entry.path.parent) != key:
-                    continue
-                entries.append((
-                    entry.path.name.lower(),
-                    bool(entry.is_dir),
-                    int(entry.size or 0),
-                    int(entry.mtime_ns or 0),
-                ))
+            entries = snapshot.identity_rows()
             self._directory_identities[key] = (key, len(entries), tuple(sorted(entries)))
         return self._directory_identities[key]
 

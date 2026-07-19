@@ -1,5 +1,8 @@
+from pathlib import Path
+
 import pytest
 
+from sunpack.contracts.filesystem import FileEntry
 from sunpack.contracts.detection import FactBag
 from sunpack.filesystem.directory_scanner import DirectoryScanner
 from sunpack.detection import DetectionScheduler
@@ -7,6 +10,13 @@ from sunpack.coordinator.task_provider import ArchiveTaskProvider
 from sunpack.coordinator.target_scan import build_fact_bags_for_targets
 from sunpack.detection.pipeline.rules.fact_requirements import ArchiveStructureCandidate
 from tests.helpers.detection_config import with_detection_pipeline
+
+
+def _entries(snapshot):
+    return [
+        FileEntry(path=Path(path), is_dir=is_dir, size=size, mtime_ns=mtime_ns)
+        for path, is_dir, size, mtime_ns in snapshot.iter_columns()
+    ]
 
 
 def test_structure_evidence_requires_a_positive_archive_prior():
@@ -46,12 +56,13 @@ def test_directory_scanner_captures_files_and_directories(tmp_path):
     (tmp_path / "nested" / "notes.txt").write_text("hello", encoding="utf-8")
 
     snapshot = DirectoryScanner(str(tmp_path)).scan()
-    names = {entry.path.name for entry in snapshot.entries}
+    names = {entry.path.name for entry in _entries(snapshot)}
 
     assert snapshot.root_path == tmp_path
     assert {"nested", "archive.zip", "notes.txt"} <= names
-    assert any(entry.is_dir and entry.path.name == "nested" for entry in snapshot.entries)
-    assert any(not entry.is_dir and entry.path.name == "archive.zip" for entry in snapshot.entries)
+    entries = _entries(snapshot)
+    assert any(entry.is_dir and entry.path.name == "nested" for entry in entries)
+    assert any(not entry.is_dir and entry.path.name == "archive.zip" for entry in entries)
 
 
 def test_directory_scanner_records_file_size(tmp_path):
@@ -59,7 +70,7 @@ def test_directory_scanner_records_file_size(tmp_path):
     target.write_bytes(b"PK\x03\x04payload")
 
     snapshot = DirectoryScanner(str(tmp_path)).scan()
-    entry = next(entry for entry in snapshot.entries if entry.path == target)
+    entry = next(entry for entry in _entries(snapshot) if entry.path == target)
 
     assert entry.size == target.stat().st_size
 
@@ -80,7 +91,7 @@ def test_directory_scanner_size_range_filters_files_outside_range(tmp_path):
         }
     }).scan()
 
-    names = {entry.path.name for entry in snapshot.entries}
+    names = {entry.path.name for entry in _entries(snapshot)}
     assert "small.zip" not in names
     assert "medium.zip" in names
     assert "large.zip" not in names
@@ -102,7 +113,7 @@ def test_directory_scanner_size_range_accepts_human_expression(tmp_path):
         }
     }).scan()
 
-    names = {entry.path.name for entry in snapshot.entries}
+    names = {entry.path.name for entry in _entries(snapshot)}
     assert "small.zip" not in names
     assert "keep.zip" in names
     assert "large.zip" not in names
@@ -122,7 +133,7 @@ def test_directory_scanner_size_range_gte_filters(tmp_path):
         }
     }).scan()
 
-    names = {entry.path.name for entry in snapshot.entries}
+    names = {entry.path.name for entry in _entries(snapshot)}
     assert "small.zip" not in names
     assert "keep.zip" in names
 
@@ -150,7 +161,7 @@ def test_directory_scanner_mtime_range_filters_files_outside_range(tmp_path):
         }
     }).scan()
 
-    names = {entry.path.name for entry in snapshot.entries}
+    names = {entry.path.name for entry in _entries(snapshot)}
     assert "old.zip" not in names
     assert "keep.zip" in names
     assert "new.zip" not in names
@@ -182,7 +193,7 @@ def test_directory_scanner_mtime_range_accepts_date_expression(tmp_path):
         }
     }).scan()
 
-    names = {entry.path.name for entry in snapshot.entries}
+    names = {entry.path.name for entry in _entries(snapshot)}
     assert "old.zip" not in names
     assert "keep.zip" in names
     assert "new.zip" not in names
@@ -201,7 +212,7 @@ def test_directory_scanner_current_dir_only_scan_mode_skips_subdirectories(tmp_p
         }
     }).scan()
 
-    names = {entry.path.name for entry in snapshot.entries}
+    names = {entry.path.name for entry in _entries(snapshot)}
     assert "root.zip" in names
     assert "nested" not in names
     assert "nested.zip" not in names
@@ -234,7 +245,7 @@ def test_directory_scanner_explicit_max_depth_overrides_scan_mode(tmp_path):
         }
     }).scan()
 
-    names = {entry.path.name for entry in snapshot.entries}
+    names = {entry.path.name for entry in _entries(snapshot)}
     assert "nested" in names
     assert "nested.zip" in names
 
@@ -262,7 +273,7 @@ def test_directory_scanner_path_filter_skips_file_before_stat(tmp_path, monkeypa
         }
     }).scan()
 
-    names = {entry.path.name for entry in snapshot.entries}
+    names = {entry.path.name for entry in _entries(snapshot)}
     assert "skip.py" not in names
     assert "keep.zip" in names
 
@@ -281,7 +292,7 @@ def test_directory_scanner_blacklist_blocks_exact_file_names(tmp_path):
         }
     }).scan()
 
-    names = {entry.path.name for entry in snapshot.entries}
+    names = {entry.path.name for entry in _entries(snapshot)}
     assert "Thumbs.db" not in names
     assert "Thumbs.zip" in names
 
@@ -299,11 +310,11 @@ def test_directory_scanner_scan_filters_global_switch_disables_filters(tmp_path)
         }
     }).scan()
 
-    names = {entry.path.name for entry in snapshot.entries}
+    names = {entry.path.name for entry in _entries(snapshot)}
     assert "skip.py" in names
 
 
-def test_directory_scanner_applies_filters_in_config_order(tmp_path, monkeypatch):
+def test_directory_scanner_executes_built_in_filters_natively(tmp_path, monkeypatch):
     target = tmp_path / "archive.zip"
     target.write_bytes(b"PK\x03\x04payload")
     observed = []
@@ -343,7 +354,7 @@ def test_directory_scanner_applies_filters_in_config_order(tmp_path, monkeypatch
         }
     }).scan()
 
-    assert observed == ["mtime_range", "whitelist", "size_range", "blacklist"]
+    assert observed == []
 
 
 def test_directory_scanner_whitelist_disabled_does_not_filter(tmp_path):
@@ -358,7 +369,7 @@ def test_directory_scanner_whitelist_disabled_does_not_filter(tmp_path):
         }
     }).scan()
 
-    names = {entry.path.name for entry in snapshot.entries}
+    names = {entry.path.name for entry in _entries(snapshot)}
     assert "keep.zip" in names
     assert "other.rar" in names
 
@@ -375,7 +386,7 @@ def test_directory_scanner_whitelist_keeps_only_allowed_extensions(tmp_path):
         }
     }).scan()
 
-    names = {entry.path.name for entry in snapshot.entries}
+    names = {entry.path.name for entry in _entries(snapshot)}
     assert "keep.zip" in names
     assert "skip.rar" not in names
 
@@ -396,7 +407,7 @@ def test_directory_scanner_whitelist_keeps_only_allowed_path_globs(tmp_path):
         }
     }).scan()
 
-    names = {entry.path.name for entry in snapshot.entries}
+    names = {entry.path.name for entry in _entries(snapshot)}
     assert "archives" in names
     assert "keep.zip" in names
     assert "other" not in names
@@ -406,13 +417,22 @@ def test_directory_scanner_whitelist_keeps_only_allowed_path_globs(tmp_path):
 def test_directory_scanner_pushes_whitelist_directory_rules_to_native(tmp_path, monkeypatch):
     captured = {}
 
-    def fake_scan(root_path, max_depth, patterns, prune_dirs, blocked_extensions, min_size, whitelist_patterns, whitelist_prune_dirs):
-        captured["whitelist_patterns"] = whitelist_patterns
-        captured["whitelist_prune_dirs"] = whitelist_prune_dirs
-        return []
+    def fake_scan(
+        root_path,
+        max_depth,
+        patterns,
+        prune_dirs,
+        blocked_extensions,
+        blocked_file_names,
+        size_ranges,
+        mtime_ranges,
+        whitelist_rules,
+    ):
+        captured["whitelist_rules"] = whitelist_rules
+        return object()
 
     monkeypatch.setattr(
-        "sunpack.filesystem.directory_scanner._NATIVE_SCAN_DIRECTORY_ENTRIES",
+        "sunpack.filesystem.directory_scanner._NATIVE_SCAN_DIRECTORY_SNAPSHOT",
         fake_scan,
     )
 
@@ -429,8 +449,9 @@ def test_directory_scanner_pushes_whitelist_directory_rules_to_native(tmp_path, 
         }
     }).scan()
 
-    assert captured["whitelist_patterns"] == [r"(^|/)archives($|/.*)"]
-    assert captured["whitelist_prune_dirs"] == [r"^downloads$"]
+    assert captured["whitelist_rules"] == [
+        ([r"(^|/)archives($|/.*)"], [r"^downloads$"], [], [])
+    ]
 
 
 def test_directory_scanner_whitelist_then_blacklist_both_apply(tmp_path):
@@ -447,7 +468,7 @@ def test_directory_scanner_whitelist_then_blacklist_both_apply(tmp_path):
         }
     }).scan()
 
-    names = {entry.path.name for entry in snapshot.entries}
+    names = {entry.path.name for entry in _entries(snapshot)}
     assert "keep.zip" in names
     assert "skip.py" not in names
     assert "skip.rar" not in names
@@ -475,7 +496,7 @@ def test_directory_scanner_whitelist_empty_fields_are_not_restrictions(tmp_path)
         }
     }).scan()
 
-    names = {entry.path.name for entry in snapshot.entries}
+    names = {entry.path.name for entry in _entries(snapshot)}
     assert "archives" in names
     assert "keep.zip" in names
     assert "skip.rar" not in names
@@ -500,7 +521,7 @@ def test_directory_scanner_whitelist_non_empty_fields_are_combined_as_constraint
         }
     }).scan()
 
-    names = {entry.path.name for entry in snapshot.entries}
+    names = {entry.path.name for entry in _entries(snapshot)}
     assert "sample.zip" in names
     assert "sample.rar" not in names
     assert "other.zip" not in names
@@ -520,7 +541,7 @@ def test_directory_scanner_directory_prune_prunes_directory(tmp_path):
         }
     }).scan()
 
-    names = {entry.path.name for entry in snapshot.entries}
+    names = {entry.path.name for entry in _entries(snapshot)}
     assert "blocked" not in names
     assert "payload.zip" not in names
     assert "keep.zip" in names
@@ -540,7 +561,7 @@ def test_directory_scanner_directory_prune_supports_path_globs(tmp_path):
         }
     }).scan()
 
-    names = {entry.path.name for entry in snapshot.entries}
+    names = {entry.path.name for entry in _entries(snapshot)}
     assert "$RECYCLE.BIN" not in names
     assert "payload.zip" not in names
     assert "keep.zip" in names
@@ -560,7 +581,7 @@ def test_directory_scanner_directory_prune_supports_prune_dir_globs(tmp_path):
         }
     }).scan()
 
-    names = {entry.path.name for entry in snapshot.entries}
+    names = {entry.path.name for entry in _entries(snapshot)}
     assert "node_modules" not in names
     assert "payload.zip" not in names
     assert "keep.zip" in names
@@ -581,7 +602,7 @@ def test_directory_scanner_directory_prune_globs_are_directory_only(tmp_path):
         }
     }).scan()
 
-    names = {entry.path.name for entry in snapshot.entries}
+    names = {entry.path.name for entry in _entries(snapshot)}
     assert "site-packages" not in names
     assert "payload.zip" not in names
     assert "site-packages.zip" in names

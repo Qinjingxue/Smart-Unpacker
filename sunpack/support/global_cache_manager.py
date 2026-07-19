@@ -8,7 +8,7 @@ from collections.abc import Callable, Sequence
 from typing import Any
 
 from sunpack_native import batch_file_head_facts as _native_batch_file_head_facts
-from sunpack_native import scan_directory_entries as _native_scan_directory_entries
+from sunpack_native import scan_directory_snapshot as _native_scan_directory_snapshot
 
 from sunpack.support.path_keys import path_key
 
@@ -71,15 +71,12 @@ def file_identity(path: str) -> tuple[str, int, int]:
 
 def directory_identity(path: str) -> tuple[str, int, tuple]:
     norm_path = path_key(path)
-    rows = _native_scan_directory_entries(norm_path, 0, [], [], [], None, [], [])
-    if not rows:
+    snapshot = _native_scan_directory_snapshot(
+        norm_path, 0, [], [], [], [], [], [], []
+    )
+    if not snapshot:
         return norm_path, 0, ()
-    entries = []
-    for row in rows:
-        if not isinstance(row, dict) or not row.get("path"):
-            continue
-        name = os.path.basename(str(row.get("path") or "")).lower()
-        entries.append((name, bool(row.get("is_dir")), int(row.get("size") or 0), int(row.get("mtime_ns") or 0)))
+    entries = list(snapshot.identity_rows())
     return norm_path, len(entries), tuple(sorted(entries))
 
 

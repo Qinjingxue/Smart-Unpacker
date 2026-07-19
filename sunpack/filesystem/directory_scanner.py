@@ -3,7 +3,7 @@ import re
 
 from sunpack_native import (
     filter_inventory_file_indices as _NATIVE_FILTER_INVENTORY_FILE_INDICES,
-    scan_directory_entries as _NATIVE_SCAN_DIRECTORY_ENTRIES,
+    scan_directory_snapshot as _NATIVE_SCAN_DIRECTORY_SNAPSHOT,
 )
 
 from sunpack.contracts.filesystem import DirectorySnapshot, FileEntry
@@ -46,7 +46,7 @@ class DirectoryScanner:
     ) -> DirectorySnapshot:
         """Apply the normal ordered filters to an already collected file table."""
         scanner = cls(root_path, config=config)
-        return DirectorySnapshot(
+        return DirectorySnapshot.from_entries(
             root_path=scanner.root_path,
             entries=scanner._apply_ordered_filters(
                 list(entries),
@@ -75,9 +75,9 @@ class DirectoryScanner:
             options["patterns"],
             options["prune_dir_globs"],
             options["blocked_extensions"],
-            options["min_size"],
-            options["whitelist_patterns"],
-            options["whitelist_prune_dirs"],
+            options["blocked_file_names"],
+            options["size_ranges"],
+            options["whitelist_rules"],
         ))
 
     def _native_inventory_filter_options(self) -> dict | None:
@@ -87,30 +87,19 @@ class DirectoryScanner:
         options = self._native_scan_options()
         if options is None:
             raise RuntimeError("Native directory scan requires built-in filesystem filters only")
-        rows = _NATIVE_SCAN_DIRECTORY_ENTRIES(
+        native_snapshot = _NATIVE_SCAN_DIRECTORY_SNAPSHOT(
             str(self.root_path),
             self.max_depth,
             options["patterns"],
             options["prune_dir_globs"],
             options["blocked_extensions"],
-            options["min_size"],
-            options["whitelist_patterns"],
-            options["whitelist_prune_dirs"],
+            options["blocked_file_names"],
+            options["size_ranges"],
+            options["mtime_ranges"],
+            options["whitelist_rules"],
         )
-
         root_path = self.root_path.parent if self.root_path.is_file() else self.root_path
-        entries = [
-            FileEntry(
-                path=Path(row.get("path")),
-                is_dir=bool(row.get("is_dir")),
-                size=row.get("size"),
-                mtime_ns=row.get("mtime_ns"),
-            )
-            for row in rows
-            if isinstance(row, dict) and row.get("path")
-        ]
-        entries = self._apply_ordered_filters(entries)
-        return DirectorySnapshot(root_path=root_path, entries=entries)
+        return DirectorySnapshot.from_native(root_path, native_snapshot)
 
     def _native_scan_options(self) -> dict | None:
         return self._native_filter_options()
@@ -121,10 +110,11 @@ class DirectoryScanner:
 
         patterns: list[str] = []
         prune_dir_globs: list[str] = []
-        whitelist_patterns: list[str] = []
-        whitelist_prune_dirs: list[str] = []
         blocked_extensions: list[str] = []
-        min_size = None
+        blocked_file_names: list[str] = []
+        size_ranges: list[tuple] = []
+        mtime_ranges: list[tuple] = []
+        whitelist_rules: list[tuple] = []
         for scan_filter in self.filters:
             name = getattr(scan_filter, "name", "")
             stage = getattr(scan_filter, "stage", "")
@@ -135,36 +125,38 @@ class DirectoryScanner:
                 continue
             if name == "blacklist" and stage == "path":
                 blocked_extensions.extend(getattr(scan_filter, "blocked_extensions", []) or [])
+                blocked_file_names.extend(getattr(scan_filter, "blocked_files", []) or [])
                 continue
             if name == "size_range" and stage == "size":
-                value = getattr(scan_filter, "native_min_size_bytes", None)
-                if value is not None:
-                    try:
-                        min_size = max(int(value), int(min_size or 0))
-                    except (TypeError, ValueError):
-                        return None
+                value_range = getattr(scan_filter, "value_range", None)
+                if value_range is None:
+                    return None
+                size_ranges.append(_numeric_range_tuple(value_range))
                 continue
-            if name in {"whitelist", "mtime_range"}:
-                if name == "whitelist":
-                    whitelist_patterns.extend(
-                        _path_glob_to_regex(item)
-                        for item in (getattr(scan_filter, "path_globs", []) or [])
-                    )
-                    whitelist_prune_dirs.extend(
-                        _dir_glob_to_regex(item)
-                        for item in (getattr(scan_filter, "prune_dir_globs", []) or [])
-                    )
-                    continue
+            if name == "whitelist":
+                whitelist_rules.append((
+                    list(getattr(scan_filter, "path_patterns", []) or []),
+                    list(getattr(scan_filter, "prune_dirs", []) or []),
+                    list(getattr(scan_filter, "file_patterns", []) or []),
+                    list(getattr(scan_filter, "allowed_extensions", []) or []),
+                ))
+                continue
+            if name == "mtime_range":
+                value_range = getattr(scan_filter, "value_range", None)
+                if value_range is None:
+                    return None
+                mtime_ranges.append(_numeric_range_tuple(value_range))
                 continue
             return None
 
         return {
             "patterns": patterns,
             "prune_dir_globs": prune_dir_globs,
-            "whitelist_patterns": whitelist_patterns,
-            "whitelist_prune_dirs": whitelist_prune_dirs,
             "blocked_extensions": blocked_extensions,
-            "min_size": min_size,
+            "blocked_file_names": blocked_file_names,
+            "size_ranges": size_ranges,
+            "mtime_ranges": mtime_ranges,
+            "whitelist_rules": whitelist_rules,
         }
 
     def _apply_ordered_filters(
@@ -253,13 +245,6 @@ def _path_key(path: Path) -> str:
     return str(path).replace("\\", "/").rstrip("/").lower()
 
 
-def _dir_glob_to_regex(pattern: str) -> str:
-    pattern = _normalize_glob(pattern)
-    if not pattern:
-        return r"a\A"
-    return f"^{_glob_segment_to_regex(pattern)}$"
-
-
 def _path_glob_to_regex(pattern: str) -> str:
     pattern = _normalize_glob(pattern)
     if not pattern:
@@ -290,3 +275,10 @@ def _glob_char_to_regex(char: str, *, slash: bool) -> str:
     if char == "?":
         return "." if slash else r"[^/]"
     return re.escape(char)
+
+
+def _numeric_range_tuple(value_range) -> tuple:
+    return tuple(
+        getattr(value_range, field, None)
+        for field in ("gt", "gte", "lt", "lte", "eq")
+    )

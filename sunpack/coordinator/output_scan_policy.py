@@ -37,7 +37,7 @@ class NestedOutputScanPolicy:
         roots = []
         seen = set()
         candidates = (
-            ((str(entry.path), entry.size) for entry in snapshot.entries if not entry.is_dir)
+            ((path, size) for path, size, _mtime_ns in snapshot.iter_file_columns())
             if snapshot is not None
             else inventory_files
         )
@@ -79,7 +79,7 @@ class NestedOutputScanPolicy:
             )
             snapshot = self._snapshot_from_inventory(inventory, scan_session)
             if snapshot is not None:
-                if not any(not entry.is_dir for entry in snapshot.entries):
+                if not snapshot.has_files:
                     continue
                 root = os.path.abspath(output_dir)
                 key = os.path.normcase(root)
@@ -122,7 +122,7 @@ class NestedOutputScanPolicy:
             if self._is_within_root(path, root)
         ]
         if not inventory_rows:
-            return DirectorySnapshot(root_path=root, entries=[])
+            return DirectorySnapshot.from_entries(root_path=root, entries=[])
 
         accepted_indices = set(DirectoryScanner.inventory_file_indices(
             str(root),
@@ -159,22 +159,24 @@ class NestedOutputScanPolicy:
             config=self._output_scan_config,
             stop_before_filter="mtime_range",
         )
-        candidate_paths = [str(entry.path) for entry in prefiltered.entries if not entry.is_dir]
+        candidate_paths = [
+            path for path, _size, _mtime_ns in prefiltered.iter_file_columns()
+        ]
         facts_by_key = scan_session.file_head_facts_for_paths(candidate_paths, magic_size=16)
         hydrated_entries: list[FileEntry] = []
-        for entry in prefiltered.entries:
-            if entry.is_dir:
-                hydrated_entries.append(entry)
+        for path, is_dir, size, mtime_ns in prefiltered.iter_columns():
+            entry_path = Path(path)
+            if is_dir:
+                hydrated_entries.append(FileEntry(path=entry_path, is_dir=True))
                 continue
-            facts = facts_by_key.get(path_key(entry.path), {})
+            facts = facts_by_key.get(path_key(entry_path), {})
             if not facts.get("exists") or not facts.get("is_file"):
                 continue
             hydrated_entries.append(FileEntry(
-                path=entry.path,
+                path=entry_path,
                 is_dir=False,
                 size=facts.get("size"),
                 mtime_ns=facts.get("mtime_ns"),
-                metadata=entry.metadata,
             ))
         return DirectoryScanner.snapshot_from_entries(
             str(root),

@@ -272,7 +272,7 @@ def install_wrappers(recorder: HotspotRecorder) -> None:
     import sunpack.detection.pipeline.rules.manager as rule_manager
     import sunpack.detection.pipeline.rules.confirmation_runner as confirmation_runner
 
-    recorder.wrap(directory_scanner, "_NATIVE_SCAN_DIRECTORY_ENTRIES", "native.scan_directory_entries")
+    recorder.wrap(directory_scanner, "_NATIVE_SCAN_DIRECTORY_SNAPSHOT", "native.scan_directory_snapshot")
     recorder.wrap(directory_scanner.DirectoryScanner, "scan", "filesystem.DirectoryScanner.scan")
     recorder.wrap(directory_scanner.DirectoryScanner, "_scan_native", "filesystem.DirectoryScanner._scan_native")
     recorder.wrap(directory_scanner.DirectoryScanner, "_apply_ordered_filters", "filesystem.apply_ordered_filters")
@@ -330,10 +330,11 @@ def run_mode(mode: str, target: str, max_depth: int | None, config: dict) -> tup
         from sunpack.filesystem.directory_scanner import DirectoryScanner
 
         result = DirectoryScanner(target_path, max_depth=max_depth, config=config).scan()
-        extra["entries"] = len(result.entries)
-        extra["files"] = sum(1 for entry in result.entries if not entry.is_dir)
-        extra["dirs"] = sum(1 for entry in result.entries if entry.is_dir)
-        extra["total_file_size_mib"] = round(mib(sum(int(entry.size or 0) for entry in result.entries if not entry.is_dir)), 3)
+        columns = list(result.iter_columns())
+        extra["entries"] = len(result)
+        extra["files"] = sum(1 for _path, is_dir, _size, _mtime in columns if not is_dir)
+        extra["dirs"] = sum(1 for _path, is_dir, _size, _mtime in columns if is_dir)
+        extra["total_file_size_mib"] = round(mib(sum(int(size or 0) for _path, is_dir, size, _mtime in columns if not is_dir)), 3)
         return result, extra
 
     if mode in {"candidates", "evaluate"}:
