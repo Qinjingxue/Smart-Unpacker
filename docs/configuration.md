@@ -168,7 +168,7 @@ CLI 在当前命令结束后关闭 Engine；watch 在服务生命周期内保持
 
 日期值支持纳秒时间戳、ISO 时间字符串，以及 `YYYYMMDD HH:MM` / `YYYYMMDD HH:MM:SS` / `YYYYMMDD`。旧的 `gt/gte/lt/lte/eq` 字段仍兼容。
 
-目录扫描使用 Rust `scan_directory_entries`。过滤器无法映射到 native 参数时会显性报错，不做 Python fallback。
+目录扫描使用 Rust `scan_directory_snapshot`。过滤器无法映射到 native 参数时会显性报错，不做 Python fallback。
 
 ## performance
 

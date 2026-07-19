@@ -4,6 +4,7 @@ import subprocess
 import uuid
 
 import pytest
+from sunpack_native import zip_fast_verify_passwords
 
 import sunpack.passwords.internal.builtin as builtin_module
 import sunpack.passwords.internal.clipboard_monitor as clipboard_monitor_module
@@ -54,7 +55,12 @@ def test_watch_retries_real_encrypted_zip_after_password_source_update(tmp_path,
     monkeypatch.setattr(builtin_module, "builtin_password_path", lambda: builtin_path)
     directory_password_file = watch_root / ".sunpack-passwords.txt"
     if source == "directory":
-        directory_password_file.write_text("wrong-password\n", encoding="utf-8")
+        wrong_password = "wrong-password"
+        while zip_fast_verify_passwords(str(archive), [wrong_password]).get("status") != "no_match":
+            # Traditional ZipCrypto has only a one-byte header check, so an
+            # arbitrary wrong password has a 1/256 false-positive chance.
+            wrong_password = f"wrong-password-{uuid.uuid4().hex}"
+        directory_password_file.write_text(wrong_password + "\n", encoding="utf-8")
 
     config = load_config()
     config["cli"] = {**(config.get("cli") or {}), "quiet": True}

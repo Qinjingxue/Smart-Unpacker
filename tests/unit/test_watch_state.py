@@ -1,6 +1,34 @@
 import json
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier, Lock
 
+import sunpack.filesystem.watcher.state as watch_state_module
 from sunpack.filesystem.watcher.state import WatchStateStore
+
+
+def test_independent_state_stores_use_unique_atomic_writers(tmp_path, monkeypatch):
+    state_path = tmp_path / "state.json"
+    stores = [WatchStateStore(str(state_path)), WatchStateStore(str(state_path))]
+    barrier = Barrier(len(stores))
+    replace_lock = Lock()
+    temporary_paths = []
+    real_replace = watch_state_module.os.replace
+
+    def synchronized_replace(source, destination):
+        temporary_paths.append(source)
+        barrier.wait()
+        with replace_lock:
+            real_replace(source, destination)
+
+    monkeypatch.setattr(watch_state_module.os, "replace", synchronized_replace)
+
+    with ThreadPoolExecutor(max_workers=len(stores)) as executor:
+        list(executor.map(lambda store: store.save(), stores))
+
+    assert len(set(temporary_paths)) == len(stores)
+    assert all(path.parent == tmp_path and path.name.endswith(".tmp") for path in temporary_paths)
+    assert json.loads(state_path.read_text(encoding="utf-8"))["version"] > 0
+    assert not list(tmp_path.glob(".state.json.*.tmp"))
 
 
 def test_input_snapshot_persists_and_matches_only_identical_stable_input(tmp_path):

@@ -122,6 +122,20 @@ def test_build_passes_edition_and_architecture_to_acceptance_setup():
     assert '"-RepairSystem", $RepairSystem' in acceptance_script
 
 
+def test_windows_native_smoke_checks_follow_current_embedded_scan_api():
+    smoke_scripts = (
+        ROOT / "scripts" / "build_windows.ps1",
+        ROOT / "scripts" / "setup_windows_dev.ps1",
+        ROOT / "run_acceptance_tests.ps1",
+    )
+
+    for path in smoke_scripts:
+        script = path.read_text(encoding="utf-8")
+        assert "'scan_embedded_archives'" in script, path
+        assert "'scan_carrier_archive'" not in script, path
+        assert "'scan_directory_entries'" not in script, path
+
+
 def test_installer_smoke_uses_process_exit_code_not_last_exit_code():
     script = (ROOT / "scripts" / "test_windows_installer.ps1").read_text(encoding="utf-8")
 

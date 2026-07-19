@@ -120,8 +120,12 @@ function Get-NativeSmokeCode {
 import sunpack_native as n
 required = [
     'native_available', 'scanner_version',
-    'scan_directory_entries', 'list_regular_files_in_directory',
-    'scan_carrier_archive', 'scan_magics_anywhere',
+    'scan_directory_snapshot', 'scan_directory_snapshots',
+    'directory_snapshot_from_columns', 'filter_inventory_file_indices',
+    'batch_file_head_facts', 'authorize_nested_candidates',
+    'relations_build_candidate_groups_from_snapshot',
+    'profile_directory_scan', 'list_regular_files_in_directory',
+    'scan_embedded_archives', 'scan_magics_anywhere',
     'scan_zip_central_directory_names', 'inspect_zip_eocd_structure',
     'inspect_pe_overlay_structure',
     'repair_read_file_range', 'repair_concat_ranges_to_bytes',

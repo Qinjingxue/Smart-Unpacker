@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 import json
 import os
+import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Any, Iterable
@@ -63,6 +65,7 @@ class WatchStateStore:
 
     def __init__(self, path: str):
         self.path = Path(path)
+        self._save_lock = threading.RLock()
         self.snapshots: dict[str, WatchInputSnapshot] = {}
         self.pending_work: dict[str, WatchInputSnapshot] = {}
         self.entries: dict[str, WatchStateEntry] = {}
@@ -110,20 +113,37 @@ class WatchStateStore:
         return result
 
     def save(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        payload: dict[str, Any] = {
-            "version": STATE_VERSION,
-            "password_generation": self.password_generation,
-            "password_source_signature": self.password_source_signature,
-            "snapshots": {key: asdict(value) for key, value in self.snapshots.items()},
-            "pending_work": {key: asdict(value) for key, value in self.pending_work.items()},
-            "entries": {key: asdict(value) for key, value in self.entries.items()},
-            "groups": {key: asdict(value) for key, value in self.groups.items()},
-            "owned_output_roots": list(self.owned_output_roots),
-        }
-        temp = self.path.with_name(f".{self.path.name}.tmp")
-        temp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        os.replace(temp, self.path)
+        with self._save_lock:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            payload: dict[str, Any] = {
+                "version": STATE_VERSION,
+                "password_generation": self.password_generation,
+                "password_source_signature": self.password_source_signature,
+                "snapshots": {key: asdict(value) for key, value in self.snapshots.items()},
+                "pending_work": {key: asdict(value) for key, value in self.pending_work.items()},
+                "entries": {key: asdict(value) for key, value in self.entries.items()},
+                "groups": {key: asdict(value) for key, value in self.groups.items()},
+                "owned_output_roots": list(self.owned_output_roots),
+            }
+            temp_path: Path | None = None
+            try:
+                with tempfile.NamedTemporaryFile(
+                    mode="w",
+                    encoding="utf-8",
+                    dir=self.path.parent,
+                    prefix=f".{self.path.name}.",
+                    suffix=".tmp",
+                    delete=False,
+                ) as temp:
+                    temp_path = Path(temp.name)
+                    json.dump(payload, temp, ensure_ascii=False, indent=2)
+                os.replace(temp_path, self.path)
+            finally:
+                if temp_path is not None:
+                    try:
+                        temp_path.unlink()
+                    except FileNotFoundError:
+                        pass
 
     def snapshot_matches(
         self,
