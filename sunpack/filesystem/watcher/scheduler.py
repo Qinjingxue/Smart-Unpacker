@@ -49,6 +49,10 @@ from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
 
 
+PROBE_PROMOTION_RETRY_SECONDS = 0.5
+PROBE_PROMOTION_MAX_RETRIES = 100
+
+
 @dataclass
 class WatchRunResult:
     processed: int = 0
@@ -888,11 +892,19 @@ class WatchScheduler:
             target = _next_nonexisting_path(target)
             os.makedirs(os.path.dirname(target), exist_ok=True)
             try:
-                os.replace(source, target)
+                self._retry_probe_promotion_on_access_denied(
+                    lambda: os.replace(source, target),
+                    source,
+                    target,
+                )
             except OSError as exc:
                 if exc.errno != errno.EXDEV and getattr(exc, "winerror", None) != 17:
                     raise
-                shutil.move(source, target)
+                self._retry_probe_promotion_on_access_denied(
+                    lambda: shutil.move(source, target),
+                    source,
+                    target,
+                )
             promoted.append(target)
             path_map[source] = target
             for reported in reported_sources:
@@ -900,6 +912,36 @@ class WatchScheduler:
                     path_map[reported] = os.path.join(target, os.path.relpath(reported, source))
         self._cleanup_probe_workspace(workspace)
         return promoted, path_map
+
+    def _retry_probe_promotion_on_access_denied(
+        self,
+        operation: Callable[[], object],
+        source: str,
+        target: str,
+    ) -> None:
+        retries = 0
+        while True:
+            try:
+                operation()
+                return
+            except OSError as exc:
+                if getattr(exc, "winerror", None) != 5:
+                    raise
+                if retries >= PROBE_PROMOTION_MAX_RETRIES:
+                    raise
+                retries += 1
+                self.log.write_throttled(
+                    "probe_promotion_retry",
+                    throttle_key=f"{os.path.normcase(source)}->{os.path.normcase(target)}",
+                    interval_seconds=30.0,
+                    source=source,
+                    target=target,
+                    retry=retries,
+                    max_retries=PROBE_PROMOTION_MAX_RETRIES,
+                    retry_seconds=PROBE_PROMOTION_RETRY_SECONDS,
+                    error=str(exc),
+                )
+                time.sleep(PROBE_PROMOTION_RETRY_SECONDS)
 
     def _is_under_watched_root(self, path: str) -> bool:
         return _longest_matching_root(path, self.watch_roots) is not None

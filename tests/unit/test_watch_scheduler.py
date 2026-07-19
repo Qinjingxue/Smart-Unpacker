@@ -225,6 +225,120 @@ def test_probe_promotion_keeps_nested_outputs_inside_outer_directory(tmp_path):
     assert not (watch_root / "inner").exists()
 
 
+def test_probe_promotion_retries_winerror_5_until_success(tmp_path, monkeypatch):
+    watch_root = tmp_path / "downloads"
+    watch_root.mkdir()
+    watcher = WatchScheduler(
+        {"watch": {"clipboard_monitor_enabled": False}},
+        [str(watch_root)],
+        out_dir=str(watch_root),
+        state_path=str(tmp_path / "state.json"),
+        initial_scan=False,
+    )
+    workspace = Path(watcher._prepare_probe_workspace(str(watch_root / "sample.zip")))
+    source = workspace / "sample"
+    source.mkdir()
+    (source / "payload.bin").write_bytes(b"payload")
+    real_replace = scheduler_module.os.replace
+    replace_attempts = []
+    sleeps = []
+
+    def intermittently_denied(current, target):
+        replace_attempts.append((current, target))
+        if len(replace_attempts) < 3:
+            error = PermissionError("temporarily denied")
+            error.winerror = 5
+            raise error
+        real_replace(current, target)
+
+    monkeypatch.setattr(scheduler_module.os, "replace", intermittently_denied)
+    monkeypatch.setattr(scheduler_module.time, "sleep", sleeps.append)
+
+    promoted, _ = watcher._promote_probe_outputs(
+        [str(source)],
+        [str(watch_root / "sample")],
+        str(workspace),
+    )
+
+    assert promoted == [str(watch_root / "sample")]
+    assert len(replace_attempts) == 3
+    assert sleeps == [0.5, 0.5]
+    assert (watch_root / "sample" / "payload.bin").is_file()
+
+
+def test_probe_promotion_does_not_retry_other_errors(tmp_path, monkeypatch):
+    watch_root = tmp_path / "downloads"
+    watch_root.mkdir()
+    watcher = WatchScheduler(
+        {"watch": {"clipboard_monitor_enabled": False}},
+        [str(watch_root)],
+        out_dir=str(watch_root),
+        state_path=str(tmp_path / "state.json"),
+        initial_scan=False,
+    )
+    workspace = Path(watcher._prepare_probe_workspace(str(watch_root / "sample.zip")))
+    source = workspace / "sample"
+    source.mkdir()
+    sleeps = []
+    error = PermissionError("sharing violation")
+    error.winerror = 32
+    monkeypatch.setattr(scheduler_module.os, "replace", lambda *_args: (_ for _ in ()).throw(error))
+    monkeypatch.setattr(scheduler_module.time, "sleep", sleeps.append)
+
+    try:
+        watcher._promote_probe_outputs(
+            [str(source)],
+            [str(watch_root / "sample")],
+            str(workspace),
+        )
+    except PermissionError as exc:
+        assert exc is error
+    else:
+        raise AssertionError("expected non-WinError 5 failure to propagate")
+
+    assert sleeps == []
+
+
+def test_probe_promotion_stops_after_100_winerror_5_retries(tmp_path, monkeypatch):
+    watch_root = tmp_path / "downloads"
+    watch_root.mkdir()
+    watcher = WatchScheduler(
+        {"watch": {"clipboard_monitor_enabled": False}},
+        [str(watch_root)],
+        out_dir=str(watch_root),
+        state_path=str(tmp_path / "state.json"),
+        initial_scan=False,
+    )
+    workspace = Path(watcher._prepare_probe_workspace(str(watch_root / "sample.zip")))
+    source = workspace / "sample"
+    source.mkdir()
+    attempts = []
+    sleeps = []
+
+    def always_denied(*_args):
+        attempts.append("attempt")
+        error = PermissionError("still denied")
+        error.winerror = 5
+        raise error
+
+    monkeypatch.setattr(scheduler_module.os, "replace", always_denied)
+    monkeypatch.setattr(scheduler_module.time, "sleep", sleeps.append)
+
+    try:
+        watcher._promote_probe_outputs(
+            [str(source)],
+            [str(watch_root / "sample")],
+            str(workspace),
+        )
+    except PermissionError as exc:
+        assert exc.winerror == 5
+    else:
+        raise AssertionError("expected retries to stop at the configured limit")
+
+    assert len(attempts) == 101
+    assert sleeps == [0.5] * 100
+
+
 def test_content_event_during_processing_starts_a_new_active_epoch(tmp_path, monkeypatch):
     monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
     archive = tmp_path / "sample.zip"
