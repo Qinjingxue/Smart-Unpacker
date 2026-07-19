@@ -1,5 +1,8 @@
 from pathlib import Path
 
+import pytest
+
+from sunpack.config.fields.coordinator import normalize_nested_extraction_policy
 from sunpack.contracts.filesystem import DirectorySnapshot, FileEntry
 from sunpack.coordinator.nested_extraction_policy import NestedExtractionPolicy
 from sunpack.coordinator.scan_session import DetectionScanSession
@@ -10,7 +13,6 @@ def _config(**overrides):
     return {
         "nested_extraction_policy": {
             "enabled": True,
-            "allow_initial_root_archives": True,
             "minimum_archive_byte_ratio": 0.5,
             "maximum_other_projects": 2,
             **overrides,
@@ -28,21 +30,44 @@ def _authorize(root: Path, entries: list[FileEntry], archives: list[Path], *, ro
         [str(root)],
         session,
         round_index=round_index,
-        direct_initial=False,
     )
 
 
-def test_initial_archive_directly_under_selected_directory_is_allowed(tmp_path):
-    archive = tmp_path / "wanted.rar"
-    entries = [
-        FileEntry(archive, False, 10),
-        *[FileEntry(tmp_path / f"game_{index}", True) for index in range(50)],
-    ]
-
-    result = _authorize(tmp_path, entries, [archive], round_index=1)
+def test_first_round_bypasses_policy_for_the_user_requested_scope(tmp_path):
+    wrapper = tmp_path / "game"
+    archive = wrapper / "wanted.rar"
+    task = direct_file_task(str(archive))
+    result = NestedExtractionPolicy(_config()).authorize_batch(
+        [task],
+        [str(tmp_path)],
+        None,
+        round_index=1,
+    )
 
     assert [task.main_path for task in result.allowed_tasks] == [str(archive)]
     assert result.skipped == []
+
+
+def test_removed_initial_root_setting_is_rejected():
+    with pytest.raises(ValueError, match="allow_initial_root_archives"):
+        normalize_nested_extraction_policy({"allow_initial_root_archives": True})
+
+
+def test_normal_detection_session_does_not_collect_raw_snapshots():
+    assert DetectionScanSession(config=_config()).include_raw_snapshots is False
+
+
+def test_second_round_root_child_has_no_special_privilege(tmp_path):
+    archive = tmp_path / "nested.zip"
+    entries = [
+        FileEntry(archive, False, 10),
+        *[FileEntry(tmp_path / f"asset_{index}", False, 100) for index in range(10)],
+    ]
+
+    result = _authorize(tmp_path, entries, [archive], round_index=2)
+
+    assert result.allowed_tasks == []
+    assert result.skipped[0]["reason"] == "nested_context_not_archive_dominant"
 
 
 def test_nested_archive_mixed_with_game_payload_is_skipped(tmp_path):

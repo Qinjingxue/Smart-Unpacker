@@ -14,9 +14,16 @@ from sunpack.support.path_keys import normalized_path, path_key, safe_relative_p
 class DetectionScanSession:
     """Directory-scoped cache for candidate construction."""
 
-    def __init__(self, relations: RelationsScheduler | None = None, config: dict | None = None):
+    def __init__(
+        self,
+        relations: RelationsScheduler | None = None,
+        config: dict | None = None,
+        *,
+        include_raw_snapshots: bool = False,
+    ):
         self.relations = relations or RelationsScheduler()
         self.config = config or {}
+        self.include_raw_snapshots = include_raw_snapshots
         self._snapshots: dict[str, DirectorySnapshot] = {}
         self._relation_groups: dict[str, List[CandidateGroup]] = {}
         self._fact_bags: dict[str, List[FactBag]] = {}
@@ -68,7 +75,7 @@ class DetectionScanSession:
                 directory,
                 max_depth=max_depth,
                 config=self.config,
-                include_raw_snapshot=True,
+                include_raw_snapshot=self.include_raw_snapshots,
             ).scan()
         return self._snapshots[key]
 

@@ -30,7 +30,6 @@ struct CandidateContext {
     raw_snapshot,
     root_path,
     candidates,
-    allow_direct_children,
     minimum_archive_byte_ratio,
     maximum_other_projects
 ))]
@@ -39,7 +38,6 @@ pub(crate) fn authorize_nested_candidates(
     raw_snapshot: PyRef<'_, NativeDirectorySnapshot>,
     root_path: &str,
     candidates: Vec<CandidateTuple>,
-    allow_direct_children: bool,
     minimum_archive_byte_ratio: f64,
     maximum_other_projects: usize,
 ) -> PyResult<Vec<Py<PyDict>>> {
@@ -138,8 +136,6 @@ pub(crate) fn authorize_nested_candidates(
 
             let (allowed, reason) = if context.scope_key.is_empty() {
                 (false, "outside_scan_root")
-            } else if allow_direct_children && context.direct_child {
-                (true, "initial_root_archive")
             } else if collective_byte_ratio >= minimum_archive_byte_ratio {
                 (true, "archive_bytes_dominate")
             } else if other_projects <= maximum_other_projects {

@@ -83,7 +83,6 @@ def run(root: str, runs: int) -> dict:
             measured_raw,
             root,
             candidates,
-            True,
             0.5,
             2,
         ))
@@ -98,7 +97,7 @@ def run(root: str, runs: int) -> dict:
             samples = []
             for _ in range(runs):
                 started = time.perf_counter_ns()
-                authorize_nested_candidates(raw, root, expanded, True, 0.5, 2)
+                authorize_nested_candidates(raw, root, expanded, 0.5, 2)
                 samples.append(time.perf_counter_ns() - started)
             scaling[str(count)] = {
                 "median_ms": _median_ms(samples),
@@ -148,7 +147,6 @@ def evaluate_dlc_sample(path: str) -> dict | None:
         snapshot.raw_native_snapshot,
         str(root),
         [(str(inner), [str(inner)])],
-        False,
         0.5,
         2,
     )[0])

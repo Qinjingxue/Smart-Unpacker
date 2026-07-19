@@ -64,6 +64,7 @@ def test_output_scan_policy_reuses_extraction_inventory(tmp_path, monkeypatch):
     assert roots == [str(tmp_path.resolve())]
     session = policy.take_scan_session(roots)
     assert session is not None
+    assert session.include_raw_snapshots is True
     bags = build_fact_bags_for_targets(roots, session=session, config=_config())
     assert [bag.get("candidate.entry_path") for bag in bags] == [str(nested.resolve())]
 

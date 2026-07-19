@@ -68,7 +68,10 @@ class NestedOutputScanPolicy:
         roots = []
         seen = set()
         inventories = inventories or {}
-        scan_session = DetectionScanSession(config=self.config)
+        scan_session = DetectionScanSession(
+            config=self.config,
+            include_raw_snapshots=True,
+        )
         has_primed_snapshot = False
         for output_dir in output_dirs:
             if not output_dir or not os.path.isdir(output_dir):

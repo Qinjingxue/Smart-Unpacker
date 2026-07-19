@@ -43,13 +43,13 @@ def normalize_nested_extraction_policy(value: Any) -> dict[str, Any]:
         value = {}
     if not isinstance(value, dict):
         raise ValueError("nested_extraction_policy must be an object")
+    unknown_fields = set(value) - set(DEFAULT_NESTED_EXTRACTION_POLICY)
+    if unknown_fields:
+        names = ", ".join(sorted(unknown_fields))
+        raise ValueError(f"nested_extraction_policy has unknown fields: {names}")
     config = {**DEFAULT_NESTED_EXTRACTION_POLICY, **value}
     if not isinstance(config.get("enabled"), bool):
         raise ValueError("nested_extraction_policy.enabled must be boolean")
-    if not isinstance(config.get("allow_initial_root_archives"), bool):
-        raise ValueError(
-            "nested_extraction_policy.allow_initial_root_archives must be boolean"
-        )
     try:
         ratio = float(config["minimum_archive_byte_ratio"])
         maximum_other_projects = int(config["maximum_other_projects"])

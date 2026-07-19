@@ -446,7 +446,6 @@ class _PipelineRuntime:
                 current_roots,
                 current_scan_session or self.task_scanner.last_scan_session,
                 round_index=round_index,
-                direct_initial=bool(direct and round_index == 1),
             )
             tasks = authorization.allowed_tasks
             context.policy_skips.extend(authorization.skipped)

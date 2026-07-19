@@ -8,7 +8,7 @@ from sunpack_native import authorize_nested_candidates as _NATIVE_AUTHORIZE_NEST
 
 from sunpack.contracts.tasks import ArchiveTask
 from sunpack.coordinator.scan_session import DetectionScanSession
-from sunpack.support.path_keys import normalized_path, path_key, safe_relative_path
+from sunpack.support.path_keys import normalized_path, safe_relative_path
 
 
 @dataclass(frozen=True)
@@ -31,18 +31,14 @@ class NestedExtractionPolicy:
         scan_session: DetectionScanSession | None,
         *,
         round_index: int,
-        direct_initial: bool,
     ) -> NestedAuthorizationBatch:
-        if not tasks or not self.config.get("enabled", True) or direct_initial:
+        # The first round is the user's requested discovery scope.  This policy
+        # only governs archives discovered from extraction output in later rounds.
+        if not tasks or round_index <= 1 or not self.config.get("enabled", True):
             return NestedAuthorizationBatch(list(tasks), [])
         if scan_session is None:
             raise RuntimeError("Nested extraction authorization requires the detection scan session")
 
-        explicit_files = {
-            path_key(normalized_path(root))
-            for root in scan_roots
-            if root and os.path.isfile(root)
-        }
         directory_roots = sorted(
             {
                 normalized_path(os.path.abspath(root))
@@ -55,11 +51,8 @@ class NestedExtractionPolicy:
 
         allowed_ids: set[int] = set()
         grouped: dict[str, list[ArchiveTask]] = {}
+        skipped: list[dict[str, Any]] = []
         for task in tasks:
-            member_keys = {path_key(path) for path in (task.all_parts or [task.main_path])}
-            if member_keys & explicit_files:
-                allowed_ids.add(id(task))
-                continue
             root = next(
                 (
                     candidate_root
@@ -69,11 +62,17 @@ class NestedExtractionPolicy:
                 None,
             )
             if root is None:
-                allowed_ids.add(id(task))
+                skipped.append({
+                    "path": task.main_path,
+                    "task_key": task.key,
+                    "round": round_index,
+                    "policy": "nested_extraction_policy",
+                    "allowed": False,
+                    "reason": "outside_scan_root",
+                })
                 continue
             grouped.setdefault(root, []).append(task)
 
-        skipped: list[dict[str, Any]] = []
         for root, root_tasks in grouped.items():
             snapshot = scan_session.snapshot_for_directory(root)
             candidates = [
@@ -87,10 +86,6 @@ class NestedExtractionPolicy:
                 snapshot.raw_native_snapshot,
                 root,
                 candidates,
-                bool(
-                    round_index == 1
-                    and self.config.get("allow_initial_root_archives", True)
-                ),
                 float(self.config.get("minimum_archive_byte_ratio", 0.5)),
                 int(self.config.get("maximum_other_projects", 2)),
             ))
