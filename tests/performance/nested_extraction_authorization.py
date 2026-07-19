@@ -83,8 +83,11 @@ def run(root: str, runs: int) -> dict:
             measured_raw,
             root,
             candidates,
-            0.5,
             2,
+            0.5,
+            0.65,
+            0.1,
+            64,
         ))
         authorization_ns.append(time.perf_counter_ns() - started)
 
@@ -97,7 +100,7 @@ def run(root: str, runs: int) -> dict:
             samples = []
             for _ in range(runs):
                 started = time.perf_counter_ns()
-                authorize_nested_candidates(raw, root, expanded, 0.5, 2)
+                authorize_nested_candidates(raw, root, expanded, 2, 0.5, 0.65, 0.1, 64)
                 samples.append(time.perf_counter_ns() - started)
             scaling[str(count)] = {
                 "median_ms": _median_ms(samples),
@@ -107,6 +110,8 @@ def run(root: str, runs: int) -> dict:
     return {
         "root": str(Path(root).resolve()),
         "runs": runs,
+        "evaluation_semantics": "hypothetical_recursive_output",
+        "first_round_bypasses_authorization": True,
         "raw_entries": len(paths),
         "candidate_count": len(candidates),
         "allowed_count": sum(bool(dict(row).get("allowed")) for row in decisions),
@@ -147,8 +152,11 @@ def evaluate_dlc_sample(path: str) -> dict | None:
         snapshot.raw_native_snapshot,
         str(root),
         [(str(inner), [str(inner)])],
-        0.5,
         2,
+        0.5,
+        0.65,
+        0.1,
+        64,
     )[0])
 
 

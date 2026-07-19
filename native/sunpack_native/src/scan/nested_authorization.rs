@@ -6,23 +6,78 @@ use std::path::{Path, PathBuf};
 
 type CandidateTuple = (String, Vec<String>);
 
+struct RawEntry {
+    key: String,
+    scope_key: String,
+    root_branch_key: Option<String>,
+    local_branch_key: Option<String>,
+    is_dir: bool,
+    size: u64,
+}
+
+#[derive(Default)]
+struct ScopeCandidates {
+    projects: usize,
+    member_keys: HashSet<String>,
+    branch_keys: HashSet<String>,
+}
+
 #[derive(Default)]
 struct ScopeStats {
-    file_count: usize,
-    directory_count: usize,
     total_bytes: u64,
-    candidate_projects: usize,
-    candidate_member_keys: HashSet<String>,
     candidate_bytes: u64,
+    candidate_projects: usize,
+    candidate_member_count: usize,
+    other_file_count: usize,
+    foreign_branch_count: usize,
+}
+
+impl ScopeStats {
+    fn other_project_count(&self) -> usize {
+        self.other_file_count
+            .saturating_add(self.foreign_branch_count)
+    }
+}
+
+struct ScopeAccumulator {
+    stats: ScopeStats,
+    all_branches: HashSet<String>,
+}
+
+impl ScopeAccumulator {
+    fn new(candidates: &ScopeCandidates) -> Self {
+        Self {
+            stats: ScopeStats {
+                candidate_projects: candidates.projects,
+                candidate_member_count: candidates.member_keys.len(),
+                ..ScopeStats::default()
+            },
+            all_branches: HashSet::new(),
+        }
+    }
+
+    fn finish(mut self, candidates: &ScopeCandidates) -> ScopeStats {
+        self.stats.foreign_branch_count = self
+            .all_branches
+            .difference(&candidates.branch_keys)
+            .count();
+        self.stats
+    }
 }
 
 struct CandidateContext {
     entry_path: String,
-    scope_path: String,
+    scope_path: PathBuf,
     scope_key: String,
     member_keys: HashSet<String>,
     candidate_bytes: u64,
     direct_child: bool,
+}
+
+struct Evaluation {
+    byte_ratio: f64,
+    project_cleanliness: f64,
+    score: f64,
 }
 
 #[pyfunction]
@@ -30,47 +85,76 @@ struct CandidateContext {
     raw_snapshot,
     root_path,
     candidates,
+    other_project_tolerance,
+    byte_ratio_weight,
+    minimum_authorization_score,
     minimum_archive_byte_ratio,
-    maximum_other_projects
+    hard_maximum_other_projects
 ))]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn authorize_nested_candidates(
     py: Python<'_>,
     raw_snapshot: PyRef<'_, NativeDirectorySnapshot>,
     root_path: &str,
     candidates: Vec<CandidateTuple>,
+    other_project_tolerance: f64,
+    byte_ratio_weight: f64,
+    minimum_authorization_score: f64,
     minimum_archive_byte_ratio: f64,
-    maximum_other_projects: usize,
+    hard_maximum_other_projects: usize,
 ) -> PyResult<Vec<Py<PyDict>>> {
     let root = PathBuf::from(root_path);
-    let mut scopes: HashMap<String, ScopeStats> = HashMap::new();
+    let root_key = path_key(&root);
+    let mut raw_entries = Vec::new();
     let mut file_sizes: HashMap<String, u64> = HashMap::new();
 
     for (path, is_dir, size, _) in raw_snapshot.records() {
-        let path_value = Path::new(path);
-        let Some((scope_path, _)) = semantic_scope(path_value, &root) else {
+        let key = path_key_from_str(path);
+        let Some(relative) = relative_key(&key, &root_key) else {
             continue;
         };
-        let scope_key = path_key(&scope_path);
-        let stats = scopes.entry(scope_key).or_default();
-        if is_dir {
-            if path_key(path_value) != path_key(&scope_path) {
-                stats.directory_count += 1;
-            }
-        } else {
-            let size = size.unwrap_or(0);
-            stats.file_count += 1;
-            stats.total_bytes = stats.total_bytes.saturating_add(size);
-            file_sizes.insert(path_key(path_value), size);
+        if relative.is_empty() || relative_contains_internal_metadata(relative) {
+            continue;
         }
+        let (scope_key, root_branch_key, local_branch_key) =
+            if let Some((first, remainder)) = relative.split_once('\\') {
+                let scope_key = format!("{root_key}\\{first}");
+                let local_branch_key = if let Some((first_local, _)) = remainder.split_once('\\') {
+                    Some(format!("{scope_key}\\{first_local}"))
+                } else if is_dir {
+                    Some(key.clone())
+                } else {
+                    None
+                };
+                (scope_key.clone(), Some(scope_key), local_branch_key)
+            } else {
+                let root_branch_key = is_dir.then(|| key.clone());
+                (root_key.clone(), root_branch_key.clone(), root_branch_key)
+            };
+        let size = if is_dir { 0 } else { size.unwrap_or(0) };
+        if !is_dir {
+            file_sizes.insert(key.clone(), size);
+        }
+        raw_entries.push(RawEntry {
+            key,
+            scope_key,
+            root_branch_key,
+            local_branch_key,
+            is_dir,
+            size,
+        });
     }
 
     let mut contexts = Vec::with_capacity(candidates.len());
+    let mut scopes: HashMap<String, ScopeCandidates> = HashMap::new();
+    let mut root_candidates = ScopeCandidates::default();
+
     for (entry_path, raw_members) in candidates {
         let entry = PathBuf::from(&entry_path);
         let Some((scope_path, direct_child)) = semantic_scope(&entry, &root) else {
             contexts.push(CandidateContext {
                 entry_path,
-                scope_path: String::new(),
+                scope_path: PathBuf::new(),
                 scope_key: String::new(),
                 member_keys: HashSet::new(),
                 candidate_bytes: 0,
@@ -92,14 +176,17 @@ pub(crate) fn authorize_nested_candidates(
             .iter()
             .map(|member| file_sizes.get(member).copied().unwrap_or(0))
             .fold(0u64, u64::saturating_add);
-        let stats = scopes.entry(scope_key.clone()).or_default();
-        stats.candidate_projects += 1;
-        stats
-            .candidate_member_keys
-            .extend(member_keys.iter().cloned());
+
+        add_candidate(&mut root_candidates, &root, &entry, &member_keys);
+        add_candidate(
+            scopes.entry(scope_key.clone()).or_default(),
+            &scope_path,
+            &entry,
+            &member_keys,
+        );
         contexts.push(CandidateContext {
             entry_path,
-            scope_path: scope_path.to_string_lossy().into_owned(),
+            scope_path,
             scope_key,
             member_keys,
             candidate_bytes,
@@ -107,61 +194,193 @@ pub(crate) fn authorize_nested_candidates(
         });
     }
 
-    for stats in scopes.values_mut() {
-        stats.candidate_bytes = stats
-            .candidate_member_keys
-            .iter()
-            .map(|member| file_sizes.get(member).copied().unwrap_or(0))
-            .fold(0u64, u64::saturating_add);
+    let mut root_accumulator = ScopeAccumulator::new(&root_candidates);
+    let mut scope_accumulators: HashMap<String, ScopeAccumulator> = scopes
+        .iter()
+        .filter(|(key, _)| key.as_str() != root_key.as_str())
+        .map(|(key, candidates)| (key.clone(), ScopeAccumulator::new(candidates)))
+        .collect();
+    for entry in &raw_entries {
+        accumulate_entry(
+            &mut root_accumulator,
+            entry,
+            &root_candidates,
+            entry.root_branch_key.as_deref(),
+        );
+        if let (Some(accumulator), Some(candidates)) = (
+            scope_accumulators.get_mut(&entry.scope_key),
+            scopes.get(&entry.scope_key),
+        ) {
+            accumulate_entry(
+                accumulator,
+                entry,
+                candidates,
+                entry.local_branch_key.as_deref(),
+            );
+        }
     }
+    let root_stats = root_accumulator.finish(&root_candidates);
+    let scope_stats: HashMap<String, ScopeStats> = scope_accumulators
+        .into_iter()
+        .map(|(key, accumulator)| {
+            let candidates = scopes.get(&key).expect("scope candidates must exist");
+            (key, accumulator.finish(candidates))
+        })
+        .collect();
 
     contexts
         .into_iter()
         .map(|context| {
             let result = PyDict::new(py);
-            let stats = scopes.get(&context.scope_key);
-            let total_bytes = stats.map(|value| value.total_bytes).unwrap_or(0);
-            let scope_candidate_bytes = stats.map(|value| value.candidate_bytes).unwrap_or(0);
-            let candidate_projects = stats.map(|value| value.candidate_projects).unwrap_or(0);
-            let candidate_members = stats
-                .map(|value| value.candidate_member_keys.len())
-                .unwrap_or(0);
-            let other_files = stats
-                .map(|value| value.file_count.saturating_sub(candidate_members))
-                .unwrap_or(0);
-            let other_directories = stats.map(|value| value.directory_count).unwrap_or(0);
-            let other_projects = other_files.saturating_add(other_directories);
-            let candidate_byte_ratio = ratio(context.candidate_bytes, total_bytes);
-            let collective_byte_ratio = ratio(scope_candidate_bytes, total_bytes);
+            let local_stats = scope_stats.get(&context.scope_key).unwrap_or(&root_stats);
+            let local = evaluate(local_stats, other_project_tolerance, byte_ratio_weight);
+            let root_evaluation = evaluate(&root_stats, other_project_tolerance, byte_ratio_weight);
+            let (authorization_score, limiting_context) = if root_evaluation.score < local.score {
+                (root_evaluation.score, "root")
+            } else {
+                (local.score, "local")
+            };
+            let minimum_byte_ratio = local.byte_ratio.min(root_evaluation.byte_ratio);
+            let observed_other_projects = local_stats
+                .other_project_count()
+                .max(root_stats.other_project_count());
 
             let (allowed, reason) = if context.scope_key.is_empty() {
                 (false, "outside_scan_root")
-            } else if collective_byte_ratio >= minimum_archive_byte_ratio {
-                (true, "archive_bytes_dominate")
-            } else if other_projects <= maximum_other_projects {
-                (true, "few_other_projects")
+            } else if minimum_byte_ratio < minimum_archive_byte_ratio {
+                (false, "archive_byte_ratio_below_floor")
+            } else if observed_other_projects > hard_maximum_other_projects {
+                (false, "too_many_other_projects")
+            } else if authorization_score < minimum_authorization_score {
+                (false, "authorization_score_below_threshold")
             } else {
-                (false, "nested_context_not_archive_dominant")
+                (true, "authorization_score_met")
             };
 
             result.set_item("entry_path", context.entry_path)?;
-            result.set_item("scope_path", context.scope_path)?;
+            result.set_item("scope_path", context.scope_path.to_string_lossy())?;
+            result.set_item("root_path", root.to_string_lossy())?;
             result.set_item("allowed", allowed)?;
             result.set_item("reason", reason)?;
             result.set_item("direct_child", context.direct_child)?;
+            result.set_item("limiting_context", limiting_context)?;
             result.set_item("candidate_bytes", context.candidate_bytes)?;
-            result.set_item("scope_candidate_bytes", scope_candidate_bytes)?;
-            result.set_item("scope_total_bytes", total_bytes)?;
-            result.set_item("candidate_byte_ratio", candidate_byte_ratio)?;
-            result.set_item("collective_candidate_byte_ratio", collective_byte_ratio)?;
-            result.set_item("candidate_project_count", candidate_projects)?;
             result.set_item("candidate_member_count", context.member_keys.len())?;
-            result.set_item("other_file_count", other_files)?;
-            result.set_item("other_directory_count", other_directories)?;
-            result.set_item("other_project_count", other_projects)?;
+            set_scope_items(&result, "local", local_stats, &local)?;
+            set_scope_items(&result, "root", &root_stats, &root_evaluation)?;
+            result.set_item("authorization_score", authorization_score)?;
             Ok(result.unbind())
         })
         .collect()
+}
+
+fn add_candidate(
+    scope: &mut ScopeCandidates,
+    scope_path: &Path,
+    entry_path: &Path,
+    member_keys: &HashSet<String>,
+) {
+    scope.projects += 1;
+    scope.member_keys.extend(member_keys.iter().cloned());
+    if let Some(branch) = immediate_branch(entry_path, scope_path, false) {
+        scope.branch_keys.insert(path_key(&branch));
+    }
+}
+
+fn accumulate_entry(
+    accumulator: &mut ScopeAccumulator,
+    entry: &RawEntry,
+    candidates: &ScopeCandidates,
+    branch_key: Option<&str>,
+) {
+    if !entry.is_dir {
+        accumulator.stats.total_bytes = accumulator.stats.total_bytes.saturating_add(entry.size);
+        if candidates.member_keys.contains(&entry.key) {
+            accumulator.stats.candidate_bytes =
+                accumulator.stats.candidate_bytes.saturating_add(entry.size);
+        } else {
+            accumulator.stats.other_file_count += 1;
+        }
+    }
+    if let Some(branch) = branch_key {
+        accumulator.all_branches.insert(branch.to_owned());
+    }
+}
+
+fn immediate_branch(path: &Path, scope: &Path, is_dir: bool) -> Option<PathBuf> {
+    let relative = path.strip_prefix(scope).ok()?;
+    let mut components = relative.components();
+    let first = components.next()?;
+    if !is_dir && components.next().is_none() {
+        return None;
+    }
+    Some(scope.join(first.as_os_str()))
+}
+
+fn evaluate(stats: &ScopeStats, tolerance: f64, byte_ratio_weight: f64) -> Evaluation {
+    let byte_ratio = ratio(stats.candidate_bytes, stats.total_bytes);
+    let project_cleanliness = project_cleanliness(stats.other_project_count(), tolerance);
+    let score = harmonic_score(byte_ratio, project_cleanliness, byte_ratio_weight);
+    Evaluation {
+        byte_ratio,
+        project_cleanliness,
+        score,
+    }
+}
+
+fn project_cleanliness(other_projects: usize, tolerance: f64) -> f64 {
+    if other_projects == 0 {
+        return 1.0;
+    }
+    if tolerance <= 0.0 {
+        return 0.0;
+    }
+    let normalized = other_projects as f64 / tolerance;
+    1.0 / (1.0 + normalized * normalized)
+}
+
+fn harmonic_score(byte_ratio: f64, cleanliness: f64, byte_ratio_weight: f64) -> f64 {
+    if byte_ratio <= 0.0 || cleanliness <= 0.0 {
+        return 0.0;
+    }
+    1.0 / (byte_ratio_weight / byte_ratio + (1.0 - byte_ratio_weight) / cleanliness)
+}
+
+fn set_scope_items(
+    result: &Bound<'_, PyDict>,
+    prefix: &str,
+    stats: &ScopeStats,
+    evaluation: &Evaluation,
+) -> PyResult<()> {
+    result.set_item(format!("{prefix}_candidate_bytes"), stats.candidate_bytes)?;
+    result.set_item(format!("{prefix}_total_bytes"), stats.total_bytes)?;
+    result.set_item(
+        format!("{prefix}_candidate_byte_ratio"),
+        evaluation.byte_ratio,
+    )?;
+    result.set_item(
+        format!("{prefix}_candidate_project_count"),
+        stats.candidate_projects,
+    )?;
+    result.set_item(
+        format!("{prefix}_candidate_member_count"),
+        stats.candidate_member_count,
+    )?;
+    result.set_item(format!("{prefix}_other_file_count"), stats.other_file_count)?;
+    result.set_item(
+        format!("{prefix}_foreign_branch_count"),
+        stats.foreign_branch_count,
+    )?;
+    result.set_item(
+        format!("{prefix}_other_project_count"),
+        stats.other_project_count(),
+    )?;
+    result.set_item(
+        format!("{prefix}_project_cleanliness"),
+        evaluation.project_cleanliness,
+    )?;
+    result.set_item(format!("{prefix}_authorization_score"), evaluation.score)?;
+    Ok(())
 }
 
 fn semantic_scope(path: &Path, root: &Path) -> Option<(PathBuf, bool)> {
@@ -176,6 +395,23 @@ fn semantic_scope(path: &Path, root: &Path) -> Option<(PathBuf, bool)> {
 
 fn path_key(path: &Path) -> String {
     path.to_string_lossy().replace('/', "\\").to_lowercase()
+}
+
+fn path_key_from_str(path: &str) -> String {
+    path.replace('/', "\\").to_lowercase()
+}
+
+fn relative_key<'a>(path: &'a str, root: &str) -> Option<&'a str> {
+    if path == root {
+        return Some("");
+    }
+    path.strip_prefix(root)?.strip_prefix('\\')
+}
+
+fn relative_contains_internal_metadata(relative: &str) -> bool {
+    relative
+        .split('\\')
+        .any(|component| component.eq_ignore_ascii_case(".sunpack"))
 }
 
 fn ratio(value: u64, total: u64) -> f64 {
@@ -201,5 +437,43 @@ mod tests {
             semantic_scope(Path::new("C:\\out\\root.rar"), root),
             Some((PathBuf::from("C:\\out"), true))
         );
+    }
+
+    #[test]
+    fn project_cleanliness_has_half_score_at_tolerance() {
+        assert_eq!(project_cleanliness(0, 2.0), 1.0);
+        assert_eq!(project_cleanliness(2, 2.0), 0.5);
+        assert!((project_cleanliness(20, 2.0) - (1.0 / 101.0)).abs() < 1e-12);
+    }
+
+    #[test]
+    fn harmonic_score_is_pulled_down_by_weak_evidence() {
+        assert!(harmonic_score(0.99, 0.8, 0.5) > 0.88);
+        assert!(harmonic_score(0.99, 0.01, 0.5) < 0.02);
+    }
+
+    #[test]
+    fn immediate_branch_ignores_direct_files_but_tracks_directories() {
+        let root = Path::new("C:\\out");
+        assert_eq!(
+            immediate_branch(Path::new("C:\\out\\a.zip"), root, false),
+            None
+        );
+        assert_eq!(
+            immediate_branch(Path::new("C:\\out\\wrapper"), root, true),
+            Some(PathBuf::from("C:\\out\\wrapper"))
+        );
+        assert_eq!(
+            immediate_branch(Path::new("C:\\out\\wrapper\\a.zip"), root, false),
+            Some(PathBuf::from("C:\\out\\wrapper"))
+        );
+    }
+
+    #[test]
+    fn internal_sunpack_metadata_is_not_user_context() {
+        assert!(relative_contains_internal_metadata(
+            ".sunpack\\recovery_report.json"
+        ));
+        assert!(!relative_contains_internal_metadata("game\\readme.txt"));
     }
 }

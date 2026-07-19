@@ -1,3 +1,4 @@
+import math
 from typing import Any
 
 from sunpack.config.advanced_defaults import advanced_config_value
@@ -51,22 +52,42 @@ def normalize_nested_extraction_policy(value: Any) -> dict[str, Any]:
     if not isinstance(config.get("enabled"), bool):
         raise ValueError("nested_extraction_policy.enabled must be boolean")
     try:
-        ratio = float(config["minimum_archive_byte_ratio"])
-        maximum_other_projects = int(config["maximum_other_projects"])
+        tolerance = float(config["other_project_tolerance"])
+        byte_ratio_weight = float(config["byte_ratio_weight"])
+        minimum_score = float(config["minimum_authorization_score"])
+        minimum_ratio = float(config["minimum_archive_byte_ratio"])
     except (TypeError, ValueError) as exc:
+        raise ValueError("nested_extraction_policy thresholds must be numeric") from exc
+    hard_maximum = config["hard_maximum_other_projects"]
+    if isinstance(hard_maximum, bool) or not isinstance(hard_maximum, int):
         raise ValueError(
-            "nested_extraction_policy thresholds must be numeric"
-        ) from exc
-    if not 0.0 <= ratio <= 1.0:
+            "nested_extraction_policy.hard_maximum_other_projects must be an integer"
+        )
+    if not math.isfinite(tolerance) or tolerance <= 0.0:
+        raise ValueError(
+            "nested_extraction_policy.other_project_tolerance must be positive"
+        )
+    if not 0.0 < byte_ratio_weight < 1.0:
+        raise ValueError(
+            "nested_extraction_policy.byte_ratio_weight must be between 0 and 1 exclusively"
+        )
+    if not 0.0 <= minimum_score <= 1.0:
+        raise ValueError(
+            "nested_extraction_policy.minimum_authorization_score must be between 0 and 1"
+        )
+    if not 0.0 <= minimum_ratio <= 1.0:
         raise ValueError(
             "nested_extraction_policy.minimum_archive_byte_ratio must be between 0 and 1"
         )
-    if maximum_other_projects < 0:
+    if hard_maximum < 0:
         raise ValueError(
-            "nested_extraction_policy.maximum_other_projects must be non-negative"
+            "nested_extraction_policy.hard_maximum_other_projects must be non-negative"
         )
-    config["minimum_archive_byte_ratio"] = ratio
-    config["maximum_other_projects"] = maximum_other_projects
+    config["other_project_tolerance"] = tolerance
+    config["byte_ratio_weight"] = byte_ratio_weight
+    config["minimum_authorization_score"] = minimum_score
+    config["minimum_archive_byte_ratio"] = minimum_ratio
+    config["hard_maximum_other_projects"] = hard_maximum
     return config
 
 
