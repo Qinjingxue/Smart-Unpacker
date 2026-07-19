@@ -43,11 +43,13 @@ class PasswordBatchVerification:
     ok: bool
     status: VerifierStatus = "unknown_needs_final_verifier"
     matched_index: int = -1
+    matched_indices: tuple[int, ...] = ()
     attempts: int = 0
     test_result: object = None
     error_text: str = ""
     terminal: bool = False
     final_confirmation_required: bool = True
+    match_evidence: str = ""
 
 
 class PasswordVerifier(Protocol):

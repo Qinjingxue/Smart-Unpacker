@@ -69,6 +69,8 @@ def classify_extract_failure(
     err_text: str,
     archive: str = None,
     is_split_archive: bool = False,
+    *,
+    password_evidence: str = "",
 ) -> FailureInfo:
     archive_name = os.path.basename(archive or "").lower()
     is_split_archive = is_split_archive or looks_like_split_archive_name(archive_name)
@@ -81,6 +83,38 @@ def classify_extract_failure(
                 "failure.missing_volume",
                 details=_missing_volume_details(worker_result, confirmed=True),
             )
+        if password_evidence == "zipcrypto_header_byte":
+            operation_result_name = str(worker_result.get("operation_result_name") or "").lower()
+            failure_kind = str(worker_result.get("failure_kind") or "").lower()
+            zipcrypto_password_or_payload_failure = operation_result_name in {
+                "wrong_password",
+                "data_error",
+                "crc_error",
+            } or failure_kind in {
+                "encrypted_or_wrong_password",
+                "data_error",
+                "checksum_error",
+                "crc_error",
+            }
+            if zipcrypto_password_or_payload_failure:
+                if worker_result.get("password_crc_proven"):
+                    return _failure(
+                        FailureKind.DAMAGED,
+                        "failure.damaged",
+                        repairable=True,
+                        details={
+                            "evidence": "zipcrypto_entry_crc_proven_before_failure",
+                            "password_crc_proven_items": int(worker_result.get("password_crc_proven_items") or 0),
+                        },
+                    )
+                return _failure(
+                    FailureKind.PASSWORD_INCONCLUSIVE,
+                    "failure.password_state_unknown",
+                    details={
+                        "evidence": "zipcrypto_failure_without_password_proof",
+                        "backend_operation_result": operation_result_name,
+                    },
+                )
         if is_split_archive and _worker_reports_payload_damage(worker_result):
             return _failure(
                 FailureKind.DAMAGED,

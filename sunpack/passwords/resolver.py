@@ -17,6 +17,7 @@ from sunpack.passwords.session import PasswordSession
 class _PendingPasswordPlan:
     candidates: list[str]
     fingerprint_key: str
+    candidate_evidence: str = ""
 
 
 class PasswordResolver:
@@ -74,8 +75,14 @@ class PasswordResolver:
 
         pending = self._take_pending(archive_key)
         if pending is not None:
-            password, fingerprint_key = pending
-            return self._confirmation_resolution(archive_key, password, fingerprint_key, fact_bag)
+            password, fingerprint_key, candidate_evidence = pending
+            return self._confirmation_resolution(
+                archive_key,
+                password,
+                fingerprint_key,
+                fact_bag,
+                candidate_evidence=candidate_evidence,
+            )
 
         fingerprint = build_archive_fingerprint(archive_path, part_paths)
 
@@ -109,8 +116,18 @@ class PasswordResolver:
         if search.extraction_candidates:
             first, *remaining = search.extraction_candidates
             with self._lock:
-                self._pending_confirmation[archive_key] = _PendingPasswordPlan(list(remaining), fingerprint.key)
-            return self._confirmation_resolution(archive_key, first, fingerprint.key, fact_bag)
+                self._pending_confirmation[archive_key] = _PendingPasswordPlan(
+                    list(remaining),
+                    fingerprint.key,
+                    search.extraction_candidate_evidence,
+                )
+            return self._confirmation_resolution(
+                archive_key,
+                first,
+                fingerprint.key,
+                fact_bag,
+                candidate_evidence=search.extraction_candidate_evidence,
+            )
         return self._remember_search(
             archive_key,
             search,
@@ -158,12 +175,12 @@ class PasswordResolver:
             candidates=candidates,
         ))
 
-    def _take_pending(self, archive_key: str) -> tuple[str, str] | None:
+    def _take_pending(self, archive_key: str) -> tuple[str, str, str] | None:
         with self._lock:
             plan = self._pending_confirmation.get(archive_key)
             if not plan or not plan.candidates:
                 return None
-            return plan.candidates.pop(0), plan.fingerprint_key
+            return plan.candidates.pop(0), plan.fingerprint_key, plan.candidate_evidence
 
     def _promote_success(self, password: str) -> None:
         self.password_tester.add_recent_password(password)
@@ -182,6 +199,8 @@ class PasswordResolver:
         password: str,
         fingerprint_key: str,
         fact_bag: FactBag | None,
+        *,
+        candidate_evidence: str = "",
     ) -> PasswordResolution:
         return PasswordResolution(
             password=password,
@@ -190,6 +209,7 @@ class PasswordResolver:
             encrypted=True if PasswordResolver._facts_require_password(fact_bag) else None,
             requires_extraction_confirmation=True,
             fingerprint_key=fingerprint_key,
+            candidate_evidence=candidate_evidence,
         )
 
     @staticmethod

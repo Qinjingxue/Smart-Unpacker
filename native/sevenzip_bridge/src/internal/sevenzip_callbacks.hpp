@@ -1044,6 +1044,12 @@ public:
         }
         clear_prop(value);
 
+        bool encrypted = false;
+        if (!is_dir && get_item_property(archive_, index, kpidEncrypted, value)) {
+            encrypted = prop_bool(value);
+        }
+        clear_prop(value);
+
 
 
         std::wstring name;
@@ -1078,7 +1084,15 @@ public:
 
             output_trace_->current_item_bytes_written = 0;
 
-            begin_item_trace(index, name, is_dir, expected_size, has_expected_size, source_crc32, has_source_crc32);
+            begin_item_trace(
+                index,
+                name,
+                is_dir,
+                encrypted,
+                expected_size,
+                has_expected_size,
+                source_crc32,
+                has_source_crc32);
 
         }
 
@@ -1271,6 +1285,7 @@ private:
         UInt32 index,
         const std::wstring& item_path,
         bool is_dir,
+        bool encrypted,
         UInt64 expected_size,
         bool has_expected_size,
         UInt32 source_crc32,
@@ -1290,6 +1305,8 @@ private:
         item.path = item_path;
 
         item.is_dir = is_dir;
+
+        item.encrypted = encrypted;
 
         item.expected_size = expected_size;
 

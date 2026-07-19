@@ -125,6 +125,8 @@ class SingleArchiveExtractor:
         # only after an extraction attempt, when disk usage may have changed.
         space_checked = True
         password_candidate_rejections = 0
+        password_candidate_inconclusive: FailureInfo | None = None
+        password_candidates_inconclusive = 0
         while retry_count < self.retry_policy.max_retries:
             with _phase(phase_timer, f"{phase_prefix}_ensure_space_retry"):
                 has_space = space_checked or self.ensure_space(5)
@@ -239,6 +241,7 @@ class SingleArchiveExtractor:
                             if resolution.requires_extraction_confirmation:
                                 diagnostics["password_verification"] = "extraction_transaction"
                                 diagnostics["password_candidates_rejected"] = password_candidate_rejections
+                                diagnostics["password_candidates_inconclusive"] = password_candidates_inconclusive
                         with _phase(phase_timer, f"{phase_prefix}_output_stats_success"):
                             worker_result = diagnostics.get("result") if isinstance(diagnostics.get("result"), dict) else {}
                             output_inventory = collect_output_inventory(out_dir, worker_result)
@@ -305,8 +308,23 @@ class SingleArchiveExtractor:
                 pass
 
             if resolution.requires_extraction_confirmation and run_result is not None:
-                candidate_failure = classify_extract_failure(run_result, err, archive=archive, is_split_archive=is_split)
-                if candidate_failure.is_password_failure:
+                candidate_failure = classify_extract_failure(
+                    run_result,
+                    err,
+                    archive=archive,
+                    is_split_archive=is_split,
+                    password_evidence=resolution.candidate_evidence,
+                )
+                if candidate_failure.details.get("evidence") == "zipcrypto_entry_crc_proven_before_failure":
+                    self.password_resolver.confirm_extraction(resolution)
+                elif candidate_failure.kind == FailureKind.PASSWORD_INCONCLUSIVE:
+                    password_candidates_inconclusive += 1
+                    if password_candidate_inconclusive is None:
+                        password_candidate_inconclusive = candidate_failure
+                    if self.password_resolver.has_pending_candidates(resolution.archive_key):
+                        shutil.rmtree(out_dir, ignore_errors=True)
+                        continue
+                elif candidate_failure.is_password_failure:
                     self.password_resolver.reject_extraction_candidate(resolution)
                     password_candidate_rejections += 1
                     if self.password_resolver.has_pending_candidates(resolution.archive_key):
@@ -336,13 +354,28 @@ class SingleArchiveExtractor:
                 continue
 
             with _phase(phase_timer, f"{phase_prefix}_classify_error"):
-                failure = classify_extract_failure(run_result or test_result, err, archive=archive, is_split_archive=is_split)
+                failure = classify_extract_failure(
+                    run_result or test_result,
+                    err,
+                    archive=archive,
+                    is_split_archive=is_split,
+                    password_evidence=resolution.candidate_evidence,
+                )
+                if password_candidate_inconclusive is not None and failure.is_password_failure:
+                    failure = password_candidate_inconclusive
                 error_msg = self._append_retry_count(self._localized_failure(failure), retry_count)
             self._log(self.i18n.t("extract.log.failed", archive=archive, error=error_msg))
             with _phase(phase_timer, f"{phase_prefix}_diagnostics_failure"):
                 diagnostics = self._diagnostics_from(run_result or test_result)
+                if resolution.requires_extraction_confirmation:
+                    diagnostics["password_candidates_rejected"] = password_candidate_rejections
+                    diagnostics["password_candidates_inconclusive"] = password_candidates_inconclusive
             with _phase(phase_timer, f"{phase_prefix}_recoverable_partial_check"):
-                recoverable_partial = self.best_effort and has_recoverable_partial_outputs(diagnostics, out_dir)
+                recoverable_partial = (
+                    failure.kind != FailureKind.PASSWORD_INCONCLUSIVE
+                    and self.best_effort
+                    and has_recoverable_partial_outputs(diagnostics, out_dir)
+                )
             if recoverable_partial:
                 with _phase(phase_timer, f"{phase_prefix}_write_partial_manifest"):
                     manifest_path, manifest_payload = write_extraction_progress_manifest_payload(
@@ -361,7 +394,7 @@ class SingleArchiveExtractor:
                     run_parts,
                     error_msg,
                     failure=failure,
-                    password_used=correct_pwd,
+                    password_used=(None if failure.kind == FailureKind.PASSWORD_INCONCLUSIVE else correct_pwd),
                     selected_codepage=selected_codepage,
                     diagnostics=diagnostics,
                     partial_outputs=True,
@@ -375,7 +408,7 @@ class SingleArchiveExtractor:
                 run_parts,
                 error_msg,
                 failure=failure,
-                password_used=correct_pwd,
+                password_used=(None if failure.kind == FailureKind.PASSWORD_INCONCLUSIVE else correct_pwd),
                 selected_codepage=selected_codepage,
                 diagnostics=diagnostics,
             )

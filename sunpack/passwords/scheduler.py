@@ -35,6 +35,7 @@ class PasswordSearchResult:
     exhausted: bool = False
     stopped_reason: str = ""
     extraction_candidates: tuple[str, ...] = ()
+    extraction_candidate_evidence: str = ""
 
 
 @dataclass(frozen=True)
@@ -191,6 +192,7 @@ class PasswordScheduler:
 
         batch_size = max(1, int(job.batch_size or self.default_batch_size))
         inconclusive: list[str] = []
+        inconclusive_evidence = ""
         attempts = 0
         for offset in range(0, len(candidates), batch_size):
             batch = candidates[offset:offset + batch_size]
@@ -202,8 +204,9 @@ class PasswordScheduler:
                 archive_input=job.archive_input,
             )
             attempts += max(0, min(int(verification.attempts or 0), len(batch)))
-            if verification.status == "match" and verification.matched_index >= 0:
-                matched = batch[verification.matched_index]
+            matched_indices = _valid_matched_indices(verification, len(batch))
+            if verification.status == "match" and matched_indices:
+                matched = batch[matched_indices[0]]
                 if not verification.final_confirmation_required:
                     self.cache.remember_success(fingerprint.key, matched)
                     result = PasswordSearchResult(
@@ -215,8 +218,13 @@ class PasswordScheduler:
                     )
                     self._emit_finished(job, result, started_at, len(candidates), skipped)
                     return result
-                inconclusive.append(matched)
-                inconclusive.extend(password for index, password in enumerate(batch) if index != verification.matched_index)
+                inconclusive.extend(batch[index] for index in matched_indices)
+                rejected = [password for index, password in enumerate(batch) if index not in matched_indices]
+                self.cache.remember_negative_batch(fingerprint.key, rejected)
+                if not inconclusive_evidence:
+                    inconclusive_evidence = verification.match_evidence
+                elif verification.match_evidence != inconclusive_evidence:
+                    inconclusive_evidence = ""
                 continue
             if verification.status == "no_match":
                 self.cache.remember_negative_batch(fingerprint.key, batch)
@@ -246,6 +254,7 @@ class PasswordScheduler:
                 attempts=attempts,
                 stopped_reason="extraction_confirmation_required",
                 extraction_candidates=tuple(dict.fromkeys(inconclusive)),
+                extraction_candidate_evidence=inconclusive_evidence,
             )
         else:
             result = PasswordSearchResult(
@@ -309,9 +318,21 @@ class PasswordScheduler:
             skipped=skipped,
             batch_size=len(batch),
             elapsed_seconds=time.monotonic() - started_at,
-            password_found=verification.ok,
+            password_found=verification.ok and not verification.final_confirmation_required,
             error_text=verification.error_text,
         ))
+        if verification.ok and verification.final_confirmation_required:
+            matched_indices = _valid_matched_indices(verification, len(batch))
+            return PasswordSearchResult(
+                password=None,
+                status=PasswordSearchStatus.INCONCLUSIVE,
+                test_result=verification.test_result,
+                error_text=verification.error_text,
+                attempts=total_attempts,
+                stopped_reason="final_confirmation_required",
+                extraction_candidates=tuple(batch[index] for index in matched_indices),
+                extraction_candidate_evidence=verification.match_evidence,
+            )
         if verification.ok:
             password = batch[verification.matched_index]
             self.cache.remember_success(fingerprint_key, password)
@@ -386,6 +407,17 @@ def _candidate_value(candidate: PasswordCandidate | str) -> str:
     if isinstance(candidate, PasswordCandidate):
         return candidate.value
     return str(candidate)
+
+
+def _valid_matched_indices(verification: PasswordBatchVerification, batch_size: int) -> tuple[int, ...]:
+    raw = verification.matched_indices or (
+        (verification.matched_index,) if verification.matched_index >= 0 else ()
+    )
+    return tuple(dict.fromkeys(
+        int(index)
+        for index in raw
+        if 0 <= int(index) < batch_size
+    ))
 
 
 

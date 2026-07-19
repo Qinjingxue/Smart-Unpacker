@@ -96,8 +96,9 @@ class FakePasswordScheduler:
 
 
 class QueuePasswordScheduler:
-    def __init__(self):
+    def __init__(self, candidate_evidence=""):
         self.planned = []
+        self.candidate_evidence = candidate_evidence
 
     def plan_for_extraction(self, job: PasswordJob):
         candidates = tuple(candidate.value for candidate in job.candidate_pipeline())
@@ -106,6 +107,7 @@ class QueuePasswordScheduler:
             password=None,
             status=PasswordSearchStatus.INCONCLUSIVE,
             extraction_candidates=candidates,
+            extraction_candidate_evidence=self.candidate_evidence,
         )
 
     def remember_extraction_success(self, fingerprint_key, password):
@@ -242,6 +244,26 @@ def test_password_resolver_queues_all_inconclusive_sources_for_extraction_confir
 
     assert session.get_resolved("archive-key") == "builtin-password"
     assert tester.password_store.recent_passwords == ["builtin-password"]
+
+
+def test_password_resolver_preserves_candidate_evidence_across_pending_confirmations():
+    tester = FakePasswordTester()
+    tester.password_store = PasswordStore.from_sources(
+        cli_passwords=["first", "second"],
+        builtin_passwords=[],
+    )
+    resolver = PasswordResolver(
+        tester,
+        PasswordSession(),
+        QueuePasswordScheduler(candidate_evidence="zipcrypto_header_byte"),
+    )
+
+    first = resolver.resolve("payload.zip", archive_key="archive-key")
+    resolver.reject_extraction_candidate(first)
+    second = resolver.resolve("payload.zip", archive_key="archive-key")
+
+    assert first.candidate_evidence == "zipcrypto_header_byte"
+    assert second.candidate_evidence == "zipcrypto_header_byte"
 
 
 def test_password_resolver_uses_directory_passwords_before_user_and_builtin():

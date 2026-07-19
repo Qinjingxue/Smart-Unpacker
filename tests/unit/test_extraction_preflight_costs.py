@@ -1,8 +1,11 @@
+import json
 from types import SimpleNamespace
 
 from sunpack.contracts.detection import FactBag
+from sunpack.contracts.failures import FailureKind
 from sunpack.contracts.tasks import ArchiveTask
 from sunpack.extraction.internal.workflow.single_archive_extractor import SingleArchiveExtractor
+from sunpack.passwords.result import PasswordResolution, PasswordResolutionStatus
 
 
 def test_successful_first_attempt_checks_free_space_once(tmp_path):
@@ -34,3 +37,73 @@ def test_successful_first_attempt_checks_free_space_once(tmp_path):
 
     assert result.success
     assert calls == [5]
+
+
+def test_crc_proven_zipcrypto_password_is_confirmed_before_reporting_later_damage(tmp_path):
+    archive = tmp_path / "encrypted.zip"
+    archive.write_bytes(b"dummy")
+    output = tmp_path / "out"
+    task = ArchiveTask(FactBag(), 1, main_path=str(archive), all_parts=[str(archive)], detected_ext=".zip")
+    task.fact_bag.set("resource.health", {"is_archive": True, "is_encrypted": True})
+    worker_result = {
+        "type": "result",
+        "status": "failed",
+        "operation_result_name": "crc_error",
+        "failure_kind": "checksum_error",
+        "password_rejected": False,
+        "password_crc_proven": True,
+        "password_crc_proven_items": 1,
+    }
+    completed = SimpleNamespace(
+        returncode=2,
+        stdout=json.dumps(worker_result),
+        stderr="",
+        worker_diagnostics={"result": worker_result},
+    )
+    confirmed = []
+
+    class Resolver:
+        password_tester = SimpleNamespace(passwords=["secret"])
+
+        def resolve(self, *_args, **_kwargs):
+            return PasswordResolution(
+                password="secret",
+                status=PasswordResolutionStatus.RESOLVED,
+                archive_key=task.key,
+                requires_extraction_confirmation=True,
+                fingerprint_key="fingerprint",
+                candidate_evidence="zipcrypto_header_byte",
+            )
+
+        def confirm_extraction(self, resolution):
+            confirmed.append(resolution.password)
+
+        @staticmethod
+        def has_pending_candidates(_archive_key):
+            return False
+
+    extractor = SingleArchiveExtractor(
+        seven_z_path="",
+        password_store=SimpleNamespace(has_candidates=lambda **_kwargs: True),
+        password_resolver=Resolver(),
+        metadata_scanner=SimpleNamespace(scan_for_task=lambda *_args, **_kwargs: SimpleNamespace(
+            selected_codepage=None,
+            decoded_names=[],
+            error=None,
+        )),
+        rename_scheduler=SimpleNamespace(),
+        ensure_space=lambda _amount: True,
+        retry_policy=SimpleNamespace(
+            max_retries=1,
+            can_retry=lambda *_args: False,
+            append_retry_count=lambda error, *_args: error,
+        ),
+        split_entry_resolver=SimpleNamespace(resolve=lambda selected, parts, split: (selected, parts, split)),
+        sevenzip_runner=SimpleNamespace(run_extract=lambda **_kwargs: completed),
+    )
+
+    result = extractor.extract(task, str(output))
+
+    assert confirmed == ["secret"]
+    assert result.failure.kind == FailureKind.DAMAGED
+    assert result.password_used == "secret"

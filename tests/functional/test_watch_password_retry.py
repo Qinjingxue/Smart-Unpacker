@@ -106,3 +106,91 @@ def test_watch_retries_real_encrypted_zip_after_password_source_update(tmp_path,
     assert extracted[0].read_text(encoding="utf-8") == payload
     if source == "watch_clipboard":
         assert password in builtin_path.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("include_real_password", [True, False], ids=["later-success", "all-inconclusive"])
+def test_watch_aggregates_all_zipcrypto_fast_matches(tmp_path, monkeypatch, include_real_password):
+    seven_zip = get_test_tools().get("seven_zip")
+    if seven_zip is None or not seven_zip.is_file():
+        pytest.skip("7z.exe is required for ZipCrypto collision coverage")
+
+    watch_root = tmp_path / "watch"
+    source_dir = tmp_path / "source"
+    output_root = tmp_path / "out"
+    watch_root.mkdir()
+    source_dir.mkdir()
+    output_root.mkdir()
+    payload = "zipcrypto collision payload " * 512
+    (source_dir / "payload.txt").write_text(payload, encoding="utf-8")
+    password = f"collision-secret-{uuid.uuid4().hex}"
+    archive = watch_root / "encrypted.zip"
+    completed = subprocess.run(
+        [
+            str(seven_zip),
+            "a",
+            "-tzip",
+            f"-p{password}",
+            "-mem=ZipCrypto",
+            "-mx=0",
+            str(archive),
+            "payload.txt",
+            "-y",
+        ],
+        cwd=str(source_dir),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    if completed.returncode != 0:
+        pytest.skip(f"encrypted ZIP fixture could not be created: {completed.stderr or completed.stdout}")
+
+    wrong_candidates = [f"collision-wrong-{index}" for index in range(4096)]
+    collision_result = zip_fast_verify_passwords(str(archive), wrong_candidates)
+    matched_indices = tuple(collision_result.get("matched_indices") or ())
+    if not matched_indices:
+        pytest.skip("no deterministic ZipCrypto one-byte collision found")
+    collision = wrong_candidates[int(matched_indices[0])]
+    supplied_passwords = [collision, *([password] if include_real_password else [])]
+    combined = zip_fast_verify_passwords(str(archive), supplied_passwords)
+    assert tuple(combined.get("matched_indices") or ()) == tuple(range(len(supplied_passwords)))
+
+    builtin_path = tmp_path / "builtin_passwords.txt"
+    monkeypatch.setattr(builtin_module, "builtin_password_path", lambda: builtin_path)
+    (watch_root / ".sunpack-passwords.txt").write_text(
+        "".join(f"{candidate}\n" for candidate in supplied_passwords),
+        encoding="utf-8",
+    )
+    config = load_config()
+    config["cli"] = {**(config.get("cli") or {}), "quiet": True}
+    config["filesystem"] = {**config.get("filesystem", {}), "scan_filters": []}
+    config["post_extract"] = {**config.get("post_extract", {}), "archive_cleanup_mode": "keep"}
+    config["watch"] = {
+        **config.get("watch", {}),
+        "clipboard_monitor_enabled": False,
+        "password_retry_debounce_seconds": 0,
+    }
+    engine = PipelineEngine(config).start()
+    watcher = WatchScheduler(
+        config,
+        [str(watch_root)],
+        out_dir=str(output_root),
+        state_path=str(tmp_path / "state.json"),
+        quiet_seconds=0,
+        initial_scan=False,
+        pipeline_engine=engine,
+    )
+    try:
+        watcher.enqueue(str(archive))
+        result = watcher.run_once()
+        extracted = list(output_root.rglob("payload.txt"))
+    finally:
+        engine.close()
+
+    assert result.succeeded == (1 if include_real_password else 0), result
+    assert result.failed == (0 if include_real_password else 1), result
+    assert not watcher.state.entries
+    if include_real_password:
+        assert len(extracted) == 1
+        assert extracted[0].read_text(encoding="utf-8") == payload
+    else:
+        assert extracted == []

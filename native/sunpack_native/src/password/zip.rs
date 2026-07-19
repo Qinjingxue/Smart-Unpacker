@@ -89,14 +89,21 @@ fn verify_zip_stream<R: Read + Seek>(
         return Ok(result.into());
     }
 
+    let mut matched_indices = Vec::new();
     for (index, password) in candidates.iter().enumerate() {
         if zipcrypto_header_matches(password.as_bytes(), &encryption_header, header.check_byte) {
-            result.set_item("status", "match")?;
-            result.set_item("matched_index", index as i32)?;
-            result.set_item("attempts", (index + 1) as i32)?;
-            result.set_item("message", "zipcrypto password header matched")?;
-            return Ok(result.into());
+            matched_indices.push(index as i32);
         }
+    }
+
+    if let Some(first) = matched_indices.first().copied() {
+        result.set_item("status", "match")?;
+        result.set_item("matched_index", first)?;
+        result.set_item("matched_indices", matched_indices)?;
+        result.set_item("attempts", candidates.len() as i32)?;
+        result.set_item("match_evidence", "zipcrypto_header_byte")?;
+        result.set_item("message", "zipcrypto password headers matched")?;
+        return Ok(result.into());
     }
 
     result.set_item("status", "no_match")?;
@@ -182,14 +189,20 @@ fn verify_winzip_aes(
     }
     let salt = &salt_and_verifier[..salt_len];
     let verifier = &salt_and_verifier[salt_len..];
+    let mut matched_indices = Vec::new();
     for (index, password) in candidates.iter().enumerate() {
         if winzip_aes_verifier_matches(password.as_bytes(), salt, verifier, key_len) {
-            result.set_item("status", "match")?;
-            result.set_item("matched_index", index as i32)?;
-            result.set_item("attempts", (index + 1) as i32)?;
-            result.set_item("message", "winzip aes password verifier matched")?;
-            return Ok(result.into());
+            matched_indices.push(index as i32);
         }
+    }
+    if let Some(first) = matched_indices.first().copied() {
+        result.set_item("status", "match")?;
+        result.set_item("matched_index", first)?;
+        result.set_item("matched_indices", matched_indices)?;
+        result.set_item("attempts", candidates.len() as i32)?;
+        result.set_item("match_evidence", "winzip_aes_password_verifier")?;
+        result.set_item("message", "winzip aes password verifiers matched")?;
+        return Ok(result.into());
     }
     result.set_item("status", "no_match")?;
     result.set_item("matched_index", -1)?;

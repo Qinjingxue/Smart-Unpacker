@@ -1243,6 +1243,51 @@ def test_watch_scheduler_marks_terminal_failure_and_skips_retry(tmp_path, monkey
     assert not watcher.state.entries
 
 
+def test_watch_scheduler_does_not_retry_password_inconclusive_after_password_source_change(tmp_path, monkeypatch):
+    monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
+    attempts = {"count": 0}
+
+    class InconclusiveRunner:
+        def __init__(self, config):
+            pass
+
+        def run_targets(self, paths):
+            attempts["count"] += 1
+            return SimpleNamespace(
+                success_count=0,
+                failed_tasks=["password or damage is inconclusive"],
+                failures=[FailureInfo(
+                    FailureKind.PASSWORD_INCONCLUSIVE,
+                    "extraction",
+                    "password or damage is inconclusive",
+                )],
+            )
+
+    watch_root = tmp_path / "in"
+    watch_root.mkdir()
+    archive_path = watch_root / "sample.zip"
+    archive_path.write_bytes(b"PK\x03\x04payload")
+
+    watcher = WatchScheduler(
+        {"watch": {"clipboard_monitor_enabled": False, "password_retry_debounce_seconds": 0}},
+        [str(watch_root)],
+        out_dir=str(tmp_path / "out"),
+        state_path=str(tmp_path / "state.json"),
+        quiet_seconds=0,
+        initial_scan=False,
+        pipeline_engine=FakePipelineEngine(InconclusiveRunner),
+    )
+    watcher.enqueue(str(archive_path))
+    first = watcher.run_once()
+    watcher.notify_password_source_changed("test")
+    second = watcher.run_once()
+
+    assert first.failed == 1
+    assert second.processed == 0
+    assert attempts["count"] == 1
+    assert not watcher.state.entries
+
+
 def test_watch_scheduler_retries_password_failure_after_password_source_change(tmp_path, monkeypatch):
     monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
     attempts = {"count": 0}

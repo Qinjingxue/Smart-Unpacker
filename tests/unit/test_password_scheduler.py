@@ -2,8 +2,9 @@ from types import SimpleNamespace
 
 from sunpack.passwords.cache import PasswordAttemptCache
 from sunpack.passwords.candidates import PasswordCandidatePipeline
+from sunpack.passwords.fingerprint import build_archive_fingerprint
 from sunpack.passwords.job import PasswordJob
-from sunpack.passwords.scheduler import PasswordScheduler
+from sunpack.passwords.scheduler import PasswordScheduler, PasswordSearchStatus
 from sunpack.passwords.verifier import PasswordBatchVerification, PasswordVerifierChain
 
 
@@ -20,6 +21,7 @@ class FakeVerifier:
                 matched_index=passwords.index(self.correct_password),
                 attempts=passwords.index(self.correct_password) + 1,
                 test_result=SimpleNamespace(returncode=0),
+                final_confirmation_required=False,
             )
         return PasswordBatchVerification(
             ok=False,
@@ -145,6 +147,31 @@ def test_password_scheduler_honors_timeout_before_verifying_more_candidates(tmp_
     assert verifier.batches == []
 
 
+def test_password_scheduler_does_not_cache_weak_fast_match_as_success(tmp_path):
+    archive = tmp_path / "encrypted.zip"
+    archive.write_bytes(b"archive")
+    verifier = StaticVerifier(PasswordBatchVerification(
+        ok=True,
+        status="match",
+        matched_index=0,
+        matched_indices=(0,),
+        attempts=1,
+        final_confirmation_required=True,
+        match_evidence="zipcrypto_header_byte",
+    ))
+    scheduler = PasswordScheduler(verifier)
+
+    result = scheduler.run(PasswordJob(
+        archive_path=str(archive),
+        candidates=PasswordCandidatePipeline.from_values(["collision"]),
+    ))
+
+    assert result.status == PasswordSearchStatus.INCONCLUSIVE
+    assert result.password is None
+    assert result.extraction_candidates == ("collision",)
+    assert scheduler.cache.get_success(build_archive_fingerprint(str(archive)).key) is None
+
+
 def test_verifier_chain_confirms_fast_match_with_final_verifier():
     fast = StaticVerifier(PasswordBatchVerification(
         ok=True,
@@ -191,6 +218,26 @@ def test_verifier_chain_falls_back_when_fast_verifier_is_unknown():
     assert outcome.ok is True
     assert outcome.matched_index == 2
     assert final.batches == [["bad1", "bad2", "secret"]]
+
+
+def test_verifier_chain_without_final_verifier_preserves_all_weak_matches():
+    fast = StaticVerifier(PasswordBatchVerification(
+        ok=True,
+        status="match",
+        matched_index=0,
+        matched_indices=(0, 2),
+        attempts=3,
+        final_confirmation_required=True,
+        match_evidence="zipcrypto_header_byte",
+    ))
+    chain = PasswordVerifierChain([fast], None)
+
+    outcome = chain.verify_batch("sample.zip", ["collision", "rejected", "secret"])
+
+    assert outcome.ok is False
+    assert outcome.status == "unknown_needs_final_verifier"
+    assert outcome.matched_indices == (0, 2)
+    assert outcome.match_evidence == "zipcrypto_header_byte"
 
 
 def test_extraction_plan_never_invokes_full_payload_final_verifier(tmp_path):
@@ -246,6 +293,32 @@ def test_extraction_plan_accepts_strong_fast_proof_and_caches_it(tmp_path):
     assert second.password == "secret"
     assert second.stopped_reason == "cache_hit"
     assert fast.batches == [["bad", "secret"]]
+
+
+def test_extraction_plan_preserves_zipcrypto_candidate_evidence(tmp_path):
+    archive = tmp_path / "encrypted.zip"
+    archive.write_bytes(b"archive")
+    fast = StaticVerifier(PasswordBatchVerification(
+        ok=True,
+        status="match",
+        matched_index=0,
+        matched_indices=(0, 2),
+        attempts=3,
+        final_confirmation_required=True,
+        match_evidence="zipcrypto_header_byte",
+    ))
+    scheduler = PasswordScheduler(PasswordVerifierChain([fast], None))
+
+    result = scheduler.plan_for_extraction(PasswordJob(
+        archive_path=str(archive),
+        archive_input={"format_hint": "zip"},
+        candidates=PasswordCandidatePipeline.from_values(["collision", "rejected", "secret"]),
+    ))
+
+    assert result.password is None
+    assert result.extraction_candidates == ("collision", "secret")
+    assert result.extraction_candidate_evidence == "zipcrypto_header_byte"
+    assert scheduler.cache.has_negative(build_archive_fingerprint(str(archive)).key, "rejected") is True
 
 
 def test_verifier_chain_prioritizes_fast_verifier_from_extension():

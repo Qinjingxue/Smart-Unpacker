@@ -22,7 +22,9 @@ from sunpack.analysis.stage import ArchiveAnalysisStage
 from sunpack.contracts.archive_input import ArchiveInputDescriptor, ArchiveInputRange
 from sunpack.extraction.progress import write_extraction_progress_manifest
 from sunpack.contracts.extraction import ExtractionResult
+from sunpack.contracts.failures import FailureKind
 from sunpack.contracts.results import OutcomeKind
+from sunpack.extraction.internal.workflow.errors import classify_extract_failure
 from sunpack.repair.candidate import RepairCandidate, RepairCandidateBatch
 from sunpack.repair.result import RepairResult
 from sunpack.support import archive_knowledge_projection as knowledge_view
@@ -409,10 +411,10 @@ def test_verification_uses_expected_names_for_truncated_tar_member_coverage(tmp_
     assert states["f2.txt"] in {"partial", "failed"}
 
 
-def test_encrypted_zip_payload_damage_with_known_password_is_not_wrong_password(tmp_path):
+def test_encrypted_zip_payload_damage_without_prior_crc_proof_is_inconclusive(tmp_path):
     archive = _encrypted_zip_with_bad_payload(tmp_path, password="secret")
     out_dir = tmp_path / "out"
-    _completed, worker_result = _run_worker(archive, out_dir, format_hint="zip", password="secret")
+    completed, worker_result = _run_worker(archive, out_dir, format_hint="zip", password="secret")
     fact_bag = FactBag()
     fact_bag.set("archive.password", "secret")
     verification = _verify_worker_output(
@@ -427,6 +429,9 @@ def test_encrypted_zip_payload_damage_with_known_password_is_not_wrong_password(
     assert worker_result["status"] == "failed"
     assert worker_result["native_status"] == "damaged"
     assert worker_result["wrong_password"] is False
+    assert worker_result["password_rejected"] is False
+    assert worker_result["password_crc_proven"] is False
+    assert worker_result["password_crc_proven_items"] == 0
     assert worker_result["failure_kind"] in {"checksum_error", "corrupted_data", "data_error"}
     assert (out_dir / "good.txt").read_text(encoding="utf-8") == "good"
     assert (out_dir / "keep.txt").read_text(encoding="utf-8") == "keep"
@@ -437,6 +442,41 @@ def test_encrypted_zip_payload_damage_with_known_password_is_not_wrong_password(
     assert verification.archive_coverage.failed_files == 1
     assert verification.archive_coverage.completeness == pytest.approx(2 / 3, abs=0.02)
     assert not any(issue.code == "fail.archive_crc_wrong_password" for issue in verification.issues)
+    failure = classify_extract_failure(
+        completed,
+        f"{completed.stdout}\n{completed.stderr}",
+        archive=str(archive),
+        password_evidence="zipcrypto_header_byte",
+    )
+    assert failure.kind == FailureKind.PASSWORD_INCONCLUSIVE
+    assert failure.is_password_failure is False
+
+
+def test_zipcrypto_damage_after_prior_crc_proof_is_damaged(tmp_path):
+    archive = _encrypted_zip(tmp_path, password="secret", corrupt_payload=False)
+    data = bytearray(archive.read_bytes())
+    payload_offset = _zip_stored_payload_offset(bytes(data), "good.txt")
+    data[payload_offset + 12] ^= 0x44
+    archive.write_bytes(bytes(data))
+
+    completed, worker_result = _run_worker(
+        archive,
+        tmp_path / "out-first-entry-damaged",
+        format_hint="zip",
+        password="secret",
+    )
+    failure = classify_extract_failure(
+        completed,
+        f"{completed.stdout}\n{completed.stderr}",
+        archive=str(archive),
+        password_evidence="zipcrypto_header_byte",
+    )
+
+    assert worker_result["password_rejected"] is False
+    assert worker_result["password_crc_proven"] is True
+    assert worker_result["password_crc_proven_items"] >= 1
+    assert failure.kind == FailureKind.DAMAGED
+    assert failure.is_password_failure is False
 
 
 def test_encrypted_zip_wrong_password_vs_payload_damage_matrix(tmp_path):
@@ -464,16 +504,22 @@ def test_encrypted_zip_wrong_password_vs_payload_damage_matrix(tmp_path):
 
     assert complete_wrong["native_status"] == "wrong_password"
     assert complete_wrong["wrong_password"] is True
+    assert complete_wrong["password_rejected"] is True
+    assert complete_wrong["password_crc_proven"] is False
     assert complete_wrong["failure_kind"] == "encrypted_or_wrong_password"
     assert complete_wrong["files_written"] == 0
 
     assert damaged_wrong["native_status"] == "wrong_password"
     assert damaged_wrong["wrong_password"] is True
+    assert damaged_wrong["password_rejected"] is True
+    assert damaged_wrong["password_crc_proven"] is False
     assert damaged_wrong["failure_kind"] == "encrypted_or_wrong_password"
     assert damaged_wrong["files_written"] == 0
 
     assert damaged_ok["native_status"] == "damaged"
     assert damaged_ok["wrong_password"] is False
+    assert damaged_ok["password_rejected"] is False
+    assert damaged_ok["password_crc_proven"] is False
     assert damaged_ok["failure_kind"] in {"checksum_error", "corrupted_data", "data_error"}
     assert damaged_ok["files_written"] == 2
 

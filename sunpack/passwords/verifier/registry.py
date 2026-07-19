@@ -51,7 +51,13 @@ class PasswordVerifierChain:
             last_error = fast_outcome.error_text or last_error
 
             if fast_outcome.status == "match" and fast_outcome.matched_index >= 0:
-                candidate_index = offset + fast_outcome.matched_index
+                local_matched_indices = fast_outcome.matched_indices or (fast_outcome.matched_index,)
+                candidate_indices = tuple(
+                    offset + index
+                    for index in local_matched_indices
+                    if 0 <= index < len(remaining)
+                )
+                candidate_index = candidate_indices[0]
                 candidate = passwords[candidate_index]
                 if not fast_outcome.final_confirmation_required:
                     return PasswordBatchVerification(
@@ -74,6 +80,20 @@ class PasswordVerifierChain:
                         test_result=confirmation.test_result,
                         error_text="",
                         terminal=True,
+                        final_confirmation_required=False,
+                    )
+                if confirmation.status in {"unknown_needs_final_verifier", "backend_unavailable"}:
+                    return PasswordBatchVerification(
+                        ok=False,
+                        status=confirmation.status,
+                        matched_index=candidate_index,
+                        matched_indices=candidate_indices,
+                        attempts=total_fast_attempts,
+                        test_result=confirmation.test_result,
+                        error_text=confirmation.error_text or fast_outcome.error_text,
+                        terminal=confirmation.terminal,
+                        final_confirmation_required=True,
+                        match_evidence=fast_outcome.match_evidence,
                     )
                 next_offset = fast_outcome.matched_index + 1
                 remaining = remaining[next_offset:]
@@ -190,7 +210,16 @@ class PasswordVerifierChain:
         archive_input: dict | None = None,
     ) -> PasswordBatchVerification:
         if self.final_verifier is None:
-            return PasswordBatchVerification(ok=True, status="match", matched_index=0, attempts=1, terminal=True)
+            return PasswordBatchVerification(
+                ok=False,
+                status="unknown_needs_final_verifier",
+                matched_index=0,
+                matched_indices=(0,),
+                attempts=1,
+                error_text="fast password match requires final confirmation",
+                terminal=False,
+                final_confirmation_required=True,
+            )
         return self.final_verifier.verify_batch(
             archive_path,
             [password],

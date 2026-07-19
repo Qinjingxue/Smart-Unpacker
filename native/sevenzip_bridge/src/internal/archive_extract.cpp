@@ -20,6 +20,7 @@
 
 #ifdef _WIN32
 
+#include <algorithm>
 #include <utility>
 
 #endif
@@ -153,6 +154,29 @@ std::string kind_for_operation_result(Int32 op_res) {
 
     return "unknown";
 
+}
+
+unsigned int password_crc_proven_items(const ExtractOutputTrace& trace) {
+    unsigned int count = 0;
+    for (const auto& item : trace.items) {
+        // A later successful item cannot retroactively prove that the password
+        // was correct when an earlier encrypted item already failed.  Only CRC
+        // matches completed before the first item failure are usable evidence.
+        if (item.failed || item.operation_result != kOpOk) {
+            break;
+        }
+        if (
+            item.encrypted &&
+            !item.is_dir &&
+            item.done &&
+            item.has_source_crc32 &&
+            item.has_output_crc32 &&
+            item.source_crc32 == item.output_crc32
+        ) {
+            ++count;
+        }
+    }
+    return count;
 }
 
 }  // namespace
@@ -435,6 +459,15 @@ ExtractArchiveResult extract_archive_internal(
 
         result.failed_item_bytes_written = raw_extract_callback->failed_item_bytes_written();
 
+        result.password_crc_proven_items = password_crc_proven_items(result.output_trace);
+
+        result.password_crc_proven = result.password_crc_proven_items > 0;
+
+        result.encrypted = result.encrypted || std::any_of(
+            result.output_trace.items.begin(),
+            result.output_trace.items.end(),
+            [](const ExtractOutputItemTrace& item) { return item.encrypted; });
+
         result.hresult = static_cast<int>(hr);
 
         archive->Close();
@@ -529,6 +562,8 @@ ExtractArchiveResult extract_archive_internal(
 
             result.wrong_password = true;
 
+            result.password_rejected = last_op_res == kOpWrongPassword;
+
             result.checksum_error = last_op_res == kOpCrcError;
 
             set_failure(result, "item_extract", "encrypted_or_wrong_password", hr);
@@ -594,6 +629,8 @@ ExtractArchiveResult extract_archive_internal(
         result.status = looks_wrong_password(last_hr, last_op_res) ? PasswordTestStatus::WrongPassword : PasswordTestStatus::Unsupported;
 
         result.wrong_password = result.status == PasswordTestStatus::WrongPassword;
+
+        result.password_rejected = result.wrong_password && last_op_res == kOpWrongPassword;
 
         result.encrypted = result.wrong_password;
 

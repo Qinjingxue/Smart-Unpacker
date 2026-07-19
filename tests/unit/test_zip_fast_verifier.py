@@ -13,12 +13,12 @@ def _require_7z_or_skip():
     return seven_zip
 
 
-def _create_zip_aes_archive(tmp_path, password: str):
+def _create_encrypted_zip_archive(tmp_path, password: str, method: str):
     seven_zip = _require_7z_or_skip()
     source_dir = tmp_path / "src"
     source_dir.mkdir()
     (source_dir / "payload.txt").write_text("zip aes payload", encoding="utf-8")
-    archive_path = tmp_path / "aes.zip"
+    archive_path = tmp_path / f"{method.lower()}.zip"
     result = subprocess.run(
         [
             str(seven_zip),
@@ -26,7 +26,7 @@ def _create_zip_aes_archive(tmp_path, password: str):
             str(archive_path),
             str(source_dir / "payload.txt"),
             "-tzip",
-            "-mem=AES256",
+            f"-mem={method}",
             f"-p{password}",
             "-y",
         ],
@@ -40,18 +40,32 @@ def _create_zip_aes_archive(tmp_path, password: str):
 
 
 def test_zip_fast_verifier_matches_winzip_aes_password(tmp_path):
-    archive_path = _create_zip_aes_archive(tmp_path, "secret")
+    archive_path = _create_encrypted_zip_archive(tmp_path, "secret", "AES256")
 
     outcome = ZipFastVerifier().verify_batch(str(archive_path), ["bad", "secret"])
 
     assert outcome.ok is True
     assert outcome.status == "match"
     assert outcome.matched_index == 1
+    assert outcome.matched_indices == (1,)
     assert outcome.attempts == 2
+    assert outcome.match_evidence == "winzip_aes_password_verifier"
+
+
+def test_zip_fast_verifier_marks_zipcrypto_header_match_as_inconclusive_evidence(tmp_path):
+    archive_path = _create_encrypted_zip_archive(tmp_path, "secret", "ZipCrypto")
+
+    outcome = ZipFastVerifier().verify_batch(str(archive_path), ["bad", "secret"])
+
+    assert outcome.ok is True
+    assert outcome.status == "match"
+    assert outcome.matched_index == 1
+    assert outcome.matched_indices == (1,)
+    assert outcome.match_evidence == "zipcrypto_header_byte"
 
 
 def test_zip_fast_verifier_rejects_wrong_winzip_aes_passwords(tmp_path):
-    archive_path = _create_zip_aes_archive(tmp_path, "secret")
+    archive_path = _create_encrypted_zip_archive(tmp_path, "secret", "AES256")
 
     outcome = ZipFastVerifier().verify_batch(str(archive_path), ["bad1", "bad2"])
 

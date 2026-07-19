@@ -95,6 +95,84 @@ def test_worker_wrong_password_evidence_maps_to_wrong_password(payload):
     assert classify_extract_failure(completed, "").message_key == "failure.wrong_password"
 
 
+@pytest.mark.parametrize(
+    ("operation_result_name", "failure_kind"),
+    [
+        ("data_error", "corrupted_data"),
+        ("crc_error", "checksum_error"),
+    ],
+)
+def test_zipcrypto_data_or_crc_without_password_proof_is_inconclusive(
+    operation_result_name,
+    failure_kind,
+):
+    completed = _worker_completed({
+        "wrong_password": True,
+        "damaged": operation_result_name == "crc_error",
+        "password_rejected": False,
+        "password_crc_proven": False,
+        "operation_result_name": operation_result_name,
+        "failure_kind": failure_kind,
+    })
+
+    failure = classify_extract_failure(
+        completed,
+        "",
+        archive="payload.zip",
+        password_evidence="zipcrypto_header_byte",
+    )
+
+    assert failure.kind is FailureKind.PASSWORD_INCONCLUSIVE
+    assert failure.is_password_failure is False
+
+
+def test_zipcrypto_backend_password_rejection_after_weak_header_match_is_inconclusive():
+    completed = _worker_completed({
+        "wrong_password": True,
+        "password_rejected": True,
+        "password_crc_proven": False,
+        "operation_result_name": "wrong_password",
+        "failure_kind": "encrypted_or_wrong_password",
+    })
+
+    failure = classify_extract_failure(
+        completed,
+        "",
+        archive="payload.zip",
+        password_evidence="zipcrypto_header_byte",
+    )
+
+    assert failure.kind is FailureKind.PASSWORD_INCONCLUSIVE
+    assert failure.is_password_failure is False
+
+
+def test_zipcrypto_damage_after_encrypted_entry_crc_proof_is_damaged():
+    completed = _worker_completed({
+        "wrong_password": False,
+        "damaged": True,
+        "checksum_error": True,
+        "password_rejected": False,
+        "password_crc_proven": True,
+        "password_crc_proven_items": 1,
+        "operation_result_name": "crc_error",
+        "failure_kind": "checksum_error",
+    })
+
+    failure = classify_extract_failure(
+        completed,
+        "",
+        archive="payload.zip",
+        password_evidence="zipcrypto_header_byte",
+    )
+
+    assert failure.kind is FailureKind.DAMAGED
+    assert failure.is_password_failure is False
+    assert failure.details == {
+        "evidence": "zipcrypto_entry_crc_proven_before_failure",
+        "password_crc_proven_items": 1,
+    }
+
+
 def test_structured_missing_volume_keeps_callback_evidence():
     completed = _worker_completed({
         "missing_volume": True,

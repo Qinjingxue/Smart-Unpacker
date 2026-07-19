@@ -71,6 +71,7 @@ struct ExtractOutputItemTrace {
     int hresult = 0;
     int win32_error = 0;
     bool is_dir = false;
+    bool encrypted = false;
     bool has_expected_size = false;
     bool has_source_crc32 = false;
     bool has_output_crc32 = false;
@@ -102,12 +103,15 @@ struct ExtractArchiveResult {
     bool missing_volume = false;
     bool missing_volume_suspected = false;
     bool wrong_password = false;
+    bool password_rejected = false;
+    bool password_crc_proven = false;
     bool unsupported_method = false;
     bool output_inventory_complete = false;
     int operation_result = 0;
     unsigned int item_count = 0;
     unsigned int files_written = 0;
     unsigned int dirs_written = 0;
+    unsigned int password_crc_proven_items = 0;
     unsigned long long bytes_written = 0;
     unsigned int failed_item_index = 0;
     unsigned long long failed_item_bytes_written = 0;

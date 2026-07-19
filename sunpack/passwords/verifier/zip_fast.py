@@ -40,13 +40,17 @@ class ZipFastVerifier:
 
         status = normalize_verifier_status(outcome.get("status"))
         matched_index = int(outcome.get("matched_index", -1))
+        matched_indices = tuple(int(index) for index in outcome.get("matched_indices") or ())
         attempts = int(outcome.get("attempts", 0))
         message = str(outcome.get("message") or "")
+        match_evidence = str(outcome.get("match_evidence") or "")
         return PasswordBatchVerification(
             ok=status == "match" and matched_index >= 0,
             status=status,
             matched_index=matched_index,
+            matched_indices=matched_indices,
             attempts=attempts,
             error_text=message.lower(),
             terminal=status == "damaged",
+            match_evidence=match_evidence,
         )

@@ -612,6 +612,7 @@ std::string output_item_traces_json(const std::vector<sunpack::sevenzip::Extract
             ",\"path\":\"" + json_escape(wide_to_utf8(item.path)) +
             "\",\"output_path\":\"" + json_escape(wide_to_utf8(item.output_path)) +
             "\",\"is_dir\":" + std::string(item.is_dir ? "true" : "false") +
+            ",\"encrypted\":" + std::string(item.encrypted ? "true" : "false") +
             ",\"bytes_written\":" + std::to_string(item.bytes_written) +
             ",\"expected_size\":" + std::to_string(item.expected_size) +
             ",\"has_expected_size\":" + std::string(item.has_expected_size ? "true" : "false") +
@@ -857,6 +858,9 @@ int run_request(const std::string& request) {
         ",\"missing_volume_evidence\":\"" + json_escape(result.missing_volume_evidence) +
         "\",\"missing_volume_name\":\"" + json_escape(wide_to_utf8(result.missing_volume_name)) +
         "\",\"wrong_password\":" + std::string(result.wrong_password ? "true" : "false") +
+        ",\"password_rejected\":" + std::string(result.password_rejected ? "true" : "false") +
+        ",\"password_crc_proven\":" + std::string(result.password_crc_proven ? "true" : "false") +
+        ",\"password_crc_proven_items\":" + std::to_string(result.password_crc_proven_items) +
         ",\"unsupported_method\":" + std::string(result.unsupported_method ? "true" : "false") +
         ",\"item_count\":" + std::to_string(result.item_count) +
         ",\"files_written\":" + std::to_string(result.files_written) +

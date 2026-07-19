@@ -41,4 +41,5 @@ class PasswordResolution:
     encrypted: bool | None = None
     requires_extraction_confirmation: bool = False
     fingerprint_key: str = ""
+    candidate_evidence: str = ""
 
