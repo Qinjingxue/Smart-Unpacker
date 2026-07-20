@@ -35,6 +35,8 @@ class ArchiveTaskProvider:
         scan_roots: list[str],
         processed_keys: set[str] | None = None,
         scan_session: DetectionScanSession | None = None,
+        *,
+        is_recursive_scan: bool = False,
     ) -> list[ArchiveTask]:
         processed_keys = processed_keys or set()
         self.failed_candidates = []
@@ -43,7 +45,7 @@ class ArchiveTaskProvider:
             return self._scan_standard_archive_targets(scan_roots, processed_keys, scan_session=scan_session)
 
         tasks: list[ArchiveTask] = []
-        for detection in self.detect_targets(scan_roots, scan_session=scan_session):
+        for detection in self.detect_targets(scan_roots, scan_session=scan_session, is_recursive_scan=is_recursive_scan):
             bag = detection.fact_bag
             if not bag.get("candidate.entry_path"):
                 continue
@@ -83,6 +85,7 @@ class ArchiveTaskProvider:
         scan_roots: list[str],
         *,
         scan_session: DetectionScanSession | None = None,
+        is_recursive_scan: bool = False,
     ):
         scan_session = scan_session or DetectionScanSession(config=self.config)
         candidate_bags = build_fact_bags_for_targets(scan_roots, session=scan_session, config=self.config)
@@ -97,7 +100,10 @@ class ArchiveTaskProvider:
             for result in initial
             if not result.decision.should_extract
         ]
-        selected = _select_single_candidate_ratio(unresolved, ratio)
+        if is_recursive_scan:
+            selected = _select_single_candidate_ratio(unresolved, ratio)
+        else:
+            selected = unresolved
         if not selected:
             return initial
 

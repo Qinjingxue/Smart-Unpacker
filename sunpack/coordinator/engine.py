@@ -440,6 +440,7 @@ class _PipelineRuntime:
                 tasks = self.task_scanner.scan_targets(
                     current_roots,
                     scan_session=current_scan_session,
+                    is_recursive_scan=(round_index > 1),
                 )
             authorization = self.nested_extraction_policy.authorize_batch(
                 tasks,
@@ -465,7 +466,7 @@ class _PipelineRuntime:
             current_roots = new_roots
             current_scan_session = next_scan_session
             current_tasks = (
-                self.task_scanner.scan_targets(new_roots, scan_session=current_scan_session)
+                self.task_scanner.scan_targets(new_roots, scan_session=current_scan_session, is_recursive_scan=True)
                 if direct
                 else None
             )

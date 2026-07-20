@@ -28,6 +28,7 @@ class ArchiveTaskScanner:
         scan_roots: list[str],
         *,
         scan_session: DetectionScanSession | None = None,
+        is_recursive_scan: bool = False,
     ) -> list[ArchiveTask]:
         scan_session = scan_session or DetectionScanSession(config=self.config)
         self.last_scan_session = scan_session
@@ -35,6 +36,7 @@ class ArchiveTaskScanner:
             scan_roots,
             processed_keys=self.context.processed_keys,
             scan_session=scan_session,
+            is_recursive_scan=is_recursive_scan,
         )
         for failure in self.provider.failed_candidates:
             if failure not in self.context.failed_tasks:
