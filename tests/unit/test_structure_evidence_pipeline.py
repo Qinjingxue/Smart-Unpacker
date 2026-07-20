@@ -34,6 +34,21 @@ def test_known_media_magic_skips_structure_scheduler(tmp_path, monkeypatch):
     assert result["read_bytes"] == 0
 
 
+def test_unknown_binary_without_archive_prior_skips_structure_scheduler(tmp_path, monkeypatch):
+    payload = tmp_path / "payload.unknown"
+    payload.write_bytes(b"opaque-data" * 1024)
+
+    def fail_if_constructed(*_args, **_kwargs):
+        raise AssertionError("structure scheduler must not run without an archive prior")
+
+    monkeypatch.setattr(structure_evidence, "ArchiveAnalysisScheduler", fail_if_constructed)
+
+    result = structure_evidence.process_structure_evidence(_context(payload, b"opaque-data"))
+
+    assert result["analyzed"] is False
+    assert result["read_bytes"] == 0
+
+
 def test_disguised_zip_uses_detection_structure_processor(tmp_path):
     archive = tmp_path / "payload.unrelated"
     with zipfile.ZipFile(archive, "w") as handle:

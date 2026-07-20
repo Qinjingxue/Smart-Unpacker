@@ -28,14 +28,20 @@ def _detected(path: Path):
         {"thresholds": {"archive_score_threshold": 6, "maybe_archive_threshold": 3}},
         scoring=[
             {
+                "name": "embedded_payload_identity",
+                "enabled": True,
+                "deep_scan_single_candidate_ratio": 0.3,
+                "embedded_payload_score": 6,
+            },
+            {
                 "name": "structure_evidence_identity",
                 "enabled": True,
                 "structure_score": 6,
                 "password_required_score": 6,
                 "minimum_confidence": 0.7,
-                "head_bytes": 1048576,
-                "tail_bytes": 1048576,
-                "full_scan_max_bytes": 67108864,
+                "head_bytes": 65536,
+                "tail_bytes": 65536,
+                "full_scan_max_bytes": 0,
                 "deep_scan": False,
                 "fuzzy_enabled": False,
                 "max_read_mb_per_archive": 64,
@@ -79,7 +85,7 @@ def test_split_7z_is_analyzed_as_one_logical_stream_with_chaotic_names(tmp_path)
 
 
 @pytest.mark.parametrize("archive_format", ["zip", "7z"])
-def test_archive_embedded_in_middle_is_found_by_bounded_structure_evidence(tmp_path, archive_format):
+def test_archive_embedded_in_middle_is_found_by_selected_embedded_deep_scan(tmp_path, archive_format):
     case = ArchiveFixtureFactory().create(tmp_path, f"middle_{archive_format}", archive_format)
     archive_bytes = case.entry_path.read_bytes()
     carrier = tmp_path / f"middle_{archive_format}.video"
@@ -91,9 +97,10 @@ def test_archive_embedded_in_middle_is_found_by_bounded_structure_evidence(tmp_p
 
     assert len(detected) == 1
     bag = detected[0].fact_bag
-    assert bag.get("analysis.selected_format") == archive_format
-    assert bag.get("file.probe_offset") == len(prefix)
-    assert bag.get("analysis.prepass").get("full_scan_complete") is True
+    embedded = bag.get("embedded_archive.analysis")
+    assert embedded["complete"] is True
+    assert embedded["candidates"][0]["format"] == archive_format
+    assert embedded["candidates"][0]["offset"] == len(prefix)
 
 
 @pytest.mark.skipif(get_optional_rar() is None, reason="RAR generator is not configured")

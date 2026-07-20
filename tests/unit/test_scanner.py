@@ -44,7 +44,7 @@ def test_structure_evidence_requires_a_positive_archive_prior():
     damaged.set("file.magic_bytes", b"broken")
 
     assert gate.matches(ordinary, {}) is False
-    assert gate.matches(unknown, {}) is True
+    assert gate.matches(unknown, {}) is False
     assert gate.matches(probed, {}) is True
     assert gate.matches(disguised, {}) is True
     assert gate.matches(damaged, {}) is True

@@ -659,9 +659,9 @@
       {
         "name": "structure_evidence",
         "enabled": true,
-        "head_bytes": 1048576,
-        "tail_bytes": 1048576,
-        "full_scan_max_bytes": 67108864,
+        "head_bytes": 65536,
+        "tail_bytes": 65536,
+        "full_scan_max_bytes": 0,
         "deep_scan": false,
         "fuzzy_enabled": false,
         "max_read_mb_per_archive": 64
@@ -757,9 +757,9 @@
           "structure_score": 6,
           "password_required_score": 6,
           "minimum_confidence": 0.7,
-          "head_bytes": 1048576,
-          "tail_bytes": 1048576,
-          "full_scan_max_bytes": 67108864,
+          "head_bytes": 65536,
+          "tail_bytes": 65536,
+          "full_scan_max_bytes": 0,
           "deep_scan": false,
           "fuzzy_enabled": false,
           "max_read_mb_per_archive": 64

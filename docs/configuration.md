@@ -411,7 +411,7 @@ print(sorted(get_repair_module_registry().all()))
 
 ## detection.rule_pipeline
 
-检测器在规则评分未接受候选时，还会调用结构分析器进行一次与扩展名无关的救援。分卷会先组合成逻辑字节流；普通情况只读取头尾，小文件可在固定预算内扫描完整逻辑流，并对每个签名候选继续验证 CRC、目录或块链。以下字段位于 `detection`：
+检测器在规则评分未接受候选时，还可调用结构分析器进行救援。初轮 `structure_evidence` 只处理具有归档扩展名、归档 magic、probe、PE overlay 或分卷关系等正向先验的候选，默认读取头尾各 64 KiB且不执行完整流扫描。完全未知的二进制文件由 `embedded_payload_identity` 的单候选占比策略选择后再执行完整流扫描，避免普通资源文件在初轮被逐字节读取。以下字段位于 `detection`：
 
 | 字段 | 说明 |
 | --- | --- |

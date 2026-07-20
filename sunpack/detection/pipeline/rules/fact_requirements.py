@@ -34,21 +34,6 @@ DEFAULT_STRUCTURE_EVIDENCE_MAGICS = (
     b"\xfd7zXZ\x00",
     b"\x28\xb5\x2f\xfd",
 )
-KNOWN_NON_ARCHIVE_MAGICS = (
-    b"RIFF",
-    b"OggS",
-    b"DDS ",
-    b"\x89PNG\r\n\x1a\n",
-    b"\xff\xd8\xff",
-    b"GIF87a",
-    b"GIF89a",
-    b"ID3",
-    b"%PDF-",
-    b"BM",
-    b"fLaC",
-)
-
-
 def _extension_values_key(values) -> tuple[str, ...]:
     return tuple(value for value in values or [] if isinstance(value, str))
 
@@ -142,12 +127,11 @@ class ArchiveStructureCandidate:
             or int(facts.get("relation.split_member_count") or 0) > 1
         ):
             return True
-        # Unknown binary containers remain eligible so misleading suffixes and
-        # archives embedded at arbitrary offsets are still discoverable. Common
-        # media/document signatures are excluded before any analysis I/O.
-        return bool(path) and not any(
-            magic_bytes.startswith(prefix) for prefix in KNOWN_NON_ARCHIVE_MAGICS
-        )
+        # A merely unknown binary is not enough evidence to run the forensic
+        # structure pipeline during the initial detection pass. Arbitrary-offset
+        # embedded archives are handled by the separately budgeted embedded deep
+        # scan after candidate selection.
+        return False
 
 
 @dataclass(frozen=True)
