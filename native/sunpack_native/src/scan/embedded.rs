@@ -4,9 +4,16 @@ use crc32fast::{hash as crc32, Hasher};
 use flate2::read::DeflateDecoder;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
-use std::collections::HashSet;
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{self, Read};
+use std::sync::{mpsc, Arc, Mutex, OnceLock};
+
+use rayon::prelude::*;
+
+#[cfg(unix)]
+use std::os::unix::fs::FileExt;
+#[cfg(windows)]
+use std::os::windows::fs::FileExt;
 
 const ZIP_LOCAL: &[u8] = b"PK\x03\x04";
 const ZIP_EOCD: &[u8] = b"PK\x05\x06";
@@ -19,6 +26,23 @@ const XZ: &[u8] = b"\xfd7zXZ\x00";
 const ZSTD: &[u8] = b"\x28\xb5\x2f\xfd";
 const TAR_USTAR: &[u8] = b"ustar";
 
+type PatternSpec = (&'static [u8], &'static str, &'static str);
+
+const PATTERNS: [PatternSpec; 10] = [
+    (ZIP_LOCAL, "zip_local", "zip"),
+    (ZIP_EOCD, "zip_eocd", "zip_eocd"),
+    (SEVEN_ZIP, "7z", "7z"),
+    (RAR4, "rar4", "rar4"),
+    (RAR5, "rar5", "rar5"),
+    (GZIP, "gzip", "gzip"),
+    (BZIP2, "bzip2", "bzip2"),
+    (XZ, "xz", "xz"),
+    (ZSTD, "zstd", "zstd"),
+    (TAR_USTAR, "tar_ustar", "tar"),
+];
+
+static EMBEDDED_MATCHER: OnceLock<AhoCorasick> = OnceLock::new();
+
 #[derive(Debug, Clone, PartialEq)]
 struct EmbeddedCandidate {
     format: &'static str,
@@ -29,6 +53,26 @@ struct EmbeddedCandidate {
     validation: &'static str,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RawHit {
+    hit_name: &'static str,
+    kind: &'static str,
+    offset: u64,
+}
+
+struct ScanChunk {
+    buffer: Vec<u8>,
+    sample_len: usize,
+    carry_len: usize,
+    base_offset: u64,
+}
+
+struct NativeScanResult {
+    file_size: u64,
+    raw_hits: Vec<RawHit>,
+    candidates: Vec<EmbeddedCandidate>,
+}
+
 /// Scan one physical byte stream once for every supported embedded format.
 ///
 /// Raw signatures are never returned directly: each hit must pass the format's
@@ -36,93 +80,31 @@ struct EmbeddedCandidate {
 /// callers select which files receive this reliable pass before invoking it.
 #[pyfunction]
 pub(crate) fn scan_embedded_archives(py: Python<'_>, path: &str) -> PyResult<Py<PyDict>> {
-    let mut file = File::open(path)?;
-    let file_size = file.metadata()?.len();
-    let patterns: [(&[u8], &'static str, &'static str); 10] = [
-        (ZIP_LOCAL, "zip_local", "zip"),
-        (ZIP_EOCD, "zip_eocd", "zip_eocd"),
-        (SEVEN_ZIP, "7z", "7z"),
-        (RAR4, "rar4", "rar4"),
-        (RAR5, "rar5", "rar5"),
-        (GZIP, "gzip", "gzip"),
-        (BZIP2, "bzip2", "bzip2"),
-        (XZ, "xz", "xz"),
-        (ZSTD, "zstd", "zstd"),
-        (TAR_USTAR, "tar_ustar", "tar"),
-    ];
-    let overlap = patterns
-        .iter()
-        .map(|(magic, _, _)| magic.len())
-        .max()
-        .unwrap_or(1)
-        - 1;
-    let matcher = AhoCorasick::new(patterns.iter().map(|(magic, _, _)| *magic))
-        .expect("embedded archive signatures are valid");
-    // Keep the cross-chunk overlap in the front of one reusable allocation.
-    // The previous loop allocated both `chunk` and `sample` for every MiB and
-    // copied the whole chunk into `sample` before scanning it.
-    let mut buffer = vec![0u8; STREAM_CHUNK_SIZE + overlap];
-    let mut carry_len = 0usize;
-    let mut current_offset = 0u64;
-    let mut raw_hits: Vec<(&'static str, &'static str, u64)> = Vec::new();
-    let mut seen = HashSet::new();
-
-    loop {
-        let bytes_read = file.read(&mut buffer[carry_len..carry_len + STREAM_CHUNK_SIZE])?;
-        if bytes_read == 0 {
-            break;
-        }
-        let sample_len = carry_len + bytes_read;
-        let sample = &buffer[..sample_len];
-        let base = current_offset.saturating_sub(carry_len as u64);
-
-        for matched in matcher.find_overlapping_iter(sample) {
-            let (_, hit_name, kind) = patterns[matched.pattern().as_usize()];
-            let absolute = base + matched.start() as u64;
-            let candidate_offset = if kind == "tar" {
-                let Some(value) = absolute.checked_sub(257) else {
-                    continue;
-                };
-                value
-            } else {
-                absolute
-            };
-            if candidate_offset > 0 && seen.insert((hit_name, candidate_offset)) {
-                raw_hits.push((hit_name, kind, candidate_offset));
-            }
-        }
-
-        carry_len = overlap.min(sample_len);
-        buffer.copy_within(sample_len - carry_len..sample_len, 0);
-        current_offset += bytes_read as u64;
-    }
-
-    let mut candidates = Vec::new();
-    let mut hits = Vec::with_capacity(raw_hits.len());
-    for (hit_name, kind, offset) in raw_hits {
-        hits.push((hit_name, if kind == "tar" { offset + 257 } else { offset }));
-        if let Some(candidate) = validate_candidate(&mut file, file_size, kind, offset)? {
-            candidates.push(candidate);
-        }
-    }
-    candidates.sort_by_key(|candidate| (candidate.offset, candidate.format));
-    candidates.dedup_by_key(|candidate| (candidate.offset, candidate.format));
+    let owned_path = path.to_owned();
+    let scan = py.detach(move || scan_embedded_archives_native(&owned_path))?;
 
     let result = PyDict::new(py);
     result.set_item("complete", true)?;
-    result.set_item("file_size", file_size)?;
-    result.set_item("read_bytes", file_size)?;
+    result.set_item("file_size", scan.file_size)?;
+    result.set_item("read_bytes", scan.file_size)?;
     let hit_rows = PyList::empty(py);
-    for (name, offset) in hits {
+    for hit in scan.raw_hits {
         let row = PyDict::new(py);
-        row.set_item("name", name)?;
-        row.set_item("offset", offset)?;
+        row.set_item("name", hit.hit_name)?;
+        row.set_item(
+            "offset",
+            if hit.kind == "tar" {
+                hit.offset + 257
+            } else {
+                hit.offset
+            },
+        )?;
         row.set_item("source", "detection_embedded_scan")?;
         hit_rows.append(row)?;
     }
     result.set_item("hits", hit_rows)?;
     let rows = PyList::empty(py);
-    for candidate in candidates {
+    for candidate in scan.candidates {
         let row = PyDict::new(py);
         row.set_item("format", candidate.format)?;
         row.set_item("detected_ext", candidate.detected_ext)?;
@@ -136,8 +118,176 @@ pub(crate) fn scan_embedded_archives(py: Python<'_>, path: &str) -> PyResult<Py<
     Ok(result.unbind())
 }
 
+fn embedded_matcher() -> &'static AhoCorasick {
+    EMBEDDED_MATCHER.get_or_init(|| {
+        AhoCorasick::new(PATTERNS.iter().map(|(magic, _, _)| *magic))
+            .expect("embedded archive signatures are valid")
+    })
+}
+
+fn scan_embedded_archives_native(path: &str) -> io::Result<NativeScanResult> {
+    let mut scan_file = File::open(path)?;
+    let file_size = scan_file.metadata()?.len();
+    let mut raw_hits = scan_raw_hits(&mut scan_file)?;
+    raw_hits.sort_by_key(|hit| (hit.offset, hit.hit_name));
+
+    let validation_file = File::open(path)?;
+    let validation_results: Vec<io::Result<Option<EmbeddedCandidate>>> = raw_hits
+        .par_iter()
+        .map(|hit| validate_candidate(&validation_file, file_size, hit.kind, hit.offset))
+        .collect();
+    let mut candidates = Vec::new();
+    for result in validation_results {
+        if let Some(candidate) = result? {
+            candidates.push(candidate);
+        }
+    }
+    candidates.sort_by_key(|candidate| (candidate.offset, candidate.format));
+    candidates.dedup_by_key(|candidate| (candidate.offset, candidate.format));
+
+    Ok(NativeScanResult {
+        file_size,
+        raw_hits,
+        candidates,
+    })
+}
+
+fn scan_raw_hits(file: &mut File) -> io::Result<Vec<RawHit>> {
+    let overlap = PATTERNS
+        .iter()
+        .map(|(magic, _, _)| magic.len())
+        .max()
+        .unwrap_or(1)
+        .saturating_sub(1);
+    let worker_count = rayon::current_num_threads().max(1);
+    let buffer_count = (worker_count * 2).clamp(2, 64);
+    let (free_tx, free_rx) = mpsc::sync_channel::<Vec<u8>>(buffer_count);
+    let (job_tx, job_rx) = mpsc::sync_channel::<ScanChunk>(buffer_count);
+    let (hits_tx, hits_rx) = mpsc::channel::<Vec<RawHit>>();
+    let job_rx = Arc::new(Mutex::new(job_rx));
+
+    for _ in 0..buffer_count {
+        free_tx
+            .send(vec![0u8; STREAM_CHUNK_SIZE + overlap])
+            .expect("embedded scan buffer receiver is alive");
+    }
+
+    let read_error = rayon::scope(move |scope| {
+        let mut carry = vec![0u8; overlap];
+        let mut carry_len = 0usize;
+        let mut current_offset = 0u64;
+        let mut read_error = None;
+        for _ in 0..worker_count {
+            let job_rx = Arc::clone(&job_rx);
+            let free_tx = free_tx.clone();
+            let hits_tx = hits_tx.clone();
+            scope.spawn(move |_| loop {
+                let job = {
+                    let receiver = job_rx
+                        .lock()
+                        .expect("embedded scan job receiver lock is not poisoned");
+                    receiver.recv()
+                };
+                let Ok(mut job) = job else {
+                    break;
+                };
+                let hits = scan_chunk(&job);
+                let _ = hits_tx.send(hits);
+                job.buffer.clear();
+                if free_tx.send(job.buffer).is_err() {
+                    break;
+                }
+            });
+        }
+
+        loop {
+            let Ok(mut buffer) = free_rx.recv() else {
+                break;
+            };
+            buffer.resize(STREAM_CHUNK_SIZE + overlap, 0);
+            if carry_len > 0 {
+                buffer[..carry_len].copy_from_slice(&carry[..carry_len]);
+            }
+
+            let mut bytes_read = 0usize;
+            while bytes_read < STREAM_CHUNK_SIZE {
+                match file.read(&mut buffer[carry_len + bytes_read..carry_len + STREAM_CHUNK_SIZE])
+                {
+                    Ok(0) => break,
+                    Ok(count) => bytes_read += count,
+                    Err(error) => {
+                        read_error = Some(error);
+                        break;
+                    }
+                }
+            }
+            if read_error.is_some() || bytes_read == 0 {
+                break;
+            }
+
+            let sample_len = carry_len + bytes_read;
+            let next_carry_len = overlap.min(sample_len);
+            carry[..next_carry_len]
+                .copy_from_slice(&buffer[sample_len - next_carry_len..sample_len]);
+            let job = ScanChunk {
+                buffer,
+                sample_len,
+                carry_len,
+                base_offset: current_offset.saturating_sub(carry_len as u64),
+            };
+            if job_tx.send(job).is_err() {
+                break;
+            }
+            carry_len = next_carry_len;
+            current_offset += bytes_read as u64;
+        }
+        drop(job_tx);
+        read_error
+    });
+
+    if let Some(error) = read_error {
+        return Err(error);
+    }
+    let mut raw_hits = Vec::new();
+    for mut hits in hits_rx {
+        raw_hits.append(&mut hits);
+    }
+    Ok(raw_hits)
+}
+
+fn scan_chunk(job: &ScanChunk) -> Vec<RawHit> {
+    let mut hits = Vec::new();
+    let sample = &job.buffer[..job.sample_len];
+    for matched in embedded_matcher().find_overlapping_iter(sample) {
+        // A match contained entirely in carry was already owned by the
+        // preceding chunk. Cross-boundary matches end in newly read bytes and
+        // are therefore retained exactly once.
+        if matched.end() <= job.carry_len {
+            continue;
+        }
+        let (_, hit_name, kind) = PATTERNS[matched.pattern().as_usize()];
+        let absolute = job.base_offset + matched.start() as u64;
+        let candidate_offset = if kind == "tar" {
+            let Some(value) = absolute.checked_sub(257) else {
+                continue;
+            };
+            value
+        } else {
+            absolute
+        };
+        if candidate_offset > 0 {
+            hits.push(RawHit {
+                hit_name,
+                kind,
+                offset: candidate_offset,
+            });
+        }
+    }
+    hits
+}
+
 fn validate_candidate(
-    file: &mut File,
+    file: &File,
     file_size: u64,
     kind: &str,
     offset: u64,
@@ -158,7 +308,7 @@ fn validate_candidate(
 }
 
 fn validate_zip_eocd(
-    file: &mut File,
+    file: &File,
     size: u64,
     eocd_offset: u64,
 ) -> std::io::Result<Option<EmbeddedCandidate>> {
@@ -221,12 +371,11 @@ fn validate_zip_eocd(
     )))
 }
 
-fn read_at(file: &mut File, offset: u64, len: usize) -> std::io::Result<Vec<u8>> {
-    file.seek(SeekFrom::Start(offset))?;
+fn read_at(file: &File, offset: u64, len: usize) -> std::io::Result<Vec<u8>> {
     let mut data = vec![0u8; len];
     let mut read = 0usize;
     while read < len {
-        let count = file.read(&mut data[read..])?;
+        let count = positional_read(file, &mut data[read..], offset + read as u64)?;
         if count == 0 {
             data.truncate(read);
             break;
@@ -236,11 +385,30 @@ fn read_at(file: &mut File, offset: u64, len: usize) -> std::io::Result<Vec<u8>>
     Ok(data)
 }
 
-fn validate_zip(
-    file: &mut File,
-    size: u64,
+#[cfg(unix)]
+fn positional_read(file: &File, buffer: &mut [u8], offset: u64) -> io::Result<usize> {
+    file.read_at(buffer, offset)
+}
+
+#[cfg(windows)]
+fn positional_read(file: &File, buffer: &mut [u8], offset: u64) -> io::Result<usize> {
+    file.seek_read(buffer, offset)
+}
+
+struct PositionalReader<'a> {
+    file: &'a File,
     offset: u64,
-) -> std::io::Result<Option<EmbeddedCandidate>> {
+}
+
+impl Read for PositionalReader<'_> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        let count = positional_read(self.file, buffer, self.offset)?;
+        self.offset = self.offset.saturating_add(count as u64);
+        Ok(count)
+    }
+}
+
+fn validate_zip(file: &File, size: u64, offset: u64) -> std::io::Result<Option<EmbeddedCandidate>> {
     let header = read_at(file, offset, 30)?;
     if header.len() < 30 || &header[..4] != ZIP_LOCAL {
         return Ok(None);
@@ -310,7 +478,7 @@ fn validate_zip(
 }
 
 fn validate_seven_zip(
-    file: &mut File,
+    file: &File,
     size: u64,
     offset: u64,
 ) -> std::io::Result<Option<EmbeddedCandidate>> {
@@ -347,7 +515,7 @@ fn validate_seven_zip(
 }
 
 fn validate_rar4(
-    file: &mut File,
+    file: &File,
     size: u64,
     offset: u64,
 ) -> std::io::Result<Option<EmbeddedCandidate>> {
@@ -375,7 +543,7 @@ fn validate_rar4(
 }
 
 fn validate_rar5(
-    file: &mut File,
+    file: &File,
     size: u64,
     offset: u64,
 ) -> std::io::Result<Option<EmbeddedCandidate>> {
@@ -413,7 +581,7 @@ fn validate_rar5(
 }
 
 fn validate_gzip(
-    file: &mut File,
+    file: &File,
     size: u64,
     offset: u64,
 ) -> std::io::Result<Option<EmbeddedCandidate>> {
@@ -455,8 +623,11 @@ fn validate_gzip(
         cursor += 2;
     }
 
-    file.seek(SeekFrom::Start(cursor))?;
-    let mut decoder = DeflateDecoder::new(&mut *file);
+    let mut compressed_reader = PositionalReader {
+        file,
+        offset: cursor,
+    };
+    let mut decoder = DeflateDecoder::new(&mut compressed_reader);
     let mut output_crc = Hasher::new();
     let mut output_size = 0u64;
     let mut buffer = [0u8; 64 * 1024];
@@ -494,7 +665,7 @@ fn validate_gzip(
 }
 
 fn read_gzip_c_string(
-    file: &mut File,
+    file: &File,
     size: u64,
     cursor: &mut u64,
     header: &mut Vec<u8>,
@@ -514,7 +685,7 @@ fn read_gzip_c_string(
 }
 
 fn validate_bzip2(
-    file: &mut File,
+    file: &File,
     size: u64,
     offset: u64,
 ) -> std::io::Result<Option<EmbeddedCandidate>> {
@@ -537,11 +708,7 @@ fn validate_bzip2(
     )))
 }
 
-fn validate_xz(
-    file: &mut File,
-    size: u64,
-    offset: u64,
-) -> std::io::Result<Option<EmbeddedCandidate>> {
+fn validate_xz(file: &File, size: u64, offset: u64) -> std::io::Result<Option<EmbeddedCandidate>> {
     let header = read_at(file, offset, 12)?;
     if header.len() < 12
         || &header[..6] != XZ
@@ -566,7 +733,7 @@ fn validate_xz(
 }
 
 fn validate_zstd(
-    file: &mut File,
+    file: &File,
     size: u64,
     offset: u64,
 ) -> std::io::Result<Option<EmbeddedCandidate>> {
@@ -617,11 +784,7 @@ fn validate_zstd(
     )))
 }
 
-fn validate_tar(
-    file: &mut File,
-    size: u64,
-    offset: u64,
-) -> std::io::Result<Option<EmbeddedCandidate>> {
+fn validate_tar(file: &File, size: u64, offset: u64) -> std::io::Result<Option<EmbeddedCandidate>> {
     if offset + 512 > size {
         return Ok(None);
     }
@@ -703,6 +866,31 @@ mod tests {
     use std::fs;
     use std::io::Write;
     use xz2::write::XzEncoder;
+
+    fn reference_raw_hits(data: &[u8]) -> Vec<RawHit> {
+        let mut hits = Vec::new();
+        for matched in embedded_matcher().find_overlapping_iter(data) {
+            let (_, hit_name, kind) = PATTERNS[matched.pattern().as_usize()];
+            let absolute = matched.start() as u64;
+            let candidate_offset = if kind == "tar" {
+                let Some(value) = absolute.checked_sub(257) else {
+                    continue;
+                };
+                value
+            } else {
+                absolute
+            };
+            if candidate_offset > 0 {
+                hits.push(RawHit {
+                    hit_name,
+                    kind,
+                    offset: candidate_offset,
+                });
+            }
+        }
+        hits.sort_by_key(|hit| (hit.offset, hit.hit_name));
+        hits
+    }
 
     #[test]
     fn finds_multiple_structurally_valid_embedded_streams() {
@@ -819,6 +1007,29 @@ mod tests {
                 gzip_offset as u64
             );
         });
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn parallel_chunks_match_one_contiguous_overlapping_scan_exactly() {
+        let mut data = vec![0x11; STREAM_CHUNK_SIZE * (PATTERNS.len() + 2)];
+        for (index, (magic, _, _)) in PATTERNS.iter().enumerate() {
+            let boundary = STREAM_CHUNK_SIZE * (index + 1);
+            let start = boundary - magic.len().saturating_sub(1);
+            data[start..start + magic.len()].copy_from_slice(magic);
+        }
+        // This short signature is wholly contained in the next chunk's carry
+        // and used to be observed twice before HashSet de-duplication.
+        let duplicate_prone = STREAM_CHUNK_SIZE * (PATTERNS.len() + 1) - 6;
+        data[duplicate_prone..duplicate_prone + GZIP.len()].copy_from_slice(GZIP);
+
+        let expected = reference_raw_hits(&data);
+        let path = temp_file("embedded_parallel_equivalence", &data);
+        let mut file = File::open(&path).unwrap();
+        let mut actual = scan_raw_hits(&mut file).unwrap();
+        actual.sort_by_key(|hit| (hit.offset, hit.hit_name));
+
+        assert_eq!(actual, expected);
         let _ = fs::remove_file(path);
     }
 }
