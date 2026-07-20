@@ -2,6 +2,7 @@ import binascii
 import json
 import subprocess
 import struct
+import tarfile
 import zipfile
 
 import pytest
@@ -403,8 +404,49 @@ def test_worker_dry_run_reports_success_diagnostics_without_writing(tmp_path):
     assert worker_result["files_written"] == 1
     assert worker_result["bytes_written"] == len("dry-run payload")
     assert output_trace["items"]
-    assert output_trace["items"][0]["path"].endswith(filename)
+    item = output_trace["items"][0]
+    assert item["path"].endswith(filename)
+    assert item["has_source_crc32"] is True
+    assert item["has_output_crc32"] is True
+    assert item["output_crc32"] == item["source_crc32"]
+    assert item["crc_verified"] is True
     assert not dry_output.exists()
+
+
+def test_worker_dry_run_hashes_output_when_source_crc_is_missing(tmp_path):
+    worker = _require_worker_or_skip()
+    seven_zip_dll = _require_7z_dll_or_skip()
+    payload = b"tar payload without an archive CRC"
+    source = tmp_path / "payload.bin"
+    source.write_bytes(payload)
+    archive = tmp_path / "payload.tar"
+    with tarfile.open(archive, "w") as handle:
+        handle.add(source, arcname=source.name)
+    result = subprocess.run(
+        [worker],
+        input=json.dumps({
+            "job_id": "dry-run-no-source-crc",
+            "seven_zip_dll_path": seven_zip_dll,
+            "archive_path": str(archive),
+            "output_dir": "",
+            "format_hint": "tar",
+            "dry_run": True,
+        }),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    worker_result = _worker_result(result.stdout)
+    item = next(
+        row for row in worker_result["diagnostics"]["output_trace"]["items"]
+        if not row["is_dir"]
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert item["has_source_crc32"] is False
+    assert item["has_output_crc32"] is True
+    assert item["output_crc32"] == (binascii.crc32(payload) & 0xFFFFFFFF)
+    assert item["crc_verified"] is True
 
 
 def test_worker_applies_explicit_shift_jis_item_paths(tmp_path):

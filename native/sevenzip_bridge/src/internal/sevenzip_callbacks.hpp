@@ -456,6 +456,9 @@ public:
         : trace_(trace),
           item_trace_index_(item_trace_index),
 
+          compute_crc_(trace_ && item_trace_index_ < trace_->items.size() &&
+                       !trace_->items[item_trace_index_].has_source_crc32),
+
           handle_(CreateFileW(win32_extended_path(path).c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
                               FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, nullptr)) {
 
@@ -576,7 +579,9 @@ public:
         }
 
         bytes_written_ += written;
-        crc32_ = update_crc32(crc32_, data, written);
+        if (compute_crc_) {
+            crc32_ = update_crc32(crc32_, data, written);
+        }
 
         if (trace_) {
 
@@ -593,8 +598,10 @@ public:
             if (item_trace_index_ < trace_->items.size()) {
 
                 trace_->items[item_trace_index_].bytes_written += written;
-                trace_->items[item_trace_index_].output_crc32 = crc32_ ^ 0xFFFFFFFFU;
-                trace_->items[item_trace_index_].has_output_crc32 = true;
+                if (compute_crc_) {
+                    trace_->items[item_trace_index_].output_crc32 = crc32_ ^ 0xFFFFFFFFU;
+                    trace_->items[item_trace_index_].has_output_crc32 = true;
+                }
 
                 trace_->items[item_trace_index_].hresult = S_OK;
 
@@ -642,6 +649,8 @@ private:
 
     std::size_t item_trace_index_ = 0;
 
+    bool compute_crc_ = false;
+
     HANDLE handle_ = INVALID_HANDLE_VALUE;
 
     UInt64 bytes_written_ = 0;
@@ -658,7 +667,10 @@ public:
 
     explicit TraceOutStream(ExtractOutputTrace* trace = nullptr, std::size_t item_trace_index = 0)
 
-        : trace_(trace), item_trace_index_(item_trace_index) {}
+        : trace_(trace),
+          item_trace_index_(item_trace_index),
+          compute_crc_(trace_ && item_trace_index_ < trace_->items.size() &&
+                       !trace_->items[item_trace_index_].has_source_crc32) {}
 
     UInt64 bytes_written() const { return bytes_written_; }
 
@@ -709,7 +721,9 @@ public:
     HRESULT STDMETHODCALLTYPE Write(const void* data, UInt32 size, UInt32* processedSize) override {
 
         bytes_written_ += size;
-        crc32_ = update_crc32(crc32_, data, size);
+        if (compute_crc_) {
+            crc32_ = update_crc32(crc32_, data, size);
+        }
 
         if (trace_) {
 
@@ -726,8 +740,10 @@ public:
             if (item_trace_index_ < trace_->items.size()) {
 
                 trace_->items[item_trace_index_].bytes_written += size;
-                trace_->items[item_trace_index_].output_crc32 = crc32_ ^ 0xFFFFFFFFU;
-                trace_->items[item_trace_index_].has_output_crc32 = true;
+                if (compute_crc_) {
+                    trace_->items[item_trace_index_].output_crc32 = crc32_ ^ 0xFFFFFFFFU;
+                    trace_->items[item_trace_index_].has_output_crc32 = true;
+                }
 
                 trace_->items[item_trace_index_].hresult = S_OK;
 
@@ -756,6 +772,8 @@ private:
     ExtractOutputTrace* trace_ = nullptr;
 
     std::size_t item_trace_index_ = 0;
+
+    bool compute_crc_ = false;
 
     UInt64 bytes_written_ = 0;
 
@@ -1349,6 +1367,14 @@ private:
         item.operation_result = opRes;
 
         item.done = opRes == kOpOk && !item.failed;
+
+        if (item.done && item.has_source_crc32) {
+            // Seven-Zip only reports kOpOk after validating the decoded bytes
+            // against the archive CRC. Reuse that proven value instead of
+            // hashing the same pre-write buffer a second time.
+            item.output_crc32 = item.source_crc32;
+            item.has_output_crc32 = true;
+        }
 
         item.failed = item.failed || opRes != kOpOk;
 
