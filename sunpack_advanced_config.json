@@ -100,8 +100,9 @@
   "watch": {
     "interval_seconds": 5.0,
     "cold_start_seconds": 1.0,
-    "quiet_min_seconds": 2.5,
+    "quiet_min_seconds": 1.25,
     "quiet_max_seconds": 180.0,
+    "boundary_confirmation_seconds": 0.5,
     "initial_scan": true,
     "max_folders": 16,
     "observer_stop_timeout_seconds": 5.0,

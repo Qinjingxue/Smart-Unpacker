@@ -10,7 +10,7 @@ class AdaptiveQuietPolicy:
     """Maps observed content-write intervals to a per-file quiet window."""
 
     initial_seconds: float = 1.0
-    minimum_seconds: float = 2.5
+    minimum_seconds: float = 1.25
     maximum_seconds: float = 180.0
     window_size: int = 12
     interval_percentile: float = 0.9
@@ -18,7 +18,7 @@ class AdaptiveQuietPolicy:
     linear_factor: float = 1.0
     logarithmic_scale: float = 0.75
     logarithmic_pivot_seconds: float = 2.0
-    shrink_alpha: float = 0.2
+    shrink_alpha: float = 0.05
 
     def __post_init__(self) -> None:
         minimum = max(0.0, float(self.minimum_seconds))
@@ -101,6 +101,7 @@ class AdaptiveQuietTracker:
         mtime: float,
         change_usn: int = 0,
         content_changed: bool | None = None,
+        learn_interval: bool = True,
     ) -> float:
         size = int(size)
         mtime = float(mtime)
@@ -117,7 +118,7 @@ class AdaptiveQuietTracker:
             self.last_mtime = mtime
             self.last_change_usn = change_usn
             return self.quiet_seconds
-        if self.last_content_event_at is not None:
+        if self.last_content_event_at is not None and learn_interval:
             interval = float(now) - self.last_content_event_at
             if interval > 0.0 and math.isfinite(interval):
                 self._intervals.append(interval)

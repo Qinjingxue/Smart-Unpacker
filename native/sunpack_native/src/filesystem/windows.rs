@@ -203,7 +203,15 @@ pub(super) fn watch_file_observation(
 
 pub(super) fn watch_file_is_ready(path: &Path) -> io::Result<bool> {
     let metadata = std::fs::metadata(path)?;
-    match open_path(path, GENERIC_READ, 0, metadata.is_dir()) {
+    // Permit antivirus/indexer readers while still conflicting with any
+    // handle that requested write access. Requiring share_mode=0 made a
+    // completed archive wait several seconds for unrelated readers.
+    match open_path(
+        path,
+        GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_DELETE,
+        metadata.is_dir(),
+    ) {
         Ok(_handle) => Ok(true),
         Err(error)
             if matches!(

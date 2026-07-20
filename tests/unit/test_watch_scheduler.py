@@ -2086,7 +2086,7 @@ def test_watch_scheduler_adapts_quiet_window_to_fast_content_writes(tmp_path, mo
         os.utime(archive_path, (clock.value, clock.value))
         events.emit(archive_path, event_type="modified")
 
-    quiet_seconds = WatchState.assert_quiet_seconds(watcher, archive_path, minimum=3.0, maximum=3.5)
+    quiet_seconds = WatchState.assert_quiet_seconds(watcher, archive_path, minimum=1.8, maximum=2.0)
     events.run_after(quiet_seconds - 0.01, processed=0)
     events.run_after(0.02, processed=1)
 

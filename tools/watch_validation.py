@@ -287,8 +287,9 @@ def _watch_config() -> dict:
             "clipboard_monitor_enabled": False,
             "initial_scan": False,
             "cold_start_seconds": 1.0,
-            "quiet_min_seconds": 2.5,
+            "quiet_min_seconds": 1.25,
             "quiet_max_seconds": 20.0,
+            "boundary_confirmation_seconds": 0.5,
             "observer_stop_timeout_seconds": 2.0,
             "output_suppression_seconds": 0.0,
         }

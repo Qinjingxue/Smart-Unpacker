@@ -24,6 +24,7 @@ def test_explicit_cold_start_takes_precedence_over_legacy_alias():
     config = normalize_watch_config({"quiet_seconds": 5, "cold_start_seconds": 1})
 
     assert config["cold_start_seconds"] == 1
+    assert config["boundary_confirmation_seconds"] == 0.5
 
 
 def test_policy_starts_below_dynamic_floor_then_corrects_after_first_interval():
@@ -34,7 +35,7 @@ def test_policy_starts_below_dynamic_floor_then_corrects_after_first_interval():
 
     tracker.observe(0.1, size=2, mtime=0.1)
 
-    assert 2.5 < tracker.quiet_seconds < 3.0
+    assert 1.25 < tracker.quiet_seconds < 1.5
 
 
 def test_policy_extends_immediately_after_one_long_observed_interval():
@@ -49,7 +50,7 @@ def test_policy_extends_immediately_after_one_long_observed_interval():
 def test_policy_uses_lower_initial_growth_curve():
     policy = AdaptiveQuietPolicy()
 
-    expected = 2.5 + 1.0 + 0.75 * math.log1p(1.0 / 2.0)
+    expected = 1.25 + 1.0 + 0.75 * math.log1p(1.0 / 2.0)
 
     assert policy.target_seconds([1.0]) == pytest.approx(expected)
     assert policy.target_seconds([1.0]) < 4.0
@@ -69,6 +70,25 @@ def test_same_metadata_event_does_not_distort_write_interval_history():
     tracker.observe(5.0, size=2, mtime=0.1)
 
     assert tracker.intervals == (0.1,)
+
+
+def test_boundary_observation_updates_baseline_without_learning_wait_interval():
+    tracker = AdaptiveQuietTracker(AdaptiveQuietPolicy())
+    tracker.observe(0.0, size=1, mtime=0.0)
+    tracker.observe(0.1, size=2, mtime=0.1)
+    quiet_seconds = tracker.quiet_seconds
+
+    tracker.observe(
+        5.0,
+        size=3,
+        mtime=5.0,
+        content_changed=True,
+        learn_interval=False,
+    )
+
+    assert tracker.intervals == (0.1,)
+    assert tracker.quiet_seconds == quiet_seconds
+    assert tracker.last_content_event_at == 5.0
 
 
 def test_explicit_metadata_only_change_updates_snapshot_without_resetting_quiet_window():

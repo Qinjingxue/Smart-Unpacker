@@ -192,6 +192,15 @@ class WatchScheduler:
             minimum_seconds=quiet_min_seconds,
             maximum_seconds=quiet_max_seconds,
         )
+        self.boundary_confirmation_seconds = max(
+            0.0,
+            float(
+                watch_config.get(
+                    "boundary_confirmation_seconds",
+                    DEFAULT_WATCH_CONFIG["boundary_confirmation_seconds"],
+                )
+            ),
+        )
         self.output_suppression_seconds = max(0.0, float(watch_config["output_suppression_seconds"]))
         self.password_retry_debounce_seconds = max(0.0, float(watch_config["password_retry_debounce_seconds"]))
         self.password_retry_include_subtree = bool(watch_config["password_retry_include_subtree"])
@@ -643,11 +652,13 @@ class WatchScheduler:
                 return
             self._pending[path] = candidate
             state.last_event_at = now
-            state.quiet_seconds = self._observe_candidate_activity(
+            learned_quiet_seconds = self._observe_candidate_activity(
                 candidate,
                 now,
                 content_changed=content_changed,
+                learn_interval=False,
             )
+            state.quiet_seconds = min(learned_quiet_seconds, self.boundary_confirmation_seconds)
             state.generation += 1
             state.filter_revision = self._filter_revision
             state.filtered_size = candidate.size
@@ -676,6 +687,7 @@ class WatchScheduler:
         now: float,
         *,
         content_changed: bool | None = None,
+        learn_interval: bool = True,
     ) -> float:
         tracker = self._quiet_trackers.get(candidate.path)
         if tracker is None:
@@ -687,6 +699,7 @@ class WatchScheduler:
             mtime=candidate.mtime,
             change_usn=candidate.change_usn,
             content_changed=content_changed,
+            learn_interval=learn_interval,
         )
 
     def _process_password_dirty_dirs(self, now: float) -> None:

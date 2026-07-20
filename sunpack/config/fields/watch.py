@@ -27,6 +27,10 @@ def normalize_watch_config(value: Any) -> dict[str, Any]:
         config["quiet_min_seconds"],
         _float_field(config, "quiet_max_seconds"),
     )
+    config["boundary_confirmation_seconds"] = max(
+        0.0,
+        _float_field(config, "boundary_confirmation_seconds"),
+    )
     config["initial_scan"] = bool(config.get("initial_scan", True))
     config["max_folders"] = max(1, _int_field(config, "max_folders"))
     config["observer_stop_timeout_seconds"] = max(0.0, _float_field(config, "observer_stop_timeout_seconds"))
