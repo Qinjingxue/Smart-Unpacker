@@ -78,3 +78,6 @@ repair_training/latest_runs.json
 
 # Temporary 7z comparison artifacts
 .codex_7z_compare/
+
+# Codebase memory generated metadata
+.codebase-memory/
