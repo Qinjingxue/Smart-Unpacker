@@ -15,12 +15,22 @@ def _payload():
 def test_config_validate_checks_rule_schema_types_even_when_disabled():
     payload = _payload()
     payload["detection"]["rule_pipeline"]["scoring"][0]["enabled"] = False
-    payload["detection"]["rule_pipeline"]["scoring"][0]["deep_scan_size_coverage_ratio"] = "many"
+    payload["detection"]["rule_pipeline"]["scoring"][0]["deep_scan_single_candidate_ratio"] = "many"
 
     result = validate_config_payload(payload)
 
     assert not result["ok"]
     assert any("Invalid type" in error for error in result["errors"])
+
+
+def test_config_validate_rejects_obsolete_cumulative_deep_scan_ratio():
+    payload = _payload()
+    payload["detection"]["rule_pipeline"]["scoring"][0]["deep_scan_size_coverage_ratio"] = 0.5
+
+    result = validate_config_payload(payload)
+
+    assert not result["ok"]
+    assert any("deep_scan_size_coverage_ratio" in error for error in result["errors"])
 
 
 def test_config_validate_rejects_normalized_config_values_in_external_shorthand_fields():

@@ -1,5 +1,4 @@
 import os
-import math
 from typing import Any
 
 from sunpack.config.detection_view import detection_config, rule_pipeline_config
@@ -89,7 +88,7 @@ class ArchiveTaskProvider:
         candidate_bags = build_fact_bags_for_targets(scan_roots, session=scan_session, config=self.config)
         fact_bags = self._filter_incomplete_split_groups(candidate_bags)
         initial = self.detector.evaluate_bags(fact_bags, scan_session=scan_session)
-        ratio = self._embedded_deep_scan_ratio()
+        ratio = self._embedded_deep_scan_single_candidate_ratio()
         if ratio <= 0.0:
             return initial
 
@@ -98,7 +97,7 @@ class ArchiveTaskProvider:
             for result in initial
             if not result.decision.should_extract
         ]
-        selected = _select_size_coverage(unresolved, ratio)
+        selected = _select_single_candidate_ratio(unresolved, ratio)
         if not selected:
             return initial
 
@@ -111,7 +110,7 @@ class ArchiveTaskProvider:
         }
         return [rescanned.get(result.fact_bag, result) for result in initial]
 
-    def _embedded_deep_scan_ratio(self) -> float:
+    def _embedded_deep_scan_single_candidate_ratio(self) -> float:
         pipeline = rule_pipeline_config(self.config)
         scoring = pipeline.get("scoring") if isinstance(pipeline.get("scoring"), list) else []
         for item in scoring:
@@ -119,7 +118,7 @@ class ArchiveTaskProvider:
                 continue
             if item.get("enabled", False) is False:
                 return 0.0
-            value = item.get("deep_scan_size_coverage_ratio", 0.5)
+            value = item.get("deep_scan_single_candidate_ratio", 0.3)
             try:
                 return min(1.0, max(0.0, float(value)))
             except (TypeError, ValueError):
@@ -194,22 +193,38 @@ def _write_initial_task_knowledge(task: ArchiveTask) -> None:
     write_detection_task(task)
 
 
-def _select_size_coverage(fact_bags: list[FactBag], ratio: float) -> list[FactBag]:
-    """Select the smallest deterministic largest-file prefix covering ratio bytes."""
+def _select_single_candidate_ratio(fact_bags: list[FactBag], ratio: float) -> list[FactBag]:
+    """Select every logical candidate whose size reaches the configured share."""
     sized = [
-        (int(size), str(bag.get("file.path") or ""), bag)
+        (size, str(bag.get("file.path") or ""), bag)
         for bag in fact_bags
-        if isinstance((size := bag.get("file.size")), int) and size > 0
+        if (size := _logical_candidate_size(bag)) > 0
     ]
     if not sized or ratio <= 0.0:
         return []
     sized.sort(key=lambda item: (-item[0], os.path.normcase(os.path.normpath(item[1]))))
-    target = max(1, math.ceil(sum(size for size, _path, _bag in sized) * min(1.0, ratio)))
-    selected: list[FactBag] = []
-    covered = 0
-    for size, _path, bag in sized:
-        selected.append(bag)
-        covered += size
-        if covered >= target:
-            break
-    return selected
+    total_size = sum(size for size, _path, _bag in sized)
+    threshold = total_size * min(1.0, ratio)
+    return [bag for size, _path, bag in sized if size >= threshold]
+
+
+def _logical_candidate_size(bag: FactBag) -> int:
+    paths = bag.get("candidate.member_paths")
+    if isinstance(paths, list) and len(paths) > 1:
+        total = 0
+        seen: set[str] = set()
+        for raw_path in paths:
+            if not isinstance(raw_path, str) or not raw_path:
+                continue
+            normalized = os.path.normcase(os.path.normpath(raw_path))
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            try:
+                total += os.path.getsize(raw_path)
+            except OSError:
+                continue
+        if total > 0:
+            return total
+    size = bag.get("file.size")
+    return int(size) if isinstance(size, int) and size > 0 else 0

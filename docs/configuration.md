@@ -405,9 +405,9 @@ print(sorted(get_repair_module_registry().all()))
 
 | 字段 | 说明 |
 | --- | --- |
-| `deep_scan_size_coverage_ratio` | 按文件大小降序选择普通检测未解决的文件，直到累计大小覆盖该集合总大小的比例；默认 `0.5`。入选文件均执行可靠完整扫描。 |
+| `deep_scan_single_candidate_ratio` | 单个未解决逻辑候选达到未解决候选总字节数的最低占比；默认 `0.3`。达到阈值的候选均执行可靠完整扫描。 |
 
-覆盖率决定“扫描哪些文件”，不限制单个文件读取范围。嵌入扫描不检查扩展名，也没有窗口、最大命中数或扫描档位。一次 Rust 顺序读取同时查找所有支持格式；结构校验得到的命中图会传给 analysis，避免再次执行全流签名扫描。
+单候选占比决定“扫描哪些逻辑候选”，不限制单个候选的读取范围。分卷只作为一个逻辑候选参与总大小计算，成员卷不会重复计数。嵌入扫描不检查扩展名，也没有窗口、最大命中数或扫描档位。一次 Rust 顺序读取同时查找所有支持格式；结构校验得到的命中图会传给 analysis，避免再次执行全流签名扫描。
 
 ## detection.rule_pipeline
 
@@ -454,9 +454,9 @@ print(sorted(get_repair_module_registry().all()))
 
 历史 `magic_bytes`、`embedded_archive` scoring 规则已移出 active 规则包；当前主流水线由格式结构规则消费 magic/结构 fact，由 `embedded_payload_identity` 统一消费 embedded 和 overlay 事实。
 
-### deep_scan_size_coverage_ratio
+### deep_scan_single_candidate_ratio
 
-默认扫描普通检测尚未解决集合中、按大小降序累计覆盖前 50% 字节的文件：
+默认扫描普通检测尚未解决集合中，单个逻辑候选大小占该集合总大小至少 30% 的候选：
 
 ```json
 {
@@ -465,7 +465,7 @@ print(sorted(get_repair_module_registry().all()))
       "scoring": [
         {
           "name": "embedded_payload_identity",
-          "deep_scan_size_coverage_ratio": 0.5
+          "deep_scan_single_candidate_ratio": 0.3
         }
       ]
     }
@@ -473,13 +473,13 @@ print(sorted(get_repair_module_registry().all()))
 }
 ```
 
-`0` 禁用该阶段，`1` 扫描全部未解决文件。中间值选择能够达到目标字节覆盖率的最小“大文件前缀”。例如扫描全部：
+`0` 禁用该阶段。阈值使用 `>=` 判断，所有达到阈值的候选都会扫描；默认 `0.3` 因而同一集合最多选中三个正大小候选。`1` 只会扫描独占未解决候选总大小的单个候选。例如只扫描占比至少 50% 的候选：
 
 ```json
 {
   "name": "embedded_payload_identity",
   "enabled": true,
-  "deep_scan_size_coverage_ratio": 1.0
+  "deep_scan_single_candidate_ratio": 0.5
 }
 ```
 

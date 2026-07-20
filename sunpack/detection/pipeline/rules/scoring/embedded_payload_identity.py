@@ -6,7 +6,7 @@ from sunpack.detection.pipeline.rules.base import RuleBase
 from sunpack.detection.pipeline.rules.registry import register_rule
 
 
-DEFAULT_DEEP_SCAN_SIZE_COVERAGE_RATIO = 0.5
+DEFAULT_DEEP_SCAN_SINGLE_CANDIDATE_RATIO = 0.3
 DEFAULT_EMBEDDED_PAYLOAD_SCORE = 6
 
 
@@ -22,11 +22,11 @@ class EmbeddedPayloadIdentityScoreRule(RuleBase):
         "analysis.signature_prepass",
     }
     config_schema = {
-        "deep_scan_size_coverage_ratio": {
+        "deep_scan_single_candidate_ratio": {
             "type": "float",
             "required": False,
-            "default": DEFAULT_DEEP_SCAN_SIZE_COVERAGE_RATIO,
-            "description": "Cumulative byte share of unresolved candidates selected for reliable embedded scanning.",
+            "default": DEFAULT_DEEP_SCAN_SINGLE_CANDIDATE_RATIO,
+            "description": "Minimum share of unresolved candidate bytes held by one logical candidate before reliable embedded scanning.",
         },
         "embedded_payload_score": {
             "type": "int",
@@ -38,10 +38,10 @@ class EmbeddedPayloadIdentityScoreRule(RuleBase):
 
     def prepare_config(self, config: dict[str, Any]) -> dict[str, Any]:
         prepared = dict(config)
-        ratio = float(prepared.get("deep_scan_size_coverage_ratio", DEFAULT_DEEP_SCAN_SIZE_COVERAGE_RATIO))
+        ratio = float(prepared.get("deep_scan_single_candidate_ratio", DEFAULT_DEEP_SCAN_SINGLE_CANDIDATE_RATIO))
         if not 0.0 <= ratio <= 1.0:
-            raise ValueError("deep_scan_size_coverage_ratio must be between 0.0 and 1.0")
-        prepared["deep_scan_size_coverage_ratio"] = ratio
+            raise ValueError("deep_scan_single_candidate_ratio must be between 0.0 and 1.0")
+        prepared["deep_scan_single_candidate_ratio"] = ratio
         return prepared
 
     def evaluate(self, facts: FactBag, config: dict[str, Any]) -> RuleEffect:

@@ -22,7 +22,7 @@ def pressure_scan_config() -> dict:
         },
     ], scoring=[
         {"name": "extension", "enabled": True, "extension_score_groups": [{"score": 5, "extensions": [".zip", ".7z", ".rar", ".gz", ".bz2", ".xz", ".001"]}]},
-        {"name": "embedded_payload_identity", "enabled": True, "deep_scan_size_coverage_ratio": 1.0, "embedded_payload_score": 5},
+        {"name": "embedded_payload_identity", "enabled": True, "deep_scan_single_candidate_ratio": 1e-9, "embedded_payload_score": 5},
     ], confirmation=[
         {"name": "seven_zip_probe", "enabled": True, "reject_executable_container": False, "reject_clear_non_archive": True},
         {"name": "seven_zip_validation", "enabled": True, "reject_on_failed": False},

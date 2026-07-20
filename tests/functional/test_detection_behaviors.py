@@ -6,7 +6,7 @@ from pathlib import Path
 
 from sunpack.contracts.detection import FactBag
 from sunpack.coordinator.inspector import InspectOrchestrator
-from sunpack.coordinator.task_provider import ArchiveTaskProvider, _select_size_coverage
+from sunpack.coordinator.task_provider import ArchiveTaskProvider, _select_single_candidate_ratio
 from sunpack.coordinator.target_scan import build_fact_bags_for_targets
 from sunpack.detection import DetectionScheduler
 from tests.helpers.detection_config import with_detection_pipeline
@@ -22,7 +22,7 @@ def embedded_config(*, ratio=1.0):
     return config_with_rules([{
         "name": "embedded_payload_identity",
         "enabled": True,
-        "deep_scan_size_coverage_ratio": ratio,
+        "deep_scan_single_candidate_ratio": ratio,
         "embedded_payload_score": 5,
     }])
 
@@ -76,15 +76,49 @@ class DetectionBehaviorTests(unittest.TestCase):
             self.assertTrue(result.fact_bag.get("file.embedded_archive_found"))
             self.assertTrue(result.fact_bag.get("analysis.signature_prepass", {}).get("full_scan_complete"))
 
-    def test_size_coverage_selects_smallest_largest_file_prefix(self):
+    def test_single_candidate_ratio_selects_every_candidate_at_or_above_threshold(self):
         bags = []
-        for name, size in (("large", 60), ("medium", 30), ("small", 10)):
+        for name, size in (("large", 40), ("medium", 30), ("small", 30)):
             bag = FactBag()
             bag.set("file.path", name)
             bag.set("file.size", size)
             bags.append(bag)
-        self.assertEqual([bag.get("file.path") for bag in _select_size_coverage(bags, 0.5)], ["large"])
-        self.assertEqual([bag.get("file.path") for bag in _select_size_coverage(bags, 0.8)], ["large", "medium"])
+        self.assertEqual(
+            [bag.get("file.path") for bag in _select_single_candidate_ratio(bags, 0.3)],
+            ["large", "medium", "small"],
+        )
+        self.assertEqual(
+            [bag.get("file.path") for bag in _select_single_candidate_ratio(bags, 0.31)],
+            ["large"],
+        )
+
+    def test_single_candidate_ratio_counts_split_group_once_at_logical_size(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first = root / "game.001"
+            second = root / "game.002"
+            other = root / "other.bin"
+            first.write_bytes(b"a" * 40)
+            second.write_bytes(b"b" * 30)
+            other.write_bytes(b"c" * 30)
+
+            split = FactBag()
+            split.set("file.path", str(first))
+            split.set("file.size", 40)
+            split.set("candidate.member_paths", [str(first), str(second), str(first)])
+            ordinary = FactBag()
+            ordinary.set("file.path", str(other))
+            ordinary.set("file.size", 30)
+
+            selected = _select_single_candidate_ratio([split, ordinary], 0.7)
+            self.assertEqual(selected, [split])
+
+    def test_single_candidate_ratio_skips_empty_or_disabled_selection(self):
+        empty = FactBag()
+        empty.set("file.path", "empty")
+        empty.set("file.size", 0)
+        self.assertEqual(_select_single_candidate_ratio([empty], 0.3), [])
+        self.assertEqual(_select_single_candidate_ratio([empty], 0.0), [])
 
     def test_structurally_invalid_magic_is_not_accepted(self):
         with tempfile.TemporaryDirectory() as tmp:

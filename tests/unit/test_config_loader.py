@@ -95,19 +95,19 @@ def test_effective_config_payload_returns_merged_external_config(tmp_path, monke
     assert payload["filesystem"]["directory_scan_mode"] == "*"
 
 
-def test_embedded_size_coverage_ratio_simple_config_overrides_advanced(tmp_path, monkeypatch):
+def test_embedded_single_candidate_ratio_simple_config_overrides_advanced(tmp_path, monkeypatch):
     simple = tmp_path / "sunpack_config.json"
     advanced = tmp_path / "sunpack_advanced_config.json"
     _write_json(advanced, _advanced_payload([{
         "name": "embedded_payload_identity", "enabled": True,
-        "deep_scan_size_coverage_ratio": 0.5,
+        "deep_scan_single_candidate_ratio": 0.3,
     }]))
     _write_json(simple, {"detection": {"rule_pipeline": {"scoring": [{
-        "name": "embedded_payload_identity", "deep_scan_size_coverage_ratio": 0.8,
+        "name": "embedded_payload_identity", "deep_scan_single_candidate_ratio": 0.8,
     }]}}})
     monkeypatch.setattr(loader, "_candidate_config_paths", _layered_config_paths(simple, advanced))
     prepared = _prepared_scoring_config(loader.load_config(), "embedded_payload_identity")
-    assert prepared["deep_scan_size_coverage_ratio"] == 0.8
+    assert prepared["deep_scan_single_candidate_ratio"] == 0.8
 
 
 def test_obsolete_embedded_scan_configuration_is_rejected():

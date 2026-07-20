@@ -18,7 +18,7 @@ CONFIGS: dict[str, dict[str, Any]] = {
         {
             "name": "embedded_payload_identity",
             "enabled": True,
-            "deep_scan_size_coverage_ratio": 1.0,
+            "deep_scan_single_candidate_ratio": 1e-9,
             "embedded_payload_score": 5,
         },
     ]),
@@ -27,7 +27,7 @@ CONFIGS: dict[str, dict[str, Any]] = {
     }, precheck=[
         {"name": "size_range", "enabled": True, "gte": 0},
     ], scoring=[
-        {"name": "embedded_payload_identity", "enabled": True, "deep_scan_size_coverage_ratio": 1.0, "embedded_payload_score": 5},
+        {"name": "embedded_payload_identity", "enabled": True, "deep_scan_single_candidate_ratio": 1e-9, "embedded_payload_score": 5},
     ]),
     "archive_scan_full": with_detection_pipeline({
         "thresholds": {"archive_score_threshold": 6, "maybe_archive_threshold": 3},
@@ -48,7 +48,7 @@ CONFIGS: dict[str, dict[str, Any]] = {
         {"name": "size_range", "enabled": True, "gte": 0},
     ], scoring=[
         {"name": "extension", "enabled": True, "extension_score_groups": [{"score": 5, "extensions": [".zip", ".7z", ".rar", ".gz", ".bz2", ".xz", ".001"]}]},
-        {"name": "embedded_payload_identity", "enabled": True, "deep_scan_size_coverage_ratio": 1.0},
+        {"name": "embedded_payload_identity", "enabled": True, "deep_scan_single_candidate_ratio": 1e-9},
         {"name": "seven_zip_structure_identity", "enabled": True, "magic_score": 5, "next_header_nid_score": 5},
         {"name": "rar_structure_identity", "enabled": True, "magic_score": 5, "block_walk_score": 5},
     ], confirmation=[
