@@ -6,6 +6,8 @@
 
 #include "sevenzip_streams.hpp"
 
+#include "sevenzip_async_output.hpp"
+
 
 
 #ifdef _WIN32
@@ -447,11 +449,11 @@ private:
 
 
 
-class FileOutStream final : public ISequentialOutStream {
+class SynchronousFileOutStream final : public ISequentialOutStream {
 
 public:
 
-    explicit FileOutStream(const std::wstring& path, ExtractOutputTrace* trace = nullptr, std::size_t item_trace_index = 0)
+    explicit SynchronousFileOutStream(const std::wstring& path, ExtractOutputTrace* trace = nullptr, std::size_t item_trace_index = 0)
 
         : trace_(trace),
           item_trace_index_(item_trace_index),
@@ -476,7 +478,7 @@ public:
 
     }
 
-    ~FileOutStream() {
+    ~SynchronousFileOutStream() {
 
         if (handle_ != INVALID_HANDLE_VALUE) {
 
@@ -659,6 +661,74 @@ private:
 
 };
 
+
+
+class AsyncFileOutStream final : public ISequentialOutStream {
+
+public:
+    AsyncFileOutStream(
+        std::shared_ptr<AsyncFileWriter> writer,
+        AsyncFileWriter::FileStatePtr file,
+        bool compute_crc
+    ) : writer_(std::move(writer)),
+        file_(std::move(file)),
+        compute_crc_(compute_crc) {}
+
+    ~AsyncFileOutStream() {
+        if (writer_ && file_) {
+            writer_->close_file(file_, crc32_ ^ 0xFFFFFFFFU, compute_crc_);
+        }
+    }
+
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** object) override {
+        if (!object) {
+            return E_POINTER;
+        }
+        *object = nullptr;
+        if (IsEqualGUID(iid, IID_IUnknown) || IsEqualGUID(iid, IID_ISequentialOutStream)) {
+            *object = static_cast<IUnknown*>(this);
+        } else {
+            return E_NOINTERFACE;
+        }
+        AddRef();
+        return S_OK;
+    }
+
+    ULONG STDMETHODCALLTYPE AddRef() override { return InterlockedIncrement(&refs_); }
+
+    ULONG STDMETHODCALLTYPE Release() override {
+        const ULONG refs = InterlockedDecrement(&refs_);
+        if (refs == 0) {
+            delete this;
+        }
+        return refs;
+    }
+
+    HRESULT STDMETHODCALLTYPE Write(const void* data, UInt32 size, UInt32* processedSize) override {
+        if (!writer_ || !file_) {
+            if (processedSize) {
+                *processedSize = 0;
+            }
+            return E_FAIL;
+        }
+        UInt32 consumed = 0;
+        const HRESULT hr = writer_->write(file_, data, size, &consumed);
+        if (compute_crc_ && consumed != 0) {
+            crc32_ = update_crc32(crc32_, data, consumed);
+        }
+        if (processedSize) {
+            *processedSize = consumed;
+        }
+        return hr;
+    }
+
+private:
+    LONG refs_ = 1;
+    std::shared_ptr<AsyncFileWriter> writer_;
+    AsyncFileWriter::FileStatePtr file_;
+    bool compute_crc_ = false;
+    UInt32 crc32_ = 0xFFFFFFFFU;
+};
 
 
 class TraceOutStream final : public ISequentialOutStream {
@@ -905,12 +975,16 @@ public:
 
         output_trace_(output_trace),
 
+        async_writer_(dry_run ? nullptr : std::make_shared<AsyncFileWriter>()),
+
         output_root_(win32_extended_path(output_dir_)),
 
         output_root_initially_empty_(directory_is_empty_or_missing(output_root_)) {
         used_output_paths_.reserve(static_cast<std::size_t>(estimated_items) * 2U + 1U);
         created_directories_.reserve(static_cast<std::size_t>(estimated_items) + 1U);
     }
+
+    ~ExtractToDiskCallback() { finalize_output(); }
 
 
 
@@ -933,6 +1007,76 @@ public:
     bool output_error() const { return output_error_; }
 
     bool output_root_initially_empty() const { return output_root_initially_empty_; }
+
+    void finalize_output() noexcept {
+        if (output_finalized_) {
+            return;
+        }
+        output_finalized_ = true;
+        if (!async_writer_) {
+            return;
+        }
+
+        async_writer_->finish();
+        UInt64 total_written = 0;
+        UInt32 completed_files = 0;
+        for (const auto& state : async_files_) {
+            if (!state) {
+                continue;
+            }
+            total_written += state->written_bytes;
+            const bool decoder_ok = state->operation_result_set && state->operation_result == kOpOk;
+            const bool output_ok = state->closed && !state->failed;
+            if (decoder_ok && output_ok) {
+                ++completed_files;
+            }
+
+            if (output_trace_ && state->trace_index < output_trace_->items.size()) {
+                auto& item = output_trace_->items[state->trace_index];
+                item.bytes_written = state->written_bytes;
+                item.operation_result = state->operation_result;
+                item.failed = item.failed || !decoder_ok || !output_ok;
+                item.done = decoder_ok && output_ok;
+                if (item.done && item.has_source_crc32) {
+                    item.output_crc32 = item.source_crc32;
+                    item.has_output_crc32 = true;
+                } else if (state->has_output_crc32) {
+                    item.output_crc32 = state->output_crc32;
+                    item.has_output_crc32 = true;
+                }
+                item.crc_verified = item.done && (!item.has_source_crc32 ||
+                    (item.has_output_crc32 && item.source_crc32 == item.output_crc32));
+                if (state->failed) {
+                    item.hresult = static_cast<int>(state->hresult);
+                    item.win32_error = state->win32_error;
+                }
+            }
+
+            if (state->failed) {
+                output_error_ = true;
+                if (failed_item_.empty()) {
+                    failed_item_ = state->item_path;
+                    failed_item_index_ = state->item_index;
+                    failed_item_bytes_written_ = state->written_bytes;
+                }
+                if (output_trace_) {
+                    output_trace_->last_hresult = static_cast<int>(state->hresult);
+                    output_trace_->last_win32_error = state->win32_error;
+                }
+            }
+        }
+        files_written_ = completed_files;
+        bytes_written_ = total_written;
+        if (output_trace_) {
+            output_trace_->total_bytes_written = total_written;
+            if (!async_files_.empty() && async_files_.back()) {
+                output_trace_->current_item_bytes_written = async_files_.back()->written_bytes;
+            }
+        }
+        if (output_error_ && operation_result_ == kOpOk) {
+            operation_result_ = kOpDataError;
+        }
+    }
 
 
 
@@ -1025,6 +1169,8 @@ public:
         current_item_is_dir_ = false;
 
         current_trace_active_ = false;
+
+        current_async_file_.reset();
 
         if (askExtractMode != kExtractMode) {
 
@@ -1197,28 +1343,17 @@ public:
 
         }
 
-        auto* stream = new FileOutStream(target.wstring(), output_trace_, current_trace_index_);
-
-        if (!stream->is_open()) {
-
-            stream->Release();
-
-            failed_item_ = name;
-
-            failed_item_index_ = index;
-
-            failed_item_bytes_written_ = current_item_bytes_written_;
-
+        if (!async_writer_) {
+            mark_current_item_failure(E_FAIL, 0);
             output_error_ = true;
-
-            mark_current_item_failure(output_trace_ ? static_cast<HRESULT>(output_trace_->last_hresult) : E_FAIL,
-                                      output_trace_ ? output_trace_->last_win32_error : 0);
-
             return E_FAIL;
-
         }
-
-        *outStream = stream;
+        const bool compute_crc = output_trace_ && current_trace_index_ < output_trace_->items.size() &&
+            !output_trace_->items[current_trace_index_].has_source_crc32;
+        current_async_file_ = async_writer_->make_file(
+            target.wstring(), name, index, current_trace_index_);
+        async_files_.push_back(current_async_file_);
+        *outStream = new AsyncFileOutStream(async_writer_, current_async_file_, compute_crc);
 
         return S_OK;
 
@@ -1228,13 +1363,22 @@ public:
 
     HRESULT STDMETHODCALLTYPE SetOperationResult(Int32 opRes) override {
 
+        if (current_async_file_) {
+            current_async_file_->operation_result = opRes;
+            current_async_file_->operation_result_set = true;
+            current_item_bytes_written_ = current_async_file_->accepted_bytes.load(std::memory_order_relaxed);
+            if (output_trace_) {
+                output_trace_->current_item_bytes_written = current_item_bytes_written_;
+            }
+        }
+
         if (opRes != kOpOk || operation_result_ == kOpOk) {
 
             operation_result_ = opRes;
 
         }
 
-        if (opRes == kOpOk && !current_item_.empty() && !current_item_is_dir_) {
+        if (opRes == kOpOk && !current_item_.empty() && !current_item_is_dir_ && !async_writer_) {
 
             files_written_ += 1;
 
@@ -1258,6 +1402,14 @@ public:
 
         emit(opRes == kOpOk ? "item_done" : "item_failed", current_index_, current_item_);
 
+        if (async_writer_) {
+            const HRESULT writer_error = async_writer_->current_error();
+            if (writer_error != S_OK) {
+                output_error_ = true;
+                mark_current_item_failure(writer_error, async_writer_->current_win32_error());
+                return writer_error;
+            }
+        }
         return S_OK;
 
     }
@@ -1453,6 +1605,12 @@ private:
 
     ExtractOutputTrace* output_trace_ = nullptr;
 
+    std::shared_ptr<AsyncFileWriter> async_writer_;
+
+    std::vector<AsyncFileWriter::FileStatePtr> async_files_;
+
+    AsyncFileWriter::FileStatePtr current_async_file_;
+
     std::filesystem::path output_root_;
 
     bool output_root_initially_empty_ = false;
@@ -1492,6 +1650,8 @@ private:
     bool current_trace_active_ = false;
 
     bool output_error_ = false;
+
+    bool output_finalized_ = false;
 
 };
 

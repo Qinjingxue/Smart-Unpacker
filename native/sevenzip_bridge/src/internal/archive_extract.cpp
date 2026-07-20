@@ -439,6 +439,12 @@ ExtractArchiveResult extract_archive_internal(
 
         hr = archive->Extract(nullptr, static_cast<UInt32>(kAllItems), 0, extract_callback.get());
 
+        // ISequentialOutStream::Write consumes buffers into a bounded async
+        // writer. Do not publish extraction success until every queued file
+        // write and close has completed and any delayed filesystem error has
+        // been folded back into the callback result.
+        raw_extract_callback->finalize_output();
+
         last_hr = hr;
 
         last_op_res = raw_extract_callback->operation_result();

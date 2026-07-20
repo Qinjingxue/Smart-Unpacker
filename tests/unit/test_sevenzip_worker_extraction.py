@@ -373,6 +373,43 @@ def test_worker_output_trace_includes_per_item_failure(tmp_path):
     assert "conflict" in failed_items[-1]["path"].replace("\\", "/")
 
 
+def test_worker_propagates_delayed_async_file_open_failure(tmp_path):
+    worker = _require_worker_or_skip()
+    seven_zip_dll = _require_7z_dll_or_skip()
+    archive, _ = _create_7z(tmp_path, "async-open-failure", "payload")
+    out_dir = tmp_path / "out"
+    payload = {
+        "job_id": "async-open-failure",
+        "seven_zip_dll_path": seven_zip_dll,
+        "archive_path": str(archive),
+        "output_dir": str(out_dir),
+        # Wildcards pass archive path traversal validation, but CreateFileW
+        # rejects them. The async writer must report that delayed failure
+        # after draining instead of publishing a successful extraction.
+        "decoded_names": ["invalid*output.txt"],
+    }
+
+    result = subprocess.run(
+        [worker],
+        input=json.dumps(payload, ensure_ascii=False),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    lines = [json.loads(line) for line in result.stdout.splitlines() if line.strip().startswith("{")]
+    worker_result = next(item for item in lines if item.get("type") == "result")
+    output_items = worker_result["diagnostics"]["output_trace"]["items"]
+
+    assert result.returncode != 0
+    assert worker_result["status"] == "failed"
+    assert worker_result["failure_stage"] == "output_write"
+    assert worker_result["failure_kind"] == "output_filesystem"
+    assert worker_result["files_written"] == 0
+    assert output_items[-1]["failed"] is True
+    assert output_items[-1]["bytes_written"] == 0
+    assert not list(out_dir.glob("invalid*output.txt"))
+
+
 def test_worker_dry_run_reports_success_diagnostics_without_writing(tmp_path):
     worker = _require_worker_or_skip()
     seven_zip_dll = _require_7z_dll_or_skip()
@@ -447,6 +484,39 @@ def test_worker_dry_run_hashes_output_when_source_crc_is_missing(tmp_path):
     assert item["has_output_crc32"] is True
     assert item["output_crc32"] == (binascii.crc32(payload) & 0xFFFFFFFF)
     assert item["crc_verified"] is True
+
+
+def test_worker_async_output_extracts_format_without_source_crc(tmp_path):
+    worker = _require_worker_or_skip()
+    seven_zip_dll = _require_7z_dll_or_skip()
+    payload = b"streamed tar payload"
+    source = tmp_path / "payload.bin"
+    source.write_bytes(payload)
+    archive = tmp_path / "payload.tar"
+    with tarfile.open(archive, "w") as handle:
+        handle.add(source, arcname=source.name)
+    out_dir = tmp_path / "out"
+
+    result = subprocess.run(
+        [worker],
+        input=json.dumps({
+            "job_id": "async-no-source-crc",
+            "seven_zip_dll_path": seven_zip_dll,
+            "archive_path": str(archive),
+            "output_dir": str(out_dir),
+            "format_hint": "tar",
+        }),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    worker_result = _worker_result(result.stdout)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert worker_result["status"] == "ok"
+    assert worker_result["files_written"] == 1
+    assert worker_result["bytes_written"] == len(payload)
+    assert (out_dir / source.name).read_bytes() == payload
 
 
 def test_worker_applies_explicit_shift_jis_item_paths(tmp_path):
