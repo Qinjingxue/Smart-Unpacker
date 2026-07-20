@@ -44,7 +44,10 @@ fixtures/*.dll
 fixtures/*.bin
 
 # Bundled third-party binaries kept locally by default
-tools/
+**/tools/
+!/tools/
+/tools/*
+!/tools/watch_validation.py
 
 # Temporary workspaces created by acceptance tests
 acceptance-*/
@@ -64,6 +67,7 @@ native/sunpack_native/target/
 native/sevenzip_bridge/build-*/
 tests/cases/archive_scan/r3961_jpg_carrier_encrypted_rar
 .sunpack/
+.sunpack_watch_validation/
 datasets/
 bug.txt
 .deepseek/

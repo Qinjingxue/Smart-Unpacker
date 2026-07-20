@@ -106,6 +106,21 @@ def test_duplicate_noise_does_not_restart_generation_but_overwrite_does(tmp_path
     assert watcher._active_states[str(archive)].generation == changed_generation
 
 
+def test_restoring_an_older_mtime_does_not_restart_content_quiet_window(tmp_path):
+    archive = tmp_path / "sample.zip"
+    archive.write_bytes(b"A" * 256 * 1024)
+    watcher = _watcher(tmp_path)
+    watcher.enqueue(str(archive), event_type="created")
+    baseline_event_at = watcher._active_states[str(archive)].last_event_at
+
+    stat = archive.stat()
+    restored_mtime_ns = stat.st_mtime_ns - 60_000_000_000
+    os.utime(archive, ns=(stat.st_atime_ns, restored_mtime_ns))
+    watcher.enqueue(str(archive), event_type="modified")
+
+    assert watcher._active_states[str(archive)].last_event_at == baseline_event_at
+
+
 def test_slow_writes_busy_handle_move_and_event_storm_reach_ready(tmp_path):
     temporary = tmp_path / "slow.zip.baiduyun.p.downloading"
     final = tmp_path / "slow.zip"

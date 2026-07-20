@@ -17,7 +17,7 @@ pub(crate) fn scan_watch_candidates(
     for root in roots {
         let path = PathBuf::from(root);
         if path.is_file() {
-            if let Some(candidate) = watch_candidate_dict(py, &path)? {
+            if let Some(candidate) = watch_candidate_dict(py, &path, None)? {
                 candidates.push((normalize_path(&path), candidate));
             }
             continue;
@@ -40,8 +40,13 @@ pub(crate) fn scan_watch_candidates(
 }
 
 #[pyfunction]
-pub(crate) fn watch_candidate_for_path(py: Python<'_>, path: &str) -> PyResult<Option<Py<PyDict>>> {
-    watch_candidate_dict(py, Path::new(path))
+#[pyo3(signature = (path, since_usn=None))]
+pub(crate) fn watch_candidate_for_path(
+    py: Python<'_>,
+    path: &str,
+    since_usn: Option<i64>,
+) -> PyResult<Option<Py<PyDict>>> {
+    watch_candidate_dict(py, Path::new(path), since_usn)
 }
 
 #[pyfunction]
@@ -117,7 +122,7 @@ fn scan_watch_dir_recursive(
         if metadata.is_dir() {
             scan_watch_dir_recursive(py, &path, candidates)?;
         } else if metadata.is_file() {
-            if let Some(candidate) = watch_candidate_from_metadata(py, &path, &metadata)? {
+            if let Some(candidate) = watch_candidate_from_metadata(py, &path, &metadata, None)? {
                 candidates.push((normalize_path(&path), candidate));
             }
         }
@@ -141,7 +146,7 @@ fn scan_watch_dir_shallow(
             Err(_) => continue,
         };
         if metadata.is_file() {
-            if let Some(candidate) = watch_candidate_from_metadata(py, &path, &metadata)? {
+            if let Some(candidate) = watch_candidate_from_metadata(py, &path, &metadata, None)? {
                 candidates.push((normalize_path(&path), candidate));
             }
         }
@@ -149,7 +154,11 @@ fn scan_watch_dir_shallow(
     Ok(())
 }
 
-fn watch_candidate_dict(py: Python<'_>, path: &Path) -> PyResult<Option<Py<PyDict>>> {
+fn watch_candidate_dict(
+    py: Python<'_>,
+    path: &Path,
+    since_usn: Option<i64>,
+) -> PyResult<Option<Py<PyDict>>> {
     let metadata = match fs::metadata(path) {
         Ok(metadata) => metadata,
         Err(_) => return Ok(None),
@@ -157,24 +166,28 @@ fn watch_candidate_dict(py: Python<'_>, path: &Path) -> PyResult<Option<Py<PyDic
     if !metadata.is_file() {
         return Ok(None);
     }
-    watch_candidate_from_metadata(py, path, &metadata)
+    watch_candidate_from_metadata(py, path, &metadata, since_usn)
 }
 
 fn watch_candidate_from_metadata(
     py: Python<'_>,
     path: &Path,
     metadata: &fs::Metadata,
+    since_usn: Option<i64>,
 ) -> PyResult<Option<Py<PyDict>>> {
     if metadata.len() == 0 {
         return Ok(None);
     }
-    let observation = watch_file_observation(path)?;
+    let observation = watch_file_observation(path, since_usn)?;
     let dict = PyDict::new(py);
     dict.set_item("path", normalize_path(path))?;
     dict.set_item("size", metadata.len())?;
     dict.set_item("mtime", mtime_seconds(metadata))?;
     dict.set_item("file_id", observation.file_id)?;
     dict.set_item("change_usn", observation.change_usn)?;
+    dict.set_item("change_reasons", observation.change_reasons)?;
+    dict.set_item("change_reasons_known", observation.change_reasons_known)?;
+    dict.set_item("change_reason_error", observation.change_reason_error)?;
     Ok(Some(dict.unbind()))
 }
 

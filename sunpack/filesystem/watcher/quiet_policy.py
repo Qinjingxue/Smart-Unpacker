@@ -88,17 +88,29 @@ class AdaptiveQuietTracker:
     def intervals(self) -> tuple[float, ...]:
         return tuple(self._intervals)
 
-    def observe(self, now: float, *, size: int, mtime: float, change_usn: int = 0) -> float:
+    def observe(
+        self,
+        now: float,
+        *,
+        size: int,
+        mtime: float,
+        change_usn: int = 0,
+        content_changed: bool | None = None,
+    ) -> float:
         size = int(size)
         mtime = float(mtime)
         change_usn = int(change_usn)
-        content_changed = (
+        detected_change = (
             self.last_size is None
             or self.last_size != size
             or self.last_mtime != mtime
             or (change_usn > 0 and self.last_change_usn != change_usn)
         )
-        if not content_changed:
+        is_content_change = detected_change if content_changed is None else bool(content_changed)
+        if not is_content_change:
+            self.last_size = size
+            self.last_mtime = mtime
+            self.last_change_usn = change_usn
             return self.quiet_seconds
         if self.last_content_event_at is not None:
             interval = float(now) - self.last_content_event_at

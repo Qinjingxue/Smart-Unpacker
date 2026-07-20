@@ -55,6 +55,26 @@ def test_watch_background_starts_in_neutral_working_directory(tmp_path, monkeypa
     assert captured["cwd"] == str(tmp_path)
 
 
+def test_watch_cli_start_exits_after_elevated_relaunch(monkeypatch):
+    monkeypatch.setattr(watch_command, "_request_watch_elevation", lambda _args: True)
+    args = SimpleNamespace(once=False, no_tray=False)
+    ctx = SimpleNamespace(t=lambda key, **_kwargs: key)
+
+    code, result = watch_command._handle_start(args, ctx)
+
+    assert code == 0
+    assert result.summary == {"elevated_relaunch": True}
+
+
+def test_watch_cli_elevation_argv_preserves_runtime_flags(monkeypatch):
+    monkeypatch.setattr(watch_command.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(watch_command.sys, "executable", r"C:\SunPack\sunpack.exe")
+
+    argv = watch_command._watch_cli_start_argv(SimpleNamespace(once=True, no_tray=True))
+
+    assert argv[1:] == ["watch", "start", "--once", "--no-tray"]
+
+
 def test_watch_service_releases_named_mutex_after_exit(tmp_path, monkeypatch):
     state_dir = tmp_path / ".sunpack_watch"
     roots_path = tmp_path / "sunpack_watch_roots.txt"

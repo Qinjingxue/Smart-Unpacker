@@ -54,6 +54,24 @@ def test_same_metadata_event_does_not_distort_write_interval_history():
     assert tracker.intervals == (0.1,)
 
 
+def test_explicit_metadata_only_change_updates_snapshot_without_resetting_quiet_window():
+    tracker = AdaptiveQuietTracker(AdaptiveQuietPolicy())
+    tracker.observe(0.0, size=1024, mtime=100.0, change_usn=10)
+
+    quiet_seconds = tracker.observe(
+        5.0,
+        size=1024,
+        mtime=50.0,
+        change_usn=11,
+        content_changed=False,
+    )
+
+    assert quiet_seconds == 1.0
+    assert tracker.intervals == ()
+    assert tracker.last_mtime == 50.0
+    assert tracker.last_change_usn == 11
+
+
 @pytest.mark.parametrize(
     ("scenario_name", "maximum_latency"),
     (("very_fast", 4.0), ("fast", 6.0), ("moderate", 10.0)),

@@ -6,18 +6,27 @@ use std::path::Path;
 pub(crate) struct WatchFileObservation {
     pub(crate) file_id: String,
     pub(crate) change_usn: i64,
+    pub(crate) change_reasons: u32,
+    pub(crate) change_reasons_known: bool,
+    pub(crate) change_reason_error: String,
 }
 
 #[cfg(windows)]
 mod windows;
 
 #[cfg(windows)]
-pub(crate) fn watch_file_observation(path: &Path) -> PyResult<WatchFileObservation> {
-    windows::watch_file_observation(path).map_err(os_error)
+pub(crate) fn watch_file_observation(
+    path: &Path,
+    since_usn: Option<i64>,
+) -> PyResult<WatchFileObservation> {
+    windows::watch_file_observation(path, since_usn).map_err(os_error)
 }
 
 #[cfg(not(windows))]
-pub(crate) fn watch_file_observation(_path: &Path) -> PyResult<WatchFileObservation> {
+pub(crate) fn watch_file_observation(
+    _path: &Path,
+    _since_usn: Option<i64>,
+) -> PyResult<WatchFileObservation> {
     Err(PyRuntimeError::new_err("watch mode requires Windows NTFS"))
 }
 
@@ -47,7 +56,7 @@ pub(crate) fn validate_ntfs_watch_root(path: &str) -> PyResult<()> {
                 filesystem
             )));
         }
-        windows::watch_file_observation(path).map_err(|error| {
+        windows::watch_file_observation(path, None).map_err(|error| {
             PyRuntimeError::new_err(format!(
                 "watch mode requires an active readable NTFS USN journal for '{}': {}",
                 path.display(),

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import subprocess
+import sys
+from pathlib import Path
 
 from sunpack.support.runtime_cwd import runtime_working_directory
 
@@ -80,6 +82,12 @@ def handle(args, ctx):
 
 
 def _handle_start(args, ctx):
+    if _request_watch_elevation(args):
+        return 0, CliCommandResult(
+            command=COMMAND,
+            inputs={"action": "start"},
+            summary={"elevated_relaunch": True},
+        )
     from sunpack.coordinator.watch_runtime import run_watch_service
 
     code = run_watch_service(
@@ -192,3 +200,26 @@ def _watch_start_argv() -> list[str]:
     from sunpack.gui.launcher import watch_launch_argv
 
     return watch_launch_argv()
+
+
+def _request_watch_elevation(args) -> bool:
+    from sunpack.platform.windows.elevation import relaunch_elevated
+
+    return relaunch_elevated(
+        _watch_cli_start_argv(args),
+        cwd=runtime_working_directory(),
+    )
+
+
+def _watch_cli_start_argv(args) -> list[str]:
+    command = ["watch", "start"]
+    if bool(getattr(args, "once", False)):
+        command.append("--once")
+    if bool(getattr(args, "no_tray", False)):
+        command.append("--no-tray")
+    if getattr(sys, "frozen", False):
+        return [str(Path(sys.executable).resolve()), *command]
+    entry = Path(__file__).resolve().parents[3] / "sunpack.py"
+    if entry.is_file():
+        return [str(Path(sys.executable).resolve()), str(entry), *command]
+    return [str(Path(sys.executable).resolve()), "-m", "sunpack", *command]

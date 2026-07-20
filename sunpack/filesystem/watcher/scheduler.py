@@ -51,6 +51,15 @@ from watchdog.observers import Observer
 
 PROBE_PROMOTION_RETRY_SECONDS = 0.5
 PROBE_PROMOTION_MAX_RETRIES = 100
+USN_REASON_DATA_OVERWRITE = 0x00000001
+USN_REASON_DATA_EXTEND = 0x00000002
+USN_REASON_DATA_TRUNCATION = 0x00000004
+USN_CONTENT_REASON_MASK = (
+    USN_REASON_DATA_OVERWRITE
+    | USN_REASON_DATA_EXTEND
+    | USN_REASON_DATA_TRUNCATION
+)
+RESTORED_MTIME_MINIMUM_BACKSTEP_SECONDS = 2.0
 
 
 @dataclass
@@ -337,7 +346,13 @@ class WatchScheduler:
         if is_directory_password_file(path, self.config):
             self._log_candidate_ignored(path, "directory_password_file")
             return
-        candidate = _candidate_for_event_path(path)
+        lookup_path = os.path.abspath(path)
+        with self._lock:
+            previous_hint = self._pending.get(lookup_path) or self._pending.get(path)
+        candidate = _candidate_for_event_path(
+            path,
+            since_usn=previous_hint.change_usn if previous_hint is not None else 0,
+        )
         if candidate is None:
             self._log_candidate_ignored(path, "not_a_file_or_unreadable")
             return
@@ -371,9 +386,15 @@ class WatchScheduler:
                 self._pending[candidate.path] = candidate
                 if not changed:
                     return
-                quiet_seconds = self._observe_candidate_activity(candidate, now)
-                state.last_event_at = now
-                state.quiet_seconds = quiet_seconds
+                content_changed = previous is None or _candidate_content_changed(previous, candidate)
+                quiet_seconds = self._observe_candidate_activity(
+                    candidate,
+                    now,
+                    content_changed=content_changed,
+                )
+                if content_changed:
+                    state.last_event_at = now
+                    state.quiet_seconds = quiet_seconds
                 state.generation += 1
                 state.event_requires_attempt = state.event_requires_attempt or event_requires_attempt
                 state.filter_revision = self._filter_revision
@@ -407,9 +428,15 @@ class WatchScheduler:
                 changed = previous is None or _candidate_observation_changed(previous, candidate)
                 self._pending[candidate.path] = candidate
                 if changed:
-                    active_quiet_seconds = self._observe_candidate_activity(candidate, now)
-                    state.last_event_at = now
-                    state.quiet_seconds = active_quiet_seconds
+                    content_changed = previous is None or _candidate_content_changed(previous, candidate)
+                    active_quiet_seconds = self._observe_candidate_activity(
+                        candidate,
+                        now,
+                        content_changed=content_changed,
+                    )
+                    if content_changed:
+                        state.last_event_at = now
+                        state.quiet_seconds = active_quiet_seconds
                     state.generation += 1
                     state.event_requires_attempt = state.event_requires_attempt or event_requires_attempt
                     state.filter_revision = self._filter_revision
@@ -529,7 +556,7 @@ class WatchScheduler:
                     ))
 
         for path, candidate, generation, force, event_requires_attempt, filter_revision, filtered_size, filtered_mtime, quiet_seconds in due:
-            refreshed = _candidate_for_event_path(path)
+            refreshed = _candidate_for_event_path(path, since_usn=candidate.change_usn)
             if refreshed is None:
                 self._drop_active(path, generation)
                 self.state.forget_path(path)
@@ -544,10 +571,20 @@ class WatchScheduler:
                 self.state.complete_work([path])
                 continue
             if _candidate_observation_changed(candidate, refreshed):
-                self._record_boundary_activity(path, generation, refreshed, now)
-                continue
+                if _candidate_content_changed(candidate, refreshed):
+                    self._record_boundary_activity(path, generation, refreshed, now)
+                    continue
+                if not self._update_boundary_metadata(path, generation, refreshed):
+                    continue
+                candidate = refreshed
             if not watch_file_is_ready(path):
-                self._record_boundary_activity(path, generation, refreshed, now)
+                self._record_boundary_activity(
+                    path,
+                    generation,
+                    refreshed,
+                    now,
+                    content_changed=False,
+                )
                 self.log.write_throttled(
                     "candidate_busy",
                     throttle_key=os.path.normcase(os.path.abspath(path)),
@@ -597,6 +634,8 @@ class WatchScheduler:
         generation: int,
         candidate: WatchCandidate,
         now: float,
+        *,
+        content_changed: bool = True,
     ) -> None:
         with self._lock:
             state = self._active_states.get(path)
@@ -604,13 +643,40 @@ class WatchScheduler:
                 return
             self._pending[path] = candidate
             state.last_event_at = now
-            state.quiet_seconds = self._observe_candidate_activity(candidate, now)
+            state.quiet_seconds = self._observe_candidate_activity(
+                candidate,
+                now,
+                content_changed=content_changed,
+            )
             state.generation += 1
             state.filter_revision = self._filter_revision
             state.filtered_size = candidate.size
             state.filtered_mtime = candidate.mtime
 
-    def _observe_candidate_activity(self, candidate: WatchCandidate, now: float) -> float:
+    def _update_boundary_metadata(
+        self,
+        path: str,
+        generation: int,
+        candidate: WatchCandidate,
+    ) -> bool:
+        with self._lock:
+            state = self._active_states.get(path)
+            if state is None or state.generation != generation:
+                return False
+            self._pending[path] = candidate
+            self._observe_candidate_activity(candidate, time.time(), content_changed=False)
+            state.filter_revision = self._filter_revision
+            state.filtered_size = candidate.size
+            state.filtered_mtime = candidate.mtime
+            return True
+
+    def _observe_candidate_activity(
+        self,
+        candidate: WatchCandidate,
+        now: float,
+        *,
+        content_changed: bool | None = None,
+    ) -> float:
         tracker = self._quiet_trackers.get(candidate.path)
         if tracker is None:
             tracker = AdaptiveQuietTracker(self._quiet_policy)
@@ -620,6 +686,7 @@ class WatchScheduler:
             size=candidate.size,
             mtime=candidate.mtime,
             change_usn=candidate.change_usn,
+            content_changed=content_changed,
         )
 
     def _process_password_dirty_dirs(self, now: float) -> None:
@@ -1125,10 +1192,10 @@ class _WatchEventHandler(FileSystemEventHandler):
         self.scheduler.enqueue(path, event_type=event_type, src_path=src_path)
 
 
-def _candidate_for_event_path(path: str) -> WatchCandidate | None:
+def _candidate_for_event_path(path: str, *, since_usn: int = 0) -> WatchCandidate | None:
     if not path:
         return None
-    return _watch_candidate_for_path(path)
+    return _watch_candidate_for_path(path, since_usn=since_usn)
 
 
 def _candidate_observation_changed(previous: WatchCandidate, current: WatchCandidate) -> bool:
@@ -1138,6 +1205,22 @@ def _candidate_observation_changed(previous: WatchCandidate, current: WatchCandi
         or previous.file_id != current.file_id
         or previous.change_usn != current.change_usn
     )
+
+
+def _candidate_content_changed(previous: WatchCandidate, current: WatchCandidate) -> bool:
+    if previous.file_id != current.file_id or previous.size != current.size:
+        return True
+    if previous.change_usn == current.change_usn:
+        return False
+    if current.change_reasons_known:
+        return bool(current.change_reasons & USN_CONTENT_REASON_MASK)
+    # Explorer and downloaders commonly restore the source/server timestamp as
+    # their final metadata operation. If volume-journal access is unavailable,
+    # optimistically ignore that one event; later same-size overwrites still
+    # change the USN and take the conservative content-change path below.
+    if current.mtime < previous.mtime - RESTORED_MTIME_MINIMUM_BACKSTEP_SECONDS:
+        return False
+    return previous.mtime != current.mtime or previous.change_usn != current.change_usn
 
 
 def _event_requires_attempt(event_type: str) -> bool:

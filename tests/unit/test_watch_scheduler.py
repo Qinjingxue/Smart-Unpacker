@@ -12,6 +12,7 @@ import sunpack.passwords.internal.clipboard_monitor as clipboard_monitor_module
 from sunpack.contracts.failures import FailureInfo, FailureKind
 from sunpack.contracts.results import OutcomeKind, TargetRunResult
 from sunpack.filesystem.watcher.scheduler import WatchScheduler as RuntimeWatchScheduler
+from sunpack.filesystem.watcher.scanner import WatchCandidate
 from tests.helpers.fake_pipeline_engine import FakePipelineEngine
 
 
@@ -33,6 +34,50 @@ def WatchScheduler(*args, pipeline_engine=None, **kwargs):
             )
         )
     return RuntimeWatchScheduler(*args, pipeline_engine=pipeline_engine, **kwargs)
+
+
+def test_usn_data_reason_detects_same_size_in_place_content_change():
+    previous = WatchCandidate("sample.zip", 100, 10.0, "file", 100)
+    current = WatchCandidate(
+        "sample.zip",
+        100,
+        10.0,
+        "file",
+        101,
+        change_reasons=scheduler_module.USN_REASON_DATA_OVERWRITE,
+        change_reasons_known=True,
+    )
+
+    assert scheduler_module._candidate_content_changed(previous, current)
+
+
+def test_usn_metadata_reason_does_not_count_as_content_change():
+    previous = WatchCandidate("sample.zip", 100, 100.0, "file", 100)
+    current = WatchCandidate(
+        "sample.zip",
+        100,
+        50.0,
+        "file",
+        101,
+        change_reasons=0x00008000,
+        change_reasons_known=True,
+    )
+
+    assert not scheduler_module._candidate_content_changed(previous, current)
+
+
+def test_unavailable_journal_treats_large_backward_mtime_restore_as_metadata_only():
+    previous = WatchCandidate("sample.zip", 100, 100.0, "file", 100)
+    current = WatchCandidate("sample.zip", 100, 50.0, "file", 101)
+
+    assert not scheduler_module._candidate_content_changed(previous, current)
+
+
+def test_unavailable_journal_keeps_same_stat_usn_change_conservative():
+    previous = WatchCandidate("sample.zip", 100, 100.0, "file", 100)
+    current = WatchCandidate("sample.zip", 100, 100.0, "file", 101)
+
+    assert scheduler_module._candidate_content_changed(previous, current)
 
 
 class FakeObserver:
@@ -843,7 +888,7 @@ def test_watch_scheduler_moved_file_uses_common_quiet_window(tmp_path, monkeypat
     assert watcher.run_once().processed == 1
 
 
-def test_watch_scheduler_copy_events_reset_common_quiet_window(tmp_path, monkeypatch):
+def test_watch_scheduler_timestamp_restore_does_not_reset_content_quiet_window(tmp_path, monkeypatch):
     monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
     now = [2000001000.0]
     monkeypatch.setattr(scheduler_module.time, "time", lambda: now[0])
@@ -884,9 +929,9 @@ def test_watch_scheduler_copy_events_reset_common_quiet_window(tmp_path, monkeyp
     watcher.enqueue(str(archive_path), event_type="modified")
 
     now[0] = 2000001010.1
-    assert watcher.run_once().processed == 0
-    now[0] = 2000001010.3
     assert watcher.run_once().processed == 1
+    now[0] = 2000001010.3
+    assert watcher.run_once().processed == 0
 
 
 def test_watch_scheduler_growth_resets_the_common_quiet_window(tmp_path, monkeypatch):
