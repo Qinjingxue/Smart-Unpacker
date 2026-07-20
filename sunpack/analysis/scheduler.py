@@ -37,6 +37,7 @@ class ArchiveAnalysisScheduler:
                 {
                     "path": volume.path,
                     "number": volume.number,
+                    "style": volume.style,
                 }
                 for volume in volumes
             ]
@@ -60,7 +61,7 @@ class ArchiveAnalysisScheduler:
             return self.analyze_path(descriptor.entry_path)
         if descriptor.open_mode in {"native_volumes", "sfx_with_volumes"} and descriptor.parts:
             paths = [
-                {"path": part.path, "number": part.volume_number or index + 1}
+                {"path": part.path, "number": part.volume_number or index + 1, "style": descriptor.volume_style}
                 for index, part in enumerate(descriptor.parts)
                 if part.path
             ]

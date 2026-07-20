@@ -6,6 +6,7 @@ from sunpack.detection.pipeline.format_defaults import DEFAULT_RAR_MAX_FIRST_HEA
 from sunpack.detection.pipeline.processors.context import FactProcessorContext
 from sunpack.detection.pipeline.processors.identity import file_identity_for_context
 from sunpack.detection.pipeline.processors.registry import register_processor
+from sunpack.detection.pipeline.processors.modules.format_structure.multi_volume import detection_binary_view, inspect_rar_view
 from sunpack.support.global_cache_manager import cached_value, file_identity
 
 
@@ -36,11 +37,7 @@ def inspect_rar_structure(
     },
 )
 def process_rar_structure(context: FactProcessorContext) -> dict[str, Any]:
-    facts = context.fact_bag
-    path = facts.get("file.path") or ""
-    return inspect_rar_structure(
-        path,
-        facts.get("file.magic_bytes") or b"",
+    return inspect_rar_view(
+        detection_binary_view(context),
         int(context.fact_config.get("max_first_header_check_bytes", DEFAULT_RAR_MAX_FIRST_HEADER_CHECK_BYTES)),
-        file_identity_for_context(context, path),
     )

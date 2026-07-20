@@ -5,6 +5,7 @@ from sunpack_native import inspect_seven_zip_structure as _native_inspect_seven_
 from sunpack.detection.pipeline.processors.context import FactProcessorContext
 from sunpack.detection.pipeline.processors.identity import file_identity_for_context
 from sunpack.detection.pipeline.processors.registry import register_processor
+from sunpack.detection.pipeline.processors.modules.format_structure.multi_volume import detection_binary_view, inspect_seven_zip_view
 from sunpack.support.global_cache_manager import cached_value, file_identity
 
 
@@ -38,11 +39,7 @@ def inspect_seven_zip_structure(
     },
 )
 def process_seven_zip_structure(context: FactProcessorContext) -> dict[str, Any]:
-    facts = context.fact_bag
-    path = facts.get("file.path") or ""
-    return inspect_seven_zip_structure(
-        path,
-        facts.get("file.magic_bytes") or b"",
+    return inspect_seven_zip_view(
+        detection_binary_view(context),
         int(context.fact_config.get("max_next_header_check_bytes", DEFAULT_MAX_NEXT_HEADER_CHECK_BYTES)),
-        file_identity_for_context(context, path),
     )

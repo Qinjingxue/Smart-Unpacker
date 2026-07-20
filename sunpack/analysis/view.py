@@ -124,9 +124,24 @@ class MultiVolumeBinaryView:
         max_read_bytes: int | None = None,
         max_concurrent_reads: int = 1,
     ):
-        self.volumes = _normalize_volume_paths(paths)
+        entries = _normalize_volume_entries(paths)
+        self.volumes = [entry["path"] for entry in entries]
         if not self.volumes:
             raise ValueError("MultiVolumeBinaryView requires at least one volume")
+        styles = {entry["style"] for entry in entries if entry["style"]}
+        self.volume_style = next(iter(styles)) if len(styles) == 1 else ""
+        self.volume_ranges = []
+        logical_start = 0
+        for index, entry in enumerate(entries):
+            size = os.path.getsize(entry["path"])
+            self.volume_ranges.append({
+                "index": index,
+                "number": entry["number"],
+                "path": entry["path"],
+                "start": logical_start,
+                "end": logical_start + size,
+            })
+            logical_start += size
         self.path = self.volumes[0]
         self.cache_bytes = max(0, int(cache_bytes or 0))
         self.max_read_bytes = max_read_bytes if max_read_bytes is None else max(0, int(max_read_bytes))
@@ -138,6 +153,16 @@ class MultiVolumeBinaryView:
         )
         self.path = str(self._native.path)
         self.size = int(self._native.size)
+
+    def logical_offset_for_disk(self, disk_number: int, relative_offset: int) -> int | None:
+        """Translate PKZIP's zero-based disk-relative offset into the logical view."""
+        disk_number = int(disk_number)
+        relative_offset = int(relative_offset)
+        if disk_number < 0 or disk_number >= len(self.volume_ranges) or relative_offset < 0:
+            return None
+        volume = self.volume_ranges[disk_number]
+        logical = int(volume["start"]) + relative_offset
+        return logical if logical <= int(volume["end"]) else None
 
     def read_at(self, offset: int, size: int) -> bytes:
         return bytes(self._native.read_at(int(offset), int(size)))
@@ -293,12 +318,28 @@ class PatchedBinaryView:
         }
 
 
-def _normalize_volume_paths(paths) -> list[str]:
+def _normalize_volume_entries(paths) -> list[dict]:
     entries = list(paths or [])
     if entries and all(isinstance(item, dict) for item in entries):
         entries = sorted(entries, key=lambda item: int(item.get("number") or 0))
-        return [str(item.get("path") or "") for item in entries if item.get("path")]
-    return [str(item) for item in entries if str(item)]
+        return [
+            {
+                "path": str(item.get("path") or ""),
+                "number": int(item.get("number") or index + 1),
+                "style": str(item.get("style") or ""),
+            }
+            for index, item in enumerate(entries)
+            if item.get("path")
+        ]
+    return [
+        {"path": str(item), "number": index + 1, "style": ""}
+        for index, item in enumerate(entries)
+        if str(item)
+    ]
+
+
+def _normalize_volume_paths(paths) -> list[str]:
+    return [entry["path"] for entry in _normalize_volume_entries(paths)]
 
 
 def _probe_zip_view(view, eocd_offset: int, max_cd_entries_to_walk: int) -> dict:
@@ -315,6 +356,9 @@ def _probe_zip_view(view, eocd_offset: int, max_cd_entries_to_walk: int) -> dict
         "central_directory_disk": 0,
         "disk_entries": 0,
         "declared_total_disks": 1,
+        "zip64": False,
+        "zip64_locator_present": False,
+        "zip64_eocd_present": False,
         "central_directory_present": False,
         "central_directory_walk_ok": False,
         "central_directory_entries_checked": 0,
@@ -334,6 +378,35 @@ def _probe_zip_view(view, eocd_offset: int, max_cd_entries_to_walk: int) -> dict
     cd_offset = _u32(eocd, 16)
     comment_length = _u16(eocd, 20)
     segment_end = eocd_offset + 22 + comment_length
+    if segment_end > view.size:
+        result["error"] = "comment_length_out_of_range"
+        return result
+    zip64_required = any((
+        disk_number == 0xFFFF,
+        central_directory_disk == 0xFFFF,
+        disk_entries == 0xFFFF,
+        total_entries == 0xFFFF,
+        cd_size == 0xFFFFFFFF,
+        cd_offset == 0xFFFFFFFF,
+    ))
+    zip64 = _read_zip64_tail(view, eocd_offset) if zip64_required else None
+    if zip64_required and zip64 is None:
+        result["error"] = "zip64_tail_missing_or_invalid"
+        return result
+    if zip64 is not None:
+        disk_number = zip64["disk_number"]
+        central_directory_disk = zip64["central_directory_disk"]
+        disk_entries = zip64["disk_entries"]
+        total_entries = zip64["total_entries"]
+        cd_size = zip64["central_directory_size"]
+        cd_offset = zip64["central_directory_offset"]
+        result.update({
+            "zip64": True,
+            "zip64_locator_present": True,
+            "zip64_eocd_present": True,
+            "zip64_eocd_offset": zip64["physical_offset"],
+            "zip64_locator_offset": eocd_offset - 20,
+        })
     is_multi_disk = disk_number != 0 or central_directory_disk != 0
     result.update({
         "segment_end": segment_end,
@@ -343,29 +416,65 @@ def _probe_zip_view(view, eocd_offset: int, max_cd_entries_to_walk: int) -> dict
         "disk_number": disk_number,
         "central_directory_disk": central_directory_disk,
         "disk_entries": disk_entries,
-        "declared_total_disks": disk_number + 1,
+        "declared_total_disks": zip64["declared_total_disks"] if zip64 is not None else disk_number + 1,
     })
-    if is_multi_disk:
-        result["error"] = "zip_multi_disk"
-        result["evidence"] = ["zip:eocd_multi_disk"]
-        return result
     if disk_entries != total_entries:
-        result["error"] = "entry_count_mismatch"
-        return result
-    if eocd_offset < cd_size:
-        result["error"] = "central_directory_size_out_of_range"
-        return result
-    physical_cd = eocd_offset - cd_size
-    if physical_cd < cd_offset:
-        result["error"] = "archive_offset_underflow"
-        return result
-    archive_offset = physical_cd - cd_offset
+        # A spanning central directory can legitimately have fewer entries on
+        # the final disk than in the complete archive.
+        if not is_multi_disk:
+            result["error"] = "entry_count_mismatch"
+            return result
+    disk_mapper = getattr(view, "logical_offset_for_disk", None)
+    spanned = getattr(view, "volume_style", "") == "zip_spanned" or is_multi_disk
+    if spanned:
+        if not callable(disk_mapper):
+            result["error"] = "zip_disk_mapping_unavailable"
+            return result
+        physical_cd = disk_mapper(central_directory_disk, cd_offset)
+        archive_offset = 0
+        if physical_cd is None:
+            result["error"] = "central_directory_disk_offset_out_of_range"
+            return result
+        expected_cd_end = zip64["physical_offset"] if zip64 is not None else eocd_offset
+        if physical_cd + cd_size != expected_cd_end:
+            result["error"] = "central_directory_size_mismatch"
+            return result
+        if zip64 is not None:
+            volume_count = len(getattr(view, "volume_ranges", []))
+            if zip64["declared_total_disks"] != volume_count or disk_number + 1 != volume_count:
+                result["error"] = "zip64_disk_count_mismatch"
+                return result
+    else:
+        cd_end = zip64["physical_offset"] if zip64 is not None else eocd_offset
+        if cd_end < cd_size:
+            result["error"] = "central_directory_size_out_of_range"
+            return result
+        physical_cd = cd_end - cd_size
+        if physical_cd < cd_offset:
+            result["error"] = "archive_offset_underflow"
+            return result
+        archive_offset = physical_cd - cd_offset
+        if zip64 is not None and zip64["physical_offset"] - zip64["locator_declared_offset"] != archive_offset:
+            result["error"] = "zip64_locator_offset_mismatch"
+            return result
     result.update({"archive_offset": archive_offset, "central_directory_offset": physical_cd})
+    if total_entries == 0 and cd_size == 0:
+        result.update({
+            "plausible": True,
+            "central_directory_walk_ok": True,
+            "local_header_links_ok": True,
+            "error": "",
+            "evidence": ["zip:eocd"] + (["zip:zip64"] if zip64 is not None else []),
+        })
+        return result
     if view.read_at(physical_cd, 4) != b"PK\x01\x02":
         result["error"] = "bad_central_directory_signature"
         return result
     result["central_directory_present"] = True
-    entries, cd_ok, links, links_ok, error = _walk_zip_cd(view, archive_offset, physical_cd, cd_size, total_entries, max_cd_entries_to_walk)
+    entries, cd_ok, links, links_ok, error = _walk_zip_cd(
+        view, archive_offset, physical_cd, cd_size, total_entries,
+        max_cd_entries_to_walk, spanned=spanned,
+    )
     result.update({
         "central_directory_entries_checked": entries,
         "central_directory_walk_ok": cd_ok,
@@ -376,10 +485,14 @@ def _probe_zip_view(view, eocd_offset: int, max_cd_entries_to_walk: int) -> dict
     if not error:
         result["plausible"] = True
         result["evidence"] = ["zip:eocd", "zip:central_directory", "zip:central_directory_walk", "zip:local_header_links"]
+        if zip64 is not None:
+            result["evidence"].append("zip:zip64")
+        if spanned:
+            result["evidence"].append("zip:multi_disk_offsets")
     return result
 
 
-def _walk_zip_cd(view, archive_offset: int, cd_offset: int, cd_size: int, total_entries: int, max_entries: int):
+def _walk_zip_cd(view, archive_offset: int, cd_offset: int, cd_size: int, total_entries: int, max_entries: int, *, spanned: bool = False):
     cursor = cd_offset
     end = cd_offset + cd_size
     limit = min(total_entries, max_entries)
@@ -391,15 +504,130 @@ def _walk_zip_cd(view, archive_offset: int, cd_offset: int, cd_size: int, total_
         filename_len = _u16(header, 28)
         extra_len = _u16(header, 30)
         comment_len = _u16(header, 32)
+        disk_start = _u16(header, 34)
         local_header_offset = _u32(header, 42)
         entry_size = 46 + filename_len + extra_len + comment_len
         if cursor + entry_size > end:
             return index, False, links_checked, False, "central_directory_variable_fields_out_of_range"
-        if view.read_at(archive_offset + local_header_offset, 4) != b"PK\x03\x04":
+        extra = view.read_at(cursor + 46 + filename_len, extra_len)
+        resolved = _resolve_zip64_central_fields(header, extra)
+        if resolved is None:
+            return index + 1, True, links_checked, False, "zip64_extra_missing_or_invalid"
+        local_header_offset = resolved["local_header_offset"]
+        disk_start = resolved["disk_start"]
+        if spanned:
+            mapper = getattr(view, "logical_offset_for_disk", None)
+            local_logical = mapper(disk_start, local_header_offset) if callable(mapper) else None
+        else:
+            local_logical = archive_offset + local_header_offset
+        if local_logical is None or view.read_at(local_logical, 4) != b"PK\x03\x04":
             return index + 1, True, links_checked, False, "local_header_link_mismatch"
         links_checked += 1
         cursor += entry_size
     return limit, True, links_checked, True, ""
+
+
+def _read_zip64_tail(view, eocd_offset: int) -> dict | None:
+    locator_offset = eocd_offset - 20
+    if locator_offset < 0:
+        return None
+    locator = view.read_at(locator_offset, 20)
+    if len(locator) != 20 or locator[:4] != b"PK\x06\x07":
+        return None
+    zip64_disk = _u32(locator, 4)
+    declared_offset = _u64(locator, 8)
+    total_disks = _u32(locator, 16)
+    physical_offset = None
+    mapper = getattr(view, "logical_offset_for_disk", None)
+    if getattr(view, "volume_style", "") == "zip_spanned" and callable(mapper):
+        physical_offset = mapper(zip64_disk, declared_offset)
+    if physical_offset is None and _zip64_record_ends_at(view, declared_offset, locator_offset):
+        physical_offset = declared_offset
+    fixed_candidate = locator_offset - 56
+    if physical_offset is None and _zip64_record_ends_at(view, fixed_candidate, locator_offset):
+        physical_offset = fixed_candidate
+    if physical_offset is None:
+        # The extensible data sector makes the record variable length. Find
+        # the record whose declared size ends exactly at the locator.
+        search_size = min(locator_offset, 1024 * 1024)
+        search_start = locator_offset - search_size
+        data = view.read_at(search_start, search_size)
+        cursor = data.rfind(b"PK\x06\x06")
+        while cursor >= 0:
+            candidate = search_start + cursor
+            if _zip64_record_ends_at(view, candidate, locator_offset):
+                physical_offset = candidate
+                break
+            cursor = data.rfind(b"PK\x06\x06", 0, cursor)
+    if physical_offset is None:
+        return None
+    fixed = view.read_at(physical_offset, 56)
+    if len(fixed) < 56 or fixed[:4] != b"PK\x06\x06" or _u64(fixed, 4) < 44 or physical_offset + 12 + _u64(fixed, 4) != locator_offset:
+        return None
+    return {
+        "physical_offset": physical_offset,
+        "locator_declared_offset": declared_offset,
+        "zip64_disk": zip64_disk,
+        "declared_total_disks": total_disks,
+        "disk_number": _u32(fixed, 16),
+        "central_directory_disk": _u32(fixed, 20),
+        "disk_entries": _u64(fixed, 24),
+        "total_entries": _u64(fixed, 32),
+        "central_directory_size": _u64(fixed, 40),
+        "central_directory_offset": _u64(fixed, 48),
+    }
+
+
+def _zip64_record_ends_at(view, offset: int, expected_end: int) -> bool:
+    if offset < 0 or offset + 56 > expected_end:
+        return False
+    fixed = view.read_at(offset, 56)
+    return bool(
+        len(fixed) >= 56
+        and fixed[:4] == b"PK\x06\x06"
+        and _u64(fixed, 4) >= 44
+        and offset + 12 + _u64(fixed, 4) == expected_end
+    )
+
+
+def _resolve_zip64_central_fields(header: bytes, extra: bytes) -> dict | None:
+    values = {
+        "uncompressed_size": _u32(header, 24),
+        "compressed_size": _u32(header, 20),
+        "local_header_offset": _u32(header, 42),
+        "disk_start": _u16(header, 34),
+    }
+    needs = (
+        ("uncompressed_size", 0xFFFFFFFF, 8),
+        ("compressed_size", 0xFFFFFFFF, 8),
+        ("local_header_offset", 0xFFFFFFFF, 8),
+        ("disk_start", 0xFFFF, 4),
+    )
+    if not any(values[name] == sentinel for name, sentinel, _ in needs):
+        return values
+    cursor = 0
+    payload = None
+    while cursor + 4 <= len(extra):
+        field_id = _u16(extra, cursor)
+        field_size = _u16(extra, cursor + 2)
+        cursor += 4
+        if cursor + field_size > len(extra):
+            return None
+        if field_id == 0x0001:
+            payload = extra[cursor:cursor + field_size]
+            break
+        cursor += field_size
+    if payload is None:
+        return None
+    cursor = 0
+    for name, sentinel, width in needs:
+        if values[name] != sentinel:
+            continue
+        if cursor + width > len(payload):
+            return None
+        values[name] = int.from_bytes(payload[cursor:cursor + width], "little")
+        cursor += width
+    return values
 
 
 def _probe_seven_zip_view(view, start_offset: int, max_next_header_check_bytes: int) -> dict:
@@ -549,6 +777,18 @@ def _probe_rar5_view(view, result: dict, start_offset: int, max_blocks: int) -> 
                 return result
             data_size, _ = parsed_data
         if index == 0 and header_type != 1:
+            if header_type == 4:
+                result.update({
+                    "plausible": True,
+                    "strong_accept": True,
+                    "password_required": True,
+                    "header_encrypted": True,
+                    "blocks_checked": 1,
+                    "segment_end": 0,
+                    "evidence": evidence + ["rar5:encryption_header"],
+                    "error": "",
+                })
+                return result
             result.update({"blocks_checked": 1, "error": "rar5_main_header_missing"})
             return result
         if index == 0:
