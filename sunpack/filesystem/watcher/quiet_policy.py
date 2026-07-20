@@ -13,11 +13,11 @@ class AdaptiveQuietPolicy:
     minimum_seconds: float = 2.5
     maximum_seconds: float = 180.0
     window_size: int = 12
-    interval_percentile: float = 1.0
+    interval_percentile: float = 0.9
     minimum_shrink_samples: int = 3
-    linear_factor: float = 1.25
-    logarithmic_scale: float = 2.0
-    logarithmic_pivot_seconds: float = 1.0
+    linear_factor: float = 1.0
+    logarithmic_scale: float = 0.75
+    logarithmic_pivot_seconds: float = 2.0
     shrink_alpha: float = 0.2
 
     def __post_init__(self) -> None:
@@ -63,6 +63,11 @@ class AdaptiveQuietPolicy:
     def adjusted_seconds(self, current: float, intervals: list[float] | tuple[float, ...]) -> float:
         target = self.target_seconds(intervals)
         current = min(self.maximum_seconds, max(self.minimum_seconds, float(current)))
+        # P90 ignores harmless isolated pauses, but once the newest interval
+        # already exceeds the active window it represents a real premature
+        # boundary. Learn it immediately so the same slowdown is not retried.
+        if intervals and intervals[-1] > current:
+            target = max(target, self.target_seconds([intervals[-1]]))
         if target >= current:
             return target
         if len(intervals) < self.minimum_shrink_samples:

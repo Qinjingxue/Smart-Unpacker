@@ -45,6 +45,7 @@ def test_usn_data_reason_detects_same_size_in_place_content_change():
         "file",
         101,
         change_reasons=scheduler_module.USN_REASON_DATA_OVERWRITE,
+        change_reasons_without_close=scheduler_module.USN_REASON_DATA_OVERWRITE,
         change_reasons_known=True,
     )
 
@@ -60,6 +61,22 @@ def test_usn_metadata_reason_does_not_count_as_content_change():
         "file",
         101,
         change_reasons=0x00008000,
+        change_reasons_known=True,
+    )
+
+    assert not scheduler_module._candidate_content_changed(previous, current)
+
+
+def test_usn_close_accumulated_data_reason_does_not_restart_content_quiet_window():
+    previous = WatchCandidate("sample.zip", 100, 10.0, "file", 100)
+    current = WatchCandidate(
+        "sample.zip",
+        100,
+        10.0,
+        "file",
+        101,
+        change_reasons=0x80000000 | scheduler_module.USN_REASON_DATA_OVERWRITE,
+        change_reasons_without_close=0,
         change_reasons_known=True,
     )
 
@@ -2069,7 +2086,7 @@ def test_watch_scheduler_adapts_quiet_window_to_fast_content_writes(tmp_path, mo
         os.utime(archive_path, (clock.value, clock.value))
         events.emit(archive_path, event_type="modified")
 
-    quiet_seconds = WatchState.assert_quiet_seconds(watcher, archive_path, minimum=3.5, maximum=4.5)
+    quiet_seconds = WatchState.assert_quiet_seconds(watcher, archive_path, minimum=3.0, maximum=3.5)
     events.run_after(quiet_seconds - 0.01, processed=0)
     events.run_after(0.02, processed=1)
 

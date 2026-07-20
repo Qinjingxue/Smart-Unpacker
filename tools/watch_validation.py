@@ -76,6 +76,7 @@ class ScenarioResult:
     journal_delta_queries: int = 0
     journal_known_deltas: int = 0
     journal_content_deltas: int = 0
+    journal_non_close_content_deltas: int = 0
     journal_reason_mask: int = 0
     journal_errors: dict[str, int] = field(default_factory=dict)
     write_seconds: float = 0.0
@@ -95,6 +96,7 @@ class ObservationMetrics:
     delta_queries: int = 0
     known_deltas: int = 0
     content_deltas: int = 0
+    non_close_content_deltas: int = 0
     reason_mask: int = 0
     errors: Counter[str] = field(default_factory=Counter)
 
@@ -319,6 +321,8 @@ def run_scenario(base: Path, scenario: Scenario, payload: bytes, *, chunk_bytes:
                 observations.reason_mask |= candidate.change_reasons
                 if candidate.change_reasons & CONTENT_REASON_MASK:
                     observations.content_deltas += 1
+                if candidate.change_reasons_without_close & CONTENT_REASON_MASK:
+                    observations.non_close_content_deltas += 1
             elif candidate.change_reason_error:
                 observations.errors[candidate.change_reason_error] += 1
         return candidate
@@ -431,6 +435,7 @@ def run_scenario(base: Path, scenario: Scenario, payload: bytes, *, chunk_bytes:
     result.journal_delta_queries = observations.delta_queries
     result.journal_known_deltas = observations.known_deltas
     result.journal_content_deltas = observations.content_deltas
+    result.journal_non_close_content_deltas = observations.non_close_content_deltas
     result.journal_reason_mask = observations.reason_mask
     result.journal_errors = dict(observations.errors.most_common())
     result.passed = (
@@ -480,6 +485,9 @@ def build_report(mode: str, results: list[ScenarioResult], started_at: str, tota
             "journal_delta_queries": sum(item.journal_delta_queries for item in results),
             "journal_known_deltas": sum(item.journal_known_deltas for item in results),
             "journal_content_deltas": sum(item.journal_content_deltas for item in results),
+            "journal_non_close_content_deltas": sum(
+                item.journal_non_close_content_deltas for item in results
+            ),
             "stable_latency_median_seconds": statistics.median(latencies) if latencies else None,
             "stable_latency_p95_seconds": _percentile(latencies, 0.95),
             "stable_latency_max_seconds": max(latencies) if latencies else None,
@@ -508,6 +516,7 @@ def report_markdown(report: dict) -> str:
         f"- Premature attempts: `{summary['premature_attempts']}`",
         f"- Events / observations: `{summary['events']} / {summary['observation_calls']}`",
         f"- Journal-known deltas: `{summary['journal_known_deltas']}/{summary['journal_delta_queries']}`",
+        f"- Journal content / non-close content deltas: `{summary['journal_content_deltas']} / {summary['journal_non_close_content_deltas']}`",
         f"- Stable latency median / p95 / max: `{latency_summary}`",
         f"- Total runtime: `{report['total_seconds']:.3f}s`",
         "",
@@ -554,6 +563,8 @@ def build_matrix_report(non_elevated: dict, elevated: dict | None, *, elevated_l
         "elevated_journal_coverage": (
             admin["journal_known_deltas"] / max(admin["journal_delta_queries"], 1)
         ),
+        "non_elevated_non_close_content_deltas": normal.get("journal_non_close_content_deltas", 0),
+        "elevated_non_close_content_deltas": admin.get("journal_non_close_content_deltas", 0),
         "median_latency_delta_seconds": (
             admin["stable_latency_median_seconds"] - normal["stable_latency_median_seconds"]
         ),
@@ -587,6 +598,7 @@ def matrix_report_markdown(matrix: dict) -> str:
         f"| Passed | {normal['passed']}/{normal['scenario_count']} | {admin['passed']}/{admin['scenario_count']} |",
         f"| Premature attempts | {normal['premature_attempts']} | {admin['premature_attempts']} |",
         f"| Journal-known deltas | {normal['journal_known_deltas']}/{normal['journal_delta_queries']} | {admin['journal_known_deltas']}/{admin['journal_delta_queries']} |",
+        f"| Content / non-close content deltas | {normal['journal_content_deltas']}/{normal.get('journal_non_close_content_deltas', 0)} | {admin['journal_content_deltas']}/{admin.get('journal_non_close_content_deltas', 0)} |",
         f"| Stable latency median | {normal['stable_latency_median_seconds']:.3f}s | {admin['stable_latency_median_seconds']:.3f}s |",
         f"| Stable latency p95 | {normal['stable_latency_p95_seconds']:.3f}s | {admin['stable_latency_p95_seconds']:.3f}s |",
         f"| Native observations/sec | {normal['observation_calls_per_second']:.1f} | {admin['observation_calls_per_second']:.1f} |",

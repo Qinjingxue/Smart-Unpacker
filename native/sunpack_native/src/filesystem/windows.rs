@@ -23,6 +23,7 @@ const FSCTL_READ_FILE_USN_DATA: u32 = 0x0009_00eb;
 const FSCTL_QUERY_USN_JOURNAL: u32 = 0x0009_00f4;
 const FSCTL_READ_USN_JOURNAL: u32 = 0x0009_00bb;
 const ALL_USN_REASONS: u32 = 0xffff_ffff;
+const USN_REASON_CLOSE: u32 = 0x8000_0000;
 const JOURNAL_BUFFER_BYTES: usize = 64 * 1024;
 const MAX_JOURNAL_BYTES_PER_OBSERVATION: usize = 1024 * 1024;
 static JOURNAL_REASON_READ_UNAVAILABLE: AtomicBool = AtomicBool::new(false);
@@ -31,6 +32,24 @@ static JOURNAL_REASON_READ_UNAVAILABLE: AtomicBool = AtomicBool::new(false);
 static VOLUME_HANDLES: OnceLock<Mutex<HashMap<String, isize>>> = OnceLock::new();
 const ERROR_SHARING_VIOLATION: i32 = 32;
 const ERROR_LOCK_VIOLATION: i32 = 33;
+
+#[derive(Default)]
+struct ChangeReasons {
+    all: u32,
+    without_close: u32,
+}
+
+impl ChangeReasons {
+    fn observe(&mut self, reason: u32) {
+        self.all |= reason;
+        // NTFS may defer all accumulated write reasons until the handle-close
+        // record. That record is useful evidence, but treating it as a new
+        // write interval at the quiet boundary creates a feedback loop.
+        if reason & USN_REASON_CLOSE == 0 {
+            self.without_close |= reason;
+        }
+    }
+}
 
 #[repr(C)]
 struct ReadFileUsnData {
@@ -164,7 +183,8 @@ pub(super) fn watch_file_observation(
                 observation.change_usn,
             ) {
                 Ok(reasons) => {
-                    observation.change_reasons = reasons;
+                    observation.change_reasons = reasons.all;
+                    observation.change_reasons_without_close = reasons.without_close;
                     observation.change_reasons_known = true;
                 }
                 Err(error) => {
@@ -295,6 +315,7 @@ fn read_file_usn(handle: Handle) -> io::Result<WatchFileObservation> {
         file_id,
         change_usn,
         change_reasons: 0,
+        change_reasons_without_close: 0,
         change_reasons_known: false,
         change_reason_error: String::new(),
     })
@@ -305,7 +326,7 @@ fn read_change_reasons(
     expected_file_id: &str,
     previous_usn: i64,
     current_usn: i64,
-) -> io::Result<u32> {
+) -> io::Result<ChangeReasons> {
     let volume = open_volume(path)?;
     let journal_id = query_journal_id(volume)?;
     // StartUsn is a journal byte position and must stay on a record boundary;
@@ -313,7 +334,7 @@ fn read_change_reasons(
     // keeps the interval logically exclusive of previous_usn.
     let mut next_usn = previous_usn;
     let mut scanned_bytes = 0usize;
-    let mut reasons = 0u32;
+    let mut reasons = ChangeReasons::default();
     let mut found = false;
 
     while next_usn <= current_usn {
@@ -355,7 +376,7 @@ fn read_change_reasons(
                 record_change_reason(record, expected_file_id, previous_usn, current_usn)?
             {
                 found = true;
-                reasons |= reason;
+                reasons.observe(reason);
             }
             offset += record_length;
         }
@@ -570,5 +591,26 @@ mod tests {
 
         assert_eq!(request.start_usn, 8_192);
         assert_eq!(request.usn_journal_id, 42);
+    }
+
+    #[test]
+    fn close_record_does_not_become_a_new_content_interval() {
+        let mut reasons = ChangeReasons::default();
+
+        reasons.observe(0x8000_0001);
+
+        assert_eq!(reasons.all, 0x8000_0001);
+        assert_eq!(reasons.without_close, 0);
+    }
+
+    #[test]
+    fn earlier_non_close_data_record_is_preserved_when_close_follows() {
+        let mut reasons = ChangeReasons::default();
+
+        reasons.observe(0x0000_0002);
+        reasons.observe(0x8000_0002);
+
+        assert_eq!(reasons.all, 0x8000_0002);
+        assert_eq!(reasons.without_close, 0x0000_0002);
     }
 }

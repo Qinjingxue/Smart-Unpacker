@@ -1213,7 +1213,7 @@ def _candidate_content_changed(previous: WatchCandidate, current: WatchCandidate
     if previous.change_usn == current.change_usn:
         return False
     if current.change_reasons_known:
-        return bool(current.change_reasons & USN_CONTENT_REASON_MASK)
+        return bool(current.change_reasons_without_close & USN_CONTENT_REASON_MASK)
     # Explorer and downloaders commonly restore the source/server timestamp as
     # their final metadata operation. If volume-journal access is unavailable,
     # optimistically ignore that one event; later same-size overwrites still

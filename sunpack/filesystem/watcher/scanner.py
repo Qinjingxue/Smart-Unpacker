@@ -17,6 +17,7 @@ class WatchCandidate:
     file_id: str = ""
     change_usn: int = 0
     change_reasons: int = 0
+    change_reasons_without_close: int = 0
     change_reasons_known: bool = False
     change_reason_error: str = ""
 
@@ -38,6 +39,9 @@ def _candidate_from_native(item: dict) -> WatchCandidate:
         file_id=str(item.get("file_id") or ""),
         change_usn=int(item.get("change_usn", 0) or 0),
         change_reasons=int(item.get("change_reasons", 0) or 0),
+        change_reasons_without_close=int(
+            item.get("change_reasons_without_close", item.get("change_reasons", 0)) or 0
+        ),
         change_reasons_known=bool(item.get("change_reasons_known", False)),
         change_reason_error=str(item.get("change_reason_error") or ""),
     )

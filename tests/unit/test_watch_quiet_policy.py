@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 import pytest
 
 from sunpack.config.fields.watch import normalize_watch_config
@@ -42,6 +44,21 @@ def test_policy_extends_immediately_after_one_long_observed_interval():
     tracker.observe(20.0, size=2, mtime=20.0)
 
     assert tracker.quiet_seconds > 20.0
+
+
+def test_policy_uses_lower_initial_growth_curve():
+    policy = AdaptiveQuietPolicy()
+
+    expected = 2.5 + 1.0 + 0.75 * math.log1p(1.0 / 2.0)
+
+    assert policy.target_seconds([1.0]) == pytest.approx(expected)
+    assert policy.target_seconds([1.0]) < 4.0
+
+
+def test_policy_uses_p90_instead_of_a_single_maximum_interval():
+    policy = AdaptiveQuietPolicy()
+
+    assert policy.effective_interval([1.0] * 9 + [20.0]) == pytest.approx(2.9)
 
 
 def test_same_metadata_event_does_not_distort_write_interval_history():
@@ -88,5 +105,5 @@ def test_fast_and_moderate_writes_complete_quickly(scenario_name: str, maximum_l
 def test_representative_writes_avoid_repeated_premature_attempts(scenario: WriteScenario):
     result = simulate_writes(scenario, AdaptiveQuietPolicy())
 
-    expected_maximum = 1 if scenario.name in {"moderate", "slow", "very_slow", "temporary_pauses"} else 0
+    expected_maximum = 2 if scenario.name in {"slowing", "temporary_pauses"} else 1
     assert result.premature_attempts <= expected_maximum

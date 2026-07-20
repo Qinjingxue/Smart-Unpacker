@@ -186,6 +186,10 @@ fn watch_candidate_from_metadata(
     dict.set_item("file_id", observation.file_id)?;
     dict.set_item("change_usn", observation.change_usn)?;
     dict.set_item("change_reasons", observation.change_reasons)?;
+    dict.set_item(
+        "change_reasons_without_close",
+        observation.change_reasons_without_close,
+    )?;
     dict.set_item("change_reasons_known", observation.change_reasons_known)?;
     dict.set_item("change_reason_error", observation.change_reason_error)?;
     Ok(Some(dict.unbind()))
