@@ -1,18 +1,11 @@
 from __future__ import annotations
 
-import os
 from typing import Any
 
 from sunpack.contracts.archive_state import ArchiveState
 from sunpack.detection.pipeline.processors.context import FactProcessorContext
 from sunpack.detection.pipeline.processors.registry import register_processor
 from sunpack.support.sevenzip_bridge_worker import open_archive_metadata
-
-
-DEFAULT_CANDIDATE_EXTENSIONS = (
-    ".zip", ".7z", ".rar", ".001", ".cab", ".arj", ".cpio",
-    ".lha", ".lzh", ".iso", ".wim", ".chm", ".rpm", ".deb",
-)
 
 
 @register_processor(
@@ -24,12 +17,7 @@ DEFAULT_CANDIDATE_EXTENSIONS = (
 def process_archive_metadata_open(context: FactProcessorContext) -> dict[str, Any]:
     facts = context.fact_bag
     path = str(facts.get("file.path") or "")
-    extensions = {
-        str(item).lower() if str(item).startswith(".") else f".{str(item).lower()}"
-        for item in context.fact_config.get("candidate_extensions", DEFAULT_CANDIDATE_EXTENSIONS)
-    }
-    extension = os.path.splitext(path)[1].lower()
-    if extension not in extensions or not facts.get("confirmation.identity_required"):
+    if not facts.get("confirmation.identity_required"):
         return {"confirmed": False, "status": "skipped", "reason": "no_metadata_candidate"}
 
     descriptor = ArchiveState.from_any(

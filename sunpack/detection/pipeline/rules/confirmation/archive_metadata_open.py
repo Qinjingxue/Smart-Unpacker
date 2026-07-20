@@ -13,7 +13,6 @@ class ArchiveMetadataOpenRule(RuleBase):
     config_schema = {
         "always_run": {"type": "bool", "required": False, "default": True},
         "timeout_seconds": {"type": "float", "required": False, "default": 1.5},
-        "candidate_extensions": {"type": "list[str]", "required": False},
     }
 
     def evaluate(self, facts: FactBag, config: dict[str, Any]) -> ConfirmationEffect:

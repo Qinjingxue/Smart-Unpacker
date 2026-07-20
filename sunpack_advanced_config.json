@@ -765,7 +765,7 @@
         {
           "name": "executable_carrier_veto",
           "enabled": true,
-          "always_run": false,
+          "always_run": true,
           "reject_runtime_bundles": true
         },
         {
@@ -778,11 +778,7 @@
           "name": "archive_metadata_open",
           "enabled": true,
           "always_run": false,
-          "timeout_seconds": 1.5,
-          "candidate_extensions": [
-            ".zip", ".7z", ".rar", ".001", ".cab", ".arj", ".cpio",
-            ".lha", ".lzh", ".iso", ".wim", ".chm", ".rpm", ".deb"
-          ]
+          "timeout_seconds": 1.5
         }
       ]
     }
