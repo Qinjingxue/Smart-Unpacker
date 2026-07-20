@@ -8,6 +8,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstddef>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <memory>
@@ -22,16 +23,23 @@ namespace sunpack::sevenzip {
 class AsyncFileWriter final {
 public:
     struct FileState {
-        FileState(std::wstring file_path, std::wstring archive_path, UInt32 archive_index, std::size_t trace)
+        FileState(
+            std::wstring file_path,
+            std::wstring archive_path,
+            UInt32 archive_index,
+            std::size_t trace,
+            std::size_t writer_lane)
             : path(std::move(file_path)),
               item_path(std::move(archive_path)),
               item_index(archive_index),
-              trace_index(trace) {}
+              trace_index(trace),
+              lane(writer_lane) {}
 
         std::wstring path;
         std::wstring item_path;
         UInt32 item_index = 0;
         std::size_t trace_index = 0;
+        std::size_t lane = 0;
         std::atomic<UInt64> accepted_bytes{0};
         UInt64 written_bytes = 0;
         UInt32 output_crc32 = 0;
@@ -54,15 +62,40 @@ public:
     static constexpr std::size_t kBufferSize = 1U << 20;
     static constexpr std::size_t kBufferCount = 64;
     static constexpr std::size_t kMaxQueuedJobs = 4096;
+    static constexpr std::size_t kDefaultWriterCount = 4;
+    static constexpr std::size_t kMaxWriterCount = 8;
 
-    AsyncFileWriter() {
+    AsyncFileWriter() : writer_count_(configured_writer_count()) {
         buffers_.reserve(kBufferCount);
         for (std::size_t index = 0; index < kBufferCount; ++index) {
             auto buffer = std::make_unique<Buffer>();
             free_buffers_.push_back(buffer.get());
             buffers_.push_back(std::move(buffer));
         }
-        worker_ = std::thread([this] { writer_loop(); });
+        lanes_.reserve(writer_count_);
+        workers_.reserve(writer_count_);
+        for (std::size_t lane = 0; lane < writer_count_; ++lane) {
+            lanes_.push_back(std::make_unique<WriterLane>());
+        }
+        try {
+            for (std::size_t lane = 0; lane < writer_count_; ++lane) {
+                workers_.emplace_back([this, lane] { writer_loop(lane); });
+            }
+        } catch (...) {
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                stopping_ = true;
+            }
+            for (const auto& lane : lanes_) {
+                lane->cv.notify_all();
+            }
+            for (auto& worker : workers_) {
+                if (worker.joinable()) {
+                    worker.join();
+                }
+            }
+            throw;
+        }
     }
 
     ~AsyncFileWriter() { finish(); }
@@ -76,8 +109,12 @@ public:
         UInt32 item_index,
         std::size_t trace_index
     ) {
+        // One archive item always stays on one FIFO lane. This permits file
+        // creation/write/close work for different items to overlap without
+        // allowing a Close job to overtake that file's Data jobs.
+        const std::size_t lane = next_lane_++ % writer_count_;
         return std::make_shared<FileState>(
-            std::move(path), std::move(item_path), item_index, trace_index);
+            std::move(path), std::move(item_path), item_index, trace_index, lane);
     }
 
     HRESULT write(
@@ -105,7 +142,7 @@ public:
                 producer_cv_.wait(lock, [this] {
                     return first_error_.load(std::memory_order_acquire) != S_OK ||
                         stopping_ ||
-                        (!free_buffers_.empty() && jobs_.size() < kMaxQueuedJobs);
+                        (!free_buffers_.empty() && queued_jobs_ < kMaxQueuedJobs);
                 });
                 const HRESULT error = first_error_.load(std::memory_order_acquire);
                 if (error != S_OK || stopping_) {
@@ -137,11 +174,12 @@ public:
                     }
                     return error != S_OK ? error : E_ABORT;
                 }
-                jobs_.push_back(Job::data(buffer));
+                lanes_[file->lane]->jobs.push_back(Job::data(buffer));
+                ++queued_jobs_;
             }
             consumed += chunk_size;
             file->accepted_bytes.fetch_add(chunk_size, std::memory_order_relaxed);
-            consumer_cv_.notify_one();
+            lanes_[file->lane]->cv.notify_one();
         }
 
         if (processed_size) {
@@ -163,15 +201,16 @@ public:
         try {
             std::unique_lock<std::mutex> lock(mutex_);
             producer_cv_.wait(lock, [this] {
-                return stopping_ || jobs_.size() < kMaxQueuedJobs;
+                return stopping_ || queued_jobs_ < kMaxQueuedJobs;
             });
             if (stopping_) {
                 mark_file_failure(file, E_ABORT, ERROR_OPERATION_ABORTED);
                 return;
             }
-            jobs_.push_back(Job::close(file));
+            lanes_[file->lane]->jobs.push_back(Job::close(file));
+            ++queued_jobs_;
             lock.unlock();
-            consumer_cv_.notify_one();
+            lanes_[file->lane]->cv.notify_one();
         } catch (...) {
             record_failure(file, E_OUTOFMEMORY, ERROR_OUTOFMEMORY);
         }
@@ -190,10 +229,14 @@ public:
             std::lock_guard<std::mutex> lock(mutex_);
             stopping_ = true;
         }
-        consumer_cv_.notify_all();
+        for (const auto& lane : lanes_) {
+            lane->cv.notify_all();
+        }
         producer_cv_.notify_all();
-        if (worker_.joinable()) {
-            worker_.join();
+        for (auto& worker : workers_) {
+            if (worker.joinable()) {
+                worker.join();
+            }
         }
     }
 
@@ -227,20 +270,42 @@ private:
         FileStatePtr file;
     };
 
-    void writer_loop() noexcept {
+    struct WriterLane {
+        std::deque<Job> jobs;
+        std::condition_variable cv;
+    };
+
+    static std::size_t configured_writer_count() noexcept {
+        wchar_t text[16]{};
+        const DWORD length = GetEnvironmentVariableW(
+            L"SUNPACK_ASYNC_WRITER_THREADS", text, static_cast<DWORD>(std::size(text)));
+        if (length == 0 || length >= std::size(text)) {
+            return kDefaultWriterCount;
+        }
+        wchar_t* end = nullptr;
+        const unsigned long configured = std::wcstoul(text, &end, 10);
+        if (end == text || *end != L'\0' || configured == 0) {
+            return kDefaultWriterCount;
+        }
+        return (std::min)(static_cast<std::size_t>(configured), kMaxWriterCount);
+    }
+
+    void writer_loop(std::size_t lane_index) noexcept {
+        WriterLane& lane = *lanes_[lane_index];
         for (;;) {
             Job job;
             {
                 std::unique_lock<std::mutex> lock(mutex_);
-                consumer_cv_.wait(lock, [this] { return stopping_ || !jobs_.empty(); });
-                if (jobs_.empty()) {
+                lane.cv.wait(lock, [this, &lane] { return stopping_ || !lane.jobs.empty(); });
+                if (lane.jobs.empty()) {
                     if (stopping_) {
                         break;
                     }
                     continue;
                 }
-                job = std::move(jobs_.front());
-                jobs_.pop_front();
+                job = std::move(lane.jobs.front());
+                lane.jobs.pop_front();
+                --queued_jobs_;
                 producer_cv_.notify_all();
             }
 
@@ -371,13 +436,15 @@ private:
 
     std::vector<std::unique_ptr<Buffer>> buffers_;
     std::deque<Buffer*> free_buffers_;
-    std::deque<Job> jobs_;
+    std::vector<std::unique_ptr<WriterLane>> lanes_;
+    std::vector<std::thread> workers_;
     mutable std::mutex mutex_;
-    std::condition_variable consumer_cv_;
     std::condition_variable producer_cv_;
-    std::thread worker_;
     std::atomic<HRESULT> first_error_{S_OK};
     std::atomic<int> first_win32_error_{0};
+    const std::size_t writer_count_;
+    std::size_t next_lane_ = 0;
+    std::size_t queued_jobs_ = 0;
     bool stopping_ = false;
 };
 
