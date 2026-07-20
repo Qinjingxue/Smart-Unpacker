@@ -38,7 +38,6 @@ def handle(args, ctx):
 
     summary = {
         "task_count": len(task_items),
-        "encrypted_task_count": sum(1 for item in task_items if item["validation_encrypted"]),
         "split_task_count": sum(1 for item in task_items if len(item["all_parts"]) > 1),
     }
     if not args.json:

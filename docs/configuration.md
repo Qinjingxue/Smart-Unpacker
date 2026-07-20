@@ -390,8 +390,7 @@ print(sorted(get_repair_module_registry().all()))
 | --- | --- |
 | `embedded_archive` | 对普通归档检测尚未解决且入选大小覆盖集的文件执行无扩展名嵌入归档深扫。 |
 | `scene_facts` | 识别游戏、程序、资源目录等场景。 |
-| `seven_zip_probe` | 生成 7z.dll 轻量 probe 结果。 |
-| `seven_zip_validation` | 生成 7z.dll test 结果。 |
+| `archive_metadata_open` | 在隔离 worker 中限时执行只读元数据打开；不解压、不做完整 Test。 |
 | `zip_structure` | 检查 ZIP local header。 |
 | `zip_eocd_structure` | 检查 ZIP EOCD 和 central directory。 |
 | `tar_header_structure` | 检查 TAR header checksum 和 ustar marker。 |
@@ -449,8 +448,9 @@ print(sorted(get_repair_module_registry().all()))
 | `rar_structure_identity` | scoring | RAR magic/header/block walk 加分。 |
 | `archive_container_identity` | scoring | CAB、ARJ、CPIO 等容器加分。 |
 | `compression_stream_identity` | scoring | gzip、bzip2、xz、zstd 结构加分。 |
-| `seven_zip_probe` | confirmation | 用 7z.dll probe 确认中间分候选。 |
-| `seven_zip_validation` | confirmation | 用 7z.dll test 确认中间分候选。 |
+| `executable_carrier_veto` | confirmation | 快速否决明确的应用运行时打包器，保留 SFX。 |
+| `archive_identity_consensus` | confirmation | 复用 ZIP/7z/RAR/TAR/流格式已有结构事实确认归档身份。 |
+| `archive_metadata_open` | confirmation | 仅对未决容器执行隔离、限时、元数据级打开。 |
 
 历史 `magic_bytes`、`embedded_archive` scoring 规则已移出 active 规则包；当前主流水线由格式结构规则消费 magic/结构 fact，由 `embedded_payload_identity` 统一消费 embedded 和 overlay 事实。
 

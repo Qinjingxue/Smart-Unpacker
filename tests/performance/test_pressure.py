@@ -13,7 +13,11 @@ def pressure_scan_config() -> dict:
             "archive_score_threshold": 5,
             "maybe_archive_threshold": 3,
         },
-    }, precheck=[
+    }, processors=[
+        {"name": "embedded_archive", "enabled": True},
+        {"name": "zip_eocd_structure", "enabled": True},
+        {"name": "archive_metadata_open", "enabled": True},
+    ], precheck=[
         {"name": "size_range", "enabled": True, "gte": 0},
         {
             "name": "blacklist",
@@ -23,9 +27,10 @@ def pressure_scan_config() -> dict:
     ], scoring=[
         {"name": "extension", "enabled": True, "extension_score_groups": [{"score": 5, "extensions": [".zip", ".7z", ".rar", ".gz", ".bz2", ".xz", ".001"]}]},
         {"name": "embedded_payload_identity", "enabled": True, "deep_scan_single_candidate_ratio": 1e-9, "embedded_payload_score": 5},
+        {"name": "zip_structure_identity", "enabled": True, "magic_score": 2, "local_header_score": 4, "cd_walk_score": 7},
     ], confirmation=[
-        {"name": "seven_zip_probe", "enabled": True, "reject_executable_container": False, "reject_clear_non_archive": True},
-        {"name": "seven_zip_validation", "enabled": True, "reject_on_failed": False},
+        {"name": "archive_identity_consensus", "enabled": True, "always_run": True},
+        {"name": "archive_metadata_open", "enabled": True, "always_run": True, "timeout_seconds": 1.5},
     ])
 
 

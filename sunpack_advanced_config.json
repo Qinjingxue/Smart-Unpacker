@@ -612,11 +612,7 @@
         "enabled": true
       },
       {
-        "name": "seven_zip_probe",
-        "enabled": true
-      },
-      {
-        "name": "seven_zip_validation",
+        "name": "archive_metadata_open",
         "enabled": true
       },
       {
@@ -646,7 +642,7 @@
       {
         "name": "executable_carrier",
         "enabled": true,
-        "scan_limit_bytes": 67108864
+        "scan_limit_bytes": 8388608
       },
       {
         "name": "seven_zip_structure",
@@ -767,21 +763,26 @@
       ],
       "confirmation": [
         {
-          "name": "executable_carrier_policy",
+          "name": "executable_carrier_veto",
           "enabled": true,
-          "always_run": true,
+          "always_run": false,
           "reject_runtime_bundles": true
         },
         {
-          "name": "seven_zip_probe",
+          "name": "archive_identity_consensus",
           "enabled": true,
-          "reject_executable_container": false,
-          "reject_clear_non_archive": true
+          "always_run": false,
+          "minimum_analysis_confidence": 0.9
         },
         {
-          "name": "seven_zip_validation",
+          "name": "archive_metadata_open",
           "enabled": true,
-          "reject_on_failed": false
+          "always_run": false,
+          "timeout_seconds": 1.5,
+          "candidate_extensions": [
+            ".zip", ".7z", ".rar", ".001", ".cab", ".arj", ".cpio",
+            ".lha", ".lzh", ".iso", ".wim", ".chm", ".rpm", ".deb"
+          ]
         }
       ]
     }

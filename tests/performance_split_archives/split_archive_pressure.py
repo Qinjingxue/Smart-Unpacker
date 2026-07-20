@@ -295,8 +295,8 @@ def pressure_config(passwords: list[str] | None = None, scheduler_profile: str =
         {"name": "tar_structure_identity", "enabled": True, "entry_walk_score": 5},
         {"name": "compression_stream_identity", "enabled": True, "magic_score": 5},
     ], confirmation=[
-        {"name": "seven_zip_probe", "enabled": True, "reject_executable_container": False, "reject_clear_non_archive": True},
-        {"name": "seven_zip_validation", "enabled": True, "reject_on_failed": False},
+        {"name": "archive_identity_consensus", "enabled": True, "always_run": True},
+        {"name": "archive_metadata_open", "enabled": True, "timeout_seconds": 1.5},
     ]))
 
 

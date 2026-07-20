@@ -6,8 +6,7 @@ from sunpack.detection.pipeline.processors.context import FactProcessorContext
 from sunpack.support.module_discovery import import_static_modules
 
 _PROCESSOR_MODULES = (
-    "sunpack.detection.pipeline.processors.modules.confirmation.seven_zip_probe",
-    "sunpack.detection.pipeline.processors.modules.confirmation.seven_zip_validation",
+    "sunpack.detection.pipeline.processors.modules.confirmation.archive_metadata_open",
     "sunpack.detection.pipeline.processors.modules.embedded_payload.embedded_archive",
     "sunpack.detection.pipeline.processors.modules.embedded_payload.executable_carrier",
     "sunpack.detection.pipeline.processors.modules.embedded_payload.pe_overlay",

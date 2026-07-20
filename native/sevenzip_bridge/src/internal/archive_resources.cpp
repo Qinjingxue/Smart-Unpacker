@@ -12,6 +12,58 @@ namespace sunpack::sevenzip {
 
 #ifdef _WIN32
 
+MetadataOpenResult open_archive_metadata_internal(
+    CreateObjectFunc create_object,
+    const std::wstring& archive_path,
+    const std::vector<std::wstring>& part_paths
+) {
+    MetadataOpenResult result;
+    result.archive_size = archive_input_size(archive_path, part_paths);
+    bool any_format_created = false;
+    HRESULT last_hr = E_FAIL;
+    for (const GUID& format : candidate_formats(archive_path, part_paths)) {
+        ComPtr<IInArchive> archive;
+        HRESULT hr = create_object(&format, &IID_IInArchive, reinterpret_cast<void**>(archive.out()));
+        if (hr != S_OK || !archive) {
+            last_hr = hr;
+            continue;
+        }
+        any_format_created = true;
+        bool stream_opened = false;
+        ComPtr<IInStream> stream = open_archive_stream(archive_path, part_paths, stream_opened);
+        if (!stream_opened) {
+            result.status = PasswordTestStatus::Error;
+            result.message = "archive file could not be opened";
+            return result;
+        }
+        ComPtr<IArchiveOpenCallback> callback(new OpenCallback(L"", callback_archive_path(archive_path, part_paths), part_paths));
+        hr = archive->Open(stream.get(), nullptr, callback.get());
+        if (hr != S_OK) {
+            last_hr = hr;
+            continue;
+        }
+        UInt32 item_count = 0;
+        if (archive->GetNumberOfItems(&item_count) != S_OK) {
+            archive->Close();
+            result.status = PasswordTestStatus::Error;
+            result.message = "archive item count could not be read";
+            return result;
+        }
+        result.status = PasswordTestStatus::Ok;
+        result.is_archive = true;
+        result.item_count = item_count;
+        result.message = "archive metadata opened";
+        archive->Close();
+        return result;
+    }
+    result.status = any_format_created && looks_wrong_password(last_hr, kOpOk)
+        ? PasswordTestStatus::WrongPassword
+        : PasswordTestStatus::Unsupported;
+    result.encrypted = result.status == PasswordTestStatus::WrongPassword;
+    result.message = result.encrypted ? "archive headers are encrypted" : "archive metadata could not be opened";
+    return result;
+}
+
 ResourceAnalysisResult analyze_archive_resources_internal(
 
     CreateObjectFunc create_object,
@@ -125,6 +177,32 @@ ResourceAnalysisResult analyze_archive_resources_internal(
 }
 
 #endif
+
+MetadataOpenResult open_archive_metadata_with_parts(
+    const std::wstring& seven_zip_dll_path,
+    const std::wstring& archive_path,
+    const std::vector<std::wstring>& part_paths
+) {
+#ifdef _WIN32
+    ComModule module(seven_zip_dll_path);
+    auto create_object = module.create_object();
+    if (!create_object) {
+        MetadataOpenResult result;
+        result.status = PasswordTestStatus::BackendUnavailable;
+        result.message = "7z.dll could not be loaded";
+        return result;
+    }
+    return open_archive_metadata_internal(create_object, archive_path, part_paths);
+#else
+    (void)seven_zip_dll_path;
+    (void)archive_path;
+    (void)part_paths;
+    MetadataOpenResult result;
+    result.status = PasswordTestStatus::BackendUnavailable;
+    result.message = "metadata open is only implemented on Windows";
+    return result;
+#endif
+}
 
 ResourceAnalysisResult analyze_archive_resources_with_parts(
 

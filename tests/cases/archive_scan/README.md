@@ -96,8 +96,8 @@ tests/cases/archive_scan/
 | `embedded_payload_identity` | 普通载体或 PE overlay 中的嵌入归档载荷命中。 |
 | `seven_zip_structure_identity` | 7z 起始魔数或结构证据命中。 |
 | `zip_structure_identity` | ZIP local header 或 EOCD/central directory 结构证据命中。 |
-| `seven_zip_probe` | 7-Zip 轻量探测确认或拒绝。 |
-| `seven_zip_validation` | 7-Zip 测试确认或拒绝。 |
+| `archive_identity_consensus` | 使用已有的有界结构证据确认归档身份。 |
+| `archive_metadata_open` | 对未决格式执行隔离、限时的元数据打开。 |
 | `size_range` | 文件大小不在允许范围内。 |
 
 ## 示例
@@ -160,14 +160,14 @@ tests/cases/archive_scan/
       "path": "R3961.jpg",
       "should_extract": true,
       "decision": "archive",
-      "matched_rules_include": ["embedded_payload_identity", "seven_zip_probe"],
+      "matched_rules_include": ["embedded_payload_identity", "archive_identity_consensus"],
       "facts": {
         "file.detected_ext": ".rar",
         "file.probe_offset": 904331,
-        "7z.probe": {
-          "is_archive": true,
-          "is_encrypted": true,
-          "type": "rar",
+        "confirmation.identity": {
+          "verdict": "confirm",
+          "strength": "strong",
+          "format": "rar",
           "offset": 904331
         }
       }
@@ -186,7 +186,7 @@ tests/cases/archive_scan/
       "path": "fake.7z",
       "should_extract": false,
       "decision": "not_archive",
-      "matched_rules_include": ["extension", "seven_zip_probe"]
+      "matched_rules_include": ["extension", "archive_metadata_open"]
     }
   ]
 }

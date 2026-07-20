@@ -201,18 +201,8 @@ def _fact_dict(res) -> dict:
     return {}
 
 
-def _validation_state(facts: dict) -> tuple[bool, bool, bool]:
-    validation = facts.get("7z.validation") or {}
-    return (
-        bool(validation.get("ok")),
-        bool(validation.get("skipped")),
-        bool(validation.get("encrypted")),
-    )
-
-
 def scan_result_to_item(res) -> dict[str, Any]:
     facts = _fact_dict(res)
-    validation_ok, validation_skipped, validation_encrypted = _validation_state(facts)
     main_path = res.main_path
     all_parts = list(res.all_parts or [])
     return {
@@ -222,9 +212,6 @@ def scan_result_to_item(res) -> dict[str, Any]:
         "score": res.score,
         "detected_ext": res.detected_ext,
         "split_role": getattr(res, "split_role", facts.get("file.split_role")),
-        "validation_ok": validation_ok,
-        "validation_skipped": validation_skipped,
-        "validation_encrypted": validation_encrypted,
         "reasons": list(res.matched_rules or []),
         "facts": facts,
     }
@@ -235,9 +222,8 @@ def inspect_result_to_item(res) -> dict[str, Any]:
     path_info = facts.get("path") or {}
     size = facts.get("file.size", 0)
     ext = facts.get("file.ext") or path_info.get("ext") or ""
-    validation_ok, validation_skipped, validation_encrypted = _validation_state(facts)
     fact_errors = facts.get("_fact_errors") or []
-    probe = facts.get("7z.probe") or {}
+    metadata_open = facts.get("archive.metadata_open") or {}
     return {
         "path": res.path,
         "decision": getattr(res, "decision", "archive" if res.should_extract else "not_archive"),
@@ -252,12 +238,9 @@ def inspect_result_to_item(res) -> dict[str, Any]:
         "size": facts.get("file.size", size),
         "ext": ext,
         "detected_ext": res.detected_ext or facts.get("file.detected_ext") or None,
-        "container_type": facts.get("file.container_type") or probe.get("type") or "unknown",
-        "validation_ok": validation_ok,
-        "validation_skipped": validation_skipped,
-        "validation_encrypted": validation_encrypted,
-        "probe_detected_archive": bool(facts.get("file.probe_detected_archive") or probe.get("is_archive")),
-        "probe_offset": int(facts.get("file.probe_offset") or probe.get("offset") or 0),
+        "container_type": facts.get("file.container_type") or metadata_open.get("type") or "unknown",
+        "identity_confirmed": bool(facts.get("file.probe_detected_archive")),
+        "identity_offset": int(facts.get("file.probe_offset") or 0),
         "is_split_candidate": bool(res.split_role or facts.get("file.is_split_candidate")),
         "skipped_by_size_limit": bool(res.stop_reason and "size below" in res.stop_reason.lower()),
         "reasons": list(res.matched_rules or []),

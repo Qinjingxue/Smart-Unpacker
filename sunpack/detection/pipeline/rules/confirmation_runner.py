@@ -38,6 +38,7 @@ class ConfirmationRunner:
 
         trace["entered"] = True
         trace["decision"] = "pass"
+        fact_bag.set("detection.scoring_total", int(total_score))
         for rule in rules:
             if not in_confirmation_band and not rule.config.get("always_run", False):
                 continue

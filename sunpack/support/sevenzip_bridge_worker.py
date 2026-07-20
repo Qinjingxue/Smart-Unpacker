@@ -21,6 +21,63 @@ class SevenZipDryRunResult:
     message: str = ""
 
 
+@dataclass(frozen=True)
+class SevenZipMetadataOpenResult:
+    ok: bool
+    is_archive: bool
+    status: str
+    archive_type: str = ""
+    item_count: int = 0
+    encrypted: bool = False
+    timed_out: bool = False
+    message: str = ""
+
+
+def open_archive_metadata(
+    archive_path: str,
+    *,
+    part_paths: list[str] | None = None,
+    format_hint: str = "",
+    timeout: float = 1.5,
+) -> SevenZipMetadataOpenResult:
+    worker_path = get_sevenzip_bridge_worker_path()
+    payload = {
+        "job_id": f"metadata-open-{uuid.uuid4().hex}",
+        "worker_command": "metadata_probe",
+        "seven_zip_dll_path": get_7z_dll_path(),
+        "archive_path": str(archive_path),
+        "part_paths": list(dict.fromkeys(part_paths or [archive_path])),
+        "format_hint": str(format_hint or ""),
+    }
+    try:
+        completed = subprocess.run(
+            [worker_path],
+            input=json.dumps(payload, ensure_ascii=False),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=max(0.1, float(timeout or 1.5)),
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except subprocess.TimeoutExpired:
+        return SevenZipMetadataOpenResult(False, False, "timeout", timed_out=True, message="metadata open timed out")
+    except OSError as exc:
+        return SevenZipMetadataOpenResult(False, False, "unavailable", message=str(exc))
+    events = _parse_worker_json_lines(completed.stdout)
+    result = next((item for item in reversed(events) if item.get("type") == "result"), {})
+    status = str(result.get("native_status") or result.get("status") or "error")
+    is_archive = bool(result.get("is_archive"))
+    return SevenZipMetadataOpenResult(
+        ok=completed.returncode == 0 and status == "ok" and is_archive,
+        is_archive=is_archive,
+        status=status,
+        archive_type=str(result.get("archive_type") or ""),
+        item_count=int(result.get("item_count") or 0),
+        encrypted=bool(result.get("encrypted")),
+        message=str(result.get("message") or completed.stderr or "metadata open failed"),
+    )
+
+
 def dry_run_archive(
     archive_path: str,
     *,

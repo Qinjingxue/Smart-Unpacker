@@ -16,9 +16,9 @@ _RULE_MODULES = (
     "sunpack.detection.pipeline.rules.scoring.structure_evidence_identity",
     "sunpack.detection.pipeline.rules.scoring.tar_structure_identity",
     "sunpack.detection.pipeline.rules.scoring.zip_structure_identity",
-    "sunpack.detection.pipeline.rules.confirmation.executable_carrier_policy",
-    "sunpack.detection.pipeline.rules.confirmation.seven_zip_probe",
-    "sunpack.detection.pipeline.rules.confirmation.seven_zip_validation",
+    "sunpack.detection.pipeline.rules.confirmation.executable_carrier_veto",
+    "sunpack.detection.pipeline.rules.confirmation.archive_identity_consensus",
+    "sunpack.detection.pipeline.rules.confirmation.archive_metadata_open",
 )
 
 class RuleRegistry:

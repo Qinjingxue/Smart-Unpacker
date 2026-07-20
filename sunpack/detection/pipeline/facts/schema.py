@@ -17,15 +17,10 @@ FACT_SCHEMA: dict[str, dict[str, Any]] = {
         "producer": "facts.collectors.magic_bytes",
         "description": "First 16 bytes used by processors and rules for magic signature checks.",
     },
-    "7z.probe": {
+    "archive.metadata_open": {
         "type": "dict",
-        "producer": "processors.seven_zip_probe",
-        "description": "Lightweight 7-Zip probe result with archive/container/encryption/offset fields.",
-    },
-    "7z.validation": {
-        "type": "dict",
-        "producer": "processors.seven_zip_validation",
-        "description": "7-Zip test result with ok/encrypted/error fields.",
+        "producer": "processors.archive_metadata_open",
+        "description": "Isolated, time-bounded metadata-only archive open result.",
     },
     "relation.is_split_related": {
         "type": "bool",
@@ -129,8 +124,8 @@ FACT_SCHEMA: dict[str, dict[str, Any]] = {
     },
     "file.container_type": {
         "type": "str",
-        "producer": "rules.confirmation.seven_zip_probe",
-        "description": "Container type reported by 7-Zip probe, such as pe/elf/macho.",
+        "producer": "rules.confirmation.executable_carrier_veto",
+        "description": "Executable carrier type established by the safety veto.",
     },
     "file.probe_detected_archive": {
         "type": "bool",
@@ -142,15 +137,15 @@ FACT_SCHEMA: dict[str, dict[str, Any]] = {
         "producer": "rules.scoring",
         "description": "Offset where embedded/probed archive payload starts.",
     },
-    "file.validation_ok": {
+    "confirmation.identity_required": {
         "type": "bool",
-        "producer": "rules.confirmation.seven_zip_validation",
-        "description": "Whether 7-Zip validation passed.",
+        "producer": "rules.confirmation.archive_identity_consensus",
+        "description": "Whether scoring must not accept without strong bounded identity confirmation.",
     },
-    "file.validation_encrypted": {
-        "type": "bool",
-        "producer": "rules.confirmation.seven_zip_validation",
-        "description": "Whether 7-Zip validation reported an encrypted archive.",
+    "confirmation.identity": {
+        "type": "dict",
+        "producer": "rules.confirmation.archive_identity_consensus",
+        "description": "Fast format-specific identity consensus result.",
     },
     "file.embedded_archive_found": {
         "type": "bool",

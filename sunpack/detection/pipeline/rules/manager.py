@@ -54,6 +54,23 @@ class RuleManager:
         )
         if decision is not None:
             return decision
+        if fact_bag.get("confirmation.identity_required"):
+            maybe = total_score >= self.decision_policy.maybe_threshold()
+            trace = dict(trace)
+            trace["decision"] = "inconclusive"
+            trace["reason"] = "No bounded confirmation reached strong archive identity"
+            return RuleDecision(
+                should_extract=False,
+                total_score=total_score,
+                matched_rules=list(matched_rules),
+                stop_reason=trace["reason"],
+                decision="maybe_archive" if maybe else "not_archive",
+                decision_stage="confirmation",
+                discarded_at="confirmation_inconclusive",
+                deciding_rule=None,
+                score_breakdown=list(score_breakdown or []),
+                confirmation=trace,
+            )
         return self.decision_policy.finalize_scoring_decision(
             fact_bag,
             total_score,
@@ -148,7 +165,18 @@ class RuleManager:
             minimum += int(rule.instance.minimum_score(rule.config))
         return minimum
 
-    def _scoring_decision_fixed(self, total_score: int, remaining_rules: List[PreparedRule]) -> bool:
+    def _scoring_decision_fixed(
+        self,
+        total_score: int,
+        remaining_rules: List[PreparedRule],
+        *,
+        require_complete_scoring: bool = False,
+    ) -> bool:
+        # Always-run confirmation consumes structural facts produced by scoring.
+        # Do not let an extension score suppress the parsers needed to confirm
+        # the candidate's actual archive identity.
+        if require_complete_scoring:
+            return False
         threshold = self.decision_policy.archive_threshold()
         return total_score >= threshold and total_score + self._remaining_minimum_score(remaining_rules) >= threshold
 
@@ -226,6 +254,10 @@ class RuleManager:
             return decisions
 
         scoring_rules = self._prepare_rules("scoring")
+        require_complete_scoring = any(
+            rule.name == "archive_identity_consensus" and rule.config.get("always_run", False)
+            for rule in self._prepare_rules("confirmation")
+        )
         scoring_state: dict[FactBag, dict[str, Any]] = {
             bag: {
                 "total_score": 0,
@@ -254,7 +286,11 @@ class RuleManager:
                     })
                     if effect.score != 0:
                         state["matched_rules"].append(rule.name)
-                if not self._scoring_decision_fixed(state["total_score"], remaining_rules):
+                if not self._scoring_decision_fixed(
+                    state["total_score"],
+                    remaining_rules,
+                    require_complete_scoring=require_complete_scoring,
+                ):
                     next_active_bags.append(bag)
             active_bags = next_active_bags
 

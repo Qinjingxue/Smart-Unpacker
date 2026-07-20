@@ -7,7 +7,7 @@ from sunpack.detection.pipeline.processors.context import FactProcessorContext
 from sunpack.detection.pipeline.processors.registry import register_processor
 
 
-DEFAULT_SCAN_LIMIT_BYTES = 64 * 1024 * 1024
+DEFAULT_SCAN_LIMIT_BYTES = 8 * 1024 * 1024
 DEFAULT_CHUNK_BYTES = 1024 * 1024
 
 # These signatures identify application runtime packers, not archive formats.

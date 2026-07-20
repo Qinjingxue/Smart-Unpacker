@@ -4,6 +4,7 @@ def with_detection_pipeline(
     precheck: list[dict] | None = None,
     scoring: list[dict] | None = None,
     confirmation: list[dict] | None = None,
+    processors: list[dict] | None = None,
 ) -> dict:
     result = dict(config or {})
     result.setdefault("verification", {})
@@ -18,11 +19,14 @@ def with_detection_pipeline(
         filesystem = dict(result.get("filesystem") or {})
         filesystem["scan_filters"] = scan_filters
         result["filesystem"] = filesystem
-    result["detection"] = {
+    detection = {
         "rule_pipeline": {
             "precheck": remaining_precheck,
             "scoring": [dict(rule) for rule in (scoring or [])],
             "confirmation": confirmation or [],
         }
     }
+    if processors is not None:
+        detection["processors"] = [dict(processor) for processor in processors]
+    result["detection"] = detection
     return result
