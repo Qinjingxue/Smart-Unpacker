@@ -58,24 +58,25 @@ pub(crate) fn scan_embedded_archives(py: Python<'_>, path: &str) -> PyResult<Py<
         - 1;
     let matcher = AhoCorasick::new(patterns.iter().map(|(magic, _, _)| *magic))
         .expect("embedded archive signatures are valid");
-    let mut carry = Vec::new();
+    // Keep the cross-chunk overlap in the front of one reusable allocation.
+    // The previous loop allocated both `chunk` and `sample` for every MiB and
+    // copied the whole chunk into `sample` before scanning it.
+    let mut buffer = vec![0u8; STREAM_CHUNK_SIZE + overlap];
+    let mut carry_len = 0usize;
     let mut current_offset = 0u64;
     let mut raw_hits: Vec<(&'static str, &'static str, u64)> = Vec::new();
     let mut seen = HashSet::new();
 
     loop {
-        let mut chunk = vec![0u8; STREAM_CHUNK_SIZE];
-        let bytes_read = file.read(&mut chunk)?;
+        let bytes_read = file.read(&mut buffer[carry_len..carry_len + STREAM_CHUNK_SIZE])?;
         if bytes_read == 0 {
             break;
         }
-        chunk.truncate(bytes_read);
-        let mut sample = Vec::with_capacity(carry.len() + chunk.len());
-        sample.extend_from_slice(&carry);
-        sample.extend_from_slice(&chunk);
-        let base = current_offset.saturating_sub(carry.len() as u64);
+        let sample_len = carry_len + bytes_read;
+        let sample = &buffer[..sample_len];
+        let base = current_offset.saturating_sub(carry_len as u64);
 
-        for matched in matcher.find_overlapping_iter(&sample) {
+        for matched in matcher.find_overlapping_iter(sample) {
             let (_, hit_name, kind) = patterns[matched.pattern().as_usize()];
             let absolute = base + matched.start() as u64;
             let candidate_offset = if kind == "tar" {
@@ -91,7 +92,8 @@ pub(crate) fn scan_embedded_archives(py: Python<'_>, path: &str) -> PyResult<Py<
             }
         }
 
-        carry = sample[sample.len().saturating_sub(overlap)..].to_vec();
+        carry_len = overlap.min(sample_len);
+        buffer.copy_within(sample_len - carry_len..sample_len, 0);
         current_offset += bytes_read as u64;
     }
 
@@ -783,6 +785,39 @@ mod tests {
                 .map(|row| row.get_item("format").unwrap().extract::<String>().unwrap())
                 .collect();
             assert_eq!(formats, ["bzip2", "xz", "zstd"]);
+        });
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn finds_signature_split_across_reused_buffer_boundary() {
+        let mut gzip = GzEncoder::new(Vec::new(), Compression::fast());
+        gzip.write_all(b"cross-boundary payload").unwrap();
+        let gzip_bytes = gzip.finish().unwrap();
+        let gzip_offset = STREAM_CHUNK_SIZE - 2;
+        let mut data = vec![b'x'; gzip_offset];
+        data.extend_from_slice(&gzip_bytes);
+        let path = temp_file("embedded_cross_boundary", &data);
+        Python::initialize();
+        Python::attach(|py| {
+            let result = scan_embedded_archives(py, path.to_str().unwrap()).unwrap();
+            let bound = result.bind(py);
+            let rows = bound
+                .get_item("candidates")
+                .unwrap()
+                .unwrap()
+                .cast_into::<PyList>()
+                .unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(
+                rows.get_item(0)
+                    .unwrap()
+                    .get_item("offset")
+                    .unwrap()
+                    .extract::<u64>()
+                    .unwrap(),
+                gzip_offset as u64
+            );
         });
         let _ = fs::remove_file(path);
     }
