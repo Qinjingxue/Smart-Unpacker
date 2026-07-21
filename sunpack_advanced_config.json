@@ -107,7 +107,7 @@
     "max_folders": 16,
     "observer_stop_timeout_seconds": 5.0,
     "output_suppression_seconds": 120.0,
-    "password_retry_debounce_seconds": 1.0,
+    "password_retry_debounce_seconds": 0.5,
     "password_retry_include_subtree": true,
     "clipboard_monitor_enabled": true,
     "clipboard_builtin_max_entries": 30,
