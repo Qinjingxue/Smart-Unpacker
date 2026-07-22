@@ -76,6 +76,7 @@ def test_quiet_progress_writes_failure_log_without_terminal_output(tmp_path, cap
 
 def test_interactive_panel_updates_fixed_row_with_progress_and_colors(tmp_path, monkeypatch):
     stream = io.StringIO()
+    monkeypatch.delenv("NO_COLOR", raising=False)
     monkeypatch.setattr(reporting, "_terminal_supports_updates", lambda _stream: True)
     monkeypatch.setattr(reporting.sys, "stdout", stream)
     reporter = RunReporter("zh")
