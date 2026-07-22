@@ -258,6 +258,7 @@ function Get-EnvironmentRefreshReasons {
     $toolsRoot = Join-Path $RepoRoot "tools"
     $requiredTools = @(
         (Join-Path $toolsRoot "7z.exe"),
+        (Join-Path $toolsRoot "7zCon.sfx"),
         (Join-Path $toolsRoot "7z.dll"),
         (Join-Path $toolsRoot "sunpack_sevenzip.dll"),
         (Join-Path $toolsRoot "sunpack_sevenzip_worker.exe")
@@ -343,6 +344,7 @@ $env:PYTHONPATH = $repoRoot
 
 Invoke-TestStep -Label "CLI contract tests" -Command @($python, "-m", "pytest", "-q", "tests/cli", "--durations=20")
 Invoke-TestStep -Label "Data case runners" -Command @($python, "-m", "pytest", "-q", "tests/runners", "--durations=20")
+Invoke-TestStep -Label "Real archive acceptance matrix" -Command @($python, "-m", "pytest", "-q", "tests/acceptance/test_real_archive_matrix.py", "--durations=20")
 Invoke-TestStep -Label "CLI help smoke test" -Command @($python, "sunpack.py", "--help")
 Invoke-TestStep -Label "CLI passwords smoke test" -Command @($python, "sunpack.py", "passwords", "--json")
 Invoke-TestStep -Label "CLI scan smoke test" -Command @($python, "sunpack.py", "scan", (Join-Path $repoRoot "tests"), "--json")
