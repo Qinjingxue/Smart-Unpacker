@@ -36,7 +36,7 @@ from sunpack.filesystem.watcher.scanner import (
     watch_file_is_ready,
 )
 from sunpack.filesystem.watcher.scanner import _candidate_for as _watch_candidate_for_path
-from sunpack.filesystem.watcher.state import WatchStateStore
+from sunpack.filesystem.watcher.state import WatchStateEntry, WatchStateStore
 from sunpack.passwords.internal import builtin as builtin_passwords_module
 from sunpack.passwords.internal.builtin import get_builtin_passwords
 from sunpack.passwords.internal.clipboard_monitor import ClipboardPasswordMonitor
@@ -338,18 +338,38 @@ class WatchScheduler:
 
     def next_delay_seconds(self) -> float:
         now = time.time()
+        monotonic_now = time.monotonic()
         with self._lock:
-            if not self._pending:
-                return self.interval_seconds
-            return max(
-                0.0,
-                min(
-                    state.quiet_seconds - (now - state.last_event_at)
-                    for state in self._active_states.values()
-                ),
-            )
+            if self._pending:
+                delay = max(
+                    0.0,
+                    min(
+                        state.quiet_seconds - (now - state.last_event_at)
+                        for state in self._active_states.values()
+                    ),
+                )
+            else:
+                delay = self.interval_seconds
+            if self._password_dirty_dirs:
+                password_delay = max(
+                    0.0,
+                    min(
+                        changed_at + self.password_retry_debounce_seconds - monotonic_now
+                        for changed_at in self._password_dirty_dirs.values()
+                    ),
+                )
+                delay = min(delay, password_delay)
+            return delay
 
-    def enqueue(self, path: str, *, force: bool = False, event_type: str = "unknown", src_path: str = ""):
+    def enqueue(
+        self,
+        path: str,
+        *,
+        force: bool = False,
+        event_type: str = "unknown",
+        src_path: str = "",
+        _password_retry_snapshot: WatchStateEntry | None = None,
+    ):
         if self.should_ignore_event_path(path):
             return
         if is_directory_password_file(path, self.config):
@@ -419,7 +439,15 @@ class WatchScheduler:
         with self._lock:
             state = self._active_states.get(candidate.path)
             if state is None:
-                active_quiet_seconds = self._observe_candidate_activity(candidate, now)
+                retry_is_unchanged = (
+                    _password_retry_snapshot is not None
+                    and _candidate_matches_password_failure(candidate, _password_retry_snapshot)
+                )
+                active_quiet_seconds = (
+                    0.0
+                    if retry_is_unchanged
+                    else self._observe_candidate_activity(candidate, now)
+                )
                 self._pending[candidate.path] = candidate
                 became_active = True
                 self._active_states[candidate.path] = _ActiveCandidateState(
@@ -511,6 +539,7 @@ class WatchScheduler:
         directory = os.path.dirname(os.path.abspath(path))
         with self._lock:
             self._password_dirty_dirs[directory] = time.monotonic()
+        self._wake_service()
 
     def notify_path_departed(self, path: str, *, recursive: bool = False) -> None:
         normalized = os.path.abspath(path)
@@ -717,7 +746,12 @@ class WatchScheduler:
             for entry in entries:
                 if os.path.exists(entry.path):
                     self.log.write("retry_password_failure", path=entry.path, directory=directory)
-                    self.enqueue(entry.path, force=True)
+                    self.enqueue(
+                        entry.path,
+                        force=True,
+                        event_type="password_retry",
+                        _password_retry_snapshot=entry,
+                    )
 
     def _prepare_group_head(self, path: str) -> WatchCandidate | None:
         candidate = _candidate_for_event_path(path)
@@ -1139,10 +1173,14 @@ class WatchScheduler:
 
     def _mark_all_password_failures_dirty(self) -> None:
         now = time.monotonic()
+        marked = False
         with self._lock:
             for entry in self.state.entries.values():
                 if entry.status == "failed_password":
                     self._password_dirty_dirs[os.path.dirname(entry.path)] = now
+                    marked = True
+        if marked:
+            self._wake_service()
 
 
 class _WatchEventHandler(FileSystemEventHandler):
@@ -1217,6 +1255,16 @@ def _candidate_observation_changed(previous: WatchCandidate, current: WatchCandi
         or previous.mtime != current.mtime
         or previous.file_id != current.file_id
         or previous.change_usn != current.change_usn
+    )
+
+
+def _candidate_matches_password_failure(candidate: WatchCandidate, entry: WatchStateEntry) -> bool:
+    return (
+        os.path.normcase(os.path.abspath(candidate.path)) == os.path.normcase(os.path.abspath(entry.path))
+        and candidate.size == entry.size
+        and candidate.mtime == entry.mtime
+        and candidate.file_id == entry.file_id
+        and candidate.change_usn == entry.change_usn
     )
 
 

@@ -1543,6 +1543,134 @@ def test_watch_scheduler_retries_password_failure_after_password_source_change(t
     assert not watcher.state.entries
 
 
+def test_password_retry_wakeup_uses_debounce_deadline_without_pending_candidate(tmp_path, monkeypatch):
+    monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
+    monotonic_clock = {"value": 100.0}
+    monkeypatch.setattr(scheduler_module.time, "monotonic", lambda: monotonic_clock["value"])
+    wakeups = []
+    archive_path = tmp_path / "sample.zip"
+    archive_path.write_bytes(b"PK\x03\x04payload")
+    stat = archive_path.stat()
+    watcher = WatchScheduler(
+        {
+            "watch": {
+                "clipboard_monitor_enabled": False,
+                "password_retry_debounce_seconds": 5,
+            }
+        },
+        [str(tmp_path)],
+        out_dir=str(tmp_path / "out"),
+        state_path=str(tmp_path / "state.json"),
+        interval_seconds=30,
+        quiet_seconds=0,
+        initial_scan=False,
+        wake_callback=lambda: wakeups.append(monotonic_clock["value"]),
+    )
+    watcher.state.mark(
+        str(archive_path),
+        stat.st_size,
+        stat.st_mtime,
+        status="failed_password",
+    )
+
+    watcher.notify_password_source_changed("test")
+
+    assert wakeups == [100.0]
+    assert watcher.pending_count == 0
+    assert watcher.next_delay_seconds() == 5.0
+    monotonic_clock["value"] = 104.75
+    assert watcher.next_delay_seconds() == 0.25
+
+
+def test_password_retry_bypasses_learned_quiet_for_unchanged_failed_archive(tmp_path, monkeypatch):
+    monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
+    attempts = {"count": 0}
+
+    class PasswordThenSuccessRunner:
+        def __init__(self, config):
+            pass
+
+        def run_targets(self, paths):
+            attempts["count"] += 1
+            if attempts["count"] == 1:
+                return SimpleNamespace(
+                    success_count=0,
+                    failed_tasks=["wrong password"],
+                    failures=[FailureInfo(FailureKind.WRONG_PASSWORD, "password_resolution", "wrong password")],
+                )
+            return SimpleNamespace(success_count=1, failed_tasks=[], failures=[])
+
+    archive_path = tmp_path / "sample.zip"
+    archive_path.write_bytes(b"PK\x03\x04payload")
+    watcher = WatchScheduler(
+        {
+            "watch": {
+                "clipboard_monitor_enabled": False,
+                "password_retry_debounce_seconds": 0,
+            }
+        },
+        [str(tmp_path)],
+        out_dir=str(tmp_path / "out"),
+        state_path=str(tmp_path / "state.json"),
+        initial_scan=False,
+        pipeline_engine=FakePipelineEngine(PasswordThenSuccessRunner),
+    )
+    watcher.enqueue(str(archive_path))
+    watcher._active_states[str(archive_path)].last_event_at = 0.0
+    assert watcher.run_once().failed == 1
+    watcher._quiet_trackers[str(archive_path)].quiet_seconds = 30.0
+
+    watcher.notify_password_source_changed("test")
+    retried = watcher.run_once()
+
+    assert retried.succeeded == 1
+    assert attempts["count"] == 2
+    assert watcher._quiet_trackers[str(archive_path)].quiet_seconds == 30.0
+
+
+def test_password_retry_preserves_quiet_when_failed_archive_changed(tmp_path, monkeypatch):
+    monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
+
+    class PasswordFailureRunner:
+        def __init__(self, config):
+            pass
+
+        def run_targets(self, paths):
+            return SimpleNamespace(
+                success_count=0,
+                failed_tasks=["wrong password"],
+                failures=[FailureInfo(FailureKind.WRONG_PASSWORD, "password_resolution", "wrong password")],
+            )
+
+    archive_path = tmp_path / "sample.zip"
+    archive_path.write_bytes(b"PK\x03\x04payload")
+    watcher = WatchScheduler(
+        {
+            "watch": {
+                "clipboard_monitor_enabled": False,
+                "password_retry_debounce_seconds": 0,
+            }
+        },
+        [str(tmp_path)],
+        out_dir=str(tmp_path / "out"),
+        state_path=str(tmp_path / "state.json"),
+        initial_scan=False,
+        pipeline_engine=FakePipelineEngine(PasswordFailureRunner),
+    )
+    watcher.enqueue(str(archive_path))
+    watcher._active_states[str(archive_path)].last_event_at = 0.0
+    assert watcher.run_once().failed == 1
+    watcher._quiet_trackers[str(archive_path)].quiet_seconds = 30.0
+    archive_path.write_bytes(b"PK\x03\x04changed-payload")
+
+    watcher.notify_password_source_changed("test")
+    retried = watcher.run_once()
+
+    assert retried.processed == 0
+    assert watcher.pending_count == 1
+    assert watcher._active_states[str(archive_path)].quiet_seconds >= 30.0
+
+
 def test_password_retry_debounce_uses_monotonic_clock_when_wall_clock_moves_backward(tmp_path, monkeypatch):
     monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
     wall_clock = WatchClock(1_000.0)
