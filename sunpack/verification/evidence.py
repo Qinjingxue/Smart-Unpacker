@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from sunpack.contracts.archive_state import ArchiveState
+from sunpack.contracts.archive_input import ArchiveInputDescriptor
 from sunpack.contracts.tasks import ArchiveTask
 from sunpack.contracts.extraction import ExtractionResult
 from sunpack.passwords import PasswordSession
@@ -53,11 +54,22 @@ def build_verification_evidence(
             password = knowledge_view.archive_password(task)
     with _phase(phase_timer, f"{phase_prefix}_archive_state"):
         archive_state = task.archive_state()
+        extraction_diagnostics = dict(extraction_result.diagnostics or {})
+        verification_input = extraction_diagnostics.get("verification_archive_input")
+        if isinstance(verification_input, dict):
+            try:
+                descriptor = ArchiveInputDescriptor.from_any(
+                    verification_input,
+                    archive_path=task.main_path,
+                    part_paths=list(task.all_parts or [task.main_path]),
+                )
+                archive_state = ArchiveState.from_archive_input(descriptor)
+            except (TypeError, ValueError, AttributeError):
+                pass
         archive_input = archive_state.to_archive_input_descriptor()
     with _phase(phase_timer, f"{phase_prefix}_analysis_facts"):
         analysis_facts = _analysis_facts_from_task(task)
     with _phase(phase_timer, f"{phase_prefix}_diagnostics"):
-        extraction_diagnostics = dict(extraction_result.diagnostics or {})
         worker_result = _worker_result(extraction_diagnostics)
         worker_native_diagnostics = _worker_native_diagnostics(worker_result)
     with _phase(phase_timer, f"{phase_prefix}_repair_hints"):

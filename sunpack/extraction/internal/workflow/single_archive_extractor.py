@@ -315,6 +315,11 @@ class SingleArchiveExtractor:
                     is_split_archive=is_split,
                     password_evidence=resolution.candidate_evidence,
                 )
+                candidate_failure = self._downgrade_ambiguous_split_empty_password(
+                    resolution,
+                    candidate_failure,
+                    is_split=is_split,
+                )
                 if candidate_failure.details.get("evidence") == "zipcrypto_entry_crc_proven_before_failure":
                     self.password_resolver.confirm_extraction(resolution)
                 elif candidate_failure.kind == FailureKind.PASSWORD_INCONCLUSIVE:
@@ -609,6 +614,42 @@ class SingleArchiveExtractor:
         )
 
     @staticmethod
+    def _downgrade_ambiguous_split_empty_password(
+        resolution: PasswordResolution,
+        failure: FailureInfo,
+        *,
+        is_split: bool,
+    ) -> FailureInfo:
+        """Do not turn an incomplete split stream into password evidence.
+
+        With an unknown encryption state the resolver deliberately tries the
+        empty password as an extraction transaction.  Some archive backends
+        report a truncated split stream as ``wrong_password``.  Rejecting the
+        empty candidate in that situation poisons the fingerprint cache and
+        creates a password-only watch blocker.  Positive encryption facts and
+        non-empty user/store candidates retain the normal password behavior.
+        """
+        if (
+            not is_split
+            or failure.kind is not FailureKind.WRONG_PASSWORD
+            or resolution.password != ""
+            or resolution.encrypted is True
+        ):
+            return failure
+        return FailureInfo(
+            kind=FailureKind.PASSWORD_INCONCLUSIVE,
+            stage=failure.stage,
+            message_key="failure.password_state_unknown",
+            message=failure.message,
+            repairable=False,
+            details={
+                **dict(failure.details or {}),
+                "evidence": "ambiguous_empty_password_on_split_input",
+                "original_failure": failure.to_dict(),
+            },
+        )
+
+    @staticmethod
     def _empty_repaired_success(diagnostics: dict, task: ArchiveTask) -> bool:
         result = diagnostics.get("result") if isinstance(diagnostics.get("result"), dict) else {}
         if str(result.get("status") or "") != "ok":
@@ -680,7 +721,15 @@ class SingleArchiveExtractor:
         for position, segment in enumerate(segments, start=1):
             fmt = str(segment.get("format") or "archive").replace("/", "_") or "archive"
             segment_id = str(segment.get("segment_id") or f"embedded_{position:02d}_{fmt}")
-            segment_dir = os.path.join(out_dir, self._safe_segment_dir_name(segment_id, position, fmt))
+            # A single embedded payload is the logical archive represented by
+            # this task (the common SFX case).  Extract it at the task output
+            # root so manifest paths continue to match.  Multiple independent
+            # payloads still need isolated subdirectories to avoid collisions.
+            segment_dir = (
+                out_dir
+                if len(segments) == 1
+                else os.path.join(out_dir, self._safe_segment_dir_name(segment_id, position, fmt))
+            )
             with _phase(phase_timer, f"{phase_prefix}_segment_descriptor"):
                 descriptor = ArchiveInputDescriptor.from_any(
                     segment.get("archive_input") if isinstance(segment.get("archive_input"), dict) else None,
@@ -761,6 +810,15 @@ class SingleArchiveExtractor:
             },
             "embedded_segments": segment_results,
         }
+        successful_segments = [item for item in segment_results if item.get("success")]
+        if len(segment_results) == 1 and len(successful_segments) == 1:
+            # Verification must inspect the logical embedded archive rather
+            # than the SFX carrier.  In particular, an executable carrier is
+            # intentionally not extractable as ZIP itself and would otherwise
+            # downgrade a fully verified embedded ZIP to partial success.
+            verification_input = successful_segments[0].get("archive_input")
+            if isinstance(verification_input, dict):
+                diagnostics["verification_archive_input"] = dict(verification_input)
         if any_success:
             manifest_path = ""
             manifest_payload = None

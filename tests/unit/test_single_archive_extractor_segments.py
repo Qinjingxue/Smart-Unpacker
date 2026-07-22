@@ -141,6 +141,46 @@ def test_extractor_runs_analysis_segments_inside_same_task_and_restores_source(t
     assert task.archive_state().to_archive_input_descriptor().open_mode == "file"
 
 
+def test_single_embedded_segment_exposes_logical_input_for_verification(tmp_path):
+    carrier = tmp_path / "carrier.exe"
+    carrier.write_bytes(b"stub-zip-tail")
+    task = _task(carrier)
+    archive_input = {
+        "kind": "archive_input",
+        "entry_path": str(carrier),
+        "open_mode": "file_range",
+        "format_hint": "zip",
+        "logical_name": "payload",
+        "parts": [{"path": str(carrier), "role": "main", "start": 5, "end": 8}],
+    }
+    write_extractable_segments(task, [{
+        "segment_id": "embedded_01_zip",
+        "format": "zip",
+        "logical_name": "payload",
+        "archive_input": archive_input,
+    }])
+    extractor = SingleArchiveExtractor(
+        seven_z_path="7z",
+        password_store=_FakePasswordStore(),
+        password_resolver=_FakePasswordResolver(),
+        metadata_scanner=ArchiveMetadataScanner(),
+        rename_scheduler=_FakeRenameScheduler(),
+        ensure_space=lambda _gb: True,
+        retry_policy=_FakeRetryPolicy(),
+        split_entry_resolver=_FakeSplitEntryResolver(),
+        sevenzip_runner=_FakeSevenZipRunner(),
+        best_effort=True,
+    )
+
+    result = extractor.extract(task, str(tmp_path / "out"))
+
+    assert result.success is True
+    assert (tmp_path / "out" / "zip.txt").exists()
+    assert not (tmp_path / "out" / "embedded_01_zip").exists()
+    assert result.diagnostics["verification_archive_input"] == archive_input
+    assert task.archive_state().to_archive_input_descriptor().open_mode == "file"
+
+
 def test_extractor_fills_success_output_counts_when_worker_omits_them(tmp_path):
     archive = tmp_path / "case.zip"
     archive.write_bytes(b"PK\x05\x06" + b"\0" * 18)

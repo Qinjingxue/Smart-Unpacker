@@ -7,6 +7,8 @@ from sunpack.repair.loop import terminal_failure_reason
 from sunpack.extraction.internal.workflow.errors import classify_extract_failure
 from sunpack.contracts.extraction import ExtractionResult
 from sunpack.contracts.failures import FailureKind
+from sunpack.passwords.result import PasswordResolution, PasswordResolutionStatus
+from sunpack.extraction.internal.workflow.single_archive_extractor import SingleArchiveExtractor
 
 
 def test_split_worker_damage_takes_precedence_over_wrong_password_signal():
@@ -66,6 +68,51 @@ def test_plain_wrong_password_stays_terminal_for_split_archive():
     )
 
     assert terminal_failure_reason(result) == "wrong_password"
+
+
+def test_unknown_empty_password_on_split_input_is_not_conclusive_password_evidence():
+    resolution = PasswordResolution(
+        password="",
+        status=PasswordResolutionStatus.RESOLVED,
+        encrypted=None,
+        requires_extraction_confirmation=True,
+    )
+    original = classify_extract_failure(
+        _worker_completed({"wrong_password": True, "native_status": "wrong_password"}),
+        "",
+        archive="payload.7z.001",
+        is_split_archive=True,
+    )
+
+    failure = SingleArchiveExtractor._downgrade_ambiguous_split_empty_password(
+        resolution,
+        original,
+        is_split=True,
+    )
+
+    assert failure.kind is FailureKind.PASSWORD_INCONCLUSIVE
+    assert failure.is_password_failure is False
+
+
+def test_known_encrypted_split_input_keeps_wrong_password_failure():
+    resolution = PasswordResolution(
+        password="",
+        status=PasswordResolutionStatus.RESOLVED,
+        encrypted=True,
+        requires_extraction_confirmation=True,
+    )
+    original = classify_extract_failure(
+        _worker_completed({"wrong_password": True, "native_status": "wrong_password"}),
+        "",
+        archive="payload.7z.001",
+        is_split_archive=True,
+    )
+
+    assert SingleArchiveExtractor._downgrade_ambiguous_split_empty_password(
+        resolution,
+        original,
+        is_split=True,
+    ) is original
 
 
 @pytest.mark.parametrize(
