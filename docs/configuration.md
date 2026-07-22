@@ -184,6 +184,7 @@ CLI 在当前命令结束后关闭 Engine；watch 在服务生命周期内保持
 | `resource_guard` | `dict` | 可选资源护栏，用 analysis 估算的文件数、解包大小、压缩比等限制任务。 |
 
 `auto` 会根据 CPU 和内存选择保守或激进档。配置文件中的超时会覆盖 profile 内置值。
+资源调度器只在存在 pipeline backlog、已注册 workload 或活跃 worker 时采集 CPU、内存和磁盘指标；Engine 空闲时会阻塞等待新工作，不进行周期采样。CLI、右键菜单和 watch 共用这一行为。
 
 `resource_guard` 当前常用字段：
 

@@ -106,16 +106,33 @@ class ConcurrencyScheduler:
 
     def _adjust_loop(self):
         poll_interval = max(self.config.get("poll_interval_ms", 1000), 100) / 1000.0
-        last_io = psutil.disk_io_counters()
-        last_bytes = (last_io.read_bytes + last_io.write_bytes) if last_io else 0
+        last_bytes = None
 
-        while self.is_running:
+        while True:
+            with self.cond:
+                if not self.is_running:
+                    break
+                sampling_needed = self._sampling_needed_locked()
+            if not sampling_needed:
+                # A resident PipelineEngine may stay idle for hours.
+                # Park without touching psutil until real pipeline pressure wakes us.
+                last_bytes = None
+                self._wake_event.wait()
+                self._wake_event.clear()
+                continue
+            if last_bytes is None:
+                initial_io = psutil.disk_io_counters()
+                last_bytes = (initial_io.read_bytes + initial_io.write_bytes) if initial_io else 0
             self._wake_event.wait(timeout=poll_interval)
             self._wake_event.clear()
-            if not self.is_running:
-                break
+            with self.cond:
+                if not self.is_running:
+                    break
+                if not self._sampling_needed_locked():
+                    continue
             now_io = psutil.disk_io_counters()
             if not now_io:
+                last_bytes = None
                 continue
 
             now_bytes = now_io.read_bytes + now_io.write_bytes
@@ -221,8 +238,8 @@ class ConcurrencyScheduler:
         with self.cond:
             workload_id = next(self._workload_ids)
             self._workloads[workload_id] = (max(0, int(pending_count or 0)), 0, str(label or ""))
-            self._mark_activity_locked()
             self._refresh_pending_estimate_locked()
+            self._mark_activity_locked()
             return workload_id
 
     def update_workload(self, workload_id: int, pending_count: int, futures_count: int = 0) -> None:
@@ -235,8 +252,8 @@ class ConcurrencyScheduler:
                 max(0, int(futures_count or 0)),
                 label,
             )
-            self._mark_activity_locked()
             self._refresh_pending_estimate_locked()
+            self._mark_activity_locked()
 
     def unregister_workload(self, workload_id: int) -> None:
         with self.cond:
@@ -321,18 +338,28 @@ class ConcurrencyScheduler:
         with self.cond:
             while not self._can_acquire_locked(demand_value):
                 self.cond.wait()
+            was_sampling = self._sampling_needed_locked()
+            if not was_sampling:
+                self._decay_idle_locked(time.monotonic())
             self.active_workers += 1
             self._add_demand_locked(demand_value)
             self._mark_activity_locked()
+            if not was_sampling:
+                self._wake_event.set()
 
     def try_acquire_slot(self, token_cost: int = 1, demand: ResourceDemand | dict | None = None) -> bool:
         demand_value = demand_from_value(demand or token_cost)
         with self.cond:
             if not self._can_acquire_locked(demand_value):
                 return False
+            was_sampling = self._sampling_needed_locked()
+            if not was_sampling:
+                self._decay_idle_locked(time.monotonic())
             self.active_workers += 1
             self._add_demand_locked(demand_value)
             self._mark_activity_locked()
+            if not was_sampling:
+                self._wake_event.set()
             return True
 
     def fit_score(self, demand: ResourceDemand | dict) -> int | None:
@@ -349,20 +376,32 @@ class ConcurrencyScheduler:
     def release_slot(self, token_cost: int = 1, demand: ResourceDemand | dict | None = None):
         demand_value = demand_from_value(demand or token_cost)
         with self.cond:
+            was_sampling = self._sampling_needed_locked()
             self.active_workers = max(0, self.active_workers - 1)
             self.active_cpu_tokens = max(0, self.active_cpu_tokens - demand_value.cpu)
             self.active_io_tokens = max(0, self.active_io_tokens - demand_value.io)
             self.active_memory_tokens = max(0, self.active_memory_tokens - demand_value.memory)
             self._refresh_active_scalar_locked()
             self._mark_activity_locked()
+            if was_sampling != self._sampling_needed_locked():
+                self._wake_event.set()
             self.cond.notify_all()
 
     def _refresh_pending_estimate_locked(self) -> None:
+        was_sampling = self._sampling_needed_locked()
         workload_pressure = sum(pending + running for pending, running, _label in self._workloads.values())
-        self.pending_task_estimate = self.pipeline_request_backlog + workload_pressure
+        next_pending_estimate = self.pipeline_request_backlog + workload_pressure
+        if not was_sampling and next_pending_estimate > 0:
+            self._decay_idle_locked(time.monotonic())
+        self.pending_task_estimate = next_pending_estimate
         if self.pending_task_estimate > 0:
             self._mark_activity_locked()
+        if was_sampling != self._sampling_needed_locked():
+            self._wake_event.set()
         self.cond.notify_all()
+
+    def _sampling_needed_locked(self) -> bool:
+        return self.pending_task_estimate > 0 or self.active_workers > 0
 
     def _mark_activity_locked(self) -> None:
         self._last_activity_at = time.monotonic()
