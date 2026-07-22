@@ -101,7 +101,6 @@ class WatchScheduler:
         *,
         out_dir: str,
         state_path: str,
-        interval_seconds: float | None = None,
         quiet_seconds: float | None = None,
         recursive: bool | None = None,
         initial_scan: bool | None = None,
@@ -119,7 +118,6 @@ class WatchScheduler:
         expanded_out_dir = os.path.expanduser(out_dir)
         self._relative_out_dir = not os.path.isabs(expanded_out_dir)
         self.out_dir = os.path.normpath(expanded_out_dir) if self._relative_out_dir else os.path.abspath(expanded_out_dir)
-        self.interval_seconds = max(0.1, float(DEFAULT_WATCH_CONFIG["interval_seconds"] if interval_seconds is None else interval_seconds))
         configured_cold_start = watch_config.get(
             "cold_start_seconds",
             watch_config.get("quiet_seconds", DEFAULT_WATCH_CONFIG["cold_start_seconds"]),
@@ -168,6 +166,7 @@ class WatchScheduler:
             self.state.remember_output_roots([self.out_dir])
         self._observer = Observer()
         self._started = False
+        self._run_wakeup = threading.Event()
         self._wake_callback = wake_callback
         if pipeline_engine is None:
             raise ValueError("WatchScheduler requires a PipelineEngine")
@@ -253,7 +252,6 @@ class WatchScheduler:
             cold_start_seconds=self.cold_start_seconds,
             quiet_min_seconds=self._quiet_policy.minimum_seconds,
             quiet_max_seconds=self._quiet_policy.maximum_seconds,
-            interval_seconds=self.interval_seconds,
         )
 
     def _ensure_directory_password_files(self) -> None:
@@ -280,8 +278,9 @@ class WatchScheduler:
         self.start()
         try:
             while True:
+                self._run_wakeup.clear()
                 self.run_once()
-                time.sleep(self.next_delay_seconds())
+                self._run_wakeup.wait(self.next_delay_seconds())
         finally:
             self.stop()
 
@@ -336,7 +335,7 @@ class WatchScheduler:
         self._filters = list(value or [])
         self._filter_revision += 1
 
-    def next_delay_seconds(self) -> float:
+    def next_delay_seconds(self) -> float | None:
         now = time.time()
         monotonic_now = time.monotonic()
         with self._lock:
@@ -349,7 +348,7 @@ class WatchScheduler:
                     ),
                 )
             else:
-                delay = self.interval_seconds
+                delay = None
             if self._password_dirty_dirs:
                 password_delay = max(
                     0.0,
@@ -358,7 +357,7 @@ class WatchScheduler:
                         for changed_at in self._password_dirty_dirs.values()
                     ),
                 )
-                delay = min(delay, password_delay)
+                delay = password_delay if delay is None else min(delay, password_delay)
             return delay
 
     def enqueue(
@@ -571,6 +570,7 @@ class WatchScheduler:
             self._wake_service()
 
     def _wake_service(self) -> None:
+        self._run_wakeup.set()
         if self._wake_callback is not None:
             self._wake_callback()
 

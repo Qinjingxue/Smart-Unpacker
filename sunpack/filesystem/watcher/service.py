@@ -230,7 +230,7 @@ class WatchService:
                     return 0
                 self.scheduler.run_once()
                 return 0
-            next_scheduler_run = 0.0
+            next_scheduler_run: float | None = 0.0
             active_scheduler = None
             while not self._stop_requested:
                 now = time.monotonic()
@@ -239,7 +239,7 @@ class WatchService:
                         active_scheduler = self.scheduler
                         next_scheduler_run = 0.0
                         self._last_idle_tick_signature = None
-                    if now >= next_scheduler_run:
+                    if next_scheduler_run is not None and now >= next_scheduler_run:
                         try:
                             result = self.scheduler.run_once()
                             if self._should_log_scheduler_tick(result):
@@ -253,13 +253,16 @@ class WatchService:
                                 )
                         except Exception as exc:
                             self.log.write("scheduler_error", error=str(exc), error_type=type(exc).__name__)
-                        next_scheduler_run = now + self._scheduler_next_delay()
-                    sleep_seconds = max(0.0, next_scheduler_run - now)
+                        delay = self._scheduler_next_delay()
+                        next_scheduler_run = None if delay is None else now + delay
+                    sleep_seconds = None if next_scheduler_run is None else max(0.0, next_scheduler_run - now)
                 else:
                     sleep_seconds = None
                 control_event = self.control_events.wait(sleep_seconds)
                 if control_event == CONTROL_SCHEDULER_WAKEUP and self.scheduler is not None:
-                    next_scheduler_run = time.monotonic() + self._scheduler_next_delay()
+                    now = time.monotonic()
+                    delay = self._scheduler_next_delay()
+                    next_scheduler_run = None if delay is None else now + delay
                 else:
                     self._handle_control_event(control_event)
             return 0
@@ -303,7 +306,6 @@ class WatchService:
             roots,
             out_dir=out_dir,
             state_path=state_path,
-            interval_seconds=float(watch_config.get("interval_seconds", 1.0)),
             quiet_seconds=float(
                 watch_config.get(
                     "cold_start_seconds",
@@ -367,15 +369,16 @@ class WatchService:
         self._last_idle_tick_signature = signature
         return True
 
-    def _scheduler_next_delay(self) -> float:
+    def _scheduler_next_delay(self) -> float | None:
         if self.scheduler is None:
-            return 0.0
+            return None
         if hasattr(self.scheduler, "next_delay_seconds"):
             try:
-                return max(0.0, float(self.scheduler.next_delay_seconds()))
+                delay = self.scheduler.next_delay_seconds()
+                return None if delay is None else max(0.0, float(delay))
             except Exception:
                 pass
-        return max(0.0, float(getattr(self.scheduler, "interval_seconds", 1.0)))
+        return None
 
     def _wake_scheduler(self) -> None:
         self.control_events.wake_scheduler()

@@ -1561,7 +1561,6 @@ def test_password_retry_wakeup_uses_debounce_deadline_without_pending_candidate(
         [str(tmp_path)],
         out_dir=str(tmp_path / "out"),
         state_path=str(tmp_path / "state.json"),
-        interval_seconds=30,
         quiet_seconds=0,
         initial_scan=False,
         wake_callback=lambda: wakeups.append(monotonic_clock["value"]),
@@ -1580,6 +1579,20 @@ def test_password_retry_wakeup_uses_debounce_deadline_without_pending_candidate(
     assert watcher.next_delay_seconds() == 5.0
     monotonic_clock["value"] = 104.75
     assert watcher.next_delay_seconds() == 0.25
+
+
+def test_idle_scheduler_has_no_polling_deadline(tmp_path, monkeypatch):
+    monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
+    watcher = WatchScheduler(
+        {"watch": {"clipboard_monitor_enabled": False}},
+        [str(tmp_path)],
+        out_dir=str(tmp_path / "out"),
+        state_path=str(tmp_path / "state.json"),
+        initial_scan=False,
+    )
+
+    assert watcher.pending_count == 0
+    assert watcher.next_delay_seconds() is None
 
 
 def test_password_retry_bypasses_learned_quiet_for_unchanged_failed_archive(tmp_path, monkeypatch):

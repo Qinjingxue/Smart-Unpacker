@@ -410,7 +410,7 @@ def test_watch_service_scheduler_uses_directory_scan_mode_not_watch_recursive(tm
     assert captured["started"] is True
 
 
-def test_watch_service_waits_on_control_event_until_scheduler_is_due(tmp_path, monkeypatch):
+def test_watch_service_waits_indefinitely_when_scheduler_is_idle(tmp_path, monkeypatch):
     state_dir = tmp_path / ".sunpack_watch"
     state_dir.mkdir()
     monkeypatch.setattr(
@@ -430,8 +430,6 @@ def test_watch_service_waits_on_control_event_until_scheduler_is_due(tmp_path, m
     waits = []
 
     class FakeScheduler:
-        interval_seconds = 5.0
-
         def run_once(self):
             scheduler_runs.append(len(scheduler_runs))
             return SimpleNamespace(processed=0, succeeded=0, failed=0, pending=0, errors=[])
@@ -458,8 +456,8 @@ def test_watch_service_waits_on_control_event_until_scheduler_is_due(tmp_path, m
     monkeypatch.setattr(service_module.time, "monotonic", lambda: next(times))
 
     assert service.run() == 0
-    assert len(scheduler_runs) == 2
-    assert waits == [5.0, 5.0]
+    assert len(scheduler_runs) == 1
+    assert waits == [None, None]
 
 
 def test_watch_service_recalculates_deadline_after_scheduler_wakeup(tmp_path, monkeypatch):
@@ -475,15 +473,13 @@ def test_watch_service_recalculates_deadline_after_scheduler_wakeup(tmp_path, mo
     waits = []
 
     class FakeScheduler:
-        interval_seconds = 5.0
-
         def __init__(self):
             self.delay = 120.0
 
         def run_once(self):
             scheduler_runs.append(len(scheduler_runs))
             if len(scheduler_runs) == 2:
-                self.delay = self.interval_seconds
+                self.delay = 5.0
             return SimpleNamespace(processed=0, succeeded=0, failed=0, pending=1, errors=[])
 
         def next_delay_seconds(self):
@@ -536,8 +532,6 @@ def test_watch_service_deduplicates_unchanged_pending_ticks(tmp_path, monkeypatc
             written.append((event, payload))
 
     class FakeScheduler:
-        interval_seconds = 5.0
-
         def __init__(self):
             self.results = iter([
                 SimpleNamespace(processed=0, succeeded=0, failed=0, pending=1, errors=[]),
@@ -548,6 +542,9 @@ def test_watch_service_deduplicates_unchanged_pending_ticks(tmp_path, monkeypatc
 
         def run_once(self):
             return next(self.results)
+
+        def next_delay_seconds(self):
+            return 5.0
 
     class FakeControlEvents:
         def __init__(self):

@@ -19,7 +19,6 @@ def normalize_watch_config(value: Any) -> dict[str, Any]:
         config["cold_start_seconds"] = raw_config["quiet_seconds"]
     config.pop("quiet_seconds", None)
     config.pop("recursive", None)
-    config["interval_seconds"] = max(0.1, _float_field(config, "interval_seconds"))
     config["cold_start_seconds"] = max(0.0, _float_field(config, "cold_start_seconds"))
     config["quiet_min_seconds"] = max(0.0, _float_field(config, "quiet_min_seconds"))
     config["quiet_max_seconds"] = max(
