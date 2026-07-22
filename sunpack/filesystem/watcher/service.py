@@ -275,6 +275,10 @@ class WatchService:
 
     def request_stop(self) -> None:
         self._stop_requested = True
+        try:
+            self.control_events.wake_stop()
+        except Exception as exc:
+            self.log.write("service_stop_wakeup_error", error=str(exc), error_type=type(exc).__name__)
 
     def request_reload(self) -> None:
         self._reload_config()
@@ -428,6 +432,9 @@ class WatchControlEvents:
 
     def wake_scheduler(self) -> bool:
         return _set_named_event(self.names[CONTROL_SCHEDULER_WAKEUP])
+
+    def wake_stop(self) -> bool:
+        return _set_named_event(self.names[CONTROL_STOP])
 
     def wait(self, timeout_seconds: float | None) -> str | None:
         if not self._handles:

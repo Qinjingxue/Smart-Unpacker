@@ -125,6 +125,59 @@ def test_watch_service_keeps_active_named_mutex(tmp_path, monkeypatch):
         first._release_lock()
 
 
+def test_request_stop_wakes_service_blocked_without_scheduler(tmp_path, monkeypatch):
+    state_dir = tmp_path / ".sunpack_watch"
+    monkeypatch.setattr(
+        service_module,
+        "load_config",
+        lambda: {
+            "watch": {
+                "state_dir": str(state_dir),
+                "roots": [],
+                "tray_enabled": False,
+            }
+        },
+    )
+    service = WatchService(engine_factory=lambda _config: FakePipelineEngine(FakeRunner))
+    waiting = threading.Event()
+    wake = threading.Event()
+
+    class BlockingControlEvents:
+        def start(self):
+            pass
+
+        def wait(self, timeout_seconds):
+            assert timeout_seconds is None
+            waiting.set()
+            assert wake.wait(timeout=1.0)
+            return CONTROL_STOP
+
+        def wake_stop(self):
+            wake.set()
+            return True
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(service, "_acquire_lock", lambda: True)
+    monkeypatch.setattr(service, "_release_lock", lambda: None)
+    monkeypatch.setattr(service, "_start_scheduler", lambda: setattr(service, "scheduler", None))
+    monkeypatch.setattr(service, "_stop_scheduler", lambda: setattr(service, "scheduler", None))
+    monkeypatch.setattr(service, "_start_tray", lambda: None)
+    monkeypatch.setattr(service, "_stop_tray", lambda: None)
+    service.control_events = BlockingControlEvents()
+    results = []
+    thread = threading.Thread(target=lambda: results.append(service.run()))
+    thread.start()
+    assert waiting.wait(timeout=1.0)
+
+    service.request_stop()
+    thread.join(timeout=1.0)
+
+    assert not thread.is_alive()
+    assert results == [0]
+
+
 def test_watch_running_reflects_named_mutex_owner(tmp_path, monkeypatch):
     state_dir = tmp_path / ".sunpack_watch"
     roots_path = tmp_path / "sunpack_watch_roots.txt"
