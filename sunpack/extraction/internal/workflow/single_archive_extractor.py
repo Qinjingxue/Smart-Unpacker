@@ -819,6 +819,22 @@ class SingleArchiveExtractor:
             verification_input = successful_segments[0].get("archive_input")
             if isinstance(verification_input, dict):
                 diagnostics["verification_archive_input"] = dict(verification_input)
+            segment_diagnostics = successful_segments[0].get("diagnostics")
+            segment_worker_result = (
+                segment_diagnostics.get("result")
+                if isinstance(segment_diagnostics, dict)
+                and isinstance(segment_diagnostics.get("result"), dict)
+                else {}
+            )
+            verified_manifest = segment_worker_result.get("verified_manifest")
+            if isinstance(verified_manifest, dict):
+                # The extraction transaction already verified the encrypted
+                # embedded payload with the selected password.  Preserve that
+                # stronger evidence at the logical task boundary instead of
+                # re-probing the SFX carrier without the segment context.
+                diagnostics["result"]["verified_manifest"] = dict(verified_manifest)
+                if segment_worker_result.get("archive_type"):
+                    diagnostics["result"]["archive_type"] = segment_worker_result["archive_type"]
         if any_success:
             manifest_path = ""
             manifest_payload = None

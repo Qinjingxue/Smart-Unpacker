@@ -58,6 +58,13 @@ class _FakeSevenZipRunner:
         result = {
             "status": "ok",
             "item_count": 1 if self.include_output_counts else 0,
+            "archive_type": name,
+            "verified_manifest": {
+                "validated": True,
+                "file_count": 1,
+                "item_count": 1,
+                "files": [{"path": f"{name}.txt", "status": "complete", "size": 2}],
+            },
         }
         if self.include_output_counts:
             result.update({
@@ -178,6 +185,7 @@ def test_single_embedded_segment_exposes_logical_input_for_verification(tmp_path
     assert (tmp_path / "out" / "zip.txt").exists()
     assert not (tmp_path / "out" / "embedded_01_zip").exists()
     assert result.diagnostics["verification_archive_input"] == archive_input
+    assert result.diagnostics["result"]["verified_manifest"]["validated"] is True
     assert task.archive_state().to_archive_input_descriptor().open_mode == "file"
 
 
