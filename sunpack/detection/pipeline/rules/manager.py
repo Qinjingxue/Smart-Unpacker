@@ -4,7 +4,6 @@ from sunpack.contracts.detection import FactBag
 from sunpack.contracts.rules import RuleDecision
 from sunpack.detection.pipeline.rules.registry import discover_rules, get_rule_registry
 from sunpack.detection.pipeline.rules.config_validator import RuleConfigValidator
-from sunpack.detection.pipeline.rules.confirmation_runner import ConfirmationRunner
 from sunpack.detection.pipeline.rules.decision_policy import RuleDecisionPolicy
 from sunpack.detection.pipeline.rules.rule_preparer import RulePreparer
 from sunpack.detection.pipeline.rules.types import PreparedRule
@@ -25,15 +24,6 @@ class RuleManager:
         self.config_validator = RuleConfigValidator(self.registry)
         self.rule_preparer = RulePreparer(config, self.registry, self.config_validator)
         self.decision_policy = RuleDecisionPolicy(config)
-        self.confirmation_runner = ConfirmationRunner(
-            self.decision_policy,
-            lambda layer: self._prepare_rules(layer),
-            lambda fact_bags, required_facts, fact_configs=None: self.ensure_pool_facts(
-                fact_bags,
-                required_facts,
-                fact_configs,
-            ),
-        )
 
     def validate_config(self) -> list[str]:
         return self.config_validator.validate_pipeline_config(self.config)
@@ -45,38 +35,11 @@ class RuleManager:
         matched_rules: List[str],
         score_breakdown: list[dict[str, Any]] | None = None,
     ) -> RuleDecision:
-        """Run externally supplied structural score through confirmation policy."""
-        decision, trace = self.confirmation_runner.run(
-            fact_bag,
-            total_score,
-            matched_rules,
-            score_breakdown=score_breakdown,
-        )
-        if decision is not None:
-            return decision
-        if fact_bag.get("confirmation.identity_required"):
-            maybe = total_score >= self.decision_policy.maybe_threshold()
-            trace = dict(trace)
-            trace["decision"] = "inconclusive"
-            trace["reason"] = "No bounded confirmation reached strong archive identity"
-            return RuleDecision(
-                should_extract=False,
-                total_score=total_score,
-                matched_rules=list(matched_rules),
-                stop_reason=trace["reason"],
-                decision="maybe_archive" if maybe else "not_archive",
-                decision_stage="confirmation",
-                discarded_at="confirmation_inconclusive",
-                deciding_rule=None,
-                score_breakdown=list(score_breakdown or []),
-                confirmation=trace,
-            )
         return self.decision_policy.finalize_scoring_decision(
             fact_bag,
             total_score,
             matched_rules,
             score_breakdown=score_breakdown,
-            confirmation=trace,
         )
 
     def _prepare_rules(self, layer: str) -> List[PreparedRule]:
@@ -169,82 +132,101 @@ class RuleManager:
         self,
         total_score: int,
         remaining_rules: List[PreparedRule],
-        *,
-        require_complete_scoring: bool = False,
     ) -> bool:
-        # Always-run confirmation consumes structural facts produced by scoring.
-        # Do not let an extension score suppress the parsers needed to confirm
-        # the candidate's actual archive identity.
-        if require_complete_scoring:
-            return False
         threshold = self.decision_policy.archive_threshold()
         return total_score >= threshold and total_score + self._remaining_minimum_score(remaining_rules) >= threshold
 
+    @staticmethod
+    def _routing_values(bag: FactBag) -> tuple[set[str], set[str]]:
+        formats: set[str] = set()
+        extensions: set[str] = set()
+        archive_input = bag.get("archive.input") or {}
+        for value in (
+            archive_input.get("format_hint") if isinstance(archive_input, dict) else "",
+            bag.get("relation.format_hint"),
+            bag.get("relation.split_family"),
+        ):
+            normalized = str(value or "").lower().lstrip(".")
+            if normalized:
+                formats.add(normalized)
+
+        for value in (
+            bag.get("candidate.logical_name"),
+            bag.get("file.logical_name"),
+            bag.get("candidate.entry_path"),
+            bag.get("file.path"),
+        ):
+            name = str(value or "").replace("\\", "/").rsplit("/", 1)[-1].lower()
+            if not name:
+                continue
+            parts = name.split(".")
+            for count in (1, 2):
+                if len(parts) > count:
+                    extensions.add("." + ".".join(parts[-count:]))
+        return formats, extensions
+
+    def _ordered_precheck_rules(self, bag: FactBag, rules: List[PreparedRule]) -> List[PreparedRule]:
+        formats, extensions = self._routing_values(bag)
+        guards = [rule for rule in rules if getattr(rule.instance, "precheck_phase", "identity") == "guard"]
+        identity = [rule for rule in rules if getattr(rule.instance, "precheck_phase", "identity") == "identity"]
+        tails = [rule for rule in rules if getattr(rule.instance, "precheck_phase", "identity") == "tail"]
+        promoted: list[PreparedRule] = []
+        remaining: list[PreparedRule] = []
+        for rule in identity:
+            rule_formats = set(getattr(rule.instance, "routing_formats", set()) or set())
+            rule_extensions = set(getattr(rule.instance, "routing_extensions", set()) or set())
+            matches = bool(rule_formats & formats or rule_extensions & extensions)
+            if getattr(rule.instance, "can_be_promoted", False) and matches:
+                promoted.append(rule)
+            else:
+                remaining.append(rule)
+        return guards + promoted + remaining + tails
+
     def _run_precheck(self, fact_bags: List[FactBag]) -> tuple[Dict[FactBag, RuleDecision], List[FactBag]]:
         decisions: Dict[FactBag, RuleDecision] = {}
-        surviving = list(fact_bags)
-
-        for rule in self._prepare_rules("precheck"):
-            requirements = self._rule_fact_requirements(rule)
-            prerequisite_facts: set[str] = set()
-            for requirement in requirements:
-                prerequisite_facts.update(requirement.prerequisite_facts)
-            if prerequisite_facts:
-                self.ensure_pool_facts(surviving, prerequisite_facts)
-
-            active_by_bag: dict[FactBag, set[str]] = {}
-            active_groups: dict[frozenset[str], list[FactBag]] = {}
-            for bag in surviving:
+        surviving: List[FactBag] = []
+        configured_rules = self._prepare_rules("precheck")
+        for bag in fact_bags:
+            terminal = False
+            for rule in self._ordered_precheck_rules(bag, configured_rules):
+                requirements = self._rule_fact_requirements(rule)
+                prerequisite_facts: set[str] = set()
+                for requirement in requirements:
+                    prerequisite_facts.update(requirement.prerequisite_facts)
+                if prerequisite_facts:
+                    self.ensure_pool_facts([bag], prerequisite_facts)
                 active_facts = {
                     requirement.fact_name
                     for requirement in requirements
                     if requirement.matches(bag, self._effective_fact_config(requirement.fact_name, rule.config))
                 }
-                active_by_bag[bag] = active_facts
                 if active_facts:
-                    active_groups.setdefault(frozenset(active_facts), []).append(bag)
-            for active_facts, active_bags in active_groups.items():
-                fact_configs = {
-                    fact_name: self._effective_fact_config(fact_name, rule.config)
-                    for fact_name in active_facts
-                }
-                self.ensure_pool_facts(active_bags, set(active_facts), fact_configs)
-
-            next_surviving: List[FactBag] = []
-            for bag in surviving:
-                if requirements and not active_by_bag.get(bag):
-                    next_surviving.append(bag)
+                    fact_configs = {
+                        fact_name: self._effective_fact_config(fact_name, rule.config)
+                        for fact_name in active_facts
+                    }
+                    self.ensure_pool_facts([bag], set(active_facts), fact_configs)
+                if requirements and not active_facts:
                     continue
                 effect = self._evaluate_precheck_rule(bag, rule)
-                if effect.decision == "reject":
+                if effect.decision in {"reject", "accept"}:
+                    accepted = effect.decision == "accept"
                     decisions[bag] = RuleDecision(
-                        should_extract=False,
+                        should_extract=accepted,
                         total_score=0,
                         matched_rules=[rule.name],
                         stop_reason=effect.reason,
-                        decision="not_archive",
+                        decision="archive" if accepted else "not_archive",
                         decision_stage="precheck",
-                        discarded_at="precheck",
+                        discarded_at=None if accepted else "precheck",
                         deciding_rule=rule.name,
                     )
-                elif effect.decision == "accept":
-                    decisions[bag] = RuleDecision(
-                        should_extract=True,
-                        total_score=0,
-                        matched_rules=[rule.name],
-                        stop_reason=effect.reason,
-                        decision="archive",
-                        decision_stage="precheck",
-                        discarded_at=None,
-                        deciding_rule=rule.name,
-                    )
-                elif effect.decision == "pass":
-                    next_surviving.append(bag)
-                else:
+                    terminal = True
+                    break
+                if effect.decision != "pass":
                     raise ValueError(f"Precheck rule {rule.name} returned unsupported effect: {effect.decision}")
-            surviving = next_surviving
-            if not surviving:
-                break
+            if not terminal:
+                surviving.append(bag)
 
         return decisions, surviving
 
@@ -274,10 +256,6 @@ class RuleManager:
             return decisions
 
         scoring_rules = self._prepare_rules("scoring")
-        require_complete_scoring = any(
-            rule.name == "archive_identity_consensus" and rule.config.get("always_run", False)
-            for rule in self._prepare_rules("confirmation")
-        )
         scoring_state: dict[FactBag, dict[str, Any]] = {
             bag: {
                 "total_score": 0,
@@ -309,7 +287,6 @@ class RuleManager:
                 if not self._scoring_decision_fixed(
                     state["total_score"],
                     remaining_rules,
-                    require_complete_scoring=require_complete_scoring,
                 ):
                     next_active_bags.append(bag)
             active_bags = next_active_bags

@@ -18,7 +18,6 @@ class InspectResult:
     discarded_at: str
     deciding_rule: str
     score_breakdown: list
-    confirmation: dict
 
 class InspectOrchestrator:
     def __init__(self, config: Dict[str, Any]):
@@ -50,7 +49,6 @@ class InspectOrchestrator:
                 discarded_at=decision.discarded_at or "",
                 deciding_rule=decision.deciding_rule or "",
                 score_breakdown=list(decision.score_breakdown or []),
-                confirmation=dict(decision.confirmation or {}),
             ))
                 
         return results

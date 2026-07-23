@@ -20,21 +20,32 @@ def relation_group_to_fact_bag(group: CandidateGroup) -> FactBag:
     bag.set("candidate.member_paths", all_paths)
     bag.set("candidate.logical_name", group.logical_name)
     if group.split_volumes:
+        format_hint = _split_format_hint(
+            relation.split_family,
+            group.split_volumes[0].style,
+            group.split_volumes[0].prefix,
+        )
         source_descriptor = ArchiveInputDescriptor.from_split_volumes(
             archive_path=group.entry_path,
             volumes=group.split_volumes,
-            format_hint=_split_format_hint(
-                relation.split_family,
-                group.split_volumes[0].style,
-                group.split_volumes[0].prefix,
-            ),
+            format_hint=format_hint,
             logical_name=group.logical_name,
+        )
+        bag.set("relation.format_hint", format_hint)
+        format_hint_is_exact = bool(format_hint) and group.split_group_complete is True and all(
+            volume.source == "standard" for volume in group.split_volumes
+        )
+        bag.set(
+            "relation.format_hint_confidence",
+            "strong" if format_hint_is_exact else "weak" if format_hint else "none",
         )
     else:
         source_descriptor = ArchiveInputDescriptor.from_parts(
             archive_path=group.entry_path,
             logical_name=group.logical_name,
         )
+        bag.set("relation.format_hint", "")
+        bag.set("relation.format_hint_confidence", "none")
     state = ArchiveState.from_archive_input(source_descriptor)
     bag.set("archive.input", source_descriptor.to_dict())
     bag.set("archive.state", state.to_dict())

@@ -18,7 +18,7 @@ SCAN_CONFIG = normalize_config(with_detection_pipeline({
     {"name": "size_range", "enabled": True, "gte": 0},
     {"name": "embedded_payload_identity", "enabled": True},
 ], scoring=[
-    {"name": "extension", "enabled": True, "extension_score_groups": [{"score": 1, "extensions": [".zip", ".7z", ".rar", ".001"]}]},
+    {"name": "zip_structure_identity", "enabled": True, "magic_score": 1, "local_header_score": 1, "cd_walk_score": 1},
     {"name": "seven_zip_structure_identity", "enabled": True, "structure_score": 1, "magic_score": 1, "next_header_nid_score": 1},
     {"name": "rar_structure_identity", "enabled": True, "structure_score": 1, "magic_score": 1, "block_walk_score": 1},
 ]))
@@ -34,7 +34,16 @@ def _minimal_7z_header() -> bytes:
 def _write_files(root: Path, names: list[str]):
     root.mkdir(parents=True, exist_ok=True)
     for name in names:
-        (root / name).write_bytes(f"fixture::{name}".encode("utf-8"))
+        lower = name.lower()
+        if lower.endswith(".7z") or (".7z." in lower and lower.rsplit(".", 1)[-1].isdigit()):
+            payload = b"7z\xbc\xaf\x27\x1c" + b"fixture"
+        elif ".zip." in lower:
+            payload = b"PK\x03\x04" + b"fixture"
+        elif ".part" in lower and lower.endswith(".rar"):
+            payload = b"Rar!\x1a\x07\x00" + b"fixture"
+        else:
+            payload = f"fixture::{name}".encode("utf-8")
+        (root / name).write_bytes(payload)
 
 
 def _scan_parts(root: Path) -> dict[str, list[str]]:
@@ -185,8 +194,16 @@ def test_missing_head_split_volume_can_be_recovered_by_fuzzy_candidate(tmp_path)
     for path in root.iterdir():
         path.write_bytes(b"x" * (1024 * 1024))
 
-    actual = _scan_parts(root)
+    bags = build_fact_bags_for_targets([str(root)], config=SCAN_CONFIG)
+    recovered = next(
+        bag for bag in bags
+        if str(root / "lost.7z.002") in (bag.get("candidate.member_paths") or [])
+    )
 
-    assert actual == {
-        "lost.7z": ["lost.7z", "lost.7z.002", "lost.7z.003"],
-    }
+    assert [Path(path).name for path in recovered.get("candidate.member_paths")] == [
+        "lost.7z", "lost.7z.002", "lost.7z.003",
+    ]
+    assert recovered.get("relation.split_group_complete") is None
+    assert recovered.get("relation.split_group_status") == "ambiguous"
+    assert recovered.get("relation.format_hint") == "7z"
+    assert recovered.get("relation.format_hint_confidence") == "weak"

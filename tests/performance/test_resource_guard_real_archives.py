@@ -87,8 +87,7 @@ def _resource_guard_pipeline_config(
         "verification": {"enabled": True},
     }, precheck=[
         {"name": "size_range", "enabled": True, "gte": 0},
-    ], scoring=[
-        {"name": "extension", "enabled": True, "extension_score_groups": [{"score": 5, "extensions": [".zip"]}]},
+        {"name": "zip_structure_accept", "enabled": True},
     ]))
 
 

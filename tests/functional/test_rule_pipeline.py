@@ -4,9 +4,11 @@ import pytest
 
 from sunpack.contracts.detection import FactBag
 from sunpack.detection import DetectionScheduler
+from sunpack.detection.validation import validate_detection_contracts
 from sunpack.detection.pipeline.rules.scoring.zip_structure_identity import ZipStructureIdentityScoreRule
+from sunpack.detection.pipeline.rules.precheck.tar_structure_accept import TarStructureAcceptRule
 from tests.helpers.detection_config import with_detection_pipeline
-from tests.helpers.fs_builder import make_zip
+from tests.helpers.fs_builder import make_minimal_7z, make_zip
 
 
 def _rule_pipeline_config():
@@ -15,10 +17,12 @@ def _rule_pipeline_config():
     }, precheck=[
         {"name": "blacklist", "enabled": True, "blocked_files": []},
         {"name": "size_range", "enabled": True, "gte": 0},
+        {"name": "zip_structure_accept", "enabled": True},
+        {"name": "seven_zip_structure_accept", "enabled": True},
         {"name": "embedded_payload_identity", "enabled": True},
     ], scoring=[
-        {"name": "extension", "enabled": True, "extension_score_groups": [{"score": 5, "extensions": [".zip", ".7z", ".rar", ".gz", ".bz2", ".xz", ".001"]}]},
         {"name": "zip_structure_identity", "enabled": True, "magic_score": 5, "local_header_score": 5, "cd_walk_score": 5},
+        {"name": "seven_zip_structure_identity", "enabled": True, "magic_score": 5, "next_header_nid_score": 5},
     ])
 
 
@@ -27,7 +31,7 @@ def _rule_pipeline_config():
     [
         ("archive.zip", make_zip({"inside.txt": "hello"}), True),
         ("notes.txt", b"plain text", False),
-        ("game/www/audio/bgm.7z", b"7z\xbc\xaf\x27\x1c", True),
+        ("game/www/audio/bgm.7z", make_minimal_7z(), True),
     ],
     ids=["zip archive", "plain text", "runtime archive"],
 )
@@ -47,7 +51,7 @@ def test_rule_pipeline_evaluates_generated_files(tmp_path, relative_path, conten
     assert decision.should_extract is expected_extract
 
 
-def test_scoring_stops_after_archive_threshold_when_remaining_rules_cannot_reduce_score(tmp_path, monkeypatch):
+def test_strict_precheck_stops_before_scoring(tmp_path, monkeypatch):
     target = tmp_path / "archive.zip"
     target.write_bytes(make_zip({"inside.txt": "hello"}))
 
@@ -57,8 +61,9 @@ def test_scoring_stops_after_archive_threshold_when_remaining_rules_cannot_reduc
     monkeypatch.setattr(ZipStructureIdentityScoreRule, "evaluate", fail_if_called)
     config = with_detection_pipeline({
         "thresholds": {"archive_score_threshold": 5, "maybe_archive_threshold": 3},
-    }, scoring=[
-        {"name": "extension", "enabled": True, "extension_score_groups": [{"score": 5, "extensions": [".zip"]}]},
+    }, precheck=[
+        {"name": "zip_structure_accept", "enabled": True},
+    ], scoring=[
         {"name": "zip_structure_identity", "enabled": True, "magic_score": 5, "local_header_score": 5, "cd_walk_score": 5},
     ])
 
@@ -67,6 +72,42 @@ def test_scoring_stops_after_archive_threshold_when_remaining_rules_cannot_reduc
     decision = DetectionScheduler(config).evaluate_bag(bag)
 
     assert decision.should_extract is True
-    assert decision.total_score == 5
-    assert decision.matched_rules == ["extension"]
+    assert decision.decision_stage == "precheck"
+    assert decision.matched_rules == ["zip_structure_accept"]
+
+
+def test_logical_extension_promotes_matching_precheck_ahead_of_config_order(tmp_path, monkeypatch):
+    target = tmp_path / "archive.zip"
+    target.write_bytes(make_zip({"inside.txt": "hello"}))
+
+    def fail_if_called(self, facts, config):
+        raise AssertionError("unrelated TAR precheck ran before routed ZIP precheck")
+
+    monkeypatch.setattr(TarStructureAcceptRule, "evaluate", fail_if_called)
+    config = with_detection_pipeline(precheck=[
+        {"name": "tar_structure_accept", "enabled": True},
+        {"name": "zip_structure_accept", "enabled": True},
+    ])
+    bag = FactBag()
+    bag.set("file.path", str(target))
+    bag.set("candidate.logical_name", "archive.zip")
+
+    decision = DetectionScheduler(config).evaluate_bag(bag)
+
+    assert decision.should_extract is True
+    assert decision.deciding_rule == "zip_structure_accept"
+
+
+def test_removed_confirmation_layer_is_rejected():
+    result = validate_detection_contracts({
+        "detection": {
+            "rule_pipeline": {
+                "precheck": [],
+                "scoring": [],
+                "confirmation": [],
+            }
+        }
+    })
+
+    assert result["errors"] == ["Unknown detection.rule_pipeline field(s): confirmation"]
 

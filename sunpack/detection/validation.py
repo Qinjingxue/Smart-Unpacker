@@ -28,7 +28,7 @@ def validate_detection_contracts(payload: dict) -> dict[str, Any]:
                 errors.append(f"Rule {rule_name} declares unknown fact {fact}")
 
     configured = []
-    for layer in ("precheck", "scoring", "confirmation"):
+    for layer in ("precheck", "scoring"):
         rules = rule_pipeline_config(payload).get(layer, [])
         if not isinstance(rules, list):
             errors.append(f"detection.rule_pipeline.{layer} must be a list")

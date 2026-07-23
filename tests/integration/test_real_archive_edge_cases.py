@@ -29,27 +29,27 @@ def edge_config(passwords: list[str] | None = None) -> dict:
         "builtin_passwords": [],
     }, processors=[
         {"name": "embedded_archive", "enabled": True},
+        {"name": "pe_overlay_structure", "enabled": True},
+        {"name": "executable_carrier", "enabled": True},
         {"name": "zip_eocd_structure", "enabled": True},
         {"name": "tar_header_structure", "enabled": True},
         {"name": "compression_stream_structure", "enabled": True},
-        {"name": "archive_container_structure", "enabled": True},
         {"name": "seven_zip_structure", "enabled": True},
         {"name": "rar_structure", "enabled": True},
-        {"name": "archive_metadata_open", "enabled": True},
     ], precheck=[
         {"name": "size_range", "enabled": True, "gte": 0},
+        {"name": "zip_structure_accept", "enabled": True},
+        {"name": "tar_structure_accept", "enabled": True},
+        {"name": "seven_zip_structure_accept", "enabled": True},
+        {"name": "rar_structure_accept", "enabled": True},
+        {"name": "compression_stream_accept", "enabled": True},
         {"name": "embedded_payload_identity", "enabled": True},
     ], scoring=[
-        {"name": "extension", "enabled": True, "extension_score_groups": [{"score": 5, "extensions": [".zip", ".7z", ".rar", ".tar", ".gz", ".bz2", ".xz", ".zst", ".001"]}]},
         {"name": "seven_zip_structure_identity", "enabled": True, "magic_score": 5, "next_header_nid_score": 5},
         {"name": "rar_structure_identity", "enabled": True, "magic_score": 5, "block_walk_score": 5},
         {"name": "zip_structure_identity", "enabled": True, "magic_score": 2, "local_header_score": 4, "cd_walk_score": 7},
         {"name": "tar_structure_identity", "enabled": True, "entry_walk_score": 7},
         {"name": "compression_stream_identity", "enabled": True, "magic_score": 2},
-        {"name": "archive_container_identity", "enabled": True},
-    ], confirmation=[
-        {"name": "archive_identity_consensus", "enabled": True, "always_run": True},
-        {"name": "archive_metadata_open", "enabled": True, "always_run": True, "timeout_seconds": 1.5},
     ]))
 
 
@@ -70,7 +70,6 @@ def detection_disabled_config(passwords: list[str] | None = None) -> dict:
             "rule_pipeline": {
                 "precheck": [],
                 "scoring": [],
-                "confirmation": [],
             },
         },
     })

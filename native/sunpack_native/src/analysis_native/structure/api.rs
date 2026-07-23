@@ -516,22 +516,3 @@ pub(crate) fn inspect_compression_stream_structure(
     compression_empty(py, "compression_stream_magic_not_found", "", "", false)
 }
 
-#[pyfunction]
-pub(crate) fn inspect_archive_container_structure(
-    py: Python<'_>,
-    path: &str,
-) -> PyResult<Py<PyDict>> {
-    let Ok((file_size, header)) = read_at(path, 0, 4096) else {
-        return container_empty(py, "os_error");
-    };
-    if header.starts_with(b"MSCF\x00\x00\x00\x00") {
-        return inspect_cab(py, &header, file_size);
-    }
-    if header.starts_with(b"\x60\xea") {
-        return inspect_arj(py, &header, file_size);
-    }
-    if header.starts_with(b"070701") || header.starts_with(b"070702") {
-        return inspect_cpio(py, &header, file_size);
-    }
-    container_empty(py, "archive_container_magic_not_found")
-}

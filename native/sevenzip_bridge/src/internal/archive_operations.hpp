@@ -45,15 +45,6 @@ struct ResourceAnalysisResult {
     std::string message;
 };
 
-struct MetadataOpenResult {
-    PasswordTestStatus status = PasswordTestStatus::BackendUnavailable;
-    bool is_archive = false;
-    bool encrypted = false;
-    UInt32 item_count = 0;
-    UInt64 archive_size = 0;
-    std::string message;
-};
-
 struct CrcManifestItem {
     std::wstring path;
     UInt64 size = 0;
@@ -85,12 +76,6 @@ ResourceAnalysisResult analyze_archive_resources_with_parts(
     const std::wstring& archive_path,
     const std::vector<std::wstring>& part_paths,
     const std::wstring& password
-);
-
-MetadataOpenResult open_archive_metadata_with_parts(
-    const std::wstring& seven_zip_dll_path,
-    const std::wstring& archive_path,
-    const std::vector<std::wstring>& part_paths
 );
 
 CrcManifestResult read_archive_crc_manifest_with_parts(

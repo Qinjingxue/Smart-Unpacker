@@ -9,6 +9,9 @@ from sunpack.detection.pipeline.rules.registry import register_rule
 
 @register_rule(name="seven_zip_structure_accept", layer="precheck")
 class SevenZipStructureAcceptRule(RuleBase):
+    routing_formats = {"7z"}
+    routing_extensions = {".7z"}
+    can_be_promoted = True
     required_facts = {"7z.structure"}
     produced_facts = {"file.detected_ext", "file.magic_matched", "file.probe_detected_archive", "file.probe_offset"}
     config_schema = {

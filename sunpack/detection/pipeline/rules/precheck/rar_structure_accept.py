@@ -9,6 +9,9 @@ from sunpack.detection.pipeline.rules.registry import register_rule
 
 @register_rule(name="rar_structure_accept", layer="precheck")
 class RarStructureAcceptRule(RuleBase):
+    routing_formats = {"rar", "rar4", "rar5"}
+    routing_extensions = {".rar", ".r00"}
+    can_be_promoted = True
     required_facts = {"rar.structure"}
     produced_facts = {"file.detected_ext", "file.magic_matched", "file.probe_detected_archive", "file.probe_offset"}
     config_schema = {

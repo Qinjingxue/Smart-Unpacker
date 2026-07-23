@@ -11,5 +11,4 @@ include!("seven_zip.rs");
 include!("rar.rs");
 include!("tar.rs");
 include!("compression.rs");
-include!("container.rs");
 include!("util.rs");

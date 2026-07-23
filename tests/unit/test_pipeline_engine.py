@@ -24,9 +24,7 @@ def _config(**pipeline):
         "verification": {"enabled": False, "methods": []},
         "post_extract": {"archive_cleanup_mode": "k", "flatten_single_directory": False},
         "thresholds": {"archive_score_threshold": 5, "maybe_archive_threshold": 3},
-    }, scoring=[
-        {"name": "extension", "enabled": True, "extension_score_groups": [{"score": 5, "extensions": [".zip"]}]},
-    ]))
+    }))
 
 
 def test_engine_idle_state_includes_active_and_queued_requests():

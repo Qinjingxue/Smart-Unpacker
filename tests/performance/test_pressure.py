@@ -15,8 +15,9 @@ def pressure_scan_config() -> dict:
         },
     }, processors=[
         {"name": "embedded_archive", "enabled": True},
+        {"name": "pe_overlay_structure", "enabled": True},
+        {"name": "executable_carrier", "enabled": True},
         {"name": "zip_eocd_structure", "enabled": True},
-        {"name": "archive_metadata_open", "enabled": True},
     ], precheck=[
         {"name": "size_range", "enabled": True, "gte": 0},
         {
@@ -25,12 +26,9 @@ def pressure_scan_config() -> dict:
             "blocked_extensions": [".jar", ".docx", ".apk", ".xlsx"],
         },
         {"name": "embedded_payload_identity", "enabled": True, "deep_scan_single_candidate_ratio": 1e-9},
+        {"name": "zip_structure_accept", "enabled": True},
     ], scoring=[
-        {"name": "extension", "enabled": True, "extension_score_groups": [{"score": 5, "extensions": [".zip", ".7z", ".rar", ".gz", ".bz2", ".xz", ".001"]}]},
         {"name": "zip_structure_identity", "enabled": True, "magic_score": 2, "local_header_score": 4, "cd_walk_score": 7},
-    ], confirmation=[
-        {"name": "archive_identity_consensus", "enabled": True, "always_run": True},
-        {"name": "archive_metadata_open", "enabled": True, "always_run": True, "timeout_seconds": 1.5},
     ])
 
 

@@ -392,12 +392,10 @@ print(sorted(get_repair_module_registry().all()))
 | --- | --- |
 | `embedded_archive` | 对普通归档检测尚未解决且入选大小覆盖集的文件执行无扩展名嵌入归档深扫。 |
 | `scene_facts` | 识别游戏、程序、资源目录等场景。 |
-| `archive_metadata_open` | 在隔离 worker 中限时执行只读元数据打开；不解压、不做完整 Test。 |
 | `zip_structure` | 检查 ZIP local header。 |
 | `zip_eocd_structure` | 检查 ZIP EOCD 和 central directory。 |
 | `tar_header_structure` | 检查 TAR header checksum 和 ustar marker。 |
 | `compression_stream_structure` | 检查 gzip、bzip2、xz、zstd 轻量流结构。 |
-| `archive_container_structure` | 检查 CAB、ARJ、CPIO 等轻量容器结构。 |
 | `pe_overlay_structure` | 检查 PE overlay 中的归档载荷。 |
 | `seven_zip_structure` | 检查 7z signature、start header CRC、next header 范围和 NID。 |
 | `rar_structure` | 检查 RAR4/RAR5 signature、main header 和 block/header walk。 |
@@ -422,16 +420,15 @@ print(sorted(get_repair_module_registry().all()))
 
 完整流扫描是发现“任意位置 embedding”的物理必要条件；默认预算避免对大量数 GiB 普通文件逐字节重读。超过预算的文件仍会进行头尾结构分析、ZIP 尾目录回链和分卷逻辑视图验证。
 
-检测规则分三层：
+检测规则分两层：
 
-- `precheck`：高置信结构快速接受；最后执行安装器否决与 embedded payload 识别。
-- `scoring`：扩展名和真实结构。
-- `confirmation`：7z.dll probe/test 等确认层。
+- `precheck`：完整结构的严格识别。每个格式规则声明常见格式和扩展名；关系层提供逻辑分卷提示后，匹配规则会被临时提前，校验失败再回到配置顺序。安装器否决与 embedded payload 识别固定最后执行。
+- `scoring`：只处理字段损坏、结构不完整等模糊证据。
 
 每条规则至少包含：
 
 ```json
-{"name": "extension", "enabled": true}
+{"name": "zip_structure_accept", "enabled": true}
 ```
 
 `config validate` 会校验规则名和规则 schema。默认配置的主要规则：
@@ -442,18 +439,15 @@ print(sorted(get_repair_module_registry().all()))
 | `tar_structure_accept` | precheck | 结构可信的 TAR 快速接受。 |
 | `seven_zip_structure_accept` | precheck | start/next header 可信的 7z 快速接受。 |
 | `rar_structure_accept` | precheck | main header/block walk 可信的 RAR 快速接受。 |
-| `extension` | scoring | 扩展名加分。 |
+| `compression_stream_accept` | precheck | 完整校验 gzip、bzip2、xz、zstd 流并快速接受。 |
 | `embedded_payload_identity` | precheck | 先否决已知安装器，再对获准深扫且找到可靠嵌入归档的文件直接接受。 |
 | `zip_structure_identity` | scoring | ZIP local header、EOCD、CD walk 加分。 |
 | `tar_structure_identity` | scoring | TAR header、ustar、entry walk 加分。 |
 | `seven_zip_structure_identity` | scoring | 7z magic/header/NID 加分。 |
 | `rar_structure_identity` | scoring | RAR magic/header/block walk 加分。 |
-| `archive_container_identity` | scoring | CAB、ARJ、CPIO 等容器加分。 |
 | `compression_stream_identity` | scoring | gzip、bzip2、xz、zstd 结构加分。 |
-| `archive_identity_consensus` | confirmation | 复用 ZIP/7z/RAR/TAR/流格式已有结构事实确认归档身份。 |
-| `archive_metadata_open` | confirmation | 仅对未决容器执行隔离、限时、元数据级打开。 |
 
-历史 `magic_bytes`、`embedded_archive` scoring 规则已移出 active 规则包；当前主流水线由格式结构规则消费 magic/结构 fact，由 precheck 最后的 `embedded_payload_identity` 统一执行安装器否决并消费 embedded 和 overlay 事实。安装器文件读取与特征匹配由 Rust 实现；命中后不会调度完整嵌入归档扫描。
+历史 `extension`、`magic_bytes`、`embedded_archive` scoring 规则已移出 active 规则包；CAB、ARJ、CPIO 的孤立检测支持以及 confirmation 层也已删除。当前主流水线由严格 precheck 和容损 scoring 消费结构 fact，由 precheck 最后的 `embedded_payload_identity` 统一执行安装器否决并消费 embedded 和 overlay 事实。安装器文件读取与特征匹配由 Rust 实现；命中后不会调度完整嵌入归档扫描。
 
 ### deep_scan_single_candidate_ratio
 

@@ -158,10 +158,6 @@ fn sunpack_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(
-        analysis_native::inspect_archive_container_structure,
-        m
-    )?)?;
-    m.add_function(wrap_pyfunction!(
         scan::pe_overlay::inspect_pe_overlay_structure,
         m
     )?)?;

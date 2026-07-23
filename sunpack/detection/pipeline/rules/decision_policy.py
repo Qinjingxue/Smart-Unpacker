@@ -14,7 +14,6 @@ class RuleDecisionPolicy:
         total_score: int,
         matched_rules: List[str],
         score_breakdown: list[dict[str, Any]] | None = None,
-        confirmation: dict[str, Any] | None = None,
     ) -> RuleDecision:
         threshold = self.archive_threshold()
         maybe_threshold = self.maybe_threshold()
@@ -38,7 +37,6 @@ class RuleDecisionPolicy:
             discarded_at=discarded_at,
             deciding_rule=matched_rules[-1] if matched_rules else None,
             score_breakdown=list(score_breakdown or []),
-            confirmation=dict(confirmation or {}),
         )
 
     def archive_threshold(self) -> int:
@@ -48,13 +46,6 @@ class RuleDecisionPolicy:
     def maybe_threshold(self) -> int:
         thresholds = self._thresholds()
         return int(thresholds.get("maybe_archive_threshold", 3))
-
-    def confirmation_bounds(self) -> tuple[int, int]:
-        return self.maybe_threshold(), self.archive_threshold() - 1
-
-    def should_enter_confirmation(self, total_score: int) -> bool:
-        min_score, max_score = self.confirmation_bounds()
-        return min_score <= total_score <= max_score
 
     def _thresholds(self) -> dict[str, Any]:
         thresholds = self.config.get("thresholds", {})

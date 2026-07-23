@@ -8,6 +8,9 @@ from sunpack.detection.pipeline.rules.registry import register_rule
 
 @register_rule(name="tar_structure_accept", layer="precheck")
 class TarStructureAcceptRule(RuleBase):
+    routing_formats = {"tar"}
+    routing_extensions = {".tar"}
+    can_be_promoted = True
     required_facts = {"tar.header_structure"}
     produced_facts = {"file.detected_ext", "file.probe_detected_archive", "file.probe_offset"}
     config_schema = {

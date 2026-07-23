@@ -6,11 +6,9 @@ from sunpack.detection.pipeline.processors.context import FactProcessorContext
 from sunpack.support.module_discovery import import_static_modules
 
 _PROCESSOR_MODULES = (
-    "sunpack.detection.pipeline.processors.modules.confirmation.archive_metadata_open",
     "sunpack.detection.pipeline.processors.modules.embedded_payload.embedded_archive",
     "sunpack.detection.pipeline.processors.modules.embedded_payload.executable_carrier",
     "sunpack.detection.pipeline.processors.modules.embedded_payload.pe_overlay",
-    "sunpack.detection.pipeline.processors.modules.format_structure.archive_container",
     "sunpack.detection.pipeline.processors.modules.format_structure.compression_stream",
     "sunpack.detection.pipeline.processors.modules.format_structure.rar",
     "sunpack.detection.pipeline.processors.modules.format_structure.seven_zip",

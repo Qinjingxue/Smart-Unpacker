@@ -1,4 +1,4 @@
-from sunpack.coordinator.scanner import ScanOrchestrator
+from sunpack.coordinator.target_scan import build_fact_bags_for_targets
 from tests.helpers.detection_config import with_detection_pipeline
 
 
@@ -15,17 +15,16 @@ def test_scan_reports_misnamed_split_parts_consistently(tmp_path):
     config = with_detection_pipeline({
         "thresholds": {"archive_score_threshold": 1, "maybe_archive_threshold": 1},
     }, scoring=[
-        {"name": "extension", "enabled": True, "extension_score_groups": [{"score": 1, "extensions": [".001", ".7z"]}]},
+        {"name": "seven_zip_structure_identity", "enabled": True, "magic_score": 1, "next_header_nid_score": 1},
     ])
 
-    results = ScanOrchestrator(config).scan(str(tmp_path))
+    bags = build_fact_bags_for_targets([str(tmp_path)], config=config)
+    grouped = next(bag for bag in bags if bag.get("file.path") == str(first))
 
-    assert len(results) == 1
-    assert results[0].main_path == str(first)
-    assert results[0].all_parts == [str(first), str(normal_2), str(normal_3), str(fuzzy_4), str(fuzzy_5)]
+    assert grouped.get("candidate.member_paths") == [str(first), str(normal_2), str(normal_3), str(fuzzy_4), str(fuzzy_5)]
     assert [
         (item["path"], item["number"], item["source"])
-        for item in results[0].fact_bag.get("relation.split_volumes")
+        for item in grouped.get("relation.split_volumes")
     ] == [
         (str(first), 1, "standard"),
         (str(normal_2), 2, "candidate"),

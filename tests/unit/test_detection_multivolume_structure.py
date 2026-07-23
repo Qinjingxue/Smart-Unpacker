@@ -43,6 +43,17 @@ def test_seven_zip_detection_reads_next_header_from_later_volume(tmp_path):
     assert result["next_header_semantic_ok"] is True
 
 
+def test_seven_zip_detection_preserves_magic_for_truncated_logical_volume(tmp_path):
+    part = tmp_path / "missing.7z.001"
+    part.write_bytes(b"7z\xbc\xaf\x27\x1cpartial")
+
+    result = process_seven_zip_structure(_context([part], "numeric_suffix", "7z.structure"))
+
+    assert result["magic_matched"] is True
+    assert result["plausible"] is False
+    assert result["error"] in {"file_too_small", "unsupported_version"}
+
+
 def test_rar_detection_walks_blocks_across_raw_volume_boundary(tmp_path):
     archive = b"Rar!\x1a\x07\x00" + _rar4_block(0x73) + _rar4_block(0x7B)
     parts = [tmp_path / "a.rar.001", tmp_path / "a.rar.002"]

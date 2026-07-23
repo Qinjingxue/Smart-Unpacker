@@ -644,10 +644,14 @@ def _probe_seven_zip_view(view, start_offset: int, max_next_header_check_bytes: 
         "next_header_nid_valid": False,
     })
     header = view.read_at(start_offset, 32)
-    if len(header) < 32 or header[:6] != b"7z\xbc\xaf\x27\x1c":
+    if header[:6] != b"7z\xbc\xaf\x27\x1c":
         result["error"] = "7z_signature_not_found"
         return result
     result["magic_matched"] = True
+    result["evidence"] = ["7z:signature"]
+    if len(header) < 32:
+        result["error"] = "file_too_small"
+        return result
     start_header = header[12:32]
     result["start_header_crc_ok"] = _u32(header, 8) == crc32(start_header) & 0xFFFFFFFF
     if not result["start_header_crc_ok"]:
@@ -664,7 +668,7 @@ def _probe_seven_zip_view(view, start_offset: int, max_next_header_check_bytes: 
         result["error"] = "next_header_out_of_range"
         return result
     result["plausible"] = True
-    result["evidence"] = ["7z:signature", "7z:start_header_crc", "7z:next_header_range"]
+    result["evidence"].extend(["7z:start_header_crc", "7z:next_header_range"])
     if next_size <= max_next_header_check_bytes:
         next_header = view.read_at(next_start, next_size)
         crc_ok = crc32(next_header) & 0xFFFFFFFF == next_crc

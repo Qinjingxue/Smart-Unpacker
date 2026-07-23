@@ -773,7 +773,6 @@ int run_request(const std::string& request) {
     const std::wstring format_hint = utf8_to_wide(json_string_field(request, "format_hint", ""));
     const std::wstring codepage = utf8_to_wide(json_string_field(request, "codepage", ""));
     const bool dry_run = json_bool_field(request, "dry_run", false);
-    const bool metadata_probe = command == "metadata_probe";
 
     std::vector<std::wstring> part_paths;
     for (const auto& part : json_string_array_field(request, "part_paths")) {
@@ -792,7 +791,7 @@ int run_request(const std::string& request) {
         return 2;
     }
 
-    if (archive_path.empty() || (!dry_run && !metadata_probe && output_dir.empty())) {
+    if (archive_path.empty() || (!dry_run && output_dir.empty())) {
         print_json_line(
             "{\"type\":\"result\",\"job_id\":\"" + json_escape(job_id) +
             "\",\"status\":\"error\",\"category\":\"invalid_request\",\"message\":\"archive_path is required; output_dir is required unless dry_run is true\"}");
@@ -831,28 +830,6 @@ int run_request(const std::string& request) {
             "\",\"status\":\"error\",\"category\":\"invalid_request\",\"message\":\"" +
             json_escape(archive_input.validation_error) + "\"}");
         return 2;
-    }
-    if (metadata_probe) {
-        if (!archive_input.ranges.empty() || !archive_input.patches.empty()) {
-            print_json_line(
-                "{\"type\":\"result\",\"job_id\":\"" + json_escape(job_id) +
-                "\",\"status\":\"inconclusive\",\"native_status\":\"unsupported\",\"is_archive\":false,"
-                "\"message\":\"metadata probe does not support ranged or patched input\"}");
-            return 1;
-        }
-        const auto metadata = open_archive_metadata_with_parts(
-            dll_path, archive_input.archive_path, archive_input.part_paths);
-        const bool ok = metadata.status == PasswordTestStatus::Ok && metadata.is_archive;
-        print_json_line(
-            "{\"type\":\"result\",\"job_id\":\"" + json_escape(job_id) +
-            "\",\"status\":\"" + std::string(ok ? "ok" : "inconclusive") +
-            "\",\"native_status\":\"" + json_escape(status_to_string(metadata.status)) +
-            "\",\"is_archive\":" + std::string(metadata.is_archive ? "true" : "false") +
-            ",\"encrypted\":" + std::string(metadata.encrypted ? "true" : "false") +
-            ",\"item_count\":" + std::to_string(metadata.item_count) +
-            ",\"archive_type\":\"" + json_escape(wide_to_utf8(archive_type_for_path(archive_input.archive_path))) +
-            "\",\"message\":\"" + json_escape(metadata.message) + "\"}");
-        return ok ? 0 : 1;
     }
     ExtractArchiveResult result = !archive_input.patches.empty()
         ? extract_archive_with_patches(dll_path, archive_input.archive_path, archive_input.part_paths, archive_input.ranges, archive_input.patches, archive_input.format_hint, password, output_dir, codepage, decoded_names, progress, dry_run)

@@ -1131,7 +1131,76 @@ fn little_uint(data: &[u8]) -> u64 {
         .fold(0u64, |v, (i, b)| v | ((*b as u64) << (8 * i)))
 }
 
+fn inspect_zstd_bounded(
+    py: Python<'_>,
+    path: &str,
+    header: &[u8],
+    file_size: u64,
+) -> PyResult<Py<PyDict>> {
+    let data = match read_prefix(path, STREAM_STRUCTURE_HEAD_BYTES) {
+        Ok(data) => data,
+        Err(_) => {
+            return compression_empty(
+                py,
+                "os_error",
+                "zstd",
+                ".zst",
+                header.starts_with(ZSTD_MAGIC),
+            )
+        }
+    };
+    let magic = data.starts_with(ZSTD_MAGIC);
+    let descriptor = data.get(4).copied().unwrap_or(0);
+    let reserved_bit_clear = descriptor & 0x08 == 0;
+    let d = compression_base(py, "zstd", ".zst", magic)?;
+    d.set_item("validation_scope", "bounded_structure")?;
+    d.set_item("validation_complete", false)?;
+    d.set_item("frame.magic", hex_bytes(data.get(..4).unwrap_or(&[])))?;
+    d.set_item("frame.header.descriptor", descriptor)?;
+    d.set_item("frame.header.content_size_flag", descriptor >> 6)?;
+    d.set_item("frame.header.single_segment_flag", descriptor & 0x20 != 0)?;
+    d.set_item("frame.header.checksum_flag", descriptor & 0x04 != 0)?;
+    d.set_item("frame.header.dictionary_id_flag", descriptor & 0x03)?;
+    d.set_item("frame.decoded_content", 0)?;
+    d.set_item("archive.trailing_data", 0)?;
+    d.set_item("trailing_data_verified", false)?;
+    d.set_item("plausible", magic && reserved_bit_clear)?;
+    d.set_item(
+        "confidence",
+        if magic && reserved_bit_clear {
+            "medium"
+        } else {
+            "none"
+        },
+    )?;
+    d.set_item(
+        "error",
+        if reserved_bit_clear {
+            ""
+        } else {
+            "zstd_reserved_bit_set"
+        },
+    )?;
+    d.set_item(
+        "damage_flags",
+        PyList::new(
+            py,
+            if reserved_bit_clear {
+                Vec::<&str>::new()
+            } else {
+                vec!["zstd_reserved_bit_set"]
+            },
+        )?,
+    )?;
+    d.set_item("file_size", file_size)?;
+    finish_fields(&d, ZSTD_FIELDS)?;
+    Ok(d.unbind())
+}
+
 fn inspect_zstd(py: Python<'_>, path: &str, header: &[u8], file_size: u64) -> PyResult<Py<PyDict>> {
+    if file_size > FULL_STREAM_STRUCTURE_MAX_BYTES {
+        return inspect_zstd_bounded(py, path, header, file_size);
+    }
     let data = match std::fs::read(path) {
         Ok(data) => data,
         Err(_) => {

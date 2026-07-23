@@ -56,7 +56,6 @@ def layer_specs():
     from sunpack.coordinator.scan_session import DetectionScanSession
     from sunpack.coordinator.task_provider import ArchiveTaskProvider
     from sunpack.detection.pipeline.facts.batch_provider import BatchFactProvider
-    from sunpack.detection.pipeline.rules.confirmation_runner import ConfirmationRunner
     from sunpack.detection.pipeline.rules.manager import RuleManager
     from sunpack.detection.scheduler import DetectionScheduler
     from sunpack.filesystem.directory_scanner import DirectoryScanner
@@ -72,7 +71,6 @@ def layer_specs():
         ("detection.evaluate", DetectionScheduler, "evaluate_bags"),
         ("rules.precheck", RuleManager, "_run_precheck"),
         ("rules.total", RuleManager, "evaluate_pool"),
-        ("rules.confirmation", ConfirmationRunner, "run"),
         ("facts.prefill", BatchFactProvider, "prefill_facts"),
     ]
 

@@ -132,7 +132,6 @@ pipeline:
 - `inspect_rar_structure`
 - `inspect_tar_header_structure`
 - `inspect_compression_stream_structure`
-- `inspect_archive_container_structure`
 - `inspect_pe_overlay_structure`
 
 These functions preserve the Python result shapes. During the current test

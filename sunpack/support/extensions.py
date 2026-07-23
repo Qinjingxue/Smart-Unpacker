@@ -18,23 +18,5 @@ def normalize_exts(values) -> set[str]:
     return normalized
 
 
-def normalize_extension_score_groups(values) -> dict[str, int]:
-    if not isinstance(values, list):
-        return {}
-    normalized = {}
-    for group in values:
-        if not isinstance(group, dict):
-            continue
-        try:
-            score = int(group.get("score"))
-        except (TypeError, ValueError):
-            continue
-        for ext in group.get("extensions") or []:
-            if not isinstance(ext, str) or not ext.strip():
-                continue
-            normalized[normalize_ext(ext)] = score
-    return normalized
-
-
 def path_extension(path: Any) -> str:
     return os.path.splitext(str(path or ""))[1].lower()

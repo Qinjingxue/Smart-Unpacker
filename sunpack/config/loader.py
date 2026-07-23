@@ -46,7 +46,6 @@ _NAMED_MODULE_LIST_PATHS = {
     ("detection", "processors"),
     ("detection", "rule_pipeline", "precheck"),
     ("detection", "rule_pipeline", "scoring"),
-    ("detection", "rule_pipeline", "confirmation"),
 }
 
 _OVERRIDE_ORDERED_NAMED_MODULE_LIST_PATHS = {

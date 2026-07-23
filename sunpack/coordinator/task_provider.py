@@ -140,7 +140,7 @@ class ArchiveTaskProvider:
         if self._has_enabled_modules(detector_config.get("processors")):
             return False
         pipeline = rule_pipeline_config(self.config)
-        for layer in ("precheck", "scoring", "confirmation"):
+        for layer in ("precheck", "scoring"):
             if self._has_enabled_modules(pipeline.get(layer)):
                 return False
         return True

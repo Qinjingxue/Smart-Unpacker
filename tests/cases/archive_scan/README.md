@@ -57,7 +57,7 @@ tests/cases/archive_scan/
 
 | 值 | 说明 |
 | --- | --- |
-| `archive_scan_full` | 推荐默认值。启用大小阈值、场景保护、扩展名打分、归档身份识别、场景扣分和 7-Zip confirmation。 |
+| `archive_scan_full` | 推荐默认值。启用严格结构 precheck、容损结构 scoring、场景保护和嵌入归档识别。 |
 | `minimal` | 极简配置，主要用于基础规则测试。 |
 | `embedded_archive_loose` | 用于宽松扫描嵌入式归档。 |
 | `embedded_archive_carrier_tail` | 用于测试图片/PDF/WebP 等载体尾部附加压缩包。 |
@@ -84,7 +84,7 @@ tests/cases/archive_scan/
 | --- | --- |
 | `archive` | 判定为压缩包，`should_extract` 通常为 `true`。 |
 | `not_archive` | 判定为非压缩包，`should_extract` 为 `false`。 |
-| `maybe_archive` | 分数处于可疑区间，但 confirmation 没有最终确认。通常不解压。 |
+| `maybe_archive` | 只有模糊结构证据、分数处于可疑区间。通常不解压。 |
 
 注意：如果只关心“是不是压缩包”，只写 `should_extract` 即可；只有需要锁定具体状态时才写 `decision`。
 
@@ -92,12 +92,11 @@ tests/cases/archive_scan/
 
 | 规则名 | 含义 |
 | --- | --- |
-| `extension` | 扩展名规则命中，例如 `.zip`、`.7z`。 |
+| `zip_structure_accept` | ZIP 通过严格结构校验并由 precheck 接受。 |
+| `compression_stream_accept` | gzip、bzip2、xz 或 zstd 通过完整流校验。 |
 | `embedded_payload_identity` | precheck 最后先否决已知安装器，再直接接受普通载体或 PE overlay 中的可靠嵌入归档载荷。 |
 | `seven_zip_structure_identity` | 7z 起始魔数或结构证据命中。 |
 | `zip_structure_identity` | ZIP local header 或 EOCD/central directory 结构证据命中。 |
-| `archive_identity_consensus` | 使用已有的有界结构证据确认归档身份。 |
-| `archive_metadata_open` | 对未决格式执行隔离、限时的元数据打开。 |
 | `size_range` | 文件大小不在允许范围内。 |
 
 ## 示例
@@ -128,7 +127,7 @@ tests/cases/archive_scan/
       "path": "sample.zip",
       "should_extract": true,
       "decision": "archive",
-      "matched_rules_include": ["extension"]
+      "matched_rules_include": ["zip_structure_accept"]
     }
   ]
 }
@@ -163,13 +162,7 @@ tests/cases/archive_scan/
       "matched_rules_include": ["embedded_payload_identity"],
       "facts": {
         "file.detected_ext": ".rar",
-        "file.probe_offset": 904331,
-        "confirmation.identity": {
-          "verdict": "confirm",
-          "strength": "strong",
-          "format": "rar",
-          "offset": 904331
-        }
+        "file.probe_offset": 904331
       }
     }
   ]
@@ -186,7 +179,7 @@ tests/cases/archive_scan/
       "path": "fake.7z",
       "should_extract": false,
       "decision": "not_archive",
-      "matched_rules_include": ["extension", "archive_metadata_open"]
+      "max_score": 0
     }
   ]
 }

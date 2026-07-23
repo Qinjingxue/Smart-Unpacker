@@ -29,23 +29,6 @@ class RuleEffect:
         return cls(decision="require", required_facts=set(fact_names))
 
 @dataclass
-class ConfirmationEffect:
-    decision: str  # "confirm", "reject", "pass"
-    reason: Optional[str] = None
-
-    @classmethod
-    def confirm(cls, reason: str) -> "ConfirmationEffect":
-        return cls(decision="confirm", reason=reason)
-
-    @classmethod
-    def reject(cls, reason: str) -> "ConfirmationEffect":
-        return cls(decision="reject", reason=reason)
-
-    @classmethod
-    def pass_(cls) -> "ConfirmationEffect":
-        return cls(decision="pass")
-
-@dataclass
 class RuleDecision:
     should_extract: bool
     total_score: int
@@ -56,4 +39,3 @@ class RuleDecision:
     discarded_at: Optional[str] = None
     deciding_rule: Optional[str] = None
     score_breakdown: List[Dict[str, Any]] = field(default_factory=list)
-    confirmation: Dict[str, Any] = field(default_factory=dict)

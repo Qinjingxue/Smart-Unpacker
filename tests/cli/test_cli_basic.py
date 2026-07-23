@@ -60,7 +60,7 @@ class CliBasicTests(unittest.TestCase):
         self.assertIn("deciding_rule", first_item)
         self.assertIn("stop_reason", first_item)
         self.assertIn("score_breakdown", first_item)
-        self.assertIn("confirmation", first_item)
+        self.assertNotIn("confirmation", first_item)
 
     def test_inspect_analyze_json_shape_is_compact(self):
         with tempfile.TemporaryDirectory() as tmp:

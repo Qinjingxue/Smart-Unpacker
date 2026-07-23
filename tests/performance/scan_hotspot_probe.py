@@ -270,7 +270,6 @@ def install_wrappers(recorder: HotspotRecorder) -> None:
     import sunpack.detection.pipeline.facts.batch_provider as batch_provider
     import sunpack.detection.pipeline.processors.runner as processor_runner
     import sunpack.detection.pipeline.rules.manager as rule_manager
-    import sunpack.detection.pipeline.rules.confirmation_runner as confirmation_runner
 
     recorder.wrap(directory_scanner, "_NATIVE_SCAN_DIRECTORY_SNAPSHOT", "native.scan_directory_snapshot")
     recorder.wrap(directory_scanner.DirectoryScanner, "scan", "filesystem.DirectoryScanner.scan")
@@ -305,7 +304,6 @@ def install_wrappers(recorder: HotspotRecorder) -> None:
     recorder.wrap(rule_manager.RuleManager, "evaluate_pool", "rules.evaluate_pool")
     recorder.wrap(rule_manager.RuleManager, "_run_precheck", "rules.run_precheck")
     recorder.wrap(rule_manager.RuleManager, "_ensure_scoring_rule_facts", "rules.ensure_scoring_rule_facts")
-    recorder.wrap(confirmation_runner.ConfirmationRunner, "run", "rules.confirmation.run")
 
 
 def summarize_scan_session(session: Any | None) -> dict[str, Any]:

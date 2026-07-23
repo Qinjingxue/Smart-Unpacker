@@ -12,6 +12,9 @@ ZIP_START_MAGICS = (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")
 
 @register_rule(name="zip_structure_accept", layer="precheck")
 class ZipStructureAcceptRule(RuleBase):
+    routing_formats = {"zip"}
+    routing_extensions = {".zip", ".zipx", ".jar", ".apk", ".docx", ".xlsx", ".z01"}
+    can_be_promoted = True
     required_facts = {"zip.eocd_structure"}
     fact_requirements = [FactRequirement("zip.eocd_structure", MagicBytesStartsWith(ZIP_START_MAGICS))]
     produced_facts = {"file.detected_ext", "file.probe_detected_archive", "file.probe_offset"}

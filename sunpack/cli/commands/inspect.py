@@ -105,10 +105,6 @@ def handle(args, ctx):
                 reporter.info(ctx.t("cli.inspect.score_breakdown",
                     breakdown=to_json_text(item["score_breakdown"], pretty=False)
                 ))
-            if reporter.verbose and item.get("confirmation"):
-                reporter.info(ctx.t("cli.inspect.confirmation",
-                    confirmation=to_json_text(item["confirmation"], pretty=False)
-                ))
             if reporter.verbose and item.get("fact_errors"):
                 reporter.info(ctx.t("cli.inspect.fact_errors", errors=to_json_text(item["fact_errors"], pretty=False)))
 

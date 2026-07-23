@@ -15,7 +15,12 @@ class RuleConfigValidator:
         pipeline_config = rule_pipeline_config(config)
         if not isinstance(pipeline_config, dict):
             return ["detection.rule_pipeline must be an object"]
-        for layer in ("precheck", "scoring", "confirmation"):
+        unknown_layers = sorted(set(pipeline_config) - {"precheck", "scoring"})
+        if unknown_layers:
+            errors.append(
+                "Unknown detection.rule_pipeline field(s): " + ", ".join(unknown_layers)
+            )
+        for layer in ("precheck", "scoring"):
             rules = pipeline_config.get(layer, [])
             if not isinstance(rules, list):
                 errors.append(f"detection.rule_pipeline.{layer} must be a list")

@@ -4,6 +4,7 @@ from sunpack.coordinator.output_scan_policy import NestedOutputScanPolicy as Out
 from sunpack.coordinator.scanner import ScanOrchestrator
 from sunpack.detection import DetectionScheduler
 from tests.helpers.detection_config import with_detection_pipeline
+from tests.helpers.fs_builder import make_zip
 
 
 def scan_config(blocked_files=None, blocked_extensions=None):
@@ -18,8 +19,9 @@ def scan_config(blocked_files=None, blocked_extensions=None):
             "blocked_extensions": blocked_extensions or [],
         },
         {"name": "embedded_payload_identity", "enabled": True},
+        {"name": "zip_structure_accept", "enabled": True},
     ], scoring=[
-        {"name": "extension", "enabled": True, "extension_score_groups": [{"score": 5, "extensions": [".zip", ".7z", ".rar", ".gz", ".bz2", ".xz", ".001"]}]},
+        {"name": "zip_structure_identity", "enabled": True, "magic_score": 2, "local_header_score": 4, "cd_walk_score": 7},
     ])
 
 
@@ -34,8 +36,8 @@ def decisions_for(root: Path, config: dict):
 def test_blacklist_does_not_filter_directories_or_paths(tmp_path):
     weapon_dir = tmp_path / "FBX" / "weapon"
     weapon_dir.mkdir(parents=True)
-    (weapon_dir / "payload.zip").write_bytes(b"PK\x03\x04payload")
-    (tmp_path / "keep.zip").write_bytes(b"PK\x03\x04payload")
+    (weapon_dir / "payload.zip").write_bytes(make_zip({"payload.txt": "payload"}))
+    (tmp_path / "keep.zip").write_bytes(make_zip({"payload.txt": "payload"}))
 
     decisions = decisions_for(tmp_path, scan_config(blocked_files=["weapon"]))
 
@@ -46,9 +48,10 @@ def test_blacklist_does_not_filter_directories_or_paths(tmp_path):
 def test_blacklist_filters_exact_file_names_anywhere(tmp_path):
     nested = tmp_path / "FBX" / "weapon"
     nested.mkdir(parents=True)
-    (tmp_path / "demo.zip").write_bytes(b"PK\x03\x04payload")
-    (nested / "demo.zip").write_bytes(b"PK\x03\x04payload")
-    (tmp_path / "keep.zip").write_bytes(b"PK\x03\x04payload")
+    archive_bytes = make_zip({"payload.txt": "payload"})
+    (tmp_path / "demo.zip").write_bytes(archive_bytes)
+    (nested / "demo.zip").write_bytes(archive_bytes)
+    (tmp_path / "keep.zip").write_bytes(archive_bytes)
 
     decisions = decisions_for(tmp_path, scan_config(blocked_files=["demo.zip"]))
 
@@ -59,7 +62,7 @@ def test_blacklist_filters_exact_file_names_anywhere(tmp_path):
 
 def test_filename_blacklist_filters_single_rename_candidate_before_planning(tmp_path):
     archive = tmp_path / "asset.foo"
-    archive.write_bytes(b"PK\x03\x04payload")
+    archive.write_bytes(make_zip({"payload.txt": "payload"}))
 
     results = ScanOrchestrator(scan_config(blocked_files=["asset.foo"])).scan(str(tmp_path))
 

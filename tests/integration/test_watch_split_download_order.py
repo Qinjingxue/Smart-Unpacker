@@ -51,7 +51,7 @@ def _watch_config() -> dict:
     config["detection"] = {
         "fact_collectors": [],
         "processors": [],
-        "rule_pipeline": {"precheck": [], "scoring": [], "confirmation": []},
+        "rule_pipeline": {"precheck": [], "scoring": []},
     }
     return config
 

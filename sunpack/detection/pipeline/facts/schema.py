@@ -17,11 +17,6 @@ FACT_SCHEMA: dict[str, dict[str, Any]] = {
         "producer": "facts.collectors.magic_bytes",
         "description": "First 16 bytes used by processors and rules for magic signature checks.",
     },
-    "archive.metadata_open": {
-        "type": "dict",
-        "producer": "processors.archive_metadata_open",
-        "description": "Isolated, time-bounded metadata-only archive open result.",
-    },
     "relation.is_split_related": {
         "type": "bool",
         "producer": "relations.group_builder",
@@ -137,16 +132,6 @@ FACT_SCHEMA: dict[str, dict[str, Any]] = {
         "producer": "rules.scoring",
         "description": "Offset where embedded/probed archive payload starts.",
     },
-    "confirmation.identity_required": {
-        "type": "bool",
-        "producer": "rules.confirmation.archive_identity_consensus",
-        "description": "Whether scoring must not accept without strong bounded identity confirmation.",
-    },
-    "confirmation.identity": {
-        "type": "dict",
-        "producer": "rules.confirmation.archive_identity_consensus",
-        "description": "Fast format-specific identity consensus result.",
-    },
     "file.embedded_archive_found": {
         "type": "bool",
         "producer": "rules.precheck.embedded_payload_identity",
@@ -207,11 +192,6 @@ FACT_SCHEMA: dict[str, dict[str, Any]] = {
         "producer": "processors.compression_stream_structure",
         "description": "Lightweight gzip, bzip2, xz, or zstd stream structure check derived from the candidate file.",
     },
-    "archive.container_structure": {
-        "type": "dict",
-        "producer": "processors.archive_container_structure",
-        "description": "Lightweight CAB, ARJ, or CPIO container structure check derived from the candidate file.",
-    },
     "pe.overlay_structure": {
         "type": "dict",
         "producer": "processors.pe_overlay_structure",
@@ -226,6 +206,16 @@ FACT_SCHEMA: dict[str, dict[str, Any]] = {
         "type": "dict",
         "producer": "processors.structure_evidence",
         "description": "On-demand forensic structure evidence produced inside the detection pipeline.",
+    },
+    "relation.format_hint": {
+        "type": "str",
+        "producer": "relations.group_builder",
+        "description": "Canonical format routing hint inferred once by the logical-volume relation layer.",
+    },
+    "relation.format_hint_confidence": {
+        "type": "str",
+        "producer": "relations.group_builder",
+        "description": "Naming-only confidence for the relation format hint; never an archive identity verdict.",
     },
     "analysis.signature_prepass": {
         "type": "dict",

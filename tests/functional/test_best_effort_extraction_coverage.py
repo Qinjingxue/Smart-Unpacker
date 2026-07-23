@@ -1421,8 +1421,9 @@ def _best_effort_pipeline_config(
         },
     }, precheck=[
         {"name": "size_range", "enabled": True, "gte": 0},
+        {"name": "zip_structure_accept", "enabled": True},
     ], scoring=[
-        {"name": "extension", "enabled": True, "extension_score_groups": [{"score": 5, "extensions": [".zip"]}]},
+        {"name": "zip_structure_identity", "enabled": True, "magic_score": 5, "local_header_score": 5, "cd_walk_score": 5},
     ]))
 
 
@@ -1452,12 +1453,10 @@ def _zip_tar_gz_recursive_pipeline_config(tmp_path: Path) -> dict:
         },
     }, precheck=[
         {"name": "size_range", "enabled": True, "gte": 0},
+        {"name": "zip_structure_accept", "enabled": True},
+        {"name": "tar_structure_accept", "enabled": True},
+        {"name": "compression_stream_accept", "enabled": True},
     ], scoring=[
-        {
-            "name": "extension",
-            "enabled": True,
-            "extension_score_groups": [{"score": 5, "extensions": [".zip", ".tar", ".gz", ".tgz", ".tar.gz"]}],
-        },
         {
             "name": "zip_structure_identity",
             "enabled": True,
@@ -1496,12 +1495,9 @@ def _zip_7z_recursive_pipeline_config(tmp_path: Path) -> dict:
         },
     }, precheck=[
         {"name": "size_range", "enabled": True, "gte": 0},
+        {"name": "zip_structure_accept", "enabled": True},
+        {"name": "seven_zip_structure_accept", "enabled": True},
     ], scoring=[
-        {
-            "name": "extension",
-            "enabled": True,
-            "extension_score_groups": [{"score": 5, "extensions": [".zip", ".7z", ".001"]}],
-        },
         {
             "name": "zip_structure_identity",
             "enabled": True,
@@ -1544,12 +1540,9 @@ def _tar_gz_recursive_pipeline_config(tmp_path: Path) -> dict:
         },
     }, precheck=[
         {"name": "size_range", "enabled": True, "gte": 0},
+        {"name": "tar_structure_accept", "enabled": True},
+        {"name": "compression_stream_accept", "enabled": True},
     ], scoring=[
-        {
-            "name": "extension",
-            "enabled": True,
-            "extension_score_groups": [{"score": 5, "extensions": [".tar", ".gz", ".tgz", ".tar.gz"]}],
-        },
         {"name": "compression_stream_identity", "enabled": True, "magic_score": 5},
         {"name": "tar_structure_identity", "enabled": True, "entry_walk_score": 5},
     ]))

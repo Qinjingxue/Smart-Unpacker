@@ -22,6 +22,7 @@ class _EmbeddedModuleEnabled:
 
 @register_rule(name="embedded_payload_identity", layer="precheck")
 class EmbeddedPayloadIdentityPrecheckRule(RuleBase):
+    precheck_phase = "tail"
     fact_requirements = [
         FactRequirement("executable.carrier", _EmbeddedModuleEnabled()),
     ]

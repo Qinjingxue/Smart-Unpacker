@@ -24,8 +24,8 @@ from sunpack_native import (
 
 
 ARCHIVE_EXTENSIONS = {
-    ".001", ".7z", ".arj", ".bz2", ".cab", ".cpio", ".gz", ".rar",
-    ".tar", ".tbz", ".tbz2", ".tgz", ".txz", ".tzst", ".xz", ".z",
+    ".001", ".7z", ".bz2", ".gz", ".rar",
+    ".tar", ".tbz", ".tbz2", ".tgz", ".txz", ".tzst", ".xz",
     ".zip", ".zst",
 }
 

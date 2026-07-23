@@ -39,7 +39,7 @@ def build_effective_config(config: dict) -> dict[str, Any]:
                     for rule in pipeline_config.get(layer, [])
                     if isinstance(rule, dict)
                 ]
-                for layer in ("precheck", "scoring", "confirmation")
+                for layer in ("precheck", "scoring")
             }
         },
         "filesystem": {
@@ -223,7 +223,6 @@ def inspect_result_to_item(res) -> dict[str, Any]:
     size = facts.get("file.size", 0)
     ext = facts.get("file.ext") or path_info.get("ext") or ""
     fact_errors = facts.get("_fact_errors") or []
-    metadata_open = facts.get("archive.metadata_open") or {}
     return {
         "path": res.path,
         "decision": getattr(res, "decision", "archive" if res.should_extract else "not_archive"),
@@ -234,11 +233,10 @@ def inspect_result_to_item(res) -> dict[str, Any]:
         "should_extract": res.should_extract,
         "score": res.score,
         "score_breakdown": list(getattr(res, "score_breakdown", []) or []),
-        "confirmation": dict(getattr(res, "confirmation", {}) or {}),
         "size": facts.get("file.size", size),
         "ext": ext,
         "detected_ext": res.detected_ext or facts.get("file.detected_ext") or None,
-        "container_type": facts.get("file.container_type") or metadata_open.get("type") or "unknown",
+        "container_type": facts.get("file.container_type") or "unknown",
         "identity_confirmed": bool(facts.get("file.probe_detected_archive")),
         "identity_offset": int(facts.get("file.probe_offset") or 0),
         "is_split_candidate": bool(res.split_role or facts.get("file.is_split_candidate")),

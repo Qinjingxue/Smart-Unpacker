@@ -25,12 +25,9 @@ def minimal_config():
     }, precheck=[
         {"name": "blacklist", "enabled": True, "blocked_files": []},
         {"name": "size_range", "enabled": True, "gte": 0},
+        {"name": "zip_structure_accept", "enabled": True},
     ], scoring=[
-        {
-            "name": "extension",
-            "enabled": True,
-            "extension_score_groups": [{"score": 5, "extensions": [".zip"]}],
-        }
+        {"name": "zip_structure_identity", "enabled": True, "magic_score": 2, "local_header_score": 4, "cd_walk_score": 7},
     ]))
 
 
@@ -45,8 +42,8 @@ class DetectionPipelineTests(unittest.TestCase):
             decision = DetectionScheduler(minimal_config()).evaluate_bag(bag)
 
             self.assertTrue(decision.should_extract)
-            self.assertEqual(decision.total_score, 5)
-            self.assertIn("extension", decision.matched_rules)
+            self.assertEqual(decision.total_score, 0)
+            self.assertEqual(decision.deciding_rule, "zip_structure_accept")
             self.assertEqual(bag.get("file.path"), str(archive_path))
 
     def test_archive_task_keeps_physical_path_and_exposes_format_hint(self):

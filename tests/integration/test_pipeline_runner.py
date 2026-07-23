@@ -43,8 +43,9 @@ def test_pipeline_runner_uses_tmp_path_and_applies_success_postprocess(tmp_path,
         },
     }, precheck=[
         {"name": "size_range", "enabled": True, "gte": 0},
+        {"name": "zip_structure_accept", "enabled": True},
     ], scoring=[
-        {"name": "extension", "enabled": True, "extension_score_groups": [{"score": 5, "extensions": [".zip"]}]},
+        {"name": "zip_structure_identity", "enabled": True, "magic_score": 2, "local_header_score": 4, "cd_walk_score": 7},
     ]))
 
     engine = PipelineEngine(config)
@@ -152,9 +153,7 @@ def test_output_root_preserves_tree_and_recursive_scan_uses_success_outputs(tmp_
             "archive_cleanup_mode": "k",
             "flatten_single_directory": False,
         },
-    }, scoring=[
-        {"name": "extension", "enabled": True, "extension_score_groups": [{"score": 5, "extensions": [".zip"]}]},
-    ]))
+    }))
     engine = PipelineEngine(config)
     task = ArchiveTask(fact_bag=FactBag(), score=10, main_path=str(archive), all_parts=[str(archive)], logical_name="payload")
 

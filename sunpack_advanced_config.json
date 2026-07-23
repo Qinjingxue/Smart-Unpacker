@@ -611,10 +611,6 @@
         "enabled": true
       },
       {
-        "name": "archive_metadata_open",
-        "enabled": true
-      },
-      {
         "name": "zip_structure",
         "enabled": true
       },
@@ -628,10 +624,6 @@
       },
       {
         "name": "compression_stream_structure",
-        "enabled": true
-      },
-      {
-        "name": "archive_container_structure",
         "enabled": true
       },
       {
@@ -684,25 +676,16 @@
           "max_first_header_check_bytes": 1048576
         },
         {
+          "name": "compression_stream_accept",
+          "enabled": true
+        },
+        {
           "name": "embedded_payload_identity",
           "enabled": true,
           "deep_scan_single_candidate_ratio": 0.3
         }
       ],
       "scoring": [
-        {
-          "name": "extension",
-          "enabled": true,
-          "extension_score_groups": [
-            {
-              "score": 5,
-              "extensions": [
-                ".zip", ".7z", ".rar", ".gz", ".bz2", ".xz", ".zst", ".Z", ".tar", ".tgz", ".tbz2", ".txz",
-                ".tzst"
-              ]
-            }
-          ]
-        },
         {
           "name": "seven_zip_structure_identity",
           "enabled": true,
@@ -735,11 +718,6 @@
           "entry_walk_score": 7
         },
         {
-          "name": "archive_container_identity",
-          "enabled": true,
-          "container_score": 5
-        },
-        {
           "name": "compression_stream_identity",
           "enabled": true,
           "stream_score": 5,
@@ -757,20 +735,6 @@
           "deep_scan": false,
           "fuzzy_enabled": false,
           "max_read_mb_per_archive": 64
-        }
-      ],
-      "confirmation": [
-        {
-          "name": "archive_identity_consensus",
-          "enabled": true,
-          "always_run": false,
-          "minimum_analysis_confidence": 0.9
-        },
-        {
-          "name": "archive_metadata_open",
-          "enabled": true,
-          "always_run": false,
-          "timeout_seconds": 1.5
         }
       ]
     }

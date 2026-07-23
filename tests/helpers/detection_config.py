@@ -3,7 +3,6 @@ def with_detection_pipeline(
     *,
     precheck: list[dict] | None = None,
     scoring: list[dict] | None = None,
-    confirmation: list[dict] | None = None,
     processors: list[dict] | None = None,
 ) -> dict:
     result = dict(config or {})
@@ -23,7 +22,6 @@ def with_detection_pipeline(
         "rule_pipeline": {
             "precheck": remaining_precheck,
             "scoring": [dict(rule) for rule in (scoring or [])],
-            "confirmation": confirmation or [],
         }
     }
     if processors is not None:
