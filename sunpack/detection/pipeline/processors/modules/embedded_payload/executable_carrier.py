@@ -10,9 +10,10 @@ from sunpack.detection.pipeline.processors.registry import register_processor
 DEFAULT_SCAN_LIMIT_BYTES = 8 * 1024 * 1024
 DEFAULT_CHUNK_BYTES = 1024 * 1024
 
-# These signatures identify application runtime packers, not archive formats.
-# Keep profiles independent so new packers can be added without changing policy.
+# These signatures identify application or installer bundles, not archive formats.
+# Keep profiles independent so new bundle types can be added without changing policy.
 RUNTIME_STUB_PROFILES: tuple[tuple[str, tuple[bytes, ...]], ...] = (
+    ("inno_setup", (b"Inno Setup Setup Data (", b"JR.Inno.Setup")),
     ("par_packer", (b"PAR::Packer", b"PAR_TEMP")),
     ("nuitka_onefile", (b"NUITKA_ONEFILE_PARENT",)),
 )

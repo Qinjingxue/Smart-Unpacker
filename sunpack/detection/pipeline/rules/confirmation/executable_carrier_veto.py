@@ -21,6 +21,8 @@ class ExecutableCarrierVetoRule(RuleBase):
             return ConfirmationEffect.pass_()
         facts.set("file.container_type", "pe")
         if carrier.get("kind") == "runtime_bundle" and config.get("reject_runtime_bundles", True):
-            profile = str(carrier.get("runtime_profile") or "application runtime packer")
-            return ConfirmationEffect.reject(f"Executable runtime bundle ({profile}) is not an SFX archive")
+            profile = str(carrier.get("runtime_profile") or "unknown")
+            return ConfirmationEffect.reject(
+                f"Executable application/installer bundle ({profile}) is not treated as a user archive"
+            )
         return ConfirmationEffect.pass_()
