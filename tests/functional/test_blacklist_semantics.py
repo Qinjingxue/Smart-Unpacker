@@ -17,9 +17,9 @@ def scan_config(blocked_files=None, blocked_extensions=None):
             "blocked_files": blocked_files or [],
             "blocked_extensions": blocked_extensions or [],
         },
+        {"name": "embedded_payload_identity", "enabled": True},
     ], scoring=[
         {"name": "extension", "enabled": True, "extension_score_groups": [{"score": 5, "extensions": [".zip", ".7z", ".rar", ".gz", ".bz2", ".xz", ".001"]}]},
-        {"name": "embedded_payload_identity", "enabled": True},
     ])
 
 

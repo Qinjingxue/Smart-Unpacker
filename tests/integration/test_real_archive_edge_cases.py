@@ -38,9 +38,9 @@ def edge_config(passwords: list[str] | None = None) -> dict:
         {"name": "archive_metadata_open", "enabled": True},
     ], precheck=[
         {"name": "size_range", "enabled": True, "gte": 0},
+        {"name": "embedded_payload_identity", "enabled": True},
     ], scoring=[
         {"name": "extension", "enabled": True, "extension_score_groups": [{"score": 5, "extensions": [".zip", ".7z", ".rar", ".tar", ".gz", ".bz2", ".xz", ".zst", ".001"]}]},
-        {"name": "embedded_payload_identity", "enabled": True},
         {"name": "seven_zip_structure_identity", "enabled": True, "magic_score": 5, "next_header_nid_score": 5},
         {"name": "rar_structure_identity", "enabled": True, "magic_score": 5, "block_walk_score": 5},
         {"name": "zip_structure_identity", "enabled": True, "magic_score": 2, "local_header_score": 4, "cd_walk_score": 7},

@@ -412,7 +412,7 @@ print(sorted(get_repair_module_registry().all()))
 
 ## detection.rule_pipeline
 
-检测器在规则评分未接受候选时，还可调用结构分析器进行救援。初轮 `structure_evidence` 只处理具有归档扩展名、归档 magic、probe、PE overlay 或分卷关系等正向先验的候选，默认读取头尾各 64 KiB且不执行完整流扫描。完全未知的二进制文件由 `embedded_payload_identity` 的单候选占比策略选择后再执行完整流扫描，避免普通资源文件在初轮被逐字节读取。以下字段位于 `detection`：
+检测器在初轮规则未接受候选时，还可调用结构分析器进行救援。初轮 `structure_evidence` 只处理具有归档扩展名、归档 magic、probe、PE overlay 或分卷关系等正向先验的候选，默认读取头尾各 64 KiB且不执行完整流扫描。完全未知的二进制文件由 `embedded_payload_identity` 的单候选占比策略选择后再执行完整流扫描，避免普通资源文件在初轮被逐字节读取。以下字段位于 `detection`：
 
 | 字段 | 说明 |
 | --- | --- |
@@ -424,8 +424,8 @@ print(sorted(get_repair_module_registry().all()))
 
 检测规则分三层：
 
-- `precheck`：高置信结构快速接受。
-- `scoring`：扩展名、真实结构、embedded payload。
+- `precheck`：高置信结构快速接受；最后执行安装器否决与 embedded payload 识别。
+- `scoring`：扩展名和真实结构。
 - `confirmation`：7z.dll probe/test 等确认层。
 
 每条规则至少包含：
@@ -443,18 +443,17 @@ print(sorted(get_repair_module_registry().all()))
 | `seven_zip_structure_accept` | precheck | start/next header 可信的 7z 快速接受。 |
 | `rar_structure_accept` | precheck | main header/block walk 可信的 RAR 快速接受。 |
 | `extension` | scoring | 扩展名加分。 |
-| `embedded_payload_identity` | scoring | 对入选文件的可靠嵌入归档身份加分。 |
+| `embedded_payload_identity` | precheck | 先否决已知安装器，再对获准深扫且找到可靠嵌入归档的文件直接接受。 |
 | `zip_structure_identity` | scoring | ZIP local header、EOCD、CD walk 加分。 |
 | `tar_structure_identity` | scoring | TAR header、ustar、entry walk 加分。 |
 | `seven_zip_structure_identity` | scoring | 7z magic/header/NID 加分。 |
 | `rar_structure_identity` | scoring | RAR magic/header/block walk 加分。 |
 | `archive_container_identity` | scoring | CAB、ARJ、CPIO 等容器加分。 |
 | `compression_stream_identity` | scoring | gzip、bzip2、xz、zstd 结构加分。 |
-| `executable_carrier_veto` | confirmation | 快速否决明确的应用运行时打包器，保留 SFX。 |
 | `archive_identity_consensus` | confirmation | 复用 ZIP/7z/RAR/TAR/流格式已有结构事实确认归档身份。 |
 | `archive_metadata_open` | confirmation | 仅对未决容器执行隔离、限时、元数据级打开。 |
 
-历史 `magic_bytes`、`embedded_archive` scoring 规则已移出 active 规则包；当前主流水线由格式结构规则消费 magic/结构 fact，由 `embedded_payload_identity` 统一消费 embedded 和 overlay 事实。
+历史 `magic_bytes`、`embedded_archive` scoring 规则已移出 active 规则包；当前主流水线由格式结构规则消费 magic/结构 fact，由 precheck 最后的 `embedded_payload_identity` 统一执行安装器否决并消费 embedded 和 overlay 事实。安装器文件读取与特征匹配由 Rust 实现；命中后不会调度完整嵌入归档扫描。
 
 ### deep_scan_single_candidate_ratio
 
@@ -464,7 +463,7 @@ print(sorted(get_repair_module_registry().all()))
 {
   "detection": {
     "rule_pipeline": {
-      "scoring": [
+      "precheck": [
         {
           "name": "embedded_payload_identity",
           "deep_scan_single_candidate_ratio": 0.3

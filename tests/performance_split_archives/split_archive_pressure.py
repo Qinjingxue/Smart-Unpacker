@@ -261,6 +261,7 @@ def pressure_config(passwords: list[str] | None = None, scheduler_profile: str =
         "performance": {"scheduler_profile": scheduler_profile},
     }, precheck=[
         {"name": "size_range", "enabled": True, "gte": 0},
+        {"name": "embedded_payload_identity", "enabled": True},
     ], scoring=[
         {
             "name": "extension",
@@ -288,7 +289,6 @@ def pressure_config(passwords: list[str] | None = None, scheduler_profile: str =
                 ],
             }],
         },
-        {"name": "embedded_payload_identity", "enabled": True},
         {"name": "seven_zip_structure_identity", "enabled": True, "magic_score": 5, "next_header_nid_score": 5},
         {"name": "zip_structure_identity", "enabled": True, "magic_score": 5, "local_header_score": 5, "cd_walk_score": 5},
         {"name": "rar_structure_identity", "enabled": True, "magic_score": 5, "block_walk_score": 5},

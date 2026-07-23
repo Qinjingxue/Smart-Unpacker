@@ -682,6 +682,11 @@
           "name": "rar_structure_accept",
           "enabled": true,
           "max_first_header_check_bytes": 1048576
+        },
+        {
+          "name": "embedded_payload_identity",
+          "enabled": true,
+          "deep_scan_single_candidate_ratio": 0.3
         }
       ],
       "scoring": [
@@ -697,12 +702,6 @@
               ]
             }
           ]
-        },
-        {
-          "name": "embedded_payload_identity",
-          "enabled": true,
-          "deep_scan_single_candidate_ratio": 0.3,
-          "embedded_payload_score": 6
         },
         {
           "name": "seven_zip_structure_identity",
@@ -761,12 +760,6 @@
         }
       ],
       "confirmation": [
-        {
-          "name": "executable_carrier_veto",
-          "enabled": true,
-          "always_run": true,
-          "reject_runtime_bundles": true
-        },
         {
           "name": "archive_identity_consensus",
           "enabled": true,

@@ -16,9 +16,9 @@ SCAN_CONFIG = normalize_config(with_detection_pipeline({
     "thresholds": {"archive_score_threshold": 1, "maybe_archive_threshold": 1},
 }, precheck=[
     {"name": "size_range", "enabled": True, "gte": 0},
+    {"name": "embedded_payload_identity", "enabled": True},
 ], scoring=[
     {"name": "extension", "enabled": True, "extension_score_groups": [{"score": 1, "extensions": [".zip", ".7z", ".rar", ".001"]}]},
-    {"name": "embedded_payload_identity", "enabled": True},
     {"name": "seven_zip_structure_identity", "enabled": True, "structure_score": 1, "magic_score": 1, "next_header_nid_score": 1},
     {"name": "rar_structure_identity", "enabled": True, "structure_score": 1, "magic_score": 1, "block_walk_score": 1},
 ]))

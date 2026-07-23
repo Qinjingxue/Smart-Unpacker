@@ -8,14 +8,14 @@ from tests.helpers.detection_config import with_detection_pipeline
 
 def _payload():
     return with_detection_pipeline(
-        scoring=[{"name": "embedded_payload_identity", "enabled": True}],
+        precheck=[{"name": "embedded_payload_identity", "enabled": True}],
     )
 
 
 def test_config_validate_checks_rule_schema_types_even_when_disabled():
     payload = _payload()
-    payload["detection"]["rule_pipeline"]["scoring"][0]["enabled"] = False
-    payload["detection"]["rule_pipeline"]["scoring"][0]["deep_scan_single_candidate_ratio"] = "many"
+    payload["detection"]["rule_pipeline"]["precheck"][0]["enabled"] = False
+    payload["detection"]["rule_pipeline"]["precheck"][0]["deep_scan_single_candidate_ratio"] = "many"
 
     result = validate_config_payload(payload)
 
@@ -25,7 +25,7 @@ def test_config_validate_checks_rule_schema_types_even_when_disabled():
 
 def test_config_validate_rejects_obsolete_cumulative_deep_scan_ratio():
     payload = _payload()
-    payload["detection"]["rule_pipeline"]["scoring"][0]["deep_scan_size_coverage_ratio"] = 0.5
+    payload["detection"]["rule_pipeline"]["precheck"][0]["deep_scan_size_coverage_ratio"] = 0.5
 
     result = validate_config_payload(payload)
 
@@ -111,4 +111,4 @@ def test_effective_config_includes_thresholds_scheduler_and_rule_pipeline():
     assert effective["filesystem"]["directory_scan_mode"] == "current_dir_only"
     assert effective["scheduler"]["scheduler_profile"] == "auto"
     assert effective["scheduler"]["resolved_scheduler_profile"] in {"conservative", "aggressive"}
-    assert effective["detection"]["rule_pipeline"]["scoring"][0]["name"] == "embedded_payload_identity"
+    assert effective["detection"]["rule_pipeline"]["precheck"][0]["name"] == "embedded_payload_identity"

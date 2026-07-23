@@ -26,15 +26,15 @@ def _layered_config_paths(simple, advanced):
     return candidate_paths
 
 
-def _prepared_scoring_config(config, name):
+def _prepared_precheck_config(config, name):
     scheduler = DetectionScheduler(config)
-    for rule in scheduler.rule_manager._prepare_rules("scoring"):
+    for rule in scheduler.rule_manager._prepare_rules("precheck"):
         if rule.name == name:
             return rule.config
     return None
 
 
-def _advanced_payload(scoring=None):
+def _advanced_payload(precheck=None):
     return {
         "cli": {"language": "en"},
         "thresholds": {"archive_score_threshold": 6, "maybe_archive_threshold": 3},
@@ -47,7 +47,11 @@ def _advanced_payload(scoring=None):
             "enabled": True,
             "fact_collectors": [{"name": "file_facts", "enabled": True}],
             "processors": [],
-            "rule_pipeline": {"precheck": [], "scoring": scoring or [{"name": "extension", "enabled": True}], "confirmation": []},
+            "rule_pipeline": {
+                "precheck": precheck or [],
+                "scoring": [{"name": "extension", "enabled": True}],
+                "confirmation": [],
+            },
         },
     }
 
@@ -102,11 +106,11 @@ def test_embedded_single_candidate_ratio_simple_config_overrides_advanced(tmp_pa
         "name": "embedded_payload_identity", "enabled": True,
         "deep_scan_single_candidate_ratio": 0.3,
     }]))
-    _write_json(simple, {"detection": {"rule_pipeline": {"scoring": [{
+    _write_json(simple, {"detection": {"rule_pipeline": {"precheck": [{
         "name": "embedded_payload_identity", "deep_scan_single_candidate_ratio": 0.8,
     }]}}})
     monkeypatch.setattr(loader, "_candidate_config_paths", _layered_config_paths(simple, advanced))
-    prepared = _prepared_scoring_config(loader.load_config(), "embedded_payload_identity")
+    prepared = _prepared_precheck_config(loader.load_config(), "embedded_payload_identity")
     assert prepared["deep_scan_single_candidate_ratio"] == 0.8
 
 
@@ -116,4 +120,4 @@ def test_obsolete_embedded_scan_configuration_is_rejected():
         "embedded_payload_scan_level": "deep",
     }])
     with pytest.raises(ValueError, match="embedded_payload_scan_level"):
-        _prepared_scoring_config(config, "embedded_payload_identity")
+        _prepared_precheck_config(config, "embedded_payload_identity")

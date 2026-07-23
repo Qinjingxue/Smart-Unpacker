@@ -24,9 +24,9 @@ def pressure_scan_config() -> dict:
             "enabled": True,
             "blocked_extensions": [".jar", ".docx", ".apk", ".xlsx"],
         },
+        {"name": "embedded_payload_identity", "enabled": True, "deep_scan_single_candidate_ratio": 1e-9},
     ], scoring=[
         {"name": "extension", "enabled": True, "extension_score_groups": [{"score": 5, "extensions": [".zip", ".7z", ".rar", ".gz", ".bz2", ".xz", ".001"]}]},
-        {"name": "embedded_payload_identity", "enabled": True, "deep_scan_single_candidate_ratio": 1e-9, "embedded_payload_score": 5},
         {"name": "zip_structure_identity", "enabled": True, "magic_score": 2, "local_header_score": 4, "cd_walk_score": 7},
     ], confirmation=[
         {"name": "archive_identity_consensus", "enabled": True, "always_run": True},

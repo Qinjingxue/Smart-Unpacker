@@ -93,7 +93,7 @@ tests/cases/archive_scan/
 | 规则名 | 含义 |
 | --- | --- |
 | `extension` | 扩展名规则命中，例如 `.zip`、`.7z`。 |
-| `embedded_payload_identity` | 普通载体或 PE overlay 中的嵌入归档载荷命中。 |
+| `embedded_payload_identity` | precheck 最后先否决已知安装器，再直接接受普通载体或 PE overlay 中的可靠嵌入归档载荷。 |
 | `seven_zip_structure_identity` | 7z 起始魔数或结构证据命中。 |
 | `zip_structure_identity` | ZIP local header 或 EOCD/central directory 结构证据命中。 |
 | `archive_identity_consensus` | 使用已有的有界结构证据确认归档身份。 |
@@ -160,7 +160,7 @@ tests/cases/archive_scan/
       "path": "R3961.jpg",
       "should_extract": true,
       "decision": "archive",
-      "matched_rules_include": ["embedded_payload_identity", "archive_identity_consensus"],
+      "matched_rules_include": ["embedded_payload_identity"],
       "facts": {
         "file.detected_ext": ".rar",
         "file.probe_offset": 904331,

@@ -15,9 +15,9 @@ def _rule_pipeline_config():
     }, precheck=[
         {"name": "blacklist", "enabled": True, "blocked_files": []},
         {"name": "size_range", "enabled": True, "gte": 0},
+        {"name": "embedded_payload_identity", "enabled": True},
     ], scoring=[
         {"name": "extension", "enabled": True, "extension_score_groups": [{"score": 5, "extensions": [".zip", ".7z", ".rar", ".gz", ".bz2", ".xz", ".001"]}]},
-        {"name": "embedded_payload_identity", "enabled": True},
         {"name": "zip_structure_identity", "enabled": True, "magic_score": 5, "local_header_score": 5, "cd_walk_score": 5},
     ])
 

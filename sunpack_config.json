@@ -76,7 +76,7 @@
   },
   "detection": {
     "rule_pipeline": {
-      "scoring": [
+      "precheck": [
         {
           "name": "embedded_payload_identity",
           "deep_scan_single_candidate_ratio": 0.3

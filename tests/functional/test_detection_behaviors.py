@@ -19,12 +19,16 @@ def config_with_rules(scoring):
 
 
 def embedded_config(*, ratio=1.0):
-    return config_with_rules([{
-        "name": "embedded_payload_identity",
-        "enabled": True,
-        "deep_scan_single_candidate_ratio": ratio,
-        "embedded_payload_score": 5,
-    }])
+    return with_detection_pipeline({
+        "thresholds": {"archive_score_threshold": 5, "maybe_archive_threshold": 3},
+    }, precheck=[
+        {"name": "size_range", "enabled": True, "gte": 0},
+        {
+            "name": "embedded_payload_identity",
+            "enabled": True,
+            "deep_scan_single_candidate_ratio": ratio,
+        },
+    ])
 
 
 def zip_bytes():
@@ -132,9 +136,11 @@ class DetectionBehaviorTests(unittest.TestCase):
         bag.set("file.path", "installer.exe")
         bag.set("embedded_archive.analysis", {"found": False})
         bag.set("pe.overlay_structure", {
+            "is_pe": True,
             "archive_like": True,
             "format": "7z",
             "detected_ext": ".7z",
+            "overlay_offset": 434176,
             "archive_offset": 434176,
         })
         decision = DetectionScheduler(embedded_config()).evaluate_bag(bag)

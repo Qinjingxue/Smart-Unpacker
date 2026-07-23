@@ -118,8 +118,8 @@ class ArchiveTaskProvider:
 
     def _embedded_deep_scan_single_candidate_ratio(self) -> float:
         pipeline = rule_pipeline_config(self.config)
-        scoring = pipeline.get("scoring") if isinstance(pipeline.get("scoring"), list) else []
-        for item in scoring:
+        precheck = pipeline.get("precheck") if isinstance(pipeline.get("precheck"), list) else []
+        for item in precheck:
             if not isinstance(item, dict) or item.get("name") != "embedded_payload_identity":
                 continue
             if item.get("enabled", False) is False:

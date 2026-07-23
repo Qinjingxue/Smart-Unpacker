@@ -26,13 +26,14 @@ ARCHIVE_FORMATS = [
 def _detected(path: Path):
     config = with_detection_pipeline(
         {"thresholds": {"archive_score_threshold": 6, "maybe_archive_threshold": 3}},
-        scoring=[
+        precheck=[
             {
                 "name": "embedded_payload_identity",
                 "enabled": True,
                 "deep_scan_single_candidate_ratio": 0.3,
-                "embedded_payload_score": 6,
             },
+        ],
+        scoring=[
             {
                 "name": "structure_evidence_identity",
                 "enabled": True,

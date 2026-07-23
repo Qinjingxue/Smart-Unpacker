@@ -124,8 +124,8 @@ FACT_SCHEMA: dict[str, dict[str, Any]] = {
     },
     "file.container_type": {
         "type": "str",
-        "producer": "rules.confirmation.executable_carrier_veto",
-        "description": "Executable carrier type established by the safety veto.",
+        "producer": "rules.precheck.embedded_payload_identity",
+        "description": "Executable carrier type established by embedded-payload precheck.",
     },
     "file.probe_detected_archive": {
         "type": "bool",
@@ -149,7 +149,7 @@ FACT_SCHEMA: dict[str, dict[str, Any]] = {
     },
     "file.embedded_archive_found": {
         "type": "bool",
-        "producer": "rules.scoring.embedded_payload_identity",
+        "producer": "rules.precheck.embedded_payload_identity",
         "description": "Whether a carrier/ambiguous resource contains an embedded archive payload.",
     },
     "embedded_archive.analysis": {
@@ -229,7 +229,7 @@ FACT_SCHEMA: dict[str, dict[str, Any]] = {
     },
     "analysis.signature_prepass": {
         "type": "dict",
-        "producer": "rules.embedded_payload_identity",
+        "producer": "rules.precheck.embedded_payload_identity",
         "description": "Reusable full-stream signature hit map produced by reliable embedded detection.",
     },
     "7z.structure": {

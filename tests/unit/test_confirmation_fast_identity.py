@@ -3,7 +3,10 @@ from sunpack.detection.pipeline.processors.context import FactProcessorContext
 from sunpack.detection.pipeline.processors.modules.confirmation import archive_metadata_open
 from sunpack.detection.pipeline.processors.modules.embedded_payload.executable_carrier import classify_executable_carrier
 from sunpack.detection.pipeline.rules.confirmation.archive_identity_consensus import ArchiveIdentityConsensusRule
-from sunpack.detection.pipeline.rules.confirmation.executable_carrier_veto import ExecutableCarrierVetoRule
+from sunpack.detection.pipeline.rules.precheck.embedded_payload_identity import (
+    EmbeddedPayloadIdentityPrecheckRule,
+)
+from sunpack.detection.pipeline.rules.manager import RuleManager
 from sunpack.detection.scheduler import DetectionScheduler
 from sunpack.support.sevenzip_bridge_worker import SevenZipMetadataOpenResult
 from tests.helpers.detection_config import with_detection_pipeline
@@ -50,7 +53,7 @@ def test_runtime_bundle_veto_rejects_before_identity_confirmation():
         "kind": "runtime_bundle",
         "runtime_profile": "par_packer",
     })
-    effect = ExecutableCarrierVetoRule().evaluate(facts, {"reject_runtime_bundles": True})
+    effect = EmbeddedPayloadIdentityPrecheckRule().evaluate(facts, {})
     assert effect.decision == "reject"
     assert effect.reason == "Executable application/installer bundle (par_packer) is not treated as a user archive"
 
@@ -76,7 +79,7 @@ def test_inno_setup_stub_is_rejected_as_an_installer_bundle(tmp_path):
 
     facts = FactBag()
     facts.set("executable.carrier", carrier)
-    effect = ExecutableCarrierVetoRule().evaluate(facts, {"reject_runtime_bundles": True})
+    effect = EmbeddedPayloadIdentityPrecheckRule().evaluate(facts, {})
     assert effect.decision == "reject"
     assert effect.reason == "Executable application/installer bundle (inno_setup) is not treated as a user archive"
 
@@ -99,7 +102,7 @@ def test_squirrel_setup_stub_is_rejected_as_an_installer_bundle(tmp_path):
 
     facts = FactBag()
     facts.set("executable.carrier", carrier)
-    effect = ExecutableCarrierVetoRule().evaluate(facts, {"reject_runtime_bundles": True})
+    effect = EmbeddedPayloadIdentityPrecheckRule().evaluate(facts, {})
     assert effect.decision == "reject"
     assert effect.reason == (
         "Executable application/installer bundle (squirrel_windows) is not treated as a user archive"
@@ -123,7 +126,7 @@ def test_qt_ifw_tail_layout_is_rejected_as_an_installer_bundle(tmp_path):
 
     facts = FactBag()
     facts.set("executable.carrier", carrier)
-    effect = ExecutableCarrierVetoRule().evaluate(facts, {"reject_runtime_bundles": True})
+    effect = EmbeddedPayloadIdentityPrecheckRule().evaluate(facts, {})
     assert effect.decision == "reject"
     assert effect.reason == (
         "Executable application/installer bundle (qt_installer_framework) is not treated as a user archive"
@@ -141,6 +144,82 @@ def test_qt_ifw_cookie_without_valid_marker_is_not_a_runtime_bundle(tmp_path):
         {"is_pe": True, "overlay_offset": len(stub), "archive_like": False},
     )
     assert carrier["kind"] == "plain_executable"
+
+
+def test_precheck_rejects_runtime_bundle_without_requesting_embedded_scan():
+    facts = FactBag()
+    requested = []
+
+    def ensure_facts(bags, fact_names, fact_configs=None):
+        del fact_configs
+        requested.append(set(fact_names))
+        for bag in bags:
+            if "executable.carrier" in fact_names:
+                bag.set("executable.carrier", {
+                    "is_executable": True,
+                    "kind": "runtime_bundle",
+                    "runtime_profile": "inno_setup",
+                })
+
+    manager = RuleManager({
+        "thresholds": {"archive_score_threshold": 6, "maybe_archive_threshold": 3},
+        "detection": {
+            "rule_pipeline": {
+                "precheck": [{"name": "embedded_payload_identity", "enabled": True}],
+                "scoring": [],
+                "confirmation": [],
+            }
+        },
+    }, ensure_pool_facts=ensure_facts)
+
+    decision = manager.evaluate_pool([facts])[facts]
+
+    assert decision.should_extract is False
+    assert decision.decision_stage == "precheck"
+    assert decision.deciding_rule == "embedded_payload_identity"
+    assert all("embedded_archive.analysis" not in names for names in requested)
+
+
+def test_precheck_accepts_completed_embedded_scan():
+    facts = FactBag()
+    facts.set("candidate.embedded_deep_scan", True)
+
+    def ensure_facts(bags, fact_names, fact_configs=None):
+        del fact_configs
+        for bag in bags:
+            if "executable.carrier" in fact_names:
+                bag.set("executable.carrier", {"is_executable": False, "kind": "none"})
+            if "embedded_archive.analysis" in fact_names:
+                bag.set("embedded_archive.analysis", {
+                    "complete": True,
+                    "read_bytes": 128,
+                    "hits": [{"name": "zip_local", "offset": 12}],
+                    "candidates": [{
+                        "format": "zip",
+                        "detected_ext": ".zip",
+                        "offset": 12,
+                        "confidence": 1.0,
+                    }],
+                })
+
+    manager = RuleManager({
+        "thresholds": {"archive_score_threshold": 6, "maybe_archive_threshold": 3},
+        "detection": {
+            "rule_pipeline": {
+                "precheck": [{"name": "embedded_payload_identity", "enabled": True}],
+                "scoring": [],
+                "confirmation": [],
+            }
+        },
+    }, ensure_pool_facts=ensure_facts)
+
+    decision = manager.evaluate_pool([facts])[facts]
+
+    assert decision.should_extract is True
+    assert decision.decision_stage == "precheck"
+    assert decision.total_score == 0
+    assert facts.get("file.detected_ext") == ".zip"
+    assert facts.get("file.probe_offset") == 12
 
 
 def test_metadata_open_timeout_is_inconclusive_not_rejection(tmp_path, monkeypatch):
