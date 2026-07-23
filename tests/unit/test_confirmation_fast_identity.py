@@ -81,6 +81,68 @@ def test_inno_setup_stub_is_rejected_as_an_installer_bundle(tmp_path):
     assert effect.reason == "Executable application/installer bundle (inno_setup) is not treated as a user archive"
 
 
+def test_squirrel_setup_stub_is_rejected_as_an_installer_bundle(tmp_path):
+    path = tmp_path / "Setup.exe"
+    stub = (
+        b"MZ"
+        + "SquirrelAwareVersion".encode("utf-16le")
+        + "SquirrelSetup.log".encode("utf-16le")
+    )
+    path.write_bytes(stub)
+
+    carrier = classify_executable_carrier(
+        str(path),
+        {"is_pe": True, "overlay_offset": len(stub), "archive_like": False},
+    )
+    assert carrier["kind"] == "runtime_bundle"
+    assert carrier["runtime_profile"] == "squirrel_windows"
+
+    facts = FactBag()
+    facts.set("executable.carrier", carrier)
+    effect = ExecutableCarrierVetoRule().evaluate(facts, {"reject_runtime_bundles": True})
+    assert effect.decision == "reject"
+    assert effect.reason == (
+        "Executable application/installer bundle (squirrel_windows) is not treated as a user archive"
+    )
+
+
+def test_qt_ifw_tail_layout_is_rejected_as_an_installer_bundle(tmp_path):
+    path = tmp_path / "qt-installer.exe"
+    cookie = (0xC2630A1C99D668F8).to_bytes(8, "little")
+    installer_marker = (0x12023233).to_bytes(8, "little")
+    binary_content_size = (64).to_bytes(8, "little")
+    stub = b"MZ" + (b"\0" * 64) + binary_content_size + installer_marker + cookie + b"signed-tail"
+    path.write_bytes(stub)
+
+    carrier = classify_executable_carrier(
+        str(path),
+        {"is_pe": True, "overlay_offset": 66, "archive_like": False},
+    )
+    assert carrier["kind"] == "runtime_bundle"
+    assert carrier["runtime_profile"] == "qt_installer_framework"
+
+    facts = FactBag()
+    facts.set("executable.carrier", carrier)
+    effect = ExecutableCarrierVetoRule().evaluate(facts, {"reject_runtime_bundles": True})
+    assert effect.decision == "reject"
+    assert effect.reason == (
+        "Executable application/installer bundle (qt_installer_framework) is not treated as a user archive"
+    )
+
+
+def test_qt_ifw_cookie_without_valid_marker_is_not_a_runtime_bundle(tmp_path):
+    path = tmp_path / "not-qt-installer.exe"
+    cookie = (0xC2630A1C99D668F8).to_bytes(8, "little")
+    stub = b"MZ" + (b"\0" * 64) + (64).to_bytes(8, "little") + (0).to_bytes(8, "little") + cookie
+    path.write_bytes(stub)
+
+    carrier = classify_executable_carrier(
+        str(path),
+        {"is_pe": True, "overlay_offset": len(stub), "archive_like": False},
+    )
+    assert carrier["kind"] == "plain_executable"
+
+
 def test_metadata_open_timeout_is_inconclusive_not_rejection(tmp_path, monkeypatch):
     path = tmp_path / "ambiguous.zip"
     path.write_bytes(b"not enough structure")

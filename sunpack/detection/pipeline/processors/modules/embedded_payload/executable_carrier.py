@@ -9,11 +9,21 @@ from sunpack.detection.pipeline.processors.registry import register_processor
 
 DEFAULT_SCAN_LIMIT_BYTES = 8 * 1024 * 1024
 DEFAULT_CHUNK_BYTES = 1024 * 1024
+QT_IFW_TAIL_WINDOW_BYTES = 1024 * 1024
+QT_IFW_MAGIC_COOKIE = 0xC2630A1C99D668F8
+QT_IFW_MAGIC_MARKERS = frozenset((0x12023233, 0x12023234, 0x12023235, 0x12023236))
 
 # These signatures identify application or installer bundles, not archive formats.
 # Keep profiles independent so new bundle types can be added without changing policy.
 RUNTIME_STUB_PROFILES: tuple[tuple[str, tuple[bytes, ...]], ...] = (
     ("inno_setup", (b"Inno Setup Setup Data (", b"JR.Inno.Setup")),
+    (
+        "squirrel_windows",
+        (
+            "SquirrelAwareVersion".encode("utf-16le"),
+            "SquirrelSetup.log".encode("utf-16le"),
+        ),
+    ),
     ("par_packer", (b"PAR::Packer", b"PAR_TEMP")),
     ("nuitka_onefile", (b"NUITKA_ONEFILE_PARENT",)),
 )
@@ -101,11 +111,34 @@ def _runtime_bundle_profile(path: str, scan_limit_bytes: int, *, executable_imag
             for name, required in RUNTIME_STUB_PROFILES:
                 if all(pattern in matched for pattern in required):
                     return name
+        if _qt_ifw_tail_layout_matches(path):
+            return "qt_installer_framework"
         if _tail_contains(path, PYINSTALLER_COOKIE, window_bytes=256):
             return "pyinstaller"
     except OSError:
         return ""
     return ""
+
+
+def _qt_ifw_tail_layout_matches(path: str) -> bool:
+    cookie = QT_IFW_MAGIC_COOKIE.to_bytes(8, "little")
+    with open(path, "rb") as handle:
+        handle.seek(0, 2)
+        file_size = handle.tell()
+        window_start = max(0, file_size - QT_IFW_TAIL_WINDOW_BYTES)
+        handle.seek(window_start)
+        tail = handle.read(QT_IFW_TAIL_WINDOW_BYTES)
+
+    offset = tail.find(cookie)
+    while offset >= 0:
+        if offset >= 16:
+            marker = int.from_bytes(tail[offset - 8 : offset], "little")
+            binary_content_size = int.from_bytes(tail[offset - 16 : offset - 8], "little")
+            end_of_binary_content = window_start + offset + len(cookie)
+            if marker in QT_IFW_MAGIC_MARKERS and 24 <= binary_content_size <= end_of_binary_content:
+                return True
+        offset = tail.find(cookie, offset + 1)
+    return False
 
 
 def _tail_contains(path: str, pattern: bytes, *, window_bytes: int) -> bool:
