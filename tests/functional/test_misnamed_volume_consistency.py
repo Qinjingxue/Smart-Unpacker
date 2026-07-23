@@ -15,7 +15,7 @@ def test_scan_reports_misnamed_split_parts_consistently(tmp_path):
     config = with_detection_pipeline({
         "thresholds": {"archive_score_threshold": 1, "maybe_archive_threshold": 1},
     }, scoring=[
-        {"name": "seven_zip_structure_identity", "enabled": True, "magic_score": 1, "next_header_nid_score": 1},
+        {"name": "seven_zip_structure_identity", "enabled": True},
     ])
 
     bags = build_fact_bags_for_targets([str(tmp_path)], config=config)

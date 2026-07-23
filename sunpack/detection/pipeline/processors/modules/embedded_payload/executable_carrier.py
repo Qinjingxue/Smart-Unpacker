@@ -14,7 +14,6 @@ DEFAULT_SCAN_LIMIT_BYTES = 8 * 1024 * 1024
 def classify_executable_carrier(
     path: str,
     pe_overlay: dict[str, Any] | None,
-    structure_evidence: dict[str, Any] | None = None,
     *,
     scan_limit_bytes: int = DEFAULT_SCAN_LIMIT_BYTES,
 ) -> dict[str, Any]:
@@ -44,23 +43,6 @@ def classify_executable_carrier(
         return _result(
             "self_extracting_archive",
             str(overlay.get("confidence") or "medium"),
-            evidence,
-            is_executable=True,
-            overlay=overlay,
-        )
-
-    structure = structure_evidence or {}
-    if structure.get("has_extractable"):
-        selected = structure.get("selected") if isinstance(structure.get("selected"), dict) else {}
-        archive_format = str(selected.get("format") or "")
-        if archive_format:
-            evidence.append(f"structure:{archive_format}")
-        # An executable with a proven archive but no known SFX/runtime signature
-        # remains eligible. This conservative class prevents unknown, encrypted,
-        # damaged, or split SFX variants from being globally excluded.
-        return _result(
-            "executable_archive",
-            "medium",
             evidence,
             is_executable=True,
             overlay=overlay,
@@ -113,6 +95,5 @@ def process_executable_carrier(context: FactProcessorContext) -> dict[str, Any]:
     return classify_executable_carrier(
         str(facts.get("file.path") or ""),
         facts.get("pe.overlay_structure") or {},
-        facts.get("analysis.structure_evidence") or {},
         scan_limit_bytes=int(context.fact_config.get("scan_limit_bytes", DEFAULT_SCAN_LIMIT_BYTES) or 0),
     )

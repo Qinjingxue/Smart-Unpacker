@@ -1,63 +1,57 @@
-from typing import Any, Dict
+from typing import Any
 
 from sunpack.contracts.detection import FactBag
 from sunpack.contracts.rules import RuleEffect
 from sunpack.detection.pipeline.rules.base import RuleBase
 from sunpack.detection.pipeline.rules.registry import register_rule
-
-
-DEFAULT_TAR_HEADER_SCORE = 5
-DEFAULT_USTAR_HEADER_SCORE = 6
+from sunpack.detection.pipeline.rules.scoring._fuzzy import add_component, fuzzy_effect_reason, naming_prior
 
 
 @register_rule(name="tar_structure_identity", layer="scoring")
 class TarStructureIdentityScoreRule(RuleBase):
     required_facts = {"tar.header_structure"}
-    fact_requirements = []
     produced_facts = {"file.detected_ext", "file.probe_detected_archive", "file.probe_offset"}
-    config_schema = {
-        "tar_header_score": {
-            "type": "int",
-            "required": False,
-            "default": DEFAULT_TAR_HEADER_SCORE,
-            "description": "Score for a plausible TAR header checksum.",
-        },
-        "ustar_header_score": {
-            "type": "int",
-            "required": False,
-            "default": DEFAULT_USTAR_HEADER_SCORE,
-            "description": "Score for a plausible ustar header checksum and magic marker.",
-        },
-        "entry_walk_score": {
-            "type": "int",
-            "required": True,
-            "description": "Score for a TAR header walk across one or more entries.",
-        },
-        "max_entries_to_walk": {
-            "type": "int",
-            "required": False,
-            "description": "Maximum TAR entries checked by the TAR structure processor.",
-        },
-    }
+    config_schema: dict[str, dict[str, Any]] = {}
 
-    def evaluate(self, facts: FactBag, config: Dict[str, Any]) -> RuleEffect:
+    def evaluate(self, facts: FactBag, config: dict[str, Any]) -> RuleEffect:
+        del config
         structure = facts.get("tar.header_structure") or {}
-        if not structure.get("plausible"):
+        naming, label = naming_prior(facts, formats={"tar"}, extensions={".tar"})
+        has_binary_anchor = bool(
+            structure.get("ustar_magic")
+            or structure.get("fuzzy_name_nonempty")
+            or structure.get("fuzzy_numeric_fields_valid")
+        )
+        if not has_binary_anchor:
             return RuleEffect.pass_()
+
+        components: list[str] = []
+        score = add_component(components, "ustar-marker", 2, bool(structure.get("ustar_magic")))
+        score += add_component(components, "member-name", 1, bool(structure.get("fuzzy_name_nonempty")))
+        score += add_component(
+            components,
+            "numeric-fields",
+            2,
+            bool(structure.get("fuzzy_numeric_fields_valid")),
+        )
+        score += add_component(components, "typeflag", 1, bool(structure.get("fuzzy_typeflag_valid")))
+        score += add_component(components, "payload-range", 1, bool(structure.get("fuzzy_payload_in_range")))
+        score += add_component(
+            components,
+            "header-checksum",
+            1,
+            int(structure.get("stored_checksum") or 0) > 0
+            and int(structure.get("stored_checksum") or 0) == int(structure.get("computed_checksum") or -1),
+        )
+        score += add_component(components, label, naming, naming > 0)
+        score += add_component(
+            components,
+            "invalid-numeric-fields",
+            -2,
+            bool(structure.get("ustar_magic")) and not bool(structure.get("fuzzy_numeric_fields_valid")),
+        )
 
         facts.set("file.detected_ext", ".tar")
         facts.set("file.probe_detected_archive", True)
         facts.set("file.probe_offset", 0)
-
-        if structure.get("entry_walk_ok") and structure.get("ustar_magic"):
-            score = config["entry_walk_score"]
-            reason = "TAR structure: ustar header checksum and entry walk"
-        elif structure.get("ustar_magic"):
-            score = config.get("ustar_header_score", DEFAULT_USTAR_HEADER_SCORE)
-            reason = "TAR structure: ustar header checksum"
-        else:
-            score = config.get("tar_header_score", DEFAULT_TAR_HEADER_SCORE)
-            reason = "TAR structure: header checksum"
-        if not score:
-            return RuleEffect.pass_()
-        return RuleEffect.add_score(score, reason=reason)
+        return RuleEffect.add_score(score, reason=fuzzy_effect_reason("TAR", components))

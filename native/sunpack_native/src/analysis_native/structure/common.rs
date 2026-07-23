@@ -31,6 +31,23 @@ fn find_eocd(tail: &[u8], file_size: u64, read_size: u64) -> Option<(u64, &[u8])
     }
 }
 
+fn find_eocd_candidate(
+    tail: &[u8],
+    file_size: u64,
+    read_size: u64,
+) -> Option<(u64, [u8; ZIP_EOCD_MIN_SIZE], i64)> {
+    let index = rfind_subslice(tail, ZIP_EOCD_SIGNATURE)?;
+    if tail.len().saturating_sub(index) < ZIP_EOCD_MIN_SIZE {
+        return None;
+    }
+    let mut record = [0u8; ZIP_EOCD_MIN_SIZE];
+    record.copy_from_slice(&tail[index..index + ZIP_EOCD_MIN_SIZE]);
+    let offset = file_size - read_size + index as u64;
+    let available = tail.len().saturating_sub(index + ZIP_EOCD_MIN_SIZE) as i64;
+    let declared = u16_le(&record, 20) as i64;
+    Some((offset, record, available - declared))
+}
+
 fn walk_zip_central_directory(
     file: &mut File,
     file_size: u64,
@@ -146,6 +163,9 @@ fn zip_eocd_empty<'py>(py: Python<'py>, error: &str) -> PyResult<Bound<'py, PyDi
         d.set_item(key, value)?;
     }
     d.set_item("error", error)?;
+    d.set_item("eocd_candidate_found", false)?;
+    d.set_item("eocd_candidate_declared_entry_count_present", false)?;
+    d.set_item("eocd_candidate_declared_cd_offset_present", false)?;
     for key in [
         "eocd_offset",
         "central_directory_offset",
@@ -155,6 +175,12 @@ fn zip_eocd_empty<'py>(py: Python<'py>, error: &str) -> PyResult<Bound<'py, PyDi
         "comment_length",
         "central_directory_entries_checked",
         "local_header_links_checked",
+        "eocd_candidate_offset",
+        "eocd_candidate_comment_length",
+        "eocd_candidate_comment_available_delta",
+        "eocd_candidate_total_entries",
+        "eocd_candidate_cd_offset",
+        "eocd_candidate_cd_size",
     ] {
         d.set_item(key, 0)?;
     }

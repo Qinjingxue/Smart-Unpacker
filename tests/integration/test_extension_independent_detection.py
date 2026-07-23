@@ -27,6 +27,11 @@ def _detected(path: Path):
     config = with_detection_pipeline(
         {"thresholds": {"archive_score_threshold": 6, "maybe_archive_threshold": 3}},
         precheck=[
+            {"name": "zip_structure_accept", "enabled": True},
+            {"name": "tar_structure_accept", "enabled": True},
+            {"name": "seven_zip_structure_accept", "enabled": True},
+            {"name": "rar_structure_accept", "enabled": True},
+            {"name": "compression_stream_accept", "enabled": True},
             {
                 "name": "embedded_payload_identity",
                 "enabled": True,
@@ -34,19 +39,11 @@ def _detected(path: Path):
             },
         ],
         scoring=[
-            {
-                "name": "structure_evidence_identity",
-                "enabled": True,
-                "structure_score": 6,
-                "password_required_score": 6,
-                "minimum_confidence": 0.7,
-                "head_bytes": 65536,
-                "tail_bytes": 65536,
-                "full_scan_max_bytes": 0,
-                "deep_scan": False,
-                "fuzzy_enabled": False,
-                "max_read_mb_per_archive": 64,
-            }
+            {"name": "seven_zip_structure_identity", "enabled": True},
+            {"name": "rar_structure_identity", "enabled": True},
+            {"name": "zip_structure_identity", "enabled": True},
+            {"name": "tar_structure_identity", "enabled": True},
+            {"name": "compression_stream_identity", "enabled": True},
         ],
     )
     results = ArchiveTaskProvider(config).detect_targets([str(path)])
@@ -65,7 +62,7 @@ def test_archive_detection_does_not_depend_on_extension(tmp_path, archive_format
     detected = _detected(case.entry_path)
 
     assert len(detected) == 1
-    assert detected[0].fact_bag.get("analysis.selected_format") or detected[0].fact_bag.get("file.detected_ext")
+    assert detected[0].fact_bag.get("file.detected_ext")
 
 
 def test_split_7z_is_analyzed_as_one_logical_stream_with_chaotic_names(tmp_path):
@@ -81,7 +78,7 @@ def test_split_7z_is_analyzed_as_one_logical_stream_with_chaotic_names(tmp_path)
 
     assert len(detected) == 1
     bag = detected[0].fact_bag
-    assert bag.get("analysis.selected_format") == "7z"
+    assert bag.get("file.detected_ext") == ".7z"
     assert len(bag.get("candidate.member_paths") or []) > 1
 
 
@@ -118,9 +115,8 @@ def test_header_encrypted_rar_is_confirmed_from_crc_valid_encryption_header(tmp_
 
     assert len(detected) == 1
     bag = detected[0].fact_bag
-    assert bag.get("analysis.selected_format") == "rar"
-    evidence = next(item for item in bag.get("analysis.prepass")["hits"] if item["name"] == "rar5")
-    assert evidence["offset"] == 0
+    assert bag.get("file.detected_ext") == ".rar"
+    assert bag.get("rar.structure", {}).get("magic_matched") is True
 
 
 def test_signature_bytes_without_valid_structure_are_not_accepted(tmp_path):

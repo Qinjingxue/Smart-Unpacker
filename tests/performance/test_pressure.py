@@ -28,7 +28,7 @@ def pressure_scan_config() -> dict:
         {"name": "embedded_payload_identity", "enabled": True, "deep_scan_single_candidate_ratio": 1e-9},
         {"name": "zip_structure_accept", "enabled": True},
     ], scoring=[
-        {"name": "zip_structure_identity", "enabled": True, "magic_score": 2, "local_header_score": 4, "cd_walk_score": 7},
+        {"name": "zip_structure_identity", "enabled": True},
     ])
 
 

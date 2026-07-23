@@ -1423,7 +1423,7 @@ def _best_effort_pipeline_config(
         {"name": "size_range", "enabled": True, "gte": 0},
         {"name": "zip_structure_accept", "enabled": True},
     ], scoring=[
-        {"name": "zip_structure_identity", "enabled": True, "magic_score": 5, "local_header_score": 5, "cd_walk_score": 5},
+        {"name": "zip_structure_identity", "enabled": True},
     ]))
 
 
@@ -1457,15 +1457,9 @@ def _zip_tar_gz_recursive_pipeline_config(tmp_path: Path) -> dict:
         {"name": "tar_structure_accept", "enabled": True},
         {"name": "compression_stream_accept", "enabled": True},
     ], scoring=[
-        {
-            "name": "zip_structure_identity",
-            "enabled": True,
-            "magic_score": 5,
-            "local_header_score": 5,
-            "cd_walk_score": 5,
-        },
-        {"name": "compression_stream_identity", "enabled": True, "magic_score": 5},
-        {"name": "tar_structure_identity", "enabled": True, "entry_walk_score": 5},
+        {"name": "zip_structure_identity", "enabled": True},
+        {"name": "compression_stream_identity", "enabled": True},
+        {"name": "tar_structure_identity", "enabled": True},
     ]))
 
 
@@ -1498,19 +1492,8 @@ def _zip_7z_recursive_pipeline_config(tmp_path: Path) -> dict:
         {"name": "zip_structure_accept", "enabled": True},
         {"name": "seven_zip_structure_accept", "enabled": True},
     ], scoring=[
-        {
-            "name": "zip_structure_identity",
-            "enabled": True,
-            "magic_score": 5,
-            "local_header_score": 5,
-            "cd_walk_score": 5,
-        },
-        {
-            "name": "seven_zip_structure_identity",
-            "enabled": True,
-            "magic_score": 5,
-            "next_header_nid_score": 5,
-        },
+        {"name": "zip_structure_identity", "enabled": True},
+        {"name": "seven_zip_structure_identity", "enabled": True},
     ]))
 
 
@@ -1543,8 +1526,8 @@ def _tar_gz_recursive_pipeline_config(tmp_path: Path) -> dict:
         {"name": "tar_structure_accept", "enabled": True},
         {"name": "compression_stream_accept", "enabled": True},
     ], scoring=[
-        {"name": "compression_stream_identity", "enabled": True, "magic_score": 5},
-        {"name": "tar_structure_identity", "enabled": True, "entry_walk_score": 5},
+        {"name": "compression_stream_identity", "enabled": True},
+        {"name": "tar_structure_identity", "enabled": True},
     ]))
 
 

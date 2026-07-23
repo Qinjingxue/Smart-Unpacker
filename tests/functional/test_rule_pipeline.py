@@ -21,8 +21,8 @@ def _rule_pipeline_config():
         {"name": "seven_zip_structure_accept", "enabled": True},
         {"name": "embedded_payload_identity", "enabled": True},
     ], scoring=[
-        {"name": "zip_structure_identity", "enabled": True, "magic_score": 5, "local_header_score": 5, "cd_walk_score": 5},
-        {"name": "seven_zip_structure_identity", "enabled": True, "magic_score": 5, "next_header_nid_score": 5},
+        {"name": "zip_structure_identity", "enabled": True},
+        {"name": "seven_zip_structure_identity", "enabled": True},
     ])
 
 
@@ -64,7 +64,7 @@ def test_strict_precheck_stops_before_scoring(tmp_path, monkeypatch):
     }, precheck=[
         {"name": "zip_structure_accept", "enabled": True},
     ], scoring=[
-        {"name": "zip_structure_identity", "enabled": True, "magic_score": 5, "local_header_score": 5, "cd_walk_score": 5},
+        {"name": "zip_structure_identity", "enabled": True},
     ])
 
     bag = FactBag()

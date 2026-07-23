@@ -33,6 +33,23 @@ def test_config_validate_rejects_obsolete_cumulative_deep_scan_ratio():
     assert any("deep_scan_size_coverage_ratio" in error for error in result["errors"])
 
 
+def test_config_validate_rejects_obsolete_scoring_weight_fields():
+    payload = with_detection_pipeline(
+        scoring=[
+            {
+                "name": "zip_structure_identity",
+                "enabled": True,
+                "magic_score": 2,
+            }
+        ]
+    )
+
+    result = validate_config_payload(payload)
+
+    assert not result["ok"]
+    assert any("magic_score" in error for error in result["errors"])
+
+
 def test_config_validate_rejects_normalized_config_values_in_external_shorthand_fields():
     payload = _payload()
     payload["recursive_extract"] = {"mode": "infinite", "max_rounds": 999}

@@ -45,7 +45,7 @@ def test_pipeline_runner_uses_tmp_path_and_applies_success_postprocess(tmp_path,
         {"name": "size_range", "enabled": True, "gte": 0},
         {"name": "zip_structure_accept", "enabled": True},
     ], scoring=[
-        {"name": "zip_structure_identity", "enabled": True, "magic_score": 2, "local_header_score": 4, "cd_walk_score": 7},
+        {"name": "zip_structure_identity", "enabled": True},
     ]))
 
     engine = PipelineEngine(config)

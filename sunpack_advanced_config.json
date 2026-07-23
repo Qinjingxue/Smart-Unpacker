@@ -642,16 +642,6 @@
       {
         "name": "rar_structure",
         "enabled": true
-      },
-      {
-        "name": "structure_evidence",
-        "enabled": true,
-        "head_bytes": 65536,
-        "tail_bytes": 65536,
-        "full_scan_max_bytes": 0,
-        "deep_scan": false,
-        "fuzzy_enabled": false,
-        "max_read_mb_per_archive": 64
       }
     ],
     "rule_pipeline": {
@@ -688,53 +678,23 @@
       "scoring": [
         {
           "name": "seven_zip_structure_identity",
-          "enabled": true,
-          "structure_score": 5,
-          "magic_score": 2,
-          "next_header_nid_score": 6
+          "enabled": true
         },
         {
           "name": "rar_structure_identity",
-          "enabled": true,
-          "structure_score": 5,
-          "magic_score": 2,
-          "block_walk_score": 6
+          "enabled": true
         },
         {
           "name": "zip_structure_identity",
-          "enabled": true,
-          "eocd_score": 6,
-          "embedded_eocd_score": 4,
-          "empty_eocd_score": 4,
-          "magic_score": 2,
-          "local_header_score": 4,
-          "cd_walk_score": 7
+          "enabled": true
         },
         {
           "name": "tar_structure_identity",
-          "enabled": true,
-          "tar_header_score": 5,
-          "ustar_header_score": 6,
-          "entry_walk_score": 7
+          "enabled": true
         },
         {
           "name": "compression_stream_identity",
-          "enabled": true,
-          "stream_score": 5,
-          "magic_score": 2
-        },
-        {
-          "name": "structure_evidence_identity",
-          "enabled": true,
-          "structure_score": 6,
-          "password_required_score": 6,
-          "minimum_confidence": 0.7,
-          "head_bytes": 65536,
-          "tail_bytes": 65536,
-          "full_scan_max_bytes": 0,
-          "deep_scan": false,
-          "fuzzy_enabled": false,
-          "max_read_mb_per_archive": 64
+          "enabled": true
         }
       ]
     }

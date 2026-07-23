@@ -84,6 +84,29 @@ pub(crate) fn inspect_zip_eocd_structure(
     let mut tail = vec![0; read_size as usize];
     file.seek(SeekFrom::Start(file_size - read_size))?;
     file.read_exact(&mut tail)?;
+    if let Some((candidate_offset, candidate, comment_delta)) =
+        find_eocd_candidate(&tail, file_size, read_size)
+    {
+        let candidate_entries = u16_le(&candidate, 10);
+        let candidate_cd_size = u32_le(&candidate, 12) as u64;
+        let candidate_cd_offset = u32_le(&candidate, 16) as u64;
+        result.set_item("magic_matched", true)?;
+        result.set_item("eocd_candidate_found", true)?;
+        result.set_item("eocd_candidate_offset", candidate_offset)?;
+        result.set_item("eocd_candidate_comment_length", u16_le(&candidate, 20))?;
+        result.set_item("eocd_candidate_comment_available_delta", comment_delta)?;
+        result.set_item(
+            "eocd_candidate_declared_entry_count_present",
+            candidate_entries > 0,
+        )?;
+        result.set_item(
+            "eocd_candidate_declared_cd_offset_present",
+            candidate_cd_offset > 0,
+        )?;
+        result.set_item("eocd_candidate_total_entries", candidate_entries)?;
+        result.set_item("eocd_candidate_cd_offset", candidate_cd_offset)?;
+        result.set_item("eocd_candidate_cd_size", candidate_cd_size)?;
+    }
     let Some((eocd_offset, eocd)) = find_eocd(&tail, file_size, read_size) else {
         result.set_item("error", "eocd_not_found")?;
         return Ok(result.unbind());
@@ -450,6 +473,32 @@ pub(crate) fn inspect_tar_header_structure(
     let stored_checksum = parse_octal(&header[148..156]);
     let member_size = parse_octal(&header[124..136]);
     let computed = tar_checksum(&header);
+    let name_nonempty = header[0..100].iter().any(|byte| *byte != 0);
+    let numeric_fields_valid = stored_checksum.is_some()
+        && member_size.is_some()
+        && parse_octal(&header[100..108]).is_some()
+        && parse_octal(&header[108..116]).is_some()
+        && parse_octal(&header[116..124]).is_some()
+        && parse_octal(&header[136..148]).is_some();
+    let typeflag = header[156];
+    let typeflag_valid = matches!(
+        typeflag,
+        0 | b'0'
+            | b'1'
+            | b'2'
+            | b'3'
+            | b'4'
+            | b'5'
+            | b'6'
+            | b'7'
+            | b'x'
+            | b'g'
+            | b'L'
+            | b'K'
+            | b'S'
+    );
+    let payload_in_range = member_size
+        .is_some_and(|size| TAR_BLOCK_SIZE as u64 + size + padding_for_size(size) <= file_size);
     result.set_item("stored_checksum", stored_checksum.unwrap_or(0))?;
     result.set_item("computed_checksum", computed)?;
     result.set_item("member_size", member_size.unwrap_or(0))?;
@@ -457,6 +506,10 @@ pub(crate) fn inspect_tar_header_structure(
         "ustar_magic",
         matches!(&header[257..263], b"ustar\x00" | b"ustar "),
     )?;
+    result.set_item("fuzzy_name_nonempty", name_nonempty)?;
+    result.set_item("fuzzy_numeric_fields_valid", numeric_fields_valid)?;
+    result.set_item("fuzzy_typeflag_valid", typeflag_valid)?;
+    result.set_item("fuzzy_payload_in_range", payload_in_range)?;
     if stored_checksum.is_none() {
         result.set_item("error", "invalid_checksum_field")?;
         finish_fields(&result, TAR_FIELDS)?;

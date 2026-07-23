@@ -45,11 +45,11 @@ def edge_config(passwords: list[str] | None = None) -> dict:
         {"name": "compression_stream_accept", "enabled": True},
         {"name": "embedded_payload_identity", "enabled": True},
     ], scoring=[
-        {"name": "seven_zip_structure_identity", "enabled": True, "magic_score": 5, "next_header_nid_score": 5},
-        {"name": "rar_structure_identity", "enabled": True, "magic_score": 5, "block_walk_score": 5},
-        {"name": "zip_structure_identity", "enabled": True, "magic_score": 2, "local_header_score": 4, "cd_walk_score": 7},
-        {"name": "tar_structure_identity", "enabled": True, "entry_walk_score": 7},
-        {"name": "compression_stream_identity", "enabled": True, "magic_score": 2},
+        {"name": "seven_zip_structure_identity", "enabled": True},
+        {"name": "rar_structure_identity", "enabled": True},
+        {"name": "zip_structure_identity", "enabled": True},
+        {"name": "tar_structure_identity", "enabled": True},
+        {"name": "compression_stream_identity", "enabled": True},
     ]))
 
 

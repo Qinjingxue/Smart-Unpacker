@@ -246,6 +246,10 @@ fn tar_empty<'py>(py: Python<'py>, error: &str) -> PyResult<Bound<'py, PyDict>> 
         "zero_block",
         "entry_walk_ok",
         "end_zero_blocks",
+        "fuzzy_name_nonempty",
+        "fuzzy_numeric_fields_valid",
+        "fuzzy_typeflag_valid",
+        "fuzzy_payload_in_range",
     ] {
         d.set_item(key, false)?;
     }

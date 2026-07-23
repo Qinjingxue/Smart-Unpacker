@@ -47,9 +47,9 @@ python sunpack.py config show
 | 字段 | 类型 | 默认 | 说明 |
 | --- | --- | --- | --- |
 | `archive_score_threshold` | `int` | `6` | detection 分数达到该值时生成解压任务。 |
-| `maybe_archive_threshold` | `int` | `3` | 分数达到该值但低于归档阈值时进入确认层。 |
+| `maybe_archive_threshold` | `int` | `3` | 分数达到该值但低于归档阈值时标记为可疑归档，但不生成解压任务。 |
 
-确认层处理 `maybe_archive_threshold <= score < archive_score_threshold` 的中间可疑区间。结构事实、embedded payload、7z probe/test 和场景保护会共同影响最终决策。
+`maybe_archive_threshold <= score < archive_score_threshold` 只保留诊断状态；项目没有 detection confirmation 层，也不会在该区间启动昂贵的二次确认。
 
 ## recursive_extract
 
@@ -410,15 +410,7 @@ print(sorted(get_repair_module_registry().all()))
 
 ## detection.rule_pipeline
 
-检测器在初轮规则未接受候选时，还可调用结构分析器进行救援。初轮 `structure_evidence` 只处理具有归档扩展名、归档 magic、probe、PE overlay 或分卷关系等正向先验的候选，默认读取头尾各 64 KiB且不执行完整流扫描。完全未知的二进制文件由 `embedded_payload_identity` 的单候选占比策略选择后再执行完整流扫描，避免普通资源文件在初轮被逐字节读取。以下字段位于 `detection`：
-
-| 字段 | 说明 |
-| --- | --- |
-| `content_structure_rescue_enabled` | 启用规则拒绝后的结构救援。 |
-| `content_structure_rescue_full_scan_max_bytes` | 对不超过该大小且头尾未确认的候选扫描完整逻辑流；默认 64 MiB。 |
-| `content_structure_rescue_deep_scan` | 对任意大小候选执行完整逻辑流扫描。会产生与文件总大小等量的最低 I/O，应仅在必须发现任意中间位置 embedding 时开启。 |
-
-完整流扫描是发现“任意位置 embedding”的物理必要条件；默认预算避免对大量数 GiB 普通文件逐字节重读。超过预算的文件仍会进行头尾结构分析、ZIP 尾目录回链和分卷逻辑视图验证。
+Detection 不调用完整 analysis scheduler 做确认。任意位置 embedding 只由递归控制器授权后的 `embedded_payload_identity` 执行；其他格式事实均由有界 Rust probe 产生。大文件压缩流只读取头尾窗口，ZIP 读取 EOCD 尾窗和有限目录项，7z/RAR/TAR 读取受配置上限约束的头部或条目。
 
 检测规则分两层：
 
@@ -441,13 +433,15 @@ print(sorted(get_repair_module_registry().all()))
 | `rar_structure_accept` | precheck | main header/block walk 可信的 RAR 快速接受。 |
 | `compression_stream_accept` | precheck | 完整校验 gzip、bzip2、xz、zstd 流并快速接受。 |
 | `embedded_payload_identity` | precheck | 先否决已知安装器，再对获准深扫且找到可靠嵌入归档的文件直接接受。 |
-| `zip_structure_identity` | scoring | ZIP local header、EOCD、CD walk 加分。 |
-| `tar_structure_identity` | scoring | TAR header、ustar、entry walk 加分。 |
-| `seven_zip_structure_identity` | scoring | 7z magic/header/NID 加分。 |
-| `rar_structure_identity` | scoring | RAR magic/header/block walk 加分。 |
-| `compression_stream_identity` | scoring | gzip、bzip2、xz、zstd 结构加分。 |
+| `zip_structure_identity` | scoring | 累计 local header、EOCD、目录锚点和逻辑命名先验。 |
+| `tar_structure_identity` | scoring | 累计 ustar、成员名、数值字段、typeflag、payload 范围和逻辑命名先验。 |
+| `seven_zip_structure_identity` | scoring | 累计 signature、版本、next-header 范围、CRC/NID 和逻辑命名先验。 |
+| `rar_structure_identity` | scoring | 累计 signature、版本、header type/size、后续块和逻辑命名先验。 |
+| `compression_stream_identity` | scoring | 累计流 signature、header 字段、第二锚点、局部完整性和逻辑命名先验。 |
 
-历史 `extension`、`magic_bytes`、`embedded_archive` scoring 规则已移出 active 规则包；CAB、ARJ、CPIO 的孤立检测支持以及 confirmation 层也已删除。当前主流水线由严格 precheck 和容损 scoring 消费结构 fact，由 precheck 最后的 `embedded_payload_identity` 统一执行安装器否决并消费 embedded 和 overlay 事实。安装器文件读取与特征匹配由 Rust 实现；命中后不会调度完整嵌入归档扫描。
+Scoring 不执行严格完整性校验，也不调用 analysis scheduler。扩展名不是独立规则，而是各格式规则内部最多 2 分的命名先验；扩展名或分卷名称本身永远达不到归档阈值。格式字段由 Rust probe 读取，CRC、目录闭合、完整解码和精确流尾仍只用于 precheck 强接受，失败时 scoring 可继续组合其他独立字段。
+
+模糊证据字段依据 PKWARE ZIP APPNOTE、7-Zip 官方恢复说明、RARLAB RAR 5.0 technote、POSIX ustar、RFC 1952、bzip2 1.0.8 manual、XZ File Format 1.2.1 和 Zstandard Compression Format 设计。历史 `extension`、`magic_bytes`、`embedded_archive`、`structure_evidence_identity` scoring 规则、detection 专用 `structure_evidence` processor、CAB/ARJ/CPIO 孤立支持和 confirmation 层均不再存在。
 
 ### deep_scan_single_candidate_ratio
 

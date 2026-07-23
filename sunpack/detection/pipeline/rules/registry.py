@@ -12,7 +12,6 @@ _RULE_MODULES = (
     "sunpack.detection.pipeline.rules.scoring.compression_stream_identity",
     "sunpack.detection.pipeline.rules.scoring.rar_structure_identity",
     "sunpack.detection.pipeline.rules.scoring.seven_zip_structure_identity",
-    "sunpack.detection.pipeline.rules.scoring.structure_evidence_identity",
     "sunpack.detection.pipeline.rules.scoring.tar_structure_identity",
     "sunpack.detection.pipeline.rules.scoring.zip_structure_identity",
 )

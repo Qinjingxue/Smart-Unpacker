@@ -21,7 +21,7 @@ def scan_config(blocked_files=None, blocked_extensions=None):
         {"name": "embedded_payload_identity", "enabled": True},
         {"name": "zip_structure_accept", "enabled": True},
     ], scoring=[
-        {"name": "zip_structure_identity", "enabled": True, "magic_score": 2, "local_header_score": 4, "cd_walk_score": 7},
+        {"name": "zip_structure_identity", "enabled": True},
     ])
 
 

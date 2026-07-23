@@ -28,12 +28,6 @@ fn parse_octal(field: &[u8]) -> Option<u64> {
     u64::from_str_radix(trimmed, 8).ok()
 }
 
-fn parse_hex(field: &[u8]) -> Option<u64> {
-    std::str::from_utf8(field)
-        .ok()
-        .and_then(|s| u64::from_str_radix(s, 16).ok())
-}
-
 fn tar_checksum(header: &[u8]) -> u64 {
     header[..148].iter().map(|b| *b as u64).sum::<u64>()
         + 32 * 8
