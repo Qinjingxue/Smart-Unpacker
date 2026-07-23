@@ -1,6 +1,7 @@
 from sunpack.contracts.detection import FactBag
 from sunpack.detection.pipeline.processors.context import FactProcessorContext
 from sunpack.detection.pipeline.processors.modules.confirmation import archive_metadata_open
+from sunpack.detection.pipeline.processors.modules.embedded_payload import embedded_archive
 from sunpack.detection.pipeline.processors.modules.embedded_payload.executable_carrier import classify_executable_carrier
 from sunpack.detection.pipeline.rules.confirmation.archive_identity_consensus import ArchiveIdentityConsensusRule
 from sunpack.detection.pipeline.rules.precheck.embedded_payload_identity import (
@@ -148,6 +149,7 @@ def test_qt_ifw_cookie_without_valid_marker_is_not_a_runtime_bundle(tmp_path):
 
 def test_precheck_rejects_runtime_bundle_without_requesting_embedded_scan():
     facts = FactBag()
+    facts.set("candidate.embedded_payload_precheck_enabled", True)
     requested = []
 
     def ensure_facts(bags, fact_names, fact_configs=None):
@@ -180,9 +182,57 @@ def test_precheck_rejects_runtime_bundle_without_requesting_embedded_scan():
     assert all("embedded_archive.analysis" not in names for names in requested)
 
 
+def test_precheck_does_not_request_any_module_fact_without_candidate_authorization():
+    facts = FactBag()
+    requested = []
+
+    def ensure_facts(bags, fact_names, fact_configs=None):
+        del bags, fact_configs
+        requested.append(set(fact_names))
+
+    manager = RuleManager({
+        "thresholds": {"archive_score_threshold": 6, "maybe_archive_threshold": 3},
+        "detection": {
+            "rule_pipeline": {
+                "precheck": [{"name": "embedded_payload_identity", "enabled": True}],
+                "scoring": [],
+                "confirmation": [],
+            }
+        },
+    }, ensure_pool_facts=ensure_facts)
+
+    decision = manager.evaluate_pool([facts])[facts]
+
+    assert decision.should_extract is False
+    assert requested == []
+
+
+def test_embedded_processor_short_circuits_runtime_bundle_before_native_scan(monkeypatch):
+    facts = FactBag()
+    facts.set("candidate.embedded_payload_precheck_enabled", True)
+    facts.set("file.path", "installer.exe")
+    facts.set("file.size", 1024)
+    facts.set("executable.carrier", {"kind": "runtime_bundle"})
+    monkeypatch.setattr(
+        embedded_archive,
+        "_NATIVE_SCAN_EMBEDDED_ARCHIVES",
+        lambda _path: (_ for _ in ()).throw(AssertionError("native scan must not run")),
+    )
+
+    result = embedded_archive.process_embedded_archive_analysis(FactProcessorContext(
+        fact_bag=facts,
+        output_fact="embedded_archive.analysis",
+        config={},
+        fact_config={},
+    ))
+
+    assert result["found"] is False
+    assert result["read_bytes"] == 0
+
+
 def test_precheck_accepts_completed_embedded_scan():
     facts = FactBag()
-    facts.set("candidate.embedded_deep_scan", True)
+    facts.set("candidate.embedded_payload_precheck_enabled", True)
 
     def ensure_facts(bags, fact_names, fact_configs=None):
         del fact_configs

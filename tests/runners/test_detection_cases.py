@@ -44,7 +44,7 @@ def run_detection_case(case, workspace: Path) -> dict:
     scheduler = DetectionScheduler(config)
     decision = scheduler.evaluate_bag(bag)
     if not decision.should_extract:
-        bag.set("candidate.embedded_deep_scan", True)
+        bag.set("candidate.embedded_payload_precheck_enabled", True)
         bag.unset("embedded_archive.analysis")
         decision = scheduler.evaluate_bag(bag)
     return {

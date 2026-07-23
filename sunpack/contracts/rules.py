@@ -3,9 +3,10 @@ from typing import Any, Dict, List, Optional
 
 @dataclass
 class RuleEffect:
-    decision: str  # "reject", "accept", "pass", "score"
+    decision: str  # "reject", "accept", "pass", "score", "require"
     reason: Optional[str] = None
     score: int = 0
+    required_facts: set[str] = field(default_factory=set)
 
     @classmethod
     def reject(cls, reason: str) -> "RuleEffect":
@@ -22,6 +23,10 @@ class RuleEffect:
     @classmethod
     def add_score(cls, score: int, reason: str) -> "RuleEffect":
         return cls(decision="score", score=score, reason=reason)
+
+    @classmethod
+    def require_facts(cls, fact_names: set[str]) -> "RuleEffect":
+        return cls(decision="require", required_facts=set(fact_names))
 
 @dataclass
 class ConfirmationEffect:

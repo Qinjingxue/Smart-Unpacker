@@ -108,7 +108,7 @@ class ArchiveTaskProvider:
             return initial
 
         for bag in selected:
-            bag.set("candidate.embedded_deep_scan", True)
+            bag.set("candidate.embedded_payload_precheck_enabled", True)
             bag.unset("embedded_archive.analysis")
         rescanned = {
             result.fact_bag: result

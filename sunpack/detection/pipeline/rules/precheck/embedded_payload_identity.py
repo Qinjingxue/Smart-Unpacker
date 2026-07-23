@@ -12,22 +12,18 @@ DEFAULT_DEEP_SCAN_SINGLE_CANDIDATE_RATIO = 0.3
 
 
 @dataclass(frozen=True)
-class _EmbeddedScanEligible:
-    required_facts: set[str] = field(default_factory=lambda: {"executable.carrier"})
+class _EmbeddedModuleEnabled:
+    required_facts: set[str] = field(default_factory=set)
 
     def matches(self, facts: FactBag, config: dict[str, Any]) -> bool:
         del config
-        if not bool(facts.get("candidate.embedded_deep_scan")):
-            return False
-        carrier = facts.get("executable.carrier") or {}
-        return carrier.get("kind") != "runtime_bundle"
+        return bool(facts.get("candidate.embedded_payload_precheck_enabled"))
 
 
 @register_rule(name="embedded_payload_identity", layer="precheck")
 class EmbeddedPayloadIdentityPrecheckRule(RuleBase):
     fact_requirements = [
-        FactRequirement("executable.carrier"),
-        FactRequirement("embedded_archive.analysis", _EmbeddedScanEligible()),
+        FactRequirement("executable.carrier", _EmbeddedModuleEnabled()),
     ]
     produced_facts = {
         "file.detected_ext",
@@ -79,6 +75,11 @@ class EmbeddedPayloadIdentityPrecheckRule(RuleBase):
             facts.set("file.probe_offset", offset)
             facts.set("file.embedded_archive_found", True)
             return RuleEffect.accept(f"Validated PE overlay archive payload at offset {offset}")
+
+        if not facts.has("embedded_archive.analysis"):
+            if facts.is_missing("embedded_archive.analysis"):
+                return RuleEffect.pass_()
+            return RuleEffect.require_facts({"embedded_archive.analysis"})
 
         analysis = facts.get("embedded_archive.analysis") or {}
         candidates = list(analysis.get("candidates") or [])

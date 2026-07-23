@@ -124,6 +124,32 @@ class DetectionBehaviorTests(unittest.TestCase):
         self.assertEqual(_select_single_candidate_ratio([empty], 0.3), [])
         self.assertEqual(_select_single_candidate_ratio([empty], 0.0), [])
 
+    def test_recursive_candidate_selection_gates_the_entire_embedded_module(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            selected_path = root / "large.bin"
+            skipped_path = root / "small.bin"
+            selected_path.write_bytes(b"x" * 70)
+            skipped_path.write_bytes(b"y" * 30)
+
+            results = ArchiveTaskProvider(embedded_config(ratio=0.6)).detect_targets(
+                [str(selected_path), str(skipped_path)],
+                is_recursive_scan=True,
+            )
+            by_name = {
+                Path(result.fact_bag.get("file.path")).name: result.fact_bag
+                for result in results
+            }
+
+            self.assertTrue(
+                by_name["large.bin"].get("candidate.embedded_payload_precheck_enabled")
+            )
+            self.assertTrue(by_name["large.bin"].has("executable.carrier"))
+            self.assertFalse(
+                by_name["small.bin"].has("candidate.embedded_payload_precheck_enabled")
+            )
+            self.assertFalse(by_name["small.bin"].has("executable.carrier"))
+
     def test_structurally_invalid_magic_is_not_accepted(self):
         with tempfile.TemporaryDirectory() as tmp:
             carrier = Path(tmp) / "payload.data"
@@ -134,6 +160,7 @@ class DetectionBehaviorTests(unittest.TestCase):
     def test_pe_overlay_remains_an_ordinary_detection_result(self):
         bag = FactBag()
         bag.set("file.path", "installer.exe")
+        bag.set("candidate.embedded_payload_precheck_enabled", True)
         bag.set("embedded_archive.analysis", {"found": False})
         bag.set("pe.overlay_structure", {
             "is_pe": True,

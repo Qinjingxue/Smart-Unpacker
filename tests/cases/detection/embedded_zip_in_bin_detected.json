@@ -30,7 +30,7 @@
   },
   "assert": {
     "decision.should_extract": true,
-    "decision.total_score": 5,
+    "decision.total_score": 0,
     "facts.file.detected_ext": ".zip",
     "facts.file.embedded_archive_found": true,
     "facts.file.probe_offset": 64

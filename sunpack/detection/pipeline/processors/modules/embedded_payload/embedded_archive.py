@@ -87,7 +87,7 @@ def _normalize_native_result(value: Any, expected_size: int) -> dict[str, Any]:
 
 @register_processor(
     "embedded_archive",
-    input_facts={"file.path", "file.size"},
+    input_facts={"file.path", "file.size", "executable.carrier"},
     output_facts={"embedded_archive.analysis"},
     schemas={
         "embedded_archive.analysis": {
@@ -97,7 +97,10 @@ def _normalize_native_result(value: Any, expected_size: int) -> dict[str, Any]:
     },
 )
 def process_embedded_archive_analysis(context: FactProcessorContext) -> dict[str, Any]:
-    if not bool(context.fact_bag.get("candidate.embedded_deep_scan")):
+    if not bool(context.fact_bag.get("candidate.embedded_payload_precheck_enabled")):
+        return _empty_result()
+    carrier = context.fact_bag.get("executable.carrier") or {}
+    if carrier.get("kind") == "runtime_bundle":
         return _empty_result()
     path = str(context.fact_bag.get("file.path") or "")
     file_size = context.fact_bag.get("file.size")

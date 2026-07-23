@@ -215,7 +215,7 @@ class RuleManager:
                 if requirements and not active_by_bag.get(bag):
                     next_surviving.append(bag)
                     continue
-                effect = rule.instance.evaluate(bag, rule.config)
+                effect = self._evaluate_precheck_rule(bag, rule)
                 if effect.decision == "reject":
                     decisions[bag] = RuleDecision(
                         should_extract=False,
@@ -247,6 +247,26 @@ class RuleManager:
                 break
 
         return decisions, surviving
+
+    def _evaluate_precheck_rule(self, bag: FactBag, rule: PreparedRule):
+        requested_facts: set[str] = set()
+        while True:
+            effect = rule.instance.evaluate(bag, rule.config)
+            if effect.decision != "require":
+                return effect
+            required_facts = set(effect.required_facts)
+            new_facts = required_facts - requested_facts
+            if not new_facts:
+                raise ValueError(
+                    f"Precheck rule {rule.name} repeatedly requested unavailable facts: "
+                    f"{', '.join(sorted(required_facts))}"
+                )
+            fact_configs = {
+                fact_name: self._effective_fact_config(fact_name, rule.config)
+                for fact_name in new_facts
+            }
+            self.ensure_pool_facts([bag], new_facts, fact_configs)
+            requested_facts.update(new_facts)
 
     def evaluate_pool(self, fact_bags: List[FactBag]) -> Dict[FactBag, RuleDecision]:
         decisions, surviving = self._run_precheck(fact_bags)
