@@ -4,8 +4,8 @@ from pathlib import Path
 from PyInstaller.building.build_main import Analysis, COLLECT, EXE, PYZ
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules, copy_metadata
 
-
 project_root = Path(SPECPATH)
+manifest_path = project_root / "sunpack.manifest"
 icon_path = project_root / "sunpack.ico"
 dist_name = os.environ.get("SUNPACK_DIST_NAME", "sunpack")
 exe_name = os.environ.get("SUNPACK_EXE_NAME", "sunpack")
@@ -93,6 +93,7 @@ exe = EXE(
     console=True,
     disable_windowed_traceback=False,
     icon=str(icon_path),
+    manifest=str(manifest_path),
 )
 
 watch_exe = EXE(
@@ -108,6 +109,7 @@ watch_exe = EXE(
     console=False,
     disable_windowed_traceback=True,
     icon=str(icon_path),
+    manifest=str(manifest_path),
 )
 
 coll = COLLECT(

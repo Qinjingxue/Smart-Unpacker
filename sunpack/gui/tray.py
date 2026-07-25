@@ -13,7 +13,7 @@ from sunpack.i18n import I18nContext
 from sunpack.passwords.internal.builtin import builtin_password_path, get_builtin_passwords
 from sunpack.platform.windows.startup import disable_startup, enable_startup, startup_status
 
-
+WM_NULL = 0x0000
 WM_DESTROY = 0x0002
 WM_COMMAND = 0x0111
 WM_USER = 0x0400
@@ -177,17 +177,49 @@ class WindowsTrayIcon:
 
     def _show_menu(self, hwnd) -> None:
         menu = self.user32.CreatePopupMenu()
-        self.user32.AppendMenuW(menu, MF_STRING, ID_OPEN_CONFIG, self._text("open_config"))
-        self.user32.AppendMenuW(menu, MF_STRING, ID_OPEN_WATCH_ROOTS, self._text("open_watch_roots"))
-        self.user32.AppendMenuW(menu, MF_STRING, ID_OPEN_BUILTIN_PASSWORDS, self._text("open_builtin_passwords"))
-        self.user32.AppendMenuW(menu, MF_STRING, ID_TOGGLE_STARTUP, self._startup_menu_label())
-        self.user32.AppendMenuW(menu, MF_STRING, ID_RELOAD, self._text("reload"))
-        self.user32.AppendMenuW(menu, MF_STRING, ID_EXIT, self._text("exit"))
-        point = wintypes.POINT()
-        self.user32.GetCursorPos(ctypes.byref(point))
-        self.user32.SetForegroundWindow(hwnd)
-        self.user32.TrackPopupMenu(menu, TPM_RIGHTBUTTON, point.x, point.y, 0, hwnd, None)
-        self.user32.DestroyMenu(menu)
+        try:
+            self.user32.AppendMenuW(
+                menu, MF_STRING, ID_OPEN_CONFIG,
+                self._text("open_config"),
+            )
+            self.user32.AppendMenuW(
+                menu, MF_STRING, ID_OPEN_WATCH_ROOTS,
+                self._text("open_watch_roots"),
+            )
+            self.user32.AppendMenuW(
+                menu, MF_STRING, ID_OPEN_BUILTIN_PASSWORDS,
+                self._text("open_builtin_passwords"),
+            )
+            self.user32.AppendMenuW(
+                menu, MF_STRING, ID_TOGGLE_STARTUP,
+                self._startup_menu_label(),
+            )
+            self.user32.AppendMenuW(
+                menu, MF_STRING, ID_RELOAD,
+                self._text("reload"),
+            )
+            self.user32.AppendMenuW(
+                menu, MF_STRING, ID_EXIT,
+                self._text("exit"),
+            )
+
+            point = wintypes.POINT()
+            self.user32.GetCursorPos(ctypes.byref(point))
+            self.user32.SetForegroundWindow(hwnd)
+
+            self.user32.TrackPopupMenu(
+                menu,
+                TPM_RIGHTBUTTON,
+                point.x,
+                point.y,
+                0,
+                hwnd,
+                None,
+            )
+
+            self.user32.PostMessageW(hwnd, WM_NULL, 0, 0)
+        finally:
+            self.user32.DestroyMenu(menu)
 
     def _handle_command(self, command_id: int) -> None:
         if command_id == ID_OPEN_CONFIG:

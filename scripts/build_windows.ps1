@@ -3,6 +3,7 @@ param(
     [switch]$SkipTests,
     [switch]$SkipInstaller,
     [switch]$Clean,
+    [switch]$NoPause,
     [string]$Version,
     [string]$InnoCompilerPath,
     [ValidateSet("x64", "arm64")]
@@ -919,3 +920,10 @@ Write-Host "Release zip: $releaseZipPath"
 if (-not $SkipInstaller) {
     Write-Host "Windows installer: $releaseInstallerPath"
 }
+
+if (-not $NoPause) {
+    Write-Host ""
+    Write-Host "Press any key to exit..." -ForegroundColor Cyan
+    [Console]::ReadKey($true) | Out-Null
+}
+
