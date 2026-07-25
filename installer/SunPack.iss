@@ -56,7 +56,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 [Tasks]
 Name: "addtopath"; Description: "Add SunPack to the current user's PATH"; GroupDescription: "Shell integration:"
 Name: "contextmenu"; Description: "Register the SunPack folder context menu"; GroupDescription: "Shell integration:"
-Name: "autostart"; Description: "Start SunPack Watch when Windows starts"; GroupDescription: "Background watch:"
+Name: "autostart"; Description: "Start SunPack Watch when Windows starts"; GroupDescription: "Background watch:"; Flags: unchecked
 
 [Files]
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Excludes: "sunpack_watch_roots.txt"; Flags: ignoreversion recursesubdirs createallsubdirs
@@ -301,6 +301,11 @@ function StopExistingWatchAndWait: Boolean;
 begin
   StopExistingWatch;
   Result := WaitForExistingWatchToExit;
+end;
+
+procedure InitializeWizard();
+begin
+  WizardForm.LicenseAcceptedRadio.Checked := True;
 end;
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;
