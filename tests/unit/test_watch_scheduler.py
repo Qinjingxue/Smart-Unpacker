@@ -200,6 +200,101 @@ def _watch_summary(path: str, kind: OutcomeKind, verification: dict):
     )
 
 
+def test_successful_watch_task_notifies_shell_once_after_finalize(tmp_path, monkeypatch):
+    monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
+    archive = tmp_path / "sample.zip"
+    _write_zip(archive)
+    notify_calls = []
+    finalize_order = []
+
+    class SuccessRunner:
+        recent_passwords = []
+
+        def __init__(self, config):
+            self.output_dir = Path(config["output"]["root"]) / "sample"
+            self.context = SimpleNamespace(flatten_candidates={str(self.output_dir)}, recovered_outputs=[])
+
+        def run_targets(self, paths):
+            self.output_dir.mkdir(parents=True)
+            (self.output_dir / "payload.bin").write_bytes(b"payload")
+            return _watch_summary(paths[0], OutcomeKind.COMPLETE_SUCCESS, {"decision_hint": "accept"})
+
+        def apply_deferred_postprocess(self, output_path_map):
+            finalize_order.append("finalize")
+            assert all(Path(target).exists() for target in output_path_map.values())
+
+    def fake_notify(paths):
+        finalize_order.append("notify")
+        notify_calls.append(list(paths))
+        return [str(tmp_path.resolve())]
+
+    monkeypatch.setattr(scheduler_module, "notify_shell_directories_updated", fake_notify)
+
+    watcher = WatchScheduler(
+        {"watch": {"clipboard_monitor_enabled": False}},
+        [str(tmp_path)],
+        out_dir=str(tmp_path / "out"),
+        state_path=str(tmp_path / "state.json"),
+        quiet_seconds=0,
+        initial_scan=False,
+        pipeline_engine=FakePipelineEngine(SuccessRunner),
+    )
+    watcher.enqueue(str(archive))
+    result = watcher.run_once()
+
+    assert result.succeeded == 1
+    assert finalize_order == ["finalize", "notify"]
+    assert len(notify_calls) == 1
+    assert str(archive.resolve()) in notify_calls[0]
+    assert any(Path(path).name == "sample" for path in notify_calls[0])
+
+
+def test_failed_watch_task_does_not_notify_shell(tmp_path, monkeypatch):
+    monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
+    archive = tmp_path / "sample.zip"
+    _write_zip(archive)
+    notify_calls = []
+
+    class FailureRunner:
+        recent_passwords = []
+
+        def __init__(self, config):
+            self.context = SimpleNamespace(flatten_candidates=set(), recovered_outputs=[])
+
+        def run_targets(self, paths):
+            return SimpleNamespace(
+                success_count=0,
+                partial_success_count=0,
+                failed_tasks=["boom"],
+                failures=[FailureInfo(kind=FailureKind.UNKNOWN, stage="extraction", message="boom")],
+                processed_keys=[paths[0]],
+                target_results=[
+                    TargetRunResult(paths[0], OutcomeKind.FAILURE, verification={"decision_hint": "reject"})
+                ],
+            )
+
+    monkeypatch.setattr(
+        scheduler_module,
+        "notify_shell_directories_updated",
+        lambda paths: notify_calls.append(list(paths)) or [],
+    )
+
+    watcher = WatchScheduler(
+        {"watch": {"clipboard_monitor_enabled": False}},
+        [str(tmp_path)],
+        out_dir=str(tmp_path / "out"),
+        state_path=str(tmp_path / "state.json"),
+        quiet_seconds=0,
+        initial_scan=False,
+        pipeline_engine=FakePipelineEngine(FailureRunner),
+    )
+    watcher.enqueue(str(archive))
+    result = watcher.run_once()
+
+    assert result.failed == 1
+    assert notify_calls == []
+
+
 def test_partial_result_does_not_self_retry_but_modified_epoch_does(tmp_path, monkeypatch):
     monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
     archive = tmp_path / "sample.zip"
