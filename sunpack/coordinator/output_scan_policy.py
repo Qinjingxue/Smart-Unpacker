@@ -54,10 +54,10 @@ class NestedOutputScanPolicy:
         if inventory is None or not inventory.stats.exists or not inventory.stats.is_dir:
             return None
         root = os.path.abspath(inventory.root)
+        paths, sizes = inventory.file_columns()
         return (
-            (os.path.join(root, str(item.get("output_path") or item.get("path") or "")), int(item.get("size", 0) or 0))
-            for item in inventory.files
-            if item.get("output_path") or item.get("path")
+            (os.path.join(root, path), size)
+            for path, size in zip(paths, sizes)
         )
 
     def scan_roots_from_outputs(

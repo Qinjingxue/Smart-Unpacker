@@ -6,6 +6,7 @@ from sunpack.contracts.tasks import ArchiveTask, SplitArchiveInfo
 from sunpack.contracts.archive_input import ArchiveInputDescriptor
 from sunpack.extraction.internal.workflow.single_archive_extractor import SingleArchiveExtractor
 from sunpack.extraction.internal.sevenzip.metadata import ArchiveMetadataScanner
+from sunpack_native import worker_manifest_from_rows
 
 
 class _FakePasswordStore:
@@ -60,10 +61,21 @@ class _FakeSevenZipRunner:
             "item_count": 1 if self.include_output_counts else 0,
             "archive_type": name,
             "verified_manifest": {
+                "version": 2,
                 "validated": True,
                 "file_count": 1,
                 "item_count": 1,
-                "files": [{"path": f"{name}.txt", "status": "complete", "size": 2}],
+                "inventory": {
+                    "complete": True,
+                    "file_count": 1,
+                    "dir_count": 0,
+                    "total_size": 2,
+                    "identity_paths": True,
+                },
+                "native_rows": worker_manifest_from_rows(
+                    [[0, f"{name}.txt", "", 2, 2, 0, 0, 0, 0, 1, 1]],
+                    True, 1, 0, 2, True,
+                ),
             },
         }
         if self.include_output_counts:

@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from sunpack_native import scan_output_tree as _native_scan_output_tree
+from sunpack.extraction.internal.sevenzip.worker_diagnostics import worker_manifest_files
 
 
 CONTENT_FAILURE_KINDS = {
@@ -224,9 +225,7 @@ def _output_trace(result: dict[str, Any]) -> dict[str, Any]:
 
 
 def _verified_manifest_files(result: dict[str, Any]) -> list[dict[str, Any]]:
-    manifest = result.get("verified_manifest") if isinstance(result.get("verified_manifest"), dict) else {}
-    files = manifest.get("files")
-    return files if isinstance(files, list) else []
+    return worker_manifest_files(result)
 
 
 def _trace_has_progress(output_trace: dict[str, Any]) -> bool:

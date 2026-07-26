@@ -41,28 +41,29 @@ class ArchiveTestCrcMethod:
         if not archive_files:
             return VerificationStepResult(method=self.name, status="skipped")
         inventory = output_inventory_for_evidence(evidence)
+        output_files = inventory.materialize_files()
         if (
             inventory.worker_inventory_complete
             and inventory.identity_paths
-            and len(archive_files) == len(inventory.files)
+            and len(archive_files) == len(output_files)
             and inventory.worker_crc_available
             and all(
                 not source.get("has_crc", source.get("crc32") is not None)
                 or output.get("output_crc32", output.get("crc32")) is not None
-                for source, output in zip(archive_files, inventory.files)
+                for source, output in zip(archive_files, output_files)
             )
         ):
             match_result = _trusted_worker_crc_match_result(
                 archive_files,
-                inventory.files,
+                output_files,
                 include_observations=should_emit_file_observations(evidence, self.name),
             )
         else:
             output_index = output_file_index_for_evidence(evidence)
-            if _can_use_worker_output_crc(archive_files, inventory.files, inventory.worker_crc_available, output_by_path=output_index.by_path):
+            if _can_use_worker_output_crc(archive_files, output_files, inventory.worker_crc_available, output_by_path=output_index.by_path):
                 match_result = _worker_crc_match_result(
                     archive_files,
-                    inventory.files,
+                    output_files,
                     include_observations=should_emit_file_observations(evidence, self.name),
                     output_index=output_index,
                 )

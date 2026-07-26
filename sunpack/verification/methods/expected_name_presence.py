@@ -14,7 +14,6 @@ from sunpack.verification.methods._archive_output_match import (
 from sunpack.verification.methods._output_stats import (
     output_file_index_for_evidence,
     output_inventory_for_evidence,
-    output_stats_for_evidence,
     should_emit_file_observations,
 )
 from sunpack.verification.registry import register_verification_method
@@ -54,12 +53,12 @@ class ExpectedNamePresenceMethod:
         if not expected_names:
             return VerificationStepResult(method=self.name, status="skipped")
 
-        stats = output_stats_for_evidence(evidence)
-        if not stats.exists or not stats.is_dir or not stats.relative_paths:
+        inventory = output_inventory_for_evidence(evidence)
+        stats = inventory.stats
+        if not stats.exists or not stats.is_dir or stats.file_count <= 0:
             return VerificationStepResult(method=self.name, status="skipped")
 
         emit_observations = should_emit_file_observations(evidence, self.name)
-        inventory = output_inventory_for_evidence(evidence)
         if inventory.worker_inventory_complete and inventory.identity_paths and not emit_observations:
             count = len(expected_names)
             coverage = ArchiveOutputCoverage(

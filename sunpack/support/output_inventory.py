@@ -4,9 +4,13 @@ import os
 from dataclasses import dataclass
 from typing import Any
 
-from sunpack_native import scan_output_tree as _native_scan_output_tree
-
-from sunpack.support.path_names import normalize_match_path
+from sunpack_native import (
+    NativeOutputInventory,
+    NativeWorkerManifest,
+    output_inventory_from_serialized as _native_inventory_from_serialized,
+    scan_output_inventory as _native_scan_output_inventory,
+)
+from sunpack.extraction.internal.sevenzip.worker_diagnostics import native_worker_manifest
 
 
 @dataclass(frozen=True)
@@ -18,17 +22,42 @@ class OutputStats:
     total_size: int = 0
     transient_file_count: int = 0
     unreadable_count: int = 0
-    relative_paths: tuple[str, ...] = ()
 
 
-@dataclass(frozen=True)
 class OutputInventory:
-    root: str
-    stats: OutputStats
-    files: tuple[dict[str, Any], ...] = ()
-    worker_crc_available: bool = False
-    worker_inventory_complete: bool = False
-    identity_paths: bool = False
+    """Python facade over a Rust-owned file table."""
+
+    __slots__ = ("root", "stats", "_native", "worker_crc_available", "worker_inventory_complete", "identity_paths")
+
+    def __init__(self, native: NativeOutputInventory):
+        self._native = native
+        self.root = str(native.root)
+        self.stats = OutputStats(
+            exists=bool(native.exists), is_dir=bool(native.is_dir),
+            file_count=int(native.file_count), dir_count=int(native.dir_count),
+            total_size=int(native.total_size), transient_file_count=int(native.transient_file_count),
+            unreadable_count=int(native.unreadable_count),
+        )
+        self.worker_crc_available = bool(native.worker_crc_available)
+        self.worker_inventory_complete = bool(native.worker_inventory_complete)
+        self.identity_paths = bool(native.identity_paths)
+
+    @property
+    def files(self) -> tuple[dict[str, Any], ...]:
+        return self.materialize_files()
+
+    def materialize_files(self) -> tuple[dict[str, Any], ...]:
+        return tuple(dict(item) for item in self._native.materialize_files())
+
+    def file_columns(self) -> tuple[list[str], list[int]]:
+        paths, sizes = self._native.file_columns()
+        return list(paths), [int(item) for item in sizes]
+
+    def relative_paths(self) -> tuple[str, ...]:
+        return tuple(self._native.relative_paths())
+
+    def all_crc_ok(self) -> bool:
+        return bool(self._native.all_crc_ok())
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -42,9 +71,9 @@ class OutputInventory:
                 "total_size": self.stats.total_size,
                 "transient_file_count": self.stats.transient_file_count,
                 "unreadable_count": self.stats.unreadable_count,
-                "relative_paths": list(self.stats.relative_paths),
+                "relative_paths": list(self.relative_paths()),
             },
-            "files": list(self.files),
+            "files": list(self.materialize_files()),
             "worker_crc_available": self.worker_crc_available,
             "worker_inventory_complete": self.worker_inventory_complete,
             "identity_paths": self.identity_paths,
@@ -58,24 +87,16 @@ class OutputInventory:
         if expected_root and _path_key(root) != _path_key(expected_root):
             return None
         raw_stats = payload.get("stats") if isinstance(payload.get("stats"), dict) else {}
-        files = tuple(item for item in payload.get("files") or [] if isinstance(item, dict))
-        stats = OutputStats(
-            exists=bool(raw_stats.get("exists")),
-            is_dir=bool(raw_stats.get("is_dir")),
-            file_count=int(raw_stats.get("file_count", 0) or 0),
-            dir_count=int(raw_stats.get("dir_count", 0) or 0),
-            total_size=int(raw_stats.get("total_size", 0) or 0),
-            transient_file_count=int(raw_stats.get("transient_file_count", 0) or 0),
-            unreadable_count=int(raw_stats.get("unreadable_count", 0) or 0),
-            relative_paths=tuple(str(item) for item in raw_stats.get("relative_paths") or []),
-        )
-        return cls(
-            root=root,
-            stats=stats,
-            files=files,
-            worker_crc_available=bool(payload.get("worker_crc_available")),
-            worker_inventory_complete=bool(payload.get("worker_inventory_complete")),
-            identity_paths=bool(payload.get("identity_paths")),
+        files = [item for item in payload.get("files") or [] if isinstance(item, dict)]
+        return cls.from_native(
+            _native_inventory_from_serialized(
+                root, files,
+                bool(raw_stats.get("exists")), bool(raw_stats.get("is_dir")),
+                int(raw_stats.get("file_count", 0) or 0), int(raw_stats.get("dir_count", 0) or 0),
+                int(raw_stats.get("total_size", 0) or 0), int(raw_stats.get("transient_file_count", 0) or 0),
+                int(raw_stats.get("unreadable_count", 0) or 0), bool(payload.get("worker_crc_available")),
+                bool(payload.get("worker_inventory_complete")), bool(payload.get("identity_paths")),
+            )
         )
 
     @classmethod
@@ -86,6 +107,10 @@ class OutputInventory:
             return value
         return cls.from_dict(value, expected_root=expected_root)
 
+    @classmethod
+    def from_native(cls, native: NativeOutputInventory) -> "OutputInventory":
+        return cls(native)
+
 
 def collect_output_inventory(
     output_dir: str,
@@ -93,91 +118,30 @@ def collect_output_inventory(
 ) -> OutputInventory:
     root = os.path.abspath(output_dir) if output_dir else ""
     if not output_dir:
-        return OutputInventory(root=root, stats=OutputStats(exists=False, is_dir=False))
+        return OutputInventory.from_native(_native_inventory_from_serialized(
+            root, [], False, False, 0, 0, 0, 0, 0, False, False, False,
+        ))
     worker_inventory = _complete_worker_inventory(worker_result)
     if worker_inventory is not None:
-        files, inventory = worker_inventory
-        # The verified worker manifest is the canonical file table.  Source
-        # consumers read path/crc32; output consumers read
-        # output_path/output_crc32 from these same dictionaries.
-        merged_files = tuple(files)
-        return OutputInventory(
-            root=root,
-            stats=OutputStats(
-                exists=True, is_dir=True,
-                file_count=int(inventory["file_count"]), dir_count=int(inventory["dir_count"]),
-                total_size=int(inventory["total_size"]), transient_file_count=0, unreadable_count=0,
-                relative_paths=tuple(str(item.get("output_path") or item.get("path") or "") for item in merged_files),
-            ),
-            files=merged_files,
-            worker_crc_available=bool(files),
-            worker_inventory_complete=True,
-            identity_paths=bool(inventory.get("identity_paths")),
-        )
-    scan = dict(_native_scan_output_tree(output_dir))
-    files = [dict(item) for item in scan.get("files") or [] if isinstance(item, dict)]
-    worker_files = verified_worker_files(worker_result)
-    worker_by_path = {
-        normalize_match_path(str(item.get("output_path") or item.get("path") or "")): item
-        for item in worker_files
-        if item.get("output_path") or item.get("path")
-    }
-    merged_files: list[dict[str, Any]] = []
-    for item in files:
-        merged = {
-            "path": str(item.get("path") or ""),
-            "size": int(item.get("size", 0) or 0),
-        }
-        worker_item = worker_by_path.get(normalize_match_path(merged["path"]))
-        if worker_item is not None:
-            merged.update({
-                "bytes_written": int(worker_item.get("bytes_written", merged["size"]) or 0),
-                "status": str(worker_item.get("status") or "complete"),
-                "crc_ok": worker_item.get("crc_ok"),
-            })
-            if worker_item.get("has_output_crc") and worker_item.get("output_crc32") is not None:
-                merged["crc32"] = int(worker_item["output_crc32"]) & 0xFFFFFFFF
-                merged["crc_source"] = "sevenzip_worker_write"
-        merged_files.append(merged)
-    stats = OutputStats(
-        exists=bool(scan.get("exists")),
-        is_dir=bool(scan.get("is_dir")),
-        file_count=int(scan.get("file_count", 0) or 0),
-        dir_count=int(scan.get("dir_count", 0) or 0),
-        total_size=int(scan.get("total_size", 0) or 0),
-        transient_file_count=int(scan.get("transient_file_count", 0) or 0),
-        unreadable_count=int(scan.get("unreadable_count", 0) or 0),
-        relative_paths=tuple(str(item.get("path") or "") for item in files),
-    )
-    return OutputInventory(
-        root=root,
-        stats=stats,
-        files=tuple(merged_files),
-        worker_crc_available=bool(worker_files),
-    )
+        return OutputInventory.from_native(worker_inventory.to_output_inventory(root))
+    return OutputInventory.from_native(_native_scan_output_inventory(root))
 
 
-def verified_worker_files(worker_result: dict[str, Any] | None) -> list[dict[str, Any]]:
-    result = worker_result if isinstance(worker_result, dict) else {}
-    manifest = result.get("verified_manifest") if isinstance(result.get("verified_manifest"), dict) else {}
-    if result.get("status") != "ok" or not manifest.get("validated"):
-        return []
-    files = manifest.get("files")
-    return files if isinstance(files, list) and all(isinstance(item, dict) for item in files) else []
-
-
-def _complete_worker_inventory(worker_result: dict[str, Any] | None) -> tuple[list[dict[str, Any]], dict[str, Any]] | None:
+def _complete_worker_inventory(worker_result: dict[str, Any] | None) -> NativeWorkerManifest | None:
     result = worker_result if isinstance(worker_result, dict) else {}
     manifest = result.get("verified_manifest") if isinstance(result.get("verified_manifest"), dict) else {}
     inventory = manifest.get("inventory") if isinstance(manifest.get("inventory"), dict) else {}
-    files = verified_worker_files(result)
+    native = native_worker_manifest(result)
     if (
-        not inventory.get("complete")
-        or int(inventory.get("file_count", -1)) != len(files)
-        or any(str(item.get("status") or "") != "complete" for item in files)
+        result.get("status") != "ok"
+        or not manifest.get("validated")
+        or native is None
+        or not inventory.get("complete")
+        or int(inventory.get("file_count", -1)) != len(native)
+        or not native.all_complete()
     ):
         return None
-    return files, inventory
+    return native
 
 
 def _path_key(path: str) -> str:

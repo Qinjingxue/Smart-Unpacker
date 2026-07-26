@@ -15,7 +15,7 @@ class SampleReadabilityMethod:
         if (
             inventory.worker_inventory_complete and inventory.identity_paths
             and inventory.worker_crc_available
-            and all(item.get("crc_ok") is not False for item in inventory.files)
+            and inventory.all_crc_ok()
         ):
             return VerificationStepResult(method=self.name, status="skipped", issues=[VerificationIssue(
                 method=self.name, code="info.worker_output_already_verified",

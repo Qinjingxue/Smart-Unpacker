@@ -60,6 +60,8 @@ fn sunpack_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<analysis_native::AnalysisBinaryView>()?;
     m.add_class::<analysis_native::AnalysisMultiVolumeView>()?;
     m.add_class::<scan::directory::NativeDirectorySnapshot>()?;
+    m.add_class::<scan::directory::NativeOutputInventory>()?;
+    m.add_class::<scan::directory::NativeWorkerManifest>()?;
     m.add_function(wrap_pyfunction!(scan::magic::scan_after_markers, m)?)?;
     m.add_function(wrap_pyfunction!(scan::magic::scan_magics_anywhere, m)?)?;
     m.add_function(wrap_pyfunction!(
@@ -116,6 +118,15 @@ fn sunpack_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(scan::directory::scan_output_tree, m)?)?;
+    m.add_function(wrap_pyfunction!(scan::directory::scan_output_inventory, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        scan::directory::output_inventory_from_serialized,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        scan::directory::worker_manifest_from_rows,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(
         verification::file_crc::compute_directory_crc_manifest,
         m

@@ -202,23 +202,37 @@ def test_persistent_worker_starts_in_neutral_working_directory(tmp_path, monkeyp
     assert captured["cwd"] == str(tmp_path)
 
 
-def test_compact_worker_manifest_is_expanded_for_pipeline():
-    from sunpack.extraction.internal.sevenzip.worker_diagnostics import build_worker_diagnostics
+def test_compact_worker_manifest_is_parsed_into_native_storage():
+    from sunpack.extraction.internal.sevenzip.worker_diagnostics import (
+        build_worker_diagnostics,
+        worker_manifest_files,
+    )
 
     stdout = (
         '{"type":"result","status":"ok","verified_manifest":'
         '{"version":2,"validated":true,"item_count":1,"file_count":1,'
-        '"inventory":[1,1,0,3,1],"rows":[[0,"a.txt","a.txt",3,3,1,1,1,1,1,1]]}}\n'
+        '"inventory":[1,1,0,3,1],"rows":[[0,"a.txt","",3,3,1,1,1,1,1,1]]}}\n'
     )
     result = build_worker_diagnostics(stdout=stdout, stderr="", returncode=0)["result"]
 
-    assert result["verified_manifest"]["files"][0]["status"] == "complete"
+    manifest = result["verified_manifest"]
+    native = manifest["native_rows"]
+    assert len(native) == 1
+    assert native.all_complete() is True
+    assert "files" not in manifest
+    materialized = worker_manifest_files(result)[0]
+    assert materialized["path"] == "a.txt"
+    assert "output_path" not in materialized
+    assert materialized["status"] == "complete"
     assert result["verified_manifest"]["inventory"]["identity_paths"] is True
-    assert "rows" not in result["verified_manifest"]
+    assert "rows" not in manifest
 
 
 def test_preparsed_worker_result_avoids_stdout_reparse_and_bounds_tail():
-    from sunpack.extraction.internal.sevenzip.worker_diagnostics import build_worker_diagnostics
+    from sunpack.extraction.internal.sevenzip.worker_diagnostics import (
+        build_worker_diagnostics,
+        worker_manifest_files,
+    )
 
     result_payload = {
         "type": "result",
@@ -239,30 +253,35 @@ def test_preparsed_worker_result_avoids_stdout_reparse_and_bounds_tail():
 
     assert diagnostics["result"] is result_payload
     assert "rows" not in result_payload["verified_manifest"]
-    assert result_payload["verified_manifest"]["files"][0]["path"] == "source.txt"
-    assert result_payload["verified_manifest"]["files"][0]["output_path"] == "output.txt"
+    assert "files" not in result_payload["verified_manifest"]
+    files = worker_manifest_files(result_payload)
+    assert files[0]["path"] == "source.txt"
+    assert files[0]["output_path"] == "output.txt"
     assert sum(len(line) for line in diagnostics["process"]["stdout_tail"]) <= 4000
 
 
-def test_complete_worker_inventory_drops_redundant_output_trace_items():
-    from sunpack.extraction.internal.sevenzip.worker_diagnostics import compact_success_worker_diagnostics
+def test_complete_worker_inventory_drops_transient_native_rows_and_output_trace():
+    from sunpack.extraction.internal.sevenzip.worker_diagnostics import (
+        build_worker_diagnostics,
+        compact_success_worker_diagnostics,
+    )
 
-    diagnostics = {
-        "result": {
-            "status": "ok",
-            "verified_manifest": {
-                "validated": True,
-                "inventory": {"complete": True, "file_count": 1},
-                "files": [{"path": "a.txt", "output_path": "a.txt", "status": "complete"}],
-            },
-            "diagnostics": {"output_trace": {"items": [{"path": "a.txt"}], "files_written": 1}},
-        }
+    result = {
+        "status": "ok",
+        "verified_manifest": {
+            "version": 2,
+            "validated": True,
+            "inventory": [1, 1, 0, 3, 1],
+            "rows": [[0, "a.txt", "", 3, 3, 1, 7, 1, 7, 1, 1]],
+        },
+        "diagnostics": {"output_trace": {"items": [{"path": "a.txt"}], "files_written": 1}},
     }
+    diagnostics = build_worker_diagnostics(stdout="", stderr="", returncode=0, result_payload=result)
 
     compact_success_worker_diagnostics(diagnostics)
 
-    assert "items" not in diagnostics["result"]["diagnostics"]["output_trace"]
-    assert diagnostics["result"]["verified_manifest"]["files"][0]["path"] == "a.txt"
+    assert "items" not in result["diagnostics"]["output_trace"]
+    assert "native_rows" not in result["verified_manifest"]
 
 
 def test_worker_dry_run_reads_archive_state_with_patch_stack(tmp_path):

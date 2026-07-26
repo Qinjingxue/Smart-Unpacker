@@ -3,6 +3,8 @@ import subprocess
 from copy import deepcopy
 from typing import Any
 
+from sunpack_native import NativeWorkerManifest, worker_manifest_from_rows
+
 
 _STDIO_TAIL_LINES = 40
 _STDIO_TAIL_CHARS = 4000
@@ -93,7 +95,7 @@ def worker_result_payload(completed_or_text: Any) -> dict[str, Any]:
 
 
 def compact_success_worker_diagnostics(diagnostics: dict[str, Any]) -> None:
-    """Drop redundant per-item traces after the verified inventory owns them."""
+    """Drop transient native worker rows after the output inventory owns them."""
     result = diagnostics.get("result") if isinstance(diagnostics, dict) else None
     if not isinstance(result, dict) or result.get("status") != "ok":
         return
@@ -103,6 +105,7 @@ def compact_success_worker_diagnostics(diagnostics: dict[str, Any]) -> None:
     inventory = manifest.get("inventory")
     if not isinstance(inventory, dict) or not inventory.get("complete"):
         return
+    manifest.pop("native_rows", None)
     native = result.get("diagnostics")
     if not isinstance(native, dict):
         return
@@ -131,33 +134,40 @@ def _expand_manifest(payload: dict[str, Any]) -> None:
     manifest = payload.get("verified_manifest")
     if not isinstance(manifest, dict) or int(manifest.get("version", 0) or 0) != 2:
         return
-    if isinstance(manifest.get("files"), list) and "rows" not in manifest:
-        return
-    files: list[dict[str, Any]] = []
-    statuses = {0: "unverified", 1: "complete", 2: "failed"}
     rows = manifest.get("rows")
     if not isinstance(rows, list):
         rows = []
-    for row_index, row in enumerate(rows):
-        if not isinstance(row, list) or len(row) != 11:
-            continue
-        files.append({
-            "index": int(row[0]), "path": str(row[1]), "output_path": str(row[2] or row[1]),
-            "size": int(row[3]), "bytes_written": int(row[4]),
-            "has_crc": bool(row[5]), "crc32": int(row[6]) & 0xFFFFFFFF,
-            "has_output_crc": bool(row[7]), "output_crc32": int(row[8]) & 0xFFFFFFFF,
-            "crc_ok": bool(row[9]), "status": statuses.get(int(row[10]), "unverified"),
-        })
-        rows[row_index] = None
-    manifest["files"] = files
-    manifest.pop("rows", None)
     inventory = manifest.get("inventory")
     if isinstance(inventory, list) and len(inventory) == 5:
-        manifest["inventory"] = {
+        inventory = {
             "complete": bool(inventory[0]), "file_count": int(inventory[1]),
             "dir_count": int(inventory[2]), "total_size": int(inventory[3]),
             "identity_paths": bool(inventory[4]),
         }
+        manifest["inventory"] = inventory
+    if not isinstance(inventory, dict):
+        inventory = {}
+    if rows:
+        manifest["native_rows"] = worker_manifest_from_rows(
+            rows,
+            bool(inventory.get("complete")),
+            int(inventory.get("file_count", len(rows)) or 0),
+            int(inventory.get("dir_count", 0) or 0),
+            int(inventory.get("total_size", 0) or 0),
+            bool(inventory.get("identity_paths")),
+        )
+    manifest.pop("rows", None)
+
+
+def native_worker_manifest(result: dict[str, Any]) -> NativeWorkerManifest | None:
+    manifest = result.get("verified_manifest") if isinstance(result.get("verified_manifest"), dict) else {}
+    value = manifest.get("native_rows")
+    return value if isinstance(value, NativeWorkerManifest) else None
+
+
+def worker_manifest_files(result: dict[str, Any]) -> list[dict[str, Any]]:
+    native = native_worker_manifest(result)
+    return [dict(item) for item in native.materialize_files()] if native is not None else []
 
 
 def _tail_lines(text: str, limit: int = _STDIO_TAIL_LINES) -> list[str]:

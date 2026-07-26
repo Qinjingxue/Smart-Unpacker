@@ -83,8 +83,12 @@ def archive_state_manifest_for_evidence(evidence, *, max_items: int = 200000) ->
 def _worker_verified_manifest(evidence) -> ArchiveStateManifest | None:
     result = evidence.worker_result if isinstance(evidence.worker_result, dict) else {}
     payload = result.get("verified_manifest") if isinstance(result.get("verified_manifest"), dict) else {}
-    raw_files = payload.get("files")
-    files = raw_files if isinstance(raw_files, list) and all(isinstance(item, dict) for item in raw_files) else []
+    from sunpack.support.output_inventory import OutputInventory
+    inventory = OutputInventory.from_value(
+        getattr(evidence.extraction_result, "output_inventory", None),
+        expected_root=evidence.output_dir,
+    )
+    files = list(inventory.materialize_files()) if inventory is not None and inventory.worker_inventory_complete else []
     if (
         result.get("status") != "ok"
         or not payload.get("validated")

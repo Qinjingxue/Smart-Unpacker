@@ -1,6 +1,6 @@
 from sunpack.coordinator.output_scan_policy import NestedOutputScanPolicy as OutputScanPolicy
 from sunpack.coordinator.target_scan import build_fact_bags_for_targets
-from sunpack.support.output_inventory import OutputInventory, OutputStats
+from sunpack.support.output_inventory import collect_output_inventory
 from tests.helpers.detection_config import with_detection_pipeline
 
 
@@ -38,18 +38,7 @@ def test_output_scan_policy_reuses_extraction_inventory(tmp_path, monkeypatch):
     nested = segment_dir / "payload.ISO"
     payload = b"PK" + b"x" * (1024 * 1024)
     nested.write_bytes(payload)
-    inventory = OutputInventory(
-        root=str(tmp_path.resolve()),
-        stats=OutputStats(
-            exists=True,
-            is_dir=True,
-            file_count=1,
-            dir_count=1,
-            total_size=len(payload),
-            relative_paths=("embedded_00_rar/payload.ISO",),
-        ),
-        files=({"path": "embedded_00_rar/payload.ISO", "size": len(payload)},),
-    )
+    inventory = collect_output_inventory(str(tmp_path))
 
     monkeypatch.setattr(
         "sunpack.coordinator.output_scan_policy.DirectoryScanner.scan",
@@ -72,17 +61,7 @@ def test_output_scan_policy_reuses_extraction_inventory(tmp_path, monkeypatch):
 def test_output_scan_policy_inventory_batch_primes_file_heads(tmp_path, monkeypatch):
     archive = tmp_path / "nested.zip"
     archive.write_bytes(b"PK\x03\x04" + b"x" * (1024 * 1024))
-    inventory = OutputInventory(
-        root=str(tmp_path.resolve()),
-        stats=OutputStats(
-            exists=True,
-            is_dir=True,
-            file_count=1,
-            total_size=archive.stat().st_size,
-            relative_paths=(archive.name,),
-        ),
-        files=({"path": archive.name, "size": archive.stat().st_size},),
-    )
+    inventory = collect_output_inventory(str(tmp_path))
     policy = OutputScanPolicy(_config())
     roots = policy.scan_roots_from_outputs(
         [str(tmp_path)],

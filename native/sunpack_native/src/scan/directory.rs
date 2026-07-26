@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,6 +62,216 @@ impl NativeDirectorySnapshot {
 struct DirectoryScanRecords {
     filtered: Vec<DirectoryEntryRecord>,
     raw: Vec<DirectoryEntryRecord>,
+}
+
+#[derive(Debug, Clone)]
+struct OutputFileRecord {
+    index: u32,
+    path: String,
+    abs_path: Option<String>,
+    output_path: Option<String>,
+    size: u64,
+    bytes_written: u64,
+    crc32: Option<u32>,
+    output_crc32: Option<u32>,
+    crc_ok: Option<bool>,
+    status: u8,
+}
+
+#[pyclass(module = "sunpack_native", frozen)]
+pub(crate) struct NativeWorkerManifest {
+    files: Arc<Vec<OutputFileRecord>>,
+    complete: bool,
+    file_count: usize,
+    dir_count: usize,
+    total_size: u64,
+    identity_paths: bool,
+}
+
+#[pymethods]
+impl NativeWorkerManifest {
+    #[getter]
+    fn complete(&self) -> bool {
+        self.complete
+    }
+    #[getter]
+    fn file_count(&self) -> usize {
+        self.file_count
+    }
+    #[getter]
+    fn dir_count(&self) -> usize {
+        self.dir_count
+    }
+    #[getter]
+    fn total_size(&self) -> u64 {
+        self.total_size
+    }
+    #[getter]
+    fn identity_paths(&self) -> bool {
+        self.identity_paths
+    }
+    fn __len__(&self) -> usize {
+        self.files.len()
+    }
+    fn all_complete(&self) -> bool {
+        self.files.iter().all(|item| item.status == 1)
+    }
+    fn materialize_files(&self, py: Python<'_>) -> PyResult<Vec<Py<PyDict>>> {
+        self.files
+            .iter()
+            .map(|item| output_file_dict(py, item))
+            .collect()
+    }
+    fn to_output_inventory(&self, root: String) -> NativeOutputInventory {
+        NativeOutputInventory {
+            root,
+            exists: true,
+            is_dir: true,
+            file_count: self.file_count,
+            dir_count: self.dir_count,
+            total_size: self.total_size,
+            transient_file_count: 0,
+            unreadable_count: 0,
+            files: Arc::clone(&self.files),
+            worker_crc_available: !self.files.is_empty(),
+            worker_inventory_complete: self.complete && self.all_complete(),
+            identity_paths: self.identity_paths,
+        }
+    }
+}
+
+#[pyclass(module = "sunpack_native", frozen)]
+pub(crate) struct NativeOutputInventory {
+    root: String,
+    exists: bool,
+    is_dir: bool,
+    file_count: usize,
+    dir_count: usize,
+    total_size: u64,
+    transient_file_count: usize,
+    unreadable_count: usize,
+    files: Arc<Vec<OutputFileRecord>>,
+    worker_crc_available: bool,
+    worker_inventory_complete: bool,
+    identity_paths: bool,
+}
+
+#[pymethods]
+impl NativeOutputInventory {
+    #[getter]
+    fn root(&self) -> &str {
+        &self.root
+    }
+    #[getter]
+    fn exists(&self) -> bool {
+        self.exists
+    }
+    #[getter]
+    fn is_dir(&self) -> bool {
+        self.is_dir
+    }
+    #[getter]
+    fn file_count(&self) -> usize {
+        self.file_count
+    }
+    #[getter]
+    fn dir_count(&self) -> usize {
+        self.dir_count
+    }
+    #[getter]
+    fn total_size(&self) -> u64 {
+        self.total_size
+    }
+    #[getter]
+    fn transient_file_count(&self) -> usize {
+        self.transient_file_count
+    }
+    #[getter]
+    fn unreadable_count(&self) -> usize {
+        self.unreadable_count
+    }
+    #[getter]
+    fn worker_crc_available(&self) -> bool {
+        self.worker_crc_available
+    }
+    #[getter]
+    fn worker_inventory_complete(&self) -> bool {
+        self.worker_inventory_complete
+    }
+    #[getter]
+    fn identity_paths(&self) -> bool {
+        self.identity_paths
+    }
+
+    fn __len__(&self) -> usize {
+        self.files.len()
+    }
+
+    fn all_crc_ok(&self) -> bool {
+        self.files.iter().all(|item| item.crc_ok != Some(false))
+    }
+
+    fn relative_paths(&self) -> Vec<String> {
+        self.files
+            .iter()
+            .map(|item| item.output_path.as_ref().unwrap_or(&item.path).clone())
+            .collect()
+    }
+
+    fn file_columns(&self) -> (Vec<String>, Vec<u64>) {
+        let mut paths = Vec::with_capacity(self.files.len());
+        let mut sizes = Vec::with_capacity(self.files.len());
+        for item in self.files.iter() {
+            paths.push(item.output_path.as_ref().unwrap_or(&item.path).clone());
+            sizes.push(item.size);
+        }
+        (paths, sizes)
+    }
+
+    fn materialize_files(&self, py: Python<'_>) -> PyResult<Vec<Py<PyDict>>> {
+        self.files
+            .iter()
+            .map(|item| output_file_dict(py, item))
+            .collect()
+    }
+}
+
+fn output_file_dict(py: Python<'_>, item: &OutputFileRecord) -> PyResult<Py<PyDict>> {
+    let dict = PyDict::new(py);
+    dict.set_item("index", item.index)?;
+    dict.set_item("path", &item.path)?;
+    if let Some(abs_path) = &item.abs_path {
+        dict.set_item("abs_path", abs_path)?;
+    }
+    if let Some(output_path) = &item.output_path {
+        dict.set_item("output_path", output_path)?;
+    }
+    dict.set_item("size", item.size)?;
+    if item.bytes_written != item.size {
+        dict.set_item("bytes_written", item.bytes_written)?;
+    }
+    if let Some(crc32) = item.crc32 {
+        dict.set_item("crc32", crc32)?;
+        dict.set_item("has_crc", true)?;
+    }
+    if let Some(output_crc32) = item.output_crc32 {
+        dict.set_item("output_crc32", output_crc32)?;
+        dict.set_item("has_output_crc", true)?;
+    }
+    if let Some(crc_ok) = item.crc_ok {
+        dict.set_item("crc_ok", crc_ok)?;
+    }
+    if item.status != 0 {
+        dict.set_item(
+            "status",
+            match item.status {
+                1 => "complete",
+                2 => "failed",
+                _ => "unverified",
+            },
+        )?;
+    }
+    Ok(dict.unbind())
 }
 
 #[pymethods]
@@ -577,29 +788,202 @@ pub(crate) fn batch_file_head_facts(
 
 #[pyfunction]
 pub(crate) fn scan_output_tree(py: Python<'_>, output_dir: &str) -> PyResult<Py<PyDict>> {
-    let root = PathBuf::from(output_dir);
+    let inventory = scan_output_inventory_impl(output_dir);
     let result = PyDict::new(py);
-    result.set_item("exists", root.exists())?;
-    result.set_item("is_dir", root.is_dir())?;
-    result.set_item("file_count", 0usize)?;
-    result.set_item("dir_count", 0usize)?;
-    result.set_item("total_size", 0u64)?;
-    result.set_item("transient_file_count", 0usize)?;
-    result.set_item("unreadable_count", 0usize)?;
-    result.set_item("files", PyList::empty(py))?;
-    if !root.is_dir() {
-        return Ok(result.unbind());
-    }
-
-    let mut stats = OutputTreeStats::default();
-    walk_output_tree(py, &root, &root, &mut stats)?;
-    result.set_item("file_count", stats.file_count)?;
-    result.set_item("dir_count", stats.dir_count)?;
-    result.set_item("total_size", stats.total_size)?;
-    result.set_item("transient_file_count", stats.transient_file_count)?;
-    result.set_item("unreadable_count", stats.unreadable_count)?;
-    result.set_item("files", PyList::new(py, stats.files)?)?;
+    result.set_item("exists", inventory.exists)?;
+    result.set_item("is_dir", inventory.is_dir)?;
+    result.set_item("file_count", inventory.file_count)?;
+    result.set_item("dir_count", inventory.dir_count)?;
+    result.set_item("total_size", inventory.total_size)?;
+    result.set_item("transient_file_count", inventory.transient_file_count)?;
+    result.set_item("unreadable_count", inventory.unreadable_count)?;
+    result.set_item("files", PyList::new(py, inventory.materialize_files(py)?)?)?;
     Ok(result.unbind())
+}
+
+#[pyfunction]
+pub(crate) fn scan_output_inventory(py: Python<'_>, output_dir: String) -> NativeOutputInventory {
+    py.detach(|| scan_output_inventory_impl(&output_dir))
+}
+
+#[pyfunction]
+#[pyo3(signature = (
+    root, files, exists, is_dir, file_count, dir_count, total_size,
+    transient_file_count, unreadable_count, worker_crc_available,
+    worker_inventory_complete, identity_paths
+))]
+pub(crate) fn output_inventory_from_serialized(
+    py: Python<'_>,
+    root: String,
+    files: Vec<Py<PyDict>>,
+    exists: bool,
+    is_dir: bool,
+    file_count: usize,
+    dir_count: usize,
+    total_size: u64,
+    transient_file_count: usize,
+    unreadable_count: usize,
+    worker_crc_available: bool,
+    worker_inventory_complete: bool,
+    identity_paths: bool,
+) -> PyResult<NativeOutputInventory> {
+    let mut records = Vec::with_capacity(files.len());
+    for item in files {
+        let dict = item.bind(py);
+        let path = py_dict_string(dict, "path")?.unwrap_or_default();
+        let output_path = py_dict_string(dict, "output_path")?.filter(|value| value != &path);
+        let size = py_dict_u64(dict, "size")?.unwrap_or(0);
+        let status = match py_dict_string(dict, "status")?.as_deref() {
+            Some("complete") => 1,
+            Some("failed") => 2,
+            _ => 0,
+        };
+        let has_crc = py_dict_bool(dict, "has_crc")?.unwrap_or(false);
+        let has_output_crc = py_dict_bool(dict, "has_output_crc")?.unwrap_or(false);
+        records.push(OutputFileRecord {
+            index: py_dict_u64(dict, "index")?.unwrap_or(records.len() as u64) as u32,
+            path,
+            abs_path: None,
+            output_path,
+            size,
+            bytes_written: py_dict_u64(dict, "bytes_written")?.unwrap_or(size),
+            crc32: if has_crc {
+                py_dict_u64(dict, "crc32")?.map(|value| value as u32)
+            } else {
+                None
+            },
+            output_crc32: if has_output_crc {
+                py_dict_u64(dict, "output_crc32")?.map(|value| value as u32)
+            } else {
+                None
+            },
+            crc_ok: py_dict_bool(dict, "crc_ok")?,
+            status,
+        });
+    }
+    Ok(NativeOutputInventory {
+        root,
+        exists,
+        is_dir,
+        file_count,
+        dir_count,
+        total_size,
+        transient_file_count,
+        unreadable_count,
+        files: Arc::new(records),
+        worker_crc_available,
+        worker_inventory_complete,
+        identity_paths,
+    })
+}
+
+#[pyfunction]
+#[pyo3(signature = (rows, complete, file_count, dir_count, total_size, identity_paths=false))]
+pub(crate) fn worker_manifest_from_rows(
+    py: Python<'_>,
+    rows: Vec<Py<PyList>>,
+    complete: bool,
+    file_count: usize,
+    dir_count: usize,
+    total_size: u64,
+    identity_paths: bool,
+) -> PyResult<NativeWorkerManifest> {
+    let mut files = Vec::with_capacity(rows.len());
+    for row in rows {
+        let row = row.bind(py);
+        if row.len() != 11 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "worker manifest row must contain 11 columns",
+            ));
+        }
+        let path = row.get_item(1)?.extract::<String>()?;
+        let raw_output_path = row.get_item(2)?.extract::<String>()?;
+        let has_crc = row.get_item(5)?.extract::<u8>()? != 0;
+        let has_output_crc = row.get_item(7)?.extract::<u8>()? != 0;
+        let status = row.get_item(10)?.extract::<u8>()?;
+        files.push(OutputFileRecord {
+            index: row.get_item(0)?.extract::<u32>()?,
+            output_path: (!raw_output_path.is_empty() && raw_output_path != path)
+                .then_some(raw_output_path),
+            path,
+            abs_path: None,
+            size: row.get_item(3)?.extract::<u64>()?,
+            bytes_written: row.get_item(4)?.extract::<u64>()?,
+            crc32: has_crc
+                .then(|| row.get_item(6).and_then(|item| item.extract::<u32>()))
+                .transpose()?,
+            output_crc32: has_output_crc
+                .then(|| row.get_item(8).and_then(|item| item.extract::<u32>()))
+                .transpose()?,
+            crc_ok: Some(row.get_item(9)?.extract::<u8>()? != 0),
+            status,
+        });
+    }
+    Ok(NativeWorkerManifest {
+        files: Arc::new(files),
+        complete,
+        file_count,
+        dir_count,
+        total_size,
+        identity_paths,
+    })
+}
+
+fn scan_output_inventory_impl(output_dir: &str) -> NativeOutputInventory {
+    let root = PathBuf::from(output_dir);
+    let exists = root.exists();
+    let is_dir = root.is_dir();
+    let mut stats = OutputTreeStats::default();
+    if is_dir {
+        walk_output_tree(&root, &root, &mut stats);
+    }
+    NativeOutputInventory {
+        root: path_to_string(&root),
+        exists,
+        is_dir,
+        file_count: stats.file_count,
+        dir_count: stats.dir_count,
+        total_size: stats.total_size,
+        transient_file_count: stats.transient_file_count,
+        unreadable_count: stats.unreadable_count,
+        files: Arc::new(stats.files),
+        worker_crc_available: false,
+        worker_inventory_complete: false,
+        identity_paths: false,
+    }
+}
+
+fn py_dict_string(dict: &Bound<'_, PyDict>, key: &str) -> PyResult<Option<String>> {
+    let Some(value) = dict.get_item(key)? else {
+        return Ok(None);
+    };
+    if value.is_none() {
+        return Ok(None);
+    }
+    Ok(Some(value.str()?.to_string_lossy().into_owned()))
+}
+
+fn py_dict_u64(dict: &Bound<'_, PyDict>, key: &str) -> PyResult<Option<u64>> {
+    let Some(value) = dict.get_item(key)? else {
+        return Ok(None);
+    };
+    if value.is_none() {
+        return Ok(None);
+    }
+    Ok(value
+        .extract::<u64>()
+        .ok()
+        .or_else(|| value.extract::<i64>().ok().map(|item| item.max(0) as u64)))
+}
+
+fn py_dict_bool(dict: &Bound<'_, PyDict>, key: &str) -> PyResult<Option<bool>> {
+    let Some(value) = dict.get_item(key)? else {
+        return Ok(None);
+    };
+    if value.is_none() {
+        return Ok(None);
+    }
+    value.extract::<bool>().map(Some)
 }
 
 struct FileHeadRecord {
@@ -659,20 +1043,15 @@ struct OutputTreeStats {
     total_size: u64,
     transient_file_count: usize,
     unreadable_count: usize,
-    files: Vec<Py<PyDict>>,
+    files: Vec<OutputFileRecord>,
 }
 
-fn walk_output_tree(
-    py: Python<'_>,
-    root: &Path,
-    current: &Path,
-    stats: &mut OutputTreeStats,
-) -> PyResult<()> {
+fn walk_output_tree(root: &Path, current: &Path, stats: &mut OutputTreeStats) {
     let entries = match fs::read_dir(current) {
         Ok(entries) => entries,
         Err(_) => {
             stats.unreadable_count += 1;
-            return Ok(());
+            return;
         }
     };
     for item in entries {
@@ -694,7 +1073,7 @@ fn walk_output_tree(
                 continue;
             }
             stats.dir_count += 1;
-            walk_output_tree(py, root, &path, stats)?;
+            walk_output_tree(root, &path, stats);
             continue;
         }
         if !metadata.is_file() {
@@ -710,13 +1089,19 @@ fn walk_output_tree(
             .strip_prefix(root)
             .map(path_to_string)
             .unwrap_or_else(|_| file_name.clone());
-        let dict = PyDict::new(py);
-        dict.set_item("path", normalize_path_separator(relative))?;
-        dict.set_item("abs_path", path_to_string(&path))?;
-        dict.set_item("size", size)?;
-        stats.files.push(dict.unbind());
+        stats.files.push(OutputFileRecord {
+            index: stats.files.len() as u32,
+            path: normalize_path_separator(relative),
+            abs_path: Some(path_to_string(&path)),
+            output_path: None,
+            size,
+            bytes_written: size,
+            crc32: None,
+            output_crc32: None,
+            crc_ok: None,
+            status: 0,
+        });
     }
-    Ok(())
 }
 
 fn is_transient_file_name(name: &str) -> bool {
