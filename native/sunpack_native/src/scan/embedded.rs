@@ -1,19 +1,14 @@
+use crate::io::reader::{ManagedReader, SourceCursor};
 use crate::io::util::STREAM_CHUNK_SIZE;
 use aho_corasick::AhoCorasick;
 use crc32fast::{hash as crc32, Hasher};
 use flate2::read::DeflateDecoder;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
-use std::fs::File;
 use std::io::{self, Read};
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
 
 use rayon::prelude::*;
-
-#[cfg(unix)]
-use std::os::unix::fs::FileExt;
-#[cfg(windows)]
-use std::os::windows::fs::FileExt;
 
 const ZIP_LOCAL: &[u8] = b"PK\x03\x04";
 const ZIP_EOCD: &[u8] = b"PK\x05\x06";
@@ -126,12 +121,13 @@ fn embedded_matcher() -> &'static AhoCorasick {
 }
 
 fn scan_embedded_archives_native(path: &str) -> io::Result<NativeScanResult> {
-    let mut scan_file = File::open(path)?;
-    let file_size = scan_file.metadata()?.len();
+    let reader = ManagedReader::open(path)?;
+    let file_size = reader.len();
+    let mut scan_file = reader.stream_cursor();
     let mut raw_hits = scan_raw_hits(&mut scan_file)?;
     raw_hits.sort_by_key(|hit| (hit.offset, hit.hit_name));
 
-    let validation_file = File::open(path)?;
+    let validation_file = reader;
     let validation_results: Vec<io::Result<Option<EmbeddedCandidate>>> = raw_hits
         .par_iter()
         .map(|hit| validate_candidate(&validation_file, file_size, hit.kind, hit.offset))
@@ -152,7 +148,7 @@ fn scan_embedded_archives_native(path: &str) -> io::Result<NativeScanResult> {
     })
 }
 
-fn scan_raw_hits(file: &mut File) -> io::Result<Vec<RawHit>> {
+fn scan_raw_hits(file: &mut SourceCursor) -> io::Result<Vec<RawHit>> {
     let overlap = PATTERNS
         .iter()
         .map(|(magic, _, _)| magic.len())
@@ -287,7 +283,7 @@ fn scan_chunk(job: &ScanChunk) -> Vec<RawHit> {
 }
 
 fn validate_candidate(
-    file: &File,
+    file: &ManagedReader,
     file_size: u64,
     kind: &str,
     offset: u64,
@@ -308,7 +304,7 @@ fn validate_candidate(
 }
 
 fn validate_zip_eocd(
-    file: &File,
+    file: &ManagedReader,
     size: u64,
     eocd_offset: u64,
 ) -> std::io::Result<Option<EmbeddedCandidate>> {
@@ -371,44 +367,28 @@ fn validate_zip_eocd(
     )))
 }
 
-fn read_at(file: &File, offset: u64, len: usize) -> std::io::Result<Vec<u8>> {
-    let mut data = vec![0u8; len];
-    let mut read = 0usize;
-    while read < len {
-        let count = positional_read(file, &mut data[read..], offset + read as u64)?;
-        if count == 0 {
-            data.truncate(read);
-            break;
-        }
-        read += count;
-    }
-    Ok(data)
-}
-
-#[cfg(unix)]
-fn positional_read(file: &File, buffer: &mut [u8], offset: u64) -> io::Result<usize> {
-    file.read_at(buffer, offset)
-}
-
-#[cfg(windows)]
-fn positional_read(file: &File, buffer: &mut [u8], offset: u64) -> io::Result<usize> {
-    file.seek_read(buffer, offset)
+fn read_at(file: &ManagedReader, offset: u64, len: usize) -> std::io::Result<Vec<u8>> {
+    file.read_at(offset, len)
 }
 
 struct PositionalReader<'a> {
-    file: &'a File,
+    file: &'a ManagedReader,
     offset: u64,
 }
 
 impl Read for PositionalReader<'_> {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-        let count = positional_read(self.file, buffer, self.offset)?;
+        let count = self.file.read_direct_into_at(self.offset, buffer)?;
         self.offset = self.offset.saturating_add(count as u64);
         Ok(count)
     }
 }
 
-fn validate_zip(file: &File, size: u64, offset: u64) -> std::io::Result<Option<EmbeddedCandidate>> {
+fn validate_zip(
+    file: &ManagedReader,
+    size: u64,
+    offset: u64,
+) -> std::io::Result<Option<EmbeddedCandidate>> {
     let header = read_at(file, offset, 30)?;
     if header.len() < 30 || &header[..4] != ZIP_LOCAL {
         return Ok(None);
@@ -478,7 +458,7 @@ fn validate_zip(file: &File, size: u64, offset: u64) -> std::io::Result<Option<E
 }
 
 fn validate_seven_zip(
-    file: &File,
+    file: &ManagedReader,
     size: u64,
     offset: u64,
 ) -> std::io::Result<Option<EmbeddedCandidate>> {
@@ -515,7 +495,7 @@ fn validate_seven_zip(
 }
 
 fn validate_rar4(
-    file: &File,
+    file: &ManagedReader,
     size: u64,
     offset: u64,
 ) -> std::io::Result<Option<EmbeddedCandidate>> {
@@ -543,7 +523,7 @@ fn validate_rar4(
 }
 
 fn validate_rar5(
-    file: &File,
+    file: &ManagedReader,
     size: u64,
     offset: u64,
 ) -> std::io::Result<Option<EmbeddedCandidate>> {
@@ -581,7 +561,7 @@ fn validate_rar5(
 }
 
 fn validate_gzip(
-    file: &File,
+    file: &ManagedReader,
     size: u64,
     offset: u64,
 ) -> std::io::Result<Option<EmbeddedCandidate>> {
@@ -665,7 +645,7 @@ fn validate_gzip(
 }
 
 fn read_gzip_c_string(
-    file: &File,
+    file: &ManagedReader,
     size: u64,
     cursor: &mut u64,
     header: &mut Vec<u8>,
@@ -685,7 +665,7 @@ fn read_gzip_c_string(
 }
 
 fn validate_bzip2(
-    file: &File,
+    file: &ManagedReader,
     size: u64,
     offset: u64,
 ) -> std::io::Result<Option<EmbeddedCandidate>> {
@@ -708,7 +688,11 @@ fn validate_bzip2(
     )))
 }
 
-fn validate_xz(file: &File, size: u64, offset: u64) -> std::io::Result<Option<EmbeddedCandidate>> {
+fn validate_xz(
+    file: &ManagedReader,
+    size: u64,
+    offset: u64,
+) -> std::io::Result<Option<EmbeddedCandidate>> {
     let header = read_at(file, offset, 12)?;
     if header.len() < 12
         || &header[..6] != XZ
@@ -733,7 +717,7 @@ fn validate_xz(file: &File, size: u64, offset: u64) -> std::io::Result<Option<Em
 }
 
 fn validate_zstd(
-    file: &File,
+    file: &ManagedReader,
     size: u64,
     offset: u64,
 ) -> std::io::Result<Option<EmbeddedCandidate>> {
@@ -784,7 +768,11 @@ fn validate_zstd(
     )))
 }
 
-fn validate_tar(file: &File, size: u64, offset: u64) -> std::io::Result<Option<EmbeddedCandidate>> {
+fn validate_tar(
+    file: &ManagedReader,
+    size: u64,
+    offset: u64,
+) -> std::io::Result<Option<EmbeddedCandidate>> {
     if offset + 512 > size {
         return Ok(None);
     }
@@ -1025,7 +1013,8 @@ mod tests {
 
         let expected = reference_raw_hits(&data);
         let path = temp_file("embedded_parallel_equivalence", &data);
-        let mut file = File::open(&path).unwrap();
+        let reader = ManagedReader::open(&path).unwrap();
+        let mut file = reader.stream_cursor();
         let mut actual = scan_raw_hits(&mut file).unwrap();
         actual.sort_by_key(|hit| (hit.offset, hit.hit_name));
 

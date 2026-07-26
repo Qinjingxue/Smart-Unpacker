@@ -66,27 +66,13 @@ fn read_range_to_vec(
     end: Option<u64>,
     max_bytes: Option<u64>,
 ) -> Result<Vec<u8>, String> {
-    let mut file = File::open(path).map_err(|err| err.to_string())?;
-    let file_size = file.seek(SeekFrom::End(0)).map_err(|err| err.to_string())?;
-    if start > file_size {
-        return Err("range start is beyond input size".to_string());
-    }
-    let effective_end = end.unwrap_or(file_size).min(file_size);
-    if effective_end < start {
-        return Err("range end is before range start".to_string());
-    }
-    let len = effective_end - start;
-    if max_bytes.is_some_and(|limit| len > limit) {
-        return Err("archive deep repair input exceeds max_input_size_mb".to_string());
-    }
-    let mut output = Vec::with_capacity(len.min(COPY_CHUNK_SIZE as u64) as usize);
-    file.seek(SeekFrom::Start(start))
-        .map_err(|err| err.to_string())?;
-    let mut limited = file.take(len);
-    limited
-        .read_to_end(&mut output)
-        .map_err(|err| err.to_string())?;
-    Ok(output)
+    crate::io::util::read_source_range(
+        path,
+        start,
+        end,
+        max_bytes,
+        "archive deep repair input exceeds max_input_size_mb",
+    )
 }
 
 fn extract_password(source_input: &Bound<'_, PyDict>) -> Option<String> {
@@ -142,7 +128,10 @@ fn password_residual_fact(message: &str, password_present: bool) -> Vec<String> 
         if password_present {
             vec!["password_rejected".to_string()]
         } else {
-            vec!["password_required".to_string(), "wrong_password".to_string()]
+            vec![
+                "password_required".to_string(),
+                "wrong_password".to_string(),
+            ]
         }
     } else {
         Vec::new()
@@ -200,7 +189,7 @@ fn carrier_crop_residual_facts(format: &str) -> Vec<&'static str> {
 }
 
 fn candidate_crc32(path: &str) -> String {
-    match fs::read(path) {
+    match crate::io::reader::ManagedReader::open(path).and_then(|reader| reader.read_all()) {
         Ok(bytes) => format!("{:08x}", crc32(&bytes)),
         Err(_) => String::new(),
     }
@@ -224,7 +213,8 @@ fn find_all(data: &[u8], needle: &[u8]) -> Vec<usize> {
 }
 
 fn find_subslice(data: &[u8], needle: &[u8]) -> Option<usize> {
-    data.windows(needle.len()).position(|window| window == needle)
+    data.windows(needle.len())
+        .position(|window| window == needle)
 }
 
 fn ensure_parent(path: &Path) -> std::io::Result<()> {
@@ -302,4 +292,3 @@ fn crc32(bytes: &[u8]) -> u32 {
     }
     !crc
 }
-

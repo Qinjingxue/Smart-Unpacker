@@ -71,10 +71,11 @@ pub(crate) fn inspect_zip_eocd_structure(
     max_cd_entries_to_walk: usize,
 ) -> PyResult<Py<PyDict>> {
     let mut result = zip_eocd_empty(py, "")?;
-    let Ok(mut file) = File::open(path) else {
+    let Ok(reader) = ManagedReader::open(path) else {
         result.set_item("error", "os_error")?;
         return Ok(result.unbind());
     };
+    let mut file = reader.cursor();
     let file_size = file.seek(SeekFrom::End(0))?;
     if file_size < ZIP_EOCD_MIN_SIZE as u64 {
         result.set_item("error", "file_too_small")?;
@@ -124,7 +125,10 @@ pub(crate) fn inspect_zip_eocd_structure(
         result.set_item("error", "comment_length_mismatch")?;
         result.set_item("eocd_offset", eocd_offset)?;
         result.set_item("comment_length", comment_length)?;
-        result.set_item("declared_central_directory_offset", central_directory_offset)?;
+        result.set_item(
+            "declared_central_directory_offset",
+            central_directory_offset,
+        )?;
         result.set_item("declared_central_directory_size", central_directory_size)?;
         result.set_item("declared_total_entries", total_entries)?;
         result.set_item("trailing_bytes_after_eocd", trailing_bytes_after_eocd)?;
@@ -145,7 +149,10 @@ pub(crate) fn inspect_zip_eocd_structure(
         result.set_item("central_directory_size", central_directory_size)?;
         result.set_item("total_entries", total_entries)?;
         result.set_item("comment_length", comment_length)?;
-        result.set_item("declared_central_directory_offset", central_directory_offset)?;
+        result.set_item(
+            "declared_central_directory_offset",
+            central_directory_offset,
+        )?;
         result.set_item("declared_central_directory_size", central_directory_size)?;
         result.set_item("declared_total_entries", total_entries)?;
         result.set_item("trailing_bytes_after_eocd", trailing_bytes_after_eocd)?;
@@ -165,12 +172,18 @@ pub(crate) fn inspect_zip_eocd_structure(
     result.set_item("eocd_offset", eocd_offset)?;
     result.set_item("central_directory_offset", physical_central_offset)?;
     result.set_item("central_directory_size", central_directory_size)?;
-    result.set_item("declared_central_directory_offset", central_directory_offset)?;
+    result.set_item(
+        "declared_central_directory_offset",
+        central_directory_offset,
+    )?;
     result.set_item("declared_central_directory_size", central_directory_size)?;
     result.set_item("declared_total_entries", total_entries)?;
     result.set_item("physical_central_directory_offset", physical_central_offset)?;
     result.set_item("inferred_central_directory_offset", physical_central_offset)?;
-    result.set_item("inferred_central_directory_size", eocd_offset.saturating_sub(physical_central_offset))?;
+    result.set_item(
+        "inferred_central_directory_size",
+        eocd_offset.saturating_sub(physical_central_offset),
+    )?;
     result.set_item(
         "central_directory_offset_delta",
         physical_central_offset as i64 - central_directory_offset as i64,
@@ -215,7 +228,10 @@ pub(crate) fn inspect_zip_eocd_structure(
     file.read_exact(&mut sig)?;
     if sig != ZIP_CENTRAL_DIRECTORY_SIGNATURE {
         result.set_item("error", "bad_central_directory_signature")?;
-        result.set_item("bad_central_directory_signature_offset", physical_central_offset)?;
+        result.set_item(
+            "bad_central_directory_signature_offset",
+            physical_central_offset,
+        )?;
         return Ok(result.unbind());
     }
     result.set_item("plausible", true)?;
@@ -235,7 +251,10 @@ pub(crate) fn inspect_zip_eocd_structure(
     result.set_item("local_header_links_checked", walk.2)?;
     result.set_item("local_header_links_ok", walk.3)?;
     result.set_item("local_header_links_ok_count", walk.2)?;
-    result.set_item("local_header_links_error_count", if walk.3 { 0usize } else { 1usize })?;
+    result.set_item(
+        "local_header_links_error_count",
+        if walk.3 { 0usize } else { 1usize },
+    )?;
     if !walk.4.is_empty() {
         result.set_item("error", walk.4)?;
         result.set_item("plausible", false)?;
@@ -271,9 +290,10 @@ pub(crate) fn inspect_seven_zip_structure(
     magic_bytes: Option<&[u8]>,
     max_next_header_check_bytes: u64,
 ) -> PyResult<Py<PyDict>> {
-    let Ok(mut file) = File::open(path) else {
+    let Ok(reader) = ManagedReader::open(path) else {
         return Ok(seven_empty(py, "os_error")?.unbind());
     };
+    let mut file = reader.cursor();
     let file_size = file.seek(SeekFrom::End(0))?;
     let mut header = magic_bytes.unwrap_or(&[]).to_vec();
     if header.len() < SEVEN_Z_HEADER_SIZE {
@@ -389,9 +409,10 @@ pub(crate) fn inspect_rar_structure(
     magic_bytes: Option<&[u8]>,
     max_first_header_check_bytes: u64,
 ) -> PyResult<Py<PyDict>> {
-    let Ok(mut file) = File::open(path) else {
+    let Ok(reader) = ManagedReader::open(path) else {
         return Ok(rar_empty(py, "os_error")?.unbind());
     };
+    let mut file = reader.cursor();
     let file_size = file.seek(SeekFrom::End(0))?;
     let mut data = magic_bytes.unwrap_or(&[]).to_vec();
     if data.len() < 64 {
@@ -448,11 +469,12 @@ pub(crate) fn inspect_tar_header_structure(
     path: &str,
     max_entries_to_walk: usize,
 ) -> PyResult<Py<PyDict>> {
-    let Ok(mut file) = File::open(path) else {
+    let Ok(reader) = ManagedReader::open(path) else {
         let out = tar_empty(py, "os_error")?;
         finish_fields(&out, TAR_FIELDS)?;
         return Ok(out.unbind());
     };
+    let mut file = reader.cursor();
     let file_size = file.seek(SeekFrom::End(0))?;
     if file_size < TAR_BLOCK_SIZE as u64 {
         let out = tar_empty(py, "file_too_small")?;
@@ -568,4 +590,3 @@ pub(crate) fn inspect_compression_stream_structure(
     }
     compression_empty(py, "compression_stream_magic_not_found", "", "", false)
 }
-

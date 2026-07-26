@@ -1,4 +1,3 @@
-const COPY_CHUNK_SIZE: usize = 1024 * 1024;
 const SEVEN_Z_MAGIC: &[u8] = b"7z\xbc\xaf\x27\x1c";
 const SEVEN_Z_HEADER_SIZE: usize = 32;
 const SZ_END: u8 = 0x00;

@@ -1,4 +1,3 @@
-const COPY_CHUNK_SIZE: usize = 1024 * 1024;
 const RAR4_MAGIC: &[u8] = b"Rar!\x1a\x07\x00";
 const RAR5_MAGIC: &[u8] = b"Rar!\x1a\x07\x01\x00";
 

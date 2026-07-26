@@ -1,7 +1,7 @@
+use crate::io::reader::ManagedReader;
 use crate::io::util::{read_range, STREAM_CHUNK_SIZE};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
-use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -180,7 +180,7 @@ fn stream_find_first_pattern(
     start_offset: u64,
     end_offset: Option<u64>,
 ) -> PyResult<Option<(u64, usize)>> {
-    let mut file = File::open(path)?;
+    let mut file = ManagedReader::open(path)?.stream_cursor();
     file.seek(SeekFrom::Start(start_offset))?;
     let overlap = max_pattern_len(patterns).saturating_sub(1);
     let mut carry: Vec<u8> = Vec::new();
@@ -233,7 +233,7 @@ pub(crate) fn stream_find_magic_from_offset(
         .iter()
         .map(|(magic, _)| magic.clone())
         .collect();
-    let mut file = File::open(path)?;
+    let mut file = ManagedReader::open(path)?.stream_cursor();
     file.seek(SeekFrom::Start(start_offset))?;
     let overlap = max_pattern_len(&patterns).saturating_sub(1);
     let mut carry: Vec<u8> = Vec::new();
@@ -290,7 +290,7 @@ pub(crate) fn stream_find_magic_hits(
         .iter()
         .map(|(magic, _)| magic.clone())
         .collect();
-    let mut file = File::open(path)?;
+    let mut file = ManagedReader::open(path)?.stream_cursor();
     file.seek(SeekFrom::Start(min_offset))?;
     let overlap = max_pattern_len(&patterns).saturating_sub(1);
     let mut carry: Vec<u8> = Vec::new();

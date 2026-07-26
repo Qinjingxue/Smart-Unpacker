@@ -3,13 +3,10 @@ fn dict<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
 }
 
 fn read_at(path: &str, offset: u64, max_len: usize) -> std::io::Result<(u64, Vec<u8>)> {
-    let mut file = File::open(path)?;
-    let file_size = file.seek(SeekFrom::End(0))?;
-    file.seek(SeekFrom::Start(offset))?;
+    let reader = ManagedReader::open(path)?;
+    let file_size = reader.len();
     let len = max_len.min(file_size.saturating_sub(offset) as usize);
-    let mut buffer = vec![0; len];
-    file.read_exact(&mut buffer)?;
-    Ok((file_size, buffer))
+    Ok((file_size, reader.read_exact_at(offset, len)?))
 }
 
 fn find_eocd(tail: &[u8], file_size: u64, read_size: u64) -> Option<(u64, &[u8])> {
@@ -49,7 +46,7 @@ fn find_eocd_candidate(
 }
 
 fn walk_zip_central_directory(
-    file: &mut File,
+    file: &mut SourceCursor,
     file_size: u64,
     archive_offset: u64,
     central_directory_offset: u64,

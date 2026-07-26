@@ -15,7 +15,7 @@ use sevenz_rust2::{
 };
 use sha2::Digest;
 use std::fs::{self, File};
-use std::io::{Cursor, Read, Seek, SeekFrom, Write};
+use std::io::{Cursor, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 
 type Aes256CbcDec = cbc::Decryptor<Aes256>;

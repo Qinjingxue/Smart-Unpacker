@@ -17,49 +17,28 @@ impl AnalysisMultiVolumeView {
                 "AnalysisMultiVolumeView requires at least one volume",
             ));
         }
-        let mut cursor = 0u64;
-        let mut volumes = Vec::with_capacity(paths.len());
-        for path in &paths {
-            let size = std::fs::metadata(path)?.len();
-            let end = cursor.checked_add(size).ok_or_else(|| {
-                pyo3::exceptions::PyOverflowError::new_err("multi-volume archive size overflow")
-            })?;
-            volumes.push(VolumeRange {
-                start: cursor,
-                end,
-                path: path.clone(),
-            });
-            cursor = end;
-        }
-        Ok(Self {
-            inner: Mutex::new(AnalysisMultiVolumeViewInner {
-                path: paths[0].clone(),
-                size: cursor,
-                volumes,
+        let reader = ManagedReader::open_volumes(
+            &paths,
+            ReaderConfig {
                 cache_bytes,
                 max_read_bytes,
-                cache: HashMap::new(),
-                order: VecDeque::new(),
-                cache_size: 0,
-                read_bytes: 0,
-                cache_hits: 0,
-            }),
-            read_gate: ReadGate {
-                limit: max_concurrent_reads.max(1),
-                active: Mutex::new(0),
-                available: Condvar::new(),
+                max_concurrent_reads,
             },
+        )?;
+        Ok(Self {
+            path: paths[0].clone(),
+            reader,
         })
     }
 
     #[getter]
     fn size(&self) -> PyResult<u64> {
-        Ok(self.lock()?.size)
+        Ok(self.reader.len())
     }
 
     #[getter]
     fn path(&self) -> PyResult<String> {
-        Ok(self.lock()?.path.clone())
+        Ok(self.path.clone())
     }
 
     fn read_at<'py>(
@@ -73,7 +52,7 @@ impl AnalysisMultiVolumeView {
     }
 
     fn read_tail<'py>(&self, py: Python<'py>, size: usize) -> PyResult<Bound<'py, PyBytes>> {
-        let view_size = self.lock()?.size;
+        let view_size = self.reader.len();
         let read_size = size.min(view_size as usize);
         let offset = view_size.saturating_sub(read_size as u64);
         let data = self.read_at_bytes(offset, read_size)?;
@@ -81,10 +60,10 @@ impl AnalysisMultiVolumeView {
     }
 
     fn stats(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
-        let inner = self.lock()?;
+        let stats = self.reader.stats()?;
         let dict = PyDict::new(py);
-        dict.set_item("read_bytes", inner.read_bytes)?;
-        dict.set_item("cache_hits", inner.cache_hits)?;
+        dict.set_item("read_bytes", stats.read_bytes)?;
+        dict.set_item("cache_hits", stats.cache_hits)?;
         Ok(dict.unbind())
     }
 
@@ -110,7 +89,7 @@ impl AnalysisMultiVolumeView {
         ngram_top_k: usize,
         max_ngram_sample_bytes: usize,
     ) -> PyResult<Py<PyDict>> {
-        let file_size = self.lock()?.size;
+        let file_size = self.reader.len();
         let window_bytes = window_bytes.max(1024);
         let config = BinaryProfileConfig {
             window_bytes,
@@ -137,7 +116,7 @@ impl AnalysisMultiVolumeView {
         head_bytes: usize,
         tail_bytes: usize,
     ) -> PyResult<Py<PyDict>> {
-        let size = self.lock()?.size;
+        let size = self.reader.len();
         let head_len = head_bytes.min(size as usize);
         let tail_len = tail_bytes.min(size as usize);
         let tail_start = size.saturating_sub(tail_len as u64);

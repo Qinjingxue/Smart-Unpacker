@@ -31,7 +31,7 @@ fn tar_text(value: &[u8]) -> String {
 
 fn enrich_tar_semantics(
     d: &Bound<'_, PyDict>,
-    file: &mut File,
+    file: &mut SourceCursor,
     file_size: u64,
     max_entries: usize,
 ) -> PyResult<()> {
@@ -257,7 +257,7 @@ fn tar_empty<'py>(py: Python<'py>, error: &str) -> PyResult<Bound<'py, PyDict>> 
 }
 
 fn walk_tar(
-    file: &mut File,
+    file: &mut SourceCursor,
     file_size: u64,
     max_entries: usize,
 ) -> PyResult<(usize, bool, bool, &'static str)> {

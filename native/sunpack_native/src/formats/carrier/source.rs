@@ -81,26 +81,11 @@ fn read_range_to_vec(
     end: Option<u64>,
     max_bytes: Option<u64>,
 ) -> Result<Vec<u8>, String> {
-    let mut file = File::open(path).map_err(|err| err.to_string())?;
-    let file_size = file.seek(SeekFrom::End(0)).map_err(|err| err.to_string())?;
-    if start > file_size {
-        return Err("range start is beyond input size".to_string());
-    }
-    let effective_end = end.unwrap_or(file_size).min(file_size);
-    if effective_end < start {
-        return Err("range end is before range start".to_string());
-    }
-    let len = effective_end - start;
-    if max_bytes.is_some_and(|limit| len > limit) {
-        return Err("archive deep repair input exceeds max_input_size_mb".to_string());
-    }
-    let mut output = Vec::with_capacity(len.min(COPY_CHUNK_SIZE as u64) as usize);
-    file.seek(SeekFrom::Start(start))
-        .map_err(|err| err.to_string())?;
-    let mut limited = file.take(len);
-    limited
-        .read_to_end(&mut output)
-        .map_err(|err| err.to_string())?;
-    Ok(output)
+    crate::io::util::read_source_range(
+        path,
+        start,
+        end,
+        max_bytes,
+        "archive deep repair input exceeds max_input_size_mb",
+    )
 }
-

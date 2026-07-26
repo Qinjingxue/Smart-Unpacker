@@ -1,46 +1,10 @@
 impl AnalysisBinaryView {
-    fn lock(&self) -> PyResult<MutexGuard<'_, AnalysisBinaryViewInner>> {
-        self.inner.lock().map_err(|_| {
-            pyo3::exceptions::PyRuntimeError::new_err("analysis binary view lock poisoned")
-        })
-    }
-
     fn read_at_bytes(&self, offset: u64, size: usize) -> PyResult<Vec<u8>> {
-        let (path, read_offset, read_size) = {
-            let mut inner = self.lock()?;
-            if offset >= inner.size || size == 0 {
-                return Ok(Vec::new());
-            }
-            let read_size = size.min((inner.size - offset) as usize);
-            let key = (offset, read_size);
-            if let Some(data) = inner.cache.get(&key).cloned() {
-                inner.cache_hits += 1;
-                return Ok(data);
-            }
-            if let Some(max_read_bytes) = inner.max_read_bytes {
-                if inner.read_bytes + read_size as u64 > max_read_bytes {
-                    return Err(pyo3::exceptions::PyRuntimeError::new_err(
-                        "archive analysis read budget exceeded",
-                    ));
-                }
-            }
-            (inner.path.clone(), offset, read_size)
-        };
-
-        let _permit = self.read_gate.acquire()?;
-        let mut file = File::open(&path)?;
-        file.seek(SeekFrom::Start(read_offset))?;
-        let mut data = vec![0; read_size];
-        file.read_exact(&mut data)?;
-
-        let mut inner = self.lock()?;
-        inner.read_bytes += data.len() as u64;
-        inner.store_cache_entry((read_offset, read_size), data.clone());
-        Ok(data)
+        self.reader.read_at(offset, size).map_err(reader_error_to_py)
     }
 
     fn read_tail_bytes(&self, size: usize) -> PyResult<Vec<u8>> {
-        let view_size = self.lock()?.size;
+        let view_size = self.reader.len();
         let read_size = size.min(view_size as usize);
         let offset = view_size.saturating_sub(read_size as u64);
         self.read_at_bytes(offset, read_size)
@@ -152,7 +116,7 @@ impl AnalysisBinaryView {
         max_blocks: usize,
     ) -> PyResult<()> {
         let mut cursor = start_offset + RAR4.len() as u64;
-        let size = self.lock()?.size;
+        let size = self.reader.len();
         let evidence = PyList::empty(py);
         evidence.append("rar4:signature")?;
         for index in 0..max_blocks {
@@ -243,7 +207,7 @@ impl AnalysisBinaryView {
         max_blocks: usize,
     ) -> PyResult<()> {
         let mut cursor = start_offset + RAR5.len() as u64;
-        let size = self.lock()?.size;
+        let size = self.reader.len();
         let evidence = PyList::empty(py);
         evidence.append("rar5:signature")?;
         for index in 0..max_blocks {
@@ -391,7 +355,7 @@ impl AnalysisBinaryView {
         result.set_item("evidence", PyList::empty(py))?;
         result.set_item("damage_flags", PyList::empty(py))?;
 
-        let size = self.lock()?.size;
+        let size = self.reader.len();
         let mut cursor = start_offset;
         let mut checked = 0usize;
         let mut zero_blocks = 0usize;
@@ -534,7 +498,7 @@ impl AnalysisBinaryView {
                     py,
                     ["gzip:magic", "gzip:method:deflate", "gzip:flags_valid"],
                 )?;
-                if self.lock()?.size >= 18 {
+                if self.reader.len() >= 18 {
                     let tail = self.read_tail_bytes(4)?;
                     if tail.len() == 4 {
                         result.set_item("isize", u32_le(&tail, 0))?;
@@ -634,129 +598,7 @@ impl AnalysisBinaryView {
 }
 
 impl AnalysisMultiVolumeView {
-    fn lock(&self) -> PyResult<MutexGuard<'_, AnalysisMultiVolumeViewInner>> {
-        self.inner.lock().map_err(|_| {
-            pyo3::exceptions::PyRuntimeError::new_err("analysis multi-volume view lock poisoned")
-        })
-    }
-
     fn read_at_bytes(&self, offset: u64, size: usize) -> PyResult<Vec<u8>> {
-        let (reads, read_offset, read_size) = {
-            let mut inner = self.lock()?;
-            if offset >= inner.size || size == 0 {
-                return Ok(Vec::new());
-            }
-            let read_size = size.min((inner.size - offset) as usize);
-            let key = (offset, read_size);
-            if let Some(data) = inner.cache.get(&key).cloned() {
-                inner.cache_hits += 1;
-                return Ok(data);
-            }
-            if let Some(max_read_bytes) = inner.max_read_bytes {
-                if inner.read_bytes + read_size as u64 > max_read_bytes {
-                    return Err(pyo3::exceptions::PyRuntimeError::new_err(
-                        "archive analysis read budget exceeded",
-                    ));
-                }
-            }
-            let end_offset = offset + read_size as u64;
-            let mut reads = Vec::new();
-            for volume in &inner.volumes {
-                if offset >= volume.end || end_offset <= volume.start {
-                    continue;
-                }
-                let local_start = offset.max(volume.start);
-                let local_end = end_offset.min(volume.end);
-                reads.push(VolumeRead {
-                    path: volume.path.clone(),
-                    start: local_start - volume.start,
-                    size: (local_end - local_start) as usize,
-                });
-            }
-            (reads, offset, read_size)
-        };
-
-        let _permit = self.read_gate.acquire()?;
-        let mut data = Vec::with_capacity(read_size);
-        for read in reads {
-            let mut file = File::open(&read.path)?;
-            file.seek(SeekFrom::Start(read.start))?;
-            let mut chunk = vec![0; read.size];
-            file.read_exact(&mut chunk)?;
-            data.extend_from_slice(&chunk);
-        }
-
-        let mut inner = self.lock()?;
-        inner.read_bytes += data.len() as u64;
-        inner.store_cache_entry((read_offset, read_size), data.clone());
-        Ok(data)
-    }
-}
-
-impl AnalysisBinaryViewInner {
-    fn store_cache_entry(&mut self, key: (u64, usize), data: Vec<u8>) {
-        if self.cache_bytes == 0 || data.len() > self.cache_bytes {
-            return;
-        }
-        if let Some(old) = self.cache.insert(key, data) {
-            self.cache_size = self.cache_size.saturating_sub(old.len());
-            self.order.retain(|existing| *existing != key);
-        }
-        self.cache_size += self.cache.get(&key).map(|value| value.len()).unwrap_or(0);
-        self.order.push_back(key);
-        while self.cache_size > self.cache_bytes {
-            let Some(old_key) = self.order.pop_front() else {
-                break;
-            };
-            if let Some(old) = self.cache.remove(&old_key) {
-                self.cache_size = self.cache_size.saturating_sub(old.len());
-            }
-        }
-    }
-}
-
-impl AnalysisMultiVolumeViewInner {
-    fn store_cache_entry(&mut self, key: (u64, usize), data: Vec<u8>) {
-        if self.cache_bytes == 0 || data.len() > self.cache_bytes {
-            return;
-        }
-        if let Some(old) = self.cache.insert(key, data) {
-            self.cache_size = self.cache_size.saturating_sub(old.len());
-            self.order.retain(|existing| *existing != key);
-        }
-        self.cache_size += self.cache.get(&key).map(|value| value.len()).unwrap_or(0);
-        self.order.push_back(key);
-        while self.cache_size > self.cache_bytes {
-            let Some(old_key) = self.order.pop_front() else {
-                break;
-            };
-            if let Some(old) = self.cache.remove(&old_key) {
-                self.cache_size = self.cache_size.saturating_sub(old.len());
-            }
-        }
-    }
-}
-
-impl ReadGate {
-    fn acquire(&self) -> PyResult<ReadPermit<'_>> {
-        let mut active = self.active.lock().map_err(|_| {
-            pyo3::exceptions::PyRuntimeError::new_err("analysis read gate lock poisoned")
-        })?;
-        while *active >= self.limit {
-            active = self.available.wait(active).map_err(|_| {
-                pyo3::exceptions::PyRuntimeError::new_err("analysis read gate lock poisoned")
-            })?;
-        }
-        *active += 1;
-        Ok(ReadPermit { gate: self })
-    }
-}
-
-impl Drop for ReadPermit<'_> {
-    fn drop(&mut self) {
-        if let Ok(mut active) = self.gate.active.lock() {
-            *active = active.saturating_sub(1);
-            self.gate.available.notify_one();
-        }
+        self.reader.read_at(offset, size).map_err(reader_error_to_py)
     }
 }

@@ -6,7 +6,8 @@ const STREAM_STRUCTURE_TAIL_BYTES: usize = 1024 * 1024;
 const STREAM_STRUCTURE_DECODE_MAX_BYTES: u64 = 8 * 1024 * 1024;
 
 fn read_prefix(path: &str, limit: usize) -> std::io::Result<Vec<u8>> {
-    let mut file = File::open(path)?;
+    let reader = ManagedReader::open(path)?;
+    let mut file = reader.cursor();
     let mut data = Vec::with_capacity(limit);
     file.by_ref().take(limit as u64).read_to_end(&mut data)?;
     Ok(data)
@@ -14,7 +15,8 @@ fn read_prefix(path: &str, limit: usize) -> std::io::Result<Vec<u8>> {
 
 fn read_suffix(path: &str, file_size: u64, limit: usize) -> std::io::Result<(u64, Vec<u8>)> {
     let start = file_size.saturating_sub(limit as u64);
-    let mut file = File::open(path)?;
+    let reader = ManagedReader::open(path)?;
+    let mut file = reader.cursor();
     file.seek(SeekFrom::Start(start))?;
     let mut data = Vec::with_capacity((file_size - start) as usize);
     file.read_to_end(&mut data)?;
@@ -323,7 +325,7 @@ fn inspect_gzip(py: Python<'_>, path: &str, header: &[u8], file_size: u64) -> Py
     if file_size > FULL_STREAM_STRUCTURE_MAX_BYTES {
         return inspect_gzip_bounded(py, path, header, file_size);
     }
-    let data = match std::fs::read(path) {
+    let data = match ManagedReader::open(path).and_then(|reader| reader.read_all()) {
         Ok(data) => data,
         Err(_) => {
             return compression_empty(
@@ -626,7 +628,7 @@ fn inspect_bzip2(
     if file_size > FULL_STREAM_STRUCTURE_MAX_BYTES {
         return inspect_bzip2_bounded(py, path, header, file_size);
     }
-    let data = match std::fs::read(path) {
+    let data = match ManagedReader::open(path).and_then(|reader| reader.read_all()) {
         Ok(data) => data,
         Err(_) => {
             return compression_empty(py, "os_error", "bzip2", ".bz2", header.starts_with(b"BZh"))
@@ -893,7 +895,7 @@ fn inspect_xz(py: Python<'_>, path: &str, header: &[u8], file_size: u64) -> PyRe
     if file_size > FULL_STREAM_STRUCTURE_MAX_BYTES {
         return inspect_xz_bounded(py, path, header, file_size);
     }
-    let data = match std::fs::read(path) {
+    let data = match ManagedReader::open(path).and_then(|reader| reader.read_all()) {
         Ok(data) => data,
         Err(_) => {
             return compression_empty(py, "os_error", "xz", ".xz", header.starts_with(XZ_MAGIC))
@@ -1201,7 +1203,7 @@ fn inspect_zstd(py: Python<'_>, path: &str, header: &[u8], file_size: u64) -> Py
     if file_size > FULL_STREAM_STRUCTURE_MAX_BYTES {
         return inspect_zstd_bounded(py, path, header, file_size);
     }
-    let data = match std::fs::read(path) {
+    let data = match ManagedReader::open(path).and_then(|reader| reader.read_all()) {
         Ok(data) => data,
         Err(_) => {
             return compression_empty(
