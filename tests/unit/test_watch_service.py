@@ -178,6 +178,143 @@ def test_request_stop_wakes_service_blocked_without_scheduler(tmp_path, monkeypa
     assert results == [0]
 
 
+def test_watch_service_config_observer_targets_program_files(tmp_path, monkeypatch):
+    roots_path = tmp_path / "sunpack_watch_roots.txt"
+    state_dir = tmp_path / ".sunpack_watch"
+    captured = {}
+
+    class FakeConfigObserver:
+        def __init__(self, directory, filenames, callback, *, debounce_seconds):
+            captured.update(
+                directory=directory,
+                filenames=set(filenames),
+                callback=callback,
+                debounce_seconds=debounce_seconds,
+            )
+
+        def start(self):
+            captured["started"] = True
+
+        def stop(self):
+            captured["stopped"] = True
+
+    monkeypatch.setattr(service_module, "watch_roots_path", lambda: roots_path)
+    monkeypatch.setattr(service_module, "ConfigFileObserver", FakeConfigObserver)
+    monkeypatch.setattr(
+        service_module,
+        "load_config",
+        lambda: {"watch": {"state_dir": str(state_dir), "tray_enabled": False}},
+    )
+    service = WatchService(engine_factory=lambda _config: FakePipelineEngine(FakeRunner))
+    wakeups = []
+    service.control_events.wake_reload = lambda: wakeups.append("reload")
+
+    service._start_config_observer()
+    captured["callback"]()
+    service._stop_config_observer()
+
+    assert captured["directory"] == tmp_path.resolve()
+    assert captured["filenames"] == {
+        "sunpack_config.json",
+        "sunpack_advanced_config.json",
+        "sunpack_watch_roots.txt",
+    }
+    assert captured["debounce_seconds"] == 0.5
+    assert captured["started"] is True
+    assert captured["stopped"] is True
+    assert wakeups == ["reload"]
+
+
+def test_watch_service_invalid_config_reload_preserves_running_service(tmp_path, monkeypatch):
+    state_dir = tmp_path / ".sunpack_watch"
+    initial_config = {"watch": {"state_dir": str(state_dir), "tray_enabled": False}}
+    monkeypatch.setattr(service_module, "load_config", lambda: initial_config)
+    service = WatchService(engine_factory=lambda _config: FakePipelineEngine(FakeRunner))
+    original_config = service.config
+    original_service_config = service.service_config
+    original_log = service.log
+    scheduler_restarts = []
+    written = []
+    service.log.write = lambda event, **payload: written.append((event, payload))
+    monkeypatch.setattr(service_module, "load_config", lambda: (_ for _ in ()).throw(ValueError("invalid json")))
+    monkeypatch.setattr(service, "_start_scheduler", lambda: scheduler_restarts.append(True))
+
+    service._reload_config()
+
+    assert service.config is original_config
+    assert service.service_config is original_service_config
+    assert service.log is original_log
+    assert scheduler_restarts == []
+    assert written == [
+        (
+            "config_reload_failed",
+            {"error": "invalid json", "error_type": "ValueError", "phase": "load"},
+        )
+    ]
+
+
+def test_watch_service_reload_applies_new_roots_and_restarts_runtime(tmp_path, monkeypatch):
+    roots_path = tmp_path / "sunpack_watch_roots.txt"
+    first_root = tmp_path / "first"
+    second_root = tmp_path / "second"
+    first_root.mkdir()
+    second_root.mkdir()
+    roots_path.write_text(str(first_root), encoding="utf-8")
+    state_dir = tmp_path / ".sunpack_watch"
+    configs = iter(
+        [
+            {"watch": {"state_dir": str(state_dir), "tray_enabled": False}, "revision": 1},
+            {"watch": {"state_dir": str(state_dir), "tray_enabled": False}, "revision": 2},
+        ]
+    )
+    monkeypatch.setattr(service_module, "watch_roots_path", lambda: roots_path)
+    monkeypatch.setattr(service_module, "load_config", lambda: next(configs))
+    service = WatchService(engine_factory=lambda _config: FakePipelineEngine(FakeRunner))
+    starts = []
+    tray_events = []
+    monkeypatch.setattr(service, "_start_scheduler", lambda: starts.append((service.config["revision"], service.roots)))
+    monkeypatch.setattr(service, "_stop_tray", lambda: tray_events.append("stop"))
+    monkeypatch.setattr(service, "_start_tray", lambda: tray_events.append("start"))
+    roots_path.write_text(str(second_root), encoding="utf-8")
+
+    service._reload_config()
+
+    assert service.config["revision"] == 2
+    assert service.roots == [str(second_root.resolve())]
+    assert starts == [(2, [str(second_root.resolve())])]
+    assert tray_events == ["stop", "start"]
+
+
+def test_watch_service_apply_failure_rolls_back_previous_config(tmp_path, monkeypatch):
+    roots_path = tmp_path / "sunpack_watch_roots.txt"
+    watch_root = tmp_path / "watched"
+    watch_root.mkdir()
+    roots_path.write_text(str(watch_root), encoding="utf-8")
+    state_dir = tmp_path / ".sunpack_watch"
+    configs = iter(
+        [
+            {"watch": {"state_dir": str(state_dir), "tray_enabled": False}, "revision": 1},
+            {"watch": {"state_dir": str(state_dir), "tray_enabled": False}, "revision": 2},
+        ]
+    )
+    monkeypatch.setattr(service_module, "watch_roots_path", lambda: roots_path)
+    monkeypatch.setattr(service_module, "load_config", lambda: next(configs))
+    service = WatchService(engine_factory=lambda _config: FakePipelineEngine(FakeRunner))
+    starts = []
+
+    def start_scheduler():
+        starts.append(service.config["revision"])
+        if service.config["revision"] == 2:
+            raise RuntimeError("new runtime failed")
+
+    monkeypatch.setattr(service, "_start_scheduler", start_scheduler)
+
+    service._reload_config()
+
+    assert service.config["revision"] == 1
+    assert starts == [2, 1]
+
+
 def test_watch_running_reflects_named_mutex_owner(tmp_path, monkeypatch):
     state_dir = tmp_path / ".sunpack_watch"
     roots_path = tmp_path / "sunpack_watch_roots.txt"

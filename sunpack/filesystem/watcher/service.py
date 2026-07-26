@@ -4,12 +4,13 @@ import ctypes
 import hashlib
 import os
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from ctypes import wintypes
 from pathlib import Path
 
 from sunpack.config.fields.watch import DEFAULT_WATCH_CONFIG
-from sunpack.config.loader import load_config
+from sunpack.config.loader import ADVANCED_CONFIG_FILENAME, SIMPLE_CONFIG_FILENAME, load_config
+from sunpack.filesystem.watcher.config_observer import ConfigFileObserver
 from sunpack.filesystem.watcher.log import WatchLogStore
 from sunpack.filesystem.watcher.scheduler import WatchScheduler
 from sunpack.support.resources import get_resource_path
@@ -23,6 +24,7 @@ SERVICE_MUTEX_PREFIX = "Local\\SunPackWatchService"
 CONTROL_STOP = "stop"
 CONTROL_RELOAD = "reload"
 CONTROL_SCHEDULER_WAKEUP = "scheduler_wakeup"
+CONFIG_RELOAD_DEBOUNCE_SECONDS = 0.5
 
 MUTEX_ALL_ACCESS = 0x001F0001
 WAIT_ABANDONED = 0x00000080
@@ -205,6 +207,7 @@ class WatchService:
         self.control_events = WatchControlEvents(self.config)
         self.scheduler: WatchScheduler | None = None
         self.pipeline_engine = None
+        self.config_observer: ConfigFileObserver | None = None
         self.tray = None
         self._stop_requested = False
         self._lock_handle = None
@@ -230,6 +233,7 @@ class WatchService:
                     return 0
                 self.scheduler.run_once()
                 return 0
+            self._start_config_observer()
             next_scheduler_run: float | None = 0.0
             active_scheduler = None
             while not self._stop_requested:
@@ -270,6 +274,7 @@ class WatchService:
             self.log.write("service_error", error=str(exc), error_type=type(exc).__name__)
             raise
         finally:
+            self._stop_config_observer()
             self._stop_tray()
             self._stop_scheduler()
             self.control_events.close()
@@ -299,26 +304,37 @@ class WatchService:
         watch_config = dict(run_config.get("watch") if isinstance(run_config.get("watch"), dict) else {})
         watch_config["clipboard_monitor_enabled"] = bool(self.service_config.get("clipboard_monitor_enabled", True))
         run_config["watch"] = watch_config
-        self.pipeline_engine = self.engine_factory(run_config)
-        self.pipeline_engine.start()
-        self.scheduler = WatchScheduler(
-            run_config,
-            roots,
-            out_dir=out_dir,
-            state_path=state_path,
-            quiet_seconds=float(
-                watch_config.get(
-                    "cold_start_seconds",
-                    watch_config.get("quiet_seconds", DEFAULT_WATCH_CONFIG["cold_start_seconds"]),
-                )
-            ),
-            initial_scan=bool(watch_config.get("initial_scan", True)),
-            observer_stop_timeout_seconds=float(watch_config.get("observer_stop_timeout_seconds", 5.0)),
-            pipeline_engine=self.pipeline_engine,
-            group_coordinator=(self.group_coordinator_factory(run_config) if self.group_coordinator_factory else None),
-            wake_callback=self._wake_scheduler,
-        )
-        self.scheduler.start()
+        pipeline_engine = self.engine_factory(run_config)
+        scheduler = None
+        try:
+            pipeline_engine.start()
+            scheduler = WatchScheduler(
+                run_config,
+                roots,
+                out_dir=out_dir,
+                state_path=state_path,
+                quiet_seconds=float(
+                    watch_config.get(
+                        "cold_start_seconds",
+                        watch_config.get("quiet_seconds", DEFAULT_WATCH_CONFIG["cold_start_seconds"]),
+                    )
+                ),
+                initial_scan=bool(watch_config.get("initial_scan", True)),
+                observer_stop_timeout_seconds=float(watch_config.get("observer_stop_timeout_seconds", 5.0)),
+                pipeline_engine=pipeline_engine,
+                group_coordinator=(self.group_coordinator_factory(run_config) if self.group_coordinator_factory else None),
+                wake_callback=self._wake_scheduler,
+            )
+            scheduler.start()
+        except Exception:
+            if scheduler is not None:
+                with suppress(Exception):
+                    scheduler.stop()
+            with suppress(Exception):
+                pipeline_engine.close(graceful=True)
+            raise
+        self.pipeline_engine = pipeline_engine
+        self.scheduler = scheduler
         self.log.write("scheduler_attached", roots=roots, out_dir=out_dir, state_path=state_path)
 
     def _stop_scheduler(self) -> None:
@@ -383,16 +399,74 @@ class WatchService:
     def _wake_scheduler(self) -> None:
         self.control_events.wake_scheduler()
 
+    def _start_config_observer(self) -> None:
+        if self.config_observer is not None:
+            return
+        directory = watch_roots_path().resolve().parent
+        filenames = (SIMPLE_CONFIG_FILENAME, ADVANCED_CONFIG_FILENAME, WATCH_ROOTS_FILENAME)
+        observer = ConfigFileObserver(
+            directory,
+            filenames,
+            self._wake_config_reload,
+            debounce_seconds=CONFIG_RELOAD_DEBOUNCE_SECONDS,
+        )
+        observer.start()
+        self.config_observer = observer
+        self.log.write(
+            "config_observer_started",
+            directory=str(directory),
+            filenames=sorted(name.casefold() for name in filenames),
+        )
+
+    def _stop_config_observer(self) -> None:
+        if self.config_observer is None:
+            return
+        try:
+            self.config_observer.stop()
+        except Exception as exc:
+            self.log.write("config_observer_stop_error", error=str(exc), error_type=type(exc).__name__)
+        self.config_observer = None
+
+    def _wake_config_reload(self) -> None:
+        try:
+            self.control_events.wake_reload()
+        except Exception as exc:
+            self.log.write("config_reload_wakeup_error", error=str(exc), error_type=type(exc).__name__)
+
     def _reload_config(self) -> None:
-        self.config = load_config()
-        self.service_config = service_config_from(self.config)
-        self.state_dir = service_state_dir(self.config)
-        self.control_events.close()
-        self.control_events = WatchControlEvents(self.config)
-        self.control_events.start()
-        self.log = WatchLogStore(os.path.join(self.state_dir, "events.jsonl"))
+        previous = (self.config, self.service_config, self.state_dir, self.log)
+        try:
+            new_config = load_config()
+            new_service_config = service_config_from(new_config)
+            new_state_dir = service_state_dir(new_config)
+            Path(new_state_dir).mkdir(parents=True, exist_ok=True)
+        except Exception as exc:
+            self.log.write("config_reload_failed", error=str(exc), error_type=type(exc).__name__, phase="load")
+            return
+
+        self.config = new_config
+        self.service_config = new_service_config
+        self.state_dir = new_state_dir
+        self.log = WatchLogStore(os.path.join(new_state_dir, "events.jsonl"))
+        try:
+            self._start_scheduler()
+        except Exception as exc:
+            failed_log = self.log
+            self.config, self.service_config, self.state_dir, self.log = previous
+            failed_log.write("config_reload_failed", error=str(exc), error_type=type(exc).__name__, phase="apply")
+            try:
+                self._start_scheduler()
+            except Exception as rollback_exc:
+                self.log.write(
+                    "config_reload_rollback_failed",
+                    error=str(rollback_exc),
+                    error_type=type(rollback_exc).__name__,
+                )
+            return
+
+        self._stop_tray()
+        self._start_tray()
         self.log.write("service_reloaded", state_dir=self.state_dir, roots=self.roots)
-        self._start_scheduler()
 
     def _acquire_lock(self) -> bool:
         kernel32 = _kernel32()
@@ -435,6 +509,9 @@ class WatchControlEvents:
 
     def wake_scheduler(self) -> bool:
         return _set_named_event(self.names[CONTROL_SCHEDULER_WAKEUP])
+
+    def wake_reload(self) -> bool:
+        return _set_named_event(self.names[CONTROL_RELOAD])
 
     def wake_stop(self) -> bool:
         return _set_named_event(self.names[CONTROL_STOP])
