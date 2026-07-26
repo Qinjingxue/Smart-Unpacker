@@ -234,9 +234,12 @@ def test_engine_queue_and_active_batch_feed_pipeline_pressure(tmp_path, monkeypa
 
 def test_engine_releases_request_scoped_password_contexts(tmp_path, monkeypatch):
     engine = PipelineEngine(_config(batch_window_seconds=0))
+    archive_session_clear_calls = []
+    monkeypatch.setattr(engine_module, "clear_archive_sessions", lambda: archive_session_clear_calls.append(True))
 
     def complete_batch(submissions, **_kwargs):
         engine.batch_runner.directory_password_contexts._contexts[str(tmp_path)] = ["secret"]
+        engine._runtime.analysis_stage._report_cache[("source", "archive")] = object()
         for submission in submissions:
             submission.future.set_result(None)
 
@@ -246,4 +249,6 @@ def test_engine_releases_request_scoped_password_contexts(tmp_path, monkeypatch)
 
     assert engine.batch_runner.directory_password_contexts._contexts == {}
     assert engine.batch_runner.progress_reporter is None
+    assert engine._runtime.analysis_stage._report_cache == {}
+    assert archive_session_clear_calls == [True]
     engine.close()

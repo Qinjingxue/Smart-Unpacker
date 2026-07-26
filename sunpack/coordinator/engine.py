@@ -35,6 +35,7 @@ from sunpack.postprocess.actions import PostProcessActions
 from sunpack.rename.scheduler import RenameScheduler
 from sunpack.support.output_paths import default_output_dir_for_task
 from sunpack.support.path_keys import path_key
+from sunpack.support.archive_sessions import clear_archive_sessions
 
 
 @dataclass
@@ -513,6 +514,8 @@ class _PipelineRuntime:
         self.batch_runner.directory_password_contexts.clear()
         self.extractor.ensure_space = lambda _required_gb: True
         self.extractor.set_progress_callback(None)
+        self.analysis_stage.clear_report_cache()
+        clear_archive_sessions()
 
     def _new_reporter(self) -> RunReporter:
         return RunReporter(language=self.language, quiet=self.quiet, verbose=self.verbose)

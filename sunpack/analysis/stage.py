@@ -121,6 +121,11 @@ class ArchiveAnalysisStage:
         """Seed the shared cache with a coordinator-produced analysis report."""
         self._remember_report(self._analysis_cache_key(task), report)
 
+    def clear_report_cache(self) -> None:
+        """Release archive-specific reports after a completed request group."""
+        with self._report_cache_lock:
+            self._report_cache.clear()
+
     def _analysis_cache_key(self, task: ArchiveTask) -> tuple:
         return ("source", json.dumps(knowledge_view.source_fingerprint(task), ensure_ascii=False, sort_keys=True, default=str))
 
