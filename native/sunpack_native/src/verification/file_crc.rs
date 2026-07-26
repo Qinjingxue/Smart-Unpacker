@@ -1,8 +1,8 @@
+use crate::io::reader::ManagedReader;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyList};
 use std::collections::HashMap;
-use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use unicode_normalization::UnicodeNormalization;
@@ -809,8 +809,8 @@ struct ReadSample {
 }
 
 fn read_sample(path: &Path, read_bytes: usize) -> std::io::Result<ReadSample> {
-    let mut file = File::open(path)?;
-    let size = file.metadata()?.len();
+    let reader = ManagedReader::open(path)?;
+    let size = reader.len();
     if size == 0 {
         return Ok(ReadSample {
             size,
@@ -818,12 +818,11 @@ fn read_sample(path: &Path, read_bytes: usize) -> std::io::Result<ReadSample> {
         });
     }
     let mut buffer = vec![0u8; read_bytes];
-    let head_read = file.read(&mut buffer)? as u64;
+    let head_read = reader.read_into_at(0, &mut buffer)? as u64;
     let mut tail_read = 0u64;
     if size > read_bytes as u64 {
         let tail_offset = size.saturating_sub(read_bytes as u64);
-        file.seek(SeekFrom::Start(tail_offset))?;
-        tail_read = file.read(&mut buffer)? as u64;
+        tail_read = reader.read_into_at(tail_offset, &mut buffer)? as u64;
     }
     Ok(ReadSample {
         size,
@@ -839,11 +838,12 @@ fn relative_path(path: &Path, root: &Path) -> String {
 }
 
 fn crc32_file(path: &Path) -> std::io::Result<u32> {
-    let mut file = File::open(path)?;
+    let reader = ManagedReader::open(path)?;
+    let mut cursor = reader.stream_cursor();
     let mut crc = 0xFFFF_FFFFu32;
     let mut buffer = vec![0u8; BUFFER_SIZE];
     loop {
-        let read = file.read(&mut buffer)?;
+        let read = cursor.read(&mut buffer)?;
         if read == 0 {
             break;
         }

@@ -1,11 +1,10 @@
 from typing import Any
 
-from sunpack_native import scan_embedded_archives as _NATIVE_SCAN_EMBEDDED_ARCHIVES
-
 from sunpack.detection.pipeline.processors.context import FactProcessorContext
 from sunpack.detection.pipeline.processors.identity import file_identity_for_context
 from sunpack.detection.pipeline.processors.registry import register_processor
 from sunpack.support.global_cache_manager import cached_value, file_identity
+from sunpack.support.archive_sessions import get_archive_session
 
 
 def _empty_result(*, complete: bool = False) -> dict[str, Any]:
@@ -31,7 +30,9 @@ def analyze_embedded_archive(
     return cached_value(
         "embedded_archive_analysis",
         cache_key,
-        lambda: _normalize_native_result(_NATIVE_SCAN_EMBEDDED_ARCHIVES(path), file_size),
+        lambda: _normalize_native_result(
+            get_archive_session(path).scan_embedded_archives(), file_size
+        ),
     )
 
 

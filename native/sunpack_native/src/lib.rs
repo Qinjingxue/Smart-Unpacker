@@ -57,8 +57,14 @@ fn scanner_version() -> &'static str {
 fn sunpack_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(native_available, m)?)?;
     m.add_function(wrap_pyfunction!(scanner_version, m)?)?;
+    m.add_function(wrap_pyfunction!(io::reader::reader_cache_stats, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        io::reader::release_reader_handles_under,
+        m
+    )?)?;
     m.add_class::<analysis_native::AnalysisBinaryView>()?;
     m.add_class::<analysis_native::AnalysisMultiVolumeView>()?;
+    m.add_class::<io::reader::NativeArchiveSession>()?;
     m.add_class::<scan::directory::NativeDirectorySnapshot>()?;
     m.add_class::<scan::directory::NativeOutputInventory>()?;
     m.add_class::<scan::directory::NativeWorkerManifest>()?;

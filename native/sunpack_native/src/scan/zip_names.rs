@@ -1,9 +1,7 @@
-use crate::io::util::read_range;
+use crate::io::reader::ManagedReader;
 use crate::scan::magic::rfind_subslice;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList};
-use std::fs::File;
-use std::io::{Seek, SeekFrom};
 
 const ZIP_EOCD_SIGNATURE: &[u8] = b"PK\x05\x06";
 const ZIP_CENTRAL_DIRECTORY_SIGNATURE: &[u8] = b"PK\x01\x02";
@@ -73,14 +71,14 @@ fn scan_zip_names(
     max_samples: usize,
     max_filename_bytes: usize,
 ) -> PyResult<ZipNameScan> {
-    let mut file = File::open(path)?;
-    let file_size = file.seek(SeekFrom::End(0))?;
+    let reader = ManagedReader::open(path)?;
+    let file_size = reader.len();
     if file_size < ZIP_EOCD_LENGTH as u64 {
         return Ok(ZipNameScan::status("file_too_small"));
     }
 
     let search_size = file_size.min(MAX_ZIP_COMMENT_BYTES + ZIP_EOCD_LENGTH as u64);
-    let tail = read_range(path, file_size - search_size, search_size)?;
+    let tail = reader.read_cached_at(file_size - search_size, search_size as usize)?;
     let Some(eocd_index) = rfind_subslice(&tail, ZIP_EOCD_SIGNATURE) else {
         return Ok(ZipNameScan::status("eocd_not_found"));
     };
@@ -107,7 +105,10 @@ fn scan_zip_names(
 
     let read_size = central_size_u64
         .min(max_filename_bytes as u64 + (ZIP_CENTRAL_HEADER_LENGTH as u64 * max_samples as u64));
-    let central = read_range(path, central_offset_u64, read_size)?;
+    let read_size = usize::try_from(read_size).map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, "read range too large")
+    })?;
+    let central = reader.read_cached_at(central_offset_u64, read_size)?;
     Ok(collect_zip_names(
         &central,
         total_entries,
@@ -273,7 +274,10 @@ mod tests {
         extra.extend_from_slice(&crc32fast::hash(&raw_name).to_le_bytes());
         extra.extend_from_slice(unicode_name);
 
-        assert_eq!(valid_unicode_path_name(&raw_name, &extra), Some(unicode_name.to_vec()));
+        assert_eq!(
+            valid_unicode_path_name(&raw_name, &extra),
+            Some(unicode_name.to_vec())
+        );
         extra[5] ^= 1;
         assert_eq!(valid_unicode_path_name(&raw_name, &extra), None);
     }

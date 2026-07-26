@@ -1,3 +1,4 @@
+use crate::io::reader::ManagedReader;
 use crate::password::input::{parse_ranges, read_prefix_from_ranges};
 use aes::cipher::{block_padding::NoPadding, BlockModeDecrypt, KeyIvInit};
 use aes::Aes128;
@@ -8,8 +9,6 @@ use pyo3::types::{PyDict, PyList};
 use rayon::prelude::*;
 use sha1::{Digest, Sha1};
 use sha2::Sha256;
-use std::fs::File;
-use std::io::Read;
 
 const RAR4_SIGNATURE: &[u8] = b"Rar!\x1a\x07\x00";
 const RAR5_SIGNATURE: &[u8] = b"Rar!\x1a\x07\x01\x00";
@@ -28,16 +27,20 @@ pub(crate) fn rar_fast_verify_passwords(
     archive_path: String,
     passwords: &Bound<'_, PyList>,
 ) -> PyResult<Py<PyAny>> {
+    let reader = ManagedReader::open(&archive_path)?;
+    rar_fast_verify_passwords_with_reader(py, &reader, passwords)
+}
+
+pub(crate) fn rar_fast_verify_passwords_with_reader(
+    py: Python<'_>,
+    reader: &ManagedReader,
+    passwords: &Bound<'_, PyList>,
+) -> PyResult<Py<PyAny>> {
     let candidates = passwords
         .iter()
         .map(|item| item.extract::<String>())
         .collect::<PyResult<Vec<_>>>()?;
-    let mut data = vec![0u8; MAX_RAR_PREFIX_SCAN];
-    let len = py.detach(|| -> std::io::Result<usize> {
-        let mut file = File::open(&archive_path)?;
-        file.read(&mut data)
-    })?;
-    data.truncate(len);
+    let data = py.detach(|| reader.read_at(0, MAX_RAR_PREFIX_SCAN))?;
 
     if data.starts_with(RAR5_SIGNATURE) {
         return verify_rar5(py, &data, &candidates);

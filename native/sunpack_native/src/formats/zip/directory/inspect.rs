@@ -4,7 +4,8 @@ pub(crate) fn inspect_zip_directory_consistency(
     max_entries: usize,
 ) -> PyResult<Py<PyDict>> {
     let result = zip_directory_consistency_empty(py)?;
-    let Ok(data) = fs::read(path) else {
+    let Ok(data) = crate::io::reader::ManagedReader::open(path)
+        .and_then(|reader| reader.read_all()) else {
         result.set_item("error", "os_error")?;
         return Ok(result.unbind());
     };
@@ -539,7 +540,8 @@ pub(crate) fn inspect_zip_structure_graph(
     result.set_item("explanations", &explanations)?;
     result.set_item("summary", &summary)?;
 
-    let Ok(data) = fs::read(path) else {
+    let Ok(data) = crate::io::reader::ManagedReader::open(path)
+        .and_then(|reader| reader.read_all()) else {
         result.set_item("error", "os_error")?;
         summary.set_item("archive_readable", false)?;
         return Ok(result.unbind());

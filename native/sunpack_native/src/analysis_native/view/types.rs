@@ -1,7 +1,7 @@
 #[pyclass]
 pub(crate) struct AnalysisBinaryView {
-    path: String,
-    reader: ManagedReader,
+    pub(crate) path: String,
+    pub(crate) reader: ManagedReader,
 }
 
 #[pyclass]

@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from sunpack.passwords.verifier.base import PasswordBatchVerification, normalize_verifier_status
 from sunpack.passwords.verifier.input import verifier_input
-from sunpack_native import seven_zip_fast_verify_passwords, seven_zip_fast_verify_passwords_from_ranges
+from sunpack.support.archive_sessions import get_archive_session, retain_archive_sessions
+from sunpack_native import seven_zip_fast_verify_passwords_from_ranges
 
 
 class SevenZipFastVerifier:
@@ -32,10 +33,13 @@ class SevenZipFastVerifier:
             archive_input=archive_input,
         )
         normalized_passwords = list(passwords or [""])
+        retain_archive_sessions(
+            [item.get("path") for item in ranges] if ranges else [verifier_path]
+        )
         outcome = (
             seven_zip_fast_verify_passwords_from_ranges(ranges, normalized_passwords)
             if ranges
-            else seven_zip_fast_verify_passwords(verifier_path, normalized_passwords)
+            else get_archive_session(verifier_path).seven_zip_fast_verify_passwords(normalized_passwords)
         )
         status = normalize_verifier_status(outcome.get("status"))
         matched_index = int(outcome.get("matched_index", -1))

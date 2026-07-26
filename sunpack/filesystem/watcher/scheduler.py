@@ -45,6 +45,7 @@ from sunpack.passwords.internal.local_files import DIRECTORY_PASSWORD_FILE_NAME,
 from sunpack.platform.windows.shell_notify import notify_shell_directories_updated
 from sunpack.support.output_paths import default_output_dir_for_task
 from sunpack.support.collections import dedupe_normalized_paths
+from sunpack.support.archive_sessions import release_archive_sessions_under
 
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
@@ -1031,6 +1032,7 @@ class WatchScheduler:
                 target = os.path.join(os.path.dirname(predicted_final_dirs[0]), os.path.basename(source))
             target = _next_nonexisting_path(target)
             os.makedirs(os.path.dirname(target), exist_ok=True)
+            release_archive_sessions_under(source)
             try:
                 self._retry_probe_promotion_on_access_denied(
                     lambda: os.replace(source, target),

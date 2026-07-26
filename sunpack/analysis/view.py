@@ -6,6 +6,7 @@ from collections import Counter
 
 from sunpack_native import AnalysisBinaryView as _NativeAnalysisBinaryView
 from sunpack_native import AnalysisMultiVolumeView as _NativeAnalysisMultiVolumeView
+from sunpack.support.archive_sessions import get_archive_session
 from sunpack.contracts.archive_state import ArchiveState
 from sunpack.support.archive_state_view import ArchiveStateByteView
 
@@ -31,8 +32,8 @@ class SharedBinaryView:
         self.size = os.path.getsize(path)
         self.cache_bytes = max(0, int(cache_bytes or 0))
         self.max_read_bytes = max_read_bytes if max_read_bytes is None else max(0, int(max_read_bytes))
-        self._native = _NativeAnalysisBinaryView(
-            path,
+        self._session = get_archive_session(path)
+        self._native = self._session.analysis_view(
             cache_bytes=self.cache_bytes,
             max_read_bytes=self.max_read_bytes,
             max_concurrent_reads=max_concurrent_reads,

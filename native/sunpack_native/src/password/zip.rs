@@ -1,9 +1,9 @@
+use crate::io::reader::ManagedReader;
 use crate::password::input::{parse_ranges, ranges_total_len, VirtualRangeReader};
 use pbkdf2::pbkdf2_hmac;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use sha1::Sha1;
-use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 
 const ZIP_LOCAL: &[u8] = b"PK\x03\x04";
@@ -15,14 +15,22 @@ pub(crate) fn zip_fast_verify_passwords(
     archive_path: String,
     passwords: &Bound<'_, PyList>,
 ) -> PyResult<Py<PyAny>> {
+    let reader = ManagedReader::open(&archive_path)?;
+    zip_fast_verify_passwords_with_reader(py, &reader, passwords)
+}
+
+pub(crate) fn zip_fast_verify_passwords_with_reader(
+    py: Python<'_>,
+    reader: &ManagedReader,
+    passwords: &Bound<'_, PyList>,
+) -> PyResult<Py<PyAny>> {
     let candidates = passwords
         .iter()
         .map(|item| item.extract::<String>())
         .collect::<PyResult<Vec<_>>>()?;
 
-    let mut file = File::open(&archive_path)?;
-    let metadata = file.metadata()?;
-    verify_zip_stream(py, &mut file, metadata.len(), &candidates)
+    let total_len = reader.len();
+    verify_zip_stream(py, &mut reader.cursor(), total_len, &candidates)
 }
 
 #[pyfunction]
@@ -37,7 +45,7 @@ pub(crate) fn zip_fast_verify_passwords_from_ranges(
         .collect::<PyResult<Vec<_>>>()?;
     let parsed = parse_ranges(ranges)?;
     let total_len = ranges_total_len(&parsed);
-    let mut reader = VirtualRangeReader::new(parsed);
+    let mut reader = VirtualRangeReader::new(parsed.into());
     verify_zip_stream(py, &mut reader, total_len, &candidates)
 }
 

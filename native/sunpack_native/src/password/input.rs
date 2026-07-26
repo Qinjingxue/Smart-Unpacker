@@ -1,11 +1,12 @@
+use crate::io::reader::ManagedReader;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
-use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
+use std::sync::Arc;
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(crate) struct RangeSpec {
-    path: String,
+    reader: ManagedReader,
     start: u64,
     len: u64,
     virtual_start: u64,
@@ -31,7 +32,8 @@ pub(crate) fn parse_ranges(ranges: &Bound<'_, PyList>) -> PyResult<Vec<RangeSpec
             .get_item("end")?
             .map(|value| value.extract::<u64>())
             .transpose()?;
-        let file_len = std::fs::metadata(&path)?.len();
+        let reader = ManagedReader::open(&path)?;
+        let file_len = reader.len();
         if start > file_len {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
                 "range start is beyond file length",
@@ -48,7 +50,7 @@ pub(crate) fn parse_ranges(ranges: &Bound<'_, PyList>) -> PyResult<Vec<RangeSpec
             continue;
         }
         parsed.push(RangeSpec {
-            path,
+            reader,
             start,
             len,
             virtual_start: cursor,
@@ -69,7 +71,7 @@ pub(crate) fn read_prefix_from_ranges(
     ranges: &[RangeSpec],
     max_len: usize,
 ) -> std::io::Result<Vec<u8>> {
-    let mut reader = VirtualRangeReader::new(ranges.to_vec());
+    let mut reader = VirtualRangeReader::new(Arc::from(ranges));
     let mut data = vec![0u8; max_len.min(ranges_total_len(ranges) as usize)];
     let len = reader.read(&mut data)?;
     data.truncate(len);
@@ -77,13 +79,13 @@ pub(crate) fn read_prefix_from_ranges(
 }
 
 pub(crate) struct VirtualRangeReader {
-    ranges: Vec<RangeSpec>,
+    ranges: Arc<[RangeSpec]>,
     position: u64,
     total_len: u64,
 }
 
 impl VirtualRangeReader {
-    pub(crate) fn new(ranges: Vec<RangeSpec>) -> Self {
+    pub(crate) fn new(ranges: Arc<[RangeSpec]>) -> Self {
         let total_len = ranges_total_len(&ranges);
         Self {
             ranges,
@@ -93,7 +95,10 @@ impl VirtualRangeReader {
     }
 
     fn current_range(&self) -> Option<&RangeSpec> {
-        self.ranges.iter().find(|range| {
+        let index = self
+            .ranges
+            .partition_point(|range| range.virtual_start + range.len <= self.position);
+        self.ranges.get(index).filter(|range| {
             self.position >= range.virtual_start && self.position < range.virtual_start + range.len
         })
     }
@@ -106,15 +111,15 @@ impl Read for VirtualRangeReader {
         }
         let mut total_read = 0usize;
         while !buf.is_empty() && self.position < self.total_len {
-            let Some(range) = self.current_range().cloned() else {
+            let Some(range) = self.current_range() else {
                 break;
             };
             let local_offset = self.position - range.virtual_start;
             let available = (range.len - local_offset) as usize;
             let to_read = available.min(buf.len());
-            let mut file = File::open(&range.path)?;
-            file.seek(SeekFrom::Start(range.start + local_offset))?;
-            let read_now = file.read(&mut buf[..to_read])?;
+            let physical_offset = range.start + local_offset;
+            let reader = range.reader.clone();
+            let read_now = reader.read_into_at(physical_offset, &mut buf[..to_read])?;
             if read_now == 0 {
                 break;
             }
@@ -142,5 +147,42 @@ impl Seek for VirtualRangeReader {
         }
         self.position = (next as u64).min(self.total_len);
         Ok(self.position)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::temp_file;
+
+    #[test]
+    fn virtual_ranges_read_and_seek_across_files() {
+        let first = temp_file("password_range_first", b"012345");
+        let second = temp_file("password_range_second", b"abcdef");
+        let ranges: Arc<[RangeSpec]> = vec![
+            RangeSpec {
+                reader: ManagedReader::open(&first).unwrap(),
+                start: 2,
+                len: 3,
+                virtual_start: 0,
+            },
+            RangeSpec {
+                reader: ManagedReader::open(&second).unwrap(),
+                start: 1,
+                len: 4,
+                virtual_start: 3,
+            },
+        ]
+        .into();
+        let mut reader = VirtualRangeReader::new(ranges);
+        let mut all = [0u8; 7];
+        reader.read_exact(&mut all).unwrap();
+        assert_eq!(&all, b"234bcde");
+        reader.seek(SeekFrom::Start(2)).unwrap();
+        let mut middle = [0u8; 3];
+        reader.read_exact(&mut middle).unwrap();
+        assert_eq!(&middle, b"4bc");
+        let _ = std::fs::remove_file(first);
+        let _ = std::fs::remove_file(second);
     }
 }

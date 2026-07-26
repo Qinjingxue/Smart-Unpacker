@@ -1,10 +1,11 @@
+use crate::io::reader::ManagedReader;
 use crate::password::input::{parse_ranges, VirtualRangeReader};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use rayon::prelude::*;
 use sevenz_rust2::{Archive, Error as SevenZipError, Password};
-use std::fs::File;
 use std::io::{Read, Seek};
+use std::sync::Arc;
 
 const SEVEN_Z_SIGNATURE: &[u8] = b"7z\xbc\xaf\x27\x1c";
 const PARALLEL_PASSWORD_THRESHOLD: usize = 4;
@@ -15,25 +16,33 @@ pub(crate) fn seven_zip_fast_verify_passwords(
     archive_path: String,
     passwords: &Bound<'_, PyList>,
 ) -> PyResult<Py<PyAny>> {
+    let reader = match py.detach(|| ManagedReader::open(&archive_path)) {
+        Ok(reader) => reader,
+        Err(_) => return status(py, "damaged", -1, 0, "7z archive could not be opened"),
+    };
+    seven_zip_fast_verify_passwords_with_reader(py, &reader, passwords)
+}
+
+pub(crate) fn seven_zip_fast_verify_passwords_with_reader(
+    py: Python<'_>,
+    reader: &ManagedReader,
+    passwords: &Bound<'_, PyList>,
+) -> PyResult<Py<PyAny>> {
     let candidates = passwords
         .iter()
         .map(|item| item.extract::<String>())
         .collect::<PyResult<Vec<_>>>()?;
 
-    let mut signature_file = match py.detach(|| File::open(&archive_path)) {
-        Ok(file) => file,
-        Err(_) => return status(py, "damaged", -1, 0, "7z archive could not be opened"),
-    };
     let mut signature = [0u8; 6];
     if py
-        .detach(|| signature_file.read_exact(&mut signature))
+        .detach(|| reader.cursor().read_exact(&mut signature))
         .is_err()
         || signature != SEVEN_Z_SIGNATURE
     {
         return status(py, "unsupported_method", -1, 0, "7z signature not found");
     }
 
-    match py.detach(|| read_archive_header_from_path(&archive_path, "")) {
+    match py.detach(|| read_archive_header_from_reader(reader.cursor(), "")) {
         HeaderRead::Ok => {
             return status(
                 py,
@@ -54,7 +63,7 @@ pub(crate) fn seven_zip_fast_verify_passwords(
 
     if let Some((index, outcome)) = py.detach(|| {
         find_first_conclusive_header(&candidates, |password| {
-            read_archive_header_from_path(&archive_path, password)
+            read_archive_header_from_reader(reader.cursor(), password)
         })
     }) {
         return conclusive_status(py, index, outcome);
@@ -80,6 +89,7 @@ pub(crate) fn seven_zip_fast_verify_passwords_from_ranges(
         .map(|item| item.extract::<String>())
         .collect::<PyResult<Vec<_>>>()?;
     let parsed = parse_ranges(ranges)?;
+    let parsed: Arc<[_]> = parsed.into();
 
     let mut probe_reader = VirtualRangeReader::new(parsed.clone());
     let mut signature = [0u8; 6];
@@ -192,13 +202,6 @@ fn read_archive_header_from_reader<R: Read + Seek>(mut reader: R, password: &str
         Err(error) => HeaderRead::Unsupported(format!(
             "7z header-only verifier could not classify error: {error}"
         )),
-    }
-}
-
-fn read_archive_header_from_path(archive_path: &str, password: &str) -> HeaderRead {
-    match File::open(archive_path) {
-        Ok(file) => read_archive_header_from_reader(file, password),
-        Err(_) => HeaderRead::Damaged("7z archive could not be opened".to_string()),
     }
 }
 

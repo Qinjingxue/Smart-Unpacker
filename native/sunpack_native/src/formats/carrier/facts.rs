@@ -31,7 +31,7 @@ fn carrier_crop_residual_facts(format: &str) -> Vec<&'static str> {
 }
 
 fn candidate_crc32(path: &str) -> String {
-    match fs::read(path) {
+    match crate::io::reader::ManagedReader::open(path).and_then(|reader| reader.read_all()) {
         Ok(bytes) => format!("{:08x}", crc32(&bytes)),
         Err(_) => String::new(),
     }
@@ -53,4 +53,3 @@ fn find_all(data: &[u8], needle: &[u8]) -> Vec<usize> {
     }
     output
 }
-

@@ -129,9 +129,13 @@ impl AnalysisMultiVolumeView {
             let data = self.read_at_bytes(0, size as usize)?;
             collect_signature_hits(&mut hits, 0, &data);
         } else {
-            let head = self.read_at_bytes(0, head_len)?;
+            let mut ranges = self
+                .reader
+                .read_many(&[(0, head_len), (tail_start, tail_len)])
+                .map_err(reader_error_to_py)?;
+            let head = ranges.remove(0);
             collect_signature_hits(&mut hits, 0, &head);
-            let tail = self.read_at_bytes(tail_start, tail_len)?;
+            let tail = ranges.remove(0);
             collect_signature_hits(&mut hits, tail_start, &tail);
         }
         hits.sort_by_key(|(_, offset)| *offset);

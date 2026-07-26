@@ -76,7 +76,16 @@ struct NativeScanResult {
 #[pyfunction]
 pub(crate) fn scan_embedded_archives(py: Python<'_>, path: &str) -> PyResult<Py<PyDict>> {
     let owned_path = path.to_owned();
-    let scan = py.detach(move || scan_embedded_archives_native(&owned_path))?;
+    let reader = py.detach(move || ManagedReader::open(&owned_path))?;
+    scan_embedded_archives_with_reader(py, &reader)
+}
+
+pub(crate) fn scan_embedded_archives_with_reader(
+    py: Python<'_>,
+    reader: &ManagedReader,
+) -> PyResult<Py<PyDict>> {
+    let reader = reader.clone();
+    let scan = py.detach(move || scan_embedded_archives_native(reader))?;
 
     let result = PyDict::new(py);
     result.set_item("complete", true)?;
@@ -120,8 +129,7 @@ fn embedded_matcher() -> &'static AhoCorasick {
     })
 }
 
-fn scan_embedded_archives_native(path: &str) -> io::Result<NativeScanResult> {
-    let reader = ManagedReader::open(path)?;
+fn scan_embedded_archives_native(reader: ManagedReader) -> io::Result<NativeScanResult> {
     let file_size = reader.len();
     let mut scan_file = reader.stream_cursor();
     let mut raw_hits = scan_raw_hits(&mut scan_file)?;
