@@ -119,7 +119,7 @@ def _require_7z_or_skip():
     return seven_zip
 
 
-def _create_encrypted_header_7z(tmp_path, password: str):
+def _create_encrypted_header_7z(tmp_path, password: str, compression: str = "0"):
     seven_zip = _require_7z_or_skip()
     source_dir = tmp_path / "src"
     source_dir.mkdir()
@@ -131,7 +131,7 @@ def _create_encrypted_header_7z(tmp_path, password: str):
             "a",
             str(archive_path),
             str(source_dir / "payload.txt"),
-            "-mx=0",
+            f"-mx={compression}",
             "-mhe=on",
             f"-p{password}",
             "-y",
@@ -185,3 +185,48 @@ def test_seven_zip_fast_verifier_parallel_batch_preserves_first_match(tmp_path):
     assert rejected.ok is False
     assert rejected.status == "no_match"
     assert rejected.attempts == 40
+
+
+@pytest.mark.parametrize("compression", ["0", "5"])
+def test_seven_zip_fast_verifier_matches_unicode_password_across_header_coders(
+    tmp_path, compression
+):
+    password = "密碼-🔐-пароль"
+    archive = _create_encrypted_header_7z(tmp_path, password, compression)
+    candidates = [f"错误-{index}" for index in range(12)] + [password]
+
+    outcome = SevenZipFastVerifier().verify_batch(str(archive), candidates)
+
+    assert outcome.ok is True
+    assert outcome.status == "match"
+    assert outcome.matched_index == 12
+    assert outcome.attempts == 13
+
+
+def test_seven_zip_fast_verifier_uses_same_probe_for_embedded_range(tmp_path):
+    password = "range-secret"
+    archive = _create_encrypted_header_7z(tmp_path, password, "5")
+    prefix = b"carrier-prefix" * 37
+    carrier = tmp_path / "carrier.bin"
+    carrier.write_bytes(prefix + archive.read_bytes() + b"carrier-tail")
+    archive_input = {
+        "kind": "archive_input",
+        "entry_path": str(carrier),
+        "open_mode": "file_range",
+        "format_hint": "7z",
+        "parts": [
+            {
+                "path": str(carrier),
+                "start": len(prefix),
+                "end": len(prefix) + archive.stat().st_size,
+            }
+        ],
+    }
+
+    outcome = SevenZipFastVerifier().verify_batch(
+        str(carrier), ["wrong", password], archive_input=archive_input
+    )
+
+    assert outcome.ok is True
+    assert outcome.matched_index == 1
+    assert outcome.attempts == 2

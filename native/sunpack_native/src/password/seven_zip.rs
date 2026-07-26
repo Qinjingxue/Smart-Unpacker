@@ -1,3 +1,4 @@
+use crate::formats::seven_zip::SevenZipPasswordProbe;
 use crate::io::reader::ManagedReader;
 use crate::password::input::{parse_ranges, VirtualRangeReader};
 use pyo3::prelude::*;
@@ -5,10 +6,29 @@ use pyo3::types::{PyDict, PyList};
 use rayon::prelude::*;
 use sevenz_rust2::{Archive, Error as SevenZipError, Password};
 use std::io::{Read, Seek};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 const SEVEN_Z_SIGNATURE: &[u8] = b"7z\xbc\xaf\x27\x1c";
 const PARALLEL_PASSWORD_THRESHOLD: usize = 4;
+const MAX_PASSWORD_WORKERS: usize = 64;
+
+fn seven_zip_password_pool() -> Option<&'static rayon::ThreadPool> {
+    static POOL: OnceLock<Option<rayon::ThreadPool>> = OnceLock::new();
+    POOL.get_or_init(|| {
+        let available = std::thread::available_parallelism().ok()?.get();
+        let workers = std::env::var("SUNPACK_7Z_PASSWORD_WORKERS")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or_else(|| available.saturating_add(available / 4))
+            .clamp(1, MAX_PASSWORD_WORKERS);
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(workers)
+            .thread_name(|index| format!("sunpack-7z-password-{index}"))
+            .build()
+            .ok()
+    })
+    .as_ref()
+}
 
 #[pyfunction]
 pub(crate) fn seven_zip_fast_verify_passwords(
@@ -27,6 +47,24 @@ pub(crate) fn seven_zip_fast_verify_passwords_with_reader(
     py: Python<'_>,
     reader: &ManagedReader,
     passwords: &Bound<'_, PyList>,
+) -> PyResult<Py<PyAny>> {
+    seven_zip_fast_verify_passwords_impl(py, reader, passwords, None)
+}
+
+pub(crate) fn seven_zip_fast_verify_passwords_with_probe_cache(
+    py: Python<'_>,
+    reader: &ManagedReader,
+    passwords: &Bound<'_, PyList>,
+    probe_cache: &OnceLock<Option<Arc<SevenZipPasswordProbe>>>,
+) -> PyResult<Py<PyAny>> {
+    seven_zip_fast_verify_passwords_impl(py, reader, passwords, Some(probe_cache))
+}
+
+fn seven_zip_fast_verify_passwords_impl(
+    py: Python<'_>,
+    reader: &ManagedReader,
+    passwords: &Bound<'_, PyList>,
+    probe_cache: Option<&OnceLock<Option<Arc<SevenZipPasswordProbe>>>>,
 ) -> PyResult<Py<PyAny>> {
     let candidates = passwords
         .iter()
@@ -61,10 +99,28 @@ pub(crate) fn seven_zip_fast_verify_passwords_with_reader(
         }
     }
 
-    if let Some((index, outcome)) = py.detach(|| {
-        find_first_conclusive_header(&candidates, |password| {
+    let owned_probe;
+    let probe = if std::env::var_os("SUNPACK_DISABLE_7Z_PASSWORD_PROBE").is_some() {
+        None
+    } else if let Some(cache) = probe_cache {
+        cache
+            .get_or_init(|| {
+                py.detach(|| SevenZipPasswordProbe::from_reader(reader))
+                    .ok()
+                    .map(Arc::new)
+            })
+            .as_deref()
+    } else {
+        owned_probe = py
+            .detach(|| SevenZipPasswordProbe::from_reader(reader))
+            .ok();
+        owned_probe.as_ref()
+    };
+    if let Some((index, outcome)) = py.detach(|| match probe {
+        Some(probe) => find_first_conclusive_header_with_probe(&candidates, probe),
+        None => find_first_conclusive_header(&candidates, |password| {
             read_archive_header_from_reader(reader.cursor(), password)
-        })
+        }),
     }) {
         return conclusive_status(py, index, outcome);
     }
@@ -119,10 +175,13 @@ pub(crate) fn seven_zip_fast_verify_passwords_from_ranges(
         }
     }
 
-    if let Some((index, outcome)) = py.detach(|| {
-        find_first_conclusive_header(&candidates, |password| {
+    let probe =
+        SevenZipPasswordProbe::from_seekable(&mut VirtualRangeReader::new(parsed.clone())).ok();
+    if let Some((index, outcome)) = py.detach(|| match probe.as_ref() {
+        Some(probe) => find_first_conclusive_header_with_probe(&candidates, probe),
+        None => find_first_conclusive_header(&candidates, |password| {
             read_archive_header_from_reader(VirtualRangeReader::new(parsed.clone()), password)
-        })
+        }),
     }) {
         return conclusive_status(py, index, outcome);
     }
@@ -162,6 +221,66 @@ where
                 .then_some((index, outcome))
         })
     }
+}
+
+fn find_first_conclusive_header_with_probe(
+    candidates: &[String],
+    probe: &SevenZipPasswordProbe,
+) -> Option<(usize, HeaderRead)> {
+    let mut start = 0usize;
+    while start < candidates.len() {
+        let possible = if candidates.len() - start >= PARALLEL_PASSWORD_THRESHOLD {
+            let search = || {
+                candidates[start..]
+                    .par_iter()
+                    .enumerate()
+                    .filter_map(|(relative, password)| {
+                        probe
+                            .decoded_header_if_password_matches(password)
+                            .map(|decoded| (relative, decoded))
+                    })
+                    .find_first(|_| true)
+            };
+            match seven_zip_password_pool() {
+                Some(pool) => pool.install(search),
+                None => search(),
+            }
+        } else {
+            candidates[start..]
+                .iter()
+                .enumerate()
+                .find_map(|(relative, password)| {
+                    probe
+                        .decoded_header_if_password_matches(password)
+                        .map(|decoded| (relative, decoded))
+                })
+        }?;
+        let index = start + possible.0;
+        let outcome = read_predecoded_header_with_original_parser(&possible.1);
+        if !matches!(outcome, HeaderRead::WrongPasswordOrPasswordRequired) {
+            return Some((index, outcome));
+        }
+        // A custom decoder false positive must never hide a later real password.
+        start = index + 1;
+    }
+    None
+}
+
+fn read_predecoded_header_with_original_parser(decoded_header: &[u8]) -> HeaderRead {
+    let Ok(next_header_size) = u64::try_from(decoded_header.len()) else {
+        return HeaderRead::Unsupported("7z decoded header is too large".to_string());
+    };
+    let mut synthetic = Vec::with_capacity(32 + decoded_header.len());
+    synthetic.extend_from_slice(SEVEN_Z_SIGNATURE);
+    synthetic.extend_from_slice(&[0, 4]);
+    synthetic.extend_from_slice(&[0; 4]);
+    let mut start_header = [0u8; 20];
+    start_header[8..16].copy_from_slice(&next_header_size.to_le_bytes());
+    start_header[16..20].copy_from_slice(&crc32fast::hash(decoded_header).to_le_bytes());
+    synthetic[8..12].copy_from_slice(&crc32fast::hash(&start_header).to_le_bytes());
+    synthetic.extend_from_slice(&start_header);
+    synthetic.extend_from_slice(decoded_header);
+    read_archive_header_from_reader(std::io::Cursor::new(synthetic), "")
 }
 
 fn conclusive_status(py: Python<'_>, index: usize, outcome: HeaderRead) -> PyResult<Py<PyAny>> {
@@ -218,4 +337,21 @@ fn status(
     result.set_item("attempts", attempts)?;
     result.set_item("message", message)?;
     Ok(result.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn original_parser_confirms_predecoded_header() {
+        assert!(matches!(
+            read_predecoded_header_with_original_parser(&[0x01, 0x00]),
+            HeaderRead::Ok
+        ));
+        assert!(!matches!(
+            read_predecoded_header_with_original_parser(&[0x01, 0xff]),
+            HeaderRead::Ok
+        ));
+    }
 }

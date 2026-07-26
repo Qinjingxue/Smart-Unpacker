@@ -28,6 +28,7 @@ rayon = "1.10"
 sevenz-rust2 = { version = "0.21", default-features = false, features = ["aes256", "compress"] }
 sha1 = "0.10"
 sha2 = "0.10"
+sha2_11 = { package = "sha2", version = "0.11" }
 xz2 = "0.1"
 zstd = "0.13"
 unicode-normalization = "0.1"

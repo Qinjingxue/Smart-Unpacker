@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import statistics
 import subprocess
 import tempfile
@@ -24,6 +25,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--payload-mib", type=int, default=1)
     parser.add_argument("--wrong-passwords", type=int, default=100)
     parser.add_argument("--password", default=DEFAULT_PASSWORD)
+    parser.add_argument(
+        "--disable-seven-zip-probe",
+        action="store_true",
+        help="Run the legacy Archive::read-per-password path for A/B comparison.",
+    )
     return parser.parse_args()
 
 
@@ -86,6 +92,8 @@ def benchmark(
 
 def main() -> None:
     args = parse_args()
+    if args.disable_seven_zip_probe:
+        os.environ["SUNPACK_DISABLE_7Z_PASSWORD_PROBE"] = "1"
     if args.rounds < 1 or args.payload_mib < 1 or args.wrong_passwords < 0:
         raise SystemExit("rounds/payload-mib must be positive and wrong-passwords nonnegative")
     tools = get_test_tools()
@@ -154,4 +162,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

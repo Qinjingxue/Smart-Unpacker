@@ -19,6 +19,10 @@ $env:PYTHONPATH='C:\Users\29402\Desktop\sunpack\.venv\Lib\site-packages;C:\Users
 .venv-build\Scripts\python.exe tests\performance_reader\password_fast_path.py
 ```
 
+For a same-binary comparison against the legacy 7z `Archive::read`-per-password
+path, add `--disable-seven-zip-probe`. Run it in a separate process so the
+password worker pool and archive-session state start cleanly.
+
 Run the complete CLI scan and three native embedded-scan rounds for the fixed
 large sample:
 

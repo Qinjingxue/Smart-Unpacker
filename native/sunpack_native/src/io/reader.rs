@@ -405,6 +405,8 @@ impl ManagedReader {
 pub(crate) struct NativeArchiveSession {
     path: String,
     reader: ManagedReader,
+    seven_zip_password_probe:
+        OnceLock<Option<Arc<crate::formats::seven_zip::SevenZipPasswordProbe>>>,
 }
 
 #[pymethods]
@@ -412,7 +414,11 @@ impl NativeArchiveSession {
     #[new]
     fn new(path: String) -> PyResult<Self> {
         let reader = ManagedReader::open(&path)?;
-        Ok(Self { path, reader })
+        Ok(Self {
+            path,
+            reader,
+            seven_zip_password_probe: OnceLock::new(),
+        })
     }
 
     #[getter]
@@ -478,10 +484,11 @@ impl NativeArchiveSession {
         py: Python<'_>,
         passwords: &Bound<'_, PyList>,
     ) -> PyResult<Py<PyAny>> {
-        crate::password::seven_zip::seven_zip_fast_verify_passwords_with_reader(
+        crate::password::seven_zip::seven_zip_fast_verify_passwords_with_probe_cache(
             py,
             &self.reader,
             passwords,
+            &self.seven_zip_password_probe,
         )
     }
 
