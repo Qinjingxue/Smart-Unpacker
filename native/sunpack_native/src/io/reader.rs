@@ -1,3 +1,4 @@
+use memmap2::{Mmap, MmapOptions};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBytes, PyDict, PyList};
 use std::collections::{BTreeSet, HashMap, VecDeque};
@@ -80,6 +81,9 @@ pub(crate) trait ByteSource: Send + Sync {
         let data = self.read_direct_at(offset, buffer.len())?;
         buffer[..data.len()].copy_from_slice(&data);
         Ok(data.len())
+    }
+    fn map_read_only(&self) -> io::Result<Option<Mmap>> {
+        Ok(None)
     }
 }
 
@@ -361,6 +365,23 @@ impl ManagedReader {
             position: 0,
             streaming: true,
         }
+    }
+
+    /// Maps a single immutable file for a high-throughput full-stream scan.
+    /// Multi-volume and non-file sources return `None` and keep using the
+    /// ordinary Reader streaming path.
+    pub(crate) fn map_read_only(&self) -> io::Result<Option<Mmap>> {
+        if self.uses_request_state() {
+            return Ok(None);
+        }
+        let _permit = self.state.gate.acquire()?;
+        let mapped = self.source.map_read_only()?;
+        if let Some(ref data) = mapped {
+            self.state
+                .uncached_read_bytes
+                .fetch_add(data.len() as u64, Ordering::Relaxed);
+        }
+        Ok(mapped)
     }
 
     pub(crate) fn read_direct_into_at(&self, offset: u64, buffer: &mut [u8]) -> io::Result<usize> {
@@ -747,6 +768,23 @@ impl ByteSource for FileSource {
             .logical_bytes
             .fetch_add(count as u64, Ordering::Relaxed);
         Ok(count)
+    }
+
+    fn map_read_only(&self) -> io::Result<Option<Mmap>> {
+        if self.len() == 0 {
+            return Ok(None);
+        }
+        // SAFETY: FileSource keeps the file handle alive, the pipeline treats
+        // archive bytes as immutable, and Mmap owns the mapping until drop.
+        let mapped = match unsafe { MmapOptions::new().map(&self.file) } {
+            Ok(mapped) => mapped,
+            Err(_) => return Ok(None),
+        };
+        manager()
+            .metrics
+            .logical_bytes
+            .fetch_add(mapped.len() as u64, Ordering::Relaxed);
+        Ok(Some(mapped))
     }
 }
 

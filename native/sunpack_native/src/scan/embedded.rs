@@ -1,6 +1,6 @@
 use crate::io::reader::{ManagedReader, SourceCursor};
 use crate::io::util::STREAM_CHUNK_SIZE;
-use aho_corasick::AhoCorasick;
+use aho_corasick::{packed, AhoCorasick};
 use crc32fast::{hash as crc32, Hasher};
 use flate2::read::DeflateDecoder;
 use pyo3::prelude::*;
@@ -35,8 +35,17 @@ const PATTERNS: [PatternSpec; 10] = [
     (ZSTD, "zstd", "zstd"),
     (TAR_USTAR, "tar_ustar", "tar"),
 ];
+const XZ_PATTERN_INDEX: usize = 7;
+const ZSTD_PATTERN_INDEX: usize = 8;
 
 static EMBEDDED_MATCHER: OnceLock<AhoCorasick> = OnceLock::new();
+static EMBEDDED_PACKED_MATCHER: OnceLock<Option<packed::Searcher>> = OnceLock::new();
+
+// More workers reduce throughput once their simultaneous scans compete for
+// memory bandwidth. Keep this local to embedded scanning: candidate
+// validation and unrelated Rayon users retain the full global pool.
+const MAX_SCAN_WORKERS: usize = 8;
+const EMBEDDED_CHUNK_SIZE: usize = STREAM_CHUNK_SIZE;
 
 #[derive(Debug, Clone, PartialEq)]
 struct EmbeddedCandidate {
@@ -129,10 +138,20 @@ fn embedded_matcher() -> &'static AhoCorasick {
     })
 }
 
+fn embedded_packed_matcher() -> Option<&'static packed::Searcher> {
+    EMBEDDED_PACKED_MATCHER
+        .get_or_init(|| packed::Searcher::new(PATTERNS.iter().map(|(magic, _, _)| *magic)))
+        .as_ref()
+}
+
 fn scan_embedded_archives_native(reader: ManagedReader) -> io::Result<NativeScanResult> {
     let file_size = reader.len();
-    let mut scan_file = reader.stream_cursor();
-    let mut raw_hits = scan_raw_hits(&mut scan_file)?;
+    let mut raw_hits = if let Some(mapped) = reader.map_read_only()? {
+        scan_raw_hits_mapped(&mapped)
+    } else {
+        let mut scan_file = reader.stream_cursor();
+        scan_raw_hits(&mut scan_file)?
+    };
     raw_hits.sort_by_key(|hit| (hit.offset, hit.hit_name));
 
     let validation_file = reader;
@@ -156,6 +175,61 @@ fn scan_embedded_archives_native(reader: ManagedReader) -> io::Result<NativeScan
     })
 }
 
+fn scan_raw_hits_mapped(data: &[u8]) -> Vec<RawHit> {
+    if data.is_empty() {
+        return Vec::new();
+    }
+    let overlap = PATTERNS
+        .iter()
+        .map(|(magic, _, _)| magic.len())
+        .max()
+        .unwrap_or(1)
+        .saturating_sub(1);
+    let chunk_count = data.len().div_ceil(EMBEDDED_CHUNK_SIZE);
+    let worker_count = rayon::current_num_threads()
+        .clamp(1, MAX_SCAN_WORKERS)
+        .min(chunk_count);
+    if worker_count == 1 {
+        return scan_mapped_worker(data, overlap, 0, 1, chunk_count);
+    }
+
+    std::thread::scope(|scope| {
+        let workers = (0..worker_count)
+            .map(|worker| {
+                scope.spawn(move || {
+                    scan_mapped_worker(data, overlap, worker, worker_count, chunk_count)
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut hits = Vec::new();
+        for worker in workers {
+            hits.extend(worker.join().expect("embedded mmap worker did not panic"));
+        }
+        hits
+    })
+}
+
+fn scan_mapped_worker(
+    data: &[u8],
+    overlap: usize,
+    first_chunk: usize,
+    stride: usize,
+    chunk_count: usize,
+) -> Vec<RawHit> {
+    let mut hits = Vec::new();
+    for chunk in (first_chunk..chunk_count).step_by(stride) {
+        let start = chunk * EMBEDDED_CHUNK_SIZE;
+        let end = (start + EMBEDDED_CHUNK_SIZE).min(data.len());
+        let sample_start = start.saturating_sub(overlap);
+        hits.extend(scan_sample(
+            &data[sample_start..end],
+            start - sample_start,
+            sample_start as u64,
+        ));
+    }
+    hits
+}
+
 fn scan_raw_hits(file: &mut SourceCursor) -> io::Result<Vec<RawHit>> {
     let overlap = PATTERNS
         .iter()
@@ -163,7 +237,10 @@ fn scan_raw_hits(file: &mut SourceCursor) -> io::Result<Vec<RawHit>> {
         .max()
         .unwrap_or(1)
         .saturating_sub(1);
-    let worker_count = rayon::current_num_threads().max(1);
+    let worker_count = rayon::current_num_threads().clamp(1, MAX_SCAN_WORKERS);
+    if worker_count == 1 {
+        return scan_raw_hits_sequential(file, overlap);
+    }
     let buffer_count = (worker_count * 2).clamp(2, 64);
     let (free_tx, free_rx) = mpsc::sync_channel::<Vec<u8>>(buffer_count);
     let (job_tx, job_rx) = mpsc::sync_channel::<ScanChunk>(buffer_count);
@@ -172,7 +249,7 @@ fn scan_raw_hits(file: &mut SourceCursor) -> io::Result<Vec<RawHit>> {
 
     for _ in 0..buffer_count {
         free_tx
-            .send(vec![0u8; STREAM_CHUNK_SIZE + overlap])
+            .send(vec![0u8; EMBEDDED_CHUNK_SIZE + overlap])
             .expect("embedded scan buffer receiver is alive");
     }
 
@@ -198,9 +275,10 @@ fn scan_raw_hits(file: &mut SourceCursor) -> io::Result<Vec<RawHit>> {
                 let hits = scan_chunk(&job);
                 let _ = hits_tx.send(hits);
                 job.buffer.clear();
-                if free_tx.send(job.buffer).is_err() {
-                    break;
-                }
+                // The producer drops free_rx as soon as it reaches EOF. A
+                // failed buffer recycle must not stop this worker: jobs that
+                // were already queued still need to be scanned exactly once.
+                let _ = free_tx.send(job.buffer);
             });
         }
 
@@ -208,14 +286,15 @@ fn scan_raw_hits(file: &mut SourceCursor) -> io::Result<Vec<RawHit>> {
             let Ok(mut buffer) = free_rx.recv() else {
                 break;
             };
-            buffer.resize(STREAM_CHUNK_SIZE + overlap, 0);
+            buffer.resize(EMBEDDED_CHUNK_SIZE + overlap, 0);
             if carry_len > 0 {
                 buffer[..carry_len].copy_from_slice(&carry[..carry_len]);
             }
 
             let mut bytes_read = 0usize;
-            while bytes_read < STREAM_CHUNK_SIZE {
-                match file.read(&mut buffer[carry_len + bytes_read..carry_len + STREAM_CHUNK_SIZE])
+            while bytes_read < EMBEDDED_CHUNK_SIZE {
+                match file
+                    .read(&mut buffer[carry_len + bytes_read..carry_len + EMBEDDED_CHUNK_SIZE])
                 {
                     Ok(0) => break,
                     Ok(count) => bytes_read += count,
@@ -259,35 +338,129 @@ fn scan_raw_hits(file: &mut SourceCursor) -> io::Result<Vec<RawHit>> {
     Ok(raw_hits)
 }
 
-fn scan_chunk(job: &ScanChunk) -> Vec<RawHit> {
-    let mut hits = Vec::new();
-    let sample = &job.buffer[..job.sample_len];
-    for matched in embedded_matcher().find_overlapping_iter(sample) {
-        // A match contained entirely in carry was already owned by the
-        // preceding chunk. Cross-boundary matches end in newly read bytes and
-        // are therefore retained exactly once.
-        if matched.end() <= job.carry_len {
-            continue;
+fn scan_raw_hits_sequential(file: &mut SourceCursor, overlap: usize) -> io::Result<Vec<RawHit>> {
+    let mut buffer = vec![0u8; EMBEDDED_CHUNK_SIZE + overlap];
+    let mut carry = vec![0u8; overlap];
+    let mut carry_len = 0usize;
+    let mut current_offset = 0u64;
+    let mut raw_hits = Vec::new();
+
+    loop {
+        if carry_len > 0 {
+            buffer[..carry_len].copy_from_slice(&carry[..carry_len]);
         }
-        let (_, hit_name, kind) = PATTERNS[matched.pattern().as_usize()];
-        let absolute = job.base_offset + matched.start() as u64;
-        let candidate_offset = if kind == "tar" {
-            let Some(value) = absolute.checked_sub(257) else {
-                continue;
-            };
-            value
-        } else {
-            absolute
-        };
-        if candidate_offset > 0 {
-            hits.push(RawHit {
-                hit_name,
-                kind,
-                offset: candidate_offset,
-            });
+        let mut bytes_read = 0usize;
+        while bytes_read < EMBEDDED_CHUNK_SIZE {
+            let target = &mut buffer[carry_len + bytes_read..carry_len + EMBEDDED_CHUNK_SIZE];
+            match file.read(target)? {
+                0 => break,
+                count => bytes_read += count,
+            }
+        }
+        if bytes_read == 0 {
+            break;
+        }
+
+        let sample_len = carry_len + bytes_read;
+        raw_hits.extend(scan_sample(
+            &buffer[..sample_len],
+            carry_len,
+            current_offset.saturating_sub(carry_len as u64),
+        ));
+
+        let next_carry_len = overlap.min(sample_len);
+        carry[..next_carry_len].copy_from_slice(&buffer[sample_len - next_carry_len..sample_len]);
+        carry_len = next_carry_len;
+        current_offset += bytes_read as u64;
+    }
+    Ok(raw_hits)
+}
+
+fn scan_chunk(job: &ScanChunk) -> Vec<RawHit> {
+    let sample = &job.buffer[..job.sample_len];
+    scan_sample(sample, job.carry_len, job.base_offset)
+}
+
+fn scan_sample(sample: &[u8], carry_len: usize, base_offset: u64) -> Vec<RawHit> {
+    let mut hits = Vec::new();
+    if let Some(matcher) = embedded_packed_matcher() {
+        for matched in matcher.find_iter(sample) {
+            let pattern = matched.pattern().as_usize();
+            record_raw_hit(
+                &mut hits,
+                carry_len,
+                base_offset,
+                pattern,
+                matched.start(),
+                matched.end(),
+            );
+
+            // Packed search is deliberately non-overlapping. The current
+            // signature set has exactly one proper suffix/prefix overlap:
+            // Zstd ends in FD and XZ begins with FD. Recover that one match
+            // explicitly so this path is exactly equivalent to Standard
+            // Aho-Corasick overlapping semantics.
+            if pattern == ZSTD_PATTERN_INDEX {
+                let xz_start = matched.end() - 1;
+                let xz_end = xz_start + XZ.len();
+                if sample.get(xz_start..xz_end) == Some(XZ) {
+                    record_raw_hit(
+                        &mut hits,
+                        carry_len,
+                        base_offset,
+                        XZ_PATTERN_INDEX,
+                        xz_start,
+                        xz_end,
+                    );
+                }
+            }
+        }
+    } else {
+        for matched in embedded_matcher().find_overlapping_iter(sample) {
+            record_raw_hit(
+                &mut hits,
+                carry_len,
+                base_offset,
+                matched.pattern().as_usize(),
+                matched.start(),
+                matched.end(),
+            );
         }
     }
     hits
+}
+
+fn record_raw_hit(
+    hits: &mut Vec<RawHit>,
+    carry_len: usize,
+    base_offset: u64,
+    pattern: usize,
+    start: usize,
+    end: usize,
+) {
+    // A match contained entirely in carry was already owned by the preceding
+    // chunk. Cross-boundary matches end in newly read bytes and are retained
+    // exactly once.
+    if end <= carry_len {
+        return;
+    }
+    let (_, hit_name, kind) = PATTERNS[pattern];
+    let absolute = base_offset + start as u64;
+    let candidate_offset = if kind == "tar" {
+        let Some(value) = absolute.checked_sub(257) else {
+            return;
+        };
+        value
+    } else {
+        absolute
+    };
+    if candidate_offset > 0 {
+        hits.push(RawHit {
+            hit_name,
+            kind,
+            offset: candidate_offset,
+        });
+    }
 }
 
 fn validate_candidate(
@@ -888,6 +1061,64 @@ mod tests {
         hits
     }
 
+    fn optimized_raw_hits(data: &[u8]) -> Vec<RawHit> {
+        let mut hits = scan_sample(data, 0, 0);
+        hits.sort_by_key(|hit| (hit.offset, hit.hit_name));
+        hits
+    }
+
+    #[test]
+    fn packed_search_preserves_every_signature_overlap() {
+        let mut data = vec![0x11; 512];
+        for (left_index, (left, _, _)) in PATTERNS.iter().enumerate() {
+            for (right_index, (right, _, _)) in PATTERNS.iter().enumerate() {
+                for overlap in 1..left.len().min(right.len()) {
+                    if left[left.len() - overlap..] != right[..overlap] {
+                        continue;
+                    }
+                    let start = data.len();
+                    data.extend_from_slice(left);
+                    data.extend_from_slice(&right[overlap..]);
+                    data.extend_from_slice(&[0x11; 32]);
+                    assert_eq!(
+                        (left_index, right_index, overlap),
+                        (ZSTD_PATTERN_INDEX, XZ_PATTERN_INDEX, 1),
+                        "the packed compensation must cover every overlap",
+                    );
+                    assert!(start > 0);
+                }
+            }
+        }
+        assert_eq!(optimized_raw_hits(&data), reference_raw_hits(&data));
+    }
+
+    #[test]
+    fn packed_search_matches_overlapping_aho_on_randomized_layouts() {
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let mut data = vec![0u8; 2 * 1024 * 1024];
+        for byte in &mut data {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            *byte = state as u8;
+        }
+        for round in 0..2048usize {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            let pattern = round % PATTERNS.len();
+            let magic = PATTERNS[pattern].0;
+            let start = 300 + (state as usize % (data.len() - 600 - magic.len()));
+            data[start..start + magic.len()].copy_from_slice(magic);
+        }
+        // Force the only overlap in the set in addition to any accidental
+        // overlaps generated by the randomized corpus.
+        let overlap = b"\x28\xb5\x2f\xfd7zXZ\x00";
+        data[128..128 + overlap.len()].copy_from_slice(overlap);
+
+        assert_eq!(optimized_raw_hits(&data), reference_raw_hits(&data));
+    }
+
     #[test]
     fn finds_multiple_structurally_valid_embedded_streams() {
         let mut data = b"carrier".to_vec();
@@ -978,7 +1209,7 @@ mod tests {
         let mut gzip = GzEncoder::new(Vec::new(), Compression::fast());
         gzip.write_all(b"cross-boundary payload").unwrap();
         let gzip_bytes = gzip.finish().unwrap();
-        let gzip_offset = STREAM_CHUNK_SIZE - 2;
+        let gzip_offset = EMBEDDED_CHUNK_SIZE - 2;
         let mut data = vec![b'x'; gzip_offset];
         data.extend_from_slice(&gzip_bytes);
         let path = temp_file("embedded_cross_boundary", &data);
@@ -1008,15 +1239,15 @@ mod tests {
 
     #[test]
     fn parallel_chunks_match_one_contiguous_overlapping_scan_exactly() {
-        let mut data = vec![0x11; STREAM_CHUNK_SIZE * (PATTERNS.len() + 2)];
+        let mut data = vec![0x11; EMBEDDED_CHUNK_SIZE * (PATTERNS.len() + 2)];
         for (index, (magic, _, _)) in PATTERNS.iter().enumerate() {
-            let boundary = STREAM_CHUNK_SIZE * (index + 1);
+            let boundary = EMBEDDED_CHUNK_SIZE * (index + 1);
             let start = boundary - magic.len().saturating_sub(1);
             data[start..start + magic.len()].copy_from_slice(magic);
         }
         // This short signature is wholly contained in the next chunk's carry
         // and used to be observed twice before HashSet de-duplication.
-        let duplicate_prone = STREAM_CHUNK_SIZE * (PATTERNS.len() + 1) - 6;
+        let duplicate_prone = EMBEDDED_CHUNK_SIZE * (PATTERNS.len() + 1) - 6;
         data[duplicate_prone..duplicate_prone + GZIP.len()].copy_from_slice(GZIP);
 
         let expected = reference_raw_hits(&data);
@@ -1025,6 +1256,29 @@ mod tests {
         let mut file = reader.stream_cursor();
         let mut actual = scan_raw_hits(&mut file).unwrap();
         actual.sort_by_key(|hit| (hit.offset, hit.hit_name));
+
+        assert_eq!(actual, expected);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn one_thread_pool_uses_non_blocking_sequential_scan() {
+        let mut data = vec![0x11; EMBEDDED_CHUNK_SIZE * 3];
+        let start = EMBEDDED_CHUNK_SIZE - 2;
+        data[start..start + SEVEN_ZIP.len()].copy_from_slice(SEVEN_ZIP);
+        let expected = reference_raw_hits(&data);
+        let path = temp_file("embedded_single_thread", &data);
+        let actual = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .unwrap()
+            .install(|| {
+                let reader = ManagedReader::open(&path).unwrap();
+                let mut file = reader.stream_cursor();
+                let mut hits = scan_raw_hits(&mut file).unwrap();
+                hits.sort_by_key(|hit| (hit.offset, hit.hit_name));
+                hits
+            });
 
         assert_eq!(actual, expected);
         let _ = fs::remove_file(path);
