@@ -18,7 +18,7 @@ dependencies = [
 
 [project.optional-dependencies]
 model-runtime = [
-    "torch==2.7.0",
+    "torch==2.10.0",
     "torch-geometric==2.8.0",
 ]
 build = [

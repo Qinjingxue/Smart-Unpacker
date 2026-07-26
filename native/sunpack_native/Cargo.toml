@@ -21,7 +21,7 @@ hmac = "0.12"
 lzma-rust2 = "0.16"
 memchr = "2.7"
 pbkdf2 = "0.12"
-pyo3 = { version = "0.27", features = ["extension-module"] }
+pyo3 = { version = "0.29", features = ["extension-module"] }
 regex = "1.11"
 rayon = "1.10"
 sevenz-rust2 = { version = "0.21", default-features = false, features = ["aes256", "compress"] }
