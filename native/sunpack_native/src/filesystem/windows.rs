@@ -5,8 +5,7 @@ use std::io;
 use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 use std::ptr::{null, null_mut};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 type Handle = *mut c_void;
 
@@ -26,12 +25,15 @@ const ALL_USN_REASONS: u32 = 0xffff_ffff;
 const USN_REASON_CLOSE: u32 = 0x8000_0000;
 const JOURNAL_BUFFER_BYTES: usize = 64 * 1024;
 const MAX_JOURNAL_BYTES_PER_OBSERVATION: usize = 1024 * 1024;
-static JOURNAL_REASON_READ_UNAVAILABLE: AtomicBool = AtomicBool::new(false);
-// Volume journal reads normally require an elevated token. Cache both the
-// capability failure and successful volume handles so event storms stay cheap.
-static VOLUME_HANDLES: OnceLock<Mutex<HashMap<String, isize>>> = OnceLock::new();
+// Volume journal reads normally require an elevated token. Cache capability
+// failures per volume so one inaccessible volume does not disable all others.
+static VOLUME_CONTEXTS: OnceLock<Mutex<HashMap<String, Arc<Mutex<VolumeContext>>>>> =
+    OnceLock::new();
 const ERROR_SHARING_VIOLATION: i32 = 32;
 const ERROR_LOCK_VIOLATION: i32 = 33;
+const ERROR_INVALID_HANDLE: i32 = 6;
+const ERROR_NOT_READY: i32 = 21;
+const ERROR_DEVICE_NOT_CONNECTED: i32 = 1167;
 
 #[derive(Default)]
 struct ChangeReasons {
@@ -118,12 +120,32 @@ extern "system" {
     ) -> i32;
 }
 
-struct OwnedHandle(Handle);
+struct OwnedHandle(isize);
+
+impl OwnedHandle {
+    fn raw(&self) -> Handle {
+        self.0 as Handle
+    }
+}
 
 impl Drop for OwnedHandle {
     fn drop(&mut self) {
         unsafe {
-            CloseHandle(self.0);
+            CloseHandle(self.raw());
+        }
+    }
+}
+
+struct VolumeContext {
+    handle: Option<OwnedHandle>,
+    reason_read_unavailable_error: Option<i32>,
+}
+
+impl VolumeContext {
+    fn new() -> Self {
+        Self {
+            handle: None,
+            reason_read_unavailable_error: None,
         }
     }
 }
@@ -171,11 +193,9 @@ pub(super) fn watch_file_observation(
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
         metadata.is_dir(),
     )?;
-    let mut observation = read_file_usn(handle.0)?;
+    let mut observation = read_file_usn(handle.raw())?;
     if let Some(previous_usn) = since_usn.filter(|value| *value > 0) {
-        if observation.change_usn > previous_usn
-            && !JOURNAL_REASON_READ_UNAVAILABLE.load(Ordering::Relaxed)
-        {
+        if observation.change_usn > previous_usn {
             match read_change_reasons(
                 path,
                 &observation.file_id,
@@ -189,9 +209,6 @@ pub(super) fn watch_file_observation(
                 }
                 Err(error) => {
                     observation.change_reason_error = error.to_string();
-                    if matches!(error.raw_os_error(), Some(1) | Some(5)) {
-                        JOURNAL_REASON_READ_UNAVAILABLE.store(true, Ordering::Relaxed);
-                    }
                 }
             }
         } else if observation.change_usn == previous_usn {
@@ -251,7 +268,7 @@ fn open_path(
     if handle == INVALID_HANDLE_VALUE {
         return Err(io::Error::last_os_error());
     }
-    Ok(OwnedHandle(handle))
+    Ok(OwnedHandle(handle as isize))
 }
 
 fn read_file_usn(handle: Handle) -> io::Result<WatchFileObservation> {
@@ -335,8 +352,25 @@ fn read_change_reasons(
     previous_usn: i64,
     current_usn: i64,
 ) -> io::Result<ChangeReasons> {
-    let volume = open_volume(path)?;
-    let journal_id = query_journal_id(volume)?;
+    with_volume_context(path, |volume| {
+        let journal_id = query_journal_id(volume)?;
+        read_change_reasons_from_volume(
+            volume,
+            journal_id,
+            expected_file_id,
+            previous_usn,
+            current_usn,
+        )
+    })
+}
+
+fn read_change_reasons_from_volume(
+    volume: Handle,
+    journal_id: u64,
+    expected_file_id: &str,
+    previous_usn: i64,
+    current_usn: i64,
+) -> io::Result<ChangeReasons> {
     // StartUsn is a journal byte position and must stay on a record boundary;
     // adding one produces ERROR_INVALID_PARAMETER. The record filter below
     // keeps the interval logically exclusive of previous_usn.
@@ -417,7 +451,8 @@ fn record_change_reason(
     let major = u16::from_le_bytes(record[4..6].try_into().unwrap());
     let (file_id_end, usn_offset, reason_offset) = match major {
         2 => (16usize, 24usize, 40usize),
-        3 | 4 => (24usize, 40usize, 56usize),
+        3 => (24usize, 40usize, 56usize),
+        4 => (24usize, 40usize, 48usize),
         _ => return Ok(None),
     };
     if record.len() < reason_offset + 4 {
@@ -451,6 +486,48 @@ fn query_journal_id(volume: Handle) -> io::Result<u64> {
     Ok(u64::from_le_bytes(output[0..8].try_into().unwrap()))
 }
 
+pub(super) fn validate_volume_journal(path: &Path) -> io::Result<()> {
+    let result = with_volume_context(path, |volume| {
+        let mut metadata = vec![0u8; 80];
+        let bytes_returned =
+            device_io_control(volume, FSCTL_QUERY_USN_JOURNAL, null(), 0, &mut metadata)?;
+        if bytes_returned < 24 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "truncated USN journal metadata",
+            ));
+        }
+        let journal_id = u64::from_le_bytes(metadata[0..8].try_into().unwrap());
+        let next_usn = i64::from_le_bytes(metadata[16..24].try_into().unwrap());
+        let request = read_usn_journal_request(next_usn, journal_id);
+        let mut output = vec![0u8; JOURNAL_BUFFER_BYTES];
+        let bytes_returned = device_io_control(
+            volume,
+            FSCTL_READ_USN_JOURNAL,
+            &request as *const _ as *const c_void,
+            std::mem::size_of::<ReadUsnJournalData>() as u32,
+            &mut output,
+        )?;
+        if bytes_returned < 8 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "truncated USN journal reply",
+            ));
+        }
+        Ok(())
+    });
+    match result {
+        // A normal user may read per-file USNs without being allowed to open
+        // the volume journal. with_volume_context has already cached that
+        // capability failure for this volume, so watch can safely continue
+        // with conservative change detection and no repeated volume probes.
+        Err(error) if error.raw_os_error() == Some(5) => {
+            Ok(())
+        }
+        other => other,
+    }
+}
+
 fn device_io_control(
     handle: Handle,
     code: u32,
@@ -477,7 +554,7 @@ fn device_io_control(
     Ok(bytes_returned as usize)
 }
 
-fn open_volume(path: &Path) -> io::Result<Handle> {
+fn volume_device(path: &Path) -> io::Result<(String, Vec<u16>)> {
     let path = canonical_wide(path)?;
     let mut mount_point = vec![0u16; 32768];
     if unsafe {
@@ -490,57 +567,91 @@ fn open_volume(path: &Path) -> io::Result<Handle> {
     {
         return Err(io::Error::last_os_error());
     }
-    let mount = nul_terminated(&mount_point);
-    let mut volume = if mount.len() == 3 && mount[1] == ':' as u16 && mount[2] == '\\' as u16 {
-        OsStr::new(&format!(
-            r"\\.\{}:",
-            char::from_u32(mount[0] as u32).unwrap_or('C')
-        ))
-        .encode_wide()
-        .collect::<Vec<_>>()
-    } else {
-        let mut volume_name = vec![0u16; 64];
-        if unsafe {
-            GetVolumeNameForVolumeMountPointW(
-                mount_point.as_ptr(),
-                volume_name.as_mut_ptr(),
-                volume_name.len() as u32,
-            )
-        } == 0
-        {
-            return Err(io::Error::last_os_error());
-        }
-        let mut name = nul_terminated(&volume_name).to_vec();
-        if name.last() == Some(&('\\' as u16)) {
-            name.pop();
-        }
-        name
-    };
-    let volume_key = String::from_utf16_lossy(&volume).to_ascii_lowercase();
-    let handles = VOLUME_HANDLES.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut handles = handles
-        .lock()
-        .map_err(|_| io::Error::new(io::ErrorKind::Other, "volume handle cache poisoned"))?;
-    if let Some(handle) = handles.get(&volume_key) {
-        return Ok(*handle as Handle);
-    }
-    volume.push(0);
-    let handle = unsafe {
-        CreateFileW(
-            volume.as_ptr(),
-            GENERIC_READ,
-            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-            null(),
-            OPEN_EXISTING,
-            0,
-            null_mut(),
+    let mut volume_name = vec![0u16; 64];
+    if unsafe {
+        GetVolumeNameForVolumeMountPointW(
+            mount_point.as_ptr(),
+            volume_name.as_mut_ptr(),
+            volume_name.len() as u32,
         )
-    };
-    if handle == INVALID_HANDLE_VALUE {
+    } == 0
+    {
         return Err(io::Error::last_os_error());
     }
-    handles.insert(volume_key, handle as isize);
-    Ok(handle)
+    // Cache by the stable volume GUID rather than by a drive letter, which can
+    // later be assigned to a different removable volume.
+    let mut volume = nul_terminated(&volume_name).to_vec();
+    if volume.last() == Some(&('\\' as u16)) {
+        volume.pop();
+    }
+    let volume_key = String::from_utf16_lossy(&volume).to_ascii_lowercase();
+    volume.push(0);
+    Ok((volume_key, volume))
+}
+
+fn with_volume_context<T>(
+    path: &Path,
+    operation: impl FnOnce(Handle) -> io::Result<T>,
+) -> io::Result<T> {
+    let (volume_key, volume) = volume_device(path)?;
+    let contexts = VOLUME_CONTEXTS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut contexts = contexts
+        .lock()
+        .map_err(|_| io::Error::new(io::ErrorKind::Other, "volume handle cache poisoned"))?;
+    let context = Arc::clone(
+        contexts
+            .entry(volume_key)
+            .or_insert_with(|| Arc::new(Mutex::new(VolumeContext::new()))),
+    );
+    drop(contexts);
+    let mut context = context
+        .lock()
+        .map_err(|_| io::Error::new(io::ErrorKind::Other, "volume context poisoned"))?;
+    if let Some(error_code) = context.reason_read_unavailable_error {
+        return Err(io::Error::from_raw_os_error(error_code));
+    }
+    if context.handle.is_none() {
+        let handle = unsafe {
+            CreateFileW(
+                volume.as_ptr(),
+                GENERIC_READ,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                null(),
+                OPEN_EXISTING,
+                0,
+                null_mut(),
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE {
+            let error = io::Error::last_os_error();
+            if journal_capability_error(&error) {
+                context.reason_read_unavailable_error = error.raw_os_error();
+            }
+            return Err(error);
+        }
+        context.handle = Some(OwnedHandle(handle as isize));
+    }
+    let handle = context.handle.as_ref().unwrap().raw();
+    let result = operation(handle);
+    if let Err(error) = &result {
+        if journal_capability_error(error) {
+            context.reason_read_unavailable_error = error.raw_os_error();
+        } else if stale_volume_handle_error(error) {
+            context.handle.take();
+        }
+    }
+    result
+}
+
+fn journal_capability_error(error: &io::Error) -> bool {
+    matches!(error.raw_os_error(), Some(1) | Some(5))
+}
+
+fn stale_volume_handle_error(error: &io::Error) -> bool {
+    matches!(
+        error.raw_os_error(),
+        Some(ERROR_INVALID_HANDLE) | Some(ERROR_NOT_READY) | Some(ERROR_DEVICE_NOT_CONNECTED)
+    )
 }
 
 fn format_file_id(bytes: &[u8]) -> String {
@@ -586,6 +697,23 @@ mod tests {
         record[8..16].copy_from_slice(&0x1234u64.to_le_bytes());
         record[24..32].copy_from_slice(&101i64.to_le_bytes());
         record[40..44].copy_from_slice(&0x8000_0001u32.to_le_bytes());
+
+        let reason =
+            record_change_reason(&record, "00000000000000000000000000001234", 100, 101).unwrap();
+
+        assert_eq!(reason, Some(0x8000_0001));
+    }
+
+    #[test]
+    fn parses_v4_reason_from_its_own_layout() {
+        let mut record = vec![0u8; 64];
+        let record_length = record.len() as u32;
+        record[0..4].copy_from_slice(&record_length.to_le_bytes());
+        record[4..6].copy_from_slice(&4u16.to_le_bytes());
+        record[8..24].copy_from_slice(&0x1234u128.to_le_bytes());
+        record[40..48].copy_from_slice(&101i64.to_le_bytes());
+        record[48..52].copy_from_slice(&0x8000_0001u32.to_le_bytes());
+        record[56..60].copy_from_slice(&7u32.to_le_bytes());
 
         let reason =
             record_change_reason(&record, "00000000000000000000000000001234", 100, 101).unwrap();

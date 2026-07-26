@@ -64,6 +64,13 @@ pub(crate) fn validate_ntfs_watch_root(path: &str) -> PyResult<()> {
                 error
             ))
         })?;
+        windows::validate_volume_journal(path).map_err(|error| {
+            PyRuntimeError::new_err(format!(
+                "watch mode requires volume-level NTFS USN journal access for '{}': {}",
+                path.display(),
+                error
+            ))
+        })?;
         return Ok(());
     }
     #[cfg(not(windows))]

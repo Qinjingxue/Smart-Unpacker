@@ -334,7 +334,6 @@ def run_scenario(base: Path, scenario: Scenario, payload: bytes, *, chunk_bytes:
         [str(scenario_root)],
         out_dir=str(base / scenario.name / "out"),
         state_path=str(state_path),
-        interval_seconds=0.1,
         quiet_seconds=1.0,
         recursive=False,
         initial_scan=False,
