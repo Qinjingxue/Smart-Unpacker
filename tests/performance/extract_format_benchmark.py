@@ -11,7 +11,11 @@ import argparse, json, os, random, shutil, statistics, subprocess, sys, tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-PYTHON = ROOT / ".venv" / "Scripts" / "python.exe"
+PYTHON_CANDIDATES = (
+    ROOT / ".venv-build" / "Scripts" / "python.exe",
+    ROOT / ".venv" / "Scripts" / "python.exe",
+)
+PYTHON = next((path for path in PYTHON_CANDIDATES if path.exists()), Path(sys.executable))
 SEVEN_ZIP = ROOT / "tools" / "7z.exe"
 SUPPORTED = ("zip", "7z", "rar", "gz", "bz2", "xz", "zst", "Z", "tar", "tgz", "tbz2", "txz", "tzst")
 
@@ -33,6 +37,8 @@ def create_corpus(root: Path, extra: dict[str, Path], small_files: int) -> tuple
     corpus, skipped = dict(extra), {}
     create_specs = {"zip": ("zip", payload), "7z": ("7z", payload), "tar": ("tar", payload)}
     for ext, (archive_type, source) in create_specs.items():
+        if ext in corpus:
+            continue
         target = root / f"sample.{ext}"
         result = subprocess.run([str(SEVEN_ZIP), "a", "-y", f"-t{archive_type}", str(target), str(source)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         if result.returncode == 0 and target.exists(): corpus[ext] = target
