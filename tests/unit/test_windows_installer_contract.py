@@ -112,6 +112,16 @@ def test_build_and_release_workflow_publish_portable_and_setup_packages():
     assert "*-setup.exe" in workflow
 
 
+def test_build_notes_handles_recreated_tags_and_noninteractive_log_output():
+    workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+
+    assert "git fetch --force --prune --tags" in workflow
+    assert '--exclude="${current_tag}"' in workflow
+    assert 'commits="$(git log --format=\'- %s (%h)\' "${range}")"' in workflow
+    assert 'if [ -n "${commits}" ]; then' in workflow
+    assert "grep -q" not in workflow
+
+
 def test_build_passes_edition_and_architecture_to_acceptance_setup():
     build_script = (ROOT / "scripts" / "build_windows.ps1").read_text(encoding="utf-8")
     acceptance_script = (ROOT / "run_acceptance_tests.ps1").read_text(encoding="utf-8")

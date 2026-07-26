@@ -40,7 +40,9 @@ jobs:
           SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          git fetch --force --tags
+          # Remove stale local tag refs first; this matters when a release tag is
+          # deleted and recreated at a different commit.
+          git fetch --force --prune --tags
 
           target="${SHA}"
           current_tag=""
@@ -53,7 +55,7 @@ jobs:
 
           previous_tag=""
           if [ "${IS_TAG_REF}" = "true" ]; then
-            previous_tag="$(git describe --tags --match 'v*' --abbrev=0 "${target}^" 2>/dev/null || true)"
+            previous_tag="$(git describe --tags --match 'v*' --exclude="${current_tag}" --abbrev=0 "${target}^" 2>/dev/null || true)"
           else
             previous_tag="$(git describe --tags --match 'v*' --abbrev=0 "${target}" 2>/dev/null || true)"
           fi
@@ -84,8 +86,9 @@ jobs:
             echo "## Commits"
           } > build-notes.md
 
-          if git log --format='- %s (%h)' "${range}" | grep -q .; then
-            git log --format='- %s (%h)' "${range}" >> build-notes.md
+          commits="$(git log --format='- %s (%h)' "${range}")"
+          if [ -n "${commits}" ]; then
+            printf '%s\n' "${commits}" >> build-notes.md
           else
             echo "- No commits found in ${compare_label}." >> build-notes.md
           fi
