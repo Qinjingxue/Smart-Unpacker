@@ -58,6 +58,7 @@ fn sunpack_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(native_available, m)?)?;
     m.add_function(wrap_pyfunction!(scanner_version, m)?)?;
     m.add_function(wrap_pyfunction!(io::reader::reader_cache_stats, m)?)?;
+    m.add_function(wrap_pyfunction!(io::reader::clear_reader_resources, m)?)?;
     m.add_function(wrap_pyfunction!(
         io::reader::release_reader_handles_under,
         m

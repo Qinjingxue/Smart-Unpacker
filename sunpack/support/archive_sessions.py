@@ -4,7 +4,11 @@ import os
 import threading
 from collections import OrderedDict
 
-from sunpack_native import NativeArchiveSession, release_reader_handles_under
+from sunpack_native import (
+    NativeArchiveSession,
+    clear_reader_resources,
+    release_reader_handles_under,
+)
 
 
 _MAX_SESSIONS = 128
@@ -48,6 +52,7 @@ def retain_archive_sessions(paths) -> None:
 def clear_archive_sessions() -> None:
     with _LOCK:
         _SESSIONS.clear()
+    clear_reader_resources()
 
 
 def release_archive_sessions_under(path: str) -> None:

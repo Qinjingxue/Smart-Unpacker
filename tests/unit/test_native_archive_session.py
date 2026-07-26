@@ -54,6 +54,26 @@ def test_rust_manager_reuses_blocks_and_handle_across_python_calls(tmp_path):
     assert after_second["cache_shards"] == 64
 
 
+def test_clear_archive_sessions_releases_native_blocks_and_handles(tmp_path):
+    path = tmp_path / "request-cache.bin"
+    path.write_bytes(bytes(range(256)) * 1024)
+    session = get_archive_session(os.fspath(path))
+    assert bytes(session.read_at(17, 128)) == path.read_bytes()[17:145]
+    del session
+    populated = dict(reader_cache_stats())
+    assert populated["open_handles"] >= 1
+    assert populated["cache_entries"] >= 1
+    assert populated["hot_cache_bytes"] + populated["general_cache_bytes"] > 0
+
+    clear_archive_sessions()
+
+    cleared = dict(reader_cache_stats())
+    assert cleared["open_handles"] == 0
+    assert cleared["cache_entries"] == 0
+    assert cleared["hot_cache_bytes"] == 0
+    assert cleared["general_cache_bytes"] == 0
+
+
 def test_session_analysis_view_preserves_cache_budget_and_eof_semantics(tmp_path):
     path = tmp_path / "analysis-view.bin"
     path.write_bytes(b"abcdefgh")

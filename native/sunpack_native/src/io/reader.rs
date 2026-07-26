@@ -11,6 +11,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 use std::time::SystemTime;
 
+#[cfg(test)]
+thread_local! {
+    static THREAD_PHYSICAL_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 const BLOCK_SIZE: usize = 64 * 1024;
 const DEFAULT_SHARED_CACHE_BYTES: usize = 256 * 1024 * 1024;
 const CACHE_SHARDS: usize = 64;
@@ -1006,6 +1011,32 @@ struct ManagerMetrics {
 }
 
 impl ReaderManager {
+    fn clear_resources(&self) -> io::Result<(usize, usize, usize)> {
+        let mut removed_entries = 0usize;
+        let mut removed_bytes = 0usize;
+        for shard in &self.cache_shards {
+            let mut shard = shard
+                .lock()
+                .map_err(|_| io::Error::other("shared reader cache shard poisoned"))?;
+            removed_entries += shard.entries.len();
+            removed_bytes += shard.hot_size + shard.general_size;
+            shard.entries.clear();
+            shard.hot_order.clear();
+            shard.general_order.clear();
+            shard.hot_size = 0;
+            shard.general_size = 0;
+        }
+        let mut handles = self
+            .handles
+            .lock()
+            .map_err(|_| io::Error::other("reader manager handle lock poisoned"))?;
+        let removed_handles = handles.entries.len();
+        handles.entries.clear();
+        handles.by_path.clear();
+        handles.order.clear();
+        Ok((removed_handles, removed_entries, removed_bytes))
+    }
+
     fn open_file(&self, path: &Path) -> io::Result<Arc<FileSource>> {
         let metadata = std::fs::metadata(path)?;
         let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
@@ -1333,6 +1364,16 @@ pub(crate) fn reader_cache_stats(py: Python<'_>) -> PyResult<Py<PyDict>> {
 }
 
 #[pyfunction]
+pub(crate) fn clear_reader_resources(py: Python<'_>) -> PyResult<Py<PyDict>> {
+    let (handles, cache_entries, cache_bytes) = manager().clear_resources()?;
+    let dict = PyDict::new(py);
+    dict.set_item("handles", handles)?;
+    dict.set_item("cache_entries", cache_entries)?;
+    dict.set_item("cache_bytes", cache_bytes)?;
+    Ok(dict.unbind())
+}
+
+#[pyfunction]
 pub(crate) fn release_reader_handles_under(path: &str) -> PyResult<usize> {
     let root = std::fs::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path));
     let mut handles = manager()
@@ -1405,6 +1446,8 @@ fn read_file_at(
     let mut read = 0usize;
     while read < len {
         metrics.physical_reads.fetch_add(1, Ordering::Relaxed);
+        #[cfg(test)]
+        THREAD_PHYSICAL_READS.with(|reads| reads.set(reads.get() + 1));
         let count = positional_read(file, &mut data[read..], offset + read as u64)?;
         if count == 0 {
             data.truncate(read);
@@ -1583,11 +1626,11 @@ mod tests {
         let data = vec![0x6bu8; BLOCK_SIZE * 3];
         let path = temp_file("managed_reader_batch_prefetch", &data);
         let reader = ManagedReader::open(&path).unwrap();
-        let before = manager().metrics.physical_reads.load(Ordering::Relaxed);
+        let before = THREAD_PHYSICAL_READS.with(std::cell::Cell::get);
 
         let ranges = [(BLOCK_SIZE as u64 - 4, 8), ((BLOCK_SIZE * 2) as u64 - 4, 8)];
         let many = reader.read_many(&ranges).unwrap();
-        let after = manager().metrics.physical_reads.load(Ordering::Relaxed);
+        let after = THREAD_PHYSICAL_READS.with(std::cell::Cell::get);
 
         assert_eq!(many, vec![vec![0x6b; 8], vec![0x6b; 8]]);
         assert_eq!(after - before, 1);
