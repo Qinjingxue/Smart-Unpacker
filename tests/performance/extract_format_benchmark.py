@@ -12,7 +12,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 PYTHON_CANDIDATES = (
-    ROOT / ".venv-build" / "Scripts" / "python.exe",
     ROOT / ".venv" / "Scripts" / "python.exe",
 )
 PYTHON = next((path for path in PYTHON_CANDIDATES if path.exists()), Path(sys.executable))

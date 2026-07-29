@@ -1,7 +1,6 @@
 [CmdletBinding()]
 param(
     [switch]$Clean,
-    [switch]$IncludeBuildDeps,
     [ValidateSet("x64", "arm64")]
     [string]$Arch = "x64",
     [ValidateSet("full", "lite")]
@@ -569,13 +568,8 @@ if (-not (Test-Path -LiteralPath $venvPython)) {
 }
 
 Invoke-Native -FilePath $venvPython -Arguments @("-m", "pip", "install", "--upgrade", "pip")
-$projectExtra = if ($IncludeBuildDeps) { "dev" } else { "test" }
-Invoke-Native -FilePath $venvPython -Arguments @("-m", "pip", "install", "$repoRoot[$projectExtra]")
-if ($repairSystemMode -eq "full") {
-    Install-ModelRuntimeDependencies -PythonPath $venvPython -RepoRoot $repoRoot -BuildArch $buildArch
-} else {
-    Write-Host "Skipping model runtime dependencies for lite repair system." -ForegroundColor Yellow
-}
+Invoke-Native -FilePath $venvPython -Arguments @("-m", "pip", "install", "$repoRoot[dev]")
+Install-ModelRuntimeDependencies -PythonPath $venvPython -RepoRoot $repoRoot -BuildArch $buildArch
 
 $env:Path = "$venvScripts;$env:Path"
 $env:PYTHONPATH = $repoRoot

@@ -60,31 +60,24 @@ ARM64 的模型运行时由脚本使用 PyTorch CPU wheel 源单独安装；不�
 脚本会：
 
 1. 创建或复用隔离的 `.venv`
-2. 从 `pyproject.toml` 安装 `test` extra
-3. 默认安装模型运行时依赖；`-RepairSystem lite` 会跳过这一步
+2. 从 `pyproject.toml` 安装统一的 `dev` extra（开发、测试和构建依赖）
+3. 安装模型运行时依赖；full 和 lite 共用同一套完整环境
 4. 构建并安装 `sunpack_native`
 5. 准备对应架构的 `7z.exe`、`7z.dll` 和 license
 6. 构建 `sunpack_sevenzip.dll` 和 `sunpack_sevenzip_worker.exe`
 7. 把 C++ 产物复制到工具目录
 8. 运行 Python、Rust、C++ 和 CLI smoke checks
 
-包含发行构建依赖：
-
-```powershell
-.\scripts\setup_windows_dev.ps1 -IncludeBuildDeps
-```
-
-准备不包含模型修复系统的开发/构建环境：
+使用完整环境验证 lite 模式（环境中的 torch/PyG 不会被打进 lite 包）：
 
 ```powershell
 .\scripts\setup_windows_dev.ps1 -RepairSystem lite
-.\scripts\setup_windows_dev.ps1 -IncludeBuildDeps -RepairSystem lite
 ```
 
 清理后重建：
 
 ```powershell
-.\scripts\setup_windows_dev.ps1 -Clean -IncludeBuildDeps
+.\scripts\setup_windows_dev.ps1 -Clean
 ```
 
 ARM64 开发环境：
@@ -191,13 +184,13 @@ python -m pytest tests\unit\test_model_runtime.py
 
 构建过程：
 
-1. 创建或清理 `.venv-build`
-2. 安装项目 `build` extra
+1. 创建或复用统一的 `.venv`（`-Clean` 时清理重建）
+2. 安装项目 `dev` extra
 3. 构建并安装 Rust wheel
 4. 构建和测试 C++ bridge/worker
 5. 可选运行 acceptance tests
 6. 用 `SunPack.spec` 生成 PyInstaller onedir 包
-7. 复制配置、密码表、工具和 license；full 构建额外复制整个 `models/`
+7. 复制配置、密码表、工具和 license；full 构建额外复制整个 `models/`，lite 构建显式排除并校验 torch/PyG 运行时
 8. 校验关键 PE 文件架构
 9. 运行 packaged CLI、bridge smoke checks；full 构建额外运行模型加载 smoke check
 10. 用随附 7-Zip 创建并测试发布 ZIP

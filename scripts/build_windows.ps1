@@ -95,6 +95,27 @@ function Assert-PathMissing {
     }
 }
 
+function Assert-LitePackageExcludesModelRuntime {
+    param([Parameter(Mandatory = $true)][string]$PackageRoot)
+
+    $forbiddenNames = @("torch", "torch_geometric", "torchgen", "functorch")
+    $forbidden = Get-ChildItem -LiteralPath $PackageRoot -Recurse -Force -ErrorAction SilentlyContinue |
+        Where-Object {
+            $name = $_.Name.ToLowerInvariant()
+            foreach ($prefix in $forbiddenNames) {
+                if ($name -eq $prefix -or $name -like "$prefix.*" -or $name -like "$prefix-*" -or $name -like "${prefix}_*") {
+                    return $true
+                }
+            }
+            return $false
+        } |
+        Select-Object -First 1
+
+    if ($null -ne $forbidden) {
+        throw "Lite package contains model runtime artifact: $($forbidden.FullName)"
+    }
+}
+
 function Assert-CommandExists {
     param(
         [string]$Command,
@@ -650,7 +671,7 @@ if ($processArch -ne $buildArch) {
 }
 
 $pythonCommand = Get-PythonCommand
-$venvPath = Join-Path $repoRoot ".venv-build"
+$venvPath = Join-Path $repoRoot ".venv"
 $venvPython = Join-Path $venvPath "Scripts\python.exe"
 $venvScripts = Join-Path $venvPath "Scripts"
 $specPath = Join-Path $repoRoot "SunPack.spec"
@@ -732,19 +753,13 @@ if (-not (Test-Path -LiteralPath $venvPython)) {
 }
 
 Invoke-Native -FilePath $venvPython -Arguments @("-m", "pip", "install", "--upgrade", "pip")
-Invoke-Native -FilePath $venvPython -Arguments @("-m", "pip", "install", "$repoRoot[build]")
-if ($repairSystemMode -eq "full") {
-    Install-ModelRuntimeDependencies -PythonPath $venvPython -RepoRoot $repoRoot -BuildArch $buildArch
-} else {
-    Write-Host "Skipping model runtime dependencies for lite repair system." -ForegroundColor Yellow
-}
+Invoke-Native -FilePath $venvPython -Arguments @("-m", "pip", "install", "$repoRoot[dev]")
+Install-ModelRuntimeDependencies -PythonPath $venvPython -RepoRoot $repoRoot -BuildArch $buildArch
 Invoke-Native -FilePath $venvPython -Arguments @("-m", "pip", "check")
-if ($repairSystemMode -eq "full") {
-    Invoke-Native -FilePath $venvPython -Arguments @(
-        "-c",
-        "import importlib.metadata as m; required=('torch','torch-geometric'); missing=[name for name in required if not list(m.files(name) or []) or not m.metadata(name).get('Name')]; assert not missing, f'missing distribution metadata: {missing}'"
-    )
-}
+Invoke-Native -FilePath $venvPython -Arguments @(
+    "-c",
+    "import importlib.metadata as m; required=('torch','torch-geometric'); missing=[name for name in required if not list(m.files(name) or []) or not m.metadata(name).get('Name')]; assert not missing, f'missing distribution metadata: {missing}'"
+)
 $maturinCommand = Get-MaturinCommand -VenvScripts $venvScripts
 $cmakeCommand = Get-CMakeCommand -VenvScripts $venvScripts
 $ctestCommand = Get-CTestCommand -VenvScripts $venvScripts
@@ -836,8 +851,7 @@ if ($repairSystemMode -eq "full") {
     Assert-FileHashEqual -Source $modelManifestPath -Destination (Join-Path $distModelsRoot "manifest.json")
 } else {
     Assert-PathMissing -LiteralPath $distModelsRoot -Description "Packaged models directory"
-    Assert-PathMissing -LiteralPath (Join-Path $distInternalRoot "torch") -Description "Packaged torch runtime"
-    Assert-PathMissing -LiteralPath (Join-Path $distInternalRoot "torch_geometric") -Description "Packaged torch-geometric runtime"
+    Assert-LitePackageExcludesModelRuntime -PackageRoot $distAppRoot
 }
 
 New-Item -ItemType Directory -Path $distLicensesRoot -Force | Out-Null

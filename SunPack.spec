@@ -11,7 +11,10 @@ dist_name = os.environ.get("SUNPACK_DIST_NAME", "sunpack")
 exe_name = os.environ.get("SUNPACK_EXE_NAME", "sunpack")
 watch_exe_name = os.environ.get("SUNPACK_WATCH_EXE_NAME", "sunpack-watch")
 repair_system = os.environ.get("SUNPACK_REPAIR_SYSTEM", "full").strip().lower()
+if repair_system not in {"full", "lite"}:
+    raise ValueError(f"Unsupported SUNPACK_REPAIR_SYSTEM: {repair_system!r}")
 include_repair_models = repair_system != "lite"
+model_runtime_excludes = ["torch", "torch_geometric", "torchgen", "functorch"]
 runtime_hook_path = project_root / "build" / "sunpack_repair_system_runtime.py"
 runtime_hook_path.parent.mkdir(parents=True, exist_ok=True)
 runtime_hook_path.write_text(
@@ -72,7 +75,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[str(runtime_hook_path)],
-    excludes=[] if include_repair_models else ["torch", "torch_geometric"],
+    excludes=[] if include_repair_models else model_runtime_excludes,
     noarchive=False,
     optimize=0,
     module_collection_mode={"torch_geometric": "py"} if include_repair_models else {},

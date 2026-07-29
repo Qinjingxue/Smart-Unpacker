@@ -7,7 +7,7 @@ Build/install the optimized extension first:
 
 ```powershell
 $env:VIRTUAL_ENV='C:\Users\29402\Desktop\sunpack\.venv'
-.venv-build\Scripts\maturin.exe develop --release --manifest-path native\sunpack_native\Cargo.toml
+.venv\Scripts\maturin.exe develop --release --manifest-path native\sunpack_native\Cargo.toml
 ```
 
 Run the password benchmark. It creates temporary ZIP AES-256, encrypted-header
@@ -16,7 +16,7 @@ wrong passwords and asserts that native verification reports index 100.
 
 ```powershell
 $env:PYTHONPATH='C:\Users\29402\Desktop\sunpack\.venv\Lib\site-packages;C:\Users\29402\Desktop\sunpack'
-.venv-build\Scripts\python.exe tests\performance_reader\password_fast_path.py
+.venv\Scripts\python.exe tests\performance_reader\password_fast_path.py
 ```
 
 For a same-binary comparison against the legacy 7z `Archive::read`-per-password
@@ -28,7 +28,7 @@ large sample:
 
 ```powershell
 $env:PYTHONPATH='C:\Users\29402\Desktop\sunpack\.venv\Lib\site-packages;C:\Users\29402\Desktop\sunpack'
-.venv-build\Scripts\python.exe tests\performance_reader\embedded_scan.py
+.venv\Scripts\python.exe tests\performance_reader\embedded_scan.py
 ```
 
 Both programs print machine-readable JSON. Use `--help` for paths, round count,

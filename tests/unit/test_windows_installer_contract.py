@@ -132,6 +132,31 @@ def test_build_passes_edition_and_architecture_to_acceptance_setup():
     assert '"-RepairSystem", $RepairSystem' in acceptance_script
 
 
+def test_windows_scripts_share_one_virtual_environment():
+    build_script = (ROOT / "scripts" / "build_windows.ps1").read_text(encoding="utf-8")
+    setup_script = (ROOT / "scripts" / "setup_windows_dev.ps1").read_text(encoding="utf-8")
+
+    assert ".venv-build" not in build_script
+    assert 'Join-Path $repoRoot ".venv"' in build_script
+    assert 'Join-Path $repoRoot ".venv"' in setup_script
+    assert "IncludeBuildDeps" not in setup_script
+    assert "$repoRoot[dev]" in build_script
+    assert "$repoRoot[dev]" in setup_script
+    assert 'Install-ModelRuntimeDependencies -PythonPath $venvPython' in build_script
+    assert 'Install-ModelRuntimeDependencies -PythonPath $venvPython' in setup_script
+    assert "Skipping model runtime dependencies" not in build_script
+    assert "Skipping model runtime dependencies" not in setup_script
+
+
+def test_lite_build_excludes_model_runtime_from_shared_environment():
+    build_script = (ROOT / "scripts" / "build_windows.ps1").read_text(encoding="utf-8")
+    spec = (ROOT / "SunPack.spec").read_text(encoding="utf-8")
+
+    assert 'model_runtime_excludes = ["torch", "torch_geometric", "torchgen", "functorch"]' in spec
+    assert "excludes=[] if include_repair_models else model_runtime_excludes" in spec
+    assert "Assert-LitePackageExcludesModelRuntime -PackageRoot $distAppRoot" in build_script
+
+
 def test_windows_native_smoke_checks_follow_current_embedded_scan_api():
     smoke_scripts = (
         ROOT / "scripts" / "build_windows.ps1",
