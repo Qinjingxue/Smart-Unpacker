@@ -42,7 +42,6 @@ from sunpack.passwords.internal.builtin import get_builtin_passwords
 from sunpack.passwords.internal.clipboard_monitor import ClipboardPasswordMonitor
 from sunpack.passwords.internal.lists import dedupe_passwords
 from sunpack.passwords.internal.local_files import DIRECTORY_PASSWORD_FILE_NAME, is_directory_password_file
-from sunpack.platform.windows.shell_notify import notify_shell_directories_updated
 from sunpack.support.output_paths import default_output_dir_for_task
 from sunpack.support.collections import dedupe_normalized_paths
 from sunpack.support.archive_sessions import release_archive_sessions_under
@@ -931,32 +930,7 @@ class WatchScheduler:
             status="done",
         )
         self.log.write("done", path=candidate.path, success_count=summary.success_count, output_dirs=generated_output_dirs)
-        # Promote + deferred postprocess (trash/flatten) are finished; refresh Explorer once.
-        self._notify_shell_task_complete(
-            candidate.path,
-            generated_output_dirs,
-            request.predicted_final_dirs,
-        )
         return WatchRunResult(processed=1, succeeded=summary.success_count)
-
-    def _notify_shell_task_complete(
-        self,
-        candidate_path: str,
-        generated_output_dirs: list[str],
-        predicted_final_dirs: list[str],
-    ) -> None:
-        notified = notify_shell_directories_updated(
-            [
-                candidate_path,
-                *list(generated_output_dirs or []),
-                *list(predicted_final_dirs or []),
-            ]
-        )
-        self.log.write(
-            "shell_notified",
-            path=candidate_path,
-            directories=notified,
-        )
 
     def _common_root_for(self, path: str) -> str:
         path = os.path.abspath(path)

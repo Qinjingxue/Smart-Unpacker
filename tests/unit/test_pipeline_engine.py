@@ -45,30 +45,40 @@ def test_finalize_remaps_nested_cleanup_and_flatten_paths_with_promoted_parent(t
     probe_outer = tmp_path / "probe" / "outer"
     final_outer = tmp_path / "downloads" / "outer"
     captured = {}
+    call_order = []
 
     class FakePostProcessActions:
         def __init__(self, _config):
             pass
 
         def apply(self, **kwargs):
+            call_order.append("postprocess")
             captured.update(kwargs)
 
     monkeypatch.setattr(engine_module, "PostProcessActions", FakePostProcessActions)
-    engine = object.__new__(PipelineEngine)
-    engine.config = {}
+    monkeypatch.setattr(
+        engine_module,
+        "notify_shell_directories_updated",
+        lambda paths: call_order.append("notify") or captured.update(shell_refresh_paths=list(paths)),
+    )
+    runtime = object.__new__(engine_module._PipelineRuntime)
+    runtime.config = {}
     response = PipelineResponse(
         request_id="request",
         summary=RunSummary(success_count=1, failed_tasks=[], processed_keys=[]),
         artifacts=PipelineArtifacts(
             archives_to_clean=((str(probe_outer / "inner.7z"),),),
             flatten_targets=(str(probe_outer / "inner"),),
+            shell_refresh_paths=(str(probe_outer / "inner.7z"), str(probe_outer / "inner")),
         ),
     )
 
-    engine.finalize(response, output_path_map={str(probe_outer): str(final_outer)})
+    runtime.finalize(response, output_path_map={str(probe_outer): str(final_outer)})
 
     assert captured["archives_to_clean"] == [[str(final_outer / "inner.7z")]]
     assert captured["flatten_targets"] == [str(final_outer / "inner")]
+    assert captured["shell_refresh_paths"] == [str(final_outer / "inner.7z"), str(final_outer / "inner")]
+    assert call_order == ["postprocess", "notify"]
 
 
 def test_engine_micro_batches_independent_submissions_and_keeps_results_isolated(tmp_path, monkeypatch):
@@ -78,6 +88,7 @@ def test_engine_micro_batches_independent_submissions_and_keeps_results_isolated
     second.write_bytes(make_zip({"second.txt": "second"}))
     engine = PipelineEngine(_config())
     batch_sizes = []
+    shell_refresh_calls = []
     execute_batch = engine._runtime.execute
 
     def measured_execute(submissions, **kwargs):
@@ -85,6 +96,11 @@ def test_engine_micro_batches_independent_submissions_and_keeps_results_isolated
         return execute_batch(submissions, **kwargs)
 
     monkeypatch.setattr(engine._runtime, "execute", measured_execute)
+    monkeypatch.setattr(
+        engine_module,
+        "notify_shell_directories_updated",
+        lambda paths: shell_refresh_calls.append(list(paths)) or [],
+    )
     monkeypatch.setattr(engine.extractor, "inspect", lambda *_args, **_kwargs: type("Preflight", (), {"skip_result": None})())
     monkeypatch.setattr(engine.batch_runner.resource_inspector, "inspect", lambda task: task)
 
@@ -106,6 +122,9 @@ def test_engine_micro_batches_independent_submissions_and_keeps_results_isolated
     assert second_response.summary.success_count == 1
     assert [item.input_path for item in first_response.summary.target_results] == [str(first)]
     assert [item.input_path for item in second_response.summary.target_results] == [str(second)]
+    assert len(shell_refresh_calls) == 2
+    assert any(str(first) in paths and any(Path(path).name == "first" for path in paths) for paths in shell_refresh_calls)
+    assert any(str(second) in paths and any(Path(path).name == "second" for path in paths) for paths in shell_refresh_calls)
 
 
 def test_engine_only_closes_resident_extractor_when_engine_closes(tmp_path, monkeypatch):

@@ -200,11 +200,10 @@ def _watch_summary(path: str, kind: OutcomeKind, verification: dict):
     )
 
 
-def test_successful_watch_task_notifies_shell_once_after_finalize(tmp_path, monkeypatch):
+def test_successful_watch_task_uses_pipeline_finalize_after_promotion(tmp_path, monkeypatch):
     monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
     archive = tmp_path / "sample.zip"
     _write_zip(archive)
-    notify_calls = []
     finalize_order = []
 
     class SuccessRunner:
@@ -223,13 +222,6 @@ def test_successful_watch_task_notifies_shell_once_after_finalize(tmp_path, monk
             finalize_order.append("finalize")
             assert all(Path(target).exists() for target in output_path_map.values())
 
-    def fake_notify(paths):
-        finalize_order.append("notify")
-        notify_calls.append(list(paths))
-        return [str(tmp_path.resolve())]
-
-    monkeypatch.setattr(scheduler_module, "notify_shell_directories_updated", fake_notify)
-
     watcher = WatchScheduler(
         {"watch": {"clipboard_monitor_enabled": False}},
         [str(tmp_path)],
@@ -243,17 +235,14 @@ def test_successful_watch_task_notifies_shell_once_after_finalize(tmp_path, monk
     result = watcher.run_once()
 
     assert result.succeeded == 1
-    assert finalize_order == ["finalize", "notify"]
-    assert len(notify_calls) == 1
-    assert str(archive.resolve()) in notify_calls[0]
-    assert any(Path(path).name == "sample" for path in notify_calls[0])
+    assert finalize_order == ["finalize"]
 
 
-def test_failed_watch_task_does_not_notify_shell(tmp_path, monkeypatch):
+def test_failed_watch_task_does_not_finalize_pipeline(tmp_path, monkeypatch):
     monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
     archive = tmp_path / "sample.zip"
     _write_zip(archive)
-    notify_calls = []
+    finalize_calls = []
 
     class FailureRunner:
         recent_passwords = []
@@ -273,11 +262,8 @@ def test_failed_watch_task_does_not_notify_shell(tmp_path, monkeypatch):
                 ],
             )
 
-    monkeypatch.setattr(
-        scheduler_module,
-        "notify_shell_directories_updated",
-        lambda paths: notify_calls.append(list(paths)) or [],
-    )
+        def apply_deferred_postprocess(self, output_path_map):
+            finalize_calls.append(dict(output_path_map))
 
     watcher = WatchScheduler(
         {"watch": {"clipboard_monitor_enabled": False}},
@@ -292,7 +278,7 @@ def test_failed_watch_task_does_not_notify_shell(tmp_path, monkeypatch):
     result = watcher.run_once()
 
     assert result.failed == 1
-    assert notify_calls == []
+    assert finalize_calls == []
 
 
 def test_partial_result_does_not_self_retry_but_modified_epoch_does(tmp_path, monkeypatch):

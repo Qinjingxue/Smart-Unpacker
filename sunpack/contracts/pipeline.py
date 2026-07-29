@@ -20,6 +20,7 @@ class PipelineArtifacts:
 
     archives_to_clean: tuple[tuple[str, ...], ...] = ()
     flatten_targets: tuple[str, ...] = ()
+    shell_refresh_paths: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -28,4 +29,3 @@ class PipelineResponse:
     summary: RunSummary
     artifacts: PipelineArtifacts = field(default_factory=PipelineArtifacts)
     recent_passwords: tuple[str, ...] = ()
-

@@ -32,6 +32,7 @@ from sunpack.coordinator.task_scan import ArchiveTaskScanner
 from sunpack.extraction.scheduler import ExtractionScheduler
 from sunpack.i18n import I18nContext
 from sunpack.postprocess.actions import PostProcessActions
+from sunpack.platform.windows.shell_notify import notify_shell_directories_updated
 from sunpack.rename.scheduler import RenameScheduler
 from sunpack.support.output_paths import default_output_dir_for_task
 from sunpack.support.path_keys import path_key
@@ -184,34 +185,7 @@ class PipelineEngine:
         *,
         output_path_map: Mapping[str, str] | None = None,
     ) -> None:
-        mapping = {
-            path_key(old): os.path.abspath(new)
-            for old, new in (output_path_map or {}).items()
-        }
-        def remap(path: str) -> str:
-            normalized = os.path.abspath(path)
-            exact = mapping.get(path_key(normalized))
-            if exact:
-                return exact
-            ancestors = [
-                (old, new)
-                for old, new in (output_path_map or {}).items()
-                if _is_relative_to(normalized, old)
-            ]
-            if not ancestors:
-                return path
-            old, new = max(ancestors, key=lambda item: len(os.path.abspath(item[0])))
-            return os.path.join(os.path.abspath(new), os.path.relpath(normalized, os.path.abspath(old)))
-
-        archives_to_clean = [
-            [remap(path) for path in archive_parts]
-            for archive_parts in response.artifacts.archives_to_clean
-        ]
-        flatten_targets = [remap(path) for path in response.artifacts.flatten_targets]
-        PostProcessActions(self.config).apply(
-            archives_to_clean=archives_to_clean,
-            flatten_targets=flatten_targets,
-        )
+        self._runtime.finalize(response, output_path_map=output_path_map)
 
     def close(self, *, graceful: bool = True) -> None:
         with self._lifecycle_lock:
@@ -491,11 +465,43 @@ class _PipelineRuntime:
                 failures=response.summary.failures,
             )
             if not submission.defer_postprocess:
-                PostProcessActions(self.config).apply(
-                    archives_to_clean=response.artifacts.archives_to_clean,
-                    flatten_targets=response.artifacts.flatten_targets,
-                )
+                self.finalize(response)
             submission.future.set_result(response)
+
+    def finalize(
+        self,
+        response: PipelineResponse,
+        *,
+        output_path_map: Mapping[str, str] | None = None,
+    ) -> None:
+        mapping = {path_key(old): os.path.abspath(new) for old, new in (output_path_map or {}).items()}
+
+        def remap(path: str) -> str:
+            normalized = os.path.abspath(path)
+            exact = mapping.get(path_key(normalized))
+            if exact:
+                return exact
+            ancestors = [
+                (old, new)
+                for old, new in (output_path_map or {}).items()
+                if _is_relative_to(normalized, old)
+            ]
+            if not ancestors:
+                return path
+            old, new = max(ancestors, key=lambda item: len(os.path.abspath(item[0])))
+            return os.path.join(os.path.abspath(new), os.path.relpath(normalized, os.path.abspath(old)))
+
+        archives_to_clean = [
+            [remap(path) for path in archive_parts]
+            for archive_parts in response.artifacts.archives_to_clean
+        ]
+        flatten_targets = [remap(path) for path in response.artifacts.flatten_targets]
+        shell_refresh_paths = [remap(path) for path in response.artifacts.shell_refresh_paths]
+        PostProcessActions(self.config).apply(
+            archives_to_clean=archives_to_clean,
+            flatten_targets=flatten_targets,
+        )
+        notify_shell_directories_updated(shell_refresh_paths)
 
     def close(self) -> None:
         self.resource_scheduler.set_pipeline_request_backlog(0)
@@ -639,6 +645,20 @@ class _RequestOwnership:
                 artifacts=PipelineArtifacts(
                     archives_to_clean=tuple(archives[submission.request_id]),
                     flatten_targets=tuple(sorted(flatten[submission.request_id], key=lambda value: value.count(os.sep))),
+                    shell_refresh_paths=tuple(dict.fromkeys([
+                        *(path for archive_parts in archives[submission.request_id] for path in archive_parts),
+                        *(
+                            result.output_dir
+                            for result in request_results
+                            if result.outcome_kind in {OutcomeKind.COMPLETE_SUCCESS, OutcomeKind.PARTIAL_SUCCESS}
+                            and result.output_dir
+                        ),
+                        *(
+                            str(item.get("out_dir") or "")
+                            for item in recovered
+                            if str(item.get("out_dir") or "")
+                        ),
+                    ])),
                 ),
                 recent_passwords=tuple(recent_passwords),
             )
